@@ -2,8 +2,8 @@ use crate::error::{MqttError, Result};
 use crate::transport::Transport;
 use futures::channel::{mpsc, oneshot};
 use futures::StreamExt;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::{CloseEvent, ErrorEvent, MessageEvent, WebSocket};
@@ -37,8 +37,9 @@ impl WasmWebSocketTransport {
 
 impl Transport for WasmWebSocketTransport {
     async fn connect(&mut self) -> Result<()> {
-        let ws = WebSocket::new(&self.url)
-            .map_err(|e| MqttError::ConnectionError(format!("Failed to create WebSocket: {:?}", e)))?;
+        let ws = WebSocket::new(&self.url).map_err(|e| {
+            MqttError::ConnectionError(format!("Failed to create WebSocket: {:?}", e))
+        })?;
 
         ws.set_binary_type(web_sys::BinaryType::Arraybuffer);
 
@@ -92,14 +93,18 @@ impl Transport for WasmWebSocketTransport {
             _onclose: onclose,
         });
 
-        open_rx.await
+        open_rx
+            .await
             .map_err(|_| MqttError::ConnectionError("Connection cancelled".into()))?
     }
 
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
-        let data = self.rx.as_mut()
+        let data = self
+            .rx
+            .as_mut()
             .ok_or(MqttError::NotConnected)?
-            .next().await
+            .next()
+            .await
             .ok_or(MqttError::ConnectionClosedByPeer)?;
 
         let len = data.len().min(buf.len());
@@ -108,8 +113,7 @@ impl Transport for WasmWebSocketTransport {
     }
 
     async fn write(&mut self, buf: &[u8]) -> Result<()> {
-        let ws = self.ws.as_ref()
-            .ok_or(MqttError::NotConnected)?;
+        let ws = self.ws.as_ref().ok_or(MqttError::NotConnected)?;
 
         ws.send_with_u8_array(buf)
             .map_err(|e| MqttError::Io(format!("WebSocket send failed: {:?}", e)))?;
