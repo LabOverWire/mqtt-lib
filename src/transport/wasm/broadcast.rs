@@ -1,6 +1,5 @@
 use crate::error::Result;
 use crate::transport::Transport;
-use async_trait::async_trait;
 
 pub struct BroadcastChannelTransport {
     connected: bool,
@@ -12,24 +11,23 @@ impl BroadcastChannelTransport {
     }
 }
 
-#[async_trait(?Send)]
 impl Transport for BroadcastChannelTransport {
-    async fn connect(&mut self) -> Result<()> {
+    fn connect(&mut self) -> impl std::future::Future<Output = Result<()>> {
         self.connected = true;
-        Ok(())
+        async { Ok(()) }
     }
 
-    async fn read(&mut self, _buf: &mut [u8]) -> Result<usize> {
-        todo!("BroadcastChannelTransport::read - Sprint 2")
+    fn read(&mut self, _buf: &mut [u8]) -> impl std::future::Future<Output = Result<usize>> {
+        async { todo!("BroadcastChannelTransport::read - Sprint 2") }
     }
 
-    async fn write(&mut self, _buf: &[u8]) -> Result<()> {
-        todo!("BroadcastChannelTransport::write - Sprint 2")
+    fn write(&mut self, _buf: &[u8]) -> impl std::future::Future<Output = Result<()>> {
+        async { todo!("BroadcastChannelTransport::write - Sprint 2") }
     }
 
-    async fn close(&mut self) -> Result<()> {
+    fn close(&mut self) -> impl std::future::Future<Output = Result<()>> {
         self.connected = false;
-        Ok(())
+        async { Ok(()) }
     }
 
     fn is_connected(&self) -> bool {
