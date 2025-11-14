@@ -36,6 +36,56 @@ pub use websocket::{WebSocketConfig, WebSocketTransport};
 ))]
 pub use wasm::{BroadcastChannelTransport, MessagePortTransport, WasmWebSocketTransport};
 
+#[cfg(target_arch = "wasm32")]
+pub enum WasmTransportType {
+    WebSocket(WasmWebSocketTransport),
+    MessagePort(MessagePortTransport),
+    BroadcastChannel(BroadcastChannelTransport),
+}
+
+#[cfg(target_arch = "wasm32")]
+impl Transport for WasmTransportType {
+    async fn connect(&mut self) -> Result<()> {
+        match self {
+            Self::WebSocket(t) => t.connect().await,
+            Self::MessagePort(t) => t.connect().await,
+            Self::BroadcastChannel(t) => t.connect().await,
+        }
+    }
+
+    async fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
+        match self {
+            Self::WebSocket(t) => t.read(buf).await,
+            Self::MessagePort(t) => t.read(buf).await,
+            Self::BroadcastChannel(t) => t.read(buf).await,
+        }
+    }
+
+    async fn write(&mut self, buf: &[u8]) -> Result<()> {
+        match self {
+            Self::WebSocket(t) => t.write(buf).await,
+            Self::MessagePort(t) => t.write(buf).await,
+            Self::BroadcastChannel(t) => t.write(buf).await,
+        }
+    }
+
+    async fn close(&mut self) -> Result<()> {
+        match self {
+            Self::WebSocket(t) => t.close().await,
+            Self::MessagePort(t) => t.close().await,
+            Self::BroadcastChannel(t) => t.close().await,
+        }
+    }
+
+    fn is_connected(&self) -> bool {
+        match self {
+            Self::WebSocket(t) => t.is_connected(),
+            Self::MessagePort(t) => t.is_connected(),
+            Self::BroadcastChannel(t) => t.is_connected(),
+        }
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 pub trait Transport: Send + Sync {
     /// Establishes a connection
