@@ -2,7 +2,7 @@ mod common;
 use common::TestBroker;
 use mqtt5::transport::tls::TlsConfig;
 use mqtt5::{ConnectOptions, MqttClient};
-use std::time::Duration;
+use mqtt5::time::Duration;
 use tokio::time::timeout;
 
 #[tokio::test]

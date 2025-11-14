@@ -194,6 +194,7 @@ pub mod telemetry;
 pub mod test_utils;
 #[cfg(any(test, feature = "turmoil-testing"))]
 pub mod testing;
+pub mod time;
 pub mod topic_matching;
 pub mod transport;
 pub mod types;

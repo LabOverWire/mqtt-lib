@@ -125,7 +125,7 @@ pub mod limits {
 
 /// Time-related constants
 pub mod time {
-    use std::time::Duration;
+    use crate::time::Duration;
 
     /// Default session expiry interval (1 hour)
     pub const DEFAULT_SESSION_EXPIRY: Duration = Duration::from_secs(3600);

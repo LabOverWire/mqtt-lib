@@ -3,7 +3,7 @@ pub mod propagation;
 #[cfg(feature = "opentelemetry")]
 use crate::error::{MqttError, Result};
 #[cfg(feature = "opentelemetry")]
-use std::time::Duration;
+use crate::time::Duration;
 
 #[cfg(feature = "opentelemetry")]
 use opentelemetry::{trace::TracerProvider as _, KeyValue};

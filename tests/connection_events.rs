@@ -1,7 +1,7 @@
 use mqtt5::{client::ConnectionEvent, client::DisconnectReason, MqttClient};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use mqtt5::time::Duration;
 use tokio::sync::Mutex;
 
 #[tokio::test]

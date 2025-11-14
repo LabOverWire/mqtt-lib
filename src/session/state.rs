@@ -8,7 +8,7 @@ use crate::session::subscription::{Subscription, SubscriptionManager};
 use crate::types::WillMessage;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use crate::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
 /// Session configuration

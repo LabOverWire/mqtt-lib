@@ -14,7 +14,7 @@ pub use connection::BridgeConnection;
 pub use loop_prevention::LoopPrevention;
 pub use manager::BridgeManager;
 
-use std::time::Instant;
+use crate::time::Instant;
 
 /// Statistics for a bridge connection
 #[derive(Debug, Clone, Default)]

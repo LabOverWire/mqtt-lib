@@ -12,7 +12,7 @@ use crate::session::limits::{ExpiringMessage, LimitsManager};
 use crate::session::retained::RetainedMessage;
 use crate::{MqttClient, QoS, Result};
 use bytes::BytesMut;
-use std::time::Duration;
+use crate::time::Duration;
 use tokio::time::timeout;
 
 /// Helper trait for building test packets

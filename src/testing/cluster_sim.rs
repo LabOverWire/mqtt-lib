@@ -2,7 +2,7 @@
 
 use super::{TurmoilBroker, TurmoilBrokerConfig};
 use std::collections::HashMap;
-use std::time::Duration;
+use crate::time::Duration;
 
 /// Configuration for a cluster simulation
 #[derive(Debug, Clone)]

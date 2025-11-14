@@ -6,7 +6,7 @@
 #[cfg(feature = "turmoil-testing")]
 use mqtt5::testing::{TurmoilBroker, TurmoilBrokerConfig, TurmoilClient, TurmoilClientConfig};
 #[cfg(feature = "turmoil-testing")]
-use std::time::Duration;
+use mqtt5::time::Duration;
 
 #[cfg(feature = "turmoil-testing")]
 #[test]

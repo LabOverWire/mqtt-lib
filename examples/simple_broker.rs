@@ -28,7 +28,7 @@
 
 use mqtt5::broker::{BrokerConfig, MqttBroker};
 use std::net::SocketAddr;
-use std::time::Duration;
+use mqtt5::time::Duration;
 use tracing::{error, info};
 
 #[tokio::main]

@@ -7,7 +7,7 @@ mod tests {
     use super::*;
     use mqtt5::transport::tls::TlsConfig;
     use mqtt5::{ConnectOptions, MqttClient};
-    use std::time::Duration;
+    use mqtt5::time::Duration;
 
     #[tokio::test]
     async fn debug_tls_connection() {

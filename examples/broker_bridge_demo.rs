@@ -7,7 +7,7 @@ use mqtt5::broker::bridge::{BridgeConfig, BridgeDirection};
 use mqtt5::broker::{BrokerConfig, MqttBroker};
 use mqtt5::client::MqttClient;
 use mqtt5::QoS;
-use std::time::Duration;
+use mqtt5::time::Duration;
 use tokio::time::sleep;
 use tracing::info;
 use tracing_subscriber::EnvFilter;

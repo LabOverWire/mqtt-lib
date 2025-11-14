@@ -1,5 +1,5 @@
 use crate::error::MqttError;
-use std::time::Duration;
+use crate::time::Duration;
 
 /// Connection events
 #[derive(Debug, Clone)]

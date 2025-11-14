@@ -1,5 +1,5 @@
 use cucumber::{given, then, when};
-use std::time::Duration;
+use mqtt5::time::Duration;
 
 use super::world::BddWorld;
 use crate::common::cli_helpers::{

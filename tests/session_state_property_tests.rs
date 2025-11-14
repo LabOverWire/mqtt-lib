@@ -813,7 +813,7 @@ mod concurrent_session_tests {
 #[cfg(test)]
 mod performance_property_tests {
     use super::*;
-    use std::time::Instant;
+    use mqtt5::time::Instant;
 
     proptest! {
         #[test]

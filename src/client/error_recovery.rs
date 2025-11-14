@@ -1,6 +1,6 @@
 use crate::error::MqttError;
 use crate::types::ReasonCode;
-use std::time::Duration;
+use crate::time::Duration;
 
 /// Error recovery configuration
 #[derive(Debug, Clone)]

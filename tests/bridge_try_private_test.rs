@@ -3,7 +3,7 @@ use mqtt5::broker::{BrokerConfig, MqttBroker};
 use mqtt5::client::MqttClient;
 use mqtt5::types::ConnectOptions;
 use mqtt5::QoS;
-use std::time::Duration;
+use mqtt5::time::Duration;
 use tokio::time::sleep;
 
 #[tokio::test]

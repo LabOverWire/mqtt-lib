@@ -6,7 +6,7 @@ use mqtt5::broker::config::{StorageBackend, StorageConfig};
 use mqtt5::broker::{BrokerConfig, MqttBroker};
 use mqtt5::client::MqttClient;
 use std::sync::Arc;
-use std::time::Duration;
+use mqtt5::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::{sleep, timeout};
 

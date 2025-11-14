@@ -1,7 +1,7 @@
 use crate::error::{MqttError, Result};
 use crate::transport::Transport;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use crate::time::{Duration, Instant};
 use tokio::sync::{Mutex, RwLock};
 use tokio::time::interval;
 

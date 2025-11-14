@@ -3,7 +3,7 @@ use common::TestBroker;
 use mqtt5::{MqttClient, PublishOptions, QoS};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use mqtt5::time::Duration;
 use tokio::time::timeout;
 
 #[tokio::test]

@@ -3,7 +3,7 @@ use clap::Args;
 use dialoguer::{Input, Select};
 use mqtt5::{ConnectOptions, MqttClient, QoS, WillMessage};
 use std::path::PathBuf;
-use std::time::Duration;
+use mqtt5::time::Duration;
 use tokio::signal;
 use tracing::{debug, info};
 

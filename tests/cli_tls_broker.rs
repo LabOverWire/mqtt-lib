@@ -1,6 +1,6 @@
 //! Test for CLI TLS broker functionality
 
-use std::time::Duration;
+use mqtt5::time::Duration;
 use tokio::process::Command;
 
 #[tokio::test]

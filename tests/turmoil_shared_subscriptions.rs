@@ -12,7 +12,7 @@ use mqtt5::QoS;
 #[cfg(feature = "turmoil-testing")]
 use std::sync::Arc;
 #[cfg(feature = "turmoil-testing")]
-use std::time::Duration;
+use mqtt5::time::Duration;
 #[cfg(feature = "turmoil-testing")]
 use tokio::sync::mpsc;
 

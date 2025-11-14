@@ -1,5 +1,5 @@
 use crate::error::{MqttError, Result};
-use std::time::{Duration, Instant};
+use crate::time::{Duration, Instant};
 
 /// Configuration for message and packet size limits
 #[derive(Debug, Clone)]

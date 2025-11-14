@@ -2,7 +2,7 @@
 
 use mqtt5::broker::config::{BrokerConfig, WebSocketConfig};
 use mqtt5::broker::MqttBroker;
-use std::time::Duration;
+use mqtt5::time::Duration;
 
 #[tokio::test]
 async fn test_broker_websocket_creation() {

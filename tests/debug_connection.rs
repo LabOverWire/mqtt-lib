@@ -1,7 +1,7 @@
 mod common;
 use common::TestBroker;
 use mqtt5::MqttClient;
-use std::time::Duration;
+use mqtt5::time::Duration;
 
 #[tokio::test]
 async fn test_simple_connection_and_subscribe() {

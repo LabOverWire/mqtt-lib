@@ -502,7 +502,7 @@ impl ConnectPacket {
 mod tests {
     use super::*;
     use bytes::BytesMut;
-    use std::time::Duration;
+    use crate::time::Duration;
 
     #[test]
     fn test_connect_packet_basic() {

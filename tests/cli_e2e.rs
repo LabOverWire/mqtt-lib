@@ -5,7 +5,7 @@
 mod common;
 use common::cli_helpers::*;
 use common::TestBroker;
-use std::time::Duration;
+use mqtt5::time::Duration;
 
 /// Test basic publish and subscribe
 #[tokio::test]

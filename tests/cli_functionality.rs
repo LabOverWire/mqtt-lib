@@ -3,7 +3,7 @@
 //! Tests that validate our mqttv5 CLI tool works correctly in real scenarios.
 //! These tests demonstrate that we can replace mosquitto tools completely.
 
-use std::time::Duration;
+use mqtt5::time::Duration;
 
 mod common;
 use common::cli_helpers::*;

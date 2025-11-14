@@ -3,7 +3,7 @@
 use mqtt5::broker::config::{BrokerConfig, TlsConfig};
 use mqtt5::broker::MqttBroker;
 use std::path::PathBuf;
-use std::time::Duration;
+use mqtt5::time::Duration;
 
 #[tokio::test]
 async fn test_broker_tls_creation() {

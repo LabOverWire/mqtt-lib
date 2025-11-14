@@ -10,7 +10,7 @@ use crate::telemetry::TelemetryConfig;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::time::Duration;
+use crate::time::Duration;
 
 /// Broker configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]

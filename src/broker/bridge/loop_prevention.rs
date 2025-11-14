@@ -7,7 +7,7 @@ use crate::packet::publish::PublishPacket;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use crate::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tracing::{debug, warn};
 

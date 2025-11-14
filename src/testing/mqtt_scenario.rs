@@ -2,7 +2,7 @@
 
 use super::{TurmoilBrokerConfig, TurmoilClientConfig};
 use std::collections::HashMap;
-use std::time::Duration;
+use crate::time::Duration;
 
 /// Network conditions for scenario testing
 #[derive(Debug, Clone)]

@@ -2,7 +2,7 @@
 mod tests {
     use crate::client::error_recovery::{ErrorRecoveryConfig, RecoverableError, RetryState};
     use crate::error::MqttError;
-    use std::time::Duration;
+    use crate::time::Duration;
 
     #[tokio::test]
     async fn test_retry_state() {

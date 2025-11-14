@@ -21,7 +21,7 @@
 //! ```
 
 use mqtt5::{broker::MqttBroker, ConnectOptions, ConnectionEvent, MqttClient};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use mqtt5::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::time::sleep;
 
 #[tokio::main]

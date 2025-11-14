@@ -7,7 +7,7 @@ use mqtt5::transport::websocket::{WebSocketConfig, WebSocketTransport};
 use mqtt5::transport::Transport;
 use proptest::prelude::*;
 use std::collections::HashMap;
-use std::time::Duration;
+use mqtt5::time::Duration;
 
 // Generate valid WebSocket URLs
 fn valid_websocket_url() -> impl Strategy<Value = String> {

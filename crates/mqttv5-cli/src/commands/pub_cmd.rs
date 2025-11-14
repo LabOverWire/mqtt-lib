@@ -5,7 +5,7 @@ use mqtt5::{ConnectOptions, ConnectionEvent, MqttClient, PublishOptions, QoS, Wi
 use std::fs;
 use std::io::{self, Read};
 use std::path::PathBuf;
-use std::time::Duration;
+use mqtt5::time::Duration;
 use tokio::signal;
 use tracing::{debug, info, warn};
 

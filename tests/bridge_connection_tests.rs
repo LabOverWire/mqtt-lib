@@ -5,7 +5,7 @@ use mqtt5::broker::router::MessageRouter;
 use mqtt5::packet::publish::PublishPacket;
 use mqtt5::QoS;
 use std::sync::Arc;
-use std::time::Duration;
+use mqtt5::time::Duration;
 
 #[tokio::test]
 async fn test_bridge_connection_creation() {

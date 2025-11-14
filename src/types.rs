@@ -1,6 +1,6 @@
 use crate::session::SessionConfig;
 use crate::QoS;
-use std::time::Duration;
+use crate::time::Duration;
 
 pub use crate::protocol::v5::reason_codes::ReasonCode;
 
@@ -75,7 +75,7 @@ impl Default for ReconnectConfig {
 ///
 /// ```
 /// use mqtt5::{ConnectOptions, WillMessage, QoS};
-/// use std::time::Duration;
+/// use crate::time::Duration;
 ///
 /// // Basic connection options
 /// let options = ConnectOptions::new("my-client-id")
@@ -364,7 +364,7 @@ impl From<WillProperties> for crate::protocol::v5::properties::Properties {
 ///
 /// ```
 /// use mqtt5::{PublishOptions, QoS};
-/// use std::time::Duration;
+/// use crate::time::Duration;
 ///
 /// // Basic publish with QoS 1
 /// let mut options = PublishOptions::default();

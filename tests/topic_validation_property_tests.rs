@@ -512,7 +512,7 @@ mod edge_case_tests {
 #[cfg(test)]
 mod performance_property_tests {
     use super::*;
-    use std::time::{Duration, Instant};
+    use mqtt5::time::{Duration, Instant};
 
     proptest! {
         #[test]

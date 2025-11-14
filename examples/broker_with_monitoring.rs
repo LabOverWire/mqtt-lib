@@ -9,7 +9,7 @@ use mqtt5::broker::{BrokerConfig, MqttBroker, StorageBackendType, StorageConfig}
 use mqtt5::client::MqttClient;
 use mqtt5::types::PublishOptions;
 use mqtt5::{Message, QoS};
-use std::time::Duration;
+use mqtt5::time::Duration;
 use tokio::time::sleep;
 use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;

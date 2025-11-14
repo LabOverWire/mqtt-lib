@@ -11,7 +11,7 @@ use mqtt5::{MqttClient, MqttError, QoS};
 use mqtt5::types::{ConnectOptions, WillMessage, WillProperties};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::Duration;
+use mqtt5::time::Duration;
 use tokio::sync::Mutex;
 
 #[tokio::test]

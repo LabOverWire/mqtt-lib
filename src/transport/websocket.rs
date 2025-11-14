@@ -18,7 +18,7 @@
 //! ```rust,no_run
 //! use mqtt5::transport::websocket::{WebSocketConfig, WebSocketTransport};
 //! use mqtt5::transport::Transport;
-//! use std::time::Duration;
+//! use crate::time::Duration;
 //!
 //! # #[tokio::main]
 //! # async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -47,7 +47,7 @@ use crate::transport::Transport;
 use futures_util::{stream::SplitSink, stream::SplitStream, StreamExt};
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::time::Duration;
+use crate::time::Duration;
 use tokio::net::TcpStream;
 use tokio_tungstenite::{
     tungstenite::{self, http::Request, protocol::Message},

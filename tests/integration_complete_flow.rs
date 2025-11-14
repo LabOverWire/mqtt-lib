@@ -5,7 +5,7 @@ use mqtt5::{ConnectOptions, MqttClient, PublishOptions, PublishResult, QoS, Subs
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use mqtt5::time::Duration;
 
 /// Counter for tracking events  
 struct EventCounter {

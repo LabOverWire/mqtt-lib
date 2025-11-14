@@ -24,7 +24,7 @@ use crate::QoS;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use crate::time::{Duration, SystemTime};
 use tokio::sync::RwLock;
 
 /// Retained message with metadata

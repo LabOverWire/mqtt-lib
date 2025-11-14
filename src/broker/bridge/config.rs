@@ -2,7 +2,7 @@
 
 use crate::QoS;
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
+use crate::time::Duration;
 
 /// Bridge connection configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -6,7 +6,7 @@
 //! - Authentication
 //! - All `QoS` levels
 
-use std::time::Duration;
+use mqtt5::time::Duration;
 
 mod common;
 use common::cli_helpers::*;

@@ -7,7 +7,7 @@ use crate::packet::publish::PublishPacket;
 use crate::protocol::v5::properties::{PropertyId, PropertyValue};
 use crate::QoS;
 use std::sync::Arc;
-use std::time::Duration;
+use crate::time::Duration;
 use tokio::time::sleep;
 
 fn create_memory_storage() -> Storage<MemoryBackend> {
