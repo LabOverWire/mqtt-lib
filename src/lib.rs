@@ -174,8 +174,10 @@
 #![allow(clippy::cast_lossless)]
 #![allow(clippy::single_component_path_imports)]
 
+#[cfg(not(target_arch = "wasm32"))]
 pub mod broker;
 pub mod callback;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod client;
 pub mod constants;
 pub mod encoding;
@@ -185,8 +187,10 @@ pub mod packet;
 pub mod packet_id;
 pub mod protocol;
 pub mod session;
-pub mod tasks; // Direct async tasks
+#[cfg(not(target_arch = "wasm32"))]
+pub mod tasks;
 pub mod telemetry;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod test_utils;
 #[cfg(any(test, feature = "turmoil-testing"))]
 pub mod testing;
@@ -201,6 +205,7 @@ pub mod validation;
 ))]
 pub mod wasm;
 
+#[cfg(not(target_arch = "wasm32"))]
 pub use client::{
     ConnectionEvent, DisconnectReason, MockCall, MockMqttClient, MqttClient, MqttClientTrait,
 };

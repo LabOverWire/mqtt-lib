@@ -19,7 +19,7 @@ impl WasmMqttClient {
         Ok(())
     }
 
-    pub async fn publish(&self, topic: &str, payload: &[u8]) -> Result<(), JsValue> {
+    pub async fn publish(&self, topic: &str, _payload: &[u8]) -> Result<(), JsValue> {
         web_sys::console::log_1(&format!("Publishing to topic: {}", topic).into());
         Ok(())
     }

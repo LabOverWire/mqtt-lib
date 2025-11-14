@@ -8,10 +8,16 @@ use crate::packet::publish::PublishPacket;
 use crate::packet::subscribe::{SubscribePacket, SubscriptionOptions, TopicFilter};
 use crate::packet::unsubscribe::UnsubscribePacket;
 use crate::protocol::v5::properties::Properties;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::transport::tcp::TcpConfig;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::transport::tls::TlsConfig;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::transport::websocket::{WebSocketConfig, WebSocketTransport};
-use crate::transport::{TcpTransport, TlsTransport, Transport, TransportType};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::transport::{TcpTransport, TlsTransport, TransportType};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::transport::Transport;
 use crate::types::{
     ConnectOptions, ConnectResult, PublishOptions, PublishResult, SubscribeOptions,
 };
@@ -24,6 +30,7 @@ use tokio::time::Duration;
 use tracing::instrument;
 
 mod connection;
+#[cfg(not(target_arch = "wasm32"))]
 mod direct;
 mod error_recovery;
 pub mod mock;
@@ -35,6 +42,7 @@ pub use self::error_recovery::{ErrorCallback, ErrorRecoveryConfig, RecoverableEr
 pub use self::mock::{MockCall, MockMqttClient};
 pub use self::r#trait::MqttClientTrait;
 
+#[cfg(not(target_arch = "wasm32"))]
 use self::direct::DirectClientInner;
 
 /// Type alias for connection event callback

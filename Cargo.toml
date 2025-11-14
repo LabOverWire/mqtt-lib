@@ -25,16 +25,30 @@ exclude = [
 [features]
 default = []
 turmoil-testing = ["turmoil"]
-opentelemetry = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:tracing-opentelemetry", "tracing-subscriber"]
+opentelemetry = [
+    "dep:opentelemetry",
+    "dep:opentelemetry_sdk",
+    "dep:opentelemetry-otlp",
+    "dep:tracing-opentelemetry",
+    "tracing-subscriber",
+]
 opentelemetry_sdk = ["dep:opentelemetry_sdk"]
 opentelemetry-otlp = ["dep:opentelemetry-otlp"]
 tracing-opentelemetry = ["dep:tracing-opentelemetry"]
 
 # WASM features
-wasm-client = ["dep:wasm-bindgen", "dep:wasm-bindgen-futures", "dep:web-sys", "dep:js-sys", "dep:web-time"]
+wasm-client = [
+    "dep:wasm-bindgen",
+    "dep:wasm-bindgen-futures",
+    "dep:web-sys",
+    "dep:js-sys",
+    "dep:web-time",
+    "tokio",
+]
 wasm-broker = ["wasm-client"]
 wasm-p2p = ["wasm-client", "dep:matchbox_socket"]
 wasm-full = ["wasm-client", "wasm-broker", "wasm-p2p"]
+tokio = ["dep:tokio"]
 
 [dev-dependencies]
 tokio-test = "0.4"
@@ -109,7 +123,6 @@ wasm-opt = ["-O0"]
 
 [dependencies]
 base64 = "0.22"
-bcrypt = "0.17"
 bebytes = "2.10"
 bytes = "1.10"
 futures = "0.3"
@@ -117,30 +130,39 @@ futures-util = "0.3"
 hex = "0.4"
 humantime-serde = "1.1"
 rand = "0.9"
-ring = "0.17.14"
-rustls = { version = "0.23", features = ["ring"] }
-rustls-pemfile = "2.2"
-rustls-pki-types = "1.13.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
 thiserror = "2.0"
-tokio = { version = "1.47", features = ["full"] }
-tokio-rustls = "0.26"
-tokio-tungstenite = { version = "0.28", features = ["rustls-tls-native-roots"] }
 toml = "0.9"
 tracing = "0.1"
+url = "2.5"
+log = "0.4"
 tracing-subscriber = { version = "0.3", features = [
     "env-filter",
 ], optional = true }
 turmoil = { version = "0.7", optional = true }
-url = "2.5"
-webpki-roots = "1.0"
-log = "0.4"
-opentelemetry_sdk = { version = "0.31", features = ["trace", "rt-tokio"], optional = true }
-opentelemetry-otlp = { version = "0.31", features = ["trace", "grpc-tonic"], optional = true }
+opentelemetry_sdk = { version = "0.31", features = [
+    "trace",
+    "rt-tokio",
+], optional = true }
+opentelemetry-otlp = { version = "0.31", features = [
+    "trace",
+    "grpc-tonic",
+], optional = true }
 tracing-opentelemetry = { version = "0.32", optional = true }
 opentelemetry = { version = "0.31", features = ["trace"], optional = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+bcrypt = "0.17"
+ring = "0.17.14"
+rustls = { version = "0.23", features = ["ring"] }
+rustls-pemfile = "2.2"
+rustls-pki-types = "1.13.0"
+tokio = { version = "1.47", features = ["full"] }
+tokio-rustls = "0.26"
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-native-roots"] }
+webpki-roots = "1.0"
 
 # WASM dependencies
 [target.'cfg(target_arch = "wasm32")'.dependencies]
@@ -150,10 +172,6 @@ js-sys = { version = "0.3", optional = true }
 web-time = { version = "1.0", optional = true }
 matchbox_socket = { version = "0.10", optional = true }
 console_error_panic_hook = "0.1"
-# Both versions needed for different dependencies
-getrandom = { version = "0.2", features = ["js"] }
-# Version 0.3 doesn't use features, uses cfg instead (set in .cargo/config.toml)
-
 web-sys = { version = "0.3", optional = true, features = [
     "BroadcastChannel",
     "MessageChannel",
@@ -168,4 +186,15 @@ web-sys = { version = "0.3", optional = true, features = [
     "Window",
     "Event",
     "EventTarget",
+    "console",
 ] }
+
+[target.wasm32-unknown-unknown.dependencies]
+getrandom = { version = "0.3", features = ["wasm_js"] }
+tokio = { version = "1.47", features = [
+    "sync",
+    "macros",
+    "io-util",
+    "time",
+    "rt",
+], optional = true }

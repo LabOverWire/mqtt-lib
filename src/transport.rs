@@ -1,9 +1,14 @@
+#[cfg(not(target_arch = "wasm32"))]
 pub mod manager;
 #[cfg(test)]
 pub mod mock;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod packet_io;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod tcp;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod tls;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod websocket;
 
 #[cfg(all(
@@ -14,10 +19,15 @@ pub mod wasm;
 
 use crate::error::Result;
 
+#[cfg(not(target_arch = "wasm32"))]
 pub use manager::{ConnectionState, ConnectionStats, ManagerConfig, TransportManager};
+#[cfg(not(target_arch = "wasm32"))]
 pub use packet_io::{PacketIo, PacketReader, PacketWriter};
+#[cfg(not(target_arch = "wasm32"))]
 pub use tcp::{TcpConfig, TcpTransport};
+#[cfg(not(target_arch = "wasm32"))]
 pub use tls::{TlsConfig, TlsTransport};
+#[cfg(not(target_arch = "wasm32"))]
 pub use websocket::{WebSocketConfig, WebSocketTransport};
 
 #[cfg(all(
@@ -98,13 +108,14 @@ pub trait Transport {
     }
 }
 
-/// Enum for different transport types
+#[cfg(not(target_arch = "wasm32"))]
 pub enum TransportType {
     Tcp(TcpTransport),
     Tls(Box<TlsTransport>),
     WebSocket(Box<WebSocketTransport>),
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Transport for TransportType {
     async fn connect(&mut self) -> Result<()> {
         match self {
