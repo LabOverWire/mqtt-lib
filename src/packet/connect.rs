@@ -501,8 +501,8 @@ impl ConnectPacket {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::BytesMut;
     use crate::time::Duration;
+    use bytes::BytesMut;
 
     #[test]
     fn test_connect_packet_basic() {

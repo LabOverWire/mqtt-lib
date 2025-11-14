@@ -1,8 +1,8 @@
 //! Cluster simulation utilities for testing distributed MQTT scenarios
 
 use super::{TurmoilBroker, TurmoilBrokerConfig};
-use std::collections::HashMap;
 use crate::time::Duration;
+use std::collections::HashMap;
 
 /// Configuration for a cluster simulation
 #[derive(Debug, Clone)]

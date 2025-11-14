@@ -3,10 +3,10 @@
 //! Run with: cargo run --example `shared_subscription_demo`
 
 use mqtt5::broker::{BrokerConfig, MqttBroker};
+use mqtt5::time::Duration;
 use mqtt5::{ConnectOptions, MqttClient};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use mqtt5::time::Duration;
 use tokio::time::sleep;
 
 #[tokio::main]

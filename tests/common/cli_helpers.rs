@@ -1,8 +1,8 @@
 #![allow(dead_code)]
 
+use mqtt5::time::Duration;
 use std::io::Write;
 use std::process::{Command, Output, Stdio};
-use mqtt5::time::Duration;
 use tokio::time::timeout;
 
 const CLI_BINARY: &str = "target/release/mqttv5";

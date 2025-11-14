@@ -1,9 +1,9 @@
 use mqtt5::error::MqttError;
 use mqtt5::session::limits::{ExpiringMessage, LimitsConfig, LimitsManager};
 use mqtt5::session::queue::MessageQueue;
+use mqtt5::time::Duration;
 use mqtt5::QoS;
 use std::thread;
-use mqtt5::time::Duration;
 
 #[test]
 fn test_packet_size_validation() {

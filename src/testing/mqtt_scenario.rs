@@ -1,8 +1,8 @@
 //! MQTT scenario builder for complex testing scenarios
 
 use super::{TurmoilBrokerConfig, TurmoilClientConfig};
-use std::collections::HashMap;
 use crate::time::Duration;
+use std::collections::HashMap;
 
 /// Network conditions for scenario testing
 #[derive(Debug, Clone)]

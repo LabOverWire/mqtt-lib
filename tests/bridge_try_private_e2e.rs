@@ -1,9 +1,9 @@
 use mqtt5::broker::bridge::{BridgeConfig, BridgeDirection};
 use mqtt5::broker::{BrokerConfig, MqttBroker};
 use mqtt5::client::MqttClient;
+use mqtt5::time::Duration;
 use mqtt5::QoS;
 use std::sync::Arc;
-use mqtt5::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::{sleep, timeout};
 

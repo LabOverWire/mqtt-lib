@@ -1,7 +1,7 @@
+use mqtt5::time::Duration;
 use mqtt5::{MqttClient, MqttError, QoS, RetainHandling, SubscribeOptions};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
-use mqtt5::time::Duration;
 use tokio::sync::Mutex;
 use ulid::Ulid;
 

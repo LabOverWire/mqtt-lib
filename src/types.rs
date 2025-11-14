@@ -1,6 +1,6 @@
 use crate::session::SessionConfig;
-use crate::QoS;
 use crate::time::Duration;
+use crate::QoS;
 
 pub use crate::protocol::v5::reason_codes::ReasonCode;
 

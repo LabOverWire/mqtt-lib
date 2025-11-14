@@ -5,9 +5,9 @@ use super::super::*;
 use crate::broker::storage::{ClientSession, QueuedMessage, RetainedMessage};
 use crate::packet::publish::PublishPacket;
 use crate::protocol::v5::properties::{PropertyId, PropertyValue};
+use crate::time::Duration;
 use crate::QoS;
 use std::sync::Arc;
-use crate::time::Duration;
 use tokio::time::sleep;
 
 fn create_memory_storage() -> Storage<MemoryBackend> {

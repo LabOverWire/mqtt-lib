@@ -2,9 +2,9 @@
 
 pub mod cli_helpers;
 
+use mqtt5::time::Duration;
 use mqtt5::{ConnectOptions, MqttClient, PublishOptions, PublishProperties, QoS};
 use std::sync::Arc;
-use mqtt5::time::Duration;
 use tokio::sync::RwLock;
 use ulid::Ulid;
 

@@ -1,6 +1,7 @@
 mod common;
 
 use common::TestBroker;
+use mqtt5::time::Duration;
 use mqtt5::{
     ConnectOptions, ConnectionEvent, Message, MqttClient, PublishOptions, QoS, SubscribeOptions,
     WillMessage, WillProperties,
@@ -8,7 +9,6 @@ use mqtt5::{
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
-use mqtt5::time::Duration;
 use tokio::sync::Mutex;
 use ulid::Ulid;
 

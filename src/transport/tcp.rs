@@ -1,7 +1,7 @@
 use crate::error::{MqttError, Result};
+use crate::time::Duration;
 use crate::transport::Transport;
 use std::net::{IpAddr, SocketAddr};
-use crate::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{
     tcp::{OwnedReadHalf, OwnedWriteHalf},

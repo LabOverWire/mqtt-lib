@@ -8,11 +8,11 @@ use mqtt5::broker::router::MessageRouter;
 #[cfg(feature = "turmoil-testing")]
 use mqtt5::packet::publish::PublishPacket;
 #[cfg(feature = "turmoil-testing")]
+use mqtt5::time::Duration;
+#[cfg(feature = "turmoil-testing")]
 use mqtt5::QoS;
 #[cfg(feature = "turmoil-testing")]
 use std::sync::Arc;
-#[cfg(feature = "turmoil-testing")]
-use mqtt5::time::Duration;
 #[cfg(feature = "turmoil-testing")]
 use tokio::sync::mpsc;
 

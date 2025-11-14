@@ -2,10 +2,10 @@
 
 use crate::client::MqttClient;
 use crate::error::MqttError;
+use crate::time::Duration;
 use crate::types::Message;
 use crate::QoS;
 use std::sync::Arc;
-use crate::time::Duration;
 use tokio::sync::{mpsc, Mutex};
 
 /// Configuration for Turmoil-based client

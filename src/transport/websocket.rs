@@ -41,13 +41,13 @@
 
 use crate::error::{MqttError, Result};
 use crate::packet::Packet;
+use crate::time::Duration;
 use crate::transport::packet_io::{PacketReader, PacketWriter};
 use crate::transport::tls::TlsConfig;
 use crate::transport::Transport;
 use futures_util::{stream::SplitSink, stream::SplitStream, StreamExt};
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use crate::time::Duration;
 use tokio::net::TcpStream;
 use tokio_tungstenite::{
     tungstenite::{self, http::Request, protocol::Message},

@@ -3,11 +3,11 @@
 //! This test suite uses property-based testing to verify the robustness
 //! of WebSocket configuration parsing, validation, and TLS integration.
 
+use mqtt5::time::Duration;
 use mqtt5::transport::websocket::{WebSocketConfig, WebSocketTransport};
 use mqtt5::transport::Transport;
 use proptest::prelude::*;
 use std::collections::HashMap;
-use mqtt5::time::Duration;
 
 // Generate valid WebSocket URLs
 fn valid_websocket_url() -> impl Strategy<Value = String> {

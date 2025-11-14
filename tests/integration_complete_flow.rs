@@ -1,11 +1,11 @@
 mod common;
 
 use common::{create_test_client_with_broker, test_client_id, TestBroker};
+use mqtt5::time::Duration;
 use mqtt5::{ConnectOptions, MqttClient, PublishOptions, PublishResult, QoS, SubscribeOptions};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
-use mqtt5::time::Duration;
 
 /// Counter for tracking events  
 struct EventCounter {

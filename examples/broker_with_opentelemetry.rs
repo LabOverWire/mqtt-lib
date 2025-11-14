@@ -25,8 +25,8 @@
 
 use mqtt5::broker::{BrokerConfig, MqttBroker};
 use mqtt5::telemetry::TelemetryConfig;
-use mqtt5::MqttClient;
 use mqtt5::time::Duration;
+use mqtt5::MqttClient;
 use tokio::time::sleep;
 use tracing::info;
 

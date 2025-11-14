@@ -1,7 +1,7 @@
 use crate::error::{MqttError, Result};
+use crate::time::{Duration, Instant};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-use crate::time::{Duration, Instant};
 use tokio::sync::{Notify, RwLock, Semaphore};
 
 /// Flow control manager for handling Receive Maximum

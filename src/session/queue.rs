@@ -1,8 +1,8 @@
 use crate::error::{MqttError, Result};
 use crate::session::limits::{ExpiringMessage, LimitsManager};
+use crate::time::Instant;
 use crate::QoS;
 use std::collections::VecDeque;
-use crate::time::Instant;
 
 /// `Result` of queueing a message
 #[derive(Debug, Clone)]

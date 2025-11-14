@@ -22,12 +22,12 @@ use crate::packet::unsuback::UnsubAckPacket;
 use crate::packet::unsubscribe::UnsubscribePacket;
 use crate::packet::Packet;
 use crate::protocol::v5::reason_codes::ReasonCode;
+use crate::time::Duration;
 use crate::transport::packet_io::PacketIo;
 use crate::QoS;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use crate::time::Duration;
 
 use tokio::sync::mpsc;
 use tokio::time::{interval, timeout};

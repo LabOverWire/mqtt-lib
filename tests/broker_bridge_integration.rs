@@ -3,9 +3,9 @@
 use mqtt5::broker::bridge::{BridgeConfig, BridgeDirection, BridgeManager};
 use mqtt5::broker::router::MessageRouter;
 use mqtt5::packet::publish::PublishPacket;
+use mqtt5::time::Duration;
 use mqtt5::QoS;
 use std::sync::Arc;
-use mqtt5::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 

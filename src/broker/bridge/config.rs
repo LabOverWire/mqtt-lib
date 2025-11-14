@@ -1,8 +1,8 @@
 //! Bridge configuration types
 
+use crate::time::Duration;
 use crate::QoS;
 use serde::{Deserialize, Serialize};
-use crate::time::Duration;
 
 /// Bridge connection configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]

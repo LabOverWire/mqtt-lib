@@ -7,13 +7,13 @@ use crate::broker::bridge::{BridgeConfig, BridgeDirection, BridgeError, BridgeSt
 use crate::broker::router::MessageRouter;
 use crate::client::MqttClient;
 use crate::packet::publish::PublishPacket;
+use crate::time::{Duration, Instant};
 use crate::transport::tls::TlsConfig;
 use crate::types::ConnectOptions;
 use crate::validation::topic_matches_filter;
 use std::net::ToSocketAddrs;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use crate::time::{Duration, Instant};
 use tokio::sync::{broadcast, RwLock};
 use tracing::{debug, error, info, warn};
 

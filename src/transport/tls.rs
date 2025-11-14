@@ -1,11 +1,11 @@
 use crate::error::{MqttError, Result};
+use crate::time::Duration;
 use crate::transport::Transport;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
 use rustls::{ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use crate::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::net::TcpStream;
 use tokio::time::timeout;

@@ -5,9 +5,9 @@ use common::TestBroker;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mqtt5::time::Duration;
     use mqtt5::transport::tls::TlsConfig;
     use mqtt5::{ConnectOptions, MqttClient};
-    use mqtt5::time::Duration;
 
     #[tokio::test]
     async fn debug_tls_connection() {

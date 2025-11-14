@@ -2,8 +2,8 @@
 
 use mqtt5::broker::bridge::LoopPrevention;
 use mqtt5::packet::publish::PublishPacket;
-use mqtt5::QoS;
 use mqtt5::time::Duration;
+use mqtt5::QoS;
 use tokio::time::sleep;
 
 #[tokio::test]

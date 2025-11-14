@@ -5,10 +5,10 @@ use crate::session::limits::LimitsManager;
 use crate::session::queue::{MessageQueue, QueuedMessage};
 use crate::session::retained::{RetainedMessage, RetainedMessageStore};
 use crate::session::subscription::{Subscription, SubscriptionManager};
+use crate::time::{Duration, Instant};
 use crate::types::WillMessage;
 use std::collections::HashMap;
 use std::sync::Arc;
-use crate::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
 /// Session configuration

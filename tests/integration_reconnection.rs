@@ -1,10 +1,10 @@
 mod common;
 
 use common::TestBroker;
+use mqtt5::time::Duration;
 use mqtt5::{ConnectOptions, ConnectionEvent, MqttClient, QoS, SubscribeOptions};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
-use mqtt5::time::Duration;
 
 use ulid::Ulid;
 

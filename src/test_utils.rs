@@ -10,9 +10,9 @@ use crate::protocol::v5::properties::Properties;
 use crate::protocol::v5::reason_codes::ReasonCode;
 use crate::session::limits::{ExpiringMessage, LimitsManager};
 use crate::session::retained::RetainedMessage;
+use crate::time::Duration;
 use crate::{MqttClient, QoS, Result};
 use bytes::BytesMut;
-use crate::time::Duration;
 use tokio::time::timeout;
 
 /// Helper trait for building test packets

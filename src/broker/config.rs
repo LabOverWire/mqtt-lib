@@ -7,10 +7,10 @@ use crate::broker::bridge::BridgeConfig;
 use crate::error::Result;
 #[cfg(feature = "opentelemetry")]
 use crate::telemetry::TelemetryConfig;
+use crate::time::Duration;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use crate::time::Duration;
 
 /// Broker configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]

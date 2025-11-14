@@ -4,10 +4,10 @@
 //! when the same message is being forwarded multiple times.
 
 use crate::packet::publish::PublishPacket;
+use crate::time::{Duration, Instant};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Arc;
-use crate::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tracing::{debug, warn};
 

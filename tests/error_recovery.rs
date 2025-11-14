@@ -1,9 +1,9 @@
 use mqtt5::client::{ErrorRecoveryConfig, RecoverableError};
+use mqtt5::time::Duration;
 use mqtt5::types::ReasonCode;
 use mqtt5::{MqttClient, MqttError};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
-use mqtt5::time::Duration;
 
 #[tokio::test]
 async fn test_error_callback_registration() {
