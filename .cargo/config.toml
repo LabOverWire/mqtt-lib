@@ -3,8 +3,11 @@
 # target = "wasm32-unknown-unknown"
 
 [target.wasm32-unknown-unknown]
-# Use lld linker for faster builds
-rustflags = ["-C", "link-arg=-zstack-size=65536"]
+# Use lld linker for faster builds and enable getrandom WASM support
+rustflags = [
+    "-C", "link-arg=-zstack-size=65536",
+    "--cfg", "getrandom_backend=\"wasm_js\""
+]
 
 # Enable unstable features for better WASM support
 [unstable]

@@ -195,7 +195,10 @@ pub mod transport;
 pub mod types;
 pub mod validation;
 
-#[cfg(all(target_arch = "wasm32", any(feature = "wasm-client", feature = "wasm-broker")))]
+#[cfg(all(
+    target_arch = "wasm32",
+    any(feature = "wasm-client", feature = "wasm-broker")
+))]
 pub mod wasm;
 
 pub use client::{

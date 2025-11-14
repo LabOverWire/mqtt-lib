@@ -6,7 +6,10 @@ pub mod tcp;
 pub mod tls;
 pub mod websocket;
 
-#[cfg(all(target_arch = "wasm32", any(feature = "wasm-client", feature = "wasm-broker")))]
+#[cfg(all(
+    target_arch = "wasm32",
+    any(feature = "wasm-client", feature = "wasm-broker")
+))]
 pub mod wasm;
 
 use crate::error::Result;
@@ -17,7 +20,10 @@ pub use tcp::{TcpConfig, TcpTransport};
 pub use tls::{TlsConfig, TlsTransport};
 pub use websocket::{WebSocketConfig, WebSocketTransport};
 
-#[cfg(all(target_arch = "wasm32", any(feature = "wasm-client", feature = "wasm-broker")))]
+#[cfg(all(
+    target_arch = "wasm32",
+    any(feature = "wasm-client", feature = "wasm-broker")
+))]
 pub use wasm::{BroadcastChannelTransport, MessagePortTransport, WasmWebSocketTransport};
 
 #[cfg(not(target_arch = "wasm32"))]

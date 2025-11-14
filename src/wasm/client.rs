@@ -19,19 +19,12 @@ impl WasmMqttClient {
         Ok(())
     }
 
-    pub async fn publish(
-        &self,
-        topic: &str,
-        payload: &[u8],
-    ) -> Result<(), JsValue> {
+    pub async fn publish(&self, topic: &str, payload: &[u8]) -> Result<(), JsValue> {
         web_sys::console::log_1(&format!("Publishing to topic: {}", topic).into());
         Ok(())
     }
 
-    pub async fn subscribe(
-        &self,
-        topic: &str,
-    ) -> Result<u16, JsValue> {
+    pub async fn subscribe(&self, topic: &str) -> Result<u16, JsValue> {
         web_sys::console::log_1(&format!("Subscribing to topic: {}", topic).into());
         Ok(1)
     }
