@@ -1,0 +1,11 @@
+[build]
+# Default target for WASM builds
+# target = "wasm32-unknown-unknown"
+
+[target.wasm32-unknown-unknown]
+# Use lld linker for faster builds
+rustflags = ["-C", "link-arg=-zstack-size=65536"]
+
+# Enable unstable features for better WASM support
+[unstable]
+# build-std = ["std", "panic_abort"]

@@ -6,6 +6,9 @@ pub mod tcp;
 pub mod tls;
 pub mod websocket;
 
+#[cfg(all(target_arch = "wasm32", any(feature = "wasm-client", feature = "wasm-broker")))]
+pub mod wasm;
+
 use crate::error::Result;
 
 pub use manager::{ConnectionState, ConnectionStats, ManagerConfig, TransportManager};
@@ -14,6 +17,10 @@ pub use tcp::{TcpConfig, TcpTransport};
 pub use tls::{TlsConfig, TlsTransport};
 pub use websocket::{WebSocketConfig, WebSocketTransport};
 
+#[cfg(all(target_arch = "wasm32", any(feature = "wasm-client", feature = "wasm-broker")))]
+pub use wasm::{BroadcastChannelTransport, MessagePortTransport, WasmWebSocketTransport};
+
+#[cfg(not(target_arch = "wasm32"))]
 pub trait Transport: Send + Sync {
     /// Establishes a connection
     ///
@@ -42,6 +49,47 @@ pub trait Transport: Send + Sync {
     ///
     /// Returns an error if the connection cannot be closed cleanly
     fn close(&mut self) -> impl std::future::Future<Output = Result<()>> + Send;
+
+    /// Checks if the transport is connected
+    fn is_connected(&self) -> bool {
+        false
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+pub trait Transport {
+    /// Establishes a connection
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the connection cannot be established
+    fn connect(&mut self) -> impl std::future::Future<Output = Result<()>>;
+
+    /// Reads data into the provided buffer
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the read operation fails
+    fn read(&mut self, buf: &mut [u8]) -> impl std::future::Future<Output = Result<usize>>;
+
+    /// Writes data from the provided buffer
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the write operation fails
+    fn write(&mut self, buf: &[u8]) -> impl std::future::Future<Output = Result<()>>;
+
+    /// Closes the connection
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the connection cannot be closed cleanly
+    fn close(&mut self) -> impl std::future::Future<Output = Result<()>>;
+
+    /// Checks if the transport is connected
+    fn is_connected(&self) -> bool {
+        false
+    }
 }
 
 /// Enum for different transport types

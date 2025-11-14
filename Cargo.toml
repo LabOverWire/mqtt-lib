@@ -30,6 +30,12 @@ opentelemetry_sdk = ["dep:opentelemetry_sdk"]
 opentelemetry-otlp = ["dep:opentelemetry-otlp"]
 tracing-opentelemetry = ["dep:tracing-opentelemetry"]
 
+# WASM features
+wasm-client = ["dep:wasm-bindgen", "dep:wasm-bindgen-futures", "dep:web-sys", "dep:js-sys", "dep:web-time"]
+wasm-broker = ["wasm-client"]
+wasm-p2p = ["wasm-client", "dep:matchbox_socket"]
+wasm-full = ["wasm-client", "wasm-broker", "wasm-p2p"]
+
 [dev-dependencies]
 tokio-test = "0.4"
 ulid = "1.2.1"
@@ -95,6 +101,12 @@ debug = true
 [workspace]
 members = [".", "crates/mqttv5-cli"]
 
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = ["-O4", "-oz"]
+
+[package.metadata.wasm-pack.profile.dev]
+wasm-opt = ["-O0"]
+
 [dependencies]
 base64 = "0.22"
 bcrypt = "0.17"
@@ -129,3 +141,29 @@ opentelemetry_sdk = { version = "0.31", features = ["trace", "rt-tokio"], option
 opentelemetry-otlp = { version = "0.31", features = ["trace", "grpc-tonic"], optional = true }
 tracing-opentelemetry = { version = "0.32", optional = true }
 opentelemetry = { version = "0.31", features = ["trace"], optional = true }
+
+# WASM dependencies
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = { version = "0.2", optional = true }
+wasm-bindgen-futures = { version = "0.4", optional = true }
+js-sys = { version = "0.3", optional = true }
+web-time = { version = "1.0", optional = true }
+matchbox_socket = { version = "0.10", optional = true }
+console_error_panic_hook = "0.1"
+async-trait = "0.1"
+
+web-sys = { version = "0.3", optional = true, features = [
+    "BroadcastChannel",
+    "MessageChannel",
+    "MessagePort",
+    "MessageEvent",
+    "ExtendableMessageEvent",
+    "ServiceWorkerGlobalScope",
+    "WebSocket",
+    "CloseEvent",
+    "ErrorEvent",
+    "Blob",
+    "Window",
+    "Event",
+    "EventTarget",
+] }
