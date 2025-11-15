@@ -36,6 +36,7 @@ pub async fn read_packet(transport: &mut WasmTransportType) -> Result<Packet> {
     Packet::decode_from_body(fixed_header.packet_type, &fixed_header, &mut body)
 }
 
+#[allow(async_fn_in_trait)]
 pub trait ReadExact {
     async fn read_exact(&mut self, buf: &mut [u8]) -> Result<()>;
 }
