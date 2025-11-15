@@ -80,7 +80,11 @@ fn encode_packet_simple(packet: &Packet, buf: &mut BytesMut) -> crate::error::Re
             )?;
             buf.put(body);
         }
-        _ => return Err(crate::error::MqttError::ProtocolError("Unsupported packet type for WASM client".to_string())),
+        _ => {
+            return Err(crate::error::MqttError::ProtocolError(
+                "Unsupported packet type for WASM client".to_string(),
+            ))
+        }
     }
     Ok(())
 }
@@ -102,7 +106,9 @@ impl WasmMqttClient {
     }
 
     pub async fn connect(&self, url: &str) -> Result<(), JsValue> {
-        let mut transport = WasmTransportType::WebSocket(crate::transport::wasm::websocket::WasmWebSocketTransport::new(url));
+        let mut transport = WasmTransportType::WebSocket(
+            crate::transport::wasm::websocket::WasmWebSocketTransport::new(url),
+        );
         transport
             .connect()
             .await
