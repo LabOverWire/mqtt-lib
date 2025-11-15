@@ -11,8 +11,18 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use wasm_bindgen::prelude::*;
-use wasm_bindgen_futures::spawn_local;
+use wasm_bindgen_futures::{spawn_local, JsFuture};
 use web_sys::MessagePort;
+
+async fn sleep_ms(millis: u32) {
+    let promise = js_sys::Promise::new(&mut |resolve, _reject| {
+        let window = web_sys::window().expect("no global window");
+        window
+            .set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, millis as i32)
+            .expect("setTimeout failed");
+    });
+    JsFuture::from(promise).await.ok();
+}
 
 struct ClientState {
     client_id: String,
@@ -22,6 +32,8 @@ struct ClientState {
     subscriptions: HashMap<String, js_sys::Function>,
     pending_subacks: HashMap<u16, js_sys::Function>,
     keep_alive: u16,
+    last_ping_sent: Option<f64>,
+    last_pong_received: Option<f64>,
 }
 
 impl ClientState {
@@ -34,6 +46,8 @@ impl ClientState {
             subscriptions: HashMap::new(),
             pending_subacks: HashMap::new(),
             keep_alive: 60,
+            last_ping_sent: None,
+            last_pong_received: None,
         }
     }
 
@@ -78,7 +92,9 @@ impl WasmMqttClient {
                         match read_packet(transport).await {
                             Ok(packet) => packet,
                             Err(e) => {
-                                web_sys::console::error_1(&format!("Packet read error: {}", e).into());
+                                web_sys::console::error_1(
+                                    &format!("Packet read error: {}", e).into(),
+                                );
                                 state_ref.connected = false;
                                 break;
                             }
@@ -93,10 +109,93 @@ impl WasmMqttClient {
         });
     }
 
+    fn spawn_keepalive_task(&self) {
+        let state = Rc::clone(&self.state);
+
+        spawn_local(async move {
+            loop {
+                let keep_alive_ms = {
+                    let state_ref = state.borrow();
+                    if !state_ref.connected {
+                        break;
+                    }
+                    (state_ref.keep_alive as f64) * 1000.0
+                };
+
+                let sleep_duration = (keep_alive_ms / 2.0) as u32;
+                sleep_ms(sleep_duration).await;
+
+                let should_disconnect = {
+                    let state_ref = state.borrow();
+                    if !state_ref.connected {
+                        break;
+                    }
+
+                    let now = js_sys::Date::now();
+
+                    if let Some(last_ping) = state_ref.last_ping_sent {
+                        if let Some(last_pong) = state_ref.last_pong_received {
+                            if last_ping > last_pong && (now - last_ping) > keep_alive_ms * 1.5 {
+                                web_sys::console::error_1(&"Keepalive timeout".into());
+                                true
+                            } else {
+                                false
+                            }
+                        } else if (now - last_ping) > keep_alive_ms * 1.5 {
+                            web_sys::console::error_1(&"Keepalive timeout".into());
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                };
+
+                if should_disconnect {
+                    state.borrow_mut().connected = false;
+                    break;
+                }
+
+                let packet = Packet::PingReq;
+                let mut buf = BytesMut::new();
+                if let Err(e) = encode_packet(&packet, &mut buf) {
+                    web_sys::console::error_1(&format!("Ping encode error: {}", e).into());
+                    continue;
+                }
+
+                state.borrow_mut().last_ping_sent = Some(js_sys::Date::now());
+
+                let write_result = {
+                    let mut state_ref = state.borrow_mut();
+                    if let Some(transport) = &mut state_ref.transport {
+                        Some(transport.write(&buf).await)
+                    } else {
+                        None
+                    }
+                };
+
+                match write_result {
+                    Some(Ok(_)) => {}
+                    Some(Err(e)) => {
+                        web_sys::console::error_1(&format!("Ping send error: {}", e).into());
+                        state.borrow_mut().connected = false;
+                        break;
+                    }
+                    None => {
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
     fn handle_incoming_packet(state: &Rc<RefCell<ClientState>>, packet: Packet) {
         match packet {
             Packet::ConnAck(connack) => {
-                web_sys::console::log_1(&format!("CONNACK received: {:?}", connack.reason_code).into());
+                web_sys::console::log_1(
+                    &format!("CONNACK received: {:?}", connack.reason_code).into(),
+                );
             }
             Packet::Publish(publish) => {
                 let topic = publish.topic_name.clone();
@@ -107,7 +206,8 @@ impl WasmMqttClient {
                     let topic_js = JsValue::from_str(&topic);
                     let payload_array = js_sys::Uint8Array::from(&payload[..]);
 
-                    if let Err(e) = callback.call2(&JsValue::NULL, &topic_js, &payload_array.into()) {
+                    if let Err(e) = callback.call2(&JsValue::NULL, &topic_js, &payload_array.into())
+                    {
                         web_sys::console::error_1(&format!("Callback error: {:?}", e).into());
                     }
                 }
@@ -115,20 +215,27 @@ impl WasmMqttClient {
             Packet::SubAck(suback) => {
                 let callback = state.borrow_mut().pending_subacks.remove(&suback.packet_id);
                 if let Some(callback) = callback {
-                    let reason_codes = suback.reason_codes.iter()
+                    let reason_codes = suback
+                        .reason_codes
+                        .iter()
                         .map(|rc| JsValue::from_f64(*rc as u8 as f64))
                         .collect::<js_sys::Array>();
 
                     if let Err(e) = callback.call1(&JsValue::NULL, &reason_codes.into()) {
-                        web_sys::console::error_1(&format!("SUBACK callback error: {:?}", e).into());
+                        web_sys::console::error_1(
+                            &format!("SUBACK callback error: {:?}", e).into(),
+                        );
                     }
                 }
             }
             Packet::PingResp => {
+                state.borrow_mut().last_pong_received = Some(js_sys::Date::now());
                 web_sys::console::log_1(&"PINGRESP received".into());
             }
             Packet::PubAck(puback) => {
-                web_sys::console::log_1(&format!("PUBACK received for packet {}", puback.packet_id).into());
+                web_sys::console::log_1(
+                    &format!("PUBACK received for packet {}", puback.packet_id).into(),
+                );
             }
             _ => {
                 web_sys::console::warn_1(&format!("Unhandled packet type: {:?}", packet).into());
@@ -211,6 +318,7 @@ impl WasmMqttClient {
         self.state.borrow_mut().connected = true;
 
         self.spawn_packet_reader();
+        self.spawn_keepalive_task();
 
         Ok(())
     }
@@ -289,7 +397,10 @@ impl WasmMqttClient {
 
         let packet_id = self.state.borrow_mut().next_packet_id();
 
-        self.state.borrow_mut().subscriptions.insert(topic.to_string(), callback);
+        self.state
+            .borrow_mut()
+            .subscriptions
+            .insert(topic.to_string(), callback);
 
         let subscribe_packet = SubscribePacket {
             packet_id,
