@@ -2,6 +2,7 @@
 
 pub mod bindings;
 pub mod client;
+pub mod decoder;
 pub mod service_worker;
 
 pub use client::WasmMqttClient;

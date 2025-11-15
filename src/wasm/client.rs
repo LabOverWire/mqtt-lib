@@ -1,12 +1,13 @@
 use crate::packet::connect::ConnectPacket;
 use crate::packet::publish::PublishPacket;
 use crate::packet::subscribe::SubscribePacket;
-use crate::packet::{MqttPacket, Packet, PacketType};
+use crate::packet::{MqttPacket, Packet};
 use crate::protocol::v5::properties::Properties;
 use crate::transport::{Transport, WasmTransportType};
 use crate::QoS;
-use bytes::{BufMut, BytesMut};
+use bytes::BytesMut;
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 use wasm_bindgen::prelude::*;
 use web_sys::MessagePort;
@@ -16,6 +17,9 @@ struct ClientState {
     transport: Option<WasmTransportType>,
     packet_id: u16,
     connected: bool,
+    subscriptions: HashMap<String, js_sys::Function>,
+    pending_subacks: HashMap<u16, js_sys::Function>,
+    keep_alive: u16,
 }
 
 impl ClientState {
@@ -25,6 +29,9 @@ impl ClientState {
             transport: None,
             packet_id: 0,
             connected: false,
+            subscriptions: HashMap::new(),
+            pending_subacks: HashMap::new(),
+            keep_alive: 60,
         }
     }
 
@@ -37,57 +44,20 @@ impl ClientState {
     }
 }
 
-fn encode_packet_simple(packet: &Packet, buf: &mut BytesMut) -> crate::error::Result<()> {
+fn encode_packet(packet: &Packet, buf: &mut BytesMut) -> crate::error::Result<()> {
     match packet {
-        Packet::Connect(p) => {
-            let flags = 0;
-            let packet_type_byte = (u8::from(PacketType::Connect) << 4) | flags;
-            buf.put_u8(packet_type_byte);
-
-            let mut body = BytesMut::new();
-            p.encode_body(&mut body)?;
-
-            crate::encoding::variable_int::encode_variable_int(
-                buf,
-                body.len().try_into().unwrap_or(u32::MAX),
-            )?;
-            buf.put(body);
+        Packet::Connect(p) => p.encode(buf),
+        Packet::Publish(p) => p.encode(buf),
+        Packet::Subscribe(p) => p.encode(buf),
+        Packet::PingReq => {
+            crate::packet::pingreq::PingReqPacket::default().encode(buf)
         }
-        Packet::Publish(p) => {
-            let flags = p.flags();
-            let packet_type_byte = (u8::from(PacketType::Publish) << 4) | flags;
-            buf.put_u8(packet_type_byte);
-
-            let mut body = BytesMut::new();
-            p.encode_body(&mut body)?;
-
-            crate::encoding::variable_int::encode_variable_int(
-                buf,
-                body.len().try_into().unwrap_or(u32::MAX),
-            )?;
-            buf.put(body);
-        }
-        Packet::Subscribe(p) => {
-            let flags = 0x02;
-            let packet_type_byte = (u8::from(PacketType::Subscribe) << 4) | flags;
-            buf.put_u8(packet_type_byte);
-
-            let mut body = BytesMut::new();
-            p.encode_body(&mut body)?;
-
-            crate::encoding::variable_int::encode_variable_int(
-                buf,
-                body.len().try_into().unwrap_or(u32::MAX),
-            )?;
-            buf.put(body);
-        }
-        _ => {
-            return Err(crate::error::MqttError::ProtocolError(
-                "Unsupported packet type for WASM client".to_string(),
-            ))
-        }
+        Packet::Disconnect(p) => p.encode(buf),
+        Packet::Unsubscribe(p) => p.encode(buf),
+        _ => Err(crate::error::MqttError::ProtocolError(
+            format!("Encoding not yet implemented for packet type: {:?}", packet),
+        )),
     }
-    Ok(())
 }
 
 #[wasm_bindgen]
@@ -127,7 +97,10 @@ impl WasmMqttClient {
         self.connect_with_transport(transport).await
     }
 
-    async fn connect_with_transport(&self, mut transport: WasmTransportType) -> Result<(), JsValue> {
+    async fn connect_with_transport(
+        &self,
+        mut transport: WasmTransportType,
+    ) -> Result<(), JsValue> {
         transport
             .connect()
             .await
@@ -148,7 +121,7 @@ impl WasmMqttClient {
 
         let packet = Packet::Connect(Box::new(connect_packet));
         let mut buf = BytesMut::new();
-        encode_packet_simple(&packet, &mut buf)
+        encode_packet(&packet, &mut buf)
             .map_err(|e| JsValue::from_str(&format!("Packet encoding failed: {}", e)))?;
 
         transport
@@ -185,7 +158,7 @@ impl WasmMqttClient {
 
         let packet = Packet::Publish(publish_packet);
         let mut buf = BytesMut::new();
-        encode_packet_simple(&packet, &mut buf)
+        encode_packet(&packet, &mut buf)
             .map_err(|e| JsValue::from_str(&format!("Packet encoding failed: {}", e)))?;
 
         let mut state = self.state.borrow_mut();
@@ -217,7 +190,7 @@ impl WasmMqttClient {
 
         let packet = Packet::Subscribe(subscribe_packet);
         let mut buf = BytesMut::new();
-        encode_packet_simple(&packet, &mut buf)
+        encode_packet(&packet, &mut buf)
             .map_err(|e| JsValue::from_str(&format!("Packet encoding failed: {}", e)))?;
 
         let mut state = self.state.borrow_mut();
