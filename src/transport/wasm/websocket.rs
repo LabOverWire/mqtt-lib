@@ -44,8 +44,7 @@ impl Transport for WasmWebSocketTransport {
         ws.set_binary_type(web_sys::BinaryType::Arraybuffer);
 
         let (msg_tx, msg_rx) = mpsc::unbounded();
-        let (open_tx, open_rx) = oneshot::channel();
-        let (error_tx, _error_rx) = oneshot::channel::<Result<()>>();
+        let (result_tx, result_rx) = oneshot::channel();
 
         let msg_tx_clone = msg_tx.clone();
         let onmessage = Closure::new(move |e: MessageEvent| {
@@ -56,21 +55,29 @@ impl Transport for WasmWebSocketTransport {
             }
         });
 
-        let mut open_tx_opt = Some(open_tx);
+        let result_tx = Arc::new(std::sync::Mutex::new(Some(result_tx)));
+
+        let result_tx_open = result_tx.clone();
         let connected_clone = self.connected.clone();
         let onopen = Closure::new(move |_: JsValue| {
             connected_clone.store(true, Ordering::SeqCst);
-            if let Some(tx) = open_tx_opt.take() {
-                let _ = tx.send(Ok(()));
+            if let Ok(mut tx_opt) = result_tx_open.lock() {
+                if let Some(tx) = tx_opt.take() {
+                    let _ = tx.send(Ok(()));
+                }
             }
         });
 
-        let mut error_tx_opt = Some(error_tx);
+        let result_tx_error = result_tx;
         let connected_clone2 = self.connected.clone();
         let onerror = Closure::new(move |_e: ErrorEvent| {
             connected_clone2.store(false, Ordering::SeqCst);
-            if let Some(tx) = error_tx_opt.take() {
-                let _ = tx.send(Err(MqttError::ConnectionError("WebSocket error".into())));
+            if let Ok(mut tx_opt) = result_tx_error.lock() {
+                if let Some(tx) = tx_opt.take() {
+                    let _ = tx.send(Err(MqttError::ConnectionError(
+                        "WebSocket connection failed".into(),
+                    )));
+                }
             }
         });
 
@@ -93,7 +100,7 @@ impl Transport for WasmWebSocketTransport {
             _onclose: onclose,
         });
 
-        open_rx
+        result_rx
             .await
             .map_err(|_| MqttError::ConnectionError("Connection cancelled".into()))?
     }

@@ -120,9 +120,13 @@ async function handleConnect(e) {
 
     try {
         updateStatus('connecting');
+        console.log('Connecting to:', brokerUrl, 'with client ID:', clientId);
 
         client = new WasmMqttClient(clientId);
+        console.log('WASM client created');
+
         await client.connect(brokerUrl);
+        console.log('Connection successful');
 
         updateStatus('connected');
         toggleControls(true);
@@ -130,6 +134,7 @@ async function handleConnect(e) {
         addMessage('system', new TextEncoder().encode(`Connected to ${brokerUrl}`), 'system');
 
     } catch (error) {
+        console.error('Connection error:', error);
         updateStatus('disconnected');
         showError(`Connection failed: ${error}`);
         client = null;
