@@ -9,6 +9,7 @@ use bytes::{BufMut, BytesMut};
 use std::cell::RefCell;
 use std::rc::Rc;
 use wasm_bindgen::prelude::*;
+use web_sys::MessagePort;
 
 struct ClientState {
     client_id: String,
@@ -106,9 +107,27 @@ impl WasmMqttClient {
     }
 
     pub async fn connect(&self, url: &str) -> Result<(), JsValue> {
-        let mut transport = WasmTransportType::WebSocket(
+        let transport = WasmTransportType::WebSocket(
             crate::transport::wasm::websocket::WasmWebSocketTransport::new(url),
         );
+        self.connect_with_transport(transport).await
+    }
+
+    pub async fn connect_message_port(&self, port: MessagePort) -> Result<(), JsValue> {
+        let transport = WasmTransportType::MessagePort(
+            crate::transport::wasm::message_port::MessagePortTransport::new(port),
+        );
+        self.connect_with_transport(transport).await
+    }
+
+    pub async fn connect_broadcast_channel(&self, channel_name: &str) -> Result<(), JsValue> {
+        let transport = WasmTransportType::BroadcastChannel(
+            crate::transport::wasm::broadcast::BroadcastChannelTransport::new(channel_name),
+        );
+        self.connect_with_transport(transport).await
+    }
+
+    async fn connect_with_transport(&self, mut transport: WasmTransportType) -> Result<(), JsValue> {
         transport
             .connect()
             .await

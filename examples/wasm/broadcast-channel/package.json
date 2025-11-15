@@ -1,0 +1,11 @@
+{
+  "name": "mqtt5-broadcast-channel-example",
+  "version": "0.9.0",
+  "description": "MQTT BroadcastChannel example using mqtt5 WASM with in-memory broker",
+  "type": "module",
+  "scripts": {
+    "build": "cd ../../.. && wasm-pack build --target web --features wasm-client && cp -r pkg examples/wasm/broadcast-channel/",
+    "serve": "python3 -m http.server 8000",
+    "dev": "npm run build && npm run serve"
+  }
+}

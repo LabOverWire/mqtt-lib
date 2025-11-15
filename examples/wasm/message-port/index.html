@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MQTT MessagePort Example - mqtt5</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>MQTT MessagePort Client</h1>
+            <p class="subtitle">Service Worker-based MQTT client with shared connections</p>
+            <p class="hint">💡 Open multiple tabs to test connection sharing</p>
+        </header>
+
+        <div class="status-bar">
+            <div class="status-group">
+                <span class="status-label">Service Worker:</span>
+                <span id="sw-status" class="status disconnected">Not Registered</span>
+            </div>
+            <div class="status-group">
+                <span class="status-label">Tab ID:</span>
+                <span id="tab-id" class="status-value">-</span>
+            </div>
+            <div class="status-group">
+                <span class="status-label">Connection:</span>
+                <span id="connection-status" class="status disconnected">Disconnected</span>
+            </div>
+        </div>
+
+        <section class="card">
+            <h2>Connection</h2>
+            <form id="connect-form">
+                <div class="form-group">
+                    <label for="broker-url">Broker URL</label>
+                    <input
+                        type="text"
+                        id="broker-url"
+                        value="ws://broker.hivemq.com:8000/mqtt"
+                        placeholder="ws://broker:port/path"
+                    >
+                    <small style="color: #6b7280; font-size: 0.875rem; margin-top: 4px; display: block;">
+                        Try: ws://broker.hivemq.com:8000/mqtt or ws://test.mosquitto.org:8080
+                    </small>
+                </div>
+                <div class="form-group">
+                    <label for="client-id">Client ID</label>
+                    <input
+                        type="text"
+                        id="client-id"
+                        placeholder="Auto-generated if empty"
+                    >
+                </div>
+                <button type="submit" id="connect-btn" class="btn btn-primary" disabled>Connect</button>
+                <button type="button" id="disconnect-btn" class="btn btn-secondary" disabled>Disconnect</button>
+            </form>
+        </section>
+
+        <section class="card">
+            <h2>Subscribe</h2>
+            <form id="subscribe-form">
+                <div class="form-group">
+                    <label for="subscribe-topic">Topic Filter</label>
+                    <input
+                        type="text"
+                        id="subscribe-topic"
+                        placeholder="test/topic or sensors/+/temperature"
+                        disabled
+                    >
+                </div>
+                <button type="submit" class="btn btn-primary" disabled>Subscribe</button>
+            </form>
+            <div id="subscriptions" class="subscriptions-list"></div>
+        </section>
+
+        <section class="card">
+            <h2>Publish</h2>
+            <form id="publish-form">
+                <div class="form-group">
+                    <label for="publish-topic">Topic</label>
+                    <input
+                        type="text"
+                        id="publish-topic"
+                        placeholder="test/topic"
+                        disabled
+                    >
+                </div>
+                <div class="form-group">
+                    <label for="publish-payload">Payload</label>
+                    <textarea
+                        id="publish-payload"
+                        rows="3"
+                        placeholder="Message to publish"
+                        disabled
+                    ></textarea>
+                </div>
+                <button type="submit" class="btn btn-primary" disabled>Publish</button>
+            </form>
+        </section>
+
+        <section class="card">
+            <h2>Messages</h2>
+            <div class="messages-controls">
+                <button id="clear-messages" class="btn btn-secondary btn-sm">Clear</button>
+            </div>
+            <div id="messages" class="messages-log"></div>
+        </section>
+    </div>
+
+    <script type="module" src="app.js"></script>
+</body>
+</html>
