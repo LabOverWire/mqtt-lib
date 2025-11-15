@@ -44,7 +44,14 @@ function addMessage(topic, payload, direction = 'received') {
     const now = new Date();
     const timeStr = now.toLocaleTimeString();
 
-    const payloadStr = new TextDecoder().decode(payload);
+    let payloadStr;
+    if (payload instanceof Uint8Array) {
+        payloadStr = new TextDecoder().decode(payload);
+    } else if (typeof payload === 'string') {
+        payloadStr = payload;
+    } else {
+        payloadStr = new TextDecoder().decode(payload);
+    }
 
     messageDiv.innerHTML = `
         <div class="message-header">
@@ -93,7 +100,13 @@ function updateSubscriptionsList() {
     document.querySelectorAll('.unsubscribe-btn').forEach(btn => {
         btn.addEventListener('click', async (e) => {
             const topic = e.target.dataset.topic;
-            removeSubscription(topic);
+            try {
+                await client.unsubscribe(topic);
+                removeSubscription(topic);
+                addMessage('system', `Unsubscribed from ${topic}`, 'system');
+            } catch (error) {
+                showError(`Unsubscribe failed: ${error}`);
+            }
         });
     });
 }
@@ -125,13 +138,29 @@ async function handleConnect(e) {
         client = new WasmMqttClient(clientId);
         console.log('WASM client created');
 
+        client.on_connect((reasonCode, sessionPresent) => {
+            console.log('onConnect callback:', reasonCode, sessionPresent);
+            updateStatus('connected');
+            toggleControls(true);
+            addMessage('system', `Connected to ${brokerUrl} (reason: ${reasonCode}, session: ${sessionPresent})`, 'system');
+        });
+
+        client.on_disconnect(() => {
+            console.log('onDisconnect callback');
+            updateStatus('disconnected');
+            toggleControls(false);
+            subscriptions.clear();
+            updateSubscriptionsList();
+            addMessage('system', 'Disconnected from broker', 'system');
+        });
+
+        client.on_error((error) => {
+            console.error('onError callback:', error);
+            addMessage('system', `Error: ${error}`, 'error');
+        });
+
         await client.connect(brokerUrl);
-        console.log('Connection successful');
-
-        updateStatus('connected');
-        toggleControls(true);
-
-        addMessage('system', new TextEncoder().encode(`Connected to ${brokerUrl}`), 'system');
+        console.log('Connection initiated');
 
     } catch (error) {
         console.error('Connection error:', error);
@@ -146,13 +175,6 @@ async function handleDisconnect() {
 
     try {
         await client.disconnect();
-        updateStatus('disconnected');
-        toggleControls(false);
-        subscriptions.clear();
-        updateSubscriptionsList();
-
-        addMessage('system', new TextEncoder().encode('Disconnected from broker'), 'system');
-
     } catch (error) {
         showError(`Disconnect failed: ${error}`);
     } finally {
@@ -180,9 +202,13 @@ async function handleSubscribe(e) {
     }
 
     try {
-        const packetId = await client.subscribe(topic);
+        const packetId = await client.subscribe_with_callback(topic, (receivedTopic, payload) => {
+            console.log('Message received:', receivedTopic, payload);
+            addMessage(receivedTopic, payload, 'received');
+        });
+
         addSubscription(topic);
-        addMessage('system', new TextEncoder().encode(`Subscribed to ${topic} (packet_id: ${packetId})`), 'system');
+        addMessage('system', `Subscribed to ${topic} (packet_id: ${packetId})`, 'system');
         document.getElementById('subscribe-topic').value = '';
 
     } catch (error) {

@@ -145,41 +145,58 @@ impl WasmMqttClient {
 
         spawn_local(async move {
             loop {
-                let keep_alive_ms = {
-                    let state_ref = state.borrow();
-                    if !state_ref.connected {
-                        break;
+                let (keep_alive_ms, connected) = {
+                    match state.try_borrow() {
+                        Ok(state_ref) => {
+                            let ms = (state_ref.keep_alive as f64) * 1000.0;
+                            let conn = state_ref.connected;
+                            (ms, conn)
+                        }
+                        Err(_) => {
+                            sleep_ms(100).await;
+                            continue;
+                        }
                     }
-                    (state_ref.keep_alive as f64) * 1000.0
                 };
+
+                if !connected {
+                    break;
+                }
 
                 let sleep_duration = (keep_alive_ms / 2.0) as u32;
                 sleep_ms(sleep_duration).await;
 
                 let should_disconnect = {
-                    let state_ref = state.borrow();
-                    if !state_ref.connected {
-                        break;
-                    }
+                    match state.try_borrow() {
+                        Ok(state_ref) => {
+                            if !state_ref.connected {
+                                break;
+                            }
 
-                    let now = js_sys::Date::now();
+                            let now = js_sys::Date::now();
 
-                    if let Some(last_ping) = state_ref.last_ping_sent {
-                        if let Some(last_pong) = state_ref.last_pong_received {
-                            if last_ping > last_pong && (now - last_ping) > keep_alive_ms * 1.5 {
-                                web_sys::console::error_1(&"Keepalive timeout".into());
-                                true
+                            if let Some(last_ping) = state_ref.last_ping_sent {
+                                if let Some(last_pong) = state_ref.last_pong_received {
+                                    if last_ping > last_pong && (now - last_ping) > keep_alive_ms * 1.5 {
+                                        web_sys::console::error_1(&"Keepalive timeout".into());
+                                        true
+                                    } else {
+                                        false
+                                    }
+                                } else if (now - last_ping) > keep_alive_ms * 1.5 {
+                                    web_sys::console::error_1(&"Keepalive timeout".into());
+                                    true
+                                } else {
+                                    false
+                                }
                             } else {
                                 false
                             }
-                        } else if (now - last_ping) > keep_alive_ms * 1.5 {
-                            web_sys::console::error_1(&"Keepalive timeout".into());
-                            true
-                        } else {
-                            false
                         }
-                    } else {
-                        false
+                        Err(_) => {
+                            sleep_ms(100).await;
+                            continue;
+                        }
                     }
                 };
 
@@ -239,7 +256,9 @@ impl WasmMqttClient {
                     let session_present = JsValue::from_bool(connack.session_present);
 
                     if let Err(e) = callback.call2(&JsValue::NULL, &reason_code, &session_present) {
-                        web_sys::console::error_1(&format!("onConnect callback error: {:?}", e).into());
+                        web_sys::console::error_1(
+                            &format!("onConnect callback error: {:?}", e).into(),
+                        );
                     }
                 }
             }
