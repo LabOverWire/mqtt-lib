@@ -1,6 +1,7 @@
 use crate::packet::connect::ConnectPacket;
 use crate::packet::publish::PublishPacket;
 use crate::packet::subscribe::SubscribePacket;
+use crate::packet::unsubscribe::UnsubscribePacket;
 use crate::packet::{MqttPacket, Packet};
 use crate::protocol::v5::properties::Properties;
 use crate::transport::{Transport, WasmTransportType};
@@ -31,6 +32,7 @@ struct ClientState {
     connected: bool,
     subscriptions: HashMap<String, js_sys::Function>,
     pending_subacks: HashMap<u16, js_sys::Function>,
+    pending_pubacks: HashMap<u16, js_sys::Function>,
     keep_alive: u16,
     last_ping_sent: Option<f64>,
     last_pong_received: Option<f64>,
@@ -45,6 +47,7 @@ impl ClientState {
             connected: false,
             subscriptions: HashMap::new(),
             pending_subacks: HashMap::new(),
+            pending_pubacks: HashMap::new(),
             keep_alive: 60,
             last_ping_sent: None,
             last_pong_received: None,
@@ -233,9 +236,19 @@ impl WasmMqttClient {
                 web_sys::console::log_1(&"PINGRESP received".into());
             }
             Packet::PubAck(puback) => {
-                web_sys::console::log_1(
-                    &format!("PUBACK received for packet {}", puback.packet_id).into(),
-                );
+                let callback = state.borrow_mut().pending_pubacks.remove(&puback.packet_id);
+                if let Some(callback) = callback {
+                    let reason_code = JsValue::from_f64(puback.reason_code as u8 as f64);
+                    if let Err(e) = callback.call1(&JsValue::NULL, &reason_code) {
+                        web_sys::console::error_1(
+                            &format!("PUBACK callback error: {:?}", e).into(),
+                        );
+                    }
+                } else {
+                    web_sys::console::log_1(
+                        &format!("PUBACK received for packet {}", puback.packet_id).into(),
+                    );
+                }
             }
             _ => {
                 web_sys::console::warn_1(&format!("Unhandled packet type: {:?}", packet).into());
@@ -354,6 +367,49 @@ impl WasmMqttClient {
         Ok(())
     }
 
+    pub async fn publish_qos1(
+        &self,
+        topic: &str,
+        payload: &[u8],
+        callback: js_sys::Function,
+    ) -> Result<u16, JsValue> {
+        if !self.state.borrow().connected {
+            return Err(JsValue::from_str("Not connected"));
+        }
+
+        let packet_id = self.state.borrow_mut().next_packet_id();
+
+        self.state
+            .borrow_mut()
+            .pending_pubacks
+            .insert(packet_id, callback);
+
+        let publish_packet = PublishPacket {
+            dup: false,
+            qos: QoS::AtLeastOnce,
+            retain: false,
+            topic_name: topic.to_string(),
+            packet_id: Some(packet_id),
+            properties: Properties::default(),
+            payload: payload.to_vec(),
+        };
+
+        let packet = Packet::Publish(publish_packet);
+        let mut buf = BytesMut::new();
+        encode_packet(&packet, &mut buf)
+            .map_err(|e| JsValue::from_str(&format!("Packet encoding failed: {}", e)))?;
+
+        let mut state = self.state.borrow_mut();
+        if let Some(transport) = &mut state.transport {
+            transport
+                .write(&buf)
+                .await
+                .map_err(|e| JsValue::from_str(&format!("Write failed: {}", e)))?;
+        }
+
+        Ok(packet_id)
+    }
+
     pub async fn subscribe(&self, topic: &str) -> Result<u16, JsValue> {
         if !self.state.borrow().connected {
             return Err(JsValue::from_str("Not connected"));
@@ -412,6 +468,37 @@ impl WasmMqttClient {
         };
 
         let packet = Packet::Subscribe(subscribe_packet);
+        let mut buf = BytesMut::new();
+        encode_packet(&packet, &mut buf)
+            .map_err(|e| JsValue::from_str(&format!("Packet encoding failed: {}", e)))?;
+
+        let mut state = self.state.borrow_mut();
+        if let Some(transport) = &mut state.transport {
+            transport
+                .write(&buf)
+                .await
+                .map_err(|e| JsValue::from_str(&format!("Write failed: {}", e)))?;
+        }
+
+        Ok(packet_id)
+    }
+
+    pub async fn unsubscribe(&self, topic: &str) -> Result<u16, JsValue> {
+        if !self.state.borrow().connected {
+            return Err(JsValue::from_str("Not connected"));
+        }
+
+        let packet_id = self.state.borrow_mut().next_packet_id();
+
+        self.state.borrow_mut().subscriptions.remove(topic);
+
+        let unsubscribe_packet = UnsubscribePacket {
+            packet_id,
+            properties: Properties::default(),
+            filters: vec![topic.to_string()],
+        };
+
+        let packet = Packet::Unsubscribe(unsubscribe_packet);
         let mut buf = BytesMut::new();
         encode_packet(&packet, &mut buf)
             .map_err(|e| JsValue::from_str(&format!("Packet encoding failed: {}", e)))?;
