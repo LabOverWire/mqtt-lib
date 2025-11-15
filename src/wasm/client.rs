@@ -36,6 +36,9 @@ struct ClientState {
     keep_alive: u16,
     last_ping_sent: Option<f64>,
     last_pong_received: Option<f64>,
+    on_connect: Option<js_sys::Function>,
+    on_disconnect: Option<js_sys::Function>,
+    on_error: Option<js_sys::Function>,
 }
 
 impl ClientState {
@@ -51,6 +54,9 @@ impl ClientState {
             keep_alive: 60,
             last_ping_sent: None,
             last_pong_received: None,
+            on_connect: None,
+            on_disconnect: None,
+            on_error: None,
         }
     }
 
@@ -84,6 +90,25 @@ pub struct WasmMqttClient {
 }
 
 impl WasmMqttClient {
+    fn trigger_disconnect_callback(state: &Rc<RefCell<ClientState>>) {
+        let callback = state.borrow().on_disconnect.clone();
+        if let Some(callback) = callback {
+            if let Err(e) = callback.call0(&JsValue::NULL) {
+                web_sys::console::error_1(&format!("onDisconnect callback error: {:?}", e).into());
+            }
+        }
+    }
+
+    fn trigger_error_callback(state: &Rc<RefCell<ClientState>>, error_msg: &str) {
+        let callback = state.borrow().on_error.clone();
+        if let Some(callback) = callback {
+            let error_js = JsValue::from_str(error_msg);
+            if let Err(e) = callback.call1(&JsValue::NULL, &error_js) {
+                web_sys::console::error_1(&format!("onError callback error: {:?}", e).into());
+            }
+        }
+    }
+
     fn spawn_packet_reader(&self) {
         let state = Rc::clone(&self.state);
 
@@ -95,10 +120,13 @@ impl WasmMqttClient {
                         match read_packet(transport).await {
                             Ok(packet) => packet,
                             Err(e) => {
-                                web_sys::console::error_1(
-                                    &format!("Packet read error: {}", e).into(),
-                                );
+                                let error_msg = format!("Packet read error: {}", e);
+                                web_sys::console::error_1(&error_msg.clone().into());
                                 state_ref.connected = false;
+                                drop(state_ref);
+
+                                Self::trigger_error_callback(&state, &error_msg);
+                                Self::trigger_disconnect_callback(&state);
                                 break;
                             }
                         }
@@ -157,6 +185,8 @@ impl WasmMqttClient {
 
                 if should_disconnect {
                     state.borrow_mut().connected = false;
+                    Self::trigger_error_callback(&state, "Keepalive timeout");
+                    Self::trigger_disconnect_callback(&state);
                     break;
                 }
 
@@ -181,8 +211,11 @@ impl WasmMqttClient {
                 match write_result {
                     Some(Ok(_)) => {}
                     Some(Err(e)) => {
-                        web_sys::console::error_1(&format!("Ping send error: {}", e).into());
+                        let error_msg = format!("Ping send error: {}", e);
+                        web_sys::console::error_1(&error_msg.clone().into());
                         state.borrow_mut().connected = false;
+                        Self::trigger_error_callback(&state, &error_msg);
+                        Self::trigger_disconnect_callback(&state);
                         break;
                     }
                     None => {
@@ -199,6 +232,16 @@ impl WasmMqttClient {
                 web_sys::console::log_1(
                     &format!("CONNACK received: {:?}", connack.reason_code).into(),
                 );
+
+                let callback = state.borrow().on_connect.clone();
+                if let Some(callback) = callback {
+                    let reason_code = JsValue::from_f64(connack.reason_code as u8 as f64);
+                    let session_present = JsValue::from_bool(connack.session_present);
+
+                    if let Err(e) = callback.call2(&JsValue::NULL, &reason_code, &session_present) {
+                        web_sys::console::error_1(&format!("onConnect callback error: {:?}", e).into());
+                    }
+                }
             }
             Packet::Publish(publish) => {
                 let topic = publish.topic_name.clone();
@@ -515,18 +558,37 @@ impl WasmMqttClient {
     }
 
     pub async fn disconnect(&self) -> Result<(), JsValue> {
-        let mut state = self.state.borrow_mut();
-        if let Some(mut transport) = state.transport.take() {
-            transport
-                .close()
-                .await
-                .map_err(|e| JsValue::from_str(&format!("Close failed: {}", e)))?;
+        {
+            let mut state = self.state.borrow_mut();
+            if let Some(mut transport) = state.transport.take() {
+                drop(state);
+                transport
+                    .close()
+                    .await
+                    .map_err(|e| JsValue::from_str(&format!("Close failed: {}", e)))?;
+                self.state.borrow_mut().connected = false;
+            } else {
+                state.connected = false;
+            }
         }
-        state.connected = false;
+
+        Self::trigger_disconnect_callback(&self.state);
         Ok(())
     }
 
     pub fn is_connected(&self) -> bool {
         self.state.borrow().connected
+    }
+
+    pub fn on_connect(&self, callback: js_sys::Function) {
+        self.state.borrow_mut().on_connect = Some(callback);
+    }
+
+    pub fn on_disconnect(&self, callback: js_sys::Function) {
+        self.state.borrow_mut().on_disconnect = Some(callback);
+    }
+
+    pub fn on_error(&self, callback: js_sys::Function) {
+        self.state.borrow_mut().on_error = Some(callback);
     }
 }
