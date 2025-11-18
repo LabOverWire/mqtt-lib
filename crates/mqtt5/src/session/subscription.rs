@@ -1,6 +1,11 @@
 use crate::error::{MqttError, Result};
 use crate::packet::subscribe::SubscriptionOptions;
+use crate::topic_matching::matches as topic_matches;
+use crate::validation::is_valid_topic_filter;
 use std::collections::HashMap;
+
+#[cfg(test)]
+use crate::validation::is_valid_topic_name;
 
 /// A subscription to a topic filter
 #[derive(Debug, Clone, PartialEq)]
@@ -98,102 +103,6 @@ impl Default for SubscriptionManager {
     fn default() -> Self {
         Self::new()
     }
-}
-
-#[must_use]
-/// Checks if a topic matches a topic filter with wildcards
-pub fn topic_matches(topic: &str, filter: &str) -> bool {
-    let topic_parts: Vec<&str> = topic.split('/').collect();
-    let filter_parts: Vec<&str> = filter.split('/').collect();
-
-    topic_matches_recursive(&topic_parts, &filter_parts, 0, 0)
-}
-
-fn topic_matches_recursive(
-    topic_parts: &[&str],
-    filter_parts: &[&str],
-    topic_idx: usize,
-    filter_idx: usize,
-) -> bool {
-    // If we've consumed all filter parts
-    if filter_idx >= filter_parts.len() {
-        // We should have consumed all topic parts too
-        return topic_idx >= topic_parts.len();
-    }
-
-    let filter_part = filter_parts[filter_idx];
-
-    // Handle multi-level wildcard
-    if filter_part == "#" {
-        // # must be the last part of the filter
-        return filter_idx == filter_parts.len() - 1;
-    }
-
-    // If we've run out of topic parts but still have filter parts (and it's not #)
-    if topic_idx >= topic_parts.len() {
-        return false;
-    }
-
-    let topic_part = topic_parts[topic_idx];
-
-    // Handle single-level wildcard or exact match
-    if filter_part == "+" || filter_part == topic_part {
-        // Move to next level
-        return topic_matches_recursive(topic_parts, filter_parts, topic_idx + 1, filter_idx + 1);
-    }
-
-    false
-}
-
-#[must_use]
-/// Validates a topic filter
-pub fn is_valid_topic_filter(filter: &str) -> bool {
-    // Empty filter is invalid
-    if filter.is_empty() {
-        return false;
-    }
-
-    // Check for null characters
-    if filter.contains('\0') {
-        return false;
-    }
-
-    let parts: Vec<&str> = filter.split('/').collect();
-
-    for (i, part) in parts.iter().enumerate() {
-        // # must be alone in its level and must be the last level
-        if part.contains('#') && (*part != "#" || i != parts.len() - 1) {
-            return false;
-        }
-
-        // + must be alone in its level
-        if part.contains('+') && *part != "+" {
-            return false;
-        }
-    }
-
-    true
-}
-
-#[must_use]
-/// Validates a topic name (no wildcards allowed)
-pub fn is_valid_topic_name(topic: &str) -> bool {
-    // Empty topic is invalid
-    if topic.is_empty() {
-        return false;
-    }
-
-    // Check for null characters
-    if topic.contains('\0') {
-        return false;
-    }
-
-    // Topic names cannot contain wildcards
-    if topic.contains('+') || topic.contains('#') {
-        return false;
-    }
-
-    true
 }
 
 #[cfg(test)]

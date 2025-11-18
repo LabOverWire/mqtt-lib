@@ -1,0 +1,30 @@
+[package]
+name = "mqtt5-protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "MQTT v5.0 protocol implementation - packets, encoding, and validation"
+documentation = "https://docs.rs/mqtt5-protocol"
+readme = "README.md"
+keywords = ["mqtt", "protocol", "iot", "codec", "packet"]
+categories = ["network-programming", "encoding", "parsing"]
+
+[features]
+default = []
+
+[dependencies]
+bebytes = "2.10"
+bytes = "1.10"
+thiserror = "2.0"
+serde = { version = "1.0", features = ["derive"] }
+tracing = "0.1.41"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-time = "1.0"
+getrandom = { version = "0.3", features = ["wasm_js"] }
+
+[dev-dependencies]
+proptest = "1.9.0"

@@ -1,4 +1,5 @@
 use crate::packet::publish::PublishPacket;
+use crate::topic_matching::matches as topic_matches;
 use crate::QoS;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -52,7 +53,7 @@ impl RetainedMessageStore {
         let mut matching = Vec::new();
 
         for (topic, message) in messages.iter() {
-            if crate::session::topic_matches(topic, topic_filter) {
+            if topic_matches(topic, topic_filter) {
                 matching.push(message.clone());
             }
         }

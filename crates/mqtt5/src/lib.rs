@@ -174,19 +174,16 @@
 #![allow(clippy::cast_lossless)]
 #![allow(clippy::single_component_path_imports)]
 
+pub use mqtt5_protocol::{
+    constants, encoding, error, flags, packet, packet_id, protocol, qos2, time, topic_matching,
+    validation,
+};
+
 #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-broker"))]
 pub mod broker;
 pub mod callback;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod client;
-pub mod constants;
-pub mod encoding;
-pub mod error;
-pub mod flags;
-pub mod packet;
-pub mod packet_id;
-pub mod protocol;
-pub mod qos2;
 pub mod session;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod tasks;
@@ -195,11 +192,8 @@ pub mod telemetry;
 pub mod test_utils;
 #[cfg(any(test, feature = "turmoil-testing"))]
 pub mod testing;
-pub mod time;
-pub mod topic_matching;
 pub mod transport;
 pub mod types;
-pub mod validation;
 
 #[cfg(all(
     target_arch = "wasm32",
@@ -211,70 +205,12 @@ pub mod wasm;
 pub use client::{
     ConnectionEvent, DisconnectReason, MockCall, MockMqttClient, MqttClient, MqttClientTrait,
 };
-pub use error::{MqttError, Result};
-pub use packet::publish::PublishPacket;
-pub use packet::{FixedHeader, Packet, PacketType};
-pub use protocol::v5::properties::{Properties, PropertyId, PropertyValue, PropertyValueType};
-pub use types::{
-    ConnectOptions, ConnectProperties, ConnectResult, ConnectionStats, Message, MessageProperties,
-    PublishOptions, PublishProperties, PublishResult, RetainHandling, SubscribeOptions,
-    WillMessage, WillProperties,
-};
-pub use validation::{
+pub use mqtt5_protocol::{
     is_valid_client_id, is_valid_topic_filter, is_valid_topic_name, topic_matches_filter,
-    validate_client_id, validate_topic_filter, validate_topic_name, RestrictiveValidator,
-    StandardValidator, TopicValidator,
+    validate_client_id, validate_topic_filter, validate_topic_name, ConnectProperties,
+    ConnectResult, FixedHeader, Message, MessageProperties, MqttError, Packet, PacketType,
+    Properties, PropertyId, PropertyValue, PropertyValueType, PublishOptions, PublishProperties,
+    PublishResult, QoS, RestrictiveValidator, RetainHandling, StandardValidator, SubscribeOptions,
+    TopicValidator, WillMessage, WillProperties, Result,
 };
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum QoS {
-    AtMostOnce = 0,
-    AtLeastOnce = 1,
-    ExactlyOnce = 2,
-}
-
-impl From<u8> for QoS {
-    fn from(value: u8) -> Self {
-        match value {
-            1 => QoS::AtLeastOnce,
-            2 => QoS::ExactlyOnce,
-            _ => QoS::AtMostOnce, // Default to QoS 0 for invalid values (including 0)
-        }
-    }
-}
-
-impl From<QoS> for u8 {
-    fn from(qos: QoS) -> Self {
-        qos as u8
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_qos_values() {
-        assert_eq!(QoS::AtMostOnce as u8, 0);
-        assert_eq!(QoS::AtLeastOnce as u8, 1);
-        assert_eq!(QoS::ExactlyOnce as u8, 2);
-    }
-
-    #[test]
-    fn test_qos_from_u8() {
-        assert_eq!(QoS::from(0), QoS::AtMostOnce);
-        assert_eq!(QoS::from(1), QoS::AtLeastOnce);
-        assert_eq!(QoS::from(2), QoS::ExactlyOnce);
-
-        // Invalid values default to AtMostOnce
-        assert_eq!(QoS::from(3), QoS::AtMostOnce);
-        assert_eq!(QoS::from(255), QoS::AtMostOnce);
-    }
-
-    #[test]
-    fn test_qos_into_u8() {
-        assert_eq!(u8::from(QoS::AtMostOnce), 0);
-        assert_eq!(u8::from(QoS::AtLeastOnce), 1);
-        assert_eq!(u8::from(QoS::ExactlyOnce), 2);
-    }
-}
+pub use types::{ConnectOptions, ConnectionStats};

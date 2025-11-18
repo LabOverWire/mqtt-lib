@@ -1237,12 +1237,9 @@ mod tests {
     use crate::transport::mock::MockTransport;
 
     fn create_test_client() -> DirectClientInner {
-        let options = ConnectOptions {
-            client_id: "test-client".to_string(),
-            clean_start: true,
-            keep_alive: Duration::from_secs(60),
-            ..Default::default()
-        };
+        let options = ConnectOptions::new("test-client")
+            .with_clean_start(true)
+            .with_keep_alive(Duration::from_secs(60));
         DirectClientInner::new(options)
     }
 
@@ -1377,19 +1374,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_connect_packet_with_will() {
-        let options = ConnectOptions {
-            client_id: "test-client".to_string(),
-            clean_start: true,
-            keep_alive: Duration::from_secs(60),
-            will: Some(crate::types::WillMessage {
-                topic: "test/will".to_string(),
-                payload: b"offline".to_vec(),
-                qos: QoS::AtLeastOnce,
-                retain: true,
-                properties: crate::WillProperties::default(),
-            }),
-            ..Default::default()
-        };
+        let will = crate::types::WillMessage::new("test/will", b"offline")
+            .with_qos(QoS::AtLeastOnce)
+            .with_retain(true);
+
+        let options = ConnectOptions::new("test-client")
+            .with_clean_start(true)
+            .with_keep_alive(Duration::from_secs(60))
+            .with_will(will);
 
         let client = DirectClientInner::new(options);
         let connect_packet = client.build_connect_packet().await;
@@ -1404,14 +1396,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_connect_packet_with_auth() {
-        let options = ConnectOptions {
-            client_id: "test-client".to_string(),
-            clean_start: true,
-            keep_alive: Duration::from_secs(60),
-            username: Some("user123".to_string()),
-            password: Some(b"pass123".to_vec()),
-            ..Default::default()
-        };
+        let options = ConnectOptions::new("test-client")
+            .with_clean_start(true)
+            .with_keep_alive(Duration::from_secs(60))
+            .with_credentials("user123", b"pass123");
 
         let client = DirectClientInner::new(options);
         let connect_packet = client.build_connect_packet().await;

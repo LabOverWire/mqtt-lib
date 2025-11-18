@@ -141,6 +141,7 @@ opentelemetry-otlp = { version = "0.31", features = [
 ], optional = true }
 tracing-opentelemetry = { version = "0.32", optional = true }
 opentelemetry = { version = "0.31", features = ["trace"], optional = true }
+mqtt5-protocol = { version = "0.10.0", path = "../mqtt5-protocol" }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 bcrypt = "0.17"

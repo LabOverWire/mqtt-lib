@@ -843,12 +843,11 @@ impl PasswordAuthProvider {
 mod tests {
     use super::*;
     use crate::packet::connect::ConnectPacket;
-    use crate::types::ConnectOptions;
 
     #[tokio::test]
     async fn test_allow_all_provider() {
         let provider = AllowAllAuthProvider;
-        let connect = ConnectPacket::new(ConnectOptions::new("test-client"));
+        let connect = ConnectPacket::new(mqtt5_protocol::ConnectOptions::new("test-client"));
         let addr = "127.0.0.1:12345".parse().unwrap();
 
         let result = provider.authenticate(&connect, addr).await.unwrap();
@@ -879,7 +878,7 @@ mod tests {
         let addr = "127.0.0.1:12345".parse().unwrap();
 
         // Test successful auth
-        let mut connect = ConnectPacket::new(ConnectOptions::new("test-client"));
+        let mut connect = ConnectPacket::new(mqtt5_protocol::ConnectOptions::new("test-client"));
         connect.username = Some("alice".to_string());
         connect.password = Some("secret123".as_bytes().to_vec());
 
@@ -1009,7 +1008,7 @@ mod tests {
         let addr = "127.0.0.1:12345".parse().unwrap();
 
         // Test Alice
-        let mut connect = ConnectPacket::new(ConnectOptions::new("test-client"));
+        let mut connect = ConnectPacket::new(mqtt5_protocol::ConnectOptions::new("test-client"));
         connect.username = Some("alice".to_string());
         connect.password = Some("secret123".as_bytes().to_vec());
         let result = provider.authenticate(&connect, addr).await.unwrap();
@@ -1091,7 +1090,7 @@ mod tests {
         let addr = "127.0.0.1:12345".parse().unwrap();
 
         // Test Alice authentication and authorization
-        let mut connect = ConnectPacket::new(ConnectOptions::new("alice-client"));
+        let mut connect = ConnectPacket::new(mqtt5_protocol::ConnectOptions::new("alice-client"));
         connect.username = Some("alice".to_string());
         connect.password = Some("secret123".as_bytes().to_vec());
 
@@ -1166,7 +1165,7 @@ mod tests {
         let addr = "127.0.0.1:12345".parse().unwrap();
 
         // Test Alice authentication
-        let mut connect = ConnectPacket::new(ConnectOptions::new("alice-client"));
+        let mut connect = ConnectPacket::new(mqtt5_protocol::ConnectOptions::new("alice-client"));
         connect.username = Some("alice".to_string());
         connect.password = Some("secret123".as_bytes().to_vec());
 
@@ -1200,7 +1199,7 @@ mod tests {
         let addr = "127.0.0.1:12345".parse().unwrap();
 
         // Test successful cert auth
-        let mut connect = ConnectPacket::new(ConnectOptions::new(&format!("cert:{}", fingerprint)));
+        let mut connect = ConnectPacket::new(mqtt5_protocol::ConnectOptions::new(&format!("cert:{}", fingerprint)));
         let result = provider.authenticate(&connect, addr).await.unwrap();
         assert!(result.authenticated);
         assert_eq!(result.user_id, Some("alice".to_string()));
@@ -1322,7 +1321,7 @@ mod tests {
         let addr = "127.0.0.1:12345".parse().unwrap();
 
         // Test Alice
-        let mut connect = ConnectPacket::new(ConnectOptions::new(
+        let mut connect = ConnectPacket::new(mqtt5_protocol::ConnectOptions::new(
             "cert:1234567890123456789012345678901234567890123456789012345678901234",
         ));
         let result = provider.authenticate(&connect, addr).await.unwrap();
