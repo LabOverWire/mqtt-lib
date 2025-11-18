@@ -298,7 +298,8 @@ impl WasmMqttClient {
                     Ok(mut state_ref) => {
                         let mut timed_out_pubcomps = Vec::new();
 
-                        for (packet_id, (callback, timestamp)) in state_ref.pending_pubcomps.iter() {
+                        for (packet_id, (callback, timestamp)) in state_ref.pending_pubcomps.iter()
+                        {
                             if now - timestamp > timeout_ms {
                                 timed_out_pubcomps.push((*packet_id, callback.clone()));
                             }
@@ -321,7 +322,8 @@ impl WasmMqttClient {
                             let should_keep = now - *timestamp <= cleanup_ms;
                             if !should_keep {
                                 web_sys::console::log_1(
-                                    &format!("Cleaning up stale PUBREC for packet {}", packet_id).into(),
+                                    &format!("Cleaning up stale PUBREC for packet {}", packet_id)
+                                        .into(),
                                 );
                             }
                             should_keep
@@ -331,7 +333,11 @@ impl WasmMqttClient {
                             let should_keep = now - *timestamp <= cleanup_ms;
                             if !should_keep {
                                 web_sys::console::log_1(
-                                    &format!("Cleaning up QoS 2 duplicate tracker for packet {}", packet_id).into(),
+                                    &format!(
+                                        "Cleaning up QoS 2 duplicate tracker for packet {}",
+                                        packet_id
+                                    )
+                                    .into(),
                                 );
                             }
                             should_keep
@@ -382,7 +388,8 @@ impl WasmMqttClient {
                 if qos == crate::QoS::ExactlyOnce {
                     if let Some(packet_id) = publish.packet_id {
                         let is_duplicate = state.borrow().received_qos2.contains_key(&packet_id);
-                        let actions = crate::qos2::handle_incoming_publish_qos2(packet_id, is_duplicate);
+                        let actions =
+                            crate::qos2::handle_incoming_publish_qos2(packet_id, is_duplicate);
 
                         for action in actions {
                             match action {
@@ -401,35 +408,59 @@ impl WasmMqttClient {
                                                 .into(),
                                             );
                                             let topic_js = JsValue::from_str(&topic);
-                                            let payload_array = js_sys::Uint8Array::from(&payload[..]);
+                                            let payload_array =
+                                                js_sys::Uint8Array::from(&payload[..]);
 
-                                            if let Err(e) =
-                                                callback.call2(&JsValue::NULL, &topic_js, &payload_array.into())
-                                            {
-                                                web_sys::console::error_1(&format!("Callback error: {:?}", e).into());
+                                            if let Err(e) = callback.call2(
+                                                &JsValue::NULL,
+                                                &topic_js,
+                                                &payload_array.into(),
+                                            ) {
+                                                web_sys::console::error_1(
+                                                    &format!("Callback error: {:?}", e).into(),
+                                                );
                                             }
                                         }
                                     }
 
                                     if !found_match {
                                         web_sys::console::log_1(
-                                            &format!("No subscription filter matched topic: {}", topic).into(),
+                                            &format!(
+                                                "No subscription filter matched topic: {}",
+                                                topic
+                                            )
+                                            .into(),
                                         );
                                     }
                                 }
-                                crate::qos2::QoS2Action::SendPubRec { packet_id, reason_code } => {
-                                    let pubrec = crate::packet::pubrec::PubRecPacket::new_with_reason(packet_id, reason_code);
+                                crate::qos2::QoS2Action::SendPubRec {
+                                    packet_id,
+                                    reason_code,
+                                } => {
+                                    let pubrec =
+                                        crate::packet::pubrec::PubRecPacket::new_with_reason(
+                                            packet_id,
+                                            reason_code,
+                                        );
                                     let mut buf = BytesMut::new();
-                                    if let Err(e) = encode_packet(&crate::packet::Packet::PubRec(pubrec), &mut buf) {
-                                        web_sys::console::error_1(&format!("PUBREC encode error: {}", e).into());
+                                    if let Err(e) = encode_packet(
+                                        &crate::packet::Packet::PubRec(pubrec),
+                                        &mut buf,
+                                    ) {
+                                        web_sys::console::error_1(
+                                            &format!("PUBREC encode error: {}", e).into(),
+                                        );
                                         continue;
                                     }
 
                                     let writer_rc = state.borrow().writer.clone();
                                     if let Some(writer_rc) = writer_rc {
                                         spawn_local(async move {
-                                            if let Err(e) = writer_rc.borrow_mut().write(&buf).await {
-                                                web_sys::console::error_1(&format!("PUBREC send error: {}", e).into());
+                                            if let Err(e) = writer_rc.borrow_mut().write(&buf).await
+                                            {
+                                                web_sys::console::error_1(
+                                                    &format!("PUBREC send error: {}", e).into(),
+                                                );
                                             }
                                         });
                                     }
@@ -465,7 +496,9 @@ impl WasmMqttClient {
                             if let Err(e) =
                                 callback.call2(&JsValue::NULL, &topic_js, &payload_array.into())
                             {
-                                web_sys::console::error_1(&format!("Callback error: {:?}", e).into());
+                                web_sys::console::error_1(
+                                    &format!("Callback error: {:?}", e).into(),
+                                );
                             }
                         }
                     }
@@ -534,10 +567,17 @@ impl WasmMqttClient {
             }
             Packet::PubRec(pubrec) => {
                 web_sys::console::log_1(
-                    &format!("PUBREC received: packet_id={}, reason_code={:?}", pubrec.packet_id, pubrec.reason_code).into(),
+                    &format!(
+                        "PUBREC received: packet_id={}, reason_code={:?}",
+                        pubrec.packet_id, pubrec.reason_code
+                    )
+                    .into(),
                 );
 
-                let has_pending = state.borrow().pending_pubcomps.contains_key(&pubrec.packet_id);
+                let has_pending = state
+                    .borrow()
+                    .pending_pubcomps
+                    .contains_key(&pubrec.packet_id);
                 let actions = crate::qos2::handle_incoming_pubrec(
                     pubrec.packet_id,
                     pubrec.reason_code,
@@ -549,8 +589,12 @@ impl WasmMqttClient {
                         crate::qos2::QoS2Action::SendPubRel { packet_id } => {
                             let pubrel = crate::packet::pubrel::PubRelPacket::new(packet_id);
                             let mut buf = BytesMut::new();
-                            if let Err(e) = encode_packet(&crate::packet::Packet::PubRel(pubrel), &mut buf) {
-                                web_sys::console::error_1(&format!("PUBREL encode error: {}", e).into());
+                            if let Err(e) =
+                                encode_packet(&crate::packet::Packet::PubRel(pubrel), &mut buf)
+                            {
+                                web_sys::console::error_1(
+                                    &format!("PUBREL encode error: {}", e).into(),
+                                );
                                 continue;
                             }
 
@@ -558,13 +602,20 @@ impl WasmMqttClient {
                             if let Some(writer_rc) = writer_rc {
                                 spawn_local(async move {
                                     if let Err(e) = writer_rc.borrow_mut().write(&buf).await {
-                                        web_sys::console::error_1(&format!("PUBREL send error: {}", e).into());
+                                        web_sys::console::error_1(
+                                            &format!("PUBREL send error: {}", e).into(),
+                                        );
                                     }
                                 });
                             }
                         }
-                        crate::qos2::QoS2Action::ErrorFlow { packet_id, reason_code } => {
-                            if let Some((callback, _)) = state.borrow_mut().pending_pubcomps.remove(&packet_id) {
+                        crate::qos2::QoS2Action::ErrorFlow {
+                            packet_id,
+                            reason_code,
+                        } => {
+                            if let Some((callback, _)) =
+                                state.borrow_mut().pending_pubcomps.remove(&packet_id)
+                            {
                                 let reason_code_js = JsValue::from_f64(reason_code as u8 as f64);
                                 if let Err(e) = callback.call1(&JsValue::NULL, &reason_code_js) {
                                     web_sys::console::error_1(
@@ -579,10 +630,17 @@ impl WasmMqttClient {
             }
             Packet::PubComp(pubcomp) => {
                 web_sys::console::log_1(
-                    &format!("PUBCOMP received: packet_id={}, reason_code={:?}", pubcomp.packet_id, pubcomp.reason_code).into(),
+                    &format!(
+                        "PUBCOMP received: packet_id={}, reason_code={:?}",
+                        pubcomp.packet_id, pubcomp.reason_code
+                    )
+                    .into(),
                 );
 
-                let has_pending = state.borrow().pending_pubcomps.contains_key(&pubcomp.packet_id);
+                let has_pending = state
+                    .borrow()
+                    .pending_pubcomps
+                    .contains_key(&pubcomp.packet_id);
                 let actions = crate::qos2::handle_incoming_pubcomp(
                     pubcomp.packet_id,
                     pubcomp.reason_code,
@@ -592,8 +650,11 @@ impl WasmMqttClient {
                 for action in actions {
                     match action {
                         crate::qos2::QoS2Action::CompleteFlow { packet_id } => {
-                            if let Some((callback, _)) = state.borrow_mut().pending_pubcomps.remove(&packet_id) {
-                                let reason_code_js = JsValue::from_f64(pubcomp.reason_code as u8 as f64);
+                            if let Some((callback, _)) =
+                                state.borrow_mut().pending_pubcomps.remove(&packet_id)
+                            {
+                                let reason_code_js =
+                                    JsValue::from_f64(pubcomp.reason_code as u8 as f64);
                                 if let Err(e) = callback.call1(&JsValue::NULL, &reason_code_js) {
                                     web_sys::console::error_1(
                                         &format!("PUBCOMP callback error: {:?}", e).into(),
@@ -601,8 +662,13 @@ impl WasmMqttClient {
                                 }
                             }
                         }
-                        crate::qos2::QoS2Action::ErrorFlow { packet_id, reason_code } => {
-                            if let Some((callback, _)) = state.borrow_mut().pending_pubcomps.remove(&packet_id) {
+                        crate::qos2::QoS2Action::ErrorFlow {
+                            packet_id,
+                            reason_code,
+                        } => {
+                            if let Some((callback, _)) =
+                                state.borrow_mut().pending_pubcomps.remove(&packet_id)
+                            {
                                 let reason_code_js = JsValue::from_f64(reason_code as u8 as f64);
                                 if let Err(e) = callback.call1(&JsValue::NULL, &reason_code_js) {
                                     web_sys::console::error_1(
@@ -620,7 +686,10 @@ impl WasmMqttClient {
                     &format!("PUBREL received: packet_id={}", pubrel.packet_id).into(),
                 );
 
-                let has_pubrec = state.borrow().pending_pubrecs.contains_key(&pubrel.packet_id);
+                let has_pubrec = state
+                    .borrow()
+                    .pending_pubrecs
+                    .contains_key(&pubrel.packet_id);
                 let actions = crate::qos2::handle_incoming_pubrel(pubrel.packet_id, has_pubrec);
 
                 for action in actions {
@@ -628,11 +697,21 @@ impl WasmMqttClient {
                         crate::qos2::QoS2Action::RemoveIncomingPubRec { packet_id } => {
                             state.borrow_mut().pending_pubrecs.remove(&packet_id);
                         }
-                        crate::qos2::QoS2Action::SendPubComp { packet_id, reason_code } => {
-                            let pubcomp = crate::packet::pubcomp::PubCompPacket::new_with_reason(packet_id, reason_code);
+                        crate::qos2::QoS2Action::SendPubComp {
+                            packet_id,
+                            reason_code,
+                        } => {
+                            let pubcomp = crate::packet::pubcomp::PubCompPacket::new_with_reason(
+                                packet_id,
+                                reason_code,
+                            );
                             let mut buf = BytesMut::new();
-                            if let Err(e) = encode_packet(&crate::packet::Packet::PubComp(pubcomp), &mut buf) {
-                                web_sys::console::error_1(&format!("PUBCOMP encode error: {}", e).into());
+                            if let Err(e) =
+                                encode_packet(&crate::packet::Packet::PubComp(pubcomp), &mut buf)
+                            {
+                                web_sys::console::error_1(
+                                    &format!("PUBCOMP encode error: {}", e).into(),
+                                );
                                 continue;
                             }
 
@@ -640,7 +719,9 @@ impl WasmMqttClient {
                             if let Some(writer_rc) = writer_rc {
                                 spawn_local(async move {
                                     if let Err(e) = writer_rc.borrow_mut().write(&buf).await {
-                                        web_sys::console::error_1(&format!("PUBCOMP send error: {}", e).into());
+                                        web_sys::console::error_1(
+                                            &format!("PUBCOMP send error: {}", e).into(),
+                                        );
                                     }
                                 });
                             }

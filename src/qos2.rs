@@ -5,25 +5,51 @@ use crate::protocol::v5::reason_codes::ReasonCode;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum QoS2Action {
-    SendPubRec { packet_id: u16, reason_code: ReasonCode },
-    SendPubRel { packet_id: u16 },
-    SendPubComp { packet_id: u16, reason_code: ReasonCode },
-    TrackOutgoingPubRec { packet_id: u16 },
-    TrackOutgoingPubRel { packet_id: u16 },
-    RemoveOutgoingPubRel { packet_id: u16 },
-    TrackIncomingPubRec { packet_id: u16 },
-    RemoveIncomingPubRec { packet_id: u16 },
-    DeliverMessage { packet_id: u16 },
-    CompleteFlow { packet_id: u16 },
-    ErrorFlow { packet_id: u16, reason_code: ReasonCode },
+    SendPubRec {
+        packet_id: u16,
+        reason_code: ReasonCode,
+    },
+    SendPubRel {
+        packet_id: u16,
+    },
+    SendPubComp {
+        packet_id: u16,
+        reason_code: ReasonCode,
+    },
+    TrackOutgoingPubRec {
+        packet_id: u16,
+    },
+    TrackOutgoingPubRel {
+        packet_id: u16,
+    },
+    RemoveOutgoingPubRel {
+        packet_id: u16,
+    },
+    TrackIncomingPubRec {
+        packet_id: u16,
+    },
+    RemoveIncomingPubRec {
+        packet_id: u16,
+    },
+    DeliverMessage {
+        packet_id: u16,
+    },
+    CompleteFlow {
+        packet_id: u16,
+    },
+    ErrorFlow {
+        packet_id: u16,
+        reason_code: ReasonCode,
+    },
 }
 
 impl QoS2Action {
     pub fn to_pubrec_packet(&self) -> Option<PubRecPacket> {
         match self {
-            QoS2Action::SendPubRec { packet_id, reason_code } => {
-                Some(PubRecPacket::new_with_reason(*packet_id, *reason_code))
-            }
+            QoS2Action::SendPubRec {
+                packet_id,
+                reason_code,
+            } => Some(PubRecPacket::new_with_reason(*packet_id, *reason_code)),
             _ => None,
         }
     }
@@ -37,9 +63,10 @@ impl QoS2Action {
 
     pub fn to_pubcomp_packet(&self) -> Option<PubCompPacket> {
         match self {
-            QoS2Action::SendPubComp { packet_id, reason_code } => {
-                Some(PubCompPacket::new_with_reason(*packet_id, *reason_code))
-            }
+            QoS2Action::SendPubComp {
+                packet_id,
+                reason_code,
+            } => Some(PubCompPacket::new_with_reason(*packet_id, *reason_code)),
             _ => None,
         }
     }
@@ -55,11 +82,17 @@ pub fn handle_incoming_pubrec(
     has_pending_publish: bool,
 ) -> Vec<QoS2Action> {
     if !has_pending_publish {
-        return vec![QoS2Action::ErrorFlow { packet_id, reason_code: ReasonCode::PacketIdentifierNotFound }];
+        return vec![QoS2Action::ErrorFlow {
+            packet_id,
+            reason_code: ReasonCode::PacketIdentifierNotFound,
+        }];
     }
 
     if reason_code != ReasonCode::Success {
-        return vec![QoS2Action::ErrorFlow { packet_id, reason_code }];
+        return vec![QoS2Action::ErrorFlow {
+            packet_id,
+            reason_code,
+        }];
     }
 
     vec![
@@ -82,22 +115,20 @@ pub fn handle_incoming_pubcomp(
         if reason_code == ReasonCode::Success {
             QoS2Action::CompleteFlow { packet_id }
         } else {
-            QoS2Action::ErrorFlow { packet_id, reason_code }
+            QoS2Action::ErrorFlow {
+                packet_id,
+                reason_code,
+            }
         },
     ]
 }
 
-pub fn handle_incoming_publish_qos2(
-    packet_id: u16,
-    is_duplicate: bool,
-) -> Vec<QoS2Action> {
+pub fn handle_incoming_publish_qos2(packet_id: u16, is_duplicate: bool) -> Vec<QoS2Action> {
     if is_duplicate {
-        vec![
-            QoS2Action::SendPubRec {
-                packet_id,
-                reason_code: ReasonCode::Success,
-            },
-        ]
+        vec![QoS2Action::SendPubRec {
+            packet_id,
+            reason_code: ReasonCode::Success,
+        }]
     } else {
         vec![
             QoS2Action::DeliverMessage { packet_id },
@@ -110,10 +141,7 @@ pub fn handle_incoming_publish_qos2(
     }
 }
 
-pub fn handle_incoming_pubrel(
-    packet_id: u16,
-    has_pending_pubrec: bool,
-) -> Vec<QoS2Action> {
+pub fn handle_incoming_pubrel(packet_id: u16, has_pending_pubrec: bool) -> Vec<QoS2Action> {
     if has_pending_pubrec {
         vec![
             QoS2Action::RemoveIncomingPubRec { packet_id },
@@ -123,12 +151,10 @@ pub fn handle_incoming_pubrel(
             },
         ]
     } else {
-        vec![
-            QoS2Action::SendPubComp {
-                packet_id,
-                reason_code: ReasonCode::PacketIdentifierNotFound,
-            },
-        ]
+        vec![QoS2Action::SendPubComp {
+            packet_id,
+            reason_code: ReasonCode::PacketIdentifierNotFound,
+        }]
     }
 }
 
@@ -162,7 +188,10 @@ mod tests {
         let actions = handle_incoming_pubrec(123, ReasonCode::UnspecifiedError, true);
         assert_eq!(actions.len(), 1);
         match &actions[0] {
-            QoS2Action::ErrorFlow { packet_id, reason_code } => {
+            QoS2Action::ErrorFlow {
+                packet_id,
+                reason_code,
+            } => {
                 assert_eq!(*packet_id, 123);
                 assert_eq!(*reason_code, ReasonCode::UnspecifiedError);
             }
@@ -175,7 +204,10 @@ mod tests {
         let actions = handle_incoming_pubrec(123, ReasonCode::Success, false);
         assert_eq!(actions.len(), 1);
         match &actions[0] {
-            QoS2Action::ErrorFlow { packet_id, reason_code } => {
+            QoS2Action::ErrorFlow {
+                packet_id,
+                reason_code,
+            } => {
                 assert_eq!(*packet_id, 123);
                 assert_eq!(*reason_code, ReasonCode::PacketIdentifierNotFound);
             }
