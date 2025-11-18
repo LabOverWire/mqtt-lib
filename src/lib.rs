@@ -185,6 +185,7 @@ pub mod error;
 pub mod flags;
 pub mod packet;
 pub mod packet_id;
+pub mod qos2;
 pub mod protocol;
 pub mod session;
 #[cfg(not(target_arch = "wasm32"))]
