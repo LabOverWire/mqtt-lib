@@ -190,6 +190,46 @@ mqttv5 pub
 - CLI Integration Testing - End-to-end tests with real broker verification
 - Flow control - Respects broker receive maximum limits
 
+## WASM Browser Support
+
+The library compiles to WebAssembly for browser environments with two deployment modes:
+
+### External Broker Mode
+Connect to remote MQTT brokers using WebSocket transport:
+
+```javascript
+import init, { WasmMqttClient } from './pkg/mqtt5.js';
+
+await init();
+const client = new WasmMqttClient('browser-client');
+await client.connect('ws://broker.example.com:8080/mqtt');
+
+await client.subscribe_with_callback('sensors/temp', (topic, payload) => {
+  const decoder = new TextDecoder();
+  console.log('Temperature:', decoder.decode(payload));
+});
+```
+
+### In-Tab Broker Mode
+Run a complete MQTT broker inside your browser tab:
+
+```javascript
+import init, { WasmBroker, WasmMqttClient } from './pkg/mqtt5.js';
+
+await init();
+const broker = new WasmBroker();
+const client = new WasmMqttClient('local-client');
+
+const port = broker.create_client_port();
+await client.connect_message_port(port);
+```
+
+The in-tab broker supports all core MQTT v5.0 features including QoS levels, retained messages, and subscriptions. Perfect for testing, demos, and offline-capable applications.
+
+**WASM Limitations:** No TLS socket support (use browser-managed `wss://`), memory-only storage, no file I/O. See `examples/wasm/README.md` for details.
+
+**Examples:** See `examples/wasm/` for complete browser examples.
+
 ## Advanced Broker Configuration
 
 ### Multi-Transport Broker

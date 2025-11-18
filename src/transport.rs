@@ -86,6 +86,89 @@ impl Transport for WasmTransportType {
     }
 }
 
+#[cfg(target_arch = "wasm32")]
+pub enum WasmReader {
+    WebSocket(wasm::websocket::WasmReader),
+    BroadcastChannel(wasm::broadcast::BroadcastChannelReader),
+    MessagePort(wasm::message_port::MessagePortReader),
+}
+
+#[cfg(target_arch = "wasm32")]
+pub enum WasmWriter {
+    WebSocket(wasm::websocket::WasmWriter),
+    BroadcastChannel(wasm::broadcast::BroadcastChannelWriter),
+    MessagePort(wasm::message_port::MessagePortWriter),
+}
+
+#[cfg(target_arch = "wasm32")]
+impl WasmReader {
+    pub async fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
+        match self {
+            Self::WebSocket(r) => r.read(buf).await,
+            Self::BroadcastChannel(r) => r.read(buf).await,
+            Self::MessagePort(r) => r.read(buf).await,
+        }
+    }
+
+    pub fn is_connected(&self) -> bool {
+        match self {
+            Self::WebSocket(r) => r.is_connected(),
+            Self::BroadcastChannel(r) => r.is_connected(),
+            Self::MessagePort(r) => r.is_connected(),
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl WasmWriter {
+    pub async fn write(&mut self, buf: &[u8]) -> Result<()> {
+        match self {
+            Self::WebSocket(w) => w.write(buf).await,
+            Self::BroadcastChannel(w) => w.write(buf).await,
+            Self::MessagePort(w) => w.write(buf).await,
+        }
+    }
+
+    pub async fn close(&mut self) -> Result<()> {
+        match self {
+            Self::WebSocket(w) => w.close().await,
+            Self::BroadcastChannel(w) => w.close().await,
+            Self::MessagePort(w) => w.close().await,
+        }
+    }
+
+    pub fn is_connected(&self) -> bool {
+        match self {
+            Self::WebSocket(w) => w.is_connected(),
+            Self::BroadcastChannel(w) => w.is_connected(),
+            Self::MessagePort(w) => w.is_connected(),
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl WasmTransportType {
+    pub fn into_split(self) -> Result<(WasmReader, WasmWriter)> {
+        match self {
+            Self::WebSocket(t) => {
+                let (r, w) = t.into_split()?;
+                Ok((WasmReader::WebSocket(r), WasmWriter::WebSocket(w)))
+            }
+            Self::MessagePort(t) => {
+                let (r, w) = t.into_split()?;
+                Ok((WasmReader::MessagePort(r), WasmWriter::MessagePort(w)))
+            }
+            Self::BroadcastChannel(t) => {
+                let (r, w) = t.into_split()?;
+                Ok((
+                    WasmReader::BroadcastChannel(r),
+                    WasmWriter::BroadcastChannel(w),
+                ))
+            }
+        }
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 pub trait Transport: Send + Sync {
     /// Establishes a connection

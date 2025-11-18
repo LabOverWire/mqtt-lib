@@ -2,6 +2,7 @@
 //!
 //! Routes messages between clients based on subscriptions
 
+#[cfg(not(target_arch = "wasm32"))]
 use crate::broker::bridge::BridgeManager;
 use crate::broker::storage::{DynamicStorage, QueuedMessage, RetainedMessage, StorageBackend};
 use crate::packet::publish::PublishPacket;
@@ -9,7 +10,9 @@ use crate::validation::topic_matches_filter;
 use crate::QoS;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::Weak;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, trace};
 
@@ -41,6 +44,7 @@ pub struct MessageRouter {
     /// Round-robin counters for shared subscription groups
     share_group_counters: Arc<RwLock<HashMap<String, Arc<AtomicUsize>>>>,
     /// Bridge manager for broker-to-broker connections
+    #[cfg(not(target_arch = "wasm32"))]
     bridge_manager: Arc<RwLock<Option<Weak<BridgeManager>>>>,
 }
 
@@ -63,6 +67,7 @@ impl MessageRouter {
             clients: Arc::new(RwLock::new(HashMap::new())),
             storage: None,
             share_group_counters: Arc::new(RwLock::new(HashMap::new())),
+            #[cfg(not(target_arch = "wasm32"))]
             bridge_manager: Arc::new(RwLock::new(None)),
         }
     }
@@ -76,11 +81,13 @@ impl MessageRouter {
             clients: Arc::new(RwLock::new(HashMap::new())),
             storage: Some(storage),
             share_group_counters: Arc::new(RwLock::new(HashMap::new())),
+            #[cfg(not(target_arch = "wasm32"))]
             bridge_manager: Arc::new(RwLock::new(None)),
         }
     }
 
     /// Sets the bridge manager for this router
+    #[cfg(not(target_arch = "wasm32"))]
     pub async fn set_bridge_manager(&self, bridge_manager: Arc<BridgeManager>) {
         *self.bridge_manager.write().await = Some(Arc::downgrade(&bridge_manager));
     }
@@ -238,6 +245,7 @@ impl MessageRouter {
     }
 
     /// Routes a publish message to all matching subscribers
+    #[allow(clippy::too_many_lines)]
     pub async fn route_message(&self, publish: &PublishPacket, publishing_client_id: Option<&str>) {
         trace!("Routing message to topic: {}", publish.topic_name);
 
@@ -352,11 +360,14 @@ impl MessageRouter {
         }
 
         // Forward to bridges if configured
-        let bridge_manager_weak = self.bridge_manager.read().await.clone();
-        if let Some(weak) = bridge_manager_weak {
-            if let Some(bridge_manager) = weak.upgrade() {
-                if let Err(e) = bridge_manager.handle_outgoing(publish).await {
-                    error!("Failed to forward message to bridges: {}", e);
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let bridge_manager_weak = self.bridge_manager.read().await.clone();
+            if let Some(weak) = bridge_manager_weak {
+                if let Some(bridge_manager) = weak.upgrade() {
+                    if let Err(e) = bridge_manager.handle_outgoing(publish).await {
+                        error!("Failed to forward message to bridges: {}", e);
+                    }
                 }
             }
         }

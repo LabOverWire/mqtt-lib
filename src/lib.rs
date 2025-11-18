@@ -174,7 +174,7 @@
 #![allow(clippy::cast_lossless)]
 #![allow(clippy::single_component_path_imports)]
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-broker"))]
 pub mod broker;
 pub mod callback;
 #[cfg(not(target_arch = "wasm32"))]

@@ -46,8 +46,7 @@ wasm-client = [
     "tokio",
 ]
 wasm-broker = ["wasm-client"]
-wasm-p2p = ["wasm-client", "dep:matchbox_socket"]
-wasm-full = ["wasm-client", "wasm-broker", "wasm-p2p"]
+wasm-full = ["wasm-client", "wasm-broker"]
 tokio = ["dep:tokio"]
 
 [dev-dependencies]
@@ -172,7 +171,6 @@ wasm-bindgen = { version = "0.2", optional = true }
 wasm-bindgen-futures = { version = "0.4", optional = true }
 js-sys = { version = "0.3", optional = true }
 web-time = { version = "1.0", optional = true }
-matchbox_socket = { version = "0.10", optional = true }
 console_error_panic_hook = "0.1"
 web-sys = { version = "0.3", optional = true, features = [
     "BinaryType",

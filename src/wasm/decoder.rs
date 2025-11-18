@@ -1,11 +1,11 @@
 use crate::error::{MqttError, Result};
 use crate::packet::{FixedHeader, Packet};
-use crate::transport::{Transport, WasmTransportType};
+use crate::transport::WasmReader;
 use bytes::Buf;
 
-pub async fn read_packet(transport: &mut WasmTransportType) -> Result<Packet> {
+pub async fn read_packet(reader: &mut WasmReader) -> Result<Packet> {
     let mut header_buf = vec![0u8; 5];
-    let n = transport.read(&mut header_buf).await?;
+    let n = reader.read(&mut header_buf).await?;
 
     if n == 0 {
         return Err(MqttError::ConnectionClosedByPeer);
@@ -28,7 +28,7 @@ pub async fn read_packet(transport: &mut WasmTransportType) -> Result<Packet> {
         };
 
         if bytes_read < remaining_length {
-            transport.read_exact(&mut body_buf[bytes_read..]).await?;
+            reader.read_exact(&mut body_buf[bytes_read..]).await?;
         }
     }
 
@@ -41,7 +41,7 @@ pub trait ReadExact {
     async fn read_exact(&mut self, buf: &mut [u8]) -> Result<()>;
 }
 
-impl ReadExact for WasmTransportType {
+impl ReadExact for WasmReader {
     async fn read_exact(&mut self, buf: &mut [u8]) -> Result<()> {
         let mut total_read = 0;
         while total_read < buf.len() {

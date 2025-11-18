@@ -1,19 +1,25 @@
 //! Authentication and authorization for the MQTT broker
 
 use crate::broker::acl::AclManager;
-use crate::error::{MqttError, Result};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::error::MqttError;
+use crate::error::Result;
 use crate::packet::connect::ConnectPacket;
 use crate::protocol::v5::reason_codes::ReasonCode;
 use base64::prelude::*;
 use std::collections::HashMap;
 use std::future::Future;
 use std::net::SocketAddr;
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
 use tokio::fs;
 use tokio::sync::RwLock;
-use tracing::{debug, error, info, warn};
+#[cfg(not(target_arch = "wasm32"))]
+use tracing::info;
+use tracing::{debug, error, warn};
 
 /// Authentication result from an auth provider
 #[derive(Debug, Clone)]
@@ -173,6 +179,7 @@ impl PasswordAuthProvider {
     /// # Errors
     ///
     /// Returns an error if the file cannot be read or parsed
+    #[cfg(not(target_arch = "wasm32"))]
     pub async fn from_file(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
         let provider = Self {
@@ -197,6 +204,7 @@ impl PasswordAuthProvider {
     /// # Errors
     ///
     /// Returns an error if the file cannot be read or parsed
+    #[cfg(not(target_arch = "wasm32"))]
     pub async fn load_password_file(&self) -> Result<()> {
         let Some(ref path) = self.password_file else {
             return Ok(());
@@ -259,6 +267,7 @@ impl PasswordAuthProvider {
     /// # Errors
     ///
     /// Returns an error if bcrypt hashing fails
+    #[cfg(not(target_arch = "wasm32"))]
     pub async fn add_user(&self, username: String, password: &str) -> Result<()> {
         let cost = bcrypt::DEFAULT_COST;
         let password_hash = bcrypt::hash(password, cost).map_err(|e| {
@@ -329,19 +338,28 @@ impl AuthProvider for PasswordAuthProvider {
                 let password_str = String::from_utf8_lossy(password);
 
                 // Verify password using bcrypt
-                match bcrypt::verify(&*password_str, password_hash) {
-                    Ok(true) => {
-                        debug!("Authentication successful for user: {username}");
-                        Ok(AuthResult::success_with_user(username.clone()))
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    match bcrypt::verify(&*password_str, password_hash) {
+                        Ok(true) => {
+                            debug!("Authentication successful for user: {username}");
+                            Ok(AuthResult::success_with_user(username.clone()))
+                        }
+                        Ok(false) => {
+                            warn!("Authentication failed for user: {username} (wrong password)");
+                            Ok(AuthResult::fail(ReasonCode::BadUsernameOrPassword))
+                        }
+                        Err(e) => {
+                            error!("bcrypt verification error for user {username}: {e}");
+                            Ok(AuthResult::fail(ReasonCode::ServerUnavailable))
+                        }
                     }
-                    Ok(false) => {
-                        warn!("Authentication failed for user: {username} (wrong password)");
-                        Ok(AuthResult::fail(ReasonCode::BadUsernameOrPassword))
-                    }
-                    Err(e) => {
-                        error!("bcrypt verification error for user {username}: {e}");
-                        Ok(AuthResult::fail(ReasonCode::ServerUnavailable))
-                    }
+                }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    let _ = (password_str, password_hash);
+                    error!("Password authentication with bcrypt is not available in WASM");
+                    Ok(AuthResult::fail(ReasonCode::ServerUnavailable))
                 }
             } else {
                 warn!("Authentication failed for user: {username} (user not found)");
@@ -411,6 +429,7 @@ impl ComprehensiveAuthProvider {
     /// # Errors
     ///
     /// Returns an error if files cannot be loaded
+    #[cfg(not(target_arch = "wasm32"))]
     pub async fn from_files(
         password_file: impl AsRef<Path>,
         acl_file: impl AsRef<Path>,
@@ -429,6 +448,7 @@ impl ComprehensiveAuthProvider {
     /// # Errors
     ///
     /// Returns an error if the password file cannot be loaded
+    #[cfg(not(target_arch = "wasm32"))]
     pub async fn with_password_file_and_allow_all_acl(
         password_file: impl AsRef<Path>,
     ) -> Result<Self> {
@@ -458,6 +478,7 @@ impl ComprehensiveAuthProvider {
     /// # Errors
     ///
     /// Returns an error if files cannot be reloaded
+    #[cfg(not(target_arch = "wasm32"))]
     pub async fn reload(&self) -> Result<()> {
         self.password_provider.load_password_file().await?;
         self.acl_manager.load_acl_file().await?;
@@ -546,6 +567,7 @@ impl CertificateAuthProvider {
     /// # Errors
     ///
     /// Returns an error if the file cannot be read or parsed
+    #[cfg(not(target_arch = "wasm32"))]
     pub async fn from_file(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
         let provider = Self {
@@ -562,6 +584,7 @@ impl CertificateAuthProvider {
     /// # Errors
     ///
     /// Returns an error if the file cannot be read or parsed
+    #[cfg(not(target_arch = "wasm32"))]
     pub async fn load_cert_file(&self) -> Result<()> {
         let Some(ref path) = self.cert_file else {
             return Ok(());
@@ -794,6 +817,7 @@ impl PasswordAuthProvider {
     /// # Errors
     ///
     /// Returns an error if bcrypt hashing fails
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn hash_password(password: &str) -> Result<String> {
         bcrypt::hash(password, bcrypt::DEFAULT_COST).map_err(|e| {
             error!("Failed to hash password: {}", e);
@@ -806,6 +830,7 @@ impl PasswordAuthProvider {
     /// # Errors
     ///
     /// Returns an error if bcrypt verification fails
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn verify_password(password: &str, hash: &str) -> Result<bool> {
         bcrypt::verify(password, hash).map_err(|e| {
             error!("Failed to verify password: {}", e);

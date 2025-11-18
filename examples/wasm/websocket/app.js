@@ -100,11 +100,15 @@ function updateSubscriptionsList() {
     document.querySelectorAll('.unsubscribe-btn').forEach(btn => {
         btn.addEventListener('click', async (e) => {
             const topic = e.target.dataset.topic;
+            console.log('Unsubscribe button clicked for topic:', topic);
             try {
+                console.log('Calling client.unsubscribe for topic:', topic);
                 await client.unsubscribe(topic);
+                console.log('client.unsubscribe completed for topic:', topic);
                 removeSubscription(topic);
                 addMessage('system', `Unsubscribed from ${topic}`, 'system');
             } catch (error) {
+                console.error('Unsubscribe error:', error);
                 showError(`Unsubscribe failed: ${error}`);
             }
         });
@@ -171,55 +175,77 @@ async function handleConnect(e) {
 }
 
 async function handleDisconnect() {
-    if (!client) return;
+    console.log('handleDisconnect: Function called, client:', client);
+    if (!client) {
+        console.log('handleDisconnect: No client, returning');
+        return;
+    }
 
     try {
+        console.log('handleDisconnect: Calling client.disconnect()');
         await client.disconnect();
+        console.log('handleDisconnect: disconnect() completed');
     } catch (error) {
+        console.error('handleDisconnect: Error caught:', error);
         showError(`Disconnect failed: ${error}`);
     } finally {
         client = null;
+        console.log('handleDisconnect: Client set to null');
     }
+    console.log('handleDisconnect: Function completed');
 }
 
 async function handleSubscribe(e) {
+    console.log('handleSubscribe: Function called');
     e.preventDefault();
 
+    console.log('handleSubscribe: Checking connection, client:', client, 'isConnected:', isConnected);
     if (!client || !isConnected) {
+        console.log('handleSubscribe: Not connected to broker');
         showError('Not connected to broker');
         return;
     }
 
     const topic = document.getElementById('subscribe-topic').value.trim();
+    console.log('handleSubscribe: Topic:', topic);
     if (!topic) {
+        console.log('handleSubscribe: No topic entered');
         showError('Please enter a topic filter');
         return;
     }
 
     if (subscriptions.has(topic)) {
+        console.log('handleSubscribe: Already subscribed to topic:', topic);
         showError('Already subscribed to this topic');
         return;
     }
 
     try {
+        console.log('handleSubscribe: Calling subscribe_with_callback for topic:', topic);
         const packetId = await client.subscribe_with_callback(topic, (receivedTopic, payload) => {
             console.log('Message received:', receivedTopic, payload);
             addMessage(receivedTopic, payload, 'received');
         });
 
+        console.log('handleSubscribe: subscribe_with_callback returned, packet_id:', packetId);
         addSubscription(topic);
         addMessage('system', `Subscribed to ${topic} (packet_id: ${packetId})`, 'system');
         document.getElementById('subscribe-topic').value = '';
 
     } catch (error) {
+        console.error('handleSubscribe: Error caught:', error);
         showError(`Subscribe failed: ${error}`);
     }
+    console.log('handleSubscribe: Function completed');
 }
 
 async function handlePublish(e) {
+    console.log('handlePublish: Function called');
     e.preventDefault();
 
+    console.log('handlePublish: Checking connection, client:', client, 'isConnected:', isConnected);
     if (!client || !isConnected) {
+        console.log('handlePublish: Not connected to broker');
         showError('Not connected to broker');
         return;
     }
@@ -227,7 +253,9 @@ async function handlePublish(e) {
     const topic = document.getElementById('publish-topic').value.trim();
     const payload = document.getElementById('publish-payload').value;
 
+    console.log('handlePublish: Topic:', topic, 'Payload:', payload);
     if (!topic) {
+        console.log('handlePublish: No topic entered');
         showError('Please enter a topic');
         return;
     }
@@ -236,14 +264,18 @@ async function handlePublish(e) {
         const encoder = new TextEncoder();
         const payloadBytes = encoder.encode(payload);
 
+        console.log('handlePublish: Calling client.publish, topic:', topic, 'payload bytes:', payloadBytes.length);
         await client.publish(topic, payloadBytes);
+        console.log('handlePublish: client.publish completed');
 
         addMessage(topic, payloadBytes, 'sent');
         document.getElementById('publish-payload').value = '';
 
     } catch (error) {
+        console.error('handlePublish: Error caught:', error);
         showError(`Publish failed: ${error}`);
     }
+    console.log('handlePublish: Function completed');
 }
 
 function clearMessages() {

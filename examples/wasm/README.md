@@ -1,6 +1,14 @@
-# WASM MQTT Client Examples
+# WASM MQTT Examples
 
-This directory contains browser examples demonstrating the mqtt5 WASM client with all its features including message callbacks, connection events, and QoS support.
+This directory contains browser examples demonstrating the mqtt5 WASM library with full client and broker functionality.
+
+## Use Cases
+
+### External Broker (websocket/)
+Connect to a remote MQTT broker using WebSocket transport. Suitable for production deployments where you have a dedicated MQTT infrastructure.
+
+### In-Tab Broker (local-broker/)
+Run a complete MQTT broker inside a single browser tab using MessagePort for communication. Perfect for testing, demos, and offline-capable applications without external dependencies.
 
 ## Quick Start
 
@@ -15,14 +23,14 @@ cd examples/wasm
 
 This will:
 - Build the WASM package with `wasm-pack`
-- Copy it to all example directories
-- Display instructions for running each example
+- Copy it to example directories
+- Display instructions for running examples
 
 ### 2. Run an Example
 
-Choose one of the three transport types:
-
 #### WebSocket (External Broker)
+
+Connects to a remote MQTT broker over WebSocket.
 
 ```bash
 cd websocket
@@ -31,25 +39,45 @@ python3 -m http.server 8000
 
 Open http://localhost:8000 in your browser.
 
-#### MessagePort (Service Worker)
+#### Local Broker (In-Tab)
+
+Runs a complete MQTT broker in your browser tab.
 
 ```bash
-cd message-port
-python3 -m http.server 8001
+cd local-broker
+python3 -m http.server 8000
 ```
 
-Open http://localhost:8001 in your browser.
-
-#### BroadcastChannel (In-Browser P2P)
-
-```bash
-cd broadcast-channel
-python3 -m http.server 8002
-```
-
-Open http://localhost:8002 in your browser.
+Open http://localhost:8000 in your browser.
 
 ## Features Demonstrated
+
+### Local Broker Features
+
+```javascript
+import init, { WasmBroker, WasmMqttClient } from './pkg/mqtt5.js';
+
+await init();
+
+const broker = new WasmBroker();
+const client = new WasmMqttClient('local-client');
+
+const port = broker.create_client_port();
+await client.connect_message_port(port);
+
+await client.subscribe_with_callback('test/topic', (topic, payload) => {
+  console.log('Message received:', topic, payload);
+});
+
+await client.publish('test/topic', encoder.encode('Hello'));
+```
+
+The in-tab broker:
+- Runs entirely in your browser (no external dependencies)
+- Uses MessagePort for client-broker communication
+- Memory-only storage (no persistence)
+- No authentication (AllowAllAuthProvider)
+- Supports all core MQTT v5.0 features (QoS, retained messages, subscriptions)
 
 ### Connection Events
 
@@ -107,14 +135,6 @@ The client automatically:
 
 ## Testing
 
-### WebSocket Example
-
-1. Start the example server
-2. Connect to a public broker (default: `ws://broker.hivemq.com:8000/mqtt`)
-3. Subscribe to a topic (e.g., `test/mqtt5-wasm`)
-4. Open the same URL in another browser tab
-5. Publish messages between tabs
-
 ### Testing Keepalive
 
 1. Connect to a broker
@@ -136,6 +156,30 @@ The client automatically:
 - Chrome/Edge 90+
 - Firefox 88+
 - Safari 15.4+
+
+## WASM Limitations
+
+The WASM build has the following constraints compared to the native Rust library:
+
+### Transport Limitations
+- **No TLS support**: Browser security model prevents raw TLS socket access
+- **WebSocket only for external brokers**: Use `ws://` or `wss://` (browser-managed TLS)
+- **MessagePort for in-tab broker**: Communication within the same browser tab
+
+### Storage Limitations
+- **Memory-only storage**: No file persistence available in browser environment
+- **Session data lost on page reload**: All broker state is transient
+
+### Authentication Limitations
+- **No bcrypt support**: Password hashing library not available in WASM
+- **In-tab broker uses AllowAllAuthProvider**: No authentication for local broker
+
+### Network Limitations
+- **No server sockets**: Cannot listen for incoming TCP/TLS connections
+- **No broker bridging**: Network-based broker-to-broker connections unavailable
+- **No file-based configuration**: All configuration must be done programmatically
+
+These limitations are inherent to the browser sandbox security model. For production MQTT deployments, use the native Rust library.
 
 ## Troubleshooting
 

@@ -3,12 +3,14 @@
 //! Provides durable storage for retained messages, client sessions, and message queues.
 //! Designed for production use with atomic operations and efficient file-based storage.
 
+#[cfg(not(target_arch = "wasm32"))]
 pub mod file_backend;
 pub mod memory_backend;
 pub mod queue;
 pub mod retained;
 pub mod sessions;
 
+#[cfg(not(target_arch = "wasm32"))]
 pub use file_backend::FileBackend;
 pub use memory_backend::MemoryBackend;
 pub use queue::MessageQueue;
@@ -39,8 +41,10 @@ pub struct RetainedMessage {
     /// Retain flag
     pub retain: bool,
     /// When the message was stored
+    #[serde(skip, default = "SystemTime::now")]
     pub stored_at: SystemTime,
     /// Message expiry time (if any)
+    #[serde(skip)]
     pub expires_at: Option<SystemTime>,
 }
 
@@ -56,8 +60,10 @@ pub struct ClientSession {
     /// Active subscriptions
     pub subscriptions: HashMap<String, QoS>,
     /// Session creation time
+    #[serde(skip, default = "SystemTime::now")]
     pub created_at: SystemTime,
     /// Last activity time
+    #[serde(skip, default = "SystemTime::now")]
     pub last_seen: SystemTime,
     /// Will message to publish on abnormal disconnect
     pub will_message: Option<crate::types::WillMessage>,
@@ -77,8 +83,10 @@ pub struct QueuedMessage {
     /// QoS level for delivery
     pub qos: QoS,
     /// When the message was queued
+    #[serde(skip, default = "SystemTime::now")]
     pub queued_at: SystemTime,
     /// Message expiry time (if any)
+    #[serde(skip)]
     pub expires_at: Option<SystemTime>,
     /// Packet ID for QoS 1/2 delivery
     pub packet_id: Option<u16>,
@@ -504,6 +512,7 @@ impl QueuedMessage {
 
 /// Dynamic storage backend that can hold different implementations
 pub enum DynamicStorage {
+    #[cfg(not(target_arch = "wasm32"))]
     File(FileBackend),
     Memory(MemoryBackend),
 }
@@ -511,6 +520,8 @@ pub enum DynamicStorage {
 impl StorageBackend for DynamicStorage {
     async fn store_retained_message(&self, topic: &str, message: RetainedMessage) -> Result<()> {
         match self {
+            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(not(target_arch = "wasm32"))]
             Self::File(backend) => backend.store_retained_message(topic, message).await,
             Self::Memory(backend) => backend.store_retained_message(topic, message).await,
         }
@@ -518,6 +529,8 @@ impl StorageBackend for DynamicStorage {
 
     async fn get_retained_message(&self, topic: &str) -> Result<Option<RetainedMessage>> {
         match self {
+            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(not(target_arch = "wasm32"))]
             Self::File(backend) => backend.get_retained_message(topic).await,
             Self::Memory(backend) => backend.get_retained_message(topic).await,
         }
@@ -525,6 +538,8 @@ impl StorageBackend for DynamicStorage {
 
     async fn remove_retained_message(&self, topic: &str) -> Result<()> {
         match self {
+            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(not(target_arch = "wasm32"))]
             Self::File(backend) => backend.remove_retained_message(topic).await,
             Self::Memory(backend) => backend.remove_retained_message(topic).await,
         }
@@ -535,6 +550,7 @@ impl StorageBackend for DynamicStorage {
         topic_filter: &str,
     ) -> Result<Vec<(String, RetainedMessage)>> {
         match self {
+            #[cfg(not(target_arch = "wasm32"))]
             Self::File(backend) => backend.get_retained_messages(topic_filter).await,
             Self::Memory(backend) => backend.get_retained_messages(topic_filter).await,
         }
@@ -542,6 +558,7 @@ impl StorageBackend for DynamicStorage {
 
     async fn store_session(&self, session: ClientSession) -> Result<()> {
         match self {
+            #[cfg(not(target_arch = "wasm32"))]
             Self::File(backend) => backend.store_session(session).await,
             Self::Memory(backend) => backend.store_session(session).await,
         }
@@ -549,6 +566,7 @@ impl StorageBackend for DynamicStorage {
 
     async fn get_session(&self, client_id: &str) -> Result<Option<ClientSession>> {
         match self {
+            #[cfg(not(target_arch = "wasm32"))]
             Self::File(backend) => backend.get_session(client_id).await,
             Self::Memory(backend) => backend.get_session(client_id).await,
         }
@@ -556,6 +574,7 @@ impl StorageBackend for DynamicStorage {
 
     async fn remove_session(&self, client_id: &str) -> Result<()> {
         match self {
+            #[cfg(not(target_arch = "wasm32"))]
             Self::File(backend) => backend.remove_session(client_id).await,
             Self::Memory(backend) => backend.remove_session(client_id).await,
         }
@@ -563,6 +582,7 @@ impl StorageBackend for DynamicStorage {
 
     async fn queue_message(&self, message: QueuedMessage) -> Result<()> {
         match self {
+            #[cfg(not(target_arch = "wasm32"))]
             Self::File(backend) => backend.queue_message(message).await,
             Self::Memory(backend) => backend.queue_message(message).await,
         }
@@ -570,6 +590,7 @@ impl StorageBackend for DynamicStorage {
 
     async fn get_queued_messages(&self, client_id: &str) -> Result<Vec<QueuedMessage>> {
         match self {
+            #[cfg(not(target_arch = "wasm32"))]
             Self::File(backend) => backend.get_queued_messages(client_id).await,
             Self::Memory(backend) => backend.get_queued_messages(client_id).await,
         }
@@ -577,6 +598,7 @@ impl StorageBackend for DynamicStorage {
 
     async fn remove_queued_messages(&self, client_id: &str) -> Result<()> {
         match self {
+            #[cfg(not(target_arch = "wasm32"))]
             Self::File(backend) => backend.remove_queued_messages(client_id).await,
             Self::Memory(backend) => backend.remove_queued_messages(client_id).await,
         }
@@ -584,6 +606,7 @@ impl StorageBackend for DynamicStorage {
 
     async fn cleanup_expired(&self) -> Result<()> {
         match self {
+            #[cfg(not(target_arch = "wasm32"))]
             Self::File(backend) => backend.cleanup_expired().await,
             Self::Memory(backend) => backend.cleanup_expired().await,
         }

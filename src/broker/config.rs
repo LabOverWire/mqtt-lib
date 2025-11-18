@@ -3,6 +3,7 @@
 //! Configuration options for the MQTT v5.0 broker, following the same
 //! direct async patterns as the client.
 
+#[cfg(not(target_arch = "wasm32"))]
 use crate::broker::bridge::BridgeConfig;
 use crate::error::Result;
 #[cfg(feature = "opentelemetry")]
@@ -68,6 +69,7 @@ pub struct BrokerConfig {
     pub storage_config: StorageConfig,
 
     /// Bridge configurations
+    #[cfg(not(target_arch = "wasm32"))]
     #[serde(default)]
     pub bridges: Vec<BridgeConfig>,
 
@@ -100,6 +102,7 @@ impl Default for BrokerConfig {
             websocket_config: None,
             websocket_tls_config: None,
             storage_config: StorageConfig::default(),
+            #[cfg(not(target_arch = "wasm32"))]
             bridges: vec![],
             #[cfg(feature = "opentelemetry")]
             opentelemetry_config: None,

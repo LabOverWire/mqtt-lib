@@ -14,6 +14,7 @@ pub struct WasmWebSocketTransport {
     rx: Option<mpsc::UnboundedReceiver<Vec<u8>>>,
     connected: Arc<AtomicBool>,
     _closures: Option<ClosureBundle>,
+    buffer: Vec<u8>,
 }
 
 struct ClosureBundle {
@@ -21,6 +22,106 @@ struct ClosureBundle {
     _onopen: Closure<dyn FnMut(JsValue)>,
     _onerror: Closure<dyn FnMut(ErrorEvent)>,
     _onclose: Closure<dyn FnMut(CloseEvent)>,
+}
+
+pub struct WasmReader {
+    rx: mpsc::UnboundedReceiver<Vec<u8>>,
+    buffer: Vec<u8>,
+    connected: Arc<AtomicBool>,
+}
+
+pub struct WasmWriter {
+    ws: WebSocket,
+    connected: Arc<AtomicBool>,
+    _closures: ClosureBundle,
+}
+
+impl WasmReader {
+    pub async fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
+        web_sys::console::log_1(
+            &format!(
+                "WebSocket read() called, buffer has {} bytes, requested {}",
+                self.buffer.len(),
+                buf.len()
+            )
+            .into(),
+        );
+
+        if !self.buffer.is_empty() {
+            let len = self.buffer.len().min(buf.len());
+            buf[..len].copy_from_slice(&self.buffer[..len]);
+            self.buffer.drain(..len);
+            web_sys::console::log_1(
+                &format!(
+                    "WebSocket read() returned {} bytes from buffer, {} bytes remaining in buffer",
+                    len,
+                    self.buffer.len()
+                )
+                .into(),
+            );
+            return Ok(len);
+        }
+
+        let data = self
+            .rx
+            .next()
+            .await
+            .ok_or(MqttError::ConnectionClosedByPeer)?;
+
+        web_sys::console::log_1(
+            &format!("WebSocket received {} bytes from network", data.len()).into(),
+        );
+
+        let len = data.len().min(buf.len());
+        buf[..len].copy_from_slice(&data[..len]);
+
+        if data.len() > len {
+            self.buffer.extend_from_slice(&data[len..]);
+            web_sys::console::log_1(
+                &format!(
+                    "WebSocket read() returned {} bytes, buffered {} bytes for next read",
+                    len,
+                    self.buffer.len()
+                )
+                .into(),
+            );
+        } else {
+            web_sys::console::log_1(&format!("WebSocket read() returned {} bytes", len).into());
+        }
+
+        Ok(len)
+    }
+
+    pub fn is_connected(&self) -> bool {
+        self.connected.load(Ordering::SeqCst)
+    }
+}
+
+impl WasmWriter {
+    pub async fn write(&mut self, buf: &[u8]) -> Result<()> {
+        web_sys::console::log_1(
+            &format!("WebSocket write() sending {} bytes...", buf.len()).into(),
+        );
+        self.ws
+            .send_with_u8_array(buf)
+            .map_err(|e| MqttError::Io(format!("WebSocket send failed: {:?}", e)))?;
+        web_sys::console::log_1(&"WebSocket write() complete".into());
+        Ok(())
+    }
+
+    pub async fn close(&mut self) -> Result<()> {
+        self.ws.set_onmessage(None);
+        self.ws.set_onopen(None);
+        self.ws.set_onerror(None);
+        self.ws.set_onclose(None);
+        self.ws.close().ok();
+        self.connected.store(false, Ordering::SeqCst);
+        Ok(())
+    }
+
+    pub fn is_connected(&self) -> bool {
+        self.connected.load(Ordering::SeqCst)
+    }
 }
 
 impl WasmWebSocketTransport {
@@ -31,7 +132,28 @@ impl WasmWebSocketTransport {
             rx: None,
             connected: Arc::new(AtomicBool::new(false)),
             _closures: None,
+            buffer: Vec::new(),
         }
+    }
+
+    pub fn into_split(self) -> Result<(WasmReader, WasmWriter)> {
+        let ws = self.ws.ok_or(MqttError::NotConnected)?;
+        let rx = self.rx.ok_or(MqttError::NotConnected)?;
+        let closures = self._closures.ok_or(MqttError::NotConnected)?;
+
+        let reader = WasmReader {
+            rx,
+            buffer: self.buffer,
+            connected: Arc::clone(&self.connected),
+        };
+
+        let writer = WasmWriter {
+            ws,
+            connected: self.connected,
+            _closures: closures,
+        };
+
+        Ok((reader, writer))
     }
 }
 
@@ -51,7 +173,10 @@ impl Transport for WasmWebSocketTransport {
             if let Ok(abuf) = e.data().dyn_into::<js_sys::ArrayBuffer>() {
                 let array = js_sys::Uint8Array::new(&abuf);
                 let vec = array.to_vec();
+                web_sys::console::log_1(&format!("WebSocket received {} bytes", vec.len()).into());
                 let _ = msg_tx_clone.unbounded_send(vec);
+            } else {
+                web_sys::console::warn_1(&"WebSocket received non-ArrayBuffer message".into());
             }
         });
 
@@ -106,6 +231,30 @@ impl Transport for WasmWebSocketTransport {
     }
 
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
+        web_sys::console::log_1(
+            &format!(
+                "WebSocket read() called, buffer has {} bytes, requested {}",
+                self.buffer.len(),
+                buf.len()
+            )
+            .into(),
+        );
+
+        if !self.buffer.is_empty() {
+            let len = self.buffer.len().min(buf.len());
+            buf[..len].copy_from_slice(&self.buffer[..len]);
+            self.buffer.drain(..len);
+            web_sys::console::log_1(
+                &format!(
+                    "WebSocket read() returned {} bytes from buffer, {} bytes remaining in buffer",
+                    len,
+                    self.buffer.len()
+                )
+                .into(),
+            );
+            return Ok(len);
+        }
+
         let data = self
             .rx
             .as_mut()
@@ -114,16 +263,39 @@ impl Transport for WasmWebSocketTransport {
             .await
             .ok_or(MqttError::ConnectionClosedByPeer)?;
 
+        web_sys::console::log_1(
+            &format!("WebSocket received {} bytes from network", data.len()).into(),
+        );
+
         let len = data.len().min(buf.len());
         buf[..len].copy_from_slice(&data[..len]);
+
+        if data.len() > len {
+            self.buffer.extend_from_slice(&data[len..]);
+            web_sys::console::log_1(
+                &format!(
+                    "WebSocket read() returned {} bytes, buffered {} bytes for next read",
+                    len,
+                    self.buffer.len()
+                )
+                .into(),
+            );
+        } else {
+            web_sys::console::log_1(&format!("WebSocket read() returned {} bytes", len).into());
+        }
+
         Ok(len)
     }
 
     async fn write(&mut self, buf: &[u8]) -> Result<()> {
         let ws = self.ws.as_ref().ok_or(MqttError::NotConnected)?;
 
+        web_sys::console::log_1(
+            &format!("WebSocket write() sending {} bytes...", buf.len()).into(),
+        );
         ws.send_with_u8_array(buf)
             .map_err(|e| MqttError::Io(format!("WebSocket send failed: {:?}", e)))?;
+        web_sys::console::log_1(&"WebSocket write() complete".into());
 
         Ok(())
     }

@@ -16,6 +16,55 @@ pub struct BroadcastChannelTransport {
     _closure: Option<Closure<dyn FnMut(MessageEvent)>>,
 }
 
+pub struct BroadcastChannelReader {
+    rx: mpsc::UnboundedReceiver<Vec<u8>>,
+    connected: Arc<AtomicBool>,
+}
+
+pub struct BroadcastChannelWriter {
+    channel: BroadcastChannel,
+    connected: Arc<AtomicBool>,
+    _closure: Closure<dyn FnMut(MessageEvent)>,
+}
+
+impl BroadcastChannelReader {
+    pub async fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
+        let data = self
+            .rx
+            .next()
+            .await
+            .ok_or(MqttError::ConnectionClosedByPeer)?;
+
+        let len = data.len().min(buf.len());
+        buf[..len].copy_from_slice(&data[..len]);
+        Ok(len)
+    }
+
+    pub fn is_connected(&self) -> bool {
+        self.connected.load(Ordering::SeqCst)
+    }
+}
+
+impl BroadcastChannelWriter {
+    pub async fn write(&mut self, buf: &[u8]) -> Result<()> {
+        let array = js_sys::Uint8Array::from(buf);
+        self.channel
+            .post_message(&array.buffer())
+            .map_err(|e| MqttError::Io(format!("BroadcastChannel send failed: {:?}", e)))?;
+        Ok(())
+    }
+
+    pub async fn close(&mut self) -> Result<()> {
+        self.channel.close();
+        self.connected.store(false, Ordering::SeqCst);
+        Ok(())
+    }
+
+    pub fn is_connected(&self) -> bool {
+        self.connected.load(Ordering::SeqCst)
+    }
+}
+
 impl BroadcastChannelTransport {
     pub fn new(channel_name: impl Into<String>) -> Self {
         Self {
@@ -25,6 +74,25 @@ impl BroadcastChannelTransport {
             connected: Arc::new(AtomicBool::new(false)),
             _closure: None,
         }
+    }
+
+    pub fn into_split(self) -> Result<(BroadcastChannelReader, BroadcastChannelWriter)> {
+        let channel = self.channel.ok_or(MqttError::NotConnected)?;
+        let rx = self.rx.ok_or(MqttError::NotConnected)?;
+        let closure = self._closure.ok_or(MqttError::NotConnected)?;
+
+        let reader = BroadcastChannelReader {
+            rx,
+            connected: Arc::clone(&self.connected),
+        };
+
+        let writer = BroadcastChannelWriter {
+            channel,
+            connected: self.connected,
+            _closure: closure,
+        };
+
+        Ok((reader, writer))
     }
 }
 

@@ -22,21 +22,30 @@
 
 pub mod acl;
 pub mod auth;
+#[cfg(not(target_arch = "wasm32"))]
 mod binding;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod bridge;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod client_handler;
 pub mod config;
 pub mod connection_pool;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod hot_reload;
 pub mod optimized_router;
 pub mod resource_monitor;
 pub mod router;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod server;
 pub mod storage;
 pub mod sys_topics;
+#[cfg(not(target_arch = "wasm32"))]
 mod tcp_stream_wrapper;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod tls_acceptor;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod transport;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod websocket_server;
 
 pub use acl::{AclManager, AclRule, Permission};
@@ -46,8 +55,12 @@ pub use auth::{
 };
 pub use config::{BrokerConfig, StorageBackend as StorageBackendType, StorageConfig};
 pub use resource_monitor::{ResourceLimits, ResourceMonitor, ResourceStats};
+#[cfg(not(target_arch = "wasm32"))]
 pub use server::MqttBroker;
+#[cfg(not(target_arch = "wasm32"))]
 pub use storage::{DynamicStorage, FileBackend, MemoryBackend, Storage, StorageBackend};
+#[cfg(target_arch = "wasm32")]
+pub use storage::{DynamicStorage, MemoryBackend, Storage, StorageBackend};
 
 // Re-export key types for convenience
 pub use crate::QoS;

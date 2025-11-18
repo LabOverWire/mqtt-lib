@@ -5,11 +5,15 @@
 
 use crate::error::{MqttError, Result};
 use crate::validation::topic_matches_filter;
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
 use tokio::fs;
 use tokio::sync::RwLock;
-use tracing::{debug, info, warn};
+use tracing::debug;
+#[cfg(not(target_arch = "wasm32"))]
+use tracing::{info, warn};
 
 /// Access permissions for topics
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -151,6 +155,7 @@ impl AclManager {
     /// # Errors
     ///
     /// Returns an error if the file cannot be read or parsed
+    #[cfg(not(target_arch = "wasm32"))]
     pub async fn from_file(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
         let manager = Self {
@@ -175,6 +180,7 @@ impl AclManager {
     /// # Errors
     ///
     /// Returns an error if the file cannot be read or parsed
+    #[cfg(not(target_arch = "wasm32"))]
     pub async fn load_acl_file(&self) -> Result<()> {
         let Some(ref path) = self.acl_file else {
             return Ok(());
@@ -233,6 +239,7 @@ impl AclManager {
     }
 
     /// Reloads the ACL file (alias for load_acl_file)
+    #[cfg(not(target_arch = "wasm32"))]
     pub async fn reload(&self) -> Result<()> {
         self.load_acl_file().await
     }
