@@ -192,9 +192,11 @@ mqttv5 pub
 
 ## WASM Browser Support
 
-The library compiles to WebAssembly for browser environments with two deployment modes:
+The library compiles to WebAssembly for browser environments with full MQTT v5.0 support and three deployment modes.
 
-### External Broker Mode
+### Connection Modes
+
+#### External Broker Mode (WebSocket)
 Connect to remote MQTT brokers using WebSocket transport:
 
 ```javascript
@@ -202,15 +204,11 @@ import init, { WasmMqttClient } from './pkg/mqtt5.js';
 
 await init();
 const client = new WasmMqttClient('browser-client');
-await client.connect('ws://broker.example.com:8080/mqtt');
 
-await client.subscribe_with_callback('sensors/temp', (topic, payload) => {
-  const decoder = new TextDecoder();
-  console.log('Temperature:', decoder.decode(payload));
-});
+await client.connect('ws://broker.example.com:8080/mqtt');
 ```
 
-### In-Tab Broker Mode
+#### In-Tab Broker Mode (MessagePort)
 Run a complete MQTT broker inside your browser tab:
 
 ```javascript
@@ -224,11 +222,147 @@ const port = broker.create_client_port();
 await client.connect_message_port(port);
 ```
 
-The in-tab broker supports all core MQTT v5.0 features including QoS levels, retained messages, and subscriptions. Perfect for testing, demos, and offline-capable applications.
+#### Cross-Tab Mode (BroadcastChannel)
+Communicate across browser tabs using BroadcastChannel API:
 
-**WASM Limitations:** No TLS socket support (use browser-managed `wss://`), memory-only storage, no file I/O. See `examples/wasm/README.md` for details.
+```javascript
+await client.connect_broadcast_channel('mqtt-channel');
+```
 
-**Examples:** See `examples/wasm/` for complete browser examples.
+### Complete API Reference
+
+#### Publishing Messages
+
+**QoS 0 (Fire-and-forget):**
+```javascript
+const encoder = new TextEncoder();
+await client.publish('sensors/temp', encoder.encode('25.5°C'));
+```
+
+**QoS 1 (At least once):**
+```javascript
+await client.publish_qos1('sensors/temp', encoder.encode('25.5°C'), (reasonCode) => {
+  if (reasonCode === 0) {
+    console.log('Message acknowledged');
+  } else {
+    console.error('Publish failed, reason:', reasonCode);
+  }
+});
+```
+
+**QoS 2 (Exactly once):**
+```javascript
+await client.publish_qos2('commands/action', encoder.encode('start'), (result) => {
+  if (typeof result === 'number') {
+    console.log('Success, reason code:', result);
+  } else {
+    console.error('Timeout or error:', result);
+  }
+});
+```
+
+#### Subscribing to Topics
+
+**With callback (recommended):**
+```javascript
+await client.subscribe_with_callback('sensors/+/data', (topic, payload) => {
+  const decoder = new TextDecoder();
+  console.log(`${topic}: ${decoder.decode(payload)}`);
+});
+```
+
+**Without callback:**
+```javascript
+const packetId = await client.subscribe('sensors/#');
+console.log('Subscribed with packet ID:', packetId);
+```
+
+**Unsubscribe:**
+```javascript
+await client.unsubscribe('sensors/temp');
+```
+
+#### Connection Events
+
+**Connection success:**
+```javascript
+client.on_connect((reasonCode, sessionPresent) => {
+  console.log('Connected!');
+  console.log('Reason code:', reasonCode);
+  console.log('Session present:', sessionPresent);
+});
+```
+
+**Disconnection:**
+```javascript
+client.on_disconnect(() => {
+  console.log('Disconnected from broker');
+});
+```
+
+**Errors (including keepalive timeout):**
+```javascript
+client.on_error((error) => {
+  console.error('Error:', error);
+});
+```
+
+**Check connection status:**
+```javascript
+if (client.is_connected()) {
+  console.log('Currently connected');
+}
+```
+
+**Manual disconnect:**
+```javascript
+await client.disconnect();
+```
+
+### Automatic Features
+
+#### Keepalive & Timeout Detection
+- Automatically sends PINGREQ every 30 seconds
+- Detects connection timeout after 90 seconds
+- Triggers `on_error("Keepalive timeout")` and `on_disconnect()` on timeout
+- No configuration needed - works automatically
+
+#### QoS 2 Flow Management
+- Full four-way handshake (PUBLISH → PUBREC → PUBREL → PUBCOMP)
+- 10-second timeout for incomplete flows
+- Duplicate detection with 30-second tracking window
+- Status updates via callback
+
+### In-Tab Broker Features
+
+The in-tab broker provides a complete MQTT v5.0 broker implementation:
+
+- **QoS support**: All three QoS levels (0, 1, 2)
+- **Retained messages**: In-memory storage
+- **Subscriptions**: Wildcard matching (`+`, `#`)
+- **Session management**: Memory-only (lost on page reload)
+- **Zero external dependencies**: Perfect for testing and demos
+
+### WASM Limitations
+
+- **No TLS socket support**: Use browser-managed `wss://` instead
+- **Memory-only storage**: No file I/O, use IndexedDB/localStorage for persistence
+- **No raw sockets**: WebSocket/MessagePort/BroadcastChannel only
+- **Single-threaded**: All operations run in JavaScript event loop
+
+### Browser Compatibility
+
+- Chrome/Edge 90+
+- Firefox 88+
+- Safari 15.4+
+
+### Complete Examples
+
+See `crates/mqtt5/examples/wasm/` for full browser examples:
+- `websocket/` - External broker connections
+- `qos2/` - QoS 2 flow visualization
+- Complete HTML/JavaScript/CSS applications
+- Build instructions with `wasm-pack`
 
 ## Advanced Broker Configuration
 
@@ -419,7 +553,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-See `examples/broker_with_opentelemetry.rs` for a complete example.
+See `crates/mqtt5/examples/broker_with_opentelemetry.rs` for a complete example.
 
 ## Development & Building
 
@@ -457,15 +591,15 @@ cargo make ci-verify      # Run ALL CI checks (must pass before push)
 cargo make pre-commit     # Run before committing (fmt + clippy + test)
 
 # Examples (use raw cargo for specific targets)
-cargo run --example simple_client           # Basic client usage
-cargo run --example simple_broker           # Start basic broker
-cargo run --example broker_with_tls         # TLS-enabled broker
-cargo run --example broker_with_websocket   # WebSocket-enabled broker
-cargo run --example broker_all_transports   # Broker with all transports (TCP/TLS/WebSocket)
-cargo run --example broker_bridge_demo      # Broker bridging demo
-cargo run --example broker_with_monitoring  # Broker with $SYS topics
-cargo run --example broker_with_opentelemetry --features opentelemetry  # Distributed tracing
-cargo run --example shared_subscription_demo # Shared subscription load balancing
+cargo run -p mqtt5 --example simple_client           # Basic client usage
+cargo run -p mqtt5 --example simple_broker           # Start basic broker
+cargo run -p mqtt5 --example broker_with_tls         # TLS-enabled broker
+cargo run -p mqtt5 --example broker_with_websocket   # WebSocket-enabled broker
+cargo run -p mqtt5 --example broker_all_transports   # Broker with all transports (TCP/TLS/WebSocket)
+cargo run -p mqtt5 --example broker_bridge_demo      # Broker bridging demo
+cargo run -p mqtt5 --example broker_with_monitoring  # Broker with $SYS topics
+cargo run -p mqtt5 --example broker_with_opentelemetry --features opentelemetry  # Distributed tracing
+cargo run -p mqtt5 --example shared_subscription_demo # Shared subscription load balancing
 ```
 
 ### Testing

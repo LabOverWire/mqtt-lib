@@ -17,7 +17,7 @@ Run a complete MQTT broker inside a single browser tab using MessagePort for com
 From the repository root:
 
 ```bash
-cd examples/wasm
+cd crates/mqtt5/examples/wasm
 ./build.sh
 ```
 
@@ -218,4 +218,4 @@ Free brokers for testing (no authentication):
 
 - See `docs/WASM_USAGE.md` for complete API documentation
 - Check `src/wasm/client.rs` for implementation details
-- Review the native client examples in `examples/` for comparison
+- Review the native client examples in `crates/mqtt5/examples/` for comparison

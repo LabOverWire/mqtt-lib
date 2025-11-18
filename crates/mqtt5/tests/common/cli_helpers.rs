@@ -2,10 +2,37 @@
 
 use mqtt5::time::Duration;
 use std::io::Write;
+use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 use tokio::time::timeout;
 
-const CLI_BINARY: &str = "target/release/mqttv5";
+fn get_cli_binary_path() -> PathBuf {
+    if let Ok(path) = std::env::var("CARGO_BIN_EXE_mqttv5") {
+        return PathBuf::from(path);
+    }
+
+    let workspace_root = find_workspace_root();
+    workspace_root.join("target").join("release").join("mqttv5")
+}
+
+fn find_workspace_root() -> PathBuf {
+    let mut current = std::env::current_dir().expect("Failed to get current directory");
+
+    loop {
+        let cargo_toml = current.join("Cargo.toml");
+        if cargo_toml.exists() {
+            if let Ok(contents) = std::fs::read_to_string(&cargo_toml) {
+                if contents.contains("[workspace]") {
+                    return current;
+                }
+            }
+        }
+
+        if !current.pop() {
+            panic!("Could not find workspace root");
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct CliResult {
@@ -37,8 +64,11 @@ impl CliResult {
 }
 
 pub fn ensure_cli_built() {
-    if !std::path::Path::new(CLI_BINARY).exists() {
+    let cli_binary = get_cli_binary_path();
+    if !cli_binary.exists() {
+        let workspace_root = find_workspace_root();
         let output = Command::new("cargo")
+            .current_dir(&workspace_root)
             .args(["build", "--release", "-p", "mqttv5-cli"])
             .output()
             .expect("Failed to build CLI");
@@ -55,9 +85,10 @@ pub async fn run_cli_command(args: &[&str]) -> CliResult {
     ensure_cli_built();
 
     let output = tokio::task::spawn_blocking({
+        let cli_binary = get_cli_binary_path();
         let args = args.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
         move || {
-            Command::new(CLI_BINARY)
+            Command::new(&cli_binary)
                 .args(&args)
                 .output()
                 .expect("Failed to run CLI")
@@ -98,6 +129,7 @@ pub async fn run_cli_sub_async(
 ) -> tokio::task::JoinHandle<CliResult> {
     ensure_cli_built();
 
+    let cli_binary = get_cli_binary_path();
     let broker_url = broker_url.to_string();
     let topic = topic.to_string();
     let extra_args = extra_args
@@ -120,7 +152,7 @@ pub async fn run_cli_sub_async(
             args.push(arg);
         }
 
-        let output = Command::new(CLI_BINARY)
+        let output = Command::new(&cli_binary)
             .args(&args)
             .output()
             .expect("Failed to run CLI");
@@ -217,6 +249,7 @@ pub async fn trigger_abnormal_disconnect_with_will(
 ) -> CliResult {
     ensure_cli_built();
 
+    let cli_binary = get_cli_binary_path();
     let mut args = vec![
         "pub".to_string(),
         "--url".to_string(),
@@ -237,7 +270,7 @@ pub async fn trigger_abnormal_disconnect_with_will(
         args.push(arg.to_string());
     }
 
-    let mut pub_process = Command::new(CLI_BINARY)
+    let mut pub_process = Command::new(&cli_binary)
         .args(&args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -262,6 +295,8 @@ pub async fn verify_will_delivery(
 ) -> Result<bool, String> {
     ensure_cli_built();
 
+    let cli_binary = get_cli_binary_path();
+
     // Start subscriber for will topic
     let sub_handle = run_cli_sub_async(broker_url, will_topic, 1, &[]).await;
 
@@ -269,7 +304,7 @@ pub async fn verify_will_delivery(
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Start publisher with will message and keep-alive flag
-    let mut pub_process = Command::new(CLI_BINARY)
+    let mut pub_process = Command::new(&cli_binary)
         .args([
             "pub",
             "--url",
@@ -393,11 +428,12 @@ pub async fn verify_retained_message(
 pub async fn run_cli_with_stdin(args: &[&str], stdin_data: &str) -> CliResult {
     ensure_cli_built();
 
+    let cli_binary = get_cli_binary_path();
     let stdin_data = stdin_data.to_string();
     let args = args.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
 
     let result = tokio::task::spawn_blocking(move || {
-        let mut child = Command::new(CLI_BINARY)
+        let mut child = Command::new(&cli_binary)
             .args(&args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

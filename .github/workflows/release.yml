@@ -25,7 +25,7 @@ jobs:
       - name: Verify version
         run: |
           VERSION=${GITHUB_REF#refs/tags/v}
-          CARGO_VERSION=$(grep "^version" Cargo.toml | head -1 | cut -d'"' -f2)
+          CARGO_VERSION=$(grep "^version" crates/mqtt5/Cargo.toml | head -1 | cut -d'"' -f2)
           if [ "$VERSION" != "$CARGO_VERSION" ]; then
             echo "Tag version ($VERSION) does not match Cargo.toml version ($CARGO_VERSION)"
             exit 1

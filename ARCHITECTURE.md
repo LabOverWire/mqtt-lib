@@ -258,6 +258,403 @@ Both client and broker share:
    - Topics starting with `$` excluded from root wildcards (`#`, `+`)
    - Requires explicit `$SYS/#` subscription for system topics
 
+## WASM Architecture
+
+The library compiles to WebAssembly for browser environments with full MQTT v5.0 support. The WASM architecture adapts the native design patterns to browser constraints.
+
+### Core Architectural Adaptations for Browser
+
+1. **Single-Threaded Model**:
+   - Uses `Rc<RefCell<T>>` instead of `Arc<Mutex<T>>` (no threads in WASM)
+   - Uses `spawn_local` instead of `tokio::spawn` (JavaScript event loop)
+   - State management via RefCell for interior mutability
+   - No Send/Sync requirements
+
+2. **Async Bridge Pattern**:
+   - Rust `async fn` → JavaScript Promises via wasm-bindgen-futures
+   - JavaScript callbacks → Rust closures via `js_sys::Function`
+   - Promise-based API for all async operations
+   - Callback-based event handling for messages
+
+3. **No File I/O**:
+   - Memory-only storage backend
+   - No session persistence across page reloads
+   - Configuration via programmatic API only
+
+4. **Browser-Managed TLS**:
+   - WebSocket uses `wss://` for TLS (browser handles certificates)
+   - No raw socket access or custom TLS configuration
+   - Certificate validation by browser security model
+
+### WASM Client Architecture
+
+**Core Components:**
+
+1. **WasmMqttClient**: Main client struct
+   ```rust
+   pub struct WasmMqttClient {
+       state: Rc<RefCell<ClientState>>
+   }
+   ```
+   - Wraps `ClientState` in single-threaded shared ownership
+   - All methods take `&self` and borrow state internally
+   - Exposes `#[wasm_bindgen]` annotated methods to JavaScript
+
+2. **ClientState**: Internal state management
+   ```rust
+   struct ClientState {
+       client_id: String,
+       writer: Option<Rc<RefCell<WasmWriter>>>,
+       packet_id: u16,
+       connected: bool,
+       subscriptions: HashMap<String, js_sys::Function>,
+       pending_subacks: HashMap<u16, js_sys::Function>,
+       pending_pubacks: HashMap<u16, js_sys::Function>,
+       pending_pubcomps: HashMap<u16, (js_sys::Function, f64)>,
+       pending_pubrecs: HashMap<u16, f64>,
+       received_qos2: HashMap<u16, f64>,
+       on_connect: Option<js_sys::Function>,
+       on_disconnect: Option<js_sys::Function>,
+       on_error: Option<js_sys::Function>,
+   }
+   ```
+   - Stores JavaScript callbacks for subscriptions and events
+   - Tracks in-flight QoS 1 and QoS 2 messages
+   - Manages packet ID allocation (1-65535 wrapping)
+
+3. **Connection API**:
+   - `connect(url)` - WebSocket to external broker
+   - `connect_message_port(port)` - Direct to in-tab broker
+   - `connect_broadcast_channel(name)` - Cross-tab messaging
+   - Returns JavaScript Promise
+
+4. **Publishing API**:
+   - `publish(topic, payload)` - QoS 0 (fire-and-forget)
+   - `publish_qos1(topic, payload, callback)` - QoS 1 with PUBACK
+   - `publish_qos2(topic, payload, callback)` - QoS 2 with full handshake
+   - Callbacks receive reason code or error string
+
+5. **Subscription API**:
+   - `subscribe(topic)` - Subscribe without callback (returns packet_id)
+   - `subscribe_with_callback(topic, callback)` - Subscribe with handler
+   - `unsubscribe(topic)` - Remove subscription
+   - Callbacks receive `(topic: String, payload: Uint8Array)`
+
+6. **Event API**:
+   - `on_connect(callback)` - Receives `(reason_code: u8, session_present: bool)`
+   - `on_disconnect(callback)` - No arguments
+   - `on_error(callback)` - Receives `(error: String)`
+   - `is_connected()` - Returns boolean
+
+### WASM Broker Architecture
+
+**Core Components:**
+
+1. **WasmBroker**: In-browser MQTT broker
+   ```rust
+   pub struct WasmBroker {
+       config: Arc<BrokerConfig>,
+       router: Arc<MessageRouter>,
+       auth_provider: Arc<dyn AuthProvider>,
+       storage: Arc<DynamicStorage>,
+       stats: Arc<BrokerStats>,
+       resource_monitor: Arc<ResourceMonitor>,
+   }
+   ```
+   - Complete broker implementation in browser tab
+   - Uses same core components as native broker
+   - Memory-only storage (no persistence)
+
+2. **WasmClientHandler**: Per-client connection handler
+   - Handles MessagePort communication
+   - Manages client session within browser
+   - Same packet handling logic as native broker
+   - Spawns background tasks with `spawn_local`
+
+3. **Client Connection Flow**:
+   ```javascript
+   const broker = new WasmBroker();
+   const port = broker.create_client_port();  // Creates MessageChannel
+   await client.connect_message_port(port);   // Client connects via port
+   ```
+   - `create_client_port()` creates MessageChannel
+   - Returns one port to JavaScript, keeps other for broker
+   - Spawns `WasmClientHandler` for the connection
+
+4. **Broker Features**:
+   - Full MQTT v5.0 protocol support
+   - QoS 0, 1, 2 message delivery
+   - Retained messages with in-memory storage
+   - Topic matching with wildcard support
+   - Session management (memory-only)
+   - No authentication (AllowAllAuthProvider)
+
+### Browser Transport Implementations
+
+1. **WebSocket Transport** (`WasmWebSocketTransport`):
+   ```rust
+   pub struct WasmWebSocketTransport {
+       websocket: RefCell<Option<WebSocket>>,
+       receive_queue: Rc<RefCell<VecDeque<Vec<u8>>>>,
+   }
+   ```
+   - Uses `web_sys::WebSocket` for external broker connections
+   - Message callback pushes data to receive_queue
+   - `read()` waits on queue using JavaScript Promises
+   - `write()` calls `websocket.send()` directly
+   - Supports `ws://` and `wss://` URLs
+
+2. **MessagePort Transport** (`MessagePortTransport`):
+   ```rust
+   pub struct MessagePortTransport {
+       port: RefCell<Option<MessagePort>>,
+       receive_queue: Rc<RefCell<VecDeque<Vec<u8>>>>,
+   }
+   ```
+   - Direct channel communication for in-tab broker
+   - Zero network overhead (memory copy only)
+   - `onmessage` callback fills receive_queue
+   - `postMessage()` for sending data
+   - Perfect for testing and offline apps
+
+3. **BroadcastChannel Transport** (`BroadcastChannelTransport`):
+   ```rust
+   pub struct BroadcastChannelTransport {
+       channel: RefCell<Option<BroadcastChannel>>,
+       receive_queue: Rc<RefCell<VecDeque<Vec<u8>>>>,
+   }
+   ```
+   - Cross-tab messaging via browser BroadcastChannel API
+   - All tabs with same channel name receive messages
+   - Useful for synchronized state across browser tabs
+   - Broadcasts to all listeners (not point-to-point)
+
+4. **Async Bridge Pattern**:
+   ```rust
+   async fn read(&mut self) -> Result<Vec<u8>> {
+       loop {
+           if let Some(data) = self.receive_queue.borrow_mut().pop_front() {
+               return Ok(data);
+           }
+           sleep_ms(10).await;  // JavaScript Promise-based sleep
+       }
+   }
+   ```
+   - Polling loop with async sleep
+   - JavaScript callbacks fill queues
+   - Rust async waits on queue data
+
+### WASM QoS Flow Control
+
+1. **QoS 0** (At Most Once):
+   - Direct `publish()` call
+   - No acknowledgment tracking
+   - Fire-and-forget delivery
+
+2. **QoS 1** (At Least Once):
+   ```javascript
+   await client.publish_qos1('sensors/temp', data, (reasonCode) => {
+       if (reasonCode === 0) {
+           console.log('Success');
+       } else {
+           console.error('Failed:', reasonCode);
+       }
+   });
+   ```
+   - Assigns packet_id (1-65535 wrapping counter)
+   - Stores callback in `pending_pubacks` HashMap
+   - Waits for PUBACK packet
+   - Invokes callback with reason code
+   - Removes from pending on acknowledgment
+
+3. **QoS 2** (Exactly Once):
+   ```javascript
+   await client.publish_qos2('commands/action', data, (result) => {
+       if (typeof result === 'number') {
+           console.log('Success, reason:', result);
+       } else {
+           console.error('Error:', result);
+       }
+   });
+   ```
+   - Four-way handshake: PUBLISH → PUBREC → PUBREL → PUBCOMP
+   - Stores `(callback, timestamp)` in `pending_pubcomps`
+   - Tracks PUBREC arrival in `pending_pubrecs`
+   - 10-second timeout monitoring via background task
+   - Callback receives reason code (success) or "Timeout" string
+   - Duplicate detection: `received_qos2` tracks delivered messages for 30 seconds
+
+4. **QoS 2 Timeout Handling**:
+   - Background task checks every 5 seconds
+   - Expires flows older than 10 seconds
+   - Invokes callback with "Timeout" error
+   - Cleans up tracking maps
+
+5. **QoS 2 Duplicate Prevention**:
+   - Receiving: PUBREC sent but message not re-delivered to callback
+   - Publishing: Each packet_id used only once in current window
+   - 30-second cleanup of old tracking entries
+
+### WASM Keepalive Design
+
+1. **Automatic PINGREQ**:
+   ```rust
+   fn spawn_keepalive_task(&self) {
+       let state = Rc::clone(&self.state);
+       spawn_local(async move {
+           loop {
+               sleep_ms(30000).await;  // 30 seconds
+               // Send PINGREQ if connected
+           }
+       });
+   }
+   ```
+   - Background task using `spawn_local`
+   - Sends PINGREQ every 30 seconds
+   - Tracks `last_ping_sent` timestamp
+
+2. **Connection Timeout Detection**:
+   - Monitors `last_pong_received` timestamp
+   - 90-second timeout (3x keepalive interval)
+   - Triggers `on_error("Keepalive timeout")`
+   - Triggers `on_disconnect()`
+   - Sets `connected = false`
+
+3. **PINGRESP Handling**:
+   - Packet reader updates `last_pong_received`
+   - Logs to browser console
+   - No user callback (internal only)
+
+### WASM Packet Encoding
+
+Full MQTT v5.0 codec runs in browser:
+
+```rust
+fn encode_packet(packet: &Packet, buf: &mut BytesMut) -> Result<()> {
+    match packet {
+        Packet::Connect(p) => p.encode(buf),
+        Packet::Publish(p) => p.encode(buf),
+        Packet::Subscribe(p) => p.encode(buf),
+        Packet::PubRec(p) => p.encode(buf),
+        Packet::PubRel(p) => p.encode(buf),
+        Packet::PubComp(p) => p.encode(buf),
+        // ... all packet types
+    }
+}
+```
+
+- Same encoding logic as native library
+- BeBytes serialization in WASM
+- Binary protocol handling in browser
+- Zero-copy where possible with BytesMut
+
+### WASM Background Tasks
+
+1. **Packet Reader Task**:
+   ```rust
+   spawn_local(async move {
+       loop {
+           let packet = read_packet(&mut reader).await?;
+           handle_packet(packet);
+       }
+   });
+   ```
+   - Continuously reads from transport
+   - Dispatches to packet handlers
+   - Invokes JavaScript callbacks
+
+2. **Keepalive Task**:
+   - Sends PINGREQ every 30 seconds
+   - Checks for timeout every iteration
+   - Runs until disconnect
+
+3. **QoS 2 Cleanup Task**:
+   ```rust
+   spawn_local(async move {
+       loop {
+           sleep_ms(5000).await;  // Check every 5 seconds
+           // Clean up expired QoS 2 flows (>10s)
+           // Clean up old received_qos2 entries (>30s)
+       }
+   });
+   ```
+   - Monitors pending QoS 2 operations
+   - Times out stale flows (10 seconds)
+   - Removes old duplicate tracking (30 seconds)
+
+### WASM Limitations & Design Rationale
+
+1. **No Threading**:
+   - **Limitation**: WASM is single-threaded in browsers
+   - **Solution**: `Rc<RefCell<T>>` instead of `Arc<Mutex<T>>`
+   - **Solution**: `spawn_local` instead of `tokio::spawn`
+   - **Impact**: All operations in JavaScript event loop
+
+2. **No File I/O**:
+   - **Limitation**: Browser sandbox prevents file access
+   - **Solution**: Memory-only storage backend
+   - **Impact**: No persistence across page reloads
+   - **Workaround**: Use IndexedDB/localStorage at app level
+
+3. **No Raw Sockets**:
+   - **Limitation**: Browser security model
+   - **Solution**: WebSocket for external connections
+   - **Solution**: MessagePort for in-tab broker
+   - **Solution**: BroadcastChannel for cross-tab
+   - **Impact**: Can't use TCP/TLS directly
+
+4. **Browser-Managed TLS**:
+   - **Limitation**: No access to TLS layer
+   - **Solution**: Use `wss://` URLs (browser handles TLS)
+   - **Impact**: Can't configure TLS options
+   - **Benefit**: Automatic certificate validation
+
+5. **JavaScript Callbacks**:
+   - **Limitation**: Can't return Rust closures to JS
+   - **Solution**: Accept `js_sys::Function` callbacks
+   - **Pattern**: Store callbacks, invoke from Rust
+   - **Impact**: Callback-based instead of async/await for messages
+
+6. **Time Module**:
+   - **Limitation**: `std::time` not available in WASM
+   - **Solution**: Conditional `use crate::time::*`
+   - **Implementation**: Uses `web_sys::window().performance().now()`
+   - **Impact**: Transparent to application code
+
+7. **Dependencies**:
+   - **Limitation**: Many native dependencies don't compile to WASM
+   - **Solution**: Platform-gated dependencies with `#[cfg(not(target_arch = "wasm32"))]`
+   - **Examples**: tokio, clap, bcrypt excluded from WASM builds
+   - **Impact**: Smaller WASM binary, faster compile times
+
+8. **State Management**:
+   - **Native**: `Arc<RwLock<T>>` for thread-safe shared state
+   - **WASM**: `Rc<RefCell<T>>` for single-threaded shared state
+   - **Rationale**: No threads = no need for atomic operations
+   - **Benefit**: Simpler runtime, faster execution
+
+### WASM Use Cases
+
+1. **Browser-Based MQTT Clients**:
+   - IoT dashboards and monitoring applications
+   - Real-time data visualization
+   - Connect to cloud MQTT brokers via WebSocket
+
+2. **Testing & Demos**:
+   - In-tab broker for integration testing
+   - No external dependencies required
+   - Instant setup for demonstrations
+
+3. **Offline-Capable Applications**:
+   - Local broker for offline operation
+   - Sync when connection restored
+   - Progressive Web Apps (PWAs)
+
+4. **Cross-Tab Communication**:
+   - BroadcastChannel for tab synchronization
+   - Shared state across browser windows
+   - Collaborative editing applications
+
 ## Testing Architecture
 
 1. **Unit Tests**: Direct testing of components with simple async patterns

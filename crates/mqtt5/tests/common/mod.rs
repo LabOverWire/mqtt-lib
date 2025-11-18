@@ -4,9 +4,38 @@ pub mod cli_helpers;
 
 use mqtt5::time::Duration;
 use mqtt5::{ConnectOptions, MqttClient, PublishOptions, PublishProperties, QoS};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use ulid::Ulid;
+
+fn find_workspace_root() -> PathBuf {
+    let mut current = std::env::current_dir().expect("Failed to get current directory");
+
+    loop {
+        let cargo_toml = current.join("Cargo.toml");
+        if cargo_toml.exists() {
+            if let Ok(contents) = std::fs::read_to_string(&cargo_toml) {
+                if contents.contains("[workspace]") {
+                    return current;
+                }
+            }
+        }
+
+        if !current.pop() {
+            panic!("Could not find workspace root");
+        }
+    }
+}
+
+fn get_cli_binary_path() -> PathBuf {
+    if let Ok(path) = std::env::var("CARGO_BIN_EXE_mqttv5") {
+        return PathBuf::from(path);
+    }
+
+    let workspace_root = find_workspace_root();
+    workspace_root.join("target").join("release").join("mqttv5")
+}
 
 /// Default test broker address
 pub const TEST_BROKER: &str = "mqtt://127.0.0.1:1883";
@@ -102,7 +131,6 @@ impl TestBroker {
         use mqtt5::broker::config::{
             BrokerConfig, StorageBackend, StorageConfig, TlsConfig as BrokerTlsConfig,
         };
-        use std::path::PathBuf;
 
         let _ = rustls::crypto::ring::default_provider().install_default();
 
@@ -112,10 +140,11 @@ impl TestBroker {
             ..Default::default()
         };
 
+        let workspace_root = find_workspace_root();
         let tls_port = 20000 + TLS_PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
         let tls_config = BrokerTlsConfig::new(
-            PathBuf::from("test_certs/server.pem"),
-            PathBuf::from("test_certs/server.key"),
+            workspace_root.join("test_certs/server.pem"),
+            workspace_root.join("test_certs/server.key"),
         )
         .with_require_client_cert(false)
         .with_bind_address(
@@ -194,14 +223,15 @@ impl TestBroker {
         use mqtt5::broker::config::{
             AuthConfig, AuthMethod, BrokerConfig, StorageBackend, StorageConfig,
         };
-        use std::path::PathBuf;
         use std::process::Command;
 
-        let password_file = PathBuf::from("test_passwords.txt");
+        let temp_dir = std::env::temp_dir();
+        let password_file = temp_dir.join(format!("test_passwords_{}.txt", std::process::id()));
 
         let _ = std::fs::remove_file(&password_file);
 
-        let status = Command::new("./target/release/mqttv5")
+        let cli_binary = get_cli_binary_path();
+        let status = Command::new(&cli_binary)
             .args([
                 "passwd",
                 "-c",

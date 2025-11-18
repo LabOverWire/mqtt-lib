@@ -25,8 +25,7 @@ This example tests:
 
 1. Build the WASM package:
    ```bash
-   cd /Volumes/SanDisk\ 4TB/repos/mqtt-lib
-   ./examples/wasm/build.sh
+   ./crates/mqtt5/examples/wasm/build.sh
    ```
 
 2. Have an MQTT broker running. You can use:
@@ -39,7 +38,7 @@ This example tests:
 
 1. Start a local web server:
    ```bash
-   cd examples/wasm/qos2
+   cd crates/mqtt5/examples/wasm/qos2
    python3 -m http.server 8000
    ```
 

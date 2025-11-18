@@ -133,3 +133,34 @@ jobs:
         run: cargo doc --no-deps --all-features
         env:
           RUSTDOCFLAGS: -D warnings
+
+  # Build and check WASM
+  wasm:
+    name: WASM Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Check WASM compilation
+        run: cargo check --target wasm32-unknown-unknown --features wasm-full -p mqtt5
+
+      - name: Build WASM package
+        run: |
+          cd crates/mqtt5
+          wasm-pack build --target web --features wasm-client,wasm-broker
+
+      - name: Verify WASM output
+        run: |
+          ls -lh crates/mqtt5/pkg/
+          echo "✅ WASM package built successfully"

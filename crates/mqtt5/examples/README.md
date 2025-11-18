@@ -10,13 +10,13 @@ Start with these examples to understand the fundamentals:
 
 1. **simple_broker.rs** - Basic MQTT broker
    ```bash
-   cargo run --example simple_broker
+   cargo run -p mqtt5 --example simple_broker
    ```
    Starts a broker on localhost:1883 that accepts anonymous connections.
 
 2. **simple_client.rs** - Basic MQTT client with embedded broker
    ```bash
-   cargo run --example simple_client
+   cargo run -p mqtt5 --example simple_client
    ```
    Demonstrates pub/sub with an embedded broker (or external if MQTT_BROKER env is set).
 
@@ -55,10 +55,10 @@ Start with these examples to understand the fundamentals:
 
 Run any example with:
 ```bash
-cargo run --example <example_name>
+cargo run -p mqtt5 --example <example_name>
 
 # For examples requiring features
-cargo run --example broker_with_opentelemetry --features opentelemetry
+cargo run -p mqtt5 --example broker_with_opentelemetry --features opentelemetry
 ```
 
 ### Environment Variables

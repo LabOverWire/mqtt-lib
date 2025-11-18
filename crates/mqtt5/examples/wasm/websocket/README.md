@@ -25,13 +25,13 @@ From the repository root:
 wasm-pack build --target web --features wasm-client
 
 # Copy the output to the example directory
-cp -r pkg examples/wasm/websocket/
+cp -r pkg crates/mqtt5/examples/wasm/websocket/
 ```
 
 Or use the provided build script:
 
 ```bash
-./examples/wasm/build.sh
+./crates/mqtt5/examples/wasm/build.sh
 ```
 
 ## Running
@@ -40,13 +40,13 @@ Start a local HTTP server in the example directory:
 
 ### Using Python 3:
 ```bash
-cd examples/wasm/websocket
+cd crates/mqtt5/examples/wasm/websocket
 python3 -m http.server 8000
 ```
 
 ### Using Node.js (with http-server):
 ```bash
-cd examples/wasm/websocket
+cd crates/mqtt5/examples/wasm/websocket
 npx http-server -p 8000
 ```
 
