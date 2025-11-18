@@ -1199,7 +1199,10 @@ mod tests {
         let addr = "127.0.0.1:12345".parse().unwrap();
 
         // Test successful cert auth
-        let mut connect = ConnectPacket::new(mqtt5_protocol::ConnectOptions::new(&format!("cert:{}", fingerprint)));
+        let mut connect = ConnectPacket::new(mqtt5_protocol::ConnectOptions::new(&format!(
+            "cert:{}",
+            fingerprint
+        )));
         let result = provider.authenticate(&connect, addr).await.unwrap();
         assert!(result.authenticated);
         assert_eq!(result.user_id, Some("alice".to_string()));

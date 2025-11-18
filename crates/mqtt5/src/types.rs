@@ -116,7 +116,11 @@ impl DerefMut for ConnectOptions {
     }
 }
 
-pub use mqtt5_protocol::{ConnectProperties, ConnectResult, Message, MessageProperties, PublishOptions, PublishProperties, PublishResult, RetainHandling, SubscribeOptions, WillMessage, WillProperties};
+pub use mqtt5_protocol::{
+    ConnectProperties, ConnectResult, Message, MessageProperties, PublishOptions,
+    PublishProperties, PublishResult, RetainHandling, SubscribeOptions, WillMessage,
+    WillProperties,
+};
 
 #[derive(Debug, Clone, Default)]
 pub struct ConnectionStats {

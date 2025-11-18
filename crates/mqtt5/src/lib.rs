@@ -210,7 +210,7 @@ pub use mqtt5_protocol::{
     validate_client_id, validate_topic_filter, validate_topic_name, ConnectProperties,
     ConnectResult, FixedHeader, Message, MessageProperties, MqttError, Packet, PacketType,
     Properties, PropertyId, PropertyValue, PropertyValueType, PublishOptions, PublishProperties,
-    PublishResult, QoS, RestrictiveValidator, RetainHandling, StandardValidator, SubscribeOptions,
-    TopicValidator, WillMessage, WillProperties, Result,
+    PublishResult, QoS, RestrictiveValidator, Result, RetainHandling, StandardValidator,
+    SubscribeOptions, TopicValidator, WillMessage, WillProperties,
 };
 pub use types::{ConnectOptions, ConnectionStats};
