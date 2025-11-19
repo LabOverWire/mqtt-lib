@@ -37,7 +37,7 @@ The platform is organized into three crates:
 - **mqtt5** - Native client and broker for Linux, macOS, Windows
 - **mqtt5-wasm** - WebAssembly client and broker for browsers
 
-All crates share the same protocol implementation from `mqtt5-protocol`.
+Shared protocol implementation from `mqtt5-protocol`.
 
 ## Quick Start
 
@@ -68,7 +68,7 @@ use mqtt5::{MqttClient, QoS};
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = MqttClient::new("my-device-001");
 
-    // Connect to your broker (supports multiple transports)
+    // Multiple transport options:
     client.connect("mqtt://localhost:1883").await?;       // TCP
     // client.connect("mqtts://localhost:8883").await?;   // TLS
     // client.connect("ws://localhost:8080/mqtt").await?; // WebSocket
@@ -126,11 +126,11 @@ mqttv5 pub
 
 ### CLI Features
 
-- Unified interface - Single binary with broker, pub, sub, passwd, and acl commands
-- Smart prompting - Guides users when arguments are missing
-- Input validation - Catches errors with helpful suggestions
-- Descriptive flags - `--topic` instead of `-t`, with short aliases available
-- Interactive & non-interactive - Works for both humans and scripts
+- Single binary: broker, pub, sub, passwd, acl commands
+- Interactive prompts for missing arguments
+- Input validation with error messages
+- Long flags (`--topic`) with short aliases (`-t`)
+- Interactive and non-interactive modes
 
 ## Platform Features
 
@@ -144,7 +144,7 @@ mqttv5 pub
 
 ### Client
 
-- Cloud compatible: Works with cloud MQTT brokers
+- Cloud MQTT broker support (AWS IoT, Azure IoT Hub, etc.)
 - Automatic reconnection with exponential backoff
 - Direct async/await patterns
 - Comprehensive testing support
@@ -184,25 +184,25 @@ mqttv5 pub
 - Cloud SDK compatible - Subscribe returns `(packet_id, qos)` tuple
 - Automatic reconnection with exponential backoff
 - Client-side message queuing for offline scenarios
-- Reason code validation - Properly handles broker publish rejections (ACL, quota limits)
+- Reason code validation for broker publish rejections (ACL, quota limits)
 
 ### Transport & Connectivity
 
-- Certificate loading from bytes - Load TLS certificates from memory (PEM/DER formats)
+- Certificate loading from memory (PEM/DER formats)
 - WebSocket transport - MQTT over WebSocket for browsers
 - TLS/SSL support - Secure connections with certificate validation
 - Session persistence - Survives disconnections with clean_start=false
 
 ### Testing & Development
 
-- Mockable Client Interface - `MqttClientTrait` enables testing without real brokers
-- Property-based testing - 29 tests ensuring robustness
-- CLI Integration Testing - End-to-end tests with real broker verification
-- Flow control - Respects broker receive maximum limits
+- Mockable Client Interface - `MqttClientTrait` for unit testing
+- Property-based testing - 29 tests with Proptest
+- CLI Integration Testing - End-to-end tests
+- Flow control - Broker receive maximum limits
 
 ## WASM Browser Support
 
-The library compiles to WebAssembly for browser environments with full MQTT v5.0 support and three deployment modes.
+WebAssembly builds for browser environments with three deployment modes.
 
 ### Connection Modes
 
@@ -219,7 +219,7 @@ await client.connect('ws://broker.example.com:8080/mqtt');
 ```
 
 #### In-Tab Broker Mode (MessagePort)
-Run a complete MQTT broker inside your browser tab:
+MQTT broker in a browser tab:
 
 ```javascript
 import init, { WasmBroker, WasmMqttClient } from './pkg/mqtt5.js';
@@ -233,7 +233,7 @@ await client.connect_message_port(port);
 ```
 
 #### Cross-Tab Mode (BroadcastChannel)
-Communicate across browser tabs using BroadcastChannel API:
+Communication across browser tabs via BroadcastChannel API:
 
 ```javascript
 await client.connect_broadcast_channel('mqtt-channel');
@@ -332,10 +332,9 @@ await client.disconnect();
 ### Automatic Features
 
 #### Keepalive & Timeout Detection
-- Automatically sends PINGREQ every 30 seconds
-- Detects connection timeout after 90 seconds
+- Sends PINGREQ every 30 seconds
+- Connection timeout after 90 seconds
 - Triggers `on_error("Keepalive timeout")` and `on_disconnect()` on timeout
-- No configuration needed - works automatically
 
 #### QoS 2 Flow Management
 - Full four-way handshake (PUBLISH → PUBREC → PUBREL → PUBCOMP)
@@ -345,20 +344,20 @@ await client.disconnect();
 
 ### In-Tab Broker Features
 
-The in-tab broker provides a complete MQTT v5.0 broker implementation:
+MQTT v5.0 broker in browser:
 
-- **QoS support**: All three QoS levels (0, 1, 2)
-- **Retained messages**: In-memory storage
-- **Subscriptions**: Wildcard matching (`+`, `#`)
-- **Session management**: Memory-only (lost on page reload)
-- **Zero external dependencies**: Perfect for testing and demos
+- QoS levels: 0, 1, 2
+- Retained messages: in-memory storage
+- Subscriptions: wildcard matching (`+`, `#`)
+- Session management: memory-only (lost on page reload)
+- No external dependencies
 
 ### WASM Limitations
 
-- **No TLS socket support**: Use browser-managed `wss://` instead
-- **Memory-only storage**: No file I/O, use IndexedDB/localStorage for persistence
+- **No TLS socket support**: Browser-managed `wss://` only
+- **Memory-only storage**: No file I/O (IndexedDB/localStorage available for persistence)
 - **No raw sockets**: WebSocket/MessagePort/BroadcastChannel only
-- **Single-threaded**: All operations run in JavaScript event loop
+- **Single-threaded**: JavaScript event loop execution
 
 ### Browser Compatibility
 
@@ -368,7 +367,7 @@ The in-tab broker provides a complete MQTT v5.0 broker implementation:
 
 ### Complete Examples
 
-See `crates/mqtt5-wasm/examples/` for full browser examples:
+See `crates/mqtt5-wasm/examples/` for browser examples:
 - `websocket/` - External broker connections
 - `qos2/` - QoS 2 flow visualization
 - Complete HTML/JavaScript/CSS applications
@@ -519,15 +518,15 @@ client.publish("$aws/things/device-123/shadow/update", shadow_data).await?;
 
 AWS IoT features:
 
-- Endpoint detection: Detects AWS IoT endpoints
-- Topic validation: Built-in validation for AWS IoT topic restrictions and limits
-- ALPN support: TLS configuration with AWS IoT ALPN protocol
-- Certificate loading: Load client certificates from bytes (PEM/DER formats)
+- AWS IoT endpoint detection
+- Topic validation for AWS IoT restrictions and limits
+- ALPN protocol support for AWS IoT
+- Client certificate loading from bytes (PEM/DER formats)
 - SDK compatibility: Subscribe method returns `(packet_id, qos)` tuple
 
 ## OpenTelemetry Integration
 
-Enable distributed tracing across your MQTT infrastructure with OpenTelemetry support:
+Distributed tracing with OpenTelemetry support:
 
 ```toml
 [dependencies]
@@ -537,9 +536,9 @@ mqtt5 = { version = "0.9.0", features = ["opentelemetry"] }
 ### Features
 
 - W3C trace context propagation via MQTT user properties
-- Automatic span creation for publish/subscribe operations
+- Span creation for publish/subscribe operations
 - Bridge trace context forwarding
-- Complete observability from publisher to subscriber
+- Publisher-to-subscriber observability
 
 ### Example
 

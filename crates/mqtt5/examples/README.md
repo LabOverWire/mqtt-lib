@@ -6,7 +6,7 @@ This directory contains examples demonstrating various features of the MQTT v5.0
 
 ### Basic Examples
 
-Start with these examples to understand the fundamentals:
+Start with these examples:
 
 1. **simple_broker.rs** - Basic MQTT broker
    ```bash
@@ -85,14 +85,14 @@ Some examples support configuration via environment variables:
 Test with MQTT tools:
 
 ```bash
-# Using our superior mqttv5 CLI (recommended)
+# Using mqttv5 CLI
 # Subscribe to all topics
 mqttv5 sub --host localhost --topic '#' --verbose
 
 # Publish a message
 mqttv5 pub --host localhost --topic 'test/topic' --message 'Hello!'
 
-# Or with traditional mosquitto tools
+# Or with mosquitto tools
 mosquitto_sub -h localhost -t '#' -v
 mosquitto_pub -h localhost -t 'test/topic' -m 'Hello!'
 

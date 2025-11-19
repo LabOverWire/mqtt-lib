@@ -5,10 +5,10 @@ This directory contains browser examples demonstrating the mqtt5-wasm library wi
 ## Use Cases
 
 ### External Broker (websocket/)
-Connect to a remote MQTT broker using WebSocket transport. Suitable for production deployments where you have a dedicated MQTT infrastructure.
+Connect to remote MQTT brokers via WebSocket.
 
 ### In-Tab Broker (local-broker/)
-Run a complete MQTT broker inside a single browser tab using MessagePort for communication. Perfect for testing, demos, and offline-capable applications without external dependencies.
+MQTT broker running in a browser tab using MessagePort.
 
 ## Quick Start
 

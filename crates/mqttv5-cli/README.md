@@ -8,15 +8,15 @@ A unified MQTT v5.0 CLI tool with pub, sub, and broker commands.
 
 ## Features
 
-- Unified interface: Single binary with pub, sub, and broker subcommands
-- Smart prompting: Interactive prompts for missing arguments
-- Input validation: Helpful error messages with correction suggestions
-- Full MQTT v5.0: Complete protocol support
+- Single binary: pub, sub, and broker subcommands
+- Interactive prompts for missing arguments
+- Input validation with error messages and suggestions
+- MQTT v5.0 protocol support
 - Session management: Clean start, session expiry, and persistence
 - Will message support: Last will and testament with delay and QoS options
 - Automatic reconnection: Opt-in reconnection with exponential backoff
 - Multi-transport: TCP, TLS, and WebSocket support
-- Cross-platform: Should work on Linux, macOS, and Windows
+- Cross-platform: Linux, macOS, and Windows
 
 ## Installation
 
@@ -73,11 +73,11 @@ mqttv5 broker
 
 ## CLI Design
 
-- Clear, actionable error messages with suggestions
-- Intelligent prompting for missing required arguments
-- Unified tool: One binary for all MQTT operations
-- Consistent flags and intuitive interface
-- Full MQTT v5.0 support including properties and reason codes
+- Error messages with suggestions
+- Prompts for missing required arguments
+- Single binary for all MQTT operations
+- Long flags with short aliases
+- MQTT v5.0 support including properties and reason codes
 
 ### Connection Behavior
 

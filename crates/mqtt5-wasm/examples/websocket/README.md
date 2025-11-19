@@ -8,7 +8,6 @@ This example demonstrates the mqtt5 library running as WebAssembly in the browse
 - Subscribe to topics with wildcard support
 - Publish messages to topics
 - View received messages in real-time
-- Clean, modern UI
 
 ## Prerequisites
 
