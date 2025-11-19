@@ -123,26 +123,23 @@ We use direct async/await patterns because:
 
 ### Client Error Handling
 
-The client validates all acknowledgment reason codes from the broker to ensure MQTT v5.0 compliance:
+The client validates acknowledgment reason codes:
 
-1. **PUBACK Validation** (QoS 1): Client checks PUBACK reason code after publishing
+1. **PUBACK Validation** (QoS 1): Checks PUBACK reason code
    - Success codes (0x00-0x7F): Operation completes successfully
    - Error codes (0x80+): Returns `MqttError::PublishFailed(reason_code)`
 
-2. **PUBREC Validation** (QoS 2): Client checks PUBREC reason code
-   - Error codes abort the publish flow immediately
-   - Success codes proceed to PUBREL/PUBCOMP handshake
+2. **PUBREC Validation** (QoS 2): Checks PUBREC reason code
+   - Error codes abort publish flow
+   - Success codes proceed to PUBREL/PUBCOMP
 
-3. **PUBCOMP Validation** (QoS 2): Client checks final acknowledgment
-   - Ensures complete QoS 2 flow validation
-   - Reports final broker decision on publish
+3. **PUBCOMP Validation** (QoS 2): Checks final acknowledgment
+   - Validates complete QoS 2 flow
+   - Returns final broker decision
 
-4. **Authorization Integration**:
-   - Properly handles `ReasonCode::NotAuthorized` (0x87) from ACL failures
-   - Returns descriptive errors when broker rejects due to permissions, quotas, or other constraints
-   - Prevents false success reporting when broker rejects publish
-
-This ensures the client API accurately reflects broker acceptance or rejection of messages, fixing the previous behavior where the client reported success even when the broker rejected the publish.
+4. **Authorization Handling**:
+   - `ReasonCode::NotAuthorized` (0x87) from ACL failures
+   - Broker rejections due to permissions, quotas, constraints
 
 ## Broker Architecture
 
@@ -622,56 +619,43 @@ fn encode_packet(packet: &Packet, buf: &mut BytesMut) -> Result<()> {
    - Times out stale flows (10 seconds)
    - Removes old duplicate tracking (30 seconds)
 
-### WASM Limitations & Design Rationale
+### WASM Platform Constraints
 
-1. **No Threading**:
-   - **Limitation**: WASM is single-threaded in browsers
-   - **Solution**: `Rc<RefCell<T>>` instead of `Arc<Mutex<T>>`
-   - **Solution**: `spawn_local` instead of `tokio::spawn`
-   - **Impact**: All operations in JavaScript event loop
+1. **Single-Threaded Execution**:
+   - State: `Rc<RefCell<T>>` (not `Arc<Mutex<T>>`)
+   - Tasks: `spawn_local` (not `tokio::spawn`)
+   - All operations run in JavaScript event loop
 
-2. **No File I/O**:
-   - **Limitation**: Browser sandbox prevents file access
-   - **Solution**: Memory-only storage backend
-   - **Impact**: No persistence across page reloads
-   - **Workaround**: Use IndexedDB/localStorage at app level
+2. **Memory-Only Storage**:
+   - No file I/O in browser sandbox
+   - Storage backend keeps data in memory
+   - No persistence across page reloads
+   - Applications can use IndexedDB/localStorage
 
-3. **No Raw Sockets**:
-   - **Limitation**: Browser security model
-   - **Solution**: WebSocket for external connections
-   - **Solution**: MessagePort for in-tab broker
-   - **Solution**: BroadcastChannel for cross-tab
-   - **Impact**: Can't use TCP/TLS directly
+3. **Transport Layer**:
+   - WebSocket: external broker connections
+   - MessagePort: in-tab broker communication
+   - BroadcastChannel: cross-tab messaging
+   - No raw TCP/TLS sockets
 
-4. **Browser-Managed TLS**:
-   - **Limitation**: No access to TLS layer
-   - **Solution**: Use `wss://` URLs (browser handles TLS)
-   - **Impact**: Can't configure TLS options
-   - **Benefit**: Automatic certificate validation
+4. **TLS Handling**:
+   - Browser manages TLS via `wss://` URLs
+   - No direct TLS configuration
+   - Automatic certificate validation
 
-5. **JavaScript Callbacks**:
-   - **Limitation**: Can't return Rust closures to JS
-   - **Solution**: Accept `js_sys::Function` callbacks
-   - **Pattern**: Store callbacks, invoke from Rust
-   - **Impact**: Callback-based instead of async/await for messages
+5. **JavaScript Interop**:
+   - Callbacks: `js_sys::Function`
+   - Store callbacks, invoke from Rust
+   - Callback-based message delivery
 
-6. **Time Module**:
-   - **Limitation**: `std::time` not available in WASM
-   - **Solution**: Conditional `use crate::time::*`
-   - **Implementation**: Uses `web_sys::window().performance().now()`
-   - **Impact**: Transparent to application code
+6. **Time Functions**:
+   - Platform-specific `time` module
+   - WASM: `web_sys::window().performance().now()`
+   - Native: `std::time`
 
 7. **Dependencies**:
-   - **Limitation**: Many native dependencies don't compile to WASM
-   - **Solution**: Platform-gated dependencies with `#[cfg(not(target_arch = "wasm32"))]`
-   - **Examples**: tokio, clap, bcrypt excluded from WASM builds
-   - **Impact**: Smaller WASM binary, faster compile times
-
-8. **State Management**:
-   - **Native**: `Arc<RwLock<T>>` for thread-safe shared state
-   - **WASM**: `Rc<RefCell<T>>` for single-threaded shared state
-   - **Rationale**: No threads = no need for atomic operations
-   - **Benefit**: Simpler runtime, faster execution
+   - Platform-gated with `#[cfg(not(target_arch = "wasm32"))]`
+   - tokio, clap, bcrypt excluded from WASM builds
 
 ### WASM Use Cases
 
