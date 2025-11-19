@@ -9,18 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### BREAKING CHANGES
 
-- **Workspace restructuring**: Project reorganized into proper Rust workspace
+- **Workspace restructuring**: Project reorganized into proper Rust workspace with three crates
+  - **mqtt5-protocol**: Platform-agnostic MQTT v5.0 core (packets, types, Transport trait)
+  - **mqtt5**: Native client and broker for Linux, macOS, Windows
+  - **mqtt5-wasm**: WebAssembly client and broker for browsers
   - Library moved to `crates/mqtt5/` directory
   - CLI remains in `crates/mqttv5-cli/` as sister project
-  - Import paths unchanged: `use mqtt5::*` still works
-  - Example paths changed: now `crates/mqtt5/examples/`
-  - Cargo commands now require `-p mqtt5` flag: `cargo run -p mqtt5 --example simple_broker`
+  - Import paths unchanged for native: `use mqtt5::*` still works
+  - WASM now uses: `use mqtt5_wasm::*` and imports from `./pkg/mqtt5_wasm.js`
+  - Example paths:
+    - Native examples: `crates/mqtt5/examples/`
+    - WASM examples: `crates/mqtt5-wasm/examples/`
+  - Cargo commands now require `-p` flag: `cargo run -p mqtt5 --example simple_broker`
   - Test certificate paths remain at workspace root: `test_certs/`
   - Git history preserved: all files tracked as renames
 
 ### Added
 
-- **Complete WASM client implementation** for browser environments
+- **mqtt5-protocol crate**: Platform-agnostic MQTT v5.0 core extracted from mqtt5
+  - Packet encoding/decoding for all MQTT v5.0 packet types
+  - Protocol types (QoS, properties, reason codes)
+  - Error types (`MqttError`, `Result`)
+  - Topic matching and validation
+  - Transport trait for platform-agnostic I/O
+  - Minimal dependencies: `bebytes`, `bytes`, `serde`, `thiserror`, `tracing`
+  - Shared by both mqtt5 (native) and mqtt5-wasm (browser) crates
+
+- **mqtt5-wasm crate**: Dedicated WebAssembly crate for browser environments
   - Full MQTT v5.0 protocol support compiled to WebAssembly
   - Three connection modes:
     - `connect(url)` - WebSocket connection to external MQTT brokers
@@ -68,9 +83,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Time module abstraction (std::time vs web_sys::window)
   - Single codebase supporting native and WASM targets
 
-- **WASM examples** demonstrating browser usage
-  - `examples/wasm/websocket/` - Connect to external MQTT brokers
-  - `examples/wasm/qos2/` - QoS 2 flow testing with status visualization
+- **WASM examples** demonstrating browser usage in `crates/mqtt5-wasm/examples/`
+  - `websocket/` - Connect to external MQTT brokers
+  - `qos2/` - QoS 2 flow testing with status visualization
+  - `local-broker/` - In-tab broker demonstration
   - Complete browser applications with HTML/JavaScript/CSS
   - Build infrastructure with `wasm-pack` and `build.sh` script
 
@@ -82,14 +98,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - TLS certificate paths computed from workspace root
   - All 30 BDD scenarios passing (140 steps)
 
-- Documentation updated for workspace structure
-  - README.md cargo commands include `-p mqtt5` flag
-  - Example paths updated to `crates/mqtt5/examples/`
+- Documentation updated for three-crate architecture
+  - ARCHITECTURE.md now documents crate organization and dependencies
+  - README.md explains mqtt5-protocol, mqtt5, and mqtt5-wasm separation
+  - Cargo commands include `-p` flag for workspace navigation
+  - Example paths updated: `crates/mqtt5/examples/` and `crates/mqtt5-wasm/examples/`
   - GitHub Actions workflows updated for new structure
-  - WASM example READMEs updated with correct paths
+  - Test certificate paths fixed from package-relative to workspace-relative (`../../test_certs/`)
+  - Doctests updated to use correct module paths (`mqtt5_protocol::`, `std::time::Duration`)
 
 ### Technical Details
 
+- **Crate Organization**:
+  - mqtt5-protocol: Platform-agnostic core with minimal dependencies
+  - mqtt5: Native implementation depends on mqtt5-protocol
+  - mqtt5-wasm: Browser implementation depends on mqtt5-protocol
+  - Transport trait abstraction enables platform-specific I/O implementations
+  - Consistent MQTT v5.0 compliance across all platforms
 - **WASM Architecture**: Single-threaded using Rc<RefCell<T>> instead of Arc<Mutex<T>>
 - **WASM Background Tasks**: Using spawn_local (JavaScript event loop) instead of tokio::spawn
 - **WASM Packet Encoding**: Full MQTT v5.0 codec running in browser
