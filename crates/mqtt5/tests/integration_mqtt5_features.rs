@@ -597,7 +597,8 @@ async fn test_request_response_information() {
     let broker = TestBroker::start().await;
 
     let client1 = MqttClient::new(test_client_id("resp-info-requested"));
-    let mut opts1 = ConnectOptions::new(test_client_id("resp-info-requested")).with_clean_start(true);
+    let mut opts1 =
+        ConnectOptions::new(test_client_id("resp-info-requested")).with_clean_start(true);
     opts1.properties.request_response_information = Some(true);
 
     let result1 = client1
@@ -608,7 +609,8 @@ async fn test_request_response_information() {
     client1.disconnect().await.expect("Failed to disconnect");
 
     let client2 = MqttClient::new(test_client_id("resp-info-not-requested"));
-    let mut opts2 = ConnectOptions::new(test_client_id("resp-info-not-requested")).with_clean_start(true);
+    let mut opts2 =
+        ConnectOptions::new(test_client_id("resp-info-not-requested")).with_clean_start(true);
     opts2.properties.request_response_information = Some(false);
 
     let result2 = client2
@@ -645,7 +647,8 @@ async fn test_request_problem_information() {
     client1.disconnect().await.expect("Failed to disconnect");
 
     let client2 = MqttClient::new(test_client_id("prob-info-disabled"));
-    let mut opts2 = ConnectOptions::new(test_client_id("prob-info-disabled")).with_clean_start(true);
+    let mut opts2 =
+        ConnectOptions::new(test_client_id("prob-info-disabled")).with_clean_start(true);
     opts2.properties.request_problem_information = Some(false);
 
     let result2 = client2
