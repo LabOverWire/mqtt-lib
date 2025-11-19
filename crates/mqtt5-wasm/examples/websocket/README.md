@@ -77,7 +77,11 @@ Then open your browser to: http://localhost:8000
 ### Connecting to a Broker
 
 1. Enter the WebSocket URL of your MQTT broker
-   - Default: `ws://test.mosquitto.org:8080/mqtt` (public test broker)
+   - HiveMQ: `wss://broker.hivemq.com:8884/mqtt` (public test broker, secure)
+   - HiveMQ: `ws://broker.hivemq.com:8000/mqtt` (public test broker, unsecure)
+   - Mosquitto: `ws://test.mosquitto.org:8080/mqtt` (public test broker)
+   - EMQX: `ws://broker.emqx.io:8083/mqtt` (public test broker, unsecure)
+   - EMQX: `wss://broker.emqx.io:8084/mqtt` (public test broker, secure)
    - For local broker: `ws://localhost:8080/mqtt` (if your broker supports WebSocket)
 
 2. Optionally enter a Client ID (auto-generated if left empty)

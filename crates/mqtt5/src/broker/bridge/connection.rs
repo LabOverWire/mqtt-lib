@@ -291,9 +291,9 @@ impl BridgeConnection {
         let options = self.build_connect_options();
 
         if self.config.use_tls {
-            self.connect_tls(&options).await
+            Box::pin(self.connect_tls(&options)).await
         } else {
-            self.connect_plain(&options).await
+            Box::pin(self.connect_plain(&options)).await
         }
     }
 

@@ -529,8 +529,7 @@ impl MqttClient {
                     .map_err(|e| MqttError::ConnectionError(format!("TLS connect failed: {e}")))?;
                 Ok(TransportType::Tls(Box::new(tls_transport)))
             }
-            ClientTransportType::WebSocket => {
-                let url = format!("ws://{}:{}", host, addr.port());
+            ClientTransportType::WebSocket(url) => {
                 let config = WebSocketConfig::new(&url).map_err(|e| {
                     MqttError::ConnectionError(format!("Invalid WebSocket URL: {e}"))
                 })?;
@@ -540,8 +539,7 @@ impl MqttClient {
                 })?;
                 Ok(TransportType::WebSocket(Box::new(ws_transport)))
             }
-            ClientTransportType::WebSocketSecure => {
-                let url = format!("wss://{}:{}", host, addr.port());
+            ClientTransportType::WebSocketSecure(url) => {
                 let insecure = *self.insecure_tls.read().await;
                 let mut config = WebSocketConfig::new(&url).map_err(|e| {
                     MqttError::ConnectionError(format!("Invalid WebSocket URL: {e}"))
@@ -626,7 +624,10 @@ impl MqttClient {
         for addr in addresses {
             tracing::debug!("Trying to connect to address: {}", addr);
 
-            let transport = match self.try_connect_address(*addr, transport_type, host).await {
+            let transport = match self
+                .try_connect_address(*addr, transport_type.clone(), host)
+                .await
+            {
                 Ok(t) => t,
                 Err(e) => {
                     tracing::debug!("Failed to connect to {}: {}", addr, e);
@@ -1619,10 +1620,18 @@ impl MqttClient {
             Ok((ClientTransportType::Tls, host, port))
         } else if let Some(rest) = address.strip_prefix("ws://") {
             let (host, port) = Self::split_host_port(rest, 80)?;
-            Ok((ClientTransportType::WebSocket, host, port))
+            Ok((
+                ClientTransportType::WebSocket(address.to_string()),
+                host,
+                port,
+            ))
         } else if let Some(rest) = address.strip_prefix("wss://") {
             let (host, port) = Self::split_host_port(rest, 443)?;
-            Ok((ClientTransportType::WebSocketSecure, host, port))
+            Ok((
+                ClientTransportType::WebSocketSecure(address.to_string()),
+                host,
+                port,
+            ))
         } else if let Some(rest) = address.strip_prefix("tcp://") {
             let (host, port) = Self::split_host_port(rest, 1883)?;
             Ok((ClientTransportType::Tcp, host, port))
@@ -1882,12 +1891,12 @@ impl MqttClient {
 }
 
 /// Client transport type for parsing addresses
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 enum ClientTransportType {
     Tcp,
     Tls,
-    WebSocket,
-    WebSocketSecure,
+    WebSocket(String),
+    WebSocketSecure(String),
 }
 
 #[cfg(test)]
@@ -1957,28 +1966,50 @@ mod tests {
 
         // Test WebSocket scheme with default port
         let (transport, host, port) = MqttClient::parse_address("ws://localhost").unwrap();
-        assert!(matches!(transport, ClientTransportType::WebSocket));
+        assert!(matches!(transport, ClientTransportType::WebSocket(_)));
         assert_eq!(host, "localhost");
         assert_eq!(port, 80);
 
         // Test WebSocket scheme with custom port
         let (transport, host, port) = MqttClient::parse_address("ws://localhost:8080").unwrap();
-        assert!(matches!(transport, ClientTransportType::WebSocket));
+        assert!(matches!(transport, ClientTransportType::WebSocket(_)));
         assert_eq!(host, "localhost");
         assert_eq!(port, 8080);
 
         // Test WebSocket Secure scheme with default port
         let (transport, host, port) = MqttClient::parse_address("wss://secure.broker").unwrap();
-        assert!(matches!(transport, ClientTransportType::WebSocketSecure));
+        assert!(matches!(transport, ClientTransportType::WebSocketSecure(_)));
         assert_eq!(host, "secure.broker");
         assert_eq!(port, 443);
 
         // Test WebSocket Secure scheme with custom port
         let (transport, host, port) =
             MqttClient::parse_address("wss://secure.broker:8443").unwrap();
-        assert!(matches!(transport, ClientTransportType::WebSocketSecure));
+        assert!(matches!(transport, ClientTransportType::WebSocketSecure(_)));
         assert_eq!(host, "secure.broker");
         assert_eq!(port, 8443);
+
+        // Test WebSocket with path preservation
+        let (transport, host, port) =
+            MqttClient::parse_address("ws://broker.emqx.io:8083/mqtt").unwrap();
+        if let ClientTransportType::WebSocket(url) = transport {
+            assert_eq!(url, "ws://broker.emqx.io:8083/mqtt");
+        } else {
+            panic!("Expected WebSocket transport type");
+        }
+        assert_eq!(host, "broker.emqx.io");
+        assert_eq!(port, 8083);
+
+        // Test WebSocket Secure with path preservation
+        let (transport, host, port) =
+            MqttClient::parse_address("wss://broker.hivemq.com:8884/mqtt").unwrap();
+        if let ClientTransportType::WebSocketSecure(url) = transport {
+            assert_eq!(url, "wss://broker.hivemq.com:8884/mqtt");
+        } else {
+            panic!("Expected WebSocketSecure transport type");
+        }
+        assert_eq!(host, "broker.hivemq.com");
+        assert_eq!(port, 8884);
 
         // Test IPv6 addresses
         let (transport, host, port) = MqttClient::parse_address("[::1]:1883").unwrap();

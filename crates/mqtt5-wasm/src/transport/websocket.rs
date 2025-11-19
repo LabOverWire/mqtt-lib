@@ -216,7 +216,7 @@ impl Transport for WasmWebSocketTransport {
         ws.set_onerror(Some(onerror.as_ref().unchecked_ref()));
         ws.set_onclose(Some(onclose.as_ref().unchecked_ref()));
 
-        self.ws = Some(ws);
+        self.ws = Some(ws.clone());
         self.rx = Some(msg_rx);
         self._closures = Some(ClosureBundle {
             _onmessage: onmessage,
@@ -225,9 +225,22 @@ impl Transport for WasmWebSocketTransport {
             _onclose: onclose,
         });
 
-        result_rx
+        let result = result_rx
             .await
-            .map_err(|_| MqttError::ConnectionError("Connection cancelled".into()))?
+            .map_err(|_| MqttError::ConnectionError("Connection cancelled".into()))?;
+
+        if result.is_err() {
+            ws.set_onmessage(None);
+            ws.set_onopen(None);
+            ws.set_onerror(None);
+            ws.set_onclose(None);
+            ws.close().ok();
+            self.ws = None;
+            self.rx = None;
+            self._closures = None;
+        }
+
+        result
     }
 
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
