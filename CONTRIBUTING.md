@@ -7,7 +7,7 @@
 1. **Fork and Clone**
 
    ```bash
-   git clone https://github.com/fabriciobracht/mqtt-lib.git
+   git clone https://github.com/fabracht/mqtt-lib.git
    cd mqtt-lib
    ```
 
