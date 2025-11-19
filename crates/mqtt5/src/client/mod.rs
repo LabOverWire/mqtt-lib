@@ -15,13 +15,13 @@ use crate::transport::tls::TlsConfig;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::transport::websocket::{WebSocketConfig, WebSocketTransport};
 #[cfg(not(target_arch = "wasm32"))]
-use crate::Transport;
-#[cfg(not(target_arch = "wasm32"))]
 use crate::transport::{TcpTransport, TlsTransport, TransportType};
 use crate::types::{
     ConnectOptions, ConnectResult, PublishOptions, PublishResult, SubscribeOptions,
 };
 use crate::QoS;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::Transport;
 use std::future::Future;
 use std::net::ToSocketAddrs;
 use std::sync::Arc;

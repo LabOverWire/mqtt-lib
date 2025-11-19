@@ -1,7 +1,7 @@
-use mqtt5_protocol::error::{MqttError, Result};
-use mqtt5_protocol::packet::{FixedHeader, Packet};
 use crate::transport::WasmReader;
 use bytes::Buf;
+use mqtt5_protocol::error::{MqttError, Result};
+use mqtt5_protocol::packet::{FixedHeader, Packet};
 
 pub async fn read_packet(reader: &mut WasmReader) -> Result<Packet> {
     let mut header_buf = vec![0u8; 5];

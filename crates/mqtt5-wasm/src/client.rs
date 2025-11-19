@@ -1,14 +1,14 @@
+use crate::decoder::read_packet;
+use crate::transport::{WasmReader, WasmTransportType, WasmWriter};
+use bytes::BytesMut;
 use mqtt5_protocol::packet::connect::ConnectPacket;
 use mqtt5_protocol::packet::publish::PublishPacket;
 use mqtt5_protocol::packet::subscribe::SubscribePacket;
 use mqtt5_protocol::packet::unsubscribe::UnsubscribePacket;
 use mqtt5_protocol::packet::{MqttPacket, Packet};
 use mqtt5_protocol::protocol::v5::properties::Properties;
-use crate::transport::{WasmReader, WasmTransportType, WasmWriter};
-use mqtt5_protocol::Transport;
-use crate::decoder::read_packet;
 use mqtt5_protocol::QoS;
-use bytes::BytesMut;
+use mqtt5_protocol::Transport;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -389,17 +389,23 @@ impl WasmMqttClient {
                 if qos == mqtt5_protocol::QoS::ExactlyOnce {
                     if let Some(packet_id) = publish.packet_id {
                         let is_duplicate = state.borrow().received_qos2.contains_key(&packet_id);
-                        let actions =
-                            mqtt5_protocol::qos2::handle_incoming_publish_qos2(packet_id, is_duplicate);
+                        let actions = mqtt5_protocol::qos2::handle_incoming_publish_qos2(
+                            packet_id,
+                            is_duplicate,
+                        );
 
                         for action in actions {
                             match action {
-                                mqtt5_protocol::qos2::QoS2Action::DeliverMessage { packet_id: _ } => {
+                                mqtt5_protocol::qos2::QoS2Action::DeliverMessage {
+                                    packet_id: _,
+                                } => {
                                     let subscriptions = state.borrow().subscriptions.clone();
                                     let mut found_match = false;
 
                                     for (filter, callback) in subscriptions.iter() {
-                                        if mqtt5_protocol::validation::topic_matches_filter(&topic, filter) {
+                                        if mqtt5_protocol::validation::topic_matches_filter(
+                                            &topic, filter,
+                                        ) {
                                             found_match = true;
                                             web_sys::console::log_1(
                                                 &format!(
@@ -466,7 +472,9 @@ impl WasmMqttClient {
                                         });
                                     }
                                 }
-                                mqtt5_protocol::qos2::QoS2Action::TrackIncomingPubRec { packet_id } => {
+                                mqtt5_protocol::qos2::QoS2Action::TrackIncomingPubRec {
+                                    packet_id,
+                                } => {
                                     let now = js_sys::Date::now();
                                     state.borrow_mut().pending_pubrecs.insert(packet_id, now);
                                     state.borrow_mut().received_qos2.insert(packet_id, now);
@@ -588,11 +596,13 @@ impl WasmMqttClient {
                 for action in actions {
                     match action {
                         mqtt5_protocol::qos2::QoS2Action::SendPubRel { packet_id } => {
-                            let pubrel = mqtt5_protocol::packet::pubrel::PubRelPacket::new(packet_id);
+                            let pubrel =
+                                mqtt5_protocol::packet::pubrel::PubRelPacket::new(packet_id);
                             let mut buf = BytesMut::new();
-                            if let Err(e) =
-                                encode_packet(&mqtt5_protocol::packet::Packet::PubRel(pubrel), &mut buf)
-                            {
+                            if let Err(e) = encode_packet(
+                                &mqtt5_protocol::packet::Packet::PubRel(pubrel),
+                                &mut buf,
+                            ) {
                                 web_sys::console::error_1(
                                     &format!("PUBREL encode error: {}", e).into(),
                                 );
@@ -691,7 +701,8 @@ impl WasmMqttClient {
                     .borrow()
                     .pending_pubrecs
                     .contains_key(&pubrel.packet_id);
-                let actions = mqtt5_protocol::qos2::handle_incoming_pubrel(pubrel.packet_id, has_pubrec);
+                let actions =
+                    mqtt5_protocol::qos2::handle_incoming_pubrel(pubrel.packet_id, has_pubrec);
 
                 for action in actions {
                     match action {
@@ -702,14 +713,16 @@ impl WasmMqttClient {
                             packet_id,
                             reason_code,
                         } => {
-                            let pubcomp = mqtt5_protocol::packet::pubcomp::PubCompPacket::new_with_reason(
-                                packet_id,
-                                reason_code,
-                            );
+                            let pubcomp =
+                                mqtt5_protocol::packet::pubcomp::PubCompPacket::new_with_reason(
+                                    packet_id,
+                                    reason_code,
+                                );
                             let mut buf = BytesMut::new();
-                            if let Err(e) =
-                                encode_packet(&mqtt5_protocol::packet::Packet::PubComp(pubcomp), &mut buf)
-                            {
+                            if let Err(e) = encode_packet(
+                                &mqtt5_protocol::packet::Packet::PubComp(pubcomp),
+                                &mut buf,
+                            ) {
                                 web_sys::console::error_1(
                                     &format!("PUBCOMP encode error: {}", e).into(),
                                 );

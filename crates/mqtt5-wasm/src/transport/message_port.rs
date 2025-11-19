@@ -1,7 +1,7 @@
-use mqtt5_protocol::error::{MqttError, Result};
-use mqtt5_protocol::Transport;
 use futures::channel::mpsc;
 use futures::StreamExt;
+use mqtt5_protocol::error::{MqttError, Result};
+use mqtt5_protocol::Transport;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use wasm_bindgen::prelude::*;

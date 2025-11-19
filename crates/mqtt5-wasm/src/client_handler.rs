@@ -1,3 +1,6 @@
+use crate::decoder::read_packet;
+use crate::transport::message_port::MessagePortTransport;
+use crate::transport::{WasmReader, WasmWriter};
 use mqtt5::broker::auth::AuthProvider;
 use mqtt5::broker::config::BrokerConfig;
 use mqtt5::broker::resource_monitor::ResourceMonitor;
@@ -19,11 +22,8 @@ use mqtt5_protocol::packet::unsuback::{UnsubAckPacket, UnsubAckReasonCode};
 use mqtt5_protocol::packet::unsubscribe::UnsubscribePacket;
 use mqtt5_protocol::packet::Packet;
 use mqtt5_protocol::protocol::v5::reason_codes::ReasonCode;
-use crate::transport::message_port::MessagePortTransport;
-use mqtt5_protocol::Transport;
-use crate::transport::{WasmReader, WasmWriter};
-use crate::decoder::read_packet;
 use mqtt5_protocol::QoS;
+use mqtt5_protocol::Transport;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
@@ -209,8 +209,8 @@ impl WasmClientHandler {
     }
 
     async fn write_publish_packet(publish: &PublishPacket, writer: &mut WasmWriter) -> Result<()> {
-        use mqtt5_protocol::packet::MqttPacket;
         use bytes::BytesMut;
+        use mqtt5_protocol::packet::MqttPacket;
 
         let mut buf = BytesMut::new();
         publish.encode(&mut buf)?;
@@ -406,7 +406,8 @@ impl WasmClientHandler {
                 self.storage.store_session(session.clone()).await.ok();
             }
 
-            if filter.options.retain_handling != mqtt5_protocol::packet::subscribe::RetainHandling::DoNotSend
+            if filter.options.retain_handling
+                != mqtt5_protocol::packet::subscribe::RetainHandling::DoNotSend
             {
                 let retained = self.router.get_retained_messages(&filter.filter).await;
                 for mut msg in retained {
@@ -579,8 +580,8 @@ impl WasmClientHandler {
     }
 
     async fn write_packet(&self, packet: Packet, writer: &mut WasmWriter) -> Result<()> {
-        use mqtt5_protocol::packet::MqttPacket;
         use bytes::BytesMut;
+        use mqtt5_protocol::packet::MqttPacket;
 
         let mut buf = BytesMut::new();
 

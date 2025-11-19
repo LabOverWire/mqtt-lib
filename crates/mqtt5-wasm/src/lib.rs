@@ -16,9 +16,9 @@
 pub mod bindings;
 #[cfg(feature = "broker")]
 pub mod broker;
+pub mod client;
 #[cfg(feature = "broker")]
 mod client_handler;
-pub mod client;
 pub mod decoder;
 pub mod service_worker;
 pub mod transport;
