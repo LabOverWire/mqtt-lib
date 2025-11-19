@@ -21,6 +21,7 @@ pub struct WasmConnectOptions {
 }
 
 #[wasm_bindgen]
+#[allow(non_snake_case)]
 impl WasmConnectOptions {
     #[wasm_bindgen(constructor)]
     pub fn new() -> Self {
@@ -185,7 +186,10 @@ impl WasmConnectOptions {
 
         if let Some(max) = self.receive_maximum {
             if properties
-                .add(PropertyId::ReceiveMaximum, PropertyValue::TwoByteInteger(max))
+                .add(
+                    PropertyId::ReceiveMaximum,
+                    PropertyValue::TwoByteInteger(max),
+                )
                 .is_err()
             {
                 web_sys::console::warn_1(&"Failed to add receive maximum property".into());
@@ -238,7 +242,9 @@ impl WasmConnectOptions {
                 )
                 .is_err()
             {
-                web_sys::console::warn_1(&"Failed to add request problem information property".into());
+                web_sys::console::warn_1(
+                    &"Failed to add request problem information property".into(),
+                );
             }
         }
 
@@ -302,6 +308,7 @@ pub struct WasmPublishOptions {
 }
 
 #[wasm_bindgen]
+#[allow(non_snake_case)]
 impl WasmPublishOptions {
     #[wasm_bindgen(constructor)]
     pub fn new() -> Self {
@@ -518,6 +525,7 @@ pub struct WasmSubscribeOptions {
 }
 
 #[wasm_bindgen]
+#[allow(non_snake_case)]
 impl WasmSubscribeOptions {
     #[wasm_bindgen(constructor)]
     pub fn new() -> Self {
@@ -618,6 +626,7 @@ pub struct WasmWillMessage {
 }
 
 #[wasm_bindgen]
+#[allow(non_snake_case)]
 impl WasmWillMessage {
     #[wasm_bindgen(constructor)]
     pub fn new(topic: String, payload: Vec<u8>) -> Self {

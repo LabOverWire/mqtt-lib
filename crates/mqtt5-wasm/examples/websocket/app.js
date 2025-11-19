@@ -1,4 +1,4 @@
-import init, { WasmMqttClient } from './pkg/mqtt5.js';
+import init, { WasmMqttClient, WasmConnectOptions, WasmWillMessage, WasmPublishOptions, WasmSubscribeOptions } from './pkg/mqtt5_wasm.js';
 
 let client = null;
 let isConnected = false;
@@ -142,11 +142,52 @@ async function handleConnect(e) {
         client = new WasmMqttClient(clientId);
         console.log('WASM client created');
 
+        const connectOpts = new WasmConnectOptions();
+        connectOpts.keepAlive = 60;
+        connectOpts.cleanStart = true;
+        connectOpts.sessionExpiryInterval = 3600;
+        connectOpts.receiveMaximum = 100;
+        connectOpts.maximumPacketSize = 131072;
+
+        connectOpts.addUserProperty("client-type", "browser");
+        connectOpts.addUserProperty("client-version", "0.10.0");
+        connectOpts.addUserProperty("example", "websocket");
+
+        const encoder = new TextEncoder();
+        const will = new WasmWillMessage(
+            `clients/${clientId}/status`,
+            encoder.encode("offline")
+        );
+        will.qos = 1;
+        will.retain = true;
+        will.willDelayInterval = 5;
+        will.messageExpiryInterval = 300;
+
+        connectOpts.set_will(will);
+
+        console.log('Connection options configured:', {
+            keepAlive: connectOpts.keepAlive,
+            cleanStart: connectOpts.cleanStart,
+            sessionExpiryInterval: connectOpts.sessionExpiryInterval,
+            will: 'configured'
+        });
+
         client.on_connect((reasonCode, sessionPresent) => {
             console.log('onConnect callback:', reasonCode, sessionPresent);
             updateStatus('connected');
             toggleControls(true);
             addMessage('system', `Connected to ${brokerUrl} (reason: ${reasonCode}, session: ${sessionPresent})`, 'system');
+
+            const onlinePayload = encoder.encode("online");
+            const onlineOpts = new WasmPublishOptions();
+            onlineOpts.qos = 1;
+            onlineOpts.retain = true;
+            onlineOpts.messageExpiryInterval = 300;
+            onlineOpts.addUserProperty("status-update", "true");
+
+            client.publish_with_options(`clients/${clientId}/status`, onlinePayload, onlineOpts).catch(err => {
+                console.error('Failed to publish online status:', err);
+            });
         });
 
         client.on_disconnect(() => {
@@ -163,7 +204,7 @@ async function handleConnect(e) {
             addMessage('system', `Error: ${error}`, 'error');
         });
 
-        await client.connect(brokerUrl);
+        await client.connect_with_options(brokerUrl, connectOpts);
         console.log('Connection initiated');
 
     } catch (error) {
@@ -221,15 +262,22 @@ async function handleSubscribe(e) {
     }
 
     try {
-        console.log('handleSubscribe: Calling subscribe_with_callback for topic:', topic);
-        const packetId = await client.subscribe_with_callback(topic, (receivedTopic, payload) => {
+        const subOpts = new WasmSubscribeOptions();
+        subOpts.qos = 1;
+        subOpts.noLocal = false;
+        subOpts.retainAsPublished = true;
+        subOpts.retainHandling = 0;
+        subOpts.subscriptionIdentifier = Math.floor(Math.random() * 1000000);
+
+        console.log('handleSubscribe: Calling subscribe_with_options for topic:', topic);
+        const packetId = await client.subscribe_with_options(topic, (receivedTopic, payload) => {
             console.log('Message received:', receivedTopic, payload);
             addMessage(receivedTopic, payload, 'received');
-        });
+        }, subOpts);
 
-        console.log('handleSubscribe: subscribe_with_callback returned, packet_id:', packetId);
+        console.log('handleSubscribe: subscribe_with_options returned, packet_id:', packetId);
         addSubscription(topic);
-        addMessage('system', `Subscribed to ${topic} (packet_id: ${packetId})`, 'system');
+        addMessage('system', `Subscribed to ${topic} (packet_id: ${packetId}, sub_id: ${subOpts.subscriptionIdentifier})`, 'system');
         document.getElementById('subscribe-topic').value = '';
 
     } catch (error) {
@@ -264,9 +312,18 @@ async function handlePublish(e) {
         const encoder = new TextEncoder();
         const payloadBytes = encoder.encode(payload);
 
-        console.log('handlePublish: Calling client.publish, topic:', topic, 'payload bytes:', payloadBytes.length);
-        await client.publish(topic, payloadBytes);
-        console.log('handlePublish: client.publish completed');
+        const pubOpts = new WasmPublishOptions();
+        pubOpts.qos = 1;
+        pubOpts.retain = false;
+        pubOpts.messageExpiryInterval = 300;
+        pubOpts.payloadFormatIndicator = true;
+        pubOpts.contentType = "text/plain";
+        pubOpts.addUserProperty("sender", "websocket-example");
+        pubOpts.addUserProperty("timestamp", new Date().toISOString());
+
+        console.log('handlePublish: Calling client.publish_with_options, topic:', topic);
+        await client.publish_with_options(topic, payloadBytes, pubOpts);
+        console.log('handlePublish: client.publish_with_options completed');
 
         addMessage(topic, payloadBytes, 'sent');
         document.getElementById('publish-payload').value = '';
@@ -300,6 +357,12 @@ async function initApp() {
         updateSubscriptionsList();
 
         console.log('Application ready');
+        console.log('Configuration features demonstrated:');
+        console.log('- WasmConnectOptions: keepAlive, cleanStart, sessionExpiryInterval, receiveMaximum, maximumPacketSize');
+        console.log('- WasmWillMessage: topic, payload, qos, retain, willDelayInterval, messageExpiryInterval');
+        console.log('- User properties: client-type, client-version, example');
+        console.log('- WasmPublishOptions: qos, retain, messageExpiryInterval, payloadFormatIndicator, contentType, user properties');
+        console.log('- WasmSubscribeOptions: qos, noLocal, retainAsPublished, retainHandling, subscriptionIdentifier');
 
     } catch (error) {
         console.error('Failed to initialize WASM:', error);

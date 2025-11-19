@@ -776,7 +776,8 @@ impl WasmMqttClient {
         let transport = WasmTransportType::WebSocket(
             crate::transport::websocket::WasmWebSocketTransport::new(url),
         );
-        self.connect_with_transport_and_config(transport, config).await
+        self.connect_with_transport_and_config(transport, config)
+            .await
     }
 
     pub async fn connect_message_port(&self, port: MessagePort) -> Result<(), JsValue> {
@@ -784,7 +785,8 @@ impl WasmMqttClient {
         let transport = WasmTransportType::MessagePort(
             crate::transport::message_port::MessagePortTransport::new(port),
         );
-        self.connect_with_transport_and_config(transport, &config).await
+        self.connect_with_transport_and_config(transport, &config)
+            .await
     }
 
     pub async fn connect_broadcast_channel(&self, channel_name: &str) -> Result<(), JsValue> {
@@ -792,7 +794,8 @@ impl WasmMqttClient {
         let transport = WasmTransportType::BroadcastChannel(
             crate::transport::broadcast::BroadcastChannelTransport::new(channel_name),
         );
-        self.connect_with_transport_and_config(transport, &config).await
+        self.connect_with_transport_and_config(transport, &config)
+            .await
     }
 
     async fn connect_with_transport_and_config(
@@ -1271,10 +1274,8 @@ impl WasmMqttClient {
             }
         }
 
-        let mut topic_filter = mqtt5_protocol::packet::subscribe::TopicFilter::new(
-            topic,
-            options.to_qos(),
-        );
+        let mut topic_filter =
+            mqtt5_protocol::packet::subscribe::TopicFilter::new(topic, options.to_qos());
         topic_filter.options.no_local = options.no_local;
         topic_filter.options.retain_as_published = options.retain_as_published;
         topic_filter.options.retain_handling = match options.retain_handling {
@@ -1288,7 +1289,9 @@ impl WasmMqttClient {
             if properties
                 .add(
                     mqtt5_protocol::protocol::v5::properties::PropertyId::SubscriptionIdentifier,
-                    mqtt5_protocol::protocol::v5::properties::PropertyValue::VariableByteInteger(id),
+                    mqtt5_protocol::protocol::v5::properties::PropertyValue::VariableByteInteger(
+                        id,
+                    ),
                 )
                 .is_err()
             {

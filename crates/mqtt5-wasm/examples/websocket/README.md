@@ -4,10 +4,31 @@ This example demonstrates the mqtt5 library running as WebAssembly in the browse
 
 ## Features
 
-- Connect to any MQTT broker supporting WebSocket
-- Subscribe to topics with wildcard support
-- Publish messages to topics
-- View received messages in real-time
+This example demonstrates all MQTT v5.0 configuration options available in the WASM client:
+
+### Connection Features
+- WebSocket transport to MQTT brokers
+- Connection options: keepAlive, cleanStart, sessionExpiryInterval, receiveMaximum, maximumPacketSize
+- Will message support with QoS, retain, delay interval, and message expiry
+- User properties on connection (client-type, client-version, example)
+
+### Publish Features
+- QoS levels (0, 1, 2) with configurable options
+- Retain flag for persistent messages
+- Message properties: messageExpiryInterval, payloadFormatIndicator, contentType
+- User properties on publish (sender, timestamp)
+
+### Subscribe Features
+- QoS selection (0, 1, 2)
+- Topic wildcards (`+` single-level, `#` multi-level)
+- Subscription options: noLocal, retainAsPublished, retainHandling
+- Subscription identifiers for message routing
+- Dynamic subscription management (subscribe/unsubscribe)
+
+### Message Handling
+- Real-time message display
+- Connection event callbacks (connect, disconnect, error)
+- Status monitoring with will messages
 
 ## Prerequisites
 
@@ -146,6 +167,71 @@ ws://localhost:8083/mqtt
 - MQTT over WebSocket typically doesn't have CORS issues
 - Ensure you're serving the page from an HTTP server (not `file://`)
 
+## Configuration Examples
+
+The example demonstrates all available configuration options:
+
+### Connection with Options
+
+```javascript
+import { WasmMqttClient, WasmConnectOptions, WasmWillMessage } from './pkg/mqtt5_wasm.js';
+
+const client = new WasmMqttClient("my-client-id");
+
+const connectOpts = new WasmConnectOptions();
+connectOpts.keepAlive = 60;
+connectOpts.cleanStart = true;
+connectOpts.sessionExpiryInterval = 3600;
+connectOpts.receiveMaximum = 100;
+connectOpts.maximumPacketSize = 131072;
+
+connectOpts.addUserProperty("client-type", "browser");
+connectOpts.addUserProperty("client-version", "0.10.0");
+
+const will = new WasmWillMessage("status/offline", encoder.encode("offline"));
+will.qos = 1;
+will.retain = true;
+will.willDelayInterval = 5;
+will.messageExpiryInterval = 300;
+connectOpts.set_will(will);
+
+await client.connect_with_options("ws://broker:8000/mqtt", connectOpts);
+```
+
+### Publish with Options
+
+```javascript
+import { WasmPublishOptions } from './pkg/mqtt5_wasm.js';
+
+const pubOpts = new WasmPublishOptions();
+pubOpts.qos = 1;
+pubOpts.retain = false;
+pubOpts.messageExpiryInterval = 300;
+pubOpts.payloadFormatIndicator = true;
+pubOpts.contentType = "text/plain";
+pubOpts.addUserProperty("sender", "websocket-example");
+
+const encoder = new TextEncoder();
+await client.publish_with_options("topic", encoder.encode("message"), pubOpts);
+```
+
+### Subscribe with Options
+
+```javascript
+import { WasmSubscribeOptions } from './pkg/mqtt5_wasm.js';
+
+const subOpts = new WasmSubscribeOptions();
+subOpts.qos = 1;
+subOpts.noLocal = false;
+subOpts.retainAsPublished = true;
+subOpts.retainHandling = 0;
+subOpts.subscriptionIdentifier = 42;
+
+await client.subscribe_with_options("topic/filter", (topic, payload) => {
+    console.log('Message:', topic, payload);
+}, subOpts);
+```
+
 ## Architecture
 
 This example demonstrates:
@@ -155,6 +241,7 @@ This example demonstrates:
 3. **Async/Await**: Rust async functions exposed to JavaScript as Promises
 4. **Binary Data**: Handling MQTT binary payloads with Uint8Array
 5. **Client State Management**: Connection lifecycle and message handling
+6. **Full MQTT v5.0 Configuration**: All connection, publish, and subscribe options
 
 ## Next Steps
 
