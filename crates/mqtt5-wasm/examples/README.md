@@ -1,6 +1,6 @@
 # WASM MQTT Examples
 
-This directory contains browser examples demonstrating the mqtt5 WASM library with full client and broker functionality.
+This directory contains browser examples demonstrating the mqtt5-wasm library with full client and broker functionality.
 
 ## Use Cases
 
@@ -17,7 +17,7 @@ Run a complete MQTT broker inside a single browser tab using MessagePort for com
 From the repository root:
 
 ```bash
-cd crates/mqtt5/examples/wasm
+cd crates/mqtt5-wasm/examples
 ./build.sh
 ```
 
@@ -216,6 +216,6 @@ Free brokers for testing (no authentication):
 
 ## Next Steps
 
-- See `docs/WASM_USAGE.md` for complete API documentation
-- Check `src/wasm/client.rs` for implementation details
+- See the main README for complete API documentation
+- Check `crates/mqtt5-wasm/src/client.rs` for implementation details
 - Review the native client examples in `crates/mqtt5/examples/` for comparison

@@ -29,6 +29,16 @@ mqtt5 = "0.9.0"
 cargo install mqttv5-cli
 ```
 
+## Crate Organization
+
+The platform is organized into three crates:
+
+- **mqtt5-protocol** - Platform-agnostic MQTT v5.0 core (packets, types, Transport trait)
+- **mqtt5** - Native client and broker for Linux, macOS, Windows
+- **mqtt5-wasm** - WebAssembly client and broker for browsers
+
+All crates share the same protocol implementation from `mqtt5-protocol`.
+
 ## Quick Start
 
 ### Start an MQTT Broker
@@ -358,7 +368,7 @@ The in-tab broker provides a complete MQTT v5.0 broker implementation:
 
 ### Complete Examples
 
-See `crates/mqtt5/examples/wasm/` for full browser examples:
+See `crates/mqtt5-wasm/examples/` for full browser examples:
 - `websocket/` - External broker connections
 - `qos2/` - QoS 2 flow visualization
 - Complete HTML/JavaScript/CSS applications
