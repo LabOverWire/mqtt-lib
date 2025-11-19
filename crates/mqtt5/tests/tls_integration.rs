@@ -22,7 +22,7 @@ async fn test_tls_connection() {
     // Create TLS config for local broker
     let mut tls_config = TlsConfig::new(socket_addr, "localhost").with_verify_server_cert(false); // Self-signed cert in test
     tls_config
-        .load_ca_cert_pem("test_certs/ca.pem")
+        .load_ca_cert_pem("../../test_certs/ca.pem")
         .expect("Failed to load CA cert");
 
     // Connect with TLS
@@ -90,13 +90,13 @@ async fn test_mtls_connection() {
     // Create mTLS config with client certificates
     let mut tls_config = TlsConfig::new(socket_addr, "localhost").with_verify_server_cert(false); // Self-signed cert in test
     tls_config
-        .load_ca_cert_pem("test_certs/ca.pem")
+        .load_ca_cert_pem("../../test_certs/ca.pem")
         .expect("Failed to load CA cert");
     tls_config
-        .load_client_cert_pem("test_certs/client.pem")
+        .load_client_cert_pem("../../test_certs/client.pem")
         .expect("Failed to load client cert");
     tls_config
-        .load_client_key_pem("test_certs/client.key")
+        .load_client_key_pem("../../test_certs/client.key")
         .expect("Failed to load client key");
 
     // Connect with mTLS
@@ -166,7 +166,7 @@ async fn test_tls_with_alpn() {
         .with_verify_server_cert(false)
         .with_alpn_protocols(&["mqtt"]);
     tls_config
-        .load_ca_cert_pem("test_certs/ca.pem")
+        .load_ca_cert_pem("../../test_certs/ca.pem")
         .expect("Failed to load CA cert");
 
     // Connect with TLS
@@ -210,7 +210,7 @@ async fn test_tls_reconnection() {
     // Create TLS config
     let mut tls_config = TlsConfig::new(socket_addr, "localhost").with_verify_server_cert(false);
     tls_config
-        .load_ca_cert_pem("test_certs/ca.pem")
+        .load_ca_cert_pem("../../test_certs/ca.pem")
         .expect("Failed to load CA cert");
 
     // Connect with automatic reconnection

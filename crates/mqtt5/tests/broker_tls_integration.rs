@@ -12,8 +12,8 @@ async fn test_broker_tls_creation() {
         .with_bind_address(([127, 0, 0, 1], 0)) // Use random port
         .with_tls(
             TlsConfig::new(
-                PathBuf::from("test_certs/server.crt"), // Using test certs from client tests
-                PathBuf::from("test_certs/server.key"),
+                PathBuf::from("../../test_certs/server.crt"), // Using test certs from client tests
+                PathBuf::from("../../test_certs/server.key"),
             )
             .with_bind_address(([127, 0, 0, 1], 0)), // Use random port for TLS too
         );
@@ -48,10 +48,10 @@ async fn test_broker_tls_with_client_certs() {
         .with_bind_address(([127, 0, 0, 1], 0))
         .with_tls(
             TlsConfig::new(
-                PathBuf::from("test_certs/server.crt"),
-                PathBuf::from("test_certs/server.key"),
+                PathBuf::from("../../test_certs/server.crt"),
+                PathBuf::from("../../test_certs/server.key"),
             )
-            .with_ca_file(PathBuf::from("test_certs/ca.crt"))
+            .with_ca_file(PathBuf::from("../../test_certs/ca.crt"))
             .with_require_client_cert(true)
             .with_bind_address(([127, 0, 0, 1], 0)),
         );
@@ -79,8 +79,8 @@ async fn test_broker_default_tls_port() {
         .with_bind_address(([127, 0, 0, 1], 1883))
         .with_tls(
             TlsConfig::new(
-                PathBuf::from("test_certs/server.crt"),
-                PathBuf::from("test_certs/server.key"),
+                PathBuf::from("../../test_certs/server.crt"),
+                PathBuf::from("../../test_certs/server.key"),
             ), // Note: not setting bind_address, should default to 8883
         );
 

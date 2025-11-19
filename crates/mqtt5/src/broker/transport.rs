@@ -4,7 +4,7 @@
 //! (TCP, TLS, WebSocket) used by the broker's client handler.
 
 use crate::error::Result;
-use crate::transport::Transport;
+use crate::Transport;
 use std::fmt::Debug;
 use std::net::SocketAddr;
 use std::pin::Pin;

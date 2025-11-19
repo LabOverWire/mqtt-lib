@@ -17,8 +17,8 @@
 //!
 //! ```rust,no_run
 //! use mqtt5::transport::websocket::{WebSocketConfig, WebSocketTransport};
-//! use mqtt5::transport::Transport;
-//! use crate::time::Duration;
+//! use mqtt5_protocol::transport::Transport;
+//! use std::time::Duration;
 //!
 //! # #[tokio::main]
 //! # async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -30,7 +30,7 @@
 //! // Secure WebSocket with custom configuration
 //! let config = WebSocketConfig::new("wss://secure-broker.example.com/mqtt")?
 //!     .with_timeout(Duration::from_secs(30))
-//!     .with_subprotocol("mqtt")  
+//!     .with_subprotocol("mqtt")
 //!     .with_header("Authorization", "Bearer token123");
 //!
 //! let mut transport = WebSocketTransport::new(config);
@@ -44,7 +44,7 @@ use crate::packet::Packet;
 use crate::time::Duration;
 use crate::transport::packet_io::{PacketReader, PacketWriter};
 use crate::transport::tls::TlsConfig;
-use crate::transport::Transport;
+use crate::Transport;
 use futures_util::{stream::SplitSink, stream::SplitStream, StreamExt};
 use std::collections::HashMap;
 use std::net::SocketAddr;

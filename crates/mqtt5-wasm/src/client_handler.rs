@@ -1,29 +1,29 @@
-use crate::broker::auth::AuthProvider;
-use crate::broker::config::BrokerConfig;
-use crate::broker::resource_monitor::ResourceMonitor;
-use crate::broker::router::MessageRouter;
-use crate::broker::storage::{ClientSession, DynamicStorage, StorageBackend};
-use crate::broker::sys_topics::BrokerStats;
-use crate::error::{MqttError, Result};
-use crate::packet::connack::ConnAckPacket;
-use crate::packet::connect::ConnectPacket;
-use crate::packet::disconnect::DisconnectPacket;
-use crate::packet::puback::PubAckPacket;
-use crate::packet::pubcomp::PubCompPacket;
-use crate::packet::publish::PublishPacket;
-use crate::packet::pubrec::PubRecPacket;
-use crate::packet::pubrel::PubRelPacket;
-use crate::packet::suback::{SubAckPacket, SubAckReasonCode};
-use crate::packet::subscribe::SubscribePacket;
-use crate::packet::unsuback::{UnsubAckPacket, UnsubAckReasonCode};
-use crate::packet::unsubscribe::UnsubscribePacket;
-use crate::packet::Packet;
-use crate::protocol::v5::reason_codes::ReasonCode;
-use crate::transport::wasm::message_port::MessagePortTransport;
-use crate::transport::Transport;
+use mqtt5::broker::auth::AuthProvider;
+use mqtt5::broker::config::BrokerConfig;
+use mqtt5::broker::resource_monitor::ResourceMonitor;
+use mqtt5::broker::router::MessageRouter;
+use mqtt5::broker::storage::{ClientSession, DynamicStorage, StorageBackend};
+use mqtt5::broker::sys_topics::BrokerStats;
+use mqtt5_protocol::error::{MqttError, Result};
+use mqtt5_protocol::packet::connack::ConnAckPacket;
+use mqtt5_protocol::packet::connect::ConnectPacket;
+use mqtt5_protocol::packet::disconnect::DisconnectPacket;
+use mqtt5_protocol::packet::puback::PubAckPacket;
+use mqtt5_protocol::packet::pubcomp::PubCompPacket;
+use mqtt5_protocol::packet::publish::PublishPacket;
+use mqtt5_protocol::packet::pubrec::PubRecPacket;
+use mqtt5_protocol::packet::pubrel::PubRelPacket;
+use mqtt5_protocol::packet::suback::{SubAckPacket, SubAckReasonCode};
+use mqtt5_protocol::packet::subscribe::SubscribePacket;
+use mqtt5_protocol::packet::unsuback::{UnsubAckPacket, UnsubAckReasonCode};
+use mqtt5_protocol::packet::unsubscribe::UnsubscribePacket;
+use mqtt5_protocol::packet::Packet;
+use mqtt5_protocol::protocol::v5::reason_codes::ReasonCode;
+use crate::transport::message_port::MessagePortTransport;
+use mqtt5_protocol::Transport;
 use crate::transport::{WasmReader, WasmWriter};
-use crate::wasm::decoder::read_packet;
-use crate::QoS;
+use crate::decoder::read_packet;
+use mqtt5_protocol::QoS;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
@@ -209,7 +209,7 @@ impl WasmClientHandler {
     }
 
     async fn write_publish_packet(publish: &PublishPacket, writer: &mut WasmWriter) -> Result<()> {
-        use crate::packet::MqttPacket;
+        use mqtt5_protocol::packet::MqttPacket;
         use bytes::BytesMut;
 
         let mut buf = BytesMut::new();
@@ -302,7 +302,7 @@ impl WasmClientHandler {
     }
 
     async fn handle_session(&mut self, connect: &ConnectPacket) -> Result<bool> {
-        use crate::protocol::v5::properties::{PropertyId, PropertyValue};
+        use mqtt5_protocol::protocol::v5::properties::{PropertyId, PropertyValue};
 
         let client_id = &connect.client_id;
         let session_expiry = connect
@@ -406,7 +406,7 @@ impl WasmClientHandler {
                 self.storage.store_session(session.clone()).await.ok();
             }
 
-            if filter.options.retain_handling != crate::packet::subscribe::RetainHandling::DoNotSend
+            if filter.options.retain_handling != mqtt5_protocol::packet::subscribe::RetainHandling::DoNotSend
             {
                 let retained = self.router.get_retained_messages(&filter.filter).await;
                 for mut msg in retained {
@@ -579,7 +579,7 @@ impl WasmClientHandler {
     }
 
     async fn write_packet(&self, packet: Packet, writer: &mut WasmWriter) -> Result<()> {
-        use crate::packet::MqttPacket;
+        use mqtt5_protocol::packet::MqttPacket;
         use bytes::BytesMut;
 
         let mut buf = BytesMut::new();
@@ -594,7 +594,7 @@ impl WasmClientHandler {
             Packet::PubRel(p) => p.encode(&mut buf)?,
             Packet::PubComp(p) => p.encode(&mut buf)?,
             Packet::PingResp => {
-                crate::packet::pingresp::PingRespPacket::default().encode(&mut buf)?
+                mqtt5_protocol::packet::pingresp::PingRespPacket::default().encode(&mut buf)?
             }
             Packet::Disconnect(p) => p.encode(&mut buf)?,
             _ => {

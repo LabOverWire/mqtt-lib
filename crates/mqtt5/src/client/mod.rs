@@ -15,7 +15,7 @@ use crate::transport::tls::TlsConfig;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::transport::websocket::{WebSocketConfig, WebSocketTransport};
 #[cfg(not(target_arch = "wasm32"))]
-use crate::transport::Transport;
+use crate::Transport;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::transport::{TcpTransport, TlsTransport, TransportType};
 use crate::types::{
@@ -85,7 +85,7 @@ pub type ConnectionEventCallback = Arc<dyn Fn(ConnectionEvent) + Send + Sync>;
 ///
 /// ```rust,no_run
 /// use mqtt5::{MqttClient, ConnectOptions, PublishOptions, QoS};
-/// use crate::time::Duration;
+/// use std::time::Duration;
 ///
 /// #[tokio::main]
 /// async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -155,7 +155,7 @@ impl MqttClient {
     ///
     /// ```
     /// use mqtt5::{MqttClient, ConnectOptions};
-    /// use crate::time::Duration;
+    /// use std::time::Duration;
     ///
     /// let options = ConnectOptions::new("client-001")
     ///     .with_clean_start(true)
@@ -841,7 +841,7 @@ impl MqttClient {
     /// ```rust,no_run
     /// # use mqtt5::{MqttClient, ConnectOptions, transport::tls::TlsConfig};
     /// # use std::net::SocketAddr;
-    /// # use crate::time::Duration;
+    /// # use std::time::Duration;
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let mut options = ConnectOptions::new("aws-iot-client")
     ///     .with_clean_start(false)

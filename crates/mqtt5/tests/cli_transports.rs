@@ -7,21 +7,22 @@ use std::process::Command;
 mod common;
 use common::TestBroker;
 
-const CLI_BINARY: &str = "target/release/mqttv5";
-
-fn ensure_cli_built() {
-    if !std::path::Path::new(CLI_BINARY).exists() {
-        let output = Command::new("cargo")
+fn get_cli_binary() -> &'static str {
+    if std::path::Path::new("../../target/release/mqttv5").exists() {
+        "../../target/release/mqttv5"
+    } else if std::path::Path::new("target/release/mqttv5").exists() {
+        "target/release/mqttv5"
+    } else {
+        Command::new("cargo")
             .args(["build", "--release", "-p", "mqttv5-cli"])
             .output()
             .expect("Failed to build CLI");
-
-        assert!(
-            output.status.success(),
-            "Failed to build CLI: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        "../../target/release/mqttv5"
     }
+}
+
+fn ensure_cli_built() {
+    let _ = get_cli_binary();
 }
 
 /// Test TCP transport (mqtt://)
@@ -31,7 +32,7 @@ async fn test_cli_tcp_transport() {
     let broker = TestBroker::start().await;
     let broker_url = broker.address(); // This returns mqtt://...
 
-    let result = tokio::process::Command::new(CLI_BINARY)
+    let result = tokio::process::Command::new(get_cli_binary())
         .args([
             "pub",
             "--url",
@@ -56,8 +57,8 @@ async fn test_cli_tls_transport() {
     ensure_cli_built();
 
     // Generate test certificates if not present
-    if !std::path::Path::new("test_certs/server.pem").exists() {
-        let _ = Command::new("./scripts/generate_test_certs.sh").output();
+    if !std::path::Path::new("../../test_certs/server.pem").exists() {
+        let _ = Command::new("../../scripts/generate_test_certs.sh").output();
     }
 
     let _broker = TestBroker::start_with_tls().await;
@@ -67,7 +68,7 @@ async fn test_cli_tls_transport() {
 
     // Note: This will likely fail due to certificate validation
     // but we're testing that the URL scheme is recognized
-    let result = tokio::process::Command::new(CLI_BINARY)
+    let result = tokio::process::Command::new(get_cli_binary())
         .args([
             "pub",
             "--url",
@@ -102,7 +103,7 @@ async fn test_cli_url_custom_ports() {
     ensure_cli_built();
 
     // Test custom TCP port
-    let tcp_result = tokio::process::Command::new(CLI_BINARY)
+    let tcp_result = tokio::process::Command::new(get_cli_binary())
         .args([
             "pub",
             "--url",
@@ -124,7 +125,7 @@ async fn test_cli_url_custom_ports() {
     );
 
     // Test custom TLS port
-    let tls_result = tokio::process::Command::new(CLI_BINARY)
+    let tls_result = tokio::process::Command::new(get_cli_binary())
         .args([
             "pub",
             "--url",
@@ -158,7 +159,7 @@ async fn test_cli_transport_help() {
     ensure_cli_built();
 
     // Check that help mentions all transport types
-    let pub_help = tokio::process::Command::new(CLI_BINARY)
+    let pub_help = tokio::process::Command::new(get_cli_binary())
         .args(["pub", "--help"])
         .output()
         .await

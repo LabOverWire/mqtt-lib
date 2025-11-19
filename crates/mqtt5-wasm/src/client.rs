@@ -1,12 +1,13 @@
-use crate::packet::connect::ConnectPacket;
-use crate::packet::publish::PublishPacket;
-use crate::packet::subscribe::SubscribePacket;
-use crate::packet::unsubscribe::UnsubscribePacket;
-use crate::packet::{MqttPacket, Packet};
-use crate::protocol::v5::properties::Properties;
-use crate::transport::{Transport, WasmReader, WasmTransportType, WasmWriter};
-use crate::wasm::decoder::read_packet;
-use crate::QoS;
+use mqtt5_protocol::packet::connect::ConnectPacket;
+use mqtt5_protocol::packet::publish::PublishPacket;
+use mqtt5_protocol::packet::subscribe::SubscribePacket;
+use mqtt5_protocol::packet::unsubscribe::UnsubscribePacket;
+use mqtt5_protocol::packet::{MqttPacket, Packet};
+use mqtt5_protocol::protocol::v5::properties::Properties;
+use crate::transport::{WasmReader, WasmTransportType, WasmWriter};
+use mqtt5_protocol::Transport;
+use crate::decoder::read_packet;
+use mqtt5_protocol::QoS;
 use bytes::BytesMut;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -75,7 +76,7 @@ impl ClientState {
     }
 }
 
-fn encode_packet(packet: &Packet, buf: &mut BytesMut) -> crate::error::Result<()> {
+fn encode_packet(packet: &Packet, buf: &mut BytesMut) -> mqtt5_protocol::error::Result<()> {
     match packet {
         Packet::Connect(p) => p.encode(buf),
         Packet::Publish(p) => p.encode(buf),
@@ -83,10 +84,10 @@ fn encode_packet(packet: &Packet, buf: &mut BytesMut) -> crate::error::Result<()
         Packet::PubRel(p) => p.encode(buf),
         Packet::PubComp(p) => p.encode(buf),
         Packet::Subscribe(p) => p.encode(buf),
-        Packet::PingReq => crate::packet::pingreq::PingReqPacket::default().encode(buf),
+        Packet::PingReq => mqtt5_protocol::packet::pingreq::PingReqPacket::default().encode(buf),
         Packet::Disconnect(p) => p.encode(buf),
         Packet::Unsubscribe(p) => p.encode(buf),
-        _ => Err(crate::error::MqttError::ProtocolError(format!(
+        _ => Err(mqtt5_protocol::error::MqttError::ProtocolError(format!(
             "Encoding not yet implemented for packet type: {:?}",
             packet
         ))),
@@ -385,20 +386,20 @@ impl WasmMqttClient {
                     .into(),
                 );
 
-                if qos == crate::QoS::ExactlyOnce {
+                if qos == mqtt5_protocol::QoS::ExactlyOnce {
                     if let Some(packet_id) = publish.packet_id {
                         let is_duplicate = state.borrow().received_qos2.contains_key(&packet_id);
                         let actions =
-                            crate::qos2::handle_incoming_publish_qos2(packet_id, is_duplicate);
+                            mqtt5_protocol::qos2::handle_incoming_publish_qos2(packet_id, is_duplicate);
 
                         for action in actions {
                             match action {
-                                crate::qos2::QoS2Action::DeliverMessage { packet_id: _ } => {
+                                mqtt5_protocol::qos2::QoS2Action::DeliverMessage { packet_id: _ } => {
                                     let subscriptions = state.borrow().subscriptions.clone();
                                     let mut found_match = false;
 
                                     for (filter, callback) in subscriptions.iter() {
-                                        if crate::validation::topic_matches_filter(&topic, filter) {
+                                        if mqtt5_protocol::validation::topic_matches_filter(&topic, filter) {
                                             found_match = true;
                                             web_sys::console::log_1(
                                                 &format!(
@@ -433,18 +434,18 @@ impl WasmMqttClient {
                                         );
                                     }
                                 }
-                                crate::qos2::QoS2Action::SendPubRec {
+                                mqtt5_protocol::qos2::QoS2Action::SendPubRec {
                                     packet_id,
                                     reason_code,
                                 } => {
                                     let pubrec =
-                                        crate::packet::pubrec::PubRecPacket::new_with_reason(
+                                        mqtt5_protocol::packet::pubrec::PubRecPacket::new_with_reason(
                                             packet_id,
                                             reason_code,
                                         );
                                     let mut buf = BytesMut::new();
                                     if let Err(e) = encode_packet(
-                                        &crate::packet::Packet::PubRec(pubrec),
+                                        &mqtt5_protocol::packet::Packet::PubRec(pubrec),
                                         &mut buf,
                                     ) {
                                         web_sys::console::error_1(
@@ -465,7 +466,7 @@ impl WasmMqttClient {
                                         });
                                     }
                                 }
-                                crate::qos2::QoS2Action::TrackIncomingPubRec { packet_id } => {
+                                mqtt5_protocol::qos2::QoS2Action::TrackIncomingPubRec { packet_id } => {
                                     let now = js_sys::Date::now();
                                     state.borrow_mut().pending_pubrecs.insert(packet_id, now);
                                     state.borrow_mut().received_qos2.insert(packet_id, now);
@@ -481,7 +482,7 @@ impl WasmMqttClient {
                     let mut found_match = false;
 
                     for (filter, callback) in subscriptions.iter() {
-                        if crate::validation::topic_matches_filter(&topic, filter) {
+                        if mqtt5_protocol::validation::topic_matches_filter(&topic, filter) {
                             found_match = true;
                             web_sys::console::log_1(
                                 &format!(
@@ -578,7 +579,7 @@ impl WasmMqttClient {
                     .borrow()
                     .pending_pubcomps
                     .contains_key(&pubrec.packet_id);
-                let actions = crate::qos2::handle_incoming_pubrec(
+                let actions = mqtt5_protocol::qos2::handle_incoming_pubrec(
                     pubrec.packet_id,
                     pubrec.reason_code,
                     has_pending,
@@ -586,11 +587,11 @@ impl WasmMqttClient {
 
                 for action in actions {
                     match action {
-                        crate::qos2::QoS2Action::SendPubRel { packet_id } => {
-                            let pubrel = crate::packet::pubrel::PubRelPacket::new(packet_id);
+                        mqtt5_protocol::qos2::QoS2Action::SendPubRel { packet_id } => {
+                            let pubrel = mqtt5_protocol::packet::pubrel::PubRelPacket::new(packet_id);
                             let mut buf = BytesMut::new();
                             if let Err(e) =
-                                encode_packet(&crate::packet::Packet::PubRel(pubrel), &mut buf)
+                                encode_packet(&mqtt5_protocol::packet::Packet::PubRel(pubrel), &mut buf)
                             {
                                 web_sys::console::error_1(
                                     &format!("PUBREL encode error: {}", e).into(),
@@ -609,7 +610,7 @@ impl WasmMqttClient {
                                 });
                             }
                         }
-                        crate::qos2::QoS2Action::ErrorFlow {
+                        mqtt5_protocol::qos2::QoS2Action::ErrorFlow {
                             packet_id,
                             reason_code,
                         } => {
@@ -641,7 +642,7 @@ impl WasmMqttClient {
                     .borrow()
                     .pending_pubcomps
                     .contains_key(&pubcomp.packet_id);
-                let actions = crate::qos2::handle_incoming_pubcomp(
+                let actions = mqtt5_protocol::qos2::handle_incoming_pubcomp(
                     pubcomp.packet_id,
                     pubcomp.reason_code,
                     has_pending,
@@ -649,7 +650,7 @@ impl WasmMqttClient {
 
                 for action in actions {
                     match action {
-                        crate::qos2::QoS2Action::CompleteFlow { packet_id } => {
+                        mqtt5_protocol::qos2::QoS2Action::CompleteFlow { packet_id } => {
                             if let Some((callback, _)) =
                                 state.borrow_mut().pending_pubcomps.remove(&packet_id)
                             {
@@ -662,7 +663,7 @@ impl WasmMqttClient {
                                 }
                             }
                         }
-                        crate::qos2::QoS2Action::ErrorFlow {
+                        mqtt5_protocol::qos2::QoS2Action::ErrorFlow {
                             packet_id,
                             reason_code,
                         } => {
@@ -690,24 +691,24 @@ impl WasmMqttClient {
                     .borrow()
                     .pending_pubrecs
                     .contains_key(&pubrel.packet_id);
-                let actions = crate::qos2::handle_incoming_pubrel(pubrel.packet_id, has_pubrec);
+                let actions = mqtt5_protocol::qos2::handle_incoming_pubrel(pubrel.packet_id, has_pubrec);
 
                 for action in actions {
                     match action {
-                        crate::qos2::QoS2Action::RemoveIncomingPubRec { packet_id } => {
+                        mqtt5_protocol::qos2::QoS2Action::RemoveIncomingPubRec { packet_id } => {
                             state.borrow_mut().pending_pubrecs.remove(&packet_id);
                         }
-                        crate::qos2::QoS2Action::SendPubComp {
+                        mqtt5_protocol::qos2::QoS2Action::SendPubComp {
                             packet_id,
                             reason_code,
                         } => {
-                            let pubcomp = crate::packet::pubcomp::PubCompPacket::new_with_reason(
+                            let pubcomp = mqtt5_protocol::packet::pubcomp::PubCompPacket::new_with_reason(
                                 packet_id,
                                 reason_code,
                             );
                             let mut buf = BytesMut::new();
                             if let Err(e) =
-                                encode_packet(&crate::packet::Packet::PubComp(pubcomp), &mut buf)
+                                encode_packet(&mqtt5_protocol::packet::Packet::PubComp(pubcomp), &mut buf)
                             {
                                 web_sys::console::error_1(
                                     &format!("PUBCOMP encode error: {}", e).into(),
@@ -750,21 +751,21 @@ impl WasmMqttClient {
 
     pub async fn connect(&self, url: &str) -> Result<(), JsValue> {
         let transport = WasmTransportType::WebSocket(
-            crate::transport::wasm::websocket::WasmWebSocketTransport::new(url),
+            crate::transport::websocket::WasmWebSocketTransport::new(url),
         );
         self.connect_with_transport(transport).await
     }
 
     pub async fn connect_message_port(&self, port: MessagePort) -> Result<(), JsValue> {
         let transport = WasmTransportType::MessagePort(
-            crate::transport::wasm::message_port::MessagePortTransport::new(port),
+            crate::transport::message_port::MessagePortTransport::new(port),
         );
         self.connect_with_transport(transport).await
     }
 
     pub async fn connect_broadcast_channel(&self, channel_name: &str) -> Result<(), JsValue> {
         let transport = WasmTransportType::BroadcastChannel(
-            crate::transport::wasm::broadcast::BroadcastChannelTransport::new(channel_name),
+            crate::transport::broadcast::BroadcastChannelTransport::new(channel_name),
         );
         self.connect_with_transport(transport).await
     }
@@ -1095,7 +1096,7 @@ impl WasmMqttClient {
         let subscribe_packet = SubscribePacket {
             packet_id,
             properties: Properties::default(),
-            filters: vec![crate::packet::subscribe::TopicFilter::new(
+            filters: vec![mqtt5_protocol::packet::subscribe::TopicFilter::new(
                 topic,
                 QoS::AtMostOnce,
             )],
@@ -1186,7 +1187,7 @@ impl WasmMqttClient {
         let subscribe_packet = SubscribePacket {
             packet_id,
             properties: Properties::default(),
-            filters: vec![crate::packet::subscribe::TopicFilter::new(
+            filters: vec![mqtt5_protocol::packet::subscribe::TopicFilter::new(
                 topic,
                 QoS::AtMostOnce,
             )],
@@ -1317,8 +1318,8 @@ impl WasmMqttClient {
         web_sys::console::log_1(&"disconnect called".into());
 
         web_sys::console::log_1(&"Sending DISCONNECT packet...".into());
-        let disconnect_packet = crate::packet::disconnect::DisconnectPacket {
-            reason_code: crate::protocol::v5::reason_codes::ReasonCode::Success,
+        let disconnect_packet = mqtt5_protocol::packet::disconnect::DisconnectPacket {
+            reason_code: mqtt5_protocol::protocol::v5::reason_codes::ReasonCode::Success,
             properties: Properties::default(),
         };
         let packet = Packet::Disconnect(disconnect_packet);

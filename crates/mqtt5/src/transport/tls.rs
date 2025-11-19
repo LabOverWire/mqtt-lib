@@ -1,6 +1,6 @@
 use crate::error::{MqttError, Result};
 use crate::time::Duration;
-use crate::transport::Transport;
+use crate::Transport;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
 use rustls::{ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme};
@@ -640,7 +640,7 @@ mod tests {
         );
 
         // Load test certificates (skip if they don't exist)
-        if config.load_ca_cert_pem("test_certs/ca.pem").is_err() {
+        if config.load_ca_cert_pem("../../test_certs/ca.pem").is_err() {
             // Test certificates not available, skip the test
             return;
         }

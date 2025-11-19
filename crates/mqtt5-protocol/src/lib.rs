@@ -22,6 +22,7 @@ pub mod protocol;
 pub mod qos2;
 pub mod time;
 pub mod topic_matching;
+pub mod transport;
 pub mod types;
 pub mod validation;
 
@@ -30,6 +31,7 @@ pub use flags::{ConnAckFlags, ConnectFlags, PublishFlags};
 pub use packet::{FixedHeader, Packet, PacketType};
 pub use protocol::v5::properties::{Properties, PropertyId, PropertyValue, PropertyValueType};
 pub use protocol::v5::reason_codes::ReasonCode;
+pub use transport::Transport;
 pub use types::{
     ConnectOptions, ConnectProperties, ConnectResult, Message, MessageProperties, PublishOptions,
     PublishProperties, PublishResult, QoS, RetainHandling, SubscribeOptions, WillMessage,

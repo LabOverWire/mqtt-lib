@@ -1,5 +1,5 @@
-use crate::error::{MqttError, Result};
-use crate::transport::Transport;
+use mqtt5_protocol::error::{MqttError, Result};
+use mqtt5_protocol::Transport;
 use futures::channel::{mpsc, oneshot};
 use futures::StreamExt;
 use std::sync::atomic::{AtomicBool, Ordering};

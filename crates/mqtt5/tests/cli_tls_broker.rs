@@ -5,23 +5,27 @@ use tokio::process::Command;
 
 #[tokio::test]
 async fn test_cli_broker_tls_starts() {
-    // Ensure CLI is built
-    if !std::path::Path::new("target/release/mqttv5").exists() {
+    let binary_path = if std::path::Path::new("../../target/release/mqttv5").exists() {
+        "../../target/release/mqttv5"
+    } else if std::path::Path::new("target/release/mqttv5").exists() {
+        "target/release/mqttv5"
+    } else {
         Command::new("cargo")
             .args(["build", "--release", "-p", "mqttv5-cli"])
             .output()
             .await
             .expect("Failed to build CLI");
-    }
+        "../../target/release/mqttv5"
+    };
 
     // Start broker with TLS
-    let mut broker = Command::new("target/release/mqttv5")
+    let mut broker = Command::new(binary_path)
         .args([
             "broker",
             "--tls-cert",
-            "test_certs/server.pem",
+            "../../test_certs/server.pem",
             "--tls-key",
-            "test_certs/server.key",
+            "../../test_certs/server.key",
             "--non-interactive",
         ])
         .stdout(std::process::Stdio::piped())
@@ -73,14 +77,20 @@ async fn test_cli_broker_tls_listens() {
     // Give time for cleanup
     tokio::time::sleep(Duration::from_millis(500)).await;
 
+    let binary_path = if std::path::Path::new("../../target/release/mqttv5").exists() {
+        "../../target/release/mqttv5"
+    } else {
+        "target/release/mqttv5"
+    };
+
     // Start broker with TLS in background
-    let mut broker = Command::new("target/release/mqttv5")
+    let mut broker = Command::new(binary_path)
         .args([
             "broker",
             "--tls-cert",
-            "test_certs/server.pem",
+            "../../test_certs/server.pem",
             "--tls-key",
-            "test_certs/server.key",
+            "../../test_certs/server.key",
             "--tls-host",
             "127.0.0.1:28883", // Use different port to avoid conflicts
             "--verbose",

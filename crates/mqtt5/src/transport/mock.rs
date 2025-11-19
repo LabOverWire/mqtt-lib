@@ -1,7 +1,7 @@
 //! Mock transport implementation for testing
 
 use crate::error::{MqttError, Result};
-use crate::transport::Transport;
+use crate::Transport;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::Mutex;

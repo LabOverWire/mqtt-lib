@@ -6,7 +6,7 @@ use crate::encoding::encode_variable_int;
 use crate::error::{MqttError, Result};
 use crate::packet::{FixedHeader, MqttPacket, Packet, PacketType};
 use crate::transport::tls::{TlsReadHalf, TlsWriteHalf};
-use crate::transport::Transport;
+use crate::Transport;
 use bytes::{BufMut, BytesMut};
 use std::future::Future;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};

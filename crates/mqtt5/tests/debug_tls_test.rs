@@ -31,7 +31,7 @@ mod tests {
 
         // Load CA certificate
         tls_config
-            .load_ca_cert_pem("test_certs/ca.pem")
+            .load_ca_cert_pem("../../test_certs/ca.pem")
             .expect("Failed to load CA cert");
 
         println!("TLS config created, attempting connection...");

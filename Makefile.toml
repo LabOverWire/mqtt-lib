@@ -39,9 +39,10 @@ echo "📚 DOCUMENTATION"
 echo "  cargo make doc                Generate documentation"
 echo "  cargo doc --open              Generate and open docs in browser"
 echo ""
-echo "🌐 WASM BUILD"
+echo "🌐 WASM BUILD (mqtt5-wasm crate)"
 echo "  cargo make wasm-check         Check WASM compilation"
 echo "  cargo make wasm-build         Build WASM package with wasm-pack"
+echo "  cargo make wasm-examples      Build WASM and copy to examples"
 echo ""
 echo "🔒 SECURITY & MAINTENANCE"
 echo "  cargo make audit              Check for security vulnerabilities"
@@ -135,16 +136,16 @@ args = ["check", "--all-features"]
 
 [tasks.wasm-check]
 command = "cargo"
-args = ["check", "--target", "wasm32-unknown-unknown", "--features", "wasm-full", "-p", "mqtt5"]
+args = ["check", "--target", "wasm32-unknown-unknown", "--all-features", "-p", "mqtt5-wasm"]
 description = "Check WASM compilation without building"
 
 [tasks.wasm-build]
 script = '''
 #!/bin/bash
 echo "Building WASM package with wasm-pack..."
-cd crates/mqtt5
-wasm-pack build --target web --features wasm-client,wasm-broker
-echo "✨ WASM build complete! Package in crates/mqtt5/pkg/"
+cd crates/mqtt5-wasm
+wasm-pack build --target web --features client,broker
+echo "✨ WASM build complete! Package in crates/mqtt5-wasm/pkg/"
 '''
 description = "Build WASM package using wasm-pack"
 
@@ -153,13 +154,13 @@ dependencies = ["wasm-build"]
 script = '''
 #!/bin/bash
 echo "Copying WASM package to example directories..."
-cd crates/mqtt5
-cp -r pkg examples/wasm/websocket/
-cp -r pkg examples/wasm/local-broker/
-cp -r pkg examples/wasm/qos2/
+cd crates/mqtt5-wasm
+cp -r pkg examples/websocket/
+cp -r pkg examples/local-broker/
+cp -r pkg examples/qos2/
 echo "✨ WASM examples ready!"
 echo ""
 echo "Run examples with:"
-echo "  cd crates/mqtt5/examples/wasm/websocket && python3 -m http.server 8000"
+echo "  cd crates/mqtt5-wasm/examples/websocket && python3 -m http.server 8000"
 '''
 description = "Build WASM and copy to example directories"

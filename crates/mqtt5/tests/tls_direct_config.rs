@@ -32,7 +32,7 @@ async fn test_direct_tls_config_with_alpn() {
 
     // Load test certificates
     tls_config
-        .load_ca_cert_pem("test_certs/ca.pem")
+        .load_ca_cert_pem("../../test_certs/ca.pem")
         .expect("Failed to load CA cert");
 
     // Connect and verify it works
@@ -87,7 +87,7 @@ async fn test_tls_config_with_custom_alpn() {
 
     // Load test certificates
     tls_config
-        .load_ca_cert_pem("test_certs/ca.pem")
+        .load_ca_cert_pem("../../test_certs/ca.pem")
         .expect("Failed to load CA cert");
 
     // Connect and verify it works
@@ -129,7 +129,7 @@ async fn test_tls_config_with_connect_options() {
 
     // Load test certificates
     tls_config
-        .load_ca_cert_pem("test_certs/ca.pem")
+        .load_ca_cert_pem("../../test_certs/ca.pem")
         .expect("Failed to load CA cert");
 
     let client = MqttClient::with_options(options.clone());

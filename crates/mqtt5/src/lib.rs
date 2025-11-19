@@ -179,7 +179,6 @@ pub use mqtt5_protocol::{
     validation,
 };
 
-#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-broker"))]
 pub mod broker;
 pub mod callback;
 #[cfg(not(target_arch = "wasm32"))]
@@ -195,12 +194,6 @@ pub mod testing;
 pub mod transport;
 pub mod types;
 
-#[cfg(all(
-    target_arch = "wasm32",
-    any(feature = "wasm-client", feature = "wasm-broker")
-))]
-pub mod wasm;
-
 #[cfg(not(target_arch = "wasm32"))]
 pub use client::{
     ConnectionEvent, DisconnectReason, MockCall, MockMqttClient, MqttClient, MqttClientTrait,
@@ -211,6 +204,6 @@ pub use mqtt5_protocol::{
     ConnectResult, FixedHeader, Message, MessageProperties, MqttError, Packet, PacketType,
     Properties, PropertyId, PropertyValue, PropertyValueType, PublishOptions, PublishProperties,
     PublishResult, QoS, RestrictiveValidator, Result, RetainHandling, StandardValidator,
-    SubscribeOptions, TopicValidator, WillMessage, WillProperties,
+    SubscribeOptions, TopicValidator, Transport, WillMessage, WillProperties,
 };
 pub use types::{ConnectOptions, ConnectionStats};

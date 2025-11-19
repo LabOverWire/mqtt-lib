@@ -1,10 +1,10 @@
-use crate::broker::auth::{AllowAllAuthProvider, AuthProvider};
-use crate::broker::config::BrokerConfig;
-use crate::broker::resource_monitor::{ResourceLimits, ResourceMonitor};
-use crate::broker::router::MessageRouter;
-use crate::broker::storage::{DynamicStorage, MemoryBackend};
-use crate::broker::sys_topics::BrokerStats;
-use crate::wasm::client_handler::WasmClientHandler;
+use mqtt5::broker::auth::{AllowAllAuthProvider, AuthProvider};
+use mqtt5::broker::config::BrokerConfig;
+use mqtt5::broker::resource_monitor::{ResourceLimits, ResourceMonitor};
+use mqtt5::broker::router::MessageRouter;
+use mqtt5::broker::storage::{DynamicStorage, MemoryBackend};
+use mqtt5::broker::sys_topics::BrokerStats;
+use crate::client_handler::WasmClientHandler;
 use std::sync::Arc;
 use wasm_bindgen::prelude::*;
 use web_sys::MessagePort;

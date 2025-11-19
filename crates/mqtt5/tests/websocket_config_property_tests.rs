@@ -5,7 +5,7 @@
 
 use mqtt5::time::Duration;
 use mqtt5::transport::websocket::{WebSocketConfig, WebSocketTransport};
-use mqtt5::transport::Transport;
+use mqtt5::Transport;
 use proptest::prelude::*;
 use std::collections::HashMap;
 

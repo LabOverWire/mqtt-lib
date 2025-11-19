@@ -1,7 +1,7 @@
 //! Simple wrapper for `TcpStream` to implement Transport trait
 
 use crate::error::Result;
-use crate::transport::Transport;
+use crate::Transport;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 

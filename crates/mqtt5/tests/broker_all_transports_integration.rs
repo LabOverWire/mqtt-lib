@@ -12,8 +12,8 @@ async fn test_broker_all_transports() {
         .with_bind_address(([127, 0, 0, 1], 0)) // TCP on random port
         .with_tls(
             TlsConfig::new(
-                PathBuf::from("test_certs/server.crt"),
-                PathBuf::from("test_certs/server.key"),
+                PathBuf::from("../../test_certs/server.crt"),
+                PathBuf::from("../../test_certs/server.key"),
             )
             .with_bind_address(([127, 0, 0, 1], 0)), // TLS on random port
         )

@@ -1,5 +1,5 @@
-use crate::error::{MqttError, Result};
-use crate::packet::{FixedHeader, Packet};
+use mqtt5_protocol::error::{MqttError, Result};
+use mqtt5_protocol::packet::{FixedHeader, Packet};
 use crate::transport::WasmReader;
 use bytes::Buf;
 

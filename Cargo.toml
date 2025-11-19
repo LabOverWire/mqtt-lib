@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/mqtt5-protocol", "crates/mqtt5", "crates/mqttv5-cli"]
+members = ["crates/mqtt5-protocol", "crates/mqtt5", "crates/mqtt5-wasm", "crates/mqttv5-cli"]
 resolver = "2"
 
 [workspace.package]

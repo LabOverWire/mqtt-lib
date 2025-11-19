@@ -1,65 +1,43 @@
-use crate::error::{MqttError, Result};
-use crate::transport::Transport;
+use mqtt5_protocol::error::{MqttError, Result};
+use mqtt5_protocol::Transport;
 use futures::channel::mpsc;
 use futures::StreamExt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
-use web_sys::{MessageEvent, MessagePort};
+use web_sys::{BroadcastChannel, MessageEvent};
 
-pub struct MessagePortTransport {
-    port: MessagePort,
+pub struct BroadcastChannelTransport {
+    channel_name: String,
+    channel: Option<BroadcastChannel>,
     rx: Option<mpsc::UnboundedReceiver<Vec<u8>>>,
     connected: Arc<AtomicBool>,
     _closure: Option<Closure<dyn FnMut(MessageEvent)>>,
 }
 
-pub struct MessagePortReader {
+pub struct BroadcastChannelReader {
     rx: mpsc::UnboundedReceiver<Vec<u8>>,
     connected: Arc<AtomicBool>,
-    buffer: Vec<u8>,
-    buffer_pos: usize,
 }
 
-pub struct MessagePortWriter {
-    port: MessagePort,
+pub struct BroadcastChannelWriter {
+    channel: BroadcastChannel,
     connected: Arc<AtomicBool>,
     _closure: Closure<dyn FnMut(MessageEvent)>,
 }
 
-impl MessagePortReader {
+impl BroadcastChannelReader {
     pub async fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
-        if self.buffer_pos < self.buffer.len() {
-            let available = self.buffer.len() - self.buffer_pos;
-            let to_copy = available.min(buf.len());
-            buf[..to_copy]
-                .copy_from_slice(&self.buffer[self.buffer_pos..self.buffer_pos + to_copy]);
-            self.buffer_pos += to_copy;
-
-            if self.buffer_pos >= self.buffer.len() {
-                self.buffer.clear();
-                self.buffer_pos = 0;
-            }
-
-            return Ok(to_copy);
-        }
-
         let data = self
             .rx
             .next()
             .await
             .ok_or(MqttError::ConnectionClosedByPeer)?;
 
-        let to_copy = data.len().min(buf.len());
-        buf[..to_copy].copy_from_slice(&data[..to_copy]);
-
-        if to_copy < data.len() {
-            self.buffer = data[to_copy..].to_vec();
-            self.buffer_pos = 0;
-        }
-
-        Ok(to_copy)
+        let len = data.len().min(buf.len());
+        buf[..len].copy_from_slice(&data[..len]);
+        Ok(len)
     }
 
     pub fn is_connected(&self) -> bool {
@@ -67,17 +45,17 @@ impl MessagePortReader {
     }
 }
 
-impl MessagePortWriter {
+impl BroadcastChannelWriter {
     pub async fn write(&mut self, buf: &[u8]) -> Result<()> {
         let array = js_sys::Uint8Array::from(buf);
-        self.port
+        self.channel
             .post_message(&array.buffer())
-            .map_err(|e| MqttError::Io(format!("MessagePort send failed: {:?}", e)))?;
+            .map_err(|e| MqttError::Io(format!("BroadcastChannel send failed: {:?}", e)))?;
         Ok(())
     }
 
     pub async fn close(&mut self) -> Result<()> {
-        self.port.close();
+        self.channel.close();
         self.connected.store(false, Ordering::SeqCst);
         Ok(())
     }
@@ -87,30 +65,29 @@ impl MessagePortWriter {
     }
 }
 
-impl MessagePortTransport {
-    pub fn new(port: MessagePort) -> Self {
+impl BroadcastChannelTransport {
+    pub fn new(channel_name: impl Into<String>) -> Self {
         Self {
-            port,
+            channel_name: channel_name.into(),
+            channel: None,
             rx: None,
             connected: Arc::new(AtomicBool::new(false)),
             _closure: None,
         }
     }
 
-    pub fn into_split(self) -> Result<(MessagePortReader, MessagePortWriter)> {
-        let port = self.port;
+    pub fn into_split(self) -> Result<(BroadcastChannelReader, BroadcastChannelWriter)> {
+        let channel = self.channel.ok_or(MqttError::NotConnected)?;
         let rx = self.rx.ok_or(MqttError::NotConnected)?;
         let closure = self._closure.ok_or(MqttError::NotConnected)?;
 
-        let reader = MessagePortReader {
+        let reader = BroadcastChannelReader {
             rx,
             connected: Arc::clone(&self.connected),
-            buffer: Vec::new(),
-            buffer_pos: 0,
         };
 
-        let writer = MessagePortWriter {
-            port,
+        let writer = BroadcastChannelWriter {
+            channel,
             connected: self.connected,
             _closure: closure,
         };
@@ -119,8 +96,12 @@ impl MessagePortTransport {
     }
 }
 
-impl Transport for MessagePortTransport {
+impl Transport for BroadcastChannelTransport {
     async fn connect(&mut self) -> Result<()> {
+        let channel = BroadcastChannel::new(&self.channel_name).map_err(|e| {
+            MqttError::ConnectionError(format!("Failed to create BroadcastChannel: {:?}", e))
+        })?;
+
         let (msg_tx, msg_rx) = mpsc::unbounded();
 
         let msg_tx_clone = msg_tx.clone();
@@ -132,11 +113,9 @@ impl Transport for MessagePortTransport {
             }
         });
 
-        self.port
-            .set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
+        channel.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
 
-        self.port.start();
-
+        self.channel = Some(channel);
         self.rx = Some(msg_rx);
         self._closure = Some(onmessage);
         self.connected.store(true, Ordering::SeqCst);
@@ -159,20 +138,20 @@ impl Transport for MessagePortTransport {
     }
 
     async fn write(&mut self, buf: &[u8]) -> Result<()> {
-        if !self.is_connected() {
-            return Err(MqttError::NotConnected);
-        }
+        let channel = self.channel.as_ref().ok_or(MqttError::NotConnected)?;
 
         let array = js_sys::Uint8Array::from(buf);
-        self.port
+        channel
             .post_message(&array.buffer())
-            .map_err(|e| MqttError::Io(format!("MessagePort send failed: {:?}", e)))?;
+            .map_err(|e| MqttError::Io(format!("BroadcastChannel send failed: {:?}", e)))?;
 
         Ok(())
     }
 
     async fn close(&mut self) -> Result<()> {
-        self.port.close();
+        if let Some(channel) = self.channel.take() {
+            channel.close();
+        }
         self.connected.store(false, Ordering::SeqCst);
         self._closure = None;
         Ok(())
