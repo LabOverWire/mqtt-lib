@@ -2,6 +2,55 @@
 
 This document describes the architecture of both the MQTT client library and broker implementation.
 
+## Crate Organization
+
+Three crates provide platform-specific implementations sharing a common protocol core:
+
+### mqtt5-protocol (Platform-Agnostic Core)
+
+Platform-agnostic MQTT v5.0 protocol for native, WASM, and embedded targets.
+
+- Packet encoding/decoding (CONNECT, PUBLISH, SUBSCRIBE, etc.)
+- Protocol types (QoS, properties, reason codes)
+- Error types (`MqttError`, `Result`)
+- Topic matching and validation
+- Transport trait
+
+Dependencies: `bebytes`, `bytes`, `serde`, `thiserror`, `tracing`
+
+### mqtt5 (Native)
+
+Full-featured client and broker for Linux, macOS, Windows.
+
+- `MqttClient` with automatic reconnection
+- `MqttBroker` with multi-transport support
+- TCP, TLS, WebSocket transports
+- Authentication (password, certificate)
+- ACL system
+- File-based and in-memory storage
+- Broker-to-broker bridging
+- Optional OpenTelemetry integration
+
+Dependencies: `tokio`, `rustls`, `tokio-tungstenite`
+
+### mqtt5-wasm (WebAssembly)
+
+Client and broker for browser environments.
+
+- `WasmMqttClient` with JavaScript bindings
+- `WasmBroker` for in-browser testing
+- WebSocket, MessagePort, BroadcastChannel transports
+- Promise-based API
+- Single-threaded state (`Rc<RefCell<T>>`)
+
+Dependencies: `wasm-bindgen`, `web-sys`, `js-sys`
+
+### Dependency Graph
+
+```
+mqtt5-wasm ──>  mqtt5-protocol  <── mqtt5
+```
+
 ## Core Architectural Principle: Direct Async/Await
 
 This library uses Rust's native async/await patterns throughout. Rust's async ecosystem is based on:
@@ -233,30 +282,21 @@ The MQTT broker follows the same architectural principles as the client - direct
 
 ## Platform Integration
 
-Both client and broker share:
+### Shared Protocol (mqtt5-protocol)
 
-1. **Common Protocol Implementation**:
+- Unified packet encoding/decoding via `bebytes`
+- Consistent MQTT v5.0 compliance across platforms
+- `Transport` trait for platform-agnostic I/O
+- Common error handling (`MqttError`)
+- Spec-compliant topic matching with wildcards (`+`, `#`)
 
-   - Shared packet encoding/decoding
-   - Same MQTT v5.0 compliance
-   - Reusable validation logic
+### Platform-Specific Transports
 
-2. **Transport Abstraction**:
+**Native** (`mqtt5`): TCP, TLS (rustls), WebSocket (tokio-tungstenite)
 
-   - Same TCP/TLS/WebSocket code
-   - Unified connection handling via TransportType enum
-   - Shared TLS configuration with rustls
+**WASM** (`mqtt5-wasm`): WebSocket (web-sys), MessagePort, BroadcastChannel
 
-3. **Architectural Principles**:
-   - Direct async/await throughout
-   - Shared error handling patterns
-   - Optional observability via OpenTelemetry
-
-4. **Topic Matching**:
-   - MQTT v5.0 spec-compliant wildcard matching
-   - `+` matches one level, `#` matches remaining levels
-   - Topics starting with `$` excluded from root wildcards (`#`, `+`)
-   - Requires explicit `$SYS/#` subscription for system topics
+All satisfy the same `Transport` trait contract.
 
 ## WASM Architecture
 
