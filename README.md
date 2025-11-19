@@ -207,36 +207,39 @@ WebAssembly builds for browser environments with three deployment modes.
 ### Connection Modes
 
 #### External Broker Mode (WebSocket)
+
 Connect to remote MQTT brokers using WebSocket transport:
 
 ```javascript
-import init, { WasmMqttClient } from './pkg/mqtt5.js';
+import init, { WasmMqttClient } from "./pkg/mqtt5.js";
 
 await init();
-const client = new WasmMqttClient('browser-client');
+const client = new WasmMqttClient("browser-client");
 
-await client.connect('ws://broker.example.com:8080/mqtt');
+await client.connect("ws://broker.example.com:8080/mqtt");
 ```
 
 #### In-Tab Broker Mode (MessagePort)
+
 MQTT broker in a browser tab:
 
 ```javascript
-import init, { WasmBroker, WasmMqttClient } from './pkg/mqtt5.js';
+import init, { WasmBroker, WasmMqttClient } from "./pkg/mqtt5.js";
 
 await init();
 const broker = new WasmBroker();
-const client = new WasmMqttClient('local-client');
+const client = new WasmMqttClient("local-client");
 
 const port = broker.create_client_port();
 await client.connect_message_port(port);
 ```
 
 #### Cross-Tab Mode (BroadcastChannel)
+
 Communication across browser tabs via BroadcastChannel API:
 
 ```javascript
-await client.connect_broadcast_channel('mqtt-channel');
+await client.connect_broadcast_channel("mqtt-channel");
 ```
 
 ### Complete API Reference
@@ -244,29 +247,32 @@ await client.connect_broadcast_channel('mqtt-channel');
 #### Publishing Messages
 
 **QoS 0 (Fire-and-forget):**
+
 ```javascript
 const encoder = new TextEncoder();
-await client.publish('sensors/temp', encoder.encode('25.5°C'));
+await client.publish("sensors/temp", encoder.encode("25.5°C"));
 ```
 
 **QoS 1 (At least once):**
+
 ```javascript
-await client.publish_qos1('sensors/temp', encoder.encode('25.5°C'), (reasonCode) => {
+await client.publish_qos1("sensors/temp", encoder.encode("25.5°C"), (reasonCode) => {
   if (reasonCode === 0) {
-    console.log('Message acknowledged');
+    console.log("Message acknowledged");
   } else {
-    console.error('Publish failed, reason:', reasonCode);
+    console.error("Publish failed, reason:", reasonCode);
   }
 });
 ```
 
 **QoS 2 (Exactly once):**
+
 ```javascript
-await client.publish_qos2('commands/action', encoder.encode('start'), (result) => {
-  if (typeof result === 'number') {
-    console.log('Success, reason code:', result);
+await client.publish_qos2("commands/action", encoder.encode("start"), (result) => {
+  if (typeof result === "number") {
+    console.log("Success, reason code:", result);
   } else {
-    console.error('Timeout or error:', result);
+    console.error("Timeout or error:", result);
   }
 });
 ```
@@ -274,57 +280,65 @@ await client.publish_qos2('commands/action', encoder.encode('start'), (result) =
 #### Subscribing to Topics
 
 **With callback (recommended):**
+
 ```javascript
-await client.subscribe_with_callback('sensors/+/data', (topic, payload) => {
+await client.subscribe_with_callback("sensors/+/data", (topic, payload) => {
   const decoder = new TextDecoder();
   console.log(`${topic}: ${decoder.decode(payload)}`);
 });
 ```
 
 **Without callback:**
+
 ```javascript
-const packetId = await client.subscribe('sensors/#');
-console.log('Subscribed with packet ID:', packetId);
+const packetId = await client.subscribe("sensors/#");
+console.log("Subscribed with packet ID:", packetId);
 ```
 
 **Unsubscribe:**
+
 ```javascript
-await client.unsubscribe('sensors/temp');
+await client.unsubscribe("sensors/temp");
 ```
 
 #### Connection Events
 
 **Connection success:**
+
 ```javascript
 client.on_connect((reasonCode, sessionPresent) => {
-  console.log('Connected!');
-  console.log('Reason code:', reasonCode);
-  console.log('Session present:', sessionPresent);
+  console.log("Connected!");
+  console.log("Reason code:", reasonCode);
+  console.log("Session present:", sessionPresent);
 });
 ```
 
 **Disconnection:**
+
 ```javascript
 client.on_disconnect(() => {
-  console.log('Disconnected from broker');
+  console.log("Disconnected from broker");
 });
 ```
 
 **Errors (including keepalive timeout):**
+
 ```javascript
 client.on_error((error) => {
-  console.error('Error:', error);
+  console.error("Error:", error);
 });
 ```
 
 **Check connection status:**
+
 ```javascript
 if (client.is_connected()) {
-  console.log('Currently connected');
+  console.log("Currently connected");
 }
 ```
 
 **Manual disconnect:**
+
 ```javascript
 await client.disconnect();
 ```
@@ -332,11 +346,13 @@ await client.disconnect();
 ### Automatic Features
 
 #### Keepalive & Timeout Detection
+
 - Sends PINGREQ every 30 seconds
 - Connection timeout after 90 seconds
 - Triggers `on_error("Keepalive timeout")` and `on_disconnect()` on timeout
 
 #### QoS 2 Flow Management
+
 - Full four-way handshake (PUBLISH → PUBREC → PUBREL → PUBCOMP)
 - 10-second timeout for incomplete flows
 - Duplicate detection with 30-second tracking window
@@ -354,10 +370,10 @@ MQTT v5.0 broker in browser:
 
 ### WASM Limitations
 
-- **No TLS socket support**: Browser-managed `wss://` only
-- **Memory-only storage**: No file I/O (IndexedDB/localStorage available for persistence)
-- **No raw sockets**: WebSocket/MessagePort/BroadcastChannel only
-- **Single-threaded**: JavaScript event loop execution
+- Browser-managed `wss://` only
+- No file I/O (IndexedDB/localStorage available for persistence)
+- WebSocket/MessagePort/BroadcastChannel only
+- JavaScript event loop execution
 
 ### Browser Compatibility
 
@@ -368,6 +384,7 @@ MQTT v5.0 broker in browser:
 ### Complete Examples
 
 See `crates/mqtt5-wasm/examples/` for browser examples:
+
 - `websocket/` - External broker connections
 - `qos2/` - QoS 2 flow visualization
 - Complete HTML/JavaScript/CSS applications
