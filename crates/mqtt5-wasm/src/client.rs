@@ -1,3 +1,4 @@
+use crate::config::{WasmConnectOptions, WasmPublishOptions, WasmSubscribeOptions};
 use crate::decoder::read_packet;
 use crate::transport::{WasmReader, WasmTransportType, WasmWriter};
 use bytes::BytesMut;
@@ -763,29 +764,41 @@ impl WasmMqttClient {
     }
 
     pub async fn connect(&self, url: &str) -> Result<(), JsValue> {
+        let config = WasmConnectOptions::default();
+        self.connect_with_options(url, &config).await
+    }
+
+    pub async fn connect_with_options(
+        &self,
+        url: &str,
+        config: &WasmConnectOptions,
+    ) -> Result<(), JsValue> {
         let transport = WasmTransportType::WebSocket(
             crate::transport::websocket::WasmWebSocketTransport::new(url),
         );
-        self.connect_with_transport(transport).await
+        self.connect_with_transport_and_config(transport, config).await
     }
 
     pub async fn connect_message_port(&self, port: MessagePort) -> Result<(), JsValue> {
+        let config = WasmConnectOptions::default();
         let transport = WasmTransportType::MessagePort(
             crate::transport::message_port::MessagePortTransport::new(port),
         );
-        self.connect_with_transport(transport).await
+        self.connect_with_transport_and_config(transport, &config).await
     }
 
     pub async fn connect_broadcast_channel(&self, channel_name: &str) -> Result<(), JsValue> {
+        let config = WasmConnectOptions::default();
         let transport = WasmTransportType::BroadcastChannel(
             crate::transport::broadcast::BroadcastChannelTransport::new(channel_name),
         );
-        self.connect_with_transport(transport).await
+        self.connect_with_transport_and_config(transport, &config).await
     }
 
-    async fn connect_with_transport(
+    async fn connect_with_transport_and_config(
         &self,
         mut transport: WasmTransportType,
+        config: &WasmConnectOptions,
     ) -> Result<(), JsValue> {
         web_sys::console::log_1(&"Transport connecting...".into());
         transport
@@ -796,16 +809,27 @@ impl WasmMqttClient {
         web_sys::console::log_1(&"Transport connected, sending CONNECT packet...".into());
 
         let client_id = self.state.borrow().client_id.clone();
+
+        self.state.borrow_mut().keep_alive = config.keep_alive;
+
+        let (will, will_properties) = if let Some(will_config) = &config.will {
+            let will_msg = will_config.to_will_message();
+            let will_props = will_msg.properties.clone().into();
+            (Some(will_msg), will_props)
+        } else {
+            (None, Properties::default())
+        };
+
         let connect_packet = ConnectPacket {
             protocol_version: 5,
-            clean_start: true,
-            keep_alive: 60,
+            clean_start: config.clean_start,
+            keep_alive: config.keep_alive,
             client_id,
-            username: None,
-            password: None,
-            will: None,
-            properties: Properties::default(),
-            will_properties: Properties::default(),
+            username: config.username.clone(),
+            password: config.password.clone(),
+            will,
+            properties: config.to_properties(),
+            will_properties,
         };
 
         let packet = Packet::Connect(Box::new(connect_packet));
@@ -926,6 +950,73 @@ impl WasmMqttClient {
 
         web_sys::console::log_1(&"PUBLISH packet sent".into());
         web_sys::console::log_1(&"publish completed".into());
+        Ok(())
+    }
+
+    pub async fn publish_with_options(
+        &self,
+        topic: &str,
+        payload: &[u8],
+        options: &WasmPublishOptions,
+    ) -> Result<(), JsValue> {
+        loop {
+            match self.state.try_borrow() {
+                Ok(state) => {
+                    if !state.connected {
+                        return Err(JsValue::from_str("Not connected"));
+                    }
+                    break;
+                }
+                Err(_) => {
+                    sleep_ms(10).await;
+                    continue;
+                }
+            }
+        }
+
+        let qos = options.to_qos();
+        let packet_id = if qos != QoS::AtMostOnce {
+            Some(loop {
+                match self.state.try_borrow_mut() {
+                    Ok(mut state) => break state.next_packet_id(),
+                    Err(_) => {
+                        sleep_ms(10).await;
+                        continue;
+                    }
+                }
+            })
+        } else {
+            None
+        };
+
+        let publish_packet = PublishPacket {
+            dup: false,
+            qos,
+            retain: options.retain,
+            topic_name: topic.to_string(),
+            packet_id,
+            properties: options.to_properties(),
+            payload: payload.to_vec(),
+        };
+
+        let packet = Packet::Publish(publish_packet);
+        let mut buf = BytesMut::new();
+        encode_packet(&packet, &mut buf)
+            .map_err(|e| JsValue::from_str(&format!("Packet encoding failed: {}", e)))?;
+
+        let writer_rc = self
+            .state
+            .borrow()
+            .writer
+            .clone()
+            .ok_or_else(|| JsValue::from_str("Writer disconnected"))?;
+
+        writer_rc
+            .borrow_mut()
+            .write(&buf)
+            .await
+            .map_err(|e| JsValue::from_str(&format!("Write failed: {}", e)))?;
+
         Ok(())
     }
 
@@ -1113,6 +1204,102 @@ impl WasmMqttClient {
                 topic,
                 QoS::AtMostOnce,
             )],
+        };
+
+        let packet = Packet::Subscribe(subscribe_packet);
+        let mut buf = BytesMut::new();
+        encode_packet(&packet, &mut buf)
+            .map_err(|e| JsValue::from_str(&format!("Packet encoding failed: {}", e)))?;
+
+        let writer_rc = self
+            .state
+            .borrow()
+            .writer
+            .clone()
+            .ok_or_else(|| JsValue::from_str("Writer disconnected"))?;
+
+        writer_rc
+            .borrow_mut()
+            .write(&buf)
+            .await
+            .map_err(|e| JsValue::from_str(&format!("Write failed: {}", e)))?;
+
+        Ok(packet_id)
+    }
+
+    pub async fn subscribe_with_options(
+        &self,
+        topic: &str,
+        callback: js_sys::Function,
+        options: &WasmSubscribeOptions,
+    ) -> Result<u16, JsValue> {
+        loop {
+            match self.state.try_borrow() {
+                Ok(state) => {
+                    if !state.connected {
+                        return Err(JsValue::from_str("Not connected"));
+                    }
+                    break;
+                }
+                Err(_) => {
+                    sleep_ms(10).await;
+                    continue;
+                }
+            }
+        }
+
+        let packet_id = loop {
+            match self.state.try_borrow_mut() {
+                Ok(mut state) => break state.next_packet_id(),
+                Err(_) => {
+                    sleep_ms(10).await;
+                    continue;
+                }
+            }
+        };
+
+        loop {
+            match self.state.try_borrow_mut() {
+                Ok(mut state) => {
+                    state.subscriptions.insert(topic.to_string(), callback);
+                    break;
+                }
+                Err(_) => {
+                    sleep_ms(10).await;
+                    continue;
+                }
+            }
+        }
+
+        let mut topic_filter = mqtt5_protocol::packet::subscribe::TopicFilter::new(
+            topic,
+            options.to_qos(),
+        );
+        topic_filter.options.no_local = options.no_local;
+        topic_filter.options.retain_as_published = options.retain_as_published;
+        topic_filter.options.retain_handling = match options.retain_handling {
+            1 => mqtt5_protocol::packet::subscribe::RetainHandling::SendAtSubscribeIfNew,
+            2 => mqtt5_protocol::packet::subscribe::RetainHandling::DoNotSend,
+            _ => mqtt5_protocol::packet::subscribe::RetainHandling::SendAtSubscribe,
+        };
+
+        let mut properties = Properties::default();
+        if let Some(id) = options.subscription_identifier {
+            if properties
+                .add(
+                    mqtt5_protocol::protocol::v5::properties::PropertyId::SubscriptionIdentifier,
+                    mqtt5_protocol::protocol::v5::properties::PropertyValue::VariableByteInteger(id),
+                )
+                .is_err()
+            {
+                web_sys::console::warn_1(&"Failed to add subscription identifier property".into());
+            }
+        }
+
+        let subscribe_packet = SubscribePacket {
+            packet_id,
+            properties,
+            filters: vec![topic_filter],
         };
 
         let packet = Packet::Subscribe(subscribe_packet);
