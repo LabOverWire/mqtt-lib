@@ -83,6 +83,10 @@ pub struct BrokerCommand {
     #[arg(long)]
     pub keep_alive: Option<u16>,
 
+    /// Response information string sent to clients that request it
+    #[arg(long)]
+    pub response_information: Option<String>,
+
     /// Disable retained messages
     #[arg(long)]
     pub no_retain: bool,
@@ -270,6 +274,10 @@ async fn create_interactive_config(cmd: &mut BrokerCommand) -> Result<BrokerConf
 
     if let Some(keep_alive) = cmd.keep_alive {
         config.server_keep_alive = Some(std::time::Duration::from_secs(keep_alive as u64));
+    }
+
+    if let Some(ref response_info) = cmd.response_information {
+        config.response_information = Some(response_info.clone());
     }
 
     // Configure authentication

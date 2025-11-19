@@ -591,3 +591,77 @@ async fn test_reason_codes_and_strings() {
 
     client.disconnect().await.expect("Failed to disconnect");
 }
+
+#[tokio::test]
+async fn test_request_response_information() {
+    let broker = TestBroker::start().await;
+
+    let client1 = MqttClient::new(test_client_id("resp-info-requested"));
+    let mut opts1 = ConnectOptions::new(test_client_id("resp-info-requested")).with_clean_start(true);
+    opts1.properties.request_response_information = Some(true);
+
+    let result1 = client1
+        .connect_with_options(broker.address(), opts1)
+        .await
+        .expect("Failed to connect with request_response_information=true");
+    assert!(!result1.session_present);
+    client1.disconnect().await.expect("Failed to disconnect");
+
+    let client2 = MqttClient::new(test_client_id("resp-info-not-requested"));
+    let mut opts2 = ConnectOptions::new(test_client_id("resp-info-not-requested")).with_clean_start(true);
+    opts2.properties.request_response_information = Some(false);
+
+    let result2 = client2
+        .connect_with_options(broker.address(), opts2)
+        .await
+        .expect("Failed to connect with request_response_information=false");
+    assert!(!result2.session_present);
+    client2.disconnect().await.expect("Failed to disconnect");
+
+    let client3 = MqttClient::new(test_client_id("resp-info-default"));
+    let opts3 = ConnectOptions::new(test_client_id("resp-info-default")).with_clean_start(true);
+
+    let result3 = client3
+        .connect_with_options(broker.address(), opts3)
+        .await
+        .expect("Failed to connect with default request_response_information");
+    assert!(!result3.session_present);
+    client3.disconnect().await.expect("Failed to disconnect");
+}
+
+#[tokio::test]
+async fn test_request_problem_information() {
+    let broker = TestBroker::start().await;
+
+    let client1 = MqttClient::new(test_client_id("prob-info-enabled"));
+    let mut opts1 = ConnectOptions::new(test_client_id("prob-info-enabled")).with_clean_start(true);
+    opts1.properties.request_problem_information = Some(true);
+
+    let result1 = client1
+        .connect_with_options(broker.address(), opts1)
+        .await
+        .expect("Failed to connect with request_problem_information=true");
+    assert!(!result1.session_present);
+    client1.disconnect().await.expect("Failed to disconnect");
+
+    let client2 = MqttClient::new(test_client_id("prob-info-disabled"));
+    let mut opts2 = ConnectOptions::new(test_client_id("prob-info-disabled")).with_clean_start(true);
+    opts2.properties.request_problem_information = Some(false);
+
+    let result2 = client2
+        .connect_with_options(broker.address(), opts2)
+        .await
+        .expect("Failed to connect with request_problem_information=false");
+    assert!(!result2.session_present);
+    client2.disconnect().await.expect("Failed to disconnect");
+
+    let client3 = MqttClient::new(test_client_id("prob-info-default"));
+    let opts3 = ConnectOptions::new(test_client_id("prob-info-default")).with_clean_start(true);
+
+    let result3 = client3
+        .connect_with_options(broker.address(), opts3)
+        .await
+        .expect("Failed to connect with default request_problem_information");
+    assert!(!result3.session_present);
+    client3.disconnect().await.expect("Failed to disconnect");
+}

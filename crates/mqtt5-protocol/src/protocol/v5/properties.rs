@@ -565,6 +565,20 @@ impl Properties {
             .push(PropertyValue::Byte(u8::from(request)));
     }
 
+    /// Gets request problem information
+    pub fn get_request_problem_information(&self) -> Option<bool> {
+        self.properties
+            .get(&PropertyId::RequestProblemInformation)
+            .and_then(|values| values.first())
+            .and_then(|value| {
+                if let PropertyValue::Byte(v) = value {
+                    Some(*v != 0)
+                } else {
+                    None
+                }
+            })
+    }
+
     /// Sets the will delay interval
     pub fn set_will_delay_interval(&mut self, seconds: u32) {
         self.properties
@@ -579,6 +593,20 @@ impl Properties {
             .entry(PropertyId::RequestResponseInformation)
             .or_default()
             .push(PropertyValue::Byte(u8::from(request)));
+    }
+
+    /// Gets request response information
+    pub fn get_request_response_information(&self) -> Option<bool> {
+        self.properties
+            .get(&PropertyId::RequestResponseInformation)
+            .and_then(|values| values.first())
+            .and_then(|value| {
+                if let PropertyValue::Byte(v) = value {
+                    Some(*v != 0)
+                } else {
+                    None
+                }
+            })
     }
 
     /// Sets the response information

@@ -56,6 +56,8 @@ pub struct ClientHandler {
     session: Option<ClientSession>,
     next_packet_id: u16,
     normal_disconnect: bool,
+    request_problem_information: bool,
+    request_response_information: bool,
 }
 
 impl ClientHandler {
@@ -93,6 +95,8 @@ impl ClientHandler {
             session: None,
             next_packet_id: 1,
             normal_disconnect: false,
+            request_problem_information: true,
+            request_response_information: false,
         }
     }
 
@@ -416,6 +420,7 @@ impl ClientHandler {
     }
 
     /// Handles CONNECT packet
+    #[allow(clippy::too_many_lines)]
     async fn handle_connect(&mut self, mut connect: ConnectPacket) -> Result<()> {
         debug!(
             client_id = %connect.client_id,
@@ -428,6 +433,15 @@ impl ClientHandler {
 
         self.validate_protocol_version(connect.protocol_version)
             .await?;
+
+        self.request_problem_information = connect
+            .properties
+            .get_request_problem_information()
+            .unwrap_or(true);
+        self.request_response_information = connect
+            .properties
+            .get_request_response_information()
+            .unwrap_or(false);
 
         // Handle empty client ID for MQTT v5
         let mut assigned_client_id = None;
@@ -452,7 +466,12 @@ impl ClientHandler {
                 reason = ?auth_result.reason_code,
                 "Authentication failed"
             );
-            let connack = ConnAckPacket::new(false, auth_result.reason_code);
+            let mut connack = ConnAckPacket::new(false, auth_result.reason_code);
+            if self.request_problem_information {
+                connack
+                    .properties
+                    .set_reason_string("Authentication failed".to_string());
+            }
             self.transport
                 .write_packet(Packet::ConnAck(connack))
                 .await?;
@@ -508,6 +527,14 @@ impl ClientHandler {
             connack
                 .properties
                 .set_server_keep_alive(u16::try_from(keep_alive.as_secs()).unwrap_or(u16::MAX));
+        }
+
+        if self.request_response_information {
+            if let Some(ref response_info) = self.config.response_information {
+                connack
+                    .properties
+                    .set_response_information(response_info.clone());
+            }
         }
 
         debug!(
@@ -591,7 +618,14 @@ impl ClientHandler {
         }
 
         let mut suback = SubAckPacket::new(subscribe.packet_id);
-        suback.reason_codes = reason_codes;
+        suback.reason_codes.clone_from(&reason_codes);
+        if self.request_problem_information
+            && reason_codes.contains(&crate::packet::suback::SubAckReasonCode::NotAuthorized)
+        {
+            suback
+                .properties
+                .set_reason_string("One or more subscriptions not authorized".to_string());
+        }
         self.transport.write_packet(Packet::SubAck(suback)).await
     }
 
@@ -655,6 +689,7 @@ impl ClientHandler {
     }
 
     /// Handles PUBLISH packet
+    #[allow(clippy::too_many_lines)]
     async fn handle_publish(&mut self, publish: PublishPacket) -> Result<()> {
         let client_id = self.client_id.as_ref().unwrap();
 
@@ -679,12 +714,24 @@ impl ClientHandler {
                     QoS::AtLeastOnce => {
                         let mut puback = PubAckPacket::new(publish.packet_id.unwrap());
                         puback.reason_code = ReasonCode::NotAuthorized;
+                        if self.request_problem_information {
+                            puback.properties.set_reason_string(format!(
+                                "Not authorized to publish to topic: {}",
+                                publish.topic_name
+                            ));
+                        }
                         debug!("Sending PUBACK with NotAuthorized");
                         self.transport.write_packet(Packet::PubAck(puback)).await?;
                     }
                     QoS::ExactlyOnce => {
                         let mut pubrec = PubRecPacket::new(publish.packet_id.unwrap());
                         pubrec.reason_code = ReasonCode::NotAuthorized;
+                        if self.request_problem_information {
+                            pubrec.properties.set_reason_string(format!(
+                                "Not authorized to publish to topic: {}",
+                                publish.topic_name
+                            ));
+                        }
                         debug!("Sending PUBREC with NotAuthorized");
                         self.transport.write_packet(Packet::PubRec(pubrec)).await?;
                     }
@@ -707,11 +754,21 @@ impl ClientHandler {
                     QoS::AtLeastOnce => {
                         let mut puback = PubAckPacket::new(publish.packet_id.unwrap());
                         puback.reason_code = ReasonCode::QuotaExceeded;
+                        if self.request_problem_information {
+                            puback
+                                .properties
+                                .set_reason_string("Rate limit exceeded".to_string());
+                        }
                         self.transport.write_packet(Packet::PubAck(puback)).await?;
                     }
                     QoS::ExactlyOnce => {
                         let mut pubrec = PubRecPacket::new(publish.packet_id.unwrap());
                         pubrec.reason_code = ReasonCode::QuotaExceeded;
+                        if self.request_problem_information {
+                            pubrec
+                                .properties
+                                .set_reason_string("Rate limit exceeded".to_string());
+                        }
                         self.transport.write_packet(Packet::PubRec(pubrec)).await?;
                     }
                     QoS::AtMostOnce => {}

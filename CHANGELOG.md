@@ -26,6 +26,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Broker support for Request Response Information property
+- Broker support for Request Problem Information property
+- Conditional reason strings in error responses based on client preference
+- CLI `--response-information` flag for broker command
+
 - **mqtt5-protocol crate**: Platform-agnostic MQTT v5.0 core extracted from mqtt5
   - Packet encoding/decoding for all MQTT v5.0 packet types
   - Protocol types (QoS, properties, reason codes)
