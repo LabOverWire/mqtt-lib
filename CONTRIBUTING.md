@@ -1,6 +1,6 @@
 # Contributing to mqtt-v5
 
-## For Human Contributors
+## For Contributors
 
 ### Getting Started
 
@@ -87,7 +87,7 @@ When implementing MQTT features:
 
 ## Release Process
 
-Releases are managed by me:
+Releases are managed by me. I:
 
 1. Update version in `Cargo.toml`
 2. Update `CHANGELOG.md`
