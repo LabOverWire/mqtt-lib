@@ -21,11 +21,9 @@ pub mod client;
 mod client_handler;
 pub mod config;
 pub mod decoder;
-pub mod service_worker;
 pub mod transport;
 
 #[cfg(feature = "broker")]
 pub use broker::{WasmBroker, WasmBrokerConfig};
 pub use client::WasmMqttClient;
 pub use config::{WasmConnectOptions, WasmPublishOptions, WasmSubscribeOptions, WasmWillMessage};
-pub use service_worker::start_service_worker;
