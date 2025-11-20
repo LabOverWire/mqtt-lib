@@ -1,1 +1,1 @@
-testuser:$2b$12$yDR/uy2Ui3KnoUoI7QYetOHg9nJngl7VIfRG/N3HAsc13v5.XRdMq
+testuser:$argon2id$v=19$m=19456,t=2,p=1$H+rOrfeyigPxRsOvYGfH4Q$umgiPteu6W657u+MTVgNTjveB0Qi8Lxn2uH7upcgyI0

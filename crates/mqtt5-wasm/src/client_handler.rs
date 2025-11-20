@@ -44,6 +44,8 @@ pub struct WasmClientHandler {
     publish_rx: tokio::sync::mpsc::Receiver<PublishPacket>,
     publish_tx: tokio::sync::mpsc::Sender<PublishPacket>,
     inflight_publishes: HashMap<u16, PublishPacket>,
+    normal_disconnect: bool,
+    keep_alive: mqtt5::time::Duration,
 }
 
 static HANDLER_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
@@ -75,6 +77,8 @@ impl WasmClientHandler {
             publish_rx,
             publish_tx,
             inflight_publishes: HashMap::new(),
+            normal_disconnect: false,
+            keep_alive: mqtt5::time::Duration::from_secs(60),
         };
 
         spawn_local(async move {
@@ -102,9 +106,16 @@ impl WasmClientHandler {
             .register_client(client_id.clone(), self.publish_tx.clone(), disconnect_tx)
             .await;
 
+        self.stats.client_connected();
+
         let result = self.packet_loop(&mut reader, writer, disconnect_rx).await;
 
+        if !self.normal_disconnect {
+            self.publish_will_message(&client_id).await;
+        }
+
         self.router.unregister_client(&client_id).await;
+        self.stats.client_disconnected();
 
         result
     }
@@ -133,7 +144,7 @@ impl WasmClientHandler {
         writer: WasmWriter,
         disconnect_rx: tokio::sync::oneshot::Receiver<()>,
     ) -> Result<()> {
-        use std::cell::RefCell;
+        use std::cell::{Cell, RefCell};
         use std::rc::Rc;
         use wasm_bindgen_futures::spawn_local;
 
@@ -152,10 +163,35 @@ impl WasmClientHandler {
             }
         });
 
+        let last_packet_time = Rc::new(Cell::new(mqtt5::time::Instant::now()));
+        let last_packet_time_ka = Rc::clone(&last_packet_time);
+        let running_ka = Rc::clone(&running);
+        let keep_alive = self.keep_alive;
+        let handler_id = self.handler_id;
+
+        if !keep_alive.is_zero() {
+            spawn_local(async move {
+                let timeout = keep_alive + mqtt5::time::Duration::from_secs(keep_alive.as_secs() / 2);
+                loop {
+                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+                    if !*running_ka.borrow() {
+                        break;
+                    }
+
+                    let elapsed = last_packet_time_ka.get().elapsed();
+                    if elapsed > timeout {
+                        warn!("Handler #{} keep-alive timeout", handler_id);
+                        *running_ka.borrow_mut() = false;
+                        break;
+                    }
+                }
+            });
+        }
+
         let running_forward = Rc::clone(&running);
         let mut publish_rx =
             std::mem::replace(&mut self.publish_rx, tokio::sync::mpsc::channel(1).1);
-        let handler_id = self.handler_id;
         let writer_shared = Rc::new(RefCell::new(writer));
         let writer_for_forward = Rc::clone(&writer_shared);
 
@@ -185,12 +221,13 @@ impl WasmClientHandler {
 
         loop {
             if !*running.borrow() {
-                info!("Session takeover, disconnecting");
+                info!("Session takeover or keep-alive timeout, disconnecting");
                 return Ok(());
             }
 
             match read_packet(reader).await {
                 Ok(packet) => {
+                    last_packet_time.set(mqtt5::time::Instant::now());
                     if let Ok(mut writer_guard) = writer_shared.try_borrow_mut() {
                         if let Err(e) = self.handle_packet(packet, &mut *writer_guard).await {
                             error!("Error handling packet: {}", e);
@@ -238,7 +275,7 @@ impl WasmClientHandler {
 
     async fn handle_connect(
         &mut self,
-        connect: ConnectPacket,
+        mut connect: ConnectPacket,
         writer: &mut WasmWriter,
     ) -> Result<()> {
         if connect.protocol_version != 5 {
@@ -247,6 +284,16 @@ impl WasmClientHandler {
             return Err(MqttError::ProtocolError(
                 "Unsupported protocol version".to_string(),
             ));
+        }
+
+        let mut assigned_client_id = None;
+        if connect.client_id.is_empty() {
+            use std::sync::atomic::{AtomicU32, Ordering};
+            static COUNTER: AtomicU32 = AtomicU32::new(0);
+            let generated_id = format!("wasm-auto-{}", COUNTER.fetch_add(1, Ordering::SeqCst));
+            debug!("Generated client ID '{}' for empty client ID", generated_id);
+            connect.client_id.clone_from(&generated_id);
+            assigned_client_id = Some(generated_id);
         }
 
         use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -265,10 +312,18 @@ impl WasmClientHandler {
 
         self.client_id = Some(connect.client_id.clone());
         self.user_id = auth_result.user_id;
+        self.keep_alive = mqtt5::time::Duration::from_secs(u64::from(connect.keep_alive));
 
         let session_present = self.handle_session(&connect).await?;
 
         let mut connack = ConnAckPacket::new(session_present, ReasonCode::Success);
+
+        if let Some(ref assigned_id) = assigned_client_id {
+            connack
+                .properties
+                .set_assigned_client_identifier(assigned_id.clone());
+        }
+
         connack
             .properties
             .set_session_expiry_interval(self.config.session_expiry_interval.as_secs() as u32);
@@ -302,40 +357,42 @@ impl WasmClientHandler {
     }
 
     async fn handle_session(&mut self, connect: &ConnectPacket) -> Result<bool> {
-        use mqtt5_protocol::protocol::v5::properties::{PropertyId, PropertyValue};
-
         let client_id = &connect.client_id;
-        let session_expiry = connect
-            .properties
-            .get(PropertyId::SessionExpiryInterval)
-            .and_then(|prop| {
-                if let PropertyValue::FourByteInteger(val) = prop {
-                    Some(*val)
-                } else {
-                    None
-                }
-            });
+        let session_expiry = connect.properties.get_session_expiry_interval();
 
         if connect.clean_start {
             self.storage.remove_session(client_id).await.ok();
             self.storage.remove_queued_messages(client_id).await.ok();
 
-            let session =
-                ClientSession::new(client_id.clone(), session_expiry != Some(0), session_expiry);
+            let session = ClientSession::new_with_will(
+                client_id.clone(),
+                session_expiry != Some(0),
+                session_expiry,
+                connect.will.clone(),
+            );
+            self.storage.store_session(session.clone()).await.ok();
             self.session = Some(session);
             Ok(false)
         } else {
             match self.storage.get_session(client_id).await {
-                Ok(Some(session)) => {
+                Ok(Some(mut session)) => {
+                    session.will_message.clone_from(&connect.will);
+                    session.will_delay_interval = connect
+                        .will
+                        .as_ref()
+                        .and_then(|w| w.properties.will_delay_interval);
+                    self.storage.store_session(session.clone()).await.ok();
                     self.session = Some(session);
                     Ok(true)
                 }
                 Ok(None) => {
-                    let session = ClientSession::new(
+                    let session = ClientSession::new_with_will(
                         client_id.clone(),
                         session_expiry != Some(0),
                         session_expiry,
+                        connect.will.clone(),
                     );
+                    self.storage.store_session(session.clone()).await.ok();
                     self.session = Some(session);
                     Ok(false)
                 }
@@ -567,8 +624,46 @@ impl WasmClientHandler {
     }
 
     async fn handle_disconnect(&mut self, _disconnect: DisconnectPacket) -> Result<()> {
-        debug!("Client disconnected");
-        Ok(())
+        debug!("Client disconnected normally");
+        self.normal_disconnect = true;
+
+        if let Some(ref mut session) = self.session {
+            session.will_message = None;
+            session.will_delay_interval = None;
+        }
+
+        Err(MqttError::ClientClosed)
+    }
+
+    async fn publish_will_message(&self, client_id: &str) {
+        if let Some(ref session) = self.session {
+            if let Some(ref will) = session.will_message {
+                debug!("Publishing will message for client {}", client_id);
+
+                let mut publish =
+                    PublishPacket::new(will.topic.clone(), will.payload.clone(), will.qos);
+                publish.retain = will.retain;
+
+                if let Some(delay) = session.will_delay_interval {
+                    if delay > 0 {
+                        debug!("Spawning task to publish will after {} seconds", delay);
+                        let router = Arc::clone(&self.router);
+                        let publish_clone = publish.clone();
+                        let client_id_clone = client_id.to_string();
+                        spawn_local(async move {
+                            tokio::time::sleep(tokio::time::Duration::from_secs(u64::from(delay)))
+                                .await;
+                            debug!("Publishing delayed will message for {}", client_id_clone);
+                            router.route_message(&publish_clone, None).await;
+                        });
+                    } else {
+                        self.router.route_message(&publish, None).await;
+                    }
+                } else {
+                    self.router.route_message(&publish, None).await;
+                }
+            }
+        }
     }
 
     async fn send_publish(

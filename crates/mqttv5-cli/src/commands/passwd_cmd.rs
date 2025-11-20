@@ -1,4 +1,7 @@
 use anyhow::{bail, Context, Result};
+use argon2::password_hash::rand_core::OsRng;
+use argon2::password_hash::{PasswordHasher, SaltString};
+use argon2::Argon2;
 use clap::Args;
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
@@ -38,22 +41,11 @@ pub struct PasswdCommand {
         conflicts_with_all = &["file", "create", "delete"]
     )]
     pub stdout: bool,
-
-    #[arg(
-        long,
-        default_value = "12",
-        help = "Bcrypt cost factor (4-31, default: 12)"
-    )]
-    pub cost: u32,
 }
 
 pub fn execute(cmd: PasswdCommand) -> Result<()> {
     if cmd.username.contains(':') {
         bail!("Username cannot contain ':' character");
-    }
-
-    if cmd.cost < 4 || cmd.cost > 31 {
-        bail!("Bcrypt cost must be between 4 and 31");
     }
 
     if cmd.stdout {
@@ -72,9 +64,18 @@ pub fn execute(cmd: PasswdCommand) -> Result<()> {
     handle_add_or_update(&cmd, file_path)
 }
 
+fn hash_password(password: &str) -> Result<String> {
+    let salt = SaltString::generate(&mut OsRng);
+    let argon2 = Argon2::default();
+    argon2
+        .hash_password(password.as_bytes(), &salt)
+        .map(|hash| hash.to_string())
+        .map_err(|e| anyhow::anyhow!("Failed to hash password: {}", e))
+}
+
 fn handle_stdout_mode(cmd: &PasswdCommand) -> Result<()> {
     let password = get_password(cmd)?;
-    let hash = bcrypt::hash(&password, cmd.cost).context("Failed to hash password")?;
+    let hash = hash_password(&password)?;
 
     println!("{}:{}", cmd.username, hash);
     Ok(())
@@ -104,7 +105,7 @@ fn handle_add_or_update(cmd: &PasswdCommand, file_path: &PathBuf) -> Result<()> 
     };
 
     let password = get_password(cmd)?;
-    let hash = bcrypt::hash(&password, cmd.cost).context("Failed to hash password")?;
+    let hash = hash_password(&password)?;
 
     let action = if users.contains_key(&cmd.username) {
         "Updated"

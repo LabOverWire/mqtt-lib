@@ -1,11 +1,13 @@
 //! Authentication and authorization for the MQTT broker
 
 use crate::broker::acl::AclManager;
-#[cfg(not(target_arch = "wasm32"))]
 use crate::error::MqttError;
 use crate::error::Result;
 use crate::packet::connect::ConnectPacket;
 use crate::protocol::v5::reason_codes::ReasonCode;
+use argon2::password_hash::rand_core::OsRng;
+use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
+use argon2::Argon2;
 use base64::prelude::*;
 use std::collections::HashMap;
 use std::future::Future;
@@ -150,7 +152,7 @@ impl AuthProvider for AllowAllAuthProvider {
     }
 }
 
-/// Username/password authentication provider with file loading and bcrypt hashing
+/// Username/password authentication provider with file loading and Argon2 hashing
 #[derive(Debug)]
 pub struct PasswordAuthProvider {
     /// Map of username to password hash
@@ -262,19 +264,13 @@ impl PasswordAuthProvider {
         Ok(())
     }
 
-    /// Adds a user with plaintext password (hashes it with bcrypt)
+    /// Adds a user with plaintext password (hashes it with Argon2)
     ///
     /// # Errors
     ///
-    /// Returns an error if bcrypt hashing fails
-    #[cfg(not(target_arch = "wasm32"))]
+    /// Returns an error if Argon2 hashing fails
     pub async fn add_user(&self, username: String, password: &str) -> Result<()> {
-        let cost = bcrypt::DEFAULT_COST;
-        let password_hash = bcrypt::hash(password, cost).map_err(|e| {
-            error!("Failed to hash password: {}", e);
-            MqttError::AuthenticationFailed
-        })?;
-
+        let password_hash = Self::hash_password(password)?;
         self.users.write().await.insert(username, password_hash);
         Ok(())
     }
@@ -331,35 +327,23 @@ impl AuthProvider for PasswordAuthProvider {
                 return Ok(AuthResult::fail(ReasonCode::BadUsernameOrPassword));
             };
 
-            // Verify username/password
             let users = self.users.read().await;
             if let Some(password_hash) = users.get(username) {
-                // Convert password bytes to string
                 let password_str = String::from_utf8_lossy(password);
 
-                // Verify password using bcrypt
-                #[cfg(not(target_arch = "wasm32"))]
-                {
-                    match bcrypt::verify(&*password_str, password_hash) {
-                        Ok(true) => {
-                            debug!("Authentication successful for user: {username}");
-                            Ok(AuthResult::success_with_user(username.clone()))
-                        }
-                        Ok(false) => {
-                            warn!("Authentication failed for user: {username} (wrong password)");
-                            Ok(AuthResult::fail(ReasonCode::BadUsernameOrPassword))
-                        }
-                        Err(e) => {
-                            error!("bcrypt verification error for user {username}: {e}");
-                            Ok(AuthResult::fail(ReasonCode::ServerUnavailable))
-                        }
+                match Self::verify_password(&password_str, password_hash) {
+                    Ok(true) => {
+                        debug!("Authentication successful for user: {username}");
+                        Ok(AuthResult::success_with_user(username.clone()))
                     }
-                }
-                #[cfg(target_arch = "wasm32")]
-                {
-                    let _ = (password_str, password_hash);
-                    error!("Password authentication with bcrypt is not available in WASM");
-                    Ok(AuthResult::fail(ReasonCode::ServerUnavailable))
+                    Ok(false) => {
+                        warn!("Authentication failed for user: {username} (wrong password)");
+                        Ok(AuthResult::fail(ReasonCode::BadUsernameOrPassword))
+                    }
+                    Err(e) => {
+                        error!("Argon2 verification error for user {username}: {e}");
+                        Ok(AuthResult::fail(ReasonCode::ServerUnavailable))
+                    }
                 }
             } else {
                 warn!("Authentication failed for user: {username} (user not found)");
@@ -812,30 +796,36 @@ impl AuthProvider for CertificateAuthProvider {
 
 /// Utility functions for password management
 impl PasswordAuthProvider {
-    /// Generates a bcrypt hash for a password
+    /// Generates an Argon2 hash for a password
     ///
     /// # Errors
     ///
-    /// Returns an error if bcrypt hashing fails
-    #[cfg(not(target_arch = "wasm32"))]
+    /// Returns an error if Argon2 hashing fails
     pub fn hash_password(password: &str) -> Result<String> {
-        bcrypt::hash(password, bcrypt::DEFAULT_COST).map_err(|e| {
-            error!("Failed to hash password: {}", e);
-            MqttError::AuthenticationFailed
-        })
+        let salt = SaltString::generate(&mut OsRng);
+        let argon2 = Argon2::default();
+        argon2
+            .hash_password(password.as_bytes(), &salt)
+            .map(|hash| hash.to_string())
+            .map_err(|e| {
+                error!("Failed to hash password: {}", e);
+                MqttError::AuthenticationFailed
+            })
     }
 
-    /// Verifies a password against a bcrypt hash
+    /// Verifies a password against an Argon2 hash
     ///
     /// # Errors
     ///
-    /// Returns an error if bcrypt verification fails
-    #[cfg(not(target_arch = "wasm32"))]
+    /// Returns an error if Argon2 verification fails
     pub fn verify_password(password: &str, hash: &str) -> Result<bool> {
-        bcrypt::verify(password, hash).map_err(|e| {
-            error!("Failed to verify password: {}", e);
+        let parsed_hash = PasswordHash::new(hash).map_err(|e| {
+            error!("Failed to parse password hash: {}", e);
             MqttError::AuthenticationFailed
-        })
+        })?;
+        Ok(Argon2::default()
+            .verify_password(password.as_bytes(), &parsed_hash)
+            .is_ok())
     }
 }
 
