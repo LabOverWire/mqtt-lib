@@ -1,6 +1,6 @@
 use crate::error::{MqttError, Result};
 use crate::session::limits::{ExpiringMessage, LimitsManager};
-use crate::time::Instant;
+use crate::time::{Duration, Instant};
 use crate::QoS;
 use std::collections::VecDeque;
 
@@ -203,7 +203,7 @@ impl MessageQueue {
     }
 
     /// Removes expired messages (both by message expiry and queue timeout)
-    pub fn remove_expired(&mut self, queue_timeout: std::time::Duration) {
+    pub fn remove_expired(&mut self, queue_timeout: Duration) {
         let now = Instant::now();
 
         // Remove messages that are expired or have been in queue too long
@@ -246,9 +246,9 @@ pub struct QueueStats {
     /// Maximum allowed size
     pub max_size: usize,
     /// Age of oldest message
-    pub oldest_message_age: Option<std::time::Duration>,
+    pub oldest_message_age: Option<Duration>,
     /// Age of newest message
-    pub newest_message_age: Option<std::time::Duration>,
+    pub newest_message_age: Option<Duration>,
 }
 
 #[cfg(test)]
@@ -437,13 +437,13 @@ mod tests {
             if let Some(last) = queue.queue.back_mut() {
                 // Set timestamps: 30ms, 20ms, 10ms ago
                 last.queued_at = now
-                    .checked_sub(std::time::Duration::from_millis((3 - u64::from(i)) * 10))
+                    .checked_sub(crate::time::Duration::from_millis((3 - u64::from(i)) * 10))
                     .unwrap();
             }
         }
 
         // Remove messages older than 15ms (should remove first 2)
-        queue.remove_expired(std::time::Duration::from_millis(15));
+        queue.remove_expired(crate::time::Duration::from_millis(15));
 
         assert_eq!(queue.len(), 1);
         let remaining = queue.dequeue().unwrap();
@@ -480,7 +480,7 @@ mod tests {
     fn test_queue_with_expiring_messages() {
         let mut queue = MessageQueue::new(10, 1024);
         let config = LimitsConfig {
-            default_message_expiry: Some(std::time::Duration::from_millis(50)),
+            default_message_expiry: Some(crate::time::Duration::from_millis(50)),
             ..Default::default()
         };
         let limits = LimitsManager::new(config);
@@ -499,7 +499,7 @@ mod tests {
         queue.enqueue(msg).unwrap();
 
         // Sleep to let message expire
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::thread::sleep(crate::time::Duration::from_millis(10));
 
         // Dequeue should skip expired message
         let dequeued = queue.dequeue();

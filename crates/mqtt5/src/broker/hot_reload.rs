@@ -58,7 +58,7 @@ pub struct HotReloadManager {
     /// File system watcher handle
     watcher_handle: Option<tokio::task::JoinHandle<()>>,
     /// Last known file modification time
-    last_modified: Arc<RwLock<Option<std::time::SystemTime>>>,
+    last_modified: Arc<RwLock<Option<crate::time::SystemTime>>>,
     /// Configuration hash for change detection
     config_hash: Arc<RwLock<u64>>,
 }
@@ -113,7 +113,7 @@ impl HotReloadManager {
         let change_sender = self.change_sender.clone();
 
         let handle = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+            let mut interval = tokio::time::interval(crate::time::Duration::from_secs(5));
 
             loop {
                 interval.tick().await;
@@ -183,7 +183,7 @@ impl HotReloadManager {
     /// Checks if the configuration file has been modified
     async fn check_file_changed(
         config_path: &Path,
-        last_modified: &Arc<RwLock<Option<std::time::SystemTime>>>,
+        last_modified: &Arc<RwLock<Option<crate::time::SystemTime>>>,
     ) -> Result<bool> {
         let metadata = fs::metadata(config_path)
             .await
@@ -470,7 +470,7 @@ mod tests {
 
         // Wait for change notification with timeout
         let change_result = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
+            crate::time::Duration::from_secs(2),
             subscriber.wait_for_change(),
         )
         .await;

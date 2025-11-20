@@ -216,7 +216,7 @@ mod tests {
         let broker_handle = tokio::spawn(async move { broker.run().await });
 
         // Give broker time to start
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        tokio::time::sleep(crate::time::Duration::from_millis(100)).await;
 
         // Create test bridge config pointing to our test broker
         let config = BridgeConfig::new("test-bridge", &format!("{}", broker_addr)).add_topic(

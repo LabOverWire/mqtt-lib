@@ -12,7 +12,7 @@ pub struct MessagePortTransport {
     port: MessagePort,
     rx: Option<mpsc::UnboundedReceiver<Vec<u8>>>,
     connected: Arc<AtomicBool>,
-    _closure: Option<Closure<dyn FnMut(MessageEvent)>>,
+    closure: Option<Closure<dyn FnMut(MessageEvent)>>,
 }
 
 pub struct MessagePortReader {
@@ -68,7 +68,7 @@ impl MessagePortReader {
 }
 
 impl MessagePortWriter {
-    pub async fn write(&mut self, buf: &[u8]) -> Result<()> {
+    pub fn write(&mut self, buf: &[u8]) -> Result<()> {
         let array = js_sys::Uint8Array::from(buf);
         self.port
             .post_message(&array.buffer())
@@ -76,7 +76,7 @@ impl MessagePortWriter {
         Ok(())
     }
 
-    pub async fn close(&mut self) -> Result<()> {
+    pub fn close(&mut self) -> Result<()> {
         self.port.close();
         self.connected.store(false, Ordering::SeqCst);
         Ok(())
@@ -93,14 +93,14 @@ impl MessagePortTransport {
             port,
             rx: None,
             connected: Arc::new(AtomicBool::new(false)),
-            _closure: None,
+            closure: None,
         }
     }
 
     pub fn into_split(self) -> Result<(MessagePortReader, MessagePortWriter)> {
         let port = self.port;
         let rx = self.rx.ok_or(MqttError::NotConnected)?;
-        let closure = self._closure.ok_or(MqttError::NotConnected)?;
+        let closure = self.closure.ok_or(MqttError::NotConnected)?;
 
         let reader = MessagePortReader {
             rx,
@@ -138,7 +138,7 @@ impl Transport for MessagePortTransport {
         self.port.start();
 
         self.rx = Some(msg_rx);
-        self._closure = Some(onmessage);
+        self.closure = Some(onmessage);
         self.connected.store(true, Ordering::SeqCst);
 
         Ok(())
@@ -174,7 +174,7 @@ impl Transport for MessagePortTransport {
     async fn close(&mut self) -> Result<()> {
         self.port.close();
         self.connected.store(false, Ordering::SeqCst);
-        self._closure = None;
+        self.closure = None;
         Ok(())
     }
 

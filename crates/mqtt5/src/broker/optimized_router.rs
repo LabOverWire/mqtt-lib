@@ -40,7 +40,7 @@ pub struct OptimizedClientInfo {
     /// Whether client is currently online
     pub online: bool,
     /// Last seen timestamp for cleanup
-    pub last_seen: std::time::Instant,
+    pub last_seen: crate::time::Instant,
 }
 
 /// Node in the subscription tree for fast topic-based lookups
@@ -150,7 +150,7 @@ impl OptimizedMessageRouter {
         let client_info = OptimizedClientInfo {
             sender,
             online: true,
-            last_seen: std::time::Instant::now(),
+            last_seen: crate::time::Instant::now(),
         };
 
         let mut clients = self.clients.write().await;
@@ -336,7 +336,7 @@ impl OptimizedMessageRouter {
 
     /// High-performance message routing with optimized algorithms
     pub async fn route_message_optimized(&self, publish: &PublishPacket) {
-        let start_time = std::time::Instant::now();
+        let start_time = crate::time::Instant::now();
         trace!("Routing message to topic: {}", publish.topic_name);
 
         // Update metrics for every message processed

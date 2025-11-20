@@ -90,19 +90,19 @@ impl WasmReader {
 }
 
 impl WasmWriter {
-    pub async fn write(&mut self, buf: &[u8]) -> Result<()> {
+    pub fn write(&mut self, buf: &[u8]) -> Result<()> {
         match self {
-            Self::WebSocket(w) => w.write(buf).await,
-            Self::BroadcastChannel(w) => w.write(buf).await,
-            Self::MessagePort(w) => w.write(buf).await,
+            Self::WebSocket(w) => w.write(buf),
+            Self::BroadcastChannel(w) => w.write(buf),
+            Self::MessagePort(w) => w.write(buf),
         }
     }
 
-    pub async fn close(&mut self) -> Result<()> {
+    pub fn close(&mut self) -> Result<()> {
         match self {
-            Self::WebSocket(w) => w.close().await,
-            Self::BroadcastChannel(w) => w.close().await,
-            Self::MessagePort(w) => w.close().await,
+            Self::WebSocket(w) => w.close(),
+            Self::BroadcastChannel(w) => w.close(),
+            Self::MessagePort(w) => w.close(),
         }
     }
 

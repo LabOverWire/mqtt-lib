@@ -499,12 +499,12 @@ mod tests {
         fc.register_send(2).await.unwrap();
 
         // Sleep a bit
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        tokio::time::sleep(crate::time::Duration::from_millis(10)).await;
 
         fc.register_send(3).await.unwrap();
 
         // Check expired with very short timeout
-        let expired = fc.get_expired(std::time::Duration::from_millis(5)).await;
+        let expired = fc.get_expired(crate::time::Duration::from_millis(5)).await;
         assert_eq!(expired.len(), 2);
         assert!(expired.contains(&1));
         assert!(expired.contains(&2));

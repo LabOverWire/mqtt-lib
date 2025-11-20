@@ -169,6 +169,7 @@ impl WasmConnectOptions {
         self.user_properties.clear();
     }
 
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn to_properties(&self) -> Properties {
         let mut properties = Properties::default();
 
@@ -732,8 +733,10 @@ impl WasmWillMessage {
 
         will.properties.will_delay_interval = self.will_delay_interval;
         will.properties.message_expiry_interval = self.message_expiry_interval;
-        will.properties.content_type = self.content_type.clone();
-        will.properties.response_topic = self.response_topic.clone();
+        will.properties.content_type.clone_from(&self.content_type);
+        will.properties
+            .response_topic
+            .clone_from(&self.response_topic);
 
         will
     }

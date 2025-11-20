@@ -13,7 +13,7 @@ pub struct BroadcastChannelTransport {
     channel: Option<BroadcastChannel>,
     rx: Option<mpsc::UnboundedReceiver<Vec<u8>>>,
     connected: Arc<AtomicBool>,
-    _closure: Option<Closure<dyn FnMut(MessageEvent)>>,
+    closure: Option<Closure<dyn FnMut(MessageEvent)>>,
 }
 
 pub struct BroadcastChannelReader {
@@ -46,7 +46,7 @@ impl BroadcastChannelReader {
 }
 
 impl BroadcastChannelWriter {
-    pub async fn write(&mut self, buf: &[u8]) -> Result<()> {
+    pub fn write(&mut self, buf: &[u8]) -> Result<()> {
         let array = js_sys::Uint8Array::from(buf);
         self.channel
             .post_message(&array.buffer())
@@ -54,7 +54,7 @@ impl BroadcastChannelWriter {
         Ok(())
     }
 
-    pub async fn close(&mut self) -> Result<()> {
+    pub fn close(&mut self) -> Result<()> {
         self.channel.close();
         self.connected.store(false, Ordering::SeqCst);
         Ok(())
@@ -72,14 +72,14 @@ impl BroadcastChannelTransport {
             channel: None,
             rx: None,
             connected: Arc::new(AtomicBool::new(false)),
-            _closure: None,
+            closure: None,
         }
     }
 
     pub fn into_split(self) -> Result<(BroadcastChannelReader, BroadcastChannelWriter)> {
         let channel = self.channel.ok_or(MqttError::NotConnected)?;
         let rx = self.rx.ok_or(MqttError::NotConnected)?;
-        let closure = self._closure.ok_or(MqttError::NotConnected)?;
+        let closure = self.closure.ok_or(MqttError::NotConnected)?;
 
         let reader = BroadcastChannelReader {
             rx,
@@ -117,7 +117,7 @@ impl Transport for BroadcastChannelTransport {
 
         self.channel = Some(channel);
         self.rx = Some(msg_rx);
-        self._closure = Some(onmessage);
+        self.closure = Some(onmessage);
         self.connected.store(true, Ordering::SeqCst);
 
         Ok(())
@@ -153,7 +153,7 @@ impl Transport for BroadcastChannelTransport {
             channel.close();
         }
         self.connected.store(false, Ordering::SeqCst);
-        self._closure = None;
+        self.closure = None;
         Ok(())
     }
 

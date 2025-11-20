@@ -172,7 +172,7 @@ impl ConnectPacket {
     }
 
     /// Calculates keep alive value, clamping to u16 range
-    fn calculate_keep_alive(keep_alive: std::time::Duration) -> u16 {
+    fn calculate_keep_alive(keep_alive: crate::time::Duration) -> u16 {
         keep_alive
             .as_secs()
             .min(u64::from(u16::MAX))

@@ -21,7 +21,10 @@ async fn sleep_ms(millis: u32) {
     let promise = js_sys::Promise::new(&mut |resolve, _reject| {
         let window = web_sys::window().expect("no global window");
         window
-            .set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, millis as i32)
+            .set_timeout_with_callback_and_timeout_and_arguments_0(
+                &resolve,
+                i32::try_from(millis).unwrap_or(i32::MAX),
+            )
             .expect("setTimeout failed");
     });
     JsFuture::from(promise).await.ok();
@@ -124,17 +127,11 @@ impl WasmMqttClient {
         let state = Rc::clone(&self.state);
 
         spawn_local(async move {
-            web_sys::console::log_1(&"Packet reader task started".into());
             loop {
-                web_sys::console::log_1(&"Packet reader: reading next packet...".into());
                 let packet_result = read_packet(&mut reader).await;
-                web_sys::console::log_1(&"Packet reader: read_packet() returned".into());
 
                 match packet_result {
                     Ok(packet) => {
-                        web_sys::console::log_1(
-                            &format!("Packet reader: handling packet: {:?}", packet).into(),
-                        );
                         Self::handle_incoming_packet(&state, packet);
                     }
                     Err(e) => {
@@ -147,7 +144,6 @@ impl WasmMqttClient {
                                 }
                                 Err(_) => {
                                     sleep_ms(10).await;
-                                    continue;
                                 }
                             }
                         };
@@ -157,17 +153,11 @@ impl WasmMqttClient {
                             web_sys::console::error_1(&error_msg.clone().into());
                             Self::trigger_error_callback(&state, &error_msg);
                             Self::trigger_disconnect_callback(&state);
-                        } else {
-                            web_sys::console::log_1(
-                                &"Packet reader: connection closed (expected during disconnect)"
-                                    .into(),
-                            );
                         }
                         break;
                     }
                 }
             }
-            web_sys::console::log_1(&"Packet reader task exited".into());
         });
     }
 
@@ -176,61 +166,50 @@ impl WasmMqttClient {
 
         spawn_local(async move {
             loop {
-                let (keep_alive_ms, connected) = {
-                    match state.try_borrow() {
-                        Ok(state_ref) => {
-                            let ms = (state_ref.keep_alive as f64) * 1000.0;
-                            let conn = state_ref.connected;
-                            (ms, conn)
-                        }
-                        Err(_) => {
-                            sleep_ms(100).await;
-                            continue;
-                        }
-                    }
+                let (keep_alive_ms, connected) = if let Ok(state_ref) = state.try_borrow() {
+                    let ms = f64::from(state_ref.keep_alive) * 1000.0;
+                    let conn = state_ref.connected;
+                    (ms, conn)
+                } else {
+                    sleep_ms(100).await;
+                    continue;
                 };
 
                 if !connected {
                     break;
                 }
 
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                 let sleep_duration = (keep_alive_ms / 2.0) as u32;
                 sleep_ms(sleep_duration).await;
 
-                let should_disconnect = {
-                    match state.try_borrow() {
-                        Ok(state_ref) => {
-                            if !state_ref.connected {
-                                break;
-                            }
+                let should_disconnect = if let Ok(state_ref) = state.try_borrow() {
+                    if !state_ref.connected {
+                        break;
+                    }
 
-                            let now = js_sys::Date::now();
+                    let now = js_sys::Date::now();
 
-                            if let Some(last_ping) = state_ref.last_ping_sent {
-                                if let Some(last_pong) = state_ref.last_pong_received {
-                                    if last_ping > last_pong
-                                        && (now - last_ping) > keep_alive_ms * 1.5
-                                    {
-                                        web_sys::console::error_1(&"Keepalive timeout".into());
-                                        true
-                                    } else {
-                                        false
-                                    }
-                                } else if (now - last_ping) > keep_alive_ms * 1.5 {
-                                    web_sys::console::error_1(&"Keepalive timeout".into());
-                                    true
-                                } else {
-                                    false
-                                }
+                    if let Some(last_ping) = state_ref.last_ping_sent {
+                        if let Some(last_pong) = state_ref.last_pong_received {
+                            if last_ping > last_pong && (now - last_ping) > keep_alive_ms * 1.5 {
+                                web_sys::console::error_1(&"Keepalive timeout".into());
+                                true
                             } else {
                                 false
                             }
+                        } else if (now - last_ping) > keep_alive_ms * 1.5 {
+                            web_sys::console::error_1(&"Keepalive timeout".into());
+                            true
+                        } else {
+                            false
                         }
-                        Err(_) => {
-                            sleep_ms(100).await;
-                            continue;
-                        }
+                    } else {
+                        false
                     }
+                } else {
+                    sleep_ms(100).await;
+                    continue;
                 };
 
                 if should_disconnect {
@@ -255,8 +234,8 @@ impl WasmMqttClient {
                 };
 
                 match writer_rc {
-                    Some(writer_rc) => match writer_rc.borrow_mut().write(&buf).await {
-                        Ok(_) => {}
+                    Some(writer_rc) => match writer_rc.borrow_mut().write(&buf) {
+                        Ok(()) => {}
                         Err(e) => {
                             let error_msg = format!("Ping send error: {}", e);
                             web_sys::console::error_1(&error_msg.clone().into());
@@ -283,9 +262,7 @@ impl WasmMqttClient {
 
                 let connected = match state.try_borrow() {
                     Ok(state_ref) => state_ref.connected,
-                    Err(_) => {
-                        continue;
-                    }
+                    Err(_) => continue,
                 };
 
                 if !connected {
@@ -296,70 +273,44 @@ impl WasmMqttClient {
                 let timeout_ms = 10000.0;
                 let cleanup_ms = 30000.0;
 
-                match state.try_borrow_mut() {
-                    Ok(mut state_ref) => {
-                        let mut timed_out_pubcomps = Vec::new();
+                if let Ok(mut state_ref) = state.try_borrow_mut() {
+                    let mut timed_out_pubcomps = Vec::new();
 
-                        for (packet_id, (callback, timestamp)) in state_ref.pending_pubcomps.iter()
-                        {
-                            if now - timestamp > timeout_ms {
-                                timed_out_pubcomps.push((*packet_id, callback.clone()));
-                            }
+                    for (packet_id, (callback, timestamp)) in &state_ref.pending_pubcomps {
+                        if now - timestamp > timeout_ms {
+                            timed_out_pubcomps.push((*packet_id, callback.clone()));
                         }
+                    }
 
-                        for (packet_id, callback) in timed_out_pubcomps {
-                            state_ref.pending_pubcomps.remove(&packet_id);
-                            web_sys::console::warn_1(
-                                &format!("QoS 2 publish timeout for packet {}", packet_id).into(),
+                    for (packet_id, callback) in timed_out_pubcomps {
+                        state_ref.pending_pubcomps.remove(&packet_id);
+                        web_sys::console::warn_1(
+                            &format!("QoS 2 publish timeout for packet {}", packet_id).into(),
+                        );
+                        let error = JsValue::from_str("Timeout");
+                        if let Err(e) = callback.call1(&JsValue::NULL, &error) {
+                            web_sys::console::error_1(
+                                &format!("QoS 2 timeout callback error: {:?}", e).into(),
                             );
-                            let error = JsValue::from_str("Timeout");
-                            if let Err(e) = callback.call1(&JsValue::NULL, &error) {
-                                web_sys::console::error_1(
-                                    &format!("QoS 2 timeout callback error: {:?}", e).into(),
-                                );
-                            }
                         }
-
-                        state_ref.pending_pubrecs.retain(|packet_id, timestamp| {
-                            let should_keep = now - *timestamp <= cleanup_ms;
-                            if !should_keep {
-                                web_sys::console::log_1(
-                                    &format!("Cleaning up stale PUBREC for packet {}", packet_id)
-                                        .into(),
-                                );
-                            }
-                            should_keep
-                        });
-
-                        state_ref.received_qos2.retain(|packet_id, timestamp| {
-                            let should_keep = now - *timestamp <= cleanup_ms;
-                            if !should_keep {
-                                web_sys::console::log_1(
-                                    &format!(
-                                        "Cleaning up QoS 2 duplicate tracker for packet {}",
-                                        packet_id
-                                    )
-                                    .into(),
-                                );
-                            }
-                            should_keep
-                        });
                     }
-                    Err(_) => {
-                        continue;
-                    }
+
+                    state_ref
+                        .pending_pubrecs
+                        .retain(|_packet_id, timestamp| now - *timestamp <= cleanup_ms);
+
+                    state_ref
+                        .received_qos2
+                        .retain(|_packet_id, timestamp| now - *timestamp <= cleanup_ms);
                 }
             }
         });
     }
 
+    #[allow(clippy::too_many_lines)]
     fn handle_incoming_packet(state: &Rc<RefCell<ClientState>>, packet: Packet) {
         match packet {
             Packet::ConnAck(connack) => {
-                web_sys::console::log_1(
-                    &format!("CONNACK received: {:?}", connack.reason_code).into(),
-                );
-
                 let callback = state.borrow().on_connect.clone();
                 if let Some(callback) = callback {
                     let reason_code = JsValue::from_f64(connack.reason_code as u8 as f64);
@@ -377,16 +328,6 @@ impl WasmMqttClient {
                 let payload = publish.payload.clone();
                 let qos = publish.qos;
 
-                web_sys::console::log_1(
-                    &format!(
-                        "PUBLISH received: topic={}, qos={:?}, payload_size={} bytes",
-                        topic,
-                        qos,
-                        payload.len()
-                    )
-                    .into(),
-                );
-
                 if qos == mqtt5_protocol::QoS::ExactlyOnce {
                     if let Some(packet_id) = publish.packet_id {
                         let is_duplicate = state.borrow().received_qos2.contains_key(&packet_id);
@@ -401,20 +342,11 @@ impl WasmMqttClient {
                                     packet_id: _,
                                 } => {
                                     let subscriptions = state.borrow().subscriptions.clone();
-                                    let mut found_match = false;
 
-                                    for (filter, callback) in subscriptions.iter() {
+                                    for (filter, callback) in &subscriptions {
                                         if mqtt5_protocol::validation::topic_matches_filter(
                                             &topic, filter,
                                         ) {
-                                            found_match = true;
-                                            web_sys::console::log_1(
-                                                &format!(
-                                                    "Topic {} matches filter {}, calling callback",
-                                                    topic, filter
-                                                )
-                                                .into(),
-                                            );
                                             let topic_js = JsValue::from_str(&topic);
                                             let payload_array =
                                                 js_sys::Uint8Array::from(&payload[..]);
@@ -429,16 +361,6 @@ impl WasmMqttClient {
                                                 );
                                             }
                                         }
-                                    }
-
-                                    if !found_match {
-                                        web_sys::console::log_1(
-                                            &format!(
-                                                "No subscription filter matched topic: {}",
-                                                topic
-                                            )
-                                            .into(),
-                                        );
                                     }
                                 }
                                 mqtt5_protocol::qos2::QoS2Action::SendPubRec {
@@ -464,8 +386,7 @@ impl WasmMqttClient {
                                     let writer_rc = state.borrow().writer.clone();
                                     if let Some(writer_rc) = writer_rc {
                                         spawn_local(async move {
-                                            if let Err(e) = writer_rc.borrow_mut().write(&buf).await
-                                            {
+                                            if let Err(e) = writer_rc.borrow_mut().write(&buf) {
                                                 web_sys::console::error_1(
                                                     &format!("PUBREC send error: {}", e).into(),
                                                 );
@@ -488,18 +409,9 @@ impl WasmMqttClient {
                     }
                 } else {
                     let subscriptions = state.borrow().subscriptions.clone();
-                    let mut found_match = false;
 
-                    for (filter, callback) in subscriptions.iter() {
+                    for (filter, callback) in &subscriptions {
                         if mqtt5_protocol::validation::topic_matches_filter(&topic, filter) {
-                            found_match = true;
-                            web_sys::console::log_1(
-                                &format!(
-                                    "Topic {} matches filter {}, calling callback",
-                                    topic, filter
-                                )
-                                .into(),
-                            );
                             let topic_js = JsValue::from_str(&topic);
                             let payload_array = js_sys::Uint8Array::from(&payload[..]);
 
@@ -512,26 +424,11 @@ impl WasmMqttClient {
                             }
                         }
                     }
-
-                    if !found_match {
-                        web_sys::console::log_1(
-                            &format!("No subscription filter matched topic: {}", topic).into(),
-                        );
-                    }
                 }
             }
             Packet::SubAck(suback) => {
-                web_sys::console::log_1(
-                    &format!(
-                        "SUBACK received: packet_id={}, reason_codes={:?}",
-                        suback.packet_id, suback.reason_codes
-                    )
-                    .into(),
-                );
-
                 let callback = state.borrow_mut().pending_subacks.remove(&suback.packet_id);
                 if let Some(callback) = callback {
-                    web_sys::console::log_1(&"Calling SUBACK callback".into());
                     let reason_codes = suback
                         .reason_codes
                         .iter()
@@ -543,22 +440,11 @@ impl WasmMqttClient {
                             &format!("SUBACK callback error: {:?}", e).into(),
                         );
                     }
-                } else {
-                    web_sys::console::log_1(&"No pending SUBACK callback found".into());
                 }
             }
-            Packet::UnsubAck(unsuback) => {
-                web_sys::console::log_1(
-                    &format!(
-                        "UNSUBACK received: packet_id={}, reason_codes={:?}",
-                        unsuback.packet_id, unsuback.reason_codes
-                    )
-                    .into(),
-                );
-            }
+            Packet::UnsubAck(_unsuback) => {}
             Packet::PingResp => {
                 state.borrow_mut().last_pong_received = Some(js_sys::Date::now());
-                web_sys::console::log_1(&"PINGRESP received".into());
             }
             Packet::PubAck(puback) => {
                 let callback = state.borrow_mut().pending_pubacks.remove(&puback.packet_id);
@@ -569,21 +455,9 @@ impl WasmMqttClient {
                             &format!("PUBACK callback error: {:?}", e).into(),
                         );
                     }
-                } else {
-                    web_sys::console::log_1(
-                        &format!("PUBACK received for packet {}", puback.packet_id).into(),
-                    );
                 }
             }
             Packet::PubRec(pubrec) => {
-                web_sys::console::log_1(
-                    &format!(
-                        "PUBREC received: packet_id={}, reason_code={:?}",
-                        pubrec.packet_id, pubrec.reason_code
-                    )
-                    .into(),
-                );
-
                 let has_pending = state
                     .borrow()
                     .pending_pubcomps
@@ -597,11 +471,11 @@ impl WasmMqttClient {
                 for action in actions {
                     match action {
                         mqtt5_protocol::qos2::QoS2Action::SendPubRel { packet_id } => {
-                            let pubrel =
+                            let pubrel_packet =
                                 mqtt5_protocol::packet::pubrel::PubRelPacket::new(packet_id);
                             let mut buf = BytesMut::new();
                             if let Err(e) = encode_packet(
-                                &mqtt5_protocol::packet::Packet::PubRel(pubrel),
+                                &mqtt5_protocol::packet::Packet::PubRel(pubrel_packet),
                                 &mut buf,
                             ) {
                                 web_sys::console::error_1(
@@ -613,7 +487,7 @@ impl WasmMqttClient {
                             let writer_rc = state.borrow().writer.clone();
                             if let Some(writer_rc) = writer_rc {
                                 spawn_local(async move {
-                                    if let Err(e) = writer_rc.borrow_mut().write(&buf).await {
+                                    if let Err(e) = writer_rc.borrow_mut().write(&buf) {
                                         web_sys::console::error_1(
                                             &format!("PUBREL send error: {}", e).into(),
                                         );
@@ -641,14 +515,6 @@ impl WasmMqttClient {
                 }
             }
             Packet::PubComp(pubcomp) => {
-                web_sys::console::log_1(
-                    &format!(
-                        "PUBCOMP received: packet_id={}, reason_code={:?}",
-                        pubcomp.packet_id, pubcomp.reason_code
-                    )
-                    .into(),
-                );
-
                 let has_pending = state
                     .borrow()
                     .pending_pubcomps
@@ -694,10 +560,6 @@ impl WasmMqttClient {
                 }
             }
             Packet::PubRel(pubrel) => {
-                web_sys::console::log_1(
-                    &format!("PUBREL received: packet_id={}", pubrel.packet_id).into(),
-                );
-
                 let has_pubrec = state
                     .borrow()
                     .pending_pubrecs
@@ -733,7 +595,7 @@ impl WasmMqttClient {
                             let writer_rc = state.borrow().writer.clone();
                             if let Some(writer_rc) = writer_rc {
                                 spawn_local(async move {
-                                    if let Err(e) = writer_rc.borrow_mut().write(&buf).await {
+                                    if let Err(e) = writer_rc.borrow_mut().write(&buf) {
                                         web_sys::console::error_1(
                                             &format!("PUBCOMP send error: {}", e).into(),
                                         );
@@ -803,13 +665,10 @@ impl WasmMqttClient {
         mut transport: WasmTransportType,
         config: &WasmConnectOptions,
     ) -> Result<(), JsValue> {
-        web_sys::console::log_1(&"Transport connecting...".into());
         transport
             .connect()
             .await
             .map_err(|e| JsValue::from_str(&format!("Transport connection failed: {}", e)))?;
-
-        web_sys::console::log_1(&"Transport connected, sending CONNECT packet...".into());
 
         let client_id = self.state.borrow().client_id.clone();
 
@@ -840,26 +699,18 @@ impl WasmMqttClient {
         encode_packet(&packet, &mut buf)
             .map_err(|e| JsValue::from_str(&format!("Packet encoding failed: {}", e)))?;
 
-        web_sys::console::log_1(&format!("Sending {} bytes...", buf.len()).into());
-
         transport
             .write(&buf)
             .await
             .map_err(|e| JsValue::from_str(&format!("Write failed: {}", e)))?;
 
-        web_sys::console::log_1(&"CONNECT sent, splitting transport...".into());
-
         let (mut reader, writer) = transport
             .into_split()
             .map_err(|e| JsValue::from_str(&format!("Transport split failed: {}", e)))?;
 
-        web_sys::console::log_1(&"Transport split, waiting for CONNACK...".into());
-
         let connack = read_packet(&mut reader)
             .await
             .map_err(|e| JsValue::from_str(&format!("CONNACK read failed: {}", e)))?;
-
-        web_sys::console::log_1(&format!("Received packet: {:?}", connack).into());
 
         if let Packet::ConnAck(connack) = connack {
             let reason_code = connack.reason_code;
@@ -892,35 +743,20 @@ impl WasmMqttClient {
     }
 
     pub async fn publish(&self, topic: &str, payload: &[u8]) -> Result<(), JsValue> {
-        web_sys::console::log_1(
-            &format!(
-                "publish called for topic: {}, payload size: {} bytes",
-                topic,
-                payload.len()
-            )
-            .into(),
-        );
-
-        web_sys::console::log_1(&"Checking connection status...".into());
         loop {
             match self.state.try_borrow() {
                 Ok(state) => {
                     if !state.connected {
-                        web_sys::console::log_1(&"Not connected, returning error".into());
                         return Err(JsValue::from_str("Not connected"));
                     }
-                    web_sys::console::log_1(&"Connected, proceeding...".into());
                     break;
                 }
                 Err(_) => {
-                    web_sys::console::log_1(&"State borrowed, retrying in 10ms...".into());
                     sleep_ms(10).await;
-                    continue;
                 }
             }
         }
 
-        web_sys::console::log_1(&"Creating PUBLISH packet (QoS 0)...".into());
         let publish_packet = PublishPacket {
             dup: false,
             qos: QoS::AtMostOnce,
@@ -936,8 +772,6 @@ impl WasmMqttClient {
         encode_packet(&packet, &mut buf)
             .map_err(|e| JsValue::from_str(&format!("Packet encoding failed: {}", e)))?;
 
-        web_sys::console::log_1(&format!("Sending PUBLISH packet ({} bytes)...", buf.len()).into());
-
         let writer_rc = self
             .state
             .borrow()
@@ -948,11 +782,8 @@ impl WasmMqttClient {
         writer_rc
             .borrow_mut()
             .write(&buf)
-            .await
             .map_err(|e| JsValue::from_str(&format!("Write failed: {}", e)))?;
 
-        web_sys::console::log_1(&"PUBLISH packet sent".into());
-        web_sys::console::log_1(&"publish completed".into());
         Ok(())
     }
 
@@ -972,7 +803,6 @@ impl WasmMqttClient {
                 }
                 Err(_) => {
                     sleep_ms(10).await;
-                    continue;
                 }
             }
         }
@@ -984,7 +814,6 @@ impl WasmMqttClient {
                     Ok(mut state) => break state.next_packet_id(),
                     Err(_) => {
                         sleep_ms(10).await;
-                        continue;
                     }
                 }
             })
@@ -1017,7 +846,6 @@ impl WasmMqttClient {
         writer_rc
             .borrow_mut()
             .write(&buf)
-            .await
             .map_err(|e| JsValue::from_str(&format!("Write failed: {}", e)))?;
 
         Ok(())
@@ -1039,7 +867,6 @@ impl WasmMqttClient {
                 }
                 Err(_) => {
                     sleep_ms(10).await;
-                    continue;
                 }
             }
         }
@@ -1049,7 +876,6 @@ impl WasmMqttClient {
                 Ok(mut state) => break state.next_packet_id(),
                 Err(_) => {
                     sleep_ms(10).await;
-                    continue;
                 }
             }
         };
@@ -1062,7 +888,6 @@ impl WasmMqttClient {
                 }
                 Err(_) => {
                     sleep_ms(10).await;
-                    continue;
                 }
             }
         }
@@ -1092,7 +917,6 @@ impl WasmMqttClient {
         writer_rc
             .borrow_mut()
             .write(&buf)
-            .await
             .map_err(|e| JsValue::from_str(&format!("Write failed: {}", e)))?;
 
         Ok(packet_id)
@@ -1114,7 +938,6 @@ impl WasmMqttClient {
                 }
                 Err(_) => {
                     sleep_ms(10).await;
-                    continue;
                 }
             }
         }
@@ -1124,7 +947,6 @@ impl WasmMqttClient {
                 Ok(mut state) => break state.next_packet_id(),
                 Err(_) => {
                     sleep_ms(10).await;
-                    continue;
                 }
             }
         };
@@ -1138,7 +960,6 @@ impl WasmMqttClient {
                 }
                 Err(_) => {
                     sleep_ms(10).await;
-                    continue;
                 }
             }
         }
@@ -1168,7 +989,6 @@ impl WasmMqttClient {
         writer_rc
             .borrow_mut()
             .write(&buf)
-            .await
             .map_err(|e| JsValue::from_str(&format!("Write failed: {}", e)))?;
 
         Ok(packet_id)
@@ -1185,7 +1005,6 @@ impl WasmMqttClient {
                 }
                 Err(_) => {
                     sleep_ms(10).await;
-                    continue;
                 }
             }
         }
@@ -1195,7 +1014,6 @@ impl WasmMqttClient {
                 Ok(mut state) => break state.next_packet_id(),
                 Err(_) => {
                     sleep_ms(10).await;
-                    continue;
                 }
             }
         };
@@ -1224,7 +1042,6 @@ impl WasmMqttClient {
         writer_rc
             .borrow_mut()
             .write(&buf)
-            .await
             .map_err(|e| JsValue::from_str(&format!("Write failed: {}", e)))?;
 
         Ok(packet_id)
@@ -1246,7 +1063,6 @@ impl WasmMqttClient {
                 }
                 Err(_) => {
                     sleep_ms(10).await;
-                    continue;
                 }
             }
         }
@@ -1256,7 +1072,6 @@ impl WasmMqttClient {
                 Ok(mut state) => break state.next_packet_id(),
                 Err(_) => {
                     sleep_ms(10).await;
-                    continue;
                 }
             }
         };
@@ -1269,7 +1084,6 @@ impl WasmMqttClient {
                 }
                 Err(_) => {
                     sleep_ms(10).await;
-                    continue;
                 }
             }
         }
@@ -1320,7 +1134,6 @@ impl WasmMqttClient {
         writer_rc
             .borrow_mut()
             .write(&buf)
-            .await
             .map_err(|e| JsValue::from_str(&format!("Write failed: {}", e)))?;
 
         Ok(packet_id)
@@ -1331,62 +1144,41 @@ impl WasmMqttClient {
         topic: &str,
         callback: js_sys::Function,
     ) -> Result<u16, JsValue> {
-        web_sys::console::log_1(
-            &format!("subscribe_with_callback called for topic: {}", topic).into(),
-        );
-
-        web_sys::console::log_1(&"Checking connection status...".into());
         loop {
             match self.state.try_borrow() {
                 Ok(state) => {
                     if !state.connected {
-                        web_sys::console::log_1(&"Not connected, returning error".into());
                         return Err(JsValue::from_str("Not connected"));
                     }
-                    web_sys::console::log_1(&"Connected, proceeding...".into());
                     break;
                 }
                 Err(_) => {
-                    web_sys::console::log_1(&"State borrowed, retrying in 10ms...".into());
                     sleep_ms(10).await;
-                    continue;
                 }
             }
         }
 
-        web_sys::console::log_1(&"Getting packet ID...".into());
         let packet_id = loop {
             match self.state.try_borrow_mut() {
-                Ok(mut state) => {
-                    let id = state.next_packet_id();
-                    web_sys::console::log_1(&format!("Got packet ID: {}", id).into());
-                    break id;
-                }
+                Ok(mut state) => break state.next_packet_id(),
                 Err(_) => {
-                    web_sys::console::log_1(&"State mutably borrowed, retrying in 10ms...".into());
                     sleep_ms(10).await;
-                    continue;
                 }
             }
         };
 
-        web_sys::console::log_1(&"Storing subscription callback...".into());
         loop {
             match self.state.try_borrow_mut() {
                 Ok(mut state) => {
                     state.subscriptions.insert(topic.to_string(), callback);
-                    web_sys::console::log_1(&"Callback stored".into());
                     break;
                 }
                 Err(_) => {
-                    web_sys::console::log_1(&"State mutably borrowed, retrying in 10ms...".into());
                     sleep_ms(10).await;
-                    continue;
                 }
             }
         }
 
-        web_sys::console::log_1(&"Creating SUBSCRIBE packet...".into());
         let subscribe_packet = SubscribePacket {
             packet_id,
             properties: Properties::default(),
@@ -1401,10 +1193,6 @@ impl WasmMqttClient {
         encode_packet(&packet, &mut buf)
             .map_err(|e| JsValue::from_str(&format!("Packet encoding failed: {}", e)))?;
 
-        web_sys::console::log_1(
-            &format!("Sending SUBSCRIBE packet ({} bytes)...", buf.len()).into(),
-        );
-
         let writer_rc = self
             .state
             .borrow()
@@ -1415,75 +1203,47 @@ impl WasmMqttClient {
         writer_rc
             .borrow_mut()
             .write(&buf)
-            .await
             .map_err(|e| JsValue::from_str(&format!("Write failed: {}", e)))?;
 
-        web_sys::console::log_1(&"SUBSCRIBE packet sent".into());
-        web_sys::console::log_1(
-            &format!(
-                "subscribe_with_callback completed, packet_id: {}",
-                packet_id
-            )
-            .into(),
-        );
         Ok(packet_id)
     }
 
     pub async fn unsubscribe(&self, topic: &str) -> Result<u16, JsValue> {
-        web_sys::console::log_1(&format!("unsubscribe called for topic: {}", topic).into());
-
-        web_sys::console::log_1(&"Checking connection status...".into());
         loop {
             match self.state.try_borrow() {
                 Ok(state) => {
                     if !state.connected {
-                        web_sys::console::log_1(&"Not connected, returning error".into());
                         return Err(JsValue::from_str("Not connected"));
                     }
-                    web_sys::console::log_1(&"Connected, proceeding...".into());
                     break;
                 }
                 Err(_) => {
-                    web_sys::console::log_1(&"State borrowed, retrying in 10ms...".into());
                     sleep_ms(10).await;
-                    continue;
                 }
             }
         }
 
-        web_sys::console::log_1(&"Getting packet ID...".into());
         let packet_id = loop {
             match self.state.try_borrow_mut() {
-                Ok(mut state) => {
-                    let id = state.next_packet_id();
-                    web_sys::console::log_1(&format!("Got packet ID: {}", id).into());
-                    break id;
-                }
+                Ok(mut state) => break state.next_packet_id(),
                 Err(_) => {
-                    web_sys::console::log_1(&"State mutably borrowed, retrying in 10ms...".into());
                     sleep_ms(10).await;
-                    continue;
                 }
             }
         };
 
-        web_sys::console::log_1(&"Removing subscription from state...".into());
         loop {
             match self.state.try_borrow_mut() {
                 Ok(mut state) => {
                     state.subscriptions.remove(topic);
-                    web_sys::console::log_1(&"Subscription removed".into());
                     break;
                 }
                 Err(_) => {
-                    web_sys::console::log_1(&"State mutably borrowed, retrying in 10ms...".into());
                     sleep_ms(10).await;
-                    continue;
                 }
             }
         }
 
-        web_sys::console::log_1(&"Creating UNSUBSCRIBE packet...".into());
         let unsubscribe_packet = UnsubscribePacket {
             packet_id,
             properties: Properties::default(),
@@ -1495,10 +1255,6 @@ impl WasmMqttClient {
         encode_packet(&packet, &mut buf)
             .map_err(|e| JsValue::from_str(&format!("Packet encoding failed: {}", e)))?;
 
-        web_sys::console::log_1(
-            &format!("Sending UNSUBSCRIBE packet ({} bytes)...", buf.len()).into(),
-        );
-
         let writer_rc = self
             .state
             .borrow()
@@ -1509,18 +1265,12 @@ impl WasmMqttClient {
         writer_rc
             .borrow_mut()
             .write(&buf)
-            .await
             .map_err(|e| JsValue::from_str(&format!("Write failed: {}", e)))?;
 
-        web_sys::console::log_1(&"UNSUBSCRIBE packet sent".into());
-        web_sys::console::log_1(&format!("unsubscribe completed, packet_id: {}", packet_id).into());
         Ok(packet_id)
     }
 
     pub async fn disconnect(&self) -> Result<(), JsValue> {
-        web_sys::console::log_1(&"disconnect called".into());
-
-        web_sys::console::log_1(&"Sending DISCONNECT packet...".into());
         let disconnect_packet = mqtt5_protocol::packet::disconnect::DisconnectPacket {
             reason_code: mqtt5_protocol::protocol::v5::reason_codes::ReasonCode::Success,
             properties: Properties::default(),
@@ -1530,48 +1280,29 @@ impl WasmMqttClient {
         encode_packet(&packet, &mut buf)
             .map_err(|e| JsValue::from_str(&format!("DISCONNECT packet encoding failed: {}", e)))?;
 
-        let writer_rc = self.state.borrow().writer.clone();
-        if let Some(writer_rc) = writer_rc {
-            writer_rc
-                .borrow_mut()
-                .write(&buf)
-                .await
-                .map_err(|e| JsValue::from_str(&format!("DISCONNECT packet send failed: {}", e)))?;
-            web_sys::console::log_1(&"DISCONNECT packet sent".into());
-        }
-
-        web_sys::console::log_1(&"Marking disconnected and taking writer...".into());
         let writer_rc = loop {
             match self.state.try_borrow_mut() {
                 Ok(mut state) => {
                     state.connected = false;
-                    let w = state.writer.take();
-                    web_sys::console::log_1(
-                        &format!("Writer taken, is_some: {}", w.is_some()).into(),
-                    );
-                    break w;
+                    break state.writer.take();
                 }
                 Err(_) => {
-                    web_sys::console::log_1(&"State mutably borrowed, retrying in 10ms...".into());
                     sleep_ms(10).await;
-                    continue;
                 }
             }
         };
 
         if let Some(writer_rc) = writer_rc {
-            web_sys::console::log_1(&"Closing writer...".into());
-            writer_rc
-                .borrow_mut()
+            let mut writer = writer_rc.borrow_mut();
+            writer
+                .write(&buf)
+                .map_err(|e| JsValue::from_str(&format!("DISCONNECT packet send failed: {}", e)))?;
+            writer
                 .close()
-                .await
                 .map_err(|e| JsValue::from_str(&format!("Close failed: {}", e)))?;
-            web_sys::console::log_1(&"Writer closed".into());
         }
 
-        web_sys::console::log_1(&"Triggering disconnect callback...".into());
         Self::trigger_disconnect_callback(&self.state);
-        web_sys::console::log_1(&"disconnect completed".into());
         Ok(())
     }
 

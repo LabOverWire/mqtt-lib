@@ -307,7 +307,7 @@ impl MqttBroker {
             max_message_rate_per_client: 1000,
             max_bandwidth_per_client: 10 * 1024 * 1024,
             max_connection_rate: 100,
-            rate_limit_window: std::time::Duration::from_secs(60),
+            rate_limit_window: crate::time::Duration::from_secs(60),
         }
     }
 
@@ -415,7 +415,7 @@ impl MqttBroker {
         let resource_monitor_clone = Arc::clone(&self.resource_monitor);
         let mut shutdown_rx_cleanup = shutdown_tx.subscribe();
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            let mut interval = tokio::time::interval(crate::time::Duration::from_secs(60));
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
@@ -774,7 +774,7 @@ impl MqttBroker {
         }
 
         // Give clients time to disconnect gracefully
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        tokio::time::sleep(crate::time::Duration::from_millis(100)).await;
 
         info!("Broker shutdown complete");
         Ok(())
@@ -827,7 +827,7 @@ mod tests {
         let broker_handle = tokio::spawn(async move { broker.run().await });
 
         // Give broker time to start
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        tokio::time::sleep(crate::time::Duration::from_millis(10)).await;
 
         // Now test shutdown - but we can't call it because broker was moved
         // Just ensure the broker starts without error for now

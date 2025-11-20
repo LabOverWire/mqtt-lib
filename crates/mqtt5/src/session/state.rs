@@ -413,7 +413,7 @@ impl SessionState {
     }
 
     /// Removes expired messages from the queue
-    pub async fn remove_expired_messages(&self, timeout: std::time::Duration) {
+    pub async fn remove_expired_messages(&self, timeout: crate::time::Duration) {
         self.message_queue.write().await.remove_expired(timeout);
     }
 

@@ -78,7 +78,7 @@ pub struct PooledConnection {
     /// Connection state
     pub state: ConnectionState,
     /// Last activity timestamp
-    pub last_used: std::time::Instant,
+    pub last_used: crate::time::Instant,
 }
 
 /// Connection state for pooling
@@ -125,7 +125,7 @@ impl ConnectionPool {
             if let Some(mut conn) = pool.pop_front() {
                 conn.id = client_id.to_string();
                 conn.state = ConnectionState::InUse;
-                conn.last_used = std::time::Instant::now();
+                conn.last_used = crate::time::Instant::now();
 
                 // Clear buffers for reuse
                 conn.read_buffer.clear();
@@ -149,7 +149,7 @@ impl ConnectionPool {
             read_buffer: BytesMut::with_capacity(self.config.initial_buffer_capacity),
             write_buffer: BytesMut::with_capacity(self.config.initial_buffer_capacity),
             state: ConnectionState::Fresh,
-            last_used: std::time::Instant::now(),
+            last_used: crate::time::Instant::now(),
         };
 
         self.metrics
@@ -249,9 +249,9 @@ impl ConnectionPool {
     }
 
     /// Cleans up expired connections from the pool
-    pub async fn cleanup_expired(&self, max_age: std::time::Duration) {
+    pub async fn cleanup_expired(&self, max_age: crate::time::Duration) {
         let mut pool = self.available_connections.lock().await;
-        let now = std::time::Instant::now();
+        let now = crate::time::Instant::now();
 
         let initial_size = pool.len();
         pool.retain(|conn| now.duration_since(conn.last_used) < max_age);
@@ -439,7 +439,7 @@ impl PooledConnectionManager {
     pub async fn maintain_pools(&self) {
         // Clean up connections older than 5 minutes
         self.connection_pool
-            .cleanup_expired(std::time::Duration::from_secs(300))
+            .cleanup_expired(crate::time::Duration::from_secs(300))
             .await;
     }
 }
@@ -561,7 +561,7 @@ mod tests {
         pool.return_connection(conn).await;
 
         // Clean up with very short timeout - should remove the connection
-        pool.cleanup_expired(std::time::Duration::from_nanos(1))
+        pool.cleanup_expired(crate::time::Duration::from_nanos(1))
             .await;
 
         // Next get should create a new connection

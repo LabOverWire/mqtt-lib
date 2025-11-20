@@ -201,6 +201,10 @@ impl PasswordAuthProvider {
         self
     }
 
+    pub fn set_allow_anonymous(&mut self, allow: bool) {
+        self.allow_anonymous = allow;
+    }
+
     /// Loads or reloads the password file
     ///
     /// # Errors

@@ -128,6 +128,6 @@ pub struct ConnectionStats {
     pub messages_received: u64,
     pub bytes_sent: u64,
     pub bytes_received: u64,
-    pub connect_time: Option<std::time::Instant>,
-    pub last_message_time: Option<std::time::Instant>,
+    pub connect_time: Option<crate::time::Instant>,
+    pub last_message_time: Option<crate::time::Instant>,
 }

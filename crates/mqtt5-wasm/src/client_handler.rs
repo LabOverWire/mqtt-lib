@@ -171,9 +171,10 @@ impl WasmClientHandler {
 
         if !keep_alive.is_zero() {
             spawn_local(async move {
-                let timeout = keep_alive + mqtt5::time::Duration::from_secs(keep_alive.as_secs() / 2);
+                let timeout =
+                    keep_alive + mqtt5::time::Duration::from_secs(keep_alive.as_secs() / 2);
                 loop {
-                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                    gloo_timers::future::sleep(std::time::Duration::from_secs(1)).await;
 
                     if !*running_ka.borrow() {
                         break;
@@ -251,7 +252,7 @@ impl WasmClientHandler {
 
         let mut buf = BytesMut::new();
         publish.encode(&mut buf)?;
-        writer.write(&buf).await?;
+        writer.write(&buf)?;
         Ok(())
     }
 
@@ -651,8 +652,10 @@ impl WasmClientHandler {
                         let publish_clone = publish.clone();
                         let client_id_clone = client_id.to_string();
                         spawn_local(async move {
-                            tokio::time::sleep(tokio::time::Duration::from_secs(u64::from(delay)))
-                                .await;
+                            gloo_timers::future::sleep(std::time::Duration::from_secs(u64::from(
+                                delay,
+                            )))
+                            .await;
                             debug!("Publishing delayed will message for {}", client_id_clone);
                             router.route_message(&publish_clone, None).await;
                         });
@@ -701,7 +704,7 @@ impl WasmClientHandler {
             }
         }
 
-        writer.write(&buf).await?;
+        writer.write(&buf)?;
         Ok(())
     }
 }

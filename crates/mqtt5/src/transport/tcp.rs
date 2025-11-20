@@ -266,7 +266,7 @@ mod tests {
         });
 
         // Give broker time to start
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        tokio::time::sleep(crate::time::Duration::from_millis(500)).await;
 
         let mut transport = TcpTransport::from_addr(broker_addr);
 

@@ -48,7 +48,7 @@ impl TurmoilBrokerConfig {
 
     /// Sets the duration (for compatibility - stored but not used)
     #[must_use]
-    pub fn with_duration(self, _duration: std::time::Duration) -> Self {
+    pub fn with_duration(self, _duration: crate::time::Duration) -> Self {
         self
     }
 

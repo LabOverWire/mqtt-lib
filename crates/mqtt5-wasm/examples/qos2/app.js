@@ -1,4 +1,4 @@
-import init, { WasmMqttClient } from './pkg/mqtt5.js';
+import init, { WasmMqttClient } from './pkg/mqtt5_wasm.js';
 
 let client = null;
 let isConnected = false;
