@@ -153,14 +153,14 @@ jobs:
         run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
 
       - name: Check WASM compilation
-        run: cargo check --target wasm32-unknown-unknown --features wasm-full -p mqtt5
+        run: cargo check --target wasm32-unknown-unknown --all-features -p mqtt5-wasm
 
       - name: Build WASM package
         run: |
-          cd crates/mqtt5
-          wasm-pack build --target web --features wasm-client,wasm-broker
+          cd crates/mqtt5-wasm
+          wasm-pack build --target web --features client,broker
 
       - name: Verify WASM output
         run: |
-          ls -lh crates/mqtt5/pkg/
+          ls -lh crates/mqtt5-wasm/pkg/
           echo "✅ WASM package built successfully"

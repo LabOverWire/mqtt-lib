@@ -157,7 +157,6 @@ echo "Copying WASM package to example directories..."
 cd crates/mqtt5-wasm
 cp -r pkg examples/websocket/
 cp -r pkg examples/local-broker/
-cp -r pkg examples/qos2/
 echo "✨ WASM examples ready!"
 echo ""
 echo "Run examples with:"

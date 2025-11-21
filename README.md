@@ -211,7 +211,7 @@ WebAssembly builds for browser environments with three deployment modes.
 Connect to remote MQTT brokers using WebSocket transport:
 
 ```javascript
-import init, { WasmMqttClient } from "./pkg/mqtt5.js";
+import init, { WasmMqttClient } from "./pkg/mqtt5_wasm.js";
 
 await init();
 const client = new WasmMqttClient("browser-client");
@@ -224,7 +224,7 @@ await client.connect("ws://broker.example.com:8080/mqtt");
 MQTT broker in a browser tab:
 
 ```javascript
-import init, { WasmBroker, WasmMqttClient } from "./pkg/mqtt5.js";
+import init, { WasmBroker, WasmMqttClient } from "./pkg/mqtt5_wasm.js";
 
 await init();
 const broker = new WasmBroker();
@@ -386,7 +386,7 @@ MQTT v5.0 broker in browser:
 See `crates/mqtt5-wasm/examples/` for browser examples:
 
 - `websocket/` - External broker connections
-- `qos2/` - QoS 2 flow visualization
+- `local-broker/` - In-tab broker with MessagePort
 - Complete HTML/JavaScript/CSS applications
 - Build instructions with `wasm-pack`
 

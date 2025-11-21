@@ -55,7 +55,7 @@ Open http://localhost:8000 in your browser.
 ### Local Broker Features
 
 ```javascript
-import init, { WasmBroker, WasmMqttClient } from './pkg/mqtt5.js';
+import init, { WasmBroker, WasmMqttClient } from './pkg/mqtt5_wasm.js';
 
 await init();
 
