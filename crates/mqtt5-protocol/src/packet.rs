@@ -83,8 +83,7 @@ use bytes::{Buf, BufMut};
 /// Used by `PubAck`, `PubRec`, `PubRel`, and `PubComp` packets
 #[derive(Debug, Clone, Copy, PartialEq, Eq, BeBytes)]
 pub struct AckPacketHeader {
-    /// Packet identifier (big-endian u16)
-    #[bebytes(big_endian)]
+    /// Packet identifier
     pub packet_id: u16,
     /// Reason code (single byte)
     pub reason_code: u8,
