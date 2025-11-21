@@ -7,8 +7,8 @@ use mqtt5::broker::resource_monitor::ResourceMonitor;
 use mqtt5::broker::router::MessageRouter;
 use mqtt5::broker::storage::{ClientSession, DynamicStorage, StorageBackend};
 use mqtt5::broker::sys_topics::BrokerStats;
-use mqtt5_protocol::packet::auth::AuthPacket;
 use mqtt5_protocol::error::{MqttError, Result};
+use mqtt5_protocol::packet::auth::AuthPacket;
 use mqtt5_protocol::packet::connack::ConnAckPacket;
 use mqtt5_protocol::packet::connect::ConnectPacket;
 use mqtt5_protocol::packet::disconnect::DisconnectPacket;
@@ -698,9 +698,7 @@ impl WasmClientHandler {
                 let auth_method = match self.auth_method.clone() {
                     Some(m) => m,
                     None => {
-                        return Err(MqttError::ProtocolError(
-                            "No auth method set".to_string(),
-                        ));
+                        return Err(MqttError::ProtocolError("No auth method set".to_string()));
                     }
                 };
 
@@ -756,7 +754,8 @@ impl WasmClientHandler {
                     None => {
                         let disconnect = DisconnectPacket {
                             reason_code: ReasonCode::ProtocolError,
-                            properties: mqtt5_protocol::protocol::v5::properties::Properties::default(),
+                            properties:
+                                mqtt5_protocol::protocol::v5::properties::Properties::default(),
                         };
                         self.write_packet(Packet::Disconnect(disconnect), writer)
                             .await?;
@@ -771,12 +770,7 @@ impl WasmClientHandler {
 
                 let result = self
                     .auth_provider
-                    .reauthenticate(
-                        &auth_method,
-                        auth_data,
-                        &client_id,
-                        self.user_id.as_deref(),
-                    )
+                    .reauthenticate(&auth_method, auth_data, &client_id, self.user_id.as_deref())
                     .await?;
 
                 match result.status {
@@ -807,7 +801,8 @@ impl WasmClientHandler {
                         warn!("Re-authentication failed for {}", client_id);
                         let disconnect = DisconnectPacket {
                             reason_code: result.reason_code,
-                            properties: mqtt5_protocol::protocol::v5::properties::Properties::default(),
+                            properties:
+                                mqtt5_protocol::protocol::v5::properties::Properties::default(),
                         };
                         self.write_packet(Packet::Disconnect(disconnect), writer)
                             .await?;
@@ -852,9 +847,9 @@ impl WasmClientHandler {
                         connack.properties.set_authentication_data(data.into());
                     }
 
-                    connack
-                        .properties
-                        .set_session_expiry_interval(self.config.session_expiry_interval.as_secs() as u32);
+                    connack.properties.set_session_expiry_interval(
+                        self.config.session_expiry_interval.as_secs() as u32,
+                    );
                     if self.config.maximum_qos < 2 {
                         connack.properties.set_maximum_qos(self.config.maximum_qos);
                     }
@@ -865,15 +860,15 @@ impl WasmClientHandler {
                     connack
                         .properties
                         .set_topic_alias_maximum(self.config.topic_alias_maximum);
-                    connack
-                        .properties
-                        .set_wildcard_subscription_available(self.config.wildcard_subscription_available);
-                    connack
-                        .properties
-                        .set_subscription_identifier_available(self.config.subscription_identifier_available);
-                    connack
-                        .properties
-                        .set_shared_subscription_available(self.config.shared_subscription_available);
+                    connack.properties.set_wildcard_subscription_available(
+                        self.config.wildcard_subscription_available,
+                    );
+                    connack.properties.set_subscription_identifier_available(
+                        self.config.subscription_identifier_available,
+                    );
+                    connack.properties.set_shared_subscription_available(
+                        self.config.shared_subscription_available,
+                    );
 
                     self.write_packet(Packet::ConnAck(connack), writer).await?;
 

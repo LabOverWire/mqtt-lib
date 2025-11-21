@@ -65,8 +65,10 @@ pub fn execute(cmd: PasswdCommand) -> Result<()> {
 
 fn hash_password(password: &str) -> Result<String> {
     let mut bytes = [0u8; Salt::RECOMMENDED_LENGTH];
-    getrandom::fill(&mut bytes).map_err(|e| anyhow::anyhow!("Failed to generate random salt: {e}"))?;
-    let salt = SaltString::encode_b64(&bytes).map_err(|e| anyhow::anyhow!("Failed to encode salt: {e}"))?;
+    getrandom::fill(&mut bytes)
+        .map_err(|e| anyhow::anyhow!("Failed to generate random salt: {e}"))?;
+    let salt = SaltString::encode_b64(&bytes)
+        .map_err(|e| anyhow::anyhow!("Failed to encode salt: {e}"))?;
     let argon2 = Argon2::default();
     argon2
         .hash_password(password.as_bytes(), &salt)
