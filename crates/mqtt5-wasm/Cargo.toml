@@ -7,6 +7,10 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "MQTT v5.0 WebAssembly client and broker for browser environments"
+documentation = "https://docs.rs/mqtt5-wasm"
+readme = "README.md"
+keywords = ["mqtt", "wasm", "webassembly", "iot", "pubsub"]
+categories = ["wasm", "network-programming"]
 
 [lib]
 crate-type = ["cdylib", "rlib"]

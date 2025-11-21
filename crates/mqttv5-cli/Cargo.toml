@@ -7,6 +7,8 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Superior CLI tool for MQTT v5.0 - unified client and broker commands with ergonomic input design"
+documentation = "https://docs.rs/mqttv5-cli"
+readme = "README.md"
 keywords = ["mqtt", "cli", "client", "broker", "iot"]
 categories = ["command-line-utilities", "network-programming"]
 
