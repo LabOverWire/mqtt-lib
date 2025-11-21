@@ -328,7 +328,7 @@ impl MqttClient {
                 config.use_system_roots = false;
                 tracing::debug!(
                     "Loaded CA cert, use_system_roots=false, has {} certs",
-                    config.root_certs.as_ref().map_or(0, bebytes::Vec::len)
+                    config.root_certs.as_ref().map_or(0, Vec::len)
                 );
             }
 
