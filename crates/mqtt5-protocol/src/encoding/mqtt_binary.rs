@@ -10,7 +10,6 @@ use bytes::Bytes;
 #[derive(Debug, Clone, PartialEq, Eq, BeBytes)]
 pub struct MqttBinary {
     /// Length of the binary data in bytes (big-endian)
-    #[bebytes(big_endian)]
     length: u16,
 
     /// Binary data with size determined by length field
