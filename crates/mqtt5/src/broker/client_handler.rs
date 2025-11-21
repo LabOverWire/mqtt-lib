@@ -1,7 +1,6 @@
 //! Client connection handler for the MQTT broker - simplified version
 
 use crate::broker::auth::{AuthProvider, EnhancedAuthStatus};
-use crate::packet::auth::AuthPacket;
 use crate::broker::config::BrokerConfig;
 use crate::broker::resource_monitor::ResourceMonitor;
 use crate::broker::router::MessageRouter;
@@ -9,6 +8,7 @@ use crate::broker::storage::{ClientSession, DynamicStorage, StorageBackend};
 use crate::broker::sys_topics::BrokerStats;
 use crate::broker::transport::BrokerTransport;
 use crate::error::{MqttError, Result};
+use crate::packet::auth::AuthPacket;
 use crate::packet::connack::ConnAckPacket;
 use crate::packet::connect::ConnectPacket;
 use crate::packet::disconnect::DisconnectPacket;
@@ -486,11 +486,7 @@ impl ClientHandler {
 
                 let result = self
                     .auth_provider
-                    .authenticate_enhanced(
-                        method,
-                        auth_data_prop,
-                        &connect.client_id,
-                    )
+                    .authenticate_enhanced(method, auth_data_prop, &connect.client_id)
                     .await?;
 
                 match result.status {
@@ -1119,11 +1115,7 @@ impl ClientHandler {
             ReasonCode::ContinueAuthentication => {
                 let result = self
                     .auth_provider
-                    .authenticate_enhanced(
-                        &auth_method,
-                        auth.authentication_data(),
-                        &client_id,
-                    )
+                    .authenticate_enhanced(&auth_method, auth.authentication_data(), &client_id)
                     .await?;
 
                 match result.status {
@@ -1133,7 +1125,8 @@ impl ClientHandler {
                         if let Some(pending) = self.pending_connect.take() {
                             let session_present = self.handle_session(&pending.connect).await?;
 
-                            let mut connack = ConnAckPacket::new(session_present, ReasonCode::Success);
+                            let mut connack =
+                                ConnAckPacket::new(session_present, ReasonCode::Success);
 
                             if let Some(ref assigned_id) = pending.assigned_client_id {
                                 connack
@@ -1156,7 +1149,8 @@ impl ClientHandler {
                                 .await?;
 
                             if session_present {
-                                self.deliver_queued_messages(&pending.connect.client_id).await?;
+                                self.deliver_queued_messages(&pending.connect.client_id)
+                                    .await?;
                             }
                         } else {
                             let success_auth = AuthPacket::success(result.auth_method)?;
@@ -1166,14 +1160,17 @@ impl ClientHandler {
                         }
                     }
                     EnhancedAuthStatus::Continue => {
-                        let continue_auth =
-                            AuthPacket::continue_authentication(result.auth_method, result.auth_data)?;
+                        let continue_auth = AuthPacket::continue_authentication(
+                            result.auth_method,
+                            result.auth_data,
+                        )?;
                         self.transport
                             .write_packet(Packet::Auth(continue_auth))
                             .await?;
                     }
                     EnhancedAuthStatus::Failed => {
-                        let failure_auth = AuthPacket::failure(result.reason_code, result.reason_string)?;
+                        let failure_auth =
+                            AuthPacket::failure(result.reason_code, result.reason_string)?;
                         self.transport
                             .write_packet(Packet::Auth(failure_auth))
                             .await?;
@@ -1206,8 +1203,10 @@ impl ClientHandler {
                             .await?;
                     }
                     EnhancedAuthStatus::Continue => {
-                        let continue_auth =
-                            AuthPacket::continue_authentication(result.auth_method, result.auth_data)?;
+                        let continue_auth = AuthPacket::continue_authentication(
+                            result.auth_method,
+                            result.auth_data,
+                        )?;
                         self.transport
                             .write_packet(Packet::Auth(continue_auth))
                             .await?;

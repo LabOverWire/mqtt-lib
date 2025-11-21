@@ -5,8 +5,7 @@ use crate::error::MqttError;
 use crate::error::Result;
 use crate::packet::connect::ConnectPacket;
 use crate::protocol::v5::reason_codes::ReasonCode;
-use argon2::password_hash::rand_core::OsRng;
-use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
+use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, Salt, SaltString};
 use argon2::Argon2;
 use base64::prelude::*;
 use std::collections::HashMap;
@@ -903,7 +902,15 @@ impl PasswordAuthProvider {
     ///
     /// Returns an error if Argon2 hashing fails
     pub fn hash_password(password: &str) -> Result<String> {
-        let salt = SaltString::generate(&mut OsRng);
+        let mut bytes = [0u8; Salt::RECOMMENDED_LENGTH];
+        getrandom::fill(&mut bytes).map_err(|e| {
+            error!("Failed to generate random salt: {}", e);
+            MqttError::AuthenticationFailed
+        })?;
+        let salt = SaltString::encode_b64(&bytes).map_err(|e| {
+            error!("Failed to encode salt: {}", e);
+            MqttError::AuthenticationFailed
+        })?;
         let argon2 = Argon2::default();
         argon2
             .hash_password(password.as_bytes(), &salt)
@@ -1511,10 +1518,8 @@ mod tests {
         assert_eq!(result.reason_code, ReasonCode::ContinueAuthentication);
         assert_eq!(result.auth_data, Some(b"challenge".to_vec()));
 
-        let result = EnhancedAuthResult::fail(
-            "SCRAM-SHA-256".to_string(),
-            ReasonCode::NotAuthorized,
-        );
+        let result =
+            EnhancedAuthResult::fail("SCRAM-SHA-256".to_string(), ReasonCode::NotAuthorized);
         assert_eq!(result.status, EnhancedAuthStatus::Failed);
         assert_eq!(result.reason_code, ReasonCode::NotAuthorized);
 
@@ -1611,16 +1616,11 @@ mod tests {
                 }
 
                 match auth_data {
-                    None => {
-                        Ok(EnhancedAuthResult::continue_auth(method, Some(challenge)))
-                    }
+                    None => Ok(EnhancedAuthResult::continue_auth(method, Some(challenge))),
                     Some(response) if response == expected => {
                         Ok(EnhancedAuthResult::success(method))
                     }
-                    Some(_) => Ok(EnhancedAuthResult::fail(
-                        method,
-                        ReasonCode::NotAuthorized,
-                    )),
+                    Some(_) => Ok(EnhancedAuthResult::fail(method, ReasonCode::NotAuthorized)),
                 }
             })
         }
@@ -1653,21 +1653,13 @@ mod tests {
         assert_eq!(result.auth_data, Some(b"server-challenge".to_vec()));
 
         let result = provider
-            .authenticate_enhanced(
-                "CHALLENGE-RESPONSE",
-                Some(b"correct-response"),
-                "client-1",
-            )
+            .authenticate_enhanced("CHALLENGE-RESPONSE", Some(b"correct-response"), "client-1")
             .await
             .unwrap();
         assert_eq!(result.status, EnhancedAuthStatus::Success);
 
         let result = provider
-            .authenticate_enhanced(
-                "CHALLENGE-RESPONSE",
-                Some(b"wrong-response"),
-                "client-1",
-            )
+            .authenticate_enhanced("CHALLENGE-RESPONSE", Some(b"wrong-response"), "client-1")
             .await
             .unwrap();
         assert_eq!(result.status, EnhancedAuthStatus::Failed);

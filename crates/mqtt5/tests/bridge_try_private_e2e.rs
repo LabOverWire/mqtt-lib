@@ -55,11 +55,11 @@ async fn test_bridge_with_try_private_true() {
     let client2 = MqttClient::new("subscriber");
 
     client1
-        .connect(&format!("mqtt://{}", broker1_addr))
+        .connect(&format!("mqtt://{broker1_addr}"))
         .await
         .unwrap();
     client2
-        .connect(&format!("mqtt://{}", broker2_addr))
+        .connect(&format!("mqtt://{broker2_addr}"))
         .await
         .unwrap();
 
@@ -138,11 +138,11 @@ async fn test_bridge_with_try_private_false() {
     let client2 = MqttClient::new("subscriber2");
 
     client1
-        .connect(&format!("mqtt://{}", broker1_addr))
+        .connect(&format!("mqtt://{broker1_addr}"))
         .await
         .unwrap();
     client2
-        .connect(&format!("mqtt://{}", broker2_addr))
+        .connect(&format!("mqtt://{broker2_addr}"))
         .await
         .unwrap();
 
@@ -224,11 +224,11 @@ async fn test_bridge_bidirectional_with_try_private() {
     let client2 = Arc::new(MqttClient::new("client-on-broker2"));
 
     client1
-        .connect(&format!("mqtt://{}", broker1_addr))
+        .connect(&format!("mqtt://{broker1_addr}"))
         .await
         .unwrap();
     client2
-        .connect(&format!("mqtt://{}", broker2_addr))
+        .connect(&format!("mqtt://{broker2_addr}"))
         .await
         .unwrap();
 

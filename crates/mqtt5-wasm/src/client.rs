@@ -47,6 +47,8 @@ struct ClientState {
     on_connect: Option<js_sys::Function>,
     on_disconnect: Option<js_sys::Function>,
     on_error: Option<js_sys::Function>,
+    on_auth_challenge: Option<js_sys::Function>,
+    auth_method: Option<String>,
 }
 
 impl ClientState {
@@ -68,6 +70,8 @@ impl ClientState {
             on_connect: None,
             on_disconnect: None,
             on_error: None,
+            on_auth_challenge: None,
+            auth_method: None,
         }
     }
 
@@ -91,6 +95,7 @@ fn encode_packet(packet: &Packet, buf: &mut BytesMut) -> mqtt5_protocol::error::
         Packet::PingReq => mqtt5_protocol::packet::pingreq::PingReqPacket::default().encode(buf),
         Packet::Disconnect(p) => p.encode(buf),
         Packet::Unsubscribe(p) => p.encode(buf),
+        Packet::Auth(p) => p.encode(buf),
         _ => Err(mqtt5_protocol::error::MqttError::ProtocolError(format!(
             "Encoding not yet implemented for packet type: {:?}",
             packet
@@ -607,6 +612,36 @@ impl WasmMqttClient {
                     }
                 }
             }
+            Packet::Auth(auth) => {
+                let reason_code = auth.reason_code;
+
+                if reason_code == mqtt5_protocol::protocol::v5::reason_codes::ReasonCode::ContinueAuthentication {
+                    let callback = state.borrow().on_auth_challenge.clone();
+                    if let Some(callback) = callback {
+                        let auth_method = auth
+                            .properties
+                            .get_authentication_method()
+                            .cloned()
+                            .unwrap_or_default();
+                        let auth_data = auth.properties.get_authentication_data();
+
+                        let method_js = JsValue::from_str(&auth_method);
+                        let data_js = if let Some(data) = auth_data {
+                            js_sys::Uint8Array::from(data).into()
+                        } else {
+                            JsValue::NULL
+                        };
+
+                        if let Err(e) = callback.call2(&JsValue::NULL, &method_js, &data_js) {
+                            web_sys::console::error_1(
+                                &format!("onAuthChallenge callback error: {:?}", e).into(),
+                            );
+                        }
+                    }
+                } else if reason_code == mqtt5_protocol::protocol::v5::reason_codes::ReasonCode::Success {
+                    web_sys::console::log_1(&"Authentication successful".into());
+                }
+            }
             _ => {
                 web_sys::console::warn_1(&format!("Unhandled packet type: {:?}", packet).into());
             }
@@ -704,41 +739,94 @@ impl WasmMqttClient {
             .await
             .map_err(|e| JsValue::from_str(&format!("Write failed: {}", e)))?;
 
+        if let Some(method) = &config.authentication_method {
+            self.state.borrow_mut().auth_method = Some(method.clone());
+        }
+
         let (mut reader, writer) = transport
             .into_split()
             .map_err(|e| JsValue::from_str(&format!("Transport split failed: {}", e)))?;
 
-        let connack = read_packet(&mut reader)
-            .await
-            .map_err(|e| JsValue::from_str(&format!("CONNACK read failed: {}", e)))?;
+        let writer_rc = Rc::new(RefCell::new(writer));
+        self.state.borrow_mut().writer = Some(Rc::clone(&writer_rc));
 
-        if let Packet::ConnAck(connack) = connack {
-            let reason_code = connack.reason_code;
-            let session_present = connack.session_present;
+        loop {
+            let packet = read_packet(&mut reader)
+                .await
+                .map_err(|e| JsValue::from_str(&format!("Packet read failed: {}", e)))?;
 
-            self.state.borrow_mut().writer = Some(Rc::new(RefCell::new(writer)));
-            self.state.borrow_mut().connected = true;
+            match packet {
+                Packet::ConnAck(connack) => {
+                    let reason_code = connack.reason_code;
+                    let session_present = connack.session_present;
 
-            self.spawn_packet_reader(reader);
-            self.spawn_keepalive_task();
-            self.spawn_qos2_cleanup_task();
+                    self.state.borrow_mut().connected = true;
 
-            let callback = self.state.borrow().on_connect.clone();
-            if let Some(callback) = callback {
-                let reason_code_js = JsValue::from_f64(reason_code as u8 as f64);
-                let session_present_js = JsValue::from_bool(session_present);
+                    self.spawn_packet_reader(reader);
+                    self.spawn_keepalive_task();
+                    self.spawn_qos2_cleanup_task();
 
-                if let Err(e) = callback.call2(&JsValue::NULL, &reason_code_js, &session_present_js)
-                {
-                    web_sys::console::error_1(&format!("onConnect callback error: {:?}", e).into());
+                    let callback = self.state.borrow().on_connect.clone();
+                    if let Some(callback) = callback {
+                        let reason_code_js = JsValue::from_f64(reason_code as u8 as f64);
+                        let session_present_js = JsValue::from_bool(session_present);
+
+                        if let Err(e) =
+                            callback.call2(&JsValue::NULL, &reason_code_js, &session_present_js)
+                        {
+                            web_sys::console::error_1(
+                                &format!("onConnect callback error: {:?}", e).into(),
+                            );
+                        }
+                    }
+
+                    return Ok(());
+                }
+                Packet::Auth(auth) => {
+                    let auth_reason = auth.reason_code;
+                    if auth_reason
+                        == mqtt5_protocol::protocol::v5::reason_codes::ReasonCode::ContinueAuthentication
+                    {
+                        let callback = self.state.borrow().on_auth_challenge.clone();
+                        if let Some(callback) = callback {
+                            let auth_method = auth
+                                .properties
+                                .get_authentication_method()
+                                .cloned()
+                                .unwrap_or_default();
+                            let auth_data = auth.properties.get_authentication_data();
+
+                            let method_js = JsValue::from_str(&auth_method);
+                            let data_js = if let Some(data) = auth_data {
+                                js_sys::Uint8Array::from(data).into()
+                            } else {
+                                JsValue::NULL
+                            };
+
+                            if let Err(e) = callback.call2(&JsValue::NULL, &method_js, &data_js) {
+                                web_sys::console::error_1(
+                                    &format!("onAuthChallenge callback error: {:?}", e).into(),
+                                );
+                            }
+                        } else {
+                            return Err(JsValue::from_str(
+                                "AUTH challenge received but no on_auth_challenge callback set",
+                            ));
+                        }
+                    } else {
+                        return Err(JsValue::from_str(&format!(
+                            "Unexpected AUTH reason code: {:?}",
+                            auth_reason
+                        )));
+                    }
+                }
+                _ => {
+                    return Err(JsValue::from_str(&format!(
+                        "Expected CONNACK or AUTH, received: {:?}",
+                        packet
+                    )));
                 }
             }
-
-            Ok(())
-        } else {
-            Err(JsValue::from_str(
-                "Expected CONNACK, received different packet",
-            ))
         }
     }
 
@@ -1320,5 +1408,47 @@ impl WasmMqttClient {
 
     pub fn on_error(&self, callback: js_sys::Function) {
         self.state.borrow_mut().on_error = Some(callback);
+    }
+
+    pub fn on_auth_challenge(&self, callback: js_sys::Function) {
+        self.state.borrow_mut().on_auth_challenge = Some(callback);
+    }
+
+    pub async fn respond_auth(&self, auth_data: &[u8]) -> Result<(), JsValue> {
+        let auth_method = self
+            .state
+            .borrow()
+            .auth_method
+            .clone()
+            .ok_or_else(|| JsValue::from_str("No auth method set"))?;
+
+        let mut auth_packet = mqtt5_protocol::packet::auth::AuthPacket::new(
+            mqtt5_protocol::protocol::v5::reason_codes::ReasonCode::ContinueAuthentication,
+        );
+        auth_packet
+            .properties
+            .set_authentication_method(auth_method);
+        auth_packet
+            .properties
+            .set_authentication_data(auth_data.to_vec().into());
+
+        let packet = Packet::Auth(auth_packet);
+        let mut buf = BytesMut::new();
+        encode_packet(&packet, &mut buf)
+            .map_err(|e| JsValue::from_str(&format!("AUTH packet encoding failed: {}", e)))?;
+
+        let writer_rc = self
+            .state
+            .borrow()
+            .writer
+            .clone()
+            .ok_or_else(|| JsValue::from_str("Writer disconnected"))?;
+
+        writer_rc
+            .borrow_mut()
+            .write(&buf)
+            .map_err(|e| JsValue::from_str(&format!("AUTH send failed: {}", e)))?;
+
+        Ok(())
     }
 }

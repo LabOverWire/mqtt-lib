@@ -1,6 +1,5 @@
 use anyhow::{bail, Context, Result};
-use argon2::password_hash::rand_core::OsRng;
-use argon2::password_hash::{PasswordHasher, SaltString};
+use argon2::password_hash::{PasswordHasher, Salt, SaltString};
 use argon2::Argon2;
 use clap::Args;
 use std::collections::HashMap;
@@ -65,12 +64,14 @@ pub fn execute(cmd: PasswdCommand) -> Result<()> {
 }
 
 fn hash_password(password: &str) -> Result<String> {
-    let salt = SaltString::generate(&mut OsRng);
+    let mut bytes = [0u8; Salt::RECOMMENDED_LENGTH];
+    getrandom::fill(&mut bytes).map_err(|e| anyhow::anyhow!("Failed to generate random salt: {e}"))?;
+    let salt = SaltString::encode_b64(&bytes).map_err(|e| anyhow::anyhow!("Failed to encode salt: {e}"))?;
     let argon2 = Argon2::default();
     argon2
         .hash_password(password.as_bytes(), &salt)
         .map(|hash| hash.to_string())
-        .map_err(|e| anyhow::anyhow!("Failed to hash password: {}", e))
+        .map_err(|e| anyhow::anyhow!("Failed to hash password: {e}"))
 }
 
 fn handle_stdout_mode(cmd: &PasswdCommand) -> Result<()> {

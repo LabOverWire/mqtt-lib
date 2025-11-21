@@ -1,12 +1,13 @@
 use crate::decoder::read_packet;
 use crate::transport::message_port::MessagePortTransport;
 use crate::transport::{WasmReader, WasmWriter};
-use mqtt5::broker::auth::AuthProvider;
+use mqtt5::broker::auth::{AuthProvider, EnhancedAuthResult, EnhancedAuthStatus};
 use mqtt5::broker::config::BrokerConfig;
 use mqtt5::broker::resource_monitor::ResourceMonitor;
 use mqtt5::broker::router::MessageRouter;
 use mqtt5::broker::storage::{ClientSession, DynamicStorage, StorageBackend};
 use mqtt5::broker::sys_topics::BrokerStats;
+use mqtt5_protocol::packet::auth::AuthPacket;
 use mqtt5_protocol::error::{MqttError, Result};
 use mqtt5_protocol::packet::connack::ConnAckPacket;
 use mqtt5_protocol::packet::connect::ConnectPacket;
@@ -30,6 +31,18 @@ use tracing::{debug, error, info, warn};
 use wasm_bindgen_futures::spawn_local;
 use web_sys::MessagePort;
 
+#[derive(Debug, Clone, PartialEq)]
+enum AuthState {
+    NotStarted,
+    InProgress,
+    Completed,
+}
+
+struct PendingConnect {
+    connect: ConnectPacket,
+    assigned_client_id: Option<String>,
+}
+
 pub struct WasmClientHandler {
     handler_id: u32,
     client_id: Option<String>,
@@ -46,6 +59,9 @@ pub struct WasmClientHandler {
     inflight_publishes: HashMap<u16, PublishPacket>,
     normal_disconnect: bool,
     keep_alive: mqtt5::time::Duration,
+    auth_method: Option<String>,
+    auth_state: AuthState,
+    pending_connect: Option<PendingConnect>,
 }
 
 static HANDLER_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
@@ -79,6 +95,9 @@ impl WasmClientHandler {
             inflight_publishes: HashMap::new(),
             normal_disconnect: false,
             keep_alive: mqtt5::time::Duration::from_secs(60),
+            auth_method: None,
+            auth_state: AuthState::NotStarted,
+            pending_connect: None,
         };
 
         spawn_local(async move {
@@ -267,6 +286,7 @@ impl WasmClientHandler {
             Packet::PubComp(pubcomp) => self.handle_pubcomp(pubcomp).await,
             Packet::PingReq => self.handle_pingreq(writer).await,
             Packet::Disconnect(disconnect) => self.handle_disconnect(disconnect).await,
+            Packet::Auth(auth) => self.handle_auth(auth, writer).await,
             _ => {
                 warn!("Unexpected packet type");
                 Ok(())
@@ -300,6 +320,25 @@ impl WasmClientHandler {
         use std::net::{IpAddr, Ipv4Addr, SocketAddr};
         let dummy_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
 
+        if let Some(auth_method) = connect.properties.get_authentication_method() {
+            if self.auth_provider.supports_enhanced_auth() {
+                self.auth_method = Some(auth_method.clone());
+                self.auth_state = AuthState::InProgress;
+                self.pending_connect = Some(PendingConnect {
+                    connect: connect.clone(),
+                    assigned_client_id: assigned_client_id.clone(),
+                });
+
+                let auth_data = connect.properties.get_authentication_data();
+                let result = self
+                    .auth_provider
+                    .authenticate_enhanced(auth_method, auth_data, &connect.client_id)
+                    .await?;
+
+                return self.process_enhanced_auth_result(result, writer).await;
+            }
+        }
+
         let auth_result = self
             .auth_provider
             .authenticate(&connect, dummy_addr)
@@ -314,6 +353,7 @@ impl WasmClientHandler {
         self.client_id = Some(connect.client_id.clone());
         self.user_id = auth_result.user_id;
         self.keep_alive = mqtt5::time::Duration::from_secs(u64::from(connect.keep_alive));
+        self.auth_state = AuthState::Completed;
 
         let session_present = self.handle_session(&connect).await?;
 
@@ -636,6 +676,237 @@ impl WasmClientHandler {
         Err(MqttError::ClientClosed)
     }
 
+    #[allow(clippy::too_many_lines)]
+    async fn handle_auth(&mut self, auth: AuthPacket, writer: &mut WasmWriter) -> Result<()> {
+        let reason_code = auth.reason_code;
+
+        match reason_code {
+            ReasonCode::ContinueAuthentication => {
+                if self.auth_state != AuthState::InProgress {
+                    warn!("AUTH received but not in auth flow");
+                    let disconnect = DisconnectPacket {
+                        reason_code: ReasonCode::ProtocolError,
+                        properties: mqtt5_protocol::protocol::v5::properties::Properties::default(),
+                    };
+                    self.write_packet(Packet::Disconnect(disconnect), writer)
+                        .await?;
+                    return Err(MqttError::ProtocolError(
+                        "AUTH received outside of auth flow".to_string(),
+                    ));
+                }
+
+                let auth_method = match self.auth_method.clone() {
+                    Some(m) => m,
+                    None => {
+                        return Err(MqttError::ProtocolError(
+                            "No auth method set".to_string(),
+                        ));
+                    }
+                };
+
+                let packet_method = auth
+                    .properties
+                    .get_authentication_method()
+                    .cloned()
+                    .unwrap_or_default();
+                if packet_method != auth_method {
+                    warn!(
+                        "AUTH method mismatch: expected {}, got {}",
+                        auth_method, packet_method
+                    );
+                    let disconnect = DisconnectPacket {
+                        reason_code: ReasonCode::ProtocolError,
+                        properties: mqtt5_protocol::protocol::v5::properties::Properties::default(),
+                    };
+                    self.write_packet(Packet::Disconnect(disconnect), writer)
+                        .await?;
+                    return Err(MqttError::ProtocolError("AUTH method mismatch".to_string()));
+                }
+
+                let auth_data = auth.properties.get_authentication_data();
+                let client_id = self
+                    .pending_connect
+                    .as_ref()
+                    .map(|pc| pc.connect.client_id.clone())
+                    .unwrap_or_default();
+
+                let result = self
+                    .auth_provider
+                    .authenticate_enhanced(&auth_method, auth_data, &client_id)
+                    .await?;
+
+                self.process_enhanced_auth_result(result, writer).await
+            }
+            ReasonCode::ReAuthenticate => {
+                if self.auth_state != AuthState::Completed {
+                    warn!("Re-auth requested but initial auth not complete");
+                    let disconnect = DisconnectPacket {
+                        reason_code: ReasonCode::ProtocolError,
+                        properties: mqtt5_protocol::protocol::v5::properties::Properties::default(),
+                    };
+                    self.write_packet(Packet::Disconnect(disconnect), writer)
+                        .await?;
+                    return Err(MqttError::ProtocolError(
+                        "Re-auth before initial auth".to_string(),
+                    ));
+                }
+
+                let auth_method = match auth.properties.get_authentication_method() {
+                    Some(m) => m.clone(),
+                    None => {
+                        let disconnect = DisconnectPacket {
+                            reason_code: ReasonCode::ProtocolError,
+                            properties: mqtt5_protocol::protocol::v5::properties::Properties::default(),
+                        };
+                        self.write_packet(Packet::Disconnect(disconnect), writer)
+                            .await?;
+                        return Err(MqttError::ProtocolError(
+                            "Re-auth missing method".to_string(),
+                        ));
+                    }
+                };
+
+                let auth_data = auth.properties.get_authentication_data();
+                let client_id = self.client_id.clone().unwrap_or_default();
+
+                let result = self
+                    .auth_provider
+                    .reauthenticate(
+                        &auth_method,
+                        auth_data,
+                        &client_id,
+                        self.user_id.as_deref(),
+                    )
+                    .await?;
+
+                match result.status {
+                    EnhancedAuthStatus::Success => {
+                        debug!("Re-authentication successful for {}", client_id);
+                        let mut response = AuthPacket::new(ReasonCode::Success);
+                        response
+                            .properties
+                            .set_authentication_method(result.auth_method);
+                        if let Some(data) = result.auth_data {
+                            response.properties.set_authentication_data(data.into());
+                        }
+                        self.write_packet(Packet::Auth(response), writer).await?;
+                        Ok(())
+                    }
+                    EnhancedAuthStatus::Continue => {
+                        let mut response = AuthPacket::new(ReasonCode::ContinueAuthentication);
+                        response
+                            .properties
+                            .set_authentication_method(result.auth_method);
+                        if let Some(data) = result.auth_data {
+                            response.properties.set_authentication_data(data.into());
+                        }
+                        self.write_packet(Packet::Auth(response), writer).await?;
+                        Ok(())
+                    }
+                    EnhancedAuthStatus::Failed => {
+                        warn!("Re-authentication failed for {}", client_id);
+                        let disconnect = DisconnectPacket {
+                            reason_code: result.reason_code,
+                            properties: mqtt5_protocol::protocol::v5::properties::Properties::default(),
+                        };
+                        self.write_packet(Packet::Disconnect(disconnect), writer)
+                            .await?;
+                        Err(MqttError::AuthenticationFailed)
+                    }
+                }
+            }
+            _ => {
+                warn!("Unexpected AUTH reason code: {:?}", reason_code);
+                Ok(())
+            }
+        }
+    }
+
+    async fn process_enhanced_auth_result(
+        &mut self,
+        result: EnhancedAuthResult,
+        writer: &mut WasmWriter,
+    ) -> Result<()> {
+        match result.status {
+            EnhancedAuthStatus::Success => {
+                self.auth_state = AuthState::Completed;
+
+                if let Some(pending) = self.pending_connect.take() {
+                    self.client_id = Some(pending.connect.client_id.clone());
+                    self.keep_alive =
+                        mqtt5::time::Duration::from_secs(u64::from(pending.connect.keep_alive));
+
+                    let session_present = self.handle_session(&pending.connect).await?;
+
+                    let mut connack = ConnAckPacket::new(session_present, ReasonCode::Success);
+                    if let Some(ref assigned_id) = pending.assigned_client_id {
+                        connack
+                            .properties
+                            .set_assigned_client_identifier(assigned_id.clone());
+                    }
+
+                    connack
+                        .properties
+                        .set_authentication_method(result.auth_method);
+                    if let Some(data) = result.auth_data {
+                        connack.properties.set_authentication_data(data.into());
+                    }
+
+                    connack
+                        .properties
+                        .set_session_expiry_interval(self.config.session_expiry_interval.as_secs() as u32);
+                    if self.config.maximum_qos < 2 {
+                        connack.properties.set_maximum_qos(self.config.maximum_qos);
+                    }
+                    connack.properties.set_retain_available(true);
+                    connack
+                        .properties
+                        .set_maximum_packet_size(self.config.max_packet_size as u32);
+                    connack
+                        .properties
+                        .set_topic_alias_maximum(self.config.topic_alias_maximum);
+                    connack
+                        .properties
+                        .set_wildcard_subscription_available(self.config.wildcard_subscription_available);
+                    connack
+                        .properties
+                        .set_subscription_identifier_available(self.config.subscription_identifier_available);
+                    connack
+                        .properties
+                        .set_shared_subscription_available(self.config.shared_subscription_available);
+
+                    self.write_packet(Packet::ConnAck(connack), writer).await?;
+
+                    if session_present {
+                        self.deliver_queued_messages(&pending.connect.client_id, writer)
+                            .await?;
+                    }
+                }
+
+                Ok(())
+            }
+            EnhancedAuthStatus::Continue => {
+                let mut auth_packet = AuthPacket::new(ReasonCode::ContinueAuthentication);
+                auth_packet
+                    .properties
+                    .set_authentication_method(result.auth_method);
+                if let Some(data) = result.auth_data {
+                    auth_packet.properties.set_authentication_data(data.into());
+                }
+                self.write_packet(Packet::Auth(auth_packet), writer).await?;
+                Ok(())
+            }
+            EnhancedAuthStatus::Failed => {
+                self.auth_state = AuthState::NotStarted;
+                self.pending_connect = None;
+
+                let connack = ConnAckPacket::new(false, result.reason_code);
+                self.write_packet(Packet::ConnAck(connack), writer).await?;
+                Err(MqttError::AuthenticationFailed)
+            }
+        }
+    }
+
     async fn publish_will_message(&self, client_id: &str) {
         if let Some(ref session) = self.session {
             if let Some(ref will) = session.will_message {
@@ -696,6 +967,7 @@ impl WasmClientHandler {
                 mqtt5_protocol::packet::pingresp::PingRespPacket::default().encode(&mut buf)?
             }
             Packet::Disconnect(p) => p.encode(&mut buf)?,
+            Packet::Auth(p) => p.encode(&mut buf)?,
             _ => {
                 return Err(MqttError::ProtocolError(format!(
                     "Encoding not yet implemented for packet type: {:?}",
