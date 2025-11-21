@@ -557,6 +557,32 @@ impl Properties {
             .push(PropertyValue::BinaryData(data));
     }
 
+    pub fn get_authentication_method(&self) -> Option<&String> {
+        self.properties
+            .get(&PropertyId::AuthenticationMethod)
+            .and_then(|values| values.first())
+            .and_then(|value| {
+                if let PropertyValue::Utf8String(s) = value {
+                    Some(s)
+                } else {
+                    None
+                }
+            })
+    }
+
+    pub fn get_authentication_data(&self) -> Option<&[u8]> {
+        self.properties
+            .get(&PropertyId::AuthenticationData)
+            .and_then(|values| values.first())
+            .and_then(|value| {
+                if let PropertyValue::BinaryData(b) = value {
+                    Some(b.as_ref())
+                } else {
+                    None
+                }
+            })
+    }
+
     /// Sets request problem information
     pub fn set_request_problem_information(&mut self, request: bool) {
         self.properties

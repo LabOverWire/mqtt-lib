@@ -82,6 +82,68 @@ impl AuthResult {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum EnhancedAuthStatus {
+    Success,
+    Continue,
+    Failed,
+}
+
+#[derive(Debug, Clone)]
+pub struct EnhancedAuthResult {
+    pub status: EnhancedAuthStatus,
+    pub reason_code: ReasonCode,
+    pub auth_method: String,
+    pub auth_data: Option<Vec<u8>>,
+    pub reason_string: Option<String>,
+}
+
+impl EnhancedAuthResult {
+    #[must_use]
+    pub fn success(auth_method: String) -> Self {
+        Self {
+            status: EnhancedAuthStatus::Success,
+            reason_code: ReasonCode::Success,
+            auth_method,
+            auth_data: None,
+            reason_string: None,
+        }
+    }
+
+    #[must_use]
+    pub fn continue_auth(auth_method: String, auth_data: Option<Vec<u8>>) -> Self {
+        Self {
+            status: EnhancedAuthStatus::Continue,
+            reason_code: ReasonCode::ContinueAuthentication,
+            auth_method,
+            auth_data,
+            reason_string: None,
+        }
+    }
+
+    #[must_use]
+    pub fn fail(auth_method: String, reason_code: ReasonCode) -> Self {
+        Self {
+            status: EnhancedAuthStatus::Failed,
+            reason_code,
+            auth_method,
+            auth_data: None,
+            reason_string: None,
+        }
+    }
+
+    #[must_use]
+    pub fn fail_with_reason(auth_method: String, reason_code: ReasonCode, reason: String) -> Self {
+        Self {
+            status: EnhancedAuthStatus::Failed,
+            reason_code,
+            auth_method,
+            auth_data: None,
+            reason_string: Some(reason),
+        }
+    }
+}
+
 /// Authentication provider trait
 pub trait AuthProvider: Send + Sync {
     /// Authenticate a client connection
@@ -118,6 +180,41 @@ pub trait AuthProvider: Send + Sync {
         user_id: Option<&'a str>,
         topic_filter: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<bool>> + Send + 'a>>;
+
+    fn supports_enhanced_auth(&self) -> bool {
+        false
+    }
+
+    fn authenticate_enhanced<'a>(
+        &'a self,
+        auth_method: &'a str,
+        _auth_data: Option<&'a [u8]>,
+        _client_id: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<EnhancedAuthResult>> + Send + 'a>> {
+        let method = auth_method.to_string();
+        Box::pin(async move {
+            Ok(EnhancedAuthResult::fail(
+                method,
+                ReasonCode::BadAuthenticationMethod,
+            ))
+        })
+    }
+
+    fn reauthenticate<'a>(
+        &'a self,
+        auth_method: &'a str,
+        _auth_data: Option<&'a [u8]>,
+        _client_id: &'a str,
+        _user_id: Option<&'a str>,
+    ) -> Pin<Box<dyn Future<Output = Result<EnhancedAuthResult>> + Send + 'a>> {
+        let method = auth_method.to_string();
+        Box::pin(async move {
+            Ok(EnhancedAuthResult::fail(
+                method,
+                ReasonCode::BadAuthenticationMethod,
+            ))
+        })
+    }
 }
 
 /// Allow all authentication provider (for testing/development)
@@ -1396,5 +1493,191 @@ mod tests {
         assert!(result.is_ok());
         // Note: This test might not work perfectly due to the simplified implementation
         // In production, you'd use proper X.509 parsing
+    }
+
+    #[tokio::test]
+    async fn test_enhanced_auth_result_builders() {
+        let result = EnhancedAuthResult::success("SCRAM-SHA-256".to_string());
+        assert_eq!(result.status, EnhancedAuthStatus::Success);
+        assert_eq!(result.reason_code, ReasonCode::Success);
+        assert_eq!(result.auth_method, "SCRAM-SHA-256");
+        assert!(result.auth_data.is_none());
+
+        let result = EnhancedAuthResult::continue_auth(
+            "SCRAM-SHA-256".to_string(),
+            Some(b"challenge".to_vec()),
+        );
+        assert_eq!(result.status, EnhancedAuthStatus::Continue);
+        assert_eq!(result.reason_code, ReasonCode::ContinueAuthentication);
+        assert_eq!(result.auth_data, Some(b"challenge".to_vec()));
+
+        let result = EnhancedAuthResult::fail(
+            "SCRAM-SHA-256".to_string(),
+            ReasonCode::NotAuthorized,
+        );
+        assert_eq!(result.status, EnhancedAuthStatus::Failed);
+        assert_eq!(result.reason_code, ReasonCode::NotAuthorized);
+
+        let result = EnhancedAuthResult::fail_with_reason(
+            "SCRAM-SHA-256".to_string(),
+            ReasonCode::BadAuthenticationMethod,
+            "Unsupported method".to_string(),
+        );
+        assert_eq!(result.status, EnhancedAuthStatus::Failed);
+        assert_eq!(result.reason_string, Some("Unsupported method".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_default_enhanced_auth_not_supported() {
+        let provider = AllowAllAuthProvider;
+        assert!(!provider.supports_enhanced_auth());
+
+        let result = provider
+            .authenticate_enhanced("SCRAM-SHA-256", Some(b"data"), "client-1")
+            .await
+            .unwrap();
+        assert_eq!(result.status, EnhancedAuthStatus::Failed);
+        assert_eq!(result.reason_code, ReasonCode::BadAuthenticationMethod);
+
+        let result = provider
+            .reauthenticate("SCRAM-SHA-256", Some(b"data"), "client-1", Some("user"))
+            .await
+            .unwrap();
+        assert_eq!(result.status, EnhancedAuthStatus::Failed);
+        assert_eq!(result.reason_code, ReasonCode::BadAuthenticationMethod);
+    }
+
+    pub struct ChallengeResponseAuthProvider {
+        challenge: Vec<u8>,
+        expected_response: Vec<u8>,
+    }
+
+    impl ChallengeResponseAuthProvider {
+        pub fn new(challenge: Vec<u8>, expected_response: Vec<u8>) -> Self {
+            Self {
+                challenge,
+                expected_response,
+            }
+        }
+    }
+
+    impl AuthProvider for ChallengeResponseAuthProvider {
+        fn authenticate<'a>(
+            &'a self,
+            _connect: &'a ConnectPacket,
+            _client_addr: SocketAddr,
+        ) -> Pin<Box<dyn Future<Output = Result<AuthResult>> + Send + 'a>> {
+            Box::pin(async move { Ok(AuthResult::success()) })
+        }
+
+        fn authorize_publish<'a>(
+            &'a self,
+            _client_id: &str,
+            _user_id: Option<&'a str>,
+            _topic: &'a str,
+        ) -> Pin<Box<dyn Future<Output = Result<bool>> + Send + 'a>> {
+            Box::pin(async move { Ok(true) })
+        }
+
+        fn authorize_subscribe<'a>(
+            &'a self,
+            _client_id: &str,
+            _user_id: Option<&'a str>,
+            _topic_filter: &'a str,
+        ) -> Pin<Box<dyn Future<Output = Result<bool>> + Send + 'a>> {
+            Box::pin(async move { Ok(true) })
+        }
+
+        fn supports_enhanced_auth(&self) -> bool {
+            true
+        }
+
+        fn authenticate_enhanced<'a>(
+            &'a self,
+            auth_method: &'a str,
+            auth_data: Option<&'a [u8]>,
+            _client_id: &'a str,
+        ) -> Pin<Box<dyn Future<Output = Result<EnhancedAuthResult>> + Send + 'a>> {
+            let method = auth_method.to_string();
+            let challenge = self.challenge.clone();
+            let expected = self.expected_response.clone();
+
+            Box::pin(async move {
+                if method != "CHALLENGE-RESPONSE" {
+                    return Ok(EnhancedAuthResult::fail(
+                        method,
+                        ReasonCode::BadAuthenticationMethod,
+                    ));
+                }
+
+                match auth_data {
+                    None => {
+                        Ok(EnhancedAuthResult::continue_auth(method, Some(challenge)))
+                    }
+                    Some(response) if response == expected => {
+                        Ok(EnhancedAuthResult::success(method))
+                    }
+                    Some(_) => Ok(EnhancedAuthResult::fail(
+                        method,
+                        ReasonCode::NotAuthorized,
+                    )),
+                }
+            })
+        }
+
+        fn reauthenticate<'a>(
+            &'a self,
+            auth_method: &'a str,
+            auth_data: Option<&'a [u8]>,
+            client_id: &'a str,
+            _user_id: Option<&'a str>,
+        ) -> Pin<Box<dyn Future<Output = Result<EnhancedAuthResult>> + Send + 'a>> {
+            self.authenticate_enhanced(auth_method, auth_data, client_id)
+        }
+    }
+
+    #[tokio::test]
+    async fn test_challenge_response_provider() {
+        let provider = ChallengeResponseAuthProvider::new(
+            b"server-challenge".to_vec(),
+            b"correct-response".to_vec(),
+        );
+
+        assert!(provider.supports_enhanced_auth());
+
+        let result = provider
+            .authenticate_enhanced("CHALLENGE-RESPONSE", None, "client-1")
+            .await
+            .unwrap();
+        assert_eq!(result.status, EnhancedAuthStatus::Continue);
+        assert_eq!(result.auth_data, Some(b"server-challenge".to_vec()));
+
+        let result = provider
+            .authenticate_enhanced(
+                "CHALLENGE-RESPONSE",
+                Some(b"correct-response"),
+                "client-1",
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.status, EnhancedAuthStatus::Success);
+
+        let result = provider
+            .authenticate_enhanced(
+                "CHALLENGE-RESPONSE",
+                Some(b"wrong-response"),
+                "client-1",
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.status, EnhancedAuthStatus::Failed);
+        assert_eq!(result.reason_code, ReasonCode::NotAuthorized);
+
+        let result = provider
+            .authenticate_enhanced("WRONG-METHOD", None, "client-1")
+            .await
+            .unwrap();
+        assert_eq!(result.status, EnhancedAuthStatus::Failed);
+        assert_eq!(result.reason_code, ReasonCode::BadAuthenticationMethod);
     }
 }
