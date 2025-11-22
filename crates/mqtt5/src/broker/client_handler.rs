@@ -698,7 +698,9 @@ impl ClientHandler {
             if should_send_retained {
                 let retained = self.router.get_retained_messages(&filter.filter).await;
                 for mut msg in retained {
-                    msg.retain = true;
+                    if !filter.options.retain_as_published {
+                        msg.retain = false;
+                    }
                     self.publish_tx.send(msg).await.map_err(|_| {
                         MqttError::InvalidState("Failed to queue retained message".to_string())
                     })?;
@@ -804,8 +806,7 @@ impl ClientHandler {
                     )));
                 }
             } else {
-                self.topic_aliases
-                    .insert(alias, publish.topic_name.clone());
+                self.topic_aliases.insert(alias, publish.topic_name.clone());
             }
         } else if publish.topic_name.is_empty() {
             return Err(MqttError::ProtocolError(

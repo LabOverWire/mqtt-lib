@@ -369,8 +369,8 @@ impl RetainedMessage {
             .unwrap_or_default()
             .as_secs();
         let message_expiry_interval = packet.properties.get_message_expiry_interval();
-        let expires_at = message_expiry_interval
-            .map(|interval| now + Duration::from_secs(u64::from(interval)));
+        let expires_at =
+            message_expiry_interval.map(|interval| now + Duration::from_secs(u64::from(interval)));
 
         Self {
             topic: packet.topic_name,
@@ -393,8 +393,8 @@ impl RetainedMessage {
 
     /// Convert to PublishPacket for delivery
     pub fn to_publish_packet(&self) -> PublishPacket {
-        let mut packet =
-            PublishPacket::new(&self.topic, self.payload.clone(), self.qos).with_retain(self.retain);
+        let mut packet = PublishPacket::new(&self.topic, self.payload.clone(), self.qos)
+            .with_retain(self.retain);
 
         if let Some(remaining) = self.remaining_expiry_interval() {
             packet.properties.set_message_expiry_interval(remaining);
@@ -494,8 +494,8 @@ impl QueuedMessage {
             .unwrap_or_default()
             .as_secs();
         let message_expiry_interval = packet.properties.get_message_expiry_interval();
-        let expires_at = message_expiry_interval
-            .map(|interval| now + Duration::from_secs(u64::from(interval)));
+        let expires_at =
+            message_expiry_interval.map(|interval| now + Duration::from_secs(u64::from(interval)));
 
         Self {
             topic: packet.topic_name,

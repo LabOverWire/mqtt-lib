@@ -113,6 +113,14 @@ pub struct SubCommand {
     #[arg(long)]
     pub subscription_identifier: Option<u32>,
 
+    /// Retain handling: 0=SendAtSubscribe, 1=SendAtSubscribeIfNew, 2=DoNotSend
+    #[arg(long, value_parser = parse_retain_handling)]
+    pub retain_handling: Option<mqtt5::RetainHandling>,
+
+    /// Retain As Published - keep original retain flag when delivering messages
+    #[arg(long)]
+    pub retain_as_published: bool,
+
     /// OpenTelemetry OTLP endpoint (e.g., http://localhost:4317)
     #[cfg(feature = "opentelemetry")]
     #[arg(long)]
@@ -135,6 +143,15 @@ fn parse_qos(s: &str) -> Result<QoS, String> {
         "1" => Ok(QoS::AtLeastOnce),
         "2" => Ok(QoS::ExactlyOnce),
         _ => Err(format!("QoS must be 0, 1, or 2, got: {s}")),
+    }
+}
+
+fn parse_retain_handling(s: &str) -> Result<mqtt5::RetainHandling, String> {
+    match s {
+        "0" => Ok(mqtt5::RetainHandling::SendAtSubscribe),
+        "1" => Ok(mqtt5::RetainHandling::SendIfNew),
+        "2" => Ok(mqtt5::RetainHandling::DontSend),
+        _ => Err(format!("retain_handling must be 0, 1, or 2, got: {s}")),
     }
 }
 
@@ -321,8 +338,9 @@ pub async fn execute(mut cmd: SubCommand, verbose: bool, debug: bool) -> Result<
     let subscribe_options = mqtt5::SubscribeOptions {
         qos,
         no_local: cmd.no_local,
+        retain_as_published: cmd.retain_as_published,
+        retain_handling: cmd.retain_handling.unwrap_or(mqtt5::RetainHandling::SendAtSubscribe),
         subscription_identifier: cmd.subscription_identifier,
-        ..Default::default()
     };
 
     let (packet_id, granted_qos) = client

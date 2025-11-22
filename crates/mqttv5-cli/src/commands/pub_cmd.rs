@@ -47,6 +47,14 @@ pub struct PubCommand {
     #[arg(long, short)]
     pub retain: bool,
 
+    /// Message expiry interval in seconds (0 = no expiry)
+    #[arg(long)]
+    pub message_expiry_interval: Option<u32>,
+
+    /// Topic alias (1-65535) for repeated publishing to same topic
+    #[arg(long)]
+    pub topic_alias: Option<u16>,
+
     /// Username for authentication
     #[arg(long, short)]
     pub username: Option<String>,
@@ -331,18 +339,24 @@ pub async fn execute(mut cmd: PubCommand, verbose: bool, debug: bool) -> Result<
     // Publish message
     info!("Publishing to topic '{}'...", topic);
 
-    if cmd.retain {
-        // Use publish_with_options when retain flag is set
-        let options = PublishOptions {
+    if cmd.topic_alias == Some(0) {
+        anyhow::bail!("Topic alias must be between 1 and 65535, got: 0");
+    }
+
+    let has_properties = cmd.retain || cmd.message_expiry_interval.is_some() || cmd.topic_alias.is_some();
+
+    if has_properties {
+        let mut options = PublishOptions {
             qos,
-            retain: true,
+            retain: cmd.retain,
             ..Default::default()
         };
+        options.properties.message_expiry_interval = cmd.message_expiry_interval;
+        options.properties.topic_alias = cmd.topic_alias;
         client
             .publish_with_options(&topic, message.as_bytes(), options)
             .await?;
     } else {
-        // Use the regular publish methods when retain is not set
         match qos {
             QoS::AtMostOnce => {
                 client.publish(&topic, message.as_bytes()).await?;
