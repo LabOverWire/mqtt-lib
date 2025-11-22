@@ -547,7 +547,7 @@ Distributed tracing with OpenTelemetry support:
 
 ```toml
 [dependencies]
-mqtt5 = { version = "0.9.0", features = ["opentelemetry"] }
+mqtt5 = { version = "0.10.0", features = ["opentelemetry"] }
 ```
 
 ### Features
