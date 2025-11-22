@@ -126,6 +126,12 @@ mqttv5 pub -t "test/topic" -m "data" --keep-alive 120 \
 # WebSocket transport
 mqttv5 pub --url "ws://broker:8080/mqtt" -t "test/websocket" -m "WebSocket message"
 mqttv5 sub --url "wss://secure-broker:8443/mqtt" -t "test/+"
+
+# Message expiry and topic alias
+mqttv5 pub -t "sensors/temp" -m "23.5" --message-expiry-interval 300 --topic-alias 1
+
+# Subscription options (retain handling: 0=send, 1=send if new, 2=don't send)
+mqttv5 sub -t "config/#" --retain-handling 2 --retain-as-published
 ```
 
 ## Environment Variables

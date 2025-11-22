@@ -343,7 +343,8 @@ pub async fn execute(mut cmd: PubCommand, verbose: bool, debug: bool) -> Result<
         anyhow::bail!("Topic alias must be between 1 and 65535, got: 0");
     }
 
-    let has_properties = cmd.retain || cmd.message_expiry_interval.is_some() || cmd.topic_alias.is_some();
+    let has_properties =
+        cmd.retain || cmd.message_expiry_interval.is_some() || cmd.topic_alias.is_some();
 
     if has_properties {
         let mut options = PublishOptions {

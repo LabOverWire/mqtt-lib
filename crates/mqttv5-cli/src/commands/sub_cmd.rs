@@ -339,7 +339,9 @@ pub async fn execute(mut cmd: SubCommand, verbose: bool, debug: bool) -> Result<
         qos,
         no_local: cmd.no_local,
         retain_as_published: cmd.retain_as_published,
-        retain_handling: cmd.retain_handling.unwrap_or(mqtt5::RetainHandling::SendAtSubscribe),
+        retain_handling: cmd
+            .retain_handling
+            .unwrap_or(mqtt5::RetainHandling::SendAtSubscribe),
         subscription_identifier: cmd.subscription_identifier,
     };
 

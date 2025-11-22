@@ -30,6 +30,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Broker support for Request Problem Information property
 - Conditional reason strings in error responses based on client preference
 - CLI `--response-information` flag for broker command
+- CLI subscribe command: `--retain-handling` and `--retain-as-published` options
+- CLI publish command: `--message-expiry-interval` and `--topic-alias` options
 
 - **mqtt5-protocol crate**: Platform-agnostic MQTT v5.0 core extracted from mqtt5
   - Packet encoding/decoding for all MQTT v5.0 packet types
@@ -125,6 +127,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **WASM Packet Encoding**: Full MQTT v5.0 codec running in browser
 - **WASM Limitations**: No TLS socket control (use wss://), no file I/O, no raw sockets
 - **Workspace Benefits**: Shared metadata, cleaner structure, better IDE support
+
+### Fixed
+
+- Broker now correctly clears retain flag when delivering retained messages to subscribers with `retain_as_published=false`
 
 ## [0.9.0] - 2025-11-12
 
