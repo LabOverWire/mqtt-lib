@@ -10,7 +10,7 @@ resolver = "2"
 [workspace.package]
 version = "0.10.0"
 edition = "2021"
-rust-version = "1.83"
+rust-version = "1.85"
 authors = ["fabriciobracht <fabricio@bracht.dev>"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/LabOverWire/mqtt-lib"
