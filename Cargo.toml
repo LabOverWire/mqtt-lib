@@ -1,5 +1,10 @@
 [workspace]
-members = ["crates/mqtt5-protocol", "crates/mqtt5", "crates/mqtt5-wasm", "crates/mqttv5-cli"]
+members = [
+    "crates/mqtt5-protocol",
+    "crates/mqtt5",
+    "crates/mqtt5-wasm",
+    "crates/mqttv5-cli",
+]
 resolver = "2"
 
 [workspace.package]
@@ -8,7 +13,7 @@ edition = "2021"
 rust-version = "1.83"
 authors = ["fabriciobracht <fabricio@bracht.dev>"]
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/fabriciobracht/mqtt-lib"
+repository = "https://github.com/LabOverWire/mqtt-lib"
 
 [profile.release]
 lto = true

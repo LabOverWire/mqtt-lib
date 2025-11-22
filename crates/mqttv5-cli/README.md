@@ -2,7 +2,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/mqttv5-cli.svg)](https://crates.io/crates/mqttv5-cli)
 [![Downloads](https://img.shields.io/crates/d/mqttv5-cli.svg)](https://crates.io/crates/mqttv5-cli)
-[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](https://github.com/fabracht/mqtt-lib#license)
+[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](https://github.com/LabOverWire/mqtt-lib#license)
 
 A unified MQTT v5.0 CLI tool with pub, sub, and broker commands.
 
@@ -84,6 +84,7 @@ mqttv5 broker
 By default, the CLI exits immediately when the broker disconnects. This prevents duplicate topic takeover issues when clients reconnect with the same client ID.
 
 Use `--auto-reconnect` to enable automatic reconnection with exponential backoff. When enabled:
+
 - The library handles reconnection automatically
 - Subscriptions are restored based on session state
 - The client continues running until Ctrl+C or target message count reached

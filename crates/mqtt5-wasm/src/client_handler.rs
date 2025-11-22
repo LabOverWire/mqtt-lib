@@ -496,6 +496,7 @@ impl WasmClientHandler {
                     granted_qos,
                     None,
                     filter.options.no_local,
+                    filter.options.retain_as_published,
                 )
                 .await;
 

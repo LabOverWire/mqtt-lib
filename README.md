@@ -2,8 +2,8 @@
 
 [![Crates.io](https://img.shields.io/crates/v/mqtt5.svg)](https://crates.io/crates/mqtt5)
 [![Documentation](https://docs.rs/mqtt5/badge.svg)](https://docs.rs/mqtt5)
-[![Rust CI](https://github.com/fabracht/mqtt-lib/actions/workflows/rust.yml/badge.svg)](https://github.com/fabracht/mqtt-lib/actions)
-[![License](https://img.shields.io/crates/l/mqtt5.svg)](https://github.com/fabracht/mqtt-lib#license)
+[![Rust CI](https://github.com/LabOverWire/mqtt-lib/actions/workflows/rust.yml/badge.svg)](https://github.com/LabOverWire/mqtt-lib/actions)
+[![License](https://img.shields.io/crates/l/mqtt5.svg)](https://github.com/LabOverWire/mqtt-lib#license)
 
 **MQTT v5.0 platform featuring client library and broker implementation**
 
@@ -95,7 +95,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 cargo install mqttv5-cli
 
 # Or build from source
-git clone https://github.com/fabracht/mqtt-lib
+git clone https://github.com/LabOverWire/mqtt-lib
 cd mqtt-lib
 cargo build --release -p mqttv5-cli
 ```
@@ -592,7 +592,7 @@ See `crates/mqtt5/examples/broker_with_opentelemetry.rs` for a complete example.
 
 ```bash
 # Clone the repository
-git clone https://github.com/fabracht/mqtt-lib.git
+git clone https://github.com/LabOverWire/mqtt-lib.git
 cd mqtt-lib
 
 # Install development tools and git hooks
