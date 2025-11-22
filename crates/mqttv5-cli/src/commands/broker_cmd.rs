@@ -11,7 +11,7 @@ pub struct BrokerCommand {
     #[arg(long, short)]
     pub config: Option<PathBuf>,
 
-    /// TCP bind address (e.g., 0.0.0.0:1883 [::]:1883) - can be specified multiple times
+    /// TCP bind address (e.g., `0.0.0.0:1883` `[::]:1883`) - can be specified multiple times
     #[arg(long, short = 'H', action = ArgAction::Append)]
     pub host: Vec<String>,
 
@@ -27,7 +27,7 @@ pub struct BrokerCommand {
     #[arg(long)]
     pub auth_password_file: Option<PathBuf>,
 
-    /// ACL file path (format: user <username> topic <pattern> permission <type> per line)
+    /// ACL file path (format: `user <username> topic <pattern> permission <type>` per line)
     #[arg(long)]
     pub acl_file: Option<PathBuf>,
 
