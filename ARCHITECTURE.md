@@ -94,6 +94,7 @@ We use direct async/await patterns because:
    - Config applied automatically when connecting to mqtts:// URLs
 
 5. **Background Tasks**: Specific focused tasks
+
    - Packet reader: Continuously reads packets
    - Keep-alive: Sends pings at intervals
    - Reconnection: Handles connection recovery with exponential backoff
@@ -126,14 +127,17 @@ We use direct async/await patterns because:
 The client validates acknowledgment reason codes:
 
 1. **PUBACK Validation** (QoS 1): Checks PUBACK reason code
+
    - Success codes (0x00-0x7F): Operation completes successfully
    - Error codes (0x80+): Returns `MqttError::PublishFailed(reason_code)`
 
 2. **PUBREC Validation** (QoS 2): Checks PUBREC reason code
+
    - Error codes abort publish flow
    - Success codes proceed to PUBREL/PUBCOMP
 
 3. **PUBCOMP Validation** (QoS 2): Checks final acknowledgment
+
    - Validates complete QoS 2 flow
    - Returns final broker decision
 
@@ -203,11 +207,11 @@ The MQTT broker follows the same architectural principles as the client - direct
    - Direct auth checks during CONNECT
    - Pluggable auth providers via AuthProvider trait:
      - `AllowAllAuthProvider` - No authentication (development only)
-     - `PasswordAuthProvider` - File-based username/password with bcrypt
+     - `PasswordAuthProvider` - File-based username/password with argon2
      - `CertificateAuthProvider` - Client certificate validation
      - `ComprehensiveAuthProvider` - Combines multiple auth methods
    - Custom provider composition via `with_providers()` constructor
-   - Bcrypt password hashing for secure storage
+   - Argon2 password hashing for secure storage
    - CLI `passwd` command for password management
    - Debug logging for authorization decisions (troubleshooting support)
 
@@ -244,6 +248,7 @@ The MQTT broker follows the same architectural principles as the client - direct
    - Requires explicit `$SYS/#` subscription (not matched by `#`)
 
 6. **Session Takeover**:
+
    - Handles new client connections with existing client IDs
    - Uses oneshot channels for disconnect signaling
    - Router tracks disconnect channels per client ID
@@ -263,6 +268,7 @@ The MQTT broker follows the same architectural principles as the client - direct
    - Zero overhead when feature is not enabled
 
    **Trace Context Flow:**
+
    ```
    Publisher -> inject traceparent/tracestate into user properties
             -> PUBLISH packet with trace context
@@ -272,9 +278,10 @@ The MQTT broker follows the same architectural principles as the client - direct
    ```
 
    **Configuration:**
+
    - `TelemetryConfig` - Configure service name, endpoint, sampling
    - `BrokerConfig::with_opentelemetry(config)` - Enable tracing for broker
-   - Environment variables for OpenTelemetry configuration (OTEL_*)
+   - Environment variables for OpenTelemetry configuration (OTEL\_\*)
    - Automatic context propagation via `with_remote_context()` helper
 
 ## Platform Integration
@@ -302,18 +309,21 @@ The library compiles to WebAssembly for browser environments with full MQTT v5.0
 ### Core Architectural Adaptations for Browser
 
 1. **Single-Threaded Model**:
+
    - Uses `Rc<RefCell<T>>` instead of `Arc<Mutex<T>>` (no threads in WASM)
    - Uses `spawn_local` instead of `tokio::spawn` (JavaScript event loop)
    - State management via RefCell for interior mutability
    - No Send/Sync requirements
 
 2. **Async Bridge Pattern**:
+
    - Rust `async fn` → JavaScript Promises via wasm-bindgen-futures
    - JavaScript callbacks → Rust closures via `js_sys::Function`
    - Promise-based API for all async operations
    - Callback-based event handling for messages
 
 3. **No File I/O**:
+
    - Memory-only storage backend
    - No session persistence across page reloads
    - Configuration via programmatic API only
@@ -328,16 +338,19 @@ The library compiles to WebAssembly for browser environments with full MQTT v5.0
 **Core Components:**
 
 1. **WasmMqttClient**: Main client struct
+
    ```rust
    pub struct WasmMqttClient {
        state: Rc<RefCell<ClientState>>
    }
    ```
+
    - Wraps `ClientState` in single-threaded shared ownership
    - All methods take `&self` and borrow state internally
    - Exposes `#[wasm_bindgen]` annotated methods to JavaScript
 
 2. **ClientState**: Internal state management
+
    ```rust
    struct ClientState {
        client_id: String,
@@ -355,23 +368,27 @@ The library compiles to WebAssembly for browser environments with full MQTT v5.0
        on_error: Option<js_sys::Function>,
    }
    ```
+
    - Stores JavaScript callbacks for subscriptions and events
    - Tracks in-flight QoS 1 and QoS 2 messages
    - Manages packet ID allocation (1-65535 wrapping)
 
 3. **Connection API**:
+
    - `connect(url)` - WebSocket to external broker
    - `connect_message_port(port)` - Direct to in-tab broker
    - `connect_broadcast_channel(name)` - Cross-tab messaging
    - Returns JavaScript Promise
 
 4. **Publishing API**:
+
    - `publish(topic, payload)` - QoS 0 (fire-and-forget)
    - `publish_qos1(topic, payload, callback)` - QoS 1 with PUBACK
    - `publish_qos2(topic, payload, callback)` - QoS 2 with full handshake
    - Callbacks receive reason code or error string
 
 5. **Subscription API**:
+
    - `subscribe(topic)` - Subscribe without callback (returns packet_id)
    - `subscribe_with_callback(topic, callback)` - Subscribe with handler
    - `unsubscribe(topic)` - Remove subscription
@@ -388,6 +405,7 @@ The library compiles to WebAssembly for browser environments with full MQTT v5.0
 **Core Components:**
 
 1. **WasmBroker**: In-browser MQTT broker
+
    ```rust
    pub struct WasmBroker {
        config: Arc<BrokerConfig>,
@@ -398,22 +416,26 @@ The library compiles to WebAssembly for browser environments with full MQTT v5.0
        resource_monitor: Arc<ResourceMonitor>,
    }
    ```
+
    - Complete broker implementation in browser tab
    - Uses same core components as native broker
    - Memory-only storage (no persistence)
 
 2. **WasmClientHandler**: Per-client connection handler
+
    - Handles MessagePort communication
    - Manages client session within browser
    - Same packet handling logic as native broker
    - Spawns background tasks with `spawn_local`
 
 3. **Client Connection Flow**:
+
    ```javascript
    const broker = new WasmBroker();
-   const port = broker.create_client_port();  // Creates MessageChannel
-   await client.connect_message_port(port);   // Client connects via port
+   const port = broker.create_client_port(); // Creates MessageChannel
+   await client.connect_message_port(port); // Client connects via port
    ```
+
    - `create_client_port()` creates MessageChannel
    - Returns one port to JavaScript, keeps other for broker
    - Spawns `WasmClientHandler` for the connection
@@ -429,12 +451,14 @@ The library compiles to WebAssembly for browser environments with full MQTT v5.0
 ### Browser Transport Implementations
 
 1. **WebSocket Transport** (`WasmWebSocketTransport`):
+
    ```rust
    pub struct WasmWebSocketTransport {
        websocket: RefCell<Option<WebSocket>>,
        receive_queue: Rc<RefCell<VecDeque<Vec<u8>>>>,
    }
    ```
+
    - Uses `web_sys::WebSocket` for external broker connections
    - Message callback pushes data to receive_queue
    - `read()` waits on queue using JavaScript Promises
@@ -442,12 +466,14 @@ The library compiles to WebAssembly for browser environments with full MQTT v5.0
    - Supports `ws://` and `wss://` URLs
 
 2. **MessagePort Transport** (`MessagePortTransport`):
+
    ```rust
    pub struct MessagePortTransport {
        port: RefCell<Option<MessagePort>>,
        receive_queue: Rc<RefCell<VecDeque<Vec<u8>>>>,
    }
    ```
+
    - Direct channel communication for in-tab broker
    - Zero network overhead (memory copy only)
    - `onmessage` callback fills receive_queue
@@ -455,12 +481,14 @@ The library compiles to WebAssembly for browser environments with full MQTT v5.0
    - Perfect for testing and offline apps
 
 3. **BroadcastChannel Transport** (`BroadcastChannelTransport`):
+
    ```rust
    pub struct BroadcastChannelTransport {
        channel: RefCell<Option<BroadcastChannel>>,
        receive_queue: Rc<RefCell<VecDeque<Vec<u8>>>>,
    }
    ```
+
    - Cross-tab messaging via browser BroadcastChannel API
    - All tabs with same channel name receive messages
    - Useful for synchronized state across browser tabs
@@ -484,20 +512,23 @@ The library compiles to WebAssembly for browser environments with full MQTT v5.0
 ### WASM QoS Flow Control
 
 1. **QoS 0** (At Most Once):
+
    - Direct `publish()` call
    - No acknowledgment tracking
    - Fire-and-forget delivery
 
 2. **QoS 1** (At Least Once):
+
    ```javascript
-   await client.publish_qos1('sensors/temp', data, (reasonCode) => {
-       if (reasonCode === 0) {
-           console.log('Success');
-       } else {
-           console.error('Failed:', reasonCode);
-       }
+   await client.publish_qos1("sensors/temp", data, (reasonCode) => {
+     if (reasonCode === 0) {
+       console.log("Success");
+     } else {
+       console.error("Failed:", reasonCode);
+     }
    });
    ```
+
    - Assigns packet_id (1-65535 wrapping counter)
    - Stores callback in `pending_pubacks` HashMap
    - Waits for PUBACK packet
@@ -505,15 +536,17 @@ The library compiles to WebAssembly for browser environments with full MQTT v5.0
    - Removes from pending on acknowledgment
 
 3. **QoS 2** (Exactly Once):
+
    ```javascript
-   await client.publish_qos2('commands/action', data, (result) => {
-       if (typeof result === 'number') {
-           console.log('Success, reason:', result);
-       } else {
-           console.error('Error:', result);
-       }
+   await client.publish_qos2("commands/action", data, (result) => {
+     if (typeof result === "number") {
+       console.log("Success, reason:", result);
+     } else {
+       console.error("Error:", result);
+     }
    });
    ```
+
    - Four-way handshake: PUBLISH → PUBREC → PUBREL → PUBCOMP
    - Stores `(callback, timestamp)` in `pending_pubcomps`
    - Tracks PUBREC arrival in `pending_pubrecs`
@@ -522,6 +555,7 @@ The library compiles to WebAssembly for browser environments with full MQTT v5.0
    - Duplicate detection: `received_qos2` tracks delivered messages for 30 seconds
 
 4. **QoS 2 Timeout Handling**:
+
    - Background task checks every 5 seconds
    - Expires flows older than 10 seconds
    - Invokes callback with "Timeout" error
@@ -535,6 +569,7 @@ The library compiles to WebAssembly for browser environments with full MQTT v5.0
 ### WASM Keepalive Design
 
 1. **Automatic PINGREQ**:
+
    ```rust
    fn spawn_keepalive_task(&self) {
        let state = Rc::clone(&self.state);
@@ -546,11 +581,13 @@ The library compiles to WebAssembly for browser environments with full MQTT v5.0
        });
    }
    ```
+
    - Background task using `spawn_local`
    - Sends PINGREQ every 30 seconds
    - Tracks `last_ping_sent` timestamp
 
 2. **Connection Timeout Detection**:
+
    - Monitors `last_pong_received` timestamp
    - 90-second timeout (3x keepalive interval)
    - Triggers `on_error("Keepalive timeout")`
@@ -588,6 +625,7 @@ fn encode_packet(packet: &Packet, buf: &mut BytesMut) -> Result<()> {
 ### WASM Background Tasks
 
 1. **Packet Reader Task**:
+
    ```rust
    spawn_local(async move {
        loop {
@@ -596,11 +634,13 @@ fn encode_packet(packet: &Packet, buf: &mut BytesMut) -> Result<()> {
        }
    });
    ```
+
    - Continuously reads from transport
    - Dispatches to packet handlers
    - Invokes JavaScript callbacks
 
 2. **Keepalive Task**:
+
    - Sends PINGREQ every 30 seconds
    - Checks for timeout every iteration
    - Runs until disconnect
@@ -622,54 +662,63 @@ fn encode_packet(packet: &Packet, buf: &mut BytesMut) -> Result<()> {
 ### WASM Platform Constraints
 
 1. **Single-Threaded Execution**:
+
    - State: `Rc<RefCell<T>>` (not `Arc<Mutex<T>>`)
    - Tasks: `spawn_local` (not `tokio::spawn`)
    - All operations run in JavaScript event loop
 
 2. **Memory-Only Storage**:
+
    - No file I/O in browser sandbox
    - Storage backend keeps data in memory
    - No persistence across page reloads
    - Applications can use IndexedDB/localStorage
 
 3. **Transport Layer**:
+
    - WebSocket: external broker connections
    - MessagePort: in-tab broker communication
    - BroadcastChannel: cross-tab messaging
    - No raw TCP/TLS sockets
 
 4. **TLS Handling**:
+
    - Browser manages TLS via `wss://` URLs
    - No direct TLS configuration
    - Automatic certificate validation
 
 5. **JavaScript Interop**:
+
    - Callbacks: `js_sys::Function`
    - Store callbacks, invoke from Rust
    - Callback-based message delivery
 
 6. **Time Functions**:
+
    - Platform-specific `time` module
    - WASM: `web_sys::window().performance().now()`
    - Native: `std::time`
 
 7. **Dependencies**:
    - Platform-gated with `#[cfg(not(target_arch = "wasm32"))]`
-   - tokio, clap, bcrypt excluded from WASM builds
+   - tokio, clap excluded from WASM builds
 
 ### WASM Use Cases
 
 1. **Browser-Based MQTT Clients**:
+
    - IoT dashboards and monitoring applications
    - Real-time data visualization
    - Connect to cloud MQTT brokers via WebSocket
 
 2. **Testing & Demos**:
+
    - In-tab broker for integration testing
    - No external dependencies required
    - Instant setup for demonstrations
 
 3. **Offline-Capable Applications**:
+
    - Local broker for offline operation
    - Sync when connection restored
    - Progressive Web Apps (PWAs)

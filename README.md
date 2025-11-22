@@ -137,7 +137,7 @@ mqttv5 pub
 ### Broker
 
 - Multiple transports: TCP, TLS, WebSocket in a single binary
-- Built-in authentication: Username/password, file-based, bcrypt
+- Built-in authentication: Username/password, file-based, argon2
 - Resource monitoring: Connection limits, rate limiting, memory tracking
 - Distributed tracing: OpenTelemetry integration with trace context propagation
 - Self-contained: No external dependencies
@@ -652,7 +652,7 @@ This project follows Rust async patterns:
 ## Security
 
 - TLS 1.2+ support with certificate validation
-- Username/password authentication with bcrypt hashing
+- Username/password authentication with argon2 hashing
 - Rate limiting
 - Resource monitoring
 - Client certificate authentication for mutual TLS

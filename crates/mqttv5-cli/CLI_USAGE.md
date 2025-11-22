@@ -308,13 +308,12 @@ mqttv5 passwd [OPTIONS] <USERNAME> [FILE]
 
 #### Passwd Flags
 
-| Flag            | Description                                               |
-| --------------- | --------------------------------------------------------- |
-| `--create, -c`  | Create new password file                                  |
-| `--batch, -b`   | Password on command line (insecure, use for scripts only) |
-| `--delete, -D`  | Delete user from password file                            |
-| `--stdout, -n`  | Output hash to stdout instead of file                     |
-| `--cost <4-31>` | Bcrypt cost factor (default: 12)                          |
+| Flag              | Description                                               |
+| ----------------- | --------------------------------------------------------- |
+| `--create, -c`    | Create new password file                                  |
+| `--batch, -b <P>` | Password on command line (insecure, use for scripts only) |
+| `--delete, -D`    | Delete user from password file                            |
+| `--stdout, -n`    | Output hash to stdout instead of file                     |
 
 #### Passwd Examples
 

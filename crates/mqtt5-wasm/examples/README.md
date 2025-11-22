@@ -5,9 +5,11 @@ This directory contains browser examples demonstrating the mqtt5-wasm library wi
 ## Use Cases
 
 ### External Broker (websocket/)
+
 Connect to remote MQTT brokers via WebSocket.
 
 ### In-Tab Broker (local-broker/)
+
 MQTT broker running in a browser tab using MessagePort.
 
 ## Quick Start
@@ -22,6 +24,7 @@ cd crates/mqtt5-wasm/examples
 ```
 
 This will:
+
 - Build the WASM package with `wasm-pack`
 - Copy it to example directories
 - Display instructions for running examples
@@ -55,24 +58,25 @@ Open http://localhost:8000 in your browser.
 ### Local Broker Features
 
 ```javascript
-import init, { WasmBroker, WasmMqttClient } from './pkg/mqtt5_wasm.js';
+import init, { WasmBroker, WasmMqttClient } from "./pkg/mqtt5_wasm.js";
 
 await init();
 
 const broker = new WasmBroker();
-const client = new WasmMqttClient('local-client');
+const client = new WasmMqttClient("local-client");
 
 const port = broker.create_client_port();
 await client.connect_message_port(port);
 
-await client.subscribe_with_callback('test/topic', (topic, payload) => {
-  console.log('Message received:', topic, payload);
+await client.subscribe_with_callback("test/topic", (topic, payload) => {
+  console.log("Message received:", topic, payload);
 });
 
-await client.publish('test/topic', encoder.encode('Hello'));
+await client.publish("test/topic", encoder.encode("Hello"));
 ```
 
 The in-tab broker:
+
 - Runs entirely in your browser (no external dependencies)
 - Uses MessagePort for client-broker communication
 - Memory-only storage (no persistence)
@@ -85,15 +89,15 @@ All examples demonstrate the event callback system:
 
 ```javascript
 client.on_connect((reasonCode, sessionPresent) => {
-  console.log('Connected!', reasonCode, sessionPresent);
+  console.log("Connected!", reasonCode, sessionPresent);
 });
 
 client.on_disconnect(() => {
-  console.log('Disconnected');
+  console.log("Disconnected");
 });
 
 client.on_error((error) => {
-  console.error('Error:', error);
+  console.error("Error:", error);
 });
 ```
 
@@ -102,10 +106,10 @@ client.on_error((error) => {
 Subscribe with automatic message handling:
 
 ```javascript
-await client.subscribe_with_callback('test/topic', (topic, payload) => {
+await client.subscribe_with_callback("test/topic", (topic, payload) => {
   const decoder = new TextDecoder();
   const message = decoder.decode(payload);
-  console.log('Received:', topic, message);
+  console.log("Received:", topic, message);
 });
 ```
 
@@ -114,7 +118,7 @@ await client.subscribe_with_callback('test/topic', (topic, payload) => {
 Remove subscriptions dynamically:
 
 ```javascript
-await client.unsubscribe('test/topic');
+await client.unsubscribe("test/topic");
 ```
 
 ### Publishing
@@ -123,12 +127,13 @@ QoS 0 (fire-and-forget):
 
 ```javascript
 const encoder = new TextEncoder();
-await client.publish('test/topic', encoder.encode('Hello'));
+await client.publish("test/topic", encoder.encode("Hello"));
 ```
 
 ### Automatic Keepalive
 
 The client automatically:
+
 - Sends PINGREQ packets every 30 seconds
 - Detects connection timeout after 90 seconds
 - Triggers `on_error` and `on_disconnect` callbacks on timeout
@@ -162,19 +167,18 @@ The client automatically:
 The WASM build has the following constraints compared to the native Rust library:
 
 ### Transport Limitations
+
 - **No TLS support**: Browser security model prevents raw TLS socket access
 - **WebSocket only for external brokers**: Use `ws://` or `wss://` (browser-managed TLS)
 - **MessagePort for in-tab broker**: Communication within the same browser tab
 
 ### Storage Limitations
+
 - **Memory-only storage**: No file persistence available in browser environment
 - **Session data lost on page reload**: All broker state is transient
 
-### Authentication Limitations
-- **No bcrypt support**: Password hashing library not available in WASM
-- **In-tab broker uses AllowAllAuthProvider**: No authentication for local broker
-
 ### Network Limitations
+
 - **No server sockets**: Cannot listen for incoming TCP/TLS connections
 - **No broker bridging**: Network-based broker-to-broker connections unavailable
 - **No file-based configuration**: All configuration must be done programmatically
@@ -184,22 +188,26 @@ These limitations are inherent to the browser sandbox security model. For produc
 ## Troubleshooting
 
 **WASM fails to load:**
+
 - Ensure you're using a web server (not `file://`)
 - Check that `pkg/` directory exists with `mqtt5_bg.wasm`
 - Verify MIME type: server should send `.wasm` as `application/wasm`
 
 **Connection fails:**
+
 - Check broker URL format: `ws://` or `wss://`
 - Verify broker is accessible (test with another MQTT client)
 - Check browser console for CORS errors
 - Try a public broker: `ws://broker.hivemq.com:8000/mqtt`
 
 **Messages not received:**
+
 - Ensure you used `subscribe_with_callback()`, not `subscribe()`
 - Check browser console for callback errors
 - Verify topic matches (wildcards: `+` for single level, `#` for multi-level)
 
 **Keepalive timeout:**
+
 - This is expected if broker becomes unreachable
 - Check network connectivity
 - Verify broker supports MQTT v5.0

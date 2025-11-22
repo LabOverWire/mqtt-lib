@@ -34,6 +34,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CLI publish command: `--message-expiry-interval` and `--topic-alias` options
 
 - **mqtt5-protocol crate**: Platform-agnostic MQTT v5.0 core extracted from mqtt5
+
   - Packet encoding/decoding for all MQTT v5.0 packet types
   - Protocol types (QoS, properties, reason codes)
   - Error types (`MqttError`, `Result`)
@@ -43,6 +44,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Shared by both mqtt5 (native) and mqtt5-wasm (browser) crates
 
 - **mqtt5-wasm crate**: Dedicated WebAssembly crate for browser environments
+
   - Full MQTT v5.0 protocol support compiled to WebAssembly
   - Three connection modes:
     - `connect(url)` - WebSocket connection to external MQTT brokers
@@ -70,6 +72,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Connection state management**: `is_connected()`, `disconnect()`
 
 - **WASM broker implementation** for in-browser MQTT broker
+
   - `WasmBroker` - Complete MQTT broker running in browser tab
   - `create_client_port()` - Create MessagePort for client connections
   - Memory-only storage backend (no file I/O in browser)
@@ -78,6 +81,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Perfect for testing, demos, and offline-capable applications
 
 - **WASM transport layer** with async bridge patterns
+
   - **WebSocket transport**: `WasmWebSocketTransport` using web_sys::WebSocket
   - **MessagePort transport**: Channel-based IPC for in-tab broker communication
   - **BroadcastChannel transport**: Cross-tab messaging for distributed applications
@@ -85,7 +89,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Split reader/writer pattern for concurrent packet I/O
 
 - **Platform-gated dependencies** for WASM compatibility
-  - Native CLI dependencies (clap, tokio, bcrypt) excluded from WASM builds
+
+  - Native CLI dependencies (clap, tokio) excluded from WASM builds
   - Conditional compilation for WASM vs native targets
   - Time module abstraction (std::time vs web_sys::window)
   - Single codebase supporting native and WASM targets
@@ -100,6 +105,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Enhanced
 
 - BDD test infrastructure updated for workspace structure
+
   - Dynamic workspace root discovery
   - CLI binary path resolution using CARGO_BIN_EXE environment variable
   - TLS certificate paths computed from workspace root
