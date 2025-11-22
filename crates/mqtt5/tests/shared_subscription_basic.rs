@@ -38,6 +38,7 @@ async fn test_shared_subscription_distribution() {
             QoS::AtMostOnce,
             None,
             false,
+            false,
         )
         .await;
 
@@ -48,6 +49,7 @@ async fn test_shared_subscription_distribution() {
             QoS::AtMostOnce,
             None,
             false,
+            false,
         )
         .await;
 
@@ -57,6 +59,7 @@ async fn test_shared_subscription_distribution() {
             "$share/workers/tasks/+".to_string(),
             QoS::AtMostOnce,
             None,
+            false,
             false,
         )
         .await;
@@ -130,6 +133,7 @@ async fn test_mixed_shared_and_regular_subscriptions() {
             QoS::AtMostOnce,
             None,
             false,
+            false,
         )
         .await;
 
@@ -139,6 +143,7 @@ async fn test_mixed_shared_and_regular_subscriptions() {
             "$share/team/alerts/+".to_string(),
             QoS::AtMostOnce,
             None,
+            false,
             false,
         )
         .await;
@@ -150,6 +155,7 @@ async fn test_mixed_shared_and_regular_subscriptions() {
             "alerts/+".to_string(),
             QoS::AtMostOnce,
             None,
+            false,
             false,
         )
         .await;

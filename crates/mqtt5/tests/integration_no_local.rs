@@ -24,6 +24,7 @@ async fn test_no_local_true_filters_own_messages() {
             QoS::AtMostOnce,
             None,
             true,
+            false,
         )
         .await;
 
@@ -54,6 +55,7 @@ async fn test_no_local_false_allows_own_messages() {
             "test/topic".to_string(),
             QoS::AtMostOnce,
             None,
+            false,
             false,
         )
         .await;
@@ -96,6 +98,7 @@ async fn test_no_local_other_clients_receive_messages() {
             QoS::AtMostOnce,
             None,
             true,
+            false,
         )
         .await;
 
@@ -105,6 +108,7 @@ async fn test_no_local_other_clients_receive_messages() {
             "test/topic".to_string(),
             QoS::AtMostOnce,
             None,
+            false,
             false,
         )
         .await;
@@ -147,6 +151,7 @@ async fn test_no_local_with_wildcards() {
             QoS::AtMostOnce,
             None,
             true,
+            false,
         )
         .await;
 
@@ -181,6 +186,7 @@ async fn test_no_local_with_multilevel_wildcard() {
             QoS::AtMostOnce,
             None,
             true,
+            false,
         )
         .await;
 
@@ -213,6 +219,7 @@ async fn test_no_local_server_generated_messages() {
             QoS::AtMostOnce,
             None,
             true,
+            false,
         )
         .await;
 
@@ -248,6 +255,7 @@ async fn test_no_local_multiple_subscriptions_same_client() {
             QoS::AtMostOnce,
             None,
             true,
+            false,
         )
         .await;
 
@@ -257,6 +265,7 @@ async fn test_no_local_multiple_subscriptions_same_client() {
             "test/topic2".to_string(),
             QoS::AtMostOnce,
             None,
+            false,
             false,
         )
         .await;
@@ -302,6 +311,7 @@ async fn test_no_local_with_qos_levels() {
             QoS::AtLeastOnce,
             None,
             true,
+            false,
         )
         .await;
 

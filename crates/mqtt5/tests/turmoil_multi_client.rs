@@ -53,6 +53,7 @@ fn test_multi_client_message_routing() {
                 QoS::AtMostOnce,
                 None,
                 false,
+                false,
             )
             .await;
 
@@ -74,6 +75,7 @@ fn test_multi_client_message_routing() {
                 "sensors/+/humidity".to_string(),
                 QoS::AtMostOnce,
                 None,
+                false,
                 false,
             )
             .await;
@@ -97,6 +99,7 @@ fn test_multi_client_message_routing() {
                 QoS::AtMostOnce,
                 None,
                 false,
+                false,
             )
             .await;
 
@@ -118,6 +121,7 @@ fn test_multi_client_message_routing() {
                 "sensors/room1/+".to_string(),
                 QoS::AtMostOnce,
                 None,
+                false,
                 false,
             )
             .await;
@@ -213,6 +217,7 @@ fn test_client_subscription_changes() {
                 QoS::AtMostOnce,
                 None,
                 false,
+                false,
             )
             .await;
 
@@ -248,6 +253,7 @@ fn test_client_subscription_changes() {
                 "alerts/warning".to_string(),
                 QoS::AtMostOnce,
                 None,
+                false,
                 false,
             )
             .await;
@@ -301,6 +307,7 @@ fn test_message_ordering_with_multiple_clients() {
                 QoS::AtMostOnce,
                 None,
                 false,
+                false,
             )
             .await;
 
@@ -310,6 +317,7 @@ fn test_message_ordering_with_multiple_clients() {
                 "sequence/test".to_string(),
                 QoS::AtMostOnce,
                 None,
+                false,
                 false,
             )
             .await;

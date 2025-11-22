@@ -40,10 +40,11 @@ pub struct RetainedMessage {
     pub qos: QoS,
     /// Retain flag
     pub retain: bool,
-    /// When the message was stored
-    #[serde(skip, default = "SystemTime::now")]
-    pub stored_at: SystemTime,
-    /// Message expiry time (if any)
+    /// When the message was stored (Unix timestamp in seconds)
+    pub stored_at_secs: u64,
+    /// Original message expiry interval in seconds (if any)
+    pub message_expiry_interval: Option<u32>,
+    /// Message expiry time (computed from stored_at + interval)
     #[serde(skip)]
     pub expires_at: Option<SystemTime>,
 }
@@ -82,10 +83,11 @@ pub struct QueuedMessage {
     pub client_id: String,
     /// QoS level for delivery
     pub qos: QoS,
-    /// When the message was queued
-    #[serde(skip, default = "SystemTime::now")]
-    pub queued_at: SystemTime,
-    /// Message expiry time (if any)
+    /// When the message was queued (Unix timestamp in seconds)
+    pub queued_at_secs: u64,
+    /// Original message expiry interval in seconds (if any)
+    pub message_expiry_interval: Option<u32>,
+    /// Message expiry time (computed from queued_at + interval)
     #[serde(skip)]
     pub expires_at: Option<SystemTime>,
     /// Packet ID for QoS 1/2 delivery
@@ -362,7 +364,12 @@ impl RetainedMessage {
     /// Create new retained message from PUBLISH packet
     pub fn new(packet: PublishPacket) -> Self {
         let now = SystemTime::now();
-        let expires_at = Self::extract_message_expiry(&packet)
+        let stored_at_secs = now
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let message_expiry_interval = packet.properties.get_message_expiry_interval();
+        let expires_at = message_expiry_interval
             .map(|interval| now + Duration::from_secs(u64::from(interval)));
 
         Self {
@@ -370,27 +377,40 @@ impl RetainedMessage {
             payload: packet.payload,
             qos: packet.qos,
             retain: packet.retain,
-            stored_at: now,
+            stored_at_secs,
+            message_expiry_interval,
             expires_at,
+        }
+    }
+
+    /// Recompute expires_at from stored fields (call after deserialization)
+    pub fn recompute_expiry(&mut self) {
+        if let Some(interval) = self.message_expiry_interval {
+            let stored_at = SystemTime::UNIX_EPOCH + Duration::from_secs(self.stored_at_secs);
+            self.expires_at = Some(stored_at + Duration::from_secs(u64::from(interval)));
         }
     }
 
     /// Convert to PublishPacket for delivery
     pub fn to_publish_packet(&self) -> PublishPacket {
-        PublishPacket::new(&self.topic, self.payload.clone(), self.qos).with_retain(self.retain)
-    }
+        let mut packet =
+            PublishPacket::new(&self.topic, self.payload.clone(), self.qos).with_retain(self.retain);
 
-    /// Extract message expiry interval from packet properties
-    fn extract_message_expiry(packet: &PublishPacket) -> Option<u32> {
-        use crate::protocol::v5::properties::{PropertyId, PropertyValue};
+        if let Some(remaining) = self.remaining_expiry_interval() {
+            packet.properties.set_message_expiry_interval(remaining);
+        }
 
         packet
-            .properties
-            .get(PropertyId::MessageExpiryInterval)
-            .and_then(|prop| match prop {
-                PropertyValue::FourByteInteger(value) => Some(*value),
-                _ => None,
-            })
+    }
+
+    #[must_use]
+    pub fn remaining_expiry_interval(&self) -> Option<u32> {
+        self.expires_at.and_then(|expiry| {
+            expiry
+                .duration_since(SystemTime::now())
+                .ok()
+                .map(|d| u32::try_from(d.as_secs()).unwrap_or(u32::MAX))
+        })
     }
 
     /// Check if message has expired
@@ -469,7 +489,12 @@ impl QueuedMessage {
     /// Create new queued message from PUBLISH packet
     pub fn new(packet: PublishPacket, client_id: String, qos: QoS, packet_id: Option<u16>) -> Self {
         let now = SystemTime::now();
-        let expires_at = Self::extract_message_expiry(&packet)
+        let queued_at_secs = now
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let message_expiry_interval = packet.properties.get_message_expiry_interval();
+        let expires_at = message_expiry_interval
             .map(|interval| now + Duration::from_secs(u64::from(interval)));
 
         Self {
@@ -477,9 +502,18 @@ impl QueuedMessage {
             payload: packet.payload,
             client_id,
             qos,
-            queued_at: now,
+            queued_at_secs,
+            message_expiry_interval,
             expires_at,
             packet_id,
+        }
+    }
+
+    /// Recompute expires_at from stored fields (call after deserialization)
+    pub fn recompute_expiry(&mut self) {
+        if let Some(interval) = self.message_expiry_interval {
+            let queued_at = SystemTime::UNIX_EPOCH + Duration::from_secs(self.queued_at_secs);
+            self.expires_at = Some(queued_at + Duration::from_secs(u64::from(interval)));
         }
     }
 
@@ -487,20 +521,22 @@ impl QueuedMessage {
     pub fn to_publish_packet(&self) -> PublishPacket {
         let mut packet = PublishPacket::new(&self.topic, self.payload.clone(), self.qos);
         packet.packet_id = self.packet_id;
+
+        if let Some(remaining) = self.remaining_expiry_interval() {
+            packet.properties.set_message_expiry_interval(remaining);
+        }
+
         packet
     }
 
-    /// Extract message expiry interval from packet properties
-    fn extract_message_expiry(packet: &PublishPacket) -> Option<u32> {
-        use crate::protocol::v5::properties::{PropertyId, PropertyValue};
-
-        packet
-            .properties
-            .get(PropertyId::MessageExpiryInterval)
-            .and_then(|prop| match prop {
-                PropertyValue::FourByteInteger(value) => Some(*value),
-                _ => None,
-            })
+    #[must_use]
+    pub fn remaining_expiry_interval(&self) -> Option<u32> {
+        self.expires_at.and_then(|expiry| {
+            expiry
+                .duration_since(SystemTime::now())
+                .ok()
+                .map(|d| u32::try_from(d.as_secs()).unwrap_or(u32::MAX))
+        })
     }
 
     /// Check if message has expired

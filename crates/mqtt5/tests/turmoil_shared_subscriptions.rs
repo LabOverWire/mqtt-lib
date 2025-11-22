@@ -46,13 +46,13 @@ fn test_shared_subscriptions_in_turmoil() {
             .register_client("worker3".to_string(), tx3, dtx3)
             .await;
 
-        // All workers subscribe to same shared subscription
         router
             .subscribe(
                 "worker1".to_string(),
                 "$share/workers/tasks/+".to_string(),
                 QoS::AtMostOnce,
                 None,
+                false,
                 false,
             )
             .await;
@@ -64,6 +64,7 @@ fn test_shared_subscriptions_in_turmoil() {
                 QoS::AtMostOnce,
                 None,
                 false,
+                false,
             )
             .await;
 
@@ -73,6 +74,7 @@ fn test_shared_subscriptions_in_turmoil() {
                 "$share/workers/tasks/+".to_string(),
                 QoS::AtMostOnce,
                 None,
+                false,
                 false,
             )
             .await;

@@ -463,12 +463,40 @@ impl Properties {
             .push(PropertyValue::FourByteInteger(seconds));
     }
 
+    /// Gets the message expiry interval in seconds
+    pub fn get_message_expiry_interval(&self) -> Option<u32> {
+        self.properties
+            .get(&PropertyId::MessageExpiryInterval)
+            .and_then(|values| values.first())
+            .and_then(|value| {
+                if let PropertyValue::FourByteInteger(v) = value {
+                    Some(*v)
+                } else {
+                    None
+                }
+            })
+    }
+
     /// Sets the topic alias
     pub fn set_topic_alias(&mut self, alias: u16) {
         self.properties
             .entry(PropertyId::TopicAlias)
             .or_default()
             .push(PropertyValue::TwoByteInteger(alias));
+    }
+
+    /// Gets the topic alias
+    pub fn get_topic_alias(&self) -> Option<u16> {
+        self.properties
+            .get(&PropertyId::TopicAlias)
+            .and_then(|values| values.first())
+            .and_then(|value| {
+                if let PropertyValue::TwoByteInteger(v) = value {
+                    Some(*v)
+                } else {
+                    None
+                }
+            })
     }
 
     /// Sets the response topic
@@ -501,6 +529,20 @@ impl Properties {
             .entry(PropertyId::SubscriptionIdentifier)
             .or_default()
             .push(PropertyValue::VariableByteInteger(id));
+    }
+
+    #[must_use]
+    pub fn get_subscription_identifier(&self) -> Option<u32> {
+        self.properties
+            .get(&PropertyId::SubscriptionIdentifier)
+            .and_then(|values| values.first())
+            .and_then(|value| {
+                if let PropertyValue::VariableByteInteger(v) = value {
+                    Some(*v)
+                } else {
+                    None
+                }
+            })
     }
 
     /// Sets the session expiry interval
@@ -673,6 +715,20 @@ impl Properties {
             .entry(PropertyId::TopicAliasMaximum)
             .or_default()
             .push(PropertyValue::TwoByteInteger(max));
+    }
+
+    /// Gets the topic alias maximum
+    pub fn get_topic_alias_maximum(&self) -> Option<u16> {
+        self.properties
+            .get(&PropertyId::TopicAliasMaximum)
+            .and_then(|values| values.first())
+            .and_then(|value| {
+                if let PropertyValue::TwoByteInteger(v) = value {
+                    Some(*v)
+                } else {
+                    None
+                }
+            })
     }
 
     /// Sets the maximum `QoS`

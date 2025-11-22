@@ -4,7 +4,6 @@
 
 use super::{ClientSession, QueuedMessage, RetainedMessage, StorageBackend};
 use crate::error::{MqttError, Result};
-use crate::time::SystemTime;
 use crate::validation::topic_matches_filter;
 use serde_json;
 use std::path::{Path, PathBuf};
@@ -283,13 +282,8 @@ impl StorageBackend for FileBackend {
             ))
         })?;
 
-        // Use timestamp + random suffix for unique filename
-        let timestamp = message
-            .queued_at
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis();
-        let filename = format!("{}_{}.json", timestamp, timestamp % 1_000_000);
+        let timestamp = message.queued_at_secs * 1000;
+        let filename = format!("{timestamp}_{}.json", timestamp % 1_000_000);
         let path = client_dir.join(filename);
 
         debug!("Queuing message for client: {}", message.client_id);
@@ -308,20 +302,17 @@ impl StorageBackend for FileBackend {
         let mut messages = Vec::new();
 
         for file_path in files {
-            if let Some(message) = self.read_file::<QueuedMessage>(file_path.clone()).await? {
+            if let Some(mut message) = self.read_file::<QueuedMessage>(file_path.clone()).await? {
+                message.recompute_expiry();
                 if !message.is_expired() {
                     messages.push(message);
-                } else {
-                    // Remove expired message
-                    if let Err(e) = fs::remove_file(&file_path).await {
-                        warn!("Failed to remove expired queued message: {}", e);
-                    }
+                } else if let Err(e) = fs::remove_file(&file_path).await {
+                    warn!("Failed to remove expired queued message: {}", e);
                 }
             }
         }
 
-        // Sort by queue time
-        messages.sort_by_key(|msg| msg.queued_at);
+        messages.sort_by_key(|msg| msg.queued_at_secs);
 
         Ok(messages)
     }

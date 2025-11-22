@@ -29,21 +29,17 @@ pub struct Subscription {
     pub share_group: Option<String>,
     /// No Local option - if true, messages published by this client are not delivered back to it
     pub no_local: bool,
+    /// Retain As Published option - if true, the retain flag is kept as-is when delivering
+    pub retain_as_published: bool,
 }
 
 /// Message router for the broker
 pub struct MessageRouter {
-    /// Map of topic filters to subscriptions
     subscriptions: Arc<RwLock<HashMap<String, Vec<Subscription>>>>,
-    /// Map of exact topics to retained messages (in-memory cache)
-    retained_messages: Arc<RwLock<HashMap<String, PublishPacket>>>,
-    /// Active client connections
+    retained_messages: Arc<RwLock<HashMap<String, RetainedMessage>>>,
     clients: Arc<RwLock<HashMap<String, ClientInfo>>>,
-    /// Storage backend for persistence
     storage: Option<Arc<DynamicStorage>>,
-    /// Round-robin counters for shared subscription groups
     share_group_counters: Arc<RwLock<HashMap<String, Arc<AtomicUsize>>>>,
-    /// Bridge manager for broker-to-broker connections
     #[cfg(not(target_arch = "wasm32"))]
     bridge_manager: Arc<RwLock<Option<Weak<BridgeManager>>>>,
 }
@@ -100,7 +96,7 @@ impl MessageRouter {
             let mut retained = self.retained_messages.write().await;
 
             for (topic, msg) in stored_messages {
-                retained.insert(topic, msg.to_publish_packet());
+                retained.insert(topic, msg);
             }
 
             debug!("Loaded {} retained messages from storage", retained.len());
@@ -157,7 +153,6 @@ impl MessageRouter {
         debug!("Unregistered client: {}", client_id);
     }
 
-    /// Adds a subscription for a client
     pub async fn subscribe(
         &self,
         client_id: String,
@@ -165,14 +160,14 @@ impl MessageRouter {
         qos: QoS,
         subscription_id: Option<u32>,
         no_local: bool,
-    ) {
+        retain_as_published: bool,
+    ) -> bool {
         let (actual_filter, share_group) = Self::parse_shared_subscription(&topic_filter);
 
         let mut subscriptions = self.subscriptions.write().await;
 
         let subs = subscriptions.entry(actual_filter.to_string()).or_default();
 
-        // Check if this client already has a subscription for this topic
         let existing_pos = subs.iter().position(|s| s.client_id == client_id);
 
         let subscription = Subscription {
@@ -181,28 +176,30 @@ impl MessageRouter {
             subscription_id,
             share_group: share_group.clone(),
             no_local,
+            retain_as_published,
         };
 
-        if let Some(pos) = existing_pos {
-            // Update existing subscription
+        let is_new = if let Some(pos) = existing_pos {
             subs[pos] = subscription;
             debug!(
                 "Client {} updated subscription to {}",
                 client_id, topic_filter
             );
+            false
         } else {
-            // Add new subscription
             subs.push(subscription);
             debug!("Client {} subscribed to {}", client_id, topic_filter);
-        }
+            true
+        };
 
-        // Initialize share group counter if needed
         if let Some(group) = share_group {
             let mut counters = self.share_group_counters.write().await;
             counters
                 .entry(group)
                 .or_insert_with(|| Arc::new(AtomicUsize::new(0)));
         }
+
+        is_new
     }
 
     /// Parses a shared subscription topic filter
@@ -264,12 +261,11 @@ impl MessageRouter {
                     }
                 }
             } else {
-                retained.insert(publish.topic_name.clone(), publish.clone());
+                let retained_msg = RetainedMessage::new(publish.clone());
+                retained.insert(publish.topic_name.clone(), retained_msg.clone());
                 debug!("Stored retained message for topic: {}", publish.topic_name);
 
-                // Persist to storage
                 if let Some(ref storage) = self.storage {
-                    let retained_msg = RetainedMessage::new(publish.clone());
                     if let Err(e) = storage
                         .store_retained_message(&publish.topic_name, retained_msg)
                         .await
@@ -403,11 +399,13 @@ impl MessageRouter {
                 (QoS::ExactlyOnce, QoS::ExactlyOnce) => QoS::ExactlyOnce,
             };
 
-            // Create message with effective QoS
             let mut message = publish.clone();
             message.qos = effective_qos;
 
-            // Add subscription identifier if present
+            if !sub.retain_as_published {
+                message.retain = false;
+            }
+
             if let Some(id) = sub.subscription_id {
                 message.properties.set_subscription_identifier(id);
             }
@@ -478,8 +476,8 @@ impl MessageRouter {
         let retained = self.retained_messages.read().await;
         retained
             .iter()
-            .filter(|(topic, _)| topic_matches_filter(topic, topic_filter))
-            .map(|(_, msg)| msg.clone())
+            .filter(|(topic, msg)| topic_matches_filter(topic, topic_filter) && !msg.is_expired())
+            .map(|(_, msg)| msg.to_publish_packet())
             .collect()
     }
 
@@ -536,6 +534,7 @@ mod tests {
                 QoS::AtLeastOnce,
                 None,
                 false,
+                false,
             )
             .await;
 
@@ -562,13 +561,13 @@ mod tests {
             .register_client("client2".to_string(), tx2, dtx2)
             .await;
 
-        // Subscribe to different patterns
         router
             .subscribe(
                 "client1".to_string(),
                 "test/+".to_string(),
                 QoS::AtLeastOnce,
                 None,
+                false,
                 false,
             )
             .await;
@@ -578,6 +577,7 @@ mod tests {
                 "test/data".to_string(),
                 QoS::ExactlyOnce,
                 None,
+                false,
                 false,
             )
             .await;
@@ -658,13 +658,13 @@ mod tests {
             .register_client("client3".to_string(), tx3, dtx3)
             .await;
 
-        // All subscribe to same shared subscription
         router
             .subscribe(
                 "client1".to_string(),
                 "$share/workers/test/data".to_string(),
                 QoS::AtMostOnce,
                 None,
+                false,
                 false,
             )
             .await;
@@ -675,6 +675,7 @@ mod tests {
                 QoS::AtMostOnce,
                 None,
                 false,
+                false,
             )
             .await;
         router
@@ -683,6 +684,7 @@ mod tests {
                 "$share/workers/test/data".to_string(),
                 QoS::AtMostOnce,
                 None,
+                false,
                 false,
             )
             .await;
@@ -735,13 +737,13 @@ mod tests {
             .register_client("regular".to_string(), tx3, dtx3)
             .await;
 
-        // Two clients with shared subscription
         router
             .subscribe(
                 "shared1".to_string(),
                 "$share/group/test/+".to_string(),
                 QoS::AtMostOnce,
                 None,
+                false,
                 false,
             )
             .await;
@@ -752,16 +754,17 @@ mod tests {
                 QoS::AtMostOnce,
                 None,
                 false,
+                false,
             )
             .await;
 
-        // One client with regular subscription
         router
             .subscribe(
                 "regular".to_string(),
                 "test/+".to_string(),
                 QoS::AtMostOnce,
                 None,
+                false,
                 false,
             )
             .await;

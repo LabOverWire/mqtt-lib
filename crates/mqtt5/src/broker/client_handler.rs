@@ -74,6 +74,7 @@ pub struct ClientHandler {
     auth_method: Option<String>,
     auth_state: AuthState,
     pending_connect: Option<PendingConnect>,
+    topic_aliases: HashMap<u16, String>,
 }
 
 impl ClientHandler {
@@ -116,6 +117,7 @@ impl ClientHandler {
             auth_method: None,
             auth_state: AuthState::NotStarted,
             pending_connect: None,
+            topic_aliases: HashMap::new(),
         }
     }
 
@@ -668,18 +670,18 @@ impl ClientHandler {
                 filter.options.qos as u8
             };
 
-            // Add subscription
-            self.router
+            let is_new = self
+                .router
                 .subscribe(
                     client_id.clone(),
                     filter.filter.clone(),
                     QoS::from(granted_qos),
-                    None,
+                    subscribe.properties.get_subscription_identifier(),
                     filter.options.no_local,
+                    filter.options.retain_as_published,
                 )
                 .await;
 
-            // Persist subscription to session
             if let Some(ref mut session) = self.session {
                 session.add_subscription(filter.filter.clone(), QoS::from(granted_qos));
                 if let Some(ref storage) = self.storage {
@@ -687,9 +689,13 @@ impl ClientHandler {
                 }
             }
 
-            // Send retained messages if requested
-            if filter.options.retain_handling != crate::packet::subscribe::RetainHandling::DoNotSend
-            {
+            let should_send_retained = match filter.options.retain_handling {
+                crate::packet::subscribe::RetainHandling::SendAtSubscribe => true,
+                crate::packet::subscribe::RetainHandling::SendAtSubscribeIfNew => is_new,
+                crate::packet::subscribe::RetainHandling::DoNotSend => false,
+            };
+
+            if should_send_retained {
                 let retained = self.router.get_retained_messages(&filter.filter).await;
                 for mut msg in retained {
                     msg.retain = true;
@@ -777,14 +783,39 @@ impl ClientHandler {
 
     /// Handles PUBLISH packet
     #[allow(clippy::too_many_lines)]
-    async fn handle_publish(&mut self, publish: PublishPacket) -> Result<()> {
+    async fn handle_publish(&mut self, mut publish: PublishPacket) -> Result<()> {
         let client_id = self.client_id.as_ref().unwrap();
 
-        // Track publish received stats
+        if let Some(alias) = publish.properties.get_topic_alias() {
+            if alias == 0 || alias > self.config.topic_alias_maximum {
+                return Err(MqttError::ProtocolError(format!(
+                    "Invalid topic alias: {} (maximum: {})",
+                    alias, self.config.topic_alias_maximum
+                )));
+            }
+
+            if publish.topic_name.is_empty() {
+                if let Some(topic) = self.topic_aliases.get(&alias) {
+                    publish.topic_name.clone_from(topic);
+                } else {
+                    return Err(MqttError::ProtocolError(format!(
+                        "Topic alias {} not found",
+                        alias
+                    )));
+                }
+            } else {
+                self.topic_aliases
+                    .insert(alias, publish.topic_name.clone());
+            }
+        } else if publish.topic_name.is_empty() {
+            return Err(MqttError::ProtocolError(
+                "Empty topic name without topic alias".to_string(),
+            ));
+        }
+
         let payload_size = publish.payload.len();
         self.stats.publish_received(payload_size);
 
-        // Check authorization
         let authorized = self
             .auth_provider
             .authorize_publish(client_id, self.user_id.as_deref(), &publish.topic_name)
@@ -992,7 +1023,6 @@ impl ClientHandler {
         mut session: ClientSession,
         storage: &Arc<DynamicStorage>,
     ) -> Result<()> {
-        // Restore subscriptions
         for (topic_filter, qos) in &session.subscriptions {
             self.router
                 .subscribe(
@@ -1000,6 +1030,7 @@ impl ClientHandler {
                     topic_filter.clone(),
                     *qos,
                     None,
+                    false,
                     false,
                 )
                 .await;

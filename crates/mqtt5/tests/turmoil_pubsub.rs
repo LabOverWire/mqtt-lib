@@ -40,6 +40,7 @@ fn test_basic_publish_subscribe() {
                 QoS::AtMostOnce,
                 None,
                 false,
+                false,
             )
             .await;
 
@@ -97,6 +98,7 @@ fn test_wildcard_subscriptions() {
                 QoS::AtMostOnce,
                 None,
                 false,
+                false,
             )
             .await;
 
@@ -107,6 +109,7 @@ fn test_wildcard_subscriptions() {
                 "sensors/#".to_string(),
                 QoS::AtMostOnce,
                 None,
+                false,
                 false,
             )
             .await;
@@ -203,6 +206,7 @@ fn test_multiple_subscribers_same_topic() {
                     QoS::AtMostOnce,
                     None,
                     false,
+                    false,
                 )
                 .await;
         }
@@ -275,6 +279,7 @@ fn test_qos_levels() {
                 QoS::AtMostOnce,
                 None,
                 false,
+                false,
             )
             .await;
 
@@ -284,6 +289,7 @@ fn test_qos_levels() {
                 "data/qos1".to_string(),
                 QoS::AtLeastOnce,
                 None,
+                false,
                 false,
             )
             .await;
@@ -342,6 +348,7 @@ fn test_unsubscribe_functionality() {
                 "test/unsubscribe".to_string(),
                 QoS::AtMostOnce,
                 None,
+                false,
                 false,
             )
             .await;

@@ -86,6 +86,7 @@ async fn test_bridge_message_routing() {
             QoS::AtMostOnce,
             None,
             false,
+            false,
         )
         .await;
 
