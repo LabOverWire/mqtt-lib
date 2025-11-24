@@ -1,88 +1,19 @@
-[package]
-name = "mqtt5"
-version = "0.9.0"
-edition = "2021"
-rust-version = "1.83"
-authors = ["fabriciobracht <fabricio@bracht.dev>"]
-description = "Complete MQTT v5.0 platform with high-performance async client and full-featured broker supporting TCP, TLS, WebSocket, authentication, bridging, and resource monitoring"
-license = "MIT OR Apache-2.0"
-repository = "https://github.com/fabriciobracht/mqtt-lib"
-documentation = "https://docs.rs/mqtt5"
-readme = "README.md"
-keywords = ["mqtt", "iot", "messaging", "async", "broker"]
-categories = ["network-programming", "asynchronous"]
-exclude = [
-    "CLAUDE.md",
-    "mutants.out*/",
-    "docker-compose.yml",
-    "comparative_benchmarks/",
-    "test_certs/",
-    "scripts/",
-    "docs/",
-    "run_integration_tests.sh",
+[workspace]
+members = [
+    "crates/mqtt5-protocol",
+    "crates/mqtt5",
+    "crates/mqtt5-wasm",
+    "crates/mqttv5-cli",
 ]
+resolver = "2"
 
-[features]
-default = []
-turmoil-testing = ["turmoil"]
-opentelemetry = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:tracing-opentelemetry", "tracing-subscriber"]
-opentelemetry_sdk = ["dep:opentelemetry_sdk"]
-opentelemetry-otlp = ["dep:opentelemetry-otlp"]
-tracing-opentelemetry = ["dep:tracing-opentelemetry"]
-
-[dev-dependencies]
-tokio-test = "0.4"
-ulid = "1.2.1"
-proptest = "1.9.0"
-serde_json = "1.0.142"
-rand = "0.9.2"
-futures = "0.3.31"
-tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
-anyhow = "1.0"
-
-url = "2.5.4"
-hyper = { version = "1.6.0", features = ["full"] }
-hyper-util = { version = "0.1.16", features = ["full"] }
-tempfile = "3.12.0"
-cucumber = "0.21.1"
-
-[[example]]
-name = "simple_broker"
-path = "examples/simple_broker.rs"
-
-[[example]]
-name = "broker_with_monitoring"
-path = "examples/broker_with_monitoring.rs"
-
-[[example]]
-name = "broker_with_tls"
-path = "examples/broker_with_tls.rs"
-
-[[example]]
-name = "broker_with_websocket"
-path = "examples/broker_with_websocket.rs"
-
-[[example]]
-name = "broker_all_transports"
-path = "examples/broker_all_transports.rs"
-
-[[example]]
-name = "broker_bridge_demo"
-path = "examples/broker_bridge_demo.rs"
-
-[[example]]
-name = "broker_with_opentelemetry"
-path = "examples/broker_with_opentelemetry.rs"
-required-features = ["opentelemetry"]
-
-[lib]
-name = "mqtt5"
-path = "src/lib.rs"
-
-[[test]]
-name = "cli_bdd"
-path = "tests/cli_bdd.rs"
-harness = false
+[workspace.package]
+version = "0.10.0"
+edition = "2021"
+rust-version = "1.85"
+authors = ["fabriciobracht <fabricio@bracht.dev>"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/LabOverWire/mqtt-lib"
 
 [profile.release]
 lto = true
@@ -91,41 +22,3 @@ panic = "abort"
 
 [profile.dev]
 debug = true
-
-[workspace]
-members = [".", "crates/mqttv5-cli"]
-
-[dependencies]
-base64 = "0.22"
-bcrypt = "0.17"
-bebytes = "2.10"
-bytes = "1.10"
-futures = "0.3"
-futures-util = "0.3"
-hex = "0.4"
-humantime-serde = "1.1"
-rand = "0.9"
-ring = "0.17.14"
-rustls = { version = "0.23", features = ["ring"] }
-rustls-pemfile = "2.2"
-rustls-pki-types = "1.13.0"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-sha2 = "0.10"
-thiserror = "2.0"
-tokio = { version = "1.47", features = ["full"] }
-tokio-rustls = "0.26"
-tokio-tungstenite = { version = "0.28", features = ["rustls-tls-native-roots"] }
-toml = "0.9"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = [
-    "env-filter",
-], optional = true }
-turmoil = { version = "0.7", optional = true }
-url = "2.5"
-webpki-roots = "1.0"
-log = "0.4"
-opentelemetry_sdk = { version = "0.31", features = ["trace", "rt-tokio"], optional = true }
-opentelemetry-otlp = { version = "0.31", features = ["trace", "grpc-tonic"], optional = true }
-tracing-opentelemetry = { version = "0.32", optional = true }
-opentelemetry = { version = "0.31", features = ["trace"], optional = true }

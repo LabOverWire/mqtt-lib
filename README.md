@@ -2,8 +2,8 @@
 
 [![Crates.io](https://img.shields.io/crates/v/mqtt5.svg)](https://crates.io/crates/mqtt5)
 [![Documentation](https://docs.rs/mqtt5/badge.svg)](https://docs.rs/mqtt5)
-[![Rust CI](https://github.com/fabriciobracht/mqtt-lib/workflows/Rust%20CI/badge.svg)](https://github.com/fabriciobracht/mqtt-lib/actions)
-[![License](https://img.shields.io/crates/l/mqtt5.svg)](https://github.com/fabriciobracht/mqtt-lib#license)
+[![Rust CI](https://github.com/LabOverWire/mqtt-lib/actions/workflows/rust.yml/badge.svg)](https://github.com/LabOverWire/mqtt-lib/actions)
+[![License](https://img.shields.io/crates/l/mqtt5.svg)](https://github.com/LabOverWire/mqtt-lib#license)
 
 **MQTT v5.0 platform featuring client library and broker implementation**
 
@@ -20,7 +20,7 @@
 
 ```toml
 [dependencies]
-mqtt5 = "0.9.0"
+mqtt5 = "0.10.0"
 ```
 
 ### CLI Tool
@@ -28,6 +28,16 @@ mqtt5 = "0.9.0"
 ```bash
 cargo install mqttv5-cli
 ```
+
+## Crate Organization
+
+The platform is organized into three crates:
+
+- **mqtt5-protocol** - Platform-agnostic MQTT v5.0 core (packets, types, Transport trait)
+- **mqtt5** - Native client and broker for Linux, macOS, Windows
+- **mqtt5-wasm** - WebAssembly client and broker for browsers
+
+Shared protocol implementation from `mqtt5-protocol`.
 
 ## Quick Start
 
@@ -58,7 +68,7 @@ use mqtt5::{MqttClient, QoS};
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = MqttClient::new("my-device-001");
 
-    // Connect to your broker (supports multiple transports)
+    // Multiple transport options:
     client.connect("mqtt://localhost:1883").await?;       // TCP
     // client.connect("mqtts://localhost:8883").await?;   // TLS
     // client.connect("ws://localhost:8080/mqtt").await?; // WebSocket
@@ -85,7 +95,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 cargo install mqttv5-cli
 
 # Or build from source
-git clone https://github.com/fabriciobracht/mqtt-lib
+git clone https://github.com/LabOverWire/mqtt-lib
 cd mqtt-lib
 cargo build --release -p mqttv5-cli
 ```
@@ -116,25 +126,25 @@ mqttv5 pub
 
 ### CLI Features
 
-- Unified interface - Single binary with broker, pub, sub, passwd, and acl commands
-- Smart prompting - Guides users when arguments are missing
-- Input validation - Catches errors with helpful suggestions
-- Descriptive flags - `--topic` instead of `-t`, with short aliases available
-- Interactive & non-interactive - Works for both humans and scripts
+- Single binary: broker, pub, sub, passwd, acl commands
+- Interactive prompts for missing arguments
+- Input validation with error messages
+- Long flags (`--topic`) with short aliases (`-t`)
+- Interactive and non-interactive modes
 
 ## Platform Features
 
 ### Broker
 
 - Multiple transports: TCP, TLS, WebSocket in a single binary
-- Built-in authentication: Username/password, file-based, bcrypt
+- Built-in authentication: Username/password, file-based, argon2
 - Resource monitoring: Connection limits, rate limiting, memory tracking
 - Distributed tracing: OpenTelemetry integration with trace context propagation
 - Self-contained: No external dependencies
 
 ### Client
 
-- Cloud compatible: Works with cloud MQTT brokers
+- Cloud MQTT broker support (AWS IoT, Azure IoT Hub, etc.)
 - Automatic reconnection with exponential backoff
 - Direct async/await patterns
 - Comprehensive testing support
@@ -174,21 +184,211 @@ mqttv5 pub
 - Cloud SDK compatible - Subscribe returns `(packet_id, qos)` tuple
 - Automatic reconnection with exponential backoff
 - Client-side message queuing for offline scenarios
-- Reason code validation - Properly handles broker publish rejections (ACL, quota limits)
+- Reason code validation for broker publish rejections (ACL, quota limits)
 
 ### Transport & Connectivity
 
-- Certificate loading from bytes - Load TLS certificates from memory (PEM/DER formats)
+- Certificate loading from memory (PEM/DER formats)
 - WebSocket transport - MQTT over WebSocket for browsers
 - TLS/SSL support - Secure connections with certificate validation
 - Session persistence - Survives disconnections with clean_start=false
 
 ### Testing & Development
 
-- Mockable Client Interface - `MqttClientTrait` enables testing without real brokers
-- Property-based testing - 29 tests ensuring robustness
-- CLI Integration Testing - End-to-end tests with real broker verification
-- Flow control - Respects broker receive maximum limits
+- Mockable Client Interface - `MqttClientTrait` for unit testing
+- Property-based testing - 29 tests with Proptest
+- CLI Integration Testing - End-to-end tests
+- Flow control - Broker receive maximum limits
+
+## WASM Browser Support
+
+WebAssembly builds for browser environments with three deployment modes.
+
+### Connection Modes
+
+#### External Broker Mode (WebSocket)
+
+Connect to remote MQTT brokers using WebSocket transport:
+
+```javascript
+import init, { WasmMqttClient } from "./pkg/mqtt5_wasm.js";
+
+await init();
+const client = new WasmMqttClient("browser-client");
+
+await client.connect("ws://broker.example.com:8080/mqtt");
+```
+
+#### In-Tab Broker Mode (MessagePort)
+
+MQTT broker in a browser tab:
+
+```javascript
+import init, { WasmBroker, WasmMqttClient } from "./pkg/mqtt5_wasm.js";
+
+await init();
+const broker = new WasmBroker();
+const client = new WasmMqttClient("local-client");
+
+const port = broker.create_client_port();
+await client.connect_message_port(port);
+```
+
+#### Cross-Tab Mode (BroadcastChannel)
+
+Communication across browser tabs via BroadcastChannel API:
+
+```javascript
+await client.connect_broadcast_channel("mqtt-channel");
+```
+
+### Complete API Reference
+
+#### Publishing Messages
+
+**QoS 0 (Fire-and-forget):**
+
+```javascript
+const encoder = new TextEncoder();
+await client.publish("sensors/temp", encoder.encode("25.5°C"));
+```
+
+**QoS 1 (At least once):**
+
+```javascript
+await client.publish_qos1("sensors/temp", encoder.encode("25.5°C"), (reasonCode) => {
+  if (reasonCode === 0) {
+    console.log("Message acknowledged");
+  } else {
+    console.error("Publish failed, reason:", reasonCode);
+  }
+});
+```
+
+**QoS 2 (Exactly once):**
+
+```javascript
+await client.publish_qos2("commands/action", encoder.encode("start"), (result) => {
+  if (typeof result === "number") {
+    console.log("Success, reason code:", result);
+  } else {
+    console.error("Timeout or error:", result);
+  }
+});
+```
+
+#### Subscribing to Topics
+
+**With callback (recommended):**
+
+```javascript
+await client.subscribe_with_callback("sensors/+/data", (topic, payload) => {
+  const decoder = new TextDecoder();
+  console.log(`${topic}: ${decoder.decode(payload)}`);
+});
+```
+
+**Without callback:**
+
+```javascript
+const packetId = await client.subscribe("sensors/#");
+console.log("Subscribed with packet ID:", packetId);
+```
+
+**Unsubscribe:**
+
+```javascript
+await client.unsubscribe("sensors/temp");
+```
+
+#### Connection Events
+
+**Connection success:**
+
+```javascript
+client.on_connect((reasonCode, sessionPresent) => {
+  console.log("Connected!");
+  console.log("Reason code:", reasonCode);
+  console.log("Session present:", sessionPresent);
+});
+```
+
+**Disconnection:**
+
+```javascript
+client.on_disconnect(() => {
+  console.log("Disconnected from broker");
+});
+```
+
+**Errors (including keepalive timeout):**
+
+```javascript
+client.on_error((error) => {
+  console.error("Error:", error);
+});
+```
+
+**Check connection status:**
+
+```javascript
+if (client.is_connected()) {
+  console.log("Currently connected");
+}
+```
+
+**Manual disconnect:**
+
+```javascript
+await client.disconnect();
+```
+
+### Automatic Features
+
+#### Keepalive & Timeout Detection
+
+- Sends PINGREQ every 30 seconds
+- Connection timeout after 90 seconds
+- Triggers `on_error("Keepalive timeout")` and `on_disconnect()` on timeout
+
+#### QoS 2 Flow Management
+
+- Full four-way handshake (PUBLISH → PUBREC → PUBREL → PUBCOMP)
+- 10-second timeout for incomplete flows
+- Duplicate detection with 30-second tracking window
+- Status updates via callback
+
+### In-Tab Broker Features
+
+MQTT v5.0 broker in browser:
+
+- QoS levels: 0, 1, 2
+- Retained messages: in-memory storage
+- Subscriptions: wildcard matching (`+`, `#`)
+- Session management: memory-only (lost on page reload)
+- No external dependencies
+
+### WASM Limitations
+
+- Browser-managed `wss://` only
+- No file I/O (IndexedDB/localStorage available for persistence)
+- WebSocket/MessagePort/BroadcastChannel only
+- JavaScript event loop execution
+
+### Browser Compatibility
+
+- Chrome/Edge 90+
+- Firefox 88+
+- Safari 15.4+
+
+### Complete Examples
+
+See `crates/mqtt5-wasm/examples/` for browser examples:
+
+- `websocket/` - External broker connections
+- `local-broker/` - In-tab broker with MessagePort
+- Complete HTML/JavaScript/CSS applications
+- Build instructions with `wasm-pack`
 
 ## Advanced Broker Configuration
 
@@ -335,27 +535,27 @@ client.publish("$aws/things/device-123/shadow/update", shadow_data).await?;
 
 AWS IoT features:
 
-- Endpoint detection: Detects AWS IoT endpoints
-- Topic validation: Built-in validation for AWS IoT topic restrictions and limits
-- ALPN support: TLS configuration with AWS IoT ALPN protocol
-- Certificate loading: Load client certificates from bytes (PEM/DER formats)
+- AWS IoT endpoint detection
+- Topic validation for AWS IoT restrictions and limits
+- ALPN protocol support for AWS IoT
+- Client certificate loading from bytes (PEM/DER formats)
 - SDK compatibility: Subscribe method returns `(packet_id, qos)` tuple
 
 ## OpenTelemetry Integration
 
-Enable distributed tracing across your MQTT infrastructure with OpenTelemetry support:
+Distributed tracing with OpenTelemetry support:
 
 ```toml
 [dependencies]
-mqtt5 = { version = "0.9.0", features = ["opentelemetry"] }
+mqtt5 = { version = "0.10.0", features = ["opentelemetry"] }
 ```
 
 ### Features
 
 - W3C trace context propagation via MQTT user properties
-- Automatic span creation for publish/subscribe operations
+- Span creation for publish/subscribe operations
 - Bridge trace context forwarding
-- Complete observability from publisher to subscriber
+- Publisher-to-subscriber observability
 
 ### Example
 
@@ -379,7 +579,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-See `examples/broker_with_opentelemetry.rs` for a complete example.
+See `crates/mqtt5/examples/broker_with_opentelemetry.rs` for a complete example.
 
 ## Development & Building
 
@@ -392,7 +592,7 @@ See `examples/broker_with_opentelemetry.rs` for a complete example.
 
 ```bash
 # Clone the repository
-git clone https://github.com/fabriciobracht/mqtt-lib.git
+git clone https://github.com/LabOverWire/mqtt-lib.git
 cd mqtt-lib
 
 # Install development tools and git hooks
@@ -417,15 +617,15 @@ cargo make ci-verify      # Run ALL CI checks (must pass before push)
 cargo make pre-commit     # Run before committing (fmt + clippy + test)
 
 # Examples (use raw cargo for specific targets)
-cargo run --example simple_client           # Basic client usage
-cargo run --example simple_broker           # Start basic broker
-cargo run --example broker_with_tls         # TLS-enabled broker
-cargo run --example broker_with_websocket   # WebSocket-enabled broker
-cargo run --example broker_all_transports   # Broker with all transports (TCP/TLS/WebSocket)
-cargo run --example broker_bridge_demo      # Broker bridging demo
-cargo run --example broker_with_monitoring  # Broker with $SYS topics
-cargo run --example broker_with_opentelemetry --features opentelemetry  # Distributed tracing
-cargo run --example shared_subscription_demo # Shared subscription load balancing
+cargo run -p mqtt5 --example simple_client           # Basic client usage
+cargo run -p mqtt5 --example simple_broker           # Start basic broker
+cargo run -p mqtt5 --example broker_with_tls         # TLS-enabled broker
+cargo run -p mqtt5 --example broker_with_websocket   # WebSocket-enabled broker
+cargo run -p mqtt5 --example broker_all_transports   # Broker with all transports (TCP/TLS/WebSocket)
+cargo run -p mqtt5 --example broker_bridge_demo      # Broker bridging demo
+cargo run -p mqtt5 --example broker_with_monitoring  # Broker with $SYS topics
+cargo run -p mqtt5 --example broker_with_opentelemetry --features opentelemetry  # Distributed tracing
+cargo run -p mqtt5 --example shared_subscription_demo # Shared subscription load balancing
 ```
 
 ### Testing
@@ -452,7 +652,7 @@ This project follows Rust async patterns:
 ## Security
 
 - TLS 1.2+ support with certificate validation
-- Username/password authentication with bcrypt hashing
+- Username/password authentication with argon2 hashing
 - Rate limiting
 - Resource monitoring
 - Client certificate authentication for mutual TLS

@@ -5,6 +5,143 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] - 2025-11-18
+
+### BREAKING CHANGES
+
+- **Workspace restructuring**: Project reorganized into proper Rust workspace with three crates
+  - **mqtt5-protocol**: Platform-agnostic MQTT v5.0 core (packets, types, Transport trait)
+  - **mqtt5**: Native client and broker for Linux, macOS, Windows
+  - **mqtt5-wasm**: WebAssembly client and broker for browsers
+  - Library moved to `crates/mqtt5/` directory
+  - CLI remains in `crates/mqttv5-cli/` as sister project
+  - Import paths unchanged for native: `use mqtt5::*` still works
+  - WASM now uses: `use mqtt5_wasm::*` and imports from `./pkg/mqtt5_wasm.js`
+  - Example paths:
+    - Native examples: `crates/mqtt5/examples/`
+    - WASM examples: `crates/mqtt5-wasm/examples/`
+  - Cargo commands now require `-p` flag: `cargo run -p mqtt5 --example simple_broker`
+  - Test certificate paths remain at workspace root: `test_certs/`
+  - Git history preserved: all files tracked as renames
+
+### Added
+
+- Broker support for Request Response Information property
+- Broker support for Request Problem Information property
+- Conditional reason strings in error responses based on client preference
+- CLI `--response-information` flag for broker command
+- CLI subscribe command: `--retain-handling` and `--retain-as-published` options
+- CLI publish command: `--message-expiry-interval` and `--topic-alias` options
+- Storage version checking with clear error messages for incompatible formats
+  - Automatically creates `.storage_version` file in storage directory
+  - Detects version mismatches and provides migration instructions
+  - Prevents silent data corruption from format changes
+
+- **mqtt5-protocol crate**: Platform-agnostic MQTT v5.0 core extracted from mqtt5
+
+  - Packet encoding/decoding for all MQTT v5.0 packet types
+  - Protocol types (QoS, properties, reason codes)
+  - Error types (`MqttError`, `Result`)
+  - Topic matching and validation
+  - Transport trait for platform-agnostic I/O
+  - Minimal dependencies: `bebytes`, `bytes`, `serde`, `thiserror`, `tracing`
+  - Shared by both mqtt5 (native) and mqtt5-wasm (browser) crates
+
+- **mqtt5-wasm crate**: Dedicated WebAssembly crate for browser environments
+
+  - Full MQTT v5.0 protocol support compiled to WebAssembly
+  - Three connection modes:
+    - `connect(url)` - WebSocket connection to external MQTT brokers
+    - `connect_message_port(port)` - Direct connection to in-tab broker
+    - `connect_broadcast_channel(name)` - Cross-tab messaging via BroadcastChannel API
+  - **QoS 0 support**: `publish(topic, payload)` for fire-and-forget messaging
+  - **QoS 1 support**: `publish_qos1(topic, payload, callback)` with PUBACK acknowledgment
+  - **QoS 2 support**: `publish_qos2(topic, payload, callback)` with full four-way handshake
+    - PUBLISH → PUBREC → PUBREL → PUBCOMP flow
+    - 10-second timeout for incomplete flows
+    - Duplicate detection with 30-second tracking window
+    - Status tracking for each QoS 2 message
+  - **Subscription management**:
+    - `subscribe(topic)` - Subscribe without callback
+    - `subscribe_with_callback(topic, callback)` - Subscribe with message handler
+    - `unsubscribe(topic)` - Remove subscriptions dynamically
+  - **Connection event callbacks**:
+    - `on_connect(callback)` - Receive CONNACK with reason code and session_present flag
+    - `on_disconnect(callback)` - Notified when connection closes
+    - `on_error(callback)` - Error notifications including keepalive timeouts
+  - **Automatic keepalive**:
+    - Sends PINGREQ every 30 seconds automatically
+    - Detects connection timeout after 90 seconds
+    - Triggers error and disconnect callbacks on timeout
+  - **Connection state management**: `is_connected()`, `disconnect()`
+
+- **WASM broker implementation** for in-browser MQTT broker
+
+  - `WasmBroker` - Complete MQTT broker running in browser tab
+  - `create_client_port()` - Create MessagePort for client connections
+  - Memory-only storage backend (no file I/O in browser)
+  - AllowAllAuthProvider for development/testing
+  - Full MQTT v5.0 feature support (QoS, retained messages, subscriptions)
+  - Perfect for testing, demos, and offline-capable applications
+
+- **WASM transport layer** with async bridge patterns
+
+  - **WebSocket transport**: `WasmWebSocketTransport` using web_sys::WebSocket
+  - **MessagePort transport**: Channel-based IPC for in-tab broker communication
+  - **BroadcastChannel transport**: Cross-tab messaging for distributed applications
+  - Async bridge converting Rust futures to JavaScript Promises
+  - Split reader/writer pattern for concurrent packet I/O
+
+- **Platform-gated dependencies** for WASM compatibility
+
+  - Native CLI dependencies (clap, tokio) excluded from WASM builds
+  - Conditional compilation for WASM vs native targets
+  - Time module abstraction (std::time vs web_sys::window)
+  - Single codebase supporting native and WASM targets
+
+- **WASM examples** demonstrating browser usage in `crates/mqtt5-wasm/examples/`
+  - `websocket/` - Connect to external MQTT brokers
+  - `qos2/` - QoS 2 flow testing with status visualization
+  - `local-broker/` - In-tab broker demonstration
+  - Complete browser applications with HTML/JavaScript/CSS
+  - Build infrastructure with `wasm-pack` and `build.sh` script
+
+### Enhanced
+
+- BDD test infrastructure updated for workspace structure
+
+  - Dynamic workspace root discovery
+  - CLI binary path resolution using CARGO_BIN_EXE environment variable
+  - TLS certificate paths computed from workspace root
+  - All 30 BDD scenarios passing (140 steps)
+
+- Documentation updated for three-crate architecture
+  - ARCHITECTURE.md now documents crate organization and dependencies
+  - README.md explains mqtt5-protocol, mqtt5, and mqtt5-wasm separation
+  - Cargo commands include `-p` flag for workspace navigation
+  - Example paths updated: `crates/mqtt5/examples/` and `crates/mqtt5-wasm/examples/`
+  - GitHub Actions workflows updated for new structure
+  - Test certificate paths fixed from package-relative to workspace-relative (`../../test_certs/`)
+  - Doctests updated to use correct module paths (`mqtt5_protocol::`, `std::time::Duration`)
+
+### Technical Details
+
+- **Crate Organization**:
+  - mqtt5-protocol: Platform-agnostic core with minimal dependencies
+  - mqtt5: Native implementation depends on mqtt5-protocol
+  - mqtt5-wasm: Browser implementation depends on mqtt5-protocol
+  - Transport trait abstraction enables platform-specific I/O implementations
+  - Consistent MQTT v5.0 compliance across all platforms
+- **WASM Architecture**: Single-threaded using Rc<RefCell<T>> instead of Arc<Mutex<T>>
+- **WASM Background Tasks**: Using spawn_local (JavaScript event loop) instead of tokio::spawn
+- **WASM Packet Encoding**: Full MQTT v5.0 codec running in browser
+- **WASM Limitations**: No TLS socket control (use wss://), no file I/O, no raw sockets
+- **Workspace Benefits**: Shared metadata, cleaner structure, better IDE support
+
+### Fixed
+
+- Broker now correctly clears retain flag when delivering retained messages to subscribers with `retain_as_published=false`
+
 ## [0.9.0] - 2025-11-12
 
 ### Added

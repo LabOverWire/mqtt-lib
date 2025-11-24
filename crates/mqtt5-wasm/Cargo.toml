@@ -1,0 +1,74 @@
+[package]
+name = "mqtt5-wasm"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "MQTT v5.0 WebAssembly client and broker for browser environments"
+documentation = "https://docs.rs/mqtt5-wasm"
+readme = "README.md"
+keywords = ["mqtt", "wasm", "webassembly", "iot", "pubsub"]
+categories = ["wasm", "network-programming"]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["client"]
+client = [
+    "dep:wasm-bindgen",
+    "dep:wasm-bindgen-futures",
+    "dep:web-sys",
+    "dep:js-sys",
+]
+broker = ["client", "dep:mqtt5", "dep:tokio"]
+
+[dependencies]
+mqtt5-protocol = { path = "../mqtt5-protocol", version = "0.1" }
+mqtt5 = { path = "../mqtt5", version = "0.10", optional = true, default-features = false, features = [
+    "tokio",
+] }
+
+wasm-bindgen = { version = "0.2", optional = true }
+wasm-bindgen-futures = { version = "0.4", optional = true }
+js-sys = { version = "0.3", optional = true }
+console_error_panic_hook = "0.1"
+getrandom = { version = "0.3", features = ["wasm_js"] }
+
+bytes = "1.10"
+futures = "0.3"
+futures-util = "0.3"
+tracing = "0.1.41"
+tokio = { version = "1.47", optional = true }
+gloo-timers = { version = "0.3.0", features = ["futures"] }
+
+[dependencies.web-sys]
+version = "0.3"
+optional = true
+features = [
+    "BinaryType",
+    "Blob",
+    "BroadcastChannel",
+    "CloseEvent",
+    "ErrorEvent",
+    "Event",
+    "EventTarget",
+    "ExtendableMessageEvent",
+    "MessageChannel",
+    "MessageEvent",
+    "MessagePort",
+    "ServiceWorkerGlobalScope",
+    "WebSocket",
+    "Window",
+    "console",
+]
+[target.wasm32-unknown-unknown.dependencies]
+tokio = { version = "1.47", optional = true, features = [
+    "sync",
+    "macros",
+    "io-util",
+    "time",
+    "rt",
+] }

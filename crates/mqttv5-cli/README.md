@@ -2,21 +2,21 @@
 
 [![Crates.io](https://img.shields.io/crates/v/mqttv5-cli.svg)](https://crates.io/crates/mqttv5-cli)
 [![Downloads](https://img.shields.io/crates/d/mqttv5-cli.svg)](https://crates.io/crates/mqttv5-cli)
-[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](https://github.com/fabriciobracht/mqtt-lib#license)
+[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](https://github.com/LabOverWire/mqtt-lib#license)
 
 A unified MQTT v5.0 CLI tool with pub, sub, and broker commands.
 
 ## Features
 
-- Unified interface: Single binary with pub, sub, and broker subcommands
-- Smart prompting: Interactive prompts for missing arguments
-- Input validation: Helpful error messages with correction suggestions
-- Full MQTT v5.0: Complete protocol support
+- Single binary: pub, sub, and broker subcommands
+- Interactive prompts for missing arguments
+- Input validation with error messages and suggestions
+- MQTT v5.0 protocol support
 - Session management: Clean start, session expiry, and persistence
 - Will message support: Last will and testament with delay and QoS options
 - Automatic reconnection: Opt-in reconnection with exponential backoff
 - Multi-transport: TCP, TLS, and WebSocket support
-- Cross-platform: Should work on Linux, macOS, and Windows
+- Cross-platform: Linux, macOS, and Windows
 
 ## Installation
 
@@ -73,17 +73,18 @@ mqttv5 broker
 
 ## CLI Design
 
-- Clear, actionable error messages with suggestions
-- Intelligent prompting for missing required arguments
-- Unified tool: One binary for all MQTT operations
-- Consistent flags and intuitive interface
-- Full MQTT v5.0 support including properties and reason codes
+- Error messages with suggestions
+- Prompts for missing required arguments
+- Single binary for all MQTT operations
+- Long flags with short aliases
+- MQTT v5.0 support including properties and reason codes
 
 ### Connection Behavior
 
 By default, the CLI exits immediately when the broker disconnects. This prevents duplicate topic takeover issues when clients reconnect with the same client ID.
 
 Use `--auto-reconnect` to enable automatic reconnection with exponential backoff. When enabled:
+
 - The library handles reconnection automatically
 - Subscriptions are restored based on session state
 - The client continues running until Ctrl+C or target message count reached
@@ -126,6 +127,12 @@ mqttv5 pub -t "test/topic" -m "data" --keep-alive 120 \
 # WebSocket transport
 mqttv5 pub --url "ws://broker:8080/mqtt" -t "test/websocket" -m "WebSocket message"
 mqttv5 sub --url "wss://secure-broker:8443/mqtt" -t "test/+"
+
+# Message expiry and topic alias
+mqttv5 pub -t "sensors/temp" -m "23.5" --message-expiry-interval 300 --topic-alias 1
+
+# Subscription options (retain handling: 0=send, 1=send if new, 2=don't send)
+mqttv5 sub -t "config/#" --retain-handling 2 --retain-as-published
 ```
 
 ## Environment Variables

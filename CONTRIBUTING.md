@@ -1,13 +1,13 @@
 # Contributing to mqtt-v5
 
-## For Human Contributors
+## For Contributors
 
 ### Getting Started
 
 1. **Fork and Clone**
 
    ```bash
-   git clone https://github.com/fabriciobracht/mqtt-lib.git
+   git clone https://github.com/LabOverWire/mqtt-lib.git
    cd mqtt-lib
    ```
 
@@ -87,7 +87,7 @@ When implementing MQTT features:
 
 ## Release Process
 
-Releases are managed by me:
+Releases are managed by me. I:
 
 1. Update version in `Cargo.toml`
 2. Update `CHANGELOG.md`

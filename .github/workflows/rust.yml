@@ -104,12 +104,12 @@ jobs:
 
   # Test with minimal supported Rust version
   msrv:
-    name: MSRV (1.83)
+    name: MSRV (1.85)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@1.83
+        uses: dtolnay/rust-toolchain@1.85
       - name: Cache dependencies
         uses: Swatinem/rust-cache@v2
       - name: Generate test certificates
@@ -133,3 +133,34 @@ jobs:
         run: cargo doc --no-deps --all-features
         env:
           RUSTDOCFLAGS: -D warnings
+
+  # Build and check WASM
+  wasm:
+    name: WASM Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Check WASM compilation
+        run: cargo check --target wasm32-unknown-unknown --all-features -p mqtt5-wasm
+
+      - name: Build WASM package
+        run: |
+          cd crates/mqtt5-wasm
+          wasm-pack build --target web --features client,broker
+
+      - name: Verify WASM output
+        run: |
+          ls -lh crates/mqtt5-wasm/pkg/
+          echo "✅ WASM package built successfully"

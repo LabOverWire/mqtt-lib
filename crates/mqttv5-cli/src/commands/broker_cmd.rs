@@ -11,7 +11,7 @@ pub struct BrokerCommand {
     #[arg(long, short)]
     pub config: Option<PathBuf>,
 
-    /// TCP bind address (e.g., 0.0.0.0:1883 [::]:1883) - can be specified multiple times
+    /// TCP bind address (e.g., `0.0.0.0:1883` `[::]:1883`) - can be specified multiple times
     #[arg(long, short = 'H', action = ArgAction::Append)]
     pub host: Vec<String>,
 
@@ -27,7 +27,7 @@ pub struct BrokerCommand {
     #[arg(long)]
     pub auth_password_file: Option<PathBuf>,
 
-    /// ACL file path (format: user <username> topic <pattern> permission <type> per line)
+    /// ACL file path (format: `user <username> topic <pattern> permission <type>` per line)
     #[arg(long)]
     pub acl_file: Option<PathBuf>,
 
@@ -82,6 +82,10 @@ pub struct BrokerCommand {
     /// Server keep-alive time in seconds (optional)
     #[arg(long)]
     pub keep_alive: Option<u16>,
+
+    /// Response information string sent to clients that request it
+    #[arg(long)]
+    pub response_information: Option<String>,
 
     /// Disable retained messages
     #[arg(long)]
@@ -270,6 +274,10 @@ async fn create_interactive_config(cmd: &mut BrokerCommand) -> Result<BrokerConf
 
     if let Some(keep_alive) = cmd.keep_alive {
         config.server_keep_alive = Some(std::time::Duration::from_secs(keep_alive as u64));
+    }
+
+    if let Some(ref response_info) = cmd.response_information {
+        config.response_information = Some(response_info.clone());
     }
 
     // Configure authentication
