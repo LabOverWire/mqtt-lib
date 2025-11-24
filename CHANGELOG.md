@@ -32,6 +32,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CLI `--response-information` flag for broker command
 - CLI subscribe command: `--retain-handling` and `--retain-as-published` options
 - CLI publish command: `--message-expiry-interval` and `--topic-alias` options
+- Storage version checking with clear error messages for incompatible formats
+  - Automatically creates `.storage_version` file in storage directory
+  - Detects version mismatches and provides migration instructions
+  - Prevents silent data corruption from format changes
 
 - **mqtt5-protocol crate**: Platform-agnostic MQTT v5.0 core extracted from mqtt5
 

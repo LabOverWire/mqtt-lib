@@ -11,6 +11,17 @@ use tokio::fs::{self, File};
 use tokio::io::AsyncWriteExt;
 use tracing::{debug, info, warn};
 
+/// Storage format version
+///
+/// IMPORTANT: Only increment this version when the storage format changes:
+/// - Modifying RetainedMessage, ClientSession, or QueuedMessage struct fields
+/// - Changing file naming scheme (topic_to_filename, queue file names)
+/// - Changing directory structure (retained/, sessions/, queues/)
+///
+/// Version History:
+/// - 1: Initial version (0.10.0)
+const STORAGE_VERSION: &str = "1";
+
 /// File-based storage backend
 #[derive(Debug)]
 #[allow(clippy::struct_field_names)]
@@ -30,12 +41,15 @@ impl FileBackend {
     ///
     /// # Errors
     ///
-    /// Returns error if directories cannot be created
+    /// Returns error if directories cannot be created or version mismatch detected
     pub async fn new(base_dir: impl AsRef<Path>) -> Result<Self> {
         let base_dir = base_dir.as_ref().to_path_buf();
         let retained_dir = base_dir.join("retained");
         let sessions_dir = base_dir.join("sessions");
         let queues_dir = base_dir.join("queues");
+
+        // Check storage version before creating directories
+        Self::check_storage_version(&base_dir).await?;
 
         // Create directories
         fs::create_dir_all(&retained_dir)
@@ -61,6 +75,52 @@ impl FileBackend {
             sessions_dir,
             queues_dir,
         })
+    }
+
+    async fn check_storage_version(base_dir: &Path) -> Result<()> {
+        let version_file = base_dir.join(".storage_version");
+
+        if version_file.exists() {
+            let stored_version = fs::read_to_string(&version_file)
+                .await
+                .map_err(|e| MqttError::Configuration(format!("Failed to read storage version: {e}")))?;
+
+            let stored_version = stored_version.trim();
+
+            if stored_version != STORAGE_VERSION {
+                return Err(MqttError::Configuration(format!(
+                    "Storage version mismatch: found version {}, expected version {}.\n\
+                     \n\
+                     The storage format has changed and is incompatible.\n\
+                     \n\
+                     To resolve this issue:\n\
+                     1. Backup your data: mqttv5 storage backup --dir {} --output backup.json\n\
+                     2. Remove the storage directory: rm -rf {}\n\
+                     3. Restart the broker (it will create a new storage with version {})\n\
+                     \n\
+                     Note: Without backup, all retained messages and session data will be lost.",
+                    stored_version,
+                    STORAGE_VERSION,
+                    base_dir.display(),
+                    base_dir.display(),
+                    STORAGE_VERSION
+                )));
+            }
+
+            debug!("Storage version verified: {}", STORAGE_VERSION);
+        } else {
+            fs::create_dir_all(base_dir)
+                .await
+                .map_err(|e| MqttError::Configuration(format!("Failed to create storage dir: {e}")))?;
+
+            fs::write(&version_file, STORAGE_VERSION)
+                .await
+                .map_err(|e| MqttError::Configuration(format!("Failed to write storage version: {e}")))?;
+
+            info!("Created new storage with version {}", STORAGE_VERSION);
+        }
+
+        Ok(())
     }
 
     /// Convert topic to safe filename

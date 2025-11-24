@@ -45,6 +45,7 @@ Start an MQTT v5.0 broker.
 | `--session-expiry <SECS>`     | Default session expiry interval in seconds                      | `3600`                      |
 | `--max-qos <0\|1\|2>`         | Maximum QoS level                                               | `2`                         |
 | `--keep-alive <SECS>`         | Server keep-alive time in seconds                               | None                        |
+| `--response-information <STR>` | Response information sent to clients that request it           | None                        |
 | `--no-retain`                 | Disable retained messages                                       | `false`                     |
 | `--no-wildcards`              | Disable wildcard subscriptions                                  | `false`                     |
 | `--non-interactive`           | Skip interactive prompts                                        | `false`                     |
@@ -129,6 +130,8 @@ Publish an MQTT message.
 | `--port, -p <PORT>`       | Broker port                                   | `1883`         |
 | `--qos, -q <0\|1\|2>`     | QoS level                                     | `0`            |
 | `--retain, -r`            | Retain message                                | `false`        |
+| `--message-expiry-interval <SECS>` | Message expiry interval in seconds   | None           |
+| `--topic-alias <N>`       | Topic alias (1-65535)                         | None           |
 | `--username, -u <USER>`   | Authentication username                       | None           |
 | `--password, -P <PASS>`   | Authentication password                       | None           |
 | `--client-id, -c <ID>`    | Client ID                                     | Auto-generated |
@@ -193,6 +196,18 @@ mqttv5 pub -t test/topic -m "Online" \
   --will-retain
 ```
 
+With message expiry (60 seconds):
+
+```bash
+mqttv5 pub -t alerts/fire -m "Building A" --message-expiry-interval 60
+```
+
+With topic alias:
+
+```bash
+mqttv5 pub -t sensors/room1/temperature -m "22.5" --topic-alias 1
+```
+
 Publish with OpenTelemetry tracing:
 
 ```bash
@@ -217,6 +232,8 @@ Subscribe to MQTT topics.
 | `--verbose, -v`           | Include topic names in output                       | `false`        |
 | `--count, -n <N>`         | Exit after receiving N messages                     | `0` (infinite) |
 | `--no-local`              | Don't receive own published messages                | `false`        |
+| `--retain-handling <0\|1\|2>` | Retain handling: 0=send, 1=send if new, 2=don't send | `0`         |
+| `--retain-as-published`   | Keep original retain flag on delivery               | `false`        |
 | `--subscription-identifier <ID>` | Subscription identifier (1-268435455)         | None           |
 | `--username, -u <USER>`   | Authentication username                             | None           |
 | `--password, -P <PASS>`   | Authentication password                             | None           |
@@ -275,6 +292,18 @@ Subscription with identifier:
 
 ```bash
 mqttv5 sub -t sensors/+/temperature --subscription-identifier 42 -v
+```
+
+With retain handling (don't send retained messages):
+
+```bash
+mqttv5 sub -t config/settings --retain-handling 2 -v
+```
+
+With retain-as-published (preserve retain flag):
+
+```bash
+mqttv5 sub -t status/# --retain-as-published -v
 ```
 
 Persistent session:
@@ -776,11 +805,11 @@ Configuration uses humantime format for duration values:
 Password files use one line per user:
 
 ```
-username:$2b$12$hash...
+username:$argon2id$v=19$m=...
 ```
 
 - Username followed by colon
-- Bcrypt hash of password
+- Argon2 hash of password
 - Use `mqttv5 passwd` command to manage
 
 ### ACL File Format
