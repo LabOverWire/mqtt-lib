@@ -81,9 +81,9 @@ impl FileBackend {
         let version_file = base_dir.join(".storage_version");
 
         if version_file.exists() {
-            let stored_version = fs::read_to_string(&version_file)
-                .await
-                .map_err(|e| MqttError::Configuration(format!("Failed to read storage version: {e}")))?;
+            let stored_version = fs::read_to_string(&version_file).await.map_err(|e| {
+                MqttError::Configuration(format!("Failed to read storage version: {e}"))
+            })?;
 
             let stored_version = stored_version.trim();
 
@@ -109,13 +109,15 @@ impl FileBackend {
 
             debug!("Storage version verified: {}", STORAGE_VERSION);
         } else {
-            fs::create_dir_all(base_dir)
-                .await
-                .map_err(|e| MqttError::Configuration(format!("Failed to create storage dir: {e}")))?;
+            fs::create_dir_all(base_dir).await.map_err(|e| {
+                MqttError::Configuration(format!("Failed to create storage dir: {e}"))
+            })?;
 
             fs::write(&version_file, STORAGE_VERSION)
                 .await
-                .map_err(|e| MqttError::Configuration(format!("Failed to write storage version: {e}")))?;
+                .map_err(|e| {
+                    MqttError::Configuration(format!("Failed to write storage version: {e}"))
+                })?;
 
             info!("Created new storage with version {}", STORAGE_VERSION);
         }
