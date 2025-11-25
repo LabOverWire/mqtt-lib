@@ -141,6 +141,7 @@ rustls-pki-types = "1.13.0"
 tokio = { version = "1.47", features = ["full"] }
 tokio-rustls = "0.26"
 tokio-tungstenite = { version = "0.28", features = ["rustls-tls-native-roots"] }
+quinn = "0.11"
 webpki-roots = "1.0"
 
 [target.wasm32-unknown-unknown.dependencies]

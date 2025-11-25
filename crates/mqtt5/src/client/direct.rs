@@ -27,17 +27,19 @@ use crate::session::SessionState;
 use crate::transport::tls::{TlsReadHalf, TlsWriteHalf};
 use crate::transport::websocket::{WebSocketReadHandle, WebSocketWriteHandle};
 use crate::transport::{PacketIo, PacketReader, PacketWriter, TransportType};
+use quinn::{Connection, RecvStream, SendStream};
 use crate::types::{ConnectOptions, ConnectResult, PublishOptions, PublishResult};
 use crate::QoS;
 
 #[cfg(feature = "opentelemetry")]
 use crate::telemetry::propagation;
 
-/// Unified reader type that can handle TCP, TLS, and WebSocket
+/// Unified reader type that can handle TCP, TLS, WebSocket, and QUIC
 pub enum UnifiedReader {
     Tcp(OwnedReadHalf),
     Tls(TlsReadHalf),
     WebSocket(WebSocketReadHandle),
+    Quic(RecvStream),
 }
 
 impl PacketReader for UnifiedReader {
@@ -46,15 +48,17 @@ impl PacketReader for UnifiedReader {
             Self::Tcp(reader) => reader.read_packet().await,
             Self::Tls(reader) => reader.read_packet().await,
             Self::WebSocket(reader) => reader.read_packet().await,
+            Self::Quic(reader) => reader.read_packet().await,
         }
     }
 }
 
-/// Unified writer type that can handle TCP, TLS, and WebSocket
+/// Unified writer type that can handle TCP, TLS, WebSocket, and QUIC
 pub enum UnifiedWriter {
     Tcp(OwnedWriteHalf),
     Tls(TlsWriteHalf),
     WebSocket(WebSocketWriteHandle),
+    Quic(SendStream),
 }
 
 impl PacketWriter for UnifiedWriter {
@@ -63,6 +67,7 @@ impl PacketWriter for UnifiedWriter {
             Self::Tcp(writer) => writer.write_packet(packet).await,
             Self::Tls(writer) => writer.write_packet(packet).await,
             Self::WebSocket(writer) => writer.write_packet(packet).await,
+            Self::Quic(writer) => writer.write_packet(packet).await,
         }
     }
 }
@@ -71,6 +76,8 @@ impl PacketWriter for UnifiedWriter {
 pub struct DirectClientInner {
     /// Write half of the transport for client operations
     pub writer: Option<Arc<tokio::sync::RwLock<UnifiedWriter>>>,
+    /// QUIC connection (for multi-stream support in Phase 2+)
+    pub quic_connection: Option<Arc<Connection>>,
     /// Session state
     pub session: Arc<RwLock<SessionState>>,
     /// Connection status
@@ -119,6 +126,7 @@ impl DirectClientInner {
 
         Self {
             writer: None,
+            quic_connection: None,
             session,
             connected: Arc::new(AtomicBool::new(false)),
             callback_manager: Arc::new(CallbackManager::new()),
@@ -228,6 +236,11 @@ impl DirectClientInner {
                     TransportType::WebSocket(ws) => {
                         let (r, w) = (*ws).into_split()?;
                         (UnifiedReader::WebSocket(r), UnifiedWriter::WebSocket(w))
+                    }
+                    TransportType::Quic(quic) => {
+                        let (w, r, conn) = (*quic).into_split()?;
+                        self.quic_connection = Some(Arc::new(conn));
+                        (UnifiedReader::Quic(r), UnifiedWriter::Quic(w))
                     }
                 };
 

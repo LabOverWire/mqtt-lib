@@ -15,7 +15,9 @@ use crate::transport::tls::TlsConfig;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::transport::websocket::{WebSocketConfig, WebSocketTransport};
 #[cfg(not(target_arch = "wasm32"))]
-use crate::transport::{TcpTransport, TlsTransport, TransportType};
+use crate::transport::quic::QuicConfig;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::transport::{QuicTransport, TcpTransport, TlsTransport, TransportType};
 use crate::types::{
     ConnectOptions, ConnectResult, PublishOptions, PublishResult, SubscribeOptions,
 };
@@ -485,6 +487,7 @@ impl MqttClient {
     ///
     /// Returns an error if the operation fails
     /// Try to connect to a specific address
+    #[allow(clippy::too_many_lines)]
     async fn try_connect_address(
         &self,
         addr: std::net::SocketAddr,
@@ -555,6 +558,46 @@ impl MqttClient {
                     MqttError::ConnectionError(format!("WebSocket connect failed: {e}"))
                 })?;
                 Ok(TransportType::WebSocket(Box::new(ws_transport)))
+            }
+            ClientTransportType::Quic => {
+                let config = QuicConfig::new(addr, host).with_verify_server_cert(false);
+                let mut quic_transport = QuicTransport::new(config);
+                quic_transport.connect().await.map_err(|e| {
+                    MqttError::ConnectionError(format!("QUIC connect failed: {e}"))
+                })?;
+                Ok(TransportType::Quic(Box::new(quic_transport)))
+            }
+            ClientTransportType::QuicSecure => {
+                let insecure = *self.insecure_tls.read().await;
+                let tls_config_lock = self.tls_config.read().await;
+                let mut config = QuicConfig::new(addr, host).with_verify_server_cert(!insecure);
+
+                if let Some(existing_config) = &*tls_config_lock {
+                    tracing::debug!(
+                        "Using stored TLS config for QUIC - use_system_roots: {}, has_ca: {}, has_cert: {}",
+                        existing_config.use_system_roots,
+                        existing_config.root_certs.is_some(),
+                        existing_config.client_cert.is_some()
+                    );
+
+                    if let (Some(ref cert_chain), Some(ref key)) =
+                        (&existing_config.client_cert, &existing_config.client_key) {
+                        config = config.with_client_cert(cert_chain.clone(), key.clone_key());
+                    }
+
+                    if let Some(ref certs) = existing_config.root_certs {
+                        config = config.with_root_certs(certs.clone());
+                    }
+                } else {
+                    tracing::debug!("No stored TLS config for QUIC, using default");
+                }
+                drop(tls_config_lock);
+
+                let mut quic_transport = QuicTransport::new(config);
+                quic_transport.connect().await.map_err(|e| {
+                    MqttError::ConnectionError(format!("QUIC connect failed: {e}"))
+                })?;
+                Ok(TransportType::Quic(Box::new(quic_transport)))
             }
         }
     }
@@ -1638,6 +1681,12 @@ impl MqttClient {
         } else if let Some(rest) = address.strip_prefix("ssl://") {
             let (host, port) = Self::split_host_port(rest, 8883)?;
             Ok((ClientTransportType::Tls, host, port))
+        } else if let Some(rest) = address.strip_prefix("quic://") {
+            let (host, port) = Self::split_host_port(rest, 14567)?;
+            Ok((ClientTransportType::Quic, host, port))
+        } else if let Some(rest) = address.strip_prefix("quics://") {
+            let (host, port) = Self::split_host_port(rest, 14567)?;
+            Ok((ClientTransportType::QuicSecure, host, port))
         } else {
             let (host, port) = Self::split_host_port(address, 1883)?;
             Ok((ClientTransportType::Tcp, host, port))
@@ -1897,6 +1946,8 @@ enum ClientTransportType {
     Tls,
     WebSocket(String),
     WebSocketSecure(String),
+    Quic,
+    QuicSecure,
 }
 
 #[cfg(test)]
