@@ -9,13 +9,13 @@ use crate::packet::subscribe::{SubscribePacket, SubscriptionOptions, TopicFilter
 use crate::packet::unsubscribe::UnsubscribePacket;
 use crate::protocol::v5::properties::Properties;
 #[cfg(not(target_arch = "wasm32"))]
+use crate::transport::quic::QuicConfig;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::transport::tcp::TcpConfig;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::transport::tls::TlsConfig;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::transport::websocket::{WebSocketConfig, WebSocketTransport};
-#[cfg(not(target_arch = "wasm32"))]
-use crate::transport::quic::QuicConfig;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::transport::{QuicTransport, TcpTransport, TlsTransport, TransportType};
 use crate::types::{
@@ -562,9 +562,10 @@ impl MqttClient {
             ClientTransportType::Quic => {
                 let config = QuicConfig::new(addr, host).with_verify_server_cert(false);
                 let mut quic_transport = QuicTransport::new(config);
-                quic_transport.connect().await.map_err(|e| {
-                    MqttError::ConnectionError(format!("QUIC connect failed: {e}"))
-                })?;
+                quic_transport
+                    .connect()
+                    .await
+                    .map_err(|e| MqttError::ConnectionError(format!("QUIC connect failed: {e}")))?;
                 Ok(TransportType::Quic(Box::new(quic_transport)))
             }
             ClientTransportType::QuicSecure => {
@@ -581,7 +582,8 @@ impl MqttClient {
                     );
 
                     if let (Some(ref cert_chain), Some(ref key)) =
-                        (&existing_config.client_cert, &existing_config.client_key) {
+                        (&existing_config.client_cert, &existing_config.client_key)
+                    {
                         config = config.with_client_cert(cert_chain.clone(), key.clone_key());
                     }
 
@@ -594,9 +596,10 @@ impl MqttClient {
                 drop(tls_config_lock);
 
                 let mut quic_transport = QuicTransport::new(config);
-                quic_transport.connect().await.map_err(|e| {
-                    MqttError::ConnectionError(format!("QUIC connect failed: {e}"))
-                })?;
+                quic_transport
+                    .connect()
+                    .await
+                    .map_err(|e| MqttError::ConnectionError(format!("QUIC connect failed: {e}")))?;
                 Ok(TransportType::Quic(Box::new(quic_transport)))
             }
         }

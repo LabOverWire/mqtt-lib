@@ -112,22 +112,24 @@ impl QuicConfig {
             }
         }
 
-        let crypto = if let (Some(ref cert_chain), Some(ref key)) = (&self.client_cert, &self.client_key) {
-            RustlsClientConfig::builder()
-                .with_root_certificates(root_store)
-                .with_client_auth_cert(cert_chain.clone(), key.clone_key())
-                .map_err(|e| {
-                    MqttError::ConnectionError(format!("Failed to configure client cert: {e}"))
-                })?
-        } else {
-            RustlsClientConfig::builder()
-                .with_root_certificates(root_store)
-                .with_no_client_auth()
-        };
+        let crypto =
+            if let (Some(ref cert_chain), Some(ref key)) = (&self.client_cert, &self.client_key) {
+                RustlsClientConfig::builder()
+                    .with_root_certificates(root_store)
+                    .with_client_auth_cert(cert_chain.clone(), key.clone_key())
+                    .map_err(|e| {
+                        MqttError::ConnectionError(format!("Failed to configure client cert: {e}"))
+                    })?
+            } else {
+                RustlsClientConfig::builder()
+                    .with_root_certificates(root_store)
+                    .with_no_client_auth()
+            };
 
         Ok(ClientConfig::new(Arc::new(
-            quinn::crypto::rustls::QuicClientConfig::try_from(crypto)
-                .map_err(|e| MqttError::ConnectionError(format!("Failed to build QUIC config: {e}")))?,
+            quinn::crypto::rustls::QuicClientConfig::try_from(crypto).map_err(|e| {
+                MqttError::ConnectionError(format!("Failed to build QUIC config: {e}"))
+            })?,
         )))
     }
 }
@@ -156,14 +158,11 @@ impl QuicTransport {
         self.connection.is_some() && self.control_stream.is_some()
     }
 
-    pub fn into_split(mut self) -> Result<(SendStream, RecvStream, Connection)> {
-        let (send, recv) = self.control_stream
-            .take()
-            .ok_or(MqttError::NotConnected)?;
-        let conn = self.connection
-            .take()
-            .ok_or(MqttError::NotConnected)?;
-        Ok((send, recv, conn))
+    pub fn into_split(mut self) -> Result<(SendStream, RecvStream, Connection, StreamStrategy)> {
+        let (send, recv) = self.control_stream.take().ok_or(MqttError::NotConnected)?;
+        let conn = self.connection.take().ok_or(MqttError::NotConnected)?;
+        let strategy = self.config.stream_strategy;
+        Ok((send, recv, conn, strategy))
     }
 }
 
@@ -179,28 +178,23 @@ impl Transport for QuicTransport {
             .map_err(|e| MqttError::ConnectionError(format!("Failed to create endpoint: {e}")))?;
         endpoint.set_default_client_config(client_config);
 
-        let connecting = endpoint.connect(self.config.addr, &self.config.server_name)
+        let connecting = endpoint
+            .connect(self.config.addr, &self.config.server_name)
             .map_err(|e| MqttError::ConnectionError(format!("QUIC connect failed: {e}")))?;
 
-        let connection = tokio::time::timeout(
-            self.config.connect_timeout,
-            connecting,
-        )
-        .await
-        .map_err(|_| MqttError::Timeout)?
-        .map_err(|e| MqttError::ConnectionError(format!("QUIC handshake failed: {e}")))?;
+        let connection = tokio::time::timeout(self.config.connect_timeout, connecting)
+            .await
+            .map_err(|_| MqttError::Timeout)?
+            .map_err(|e| MqttError::ConnectionError(format!("QUIC handshake failed: {e}")))?;
 
         tracing::info!(
             remote_addr = %connection.remote_address(),
             "QUIC connection established"
         );
 
-        let (send, recv) = connection
-            .open_bi()
-            .await
-            .map_err(|e| {
-                MqttError::ConnectionError(format!("Failed to open control stream: {e}"))
-            })?;
+        let (send, recv) = connection.open_bi().await.map_err(|e| {
+            MqttError::ConnectionError(format!("Failed to open control stream: {e}"))
+        })?;
 
         tracing::debug!("QUIC control stream opened");
 
@@ -259,7 +253,9 @@ impl PacketReader for RecvStream {
         let mut header_buf = BytesMut::with_capacity(5);
 
         let mut byte = [0u8; 1];
-        let n = self.read(&mut byte).await
+        let n = self
+            .read(&mut byte)
+            .await
             .map_err(|e| MqttError::ConnectionError(format!("QUIC read error: {e}")))?
             .ok_or(MqttError::ClientClosed)?;
         if n == 0 {
@@ -268,7 +264,9 @@ impl PacketReader for RecvStream {
         header_buf.put_u8(byte[0]);
 
         loop {
-            let n = self.read(&mut byte).await
+            let n = self
+                .read(&mut byte)
+                .await
                 .map_err(|e| MqttError::ConnectionError(format!("QUIC read error: {e}")))?
                 .ok_or(MqttError::ClientClosed)?;
             if n == 0 {
@@ -293,7 +291,9 @@ impl PacketReader for RecvStream {
         let mut payload = vec![0u8; fixed_header.remaining_length as usize];
         let mut bytes_read = 0;
         while bytes_read < payload.len() {
-            let n = self.read(&mut payload[bytes_read..]).await
+            let n = self
+                .read(&mut payload[bytes_read..])
+                .await
                 .map_err(|e| MqttError::ConnectionError(format!("QUIC read error: {e}")))?
                 .ok_or(MqttError::ClientClosed)?;
             if n == 0 {
@@ -311,7 +311,8 @@ impl PacketWriter for SendStream {
     async fn write_packet(&mut self, packet: Packet) -> Result<()> {
         let mut buf = BytesMut::with_capacity(1024);
         encode_packet_to_buffer(&packet, &mut buf)?;
-        self.write_all(&buf).await
+        self.write_all(&buf)
+            .await
             .map_err(|e| MqttError::ConnectionError(format!("QUIC write error: {e}")))?;
         Ok(())
     }

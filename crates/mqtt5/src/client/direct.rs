@@ -26,10 +26,12 @@ use crate::session::subscription::Subscription;
 use crate::session::SessionState;
 use crate::transport::tls::{TlsReadHalf, TlsWriteHalf};
 use crate::transport::websocket::{WebSocketReadHandle, WebSocketWriteHandle};
-use crate::transport::{PacketIo, PacketReader, PacketWriter, TransportType};
-use quinn::{Connection, RecvStream, SendStream};
+use crate::transport::{
+    PacketIo, PacketReader, PacketWriter, QuicStreamManager, StreamStrategy, TransportType,
+};
 use crate::types::{ConnectOptions, ConnectResult, PublishOptions, PublishResult};
 use crate::QoS;
+use quinn::{Connection, RecvStream, SendStream};
 
 #[cfg(feature = "opentelemetry")]
 use crate::telemetry::propagation;
@@ -76,9 +78,8 @@ impl PacketWriter for UnifiedWriter {
 pub struct DirectClientInner {
     /// Write half of the transport for client operations
     pub writer: Option<Arc<tokio::sync::RwLock<UnifiedWriter>>>,
-    /// QUIC connection (for multi-stream support in Phase 2+)
     pub quic_connection: Option<Arc<Connection>>,
-    /// Session state
+    pub stream_strategy: Option<StreamStrategy>,
     pub session: Arc<RwLock<SessionState>>,
     /// Connection status
     pub connected: Arc<AtomicBool>,
@@ -127,6 +128,7 @@ impl DirectClientInner {
         Self {
             writer: None,
             quic_connection: None,
+            stream_strategy: None,
             session,
             connected: Arc::new(AtomicBool::new(false)),
             callback_manager: Arc::new(CallbackManager::new()),
@@ -238,8 +240,9 @@ impl DirectClientInner {
                         (UnifiedReader::WebSocket(r), UnifiedWriter::WebSocket(w))
                     }
                     TransportType::Quic(quic) => {
-                        let (w, r, conn) = (*quic).into_split()?;
+                        let (w, r, conn, strategy) = (*quic).into_split()?;
                         self.quic_connection = Some(Arc::new(conn));
+                        self.stream_strategy = Some(strategy);
                         (UnifiedReader::Quic(r), UnifiedWriter::Quic(w))
                     }
                 };
@@ -490,8 +493,6 @@ impl DirectClientInner {
             return Err(MqttError::NotConnected);
         }
 
-        let writer = self.writer.as_ref().ok_or(MqttError::NotConnected)?;
-
         // Get packet ID for QoS > 0
         let packet_id = (options.qos != QoS::AtMostOnce).then(|| self.packet_id_generator.next());
 
@@ -540,11 +541,8 @@ impl DirectClientInner {
                 "Sending large PUBLISH packet"
             );
         }
-        writer
-            .write()
-            .await
-            .write_packet(Packet::Publish(publish))
-            .await?;
+
+        self.send_publish_packet(publish, options.qos).await?;
 
         // Wait for acknowledgment if QoS > 0
         if let Some(rx) = rx {
@@ -556,6 +554,36 @@ impl DirectClientInner {
             None => PublishResult::QoS0,
             Some(id) => PublishResult::QoS1Or2 { packet_id: id },
         })
+    }
+
+    async fn send_publish_packet(
+        &self,
+        publish: PublishPacket,
+        qos: QoS,
+    ) -> Result<()> {
+        if let (Some(conn), Some(StreamStrategy::DataPerPublish)) =
+            (&self.quic_connection, &self.stream_strategy)
+        {
+            if qos == QoS::AtMostOnce {
+                tracing::debug!(
+                    topic = %publish.topic_name,
+                    "Using dedicated QUIC stream for QoS 0 PUBLISH"
+                );
+                let manager = QuicStreamManager::new(conn.clone(), StreamStrategy::DataPerPublish);
+                manager
+                    .send_packet_on_stream(Packet::Publish(publish))
+                    .await?;
+                return Ok(());
+            }
+        }
+
+        let writer = self.writer.as_ref().ok_or(MqttError::NotConnected)?;
+        writer
+            .write()
+            .await
+            .write_packet(Packet::Publish(publish))
+            .await?;
+        Ok(())
     }
 
     /// Create a subscription from filter and reason code

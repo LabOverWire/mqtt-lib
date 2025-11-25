@@ -5,15 +5,15 @@ pub mod mock;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod packet_io;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod quic;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod quic_stream_manager;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod tcp;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod tls;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod websocket;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod quic;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod quic_stream_manager;
 
 #[cfg(not(target_arch = "wasm32"))]
 use crate::error::Result;
@@ -25,15 +25,15 @@ pub use manager::{ConnectionState, ConnectionStats, ManagerConfig, TransportMana
 #[cfg(not(target_arch = "wasm32"))]
 pub use packet_io::{PacketIo, PacketReader, PacketWriter};
 #[cfg(not(target_arch = "wasm32"))]
+pub use quic::{QuicConfig, QuicTransport, StreamStrategy};
+#[cfg(not(target_arch = "wasm32"))]
+pub use quic_stream_manager::QuicStreamManager;
+#[cfg(not(target_arch = "wasm32"))]
 pub use tcp::{TcpConfig, TcpTransport};
 #[cfg(not(target_arch = "wasm32"))]
 pub use tls::{TlsConfig, TlsTransport};
 #[cfg(not(target_arch = "wasm32"))]
 pub use websocket::{WebSocketConfig, WebSocketTransport};
-#[cfg(not(target_arch = "wasm32"))]
-pub use quic::{QuicConfig, QuicTransport, StreamStrategy};
-#[cfg(not(target_arch = "wasm32"))]
-pub use quic_stream_manager::QuicStreamManager;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub enum TransportType {
