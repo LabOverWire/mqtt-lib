@@ -561,10 +561,11 @@ impl DirectClientInner {
     async fn send_publish_packet(&self, publish: PublishPacket, qos: QoS) -> Result<()> {
         if let Some(conn) = &self.quic_connection {
             match &self.stream_strategy {
-                Some(StreamStrategy::DataPerPublish) if qos == QoS::AtMostOnce => {
+                Some(StreamStrategy::DataPerPublish) => {
                     tracing::debug!(
                         topic = %publish.topic_name,
-                        "Using dedicated QUIC stream for QoS 0 PUBLISH (DataPerPublish)"
+                        qos = ?qos,
+                        "Using dedicated QUIC stream for PUBLISH (DataPerPublish)"
                     );
                     let manager =
                         QuicStreamManager::new(conn.clone(), StreamStrategy::DataPerPublish);
@@ -573,10 +574,11 @@ impl DirectClientInner {
                         .await?;
                     return Ok(());
                 }
-                Some(StreamStrategy::DataPerTopic) if qos == QoS::AtMostOnce => {
+                Some(StreamStrategy::DataPerTopic) => {
                     tracing::debug!(
                         topic = %publish.topic_name,
-                        "Using topic-specific QUIC stream for QoS 0 PUBLISH (DataPerTopic)"
+                        qos = ?qos,
+                        "Using topic-specific QUIC stream for PUBLISH (DataPerTopic)"
                     );
                     let manager =
                         QuicStreamManager::new(conn.clone(), StreamStrategy::DataPerTopic);
@@ -585,10 +587,11 @@ impl DirectClientInner {
                         .await?;
                     return Ok(());
                 }
-                Some(StreamStrategy::DataPerSubscription) if qos == QoS::AtMostOnce => {
+                Some(StreamStrategy::DataPerSubscription) => {
                     tracing::debug!(
                         topic = %publish.topic_name,
-                        "Using subscription-based QUIC stream for QoS 0 PUBLISH (DataPerSubscription)"
+                        qos = ?qos,
+                        "Using subscription-based QUIC stream for PUBLISH (DataPerSubscription)"
                     );
                     let manager =
                         QuicStreamManager::new(conn.clone(), StreamStrategy::DataPerSubscription);
