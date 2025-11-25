@@ -974,19 +974,15 @@ impl DirectClientInner {
             tracing::debug!("💓 KEEPALIVE - Disabled (interval is zero)");
         }
 
-        if let (Some(conn), Some(strategy)) = (&self.quic_connection, self.stream_strategy) {
-            if strategy != StreamStrategy::ControlOnly {
-                let connection = conn.clone();
-                let ctx_for_streams = ctx.clone();
-                self.quic_stream_acceptor_handle = Some(tokio::spawn(async move {
-                    tracing::debug!("🔀 QUIC STREAM ACCEPTOR - Task starting");
-                    quic_stream_acceptor_task(connection, ctx_for_streams).await;
-                    tracing::debug!("🔀 QUIC STREAM ACCEPTOR - Task exited");
-                }));
-                tracing::debug!(strategy = ?strategy, "🔀 QUIC STREAM ACCEPTOR - Started for {:?} strategy", strategy);
-            } else {
-                tracing::debug!("🔀 QUIC STREAM ACCEPTOR - Skipped (ControlOnly strategy)");
-            }
+        if let Some(conn) = &self.quic_connection {
+            let connection = conn.clone();
+            let ctx_for_streams = ctx.clone();
+            self.quic_stream_acceptor_handle = Some(tokio::spawn(async move {
+                tracing::debug!("🔀 QUIC STREAM ACCEPTOR - Task starting");
+                quic_stream_acceptor_task(connection, ctx_for_streams).await;
+                tracing::debug!("🔀 QUIC STREAM ACCEPTOR - Task exited");
+            }));
+            tracing::debug!("🔀 QUIC STREAM ACCEPTOR - Started (always runs to accept server-initiated streams)");
         }
 
         Ok(())
