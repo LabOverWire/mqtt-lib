@@ -88,6 +88,7 @@ pub struct DirectClientInner {
     /// Background task handles
     pub packet_reader_handle: Option<JoinHandle<()>>,
     pub keepalive_handle: Option<JoinHandle<()>>,
+    pub quic_stream_acceptor_handle: Option<JoinHandle<()>>,
     /// Connection options
     pub options: ConnectOptions,
     /// Packet ID generator
@@ -134,6 +135,7 @@ impl DirectClientInner {
             callback_manager: Arc::new(CallbackManager::new()),
             packet_reader_handle: None,
             keepalive_handle: None,
+            quic_stream_acceptor_handle: None,
             options,
             packet_id_generator: PacketIdGenerator::new(),
             pending_subacks: Arc::new(Mutex::new(HashMap::new())),
@@ -949,9 +951,10 @@ impl DirectClientInner {
             connected,
         };
 
+        let ctx_for_packet_reader = ctx.clone();
         self.packet_reader_handle = Some(tokio::spawn(async move {
             tracing::debug!("📦 PACKET READER - Task starting");
-            packet_reader_task_with_responses(reader, ctx).await;
+            packet_reader_task_with_responses(reader, ctx_for_packet_reader).await;
             tracing::debug!("📦 PACKET READER - Task exited");
         }));
 
@@ -968,6 +971,21 @@ impl DirectClientInner {
             tracing::debug!("💓 KEEPALIVE - Disabled (interval is zero)");
         }
 
+        if let (Some(conn), Some(strategy)) = (&self.quic_connection, self.stream_strategy) {
+            if strategy != StreamStrategy::ControlOnly {
+                let connection = conn.clone();
+                let ctx_for_streams = ctx.clone();
+                self.quic_stream_acceptor_handle = Some(tokio::spawn(async move {
+                    tracing::debug!("🔀 QUIC STREAM ACCEPTOR - Task starting");
+                    quic_stream_acceptor_task(connection, ctx_for_streams).await;
+                    tracing::debug!("🔀 QUIC STREAM ACCEPTOR - Task exited");
+                }));
+                tracing::debug!(strategy = ?strategy, "🔀 QUIC STREAM ACCEPTOR - Started for {:?} strategy", strategy);
+            } else {
+                tracing::debug!("🔀 QUIC STREAM ACCEPTOR - Skipped (ControlOnly strategy)");
+            }
+        }
+
         Ok(())
     }
 
@@ -979,10 +997,14 @@ impl DirectClientInner {
         if let Some(handle) = self.keepalive_handle.take() {
             handle.abort();
         }
+        if let Some(handle) = self.quic_stream_acceptor_handle.take() {
+            handle.abort();
+        }
     }
 }
 
 /// Context for packet reader task
+#[derive(Clone)]
 struct PacketReaderContext {
     session: Arc<RwLock<SessionState>>,
     callback_manager: Arc<CallbackManager>,
@@ -1100,6 +1122,56 @@ async fn keepalive_task_with_writer(
         if let Err(e) = writer.write().await.write_packet(Packet::PingReq).await {
             tracing::error!("Error sending PINGREQ: {e}");
             break;
+        }
+    }
+}
+
+async fn quic_stream_acceptor_task(connection: Arc<Connection>, ctx: PacketReaderContext) {
+    loop {
+        match connection.accept_bi().await {
+            Ok((send, recv)) => {
+                tracing::debug!("Accepted new QUIC stream");
+                let ctx_for_reader = ctx.clone();
+                tokio::spawn(async move {
+                    quic_stream_reader_task(recv, send, ctx_for_reader).await;
+                });
+            }
+            Err(e) => {
+                tracing::error!("Error accepting QUIC stream: {e}");
+                ctx.connected.store(false, Ordering::SeqCst);
+                break;
+            }
+        }
+    }
+}
+
+async fn quic_stream_reader_task(
+    mut recv: quinn::RecvStream,
+    _send: quinn::SendStream,
+    ctx: PacketReaderContext,
+) {
+    use crate::transport::PacketReader;
+
+    loop {
+        match recv.read_packet().await {
+            Ok(packet) => {
+                tracing::trace!("Received packet on dedicated QUIC stream: {:?}", packet);
+                if let Err(e) = handle_incoming_packet_with_writer(
+                    packet,
+                    &ctx.writer,
+                    &ctx.session,
+                    &ctx.callback_manager,
+                )
+                .await
+                {
+                    tracing::error!("Error handling packet from dedicated stream: {e}");
+                    break;
+                }
+            }
+            Err(e) => {
+                tracing::debug!("QUIC stream closed or error: {e}");
+                break;
+            }
         }
     }
 }
