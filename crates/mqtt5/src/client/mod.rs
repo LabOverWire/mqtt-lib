@@ -132,6 +132,9 @@ pub struct MqttClient {
     tls_config: Arc<RwLock<Option<TlsConfig>>>,
     /// Skip TLS certificate verification (insecure, for testing only)
     insecure_tls: Arc<RwLock<bool>>,
+    /// QUIC stream strategy for multi-stream support
+    #[cfg(not(target_arch = "wasm32"))]
+    quic_stream_strategy: Arc<RwLock<crate::transport::StreamStrategy>>,
 }
 
 impl MqttClient {
@@ -179,6 +182,8 @@ impl MqttClient {
             connection_mutex: Arc::new(tokio::sync::Mutex::new(())),
             tls_config: Arc::new(RwLock::new(None)),
             insecure_tls: Arc::new(RwLock::new(false)),
+            #[cfg(not(target_arch = "wasm32"))]
+            quic_stream_strategy: Arc::new(RwLock::new(crate::transport::StreamStrategy::default())),
         }
     }
 
@@ -287,6 +292,11 @@ impl MqttClient {
     /// ```
     pub async fn set_insecure_tls(&self, insecure: bool) {
         *self.insecure_tls.write().await = insecure;
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn set_quic_stream_strategy(&self, strategy: crate::transport::StreamStrategy) {
+        *self.quic_stream_strategy.write().await = strategy;
     }
 
     pub async fn set_tls_config(
@@ -560,7 +570,10 @@ impl MqttClient {
                 Ok(TransportType::WebSocket(Box::new(ws_transport)))
             }
             ClientTransportType::Quic => {
-                let config = QuicConfig::new(addr, host).with_verify_server_cert(false);
+                let strategy = *self.quic_stream_strategy.read().await;
+                let config = QuicConfig::new(addr, host)
+                    .with_verify_server_cert(false)
+                    .with_stream_strategy(strategy);
                 let mut quic_transport = QuicTransport::new(config);
                 quic_transport
                     .connect()
@@ -570,8 +583,11 @@ impl MqttClient {
             }
             ClientTransportType::QuicSecure => {
                 let insecure = *self.insecure_tls.read().await;
+                let strategy = *self.quic_stream_strategy.read().await;
                 let tls_config_lock = self.tls_config.read().await;
-                let mut config = QuicConfig::new(addr, host).with_verify_server_cert(!insecure);
+                let mut config = QuicConfig::new(addr, host)
+                    .with_verify_server_cert(!insecure)
+                    .with_stream_strategy(strategy);
 
                 if let Some(existing_config) = &*tls_config_lock {
                     tracing::debug!(
