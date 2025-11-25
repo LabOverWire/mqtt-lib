@@ -576,9 +576,25 @@ impl DirectClientInner {
                         topic = %publish.topic_name,
                         "Using topic-specific QUIC stream for QoS 0 PUBLISH (DataPerTopic)"
                     );
-                    let manager = QuicStreamManager::new(conn.clone(), StreamStrategy::DataPerTopic);
+                    let manager =
+                        QuicStreamManager::new(conn.clone(), StreamStrategy::DataPerTopic);
                     manager
                         .send_on_topic_stream(publish.topic_name.clone(), Packet::Publish(publish))
+                        .await?;
+                    return Ok(());
+                }
+                Some(StreamStrategy::DataPerSubscription) if qos == QoS::AtMostOnce => {
+                    tracing::debug!(
+                        topic = %publish.topic_name,
+                        "Using subscription-based QUIC stream for QoS 0 PUBLISH (DataPerSubscription)"
+                    );
+                    let manager =
+                        QuicStreamManager::new(conn.clone(), StreamStrategy::DataPerSubscription);
+                    manager
+                        .send_on_subscription_stream(
+                            publish.topic_name.clone(),
+                            Packet::Publish(publish),
+                        )
                         .await?;
                     return Ok(());
                 }

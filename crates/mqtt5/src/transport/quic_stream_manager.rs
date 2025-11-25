@@ -105,6 +105,10 @@ impl QuicStreamManager {
         Ok(())
     }
 
+    pub async fn send_on_subscription_stream(&self, topic: String, packet: Packet) -> Result<()> {
+        self.send_on_topic_stream(topic, packet).await
+    }
+
     pub async fn close_all_streams(&self) {
         let mut streams = self.topic_streams.lock().await;
         for (topic, mut stream) in streams.drain() {
