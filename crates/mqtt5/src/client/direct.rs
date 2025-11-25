@@ -556,24 +556,33 @@ impl DirectClientInner {
         })
     }
 
-    async fn send_publish_packet(
-        &self,
-        publish: PublishPacket,
-        qos: QoS,
-    ) -> Result<()> {
-        if let (Some(conn), Some(StreamStrategy::DataPerPublish)) =
-            (&self.quic_connection, &self.stream_strategy)
-        {
-            if qos == QoS::AtMostOnce {
-                tracing::debug!(
-                    topic = %publish.topic_name,
-                    "Using dedicated QUIC stream for QoS 0 PUBLISH"
-                );
-                let manager = QuicStreamManager::new(conn.clone(), StreamStrategy::DataPerPublish);
-                manager
-                    .send_packet_on_stream(Packet::Publish(publish))
-                    .await?;
-                return Ok(());
+    async fn send_publish_packet(&self, publish: PublishPacket, qos: QoS) -> Result<()> {
+        if let Some(conn) = &self.quic_connection {
+            match &self.stream_strategy {
+                Some(StreamStrategy::DataPerPublish) if qos == QoS::AtMostOnce => {
+                    tracing::debug!(
+                        topic = %publish.topic_name,
+                        "Using dedicated QUIC stream for QoS 0 PUBLISH (DataPerPublish)"
+                    );
+                    let manager =
+                        QuicStreamManager::new(conn.clone(), StreamStrategy::DataPerPublish);
+                    manager
+                        .send_packet_on_stream(Packet::Publish(publish))
+                        .await?;
+                    return Ok(());
+                }
+                Some(StreamStrategy::DataPerTopic) if qos == QoS::AtMostOnce => {
+                    tracing::debug!(
+                        topic = %publish.topic_name,
+                        "Using topic-specific QUIC stream for QoS 0 PUBLISH (DataPerTopic)"
+                    );
+                    let manager = QuicStreamManager::new(conn.clone(), StreamStrategy::DataPerTopic);
+                    manager
+                        .send_on_topic_stream(publish.topic_name.clone(), Packet::Publish(publish))
+                        .await?;
+                    return Ok(());
+                }
+                _ => {}
             }
         }
 
