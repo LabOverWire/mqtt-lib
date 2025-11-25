@@ -6,7 +6,7 @@ use std::sync::Arc;
 use tokio::time::{sleep, timeout};
 use ulid::Ulid;
 
-const EMQX_PUBLIC_BROKER: &str = "quic://broker.emqx.io:14567";
+const EMQX_BROKER: &str = "quic://localhost:14567";
 
 fn test_client_id(prefix: &str) -> String {
     format!("{}-{}", prefix, Ulid::new())
@@ -22,11 +22,7 @@ async fn test_quic_basic_connection() {
     let client_id = test_client_id("quic-basic");
     let client = MqttClient::new(client_id);
 
-    let result = timeout(
-        Duration::from_secs(10),
-        client.connect(EMQX_PUBLIC_BROKER),
-    )
-    .await;
+    let result = timeout(Duration::from_secs(10), client.connect(EMQX_BROKER)).await;
 
     assert!(result.is_ok(), "Connection timeout");
     let connect_result = result.unwrap();
@@ -49,8 +45,8 @@ async fn test_quic_basic_pubsub() {
     let pub_client = MqttClient::new(pub_client_id);
     let sub_client = MqttClient::new(sub_client_id);
 
-    pub_client.connect(EMQX_PUBLIC_BROKER).await.unwrap();
-    sub_client.connect(EMQX_PUBLIC_BROKER).await.unwrap();
+    pub_client.connect(EMQX_BROKER).await.unwrap();
+    sub_client.connect(EMQX_BROKER).await.unwrap();
 
     let received = Arc::new(AtomicU32::new(0));
     let received_clone = received.clone();
@@ -64,10 +60,7 @@ async fn test_quic_basic_pubsub() {
 
     sleep(Duration::from_millis(200)).await;
 
-    pub_client
-        .publish(&topic, b"Hello QUIC")
-        .await
-        .unwrap();
+    pub_client.publish(&topic, b"Hello QUIC").await.unwrap();
 
     sleep(Duration::from_millis(500)).await;
 
@@ -91,8 +84,8 @@ async fn test_quic_qos0_fire_and_forget() {
     let pub_client = MqttClient::new(pub_client_id);
     let sub_client = MqttClient::new(sub_client_id);
 
-    pub_client.connect(EMQX_PUBLIC_BROKER).await.unwrap();
-    sub_client.connect(EMQX_PUBLIC_BROKER).await.unwrap();
+    pub_client.connect(EMQX_BROKER).await.unwrap();
+    sub_client.connect(EMQX_BROKER).await.unwrap();
 
     let received = Arc::new(AtomicU32::new(0));
     let received_clone = received.clone();
@@ -133,8 +126,8 @@ async fn test_quic_qos1_at_least_once() {
     let pub_client = MqttClient::new(pub_client_id);
     let sub_client = MqttClient::new(sub_client_id);
 
-    pub_client.connect(EMQX_PUBLIC_BROKER).await.unwrap();
-    sub_client.connect(EMQX_PUBLIC_BROKER).await.unwrap();
+    pub_client.connect(EMQX_BROKER).await.unwrap();
+    sub_client.connect(EMQX_BROKER).await.unwrap();
 
     let received = Arc::new(AtomicU32::new(0));
     let received_clone = received.clone();
@@ -184,8 +177,8 @@ async fn test_quic_qos2_exactly_once() {
     let pub_client = MqttClient::new(pub_client_id);
     let sub_client = MqttClient::new(sub_client_id);
 
-    pub_client.connect(EMQX_PUBLIC_BROKER).await.unwrap();
-    sub_client.connect(EMQX_PUBLIC_BROKER).await.unwrap();
+    pub_client.connect(EMQX_BROKER).await.unwrap();
+    sub_client.connect(EMQX_BROKER).await.unwrap();
 
     let received = Arc::new(AtomicU32::new(0));
     let received_clone = received.clone();
@@ -237,7 +230,7 @@ async fn test_quic_control_only_strategy() {
         .set_quic_stream_strategy(StreamStrategy::ControlOnly)
         .await;
 
-    client.connect(EMQX_PUBLIC_BROKER).await.unwrap();
+    client.connect(EMQX_BROKER).await.unwrap();
 
     let received = Arc::new(AtomicU32::new(0));
     let received_clone = received.clone();
@@ -281,7 +274,7 @@ async fn test_quic_data_per_publish_strategy() {
         .set_quic_stream_strategy(StreamStrategy::DataPerPublish)
         .await;
 
-    client.connect(EMQX_PUBLIC_BROKER).await.unwrap();
+    client.connect(EMQX_BROKER).await.unwrap();
 
     let received = Arc::new(AtomicU32::new(0));
     let received_clone = received.clone();
@@ -326,7 +319,7 @@ async fn test_quic_data_per_topic_strategy() {
         .set_quic_stream_strategy(StreamStrategy::DataPerTopic)
         .await;
 
-    client.connect(EMQX_PUBLIC_BROKER).await.unwrap();
+    client.connect(EMQX_BROKER).await.unwrap();
 
     let received_a = Arc::new(AtomicU32::new(0));
     let received_b = Arc::new(AtomicU32::new(0));
@@ -388,7 +381,7 @@ async fn test_quic_concurrent_publishes() {
         .set_quic_stream_strategy(StreamStrategy::DataPerPublish)
         .await;
 
-    client.connect(EMQX_PUBLIC_BROKER).await.unwrap();
+    client.connect(EMQX_BROKER).await.unwrap();
 
     let received = Arc::new(AtomicU32::new(0));
     let received_clone = received.clone();
@@ -438,7 +431,7 @@ async fn test_quic_large_message() {
 
     let client = MqttClient::new(client_id);
 
-    client.connect(EMQX_PUBLIC_BROKER).await.unwrap();
+    client.connect(EMQX_BROKER).await.unwrap();
 
     let received = Arc::new(AtomicU32::new(0));
     let received_clone = received.clone();
@@ -453,10 +446,7 @@ async fn test_quic_large_message() {
     sleep(Duration::from_millis(200)).await;
 
     let large_payload = vec![0u8; 10_000];
-    client
-        .publish_qos1(&topic, large_payload)
-        .await
-        .unwrap();
+    client.publish_qos1(&topic, large_payload).await.unwrap();
 
     sleep(Duration::from_secs(2)).await;
 
@@ -476,13 +466,13 @@ async fn test_quic_reconnect() {
 
     let client = MqttClient::new(&client_id);
 
-    client.connect(EMQX_PUBLIC_BROKER).await.unwrap();
+    client.connect(EMQX_BROKER).await.unwrap();
 
     client.disconnect().await.unwrap();
 
     sleep(Duration::from_millis(500)).await;
 
-    let result = client.connect(EMQX_PUBLIC_BROKER).await;
+    let result = client.connect(EMQX_BROKER).await;
 
     assert!(result.is_ok(), "Should successfully reconnect");
 

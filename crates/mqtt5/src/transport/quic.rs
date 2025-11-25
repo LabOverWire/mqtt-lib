@@ -5,10 +5,63 @@ use crate::Transport;
 use bytes::{BufMut, BytesMut};
 use mqtt5_protocol::packet::{FixedHeader, Packet};
 use quinn::{ClientConfig, Connection, Endpoint, RecvStream, SendStream};
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-use rustls::{ClientConfig as RustlsClientConfig, RootCertStore};
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
+use rustls::{ClientConfig as RustlsClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme};
 use std::net::SocketAddr;
 use std::sync::Arc;
+
+#[derive(Debug)]
+struct NoVerification;
+
+impl ServerCertVerifier for NoVerification {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> std::result::Result<ServerCertVerified, rustls::Error> {
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        vec![
+            SignatureScheme::RSA_PKCS1_SHA1,
+            SignatureScheme::ECDSA_SHA1_Legacy,
+            SignatureScheme::RSA_PKCS1_SHA256,
+            SignatureScheme::ECDSA_NISTP256_SHA256,
+            SignatureScheme::RSA_PKCS1_SHA384,
+            SignatureScheme::ECDSA_NISTP384_SHA384,
+            SignatureScheme::RSA_PKCS1_SHA512,
+            SignatureScheme::ECDSA_NISTP521_SHA512,
+            SignatureScheme::RSA_PSS_SHA256,
+            SignatureScheme::RSA_PSS_SHA384,
+            SignatureScheme::RSA_PSS_SHA512,
+            SignatureScheme::ED25519,
+            SignatureScheme::ED448,
+        ]
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StreamStrategy {
@@ -98,22 +151,23 @@ impl QuicConfig {
     }
 
     fn build_client_config(&self) -> Result<ClientConfig> {
-        let mut root_store = RootCertStore::empty();
-
-        if self.use_system_roots {
-            root_store.extend(webpki_roots::TLS_SERVER_ROOTS.to_vec());
-        }
-
-        if let Some(ref certs) = self.root_certs {
-            for cert in certs {
-                root_store.add(cert.clone()).map_err(|e| {
-                    MqttError::ConnectionError(format!("Failed to add root cert: {e}"))
-                })?;
-            }
-        }
-
         let crypto_provider = Arc::new(rustls::crypto::ring::default_provider());
-        let mut crypto =
+
+        let mut crypto = if self.verify_server_cert {
+            let mut root_store = RootCertStore::empty();
+
+            if self.use_system_roots {
+                root_store.extend(webpki_roots::TLS_SERVER_ROOTS.to_vec());
+            }
+
+            if let Some(ref certs) = self.root_certs {
+                for cert in certs {
+                    root_store.add(cert.clone()).map_err(|e| {
+                        MqttError::ConnectionError(format!("Failed to add root cert: {e}"))
+                    })?;
+                }
+            }
+
             if let (Some(ref cert_chain), Some(ref key)) = (&self.client_cert, &self.client_key) {
                 RustlsClientConfig::builder_with_provider(crypto_provider)
                     .with_safe_default_protocol_versions()
@@ -133,7 +187,29 @@ impl QuicConfig {
                     })?
                     .with_root_certificates(root_store)
                     .with_no_client_auth()
-            };
+            }
+        } else if let (Some(ref cert_chain), Some(ref key)) = (&self.client_cert, &self.client_key) {
+            RustlsClientConfig::builder_with_provider(crypto_provider.clone())
+                .with_safe_default_protocol_versions()
+                .map_err(|e| {
+                    MqttError::ConnectionError(format!("Failed to set protocol versions: {e}"))
+                })?
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(NoVerification))
+                .with_client_auth_cert(cert_chain.clone(), key.clone_key())
+                .map_err(|e| {
+                    MqttError::ConnectionError(format!("Failed to configure client cert: {e}"))
+                })?
+        } else {
+            RustlsClientConfig::builder_with_provider(crypto_provider.clone())
+                .with_safe_default_protocol_versions()
+                .map_err(|e| {
+                    MqttError::ConnectionError(format!("Failed to set protocol versions: {e}"))
+                })?
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(NoVerification))
+                .with_no_client_auth()
+        };
 
         crypto.alpn_protocols = vec![b"mqtt".to_vec()];
 
