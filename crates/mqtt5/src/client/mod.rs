@@ -183,7 +183,9 @@ impl MqttClient {
             tls_config: Arc::new(RwLock::new(None)),
             insecure_tls: Arc::new(RwLock::new(false)),
             #[cfg(not(target_arch = "wasm32"))]
-            quic_stream_strategy: Arc::new(RwLock::new(crate::transport::StreamStrategy::default())),
+            quic_stream_strategy: Arc::new(
+                RwLock::new(crate::transport::StreamStrategy::default()),
+            ),
         }
     }
 

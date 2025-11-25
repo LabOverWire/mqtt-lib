@@ -112,19 +112,30 @@ impl QuicConfig {
             }
         }
 
-        let crypto =
+        let crypto_provider = Arc::new(rustls::crypto::ring::default_provider());
+        let mut crypto =
             if let (Some(ref cert_chain), Some(ref key)) = (&self.client_cert, &self.client_key) {
-                RustlsClientConfig::builder()
+                RustlsClientConfig::builder_with_provider(crypto_provider)
+                    .with_safe_default_protocol_versions()
+                    .map_err(|e| {
+                        MqttError::ConnectionError(format!("Failed to set protocol versions: {e}"))
+                    })?
                     .with_root_certificates(root_store)
                     .with_client_auth_cert(cert_chain.clone(), key.clone_key())
                     .map_err(|e| {
                         MqttError::ConnectionError(format!("Failed to configure client cert: {e}"))
                     })?
             } else {
-                RustlsClientConfig::builder()
+                RustlsClientConfig::builder_with_provider(crypto_provider)
+                    .with_safe_default_protocol_versions()
+                    .map_err(|e| {
+                        MqttError::ConnectionError(format!("Failed to set protocol versions: {e}"))
+                    })?
                     .with_root_certificates(root_store)
                     .with_no_client_auth()
             };
+
+        crypto.alpn_protocols = vec![b"mqtt".to_vec()];
 
         Ok(ClientConfig::new(Arc::new(
             quinn::crypto::rustls::QuicClientConfig::try_from(crypto).map_err(|e| {
