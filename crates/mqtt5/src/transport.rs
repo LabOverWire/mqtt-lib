@@ -1,4 +1,6 @@
 #[cfg(not(target_arch = "wasm32"))]
+pub mod flow;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod manager;
 #[cfg(test)]
 pub mod mock;

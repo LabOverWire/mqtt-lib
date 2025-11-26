@@ -75,6 +75,7 @@ pub struct ClientHandler {
     auth_state: AuthState,
     pending_connect: Option<PendingConnect>,
     topic_aliases: HashMap<u16, String>,
+    external_packet_rx: Option<mpsc::Receiver<Packet>>,
 }
 
 impl ClientHandler {
@@ -90,6 +91,34 @@ impl ClientHandler {
         stats: Arc<BrokerStats>,
         resource_monitor: Arc<ResourceMonitor>,
         shutdown_rx: tokio::sync::broadcast::Receiver<()>,
+    ) -> Self {
+        Self::new_with_external_packets(
+            transport,
+            client_addr,
+            config,
+            router,
+            auth_provider,
+            storage,
+            stats,
+            resource_monitor,
+            shutdown_rx,
+            None,
+        )
+    }
+
+    /// Creates a new client handler with external packet channel for QUIC multi-stream
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_external_packets(
+        transport: BrokerTransport,
+        client_addr: SocketAddr,
+        config: Arc<BrokerConfig>,
+        router: Arc<MessageRouter>,
+        auth_provider: Arc<dyn AuthProvider>,
+        storage: Option<Arc<DynamicStorage>>,
+        stats: Arc<BrokerStats>,
+        resource_monitor: Arc<ResourceMonitor>,
+        shutdown_rx: tokio::sync::broadcast::Receiver<()>,
+        external_packet_rx: Option<mpsc::Receiver<Packet>>,
     ) -> Self {
         let (publish_tx, publish_rx) = mpsc::channel(100);
 
@@ -118,6 +147,7 @@ impl ClientHandler {
             auth_state: AuthState::NotStarted,
             pending_connect: None,
             topic_aliases: HashMap::new(),
+            external_packet_rx,
         }
     }
 
@@ -289,7 +319,7 @@ impl ClientHandler {
     ) -> Result<bool> {
         loop {
             tokio::select! {
-                // Read incoming packets
+                // Read incoming packets from control stream
                 packet_result = self.transport.read_packet() => {
                     match packet_result {
                         Ok(packet) => {
@@ -302,6 +332,19 @@ impl ClientHandler {
                         Err(e) => {
                             return Err(e);
                         }
+                    }
+                }
+
+                // Read packets from external data streams (QUIC multi-stream)
+                external_packet = async {
+                    if let Some(ref mut rx) = self.external_packet_rx {
+                        rx.recv().await
+                    } else {
+                        std::future::pending::<Option<Packet>>().await
+                    }
+                } => {
+                    if let Some(packet) = external_packet {
+                        self.handle_packet(packet).await?;
                     }
                 }
 
@@ -334,7 +377,7 @@ impl ClientHandler {
 
         loop {
             tokio::select! {
-                // Read incoming packets
+                // Read incoming packets from control stream
                 packet_result = self.transport.read_packet() => {
                     match packet_result {
                         Ok(packet) => {
@@ -348,6 +391,20 @@ impl ClientHandler {
                         Err(e) => {
                             return Err(e);
                         }
+                    }
+                }
+
+                // Read packets from external data streams (QUIC multi-stream)
+                external_packet = async {
+                    if let Some(ref mut rx) = self.external_packet_rx {
+                        rx.recv().await
+                    } else {
+                        std::future::pending::<Option<Packet>>().await
+                    }
+                } => {
+                    if let Some(packet) = external_packet {
+                        last_packet_time = tokio::time::Instant::now();
+                        self.handle_packet(packet).await?;
                     }
                 }
 

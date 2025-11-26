@@ -80,6 +80,7 @@ pub struct DirectClientInner {
     pub writer: Option<Arc<tokio::sync::RwLock<UnifiedWriter>>>,
     pub quic_connection: Option<Arc<Connection>>,
     pub stream_strategy: Option<StreamStrategy>,
+    pub quic_stream_manager: Option<Arc<QuicStreamManager>>,
     pub session: Arc<RwLock<SessionState>>,
     /// Connection status
     pub connected: Arc<AtomicBool>,
@@ -130,6 +131,7 @@ impl DirectClientInner {
             writer: None,
             quic_connection: None,
             stream_strategy: None,
+            quic_stream_manager: None,
             session,
             connected: Arc::new(AtomicBool::new(false)),
             callback_manager: Arc::new(CallbackManager::new()),
@@ -243,8 +245,11 @@ impl DirectClientInner {
                     }
                     TransportType::Quic(quic) => {
                         let (w, r, conn, strategy) = (*quic).into_split()?;
-                        self.quic_connection = Some(Arc::new(conn));
+                        let conn_arc = Arc::new(conn);
+                        self.quic_connection = Some(conn_arc.clone());
                         self.stream_strategy = Some(strategy);
+                        self.quic_stream_manager =
+                            Some(Arc::new(QuicStreamManager::new(conn_arc, strategy)));
                         (UnifiedReader::Quic(r), UnifiedWriter::Quic(w))
                     }
                 };
@@ -322,9 +327,16 @@ impl DirectClientInner {
         // Stop background tasks
         self.stop_background_tasks();
 
+        // Clean up QUIC stream manager
+        if let Some(manager) = self.quic_stream_manager.take() {
+            manager.close_all_streams().await;
+        }
+
         // Clear state
         self.set_connected(false);
         self.writer = None;
+        self.quic_connection = None;
+        self.stream_strategy = None;
 
         Ok(())
     }
@@ -559,42 +571,36 @@ impl DirectClientInner {
     }
 
     async fn send_publish_packet(&self, publish: PublishPacket, qos: QoS) -> Result<()> {
-        if let Some(conn) = &self.quic_connection {
-            match &self.stream_strategy {
-                Some(StreamStrategy::DataPerPublish) => {
+        if let Some(manager) = &self.quic_stream_manager {
+            match manager.strategy() {
+                StreamStrategy::DataPerPublish => {
                     tracing::debug!(
                         topic = %publish.topic_name,
                         qos = ?qos,
                         "Using dedicated QUIC stream for PUBLISH (DataPerPublish)"
                     );
-                    let manager =
-                        QuicStreamManager::new(conn.clone(), StreamStrategy::DataPerPublish);
                     manager
                         .send_packet_on_stream(Packet::Publish(publish))
                         .await?;
                     return Ok(());
                 }
-                Some(StreamStrategy::DataPerTopic) => {
+                StreamStrategy::DataPerTopic => {
                     tracing::debug!(
                         topic = %publish.topic_name,
                         qos = ?qos,
                         "Using topic-specific QUIC stream for PUBLISH (DataPerTopic)"
                     );
-                    let manager =
-                        QuicStreamManager::new(conn.clone(), StreamStrategy::DataPerTopic);
                     manager
                         .send_on_topic_stream(publish.topic_name.clone(), Packet::Publish(publish))
                         .await?;
                     return Ok(());
                 }
-                Some(StreamStrategy::DataPerSubscription) => {
+                StreamStrategy::DataPerSubscription => {
                     tracing::debug!(
                         topic = %publish.topic_name,
                         qos = ?qos,
                         "Using subscription-based QUIC stream for PUBLISH (DataPerSubscription)"
                     );
-                    let manager =
-                        QuicStreamManager::new(conn.clone(), StreamStrategy::DataPerSubscription);
                     manager
                         .send_on_subscription_stream(
                             publish.topic_name.clone(),
@@ -603,7 +609,7 @@ impl DirectClientInner {
                         .await?;
                     return Ok(());
                 }
-                _ => {}
+                StreamStrategy::ControlOnly => {}
             }
         }
 

@@ -7,7 +7,9 @@ use mqtt5_protocol::packet::{FixedHeader, Packet};
 use quinn::{ClientConfig, Connection, Endpoint, RecvStream, SendStream};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
-use rustls::{ClientConfig as RustlsClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme};
+use rustls::{
+    ClientConfig as RustlsClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme,
+};
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -188,7 +190,8 @@ impl QuicConfig {
                     .with_root_certificates(root_store)
                     .with_no_client_auth()
             }
-        } else if let (Some(ref cert_chain), Some(ref key)) = (&self.client_cert, &self.client_key) {
+        } else if let (Some(ref cert_chain), Some(ref key)) = (&self.client_cert, &self.client_key)
+        {
             RustlsClientConfig::builder_with_provider(crypto_provider.clone())
                 .with_safe_default_protocol_versions()
                 .map_err(|e| {
@@ -261,7 +264,7 @@ impl Transport for QuicTransport {
 
         let client_config = self.config.build_client_config()?;
 
-        let mut endpoint = Endpoint::client("[::]:0".parse().unwrap())
+        let mut endpoint = Endpoint::client("0.0.0.0:0".parse().unwrap())
             .map_err(|e| MqttError::ConnectionError(format!("Failed to create endpoint: {e}")))?;
         endpoint.set_default_client_config(client_config);
 

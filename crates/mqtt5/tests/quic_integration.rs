@@ -3,10 +3,10 @@ use mqtt5::transport::StreamStrategy;
 use mqtt5::{MqttClient, QoS, SubscribeOptions};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
-use tokio::time::{sleep, timeout};
+use tokio::time::sleep;
 use ulid::Ulid;
 
-const EMQX_BROKER: &str = "quic://localhost:14567";
+const EMQX_BROKER: &str = "quic://127.0.0.1:14567";
 
 fn test_client_id(prefix: &str) -> String {
     format!("{}-{}", prefix, Ulid::new())
@@ -17,25 +17,20 @@ fn test_topic(test_name: &str) -> String {
 }
 
 #[tokio::test]
+#[ignore]
 async fn test_quic_basic_connection() {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let client_id = test_client_id("quic-basic");
     let client = MqttClient::new(client_id);
+    client.set_insecure_tls(true).await;
 
-    let result = timeout(Duration::from_secs(10), client.connect(EMQX_BROKER)).await;
-
-    assert!(result.is_ok(), "Connection timeout");
-    let connect_result = result.unwrap();
-    assert!(
-        connect_result.is_ok(),
-        "QUIC connection failed: {:?}",
-        connect_result.err()
-    );
-
+    client.connect(EMQX_BROKER).await.unwrap();
+    assert!(client.is_connected().await);
     client.disconnect().await.unwrap();
 }
 
 #[tokio::test]
+#[ignore]
 async fn test_quic_basic_pubsub() {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let pub_client_id = test_client_id("quic-pub");
@@ -44,6 +39,8 @@ async fn test_quic_basic_pubsub() {
 
     let pub_client = MqttClient::new(pub_client_id);
     let sub_client = MqttClient::new(sub_client_id);
+    pub_client.set_insecure_tls(true).await;
+    sub_client.set_insecure_tls(true).await;
 
     pub_client.connect(EMQX_BROKER).await.unwrap();
     sub_client.connect(EMQX_BROKER).await.unwrap();
@@ -75,6 +72,7 @@ async fn test_quic_basic_pubsub() {
 }
 
 #[tokio::test]
+#[ignore]
 async fn test_quic_qos0_fire_and_forget() {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let pub_client_id = test_client_id("quic-qos0-pub");
@@ -83,6 +81,8 @@ async fn test_quic_qos0_fire_and_forget() {
 
     let pub_client = MqttClient::new(pub_client_id);
     let sub_client = MqttClient::new(sub_client_id);
+    pub_client.set_insecure_tls(true).await;
+    sub_client.set_insecure_tls(true).await;
 
     pub_client.connect(EMQX_BROKER).await.unwrap();
     sub_client.connect(EMQX_BROKER).await.unwrap();
@@ -109,7 +109,6 @@ async fn test_quic_qos0_fire_and_forget() {
     sleep(Duration::from_secs(1)).await;
 
     let count = received.load(Ordering::Relaxed);
-    println!("QoS 0: Received {count} of 10 messages");
     assert!(count > 0, "Should receive at least some messages");
 
     pub_client.disconnect().await.unwrap();
@@ -117,6 +116,7 @@ async fn test_quic_qos0_fire_and_forget() {
 }
 
 #[tokio::test]
+#[ignore]
 async fn test_quic_qos1_at_least_once() {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let pub_client_id = test_client_id("quic-qos1-pub");
@@ -125,6 +125,8 @@ async fn test_quic_qos1_at_least_once() {
 
     let pub_client = MqttClient::new(pub_client_id);
     let sub_client = MqttClient::new(sub_client_id);
+    pub_client.set_insecure_tls(true).await;
+    sub_client.set_insecure_tls(true).await;
 
     pub_client.connect(EMQX_BROKER).await.unwrap();
     sub_client.connect(EMQX_BROKER).await.unwrap();
@@ -168,6 +170,7 @@ async fn test_quic_qos1_at_least_once() {
 }
 
 #[tokio::test]
+#[ignore]
 async fn test_quic_qos2_exactly_once() {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let pub_client_id = test_client_id("quic-qos2-pub");
@@ -176,6 +179,8 @@ async fn test_quic_qos2_exactly_once() {
 
     let pub_client = MqttClient::new(pub_client_id);
     let sub_client = MqttClient::new(sub_client_id);
+    pub_client.set_insecure_tls(true).await;
+    sub_client.set_insecure_tls(true).await;
 
     pub_client.connect(EMQX_BROKER).await.unwrap();
     sub_client.connect(EMQX_BROKER).await.unwrap();
@@ -219,12 +224,14 @@ async fn test_quic_qos2_exactly_once() {
 }
 
 #[tokio::test]
+#[ignore]
 async fn test_quic_control_only_strategy() {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let client_id = test_client_id("quic-control-only");
     let topic = test_topic("control-only");
 
     let client = MqttClient::new(client_id);
+    client.set_insecure_tls(true).await;
 
     client
         .set_quic_stream_strategy(StreamStrategy::ControlOnly)
@@ -263,12 +270,14 @@ async fn test_quic_control_only_strategy() {
 }
 
 #[tokio::test]
+#[ignore]
 async fn test_quic_data_per_publish_strategy() {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let client_id = test_client_id("quic-data-per-publish");
     let topic = test_topic("data-per-publish");
 
     let client = MqttClient::new(client_id);
+    client.set_insecure_tls(true).await;
 
     client
         .set_quic_stream_strategy(StreamStrategy::DataPerPublish)
@@ -307,6 +316,7 @@ async fn test_quic_data_per_publish_strategy() {
 }
 
 #[tokio::test]
+#[ignore]
 async fn test_quic_data_per_topic_strategy() {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let client_id = test_client_id("quic-data-per-topic");
@@ -314,6 +324,7 @@ async fn test_quic_data_per_topic_strategy() {
     let topic2 = test_topic("topic-b");
 
     let client = MqttClient::new(client_id);
+    client.set_insecure_tls(true).await;
 
     client
         .set_quic_stream_strategy(StreamStrategy::DataPerTopic)
@@ -370,12 +381,79 @@ async fn test_quic_data_per_topic_strategy() {
 }
 
 #[tokio::test]
+#[ignore]
+async fn test_quic_data_per_subscription_strategy() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let client_id = test_client_id("quic-data-per-subscription");
+    let topic1 = test_topic("subscription-a");
+    let topic2 = test_topic("subscription-b");
+
+    let client = MqttClient::new(client_id);
+    client.set_insecure_tls(true).await;
+
+    client
+        .set_quic_stream_strategy(StreamStrategy::DataPerSubscription)
+        .await;
+
+    client.connect(EMQX_BROKER).await.unwrap();
+
+    let received_a = Arc::new(AtomicU32::new(0));
+    let received_b = Arc::new(AtomicU32::new(0));
+    let received_a_clone = received_a.clone();
+    let received_b_clone = received_b.clone();
+
+    client
+        .subscribe(&topic1, move |_msg| {
+            received_a_clone.fetch_add(1, Ordering::Relaxed);
+        })
+        .await
+        .unwrap();
+
+    client
+        .subscribe(&topic2, move |_msg| {
+            received_b_clone.fetch_add(1, Ordering::Relaxed);
+        })
+        .await
+        .unwrap();
+
+    sleep(Duration::from_millis(200)).await;
+
+    for i in 0..3 {
+        client
+            .publish_qos1(&topic1, format!("Subscription A Message {i}"))
+            .await
+            .unwrap();
+        client
+            .publish_qos1(&topic2, format!("Subscription B Message {i}"))
+            .await
+            .unwrap();
+    }
+
+    sleep(Duration::from_secs(2)).await;
+
+    assert_eq!(
+        received_a.load(Ordering::Relaxed),
+        3,
+        "DataPerSubscription strategy: should receive all subscription A messages"
+    );
+    assert_eq!(
+        received_b.load(Ordering::Relaxed),
+        3,
+        "DataPerSubscription strategy: should receive all subscription B messages"
+    );
+
+    client.disconnect().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
 async fn test_quic_concurrent_publishes() {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let client_id = test_client_id("quic-concurrent");
     let topic = test_topic("concurrent");
 
     let client = MqttClient::new(client_id);
+    client.set_insecure_tls(true).await;
 
     client
         .set_quic_stream_strategy(StreamStrategy::DataPerPublish)
@@ -424,12 +502,14 @@ async fn test_quic_concurrent_publishes() {
 }
 
 #[tokio::test]
+#[ignore]
 async fn test_quic_large_message() {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let client_id = test_client_id("quic-large");
     let topic = test_topic("large");
 
     let client = MqttClient::new(client_id);
+    client.set_insecure_tls(true).await;
 
     client.connect(EMQX_BROKER).await.unwrap();
 
@@ -460,21 +540,19 @@ async fn test_quic_large_message() {
 }
 
 #[tokio::test]
+#[ignore]
 async fn test_quic_reconnect() {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let client_id = test_client_id("quic-reconnect");
 
     let client = MqttClient::new(&client_id);
+    client.set_insecure_tls(true).await;
 
     client.connect(EMQX_BROKER).await.unwrap();
-
     client.disconnect().await.unwrap();
 
     sleep(Duration::from_millis(500)).await;
 
-    let result = client.connect(EMQX_BROKER).await;
-
-    assert!(result.is_ok(), "Should successfully reconnect");
-
+    client.connect(EMQX_BROKER).await.unwrap();
     client.disconnect().await.unwrap();
 }

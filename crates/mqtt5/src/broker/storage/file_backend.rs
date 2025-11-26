@@ -219,7 +219,11 @@ impl FileBackend {
             .map_err(|e| MqttError::Io(format!("Failed to read directory entry: {}", e)))?
         {
             let path = entry.path();
-            if path.is_file() && path.extension().map_or(false, |ext| ext == extension) {
+            let is_file = fs::metadata(&path)
+                .await
+                .map(|m| m.is_file())
+                .unwrap_or(false);
+            if is_file && path.extension().map_or(false, |ext| ext == extension) {
                 files.push(path);
             }
         }
@@ -436,7 +440,11 @@ impl StorageBackend for FileBackend {
             .map_err(|e| MqttError::Io(format!("Failed to read queue entry: {}", e)))?
         {
             let client_dir = entry.path();
-            if client_dir.is_dir() {
+            let is_dir = fs::metadata(&client_dir)
+                .await
+                .map(|m| m.is_dir())
+                .unwrap_or(false);
+            if is_dir {
                 let queue_files = self.list_files(&client_dir, "json").await?;
                 for file_path in queue_files {
                     if let Some(message) =

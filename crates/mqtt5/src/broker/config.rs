@@ -65,6 +65,9 @@ pub struct BrokerConfig {
     /// WebSocket TLS configuration
     pub websocket_tls_config: Option<WebSocketConfig>,
 
+    /// QUIC configuration
+    pub quic_config: Option<QuicConfig>,
+
     /// Storage configuration
     pub storage_config: StorageConfig,
 
@@ -101,6 +104,7 @@ impl Default for BrokerConfig {
             tls_config: None,
             websocket_config: None,
             websocket_tls_config: None,
+            quic_config: None,
             storage_config: StorageConfig::default(),
             #[cfg(not(target_arch = "wasm32"))]
             bridges: vec![],
@@ -198,6 +202,13 @@ impl BrokerConfig {
     #[must_use]
     pub fn with_websocket_tls(mut self, ws_tls: WebSocketConfig) -> Self {
         self.websocket_tls_config = Some(ws_tls);
+        self
+    }
+
+    /// Sets the QUIC configuration
+    #[must_use]
+    pub fn with_quic(mut self, quic: QuicConfig) -> Self {
+        self.quic_config = Some(quic);
         self
     }
 
@@ -351,6 +362,63 @@ impl TlsConfig {
     }
 
     /// Sets a single bind address (replaces all existing)
+    #[must_use]
+    pub fn with_bind_address(mut self, addr: impl Into<SocketAddr>) -> Self {
+        self.bind_addresses = vec![addr.into()];
+        self
+    }
+}
+
+/// QUIC configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuicConfig {
+    pub cert_file: PathBuf,
+    pub key_file: PathBuf,
+    pub ca_file: Option<PathBuf>,
+    pub require_client_cert: bool,
+    pub bind_addresses: Vec<SocketAddr>,
+}
+
+impl QuicConfig {
+    #[must_use]
+    #[allow(clippy::missing_panics_doc)]
+    pub fn new(cert_file: PathBuf, key_file: PathBuf) -> Self {
+        Self {
+            cert_file,
+            key_file,
+            ca_file: None,
+            require_client_cert: false,
+            bind_addresses: vec![
+                "0.0.0.0:14567".parse().expect("valid IPv4 address"),
+                "[::]:14567".parse().expect("valid IPv6 address"),
+            ],
+        }
+    }
+
+    #[must_use]
+    pub fn with_ca_file(mut self, ca_file: PathBuf) -> Self {
+        self.ca_file = Some(ca_file);
+        self
+    }
+
+    #[must_use]
+    pub fn with_require_client_cert(mut self, require: bool) -> Self {
+        self.require_client_cert = require;
+        self
+    }
+
+    #[must_use]
+    pub fn with_bind_addresses(mut self, addrs: Vec<SocketAddr>) -> Self {
+        self.bind_addresses = addrs;
+        self
+    }
+
+    #[must_use]
+    pub fn add_bind_address(mut self, addr: impl Into<SocketAddr>) -> Self {
+        self.bind_addresses.push(addr.into());
+        self
+    }
+
     #[must_use]
     pub fn with_bind_address(mut self, addr: impl Into<SocketAddr>) -> Self {
         self.bind_addresses = vec![addr.into()];
@@ -560,6 +628,21 @@ mod tests {
         assert_eq!(tls.key_file.to_str().unwrap(), "key.pem");
         assert_eq!(tls.ca_file.unwrap().to_str().unwrap(), "ca.pem");
         assert!(tls.require_client_cert);
+    }
+
+    #[test]
+    fn test_quic_config() {
+        let quic = QuicConfig::new("cert.pem".into(), "key.pem".into())
+            .with_ca_file("ca.pem".into())
+            .with_require_client_cert(true)
+            .with_bind_address("0.0.0.0:14567".parse::<SocketAddr>().unwrap());
+
+        assert_eq!(quic.cert_file.to_str().unwrap(), "cert.pem");
+        assert_eq!(quic.key_file.to_str().unwrap(), "key.pem");
+        assert_eq!(quic.ca_file.unwrap().to_str().unwrap(), "ca.pem");
+        assert!(quic.require_client_cert);
+        assert_eq!(quic.bind_addresses.len(), 1);
+        assert_eq!(quic.bind_addresses[0].to_string(), "0.0.0.0:14567");
     }
 
     #[test]

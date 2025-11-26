@@ -6,13 +6,22 @@ use mqtt5_protocol::packet::Packet;
 use quinn::{Connection, SendStream};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
+
+struct StreamInfo {
+    stream: SendStream,
+    last_used: Instant,
+}
+
+const DEFAULT_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 
 pub struct QuicStreamManager {
     connection: Arc<Connection>,
     strategy: StreamStrategy,
-    topic_streams: Arc<Mutex<HashMap<String, SendStream>>>,
+    topic_streams: Arc<Mutex<HashMap<String, StreamInfo>>>,
     max_cached_streams: usize,
+    stream_idle_timeout: Duration,
 }
 
 impl QuicStreamManager {
@@ -22,12 +31,19 @@ impl QuicStreamManager {
             strategy,
             topic_streams: Arc::new(Mutex::new(HashMap::new())),
             max_cached_streams: 100,
+            stream_idle_timeout: DEFAULT_STREAM_IDLE_TIMEOUT,
         }
     }
 
     #[must_use]
     pub fn with_max_cached_streams(mut self, max: usize) -> Self {
         self.max_cached_streams = max;
+        self
+    }
+
+    #[must_use]
+    pub fn with_stream_idle_timeout(mut self, timeout: Duration) -> Self {
+        self.stream_idle_timeout = timeout;
         self
     }
 
@@ -62,20 +78,40 @@ impl QuicStreamManager {
 
     async fn get_or_create_topic_stream(&self, topic: &str) -> Result<SendStream> {
         let mut streams = self.topic_streams.lock().await;
+        let now = Instant::now();
 
-        if let Some(stream) = streams.remove(topic) {
+        let idle_topics: Vec<String> = streams
+            .iter()
+            .filter(|(_, info)| now.duration_since(info.last_used) > self.stream_idle_timeout)
+            .map(|(topic, _)| topic.clone())
+            .collect();
+
+        for idle_topic in &idle_topics {
+            if let Some(mut info) = streams.remove(idle_topic) {
+                let _ = info.stream.finish();
+                tracing::debug!(topic = %idle_topic, "Closed idle stream");
+            }
+        }
+
+        if let Some(info) = streams.remove(topic) {
             tracing::trace!(topic = %topic, "Reusing existing stream for topic");
-            return Ok(stream);
+            return Ok(info.stream);
         }
 
         if streams.len() >= self.max_cached_streams {
-            tracing::debug!(
-                "Stream cache full ({}/{}), clearing oldest entry",
-                streams.len(),
-                self.max_cached_streams
-            );
-            if let Some(key) = streams.keys().next().cloned() {
-                streams.remove(&key);
+            let oldest = streams
+                .iter()
+                .min_by_key(|(_, info)| info.last_used)
+                .map(|(k, _)| k.clone());
+
+            if let Some(oldest_topic) = oldest {
+                if let Some(mut info) = streams.remove(&oldest_topic) {
+                    let _ = info.stream.finish();
+                    tracing::debug!(
+                        topic = %oldest_topic,
+                        "Evicted oldest stream from cache (LRU)"
+                    );
+                }
             }
         }
 
@@ -100,7 +136,13 @@ impl QuicStreamManager {
 
         tracing::debug!(topic = %topic, "Sent packet on topic-specific stream");
 
-        self.topic_streams.lock().await.insert(topic, stream);
+        self.topic_streams.lock().await.insert(
+            topic,
+            StreamInfo {
+                stream,
+                last_used: Instant::now(),
+            },
+        );
 
         Ok(())
     }
@@ -111,8 +153,8 @@ impl QuicStreamManager {
 
     pub async fn close_all_streams(&self) {
         let mut streams = self.topic_streams.lock().await;
-        for (topic, mut stream) in streams.drain() {
-            let _ = stream.finish();
+        for (topic, mut info) in streams.drain() {
+            let _ = info.stream.finish();
             tracing::trace!(topic = %topic, "Closed topic stream");
         }
     }

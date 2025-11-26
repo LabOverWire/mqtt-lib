@@ -573,7 +573,12 @@ impl MqttClient {
             }
             ClientTransportType::Quic => {
                 let strategy = *self.quic_stream_strategy.read().await;
-                let config = QuicConfig::new(addr, host)
+                let server_name = if host.parse::<std::net::IpAddr>().is_ok() {
+                    "localhost"
+                } else {
+                    host
+                };
+                let config = QuicConfig::new(addr, server_name)
                     .with_verify_server_cert(false)
                     .with_stream_strategy(strategy);
                 let mut quic_transport = QuicTransport::new(config);
@@ -587,7 +592,12 @@ impl MqttClient {
                 let insecure = *self.insecure_tls.read().await;
                 let strategy = *self.quic_stream_strategy.read().await;
                 let tls_config_lock = self.tls_config.read().await;
-                let mut config = QuicConfig::new(addr, host)
+                let server_name = if host.parse::<std::net::IpAddr>().is_ok() {
+                    "localhost"
+                } else {
+                    host
+                };
+                let mut config = QuicConfig::new(addr, server_name)
                     .with_verify_server_cert(!insecure)
                     .with_stream_strategy(strategy);
 
