@@ -77,11 +77,10 @@ impl QuicStreamManager {
     }
 
     pub async fn open_data_stream(&self) -> Result<(quinn::SendStream, quinn::RecvStream)> {
-        let (send, recv) = self
-            .connection
-            .open_bi()
-            .await
-            .map_err(|e| MqttError::ConnectionError(format!("Failed to open QUIC stream: {e}")))?;
+        let (send, recv) =
+            self.connection.open_bi().await.map_err(|e| {
+                MqttError::ConnectionError(format!("Failed to open QUIC stream: {e}"))
+            })?;
         Ok((send, recv))
     }
 
@@ -101,9 +100,9 @@ impl QuicStreamManager {
                 DataFlowHeader::client(flow_id, self.flow_expire_interval, self.flow_flags);
             header.encode(&mut buf);
 
-            send.write_all(&buf)
-                .await
-                .map_err(|e| MqttError::ConnectionError(format!("Failed to write flow header: {e}")))?;
+            send.write_all(&buf).await.map_err(|e| {
+                MqttError::ConnectionError(format!("Failed to write flow header: {e}"))
+            })?;
 
             tracing::debug!(flow_id = ?flow_id, "Wrote client data flow header on new stream");
             flow_id
@@ -197,9 +196,9 @@ impl QuicStreamManager {
                 DataFlowHeader::client(flow_id, self.flow_expire_interval, self.flow_flags);
             header.encode(&mut buf);
 
-            send.write_all(&buf)
-                .await
-                .map_err(|e| MqttError::ConnectionError(format!("Failed to write flow header: {e}")))?;
+            send.write_all(&buf).await.map_err(|e| {
+                MqttError::ConnectionError(format!("Failed to write flow header: {e}"))
+            })?;
 
             tracing::debug!(topic = %topic, flow_id = ?flow_id, "Wrote flow header for new topic stream");
             flow_id
