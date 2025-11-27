@@ -1098,10 +1098,11 @@ impl DirectClientInner {
             let recovery_flags = FlowFlags { clean: 0, ..flags };
 
             match manager.open_recovery_stream(flow_id, recovery_flags).await {
-                Ok((_send, _recv)) => {
+                Ok((send, _recv)) => {
+                    manager.register_flow_stream(flow_id, send).await;
                     tracing::debug!(
                         flow_id = ?flow_id,
-                        "Opened recovery stream for flow"
+                        "Opened and registered recovery stream for flow"
                     );
                     recovered += 1;
                 }
@@ -1215,12 +1216,12 @@ async fn packet_reader_task_with_responses(mut reader: UnifiedReader, ctx: Packe
                     _ => {}
                 }
 
-                // Handle other packets normally
                 if let Err(e) = handle_incoming_packet_with_writer(
                     packet,
                     &ctx.writer,
                     &ctx.session,
                     &ctx.callback_manager,
+                    None,
                 )
                 .await
                 {
@@ -1375,7 +1376,7 @@ async fn try_read_server_flow_header(
 
 async fn quic_stream_reader_task(
     mut recv: quinn::RecvStream,
-    _send: quinn::SendStream,
+    send: quinn::SendStream,
     ctx: PacketReaderContext,
 ) {
     use crate::transport::PacketReader;
@@ -1401,15 +1402,18 @@ async fn quic_stream_reader_task(
         }
     };
 
+    let stream_writer = Arc::new(tokio::sync::RwLock::new(UnifiedWriter::Quic(send)));
+
     loop {
         match recv.read_packet().await {
             Ok(packet) => {
                 tracing::trace!(flow_id = ?flow_id, "Received packet on server-initiated QUIC stream: {:?}", packet);
                 if let Err(e) = handle_incoming_packet_with_writer(
                     packet,
-                    &ctx.writer,
+                    &stream_writer,
                     &ctx.session,
                     &ctx.callback_manager,
+                    flow_id,
                 )
                 .await
                 {
@@ -1431,10 +1435,11 @@ async fn handle_incoming_packet_with_writer(
     writer: &Arc<tokio::sync::RwLock<UnifiedWriter>>,
     session: &Arc<RwLock<SessionState>>,
     callback_manager: &Arc<CallbackManager>,
+    flow_id: Option<crate::transport::flow::FlowId>,
 ) -> Result<()> {
     match packet {
         Packet::Publish(publish) => {
-            handle_publish_with_ack(publish, writer, session, callback_manager).await
+            handle_publish_with_ack(publish, writer, session, callback_manager, flow_id).await
         }
         Packet::PingResp => {
             // PINGRESP received, connection is alive
@@ -1471,15 +1476,19 @@ async fn handle_publish_with_ack(
     writer: &Arc<tokio::sync::RwLock<UnifiedWriter>>,
     session: &Arc<RwLock<SessionState>>,
     callback_manager: &Arc<CallbackManager>,
+    flow_id: Option<crate::transport::flow::FlowId>,
 ) -> Result<()> {
-    // Handle QoS acknowledgment
     match publish.qos {
-        crate::QoS::AtMostOnce => {
-            // No acknowledgment needed
-        }
+        crate::QoS::AtMostOnce => {}
         crate::QoS::AtLeastOnce => {
             if let Some(packet_id) = publish.packet_id {
-                // Send PUBACK directly
+                if let Some(fid) = flow_id {
+                    session
+                        .read()
+                        .await
+                        .store_publish_flow(packet_id, fid)
+                        .await;
+                }
                 let puback = crate::packet::puback::PubAckPacket {
                     packet_id,
                     reason_code: crate::protocol::v5::reason_codes::ReasonCode::Success,
@@ -1494,14 +1503,18 @@ async fn handle_publish_with_ack(
         }
         crate::QoS::ExactlyOnce => {
             if let Some(packet_id) = publish.packet_id {
-                // Store the received publish packet for duplicate detection and QoS 2 flow
+                if let Some(fid) = flow_id {
+                    session
+                        .read()
+                        .await
+                        .store_publish_flow(packet_id, fid)
+                        .await;
+                }
                 session
                     .write()
                     .await
                     .store_unacked_publish(publish.clone())
                     .await?;
-
-                // Send PUBREC directly
                 let pubrec = crate::packet::pubrec::PubRecPacket {
                     packet_id,
                     reason_code: crate::protocol::v5::reason_codes::ReasonCode::Success,
@@ -1512,13 +1525,11 @@ async fn handle_publish_with_ack(
                     .await
                     .write_packet(Packet::PubRec(pubrec))
                     .await?;
-
                 session.write().await.store_pubrec(packet_id).await;
             }
         }
     }
 
-    // Route to callbacks
     let _ = callback_manager.dispatch(&publish).await;
 
     Ok(())

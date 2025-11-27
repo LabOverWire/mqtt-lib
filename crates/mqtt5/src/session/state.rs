@@ -55,6 +55,8 @@ pub struct SessionState {
     unacked_publishes: Arc<RwLock<HashMap<u16, PublishPacket>>>,
     /// Unacknowledged PUBREL packets (`packet_id` -> timestamp)
     unacked_pubrels: Arc<RwLock<HashMap<u16, Instant>>>,
+    #[cfg(not(target_arch = "wasm32"))]
+    publish_flows: Arc<RwLock<HashMap<u16, FlowId>>>,
     /// Session creation time
     created_at: Instant,
     /// Last activity time
@@ -94,6 +96,8 @@ impl SessionState {
             config,
             unacked_publishes: Arc::new(RwLock::new(HashMap::new())),
             unacked_pubrels: Arc::new(RwLock::new(HashMap::new())),
+            #[cfg(not(target_arch = "wasm32"))]
+            publish_flows: Arc::new(RwLock::new(HashMap::new())),
             created_at: now,
             last_activity: Arc::new(RwLock::new(now)),
             clean_start,
@@ -288,6 +292,8 @@ impl SessionState {
         self.message_queue.write().await.clear();
         self.unacked_publishes.write().await.clear();
         self.unacked_pubrels.write().await.clear();
+        #[cfg(not(target_arch = "wasm32"))]
+        self.publish_flows.write().await.clear();
     }
 
     /// Gets session statistics
@@ -643,6 +649,28 @@ impl SessionState {
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn flow_count(&self) -> usize {
         self.flow_registry.read().await.len()
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn store_publish_flow(&self, packet_id: u16, flow_id: FlowId) {
+        self.touch().await;
+        self.publish_flows.write().await.insert(packet_id, flow_id);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn get_publish_flow(&self, packet_id: u16) -> Option<FlowId> {
+        self.publish_flows.read().await.get(&packet_id).copied()
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn remove_publish_flow(&self, packet_id: u16) -> Option<FlowId> {
+        self.touch().await;
+        self.publish_flows.write().await.remove(&packet_id)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn clear_publish_flows(&self) {
+        self.publish_flows.write().await.clear();
     }
 }
 

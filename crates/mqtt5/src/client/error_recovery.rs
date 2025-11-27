@@ -49,6 +49,8 @@ pub enum RecoverableError {
     SessionTakenOver,
     /// Server is shutting down
     ServerShuttingDown,
+    /// [MQoQ§Error] MQoQ flow recoverable error (Level 2)
+    MqoqFlowRecoverable,
 }
 
 impl RecoverableError {
@@ -61,6 +63,7 @@ impl RecoverableError {
             Self::QuotaExceeded,
             Self::PacketIdExhausted,
             Self::FlowControlLimited,
+            Self::MqoqFlowRecoverable,
         ]
     }
 
@@ -118,6 +121,16 @@ impl RecoverableError {
                         return Some(Self::ServerShuttingDown);
                     }
                 }
+                ReasonCode::MqoqIncompletePacket
+                | ReasonCode::MqoqFlowOpenIdle
+                | ReasonCode::MqoqFlowCancelled => {
+                    if config
+                        .recoverable_errors
+                        .contains(&Self::MqoqFlowRecoverable)
+                    {
+                        return Some(Self::MqoqFlowRecoverable);
+                    }
+                }
                 _ => {}
             },
             MqttError::PacketIdExhausted => {
@@ -148,8 +161,9 @@ impl RecoverableError {
     #[must_use]
     pub fn retry_delay(&self, attempt: u32, config: &ErrorRecoveryConfig) -> Duration {
         let base_delay = match self {
-            Self::QuotaExceeded => config.initial_retry_delay * 10, // Longer delay for quota
+            Self::QuotaExceeded => config.initial_retry_delay * 10,
             Self::FlowControlLimited => config.initial_retry_delay * 2,
+            Self::MqoqFlowRecoverable => config.initial_retry_delay * 3,
             _ => config.initial_retry_delay,
         };
 
@@ -319,7 +333,6 @@ mod tests {
         let network_error = RecoverableError::NetworkError;
         let quota_error = RecoverableError::QuotaExceeded;
 
-        // Quota exceeded should have 10x longer initial delay
         assert_eq!(
             network_error.retry_delay(0, &config),
             Duration::from_millis(100)
@@ -327,6 +340,43 @@ mod tests {
         assert_eq!(
             quota_error.retry_delay(0, &config),
             Duration::from_millis(1000)
+        );
+    }
+
+    #[test]
+    fn test_mqoq_error_classification() {
+        let config = ErrorRecoveryConfig::default();
+
+        let recoverable = RecoverableError::is_recoverable(
+            &MqttError::ConnectionRefused(ReasonCode::MqoqFlowCancelled),
+            &config,
+        );
+        assert_eq!(recoverable, Some(RecoverableError::MqoqFlowRecoverable));
+
+        let recoverable = RecoverableError::is_recoverable(
+            &MqttError::ConnectionRefused(ReasonCode::MqoqIncompletePacket),
+            &config,
+        );
+        assert_eq!(recoverable, Some(RecoverableError::MqoqFlowRecoverable));
+
+        let recoverable = RecoverableError::is_recoverable(
+            &MqttError::ConnectionRefused(ReasonCode::MqoqNoFlowState),
+            &config,
+        );
+        assert_eq!(recoverable, None);
+    }
+
+    #[test]
+    fn test_mqoq_error_retry_delay() {
+        let config = ErrorRecoveryConfig {
+            initial_retry_delay: Duration::from_millis(100),
+            ..Default::default()
+        };
+
+        let mqoq_error = RecoverableError::MqoqFlowRecoverable;
+        assert_eq!(
+            mqoq_error.retry_delay(0, &config),
+            Duration::from_millis(300)
         );
     }
 }

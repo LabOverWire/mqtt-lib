@@ -17,6 +17,11 @@ struct StreamInfo {
     last_used: Instant,
 }
 
+struct FlowStreamInfo {
+    stream: SendStream,
+    last_used: Instant,
+}
+
 const DEFAULT_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 const DEFAULT_FLOW_EXPIRE_INTERVAL: u64 = 300;
 
@@ -24,6 +29,7 @@ pub struct QuicStreamManager {
     connection: Arc<Connection>,
     strategy: StreamStrategy,
     topic_streams: Arc<Mutex<HashMap<String, StreamInfo>>>,
+    flow_streams: Arc<Mutex<HashMap<FlowId, FlowStreamInfo>>>,
     max_cached_streams: usize,
     stream_idle_timeout: Duration,
     flow_id_generator: Arc<Mutex<FlowIdGenerator>>,
@@ -38,6 +44,7 @@ impl QuicStreamManager {
             connection,
             strategy,
             topic_streams: Arc::new(Mutex::new(HashMap::new())),
+            flow_streams: Arc::new(Mutex::new(HashMap::new())),
             max_cached_streams: 100,
             stream_idle_timeout: DEFAULT_STREAM_IDLE_TIMEOUT,
             flow_id_generator: Arc::new(Mutex::new(FlowIdGenerator::new())),
@@ -77,6 +84,7 @@ impl QuicStreamManager {
         self
     }
 
+    // [RFC9000§2.1] Open bidirectional stream
     #[instrument(skip(self), level = "debug")]
     pub async fn open_data_stream(&self) -> Result<(quinn::SendStream, quinn::RecvStream)> {
         let (send, recv) =
@@ -86,6 +94,7 @@ impl QuicStreamManager {
         Ok((send, recv))
     }
 
+    // [MQoQ§4.5.2] Data flow with header
     #[instrument(skip(self), fields(strategy = ?self.strategy), level = "debug")]
     pub async fn open_data_stream_with_flow(
         &self,
@@ -116,6 +125,7 @@ impl QuicStreamManager {
         Ok((send, recv, flow_id))
     }
 
+    // [MQoQ§6.3] Flow state recovery
     pub async fn open_recovery_stream(
         &self,
         flow_id: FlowId,
@@ -150,6 +160,7 @@ impl QuicStreamManager {
         self.flow_flags
     }
 
+    // [MQoQ§5.2] Per-publish stream
     #[instrument(skip(self, packet), level = "debug")]
     pub async fn send_packet_on_stream(&self, packet: Packet) -> Result<()> {
         let (mut send, _recv, flow_id) = self.open_data_stream_with_flow().await?;
@@ -177,6 +188,7 @@ impl QuicStreamManager {
         self.enable_flow_headers
     }
 
+    // [MQoQ§5.3] Per-topic stream caching
     async fn get_or_create_topic_stream(&self, topic: &str) -> Result<(SendStream, FlowId)> {
         let mut streams = self.topic_streams.lock().await;
         let now = Instant::now();
@@ -281,11 +293,91 @@ impl QuicStreamManager {
         streams.get(topic).map(|info| info.flow_id)
     }
 
+    #[instrument(skip(self, stream), level = "debug")]
+    pub async fn register_flow_stream(&self, flow_id: FlowId, stream: SendStream) {
+        let mut flows = self.flow_streams.lock().await;
+        flows.insert(
+            flow_id,
+            FlowStreamInfo {
+                stream,
+                last_used: Instant::now(),
+            },
+        );
+        debug!(flow_id = ?flow_id, "Registered flow stream");
+    }
+
+    #[instrument(skip(self, packet), level = "debug")]
+    pub async fn send_on_flow(&self, flow_id: FlowId, packet: Packet) -> Result<()> {
+        let mut flows = self.flow_streams.lock().await;
+
+        if let Some(info) = flows.get_mut(&flow_id) {
+            let mut buf = BytesMut::with_capacity(1024);
+            encode_packet_to_buffer(&packet, &mut buf)?;
+
+            info.stream
+                .write_all(&buf)
+                .await
+                .map_err(|e| MqttError::ConnectionError(format!("QUIC write error: {e}")))?;
+            info.last_used = Instant::now();
+
+            debug!(flow_id = ?flow_id, "Sent packet on flow stream");
+            Ok(())
+        } else {
+            drop(flows);
+
+            let (mut send, _recv, new_flow_id) = self.open_data_stream_with_flow().await?;
+
+            let mut buf = BytesMut::with_capacity(1024);
+            encode_packet_to_buffer(&packet, &mut buf)?;
+
+            send.write_all(&buf)
+                .await
+                .map_err(|e| MqttError::ConnectionError(format!("QUIC write error: {e}")))?;
+
+            self.flow_streams.lock().await.insert(
+                new_flow_id,
+                FlowStreamInfo {
+                    stream: send,
+                    last_used: Instant::now(),
+                },
+            );
+
+            debug!(
+                requested_flow_id = ?flow_id,
+                actual_flow_id = ?new_flow_id,
+                "Flow not found, opened new stream"
+            );
+            Ok(())
+        }
+    }
+
+    pub async fn has_flow_stream(&self, flow_id: FlowId) -> bool {
+        self.flow_streams.lock().await.contains_key(&flow_id)
+    }
+
+    pub async fn remove_flow_stream(&self, flow_id: FlowId) -> bool {
+        let mut flows = self.flow_streams.lock().await;
+        if let Some(mut info) = flows.remove(&flow_id) {
+            let _ = info.stream.finish();
+            debug!(flow_id = ?flow_id, "Removed flow stream");
+            true
+        } else {
+            false
+        }
+    }
+
     pub async fn close_all_streams(&self) {
         let mut streams = self.topic_streams.lock().await;
         for (topic, mut info) in streams.drain() {
             let _ = info.stream.finish();
             trace!(topic = %topic, flow_id = ?info.flow_id, "Closed topic stream");
+        }
+        drop(streams);
+
+        let mut flows = self.flow_streams.lock().await;
+        for (flow_id, mut info) in flows.drain() {
+            let _ = info.stream.finish();
+            trace!(flow_id = ?flow_id, "Closed flow stream");
         }
     }
 }

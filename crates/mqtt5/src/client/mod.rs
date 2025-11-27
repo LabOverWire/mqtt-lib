@@ -132,9 +132,12 @@ pub struct MqttClient {
     tls_config: Arc<RwLock<Option<TlsConfig>>>,
     /// Skip TLS certificate verification (insecure, for testing only)
     insecure_tls: Arc<RwLock<bool>>,
-    /// QUIC stream strategy for multi-stream support
-    #[cfg(not(target_arch = "wasm32"))]
     quic_stream_strategy: Arc<RwLock<crate::transport::StreamStrategy>>,
+    quic_flow_headers: Arc<RwLock<bool>>,
+    quic_flow_expire: Arc<RwLock<u64>>,
+    quic_max_streams: Arc<RwLock<Option<usize>>>,
+    quic_datagrams: Arc<RwLock<bool>>,
+    quic_connect_timeout: Arc<RwLock<crate::time::Duration>>,
 }
 
 impl MqttClient {
@@ -182,10 +185,14 @@ impl MqttClient {
             connection_mutex: Arc::new(tokio::sync::Mutex::new(())),
             tls_config: Arc::new(RwLock::new(None)),
             insecure_tls: Arc::new(RwLock::new(false)),
-            #[cfg(not(target_arch = "wasm32"))]
             quic_stream_strategy: Arc::new(
                 RwLock::new(crate::transport::StreamStrategy::default()),
             ),
+            quic_flow_headers: Arc::new(RwLock::new(false)),
+            quic_flow_expire: Arc::new(RwLock::new(300)),
+            quic_max_streams: Arc::new(RwLock::new(None)),
+            quic_datagrams: Arc::new(RwLock::new(false)),
+            quic_connect_timeout: Arc::new(RwLock::new(crate::time::Duration::from_secs(30))),
         }
     }
 
@@ -296,9 +303,28 @@ impl MqttClient {
         *self.insecure_tls.write().await = insecure;
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     pub async fn set_quic_stream_strategy(&self, strategy: crate::transport::StreamStrategy) {
         *self.quic_stream_strategy.write().await = strategy;
+    }
+
+    pub async fn set_quic_flow_headers(&self, enable: bool) {
+        *self.quic_flow_headers.write().await = enable;
+    }
+
+    pub async fn set_quic_flow_expire(&self, seconds: u64) {
+        *self.quic_flow_expire.write().await = seconds;
+    }
+
+    pub async fn set_quic_max_streams(&self, max: Option<usize>) {
+        *self.quic_max_streams.write().await = max;
+    }
+
+    pub async fn set_quic_datagrams(&self, enable: bool) {
+        *self.quic_datagrams.write().await = enable;
+    }
+
+    pub async fn set_quic_connect_timeout(&self, timeout: crate::time::Duration) {
+        *self.quic_connect_timeout.write().await = timeout;
     }
 
     pub async fn set_tls_config(
@@ -573,14 +599,26 @@ impl MqttClient {
             }
             ClientTransportType::Quic => {
                 let strategy = *self.quic_stream_strategy.read().await;
+                let flow_headers = *self.quic_flow_headers.read().await;
+                let flow_expire = *self.quic_flow_expire.read().await;
+                let max_streams = *self.quic_max_streams.read().await;
+                let datagrams = *self.quic_datagrams.read().await;
+                let connect_timeout = *self.quic_connect_timeout.read().await;
                 let server_name = if host.parse::<std::net::IpAddr>().is_ok() {
                     "localhost"
                 } else {
                     host
                 };
-                let config = QuicConfig::new(addr, server_name)
+                let mut config = QuicConfig::new(addr, server_name)
                     .with_verify_server_cert(false)
-                    .with_stream_strategy(strategy);
+                    .with_stream_strategy(strategy)
+                    .with_flow_headers(flow_headers)
+                    .with_flow_expire_interval(flow_expire)
+                    .with_datagrams(datagrams)
+                    .with_connect_timeout(connect_timeout);
+                if let Some(max) = max_streams {
+                    config = config.with_max_concurrent_streams(max);
+                }
                 let mut quic_transport = QuicTransport::new(config);
                 quic_transport
                     .connect()
@@ -591,6 +629,11 @@ impl MqttClient {
             ClientTransportType::QuicSecure => {
                 let insecure = *self.insecure_tls.read().await;
                 let strategy = *self.quic_stream_strategy.read().await;
+                let flow_headers = *self.quic_flow_headers.read().await;
+                let flow_expire = *self.quic_flow_expire.read().await;
+                let max_streams = *self.quic_max_streams.read().await;
+                let datagrams = *self.quic_datagrams.read().await;
+                let connect_timeout = *self.quic_connect_timeout.read().await;
                 let tls_config_lock = self.tls_config.read().await;
                 let server_name = if host.parse::<std::net::IpAddr>().is_ok() {
                     "localhost"
@@ -599,7 +642,15 @@ impl MqttClient {
                 };
                 let mut config = QuicConfig::new(addr, server_name)
                     .with_verify_server_cert(!insecure)
-                    .with_stream_strategy(strategy);
+                    .with_stream_strategy(strategy)
+                    .with_flow_headers(flow_headers)
+                    .with_flow_expire_interval(flow_expire)
+                    .with_datagrams(datagrams)
+                    .with_connect_timeout(connect_timeout);
+
+                if let Some(max) = max_streams {
+                    config = config.with_max_concurrent_streams(max);
+                }
 
                 if let Some(existing_config) = &*tls_config_lock {
                     tracing::debug!(

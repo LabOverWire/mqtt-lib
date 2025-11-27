@@ -46,6 +46,16 @@ pub enum ReasonCode {
     MaximumConnectTime = 0xA0,
     SubscriptionIdentifiersNotSupported = 0xA1,
     WildcardSubscriptionsNotSupported = 0xA2,
+
+    // [MQoQ§Error] MQoQ-specific error codes
+    MqoqNoFlowState = 0xB3,
+    MqoqProtocolError = 0xB4,
+    MqoqStreamTypeError = 0xB5,
+    MqoqBadFlowId = 0xB6,
+    MqoqPersistentSubError = 0xB8,
+    MqoqIncompletePacket = 0xBA,
+    MqoqFlowOpenIdle = 0xBB,
+    MqoqFlowCancelled = 0xBC,
 }
 
 // Aliases for ReasonCode::Success (0x00) used in different contexts
@@ -67,6 +77,35 @@ impl ReasonCode {
     #[must_use]
     pub fn is_error(&self) -> bool {
         u8::from(*self) >= 0x80
+    }
+
+    #[must_use]
+    pub fn is_mqoq_error(&self) -> bool {
+        matches!(
+            self,
+            Self::MqoqNoFlowState
+                | Self::MqoqProtocolError
+                | Self::MqoqStreamTypeError
+                | Self::MqoqBadFlowId
+                | Self::MqoqPersistentSubError
+                | Self::MqoqIncompletePacket
+                | Self::MqoqFlowOpenIdle
+                | Self::MqoqFlowCancelled
+        )
+    }
+
+    #[must_use]
+    pub fn mqoq_error_level(&self) -> Option<u8> {
+        match self {
+            Self::MqoqNoFlowState | Self::MqoqProtocolError => Some(0),
+            Self::MqoqStreamTypeError | Self::MqoqBadFlowId | Self::MqoqPersistentSubError => {
+                Some(1)
+            }
+            Self::MqoqIncompletePacket | Self::MqoqFlowOpenIdle | Self::MqoqFlowCancelled => {
+                Some(2)
+            }
+            _ => None,
+        }
     }
 
     #[must_use]
@@ -115,6 +154,14 @@ impl ReasonCode {
             0xA0 => Some(Self::MaximumConnectTime),
             0xA1 => Some(Self::SubscriptionIdentifiersNotSupported),
             0xA2 => Some(Self::WildcardSubscriptionsNotSupported),
+            0xB3 => Some(Self::MqoqNoFlowState),
+            0xB4 => Some(Self::MqoqProtocolError),
+            0xB5 => Some(Self::MqoqStreamTypeError),
+            0xB6 => Some(Self::MqoqBadFlowId),
+            0xB8 => Some(Self::MqoqPersistentSubError),
+            0xBA => Some(Self::MqoqIncompletePacket),
+            0xBB => Some(Self::MqoqFlowOpenIdle),
+            0xBC => Some(Self::MqoqFlowCancelled),
             _ => None,
         }
     }
@@ -179,7 +226,6 @@ mod tests {
 
     #[test]
     fn test_reason_code_values() {
-        // Test specific values to ensure correct assignment
         assert_eq!(ReasonCode::Success as u8, 0x00);
         assert_eq!(ReasonCode::DisconnectWithWillMessage as u8, 0x04);
         assert_eq!(ReasonCode::NoMatchingSubscribers as u8, 0x10);
@@ -188,5 +234,80 @@ mod tests {
         assert_eq!(ReasonCode::ServerBusy as u8, 0x89);
         assert_eq!(ReasonCode::QuotaExceeded as u8, 0x97);
         assert_eq!(ReasonCode::WildcardSubscriptionsNotSupported as u8, 0xA2);
+    }
+
+    #[test]
+    fn test_mqoq_error_codes() {
+        assert_eq!(ReasonCode::MqoqNoFlowState as u8, 0xB3);
+        assert_eq!(ReasonCode::MqoqProtocolError as u8, 0xB4);
+        assert_eq!(ReasonCode::MqoqStreamTypeError as u8, 0xB5);
+        assert_eq!(ReasonCode::MqoqBadFlowId as u8, 0xB6);
+        assert_eq!(ReasonCode::MqoqPersistentSubError as u8, 0xB8);
+        assert_eq!(ReasonCode::MqoqIncompletePacket as u8, 0xBA);
+        assert_eq!(ReasonCode::MqoqFlowOpenIdle as u8, 0xBB);
+        assert_eq!(ReasonCode::MqoqFlowCancelled as u8, 0xBC);
+    }
+
+    #[test]
+    fn test_mqoq_error_from_u8() {
+        assert_eq!(ReasonCode::from_u8(0xB3), Some(ReasonCode::MqoqNoFlowState));
+        assert_eq!(
+            ReasonCode::from_u8(0xB4),
+            Some(ReasonCode::MqoqProtocolError)
+        );
+        assert_eq!(
+            ReasonCode::from_u8(0xB5),
+            Some(ReasonCode::MqoqStreamTypeError)
+        );
+        assert_eq!(ReasonCode::from_u8(0xB6), Some(ReasonCode::MqoqBadFlowId));
+        assert_eq!(
+            ReasonCode::from_u8(0xB8),
+            Some(ReasonCode::MqoqPersistentSubError)
+        );
+        assert_eq!(
+            ReasonCode::from_u8(0xBA),
+            Some(ReasonCode::MqoqIncompletePacket)
+        );
+        assert_eq!(
+            ReasonCode::from_u8(0xBB),
+            Some(ReasonCode::MqoqFlowOpenIdle)
+        );
+        assert_eq!(
+            ReasonCode::from_u8(0xBC),
+            Some(ReasonCode::MqoqFlowCancelled)
+        );
+        assert_eq!(ReasonCode::from_u8(0xB7), None);
+        assert_eq!(ReasonCode::from_u8(0xB9), None);
+    }
+
+    #[test]
+    fn test_mqoq_error_detection() {
+        assert!(ReasonCode::MqoqNoFlowState.is_mqoq_error());
+        assert!(ReasonCode::MqoqProtocolError.is_mqoq_error());
+        assert!(ReasonCode::MqoqStreamTypeError.is_mqoq_error());
+        assert!(ReasonCode::MqoqBadFlowId.is_mqoq_error());
+        assert!(ReasonCode::MqoqPersistentSubError.is_mqoq_error());
+        assert!(ReasonCode::MqoqIncompletePacket.is_mqoq_error());
+        assert!(ReasonCode::MqoqFlowOpenIdle.is_mqoq_error());
+        assert!(ReasonCode::MqoqFlowCancelled.is_mqoq_error());
+        assert!(!ReasonCode::Success.is_mqoq_error());
+        assert!(!ReasonCode::ProtocolError.is_mqoq_error());
+    }
+
+    #[test]
+    fn test_mqoq_error_levels() {
+        assert_eq!(ReasonCode::MqoqNoFlowState.mqoq_error_level(), Some(0));
+        assert_eq!(ReasonCode::MqoqProtocolError.mqoq_error_level(), Some(0));
+        assert_eq!(ReasonCode::MqoqStreamTypeError.mqoq_error_level(), Some(1));
+        assert_eq!(ReasonCode::MqoqBadFlowId.mqoq_error_level(), Some(1));
+        assert_eq!(
+            ReasonCode::MqoqPersistentSubError.mqoq_error_level(),
+            Some(1)
+        );
+        assert_eq!(ReasonCode::MqoqIncompletePacket.mqoq_error_level(), Some(2));
+        assert_eq!(ReasonCode::MqoqFlowOpenIdle.mqoq_error_level(), Some(2));
+        assert_eq!(ReasonCode::MqoqFlowCancelled.mqoq_error_level(), Some(2));
+        assert_eq!(ReasonCode::Success.mqoq_error_level(), None);
+        assert_eq!(ReasonCode::ProtocolError.mqoq_error_level(), None);
     }
 }

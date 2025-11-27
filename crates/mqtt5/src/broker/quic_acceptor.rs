@@ -29,6 +29,7 @@ use tracing::{debug, error, instrument, trace, warn};
 
 use super::tls_acceptor::TlsAcceptorConfig;
 
+// [RFC9000§7] QUIC transport parameters
 pub struct QuicAcceptorConfig {
     pub cert_chain: Vec<CertificateDer<'static>>,
     pub private_key: PrivateKeyDer<'static>,
@@ -230,6 +231,7 @@ pub async fn accept_quic_connection(
     Ok((connection, peer_addr))
 }
 
+// [RFC9000§2.1] Stream acceptance
 #[instrument(skip(connection), fields(peer_addr = %peer_addr))]
 pub async fn accept_quic_stream(
     connection: &quinn::Connection,
@@ -248,6 +250,7 @@ pub async fn accept_quic_stream(
     Ok(QuicStreamWrapper::new(send, recv, peer_addr))
 }
 
+// [MQoQ§4.1] Flow type detection
 fn is_flow_header_byte(b: u8) -> bool {
     matches!(
         b,
@@ -255,6 +258,7 @@ fn is_flow_header_byte(b: u8) -> bool {
     )
 }
 
+// [MQoQ§4.5] Flow header parsing
 #[instrument(skip(recv), level = "debug")]
 async fn try_read_flow_header(
     recv: &mut RecvStream,
@@ -320,6 +324,7 @@ async fn try_read_flow_header(
     }
 }
 
+// [MQoQ§4] QUIC connection handling with flow headers
 #[allow(clippy::too_many_arguments)]
 #[instrument(skip(connection, config, router, auth_provider, storage, stats, resource_monitor, shutdown_rx), fields(peer_addr = %peer_addr))]
 pub async fn run_quic_connection_handler(
@@ -388,6 +393,7 @@ pub async fn run_quic_connection_handler(
     });
 }
 
+// [MQoQ§5] Data stream processing
 fn spawn_data_stream_reader(
     mut recv: RecvStream,
     packet_tx: mpsc::Sender<Packet>,

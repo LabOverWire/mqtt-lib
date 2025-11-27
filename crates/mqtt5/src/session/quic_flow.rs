@@ -1,8 +1,10 @@
+use crate::error::{MqttError, Result};
 use crate::transport::flow::{FlowFlags, FlowId, FlowIdGenerator};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
-use tracing::{debug, warn};
+use tracing::{debug, trace, warn};
 
+// [MQoQ§4.1] Flow categorization
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FlowType {
     Control,
@@ -10,6 +12,16 @@ pub enum FlowType {
     ServerData,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FlowLifecycle {
+    #[default]
+    Idle,
+    Open,
+    HalfClosed,
+    Closed,
+}
+
+// [MQoQ§4.5] Per-flow session state
 #[derive(Debug, Clone)]
 pub struct FlowState {
     pub id: FlowId,
@@ -21,6 +33,8 @@ pub struct FlowState {
     pub subscriptions: Vec<String>,
     pub topic_aliases: HashMap<u16, String>,
     pub pending_packet_ids: Vec<u16>,
+    pub lifecycle: FlowLifecycle,
+    pub stream_id: Option<u64>,
 }
 
 impl FlowState {
@@ -35,6 +49,8 @@ impl FlowState {
             subscriptions: Vec::new(),
             topic_aliases: HashMap::new(),
             pending_packet_ids: Vec::new(),
+            lifecycle: FlowLifecycle::Open,
+            stream_id: None,
         }
     }
 
@@ -53,6 +69,8 @@ impl FlowState {
             subscriptions: Vec::new(),
             topic_aliases: HashMap::new(),
             pending_packet_ids: Vec::new(),
+            lifecycle: FlowLifecycle::Idle,
+            stream_id: None,
         }
     }
 
@@ -71,6 +89,8 @@ impl FlowState {
             subscriptions: Vec::new(),
             topic_aliases: HashMap::new(),
             pending_packet_ids: Vec::new(),
+            lifecycle: FlowLifecycle::Idle,
+            stream_id: None,
         }
     }
 
@@ -113,8 +133,59 @@ impl FlowState {
     pub fn remove_pending_packet_id(&mut self, packet_id: u16) {
         self.pending_packet_ids.retain(|&id| id != packet_id);
     }
+
+    pub fn transition_to(&mut self, new_state: FlowLifecycle) -> Result<()> {
+        let valid = match (self.lifecycle, new_state) {
+            (FlowLifecycle::Idle, FlowLifecycle::Open)
+            | (FlowLifecycle::Open, FlowLifecycle::HalfClosed | FlowLifecycle::Closed)
+            | (FlowLifecycle::HalfClosed, FlowLifecycle::Closed) => true,
+            (current, target) if current == target => true,
+            _ => false,
+        };
+
+        if valid {
+            trace!(
+                flow_id = ?self.id,
+                from = ?self.lifecycle,
+                to = ?new_state,
+                "Flow state transition"
+            );
+            self.lifecycle = new_state;
+            Ok(())
+        } else {
+            Err(MqttError::ProtocolError(format!(
+                "invalid flow transition from {:?} to {:?}",
+                self.lifecycle, new_state
+            )))
+        }
+    }
+
+    pub fn open(&mut self) -> Result<()> {
+        self.transition_to(FlowLifecycle::Open)
+    }
+
+    pub fn half_close(&mut self) -> Result<()> {
+        self.transition_to(FlowLifecycle::HalfClosed)
+    }
+
+    pub fn close(&mut self) -> Result<()> {
+        self.transition_to(FlowLifecycle::Closed)
+    }
+
+    pub fn is_open(&self) -> bool {
+        self.lifecycle == FlowLifecycle::Open
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.lifecycle == FlowLifecycle::Closed
+    }
+
+    pub fn set_stream_id(&mut self, stream_id: u64) {
+        self.stream_id = Some(stream_id);
+    }
 }
 
+// [MQoQ§6.3] Flow lifecycle management
 #[derive(Debug)]
 pub struct FlowRegistry {
     flows: HashMap<FlowId, FlowState>,
@@ -131,6 +202,7 @@ impl FlowRegistry {
         }
     }
 
+    // [RFC9000§2.1] Client-initiated stream ownership
     pub fn new_client_flow(
         &mut self,
         flags: FlowFlags,
@@ -152,6 +224,7 @@ impl FlowRegistry {
         Some(id)
     }
 
+    // [RFC9000§2.1] Server-initiated stream ownership
     pub fn new_server_flow(
         &mut self,
         flags: FlowFlags,
@@ -203,6 +276,7 @@ impl FlowRegistry {
         }
     }
 
+    // [MQoQ§4.5.2] Flow expiration
     pub fn expire_flows(&mut self) -> Vec<FlowId> {
         let expired: Vec<FlowId> = self
             .flows
@@ -409,5 +483,55 @@ mod tests {
         let flows = registry.flows_for_subscription("test/#");
         assert_eq!(flows.len(), 1);
         assert!(flows.contains(&id1));
+    }
+
+    #[test]
+    fn test_flow_lifecycle_transitions() {
+        let mut state = FlowState::new_client_data(FlowId::client(1), FlowFlags::default(), None);
+        assert_eq!(state.lifecycle, FlowLifecycle::Idle);
+
+        assert!(state.open().is_ok());
+        assert_eq!(state.lifecycle, FlowLifecycle::Open);
+        assert!(state.is_open());
+
+        assert!(state.half_close().is_ok());
+        assert_eq!(state.lifecycle, FlowLifecycle::HalfClosed);
+
+        assert!(state.close().is_ok());
+        assert_eq!(state.lifecycle, FlowLifecycle::Closed);
+        assert!(state.is_closed());
+    }
+
+    #[test]
+    fn test_flow_lifecycle_invalid_transition() {
+        let mut state = FlowState::new_client_data(FlowId::client(1), FlowFlags::default(), None);
+        assert!(state.close().is_err());
+
+        state.open().unwrap();
+        assert!(state.transition_to(FlowLifecycle::Idle).is_err());
+    }
+
+    #[test]
+    fn test_flow_lifecycle_same_state_transition() {
+        let mut state = FlowState::new_client_data(FlowId::client(1), FlowFlags::default(), None);
+        state.open().unwrap();
+        assert!(state.open().is_ok());
+        assert_eq!(state.lifecycle, FlowLifecycle::Open);
+    }
+
+    #[test]
+    fn test_flow_control_starts_open() {
+        let state = FlowState::new_control();
+        assert_eq!(state.lifecycle, FlowLifecycle::Open);
+        assert!(state.is_open());
+    }
+
+    #[test]
+    fn test_flow_stream_id() {
+        let mut state = FlowState::new_client_data(FlowId::client(1), FlowFlags::default(), None);
+        assert_eq!(state.stream_id, None);
+
+        state.set_stream_id(42);
+        assert_eq!(state.stream_id, Some(42));
     }
 }

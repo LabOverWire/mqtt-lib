@@ -2,11 +2,14 @@ use crate::error::{MqttError, Result};
 use bebytes::BeBytes;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
+// [MQoQ§4.1] Flow type identifiers
 pub const FLOW_TYPE_CONTROL: u8 = 0x11;
 pub const FLOW_TYPE_CLIENT_DATA: u8 = 0x12;
 pub const FLOW_TYPE_SERVER_DATA: u8 = 0x13;
 pub const FLOW_TYPE_USER_DEFINED: u8 = 0x14;
 
+// [MQoQ§4.2] Flow ID with initiator bit encoding
+// [RFC9000§2.1] LSB indicates client (0) vs server (1) initiated
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FlowId(u64);
 
@@ -46,6 +49,7 @@ impl From<u64> for FlowId {
     }
 }
 
+// [MQoQ§4.4] Flow persistence flags (8-bit bitfield)
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, BeBytes)]
 pub struct FlowFlags {
     #[bits(1)]
@@ -77,6 +81,7 @@ impl FlowFlags {
     }
 }
 
+// [MQoQ§4.5.1] Control flow header format
 #[derive(Debug, Clone)]
 pub struct ControlFlowHeader {
     pub flow_id: FlowId,
@@ -107,6 +112,7 @@ impl ControlFlowHeader {
     }
 }
 
+// [MQoQ§4.5.2] Data flow header format
 #[derive(Debug, Clone)]
 pub struct DataFlowHeader {
     pub flow_type: u8,
@@ -165,6 +171,7 @@ impl DataFlowHeader {
     }
 }
 
+// [MQoQ§4.5] Flow header dispatch
 #[derive(Debug, Clone)]
 pub enum FlowHeader {
     Control(ControlFlowHeader),
@@ -208,6 +215,7 @@ impl FlowHeader {
     }
 }
 
+// [MQoQ§3.1] Variable-length integer encoding
 #[allow(clippy::cast_possible_truncation)]
 pub fn encode_varint(value: u64, buf: &mut BytesMut) {
     if value <= 63 {
@@ -303,6 +311,7 @@ pub fn varint_len(value: u64) -> usize {
     }
 }
 
+// [MQoQ§4.3] Flow ID allocation
 #[derive(Debug, Default)]
 pub struct FlowIdGenerator {
     next_client: u64,

@@ -67,9 +67,12 @@ impl ServerCertVerifier for NoVerification {
     }
 }
 
+// [MQoQ§5] Multi-stream modes
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StreamStrategy {
+    // [MQoQ§2.1] Single stream mode
     ControlOnly,
+    // [MQoQ§2.2] Simple multistream modes
     DataPerPublish,
     DataPerTopic,
     DataPerSubscription,
@@ -97,6 +100,7 @@ pub struct QuicConfig {
     pub enable_datagrams: bool,
     pub datagram_send_buffer_size: usize,
     pub datagram_receive_buffer_size: usize,
+    // [MQoQ§4] Flow header toggle
     pub enable_flow_headers: bool,
     pub flow_expire_interval: u64,
     pub flow_flags: FlowFlags,
@@ -346,6 +350,7 @@ impl QuicTransport {
     }
 }
 
+// [RFC9000§7] QUIC connection establishment
 impl Transport for QuicTransport {
     #[instrument(skip(self), fields(server_name = %self.config.server_name, addr = %self.config.addr))]
     async fn connect(&mut self) -> Result<()> {
@@ -373,6 +378,7 @@ impl Transport for QuicTransport {
             "QUIC connection established"
         );
 
+        // [MQoQ§4] Control flow (mandatory first bidirectional stream)
         let (send, recv) = connection.open_bi().await.map_err(|e| {
             MqttError::ConnectionError(format!("Failed to open control stream: {e}"))
         })?;
@@ -437,6 +443,7 @@ impl Transport for QuicTransport {
     }
 }
 
+// [MQTT5§2] Fixed header parsing
 impl PacketReader for RecvStream {
     async fn read_packet(&mut self) -> Result<Packet> {
         let mut header_buf = BytesMut::with_capacity(5);
@@ -523,6 +530,7 @@ fn packet_to_type(packet: &Packet) -> PacketType {
     }
 }
 
+// [MQTT5§2] Packet encoding
 impl PacketWriter for SendStream {
     async fn write_packet(&mut self, packet: Packet) -> Result<()> {
         let packet_type = packet_to_type(&packet);
