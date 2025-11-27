@@ -37,7 +37,11 @@ impl FlowState {
         }
     }
 
-    pub fn new_client_data(id: FlowId, flags: FlowFlags, expire_interval: Option<Duration>) -> Self {
+    pub fn new_client_data(
+        id: FlowId,
+        flags: FlowFlags,
+        expire_interval: Option<Duration>,
+    ) -> Self {
         Self {
             id,
             flow_type: FlowType::ClientData,
@@ -51,7 +55,11 @@ impl FlowState {
         }
     }
 
-    pub fn new_server_data(id: FlowId, flags: FlowFlags, expire_interval: Option<Duration>) -> Self {
+    pub fn new_server_data(
+        id: FlowId,
+        flags: FlowFlags,
+        expire_interval: Option<Duration>,
+    ) -> Self {
         Self {
             id,
             flow_type: FlowType::ServerData,
@@ -331,7 +339,9 @@ mod tests {
     fn test_flow_registry_get_and_remove() {
         let mut registry = FlowRegistry::new(10);
 
-        let id = registry.new_client_flow(FlowFlags::default(), None).unwrap();
+        let id = registry
+            .new_client_flow(FlowFlags::default(), None)
+            .unwrap();
         assert!(registry.contains(id));
         assert!(registry.get(id).is_some());
 
@@ -343,7 +353,9 @@ mod tests {
     #[test]
     fn test_flow_registry_touch() {
         let mut registry = FlowRegistry::new(10);
-        let id = registry.new_client_flow(FlowFlags::default(), None).unwrap();
+        let id = registry
+            .new_client_flow(FlowFlags::default(), None)
+            .unwrap();
 
         let initial_time = registry.get(id).unwrap().last_activity;
         std::thread::sleep(Duration::from_millis(10));
@@ -357,8 +369,12 @@ mod tests {
     fn test_flow_registry_flows_for_subscription() {
         let mut registry = FlowRegistry::new(10);
 
-        let id1 = registry.new_client_flow(FlowFlags::default(), None).unwrap();
-        let id2 = registry.new_client_flow(FlowFlags::default(), None).unwrap();
+        let id1 = registry
+            .new_client_flow(FlowFlags::default(), None)
+            .unwrap();
+        let id2 = registry
+            .new_client_flow(FlowFlags::default(), None)
+            .unwrap();
 
         registry
             .get_mut(id1)

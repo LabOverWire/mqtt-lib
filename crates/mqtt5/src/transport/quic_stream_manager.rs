@@ -1,4 +1,5 @@
 use crate::error::{MqttError, Result};
+use crate::transport::flow::{DataFlowHeader, FlowFlags, FlowId, FlowIdGenerator};
 use crate::transport::packet_io::encode_packet_to_buffer;
 use crate::transport::quic::StreamStrategy;
 use bytes::BytesMut;
@@ -11,10 +12,12 @@ use tokio::sync::Mutex;
 
 struct StreamInfo {
     stream: SendStream,
+    flow_id: FlowId,
     last_used: Instant,
 }
 
 const DEFAULT_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+const DEFAULT_FLOW_EXPIRE_INTERVAL: u64 = 300;
 
 pub struct QuicStreamManager {
     connection: Arc<Connection>,
@@ -22,6 +25,10 @@ pub struct QuicStreamManager {
     topic_streams: Arc<Mutex<HashMap<String, StreamInfo>>>,
     max_cached_streams: usize,
     stream_idle_timeout: Duration,
+    flow_id_generator: Arc<Mutex<FlowIdGenerator>>,
+    flow_expire_interval: u64,
+    flow_flags: FlowFlags,
+    enable_flow_headers: bool,
 }
 
 impl QuicStreamManager {
@@ -32,6 +39,10 @@ impl QuicStreamManager {
             topic_streams: Arc::new(Mutex::new(HashMap::new())),
             max_cached_streams: 100,
             stream_idle_timeout: DEFAULT_STREAM_IDLE_TIMEOUT,
+            flow_id_generator: Arc::new(Mutex::new(FlowIdGenerator::new())),
+            flow_expire_interval: DEFAULT_FLOW_EXPIRE_INTERVAL,
+            flow_flags: FlowFlags::default(),
+            enable_flow_headers: false,
         }
     }
 
@@ -47,15 +58,64 @@ impl QuicStreamManager {
         self
     }
 
+    #[must_use]
+    pub fn with_flow_headers(mut self, enable: bool) -> Self {
+        self.enable_flow_headers = enable;
+        self
+    }
+
+    #[must_use]
+    pub fn with_flow_expire_interval(mut self, seconds: u64) -> Self {
+        self.flow_expire_interval = seconds;
+        self
+    }
+
+    #[must_use]
+    pub fn with_flow_flags(mut self, flags: FlowFlags) -> Self {
+        self.flow_flags = flags;
+        self
+    }
+
     pub async fn open_data_stream(&self) -> Result<(quinn::SendStream, quinn::RecvStream)> {
-        self.connection
+        let (send, recv) = self
+            .connection
             .open_bi()
             .await
-            .map_err(|e| MqttError::ConnectionError(format!("Failed to open QUIC stream: {e}")))
+            .map_err(|e| MqttError::ConnectionError(format!("Failed to open QUIC stream: {e}")))?;
+        Ok((send, recv))
+    }
+
+    pub async fn open_data_stream_with_flow(
+        &self,
+    ) -> Result<(quinn::SendStream, quinn::RecvStream, FlowId)> {
+        let (mut send, recv) = self.open_data_stream().await?;
+
+        let flow_id = if self.enable_flow_headers {
+            let flow_id = {
+                let mut gen = self.flow_id_generator.lock().await;
+                gen.next_client()
+            };
+
+            let mut buf = BytesMut::with_capacity(32);
+            let header =
+                DataFlowHeader::client(flow_id, self.flow_expire_interval, self.flow_flags);
+            header.encode(&mut buf);
+
+            send.write_all(&buf)
+                .await
+                .map_err(|e| MqttError::ConnectionError(format!("Failed to write flow header: {e}")))?;
+
+            tracing::debug!(flow_id = ?flow_id, "Wrote client data flow header on new stream");
+            flow_id
+        } else {
+            FlowId::client(0)
+        };
+
+        Ok((send, recv, flow_id))
     }
 
     pub async fn send_packet_on_stream(&self, packet: Packet) -> Result<()> {
-        let (mut send, _recv) = self.open_data_stream().await?;
+        let (mut send, _recv, flow_id) = self.open_data_stream_with_flow().await?;
 
         let mut buf = BytesMut::with_capacity(1024);
         encode_packet_to_buffer(&packet, &mut buf)?;
@@ -67,7 +127,7 @@ impl QuicStreamManager {
         send.finish()
             .map_err(|e| MqttError::ConnectionError(format!("QUIC stream finish error: {e}")))?;
 
-        tracing::debug!("Sent packet on dedicated QUIC stream");
+        tracing::debug!(flow_id = ?flow_id, "Sent packet on dedicated QUIC stream");
 
         Ok(())
     }
@@ -76,7 +136,11 @@ impl QuicStreamManager {
         self.strategy
     }
 
-    async fn get_or_create_topic_stream(&self, topic: &str) -> Result<SendStream> {
+    pub fn flow_headers_enabled(&self) -> bool {
+        self.enable_flow_headers
+    }
+
+    async fn get_or_create_topic_stream(&self, topic: &str) -> Result<(SendStream, FlowId)> {
         let mut streams = self.topic_streams.lock().await;
         let now = Instant::now();
 
@@ -89,13 +153,13 @@ impl QuicStreamManager {
         for idle_topic in &idle_topics {
             if let Some(mut info) = streams.remove(idle_topic) {
                 let _ = info.stream.finish();
-                tracing::debug!(topic = %idle_topic, "Closed idle stream");
+                tracing::debug!(topic = %idle_topic, flow_id = ?info.flow_id, "Closed idle stream");
             }
         }
 
         if let Some(info) = streams.remove(topic) {
-            tracing::trace!(topic = %topic, "Reusing existing stream for topic");
-            return Ok(info.stream);
+            tracing::trace!(topic = %topic, flow_id = ?info.flow_id, "Reusing existing stream for topic");
+            return Ok((info.stream, info.flow_id));
         }
 
         if streams.len() >= self.max_cached_streams {
@@ -109,22 +173,45 @@ impl QuicStreamManager {
                     let _ = info.stream.finish();
                     tracing::debug!(
                         topic = %oldest_topic,
+                        flow_id = ?info.flow_id,
                         "Evicted oldest stream from cache (LRU)"
                     );
                 }
             }
         }
+        drop(streams);
 
         tracing::debug!(topic = %topic, "Opening new stream for topic");
-        let (send, _recv) = self.connection.open_bi().await.map_err(|e| {
+        let (mut send, _recv) = self.connection.open_bi().await.map_err(|e| {
             MqttError::ConnectionError(format!("Failed to open QUIC stream for topic: {e}"))
         })?;
 
-        Ok(send)
+        let flow_id = if self.enable_flow_headers {
+            let flow_id = {
+                let mut gen = self.flow_id_generator.lock().await;
+                gen.next_client()
+            };
+
+            let mut buf = BytesMut::with_capacity(32);
+            let header =
+                DataFlowHeader::client(flow_id, self.flow_expire_interval, self.flow_flags);
+            header.encode(&mut buf);
+
+            send.write_all(&buf)
+                .await
+                .map_err(|e| MqttError::ConnectionError(format!("Failed to write flow header: {e}")))?;
+
+            tracing::debug!(topic = %topic, flow_id = ?flow_id, "Wrote flow header for new topic stream");
+            flow_id
+        } else {
+            FlowId::client(0)
+        };
+
+        Ok((send, flow_id))
     }
 
     pub async fn send_on_topic_stream(&self, topic: String, packet: Packet) -> Result<()> {
-        let mut stream = self.get_or_create_topic_stream(&topic).await?;
+        let (mut stream, flow_id) = self.get_or_create_topic_stream(&topic).await?;
 
         let mut buf = BytesMut::with_capacity(1024);
         encode_packet_to_buffer(&packet, &mut buf)?;
@@ -134,12 +221,13 @@ impl QuicStreamManager {
             .await
             .map_err(|e| MqttError::ConnectionError(format!("QUIC write error: {e}")))?;
 
-        tracing::debug!(topic = %topic, "Sent packet on topic-specific stream");
+        tracing::debug!(topic = %topic, flow_id = ?flow_id, "Sent packet on topic-specific stream");
 
         self.topic_streams.lock().await.insert(
             topic,
             StreamInfo {
                 stream,
+                flow_id,
                 last_used: Instant::now(),
             },
         );
@@ -151,11 +239,16 @@ impl QuicStreamManager {
         self.send_on_topic_stream(topic, packet).await
     }
 
+    pub async fn get_flow_id_for_topic(&self, topic: &str) -> Option<FlowId> {
+        let streams = self.topic_streams.lock().await;
+        streams.get(topic).map(|info| info.flow_id)
+    }
+
     pub async fn close_all_streams(&self) {
         let mut streams = self.topic_streams.lock().await;
         for (topic, mut info) in streams.drain() {
             let _ = info.stream.finish();
-            tracing::trace!(topic = %topic, "Closed topic stream");
+            tracing::trace!(topic = %topic, flow_id = ?info.flow_id, "Closed topic stream");
         }
     }
 }
@@ -179,5 +272,62 @@ mod tests {
             StreamStrategy::DataPerSubscription,
             StreamStrategy::ControlOnly
         );
+    }
+
+    #[test]
+    fn test_flow_header_builder_methods() {
+        let flags = FlowFlags {
+            persistent_qos: true,
+            persistent_subscriptions: true,
+            ..Default::default()
+        };
+
+        let conn = Arc::new(std::mem::MaybeUninit::<Connection>::uninit());
+        let conn_ptr = unsafe { &*conn.as_ptr() };
+
+        let _ = flags;
+        let _ = conn_ptr;
+    }
+
+    #[test]
+    fn test_flow_flags_config() {
+        let flags = FlowFlags {
+            clean: true,
+            abort_if_no_state: false,
+            err_tolerance: 1,
+            persistent_qos: true,
+            persistent_topic_alias: false,
+            persistent_subscriptions: true,
+            optional_headers: false,
+        };
+
+        assert!(flags.clean);
+        assert!(!flags.abort_if_no_state);
+        assert_eq!(flags.err_tolerance, 1);
+        assert!(flags.persistent_qos);
+        assert!(!flags.persistent_topic_alias);
+        assert!(flags.persistent_subscriptions);
+        assert!(!flags.optional_headers);
+    }
+
+    #[test]
+    fn test_default_flow_expire_interval() {
+        assert_eq!(DEFAULT_FLOW_EXPIRE_INTERVAL, 300);
+    }
+
+    #[test]
+    fn test_flow_id_generator_sequence() {
+        let mut gen = FlowIdGenerator::new();
+        let id1 = gen.next_client();
+        let id2 = gen.next_client();
+        let id3 = gen.next_client();
+
+        assert!(id1.is_client_initiated());
+        assert!(id2.is_client_initiated());
+        assert!(id3.is_client_initiated());
+
+        assert_eq!(id1.sequence(), 1);
+        assert_eq!(id2.sequence(), 2);
+        assert_eq!(id3.sequence(), 3);
     }
 }

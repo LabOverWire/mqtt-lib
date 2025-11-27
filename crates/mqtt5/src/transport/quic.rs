@@ -1,5 +1,6 @@
 use crate::error::{MqttError, Result};
 use crate::time::Duration;
+use crate::transport::flow::FlowFlags;
 use crate::transport::packet_io::{encode_packet_to_buffer, PacketReader, PacketWriter};
 use crate::Transport;
 use bytes::{BufMut, BytesMut};
@@ -80,6 +81,7 @@ impl Default for StreamStrategy {
 }
 
 #[derive(Debug)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct QuicConfig {
     pub addr: SocketAddr,
     pub server_name: String,
@@ -94,9 +96,13 @@ pub struct QuicConfig {
     pub enable_datagrams: bool,
     pub datagram_send_buffer_size: usize,
     pub datagram_receive_buffer_size: usize,
+    pub enable_flow_headers: bool,
+    pub flow_expire_interval: u64,
+    pub flow_flags: FlowFlags,
 }
 
 const DEFAULT_DATAGRAM_BUFFER_SIZE: usize = 65536;
+const DEFAULT_FLOW_EXPIRE_INTERVAL: u64 = 300;
 
 impl QuicConfig {
     #[must_use]
@@ -115,6 +121,9 @@ impl QuicConfig {
             enable_datagrams: false,
             datagram_send_buffer_size: DEFAULT_DATAGRAM_BUFFER_SIZE,
             datagram_receive_buffer_size: DEFAULT_DATAGRAM_BUFFER_SIZE,
+            enable_flow_headers: false,
+            flow_expire_interval: DEFAULT_FLOW_EXPIRE_INTERVAL,
+            flow_flags: FlowFlags::default(),
         }
     }
 
@@ -170,6 +179,24 @@ impl QuicConfig {
     pub fn with_datagram_buffer_sizes(mut self, send: usize, receive: usize) -> Self {
         self.datagram_send_buffer_size = send;
         self.datagram_receive_buffer_size = receive;
+        self
+    }
+
+    #[must_use]
+    pub fn with_flow_headers(mut self, enable: bool) -> Self {
+        self.enable_flow_headers = enable;
+        self
+    }
+
+    #[must_use]
+    pub fn with_flow_expire_interval(mut self, seconds: u64) -> Self {
+        self.flow_expire_interval = seconds;
+        self
+    }
+
+    #[must_use]
+    pub fn with_flow_flags(mut self, flags: FlowFlags) -> Self {
+        self.flow_flags = flags;
         self
     }
 
@@ -237,9 +264,8 @@ impl QuicConfig {
 
         crypto.alpn_protocols = vec![b"mqtt".to_vec()];
 
-        let quic_crypto = quinn::crypto::rustls::QuicClientConfig::try_from(crypto).map_err(|e| {
-            MqttError::ConnectionError(format!("Failed to build QUIC config: {e}"))
-        })?;
+        let quic_crypto = quinn::crypto::rustls::QuicClientConfig::try_from(crypto)
+            .map_err(|e| MqttError::ConnectionError(format!("Failed to build QUIC config: {e}")))?;
 
         let mut client_config = ClientConfig::new(Arc::new(quic_crypto));
 
@@ -504,8 +530,14 @@ mod tests {
         let config = QuicConfig::new(addr, "localhost");
 
         assert!(!config.enable_datagrams);
-        assert_eq!(config.datagram_send_buffer_size, DEFAULT_DATAGRAM_BUFFER_SIZE);
-        assert_eq!(config.datagram_receive_buffer_size, DEFAULT_DATAGRAM_BUFFER_SIZE);
+        assert_eq!(
+            config.datagram_send_buffer_size,
+            DEFAULT_DATAGRAM_BUFFER_SIZE
+        );
+        assert_eq!(
+            config.datagram_receive_buffer_size,
+            DEFAULT_DATAGRAM_BUFFER_SIZE
+        );
     }
 
     #[test]
@@ -537,5 +569,33 @@ mod tests {
         let transport = QuicTransport::new(config);
 
         assert!(transport.datagrams_enabled());
+    }
+
+    #[test]
+    fn test_quic_config_flow_headers_disabled_by_default() {
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 14567);
+        let config = QuicConfig::new(addr, "localhost");
+
+        assert!(!config.enable_flow_headers);
+        assert_eq!(config.flow_expire_interval, DEFAULT_FLOW_EXPIRE_INTERVAL);
+    }
+
+    #[test]
+    fn test_quic_config_with_flow_headers() {
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 14567);
+        let flags = FlowFlags {
+            persistent_qos: true,
+            persistent_subscriptions: true,
+            ..Default::default()
+        };
+        let config = QuicConfig::new(addr, "localhost")
+            .with_flow_headers(true)
+            .with_flow_expire_interval(600)
+            .with_flow_flags(flags);
+
+        assert!(config.enable_flow_headers);
+        assert_eq!(config.flow_expire_interval, 600);
+        assert!(config.flow_flags.persistent_qos);
+        assert!(config.flow_flags.persistent_subscriptions);
     }
 }

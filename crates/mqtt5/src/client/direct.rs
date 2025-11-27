@@ -646,9 +646,7 @@ impl DirectClientInner {
 
     pub fn send_datagram(&self, data: bytes::Bytes) -> Result<()> {
         if !self.quic_datagrams_enabled {
-            return Err(MqttError::InvalidState(
-                "Datagrams not enabled".to_string(),
-            ));
+            return Err(MqttError::InvalidState("Datagrams not enabled".to_string()));
         }
         let conn = self
             .quic_connection
@@ -660,9 +658,7 @@ impl DirectClientInner {
 
     pub async fn send_datagram_wait(&self, data: bytes::Bytes) -> Result<()> {
         if !self.quic_datagrams_enabled {
-            return Err(MqttError::InvalidState(
-                "Datagrams not enabled".to_string(),
-            ));
+            return Err(MqttError::InvalidState("Datagrams not enabled".to_string()));
         }
         let conn = self
             .quic_connection
@@ -675,9 +671,7 @@ impl DirectClientInner {
 
     pub async fn read_datagram(&self) -> Result<bytes::Bytes> {
         if !self.quic_datagrams_enabled {
-            return Err(MqttError::InvalidState(
-                "Datagrams not enabled".to_string(),
-            ));
+            return Err(MqttError::InvalidState("Datagrams not enabled".to_string()));
         }
         let conn = self
             .quic_connection
