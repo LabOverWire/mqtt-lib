@@ -11,7 +11,7 @@ Three crates provide platform-specific implementations sharing a common protocol
 Platform-agnostic MQTT v5.0 protocol for native, WASM, and embedded targets.
 
 - Packet encoding/decoding (CONNECT, PUBLISH, SUBSCRIBE, etc.)
-- Protocol types (QoS, properties, reason codes)
+- Protocol types (`QoS`, properties, reason codes)
 - Error types (`MqttError`, `Result`)
 - Topic matching and validation
 - Transport trait
@@ -24,18 +24,23 @@ Full-featured client and broker for Linux, macOS, Windows.
 
 - `MqttClient` with automatic reconnection
 - `MqttBroker` with multi-transport support
-- TCP, TLS, WebSocket transports
+- TCP, TLS, WebSocket, QUIC transports
+- QUIC multistream architecture for parallel operations
 - Authentication (password, certificate)
 - ACL system
 - File-based and in-memory storage
 - Broker-to-broker bridging
 - Optional OpenTelemetry integration
 
-Dependencies: `tokio`, `rustls`, `tokio-tungstenite`
+Dependencies: `tokio`, `rustls`, `tokio-tungstenite`, `quinn`
 
 ### mqtt5-wasm (WebAssembly)
 
-Client and broker for browser environments.
+Client and broker for browser environments. Published to npm as `mqtt5-wasm`.
+
+```bash
+npm install mqtt5-wasm
+```
 
 - `WasmMqttClient` with JavaScript bindings
 - `WasmBroker` for in-browser testing
@@ -126,19 +131,19 @@ We use direct async/await patterns because:
 
 The client validates acknowledgment reason codes:
 
-1. **PUBACK Validation** (QoS 1): Checks PUBACK reason code
+1. **PUBACK Validation** (`QoS` 1): Checks PUBACK reason code
 
    - Success codes (0x00-0x7F): Operation completes successfully
    - Error codes (0x80+): Returns `MqttError::PublishFailed(reason_code)`
 
-2. **PUBREC Validation** (QoS 2): Checks PUBREC reason code
+2. **PUBREC Validation** (`QoS` 2): Checks PUBREC reason code
 
    - Error codes abort publish flow
    - Success codes proceed to PUBREL/PUBCOMP
 
-3. **PUBCOMP Validation** (QoS 2): Checks final acknowledgment
+3. **PUBCOMP Validation** (`QoS` 2): Checks final acknowledgment
 
-   - Validates complete QoS 2 flow
+   - Validates complete `QoS` 2 flow
    - Returns final broker decision
 
 4. **Authorization Handling**:
@@ -296,11 +301,96 @@ The MQTT broker follows the same architectural principles as the client - direct
 
 ### Platform-Specific Transports
 
-**Native** (`mqtt5`): TCP, TLS (rustls), WebSocket (tokio-tungstenite)
+**Native** (`mqtt5`): TCP, TLS (rustls), WebSocket (tokio-tungstenite), QUIC (quinn)
 
 **WASM** (`mqtt5-wasm`): WebSocket (web-sys), MessagePort, BroadcastChannel
 
 All satisfy the same `Transport` trait contract.
+
+## QUIC Transport Architecture
+
+QUIC transport provides MQTT over QUIC (RFC 9000) with multistream support for parallel operations.
+
+### QUIC Connection Model
+
+```
+Client                                    Broker
+  │                                          │
+  │──── QUIC Connection (TLS 1.3) ──────────│
+  │                                          │
+  │  Stream 0 (Control)                      │
+  │  ├── CONNECT/CONNACK                     │
+  │  ├── SUBSCRIBE/SUBACK                    │
+  │  ├── PINGREQ/PINGRESP                    │
+  │  └── DISCONNECT                          │
+  │                                          │
+  │  Stream 2 (Data - client initiated)      │
+  │  └── PUBLISH (`QoS` 0/1/2)                 │
+  │                                          │
+  │  Stream 3 (Data - server initiated)      │
+  │  └── PUBLISH (subscribed messages)       │
+  │                                          │
+```
+
+### Stream Strategies
+
+1. **ControlOnly**: Single stream for all packets (traditional MQTT behavior)
+2. **DataPerPublish**: New stream per `QoS` 1/2 publish (maximum parallelism)
+3. **DataPerTopic**: Stream pooling by topic (balanced approach)
+4. **DataPerSubscription**: Server uses dedicated streams per subscription
+
+### Flow Headers
+
+QUIC streams use flow headers for state recovery and stream identification:
+
+```rust
+struct DataFlowHeader {
+    flow_id: FlowId,           // Unique stream identifier
+    flags: FlowFlags,          // Recovery mode, `QoS` flags
+    expire_interval: u32,      // Stream expiration
+}
+```
+
+- **FlowId**: Client/server initiated bit + 31-bit identifier
+- **FlowFlags**: Bit fields for recovery mode, persistent `QoS`, subscription state
+- **FlowRegistry**: Server-side tracking of active flows
+
+### QUIC Client Configuration
+
+```rust
+let config = QuicClientConfig::builder()
+    .with_ca_cert_file("ca.pem")?
+    .with_server_name("broker.example.com")
+    .build()?;
+
+client.connect("quic://broker.example.com:14567").await?;
+```
+
+- Built-in TLS 1.3 (QUIC mandates encryption)
+- Certificate verification with configurable CA
+- ALPN protocol negotiation (`mqtt`)
+- Insecure mode for development
+
+### QUIC Broker Acceptor
+
+```rust
+// Broker listens for QUIC connections
+QuicAcceptor::new(config, router, storage)
+    .accept_loop(endpoint)
+    .await;
+```
+
+- Accepts QUIC connections on configured endpoint
+- Spawns client handler per connection
+- Background stream acceptor for server-initiated streams
+- Flow registry for stream state management
+
+### Multistream Benefits
+
+1. **No Head-of-Line Blocking**: Lost packets only affect their stream
+2. **Parallel `QoS` Flows**: Multiple `QoS` 2 handshakes simultaneously
+3. **Stream Prioritization**: Control stream prioritized over data
+4. **Connection Migration**: QUIC supports IP address changes
 
 ## WASM Architecture
 
@@ -362,7 +452,7 @@ The library compiles to WebAssembly for browser environments with full MQTT v5.0
        pending_pubacks: HashMap<u16, js_sys::Function>,
        pending_pubcomps: HashMap<u16, (js_sys::Function, f64)>,
        pending_pubrecs: HashMap<u16, f64>,
-       received_qos2: HashMap<u16, f64>,
+       received_`qos2`: HashMap<u16, f64>,
        on_connect: Option<js_sys::Function>,
        on_disconnect: Option<js_sys::Function>,
        on_error: Option<js_sys::Function>,
@@ -370,7 +460,7 @@ The library compiles to WebAssembly for browser environments with full MQTT v5.0
    ```
 
    - Stores JavaScript callbacks for subscriptions and events
-   - Tracks in-flight QoS 1 and QoS 2 messages
+   - Tracks in-flight `QoS` 1 and `QoS` 2 messages
    - Manages packet ID allocation (1-65535 wrapping)
 
 3. **Connection API**:
@@ -382,9 +472,9 @@ The library compiles to WebAssembly for browser environments with full MQTT v5.0
 
 4. **Publishing API**:
 
-   - `publish(topic, payload)` - QoS 0 (fire-and-forget)
-   - `publish_qos1(topic, payload, callback)` - QoS 1 with PUBACK
-   - `publish_qos2(topic, payload, callback)` - QoS 2 with full handshake
+   - `publish(topic, payload)` - `QoS` 0 (fire-and-forget)
+   - `publish_`qos1`(topic, payload, callback)` - `QoS` 1 with PUBACK
+   - `publish_`qos2`(topic, payload, callback)` - `QoS` 2 with full handshake
    - Callbacks receive reason code or error string
 
 5. **Subscription API**:
@@ -442,7 +532,7 @@ The library compiles to WebAssembly for browser environments with full MQTT v5.0
 
 4. **Broker Features**:
    - Full MQTT v5.0 protocol support
-   - QoS 0, 1, 2 message delivery
+   - `QoS` 0, 1, 2 message delivery
    - Retained messages with in-memory storage
    - Topic matching with wildcard support
    - Session management (memory-only)
@@ -509,18 +599,18 @@ The library compiles to WebAssembly for browser environments with full MQTT v5.0
    - JavaScript callbacks fill queues
    - Rust async waits on queue data
 
-### WASM QoS Flow Control
+### WASM `QoS` Flow Control
 
-1. **QoS 0** (At Most Once):
+1. **`QoS` 0** (At Most Once):
 
    - Direct `publish()` call
    - No acknowledgment tracking
    - Fire-and-forget delivery
 
-2. **QoS 1** (At Least Once):
+2. **`QoS` 1** (At Least Once):
 
    ```javascript
-   await client.publish_qos1("sensors/temp", data, (reasonCode) => {
+   await client.publish_`qos1`("sensors/temp", data, (reasonCode) => {
      if (reasonCode === 0) {
        console.log("Success");
      } else {
@@ -535,10 +625,10 @@ The library compiles to WebAssembly for browser environments with full MQTT v5.0
    - Invokes callback with reason code
    - Removes from pending on acknowledgment
 
-3. **QoS 2** (Exactly Once):
+3. **`QoS` 2** (Exactly Once):
 
    ```javascript
-   await client.publish_qos2("commands/action", data, (result) => {
+   await client.publish_`qos2`("commands/action", data, (result) => {
      if (typeof result === "number") {
        console.log("Success, reason:", result);
      } else {
@@ -552,16 +642,16 @@ The library compiles to WebAssembly for browser environments with full MQTT v5.0
    - Tracks PUBREC arrival in `pending_pubrecs`
    - 10-second timeout monitoring via background task
    - Callback receives reason code (success) or "Timeout" string
-   - Duplicate detection: `received_qos2` tracks delivered messages for 30 seconds
+   - Duplicate detection: `received_`qos2`` tracks delivered messages for 30 seconds
 
-4. **QoS 2 Timeout Handling**:
+4. **`QoS` 2 Timeout Handling**:
 
    - Background task checks every 5 seconds
    - Expires flows older than 10 seconds
    - Invokes callback with "Timeout" error
    - Cleans up tracking maps
 
-5. **QoS 2 Duplicate Prevention**:
+5. **`QoS` 2 Duplicate Prevention**:
    - Receiving: PUBREC sent but message not re-delivered to callback
    - Publishing: Each packet_id used only once in current window
    - 30-second cleanup of old tracking entries
@@ -645,17 +735,17 @@ fn encode_packet(packet: &Packet, buf: &mut BytesMut) -> Result<()> {
    - Checks for timeout every iteration
    - Runs until disconnect
 
-3. **QoS 2 Cleanup Task**:
+3. **`QoS` 2 Cleanup Task**:
    ```rust
    spawn_local(async move {
        loop {
            sleep_ms(5000).await;  // Check every 5 seconds
-           // Clean up expired QoS 2 flows (>10s)
-           // Clean up old received_qos2 entries (>30s)
+           // Clean up expired `QoS` 2 flows (>10s)
+           // Clean up old received_`qos2` entries (>30s)
        }
    });
    ```
-   - Monitors pending QoS 2 operations
+   - Monitors pending `QoS` 2 operations
    - Times out stale flows (10 seconds)
    - Removes old duplicate tracking (30 seconds)
 

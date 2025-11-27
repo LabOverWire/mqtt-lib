@@ -273,6 +273,12 @@ Compatible with MQTT-over-QUIC brokers:
 
 WebAssembly builds for browser environments with three deployment modes.
 
+### Installation
+
+```bash
+npm install mqtt5-wasm
+```
+
 ### Connection Modes
 
 #### External Broker Mode (WebSocket)
@@ -280,7 +286,7 @@ WebAssembly builds for browser environments with three deployment modes.
 Connect to remote MQTT brokers using WebSocket transport:
 
 ```javascript
-import init, { WasmMqttClient } from "./pkg/mqtt5_wasm.js";
+import init, { WasmMqttClient } from "mqtt5-wasm";
 
 await init();
 const client = new WasmMqttClient("browser-client");
@@ -293,7 +299,7 @@ await client.connect("ws://broker.example.com:8080/mqtt");
 MQTT broker in a browser tab:
 
 ```javascript
-import init, { WasmBroker, WasmMqttClient } from "./pkg/mqtt5_wasm.js";
+import init, { WasmBroker, WasmMqttClient } from "mqtt5-wasm";
 
 await init();
 const broker = new WasmBroker();

@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **mqtt5-wasm npm package** published at version 0.1.2
+  - Available via `npm install mqtt5-wasm`
+  - Fixed README with correct installation instructions for both npm and Cargo
+  - Package available at https://www.npmjs.com/package/mqtt5-wasm
+
+- **Tracing instrumentation** for transport layer
+  - `#[instrument]` attributes on transport connect/read/write operations
+  - Structured logging for connection lifecycle events
+  - Debug-level tracing for packet I/O operations
+
 - **QUIC transport support** for MQTT over QUIC (RFC 9000)
   - QUIC URL scheme: `quic://host:port` (default port 14567)
   - Built-in TLS 1.3 encryption (QUIC mandates encryption)
