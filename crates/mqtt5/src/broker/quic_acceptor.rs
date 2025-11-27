@@ -253,11 +253,14 @@ fn is_flow_header_byte(b: u8) -> bool {
     )
 }
 
-async fn try_read_flow_header(recv: &mut RecvStream) -> Result<Option<(FlowId, FlowFlags, Option<Duration>)>> {
+async fn try_read_flow_header(
+    recv: &mut RecvStream,
+) -> Result<Option<(FlowId, FlowFlags, Option<Duration>)>> {
     let mut peek_buf = [0u8; 1];
-    let chunk = recv.read_chunk(1, true).await.map_err(|e| {
-        MqttError::ConnectionError(format!("Failed to peek stream: {e}"))
-    })?;
+    let chunk = recv
+        .read_chunk(1, true)
+        .await
+        .map_err(|e| MqttError::ConnectionError(format!("Failed to peek stream: {e}")))?;
 
     let Some(chunk) = chunk else {
         return Ok(None);

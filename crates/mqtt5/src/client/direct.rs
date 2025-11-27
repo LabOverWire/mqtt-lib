@@ -10,6 +10,7 @@ use tokio::sync::{oneshot, Mutex, RwLock};
 use tokio::task::JoinHandle;
 use tokio::time::Duration;
 
+use bytes::Bytes;
 use crate::callback::{CallbackId, CallbackManager};
 use crate::error::{MqttError, Result};
 use crate::packet::connect::ConnectPacket;
@@ -24,6 +25,9 @@ use crate::protocol::v5::properties::Properties;
 use crate::protocol::v5::reason_codes::ReasonCode;
 use crate::session::subscription::Subscription;
 use crate::session::SessionState;
+use crate::transport::flow::{
+    FlowFlags, FlowHeader, FlowId, FLOW_TYPE_CLIENT_DATA, FLOW_TYPE_CONTROL, FLOW_TYPE_SERVER_DATA,
+};
 use crate::transport::tls::{TlsReadHalf, TlsWriteHalf};
 use crate::transport::websocket::{WebSocketReadHandle, WebSocketWriteHandle};
 use crate::transport::{
@@ -32,6 +36,7 @@ use crate::transport::{
 use crate::types::{ConnectOptions, ConnectResult, PublishOptions, PublishResult};
 use crate::QoS;
 use quinn::{Connection, RecvStream, SendStream};
+use std::time::Duration as StdDuration;
 
 #[cfg(feature = "opentelemetry")]
 use crate::telemetry::propagation;
@@ -1223,6 +1228,75 @@ async fn quic_stream_acceptor_task(connection: Arc<Connection>, ctx: PacketReade
     }
 }
 
+fn is_flow_header_byte(b: u8) -> bool {
+    matches!(
+        b,
+        FLOW_TYPE_CONTROL | FLOW_TYPE_CLIENT_DATA | FLOW_TYPE_SERVER_DATA
+    )
+}
+
+async fn try_read_server_flow_header(
+    recv: &mut quinn::RecvStream,
+) -> Result<Option<(FlowId, FlowFlags, Option<StdDuration>)>> {
+    let chunk = recv
+        .read_chunk(1, true)
+        .await
+        .map_err(|e| MqttError::ConnectionError(format!("Failed to peek stream: {e}")))?;
+
+    let Some(chunk) = chunk else {
+        return Ok(None);
+    };
+
+    if chunk.bytes.is_empty() {
+        return Ok(None);
+    }
+
+    let first_byte = chunk.bytes[0];
+    if !is_flow_header_byte(first_byte) {
+        return Ok(None);
+    }
+
+    let mut header_buf = Vec::with_capacity(32);
+    header_buf.extend_from_slice(&chunk.bytes);
+
+    while header_buf.len() < 32 {
+        match recv.read_chunk(32 - header_buf.len(), true).await {
+            Ok(Some(chunk)) if !chunk.bytes.is_empty() => {
+                header_buf.extend_from_slice(&chunk.bytes);
+            }
+            Ok(_) => break,
+            Err(e) => {
+                return Err(MqttError::ConnectionError(format!(
+                    "Failed to read flow header: {e}"
+                )));
+            }
+        }
+    }
+
+    let mut bytes = Bytes::from(header_buf);
+    let flow_header = FlowHeader::decode(&mut bytes)?;
+
+    match flow_header {
+        FlowHeader::Control(h) => {
+            tracing::trace!(flow_id = ?h.flow_id, "Parsed control flow header from server");
+            Ok(Some((h.flow_id, h.flags, None)))
+        }
+        FlowHeader::ClientData(h) | FlowHeader::ServerData(h) => {
+            let expire = if h.expire_interval > 0 {
+                Some(StdDuration::from_secs(h.expire_interval))
+            } else {
+                None
+            };
+            tracing::debug!(flow_id = ?h.flow_id, is_server = h.is_server_flow(), expire = ?expire, "Parsed data flow header from server");
+            Ok(Some((h.flow_id, h.flags, expire)))
+        }
+        FlowHeader::UserDefined(_) => {
+            tracing::trace!("Ignoring user-defined flow header");
+            Ok(None)
+        }
+    }
+}
+
 async fn quic_stream_reader_task(
     mut recv: quinn::RecvStream,
     _send: quinn::SendStream,
@@ -1230,10 +1304,31 @@ async fn quic_stream_reader_task(
 ) {
     use crate::transport::PacketReader;
 
+    let flow_id = match try_read_server_flow_header(&mut recv).await {
+        Ok(Some((id, flags, expire))) => {
+            tracing::debug!(
+                flow_id = ?id,
+                is_server_initiated = id.is_server_initiated(),
+                ?flags,
+                ?expire,
+                "Server-initiated stream with flow header"
+            );
+            Some(id)
+        }
+        Ok(None) => {
+            tracing::trace!("No flow header on server-initiated stream");
+            None
+        }
+        Err(e) => {
+            tracing::warn!("Error parsing server flow header: {e}");
+            None
+        }
+    };
+
     loop {
         match recv.read_packet().await {
             Ok(packet) => {
-                tracing::trace!("Received packet on dedicated QUIC stream: {:?}", packet);
+                tracing::trace!(flow_id = ?flow_id, "Received packet on server-initiated QUIC stream: {:?}", packet);
                 if let Err(e) = handle_incoming_packet_with_writer(
                     packet,
                     &ctx.writer,
@@ -1242,12 +1337,12 @@ async fn quic_stream_reader_task(
                 )
                 .await
                 {
-                    tracing::error!("Error handling packet from dedicated stream: {e}");
+                    tracing::error!(flow_id = ?flow_id, "Error handling packet from server stream: {e}");
                     break;
                 }
             }
             Err(e) => {
-                tracing::debug!("QUIC stream closed or error: {e}");
+                tracing::debug!(flow_id = ?flow_id, "Server-initiated QUIC stream closed or error: {e}");
                 break;
             }
         }
