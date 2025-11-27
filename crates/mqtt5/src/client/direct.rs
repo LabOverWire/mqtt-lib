@@ -1096,7 +1096,7 @@ impl DirectClientInner {
 
         for (flow_id, flags) in flows {
             let recovery_flags = FlowFlags {
-                clean: false,
+                clean: 0,
                 ..flags
             };
 
@@ -1118,10 +1118,7 @@ impl DirectClientInner {
             }
         }
 
-        tracing::info!(
-            recovered = recovered,
-            "Flow recovery completed"
-        );
+        tracing::info!(recovered = recovered, "Flow recovery completed");
 
         Ok(recovered)
     }
@@ -1286,11 +1283,7 @@ async fn flow_expiration_task(session: Arc<RwLock<SessionState>>) {
 
         let expired = session.read().await.expire_flows().await;
         if !expired.is_empty() {
-            tracing::debug!(
-                count = expired.len(),
-                "Expired {} flows",
-                expired.len()
-            );
+            tracing::debug!(count = expired.len(), "Expired {} flows", expired.len());
         }
     }
 }

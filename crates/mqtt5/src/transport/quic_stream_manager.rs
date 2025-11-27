@@ -140,7 +140,7 @@ impl QuicStreamManager {
     }
 
     pub fn set_recovery_mode(&mut self, enable: bool) {
-        self.flow_flags.clean = !enable;
+        self.flow_flags.clean = u8::from(!enable);
     }
 
     pub fn current_flow_flags(&self) -> FlowFlags {
@@ -310,8 +310,8 @@ mod tests {
     #[test]
     fn test_flow_header_builder_methods() {
         let flags = FlowFlags {
-            persistent_qos: true,
-            persistent_subscriptions: true,
+            persistent_qos: 1,
+            persistent_subscriptions: 1,
             ..Default::default()
         };
 
@@ -325,22 +325,22 @@ mod tests {
     #[test]
     fn test_flow_flags_config() {
         let flags = FlowFlags {
-            clean: true,
-            abort_if_no_state: false,
+            clean: 1,
+            abort_if_no_state: 0,
             err_tolerance: 1,
-            persistent_qos: true,
-            persistent_topic_alias: false,
-            persistent_subscriptions: true,
-            optional_headers: false,
+            persistent_qos: 1,
+            persistent_topic_alias: 0,
+            persistent_subscriptions: 1,
+            optional_headers: 0,
         };
 
-        assert!(flags.clean);
-        assert!(!flags.abort_if_no_state);
+        assert_eq!(flags.clean, 1);
+        assert_eq!(flags.abort_if_no_state, 0);
         assert_eq!(flags.err_tolerance, 1);
-        assert!(flags.persistent_qos);
-        assert!(!flags.persistent_topic_alias);
-        assert!(flags.persistent_subscriptions);
-        assert!(!flags.optional_headers);
+        assert_eq!(flags.persistent_qos, 1);
+        assert_eq!(flags.persistent_topic_alias, 0);
+        assert_eq!(flags.persistent_subscriptions, 1);
+        assert_eq!(flags.optional_headers, 0);
     }
 
     #[test]

@@ -584,8 +584,8 @@ mod tests {
     fn test_quic_config_with_flow_headers() {
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 14567);
         let flags = FlowFlags {
-            persistent_qos: true,
-            persistent_subscriptions: true,
+            persistent_qos: 1,
+            persistent_subscriptions: 1,
             ..Default::default()
         };
         let config = QuicConfig::new(addr, "localhost")
@@ -595,7 +595,7 @@ mod tests {
 
         assert!(config.enable_flow_headers);
         assert_eq!(config.flow_expire_interval, 600);
-        assert!(config.flow_flags.persistent_qos);
-        assert!(config.flow_flags.persistent_subscriptions);
+        assert_eq!(config.flow_flags.persistent_qos, 1);
+        assert_eq!(config.flow_flags.persistent_subscriptions, 1);
     }
 }

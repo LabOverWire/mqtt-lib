@@ -1,3 +1,4 @@
+use bebytes::BeBytes;
 use crate::error::{MqttError, Result};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
@@ -45,52 +46,33 @@ impl From<u64> for FlowId {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default)]
-#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, BeBytes)]
 pub struct FlowFlags {
-    pub clean: bool,
-    pub abort_if_no_state: bool,
+    #[bits(1)]
+    pub optional_headers: u8,
+    #[bits(1)]
+    pub persistent_subscriptions: u8,
+    #[bits(1)]
+    pub persistent_topic_alias: u8,
+    #[bits(1)]
+    pub persistent_qos: u8,
+    #[bits(2)]
     pub err_tolerance: u8,
-    pub persistent_qos: bool,
-    pub persistent_topic_alias: bool,
-    pub persistent_subscriptions: bool,
-    pub optional_headers: bool,
+    #[bits(1)]
+    pub abort_if_no_state: u8,
+    #[bits(1)]
+    pub clean: u8,
 }
 
 impl FlowFlags {
     pub fn encode(&self) -> u8 {
-        let mut flags = 0u8;
-        if self.clean {
-            flags |= 0b0000_0001;
-        }
-        if self.abort_if_no_state {
-            flags |= 0b0000_0010;
-        }
-        flags |= (self.err_tolerance & 0b11) << 2;
-        if self.persistent_qos {
-            flags |= 0b0001_0000;
-        }
-        if self.persistent_topic_alias {
-            flags |= 0b0010_0000;
-        }
-        if self.persistent_subscriptions {
-            flags |= 0b0100_0000;
-        }
-        if self.optional_headers {
-            flags |= 0b1000_0000;
-        }
-        flags
+        self.to_be_bytes()[0]
     }
 
     pub fn decode(byte: u8) -> Self {
-        Self {
-            clean: byte & 0b0000_0001 != 0,
-            abort_if_no_state: byte & 0b0000_0010 != 0,
-            err_tolerance: (byte >> 2) & 0b11,
-            persistent_qos: byte & 0b0001_0000 != 0,
-            persistent_topic_alias: byte & 0b0010_0000 != 0,
-            persistent_subscriptions: byte & 0b0100_0000 != 0,
-            optional_headers: byte & 0b1000_0000 != 0,
+        match Self::try_from_be_bytes(&[byte]) {
+            Ok((flags, _)) => flags,
+            Err(_) => Self::default(),
         }
     }
 }
@@ -434,26 +416,17 @@ mod tests {
     #[test]
     fn test_flow_flags_encode_decode() {
         let flags = FlowFlags {
-            clean: true,
-            abort_if_no_state: false,
+            clean: 1,
+            abort_if_no_state: 0,
             err_tolerance: 2,
-            persistent_qos: true,
-            persistent_topic_alias: false,
-            persistent_subscriptions: true,
-            optional_headers: false,
+            persistent_qos: 1,
+            persistent_topic_alias: 0,
+            persistent_subscriptions: 1,
+            optional_headers: 0,
         };
         let encoded = flags.encode();
         let decoded = FlowFlags::decode(encoded);
-        assert_eq!(flags.clean, decoded.clean);
-        assert_eq!(flags.abort_if_no_state, decoded.abort_if_no_state);
-        assert_eq!(flags.err_tolerance, decoded.err_tolerance);
-        assert_eq!(flags.persistent_qos, decoded.persistent_qos);
-        assert_eq!(flags.persistent_topic_alias, decoded.persistent_topic_alias);
-        assert_eq!(
-            flags.persistent_subscriptions,
-            decoded.persistent_subscriptions
-        );
-        assert_eq!(flags.optional_headers, decoded.optional_headers);
+        assert_eq!(flags, decoded);
     }
 
     #[test]
@@ -479,7 +452,7 @@ mod tests {
             flow_id,
             3600,
             FlowFlags {
-                persistent_qos: true,
+                persistent_qos: 1,
                 ..Default::default()
             },
         );
@@ -493,7 +466,7 @@ mod tests {
         let decoded = DataFlowHeader::decode(flow_type, &mut bytes).unwrap();
         assert_eq!(decoded.flow_id.raw(), flow_id.raw());
         assert_eq!(decoded.expire_interval, 3600);
-        assert!(decoded.flags.persistent_qos);
+        assert_eq!(decoded.flags.persistent_qos, 1);
     }
 
     #[test]
