@@ -15,7 +15,7 @@ A unified MQTT v5.0 CLI tool with pub, sub, and broker commands.
 - Session management: Clean start, session expiry, and persistence
 - Will message support: Last will and testament with delay and QoS options
 - Automatic reconnection: Opt-in reconnection with exponential backoff
-- Multi-transport: TCP, TLS, and WebSocket support
+- Multi-transport: TCP, TLS, WebSocket, and QUIC support
 - Cross-platform: Linux, macOS, and Windows
 
 ## Installation
@@ -127,6 +127,14 @@ mqttv5 pub -t "test/topic" -m "data" --keep-alive 120 \
 # WebSocket transport
 mqttv5 pub --url "ws://broker:8080/mqtt" -t "test/websocket" -m "WebSocket message"
 mqttv5 sub --url "wss://secure-broker:8443/mqtt" -t "test/+"
+
+# QUIC transport (insecure mode for testing)
+mqttv5 pub --url "quic://broker:14567" -t "test/quic" -m "QUIC message"
+mqttv5 sub --url "quic://broker:14567" -t "test/+"
+
+# QUIC transport with certificate verification
+mqttv5 pub --url "quics://broker:14567" -t "test/quic" -m "Secure QUIC" --ca-cert ca.crt
+mqttv5 sub --url "quics://broker:14567" -t "test/+" --insecure
 
 # Message expiry and topic alias
 mqttv5 pub -t "sensors/temp" -m "23.5" --message-expiry-interval 300 --topic-alias 1

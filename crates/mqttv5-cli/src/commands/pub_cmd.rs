@@ -27,7 +27,7 @@ pub struct PubCommand {
     #[arg(long)]
     pub stdin: bool,
 
-    /// MQTT broker URL (e.g., mqtt://localhost:1883, mqtts://host:8883)
+    /// MQTT broker URL (mqtt://, mqtts://, ws://, wss://, quic://, quics://)
     #[arg(long, short = 'U', conflicts_with_all = &["host", "port"])]
     pub url: Option<String>,
 
@@ -111,7 +111,7 @@ pub struct PubCommand {
     #[arg(long)]
     pub ca_cert: Option<PathBuf>,
 
-    /// Skip certificate verification for TLS connections (insecure, for testing only)
+    /// Skip certificate verification for TLS/QUIC connections (insecure, for testing only)
     #[arg(long)]
     pub insecure: bool,
 

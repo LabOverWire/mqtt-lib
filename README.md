@@ -9,10 +9,10 @@
 
 ## Dual Architecture: Client + Broker
 
-| Component       | Use Case                         | Key Features                                         |
-| --------------- | -------------------------------- | ---------------------------------------------------- |
-| **MQTT Broker** | Run your own MQTT infrastructure | TLS, WebSocket, Authentication, Bridging, Monitoring |
-| **MQTT Client** | Connect to any MQTT broker       | Cloud compatible, Auto-reconnect, Mock testing       |
+| Component       | Use Case                         | Key Features                                              |
+| --------------- | -------------------------------- | --------------------------------------------------------- |
+| **MQTT Broker** | Run your own MQTT infrastructure | TLS, WebSocket, QUIC, Authentication, Bridging, Monitoring |
+| **MQTT Client** | Connect to any MQTT broker       | Cloud compatible, QUIC multistream, Auto-reconnect, Mock testing |
 
 ## 📦 Installation
 
@@ -20,7 +20,7 @@
 
 ```toml
 [dependencies]
-mqtt5 = "0.10.0"
+mqtt5 = "0.11.0"
 ```
 
 ### CLI Tool
@@ -69,9 +69,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = MqttClient::new("my-device-001");
 
     // Multiple transport options:
-    client.connect("mqtt://localhost:1883").await?;       // TCP
-    // client.connect("mqtts://localhost:8883").await?;   // TLS
-    // client.connect("ws://localhost:8080/mqtt").await?; // WebSocket
+    client.connect("mqtt://localhost:1883").await?;        // TCP
+    // client.connect("mqtts://localhost:8883").await?;    // TLS
+    // client.connect("ws://localhost:8080/mqtt").await?;  // WebSocket
+    // client.connect("quic://localhost:14567").await?;    // QUIC
 
     // Subscribe with callback
     client.subscribe("sensors/+/data", |msg| {
@@ -116,6 +117,7 @@ mqttv5 sub --topic "sensors/+" --verbose
 mqttv5 pub --url mqtt://localhost:1883 --topic test --message "TCP"
 mqttv5 pub --url mqtts://localhost:8883 --topic test --message "TLS"
 mqttv5 pub --url ws://localhost:8080/mqtt --topic test --message "WebSocket"
+mqttv5 pub --url quic://localhost:14567 --topic test --message "QUIC"
 
 # Smart prompting when arguments are missing
 mqttv5 pub
@@ -136,7 +138,7 @@ mqttv5 pub
 
 ### Broker
 
-- Multiple transports: TCP, TLS, WebSocket in a single binary
+- Multiple transports: TCP, TLS, WebSocket, QUIC in a single binary
 - Built-in authentication: Username/password, file-based, argon2
 - Resource monitoring: Connection limits, rate limiting, memory tracking
 - Distributed tracing: OpenTelemetry integration with trace context propagation
@@ -165,6 +167,7 @@ mqttv5 pub
 - TCP transport - Standard MQTT over TCP on port 1883
 - TLS/SSL transport - Secure MQTT over TLS on port 8883
 - WebSocket transport - MQTT over WebSocket for browsers
+- QUIC transport - Modern UDP-based transport with built-in TLS 1.3
 - Certificate authentication - Client certificate validation
 - Username/password authentication - File-based user management
 
@@ -191,6 +194,7 @@ mqttv5 pub
 - Certificate loading from memory (PEM/DER formats)
 - WebSocket transport - MQTT over WebSocket for browsers
 - TLS/SSL support - Secure connections with certificate validation
+- QUIC transport - UDP-based with multistream support and flow headers
 - Session persistence - Survives disconnections with clean_start=false
 
 ### Testing & Development
@@ -199,6 +203,71 @@ mqttv5 pub
 - Property-based testing - 29 tests with Proptest
 - CLI Integration Testing - End-to-end tests
 - Flow control - Broker receive maximum limits
+
+## QUIC Transport
+
+MQTT over QUIC provides modern, high-performance transport with built-in encryption.
+
+### Features
+
+- **Built-in TLS 1.3** - QUIC mandates encryption, no separate TLS handshake
+- **Multistream support** - Parallel MQTT operations without head-of-line blocking
+- **0-RTT connection** - Reduced latency for resumed connections
+- **Connection migration** - Seamless IP address changes (mobile networks)
+- **Flow headers** - Stream state recovery for persistent QoS sessions
+
+### Client Usage
+
+```rust
+use mqtt5::{MqttClient, ConnectOptions};
+use mqtt5::transport::quic::QuicClientConfig;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let client = MqttClient::new("quic-client");
+
+    // Basic QUIC connection (insecure, for testing)
+    client.connect("quic://broker.example.com:14567").await?;
+
+    // With certificate verification
+    let quic_config = QuicClientConfig::builder()
+        .with_ca_cert_file("ca.crt")?
+        .with_server_name("broker.example.com")
+        .build()?;
+
+    let options = ConnectOptions::new("quic-client".to_string())
+        .with_quic_config(quic_config);
+
+    client.connect_with_options("quic://broker.example.com:14567", options).await?;
+
+    Ok(())
+}
+```
+
+### Stream Strategies
+
+QUIC multistream support allows different stream allocation strategies:
+
+| Strategy | Description | Use Case |
+|----------|-------------|----------|
+| `ControlOnly` | Single stream for all packets | Simple deployments |
+| `DataPerPublish` | New stream per QoS 1/2 publish | High-throughput publishing |
+| `DataPerTopic` | Dedicated stream per topic | Topic isolation |
+| `DataPerSubscription` | Stream per subscription | Subscriber isolation |
+
+### Flow Headers
+
+Flow headers enable session state recovery across stream failures:
+
+- **Flow ID** - Unique identifier for stream state tracking
+- **Expire interval** - Time before server discards flow state
+- **Flags** - Recovery mode, persistent QoS, subscription state
+
+### Compatibility
+
+Compatible with MQTT-over-QUIC brokers:
+- EMQX 5.0+ (native QUIC support)
+- Other QUIC-enabled MQTT brokers
 
 ## WASM Browser Support
 
@@ -422,6 +491,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  TCP:       mqtt://localhost:1883");
     println!("  TLS:       mqtts://localhost:8883");
     println!("  WebSocket: ws://localhost:8080/mqtt");
+    println!("  QUIC:      quic://localhost:14567");
 
     broker.run().await?;
     Ok(())
@@ -547,7 +617,7 @@ Distributed tracing with OpenTelemetry support:
 
 ```toml
 [dependencies]
-mqtt5 = { version = "0.10.0", features = ["opentelemetry"] }
+mqtt5 = { version = "0.11.0", features = ["opentelemetry"] }
 ```
 
 ### Features

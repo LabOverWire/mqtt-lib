@@ -27,7 +27,7 @@ broker = ["client", "dep:mqtt5", "dep:tokio"]
 
 [dependencies]
 mqtt5-protocol = { path = "../mqtt5-protocol", version = "0.1" }
-mqtt5 = { path = "../mqtt5", version = "0.10", optional = true, default-features = false, features = [
+mqtt5 = { path = "../mqtt5", version = "0.11", optional = true, default-features = false, features = [
     "tokio",
 ] }
 
