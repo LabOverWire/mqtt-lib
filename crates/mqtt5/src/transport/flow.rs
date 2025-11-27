@@ -211,7 +211,9 @@ impl FlowHeader {
             FLOW_TYPE_CLIENT_DATA => Ok(Self::ClientData(DataFlowHeader::decode(flow_type, buf)?)),
             FLOW_TYPE_SERVER_DATA => Ok(Self::ServerData(DataFlowHeader::decode(flow_type, buf)?)),
             FLOW_TYPE_USER_DEFINED => Ok(Self::UserDefined(buf.split_to(buf.remaining()))),
-            _ => Err(MqttError::ProtocolError(format!("unknown flow type: {flow_type}"))),
+            _ => Err(MqttError::ProtocolError(format!(
+                "unknown flow type: {flow_type}"
+            ))),
         }
     }
 
@@ -250,7 +252,9 @@ pub fn encode_varint(value: u64, buf: &mut BytesMut) {
 
 pub fn decode_varint(buf: &mut Bytes) -> Result<u64> {
     if buf.remaining() < 1 {
-        return Err(MqttError::ProtocolError("insufficient data for varint".into()));
+        return Err(MqttError::ProtocolError(
+            "insufficient data for varint".into(),
+        ));
     }
     let first = buf.get_u8();
     let prefix = first >> 6;
@@ -258,14 +262,18 @@ pub fn decode_varint(buf: &mut Bytes) -> Result<u64> {
         0b00 => Ok((first & 0x3F) as u64),
         0b01 => {
             if buf.remaining() < 1 {
-                return Err(MqttError::ProtocolError("insufficient data for 2-byte varint".into()));
+                return Err(MqttError::ProtocolError(
+                    "insufficient data for 2-byte varint".into(),
+                ));
             }
             let second = buf.get_u8();
             Ok((((first & 0x3F) as u64) << 8) | (second as u64))
         }
         0b10 => {
             if buf.remaining() < 3 {
-                return Err(MqttError::ProtocolError("insufficient data for 4-byte varint".into()));
+                return Err(MqttError::ProtocolError(
+                    "insufficient data for 4-byte varint".into(),
+                ));
             }
             let b1 = buf.get_u8();
             let b2 = buf.get_u8();
@@ -277,7 +285,9 @@ pub fn decode_varint(buf: &mut Bytes) -> Result<u64> {
         }
         0b11 => {
             if buf.remaining() < 7 {
-                return Err(MqttError::ProtocolError("insufficient data for 8-byte varint".into()));
+                return Err(MqttError::ProtocolError(
+                    "insufficient data for 8-byte varint".into(),
+                ));
             }
             let b1 = buf.get_u8();
             let b2 = buf.get_u8();
@@ -439,7 +449,10 @@ mod tests {
         assert_eq!(flags.err_tolerance, decoded.err_tolerance);
         assert_eq!(flags.persistent_qos, decoded.persistent_qos);
         assert_eq!(flags.persistent_topic_alias, decoded.persistent_topic_alias);
-        assert_eq!(flags.persistent_subscriptions, decoded.persistent_subscriptions);
+        assert_eq!(
+            flags.persistent_subscriptions,
+            decoded.persistent_subscriptions
+        );
         assert_eq!(flags.optional_headers, decoded.optional_headers);
     }
 

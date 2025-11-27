@@ -80,6 +80,7 @@ pub struct DirectClientInner {
     pub writer: Option<Arc<tokio::sync::RwLock<UnifiedWriter>>>,
     pub quic_connection: Option<Arc<Connection>>,
     pub stream_strategy: Option<StreamStrategy>,
+    pub quic_datagrams_enabled: bool,
     pub quic_stream_manager: Option<Arc<QuicStreamManager>>,
     pub session: Arc<RwLock<SessionState>>,
     /// Connection status
@@ -131,6 +132,7 @@ impl DirectClientInner {
             writer: None,
             quic_connection: None,
             stream_strategy: None,
+            quic_datagrams_enabled: false,
             quic_stream_manager: None,
             session,
             connected: Arc::new(AtomicBool::new(false)),
@@ -244,10 +246,11 @@ impl DirectClientInner {
                         (UnifiedReader::WebSocket(r), UnifiedWriter::WebSocket(w))
                     }
                     TransportType::Quic(quic) => {
-                        let (w, r, conn, strategy) = (*quic).into_split()?;
+                        let (w, r, conn, strategy, datagrams) = (*quic).into_split()?;
                         let conn_arc = Arc::new(conn);
                         self.quic_connection = Some(conn_arc.clone());
                         self.stream_strategy = Some(strategy);
+                        self.quic_datagrams_enabled = datagrams;
                         self.quic_stream_manager =
                             Some(Arc::new(QuicStreamManager::new(conn_arc, strategy)));
                         (UnifiedReader::Quic(r), UnifiedWriter::Quic(w))
@@ -337,6 +340,7 @@ impl DirectClientInner {
         self.writer = None;
         self.quic_connection = None;
         self.stream_strategy = None;
+        self.quic_datagrams_enabled = false;
 
         Ok(())
     }
@@ -620,6 +624,81 @@ impl DirectClientInner {
             .write_packet(Packet::Publish(publish))
             .await?;
         Ok(())
+    }
+
+    pub fn datagrams_available(&self) -> bool {
+        self.quic_datagrams_enabled
+            && self
+                .quic_connection
+                .as_ref()
+                .and_then(|c| c.max_datagram_size())
+                .is_some()
+    }
+
+    pub fn max_datagram_size(&self) -> Option<usize> {
+        if !self.quic_datagrams_enabled {
+            return None;
+        }
+        self.quic_connection
+            .as_ref()
+            .and_then(|c| c.max_datagram_size())
+    }
+
+    pub fn send_datagram(&self, data: bytes::Bytes) -> Result<()> {
+        if !self.quic_datagrams_enabled {
+            return Err(MqttError::InvalidState(
+                "Datagrams not enabled".to_string(),
+            ));
+        }
+        let conn = self
+            .quic_connection
+            .as_ref()
+            .ok_or(MqttError::NotConnected)?;
+        conn.send_datagram(data)
+            .map_err(|e| MqttError::ConnectionError(format!("Datagram send failed: {e}")))
+    }
+
+    pub async fn send_datagram_wait(&self, data: bytes::Bytes) -> Result<()> {
+        if !self.quic_datagrams_enabled {
+            return Err(MqttError::InvalidState(
+                "Datagrams not enabled".to_string(),
+            ));
+        }
+        let conn = self
+            .quic_connection
+            .as_ref()
+            .ok_or(MqttError::NotConnected)?;
+        conn.send_datagram_wait(data)
+            .await
+            .map_err(|e| MqttError::ConnectionError(format!("Datagram send failed: {e}")))
+    }
+
+    pub async fn read_datagram(&self) -> Result<bytes::Bytes> {
+        if !self.quic_datagrams_enabled {
+            return Err(MqttError::InvalidState(
+                "Datagrams not enabled".to_string(),
+            ));
+        }
+        let conn = self
+            .quic_connection
+            .as_ref()
+            .ok_or(MqttError::NotConnected)?;
+        conn.read_datagram()
+            .await
+            .map_err(|e| MqttError::ConnectionError(format!("Datagram read failed: {e}")))
+    }
+
+    pub fn send_publish_as_datagram(&self, publish: PublishPacket) -> Result<()> {
+        if publish.qos != QoS::AtMostOnce {
+            return Err(MqttError::ProtocolError(
+                "Only QoS 0 publishes can be sent as datagrams".to_string(),
+            ));
+        }
+
+        let mut buf = bytes::BytesMut::new();
+        crate::transport::packet_io::encode_packet_to_buffer(&Packet::Publish(publish), &mut buf)?;
+
+        self.send_datagram(buf.freeze())
     }
 
     /// Create a subscription from filter and reason code

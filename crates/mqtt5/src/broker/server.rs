@@ -725,7 +725,10 @@ impl MqttBroker {
             }
         }
 
-        info!("Number of QUIC endpoints to start: {}", quic_endpoints.len());
+        info!(
+            "Number of QUIC endpoints to start: {}",
+            quic_endpoints.len()
+        );
         for quic_endpoint in quic_endpoints {
             let config = Arc::clone(&self.config);
             let router = Arc::clone(&self.router);
@@ -793,7 +796,10 @@ impl MqttBroker {
             });
         }
 
-        info!("Starting TCP accept tasks for {} listeners", listeners.len());
+        info!(
+            "Starting TCP accept tasks for {} listeners",
+            listeners.len()
+        );
         // Spawn TCP accept tasks (one per listener)
         for listener in listeners {
             let config = Arc::clone(&self.config);

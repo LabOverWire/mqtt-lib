@@ -185,9 +185,7 @@ impl AsyncWrite for QuicStreamWrapper {
     ) -> Poll<std::io::Result<usize>> {
         match Pin::new(&mut self.send).poll_write(cx, buf) {
             Poll::Ready(Ok(n)) => Poll::Ready(Ok(n)),
-            Poll::Ready(Err(e)) => {
-                Poll::Ready(Err(std::io::Error::other(e)))
-            }
+            Poll::Ready(Err(e)) => Poll::Ready(Err(std::io::Error::other(e))),
             Poll::Pending => Poll::Pending,
         }
     }
@@ -204,10 +202,9 @@ impl AsyncWrite for QuicStreamWrapper {
 pub async fn accept_quic_connection(
     endpoint: &Endpoint,
 ) -> Result<(quinn::Connection, SocketAddr)> {
-    let incoming = endpoint
-        .accept()
-        .await
-        .ok_or(MqttError::ConnectionError("QUIC endpoint closed".to_string()))?;
+    let incoming = endpoint.accept().await.ok_or(MqttError::ConnectionError(
+        "QUIC endpoint closed".to_string(),
+    ))?;
 
     let peer_addr = incoming.remote_address();
     debug!("Incoming QUIC connection from {}", peer_addr);
@@ -260,10 +257,7 @@ pub async fn run_quic_connection_handler(
     let (send, recv) = match connection.accept_bi().await {
         Ok(streams) => streams,
         Err(e) => {
-            error!(
-                "Failed to accept control stream from {}: {}",
-                peer_addr, e
-            );
+            error!("Failed to accept control stream from {}: {}", peer_addr, e);
             return;
         }
     };
@@ -302,10 +296,7 @@ pub async fn run_quic_connection_handler(
     tokio::spawn(async move {
         loop {
             if let Ok((_send, recv)) = connection.accept_bi().await {
-                debug!(
-                    "Additional QUIC data stream accepted from {}",
-                    peer_addr
-                );
+                debug!("Additional QUIC data stream accepted from {}", peer_addr);
                 spawn_data_stream_reader(recv, packet_tx.clone(), peer_addr);
             } else {
                 debug!("QUIC connection stream accept loop ended for {}", peer_addr);

@@ -91,7 +91,12 @@ pub struct QuicConfig {
     pub verify_server_cert: bool,
     pub stream_strategy: StreamStrategy,
     pub max_concurrent_streams: Option<usize>,
+    pub enable_datagrams: bool,
+    pub datagram_send_buffer_size: usize,
+    pub datagram_receive_buffer_size: usize,
 }
+
+const DEFAULT_DATAGRAM_BUFFER_SIZE: usize = 65536;
 
 impl QuicConfig {
     #[must_use]
@@ -107,6 +112,9 @@ impl QuicConfig {
             verify_server_cert: true,
             stream_strategy: StreamStrategy::default(),
             max_concurrent_streams: None,
+            enable_datagrams: false,
+            datagram_send_buffer_size: DEFAULT_DATAGRAM_BUFFER_SIZE,
+            datagram_receive_buffer_size: DEFAULT_DATAGRAM_BUFFER_SIZE,
         }
     }
 
@@ -149,6 +157,19 @@ impl QuicConfig {
     #[must_use]
     pub fn with_max_concurrent_streams(mut self, max: usize) -> Self {
         self.max_concurrent_streams = Some(max);
+        self
+    }
+
+    #[must_use]
+    pub fn with_datagrams(mut self, enable: bool) -> Self {
+        self.enable_datagrams = enable;
+        self
+    }
+
+    #[must_use]
+    pub fn with_datagram_buffer_sizes(mut self, send: usize, receive: usize) -> Self {
+        self.datagram_send_buffer_size = send;
+        self.datagram_receive_buffer_size = receive;
         self
     }
 
@@ -216,11 +237,20 @@ impl QuicConfig {
 
         crypto.alpn_protocols = vec![b"mqtt".to_vec()];
 
-        Ok(ClientConfig::new(Arc::new(
-            quinn::crypto::rustls::QuicClientConfig::try_from(crypto).map_err(|e| {
-                MqttError::ConnectionError(format!("Failed to build QUIC config: {e}"))
-            })?,
-        )))
+        let quic_crypto = quinn::crypto::rustls::QuicClientConfig::try_from(crypto).map_err(|e| {
+            MqttError::ConnectionError(format!("Failed to build QUIC config: {e}"))
+        })?;
+
+        let mut client_config = ClientConfig::new(Arc::new(quic_crypto));
+
+        if self.enable_datagrams {
+            let mut transport_config = quinn::TransportConfig::default();
+            transport_config.datagram_send_buffer_size(self.datagram_send_buffer_size);
+            transport_config.datagram_receive_buffer_size(Some(self.datagram_receive_buffer_size));
+            client_config.transport_config(Arc::new(transport_config));
+        }
+
+        Ok(client_config)
     }
 }
 
@@ -248,11 +278,44 @@ impl QuicTransport {
         self.connection.is_some() && self.control_stream.is_some()
     }
 
-    pub fn into_split(mut self) -> Result<(SendStream, RecvStream, Connection, StreamStrategy)> {
+    pub fn into_split(
+        mut self,
+    ) -> Result<(SendStream, RecvStream, Connection, StreamStrategy, bool)> {
         let (send, recv) = self.control_stream.take().ok_or(MqttError::NotConnected)?;
         let conn = self.connection.take().ok_or(MqttError::NotConnected)?;
         let strategy = self.config.stream_strategy;
-        Ok((send, recv, conn, strategy))
+        let datagrams_enabled = self.config.enable_datagrams;
+        Ok((send, recv, conn, strategy, datagrams_enabled))
+    }
+
+    pub fn datagrams_enabled(&self) -> bool {
+        self.config.enable_datagrams
+    }
+
+    pub fn max_datagram_size(&self) -> Option<usize> {
+        self.connection
+            .as_ref()
+            .and_then(Connection::max_datagram_size)
+    }
+
+    pub fn send_datagram(&self, data: bytes::Bytes) -> Result<()> {
+        let conn = self.connection.as_ref().ok_or(MqttError::NotConnected)?;
+        conn.send_datagram(data)
+            .map_err(|e| MqttError::ConnectionError(format!("Datagram send failed: {e}")))
+    }
+
+    pub async fn send_datagram_wait(&self, data: bytes::Bytes) -> Result<()> {
+        let conn = self.connection.as_ref().ok_or(MqttError::NotConnected)?;
+        conn.send_datagram_wait(data)
+            .await
+            .map_err(|e| MqttError::ConnectionError(format!("Datagram send failed: {e}")))
+    }
+
+    pub async fn read_datagram(&self) -> Result<bytes::Bytes> {
+        let conn = self.connection.as_ref().ok_or(MqttError::NotConnected)?;
+        conn.read_datagram()
+            .await
+            .map_err(|e| MqttError::ConnectionError(format!("Datagram read failed: {e}")))
     }
 }
 
@@ -433,5 +496,46 @@ mod tests {
         let transport = QuicTransport::new(config);
 
         assert!(!transport.is_connected());
+    }
+
+    #[test]
+    fn test_quic_config_defaults() {
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 14567);
+        let config = QuicConfig::new(addr, "localhost");
+
+        assert!(!config.enable_datagrams);
+        assert_eq!(config.datagram_send_buffer_size, DEFAULT_DATAGRAM_BUFFER_SIZE);
+        assert_eq!(config.datagram_receive_buffer_size, DEFAULT_DATAGRAM_BUFFER_SIZE);
+    }
+
+    #[test]
+    fn test_quic_config_with_datagrams() {
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 14567);
+        let config = QuicConfig::new(addr, "localhost")
+            .with_datagrams(true)
+            .with_datagram_buffer_sizes(32768, 16384);
+
+        assert!(config.enable_datagrams);
+        assert_eq!(config.datagram_send_buffer_size, 32768);
+        assert_eq!(config.datagram_receive_buffer_size, 16384);
+    }
+
+    #[test]
+    fn test_quic_transport_datagrams_disabled_by_default() {
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 14567);
+        let config = QuicConfig::new(addr, "localhost");
+        let transport = QuicTransport::new(config);
+
+        assert!(!transport.datagrams_enabled());
+        assert!(transport.max_datagram_size().is_none());
+    }
+
+    #[test]
+    fn test_quic_transport_datagrams_enabled() {
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 14567);
+        let config = QuicConfig::new(addr, "localhost").with_datagrams(true);
+        let transport = QuicTransport::new(config);
+
+        assert!(transport.datagrams_enabled());
     }
 }
