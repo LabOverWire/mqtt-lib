@@ -3,9 +3,13 @@ use crate::packet::publish::PublishPacket;
 use crate::session::flow_control::{FlowControlManager, TopicAliasManager};
 use crate::session::limits::LimitsManager;
 use crate::session::queue::{MessageQueue, QueuedMessage};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::session::quic_flow::{FlowRegistry, FlowState};
 use crate::session::retained::{RetainedMessage, RetainedMessageStore};
 use crate::session::subscription::{Subscription, SubscriptionManager};
 use crate::time::{Duration, Instant};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::transport::flow::{FlowFlags, FlowId};
 use crate::types::WillMessage;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -71,6 +75,8 @@ pub struct SessionState {
     will_delay_handle: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
     /// Limits manager for packet size and message expiry
     limits: Arc<RwLock<LimitsManager>>,
+    #[cfg(not(target_arch = "wasm32"))]
+    flow_registry: Arc<RwLock<FlowRegistry>>,
 }
 
 impl SessionState {
@@ -98,6 +104,8 @@ impl SessionState {
             will_message: Arc::new(RwLock::new(None)),
             will_delay_handle: Arc::new(RwLock::new(None)),
             limits: Arc::new(RwLock::new(LimitsManager::with_defaults())),
+            #[cfg(not(target_arch = "wasm32"))]
+            flow_registry: Arc::new(RwLock::new(FlowRegistry::new(256))),
         }
     }
 
@@ -558,6 +566,83 @@ impl SessionState {
     pub async fn complete_pubrel(&self, packet_id: u16) {
         self.touch().await;
         self.unacked_pubrels.write().await.remove(&packet_id);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn flow_registry(&self) -> &Arc<RwLock<FlowRegistry>> {
+        &self.flow_registry
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn register_flow(&self, state: FlowState) -> bool {
+        self.touch().await;
+        self.flow_registry.write().await.register_flow(state)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn create_client_flow(
+        &self,
+        flags: FlowFlags,
+        expire_interval: Option<std::time::Duration>,
+    ) -> Option<FlowId> {
+        self.touch().await;
+        self.flow_registry
+            .write()
+            .await
+            .new_client_flow(flags, expire_interval)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn get_flow(&self, id: FlowId) -> Option<FlowState> {
+        self.flow_registry.read().await.get(id).cloned()
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn remove_flow(&self, id: FlowId) -> Option<FlowState> {
+        self.touch().await;
+        self.flow_registry.write().await.remove(id)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn touch_flow(&self, id: FlowId) {
+        self.flow_registry.write().await.touch(id);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn clear_flows(&self) {
+        self.flow_registry.write().await.clear();
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn get_all_flow_ids(&self) -> Vec<FlowId> {
+        self.flow_registry
+            .read()
+            .await
+            .iter()
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn get_recoverable_flows(&self) -> Vec<(FlowId, FlowFlags)> {
+        self.flow_registry
+            .read()
+            .await
+            .iter()
+            .filter(|(_, state)| !state.is_expired())
+            .map(|(id, state)| (*id, state.flags))
+            .collect()
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn expire_flows(&self) -> Vec<FlowId> {
+        self.flow_registry.write().await.expire_flows()
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn flow_count(&self) -> usize {
+        self.flow_registry.read().await.len()
     }
 }
 

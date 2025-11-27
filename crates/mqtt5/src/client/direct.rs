@@ -10,7 +10,6 @@ use tokio::sync::{oneshot, Mutex, RwLock};
 use tokio::task::JoinHandle;
 use tokio::time::Duration;
 
-use bytes::Bytes;
 use crate::callback::{CallbackId, CallbackManager};
 use crate::error::{MqttError, Result};
 use crate::packet::connect::ConnectPacket;
@@ -35,6 +34,7 @@ use crate::transport::{
 };
 use crate::types::{ConnectOptions, ConnectResult, PublishOptions, PublishResult};
 use crate::QoS;
+use bytes::Bytes;
 use quinn::{Connection, RecvStream, SendStream};
 use std::time::Duration as StdDuration;
 
@@ -96,6 +96,7 @@ pub struct DirectClientInner {
     pub packet_reader_handle: Option<JoinHandle<()>>,
     pub keepalive_handle: Option<JoinHandle<()>>,
     pub quic_stream_acceptor_handle: Option<JoinHandle<()>>,
+    pub flow_expiration_handle: Option<JoinHandle<()>>,
     /// Connection options
     pub options: ConnectOptions,
     /// Packet ID generator
@@ -145,6 +146,7 @@ impl DirectClientInner {
             packet_reader_handle: None,
             keepalive_handle: None,
             quic_stream_acceptor_handle: None,
+            flow_expiration_handle: None,
             options,
             packet_id_generator: PacketIdGenerator::new(),
             pending_subacks: Arc::new(Mutex::new(HashMap::new())),
@@ -1067,9 +1069,69 @@ impl DirectClientInner {
                 tracing::debug!("🔀 QUIC STREAM ACCEPTOR - Task exited");
             }));
             tracing::debug!("🔀 QUIC STREAM ACCEPTOR - Started (always runs to accept server-initiated streams)");
+
+            let session_for_expiration = self.session.clone();
+            self.flow_expiration_handle = Some(tokio::spawn(async move {
+                tracing::debug!("⏰ FLOW EXPIRATION - Task starting");
+                flow_expiration_task(session_for_expiration).await;
+                tracing::debug!("⏰ FLOW EXPIRATION - Task exited");
+            }));
+            tracing::debug!("⏰ FLOW EXPIRATION - Started");
         }
 
         Ok(())
+    }
+
+    pub async fn get_recoverable_flows(&self) -> Vec<(FlowId, FlowFlags)> {
+        self.session.read().await.get_recoverable_flows().await
+    }
+
+    pub async fn recover_flows(&self) -> Result<usize> {
+        let Some(manager) = &self.quic_stream_manager else {
+            return Ok(0);
+        };
+
+        let flows = self.get_recoverable_flows().await;
+        let mut recovered = 0;
+
+        for (flow_id, flags) in flows {
+            let recovery_flags = FlowFlags {
+                clean: false,
+                ..flags
+            };
+
+            match manager.open_recovery_stream(flow_id, recovery_flags).await {
+                Ok((_send, _recv)) => {
+                    tracing::debug!(
+                        flow_id = ?flow_id,
+                        "Opened recovery stream for flow"
+                    );
+                    recovered += 1;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        flow_id = ?flow_id,
+                        error = %e,
+                        "Failed to open recovery stream"
+                    );
+                }
+            }
+        }
+
+        tracing::info!(
+            recovered = recovered,
+            "Flow recovery completed"
+        );
+
+        Ok(recovered)
+    }
+
+    pub async fn clear_flows(&self) {
+        self.session.read().await.clear_flows().await;
+    }
+
+    pub async fn flow_count(&self) -> usize {
+        self.session.read().await.flow_count().await
     }
 
     /// Stop background tasks
@@ -1081,6 +1143,9 @@ impl DirectClientInner {
             handle.abort();
         }
         if let Some(handle) = self.quic_stream_acceptor_handle.take() {
+            handle.abort();
+        }
+        if let Some(handle) = self.flow_expiration_handle.take() {
             handle.abort();
         }
     }
@@ -1205,6 +1270,27 @@ async fn keepalive_task_with_writer(
         if let Err(e) = writer.write().await.write_packet(Packet::PingReq).await {
             tracing::error!("Error sending PINGREQ: {e}");
             break;
+        }
+    }
+}
+
+async fn flow_expiration_task(session: Arc<RwLock<SessionState>>) {
+    let check_interval = Duration::from_secs(60);
+    let mut interval = tokio::time::interval(check_interval);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    interval.tick().await;
+
+    loop {
+        interval.tick().await;
+
+        let expired = session.read().await.expire_flows().await;
+        if !expired.is_empty() {
+            tracing::debug!(
+                count = expired.len(),
+                "Expired {} flows",
+                expired.len()
+            );
         }
     }
 }

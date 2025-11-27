@@ -113,6 +113,40 @@ impl QuicStreamManager {
         Ok((send, recv, flow_id))
     }
 
+    pub async fn open_recovery_stream(
+        &self,
+        flow_id: FlowId,
+        recovery_flags: FlowFlags,
+    ) -> Result<(quinn::SendStream, quinn::RecvStream)> {
+        let (mut send, recv) = self.open_data_stream().await?;
+
+        if self.enable_flow_headers {
+            let mut buf = BytesMut::with_capacity(32);
+            let header = DataFlowHeader::client(flow_id, self.flow_expire_interval, recovery_flags);
+            header.encode(&mut buf);
+
+            send.write_all(&buf).await.map_err(|e| {
+                MqttError::ConnectionError(format!("Failed to write recovery flow header: {e}"))
+            })?;
+
+            tracing::debug!(
+                flow_id = ?flow_id,
+                ?recovery_flags,
+                "Wrote recovery flow header on stream"
+            );
+        }
+
+        Ok((send, recv))
+    }
+
+    pub fn set_recovery_mode(&mut self, enable: bool) {
+        self.flow_flags.clean = !enable;
+    }
+
+    pub fn current_flow_flags(&self) -> FlowFlags {
+        self.flow_flags
+    }
+
     pub async fn send_packet_on_stream(&self, packet: Packet) -> Result<()> {
         let (mut send, _recv, flow_id) = self.open_data_stream_with_flow().await?;
 
