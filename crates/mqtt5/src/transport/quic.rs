@@ -4,7 +4,7 @@ use crate::transport::flow::FlowFlags;
 use crate::transport::packet_io::{encode_packet_to_buffer, PacketReader, PacketWriter};
 use crate::Transport;
 use bytes::{BufMut, BytesMut};
-use mqtt5_protocol::packet::{FixedHeader, Packet};
+use mqtt5_protocol::packet::{FixedHeader, Packet, PacketType};
 use quinn::{ClientConfig, Connection, Endpoint, RecvStream, SendStream};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
@@ -13,6 +13,7 @@ use rustls::{
 };
 use std::net::SocketAddr;
 use std::sync::Arc;
+use tracing::{debug, instrument};
 
 #[derive(Debug)]
 struct NoVerification;
@@ -346,6 +347,7 @@ impl QuicTransport {
 }
 
 impl Transport for QuicTransport {
+    #[instrument(skip(self), fields(server_name = %self.config.server_name, addr = %self.config.addr))]
     async fn connect(&mut self) -> Result<()> {
         if self.connection.is_some() {
             return Err(MqttError::AlreadyConnected);
@@ -384,18 +386,23 @@ impl Transport for QuicTransport {
         Ok(())
     }
 
+    #[instrument(skip(self, buf), fields(buf_len = buf.len()), level = "debug")]
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
         let (_, recv) = self
             .control_stream
             .as_mut()
             .ok_or(MqttError::NotConnected)?;
 
-        recv.read(buf)
+        let n = recv
+            .read(buf)
             .await
             .map_err(|e| MqttError::ConnectionError(format!("QUIC read error: {e}")))?
-            .ok_or(MqttError::ClientClosed)
+            .ok_or(MqttError::ClientClosed)?;
+        debug!(bytes_read = n, "QUIC read complete");
+        Ok(n)
     }
 
+    #[instrument(skip(self, buf), fields(buf_len = buf.len()), level = "debug")]
     async fn write(&mut self, buf: &[u8]) -> Result<()> {
         let (send, _) = self
             .control_stream
@@ -405,11 +412,13 @@ impl Transport for QuicTransport {
         send.write_all(buf)
             .await
             .map_err(|e| MqttError::ConnectionError(format!("QUIC write error: {e}")))?;
-
+        debug!(bytes_written = buf.len(), "QUIC write complete");
         Ok(())
     }
 
+    #[instrument(skip(self))]
     async fn close(&mut self) -> Result<()> {
+        debug!("Closing QUIC connection");
         if let Some((mut send, _)) = self.control_stream.take() {
             let _ = send.finish();
         }
@@ -419,6 +428,7 @@ impl Transport for QuicTransport {
         if let Some(endpoint) = self.endpoint.take() {
             endpoint.wait_idle().await;
         }
+        debug!("QUIC connection closed");
         Ok(())
     }
 
@@ -482,17 +492,51 @@ impl PacketReader for RecvStream {
         }
 
         let mut payload_buf = BytesMut::from(&payload[..]);
-        Packet::decode_from_body(fixed_header.packet_type, &fixed_header, &mut payload_buf)
+        let packet =
+            Packet::decode_from_body(fixed_header.packet_type, &fixed_header, &mut payload_buf)?;
+        debug!(
+            packet_type = ?fixed_header.packet_type,
+            packet_size = fixed_header.remaining_length,
+            "QUIC packet read complete"
+        );
+        Ok(packet)
+    }
+}
+
+fn packet_to_type(packet: &Packet) -> PacketType {
+    match packet {
+        Packet::Connect(_) => PacketType::Connect,
+        Packet::ConnAck(_) => PacketType::ConnAck,
+        Packet::Publish(_) => PacketType::Publish,
+        Packet::PubAck(_) => PacketType::PubAck,
+        Packet::PubRec(_) => PacketType::PubRec,
+        Packet::PubRel(_) => PacketType::PubRel,
+        Packet::PubComp(_) => PacketType::PubComp,
+        Packet::Subscribe(_) => PacketType::Subscribe,
+        Packet::SubAck(_) => PacketType::SubAck,
+        Packet::Unsubscribe(_) => PacketType::Unsubscribe,
+        Packet::UnsubAck(_) => PacketType::UnsubAck,
+        Packet::PingReq => PacketType::PingReq,
+        Packet::PingResp => PacketType::PingResp,
+        Packet::Disconnect(_) => PacketType::Disconnect,
+        Packet::Auth(_) => PacketType::Auth,
     }
 }
 
 impl PacketWriter for SendStream {
     async fn write_packet(&mut self, packet: Packet) -> Result<()> {
+        let packet_type = packet_to_type(&packet);
         let mut buf = BytesMut::with_capacity(1024);
         encode_packet_to_buffer(&packet, &mut buf)?;
+        let packet_size = buf.len();
         self.write_all(&buf)
             .await
             .map_err(|e| MqttError::ConnectionError(format!("QUIC write error: {e}")))?;
+        debug!(
+            packet_type = ?packet_type,
+            packet_size = packet_size,
+            "QUIC packet written"
+        );
         Ok(())
     }
 }

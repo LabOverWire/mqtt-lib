@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
+use tracing::{debug, instrument, trace};
 
 struct StreamInfo {
     stream: SendStream,
@@ -76,6 +77,7 @@ impl QuicStreamManager {
         self
     }
 
+    #[instrument(skip(self), level = "debug")]
     pub async fn open_data_stream(&self) -> Result<(quinn::SendStream, quinn::RecvStream)> {
         let (send, recv) =
             self.connection.open_bi().await.map_err(|e| {
@@ -84,6 +86,7 @@ impl QuicStreamManager {
         Ok((send, recv))
     }
 
+    #[instrument(skip(self), fields(strategy = ?self.strategy), level = "debug")]
     pub async fn open_data_stream_with_flow(
         &self,
     ) -> Result<(quinn::SendStream, quinn::RecvStream, FlowId)> {
@@ -104,7 +107,7 @@ impl QuicStreamManager {
                 MqttError::ConnectionError(format!("Failed to write flow header: {e}"))
             })?;
 
-            tracing::debug!(flow_id = ?flow_id, "Wrote client data flow header on new stream");
+            debug!(flow_id = ?flow_id, "Wrote client data flow header on new stream");
             flow_id
         } else {
             FlowId::client(0)
@@ -129,7 +132,7 @@ impl QuicStreamManager {
                 MqttError::ConnectionError(format!("Failed to write recovery flow header: {e}"))
             })?;
 
-            tracing::debug!(
+            debug!(
                 flow_id = ?flow_id,
                 ?recovery_flags,
                 "Wrote recovery flow header on stream"
@@ -147,6 +150,7 @@ impl QuicStreamManager {
         self.flow_flags
     }
 
+    #[instrument(skip(self, packet), level = "debug")]
     pub async fn send_packet_on_stream(&self, packet: Packet) -> Result<()> {
         let (mut send, _recv, flow_id) = self.open_data_stream_with_flow().await?;
 
@@ -160,7 +164,7 @@ impl QuicStreamManager {
         send.finish()
             .map_err(|e| MqttError::ConnectionError(format!("QUIC stream finish error: {e}")))?;
 
-        tracing::debug!(flow_id = ?flow_id, "Sent packet on dedicated QUIC stream");
+        debug!(flow_id = ?flow_id, "Sent packet on dedicated QUIC stream");
 
         Ok(())
     }
@@ -186,12 +190,12 @@ impl QuicStreamManager {
         for idle_topic in &idle_topics {
             if let Some(mut info) = streams.remove(idle_topic) {
                 let _ = info.stream.finish();
-                tracing::debug!(topic = %idle_topic, flow_id = ?info.flow_id, "Closed idle stream");
+                debug!(topic = %idle_topic, flow_id = ?info.flow_id, "Closed idle stream");
             }
         }
 
         if let Some(info) = streams.remove(topic) {
-            tracing::trace!(topic = %topic, flow_id = ?info.flow_id, "Reusing existing stream for topic");
+            trace!(topic = %topic, flow_id = ?info.flow_id, "Reusing existing stream for topic");
             return Ok((info.stream, info.flow_id));
         }
 
@@ -204,7 +208,7 @@ impl QuicStreamManager {
             if let Some(oldest_topic) = oldest {
                 if let Some(mut info) = streams.remove(&oldest_topic) {
                     let _ = info.stream.finish();
-                    tracing::debug!(
+                    debug!(
                         topic = %oldest_topic,
                         flow_id = ?info.flow_id,
                         "Evicted oldest stream from cache (LRU)"
@@ -214,7 +218,7 @@ impl QuicStreamManager {
         }
         drop(streams);
 
-        tracing::debug!(topic = %topic, "Opening new stream for topic");
+        debug!(topic = %topic, "Opening new stream for topic");
         let (mut send, _recv) = self.connection.open_bi().await.map_err(|e| {
             MqttError::ConnectionError(format!("Failed to open QUIC stream for topic: {e}"))
         })?;
@@ -234,7 +238,7 @@ impl QuicStreamManager {
                 MqttError::ConnectionError(format!("Failed to write flow header: {e}"))
             })?;
 
-            tracing::debug!(topic = %topic, flow_id = ?flow_id, "Wrote flow header for new topic stream");
+            debug!(topic = %topic, flow_id = ?flow_id, "Wrote flow header for new topic stream");
             flow_id
         } else {
             FlowId::client(0)
@@ -254,7 +258,7 @@ impl QuicStreamManager {
             .await
             .map_err(|e| MqttError::ConnectionError(format!("QUIC write error: {e}")))?;
 
-        tracing::debug!(topic = %topic, flow_id = ?flow_id, "Sent packet on topic-specific stream");
+        debug!(topic = %topic, flow_id = ?flow_id, "Sent packet on topic-specific stream");
 
         self.topic_streams.lock().await.insert(
             topic,
@@ -281,7 +285,7 @@ impl QuicStreamManager {
         let mut streams = self.topic_streams.lock().await;
         for (topic, mut info) in streams.drain() {
             let _ = info.stream.finish();
-            tracing::trace!(topic = %topic, flow_id = ?info.flow_id, "Closed topic stream");
+            trace!(topic = %topic, flow_id = ?info.flow_id, "Closed topic stream");
         }
     }
 }

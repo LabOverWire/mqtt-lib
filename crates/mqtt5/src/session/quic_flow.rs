@@ -1,6 +1,7 @@
 use crate::transport::flow::{FlowFlags, FlowId, FlowIdGenerator};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
+use tracing::{debug, warn};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FlowType {
@@ -136,12 +137,18 @@ impl FlowRegistry {
         expire_interval: Option<Duration>,
     ) -> Option<FlowId> {
         if self.flows.len() >= self.max_flows {
+            warn!(
+                current = self.flows.len(),
+                max = self.max_flows,
+                "Flow registry at capacity"
+            );
             return None;
         }
 
         let id = self.id_generator.next_client();
         let state = FlowState::new_client_data(id, flags, expire_interval);
         self.flows.insert(id, state);
+        debug!(flow_id = ?id, flow_type = "ClientData", "Flow registered");
         Some(id)
     }
 
@@ -151,12 +158,18 @@ impl FlowRegistry {
         expire_interval: Option<Duration>,
     ) -> Option<FlowId> {
         if self.flows.len() >= self.max_flows {
+            warn!(
+                current = self.flows.len(),
+                max = self.max_flows,
+                "Flow registry at capacity"
+            );
             return None;
         }
 
         let id = self.id_generator.next_server();
         let state = FlowState::new_server_data(id, flags, expire_interval);
         self.flows.insert(id, state);
+        debug!(flow_id = ?id, flow_type = "ServerData", "Flow registered");
         Some(id)
     }
 
@@ -200,6 +213,14 @@ impl FlowRegistry {
 
         for id in &expired {
             self.flows.remove(id);
+        }
+
+        if !expired.is_empty() {
+            debug!(
+                expired_count = expired.len(),
+                remaining = self.flows.len(),
+                "Flows expired"
+            );
         }
 
         expired

@@ -25,7 +25,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::{broadcast, mpsc, Mutex};
-use tracing::{debug, error, trace, warn};
+use tracing::{debug, error, instrument, trace, warn};
 
 use super::tls_acceptor::TlsAcceptorConfig;
 
@@ -205,6 +205,7 @@ impl AsyncWrite for QuicStreamWrapper {
     }
 }
 
+#[instrument(skip(endpoint))]
 pub async fn accept_quic_connection(
     endpoint: &Endpoint,
 ) -> Result<(quinn::Connection, SocketAddr)> {
@@ -229,6 +230,7 @@ pub async fn accept_quic_connection(
     Ok((connection, peer_addr))
 }
 
+#[instrument(skip(connection), fields(peer_addr = %peer_addr))]
 pub async fn accept_quic_stream(
     connection: &quinn::Connection,
     peer_addr: SocketAddr,
@@ -253,6 +255,7 @@ fn is_flow_header_byte(b: u8) -> bool {
     )
 }
 
+#[instrument(skip(recv), level = "debug")]
 async fn try_read_flow_header(
     recv: &mut RecvStream,
 ) -> Result<Option<(FlowId, FlowFlags, Option<Duration>)>> {
@@ -318,6 +321,7 @@ async fn try_read_flow_header(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[instrument(skip(connection, config, router, auth_provider, storage, stats, resource_monitor, shutdown_rx), fields(peer_addr = %peer_addr))]
 pub async fn run_quic_connection_handler(
     connection: Arc<Connection>,
     peer_addr: SocketAddr,

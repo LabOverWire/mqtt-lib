@@ -236,10 +236,11 @@ impl BridgeConnection {
     /// Attempts to connect without TLS to primary and backup brokers
     async fn connect_plain(&self, options: &ConnectOptions) -> Result<()> {
         let connection_string = format!("mqtt://{}", self.config.remote_address);
-        match self
-            .client
-            .connect_with_options(&connection_string, options.clone())
-            .await
+        match Box::pin(
+            self.client
+                .connect_with_options(&connection_string, options.clone()),
+        )
+        .await
         {
             Ok(_) => {
                 info!(
@@ -257,10 +258,11 @@ impl BridgeConnection {
 
         for backup in &self.config.backup_brokers {
             let backup_connection_string = format!("mqtt://{}", backup);
-            match self
-                .client
-                .connect_with_options(&backup_connection_string, options.clone())
-                .await
+            match Box::pin(
+                self.client
+                    .connect_with_options(&backup_connection_string, options.clone()),
+            )
+            .await
             {
                 Ok(_) => {
                     info!(

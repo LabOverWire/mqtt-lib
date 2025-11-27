@@ -1536,7 +1536,7 @@ impl MqttClientTrait for MqttClient {
         address: &'a str,
         options: ConnectOptions,
     ) -> impl Future<Output = Result<ConnectResult>> + Send + 'a {
-        async move { self.connect_with_options(address, options).await }
+        async move { Box::pin(self.connect_with_options(address, options)).await }
     }
 
     fn disconnect(&self) -> impl Future<Output = Result<()>> + Send + '_ {
