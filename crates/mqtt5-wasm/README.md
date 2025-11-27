@@ -12,9 +12,17 @@ MQTT v5.0 WebAssembly client and broker for browser environments.
 
 ## Installation
 
+### npm (browser/bundler)
+
+```bash
+npm install mqtt5-wasm
+```
+
+### Cargo (Rust)
+
 ```toml
 [dependencies]
-mqtt5-wasm = "0.10"
+mqtt5-wasm = "0.1.2"
 ```
 
 Build with wasm-pack:
@@ -26,7 +34,7 @@ wasm-pack build --target web --features client,broker
 ## Usage
 
 ```javascript
-import init, { WasmMqttClient } from "./pkg/mqtt5_wasm.js";
+import init, { WasmMqttClient } from "mqtt5-wasm";
 
 await init();
 const client = new WasmMqttClient("browser-client");
