@@ -1095,10 +1095,7 @@ impl DirectClientInner {
         let mut recovered = 0;
 
         for (flow_id, flags) in flows {
-            let recovery_flags = FlowFlags {
-                clean: 0,
-                ..flags
-            };
+            let recovery_flags = FlowFlags { clean: 0, ..flags };
 
             match manager.open_recovery_stream(flow_id, recovery_flags).await {
                 Ok((_send, _recv)) => {

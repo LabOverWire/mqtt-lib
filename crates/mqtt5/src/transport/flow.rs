@@ -1,5 +1,5 @@
-use bebytes::BeBytes;
 use crate::error::{MqttError, Result};
+use bebytes::BeBytes;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 pub const FLOW_TYPE_CONTROL: u8 = 0x11;

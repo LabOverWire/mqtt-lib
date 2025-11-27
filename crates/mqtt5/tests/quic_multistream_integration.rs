@@ -118,11 +118,7 @@ async fn test_flow_state_topic_aliases() {
 
 #[tokio::test]
 async fn test_flow_state_pending_packet_ids() {
-    let mut state = FlowState::new_client_data(
-        FlowId::client(1),
-        FlowFlags::default(),
-        None,
-    );
+    let mut state = FlowState::new_client_data(FlowId::client(1), FlowFlags::default(), None);
 
     state.add_pending_packet_id(100);
     state.add_pending_packet_id(200);
@@ -181,9 +177,15 @@ async fn test_flow_id_encoding() {
 async fn test_flow_registry_subscription_lookup() {
     let mut registry = FlowRegistry::new(100);
 
-    let id1 = registry.new_client_flow(FlowFlags::default(), None).unwrap();
-    let id2 = registry.new_client_flow(FlowFlags::default(), None).unwrap();
-    let id3 = registry.new_client_flow(FlowFlags::default(), None).unwrap();
+    let id1 = registry
+        .new_client_flow(FlowFlags::default(), None)
+        .unwrap();
+    let id2 = registry
+        .new_client_flow(FlowFlags::default(), None)
+        .unwrap();
+    let id3 = registry
+        .new_client_flow(FlowFlags::default(), None)
+        .unwrap();
 
     registry
         .get_mut(id1)
@@ -228,7 +230,9 @@ async fn test_flow_registry_client_server_iteration() {
 #[tokio::test]
 async fn test_flow_registry_touch_updates_activity() {
     let mut registry = FlowRegistry::new(100);
-    let id = registry.new_client_flow(FlowFlags::default(), None).unwrap();
+    let id = registry
+        .new_client_flow(FlowFlags::default(), None)
+        .unwrap();
 
     let initial_time = registry.get(id).unwrap().last_activity;
     std::thread::sleep(std::time::Duration::from_millis(10));
@@ -684,11 +688,7 @@ async fn test_flow_state_types() {
     assert_eq!(client_data.flow_type, FlowType::ClientData);
     assert_eq!(client_data.expire_interval, Some(Duration::from_secs(300)));
 
-    let server_data = FlowState::new_server_data(
-        FlowId::server(99),
-        FlowFlags::default(),
-        None,
-    );
+    let server_data = FlowState::new_server_data(FlowId::server(99), FlowFlags::default(), None);
     assert_eq!(server_data.flow_type, FlowType::ServerData);
     assert!(server_data.expire_interval.is_none());
 }
