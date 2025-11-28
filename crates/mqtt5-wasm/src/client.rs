@@ -1506,6 +1506,17 @@ impl WasmMqttClient {
         qos: QoS,
         callback: Box<dyn Fn(RustMessage)>,
     ) -> Result<u16, JsValue> {
+        self.subscribe_with_callback_internal_opts(topic, qos, false, callback)
+            .await
+    }
+
+    pub async fn subscribe_with_callback_internal_opts(
+        &self,
+        topic: &str,
+        qos: QoS,
+        no_local: bool,
+        callback: Box<dyn Fn(RustMessage)>,
+    ) -> Result<u16, JsValue> {
         loop {
             match self.state.try_borrow() {
                 Ok(state) => {
@@ -1543,11 +1554,14 @@ impl WasmMqttClient {
             }
         }
 
+        let mut options = mqtt5_protocol::packet::subscribe::SubscriptionOptions::new(qos);
+        options.no_local = no_local;
+
         let subscribe_packet = SubscribePacket {
             packet_id,
             properties: Properties::default(),
-            filters: vec![mqtt5_protocol::packet::subscribe::TopicFilter::new(
-                topic, qos,
+            filters: vec![mqtt5_protocol::packet::subscribe::TopicFilter::with_options(
+                topic, options,
             )],
         };
 

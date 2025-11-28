@@ -346,9 +346,8 @@ impl BridgeConnection {
                             packet.properties = pub_props.into();
                             packet.retain = msg.retain;
 
-                            // Forward to local broker
                             tokio::spawn(async move {
-                                router.route_message(&packet, None).await;
+                                router.route_message_local_only(&packet, None).await;
                             });
                         })
                         .await?;
