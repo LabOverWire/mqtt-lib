@@ -10,6 +10,7 @@ echo "Copying to example directories..."
 cp -r pkg examples/websocket/
 cp -r pkg examples/local-broker/
 cp -r pkg examples/qos2/
+cp -r pkg examples/broker-bridge/
 
 echo "✨ Build complete!"
 echo ""
@@ -21,6 +22,10 @@ echo "  python3 -m http.server 8000"
 echo ""
 echo "Local broker (in-tab):"
 echo "  cd examples/local-broker"
+echo "  python3 -m http.server 8000"
+echo ""
+echo "Broker Bridge (two brokers):"
+echo "  cd examples/broker-bridge"
 echo "  python3 -m http.server 8000"
 echo ""
 echo "QoS 2 Testing:"

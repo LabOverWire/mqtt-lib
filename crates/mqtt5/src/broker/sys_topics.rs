@@ -9,6 +9,7 @@ use crate::time::{Duration, SystemTime};
 use crate::QoS;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
 use tokio::time::interval;
 use tracing::debug;
 
@@ -150,6 +151,7 @@ impl SysTopicsProvider {
     }
 
     /// Start publishing $SYS topics
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn start(self) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             let mut interval = interval(self.update_interval);
