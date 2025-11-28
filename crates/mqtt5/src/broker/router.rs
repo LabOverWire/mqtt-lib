@@ -262,140 +262,10 @@ impl MessageRouter {
         }
     }
 
-    /// Routes a publish message to all matching subscribers
-    #[allow(clippy::too_many_lines)]
+    /// Routes a publish message to all matching subscribers and forwards to bridges
     pub async fn route_message(&self, publish: &PublishPacket, publishing_client_id: Option<&str>) {
-        trace!("Routing message to topic: {}", publish.topic_name);
-
-        // Handle retained messages
-        if publish.retain {
-            let mut retained = self.retained_messages.write().await;
-            if publish.payload.is_empty() {
-                // Empty payload means delete retained message
-                retained.remove(&publish.topic_name);
-                debug!("Deleted retained message for topic: {}", publish.topic_name);
-
-                // Remove from storage
-                if let Some(ref storage) = self.storage {
-                    if let Err(e) = storage.remove_retained_message(&publish.topic_name).await {
-                        tracing::error!("Failed to remove retained message from storage: {}", e);
-                    }
-                }
-            } else {
-                let retained_msg = RetainedMessage::new(publish.clone());
-                retained.insert(publish.topic_name.clone(), retained_msg.clone());
-                debug!("Stored retained message for topic: {}", publish.topic_name);
-
-                if let Some(ref storage) = self.storage {
-                    if let Err(e) = storage
-                        .store_retained_message(&publish.topic_name, retained_msg)
-                        .await
-                    {
-                        tracing::error!("Failed to store retained message to storage: {}", e);
-                    }
-                }
-            }
-        }
-
-        // Find matching subscriptions
-        let subscriptions = self.subscriptions.read().await;
-        let clients = self.clients.read().await;
-
-        // Group subscriptions by share group
-        let mut share_groups: HashMap<String, Vec<&Subscription>> = HashMap::new();
-        let mut regular_subs: Vec<&Subscription> = Vec::new();
-
-        for (topic_filter, subs) in subscriptions.iter() {
-            if topic_matches_filter(&publish.topic_name, topic_filter) {
-                for sub in subs {
-                    if let Some(ref group) = sub.share_group {
-                        share_groups.entry(group.clone()).or_default().push(sub);
-                    } else {
-                        regular_subs.push(sub);
-                    }
-                }
-            }
-        }
-
-        // Process shared subscriptions - one delivery per group
-        for (group_name, group_subs) in share_groups {
-            // Find online subscribers in this group
-            let online_subs: Vec<&Subscription> = group_subs
-                .iter()
-                .filter(|sub| clients.contains_key(&sub.client_id))
-                .copied()
-                .collect();
-
-            if !online_subs.is_empty() {
-                // Get round-robin counter for this group
-                let counters = self.share_group_counters.read().await;
-                if let Some(counter) = counters.get(&group_name) {
-                    let index = counter.fetch_add(1, Ordering::Relaxed) % online_subs.len();
-                    let chosen_sub = online_subs[index];
-
-                    // Deliver to chosen subscriber
-                    self.deliver_to_subscriber(
-                        chosen_sub,
-                        publish,
-                        &clients,
-                        self.storage.as_ref(),
-                        publishing_client_id,
-                    )
-                    .await;
-                }
-            } else if !group_subs.is_empty() {
-                // All subscribers offline - queue for first subscriber if QoS > 0
-                let sub = group_subs[0];
-                if self.storage.is_some() && sub.qos != QoS::AtMostOnce {
-                    if let Some(ref storage) = self.storage {
-                        let mut message = publish.clone();
-                        message.qos = sub.qos;
-
-                        let queued_msg =
-                            QueuedMessage::new(message, sub.client_id.clone(), sub.qos, None);
-                        if let Err(e) = storage.queue_message(queued_msg).await {
-                            error!(
-                                "Failed to queue message for offline shared subscriber {}: {}",
-                                sub.client_id, e
-                            );
-                        }
-                    }
-                }
-            }
-        }
-
-        // Process regular (non-shared) subscriptions
-        for sub in regular_subs {
-            self.deliver_to_subscriber(
-                sub,
-                publish,
-                &clients,
-                self.storage.as_ref(),
-                publishing_client_id,
-            )
+        self.route_message_internal(publish, publishing_client_id, true)
             .await;
-        }
-
-        // Forward to bridges if configured
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let bridge_manager_weak = self.bridge_manager.read().await.clone();
-            if let Some(weak) = bridge_manager_weak {
-                if let Some(bridge_manager) = weak.upgrade() {
-                    if let Err(e) = bridge_manager.handle_outgoing(publish).await {
-                        error!("Failed to forward message to bridges: {}", e);
-                    }
-                }
-            }
-        }
-
-        #[cfg(target_arch = "wasm32")]
-        {
-            let callback = self.wasm_bridge_callback.read().await;
-            if let Some(ref cb) = *callback {
-                cb(publish);
-            }
-        }
     }
 
     /// Routes a publish message to local subscribers only, without forwarding to bridges.
@@ -412,10 +282,25 @@ impl MessageRouter {
         publish: &PublishPacket,
         publishing_client_id: Option<&str>,
     ) {
-        trace!(
-            "Routing message locally (no bridge) to topic: {}",
-            publish.topic_name
-        );
+        self.route_message_internal(publish, publishing_client_id, false)
+            .await;
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn route_message_internal(
+        &self,
+        publish: &PublishPacket,
+        publishing_client_id: Option<&str>,
+        forward_to_bridges: bool,
+    ) {
+        if forward_to_bridges {
+            trace!("Routing message to topic: {}", publish.topic_name);
+        } else {
+            trace!(
+                "Routing message locally (no bridge) to topic: {}",
+                publish.topic_name
+            );
+        }
 
         if publish.retain {
             let mut retained = self.retained_messages.write().await;
@@ -513,6 +398,28 @@ impl MessageRouter {
                 publishing_client_id,
             )
             .await;
+        }
+
+        if forward_to_bridges {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let bridge_manager_weak = self.bridge_manager.read().await.clone();
+                if let Some(weak) = bridge_manager_weak {
+                    if let Some(bridge_manager) = weak.upgrade() {
+                        if let Err(e) = bridge_manager.handle_outgoing(publish).await {
+                            error!("Failed to forward message to bridges: {}", e);
+                        }
+                    }
+                }
+            }
+
+            #[cfg(target_arch = "wasm32")]
+            {
+                let callback = self.wasm_bridge_callback.read().await;
+                if let Some(ref cb) = *callback {
+                    cb(publish);
+                }
+            }
         }
     }
 
