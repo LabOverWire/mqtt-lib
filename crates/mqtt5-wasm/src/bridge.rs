@@ -304,16 +304,16 @@ impl WasmBridgeManager {
         let name = config.name.clone();
 
         if self.bridges.borrow().contains_key(&name) {
-            return Err(JsValue::from_str(&format!("Bridge '{name}' already exists")));
+            return Err(JsValue::from_str(&format!(
+                "Bridge '{name}' already exists"
+            )));
         }
 
-        let connection =
-            WasmBridgeConnection::new(config, self.router.clone()).map_err(|e| JsValue::from_str(&e))?;
+        let connection = WasmBridgeConnection::new(config, self.router.clone())
+            .map_err(|e| JsValue::from_str(&e))?;
         connection.connect(port).await?;
 
-        self.bridges
-            .borrow_mut()
-            .insert(name, Rc::new(connection));
+        self.bridges.borrow_mut().insert(name, Rc::new(connection));
         Ok(())
     }
 

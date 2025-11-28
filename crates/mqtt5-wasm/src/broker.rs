@@ -99,7 +99,9 @@ impl WasmBrokerConfig {
     fn to_broker_config(&self) -> BrokerConfig {
         BrokerConfig {
             max_clients: self.max_clients as usize,
-            session_expiry_interval: Duration::from_secs(u64::from(self.session_expiry_interval_secs)),
+            session_expiry_interval: Duration::from_secs(u64::from(
+                self.session_expiry_interval_secs,
+            )),
             max_packet_size: self.max_packet_size as usize,
             topic_alias_maximum: self.topic_alias_maximum,
             retain_available: self.retain_available,
@@ -107,7 +109,9 @@ impl WasmBrokerConfig {
             wildcard_subscription_available: self.wildcard_subscription_available,
             subscription_identifier_available: self.subscription_identifier_available,
             shared_subscription_available: self.shared_subscription_available,
-            server_keep_alive: self.server_keep_alive_secs.map(|s| Duration::from_secs(u64::from(s))),
+            server_keep_alive: self
+                .server_keep_alive_secs
+                .map(|s| Duration::from_secs(u64::from(s))),
             ..Default::default()
         }
     }
