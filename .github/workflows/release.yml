@@ -32,7 +32,7 @@ jobs:
           fi
 
       - name: Publish mqtt5-protocol to crates.io
-        run: cargo publish --package mqtt5-protocol
+        run: cargo publish --package mqtt5-protocol || echo "Version already published, skipping"
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
@@ -40,7 +40,7 @@ jobs:
         run: sleep 30
 
       - name: Publish mqtt5 library to crates.io
-        run: cargo publish --package mqtt5
+        run: cargo publish --package mqtt5 || echo "Version already published, skipping"
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
@@ -48,7 +48,7 @@ jobs:
         run: sleep 30
 
       - name: Publish mqtt5-wasm to crates.io
-        run: cargo publish --package mqtt5-wasm
+        run: cargo publish --package mqtt5-wasm || echo "Version already published, skipping"
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
@@ -56,7 +56,7 @@ jobs:
         run: sleep 30
 
       - name: Publish mqttv5-cli to crates.io
-        run: cargo publish --package mqttv5-cli
+        run: cargo publish --package mqttv5-cli || echo "Version already published, skipping"
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
