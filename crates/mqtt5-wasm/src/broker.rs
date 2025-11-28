@@ -161,7 +161,7 @@ impl WasmBroker {
 
         let bridge_manager = Rc::new(RefCell::new(WasmBridgeManager::new(Arc::clone(&router))));
 
-        Ok(WasmBroker {
+        let broker = WasmBroker {
             config,
             router,
             auth_provider,
@@ -169,7 +169,11 @@ impl WasmBroker {
             stats,
             resource_monitor,
             bridge_manager,
-        })
+        };
+
+        broker.setup_bridge_callback();
+
+        Ok(broker)
     }
 
     #[wasm_bindgen]
@@ -258,5 +262,22 @@ impl WasmBroker {
     pub async fn stop_all_bridges(&self) {
         let manager = self.bridge_manager.borrow().clone();
         manager.stop_all().await;
+    }
+
+    fn setup_bridge_callback(&self) {
+        let bridge_manager = self.bridge_manager.clone();
+        let router = Arc::clone(&self.router);
+
+        wasm_bindgen_futures::spawn_local(async move {
+            router
+                .set_wasm_bridge_callback(move |packet| {
+                    let manager = bridge_manager.borrow().clone();
+                    let packet = packet.clone();
+                    wasm_bindgen_futures::spawn_local(async move {
+                        manager.forward_to_bridges(&packet).await;
+                    });
+                })
+                .await;
+        });
     }
 }

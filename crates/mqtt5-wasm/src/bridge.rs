@@ -185,9 +185,10 @@ impl WasmBridgeConnection {
                     let qos = mapping.qos_level();
 
                     self.client
-                        .subscribe_with_callback_internal(
+                        .subscribe_with_callback_internal_opts(
                             &remote_topic,
                             qos,
+                            true,
                             Box::new(move |msg: RustMessage| {
                                 let router = router.clone();
                                 let local_prefix = local_prefix.clone();
@@ -208,7 +209,7 @@ impl WasmBridgeConnection {
                                 packet.retain = msg.retain;
 
                                 wasm_bindgen_futures::spawn_local(async move {
-                                    router.route_message(&packet, None).await;
+                                    router.route_message_local_only(&packet, None).await;
                                 });
                             }),
                         )

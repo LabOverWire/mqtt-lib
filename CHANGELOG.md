@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.1] - 2025-11-28
+
+### Fixed
+
+- **Bridge message loop prevention** for bidirectional bridges
+  - Added `route_message_local_only()` method to MessageRouter
+  - Native bridge connections now use local-only routing for incoming messages
+  - WASM bridge connections updated to prevent message echo loops
+  - Prevents infinite loops when bridges forward messages back and forth
+
+- **WASM bridge `no_local` subscription support**
+  - Bridge subscriptions now use `no_local=true` to prevent receiving own messages
+  - Added `subscribe_with_callback_internal_opts()` for internal bridge use
+  - Fixes client echo issue in bidirectional WASM broker bridges
+
+### Added
+
+- **WASM broker-bridge example** with comprehensive documentation
+  - Two-broker bidirectional bridge demonstration
+  - Visual diagram of bridge architecture
+  - Explanation of `no_local` flag importance for bridges
+  - Debug logging panel for message flow tracing
+
+- **Broker readiness signal** via `ready_receiver()` method
+  - Returns a `watch::Receiver<bool>` that signals when broker is accepting connections
+  - Eliminates need for arbitrary sleep delays in tests and applications
+  - Used throughout bridge tests for reliable startup synchronization
+
+### Changed
+
+- Cargo.toml keyword changed from "iot" to "client" for crates.io
+
 ## [0.11.0] - 2025-11-26
 
 ### Added

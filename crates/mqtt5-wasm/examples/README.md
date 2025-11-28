@@ -12,6 +12,10 @@ Connect to remote MQTT brokers via WebSocket.
 
 MQTT broker running in a browser tab using MessagePort.
 
+### Broker Bridge (broker-bridge/)
+
+Two in-browser brokers connected via MessagePort bridge, demonstrating bidirectional message forwarding.
+
 ## Quick Start
 
 ### 1. Build the WASM Package
@@ -53,6 +57,17 @@ python3 -m http.server 8000
 
 Open http://localhost:8000 in your browser.
 
+#### Broker Bridge
+
+Two brokers connected via MessagePort bridge with bidirectional message forwarding.
+
+```bash
+cd broker-bridge
+python3 -m http.server 8000
+```
+
+Open http://localhost:8000 in your browser.
+
 ## Features Demonstrated
 
 ### Local Broker Features
@@ -82,6 +97,39 @@ The in-tab broker:
 - Memory-only storage (no persistence)
 - No authentication (AllowAllAuthProvider)
 - Supports all core MQTT v5.0 features (QoS, retained messages, subscriptions)
+
+### Broker Bridge Features
+
+```javascript
+import init, {
+  WasmBroker,
+  WasmBridgeConfig,
+  WasmBridgeDirection,
+  WasmTopicMapping
+} from "./pkg/mqtt5_wasm.js";
+
+await init();
+
+const brokerA = new WasmBroker();
+const brokerB = new WasmBroker();
+
+const bridgeConfig = new WasmBridgeConfig("a-to-b");
+
+const topicMapping = new WasmTopicMapping("sensors/#", WasmBridgeDirection.Both);
+topicMapping.qos = 1;
+bridgeConfig.add_topic(topicMapping);
+
+const bridgePort = brokerB.create_client_port();
+await brokerA.add_bridge(bridgeConfig, bridgePort);
+```
+
+The broker bridge:
+
+- Connects two in-browser brokers via MessagePort
+- Supports In, Out, and Both (bidirectional) directions
+- Topic filtering with wildcard patterns
+- QoS level configuration per topic mapping
+- Optional local and remote topic prefixes
 
 ### Connection Events
 
@@ -180,7 +228,7 @@ The WASM build has the following constraints compared to the native Rust library
 ### Network Limitations
 
 - **No server sockets**: Cannot listen for incoming TCP/TLS connections
-- **No broker bridging**: Network-based broker-to-broker connections unavailable
+- **MessagePort bridging only**: Broker-to-broker connections use MessagePort, not network sockets (see broker-bridge example)
 - **No file-based configuration**: All configuration must be done programmatically
 
 These limitations are inherent to the browser sandbox security model. For production MQTT deployments, use the native Rust library.

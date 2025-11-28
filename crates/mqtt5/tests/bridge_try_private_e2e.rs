@@ -1,30 +1,44 @@
 use mqtt5::broker::bridge::{BridgeConfig, BridgeDirection};
-use mqtt5::broker::{BrokerConfig, MqttBroker};
+use mqtt5::broker::{BrokerConfig, MqttBroker, StorageConfig};
 use mqtt5::client::MqttClient;
 use mqtt5::time::Duration;
 use mqtt5::QoS;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tokio::time::{sleep, timeout};
+use tokio::time::timeout;
 
-#[tokio::test]
+fn test_broker_config() -> BrokerConfig {
+    BrokerConfig::default()
+        .with_bind_address("127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap())
+        .with_max_clients(100)
+        .with_storage(StorageConfig::new().with_persistence(false))
+}
+
+async fn wait_for_ready(mut rx: tokio::sync::watch::Receiver<bool>) {
+    while !*rx.borrow_and_update() {
+        rx.changed().await.expect("broker ready channel closed");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_bridge_with_try_private_true() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter("mqtt5=debug,warn")
         .try_init();
 
-    let broker2_config = BrokerConfig::default()
-        .with_bind_address("127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap())
-        .with_max_clients(100);
+    let broker2_config = test_broker_config();
 
     let mut broker2 = MqttBroker::with_config(broker2_config).await.unwrap();
     let broker2_addr = broker2.local_addr().expect("Failed to get broker2 address");
+    let broker2_ready = broker2.ready_receiver();
 
     let broker2_handle = tokio::spawn(async move {
-        let _ = broker2.run().await;
+        if let Err(e) = broker2.run().await {
+            eprintln!("broker2 run() error: {e}");
+        }
     });
 
-    sleep(Duration::from_millis(200)).await;
+    wait_for_ready(broker2_ready).await;
 
     let mut bridge_config = BridgeConfig::new("test-bridge", broker2_addr.to_string()).add_topic(
         "sensors/#",
@@ -33,23 +47,20 @@ async fn test_bridge_with_try_private_true() {
     );
     bridge_config.try_private = true;
 
-    let broker1_config = BrokerConfig::default()
-        .with_bind_address("127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap())
-        .with_max_clients(100);
+    let mut broker1_config = test_broker_config();
+    broker1_config.bridges = vec![bridge_config];
 
-    let mut broker1_config_with_bridge = broker1_config.clone();
-    broker1_config_with_bridge.bridges = vec![bridge_config];
-
-    let mut broker1 = MqttBroker::with_config(broker1_config_with_bridge)
-        .await
-        .unwrap();
+    let mut broker1 = MqttBroker::with_config(broker1_config).await.unwrap();
     let broker1_addr = broker1.local_addr().expect("Failed to get broker1 address");
+    let broker1_ready = broker1.ready_receiver();
 
     let broker1_handle = tokio::spawn(async move {
-        let _ = broker1.run().await;
+        if let Err(e) = broker1.run().await {
+            eprintln!("broker1 run() error: {e}");
+        }
     });
 
-    sleep(Duration::from_millis(500)).await;
+    wait_for_ready(broker1_ready).await;
 
     let client1 = MqttClient::new("publisher");
     let client2 = MqttClient::new("subscriber");
@@ -57,11 +68,11 @@ async fn test_bridge_with_try_private_true() {
     client1
         .connect(&format!("mqtt://{broker1_addr}"))
         .await
-        .unwrap();
+        .expect("client1 connect failed");
     client2
         .connect(&format!("mqtt://{broker2_addr}"))
         .await
-        .unwrap();
+        .expect("client2 connect failed");
 
     let (tx, mut rx) = mpsc::channel(10);
 
@@ -72,7 +83,7 @@ async fn test_bridge_with_try_private_true() {
         .await
         .unwrap();
 
-    sleep(Duration::from_millis(200)).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
 
     client1
         .publish_qos1("sensors/temp/data", b"25.5C")
@@ -93,46 +104,44 @@ async fn test_bridge_with_try_private_true() {
     broker2_handle.abort();
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_bridge_with_try_private_false() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter("mqtt5=debug,warn")
         .try_init();
 
-    let broker2_config = BrokerConfig::default()
-        .with_bind_address("127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap())
-        .with_max_clients(100);
+    let broker2_config = test_broker_config();
 
     let mut broker2 = MqttBroker::with_config(broker2_config).await.unwrap();
     let broker2_addr = broker2.local_addr().expect("Failed to get broker2 address");
+    let broker2_ready = broker2.ready_receiver();
 
     let broker2_handle = tokio::spawn(async move {
-        let _ = broker2.run().await;
+        if let Err(e) = broker2.run().await {
+            eprintln!("broker2 run() error: {e}");
+        }
     });
 
-    sleep(Duration::from_millis(200)).await;
+    wait_for_ready(broker2_ready).await;
 
     let mut bridge_config = BridgeConfig::new("test-bridge-no-private", broker2_addr.to_string())
         .add_topic("commands/#", BridgeDirection::Out, QoS::AtLeastOnce);
     bridge_config.try_private = false;
 
-    let broker1_config = BrokerConfig::default()
-        .with_bind_address("127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap())
-        .with_max_clients(100);
+    let mut broker1_config = test_broker_config();
+    broker1_config.bridges = vec![bridge_config];
 
-    let mut broker1_config_with_bridge = broker1_config.clone();
-    broker1_config_with_bridge.bridges = vec![bridge_config];
-
-    let mut broker1 = MqttBroker::with_config(broker1_config_with_bridge)
-        .await
-        .unwrap();
+    let mut broker1 = MqttBroker::with_config(broker1_config).await.unwrap();
     let broker1_addr = broker1.local_addr().expect("Failed to get broker1 address");
+    let broker1_ready = broker1.ready_receiver();
 
     let broker1_handle = tokio::spawn(async move {
-        let _ = broker1.run().await;
+        if let Err(e) = broker1.run().await {
+            eprintln!("broker1 run() error: {e}");
+        }
     });
 
-    sleep(Duration::from_millis(500)).await;
+    wait_for_ready(broker1_ready).await;
 
     let client1 = MqttClient::new("publisher2");
     let client2 = MqttClient::new("subscriber2");
@@ -140,11 +149,11 @@ async fn test_bridge_with_try_private_false() {
     client1
         .connect(&format!("mqtt://{broker1_addr}"))
         .await
-        .unwrap();
+        .expect("client1 connect failed");
     client2
         .connect(&format!("mqtt://{broker2_addr}"))
         .await
-        .unwrap();
+        .expect("client2 connect failed");
 
     let (tx, mut rx) = mpsc::channel(10);
 
@@ -155,7 +164,7 @@ async fn test_bridge_with_try_private_false() {
         .await
         .unwrap();
 
-    sleep(Duration::from_millis(200)).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
 
     client1
         .publish_qos1("commands/hvac/on", b"true")
@@ -179,46 +188,44 @@ async fn test_bridge_with_try_private_false() {
     broker2_handle.abort();
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_bridge_bidirectional_with_try_private() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter("mqtt5=debug,warn")
         .try_init();
 
-    let broker2_config = BrokerConfig::default()
-        .with_bind_address("127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap())
-        .with_max_clients(100);
+    let broker2_config = test_broker_config();
 
     let mut broker2 = MqttBroker::with_config(broker2_config).await.unwrap();
     let broker2_addr = broker2.local_addr().expect("Failed to get broker2 address");
+    let broker2_ready = broker2.ready_receiver();
 
     let broker2_handle = tokio::spawn(async move {
-        let _ = broker2.run().await;
+        if let Err(e) = broker2.run().await {
+            eprintln!("broker2 run() error: {e}");
+        }
     });
 
-    sleep(Duration::from_millis(200)).await;
+    wait_for_ready(broker2_ready).await;
 
     let mut bridge_config = BridgeConfig::new("bidirectional-bridge", broker2_addr.to_string())
         .add_topic("status/#", BridgeDirection::Both, QoS::AtLeastOnce);
     bridge_config.try_private = true;
 
-    let broker1_config = BrokerConfig::default()
-        .with_bind_address("127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap())
-        .with_max_clients(100);
+    let mut broker1_config = test_broker_config();
+    broker1_config.bridges = vec![bridge_config];
 
-    let mut broker1_config_with_bridge = broker1_config.clone();
-    broker1_config_with_bridge.bridges = vec![bridge_config];
-
-    let mut broker1 = MqttBroker::with_config(broker1_config_with_bridge)
-        .await
-        .unwrap();
+    let mut broker1 = MqttBroker::with_config(broker1_config).await.unwrap();
     let broker1_addr = broker1.local_addr().expect("Failed to get broker1 address");
+    let broker1_ready = broker1.ready_receiver();
 
     let broker1_handle = tokio::spawn(async move {
-        let _ = broker1.run().await;
+        if let Err(e) = broker1.run().await {
+            eprintln!("broker1 run() error: {e}");
+        }
     });
 
-    sleep(Duration::from_millis(500)).await;
+    wait_for_ready(broker1_ready).await;
 
     let client1 = Arc::new(MqttClient::new("client-on-broker1"));
     let client2 = Arc::new(MqttClient::new("client-on-broker2"));
@@ -226,11 +233,11 @@ async fn test_bridge_bidirectional_with_try_private() {
     client1
         .connect(&format!("mqtt://{broker1_addr}"))
         .await
-        .unwrap();
+        .expect("client1 connect failed");
     client2
         .connect(&format!("mqtt://{broker2_addr}"))
         .await
-        .unwrap();
+        .expect("client2 connect failed");
 
     let (tx1, mut rx1) = mpsc::channel(10);
     let (tx2, mut rx2) = mpsc::channel(10);
@@ -249,7 +256,7 @@ async fn test_bridge_bidirectional_with_try_private() {
         .await
         .unwrap();
 
-    sleep(Duration::from_millis(200)).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
 
     client1
         .publish_qos1("status/broker1", b"online")

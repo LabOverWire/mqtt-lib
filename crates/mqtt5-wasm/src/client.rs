@@ -35,7 +35,7 @@ pub struct RustMessage {
     pub payload: Vec<u8>,
     pub qos: QoS,
     pub retain: bool,
-    pub properties: mqtt5::types::MessageProperties,
+    pub properties: mqtt5_protocol::types::MessageProperties,
 }
 
 type RustCallback = Rc<dyn Fn(RustMessage)>;
@@ -345,7 +345,8 @@ impl WasmMqttClient {
                 let payload = publish.payload.clone();
                 let qos = publish.qos;
                 let retain = publish.retain;
-                let properties: mqtt5::types::MessageProperties = publish.properties.clone().into();
+                let properties: mqtt5_protocol::types::MessageProperties =
+                    publish.properties.clone().into();
 
                 if qos == mqtt5_protocol::QoS::ExactlyOnce {
                     if let Some(packet_id) = publish.packet_id {
@@ -1505,6 +1506,17 @@ impl WasmMqttClient {
         qos: QoS,
         callback: Box<dyn Fn(RustMessage)>,
     ) -> Result<u16, JsValue> {
+        self.subscribe_with_callback_internal_opts(topic, qos, false, callback)
+            .await
+    }
+
+    pub async fn subscribe_with_callback_internal_opts(
+        &self,
+        topic: &str,
+        qos: QoS,
+        no_local: bool,
+        callback: Box<dyn Fn(RustMessage)>,
+    ) -> Result<u16, JsValue> {
         loop {
             match self.state.try_borrow() {
                 Ok(state) => {
@@ -1542,12 +1554,15 @@ impl WasmMqttClient {
             }
         }
 
+        let mut options = mqtt5_protocol::packet::subscribe::SubscriptionOptions::new(qos);
+        options.no_local = no_local;
+
         let subscribe_packet = SubscribePacket {
             packet_id,
             properties: Properties::default(),
-            filters: vec![mqtt5_protocol::packet::subscribe::TopicFilter::new(
-                topic, qos,
-            )],
+            filters: vec![
+                mqtt5_protocol::packet::subscribe::TopicFilter::with_options(topic, options),
+            ],
         };
 
         let packet = Packet::Subscribe(subscribe_packet);

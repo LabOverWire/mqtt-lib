@@ -44,6 +44,8 @@ pub struct MqttBroker {
     ws_tls_acceptor: Option<TlsAcceptor>,
     quic_endpoints: Vec<Endpoint>,
     shutdown_tx: Option<tokio::sync::broadcast::Sender<()>>,
+    ready_tx: Option<tokio::sync::watch::Sender<bool>>,
+    ready_rx: tokio::sync::watch::Receiver<bool>,
 }
 
 async fn create_auth_provider(
@@ -154,6 +156,7 @@ impl MqttBroker {
             config.max_clients,
         )));
         let (shutdown_tx, _) = tokio::sync::broadcast::channel(1);
+        let (ready_tx, ready_rx) = tokio::sync::watch::channel(false);
 
         #[cfg(feature = "opentelemetry")]
         if let Some(ref otel_config) = config.opentelemetry_config {
@@ -196,6 +199,8 @@ impl MqttBroker {
             ws_tls_acceptor,
             quic_endpoints,
             shutdown_tx: Some(shutdown_tx),
+            ready_tx: Some(ready_tx),
+            ready_rx,
         })
     }
 
@@ -867,7 +872,10 @@ impl MqttBroker {
 
         info!("Broker ready - accepting connections");
 
-        // Wait for shutdown signal
+        if let Some(ready_tx) = self.ready_tx.take() {
+            let _ = ready_tx.send(true);
+        }
+
         shutdown_rx.recv().await.ok();
         info!("Broker shutting down");
 
@@ -915,6 +923,15 @@ impl MqttBroker {
     /// Gets the first local address the broker is bound to (used by tests)
     pub fn local_addr(&self) -> Option<std::net::SocketAddr> {
         self.listeners.first()?.local_addr().ok()
+    }
+
+    /// Returns a receiver that signals when the broker is ready to accept connections
+    ///
+    /// Call this before spawning `run()` to get a receiver. The broker sends `true`
+    /// when it starts accepting connections. Use `changed().await` to wait.
+    #[must_use]
+    pub fn ready_receiver(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.ready_rx.clone()
     }
 }
 

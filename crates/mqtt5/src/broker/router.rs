@@ -16,6 +16,9 @@ use std::sync::Weak;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, trace};
 
+#[cfg(target_arch = "wasm32")]
+type WasmBridgeCallback = Box<dyn Fn(&PublishPacket)>;
+
 /// Client subscription information
 #[derive(Debug, Clone)]
 pub struct Subscription {
@@ -42,6 +45,8 @@ pub struct MessageRouter {
     share_group_counters: Arc<RwLock<HashMap<String, Arc<AtomicUsize>>>>,
     #[cfg(not(target_arch = "wasm32"))]
     bridge_manager: Arc<RwLock<Option<Weak<BridgeManager>>>>,
+    #[cfg(target_arch = "wasm32")]
+    wasm_bridge_callback: Arc<RwLock<Option<WasmBridgeCallback>>>,
 }
 
 /// Information about a connected client
@@ -65,6 +70,8 @@ impl MessageRouter {
             share_group_counters: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(not(target_arch = "wasm32"))]
             bridge_manager: Arc::new(RwLock::new(None)),
+            #[cfg(target_arch = "wasm32")]
+            wasm_bridge_callback: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -79,6 +86,8 @@ impl MessageRouter {
             share_group_counters: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(not(target_arch = "wasm32"))]
             bridge_manager: Arc::new(RwLock::new(None)),
+            #[cfg(target_arch = "wasm32")]
+            wasm_bridge_callback: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -86,6 +95,15 @@ impl MessageRouter {
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn set_bridge_manager(&self, bridge_manager: Arc<BridgeManager>) {
         *self.bridge_manager.write().await = Some(Arc::downgrade(&bridge_manager));
+    }
+
+    /// Sets a WASM bridge callback that is called when messages need to be forwarded to bridges
+    #[cfg(target_arch = "wasm32")]
+    pub async fn set_wasm_bridge_callback<F>(&self, callback: F)
+    where
+        F: Fn(&PublishPacket) + 'static,
+    {
+        *self.wasm_bridge_callback.write().await = Some(Box::new(callback));
     }
 
     /// Initializes the router by loading retained messages from storage.
@@ -244,20 +262,52 @@ impl MessageRouter {
         }
     }
 
-    /// Routes a publish message to all matching subscribers
-    #[allow(clippy::too_many_lines)]
+    /// Routes a publish message to all matching subscribers and forwards to bridges
     pub async fn route_message(&self, publish: &PublishPacket, publishing_client_id: Option<&str>) {
-        trace!("Routing message to topic: {}", publish.topic_name);
+        self.route_message_internal(publish, publishing_client_id, true)
+            .await;
+    }
 
-        // Handle retained messages
+    /// Routes a publish message to local subscribers only, without forwarding to bridges.
+    ///
+    /// This method is used by bridge connections to prevent message loops when receiving
+    /// messages from remote brokers. It performs all local routing (retained messages,
+    /// subscriptions, shared subscriptions) but skips bridge forwarding.
+    ///
+    /// # Arguments
+    /// * `publish` - The publish packet to route
+    /// * `publishing_client_id` - Optional client ID that published the message (used for no_local filtering)
+    pub async fn route_message_local_only(
+        &self,
+        publish: &PublishPacket,
+        publishing_client_id: Option<&str>,
+    ) {
+        self.route_message_internal(publish, publishing_client_id, false)
+            .await;
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn route_message_internal(
+        &self,
+        publish: &PublishPacket,
+        publishing_client_id: Option<&str>,
+        forward_to_bridges: bool,
+    ) {
+        if forward_to_bridges {
+            trace!("Routing message to topic: {}", publish.topic_name);
+        } else {
+            trace!(
+                "Routing message locally (no bridge) to topic: {}",
+                publish.topic_name
+            );
+        }
+
         if publish.retain {
             let mut retained = self.retained_messages.write().await;
             if publish.payload.is_empty() {
-                // Empty payload means delete retained message
                 retained.remove(&publish.topic_name);
                 debug!("Deleted retained message for topic: {}", publish.topic_name);
 
-                // Remove from storage
                 if let Some(ref storage) = self.storage {
                     if let Err(e) = storage.remove_retained_message(&publish.topic_name).await {
                         tracing::error!("Failed to remove retained message from storage: {}", e);
@@ -279,11 +329,9 @@ impl MessageRouter {
             }
         }
 
-        // Find matching subscriptions
         let subscriptions = self.subscriptions.read().await;
         let clients = self.clients.read().await;
 
-        // Group subscriptions by share group
         let mut share_groups: HashMap<String, Vec<&Subscription>> = HashMap::new();
         let mut regular_subs: Vec<&Subscription> = Vec::new();
 
@@ -299,9 +347,7 @@ impl MessageRouter {
             }
         }
 
-        // Process shared subscriptions - one delivery per group
         for (group_name, group_subs) in share_groups {
-            // Find online subscribers in this group
             let online_subs: Vec<&Subscription> = group_subs
                 .iter()
                 .filter(|sub| clients.contains_key(&sub.client_id))
@@ -309,13 +355,11 @@ impl MessageRouter {
                 .collect();
 
             if !online_subs.is_empty() {
-                // Get round-robin counter for this group
                 let counters = self.share_group_counters.read().await;
                 if let Some(counter) = counters.get(&group_name) {
                     let index = counter.fetch_add(1, Ordering::Relaxed) % online_subs.len();
                     let chosen_sub = online_subs[index];
 
-                    // Deliver to chosen subscriber
                     self.deliver_to_subscriber(
                         chosen_sub,
                         publish,
@@ -326,7 +370,6 @@ impl MessageRouter {
                     .await;
                 }
             } else if !group_subs.is_empty() {
-                // All subscribers offline - queue for first subscriber if QoS > 0
                 let sub = group_subs[0];
                 if self.storage.is_some() && sub.qos != QoS::AtMostOnce {
                     if let Some(ref storage) = self.storage {
@@ -346,7 +389,6 @@ impl MessageRouter {
             }
         }
 
-        // Process regular (non-shared) subscriptions
         for sub in regular_subs {
             self.deliver_to_subscriber(
                 sub,
@@ -358,15 +400,24 @@ impl MessageRouter {
             .await;
         }
 
-        // Forward to bridges if configured
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let bridge_manager_weak = self.bridge_manager.read().await.clone();
-            if let Some(weak) = bridge_manager_weak {
-                if let Some(bridge_manager) = weak.upgrade() {
-                    if let Err(e) = bridge_manager.handle_outgoing(publish).await {
-                        error!("Failed to forward message to bridges: {}", e);
+        if forward_to_bridges {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let bridge_manager_weak = self.bridge_manager.read().await.clone();
+                if let Some(weak) = bridge_manager_weak {
+                    if let Some(bridge_manager) = weak.upgrade() {
+                        if let Err(e) = bridge_manager.handle_outgoing(publish).await {
+                            error!("Failed to forward message to bridges: {}", e);
+                        }
                     }
+                }
+            }
+
+            #[cfg(target_arch = "wasm32")]
+            {
+                let callback = self.wasm_bridge_callback.read().await;
+                if let Some(ref cb) = *callback {
+                    cb(publish);
                 }
             }
         }
