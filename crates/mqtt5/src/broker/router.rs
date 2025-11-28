@@ -398,6 +398,15 @@ impl MessageRouter {
         }
     }
 
+    /// Routes a publish message to local subscribers only, without forwarding to bridges.
+    ///
+    /// This method is used by bridge connections to prevent message loops when receiving
+    /// messages from remote brokers. It performs all local routing (retained messages,
+    /// subscriptions, shared subscriptions) but skips bridge forwarding.
+    ///
+    /// # Arguments
+    /// * `publish` - The publish packet to route
+    /// * `publishing_client_id` - Optional client ID that published the message (used for no_local filtering)
     pub async fn route_message_local_only(
         &self,
         publish: &PublishPacket,
