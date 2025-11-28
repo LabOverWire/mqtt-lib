@@ -32,6 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Returns a `watch::Receiver<bool>` that signals when broker is accepting connections
   - Eliminates need for arbitrary sleep delays in tests and applications
   - Used throughout bridge tests for reliable startup synchronization
+
 ### Changed
 
 - Cargo.toml keyword changed from "iot" to "client" for crates.io
