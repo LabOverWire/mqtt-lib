@@ -23,7 +23,7 @@ npm install mqtt5-wasm
 
 ```toml
 [dependencies]
-mqtt5-wasm = "0.1.2"
+mqtt5-wasm = "0.2"
 ```
 
 Build with wasm-pack:
