@@ -1,7 +1,6 @@
 #![cfg(target_arch = "wasm32")]
 #![warn(clippy::pedantic)]
 #![allow(clippy::uninlined_format_args)]
-#![allow(clippy::missing_errors_doc)]
 #![allow(clippy::unused_self)]
 #![allow(clippy::needless_borrows_for_generic_args)]
 #![allow(clippy::writeln_empty_string)]
@@ -15,6 +14,8 @@
 
 pub mod bindings;
 #[cfg(feature = "broker")]
+pub mod bridge;
+#[cfg(feature = "broker")]
 pub mod broker;
 pub mod client;
 #[cfg(feature = "broker")]
@@ -23,6 +24,8 @@ pub mod config;
 pub mod decoder;
 pub mod transport;
 
+#[cfg(feature = "broker")]
+pub use bridge::{WasmBridgeConfig, WasmBridgeDirection, WasmTopicMapping};
 #[cfg(feature = "broker")]
 pub use broker::{WasmBroker, WasmBrokerConfig};
 pub use client::WasmMqttClient;

@@ -67,6 +67,10 @@ impl TelemetryConfig {
     }
 }
 
+/// Initializes the OpenTelemetry tracer provider.
+///
+/// # Errors
+/// Returns an error if the OTLP exporter cannot be created.
 #[cfg(feature = "opentelemetry")]
 pub fn init_tracer(config: &TelemetryConfig) -> Result<SdkTracerProvider> {
     let sampler = if (config.sampling_ratio - 1.0).abs() < f64::EPSILON {
@@ -102,6 +106,10 @@ pub fn init_tracer(config: &TelemetryConfig) -> Result<SdkTracerProvider> {
     Ok(tracer_provider)
 }
 
+/// Initializes the tracing subscriber with OpenTelemetry support.
+///
+/// # Errors
+/// Returns an error if the tracer or subscriber cannot be initialized.
 #[cfg(feature = "opentelemetry")]
 pub fn init_tracing_subscriber(config: &TelemetryConfig) -> Result<()> {
     use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};

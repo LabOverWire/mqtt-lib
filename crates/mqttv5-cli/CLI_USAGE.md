@@ -40,6 +40,7 @@ Start an MQTT v5.0 broker.
 | `--ws-host <ADDR>`            | WebSocket bind address(es), can be specified multiple times     | None                        |
 | `--ws-tls-host <ADDR>`        | WebSocket TLS bind address(es), can be specified multiple times | None                        |
 | `--ws-path <PATH>`            | WebSocket path                                                  | `/mqtt`                     |
+| `--quic-host <ADDR>`          | QUIC bind address(es), requires TLS cert/key                    | None                        |
 | `--storage-dir <DIR>`         | Storage directory for persistence                               | `./mqtt_storage`            |
 | `--no-persistence`            | Disable message persistence                                     | `false`                     |
 | `--session-expiry <SECS>`     | Default session expiry interval in seconds                      | `3600`                      |
@@ -104,6 +105,16 @@ mqttv5 broker \
   --ws-host 0.0.0.0:8080
 ```
 
+Broker with QUIC transport:
+
+```bash
+mqttv5 broker \
+  --host 0.0.0.0:1883 \
+  --quic-host 0.0.0.0:14567 \
+  --tls-cert server.pem \
+  --tls-key server-key.pem
+```
+
 Broker with OpenTelemetry tracing:
 
 ```bash
@@ -125,7 +136,7 @@ Publish an MQTT message.
 | `--message, -m <MSG>`     | Message payload                               | None           |
 | `--file, -f <FILE>`       | Read message from file                        | None           |
 | `--stdin`                 | Read message from stdin                       | `false`        |
-| `--url, -U <URL>`         | Broker URL (mqtt://, mqtts://, ws://, wss://) | None           |
+| `--url, -U <URL>`         | Broker URL (mqtt://, mqtts://, ws://, wss://, quic://) | None           |
 | `--host, -H <HOST>`       | Broker hostname                               | `localhost`    |
 | `--port, -p <PORT>`       | Broker port                                   | `1883`         |
 | `--qos, -q <0\|1\|2>`     | QoS level                                     | `0`            |
@@ -152,6 +163,12 @@ Publish an MQTT message.
 | `--otel-endpoint <URL>`   | OpenTelemetry OTLP endpoint                   | None           |
 | `--otel-service-name <NAME>` | OpenTelemetry service name                 | `mqttv5-pub`   |
 | `--otel-sampling <0.0-1.0>` | OpenTelemetry sampling ratio                | `1.0`          |
+| `--quic-stream-strategy <S>` | QUIC stream strategy (control-only, per-publish, per-topic, per-subscription) | `control-only` |
+| `--quic-flow-headers`     | Enable QUIC flow headers for state recovery   | `false`        |
+| `--quic-flow-expire <SECS>` | Flow header expiry interval in seconds      | `3600`         |
+| `--quic-max-streams <N>`  | Maximum concurrent QUIC streams               | None           |
+| `--quic-datagrams`        | Enable QUIC datagrams for unreliable transport | `false`       |
+| `--quic-connect-timeout <SECS>` | QUIC connection timeout in seconds      | `30`           |
 
 #### Pub Examples
 
@@ -179,6 +196,25 @@ Publish to TLS broker:
 mqttv5 pub -t test/topic -m "Secure message" \
   --url mqtts://broker.example.com:8883 \
   --ca-cert ca.pem
+```
+
+Publish over QUIC:
+
+```bash
+mqttv5 pub -t test/topic -m "QUIC message" \
+  --url quic://broker.example.com:14567 \
+  --ca-cert ca.pem
+```
+
+Publish over QUIC with multistream:
+
+```bash
+mqttv5 pub -t sensors/data -m '{"temp":25.5}' \
+  --url quic://broker.example.com:14567 \
+  --ca-cert ca.pem \
+  --quic-stream-strategy per-publish \
+  --quic-flow-headers \
+  -q 1
 ```
 
 Publish from file:
@@ -255,6 +291,12 @@ Subscribe to MQTT topics.
 | `--otel-endpoint <URL>`   | OpenTelemetry OTLP endpoint                         | None           |
 | `--otel-service-name <NAME>` | OpenTelemetry service name                       | `mqttv5-sub`   |
 | `--otel-sampling <0.0-1.0>` | OpenTelemetry sampling ratio                      | `1.0`          |
+| `--quic-stream-strategy <S>` | QUIC stream strategy (control-only, per-publish, per-topic, per-subscription) | `control-only` |
+| `--quic-flow-headers`     | Enable QUIC flow headers for state recovery         | `false`        |
+| `--quic-flow-expire <SECS>` | Flow header expiry interval in seconds            | `3600`         |
+| `--quic-max-streams <N>`  | Maximum concurrent QUIC streams                     | None           |
+| `--quic-datagrams`        | Enable QUIC datagrams for unreliable transport      | `false`        |
+| `--quic-connect-timeout <SECS>` | QUIC connection timeout in seconds            | `30`           |
 
 #### Sub Examples
 
@@ -286,6 +328,26 @@ No-local subscription:
 
 ```bash
 mqttv5 sub -t test/topic --no-local
+```
+
+Subscribe over QUIC:
+
+```bash
+mqttv5 sub -t sensors/# \
+  --url quic://broker.example.com:14567 \
+  --ca-cert ca.pem \
+  -v
+```
+
+Subscribe over QUIC with per-subscription streams:
+
+```bash
+mqttv5 sub -t sensors/# -t commands/# \
+  --url quic://broker.example.com:14567 \
+  --ca-cert ca.pem \
+  --quic-stream-strategy per-subscription \
+  --quic-flow-headers \
+  -v
 ```
 
 Subscription with identifier:

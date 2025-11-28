@@ -8,6 +8,7 @@ use tokio::net::{
     TcpSocket, TcpStream,
 };
 use tokio::time::timeout;
+use tracing::{debug, error, instrument, trace};
 
 /// TCP transport configuration
 #[derive(Debug, Clone)]
@@ -105,22 +106,20 @@ impl TcpTransport {
 }
 
 impl Transport for TcpTransport {
+    #[instrument(skip(self), fields(addr = %self.config.addr))]
     async fn connect(&mut self) -> Result<()> {
         if self.stream.is_some() {
             return Err(MqttError::AlreadyConnected);
         }
 
-        // Create socket based on address type
         let socket = match self.config.addr.ip() {
             IpAddr::V4(_) => TcpSocket::new_v4()?,
             IpAddr::V6(_) => TcpSocket::new_v6()?,
         };
 
-        // Configure socket options before connecting
         socket.set_nodelay(self.config.nodelay)?;
         socket.set_keepalive(self.config.keepalive)?;
 
-        // Connect with timeout
         let stream = timeout(
             self.config.connect_timeout,
             socket.connect(self.config.addr),
@@ -128,40 +127,46 @@ impl Transport for TcpTransport {
         .await
         .map_err(|_| MqttError::Timeout)??;
 
+        debug!("TCP connection established");
         self.stream = Some(stream);
         Ok(())
     }
 
+    #[instrument(skip(self, buf), fields(buf_len = buf.len()), level = "debug")]
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
         if let Some(stream) = &mut self.stream {
-            tracing::trace!("TCP read attempt, buffer size: {}", buf.len());
+            trace!(buf_len = buf.len(), "TCP read attempt");
             let n = stream.read(buf).await?;
             if n == 0 {
-                tracing::debug!("TCP connection closed by remote (EOF)");
+                debug!("TCP connection closed by remote (EOF)");
                 return Err(MqttError::ConnectionClosedByPeer);
             }
-            tracing::trace!("TCP read {} bytes: {:02x?}", n, &buf[..n.min(32)]);
+            trace!(bytes_read = n, "TCP read complete");
             Ok(n)
         } else {
-            tracing::error!("TCP read attempted on unconnected stream");
+            error!("TCP read attempted on unconnected stream");
             Err(MqttError::NotConnected)
         }
     }
 
+    #[instrument(skip(self, buf), fields(buf_len = buf.len()), level = "debug")]
     async fn write(&mut self, buf: &[u8]) -> Result<()> {
         match &mut self.stream {
             Some(stream) => {
                 stream.write_all(buf).await?;
                 stream.flush().await?;
+                trace!(bytes_written = buf.len(), "TCP write complete");
                 Ok(())
             }
             None => Err(MqttError::NotConnected),
         }
     }
 
+    #[instrument(skip(self))]
     async fn close(&mut self) -> Result<()> {
         if let Some(mut stream) = self.stream.take() {
             stream.shutdown().await?;
+            debug!("TCP connection closed");
         }
         Ok(())
     }

@@ -74,7 +74,10 @@ pub struct TurmoilBroker {
 }
 
 impl TurmoilBroker {
-    /// Creates a new Turmoil broker
+    /// Creates a new Turmoil broker.
+    ///
+    /// # Errors
+    /// Returns an error if the address is invalid or broker creation fails.
     pub async fn new(config: TurmoilBrokerConfig) -> Result<Self, MqttError> {
         let addr: SocketAddr = config
             .address
@@ -95,7 +98,10 @@ impl TurmoilBroker {
         TurmoilBrokerBuilder { config }
     }
 
-    /// Runs the broker
+    /// Runs the broker.
+    ///
+    /// # Errors
+    /// Returns an error if the broker encounters a fatal error while running.
     pub async fn run(mut self) -> Result<(), MqttError> {
         self.inner.run().await
     }
@@ -113,7 +119,10 @@ pub struct TurmoilBrokerBuilder {
 }
 
 impl TurmoilBrokerBuilder {
-    /// Runs the broker (async method for test compatibility)
+    /// Runs the broker (async method for test compatibility).
+    ///
+    /// # Errors
+    /// Returns an error if broker creation or running fails.
     pub async fn run(self) -> Result<(), MqttError> {
         let broker = TurmoilBroker::new(self.config).await?;
         broker.run().await

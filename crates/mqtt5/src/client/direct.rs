@@ -24,20 +24,29 @@ use crate::protocol::v5::properties::Properties;
 use crate::protocol::v5::reason_codes::ReasonCode;
 use crate::session::subscription::Subscription;
 use crate::session::SessionState;
+use crate::transport::flow::{
+    FlowFlags, FlowHeader, FlowId, FLOW_TYPE_CLIENT_DATA, FLOW_TYPE_CONTROL, FLOW_TYPE_SERVER_DATA,
+};
 use crate::transport::tls::{TlsReadHalf, TlsWriteHalf};
 use crate::transport::websocket::{WebSocketReadHandle, WebSocketWriteHandle};
-use crate::transport::{PacketIo, PacketReader, PacketWriter, TransportType};
+use crate::transport::{
+    PacketIo, PacketReader, PacketWriter, QuicStreamManager, StreamStrategy, TransportType,
+};
 use crate::types::{ConnectOptions, ConnectResult, PublishOptions, PublishResult};
 use crate::QoS;
+use bytes::Bytes;
+use quinn::{Connection, RecvStream, SendStream};
+use std::time::Duration as StdDuration;
 
 #[cfg(feature = "opentelemetry")]
 use crate::telemetry::propagation;
 
-/// Unified reader type that can handle TCP, TLS, and WebSocket
+/// Unified reader type that can handle TCP, TLS, WebSocket, and QUIC
 pub enum UnifiedReader {
     Tcp(OwnedReadHalf),
     Tls(TlsReadHalf),
     WebSocket(WebSocketReadHandle),
+    Quic(RecvStream),
 }
 
 impl PacketReader for UnifiedReader {
@@ -46,15 +55,17 @@ impl PacketReader for UnifiedReader {
             Self::Tcp(reader) => reader.read_packet().await,
             Self::Tls(reader) => reader.read_packet().await,
             Self::WebSocket(reader) => reader.read_packet().await,
+            Self::Quic(reader) => reader.read_packet().await,
         }
     }
 }
 
-/// Unified writer type that can handle TCP, TLS, and WebSocket
+/// Unified writer type that can handle TCP, TLS, WebSocket, and QUIC
 pub enum UnifiedWriter {
     Tcp(OwnedWriteHalf),
     Tls(TlsWriteHalf),
     WebSocket(WebSocketWriteHandle),
+    Quic(SendStream),
 }
 
 impl PacketWriter for UnifiedWriter {
@@ -63,6 +74,7 @@ impl PacketWriter for UnifiedWriter {
             Self::Tcp(writer) => writer.write_packet(packet).await,
             Self::Tls(writer) => writer.write_packet(packet).await,
             Self::WebSocket(writer) => writer.write_packet(packet).await,
+            Self::Quic(writer) => writer.write_packet(packet).await,
         }
     }
 }
@@ -71,7 +83,10 @@ impl PacketWriter for UnifiedWriter {
 pub struct DirectClientInner {
     /// Write half of the transport for client operations
     pub writer: Option<Arc<tokio::sync::RwLock<UnifiedWriter>>>,
-    /// Session state
+    pub quic_connection: Option<Arc<Connection>>,
+    pub stream_strategy: Option<StreamStrategy>,
+    pub quic_datagrams_enabled: bool,
+    pub quic_stream_manager: Option<Arc<QuicStreamManager>>,
     pub session: Arc<RwLock<SessionState>>,
     /// Connection status
     pub connected: Arc<AtomicBool>,
@@ -80,6 +95,8 @@ pub struct DirectClientInner {
     /// Background task handles
     pub packet_reader_handle: Option<JoinHandle<()>>,
     pub keepalive_handle: Option<JoinHandle<()>>,
+    pub quic_stream_acceptor_handle: Option<JoinHandle<()>>,
+    pub flow_expiration_handle: Option<JoinHandle<()>>,
     /// Connection options
     pub options: ConnectOptions,
     /// Packet ID generator
@@ -119,11 +136,17 @@ impl DirectClientInner {
 
         Self {
             writer: None,
+            quic_connection: None,
+            stream_strategy: None,
+            quic_datagrams_enabled: false,
+            quic_stream_manager: None,
             session,
             connected: Arc::new(AtomicBool::new(false)),
             callback_manager: Arc::new(CallbackManager::new()),
             packet_reader_handle: None,
             keepalive_handle: None,
+            quic_stream_acceptor_handle: None,
+            flow_expiration_handle: None,
             options,
             packet_id_generator: PacketIdGenerator::new(),
             pending_subacks: Arc::new(Mutex::new(HashMap::new())),
@@ -229,6 +252,16 @@ impl DirectClientInner {
                         let (r, w) = (*ws).into_split()?;
                         (UnifiedReader::WebSocket(r), UnifiedWriter::WebSocket(w))
                     }
+                    TransportType::Quic(quic) => {
+                        let (w, r, conn, strategy, datagrams) = (*quic).into_split()?;
+                        let conn_arc = Arc::new(conn);
+                        self.quic_connection = Some(conn_arc.clone());
+                        self.stream_strategy = Some(strategy);
+                        self.quic_datagrams_enabled = datagrams;
+                        self.quic_stream_manager =
+                            Some(Arc::new(QuicStreamManager::new(conn_arc, strategy)));
+                        (UnifiedReader::Quic(r), UnifiedWriter::Quic(w))
+                    }
                 };
 
                 // Store the writer half wrapped in Arc<RwLock<>>
@@ -304,9 +337,17 @@ impl DirectClientInner {
         // Stop background tasks
         self.stop_background_tasks();
 
+        // Clean up QUIC stream manager
+        if let Some(manager) = self.quic_stream_manager.take() {
+            manager.close_all_streams().await;
+        }
+
         // Clear state
         self.set_connected(false);
         self.writer = None;
+        self.quic_connection = None;
+        self.stream_strategy = None;
+        self.quic_datagrams_enabled = false;
 
         Ok(())
     }
@@ -477,8 +518,6 @@ impl DirectClientInner {
             return Err(MqttError::NotConnected);
         }
 
-        let writer = self.writer.as_ref().ok_or(MqttError::NotConnected)?;
-
         // Get packet ID for QoS > 0
         let packet_id = (options.qos != QoS::AtMostOnce).then(|| self.packet_id_generator.next());
 
@@ -527,11 +566,8 @@ impl DirectClientInner {
                 "Sending large PUBLISH packet"
             );
         }
-        writer
-            .write()
-            .await
-            .write_packet(Packet::Publish(publish))
-            .await?;
+
+        self.send_publish_packet(publish, options.qos).await?;
 
         // Wait for acknowledgment if QoS > 0
         if let Some(rx) = rx {
@@ -543,6 +579,127 @@ impl DirectClientInner {
             None => PublishResult::QoS0,
             Some(id) => PublishResult::QoS1Or2 { packet_id: id },
         })
+    }
+
+    async fn send_publish_packet(&self, publish: PublishPacket, qos: QoS) -> Result<()> {
+        if let Some(manager) = &self.quic_stream_manager {
+            match manager.strategy() {
+                StreamStrategy::DataPerPublish => {
+                    tracing::debug!(
+                        topic = %publish.topic_name,
+                        qos = ?qos,
+                        "Using dedicated QUIC stream for PUBLISH (DataPerPublish)"
+                    );
+                    manager
+                        .send_packet_on_stream(Packet::Publish(publish))
+                        .await?;
+                    return Ok(());
+                }
+                StreamStrategy::DataPerTopic => {
+                    tracing::debug!(
+                        topic = %publish.topic_name,
+                        qos = ?qos,
+                        "Using topic-specific QUIC stream for PUBLISH (DataPerTopic)"
+                    );
+                    manager
+                        .send_on_topic_stream(publish.topic_name.clone(), Packet::Publish(publish))
+                        .await?;
+                    return Ok(());
+                }
+                StreamStrategy::DataPerSubscription => {
+                    tracing::debug!(
+                        topic = %publish.topic_name,
+                        qos = ?qos,
+                        "Using subscription-based QUIC stream for PUBLISH (DataPerSubscription)"
+                    );
+                    manager
+                        .send_on_subscription_stream(
+                            publish.topic_name.clone(),
+                            Packet::Publish(publish),
+                        )
+                        .await?;
+                    return Ok(());
+                }
+                StreamStrategy::ControlOnly => {}
+            }
+        }
+
+        let writer = self.writer.as_ref().ok_or(MqttError::NotConnected)?;
+        writer
+            .write()
+            .await
+            .write_packet(Packet::Publish(publish))
+            .await?;
+        Ok(())
+    }
+
+    pub fn datagrams_available(&self) -> bool {
+        self.quic_datagrams_enabled
+            && self
+                .quic_connection
+                .as_ref()
+                .and_then(|c| c.max_datagram_size())
+                .is_some()
+    }
+
+    pub fn max_datagram_size(&self) -> Option<usize> {
+        if !self.quic_datagrams_enabled {
+            return None;
+        }
+        self.quic_connection
+            .as_ref()
+            .and_then(|c| c.max_datagram_size())
+    }
+
+    pub fn send_datagram(&self, data: bytes::Bytes) -> Result<()> {
+        if !self.quic_datagrams_enabled {
+            return Err(MqttError::InvalidState("Datagrams not enabled".to_string()));
+        }
+        let conn = self
+            .quic_connection
+            .as_ref()
+            .ok_or(MqttError::NotConnected)?;
+        conn.send_datagram(data)
+            .map_err(|e| MqttError::ConnectionError(format!("Datagram send failed: {e}")))
+    }
+
+    pub async fn send_datagram_wait(&self, data: bytes::Bytes) -> Result<()> {
+        if !self.quic_datagrams_enabled {
+            return Err(MqttError::InvalidState("Datagrams not enabled".to_string()));
+        }
+        let conn = self
+            .quic_connection
+            .as_ref()
+            .ok_or(MqttError::NotConnected)?;
+        conn.send_datagram_wait(data)
+            .await
+            .map_err(|e| MqttError::ConnectionError(format!("Datagram send failed: {e}")))
+    }
+
+    pub async fn read_datagram(&self) -> Result<bytes::Bytes> {
+        if !self.quic_datagrams_enabled {
+            return Err(MqttError::InvalidState("Datagrams not enabled".to_string()));
+        }
+        let conn = self
+            .quic_connection
+            .as_ref()
+            .ok_or(MqttError::NotConnected)?;
+        conn.read_datagram()
+            .await
+            .map_err(|e| MqttError::ConnectionError(format!("Datagram read failed: {e}")))
+    }
+
+    pub fn send_publish_as_datagram(&self, publish: PublishPacket) -> Result<()> {
+        if publish.qos != QoS::AtMostOnce {
+            return Err(MqttError::ProtocolError(
+                "Only QoS 0 publishes can be sent as datagrams".to_string(),
+            ));
+        }
+
+        let mut buf = bytes::BytesMut::new();
+        crate::transport::packet_io::encode_packet_to_buffer(&Packet::Publish(publish), &mut buf)?;
+
+        self.send_datagram(buf.freeze())
     }
 
     /// Create a subscription from filter and reason code
@@ -883,9 +1040,10 @@ impl DirectClientInner {
             connected,
         };
 
+        let ctx_for_packet_reader = ctx.clone();
         self.packet_reader_handle = Some(tokio::spawn(async move {
             tracing::debug!("📦 PACKET READER - Task starting");
-            packet_reader_task_with_responses(reader, ctx).await;
+            packet_reader_task_with_responses(reader, ctx_for_packet_reader).await;
             tracing::debug!("📦 PACKET READER - Task exited");
         }));
 
@@ -902,7 +1060,73 @@ impl DirectClientInner {
             tracing::debug!("💓 KEEPALIVE - Disabled (interval is zero)");
         }
 
+        if let Some(conn) = &self.quic_connection {
+            let connection = conn.clone();
+            let ctx_for_streams = ctx.clone();
+            self.quic_stream_acceptor_handle = Some(tokio::spawn(async move {
+                tracing::debug!("🔀 QUIC STREAM ACCEPTOR - Task starting");
+                quic_stream_acceptor_task(connection, ctx_for_streams).await;
+                tracing::debug!("🔀 QUIC STREAM ACCEPTOR - Task exited");
+            }));
+            tracing::debug!("🔀 QUIC STREAM ACCEPTOR - Started (always runs to accept server-initiated streams)");
+
+            let session_for_expiration = self.session.clone();
+            self.flow_expiration_handle = Some(tokio::spawn(async move {
+                tracing::debug!("⏰ FLOW EXPIRATION - Task starting");
+                flow_expiration_task(session_for_expiration).await;
+                tracing::debug!("⏰ FLOW EXPIRATION - Task exited");
+            }));
+            tracing::debug!("⏰ FLOW EXPIRATION - Started");
+        }
+
         Ok(())
+    }
+
+    pub async fn get_recoverable_flows(&self) -> Vec<(FlowId, FlowFlags)> {
+        self.session.read().await.get_recoverable_flows().await
+    }
+
+    pub async fn recover_flows(&self) -> Result<usize> {
+        let Some(manager) = &self.quic_stream_manager else {
+            return Ok(0);
+        };
+
+        let flows = self.get_recoverable_flows().await;
+        let mut recovered = 0;
+
+        for (flow_id, flags) in flows {
+            let recovery_flags = FlowFlags { clean: 0, ..flags };
+
+            match manager.open_recovery_stream(flow_id, recovery_flags).await {
+                Ok((send, _recv)) => {
+                    manager.register_flow_stream(flow_id, send).await;
+                    tracing::debug!(
+                        flow_id = ?flow_id,
+                        "Opened and registered recovery stream for flow"
+                    );
+                    recovered += 1;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        flow_id = ?flow_id,
+                        error = %e,
+                        "Failed to open recovery stream"
+                    );
+                }
+            }
+        }
+
+        tracing::info!(recovered = recovered, "Flow recovery completed");
+
+        Ok(recovered)
+    }
+
+    pub async fn clear_flows(&self) {
+        self.session.read().await.clear_flows().await;
+    }
+
+    pub async fn flow_count(&self) -> usize {
+        self.session.read().await.flow_count().await
     }
 
     /// Stop background tasks
@@ -913,10 +1137,17 @@ impl DirectClientInner {
         if let Some(handle) = self.keepalive_handle.take() {
             handle.abort();
         }
+        if let Some(handle) = self.quic_stream_acceptor_handle.take() {
+            handle.abort();
+        }
+        if let Some(handle) = self.flow_expiration_handle.take() {
+            handle.abort();
+        }
     }
 }
 
 /// Context for packet reader task
+#[derive(Clone)]
 struct PacketReaderContext {
     session: Arc<RwLock<SessionState>>,
     callback_manager: Arc<CallbackManager>,
@@ -985,12 +1216,12 @@ async fn packet_reader_task_with_responses(mut reader: UnifiedReader, ctx: Packe
                     _ => {}
                 }
 
-                // Handle other packets normally
                 if let Err(e) = handle_incoming_packet_with_writer(
                     packet,
                     &ctx.writer,
                     &ctx.session,
                     &ctx.callback_manager,
+                    None,
                 )
                 .await
                 {
@@ -1038,16 +1269,177 @@ async fn keepalive_task_with_writer(
     }
 }
 
+async fn flow_expiration_task(session: Arc<RwLock<SessionState>>) {
+    let check_interval = Duration::from_secs(60);
+    let mut interval = tokio::time::interval(check_interval);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    interval.tick().await;
+
+    loop {
+        interval.tick().await;
+
+        let expired = session.read().await.expire_flows().await;
+        if !expired.is_empty() {
+            tracing::debug!(count = expired.len(), "Expired {} flows", expired.len());
+        }
+    }
+}
+
+async fn quic_stream_acceptor_task(connection: Arc<Connection>, ctx: PacketReaderContext) {
+    loop {
+        match connection.accept_bi().await {
+            Ok((send, recv)) => {
+                tracing::debug!("Accepted new QUIC stream");
+                let ctx_for_reader = ctx.clone();
+                tokio::spawn(async move {
+                    quic_stream_reader_task(recv, send, ctx_for_reader).await;
+                });
+            }
+            Err(e) => {
+                tracing::error!("Error accepting QUIC stream: {e}");
+                ctx.connected.store(false, Ordering::SeqCst);
+                break;
+            }
+        }
+    }
+}
+
+fn is_flow_header_byte(b: u8) -> bool {
+    matches!(
+        b,
+        FLOW_TYPE_CONTROL | FLOW_TYPE_CLIENT_DATA | FLOW_TYPE_SERVER_DATA
+    )
+}
+
+async fn try_read_server_flow_header(
+    recv: &mut quinn::RecvStream,
+) -> Result<Option<(FlowId, FlowFlags, Option<StdDuration>)>> {
+    let chunk = recv
+        .read_chunk(1, true)
+        .await
+        .map_err(|e| MqttError::ConnectionError(format!("Failed to peek stream: {e}")))?;
+
+    let Some(chunk) = chunk else {
+        return Ok(None);
+    };
+
+    if chunk.bytes.is_empty() {
+        return Ok(None);
+    }
+
+    let first_byte = chunk.bytes[0];
+    if !is_flow_header_byte(first_byte) {
+        return Ok(None);
+    }
+
+    let mut header_buf = Vec::with_capacity(32);
+    header_buf.extend_from_slice(&chunk.bytes);
+
+    while header_buf.len() < 32 {
+        match recv.read_chunk(32 - header_buf.len(), true).await {
+            Ok(Some(chunk)) if !chunk.bytes.is_empty() => {
+                header_buf.extend_from_slice(&chunk.bytes);
+            }
+            Ok(_) => break,
+            Err(e) => {
+                return Err(MqttError::ConnectionError(format!(
+                    "Failed to read flow header: {e}"
+                )));
+            }
+        }
+    }
+
+    let mut bytes = Bytes::from(header_buf);
+    let flow_header = FlowHeader::decode(&mut bytes)?;
+
+    match flow_header {
+        FlowHeader::Control(h) => {
+            tracing::trace!(flow_id = ?h.flow_id, "Parsed control flow header from server");
+            Ok(Some((h.flow_id, h.flags, None)))
+        }
+        FlowHeader::ClientData(h) | FlowHeader::ServerData(h) => {
+            let expire = if h.expire_interval > 0 {
+                Some(StdDuration::from_secs(h.expire_interval))
+            } else {
+                None
+            };
+            tracing::debug!(flow_id = ?h.flow_id, is_server = h.is_server_flow(), expire = ?expire, "Parsed data flow header from server");
+            Ok(Some((h.flow_id, h.flags, expire)))
+        }
+        FlowHeader::UserDefined(_) => {
+            tracing::trace!("Ignoring user-defined flow header");
+            Ok(None)
+        }
+    }
+}
+
+async fn quic_stream_reader_task(
+    mut recv: quinn::RecvStream,
+    send: quinn::SendStream,
+    ctx: PacketReaderContext,
+) {
+    use crate::transport::PacketReader;
+
+    let flow_id = match try_read_server_flow_header(&mut recv).await {
+        Ok(Some((id, flags, expire))) => {
+            tracing::debug!(
+                flow_id = ?id,
+                is_server_initiated = id.is_server_initiated(),
+                ?flags,
+                ?expire,
+                "Server-initiated stream with flow header"
+            );
+            Some(id)
+        }
+        Ok(None) => {
+            tracing::trace!("No flow header on server-initiated stream");
+            None
+        }
+        Err(e) => {
+            tracing::warn!("Error parsing server flow header: {e}");
+            None
+        }
+    };
+
+    let stream_writer = Arc::new(tokio::sync::RwLock::new(UnifiedWriter::Quic(send)));
+
+    loop {
+        match recv.read_packet().await {
+            Ok(packet) => {
+                tracing::trace!(flow_id = ?flow_id, "Received packet on server-initiated QUIC stream: {:?}", packet);
+                if let Err(e) = handle_incoming_packet_with_writer(
+                    packet,
+                    &stream_writer,
+                    &ctx.session,
+                    &ctx.callback_manager,
+                    flow_id,
+                )
+                .await
+                {
+                    tracing::error!(flow_id = ?flow_id, "Error handling packet from server stream: {e}");
+                    break;
+                }
+            }
+            Err(e) => {
+                tracing::debug!(flow_id = ?flow_id, "Server-initiated QUIC stream closed or error: {e}");
+                break;
+            }
+        }
+    }
+}
+
 /// Handle incoming packet with writer access for acknowledgments
 async fn handle_incoming_packet_with_writer(
     packet: Packet,
     writer: &Arc<tokio::sync::RwLock<UnifiedWriter>>,
     session: &Arc<RwLock<SessionState>>,
     callback_manager: &Arc<CallbackManager>,
+    flow_id: Option<crate::transport::flow::FlowId>,
 ) -> Result<()> {
     match packet {
         Packet::Publish(publish) => {
-            handle_publish_with_ack(publish, writer, session, callback_manager).await
+            handle_publish_with_ack(publish, writer, session, callback_manager, flow_id).await
         }
         Packet::PingResp => {
             // PINGRESP received, connection is alive
@@ -1084,15 +1476,19 @@ async fn handle_publish_with_ack(
     writer: &Arc<tokio::sync::RwLock<UnifiedWriter>>,
     session: &Arc<RwLock<SessionState>>,
     callback_manager: &Arc<CallbackManager>,
+    flow_id: Option<crate::transport::flow::FlowId>,
 ) -> Result<()> {
-    // Handle QoS acknowledgment
     match publish.qos {
-        crate::QoS::AtMostOnce => {
-            // No acknowledgment needed
-        }
+        crate::QoS::AtMostOnce => {}
         crate::QoS::AtLeastOnce => {
             if let Some(packet_id) = publish.packet_id {
-                // Send PUBACK directly
+                if let Some(fid) = flow_id {
+                    session
+                        .read()
+                        .await
+                        .store_publish_flow(packet_id, fid)
+                        .await;
+                }
                 let puback = crate::packet::puback::PubAckPacket {
                     packet_id,
                     reason_code: crate::protocol::v5::reason_codes::ReasonCode::Success,
@@ -1107,14 +1503,18 @@ async fn handle_publish_with_ack(
         }
         crate::QoS::ExactlyOnce => {
             if let Some(packet_id) = publish.packet_id {
-                // Store the received publish packet for duplicate detection and QoS 2 flow
+                if let Some(fid) = flow_id {
+                    session
+                        .read()
+                        .await
+                        .store_publish_flow(packet_id, fid)
+                        .await;
+                }
                 session
                     .write()
                     .await
                     .store_unacked_publish(publish.clone())
                     .await?;
-
-                // Send PUBREC directly
                 let pubrec = crate::packet::pubrec::PubRecPacket {
                     packet_id,
                     reason_code: crate::protocol::v5::reason_codes::ReasonCode::Success,
@@ -1125,13 +1525,11 @@ async fn handle_publish_with_ack(
                     .await
                     .write_packet(Packet::PubRec(pubrec))
                     .await?;
-
                 session.write().await.store_pubrec(packet_id).await;
             }
         }
     }
 
-    // Route to callbacks
     let _ = callback_manager.dispatch(&publish).await;
 
     Ok(())

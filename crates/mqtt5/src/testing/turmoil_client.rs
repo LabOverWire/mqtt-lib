@@ -98,18 +98,27 @@ impl TurmoilClient {
         Self::new(&config)
     }
 
-    /// Connects to the broker
+    /// Connects to the broker.
+    ///
+    /// # Errors
+    /// Returns an error if the connection fails.
     pub async fn connect(&self, address: &str) -> Result<(), MqttError> {
         self.inner.connect(address).await
     }
 
-    /// Waits for the connection to be established
+    /// Waits for the connection to be established.
+    ///
+    /// # Errors
+    /// This function currently does not return errors.
     pub async fn wait_for_connection(&self, timeout: Duration) -> Result<(), MqttError> {
         tokio::time::sleep(timeout).await;
         Ok(())
     }
 
-    /// Subscribes to a topic
+    /// Subscribes to a topic.
+    ///
+    /// # Errors
+    /// Returns an error if the subscription fails.
     pub async fn subscribe(&self, topic: &str, _qos: QoS) -> Result<(), MqttError> {
         let sender = self.sender.clone();
         self.inner
@@ -120,7 +129,10 @@ impl TurmoilClient {
             .map(|_| ())
     }
 
-    /// Publishes a message
+    /// Publishes a message.
+    ///
+    /// # Errors
+    /// Returns an error if publishing fails.
     pub async fn publish(&self, topic: &str, payload: &[u8], qos: QoS) -> Result<(), MqttError> {
         self.inner
             .publish_qos(topic, payload, qos)
@@ -128,18 +140,23 @@ impl TurmoilClient {
             .map(|_| ())
     }
 
-    /// Publishes a retained message
+    /// Publishes a retained message.
+    ///
+    /// # Errors
+    /// Returns an error if publishing fails.
     pub async fn publish_retained(
         &self,
         topic: &str,
         payload: &[u8],
         qos: QoS,
     ) -> Result<(), MqttError> {
-        // For now, just publish normally - retained functionality not fully implemented in test client
         self.publish(topic, payload, qos).await
     }
 
-    /// Receives a message with timeout
+    /// Receives a message with timeout.
+    ///
+    /// # Errors
+    /// Returns an error if the timeout expires or the channel is closed.
     pub async fn receive_timeout(&self, timeout: Duration) -> Result<Message, MqttError> {
         let mut receiver = self.received.lock().await;
         tokio::time::timeout(timeout, receiver.recv())
@@ -148,7 +165,10 @@ impl TurmoilClient {
             .ok_or(MqttError::NotConnected)
     }
 
-    /// Disconnects from the broker
+    /// Disconnects from the broker.
+    ///
+    /// # Errors
+    /// Returns an error if the disconnect operation fails.
     pub async fn disconnect(&self) -> Result<(), MqttError> {
         self.inner.disconnect().await
     }
@@ -158,7 +178,10 @@ impl TurmoilClient {
         self.inner.is_connected().await
     }
 
-    /// Connects with TLS (placeholder for test compatibility)
+    /// Connects with TLS (placeholder for test compatibility).
+    ///
+    /// # Errors
+    /// Returns an error if the connection fails.
     pub async fn connect_tls(&self, address: &str) -> Result<(), MqttError> {
         // For now, just do a regular connection
         self.connect(address).await

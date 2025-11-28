@@ -53,6 +53,7 @@ use tokio_tungstenite::{
     tungstenite::{self, http::Request, protocol::Message},
     MaybeTlsStream, WebSocketStream,
 };
+use tracing::{debug, error, info, instrument};
 use url::Url;
 
 /// WebSocket transport configuration
@@ -418,7 +419,10 @@ pub struct WebSocketWriteHandle {
 }
 
 impl WebSocketReadHandle {
-    /// Reads data from the WebSocket
+    /// Reads data from the WebSocket.
+    ///
+    /// # Errors
+    /// Returns an error if the connection is closed or a read error occurs.
     pub async fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
         loop {
             match self.reader.next().await {
@@ -438,7 +442,10 @@ impl WebSocketReadHandle {
 }
 
 impl WebSocketWriteHandle {
-    /// Writes data to the WebSocket
+    /// Writes data to the WebSocket.
+    ///
+    /// # Errors
+    /// Returns an error if the write operation fails.
     pub async fn write(&mut self, buf: &[u8]) -> Result<()> {
         use futures_util::SinkExt;
         self.writer
@@ -491,18 +498,12 @@ impl PacketWriter for WebSocketWriteHandle {
 }
 
 impl Transport for WebSocketTransport {
+    #[instrument(skip(self), fields(url = %self.config.url, subprotocols = ?self.config.subprotocols))]
     async fn connect(&mut self) -> Result<()> {
         if self.connected {
             return Err(MqttError::AlreadyConnected);
         }
 
-        tracing::info!(
-            url = %self.config.url,
-            subprotocols = ?self.config.subprotocols,
-            "Connecting to WebSocket broker"
-        );
-
-        // Build WebSocket request with subprotocol header
         let request = Request::builder()
             .uri(self.config.url.as_str())
             .header("Host", self.config.url.host_str().unwrap_or("localhost"))
@@ -519,7 +520,6 @@ impl Transport for WebSocketTransport {
                 MqttError::ConnectionError(format!("Failed to build WebSocket request: {e}"))
             })?;
 
-        // Handle connection based on whether it's secure and if we need custom TLS config
         let ws_result = if self.config.is_secure()
             && self
                 .config
@@ -527,10 +527,8 @@ impl Transport for WebSocketTransport {
                 .as_ref()
                 .map_or(false, |cfg| !cfg.verify_server_cert)
         {
-            // Need to use custom TLS connector for insecure mode
             use tokio_tungstenite::Connector;
 
-            // Create rustls config with dangerous no-verification
             let tls = rustls::ClientConfig::builder()
                 .dangerous()
                 .with_custom_certificate_verifier(std::sync::Arc::new(NoVerifier))
@@ -549,7 +547,6 @@ impl Transport for WebSocketTransport {
             )
             .await
         } else {
-            // Use default connection (works for both ws:// and wss:// with normal verification)
             tokio::time::timeout(
                 self.config.timeout,
                 tokio_tungstenite::connect_async(request),
@@ -559,30 +556,30 @@ impl Transport for WebSocketTransport {
 
         match ws_result {
             Ok(Ok((ws_stream, response))) => {
-                // Check if subprotocol was negotiated
                 if let Some(protocol) = response.headers().get("Sec-WebSocket-Protocol") {
-                    tracing::info!(
-                        "WebSocket connected with subprotocol: {:?}",
-                        protocol.to_str().unwrap_or("<invalid>")
+                    info!(
+                        subprotocol = ?protocol.to_str().unwrap_or("<invalid>"),
+                        "WebSocket subprotocol negotiated"
                     );
                 }
 
                 self.connection = Some(ws_stream);
                 self.connected = true;
-                tracing::info!("WebSocket connection established");
+                debug!("WebSocket connection established");
                 Ok(())
             }
             Ok(Err(e)) => {
-                tracing::error!("WebSocket connection failed: {}", e);
+                error!(error = %e, "WebSocket connection failed");
                 Err(MqttError::ConnectionError(e.to_string()))
             }
             Err(_) => {
-                tracing::error!("WebSocket connection timed out");
+                error!("WebSocket connection timed out");
                 Err(MqttError::Timeout)
             }
         }
     }
 
+    #[instrument(skip(self, buf), fields(buf_len = buf.len()), level = "debug")]
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
         if !self.connected {
             return Err(MqttError::NotConnected);
@@ -611,6 +608,7 @@ impl Transport for WebSocketTransport {
                 }
                 Some(Ok(Message::Close(_))) | None => {
                     self.connected = false;
+                    debug!("WebSocket connection closed by remote");
                     return Err(MqttError::ClientClosed);
                 }
                 Some(Ok(
@@ -624,6 +622,7 @@ impl Transport for WebSocketTransport {
         }
     }
 
+    #[instrument(skip(self, buf), fields(buf_len = buf.len()), level = "debug")]
     async fn write(&mut self, buf: &[u8]) -> Result<()> {
         use futures_util::SinkExt;
 
@@ -632,8 +631,6 @@ impl Transport for WebSocketTransport {
         }
 
         let connection = self.connection.as_mut().ok_or(MqttError::NotConnected)?;
-
-        tracing::debug!(bytes = buf.len(), "Writing WebSocket frame");
 
         connection
             .send(Message::Binary(buf.to_vec().into()))
@@ -649,19 +646,18 @@ impl Transport for WebSocketTransport {
         })
     }
 
+    #[instrument(skip(self))]
     async fn close(&mut self) -> Result<()> {
         if !self.connected {
             return Ok(());
         }
 
-        tracing::info!("Closing WebSocket connection");
-
         if let Some(mut connection) = self.connection.take() {
-            // Send close frame
             let _ = connection.close(None).await;
         }
 
         self.connected = false;
+        debug!("WebSocket connection closed");
         Ok(())
     }
 }

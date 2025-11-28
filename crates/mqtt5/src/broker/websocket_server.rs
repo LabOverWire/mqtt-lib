@@ -88,7 +88,10 @@ where
         }
     }
 
-    /// Gets the peer address (only works for TcpStream)
+    /// Gets the peer address (only works for TcpStream).
+    ///
+    /// # Errors
+    /// Returns an error if the peer address cannot be retrieved.
     pub fn peer_addr(&self) -> Result<SocketAddr>
     where
         S: std::ops::Deref<Target = TcpStream>,

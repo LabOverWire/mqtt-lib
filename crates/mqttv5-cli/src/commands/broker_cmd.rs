@@ -63,6 +63,10 @@ pub struct BrokerCommand {
     #[arg(long, default_value = "/mqtt")]
     pub ws_path: String,
 
+    /// QUIC bind address - can be specified multiple times (requires --tls-cert and --tls-key)
+    #[arg(long, action = ArgAction::Append)]
+    pub quic_host: Vec<String>,
+
     /// Storage directory for persistent data
     #[arg(long, default_value = "./mqtt_storage")]
     pub storage_dir: PathBuf,
@@ -243,7 +247,7 @@ pub async fn execute(mut cmd: BrokerCommand, verbose: bool, debug: bool) -> Resu
 
 async fn create_interactive_config(cmd: &mut BrokerCommand) -> Result<BrokerConfig> {
     use mqtt5::broker::config::{
-        AuthConfig, AuthMethod, StorageConfig, TlsConfig, WebSocketConfig,
+        AuthConfig, AuthMethod, QuicConfig, StorageConfig, TlsConfig, WebSocketConfig,
     };
 
     let mut config = BrokerConfig::new();
@@ -421,6 +425,44 @@ async fn create_interactive_config(cmd: &mut BrokerCommand) -> Result<BrokerConf
             anyhow::bail!(
                 "Both --tls-cert and --tls-key must be provided when using --ws-tls-host"
             );
+        }
+    }
+
+    // Configure QUIC
+    if !cmd.quic_host.is_empty() {
+        if let (Some(cert), Some(key)) = (&cmd.tls_cert, &cmd.tls_key) {
+            if !cert.exists() {
+                anyhow::bail!("TLS certificate file not found: {}", cert.display());
+            }
+            if !key.exists() {
+                anyhow::bail!("TLS key file not found: {}", key.display());
+            }
+
+            let quic_addrs: Result<Vec<std::net::SocketAddr>> = cmd
+                .quic_host
+                .iter()
+                .map(|h| {
+                    h.parse()
+                        .with_context(|| format!("Invalid QUIC bind address: {h}"))
+                })
+                .collect();
+
+            let mut quic_config =
+                QuicConfig::new(cert.clone(), key.clone()).with_bind_addresses(quic_addrs?);
+
+            if let Some(ca_cert) = &cmd.tls_ca_cert {
+                if !ca_cert.exists() {
+                    anyhow::bail!("TLS CA certificate file not found: {}", ca_cert.display());
+                }
+                quic_config = quic_config
+                    .with_ca_file(ca_cert.clone())
+                    .with_require_client_cert(cmd.tls_require_client_cert);
+            }
+
+            config = config.with_quic(quic_config);
+            info!("QUIC enabled on {:?}", cmd.quic_host);
+        } else {
+            anyhow::bail!("Both --tls-cert and --tls-key must be provided when using --quic-host");
         }
     }
 

@@ -4,6 +4,7 @@ use crate::Transport;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 use tokio::time::interval;
+use tracing::{debug, instrument, warn};
 
 /// Transport connection statistics
 #[derive(Debug, Clone, Default)]
@@ -119,8 +120,8 @@ impl<T: Transport + 'static> TransportManager<T> {
     /// # Errors
     ///
     /// Returns an error if the operation fails
+    #[instrument(skip(self))]
     pub async fn connect(&self) -> Result<()> {
-        // Check current state
         let current_state = *self.state.read().await;
         match current_state {
             ConnectionState::Connected => return Ok(()),
@@ -132,29 +133,25 @@ impl<T: Transport + 'static> TransportManager<T> {
             _ => {}
         }
 
-        // Set state to connecting
+        debug!(state = ?ConnectionState::Connecting, "Transport state changed");
         *self.state.write().await = ConnectionState::Connecting;
 
-        // Try to connect
         let mut transport = self.transport.lock().await;
         match transport.connect().await {
             Ok(()) => {
-                // Update state and stats
+                debug!(state = ?ConnectionState::Connected, "Transport state changed");
                 *self.state.write().await = ConnectionState::Connected;
                 let mut stats = self.stats.write().await;
                 stats.connections_established += 1;
                 stats.last_connected = Some(Instant::now());
 
-                // Reset reconnect delay
                 *self.reconnect_delay.write().await = self.config.reconnect_delay;
-
-                // Update last activity
                 *self.last_activity.write().await = Instant::now();
 
                 Ok(())
             }
             Err(e) => {
-                // Update state and stats
+                debug!(state = ?ConnectionState::Disconnected, "Transport state changed");
                 *self.state.write().await = ConnectionState::Disconnected;
                 let mut stats = self.stats.write().await;
                 stats.connection_failures += 1;
@@ -173,15 +170,15 @@ impl<T: Transport + 'static> TransportManager<T> {
     /// # Errors
     ///
     /// Returns an error if the operation fails
+    #[instrument(skip(self))]
     pub async fn disconnect(&self) -> Result<()> {
-        // Set state to closing
+        debug!(state = ?ConnectionState::Closing, "Transport state changed");
         *self.state.write().await = ConnectionState::Closing;
 
-        // Close transport
         let mut transport = self.transport.lock().await;
         let result = transport.close().await;
 
-        // Update state and stats
+        debug!(state = ?ConnectionState::Disconnected, "Transport state changed");
         *self.state.write().await = ConnectionState::Disconnected;
         let mut stats = self.stats.write().await;
         stats.last_disconnected = Some(Instant::now());
@@ -199,17 +196,15 @@ impl<T: Transport + 'static> TransportManager<T> {
     /// # Errors
     ///
     /// Returns an error if the operation fails
+    #[instrument(skip(self, buf), fields(buf_len = buf.len()), level = "debug")]
     pub async fn read(&self, buf: &mut [u8]) -> Result<usize> {
-        // Check state
         if *self.state.read().await != ConnectionState::Connected {
             return Err(MqttError::NotConnected);
         }
 
-        // Read from transport
         let mut transport = self.transport.lock().await;
         let result = transport.read(buf).await;
 
-        // Update activity and stats on success
         if let Ok(n) = result {
             *self.last_activity.write().await = Instant::now();
             self.stats.write().await.bytes_received = self
@@ -232,17 +227,15 @@ impl<T: Transport + 'static> TransportManager<T> {
     /// # Errors
     ///
     /// Returns an error if the operation fails
+    #[instrument(skip(self, buf), fields(buf_len = buf.len()), level = "debug")]
     pub async fn write(&self, buf: &[u8]) -> Result<()> {
-        // Check state
         if *self.state.read().await != ConnectionState::Connected {
             return Err(MqttError::NotConnected);
         }
 
-        // Write to transport
         let mut transport = self.transport.lock().await;
         let result = transport.write(buf).await;
 
-        // Update activity and stats on success
         if result.is_ok() {
             *self.last_activity.write().await = Instant::now();
             self.stats.write().await.bytes_sent = self
@@ -291,9 +284,9 @@ impl<T: Transport + 'static> TransportManager<T> {
                     if *manager.state.read().await == ConnectionState::Connected {
                         let last_activity = *manager.last_activity.read().await;
                         if last_activity.elapsed() > idle_timeout {
-                            // Disconnect due to idle timeout
+                            warn!(idle_secs = ?last_activity.elapsed().as_secs(), "Idle timeout triggered");
                             if let Err(e) = manager.disconnect().await {
-                                tracing::warn!("Failed to disconnect on idle timeout: {}", e);
+                                warn!(error = %e, "Failed to disconnect on idle timeout");
                             }
                         }
                     }

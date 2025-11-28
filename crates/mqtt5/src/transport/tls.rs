@@ -10,6 +10,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 use tokio_rustls::{client::TlsStream, TlsConnector};
+use tracing::{debug, instrument, trace};
 
 /// Type alias for TLS read half
 pub type TlsReadHalf = ReadHalf<TlsStream<TcpStream>>;
@@ -497,16 +498,15 @@ impl TlsTransport {
 }
 
 impl Transport for TlsTransport {
+    #[instrument(skip(self), fields(addr = %self.config.addr, server_name = %self.config.hostname, verify_certs = self.config.verify_server_cert))]
     async fn connect(&mut self) -> Result<()> {
         if self.stream.is_some() {
             return Err(MqttError::AlreadyConnected);
         }
 
-        // Build TLS configuration
         let tls_config = Arc::new(self.build_tls_config()?);
         let connector = TlsConnector::from(tls_config);
 
-        // Connect TCP first
         let tcp_stream = timeout(
             self.config.connect_timeout,
             TcpStream::connect(self.config.addr),
@@ -514,10 +514,8 @@ impl Transport for TlsTransport {
         .await
         .map_err(|_| MqttError::Timeout)??;
 
-        // Configure TCP options
         tcp_stream.set_nodelay(true)?;
 
-        // Perform TLS handshake
         let domain = ServerName::try_from(self.config.hostname.clone())
             .map_err(|_| MqttError::ProtocolError("Invalid server hostname".to_string()))?;
 
@@ -529,37 +527,46 @@ impl Transport for TlsTransport {
         .map_err(|_| MqttError::Timeout)?
         .map_err(|e| MqttError::ConnectionError(format!("TLS handshake failed: {e}")))?;
 
+        debug!("TLS connection established");
         self.stream = Some(tls_stream);
         Ok(())
     }
 
+    #[instrument(skip(self, buf), fields(buf_len = buf.len()), level = "debug")]
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
         match &mut self.stream {
             Some(stream) => {
+                trace!(buf_len = buf.len(), "TLS read attempt");
                 let n = stream.read(buf).await?;
                 if n == 0 {
+                    debug!("TLS connection closed by remote (EOF)");
                     return Err(MqttError::ConnectionClosedByPeer);
                 }
+                trace!(bytes_read = n, "TLS read complete");
                 Ok(n)
             }
             None => Err(MqttError::NotConnected),
         }
     }
 
+    #[instrument(skip(self, buf), fields(buf_len = buf.len()), level = "debug")]
     async fn write(&mut self, buf: &[u8]) -> Result<()> {
         match &mut self.stream {
             Some(stream) => {
                 stream.write_all(buf).await?;
                 stream.flush().await?;
+                trace!(bytes_written = buf.len(), "TLS write complete");
                 Ok(())
             }
             None => Err(MqttError::NotConnected),
         }
     }
 
+    #[instrument(skip(self))]
     async fn close(&mut self) -> Result<()> {
         if let Some(mut stream) = self.stream.take() {
             stream.shutdown().await?;
+            debug!("TLS connection closed");
         }
         Ok(())
     }

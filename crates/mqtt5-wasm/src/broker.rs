@@ -1,3 +1,4 @@
+use crate::bridge::{WasmBridgeConfig, WasmBridgeManager};
 use crate::client_handler::WasmClientHandler;
 use mqtt5::broker::auth::PasswordAuthProvider;
 use mqtt5::broker::config::BrokerConfig;
@@ -6,11 +7,14 @@ use mqtt5::broker::router::MessageRouter;
 use mqtt5::broker::storage::{DynamicStorage, MemoryBackend};
 use mqtt5::broker::sys_topics::BrokerStats;
 use mqtt5::time::Duration;
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::Arc;
 use wasm_bindgen::prelude::*;
 use web_sys::MessagePort;
 
 #[wasm_bindgen]
+#[allow(clippy::struct_excessive_bools)]
 pub struct WasmBrokerConfig {
     max_clients: u32,
     session_expiry_interval_secs: u32,
@@ -93,21 +97,23 @@ impl WasmBrokerConfig {
     }
 
     fn to_broker_config(&self) -> BrokerConfig {
-        let mut config = BrokerConfig::default();
-        config.max_clients = self.max_clients as usize;
-        config.session_expiry_interval =
-            Duration::from_secs(u64::from(self.session_expiry_interval_secs));
-        config.max_packet_size = self.max_packet_size as usize;
-        config.topic_alias_maximum = self.topic_alias_maximum;
-        config.retain_available = self.retain_available;
-        config.maximum_qos = self.maximum_qos;
-        config.wildcard_subscription_available = self.wildcard_subscription_available;
-        config.subscription_identifier_available = self.subscription_identifier_available;
-        config.shared_subscription_available = self.shared_subscription_available;
-        config.server_keep_alive = self
-            .server_keep_alive_secs
-            .map(|s| Duration::from_secs(u64::from(s)));
-        config
+        BrokerConfig {
+            max_clients: self.max_clients as usize,
+            session_expiry_interval: Duration::from_secs(u64::from(
+                self.session_expiry_interval_secs,
+            )),
+            max_packet_size: self.max_packet_size as usize,
+            topic_alias_maximum: self.topic_alias_maximum,
+            retain_available: self.retain_available,
+            maximum_qos: self.maximum_qos,
+            wildcard_subscription_available: self.wildcard_subscription_available,
+            subscription_identifier_available: self.subscription_identifier_available,
+            shared_subscription_available: self.shared_subscription_available,
+            server_keep_alive: self
+                .server_keep_alive_secs
+                .map(|s| Duration::from_secs(u64::from(s))),
+            ..Default::default()
+        }
     }
 }
 
@@ -125,6 +131,7 @@ pub struct WasmBroker {
     storage: Arc<DynamicStorage>,
     stats: Arc<BrokerStats>,
     resource_monitor: Arc<ResourceMonitor>,
+    bridge_manager: Rc<RefCell<WasmBridgeManager>>,
 }
 
 #[wasm_bindgen]
@@ -135,6 +142,7 @@ impl WasmBroker {
     }
 
     #[wasm_bindgen]
+    #[allow(clippy::needless_pass_by_value)]
     pub fn with_config(wasm_config: WasmBrokerConfig) -> Result<WasmBroker, JsValue> {
         let config = Arc::new(wasm_config.to_broker_config());
 
@@ -151,6 +159,8 @@ impl WasmBroker {
         };
         let resource_monitor = Arc::new(ResourceMonitor::new(limits));
 
+        let bridge_manager = Rc::new(RefCell::new(WasmBridgeManager::new(Arc::clone(&router))));
+
         Ok(WasmBroker {
             config,
             router,
@@ -158,6 +168,7 @@ impl WasmBroker {
             storage,
             stats,
             resource_monitor,
+            bridge_manager,
         })
     }
 
@@ -220,5 +231,32 @@ impl WasmBroker {
         );
 
         Ok(client_port)
+    }
+
+    #[wasm_bindgen]
+    pub async fn add_bridge(
+        &self,
+        config: WasmBridgeConfig,
+        remote_port: MessagePort,
+    ) -> Result<(), JsValue> {
+        let manager = self.bridge_manager.borrow().clone();
+        manager.add_bridge(config, remote_port).await
+    }
+
+    #[wasm_bindgen]
+    pub async fn remove_bridge(&self, name: &str) -> Result<(), JsValue> {
+        let manager = self.bridge_manager.borrow().clone();
+        manager.remove_bridge(name).await
+    }
+
+    #[wasm_bindgen]
+    pub fn list_bridges(&self) -> Vec<String> {
+        self.bridge_manager.borrow().list_bridges()
+    }
+
+    #[wasm_bindgen]
+    pub async fn stop_all_bridges(&self) {
+        let manager = self.bridge_manager.borrow().clone();
+        manager.stop_all().await;
     }
 }

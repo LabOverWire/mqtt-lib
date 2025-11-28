@@ -5,6 +5,9 @@ use crate::broker::binding::{bind_tcp_addresses, format_binding_error};
 use crate::broker::bridge::BridgeManager;
 use crate::broker::client_handler::ClientHandler;
 use crate::broker::config::{BrokerConfig, StorageBackend as StorageBackendType};
+use crate::broker::quic_acceptor::{
+    accept_quic_connection, run_quic_connection_handler, QuicAcceptorConfig,
+};
 use crate::broker::resource_monitor::{ResourceLimits, ResourceMonitor};
 use crate::broker::router::MessageRouter;
 use crate::broker::storage::{DynamicStorage, FileBackend, MemoryBackend, StorageBackend};
@@ -13,6 +16,7 @@ use crate::broker::tls_acceptor::{accept_tls_connection, TlsAcceptorConfig};
 use crate::broker::transport::BrokerTransport;
 use crate::broker::websocket_server::{accept_websocket_connection, WebSocketServerConfig};
 use crate::error::{MqttError, Result};
+use quinn::Endpoint;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
@@ -38,6 +42,7 @@ pub struct MqttBroker {
     ws_tls_listeners: Vec<TcpListener>,
     ws_tls_config: Option<WebSocketServerConfig>,
     ws_tls_acceptor: Option<TlsAcceptor>,
+    quic_endpoints: Vec<Endpoint>,
     shutdown_tx: Option<tokio::sync::broadcast::Sender<()>>,
 }
 
@@ -129,6 +134,7 @@ impl MqttBroker {
         let (ws_tls_listeners, ws_tls_config, ws_tls_acceptor) =
             Self::setup_websocket_tls(&config).await?;
         let (tls_listeners, tls_acceptor) = Self::setup_tls(&config).await?;
+        let quic_endpoints = Self::setup_quic(&config).await?;
 
         let storage = if config.storage_config.enable_persistence {
             Some(Self::create_storage_backend(&config.storage_config).await?)
@@ -188,6 +194,7 @@ impl MqttBroker {
             ws_tls_listeners,
             ws_tls_config,
             ws_tls_acceptor,
+            quic_endpoints,
             shutdown_tx: Some(shutdown_tx),
         })
     }
@@ -299,6 +306,46 @@ impl MqttBroker {
         }
     }
 
+    async fn setup_quic(config: &BrokerConfig) -> Result<Vec<Endpoint>> {
+        if let Some(ref quic_config) = config.quic_config {
+            let cert_chain =
+                QuicAcceptorConfig::load_cert_chain_from_file(&quic_config.cert_file).await?;
+            let private_key =
+                QuicAcceptorConfig::load_private_key_from_file(&quic_config.key_file).await?;
+
+            let mut acceptor_config = QuicAcceptorConfig::new(cert_chain, private_key);
+
+            if let Some(ref ca_file) = quic_config.ca_file {
+                let ca_certs = QuicAcceptorConfig::load_cert_chain_from_file(ca_file).await?;
+                acceptor_config = acceptor_config.with_client_ca_certs(ca_certs);
+            }
+
+            acceptor_config =
+                acceptor_config.with_require_client_cert(quic_config.require_client_cert);
+
+            let mut endpoints = Vec::new();
+            for addr in &quic_config.bind_addresses {
+                match acceptor_config.build_endpoint(*addr) {
+                    Ok(endpoint) => {
+                        info!("QUIC endpoint bound to {}", addr);
+                        endpoints.push(endpoint);
+                    }
+                    Err(e) => {
+                        warn!("Failed to bind QUIC endpoint to {}: {}", addr, e);
+                    }
+                }
+            }
+
+            if endpoints.is_empty() {
+                warn!("No QUIC endpoints could be bound, QUIC disabled");
+            }
+
+            Ok(endpoints)
+        } else {
+            Ok(Vec::new())
+        }
+    }
+
     fn default_resource_limits(max_clients: usize) -> ResourceLimits {
         ResourceLimits {
             max_connections: max_clients,
@@ -334,13 +381,11 @@ impl MqttBroker {
         self
     }
 
-    /// Initialize storage and start cleanup tasks
     async fn initialize_storage(
         &self,
         shutdown_tx: &tokio::sync::broadcast::Sender<()>,
     ) -> Result<()> {
         if let Some(ref storage) = self.storage {
-            // Perform initial cleanup
             storage.cleanup_expired().await?;
 
             // Start periodic cleanup task
@@ -393,6 +438,7 @@ impl MqttBroker {
         let ws_tls_listeners = std::mem::take(&mut self.ws_tls_listeners);
         let ws_tls_config = self.ws_tls_config.take();
         let ws_tls_acceptor = self.ws_tls_acceptor.take();
+        let quic_endpoints = std::mem::take(&mut self.quic_endpoints);
 
         let Some(shutdown_tx) = self.shutdown_tx.take() else {
             return Err(MqttError::InvalidState(
@@ -400,16 +446,15 @@ impl MqttBroker {
             ));
         };
 
-        // Initialize storage and cleanup tasks
         self.initialize_storage(&shutdown_tx).await?;
-
-        // Initialize router (load retained messages)
         self.router.initialize().await?;
 
         // Start $SYS topics provider
         let sys_provider =
             SysTopicsProvider::new(Arc::clone(&self.router), Arc::clone(&self.stats));
         sys_provider.start();
+
+        info!("Router initialized, starting resource monitor cleanup task");
 
         // Start resource monitor cleanup task
         let resource_monitor_clone = Arc::clone(&self.resource_monitor);
@@ -680,6 +725,81 @@ impl MqttBroker {
             }
         }
 
+        info!(
+            "Number of QUIC endpoints to start: {}",
+            quic_endpoints.len()
+        );
+        for quic_endpoint in quic_endpoints {
+            let config = Arc::clone(&self.config);
+            let router = Arc::clone(&self.router);
+            let auth_provider = Arc::clone(&self.auth_provider);
+            let storage = self.storage.clone();
+            let stats = Arc::clone(&self.stats);
+            let resource_monitor = Arc::clone(&self.resource_monitor);
+            let shutdown_tx_clone = shutdown_tx.clone();
+            let mut shutdown_rx_quic = shutdown_tx.subscribe();
+
+            let local_addr = quic_endpoint.local_addr();
+            tokio::spawn(async move {
+                debug!("QUIC accept loop starting for {:?}", local_addr);
+                loop {
+                    tokio::select! {
+                        accept_result = accept_quic_connection(&quic_endpoint) => {
+                            match accept_result {
+                                Ok((connection, peer_addr)) => {
+                                    debug!("New QUIC connection from {}", peer_addr);
+
+                                    if !resource_monitor.can_accept_connection(peer_addr.ip()).await {
+                                        warn!("QUIC connection rejected from {}: resource limits exceeded", peer_addr);
+                                        connection.close(0u32.into(), b"resource limit");
+                                        continue;
+                                    }
+
+                                    let conn = Arc::new(connection);
+                                    let config_clone = Arc::clone(&config);
+                                    let router_clone = Arc::clone(&router);
+                                    let auth_clone = Arc::clone(&auth_provider);
+                                    let storage_clone = storage.clone();
+                                    let stats_clone = Arc::clone(&stats);
+                                    let monitor_clone = Arc::clone(&resource_monitor);
+                                    let shutdown_for_handler = shutdown_tx_clone.clone();
+
+                                    tokio::spawn(async move {
+                                        run_quic_connection_handler(
+                                            conn,
+                                            peer_addr,
+                                            config_clone,
+                                            router_clone,
+                                            auth_clone,
+                                            storage_clone,
+                                            stats_clone,
+                                            monitor_clone,
+                                            shutdown_for_handler.subscribe(),
+                                        )
+                                        .await;
+                                    });
+                                }
+                                Err(e) => {
+                                    if !e.to_string().contains("endpoint closed") {
+                                        error!("QUIC accept error: {}", e);
+                                    }
+                                }
+                            }
+                        }
+
+                        _ = shutdown_rx_quic.recv() => {
+                            debug!("QUIC accept task shutting down");
+                            break;
+                        }
+                    }
+                }
+            });
+        }
+
+        info!(
+            "Starting TCP accept tasks for {} listeners",
+            listeners.len()
+        );
         // Spawn TCP accept tasks (one per listener)
         for listener in listeners {
             let config = Arc::clone(&self.config);

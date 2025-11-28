@@ -4,8 +4,9 @@
 //! - Plain TCP connections (port 1883)
 //! - TLS connections (port 8883)
 //! - WebSocket connections (port 8080)
+//! - QUIC connections (port 14567)
 
-use mqtt5::broker::config::{TlsConfig, WebSocketConfig};
+use mqtt5::broker::config::{QuicConfig, TlsConfig, WebSocketConfig};
 use mqtt5::broker::{BrokerConfig, MqttBroker};
 use std::path::PathBuf;
 use tracing::info;
@@ -41,6 +42,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .with_bind_address(([0, 0, 0, 0], 8080))
                 .with_path("/mqtt")
                 .with_tls(false),
+        )
+        .with_quic(
+            QuicConfig::new(
+                PathBuf::from("test_certs/server.pem"),
+                PathBuf::from("test_certs/server.key"),
+            )
+            .with_bind_address(([0, 0, 0, 0], 14567)),
         );
 
     // Create and run the broker
@@ -50,6 +58,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("  Plain TCP:  mqtt://localhost:1883");
     info!("  TLS:        mqtts://localhost:8883");
     info!("  WebSocket:  ws://localhost:8080/mqtt");
+    info!("  QUIC:       quic://localhost:14567");
     info!("Press Ctrl+C to stop");
 
     // Run until shutdown signal

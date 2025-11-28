@@ -13,7 +13,7 @@ pub struct SubCommand {
     #[arg(long, short)]
     pub topic: Option<String>,
 
-    /// MQTT broker URL (e.g., mqtt://localhost:1883, mqtts://host:8883)
+    /// MQTT broker URL (mqtt://, mqtts://, ws://, wss://, quic://, quics://)
     #[arg(long, short = 'U', conflicts_with_all = &["host", "port"])]
     pub url: Option<String>,
 
@@ -97,7 +97,7 @@ pub struct SubCommand {
     #[arg(long)]
     pub ca_cert: Option<PathBuf>,
 
-    /// Skip certificate verification for TLS connections (insecure, for testing only)
+    /// Skip certificate verification for TLS/QUIC connections (insecure, for testing only)
     #[arg(long)]
     pub insecure: bool,
 
@@ -120,6 +120,30 @@ pub struct SubCommand {
     /// Retain As Published - keep original retain flag when delivering messages
     #[arg(long)]
     pub retain_as_published: bool,
+
+    /// QUIC stream strategy (control-only, per-publish, per-topic, per-subscription)
+    #[arg(long, value_parser = parse_stream_strategy)]
+    pub quic_stream_strategy: Option<mqtt5::transport::StreamStrategy>,
+
+    /// Enable MQoQ flow headers for stream state tracking
+    #[arg(long)]
+    pub quic_flow_headers: bool,
+
+    /// Flow expiration interval in seconds (default: 300)
+    #[arg(long, default_value = "300")]
+    pub quic_flow_expire: u64,
+
+    /// Maximum concurrent QUIC streams
+    #[arg(long)]
+    pub quic_max_streams: Option<usize>,
+
+    /// Enable QUIC datagrams for unreliable transport
+    #[arg(long)]
+    pub quic_datagrams: bool,
+
+    /// QUIC connection timeout in seconds (default: 30)
+    #[arg(long, default_value = "30")]
+    pub quic_connect_timeout: u64,
 
     /// OpenTelemetry OTLP endpoint (e.g., http://localhost:4317)
     #[cfg(feature = "opentelemetry")]
@@ -152,6 +176,19 @@ fn parse_retain_handling(s: &str) -> Result<mqtt5::RetainHandling, String> {
         "1" => Ok(mqtt5::RetainHandling::SendIfNew),
         "2" => Ok(mqtt5::RetainHandling::DontSend),
         _ => Err(format!("retain_handling must be 0, 1, or 2, got: {s}")),
+    }
+}
+
+fn parse_stream_strategy(s: &str) -> Result<mqtt5::transport::StreamStrategy, String> {
+    use mqtt5::transport::StreamStrategy;
+    match s.to_lowercase().as_str() {
+        "control-only" | "control" => Ok(StreamStrategy::ControlOnly),
+        "per-publish" | "publish" => Ok(StreamStrategy::DataPerPublish),
+        "per-topic" | "topic" => Ok(StreamStrategy::DataPerTopic),
+        "per-subscription" | "subscription" => Ok(StreamStrategy::DataPerSubscription),
+        _ => Err(format!(
+            "Invalid stream strategy: {s}. Valid: control-only, per-publish, per-topic, per-subscription"
+        )),
     }
 }
 
@@ -269,6 +306,28 @@ pub async fn execute(mut cmd: SubCommand, verbose: bool, debug: bool) -> Result<
         client.set_insecure_tls(true).await;
         info!("Insecure TLS mode enabled (certificate verification disabled)");
     }
+
+    // Configure QUIC transport options
+    if let Some(strategy) = cmd.quic_stream_strategy {
+        client.set_quic_stream_strategy(strategy).await;
+        debug!("QUIC stream strategy: {:?}", strategy);
+    }
+    if cmd.quic_flow_headers {
+        client.set_quic_flow_headers(true).await;
+        debug!("QUIC flow headers enabled");
+    }
+    client.set_quic_flow_expire(cmd.quic_flow_expire).await;
+    if let Some(max) = cmd.quic_max_streams {
+        client.set_quic_max_streams(Some(max)).await;
+        debug!("QUIC max streams: {max}");
+    }
+    if cmd.quic_datagrams {
+        client.set_quic_datagrams(true).await;
+        debug!("QUIC datagrams enabled");
+    }
+    client
+        .set_quic_connect_timeout(Duration::from_secs(cmd.quic_connect_timeout))
+        .await;
 
     // Configure TLS if using secure connection
     if broker_url.starts_with("ssl://") || broker_url.starts_with("mqtts://") {

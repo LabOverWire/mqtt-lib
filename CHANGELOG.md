@@ -5,6 +5,70 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] - 2025-11-26
+
+### Added
+
+- **mqtt5-wasm npm package** published at version 0.1.2
+  - Available via `npm install mqtt5-wasm`
+  - Fixed README with correct installation instructions for both npm and Cargo
+  - Package available at https://www.npmjs.com/package/mqtt5-wasm
+
+- **WASM broker bridging** for connecting in-browser brokers via MessagePort
+  - `WasmBridgeConfig` for bridge name, client settings, topic mappings
+  - `WasmTopicMapping` with pattern, direction (In/Out/Both), QoS, prefixes
+  - `add_bridge(config, port)` / `remove_bridge(name)` broker methods
+  - Bidirectional message forwarding between brokers
+
+- **Tracing instrumentation** for transport layer
+  - `#[instrument]` attributes on transport connect/read/write operations
+  - Structured logging for connection lifecycle events
+  - Debug-level tracing for packet I/O operations
+
+- **QUIC transport support** for MQTT over QUIC (RFC 9000)
+  - QUIC URL scheme: `quic://host:port` (default port 14567)
+  - Built-in TLS 1.3 encryption (QUIC mandates encryption)
+  - Certificate verification with configurable CA certificates
+  - Server name indication (SNI) support
+  - ALPN protocol negotiation (`mqtt`)
+
+- **QUIC multistream architecture** for parallel MQTT operations
+  - Eliminates head-of-line blocking for concurrent publishes
+  - Stream strategies: `ControlOnly`, `DataPerPublish`, `DataPerTopic`, `DataPerSubscription`
+  - Configurable stream management with `QuicStreamManager`
+  - Automatic stream lifecycle management
+
+- **Flow headers for stream state recovery**
+  - `FlowId` - Unique identifier for stream state tracking (client/server initiated)
+  - `FlowFlags` - Recovery mode, persistent QoS, subscription state flags
+  - `DataFlowHeader` - Stream initialization with expire intervals
+  - `FlowRegistry` - Server-side flow state management
+  - bebytes-based bit field serialization for compact encoding
+
+- **QUIC client configuration**
+  - `QuicClientConfig` builder pattern for connection setup
+  - Insecure mode for development/testing
+  - CA certificate loading from file or PEM bytes
+  - Custom server name verification
+
+- **Receive-side multistream support**
+  - Background stream acceptor for server-initiated streams
+  - Packet routing from multiple concurrent streams
+  - Stream-aware packet decoding with flow context
+
+### Technical Details
+
+- **Transport layer**: Quinn 0.11 for QUIC implementation
+- **Crypto provider**: Ring for TLS operations
+- **Stream management**: Async stream multiplexing with tokio
+- **Flow encoding**: bebytes derive macros for zero-copy serialization
+- **Test coverage**: 20 multistream integration tests, unit tests for all components
+
+### Compatibility
+
+- EMQX 5.0+ (native MQTT-over-QUIC support)
+- Standard QUIC servers supporting ALPN `mqtt`
+
 ## [0.10.0] - 2025-11-24
 
 ### BREAKING CHANGES

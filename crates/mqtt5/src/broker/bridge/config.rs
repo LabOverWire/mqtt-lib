@@ -230,7 +230,10 @@ impl BridgeConfig {
         self
     }
 
-    /// Validates the configuration
+    /// Validates the configuration.
+    ///
+    /// # Errors
+    /// Returns an error if the configuration is invalid (empty name, client ID, or topics).
     pub fn validate(&self) -> crate::Result<()> {
         use crate::error::MqttError;
 

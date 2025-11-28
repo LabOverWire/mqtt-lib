@@ -34,7 +34,10 @@ impl BridgeManager {
         }
     }
 
-    /// Adds a new bridge
+    /// Adds a new bridge.
+    ///
+    /// # Errors
+    /// Returns an error if the bridge already exists or connection fails.
     pub async fn add_bridge(&self, config: BridgeConfig) -> Result<()> {
         let name = config.name.clone();
 
@@ -68,7 +71,10 @@ impl BridgeManager {
         Ok(())
     }
 
-    /// Removes a bridge
+    /// Removes a bridge.
+    ///
+    /// # Errors
+    /// Returns an error if the bridge is not found or stop fails.
     pub async fn remove_bridge(&self, name: &str) -> Result<()> {
         // Get and remove the bridge
         let bridge = self.bridges.write().await.remove(name);
@@ -92,7 +98,10 @@ impl BridgeManager {
         }
     }
 
-    /// Handles outgoing messages (called by MessageRouter)
+    /// Handles outgoing messages (called by MessageRouter).
+    ///
+    /// # Errors
+    /// Returns an error if message forwarding fails.
     pub async fn handle_outgoing(&self, packet: &PublishPacket) -> Result<()> {
         if packet.topic_name.starts_with("$SYS/") {
             return Ok(());
@@ -142,7 +151,10 @@ impl BridgeManager {
         self.bridges.read().await.keys().cloned().collect()
     }
 
-    /// Stops all bridges
+    /// Stops all bridges.
+    ///
+    /// # Errors
+    /// Returns an error if any bridge fails to stop.
     pub async fn stop_all(&self) -> Result<()> {
         info!("Stopping all bridges");
 
@@ -167,7 +179,10 @@ impl BridgeManager {
         Ok(())
     }
 
-    /// Reloads bridge configuration
+    /// Reloads bridge configuration.
+    ///
+    /// # Errors
+    /// Returns an error if removing or adding the bridge fails.
     pub async fn reload_bridge(&self, config: BridgeConfig) -> Result<()> {
         let name = config.name.clone();
 
