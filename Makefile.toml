@@ -163,3 +163,15 @@ echo "Run examples with:"
 echo "  cd crates/mqtt5-wasm/examples/websocket && python3 -m http.server 8000"
 '''
 description = "Build WASM and copy to example directories"
+
+[tasks.wasm-publish]
+dependencies = ["wasm-build"]
+script = '''
+#!/bin/bash
+echo "Publishing WASM package to npm..."
+cd crates/mqtt5-wasm/pkg
+npm pkg fix
+npm publish
+echo "✨ Published mqtt5-wasm to npm!"
+'''
+description = "Build and publish WASM package to npm"
