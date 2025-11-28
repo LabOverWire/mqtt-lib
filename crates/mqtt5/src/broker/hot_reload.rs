@@ -64,7 +64,10 @@ pub struct HotReloadManager {
 }
 
 impl HotReloadManager {
-    /// Creates a new hot-reload manager
+    /// Creates a new hot-reload manager.
+    ///
+    /// # Errors
+    /// This function currently does not return errors but the signature allows for future validation.
     pub fn new(config: BrokerConfig, config_path: PathBuf) -> Result<Self> {
         let (change_sender, _) = broadcast::channel(100);
 
@@ -82,7 +85,10 @@ impl HotReloadManager {
         Ok(manager)
     }
 
-    /// Starts the hot-reload system
+    /// Starts the hot-reload system.
+    ///
+    /// # Errors
+    /// This function currently does not return errors but the signature allows for future IO errors.
     pub async fn start(&mut self) -> Result<()> {
         info!("Starting configuration hot-reload system");
 
@@ -263,12 +269,13 @@ impl HotReloadManager {
         self.current_config.read().await.clone()
     }
 
-    /// Manually triggers a configuration reload
+    /// Manually triggers a configuration reload.
+    ///
+    /// # Errors
+    /// Returns an error if the config file cannot be read or the new config is invalid.
     ///
     /// # Panics
-    ///
-    /// Panics if the system time is before the Unix epoch (January 1, 1970).
-    /// This should not happen on any reasonable system.
+    /// Panics if the system time is before the Unix epoch (should not happen).
     pub async fn reload_now(&self) -> Result<bool> {
         info!("Manually triggering configuration reload");
 
@@ -313,12 +320,13 @@ impl HotReloadManager {
         self.change_sender.subscribe()
     }
 
-    /// Applies specific configuration changes without full reload
+    /// Applies specific configuration changes without full reload.
+    ///
+    /// # Errors
+    /// Returns an error if the updated configuration fails validation.
     ///
     /// # Panics
-    ///
-    /// Panics if the system time is before the Unix epoch (January 1, 1970).
-    /// This should not happen on any reasonable system.
+    /// Panics if the system time is before the Unix epoch (should not happen).
     pub async fn apply_partial_config(
         &self,
         change_type: ConfigChangeType,
@@ -390,7 +398,10 @@ impl ConfigSubscriber {
         }
     }
 
-    /// Waits for the next configuration change
+    /// Waits for the next configuration change.
+    ///
+    /// # Errors
+    /// Returns an error if the change channel is closed.
     pub async fn wait_for_change(&mut self) -> Result<ConfigChangeEvent> {
         loop {
             match self.receiver.recv().await {

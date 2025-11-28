@@ -228,7 +228,10 @@ impl PacketReader for OwnedReadHalf {
     }
 }
 
-/// Helper function to encode any packet to a buffer
+/// Helper function to encode any packet to a buffer.
+///
+/// # Errors
+/// Returns an error if packet encoding fails.
 pub fn encode_packet_to_buffer(packet: &Packet, buf: &mut BytesMut) -> Result<()> {
     match packet {
         Packet::Connect(p) => {

@@ -238,7 +238,10 @@ impl AclManager {
         Ok(())
     }
 
-    /// Reloads the ACL file (alias for load_acl_file)
+    /// Reloads the ACL file (alias for load_acl_file).
+    ///
+    /// # Errors
+    /// Returns an error if the ACL file cannot be read or parsed.
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn reload(&self) -> Result<()> {
         self.load_acl_file().await

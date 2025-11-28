@@ -182,7 +182,10 @@ impl<B: StorageBackend> Storage<B> {
         }
     }
 
-    /// Initialize storage and load data from backend
+    /// Initialize storage and load data from backend.
+    ///
+    /// # Errors
+    /// Returns an error if the backend fails to load retained messages.
     pub async fn initialize(&self) -> Result<()> {
         // Load retained messages into cache
         // Use "#" as wildcard to match all topics
@@ -199,7 +202,10 @@ impl<B: StorageBackend> Storage<B> {
         Ok(())
     }
 
-    /// Store retained message
+    /// Store retained message.
+    ///
+    /// # Errors
+    /// Returns an error if the backend fails to persist the message.
     pub async fn store_retained(&self, topic: &str, message: RetainedMessage) -> Result<()> {
         // Update cache
         self.retained_cache
@@ -239,7 +245,10 @@ impl<B: StorageBackend> Storage<B> {
         }
     }
 
-    /// Remove retained message
+    /// Remove retained message.
+    ///
+    /// # Errors
+    /// Returns an error if the backend fails to remove the message.
     pub async fn remove_retained(&self, topic: &str) -> Result<()> {
         // Remove from cache
         self.retained_cache.write().await.remove(topic);
@@ -264,7 +273,10 @@ impl<B: StorageBackend> Storage<B> {
             .collect()
     }
 
-    /// Store client session
+    /// Store client session.
+    ///
+    /// # Errors
+    /// Returns an error if the backend fails to persist the session.
     pub async fn store_session(&self, session: ClientSession) -> Result<()> {
         let client_id = session.client_id.clone();
 
@@ -307,7 +319,10 @@ impl<B: StorageBackend> Storage<B> {
         }
     }
 
-    /// Remove client session
+    /// Remove client session.
+    ///
+    /// # Errors
+    /// Returns an error if the backend fails to remove the session.
     pub async fn remove_session(&self, client_id: &str) -> Result<()> {
         // Remove from cache
         self.sessions_cache.write().await.remove(client_id);
@@ -316,22 +331,34 @@ impl<B: StorageBackend> Storage<B> {
         self.backend.remove_session(client_id).await
     }
 
-    /// Queue message for offline client
+    /// Queue message for offline client.
+    ///
+    /// # Errors
+    /// Returns an error if the backend fails to queue the message.
     pub async fn queue_message(&self, message: QueuedMessage) -> Result<()> {
         self.backend.queue_message(message).await
     }
 
-    /// Get queued messages for client
+    /// Get queued messages for client.
+    ///
+    /// # Errors
+    /// Returns an error if the backend fails to retrieve the messages.
     pub async fn get_queued_messages(&self, client_id: &str) -> Result<Vec<QueuedMessage>> {
         self.backend.get_queued_messages(client_id).await
     }
 
-    /// Remove queued messages for client
+    /// Remove queued messages for client.
+    ///
+    /// # Errors
+    /// Returns an error if the backend fails to remove the messages.
     pub async fn remove_queued_messages(&self, client_id: &str) -> Result<()> {
         self.backend.remove_queued_messages(client_id).await
     }
 
-    /// Periodic cleanup of expired data
+    /// Periodic cleanup of expired data.
+    ///
+    /// # Errors
+    /// Returns an error if the backend fails during cleanup.
     pub async fn cleanup_expired(&self) -> Result<()> {
         let now = SystemTime::now();
 

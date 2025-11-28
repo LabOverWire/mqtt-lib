@@ -84,7 +84,10 @@ impl QuicStreamManager {
         self
     }
 
-    // [RFC9000§2.1] Open bidirectional stream
+    /// Opens a bidirectional QUIC data stream.
+    ///
+    /// # Errors
+    /// Returns an error if the QUIC connection fails to open a stream.
     #[instrument(skip(self), level = "debug")]
     pub async fn open_data_stream(&self) -> Result<(quinn::SendStream, quinn::RecvStream)> {
         let (send, recv) =
@@ -94,7 +97,10 @@ impl QuicStreamManager {
         Ok((send, recv))
     }
 
-    // [MQoQ§4.5.2] Data flow with header
+    /// Opens a data stream with flow header.
+    ///
+    /// # Errors
+    /// Returns an error if the stream cannot be opened or the flow header write fails.
     #[instrument(skip(self), fields(strategy = ?self.strategy), level = "debug")]
     pub async fn open_data_stream_with_flow(
         &self,
@@ -125,7 +131,10 @@ impl QuicStreamManager {
         Ok((send, recv, flow_id))
     }
 
-    // [MQoQ§6.3] Flow state recovery
+    /// Opens a stream for flow state recovery.
+    ///
+    /// # Errors
+    /// Returns an error if the stream cannot be opened or the recovery header write fails.
     pub async fn open_recovery_stream(
         &self,
         flow_id: FlowId,
@@ -160,7 +169,10 @@ impl QuicStreamManager {
         self.flow_flags
     }
 
-    // [MQoQ§5.2] Per-publish stream
+    /// Sends a packet on a dedicated QUIC stream.
+    ///
+    /// # Errors
+    /// Returns an error if the stream operation or packet encoding fails.
     #[instrument(skip(self, packet), level = "debug")]
     pub async fn send_packet_on_stream(&self, packet: Packet) -> Result<()> {
         let (mut send, _recv, flow_id) = self.open_data_stream_with_flow().await?;
@@ -259,6 +271,10 @@ impl QuicStreamManager {
         Ok((send, flow_id))
     }
 
+    /// Sends a packet on a topic-specific stream.
+    ///
+    /// # Errors
+    /// Returns an error if the stream operation or packet encoding fails.
     pub async fn send_on_topic_stream(&self, topic: String, packet: Packet) -> Result<()> {
         let (mut stream, flow_id) = self.get_or_create_topic_stream(&topic).await?;
 
@@ -284,6 +300,10 @@ impl QuicStreamManager {
         Ok(())
     }
 
+    /// Sends a packet on a subscription-specific stream.
+    ///
+    /// # Errors
+    /// Returns an error if the stream operation or packet encoding fails.
     pub async fn send_on_subscription_stream(&self, topic: String, packet: Packet) -> Result<()> {
         self.send_on_topic_stream(topic, packet).await
     }
@@ -306,6 +326,10 @@ impl QuicStreamManager {
         debug!(flow_id = ?flow_id, "Registered flow stream");
     }
 
+    /// Sends a packet on an existing flow stream.
+    ///
+    /// # Errors
+    /// Returns an error if the flow stream is not found or the write operation fails.
     #[instrument(skip(self, packet), level = "debug")]
     pub async fn send_on_flow(&self, flow_id: FlowId, packet: Packet) -> Result<()> {
         let mut flows = self.flow_streams.lock().await;

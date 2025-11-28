@@ -19,7 +19,10 @@ impl<B: StorageBackend> SessionManager<B> {
         Self { storage }
     }
 
-    /// Create or restore client session
+    /// Create or restore client session.
+    ///
+    /// # Errors
+    /// Returns an error if the storage backend fails.
     pub async fn get_or_create_session(
         &self,
         client_id: &str,
@@ -58,7 +61,10 @@ impl<B: StorageBackend> SessionManager<B> {
         }
     }
 
-    /// Update session subscriptions
+    /// Update session subscriptions.
+    ///
+    /// # Errors
+    /// Returns an error if the storage backend fails.
     pub async fn update_subscriptions(
         &self,
         client_id: &str,
@@ -80,7 +86,10 @@ impl<B: StorageBackend> SessionManager<B> {
         }
     }
 
-    /// Add subscription to session
+    /// Add subscription to session.
+    ///
+    /// # Errors
+    /// Returns an error if the storage backend fails.
     pub async fn add_subscription(
         &self,
         client_id: &str,
@@ -101,7 +110,10 @@ impl<B: StorageBackend> SessionManager<B> {
         }
     }
 
-    /// Remove subscription from session
+    /// Remove subscription from session.
+    ///
+    /// # Errors
+    /// Returns an error if the storage backend fails.
     pub async fn remove_subscription(&self, client_id: &str, topic_filter: &str) -> Result<()> {
         if let Some(mut session) = self.storage.get_session(client_id).await {
             session.remove_subscription(topic_filter);
@@ -126,13 +138,19 @@ impl<B: StorageBackend> SessionManager<B> {
         }
     }
 
-    /// Remove session (on disconnect with session expiry = 0)
+    /// Remove session (on disconnect with session expiry = 0).
+    ///
+    /// # Errors
+    /// Returns an error if the storage backend fails.
     pub async fn remove_session(&self, client_id: &str) -> Result<()> {
         debug!("Removing session for client: {}", client_id);
         self.storage.remove_session(client_id).await
     }
 
-    /// Touch session to update last seen time
+    /// Touch session to update last seen time.
+    ///
+    /// # Errors
+    /// Returns an error if the storage backend fails.
     pub async fn touch_session(&self, client_id: &str) -> Result<()> {
         if let Some(mut session) = self.storage.get_session(client_id).await {
             session.touch();

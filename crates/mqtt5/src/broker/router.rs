@@ -88,7 +88,10 @@ impl MessageRouter {
         *self.bridge_manager.write().await = Some(Arc::downgrade(&bridge_manager));
     }
 
-    /// Initializes the router by loading retained messages from storage
+    /// Initializes the router by loading retained messages from storage.
+    ///
+    /// # Errors
+    /// Returns an error if the storage fails to load retained messages.
     pub async fn initialize(&self) -> Result<(), crate::error::MqttError> {
         if let Some(ref storage) = self.storage {
             // Load all retained messages from storage

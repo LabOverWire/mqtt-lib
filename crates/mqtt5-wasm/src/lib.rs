@@ -1,7 +1,6 @@
 #![cfg(target_arch = "wasm32")]
 #![warn(clippy::pedantic)]
 #![allow(clippy::uninlined_format_args)]
-#![allow(clippy::missing_errors_doc)]
 #![allow(clippy::unused_self)]
 #![allow(clippy::needless_borrows_for_generic_args)]
 #![allow(clippy::writeln_empty_string)]

@@ -357,7 +357,10 @@ impl OptimizedMessageSerializer {
         Self { buffer_pool }
     }
 
-    /// Serializes a publish packet using pooled buffers
+    /// Serializes a publish packet using pooled buffers.
+    ///
+    /// # Errors
+    /// Returns an error if packet encoding fails.
     pub async fn serialize_publish(
         &self,
         packet: &PublishPacket,
@@ -377,7 +380,10 @@ impl OptimizedMessageSerializer {
         Ok(result)
     }
 
-    /// Batch serialize multiple packets efficiently
+    /// Batch serialize multiple packets efficiently.
+    ///
+    /// # Errors
+    /// Returns an error if any packet encoding fails.
     pub async fn serialize_batch(
         &self,
         packets: &[PublishPacket],

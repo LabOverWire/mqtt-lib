@@ -134,6 +134,10 @@ impl FlowState {
         self.pending_packet_ids.retain(|&id| id != packet_id);
     }
 
+    /// Transitions the flow to a new state.
+    ///
+    /// # Errors
+    /// Returns an error if the transition is invalid for the current state.
     pub fn transition_to(&mut self, new_state: FlowLifecycle) -> Result<()> {
         let valid = match (self.lifecycle, new_state) {
             (FlowLifecycle::Idle, FlowLifecycle::Open)
@@ -160,14 +164,26 @@ impl FlowState {
         }
     }
 
+    /// Opens the flow.
+    ///
+    /// # Errors
+    /// Returns an error if the flow cannot be opened from the current state.
     pub fn open(&mut self) -> Result<()> {
         self.transition_to(FlowLifecycle::Open)
     }
 
+    /// Half-closes the flow.
+    ///
+    /// # Errors
+    /// Returns an error if the flow cannot be half-closed from the current state.
     pub fn half_close(&mut self) -> Result<()> {
         self.transition_to(FlowLifecycle::HalfClosed)
     }
 
+    /// Closes the flow.
+    ///
+    /// # Errors
+    /// Returns an error if the flow cannot be closed from the current state.
     pub fn close(&mut self) -> Result<()> {
         self.transition_to(FlowLifecycle::Closed)
     }

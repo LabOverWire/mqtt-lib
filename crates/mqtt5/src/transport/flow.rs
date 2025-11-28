@@ -102,6 +102,10 @@ impl ControlFlowHeader {
         buf.put_u8(self.flags.encode());
     }
 
+    /// Decodes a control flow header from a byte buffer.
+    ///
+    /// # Errors
+    /// Returns an error if the buffer is malformed or contains insufficient data.
     pub fn decode(buf: &mut Bytes) -> Result<Self> {
         let flow_id = FlowId::from(decode_varint(buf)?);
         if buf.remaining() < 1 {
@@ -147,6 +151,10 @@ impl DataFlowHeader {
         buf.put_u8(self.flags.encode());
     }
 
+    /// Decodes a data flow header from a byte buffer.
+    ///
+    /// # Errors
+    /// Returns an error if the buffer is malformed or contains insufficient data.
     pub fn decode(flow_type: u8, buf: &mut Bytes) -> Result<Self> {
         let flow_id = FlowId::from(decode_varint(buf)?);
         let expire_interval = decode_varint(buf)?;
@@ -192,6 +200,10 @@ impl FlowHeader {
         }
     }
 
+    /// Decodes a flow header from a byte buffer.
+    ///
+    /// # Errors
+    /// Returns an error if the flow type is unknown or the buffer is malformed.
     #[allow(clippy::cast_possible_truncation)]
     pub fn decode(buf: &mut Bytes) -> Result<Self> {
         let flow_type = decode_varint(buf)? as u8;
@@ -240,6 +252,10 @@ pub fn encode_varint(value: u64, buf: &mut BytesMut) {
     }
 }
 
+/// Decodes a variable-length integer from a byte buffer.
+///
+/// # Errors
+/// Returns an error if the buffer contains insufficient data.
 pub fn decode_varint(buf: &mut Bytes) -> Result<u64> {
     if buf.remaining() < 1 {
         return Err(MqttError::ProtocolError(

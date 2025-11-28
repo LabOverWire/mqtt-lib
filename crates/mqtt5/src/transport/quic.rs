@@ -309,6 +309,10 @@ impl QuicTransport {
         self.connection.is_some() && self.control_stream.is_some()
     }
 
+    /// Splits the transport into separate send/recv components.
+    ///
+    /// # Errors
+    /// Returns an error if the transport is not connected.
     pub fn into_split(
         mut self,
     ) -> Result<(SendStream, RecvStream, Connection, StreamStrategy, bool)> {
@@ -329,12 +333,20 @@ impl QuicTransport {
             .and_then(Connection::max_datagram_size)
     }
 
+    /// Sends a datagram over the QUIC connection.
+    ///
+    /// # Errors
+    /// Returns an error if not connected or the send fails.
     pub fn send_datagram(&self, data: bytes::Bytes) -> Result<()> {
         let conn = self.connection.as_ref().ok_or(MqttError::NotConnected)?;
         conn.send_datagram(data)
             .map_err(|e| MqttError::ConnectionError(format!("Datagram send failed: {e}")))
     }
 
+    /// Sends a datagram and waits for acknowledgment.
+    ///
+    /// # Errors
+    /// Returns an error if not connected or the send fails.
     pub async fn send_datagram_wait(&self, data: bytes::Bytes) -> Result<()> {
         let conn = self.connection.as_ref().ok_or(MqttError::NotConnected)?;
         conn.send_datagram_wait(data)
@@ -342,6 +354,10 @@ impl QuicTransport {
             .map_err(|e| MqttError::ConnectionError(format!("Datagram send failed: {e}")))
     }
 
+    /// Reads a datagram from the QUIC connection.
+    ///
+    /// # Errors
+    /// Returns an error if not connected or the read fails.
     pub async fn read_datagram(&self) -> Result<bytes::Bytes> {
         let conn = self.connection.as_ref().ok_or(MqttError::NotConnected)?;
         conn.read_datagram()

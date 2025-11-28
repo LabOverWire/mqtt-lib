@@ -20,7 +20,10 @@ use super::websocket_server::WebSocketStreamWrapper;
 pub trait WebSocketTransport:
     tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Sync + Unpin
 {
-    /// Gets the peer address (if available)
+    /// Gets the peer address (if available).
+    ///
+    /// # Errors
+    /// Returns an error if the peer address is not available for this transport type.
     fn peer_addr(&self) -> Result<SocketAddr>;
 }
 
@@ -72,7 +75,10 @@ impl BrokerTransport {
         Self::Quic(Box::new(stream))
     }
 
-    /// Gets the peer address
+    /// Gets the peer address.
+    ///
+    /// # Errors
+    /// Returns an error if the peer address cannot be retrieved from the underlying transport.
     pub fn peer_addr(&self) -> Result<SocketAddr> {
         match self {
             Self::Tcp(stream) => Ok(stream.peer_addr()?),

@@ -39,7 +39,10 @@ pub struct BridgeConnection {
 }
 
 impl BridgeConnection {
-    /// Creates a new bridge connection
+    /// Creates a new bridge connection.
+    ///
+    /// # Errors
+    /// Returns an error if the configuration is invalid.
     pub fn new(config: BridgeConfig, router: Arc<MessageRouter>) -> Result<Self> {
         // Validate configuration
         config
@@ -66,7 +69,10 @@ impl BridgeConnection {
         })
     }
 
-    /// Starts the bridge connection
+    /// Starts the bridge connection.
+    ///
+    /// # Errors
+    /// Returns an error if the connection or subscription setup fails.
     pub async fn start(&self) -> Result<()> {
         if self.running.load(Ordering::Relaxed) {
             return Ok(());
@@ -84,7 +90,10 @@ impl BridgeConnection {
         Ok(())
     }
 
-    /// Stops the bridge connection
+    /// Stops the bridge connection.
+    ///
+    /// # Errors
+    /// Returns an error if the stats update fails.
     pub async fn stop(&self) -> Result<()> {
         if !self.running.load(Ordering::Relaxed) {
             return Ok(());
@@ -358,7 +367,10 @@ impl BridgeConnection {
         Ok(())
     }
 
-    /// Forwards a message to the remote broker
+    /// Forwards a message to the remote broker.
+    ///
+    /// # Errors
+    /// Returns an error if the message forwarding fails.
     pub async fn forward_message(&self, packet: &PublishPacket) -> Result<()> {
         if !self.running.load(Ordering::Relaxed) {
             return Ok(());
@@ -455,7 +467,10 @@ impl BridgeConnection {
         stats
     }
 
-    /// Runs the bridge connection with automatic reconnection
+    /// Runs the bridge connection with automatic reconnection.
+    ///
+    /// # Errors
+    /// Returns an error if the maximum reconnect attempts is exceeded.
     pub async fn run(&self) -> Result<()> {
         let mut shutdown_rx = self.shutdown_tx.subscribe();
         let mut attempt = 0u32;

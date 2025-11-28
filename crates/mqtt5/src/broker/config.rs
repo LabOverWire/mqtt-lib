@@ -317,9 +317,11 @@ pub struct TlsConfig {
 }
 
 impl TlsConfig {
-    /// Creates a new TLS configuration
+    /// Creates a new TLS configuration with default bind addresses.
+    ///
+    /// # Panics
+    /// Panics if the default socket addresses fail to parse (should never happen).
     #[must_use]
-    #[allow(clippy::missing_panics_doc)]
     pub fn new(cert_file: PathBuf, key_file: PathBuf) -> Self {
         Self {
             cert_file,
@@ -380,8 +382,11 @@ pub struct QuicConfig {
 }
 
 impl QuicConfig {
+    /// Creates a new QUIC configuration with default bind addresses.
+    ///
+    /// # Panics
+    /// Panics if the default socket addresses fail to parse (should never happen).
     #[must_use]
-    #[allow(clippy::missing_panics_doc)]
     pub fn new(cert_file: PathBuf, key_file: PathBuf) -> Self {
         Self {
             cert_file,

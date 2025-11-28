@@ -419,7 +419,10 @@ pub struct WebSocketWriteHandle {
 }
 
 impl WebSocketReadHandle {
-    /// Reads data from the WebSocket
+    /// Reads data from the WebSocket.
+    ///
+    /// # Errors
+    /// Returns an error if the connection is closed or a read error occurs.
     pub async fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
         loop {
             match self.reader.next().await {
@@ -439,7 +442,10 @@ impl WebSocketReadHandle {
 }
 
 impl WebSocketWriteHandle {
-    /// Writes data to the WebSocket
+    /// Writes data to the WebSocket.
+    ///
+    /// # Errors
+    /// Returns an error if the write operation fails.
     pub async fn write(&mut self, buf: &[u8]) -> Result<()> {
         use futures_util::SinkExt;
         self.writer

@@ -52,12 +52,20 @@ impl QuicAcceptorConfig {
         }
     }
 
+    /// Loads a certificate chain from a PEM file.
+    ///
+    /// # Errors
+    /// Returns an error if the file cannot be read or parsed as PEM certificates.
     pub async fn load_cert_chain_from_file(
         path: impl AsRef<std::path::Path>,
     ) -> Result<Vec<CertificateDer<'static>>> {
         TlsAcceptorConfig::load_cert_chain_from_file(path).await
     }
 
+    /// Loads a private key from a PEM file.
+    ///
+    /// # Errors
+    /// Returns an error if the file cannot be read or parsed as a PEM private key.
     pub async fn load_private_key_from_file(
         path: impl AsRef<std::path::Path>,
     ) -> Result<PrivateKeyDer<'static>> {
@@ -82,7 +90,13 @@ impl QuicAcceptorConfig {
         self
     }
 
-    #[allow(clippy::missing_panics_doc)]
+    /// Builds a rustls `ServerConfig` from this QUIC acceptor configuration.
+    ///
+    /// # Errors
+    /// Returns an error if certificate loading fails or TLS configuration is invalid.
+    ///
+    /// # Panics
+    /// Panics if the idle timeout duration conversion fails (should never happen).
     pub fn build_server_config(&self) -> Result<ServerConfig> {
         let crypto_provider = Arc::new(rustls::crypto::ring::default_provider());
 
@@ -143,6 +157,10 @@ impl QuicAcceptorConfig {
         Ok(server_config)
     }
 
+    /// Builds a QUIC endpoint bound to the specified address.
+    ///
+    /// # Errors
+    /// Returns an error if the server config is invalid or the address cannot be bound.
     pub fn build_endpoint(&self, bind_addr: SocketAddr) -> Result<Endpoint> {
         let server_config = self.build_server_config()?;
         Endpoint::server(server_config, bind_addr)
@@ -206,6 +224,10 @@ impl AsyncWrite for QuicStreamWrapper {
     }
 }
 
+/// Accepts an incoming QUIC connection from the endpoint.
+///
+/// # Errors
+/// Returns an error if the endpoint is closed or the handshake fails.
 #[instrument(skip(endpoint))]
 pub async fn accept_quic_connection(
     endpoint: &Endpoint,
@@ -231,7 +253,10 @@ pub async fn accept_quic_connection(
     Ok((connection, peer_addr))
 }
 
-// [RFC9000§2.1] Stream acceptance
+/// Accepts a bidirectional QUIC stream from an established connection.
+///
+/// # Errors
+/// Returns an error if stream acceptance fails or the connection is closed.
 #[instrument(skip(connection), fields(peer_addr = %peer_addr))]
 pub async fn accept_quic_stream(
     connection: &quinn::Connection,

@@ -19,7 +19,10 @@ impl<B: StorageBackend> MessageQueue<B> {
         Self { storage }
     }
 
-    /// Queue message for offline client
+    /// Queue message for offline client.
+    ///
+    /// # Errors
+    /// Returns an error if the storage backend fails.
     pub async fn enqueue(
         &self,
         client_id: &str,
@@ -33,7 +36,10 @@ impl<B: StorageBackend> MessageQueue<B> {
         self.storage.queue_message(message).await
     }
 
-    /// Get all queued messages for client
+    /// Get all queued messages for client.
+    ///
+    /// # Errors
+    /// Returns an error if the storage backend fails.
     pub async fn dequeue_all(&self, client_id: &str) -> Result<Vec<QueuedMessage>> {
         let messages = self.storage.get_queued_messages(client_id).await?;
 
@@ -51,19 +57,28 @@ impl<B: StorageBackend> MessageQueue<B> {
         Ok(messages)
     }
 
-    /// Get count of queued messages for client
+    /// Get count of queued messages for client.
+    ///
+    /// # Errors
+    /// Returns an error if the storage backend fails.
     pub async fn count(&self, client_id: &str) -> Result<usize> {
         let messages = self.storage.get_queued_messages(client_id).await?;
         Ok(messages.len())
     }
 
-    /// Clear all queued messages for client
+    /// Clear all queued messages for client.
+    ///
+    /// # Errors
+    /// Returns an error if the storage backend fails.
     pub async fn clear(&self, client_id: &str) -> Result<()> {
         debug!("Clearing all queued messages for client: {}", client_id);
         self.storage.remove_queued_messages(client_id).await
     }
 
-    /// Check if client has queued messages
+    /// Check if client has queued messages.
+    ///
+    /// # Errors
+    /// Returns an error if the storage backend fails.
     pub async fn has_messages(&self, client_id: &str) -> Result<bool> {
         let count = self.count(client_id).await?;
         Ok(count > 0)

@@ -18,7 +18,10 @@ impl<B: StorageBackend> RetainedMessages<B> {
         Self { storage }
     }
 
-    /// Store retained message for topic
+    /// Store retained message for topic.
+    ///
+    /// # Errors
+    /// Returns an error if the storage backend fails.
     pub async fn store(&self, topic: &str, packet: PublishPacket) -> Result<()> {
         if packet.payload.is_empty() {
             // Empty payload means remove retained message
@@ -42,7 +45,10 @@ impl<B: StorageBackend> RetainedMessages<B> {
         self.storage.get_retained_matching(topic_filter).await
     }
 
-    /// Remove retained message
+    /// Remove retained message.
+    ///
+    /// # Errors
+    /// Returns an error if the storage backend fails.
     pub async fn remove(&self, topic: &str) -> Result<()> {
         self.storage.remove_retained(topic).await
     }
