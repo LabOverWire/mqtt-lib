@@ -130,3 +130,4 @@ jobs:
           bodyFile: release_notes.md
           artifacts: "artifacts/**/*"
           token: ${{ secrets.GITHUB_TOKEN }}
+          allowUpdates: true
