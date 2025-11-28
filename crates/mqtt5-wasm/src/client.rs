@@ -35,7 +35,7 @@ pub struct RustMessage {
     pub payload: Vec<u8>,
     pub qos: QoS,
     pub retain: bool,
-    pub properties: mqtt5::types::MessageProperties,
+    pub properties: mqtt5_protocol::types::MessageProperties,
 }
 
 type RustCallback = Rc<dyn Fn(RustMessage)>;
@@ -345,7 +345,8 @@ impl WasmMqttClient {
                 let payload = publish.payload.clone();
                 let qos = publish.qos;
                 let retain = publish.retain;
-                let properties: mqtt5::types::MessageProperties = publish.properties.clone().into();
+                let properties: mqtt5_protocol::types::MessageProperties =
+                    publish.properties.clone().into();
 
                 if qos == mqtt5_protocol::QoS::ExactlyOnce {
                     if let Some(packet_id) = publish.packet_id {

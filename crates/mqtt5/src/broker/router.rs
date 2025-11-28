@@ -16,6 +16,9 @@ use std::sync::Weak;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, trace};
 
+#[cfg(target_arch = "wasm32")]
+type WasmBridgeCallback = Box<dyn Fn(&PublishPacket)>;
+
 /// Client subscription information
 #[derive(Debug, Clone)]
 pub struct Subscription {
@@ -42,6 +45,8 @@ pub struct MessageRouter {
     share_group_counters: Arc<RwLock<HashMap<String, Arc<AtomicUsize>>>>,
     #[cfg(not(target_arch = "wasm32"))]
     bridge_manager: Arc<RwLock<Option<Weak<BridgeManager>>>>,
+    #[cfg(target_arch = "wasm32")]
+    wasm_bridge_callback: Arc<RwLock<Option<WasmBridgeCallback>>>,
 }
 
 /// Information about a connected client
@@ -65,6 +70,8 @@ impl MessageRouter {
             share_group_counters: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(not(target_arch = "wasm32"))]
             bridge_manager: Arc::new(RwLock::new(None)),
+            #[cfg(target_arch = "wasm32")]
+            wasm_bridge_callback: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -79,6 +86,8 @@ impl MessageRouter {
             share_group_counters: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(not(target_arch = "wasm32"))]
             bridge_manager: Arc::new(RwLock::new(None)),
+            #[cfg(target_arch = "wasm32")]
+            wasm_bridge_callback: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -86,6 +95,15 @@ impl MessageRouter {
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn set_bridge_manager(&self, bridge_manager: Arc<BridgeManager>) {
         *self.bridge_manager.write().await = Some(Arc::downgrade(&bridge_manager));
+    }
+
+    /// Sets a WASM bridge callback that is called when messages need to be forwarded to bridges
+    #[cfg(target_arch = "wasm32")]
+    pub async fn set_wasm_bridge_callback<F>(&self, callback: F)
+    where
+        F: Fn(&PublishPacket) + 'static,
+    {
+        *self.wasm_bridge_callback.write().await = Some(Box::new(callback));
     }
 
     /// Initializes the router by loading retained messages from storage.
@@ -368,6 +386,14 @@ impl MessageRouter {
                         error!("Failed to forward message to bridges: {}", e);
                     }
                 }
+            }
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            let callback = self.wasm_bridge_callback.read().await;
+            if let Some(ref cb) = *callback {
+                cb(publish);
             }
         }
     }
