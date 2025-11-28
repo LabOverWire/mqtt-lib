@@ -1560,9 +1560,9 @@ impl WasmMqttClient {
         let subscribe_packet = SubscribePacket {
             packet_id,
             properties: Properties::default(),
-            filters: vec![mqtt5_protocol::packet::subscribe::TopicFilter::with_options(
-                topic, options,
-            )],
+            filters: vec![
+                mqtt5_protocol::packet::subscribe::TopicFilter::with_options(topic, options),
+            ],
         };
 
         let packet = Packet::Subscribe(subscribe_packet);

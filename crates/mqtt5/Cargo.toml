@@ -9,7 +9,7 @@ repository.workspace = true
 description = "Complete MQTT v5.0 platform with high-performance async client and full-featured broker supporting TCP, TLS, WebSocket, authentication, bridging, and resource monitoring"
 documentation = "https://docs.rs/mqtt5"
 readme = "README.md"
-keywords = ["mqtt", "iot", "messaging", "async", "broker"]
+keywords = ["mqtt", "client", "messaging", "async", "broker"]
 categories = ["network-programming", "asynchronous"]
 exclude = [
     "CLAUDE.md",
