@@ -68,20 +68,15 @@ impl ServerCertVerifier for NoVerification {
 }
 
 // [MQoQ§5] Multi-stream modes
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum StreamStrategy {
     // [MQoQ§2.1] Single stream mode
+    #[default]
     ControlOnly,
     // [MQoQ§2.2] Simple multistream modes
     DataPerPublish,
     DataPerTopic,
     DataPerSubscription,
-}
-
-impl Default for StreamStrategy {
-    fn default() -> Self {
-        Self::ControlOnly
-    }
 }
 
 #[derive(Debug)]
