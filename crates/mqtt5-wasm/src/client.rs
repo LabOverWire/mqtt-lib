@@ -30,12 +30,23 @@ async fn sleep_ms(millis: u32) {
     JsFuture::from(promise).await.ok();
 }
 
+pub struct RustMessage {
+    pub topic: String,
+    pub payload: Vec<u8>,
+    pub qos: QoS,
+    pub retain: bool,
+    pub properties: mqtt5::types::MessageProperties,
+}
+
+type RustCallback = Rc<dyn Fn(RustMessage)>;
+
 struct ClientState {
     client_id: String,
     writer: Option<Rc<RefCell<WasmWriter>>>,
     packet_id: u16,
     connected: bool,
     subscriptions: HashMap<String, js_sys::Function>,
+    rust_subscriptions: HashMap<String, RustCallback>,
     pending_subacks: HashMap<u16, js_sys::Function>,
     pending_pubacks: HashMap<u16, js_sys::Function>,
     pending_pubcomps: HashMap<u16, (js_sys::Function, f64)>,
@@ -59,6 +70,7 @@ impl ClientState {
             packet_id: 0,
             connected: false,
             subscriptions: HashMap::new(),
+            rust_subscriptions: HashMap::new(),
             pending_subacks: HashMap::new(),
             pending_pubacks: HashMap::new(),
             pending_pubcomps: HashMap::new(),
@@ -332,6 +344,8 @@ impl WasmMqttClient {
                 let topic = publish.topic_name.clone();
                 let payload = publish.payload.clone();
                 let qos = publish.qos;
+                let retain = publish.retain;
+                let properties: mqtt5::types::MessageProperties = publish.properties.clone().into();
 
                 if qos == mqtt5_protocol::QoS::ExactlyOnce {
                     if let Some(packet_id) = publish.packet_id {
@@ -347,6 +361,8 @@ impl WasmMqttClient {
                                     packet_id: _,
                                 } => {
                                     let subscriptions = state.borrow().subscriptions.clone();
+                                    let rust_subscriptions =
+                                        state.borrow().rust_subscriptions.clone();
 
                                     for (filter, callback) in &subscriptions {
                                         if mqtt5_protocol::validation::topic_matches_filter(
@@ -365,6 +381,21 @@ impl WasmMqttClient {
                                                     &format!("Callback error: {:?}", e).into(),
                                                 );
                                             }
+                                        }
+                                    }
+
+                                    for (filter, callback) in &rust_subscriptions {
+                                        if mqtt5_protocol::validation::topic_matches_filter(
+                                            &topic, filter,
+                                        ) {
+                                            let msg = RustMessage {
+                                                topic: topic.clone(),
+                                                payload: payload.clone(),
+                                                qos,
+                                                retain,
+                                                properties: properties.clone(),
+                                            };
+                                            callback(msg);
                                         }
                                     }
                                 }
@@ -414,6 +445,7 @@ impl WasmMqttClient {
                     }
                 } else {
                     let subscriptions = state.borrow().subscriptions.clone();
+                    let rust_subscriptions = state.borrow().rust_subscriptions.clone();
 
                     for (filter, callback) in &subscriptions {
                         if mqtt5_protocol::validation::topic_matches_filter(&topic, filter) {
@@ -427,6 +459,19 @@ impl WasmMqttClient {
                                     &format!("Callback error: {:?}", e).into(),
                                 );
                             }
+                        }
+                    }
+
+                    for (filter, callback) in &rust_subscriptions {
+                        if mqtt5_protocol::validation::topic_matches_filter(&topic, filter) {
+                            let msg = RustMessage {
+                                topic: topic.clone(),
+                                payload: payload.clone(),
+                                qos,
+                                retain,
+                                properties: properties.clone(),
+                            };
+                            callback(msg);
                         }
                     }
                 }
@@ -1448,6 +1493,135 @@ impl WasmMqttClient {
             .borrow_mut()
             .write(&buf)
             .map_err(|e| JsValue::from_str(&format!("AUTH send failed: {}", e)))?;
+
+        Ok(())
+    }
+}
+
+impl WasmMqttClient {
+    pub async fn subscribe_with_callback_internal(
+        &self,
+        topic: &str,
+        qos: QoS,
+        callback: Box<dyn Fn(RustMessage)>,
+    ) -> Result<u16, JsValue> {
+        loop {
+            match self.state.try_borrow() {
+                Ok(state) => {
+                    if !state.connected {
+                        return Err(JsValue::from_str("Not connected"));
+                    }
+                    break;
+                }
+                Err(_) => {
+                    sleep_ms(10).await;
+                }
+            }
+        }
+
+        let packet_id = loop {
+            match self.state.try_borrow_mut() {
+                Ok(mut state) => break state.next_packet_id(),
+                Err(_) => {
+                    sleep_ms(10).await;
+                }
+            }
+        };
+
+        loop {
+            match self.state.try_borrow_mut() {
+                Ok(mut state) => {
+                    state
+                        .rust_subscriptions
+                        .insert(topic.to_string(), Rc::new(callback));
+                    break;
+                }
+                Err(_) => {
+                    sleep_ms(10).await;
+                }
+            }
+        }
+
+        let subscribe_packet = SubscribePacket {
+            packet_id,
+            properties: Properties::default(),
+            filters: vec![mqtt5_protocol::packet::subscribe::TopicFilter::new(
+                topic, qos,
+            )],
+        };
+
+        let packet = Packet::Subscribe(subscribe_packet);
+        let mut buf = BytesMut::new();
+        encode_packet(&packet, &mut buf)
+            .map_err(|e| JsValue::from_str(&format!("Packet encoding failed: {}", e)))?;
+
+        let writer_rc = self
+            .state
+            .borrow()
+            .writer
+            .clone()
+            .ok_or_else(|| JsValue::from_str("Writer disconnected"))?;
+
+        writer_rc
+            .borrow_mut()
+            .write(&buf)
+            .map_err(|e| JsValue::from_str(&format!("Write failed: {}", e)))?;
+
+        Ok(packet_id)
+    }
+
+    pub async fn publish_internal(
+        &self,
+        topic: &str,
+        payload: &[u8],
+        qos: QoS,
+    ) -> Result<(), JsValue> {
+        loop {
+            match self.state.try_borrow() {
+                Ok(state) => {
+                    if !state.connected {
+                        return Err(JsValue::from_str("Not connected"));
+                    }
+                    break;
+                }
+                Err(_) => {
+                    sleep_ms(10).await;
+                }
+            }
+        }
+
+        let packet_id = if qos != QoS::AtMostOnce {
+            Some(loop {
+                match self.state.try_borrow_mut() {
+                    Ok(mut state) => break state.next_packet_id(),
+                    Err(_) => {
+                        sleep_ms(10).await;
+                    }
+                }
+            })
+        } else {
+            None
+        };
+
+        let mut publish_packet = PublishPacket::new(topic.to_string(), payload.to_vec(), qos);
+        publish_packet.packet_id = packet_id;
+
+        let packet = Packet::Publish(publish_packet);
+        let mut buf = BytesMut::new();
+        encode_packet(&packet, &mut buf)
+            .map_err(|e| JsValue::from_str(&format!("PUBLISH packet encoding failed: {}", e)))?;
+
+        let writer_rc = self
+            .state
+            .borrow()
+            .writer
+            .clone()
+            .ok_or_else(|| JsValue::from_str("Writer disconnected"))?;
+
+        writer_rc
+            .borrow_mut()
+            .write(&buf)
+            .map_err(|e| JsValue::from_str(&format!("PUBLISH send failed: {}", e)))?;
 
         Ok(())
     }

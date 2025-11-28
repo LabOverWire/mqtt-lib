@@ -640,6 +640,7 @@ impl WasmClientHandler {
         Ok(())
     }
 
+    #[allow(clippy::similar_names)]
     async fn handle_pubrec(&mut self, pubrec: PubRecPacket, writer: &mut WasmWriter) -> Result<()> {
         let pubrel = PubRelPacket::new(pubrec.packet_id);
         self.write_packet(Packet::PubRel(pubrel), writer).await?;

@@ -15,6 +15,8 @@
 
 pub mod bindings;
 #[cfg(feature = "broker")]
+pub mod bridge;
+#[cfg(feature = "broker")]
 pub mod broker;
 pub mod client;
 #[cfg(feature = "broker")]
@@ -23,6 +25,8 @@ pub mod config;
 pub mod decoder;
 pub mod transport;
 
+#[cfg(feature = "broker")]
+pub use bridge::{WasmBridgeConfig, WasmBridgeDirection, WasmTopicMapping};
 #[cfg(feature = "broker")]
 pub use broker::{WasmBroker, WasmBrokerConfig};
 pub use client::WasmMqttClient;

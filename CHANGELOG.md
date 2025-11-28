@@ -14,6 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Fixed README with correct installation instructions for both npm and Cargo
   - Package available at https://www.npmjs.com/package/mqtt5-wasm
 
+- **WASM broker bridging** for connecting in-browser brokers via MessagePort
+  - `WasmBridgeConfig` for bridge name, client settings, topic mappings
+  - `WasmTopicMapping` with pattern, direction (In/Out/Both), QoS, prefixes
+  - `add_bridge(config, port)` / `remove_bridge(name)` broker methods
+  - Bidirectional message forwarding between brokers
+
 - **Tracing instrumentation** for transport layer
   - `#[instrument]` attributes on transport connect/read/write operations
   - Structured logging for connection lifecycle events
