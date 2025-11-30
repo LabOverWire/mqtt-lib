@@ -183,31 +183,8 @@ impl WasmClientHandler {
         });
 
         let last_packet_time = Rc::new(Cell::new(mqtt5::time::Instant::now()));
-        let last_packet_time_ka = Rc::clone(&last_packet_time);
-        let running_ka = Rc::clone(&running);
         let keep_alive = self.keep_alive;
         let handler_id = self.handler_id;
-
-        if !keep_alive.is_zero() {
-            spawn_local(async move {
-                let timeout =
-                    keep_alive + mqtt5::time::Duration::from_secs(keep_alive.as_secs() / 2);
-                loop {
-                    gloo_timers::future::sleep(std::time::Duration::from_secs(1)).await;
-
-                    if !*running_ka.borrow() {
-                        break;
-                    }
-
-                    let elapsed = last_packet_time_ka.get().elapsed();
-                    if elapsed > timeout {
-                        warn!("Handler #{} keep-alive timeout", handler_id);
-                        *running_ka.borrow_mut() = false;
-                        break;
-                    }
-                }
-            });
-        }
 
         let running_forward = Rc::clone(&running);
         let mut publish_rx =
@@ -239,26 +216,63 @@ impl WasmClientHandler {
             }
         });
 
+        let (timeout_tx, mut timeout_rx) = tokio::sync::mpsc::channel::<()>(1);
+
+        if !keep_alive.is_zero() {
+            let running_timeout = Rc::clone(&running);
+            let last_packet_time_timeout = Rc::clone(&last_packet_time);
+            let timeout_duration =
+                keep_alive + mqtt5::time::Duration::from_secs(keep_alive.as_secs() / 2);
+            spawn_local(async move {
+                loop {
+                    gloo_timers::future::sleep(std::time::Duration::from_secs(1)).await;
+
+                    if !*running_timeout.borrow() {
+                        break;
+                    }
+
+                    let elapsed = last_packet_time_timeout.get().elapsed();
+                    if elapsed > timeout_duration {
+                        warn!("Handler #{} keep-alive timeout detected", handler_id);
+                        *running_timeout.borrow_mut() = false;
+                        let _ = timeout_tx.send(()).await;
+                        break;
+                    }
+                }
+            });
+        }
+
         loop {
             if !*running.borrow() {
                 info!("Session takeover or keep-alive timeout, disconnecting");
                 return Ok(());
             }
 
-            match read_packet(reader).await {
-                Ok(packet) => {
-                    last_packet_time.set(mqtt5::time::Instant::now());
-                    if let Ok(mut writer_guard) = writer_shared.try_borrow_mut() {
-                        if let Err(e) = self.handle_packet(packet, &mut *writer_guard).await {
-                            error!("Error handling packet: {}", e);
-                            return Err(e);
+            let packet_future = read_packet(reader);
+            futures::pin_mut!(packet_future);
+            let timeout_future = timeout_rx.recv();
+            futures::pin_mut!(timeout_future);
+
+            match futures::future::select(packet_future, timeout_future).await {
+                futures::future::Either::Left((packet_result, _)) => match packet_result {
+                    Ok(packet) => {
+                        last_packet_time.set(mqtt5::time::Instant::now());
+                        if let Ok(mut writer_guard) = writer_shared.try_borrow_mut() {
+                            if let Err(e) = self.handle_packet(packet, &mut *writer_guard).await {
+                                error!("Error handling packet: {}", e);
+                                return Err(e);
+                            }
+                        } else {
+                            error!("Handler writer busy in main loop");
                         }
-                    } else {
-                        error!("Handler writer busy in main loop");
                     }
-                }
-                Err(e) => {
-                    debug!("Connection closed: {}", e);
+                    Err(e) => {
+                        debug!("Connection closed: {}", e);
+                        return Ok(());
+                    }
+                },
+                futures::future::Either::Right((_, _)) => {
+                    info!("Keep-alive timeout signal received");
                     return Ok(());
                 }
             }

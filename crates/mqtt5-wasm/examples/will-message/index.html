@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WASM MQTT Will Message Demo</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            max-width: 1000px;
+            margin: 40px auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .header {
+            background: white;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+        h1 {
+            color: #333;
+            margin-top: 0;
+        }
+        .highlight {
+            background: #fff3cd;
+            padding: 15px;
+            border-radius: 4px;
+            border-left: 4px solid #ffc107;
+            margin: 15px 0;
+        }
+        .clients-container {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+            gap: 20px;
+            margin-top: 20px;
+        }
+        .client {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .client h2 {
+            margin-top: 0;
+            color: #333;
+            font-size: 1.2em;
+            border-bottom: 2px solid #007bff;
+            padding-bottom: 10px;
+        }
+        .client.observer h2 { border-color: #28a745; }
+        .client.will-client h2 { border-color: #dc3545; }
+        .status {
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 4px;
+            font-weight: 500;
+            font-size: 0.9em;
+        }
+        .status.connected {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        .status.disconnected {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        button {
+            background: #007bff;
+            color: white;
+            border: none;
+            cursor: pointer;
+            padding: 10px 20px;
+            border-radius: 4px;
+            font-size: 14px;
+            margin: 5px 5px 5px 0;
+        }
+        button:hover {
+            background: #0056b3;
+        }
+        button:disabled {
+            background: #6c757d;
+            cursor: not-allowed;
+        }
+        button.danger {
+            background: #dc3545;
+        }
+        button.danger:hover {
+            background: #c82333;
+        }
+        button.success {
+            background: #28a745;
+        }
+        button.success:hover {
+            background: #218838;
+        }
+        .messages {
+            margin-top: 15px;
+            max-height: 300px;
+            overflow-y: auto;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            padding: 10px;
+            background: #fafafa;
+            font-size: 0.85em;
+        }
+        .message {
+            padding: 8px;
+            margin: 6px 0;
+            background: white;
+            border-left: 3px solid #28a745;
+            border-radius: 2px;
+        }
+        .message.will-message {
+            border-left-color: #dc3545;
+            background: #fff5f5;
+        }
+        .topic {
+            font-weight: bold;
+            color: #007bff;
+        }
+        .payload {
+            color: #333;
+            margin-top: 4px;
+        }
+        .will-config {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 4px;
+            margin: 15px 0;
+            font-size: 0.9em;
+        }
+        .will-config strong {
+            color: #dc3545;
+        }
+        #debug {
+            margin-top: 15px;
+            padding: 10px;
+            background: #f8f9fa;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 0.85em;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>MQTT Will Message (Last Will and Testament) Demo</h1>
+        <p>This demonstrates <strong>MQTT v5.0 Will Messages</strong> using an in-tab broker with MessagePort connections.</p>
+        <div class="highlight">
+            <strong>How it works:</strong>
+            <ol style="margin: 10px 0 0 0; padding-left: 20px;">
+                <li><strong>Observer</strong> subscribes to <code>status/+</code> to receive will messages</li>
+                <li><strong>Device</strong> connects with a will message and <strong>5-second keep-alive</strong></li>
+                <li>Click <strong>"Force Disconnect"</strong> to close the connection without DISCONNECT</li>
+                <li>Wait ~8 seconds for keep-alive timeout, then the broker publishes the will message</li>
+            </ol>
+            <p style="margin-top: 10px; font-size: 0.9em; color: #856404;">
+                <strong>Note:</strong> The broker detects disconnection via keep-alive timeout (1.5x keep-alive period).
+            </p>
+        </div>
+        <div id="debug" style="display: none;">
+            <strong>Debug Log:</strong>
+            <div id="debug-messages"></div>
+        </div>
+    </div>
+
+    <div class="clients-container">
+        <div class="client observer">
+            <h2>Observer Client</h2>
+            <div id="status-observer" class="status disconnected">Status: Disconnected</div>
+            <div class="controls">
+                <button id="subscribe-btn" class="success" disabled>Subscribe to status/+</button>
+            </div>
+            <h4>Received Messages:</h4>
+            <div id="messages-observer" class="messages">
+                <em>Waiting for messages...</em>
+            </div>
+        </div>
+
+        <div class="client will-client">
+            <h2>Device Client (with Will Message)</h2>
+            <div id="status-device" class="status disconnected">Status: Disconnected</div>
+            <div class="will-config">
+                <strong>Will Message Configuration:</strong>
+                <ul style="margin: 5px 0; padding-left: 20px;">
+                    <li>Topic: <code>status/device-1</code></li>
+                    <li>Payload: <code>{"status": "offline", "reason": "unexpected_disconnect"}</code></li>
+                    <li>QoS: 1 (At Least Once)</li>
+                    <li>Retain: false</li>
+                    <li><strong>Keep-alive: 5 seconds</strong> (timeout at ~8s)</li>
+                </ul>
+            </div>
+            <div id="countdown" style="display: none; margin: 10px 0; padding: 10px; background: #fff3cd; border-radius: 4px; font-weight: bold; text-align: center;"></div>
+            <div class="controls">
+                <button id="publish-btn" disabled>Publish Status: Online</button>
+                <button id="disconnect-btn" class="danger" disabled>Force Disconnect (Trigger Will)</button>
+                <button id="reconnect-btn" class="success" style="display: none;">Reconnect Device</button>
+            </div>
+        </div>
+    </div>
+
+    <script type="module">
+        import init, { WasmBroker, WasmBrokerConfig, WasmMqttClient, WasmConnectOptions, WasmWillMessage } from './pkg/mqtt5_wasm.js';
+
+        let broker;
+        let observerClient;
+        let deviceClient;
+        let devicePort;
+
+        function debugLog(msg) {
+            const debugDiv = document.getElementById('debug');
+            const messagesDiv = document.getElementById('debug-messages');
+            debugDiv.style.display = 'block';
+            const line = document.createElement('div');
+            line.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+            messagesDiv.appendChild(line);
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+            console.log(msg);
+        }
+
+        let countdownInterval = null;
+        function startCountdown() {
+            const countdownEl = document.getElementById('countdown');
+            countdownEl.style.display = 'block';
+            let seconds = 8;
+            countdownEl.textContent = `Waiting for keep-alive timeout... ${seconds}s remaining`;
+
+            if (countdownInterval) clearInterval(countdownInterval);
+            countdownInterval = setInterval(() => {
+                seconds--;
+                if (seconds > 0) {
+                    countdownEl.textContent = `Waiting for keep-alive timeout... ${seconds}s remaining`;
+                } else {
+                    countdownEl.textContent = 'Keep-alive timeout reached! Will message should appear.';
+                    clearInterval(countdownInterval);
+                    countdownInterval = null;
+                    setTimeout(() => { countdownEl.style.display = 'none'; }, 3000);
+                }
+            }, 1000);
+        }
+
+        function addMessage(topic, payload, isWillMessage = false) {
+            const messagesEl = document.getElementById('messages-observer');
+            if (messagesEl.querySelector('em')) {
+                messagesEl.innerHTML = '';
+            }
+
+            const timestamp = new Date().toLocaleTimeString();
+            const messageEl = document.createElement('div');
+            messageEl.className = isWillMessage ? 'message will-message' : 'message';
+            messageEl.innerHTML = `
+                <div class="topic">${topic} ${isWillMessage ? '⚠️ WILL MESSAGE' : ''}</div>
+                <div class="payload">${payload} <small>(${timestamp})</small></div>
+            `;
+            messagesEl.prepend(messageEl);
+        }
+
+        async function setupObserver() {
+            observerClient = new WasmMqttClient('observer-client');
+            const statusEl = document.getElementById('status-observer');
+
+            observerClient.on_connect(() => {
+                debugLog('Observer connected');
+                statusEl.className = 'status connected';
+                statusEl.textContent = 'Status: Connected';
+                document.getElementById('subscribe-btn').disabled = false;
+            });
+
+            observerClient.on_disconnect(() => {
+                debugLog('Observer disconnected');
+                statusEl.className = 'status disconnected';
+                statusEl.textContent = 'Status: Disconnected';
+            });
+
+            observerClient.on_error((error) => {
+                debugLog(`Observer error: ${error}`);
+            });
+
+            const port = broker.create_client_port();
+            await observerClient.connect_message_port(port);
+
+            document.getElementById('subscribe-btn').addEventListener('click', async () => {
+                await observerClient.subscribe_with_callback('status/+', (topic, payload) => {
+                    const decoder = new TextDecoder();
+                    const message = decoder.decode(payload);
+                    const isWill = message.includes('unexpected_disconnect');
+                    addMessage(topic, message, isWill);
+                    debugLog(`Received on ${topic}: ${message}`);
+                });
+                debugLog('Observer subscribed to status/+');
+                document.getElementById('subscribe-btn').textContent = 'Subscribed to status/+';
+                document.getElementById('subscribe-btn').disabled = true;
+            });
+        }
+
+        async function setupDevice() {
+            deviceClient = new WasmMqttClient('device-1');
+            const statusEl = document.getElementById('status-device');
+
+            deviceClient.on_connect(() => {
+                debugLog('Device connected');
+                statusEl.className = 'status connected';
+                statusEl.textContent = 'Status: Connected';
+                document.getElementById('publish-btn').disabled = false;
+                document.getElementById('disconnect-btn').disabled = false;
+                document.getElementById('reconnect-btn').style.display = 'none';
+            });
+
+            deviceClient.on_disconnect(() => {
+                debugLog('Device disconnected');
+                statusEl.className = 'status disconnected';
+                statusEl.textContent = 'Status: Disconnected';
+                document.getElementById('publish-btn').disabled = true;
+                document.getElementById('disconnect-btn').disabled = true;
+                document.getElementById('reconnect-btn').style.display = 'inline-block';
+            });
+
+            deviceClient.on_error((error) => {
+                debugLog(`Device error: ${error}`);
+            });
+
+            devicePort = broker.create_client_port();
+
+            const connectOpts = new WasmConnectOptions();
+            connectOpts.keepAlive = 5;
+            const encoder = new TextEncoder();
+
+            const willPayload = JSON.stringify({
+                status: 'offline',
+                reason: 'unexpected_disconnect',
+                timestamp: new Date().toISOString()
+            });
+
+            const will = new WasmWillMessage('status/device-1', encoder.encode(willPayload));
+            will.qos = 1;
+            will.retain = false;
+            connectOpts.set_will(will);
+
+            await deviceClient.connect_message_port_with_options(devicePort, connectOpts);
+
+            document.getElementById('publish-btn').addEventListener('click', async () => {
+                const payload = JSON.stringify({
+                    status: 'online',
+                    timestamp: new Date().toISOString()
+                });
+                await deviceClient.publish('status/device-1', encoder.encode(payload));
+                debugLog('Device published online status');
+            });
+
+            document.getElementById('disconnect-btn').addEventListener('click', () => {
+                debugLog('Force disconnecting device (closing port without DISCONNECT packet)...');
+                devicePort.close();
+                startCountdown();
+            });
+
+            document.getElementById('reconnect-btn').addEventListener('click', async () => {
+                debugLog('Reconnecting device...');
+                deviceClient = new WasmMqttClient('device-1');
+                setupDeviceCallbacks();
+                devicePort = broker.create_client_port();
+
+                const connectOpts = new WasmConnectOptions();
+                connectOpts.keepAlive = 5;
+                const encoder = new TextEncoder();
+                const willPayload = JSON.stringify({
+                    status: 'offline',
+                    reason: 'unexpected_disconnect',
+                    timestamp: new Date().toISOString()
+                });
+                const will = new WasmWillMessage('status/device-1', encoder.encode(willPayload));
+                will.qos = 1;
+                will.retain = false;
+                connectOpts.set_will(will);
+
+                await deviceClient.connect_message_port_with_options(devicePort, connectOpts);
+            });
+        }
+
+        function setupDeviceCallbacks() {
+            const statusEl = document.getElementById('status-device');
+
+            deviceClient.on_connect(() => {
+                debugLog('Device reconnected');
+                statusEl.className = 'status connected';
+                statusEl.textContent = 'Status: Connected';
+                document.getElementById('publish-btn').disabled = false;
+                document.getElementById('disconnect-btn').disabled = false;
+                document.getElementById('reconnect-btn').style.display = 'none';
+            });
+
+            deviceClient.on_disconnect(() => {
+                debugLog('Device disconnected');
+                statusEl.className = 'status disconnected';
+                statusEl.textContent = 'Status: Disconnected';
+                document.getElementById('publish-btn').disabled = true;
+                document.getElementById('disconnect-btn').disabled = true;
+                document.getElementById('reconnect-btn').style.display = 'inline-block';
+            });
+
+            deviceClient.on_error((error) => {
+                debugLog(`Device error: ${error}`);
+            });
+
+            const encoder = new TextEncoder();
+            document.getElementById('publish-btn').onclick = async () => {
+                const payload = JSON.stringify({
+                    status: 'online',
+                    timestamp: new Date().toISOString()
+                });
+                await deviceClient.publish('status/device-1', encoder.encode(payload));
+                debugLog('Device published online status');
+            };
+
+            document.getElementById('disconnect-btn').onclick = () => {
+                debugLog('Force disconnecting device (closing port without DISCONNECT packet)...');
+                devicePort.close();
+            };
+        }
+
+        async function main() {
+            try {
+                debugLog('Initializing WASM...');
+                await init();
+                debugLog('WASM initialized');
+
+                const config = new WasmBrokerConfig();
+                config.max_clients = 10;
+                config.maximum_qos = 2;
+
+                debugLog('Creating in-tab broker...');
+                broker = WasmBroker.with_config(config);
+                debugLog('Broker created');
+
+                await setupObserver();
+                await setupDevice();
+
+                debugLog('Demo ready! Click "Subscribe" on Observer, then try "Force Disconnect" on Device.');
+            } catch (error) {
+                debugLog(`ERROR: ${error.message || error}`);
+                console.error('Initialization error:', error);
+            }
+        }
+
+        main();
+    </script>
+</body>
+</html>

@@ -725,10 +725,18 @@ impl WasmMqttClient {
 
     pub async fn connect_message_port(&self, port: MessagePort) -> Result<(), JsValue> {
         let config = WasmConnectOptions::default();
+        self.connect_message_port_with_options(port, &config).await
+    }
+
+    pub async fn connect_message_port_with_options(
+        &self,
+        port: MessagePort,
+        config: &WasmConnectOptions,
+    ) -> Result<(), JsValue> {
         let transport = WasmTransportType::MessagePort(
             crate::transport::message_port::MessagePortTransport::new(port),
         );
-        self.connect_with_transport_and_config(transport, &config)
+        self.connect_with_transport_and_config(transport, config)
             .await
     }
 
@@ -954,6 +962,24 @@ impl WasmMqttClient {
         } else {
             None
         };
+
+        if qos == QoS::ExactlyOnce {
+            if let Some(pid) = packet_id {
+                let now = js_sys::Date::now();
+                let noop_callback = js_sys::Function::new_no_args("");
+                loop {
+                    match self.state.try_borrow_mut() {
+                        Ok(mut state) => {
+                            state.pending_pubcomps.insert(pid, (noop_callback, now));
+                            break;
+                        }
+                        Err(_) => {
+                            sleep_ms(10).await;
+                        }
+                    }
+                }
+            }
+        }
 
         let publish_packet = PublishPacket {
             dup: false,
@@ -1617,6 +1643,24 @@ impl WasmMqttClient {
         } else {
             None
         };
+
+        if qos == QoS::ExactlyOnce {
+            if let Some(pid) = packet_id {
+                let now = js_sys::Date::now();
+                let noop_callback = js_sys::Function::new_no_args("");
+                loop {
+                    match self.state.try_borrow_mut() {
+                        Ok(mut state) => {
+                            state.pending_pubcomps.insert(pid, (noop_callback, now));
+                            break;
+                        }
+                        Err(_) => {
+                            sleep_ms(10).await;
+                        }
+                    }
+                }
+            }
+        }
 
         let mut publish_packet = PublishPacket::new(topic.to_string(), payload.to_vec(), qos);
         publish_packet.packet_id = packet_id;

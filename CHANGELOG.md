@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [mqtt5-wasm 0.2.3] - 2025-12-01
+
+### Fixed
+
+- **WASM broker keep-alive timeout** now properly triggers will message publication
+  - Fixed blocked packet read preventing keep-alive detection
+  - Uses channel-based signaling to interrupt async reads on timeout
+
+### Added
+
+- **Will message example** demonstrating MQTT Last Will and Testament feature
+  - In-tab broker with two clients (observer + device with will)
+  - 5-second keep-alive with countdown timer UI
+  - Force disconnect button to trigger will message
+
 ## [0.11.2] - 2025-11-29
 
 ### Changed
