@@ -91,7 +91,10 @@ async fn test_session_persistence() {
             subscription_id: Some(42),
         },
     );
-    session.add_subscription("sensors/#".to_string(), StoredSubscription::new(QoS::ExactlyOnce));
+    session.add_subscription(
+        "sensors/#".to_string(),
+        StoredSubscription::new(QoS::ExactlyOnce),
+    );
 
     storage.store_session(session.clone()).await.unwrap();
 
@@ -202,7 +205,10 @@ async fn test_file_backend_persistence() {
 
         // Store session
         let mut session = ClientSession::new("persistent_client".to_string(), true, None);
-        session.add_subscription("persistent/+".to_string(), StoredSubscription::new(QoS::AtLeastOnce));
+        session.add_subscription(
+            "persistent/+".to_string(),
+            StoredSubscription::new(QoS::AtLeastOnce),
+        );
         storage.store_session(session).await.unwrap();
     }
 
