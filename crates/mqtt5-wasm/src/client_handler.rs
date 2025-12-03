@@ -5,7 +5,7 @@ use mqtt5::broker::auth::{AuthProvider, EnhancedAuthResult, EnhancedAuthStatus};
 use mqtt5::broker::config::BrokerConfig;
 use mqtt5::broker::resource_monitor::ResourceMonitor;
 use mqtt5::broker::router::MessageRouter;
-use mqtt5::broker::storage::{ClientSession, DynamicStorage, StorageBackend};
+use mqtt5::broker::storage::{ClientSession, DynamicStorage, StorageBackend, StoredSubscription};
 use mqtt5::broker::sys_topics::BrokerStats;
 use mqtt5_protocol::error::{MqttError, Result};
 use mqtt5_protocol::packet::auth::AuthPacket;
@@ -431,6 +431,19 @@ impl WasmClientHandler {
         } else {
             match self.storage.get_session(client_id).await {
                 Ok(Some(mut session)) => {
+                    for (topic_filter, stored) in &session.subscriptions {
+                        self.router
+                            .subscribe(
+                                client_id.clone(),
+                                topic_filter.clone(),
+                                stored.qos,
+                                stored.subscription_id,
+                                stored.no_local,
+                                stored.retain_as_published,
+                            )
+                            .await;
+                    }
+
                     session.will_message.clone_from(&connect.will);
                     session.will_delay_interval = connect
                         .will
@@ -503,19 +516,28 @@ impl WasmClientHandler {
                 filter.options.qos
             };
 
+            let subscription_id = subscribe.properties.get_subscription_identifier();
+
             self.router
                 .subscribe(
                     client_id.clone(),
                     filter.filter.clone(),
                     granted_qos,
-                    None,
+                    subscription_id,
                     filter.options.no_local,
                     filter.options.retain_as_published,
                 )
                 .await;
 
             if let Some(ref mut session) = self.session {
-                session.add_subscription(filter.filter.clone(), granted_qos);
+                let stored = StoredSubscription {
+                    qos: granted_qos,
+                    no_local: filter.options.no_local,
+                    retain_as_published: filter.options.retain_as_published,
+                    retain_handling: filter.options.retain_handling as u8,
+                    subscription_id,
+                };
+                session.add_subscription(filter.filter.clone(), stored);
                 self.storage.store_session(session.clone()).await.ok();
             }
 
@@ -524,7 +546,9 @@ impl WasmClientHandler {
             {
                 let retained = self.router.get_retained_messages(&filter.filter).await;
                 for mut msg in retained {
-                    msg.retain = true;
+                    if !filter.options.retain_as_published {
+                        msg.retain = false;
+                    }
                     self.send_publish(msg, writer).await?;
                 }
             }

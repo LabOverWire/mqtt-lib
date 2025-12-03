@@ -4,7 +4,7 @@ use crate::broker::auth::{AuthProvider, EnhancedAuthStatus};
 use crate::broker::config::BrokerConfig;
 use crate::broker::resource_monitor::ResourceMonitor;
 use crate::broker::router::MessageRouter;
-use crate::broker::storage::{ClientSession, DynamicStorage, StorageBackend};
+use crate::broker::storage::{ClientSession, DynamicStorage, StorageBackend, StoredSubscription};
 use crate::broker::sys_topics::BrokerStats;
 use crate::broker::transport::BrokerTransport;
 use crate::error::{MqttError, Result};
@@ -740,7 +740,14 @@ impl ClientHandler {
                 .await;
 
             if let Some(ref mut session) = self.session {
-                session.add_subscription(filter.filter.clone(), QoS::from(granted_qos));
+                let stored = StoredSubscription {
+                    qos: QoS::from(granted_qos),
+                    no_local: filter.options.no_local,
+                    retain_as_published: filter.options.retain_as_published,
+                    retain_handling: filter.options.retain_handling as u8,
+                    subscription_id: subscribe.properties.get_subscription_identifier(),
+                };
+                session.add_subscription(filter.filter.clone(), stored);
                 if let Some(ref storage) = self.storage {
                     storage.store_session(session.clone()).await.ok();
                 }
@@ -1081,15 +1088,15 @@ impl ClientHandler {
         mut session: ClientSession,
         storage: &Arc<DynamicStorage>,
     ) -> Result<()> {
-        for (topic_filter, qos) in &session.subscriptions {
+        for (topic_filter, stored) in &session.subscriptions {
             self.router
                 .subscribe(
                     connect.client_id.clone(),
                     topic_filter.clone(),
-                    *qos,
-                    None,
-                    false,
-                    false,
+                    stored.qos,
+                    stored.subscription_id,
+                    stored.no_local,
+                    stored.retain_as_published,
                 )
                 .await;
         }
