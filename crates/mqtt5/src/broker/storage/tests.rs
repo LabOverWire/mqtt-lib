@@ -2,7 +2,7 @@
 
 #[cfg(test)]
 use super::super::*;
-use crate::broker::storage::{ClientSession, QueuedMessage, RetainedMessage};
+use crate::broker::storage::{ClientSession, QueuedMessage, RetainedMessage, StoredSubscription};
 use crate::packet::publish::PublishPacket;
 use crate::protocol::v5::properties::{PropertyId, PropertyValue};
 use crate::time::Duration;
@@ -79,22 +79,42 @@ async fn test_retained_message_matching() {
 async fn test_session_persistence() {
     let storage = create_memory_storage();
 
-    // Create and store session
+    // Create and store session with full subscription options
     let mut session = ClientSession::new("client1".to_string(), true, Some(3600));
-    session.add_subscription("test/+".to_string(), QoS::AtLeastOnce);
-    session.add_subscription("sensors/#".to_string(), QoS::ExactlyOnce);
+    session.add_subscription(
+        "test/+".to_string(),
+        StoredSubscription {
+            qos: QoS::AtLeastOnce,
+            no_local: true,
+            retain_as_published: true,
+            retain_handling: 1,
+            subscription_id: Some(42),
+        },
+    );
+    session.add_subscription(
+        "sensors/#".to_string(),
+        StoredSubscription::new(QoS::ExactlyOnce),
+    );
 
     storage.store_session(session.clone()).await.unwrap();
 
-    // Retrieve session
+    // Retrieve session and verify full options
     let retrieved = storage.get_session("client1").await;
     assert!(retrieved.is_some());
     let retrieved_session = retrieved.unwrap();
     assert_eq!(retrieved_session.subscriptions.len(), 2);
-    assert_eq!(
-        retrieved_session.subscriptions.get("test/+"),
-        Some(&QoS::AtLeastOnce)
-    );
+
+    let sub = retrieved_session.subscriptions.get("test/+").unwrap();
+    assert_eq!(sub.qos, QoS::AtLeastOnce);
+    assert!(sub.no_local);
+    assert!(sub.retain_as_published);
+    assert_eq!(sub.retain_handling, 1);
+    assert_eq!(sub.subscription_id, Some(42));
+
+    let sub2 = retrieved_session.subscriptions.get("sensors/#").unwrap();
+    assert_eq!(sub2.qos, QoS::ExactlyOnce);
+    assert!(!sub2.no_local);
+    assert!(!sub2.retain_as_published);
 
     // Remove subscription
     session.remove_subscription("test/+");
@@ -185,7 +205,10 @@ async fn test_file_backend_persistence() {
 
         // Store session
         let mut session = ClientSession::new("persistent_client".to_string(), true, None);
-        session.add_subscription("persistent/+".to_string(), QoS::AtLeastOnce);
+        session.add_subscription(
+            "persistent/+".to_string(),
+            StoredSubscription::new(QoS::AtLeastOnce),
+        );
         storage.store_session(session).await.unwrap();
     }
 

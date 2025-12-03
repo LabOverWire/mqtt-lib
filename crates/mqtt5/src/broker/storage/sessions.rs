@@ -2,9 +2,8 @@
 //!
 //! Handles persistent client sessions and subscription storage.
 
-use super::{ClientSession, Storage, StorageBackend};
+use super::{ClientSession, Storage, StorageBackend, StoredSubscription};
 use crate::error::Result;
-use crate::QoS;
 use std::collections::HashMap;
 use tracing::debug;
 
@@ -68,7 +67,7 @@ impl<B: StorageBackend> SessionManager<B> {
     pub async fn update_subscriptions(
         &self,
         client_id: &str,
-        subscriptions: HashMap<String, QoS>,
+        subscriptions: HashMap<String, StoredSubscription>,
     ) -> Result<()> {
         if let Some(mut session) = self.storage.get_session(client_id).await {
             session.subscriptions = subscriptions;
@@ -94,10 +93,10 @@ impl<B: StorageBackend> SessionManager<B> {
         &self,
         client_id: &str,
         topic_filter: &str,
-        qos: QoS,
+        subscription: StoredSubscription,
     ) -> Result<()> {
         if let Some(mut session) = self.storage.get_session(client_id).await {
-            session.add_subscription(topic_filter.to_string(), qos);
+            session.add_subscription(topic_filter.to_string(), subscription);
             session.touch();
 
             debug!(
@@ -130,7 +129,7 @@ impl<B: StorageBackend> SessionManager<B> {
     }
 
     /// Get session subscriptions
-    pub async fn get_subscriptions(&self, client_id: &str) -> HashMap<String, QoS> {
+    pub async fn get_subscriptions(&self, client_id: &str) -> HashMap<String, StoredSubscription> {
         if let Some(session) = self.storage.get_session(client_id).await {
             session.subscriptions
         } else {

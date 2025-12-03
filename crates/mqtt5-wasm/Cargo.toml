@@ -1,6 +1,6 @@
 [package]
 name = "mqtt5-wasm"
-version = "0.2.2"
+version = "0.2.4"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true

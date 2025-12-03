@@ -49,6 +49,28 @@ pub struct RetainedMessage {
     pub expires_at: Option<SystemTime>,
 }
 
+/// Stored subscription options for session persistence
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredSubscription {
+    pub qos: QoS,
+    pub no_local: bool,
+    pub retain_as_published: bool,
+    pub retain_handling: u8,
+    pub subscription_id: Option<u32>,
+}
+
+impl StoredSubscription {
+    pub fn new(qos: QoS) -> Self {
+        Self {
+            qos,
+            no_local: false,
+            retain_as_published: false,
+            retain_handling: 0,
+            subscription_id: None,
+        }
+    }
+}
+
 /// Client session information
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClientSession {
@@ -58,8 +80,8 @@ pub struct ClientSession {
     pub persistent: bool,
     /// Session expiry interval in seconds
     pub expiry_interval: Option<u32>,
-    /// Active subscriptions
-    pub subscriptions: HashMap<String, QoS>,
+    /// Active subscriptions with full options
+    pub subscriptions: HashMap<String, StoredSubscription>,
     /// Session creation time
     #[serde(skip, default = "SystemTime::now")]
     pub created_at: SystemTime,
@@ -492,8 +514,8 @@ impl ClientSession {
     }
 
     /// Add subscription to session
-    pub fn add_subscription(&mut self, topic_filter: String, qos: QoS) {
-        self.subscriptions.insert(topic_filter, qos);
+    pub fn add_subscription(&mut self, topic_filter: String, subscription: StoredSubscription) {
+        self.subscriptions.insert(topic_filter, subscription);
     }
 
     /// Remove subscription from session

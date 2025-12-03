@@ -11,6 +11,7 @@ cp -r pkg examples/websocket/
 cp -r pkg examples/local-broker/
 cp -r pkg examples/qos2/
 cp -r pkg examples/broker-bridge/
+cp -r pkg examples/will-message/
 
 echo "✨ Build complete!"
 echo ""
@@ -30,6 +31,10 @@ echo "  python3 -m http.server 8000"
 echo ""
 echo "QoS 2 Testing:"
 echo "  cd examples/qos2"
+echo "  python3 -m http.server 8000"
+echo ""
+echo "Will Message (Last Will and Testament):"
+echo "  cd examples/will-message"
 echo "  python3 -m http.server 8000"
 echo ""
 echo "Then open http://localhost:8000 in your browser"
