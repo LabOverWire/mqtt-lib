@@ -33,7 +33,7 @@ async fn test_no_local_persists_after_reconnect() {
     let received = Arc::new(AtomicU32::new(0));
     let received_clone = received.clone();
 
-    let client2 = MqttClient::with_options(ConnectOptions::new(client_id).with_clean_start(false));
+    let client2 = MqttClient::new(client_id);
     let session = client2
         .connect_with_options(
             broker.address(),
@@ -136,7 +136,7 @@ async fn test_retain_as_published_persists_after_reconnect() {
     let retain_flag_seen = Arc::new(std::sync::Mutex::new(Vec::new()));
     let retain_clone = retain_flag_seen.clone();
 
-    let client2 = MqttClient::with_options(ConnectOptions::new(client_id).with_clean_start(false));
+    let client2 = MqttClient::new(client_id);
     let session = client2
         .connect_with_options(
             broker.address(),
@@ -223,7 +223,7 @@ async fn test_subscription_options_all_preserved() {
     let received = Arc::new(AtomicU32::new(0));
     let received_clone = received.clone();
 
-    let client2 = MqttClient::with_options(ConnectOptions::new(client_id).with_clean_start(false));
+    let client2 = MqttClient::new(client_id);
     let session = client2
         .connect_with_options(
             broker.address(),

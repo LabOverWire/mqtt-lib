@@ -419,6 +419,7 @@
 
             document.getElementById('disconnect-btn').onclick = () => {
                 debugLog('Force disconnecting device (closing port without DISCONNECT packet)...');
+                startCountdown();
                 devicePort.close();
             };
         }
