@@ -7,13 +7,12 @@ use crate::broker::storage::DynamicStorage;
 use crate::broker::sys_topics::BrokerStats;
 use crate::broker::transport::BrokerTransport;
 use crate::error::{MqttError, Result};
-use crate::packet::Packet;
+use crate::packet::{FixedHeader, Packet};
 use crate::session::quic_flow::{FlowRegistry, FlowState};
 use crate::transport::flow::{
     FlowFlags, FlowHeader, FlowId, FLOW_TYPE_CLIENT_DATA, FLOW_TYPE_CONTROL, FLOW_TYPE_SERVER_DATA,
 };
-use crate::transport::packet_io::PacketReader;
-use bytes::Bytes;
+use bytes::{Buf, Bytes, BytesMut};
 use quinn::{Connection, Endpoint, RecvStream, SendStream, ServerConfig};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::WebPkiClientVerifier;
@@ -283,29 +282,49 @@ fn is_flow_header_byte(b: u8) -> bool {
     )
 }
 
-// [MQoQ§4.5] Flow header parsing
+struct FlowHeaderResult {
+    flow_id: Option<FlowId>,
+    flags: Option<FlowFlags>,
+    expire: Option<Duration>,
+    leftover: BytesMut,
+}
+
 #[instrument(skip(recv), level = "debug")]
-async fn try_read_flow_header(
-    recv: &mut RecvStream,
-) -> Result<Option<(FlowId, FlowFlags, Option<Duration>)>> {
-    let mut peek_buf = [0u8; 1];
+async fn try_read_flow_header(recv: &mut RecvStream) -> Result<FlowHeaderResult> {
     let chunk = recv
         .read_chunk(1, true)
         .await
-        .map_err(|e| MqttError::ConnectionError(format!("Failed to peek stream: {e}")))?;
+        .map_err(|e| MqttError::ConnectionError(format!("Failed to read stream: {e}")))?;
 
     let Some(chunk) = chunk else {
-        return Ok(None);
+        return Ok(FlowHeaderResult {
+            flow_id: None,
+            flags: None,
+            expire: None,
+            leftover: BytesMut::new(),
+        });
     };
 
     if chunk.bytes.is_empty() {
-        return Ok(None);
+        return Ok(FlowHeaderResult {
+            flow_id: None,
+            flags: None,
+            expire: None,
+            leftover: BytesMut::new(),
+        });
     }
 
-    peek_buf[0] = chunk.bytes[0];
+    let first_byte = chunk.bytes[0];
 
-    if !is_flow_header_byte(peek_buf[0]) {
-        return Ok(None);
+    if !is_flow_header_byte(first_byte) {
+        let mut leftover = BytesMut::with_capacity(chunk.bytes.len());
+        leftover.extend_from_slice(&chunk.bytes);
+        return Ok(FlowHeaderResult {
+            flow_id: None,
+            flags: None,
+            expire: None,
+            leftover,
+        });
     }
 
     let mut header_buf = Vec::with_capacity(32);
@@ -328,10 +347,20 @@ async fn try_read_flow_header(
     let mut bytes = Bytes::from(header_buf);
     let flow_header = FlowHeader::decode(&mut bytes)?;
 
+    let mut leftover = BytesMut::with_capacity(bytes.remaining());
+    if bytes.has_remaining() {
+        leftover.extend_from_slice(&bytes);
+    }
+
     match flow_header {
         FlowHeader::Control(h) => {
             trace!(flow_id = ?h.flow_id, "Parsed control flow header");
-            Ok(Some((h.flow_id, h.flags, None)))
+            Ok(FlowHeaderResult {
+                flow_id: Some(h.flow_id),
+                flags: Some(h.flags),
+                expire: None,
+                leftover,
+            })
         }
         FlowHeader::ClientData(h) | FlowHeader::ServerData(h) => {
             let expire = if h.expire_interval > 0 {
@@ -340,13 +369,95 @@ async fn try_read_flow_header(
                 None
             };
             trace!(flow_id = ?h.flow_id, expire = ?expire, "Parsed data flow header");
-            Ok(Some((h.flow_id, h.flags, expire)))
+            Ok(FlowHeaderResult {
+                flow_id: Some(h.flow_id),
+                flags: Some(h.flags),
+                expire,
+                leftover,
+            })
         }
         FlowHeader::UserDefined(_) => {
             trace!("Ignoring user-defined flow header");
-            Ok(None)
+            Ok(FlowHeaderResult {
+                flow_id: None,
+                flags: None,
+                expire: None,
+                leftover,
+            })
         }
     }
+}
+
+async fn read_packet_with_buffer(recv: &mut RecvStream, buffer: &mut BytesMut) -> Result<Packet> {
+    while buffer.len() < 2 {
+        let mut tmp = [0u8; 64];
+        let n = recv
+            .read(&mut tmp)
+            .await
+            .map_err(|e| MqttError::ConnectionError(format!("QUIC read error: {e}")))?
+            .ok_or(MqttError::ClientClosed)?;
+        if n == 0 {
+            return Err(MqttError::ClientClosed);
+        }
+        buffer.extend_from_slice(&tmp[..n]);
+    }
+
+    let mut remaining_length = 0u32;
+    let mut multiplier = 1u32;
+    let mut remaining_length_bytes = 1usize;
+
+    for i in 1..5 {
+        if i >= buffer.len() {
+            let mut tmp = [0u8; 64];
+            let n = recv
+                .read(&mut tmp)
+                .await
+                .map_err(|e| MqttError::ConnectionError(format!("QUIC read error: {e}")))?
+                .ok_or(MqttError::ClientClosed)?;
+            if n == 0 {
+                return Err(MqttError::ClientClosed);
+            }
+            buffer.extend_from_slice(&tmp[..n]);
+        }
+
+        let byte = buffer[i];
+        remaining_length += u32::from(byte & 0x7F) * multiplier;
+        multiplier *= 128;
+        remaining_length_bytes = i;
+
+        if (byte & 0x80) == 0 {
+            break;
+        }
+
+        if i == 4 {
+            return Err(MqttError::MalformedPacket(
+                "Invalid remaining length encoding".to_string(),
+            ));
+        }
+    }
+
+    let header_len = 1 + remaining_length_bytes;
+    let total_len = header_len + remaining_length as usize;
+
+    while buffer.len() < total_len {
+        let mut tmp = [0u8; 1024];
+        let n = recv
+            .read(&mut tmp)
+            .await
+            .map_err(|e| MqttError::ConnectionError(format!("QUIC read error: {e}")))?
+            .ok_or(MqttError::ClientClosed)?;
+        if n == 0 {
+            return Err(MqttError::ClientClosed);
+        }
+        buffer.extend_from_slice(&tmp[..n]);
+    }
+
+    let packet_bytes = buffer.split_to(total_len);
+    let mut header_buf = packet_bytes.clone().freeze();
+    let fixed_header = FixedHeader::decode(&mut header_buf)?;
+
+    let mut payload_buf = BytesMut::from(&packet_bytes[header_len..]);
+    Packet::decode_from_body(fixed_header.packet_type, &fixed_header, &mut payload_buf)
 }
 
 // [MQoQ§4] QUIC connection handling with flow headers
@@ -426,29 +537,31 @@ fn spawn_data_stream_reader(
     flow_registry: Arc<Mutex<FlowRegistry>>,
 ) {
     tokio::spawn(async move {
-        let flow_id = match try_read_flow_header(&mut recv).await {
-            Ok(Some((id, flags, expire))) => {
-                let state = FlowState::new_client_data(id, flags, expire);
-                let mut registry = flow_registry.lock().await;
-                if registry.register_flow(state) {
-                    debug!(flow_id = ?id, "Registered flow from {}", peer_addr);
+        let (flow_id, mut buffer) = match try_read_flow_header(&mut recv).await {
+            Ok(result) => {
+                let flow_id = if let (Some(id), Some(flags)) = (result.flow_id, result.flags) {
+                    let state = FlowState::new_client_data(id, flags, result.expire);
+                    let mut registry = flow_registry.lock().await;
+                    if registry.register_flow(state) {
+                        debug!(flow_id = ?id, "Registered flow from {}", peer_addr);
+                    } else {
+                        warn!(flow_id = ?id, "Failed to register flow (registry full)");
+                    }
+                    Some(id)
                 } else {
-                    warn!(flow_id = ?id, "Failed to register flow (registry full)");
-                }
-                Some(id)
-            }
-            Ok(None) => {
-                trace!("No flow header on data stream from {}", peer_addr);
-                None
+                    trace!("No flow header on data stream from {}", peer_addr);
+                    None
+                };
+                (flow_id, result.leftover)
             }
             Err(e) => {
                 warn!("Error parsing flow header from {}: {}", peer_addr, e);
-                None
+                return;
             }
         };
 
         loop {
-            match recv.read_packet().await {
+            match read_packet_with_buffer(&mut recv, &mut buffer).await {
                 Ok(packet) => {
                     if let Some(id) = flow_id {
                         let mut registry = flow_registry.lock().await;
