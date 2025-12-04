@@ -92,6 +92,13 @@ pub struct ClientSession {
     pub will_message: Option<crate::types::WillMessage>,
     /// Will delay interval in seconds (extracted for convenience)
     pub will_delay_interval: Option<u32>,
+    /// Client's receive maximum (for broker outbound flow control)
+    #[serde(default = "default_receive_maximum")]
+    pub receive_maximum: u16,
+}
+
+fn default_receive_maximum() -> u16 {
+    65535
 }
 
 /// Queued message for offline client
@@ -482,6 +489,7 @@ impl ClientSession {
             last_seen: now,
             will_message: None,
             will_delay_interval: None,
+            receive_maximum: 65535,
         }
     }
 
@@ -505,6 +513,7 @@ impl ClientSession {
             last_seen: now,
             will_message,
             will_delay_interval: will_delay,
+            receive_maximum: 65535,
         }
     }
 

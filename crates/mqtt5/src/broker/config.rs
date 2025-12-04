@@ -47,6 +47,18 @@ pub struct BrokerConfig {
     /// Shared subscription available
     pub shared_subscription_available: bool,
 
+    /// Maximum subscriptions per client (0 = unlimited)
+    #[serde(default)]
+    pub max_subscriptions_per_client: usize,
+
+    /// Maximum retained messages globally (0 = unlimited)
+    #[serde(default)]
+    pub max_retained_messages: usize,
+
+    /// Maximum retained message payload size in bytes (0 = unlimited)
+    #[serde(default)]
+    pub max_retained_message_size: usize,
+
     /// Server keep alive time
     pub server_keep_alive: Option<Duration>,
 
@@ -98,6 +110,9 @@ impl Default for BrokerConfig {
             wildcard_subscription_available: true,
             subscription_identifier_available: true,
             shared_subscription_available: true,
+            max_subscriptions_per_client: 0,
+            max_retained_messages: 0,
+            max_retained_message_size: 0,
             server_keep_alive: None,
             response_information: None,
             auth_config: AuthConfig::default(),
@@ -174,6 +189,27 @@ impl BrokerConfig {
     #[must_use]
     pub fn with_retain_available(mut self, available: bool) -> Self {
         self.retain_available = available;
+        self
+    }
+
+    /// Sets the maximum subscriptions per client (0 = unlimited)
+    #[must_use]
+    pub fn with_max_subscriptions_per_client(mut self, max: usize) -> Self {
+        self.max_subscriptions_per_client = max;
+        self
+    }
+
+    /// Sets the maximum retained messages globally (0 = unlimited)
+    #[must_use]
+    pub fn with_max_retained_messages(mut self, max: usize) -> Self {
+        self.max_retained_messages = max;
+        self
+    }
+
+    /// Sets the maximum retained message payload size in bytes (0 = unlimited)
+    #[must_use]
+    pub fn with_max_retained_message_size(mut self, max: usize) -> Self {
+        self.max_retained_message_size = max;
         self
     }
 

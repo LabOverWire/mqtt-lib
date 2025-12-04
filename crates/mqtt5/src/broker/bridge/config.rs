@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 /// Bridge connection configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct BridgeConfig {
     /// Unique name for this bridge
     pub name: String,
@@ -89,6 +90,17 @@ pub struct BridgeConfig {
     /// Backup broker addresses for failover
     #[serde(default)]
     pub backup_brokers: Vec<String>,
+
+    /// Interval for health-checking primary broker when connected to backup
+    #[serde(
+        with = "humantime_serde",
+        default = "default_primary_health_check_interval"
+    )]
+    pub primary_health_check_interval: Duration,
+
+    /// Whether to automatically failback to primary when it becomes available
+    #[serde(default = "default_enable_failback")]
+    pub enable_failback: bool,
 
     /// Topic mappings for this bridge
     #[serde(default)]
@@ -174,6 +186,14 @@ fn default_qos() -> QoS {
     QoS::AtMostOnce
 }
 
+fn default_primary_health_check_interval() -> Duration {
+    Duration::from_secs(30)
+}
+
+fn default_enable_failback() -> bool {
+    true
+}
+
 impl BridgeConfig {
     /// Creates a new bridge configuration
     pub fn new(name: impl Into<String>, remote_address: impl Into<String>) -> Self {
@@ -201,6 +221,8 @@ impl BridgeConfig {
             backoff_multiplier: 2.0,
             max_reconnect_attempts: None,
             backup_brokers: Vec::new(),
+            primary_health_check_interval: Duration::from_secs(30),
+            enable_failback: true,
             topics: Vec::new(),
         }
     }

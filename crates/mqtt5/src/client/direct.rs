@@ -1482,6 +1482,15 @@ async fn handle_publish_with_ack(
         crate::QoS::AtMostOnce => {}
         crate::QoS::AtLeastOnce => {
             if let Some(packet_id) = publish.packet_id {
+                session
+                    .read()
+                    .await
+                    .flow_control()
+                    .read()
+                    .await
+                    .register_inbound_publish(packet_id)
+                    .await?;
+
                 if let Some(fid) = flow_id {
                     session
                         .read()
@@ -1499,10 +1508,28 @@ async fn handle_publish_with_ack(
                     .await
                     .write_packet(Packet::PubAck(puback))
                     .await?;
+
+                session
+                    .read()
+                    .await
+                    .flow_control()
+                    .read()
+                    .await
+                    .acknowledge_inbound(packet_id)
+                    .await;
             }
         }
         crate::QoS::ExactlyOnce => {
             if let Some(packet_id) = publish.packet_id {
+                session
+                    .read()
+                    .await
+                    .flow_control()
+                    .read()
+                    .await
+                    .register_inbound_publish(packet_id)
+                    .await?;
+
                 if let Some(fid) = flow_id {
                     session
                         .read()
@@ -1588,14 +1615,11 @@ async fn handle_pubrel(
     writer: &Arc<tokio::sync::RwLock<UnifiedWriter>>,
     session: &Arc<RwLock<SessionState>>,
 ) -> Result<()> {
-    // Check if we have a stored PUBREC for this packet ID
     let has_pubrec = session.read().await.has_pubrec(pubrel.packet_id).await;
 
     if has_pubrec {
-        // Remove the stored PUBREC
         session.write().await.remove_pubrec(pubrel.packet_id).await;
 
-        // Send PUBCOMP to complete QoS 2 flow
         let pubcomp = crate::packet::pubcomp::PubCompPacket {
             packet_id: pubrel.packet_id,
             reason_code: crate::protocol::v5::reason_codes::ReasonCode::Success,
@@ -1608,8 +1632,6 @@ async fn handle_pubrel(
             .write_packet(Packet::PubComp(pubcomp))
             .await?;
     } else {
-        // Still send PUBCOMP even if we don't have a stored PUBREC
-        // (per MQTT spec, we should always respond to PUBREL)
         let pubcomp = crate::packet::pubcomp::PubCompPacket {
             packet_id: pubrel.packet_id,
             reason_code: crate::protocol::v5::reason_codes::ReasonCode::Success,
@@ -1622,6 +1644,15 @@ async fn handle_pubrel(
             .write_packet(Packet::PubComp(pubcomp))
             .await?;
     }
+
+    session
+        .read()
+        .await
+        .flow_control()
+        .read()
+        .await
+        .acknowledge_inbound(pubrel.packet_id)
+        .await;
 
     Ok(())
 }

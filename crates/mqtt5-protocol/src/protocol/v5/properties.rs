@@ -709,6 +709,20 @@ impl Properties {
             .push(PropertyValue::TwoByteInteger(max));
     }
 
+    /// Gets the receive maximum
+    pub fn get_receive_maximum(&self) -> Option<u16> {
+        self.properties
+            .get(&PropertyId::ReceiveMaximum)
+            .and_then(|values| values.first())
+            .and_then(|value| {
+                if let PropertyValue::TwoByteInteger(v) = value {
+                    Some(*v)
+                } else {
+                    None
+                }
+            })
+    }
+
     /// Sets the topic alias maximum
     pub fn set_topic_alias_maximum(&mut self, max: u16) {
         self.properties
