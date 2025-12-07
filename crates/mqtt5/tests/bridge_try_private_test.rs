@@ -1,10 +1,15 @@
 use mqtt5::broker::bridge::{BridgeConfig, BridgeDirection};
+use mqtt5::broker::config::StorageConfig;
 use mqtt5::broker::{BrokerConfig, MqttBroker};
 use mqtt5::client::MqttClient;
-use mqtt5::time::Duration;
 use mqtt5::types::ConnectOptions;
 use mqtt5::QoS;
-use tokio::time::sleep;
+
+async fn wait_for_ready(mut rx: tokio::sync::watch::Receiver<bool>) {
+    while !*rx.borrow_and_update() {
+        rx.changed().await.expect("broker ready channel closed");
+    }
+}
 
 #[tokio::test]
 async fn test_try_private_adds_user_property() {
@@ -49,22 +54,24 @@ async fn test_try_private_false_no_user_property() {
     assert_eq!(options.properties.user_properties.len(), 0);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_bridge_connection_with_try_private() {
     let _ = tracing_subscriber::fmt().with_env_filter("warn").try_init();
 
     let broker_config = BrokerConfig::default()
         .with_bind_address("127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap())
-        .with_max_clients(10);
+        .with_max_clients(10)
+        .with_storage(StorageConfig::new().with_persistence(false));
 
     let mut broker = MqttBroker::with_config(broker_config).await.unwrap();
     let broker_addr = broker.local_addr().expect("Failed to get broker address");
+    let ready_rx = broker.ready_receiver();
 
     let broker_handle = tokio::spawn(async move {
         let _ = broker.run().await;
     });
 
-    sleep(Duration::from_millis(100)).await;
+    wait_for_ready(ready_rx).await;
 
     let test_client = MqttClient::new("test-client");
 
@@ -78,7 +85,11 @@ async fn test_bridge_connection_with_try_private() {
         .connect_with_options(&format!("mqtt://{broker_addr}"), options)
         .await;
 
-    assert!(connect_result.is_ok());
+    assert!(
+        connect_result.is_ok(),
+        "Connect failed: {:?}",
+        connect_result.err()
+    );
 
     let _ = test_client.disconnect().await;
 

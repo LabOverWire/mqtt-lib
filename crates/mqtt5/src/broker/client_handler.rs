@@ -4,7 +4,9 @@ use crate::broker::auth::{AuthProvider, EnhancedAuthStatus};
 use crate::broker::config::BrokerConfig;
 use crate::broker::resource_monitor::ResourceMonitor;
 use crate::broker::router::MessageRouter;
-use crate::broker::storage::{ClientSession, DynamicStorage, StorageBackend, StoredSubscription};
+use crate::broker::storage::{
+    ClientSession, DynamicStorage, QueuedMessage, StorageBackend, StoredSubscription,
+};
 use crate::broker::sys_topics::BrokerStats;
 use crate::broker::transport::BrokerTransport;
 use crate::error::{MqttError, Result};
@@ -26,7 +28,7 @@ use crate::protocol::v5::reason_codes::ReasonCode;
 use crate::time::Duration;
 use crate::transport::packet_io::PacketIo;
 use crate::QoS;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -76,6 +78,8 @@ pub struct ClientHandler {
     pending_connect: Option<PendingConnect>,
     topic_aliases: HashMap<u16, String>,
     external_packet_rx: Option<mpsc::Receiver<Packet>>,
+    client_receive_maximum: u16,
+    outbound_inflight: HashSet<u16>,
 }
 
 impl ClientHandler {
@@ -148,6 +152,8 @@ impl ClientHandler {
             pending_connect: None,
             topic_aliases: HashMap::new(),
             external_packet_rx,
+            client_receive_maximum: 65535,
+            outbound_inflight: HashSet::new(),
         }
     }
 
@@ -458,13 +464,13 @@ impl ClientHandler {
             Packet::Subscribe(subscribe) => self.handle_subscribe(subscribe).await,
             Packet::Unsubscribe(unsubscribe) => self.handle_unsubscribe(unsubscribe).await,
             Packet::Publish(publish) => self.handle_publish(publish).await,
-            Packet::PubAck(puback) => {
+            Packet::PubAck(ref puback) => {
                 self.handle_puback(puback);
                 Ok(())
             }
             Packet::PubRec(pubrec) => self.handle_pubrec(pubrec).await,
             Packet::PubRel(pubrel) => self.handle_pubrel(pubrel).await,
-            Packet::PubComp(pubcomp) => {
+            Packet::PubComp(ref pubcomp) => {
                 self.handle_pubcomp(pubcomp);
                 Ok(())
             }
@@ -628,6 +634,14 @@ impl ClientHandler {
         self.client_id = Some(connect.client_id.clone());
         self.keep_alive = Duration::from_secs(u64::from(connect.keep_alive));
 
+        // Extract client's receive maximum (default 65535 per MQTT spec if not specified)
+        self.client_receive_maximum = connect.properties.get_receive_maximum().unwrap_or(65535);
+        debug!(
+            client_id = %connect.client_id,
+            receive_maximum = self.client_receive_maximum,
+            "Client receive maximum"
+        );
+
         // Handle session
         let session_present = self.handle_session(&connect).await?;
 
@@ -720,6 +734,25 @@ impl ClientHandler {
                 continue;
             }
 
+            // Check subscription quota if limit is set
+            if self.config.max_subscriptions_per_client > 0 {
+                let is_existing = self
+                    .router
+                    .has_subscription(client_id, &filter.filter)
+                    .await;
+                if !is_existing {
+                    let current_count = self.router.subscription_count_for_client(client_id).await;
+                    if current_count >= self.config.max_subscriptions_per_client {
+                        debug!(
+                            "Client {} subscription quota exceeded ({}/{})",
+                            client_id, current_count, self.config.max_subscriptions_per_client
+                        );
+                        reason_codes.push(crate::packet::suback::SubAckReasonCode::QuotaExceeded);
+                        continue;
+                    }
+                }
+            }
+
             // Check QoS limit
             let granted_qos = if filter.options.qos as u8 > self.config.maximum_qos {
                 self.config.maximum_qos
@@ -778,12 +811,17 @@ impl ClientHandler {
 
         let mut suback = SubAckPacket::new(subscribe.packet_id);
         suback.reason_codes.clone_from(&reason_codes);
-        if self.request_problem_information
-            && reason_codes.contains(&crate::packet::suback::SubAckReasonCode::NotAuthorized)
-        {
-            suback
-                .properties
-                .set_reason_string("One or more subscriptions not authorized".to_string());
+        if self.request_problem_information {
+            if reason_codes.contains(&crate::packet::suback::SubAckReasonCode::NotAuthorized) {
+                suback
+                    .properties
+                    .set_reason_string("One or more subscriptions not authorized".to_string());
+            } else if reason_codes.contains(&crate::packet::suback::SubAckReasonCode::QuotaExceeded)
+            {
+                suback
+                    .properties
+                    .set_reason_string("Subscription quota exceeded".to_string());
+            }
         }
         self.transport.write_packet(Packet::SubAck(suback)).await
     }
@@ -924,6 +962,87 @@ impl ClientHandler {
             return Ok(());
         }
 
+        // Check retained message limits
+        if publish.retain && !publish.payload.is_empty() {
+            // Check retained message size limit
+            if self.config.max_retained_message_size > 0
+                && publish.payload.len() > self.config.max_retained_message_size
+            {
+                debug!(
+                    "Client {} retained message too large ({} > {})",
+                    client_id,
+                    publish.payload.len(),
+                    self.config.max_retained_message_size
+                );
+                if publish.qos != QoS::AtMostOnce {
+                    match publish.qos {
+                        QoS::AtLeastOnce => {
+                            let mut puback = PubAckPacket::new(publish.packet_id.unwrap());
+                            puback.reason_code = ReasonCode::QuotaExceeded;
+                            if self.request_problem_information {
+                                puback
+                                    .properties
+                                    .set_reason_string("Retained message too large".to_string());
+                            }
+                            self.transport.write_packet(Packet::PubAck(puback)).await?;
+                        }
+                        QoS::ExactlyOnce => {
+                            let mut pubrec = PubRecPacket::new(publish.packet_id.unwrap());
+                            pubrec.reason_code = ReasonCode::QuotaExceeded;
+                            if self.request_problem_information {
+                                pubrec
+                                    .properties
+                                    .set_reason_string("Retained message too large".to_string());
+                            }
+                            self.transport.write_packet(Packet::PubRec(pubrec)).await?;
+                        }
+                        QoS::AtMostOnce => {}
+                    }
+                }
+                return Ok(());
+            }
+
+            // Check retained message count limit (only for new retained messages)
+            if self.config.max_retained_messages > 0 {
+                let is_update = self.router.has_retained_message(&publish.topic_name).await;
+                if !is_update {
+                    let current_count = self.router.retained_count().await;
+                    if current_count >= self.config.max_retained_messages {
+                        debug!(
+                            "Client {} retained message limit exceeded ({}/{})",
+                            client_id, current_count, self.config.max_retained_messages
+                        );
+                        if publish.qos != QoS::AtMostOnce {
+                            match publish.qos {
+                                QoS::AtLeastOnce => {
+                                    let mut puback = PubAckPacket::new(publish.packet_id.unwrap());
+                                    puback.reason_code = ReasonCode::QuotaExceeded;
+                                    if self.request_problem_information {
+                                        puback.properties.set_reason_string(
+                                            "Retained message limit exceeded".to_string(),
+                                        );
+                                    }
+                                    self.transport.write_packet(Packet::PubAck(puback)).await?;
+                                }
+                                QoS::ExactlyOnce => {
+                                    let mut pubrec = PubRecPacket::new(publish.packet_id.unwrap());
+                                    pubrec.reason_code = ReasonCode::QuotaExceeded;
+                                    if self.request_problem_information {
+                                        pubrec.properties.set_reason_string(
+                                            "Retained message limit exceeded".to_string(),
+                                        );
+                                    }
+                                    self.transport.write_packet(Packet::PubRec(pubrec)).await?;
+                                }
+                                QoS::AtMostOnce => {}
+                            }
+                        }
+                        return Ok(());
+                    }
+                }
+            }
+        }
+
         // Check rate limits
         if !self
             .resource_monitor
@@ -989,10 +1108,14 @@ impl ClientHandler {
         Ok(())
     }
 
-    /// Handles PUBACK packet
-    #[allow(clippy::unused_self)]
-    fn handle_puback(&mut self, _puback: PubAckPacket) {
-        // For QoS 1 publishes we sent
+    fn handle_puback(&mut self, puback: &PubAckPacket) {
+        if self.outbound_inflight.remove(&puback.packet_id) {
+            tracing::trace!(
+                packet_id = puback.packet_id,
+                inflight = self.outbound_inflight.len(),
+                "Released outbound flow control quota on PUBACK"
+            );
+        }
     }
 
     /// Handles PUBREC packet
@@ -1019,10 +1142,14 @@ impl ClientHandler {
         self.transport.write_packet(Packet::PubComp(pubcomp)).await
     }
 
-    /// Handles PUBCOMP packet
-    #[allow(clippy::unused_self)]
-    fn handle_pubcomp(&mut self, _pubcomp: PubCompPacket) {
-        // For QoS 2 publishes we sent
+    fn handle_pubcomp(&mut self, pubcomp: &PubCompPacket) {
+        if self.outbound_inflight.remove(&pubcomp.packet_id) {
+            tracing::trace!(
+                packet_id = pubcomp.packet_id,
+                inflight = self.outbound_inflight.len(),
+                "Released outbound flow control quota on PUBCOMP"
+            );
+        }
     }
 
     /// Handles PINGREQ packet
@@ -1066,12 +1193,13 @@ impl ClientHandler {
             );
         }
 
-        let session = ClientSession::new_with_will(
+        let mut session = ClientSession::new_with_will(
             connect.client_id.clone(),
             true, // persistent
             session_expiry,
             will_message,
         );
+        session.receive_maximum = self.client_receive_maximum;
         debug!(
             "Created new session with will_delay_interval: {:?}",
             session.will_delay_interval
@@ -1107,6 +1235,9 @@ impl ClientHandler {
             .will
             .as_ref()
             .and_then(|w| w.properties.will_delay_interval);
+
+        // Update receive maximum from new connection
+        session.receive_maximum = self.client_receive_maximum;
 
         // Update last seen
         session.touch();
@@ -1377,7 +1508,37 @@ impl ClientHandler {
     }
 
     /// Sends a publish to the client
-    async fn send_publish(&mut self, publish: PublishPacket) -> Result<()> {
+    async fn send_publish(&mut self, mut publish: PublishPacket) -> Result<()> {
+        // Only enforce receive maximum for QoS > 0
+        if publish.qos != QoS::AtMostOnce {
+            // Check if we're at the client's receive maximum limit
+            if self.outbound_inflight.len() >= usize::from(self.client_receive_maximum) {
+                // Queue the message for later delivery when quota becomes available
+                if let Some(ref storage) = self.storage {
+                    let client_id = self.client_id.as_ref().unwrap();
+                    let queued_msg =
+                        QueuedMessage::new(publish.clone(), client_id.clone(), publish.qos, None);
+                    storage.queue_message(queued_msg).await?;
+                    debug!(
+                        client_id = %client_id,
+                        inflight = self.outbound_inflight.len(),
+                        max = self.client_receive_maximum,
+                        "Message queued due to receive maximum limit"
+                    );
+                }
+                return Ok(());
+            }
+
+            // Assign packet ID if not already set
+            if publish.packet_id.is_none() {
+                publish.packet_id = Some(self.next_packet_id());
+            }
+
+            if let Some(packet_id) = publish.packet_id {
+                self.outbound_inflight.insert(packet_id);
+            }
+        }
+
         let payload_size = publish.payload.len();
         self.transport
             .write_packet(Packet::Publish(publish))

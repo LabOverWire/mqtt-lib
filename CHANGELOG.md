@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.4] / [mqtt5-protocol 0.2.1] - 2025-12-04
+
+### Fixed
+
+- **QUIC data stream byte consumption bug** in broker's QUIC acceptor
+  - `try_read_flow_header()` was consuming bytes when checking for flow headers but not returning them when they weren't flow headers
+  - This caused QUIC stream strategies (DataPerPublish, DataPerTopic, DataPerSubscription) to fail with "Malformed packet" errors
+  - Added `FlowHeaderResult` with `leftover` field to preserve non-flow-header bytes
+  - Added `read_packet_with_buffer()` to use leftover bytes before reading from stream
+
+### Added
+
+- **MQTT v5.0 implementation gaps** addressed
+  - Bridge failover with exponential backoff reconnection
+  - Quota management for publish rate limiting
+  - Receive maximum enforcement in client
+
 ## [0.11.3] / [mqtt5-wasm 0.2.4] - 2025-12-03
 
 ### Fixed

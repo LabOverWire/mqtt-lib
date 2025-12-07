@@ -7,9 +7,9 @@ use tokio::sync::{Notify, RwLock, Semaphore};
 /// Flow control manager for handling Receive Maximum
 #[derive(Debug, Clone)]
 pub struct FlowControlManager {
-    /// Receive Maximum value (max in-flight `QoS` 1/2 messages)
+    /// Receive Maximum value (max in-flight `QoS` 1/2 messages we can send)
     receive_maximum: u16,
-    /// Currently in-flight messages (`packet_id` -> timestamp)
+    /// Currently in-flight outbound messages (`packet_id` -> timestamp)
     in_flight: Arc<RwLock<HashMap<u16, Instant>>>,
     /// Semaphore for flow control quota
     quota_semaphore: Arc<Semaphore>,
@@ -19,6 +19,10 @@ pub struct FlowControlManager {
     pending_queue: Arc<RwLock<VecDeque<PendingPublish>>>,
     /// Flow control configuration
     config: FlowControlConfig,
+    /// Our receive maximum (max in-flight QoS 1/2 messages server can send us)
+    inbound_receive_maximum: u16,
+    /// Currently in-flight inbound messages from server (`packet_id` -> timestamp)
+    inbound_in_flight: Arc<RwLock<HashMap<u16, Instant>>>,
 }
 
 /// Configuration for flow control behavior
@@ -79,7 +83,43 @@ impl FlowControlManager {
             quota_available: Arc::new(Notify::new()),
             pending_queue: Arc::new(RwLock::new(VecDeque::new())),
             config,
+            inbound_receive_maximum: 65535,
+            inbound_in_flight: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    pub fn set_inbound_receive_maximum(&mut self, value: u16) {
+        self.inbound_receive_maximum = value;
+    }
+
+    #[must_use]
+    pub fn inbound_receive_maximum(&self) -> u16 {
+        self.inbound_receive_maximum
+    }
+
+    /// # Errors
+    /// Returns `ReceiveMaximumExceeded` if the inbound receive maximum is exceeded.
+    pub async fn register_inbound_publish(&self, packet_id: u16) -> Result<()> {
+        if self.inbound_receive_maximum == 0 {
+            return Ok(());
+        }
+
+        let mut inbound = self.inbound_in_flight.write().await;
+        if inbound.len() >= usize::from(self.inbound_receive_maximum) {
+            return Err(MqttError::ReceiveMaximumExceeded);
+        }
+
+        inbound.insert(packet_id, Instant::now());
+        Ok(())
+    }
+
+    pub async fn acknowledge_inbound(&self, packet_id: u16) {
+        let mut inbound = self.inbound_in_flight.write().await;
+        inbound.remove(&packet_id);
+    }
+
+    pub async fn inbound_in_flight_count(&self) -> usize {
+        self.inbound_in_flight.read().await.len()
     }
 
     /// Checks if we can send a new `QoS` 1/2 message
@@ -258,6 +298,7 @@ impl FlowControlManager {
     /// Clears all in-flight tracking
     pub async fn clear(&self) {
         self.in_flight.write().await.clear();
+        self.inbound_in_flight.write().await.clear();
     }
 
     /// Gets packet IDs that have been in-flight longer than the specified duration

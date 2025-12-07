@@ -10,7 +10,7 @@ pub mod loop_prevention;
 pub mod manager;
 
 pub use config::{BridgeConfig, BridgeDirection, TopicMapping};
-pub use connection::BridgeConnection;
+pub use connection::{BridgeConnection, ConnectedBroker};
 pub use loop_prevention::LoopPrevention;
 pub use manager::BridgeManager;
 
@@ -35,6 +35,12 @@ pub struct BridgeStats {
     pub last_error: Option<String>,
     /// Time when connection was established
     pub connected_since: Option<Instant>,
+    /// Current broker address we're connected to
+    pub current_broker: Option<String>,
+    /// Whether we're connected to the primary broker
+    pub on_primary: bool,
+    /// Number of failback attempts to primary
+    pub failback_attempts: u64,
 }
 
 /// Result type for bridge operations

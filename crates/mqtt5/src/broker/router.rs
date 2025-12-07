@@ -549,6 +549,30 @@ impl MessageRouter {
     pub async fn retained_count(&self) -> usize {
         self.retained_messages.read().await.len()
     }
+
+    /// Gets the number of subscriptions for a specific client
+    pub async fn subscription_count_for_client(&self, client_id: &str) -> usize {
+        let subscriptions = self.subscriptions.read().await;
+        subscriptions
+            .values()
+            .flat_map(|subs| subs.iter())
+            .filter(|sub| sub.client_id == client_id)
+            .count()
+    }
+
+    pub async fn has_subscription(&self, client_id: &str, topic_filter: &str) -> bool {
+        let (actual_filter, _) = Self::parse_shared_subscription(topic_filter);
+        let subscriptions = self.subscriptions.read().await;
+        subscriptions
+            .get(actual_filter)
+            .is_some_and(|subs| subs.iter().any(|sub| sub.client_id == client_id))
+    }
+
+    /// Checks if a retained message already exists for a topic
+    pub async fn has_retained_message(&self, topic: &str) -> bool {
+        let retained = self.retained_messages.read().await;
+        retained.contains_key(topic)
+    }
 }
 
 impl Default for MessageRouter {

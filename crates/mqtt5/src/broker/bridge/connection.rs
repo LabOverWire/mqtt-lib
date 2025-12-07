@@ -15,7 +15,17 @@ use std::net::ToSocketAddrs;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
+use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
+
+/// Which broker the bridge is currently connected to
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectedBroker {
+    /// Connected to the primary broker
+    Primary,
+    /// Connected to a backup broker (index in backup_brokers list)
+    Backup(usize),
+}
 
 /// A bridge connection to a remote broker
 pub struct BridgeConnection {
@@ -36,6 +46,10 @@ pub struct BridgeConnection {
     messages_received: Arc<AtomicU64>,
     bytes_sent: Arc<AtomicU64>,
     bytes_received: Arc<AtomicU64>,
+    /// Which broker we're currently connected to
+    current_broker: Arc<RwLock<Option<ConnectedBroker>>>,
+    /// Handle to the health check task (runs when on backup)
+    health_check_handle: Arc<RwLock<Option<JoinHandle<()>>>>,
 }
 
 impl BridgeConnection {
@@ -66,6 +80,8 @@ impl BridgeConnection {
             messages_received: Arc::new(AtomicU64::new(0)),
             bytes_sent: Arc::new(AtomicU64::new(0)),
             bytes_received: Arc::new(AtomicU64::new(0)),
+            current_broker: Arc::new(RwLock::new(None)),
+            health_check_handle: Arc::new(RwLock::new(None)),
         })
     }
 
@@ -102,16 +118,16 @@ impl BridgeConnection {
         info!("Stopping bridge '{}'", self.config.name);
         self.running.store(false, Ordering::Relaxed);
 
-        // Send shutdown signal
+        self.stop_health_check().await;
+
         let _ = self.shutdown_tx.send(());
 
-        // Disconnect from remote broker (ignore errors if not connected)
         let _ = self.client.disconnect().await;
 
-        // Update stats
         let mut stats = self.stats.write().await;
         stats.connected = false;
         stats.connected_since = None;
+        *self.current_broker.write().await = None;
 
         Ok(())
     }
@@ -194,7 +210,7 @@ impl BridgeConnection {
     }
 
     /// Attempts to connect using TLS to primary and backup brokers
-    async fn connect_tls(&self, options: &ConnectOptions) -> Result<()> {
+    async fn connect_tls(&self, options: &ConnectOptions) -> Result<ConnectedBroker> {
         let tls_config = self.build_tls_config(&self.config.remote_address)?;
         match self
             .client
@@ -206,8 +222,9 @@ impl BridgeConnection {
                     "Bridge '{}' connected to primary broker: {} (TLS)",
                     self.config.name, self.config.remote_address
                 );
-                self.update_connected_stats().await;
-                return Ok(());
+                self.update_connected_stats(ConnectedBroker::Primary, &self.config.remote_address)
+                    .await;
+                return Ok(ConnectedBroker::Primary);
             }
             Err(e) => {
                 warn!("Failed to connect to primary broker: {}", e);
@@ -215,7 +232,7 @@ impl BridgeConnection {
             }
         }
 
-        for backup in &self.config.backup_brokers {
+        for (idx, backup) in self.config.backup_brokers.iter().enumerate() {
             let tls_config = self.build_tls_config(backup)?;
             match self
                 .client
@@ -227,8 +244,9 @@ impl BridgeConnection {
                         "Bridge '{}' connected to backup broker: {} (TLS)",
                         self.config.name, backup
                     );
-                    self.update_connected_stats().await;
-                    return Ok(());
+                    self.update_connected_stats(ConnectedBroker::Backup(idx), backup)
+                        .await;
+                    return Ok(ConnectedBroker::Backup(idx));
                 }
                 Err(e) => {
                     warn!("Failed to connect to backup broker {}: {}", backup, e);
@@ -243,7 +261,7 @@ impl BridgeConnection {
     }
 
     /// Attempts to connect without TLS to primary and backup brokers
-    async fn connect_plain(&self, options: &ConnectOptions) -> Result<()> {
+    async fn connect_plain(&self, options: &ConnectOptions) -> Result<ConnectedBroker> {
         let connection_string = format!("mqtt://{}", self.config.remote_address);
         match Box::pin(
             self.client
@@ -256,8 +274,9 @@ impl BridgeConnection {
                     "Bridge '{}' connected to primary broker: {}",
                     self.config.name, self.config.remote_address
                 );
-                self.update_connected_stats().await;
-                return Ok(());
+                self.update_connected_stats(ConnectedBroker::Primary, &self.config.remote_address)
+                    .await;
+                return Ok(ConnectedBroker::Primary);
             }
             Err(e) => {
                 warn!("Failed to connect to primary broker: {}", e);
@@ -265,7 +284,7 @@ impl BridgeConnection {
             }
         }
 
-        for backup in &self.config.backup_brokers {
+        for (idx, backup) in self.config.backup_brokers.iter().enumerate() {
             let backup_connection_string = format!("mqtt://{}", backup);
             match Box::pin(
                 self.client
@@ -278,8 +297,9 @@ impl BridgeConnection {
                         "Bridge '{}' connected to backup broker: {}",
                         self.config.name, backup
                     );
-                    self.update_connected_stats().await;
-                    return Ok(());
+                    self.update_connected_stats(ConnectedBroker::Backup(idx), backup)
+                        .await;
+                    return Ok(ConnectedBroker::Backup(idx));
                 }
                 Err(e) => {
                     warn!("Failed to connect to backup broker {}: {}", backup, e);
@@ -294,17 +314,109 @@ impl BridgeConnection {
     }
 
     /// Connects to the remote broker with failover support
-    async fn connect(&self) -> Result<()> {
+    async fn connect(&self) -> Result<ConnectedBroker> {
         let mut stats = self.stats.write().await;
         stats.connection_attempts += 1;
         drop(stats);
 
         let options = self.build_connect_options();
 
-        if self.config.use_tls {
-            Box::pin(self.connect_tls(&options)).await
+        let broker = if self.config.use_tls {
+            Box::pin(self.connect_tls(&options)).await?
         } else {
-            Box::pin(self.connect_plain(&options)).await
+            Box::pin(self.connect_plain(&options)).await?
+        };
+
+        if matches!(broker, ConnectedBroker::Backup(_)) && self.config.enable_failback {
+            self.start_health_check().await;
+        }
+
+        Ok(broker)
+    }
+
+    async fn start_health_check(&self) {
+        self.stop_health_check().await;
+
+        let config = self.config.clone();
+        let running = self.running.clone();
+        let shutdown_tx = self.shutdown_tx.clone();
+        let current_broker = self.current_broker.clone();
+        let stats = self.stats.clone();
+
+        let handle = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(config.primary_health_check_interval);
+
+            while running.load(Ordering::Relaxed) {
+                interval.tick().await;
+
+                if !running.load(Ordering::Relaxed) {
+                    break;
+                }
+
+                if let Some(ConnectedBroker::Primary) = *current_broker.read().await {
+                    debug!("Health check: already on primary, stopping");
+                    break;
+                }
+
+                if Self::probe_broker(&config.remote_address, &config).await {
+                    info!(
+                        "Bridge '{}': primary broker {} is available, triggering failback",
+                        config.name, config.remote_address
+                    );
+
+                    {
+                        let mut stats = stats.write().await;
+                        stats.failback_attempts += 1;
+                    }
+
+                    let _ = shutdown_tx.send(());
+                    break;
+                }
+            }
+        });
+
+        *self.health_check_handle.write().await = Some(handle);
+    }
+
+    async fn stop_health_check(&self) {
+        if let Some(handle) = self.health_check_handle.write().await.take() {
+            handle.abort();
+        }
+    }
+
+    async fn probe_broker(address: &str, config: &BridgeConfig) -> bool {
+        use tokio::net::TcpStream;
+
+        let addr = match address.to_socket_addrs() {
+            Ok(mut addrs) => match addrs.next() {
+                Some(addr) => addr,
+                None => return false,
+            },
+            Err(_) => return false,
+        };
+
+        match tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(addr)).await {
+            Ok(Ok(_stream)) => {
+                debug!(
+                    "Bridge '{}': primary broker {} responded to probe",
+                    config.name, address
+                );
+                true
+            }
+            _ => false,
+        }
+    }
+
+    pub fn current_broker(&self) -> Arc<RwLock<Option<ConnectedBroker>>> {
+        self.current_broker.clone()
+    }
+
+    pub async fn current_broker_address(&self) -> Option<String> {
+        let broker = self.current_broker.read().await;
+        match *broker {
+            Some(ConnectedBroker::Primary) => Some(self.config.remote_address.clone()),
+            Some(ConnectedBroker::Backup(idx)) => self.config.backup_brokers.get(idx).cloned(),
+            None => None,
         }
     }
 
@@ -441,11 +553,16 @@ impl BridgeConnection {
     }
 
     /// Updates stats when connected
-    async fn update_connected_stats(&self) {
+    async fn update_connected_stats(&self, broker: ConnectedBroker, address: &str) {
         let mut stats = self.stats.write().await;
         stats.connected = true;
         stats.connected_since = Some(Instant::now());
         stats.last_error = None;
+        stats.current_broker = Some(address.to_string());
+        stats.on_primary = matches!(broker, ConnectedBroker::Primary);
+
+        // Store which broker we're connected to
+        *self.current_broker.write().await = Some(broker);
     }
 
     /// Updates stats when an error occurs
@@ -518,7 +635,7 @@ impl BridgeConnection {
     /// Runs a single connection until disconnected
     async fn run_connection(&self) -> Result<()> {
         if !self.client.is_connected().await {
-            Box::pin(self.connect()).await?;
+            let _ = Box::pin(self.connect()).await?;
             self.setup_subscriptions().await?;
         }
 
@@ -530,6 +647,8 @@ impl BridgeConnection {
                     "Bridge '{}' disconnected from remote broker",
                     self.config.name
                 );
+                self.stop_health_check().await;
+                *self.current_broker.write().await = None;
                 break;
             }
 
