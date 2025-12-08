@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0] / [mqtt5-protocol 0.3.0] / [mqtt5-wasm 0.3.0] - 2025-12-07
+
+### Added
+
+- **MQTT v3.1.1 protocol support** for client, broker, and CLI
+  - Full backwards compatibility with MQTT v3.1.1 brokers and clients
+  - CLI `--protocol-version` flag accepts `3.1.1`, `v3.1.1`, `4`, `5.0`, `v5.0`, or `5`
+  - Broker accepts both v3.1.1 and v5.0 clients simultaneously
+  - WASM client supports `protocolVersion` option (4 for v3.1.1, 5 for v5.0)
+
+- **Cross-protocol interoperability** between v3.1.1 and v5.0 clients
+  - v3.1.1 clients can publish to v5.0 subscribers and vice versa
+  - Messages encoded with subscriber's protocol version (not publisher's)
+  - Subscription stores subscriber's protocol version for correct message delivery
+
+- **WASM callback properties** for MQTT5 request-response patterns
+  - JavaScript callbacks now receive `(topic, payload, properties)` instead of `(topic, payload)`
+  - `WasmMessageProperties` struct exposes: `responseTopic`, `correlationData`, `contentType`, `payloadFormatIndicator`, `messageExpiryInterval`, `subscriptionIdentifiers`, `getUserProperties()`
+  - Enables request-response patterns with correlation data echo and dynamic response topics
+
 ## [0.11.4] / [mqtt5-protocol 0.2.1] - 2025-12-04
 
 ### Fixed
