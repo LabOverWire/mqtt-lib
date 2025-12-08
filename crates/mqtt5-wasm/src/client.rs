@@ -1,4 +1,6 @@
-use crate::config::{WasmConnectOptions, WasmPublishOptions, WasmSubscribeOptions};
+use crate::config::{
+    WasmConnectOptions, WasmMessageProperties, WasmPublishOptions, WasmSubscribeOptions,
+};
 use crate::decoder::read_packet;
 use crate::transport::{WasmReader, WasmTransportType, WasmWriter};
 use bytes::BytesMut;
@@ -375,11 +377,14 @@ impl WasmMqttClient {
                                             let topic_js = JsValue::from_str(&topic);
                                             let payload_array =
                                                 js_sys::Uint8Array::from(&payload[..]);
+                                            let props_js: WasmMessageProperties =
+                                                properties.clone().into();
 
-                                            if let Err(e) = callback.call2(
+                                            if let Err(e) = callback.call3(
                                                 &JsValue::NULL,
                                                 &topic_js,
                                                 &payload_array.into(),
+                                                &props_js.into(),
                                             ) {
                                                 web_sys::console::error_1(
                                                     &format!("Callback error: {:?}", e).into(),
@@ -455,10 +460,14 @@ impl WasmMqttClient {
                         if mqtt5_protocol::validation::topic_matches_filter(&topic, filter) {
                             let topic_js = JsValue::from_str(&topic);
                             let payload_array = js_sys::Uint8Array::from(&payload[..]);
+                            let props_js: WasmMessageProperties = properties.clone().into();
 
-                            if let Err(e) =
-                                callback.call2(&JsValue::NULL, &topic_js, &payload_array.into())
-                            {
+                            if let Err(e) = callback.call3(
+                                &JsValue::NULL,
+                                &topic_js,
+                                &payload_array.into(),
+                                &props_js.into(),
+                            ) {
                                 web_sys::console::error_1(
                                     &format!("Callback error: {:?}", e).into(),
                                 );

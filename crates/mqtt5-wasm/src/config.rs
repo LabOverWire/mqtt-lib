@@ -1,4 +1,5 @@
 use mqtt5_protocol::protocol::v5::properties::{Properties, PropertyId, PropertyValue};
+use mqtt5_protocol::types::MessageProperties;
 use mqtt5_protocol::QoS;
 use wasm_bindgen::prelude::*;
 
@@ -758,5 +759,75 @@ impl WasmWillMessage {
             .clone_from(&self.response_topic);
 
         will
+    }
+}
+
+#[wasm_bindgen]
+pub struct WasmMessageProperties {
+    response_topic: Option<String>,
+    correlation_data: Option<Vec<u8>>,
+    content_type: Option<String>,
+    payload_format_indicator: Option<bool>,
+    message_expiry_interval: Option<u32>,
+    subscription_identifiers: Vec<u32>,
+    user_properties: Vec<(String, String)>,
+}
+
+#[wasm_bindgen]
+#[allow(non_snake_case)]
+impl WasmMessageProperties {
+    #[wasm_bindgen(getter)]
+    pub fn responseTopic(&self) -> Option<String> {
+        self.response_topic.clone()
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn correlationData(&self) -> Option<Vec<u8>> {
+        self.correlation_data.clone()
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn contentType(&self) -> Option<String> {
+        self.content_type.clone()
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn payloadFormatIndicator(&self) -> Option<bool> {
+        self.payload_format_indicator
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn messageExpiryInterval(&self) -> Option<u32> {
+        self.message_expiry_interval
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn subscriptionIdentifiers(&self) -> Vec<u32> {
+        self.subscription_identifiers.clone()
+    }
+
+    pub fn getUserProperties(&self) -> js_sys::Array {
+        let arr = js_sys::Array::new();
+        for (key, value) in &self.user_properties {
+            let pair = js_sys::Array::new();
+            pair.push(&JsValue::from_str(key));
+            pair.push(&JsValue::from_str(value));
+            arr.push(&pair);
+        }
+        arr
+    }
+}
+
+impl From<MessageProperties> for WasmMessageProperties {
+    fn from(props: MessageProperties) -> Self {
+        Self {
+            response_topic: props.response_topic,
+            correlation_data: props.correlation_data,
+            content_type: props.content_type,
+            payload_format_indicator: props.payload_format_indicator,
+            message_expiry_interval: props.message_expiry_interval,
+            subscription_identifiers: props.subscription_identifiers,
+            user_properties: props.user_properties,
+        }
     }
 }
