@@ -8,6 +8,7 @@
 
 use crate::broker::storage::{DynamicStorage, QueuedMessage, RetainedMessage, StorageBackend};
 use crate::packet::publish::PublishPacket;
+use crate::validation::parse_shared_subscription;
 use crate::QoS;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -180,7 +181,8 @@ impl OptimizedMessageRouter {
         qos: QoS,
         subscription_id: Option<u32>,
     ) {
-        let (actual_filter, share_group) = Self::parse_shared_subscription(&topic_filter);
+        let (actual_filter, share_group) = parse_shared_subscription(&topic_filter);
+        let share_group = share_group.map(str::to_string);
         let (topic_segments, has_wildcards) = Self::analyze_topic_filter(actual_filter);
 
         let subscription = OptimizedSubscription {
@@ -571,18 +573,6 @@ impl OptimizedMessageRouter {
                 || !child.multilevel_subscriptions.is_empty()
                 || !child.children.is_empty()
         });
-    }
-
-    /// Parses shared subscription topic filter (same as original)
-    fn parse_shared_subscription(topic_filter: &str) -> (&str, Option<String>) {
-        if let Some(after_share) = topic_filter.strip_prefix("$share/") {
-            if let Some(slash_pos) = after_share.find('/') {
-                let group_name = &after_share[..slash_pos];
-                let actual_filter = &after_share[slash_pos + 1..];
-                return (actual_filter, Some(group_name.to_string()));
-            }
-        }
-        (topic_filter, None)
     }
 
     /// Returns performance metrics

@@ -11,6 +11,9 @@
 #![allow(dead_code)]
 #![allow(clippy::cast_lossless)]
 #![allow(clippy::single_component_path_imports)]
+#![allow(clippy::missing_errors_doc)]
+#![allow(clippy::too_many_lines)]
+#![allow(clippy::unused_async)]
 
 pub mod bindings;
 #[cfg(feature = "broker")]

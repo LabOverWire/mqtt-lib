@@ -12,6 +12,7 @@ cp -r pkg examples/local-broker/
 cp -r pkg examples/qos2/
 cp -r pkg examples/broker-bridge/
 cp -r pkg examples/will-message/
+cp -r pkg examples/shared-subscription/
 
 echo "✨ Build complete!"
 echo ""
@@ -35,6 +36,10 @@ echo "  python3 -m http.server 8000"
 echo ""
 echo "Will Message (Last Will and Testament):"
 echo "  cd examples/will-message"
+echo "  python3 -m http.server 8000"
+echo ""
+echo "Shared Subscription (Load Balancing):"
+echo "  cd examples/shared-subscription"
 echo "  python3 -m http.server 8000"
 echo ""
 echo "Then open http://localhost:8000 in your browser"

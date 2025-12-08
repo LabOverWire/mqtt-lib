@@ -456,7 +456,7 @@ impl Transport for QuicTransport {
 
 // [MQTT5§2] Fixed header parsing
 impl PacketReader for RecvStream {
-    async fn read_packet(&mut self) -> Result<Packet> {
+    async fn read_packet(&mut self, protocol_version: u8) -> Result<Packet> {
         let mut header_buf = BytesMut::with_capacity(5);
 
         let mut byte = [0u8; 1];
@@ -510,8 +510,12 @@ impl PacketReader for RecvStream {
         }
 
         let mut payload_buf = BytesMut::from(&payload[..]);
-        let packet =
-            Packet::decode_from_body(fixed_header.packet_type, &fixed_header, &mut payload_buf)?;
+        let packet = Packet::decode_from_body_with_version(
+            fixed_header.packet_type,
+            &fixed_header,
+            &mut payload_buf,
+            protocol_version,
+        )?;
         debug!(
             packet_type = ?fixed_header.packet_type,
             packet_size = fixed_header.remaining_length,

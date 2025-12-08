@@ -456,21 +456,23 @@ impl WebSocketWriteHandle {
 }
 
 impl PacketReader for WebSocketReadHandle {
-    async fn read_packet(&mut self) -> Result<Packet> {
+    async fn read_packet(&mut self, protocol_version: u8) -> Result<Packet> {
         use crate::packet::FixedHeader;
         use bytes::BytesMut;
         use futures_util::StreamExt;
 
-        // WebSocket messages are already framed, so we get complete packets
         match self.reader.next().await {
             Some(Ok(Message::Binary(data))) => {
                 let mut buf = BytesMut::from(&data[..]);
 
-                // Parse fixed header first
                 let fixed_header = FixedHeader::decode(&mut buf)?;
 
-                // Then decode the packet body
-                Packet::decode_from_body(fixed_header.packet_type, &fixed_header, &mut buf)
+                Packet::decode_from_body_with_version(
+                    fixed_header.packet_type,
+                    &fixed_header,
+                    &mut buf,
+                    protocol_version,
+                )
             }
             Some(Ok(Message::Close(_))) | None => Err(MqttError::ClientClosed),
             Some(Ok(_)) => Err(MqttError::ProtocolError(

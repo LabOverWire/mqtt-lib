@@ -19,12 +19,13 @@ pub trait PacketIo: Transport {
     /// # Errors
     ///
     /// Returns an error if the operation fails
-    fn read_packet(&mut self) -> impl Future<Output = Result<Packet>> + Send + '_ {
+    fn read_packet(
+        &mut self,
+        protocol_version: u8,
+    ) -> impl Future<Output = Result<Packet>> + Send + '_ {
         async move {
-            // Read fixed header bytes
             let mut header_buf = BytesMut::with_capacity(5);
 
-            // Read first byte (packet type and flags)
             let mut byte = [0u8; 1];
             tracing::trace!("Attempting to read first byte of packet");
             let n = self.read(&mut byte).await?;
@@ -40,7 +41,6 @@ pub trait PacketIo: Transport {
             );
             header_buf.put_u8(byte[0]);
 
-            // Read remaining length (variable length encoding)
             loop {
                 let n = self.read(&mut byte).await?;
                 if n == 0 {
@@ -61,7 +61,6 @@ pub trait PacketIo: Transport {
                 }
             }
 
-            // Parse the complete fixed header
             let mut header_buf = header_buf.freeze();
             tracing::trace!("Fixed header bytes: {:02x?}", header_buf.as_ref());
             let fixed_header = FixedHeader::decode(&mut header_buf)?;
@@ -80,7 +79,6 @@ pub trait PacketIo: Transport {
                 );
             }
 
-            // Read remaining bytes
             let mut payload = vec![0u8; fixed_header.remaining_length as usize];
             let mut bytes_read = 0;
             while bytes_read < payload.len() {
@@ -91,17 +89,17 @@ pub trait PacketIo: Transport {
                 bytes_read += n;
             }
 
-            // Parse packet based on type
             let mut payload_buf = BytesMut::from(&payload[..]);
 
             if fixed_header.packet_type == PacketType::PubAck {
                 tracing::trace!(payload_len = payload.len(), "Decoding PUBACK packet");
             }
 
-            let packet = Packet::decode_from_body(
+            let packet = Packet::decode_from_body_with_version(
                 fixed_header.packet_type,
                 &fixed_header,
                 &mut payload_buf,
+                protocol_version,
             )?;
             tracing::debug!(
                 "Successfully decoded packet: {:?}",
@@ -161,7 +159,10 @@ pub trait PacketReader {
     /// # Errors
     ///
     /// Returns an error if the operation fails
-    fn read_packet(&mut self) -> impl Future<Output = Result<Packet>> + Send + '_;
+    fn read_packet(
+        &mut self,
+        protocol_version: u8,
+    ) -> impl Future<Output = Result<Packet>> + Send + '_;
 }
 
 /// Packet writer trait for split write halves  
@@ -176,11 +177,9 @@ pub trait PacketWriter {
 
 /// Implementation for TCP read half
 impl PacketReader for OwnedReadHalf {
-    async fn read_packet(&mut self) -> Result<Packet> {
-        // Read fixed header bytes
+    async fn read_packet(&mut self, protocol_version: u8) -> Result<Packet> {
         let mut header_buf = BytesMut::with_capacity(5);
 
-        // Read first byte (packet type and flags)
         let mut byte = [0u8; 1];
         let n = self.read(&mut byte).await?;
         if n == 0 {
@@ -188,7 +187,6 @@ impl PacketReader for OwnedReadHalf {
         }
         header_buf.put_u8(byte[0]);
 
-        // Read remaining length (variable length encoding)
         loop {
             let n = self.read(&mut byte).await?;
             if n == 0 {
@@ -207,11 +205,9 @@ impl PacketReader for OwnedReadHalf {
             }
         }
 
-        // Parse the complete fixed header
         let mut header_buf = header_buf.freeze();
         let fixed_header = FixedHeader::decode(&mut header_buf)?;
 
-        // Read remaining bytes
         let mut payload = vec![0u8; fixed_header.remaining_length as usize];
         let mut bytes_read = 0;
         while bytes_read < payload.len() {
@@ -222,9 +218,13 @@ impl PacketReader for OwnedReadHalf {
             bytes_read += n;
         }
 
-        // Parse packet based on type
         let mut payload_buf = BytesMut::from(&payload[..]);
-        Packet::decode_from_body(fixed_header.packet_type, &fixed_header, &mut payload_buf)
+        Packet::decode_from_body_with_version(
+            fixed_header.packet_type,
+            &fixed_header,
+            &mut payload_buf,
+            protocol_version,
+        )
     }
 }
 
@@ -293,11 +293,9 @@ impl PacketWriter for OwnedWriteHalf {
 
 /// Implementation for TLS read half
 impl PacketReader for TlsReadHalf {
-    async fn read_packet(&mut self) -> Result<Packet> {
-        // Read fixed header bytes
+    async fn read_packet(&mut self, protocol_version: u8) -> Result<Packet> {
         let mut header_buf = BytesMut::with_capacity(5);
 
-        // Read first byte (packet type and flags)
         let mut byte = [0u8; 1];
         let n = self.read(&mut byte).await?;
         if n == 0 {
@@ -305,7 +303,6 @@ impl PacketReader for TlsReadHalf {
         }
         header_buf.put_u8(byte[0]);
 
-        // Read remaining length (variable length encoding)
         loop {
             let n = self.read(&mut byte).await?;
             if n == 0 {
@@ -324,11 +321,9 @@ impl PacketReader for TlsReadHalf {
             }
         }
 
-        // Parse the complete fixed header
         let mut header_buf = header_buf.freeze();
         let fixed_header = FixedHeader::decode(&mut header_buf)?;
 
-        // Read remaining bytes
         let mut payload = vec![0u8; fixed_header.remaining_length as usize];
         let mut bytes_read = 0;
         while bytes_read < payload.len() {
@@ -339,9 +334,13 @@ impl PacketReader for TlsReadHalf {
             bytes_read += n;
         }
 
-        // Parse packet based on type
         let mut payload_buf = BytesMut::from(&payload[..]);
-        Packet::decode_from_body(fixed_header.packet_type, &fixed_header, &mut payload_buf)
+        Packet::decode_from_body_with_version(
+            fixed_header.packet_type,
+            &fixed_header,
+            &mut payload_buf,
+            protocol_version,
+        )
     }
 }
 
@@ -377,7 +376,7 @@ mod tests {
             .add_incoming_data(&crate::constants::packets::PINGRESP_BYTES)
             .await;
 
-        let packet = transport.read_packet().await.unwrap();
+        let packet = transport.read_packet(5).await.unwrap();
         assert!(matches!(packet, Packet::PingResp));
     }
 
@@ -391,7 +390,7 @@ mod tests {
             .add_incoming_data(&crate::constants::packets::PINGREQ_BYTES)
             .await;
 
-        let packet = transport.read_packet().await.unwrap();
+        let packet = transport.read_packet(5).await.unwrap();
         assert!(matches!(packet, Packet::PingReq));
     }
 
@@ -414,7 +413,7 @@ mod tests {
         connack.encode(&mut data).unwrap();
         transport.add_incoming_data(&data).await;
 
-        let packet = transport.read_packet().await.unwrap();
+        let packet = transport.read_packet(5).await.unwrap();
         match packet {
             Packet::ConnAck(connack) => {
                 assert!(!connack.session_present);
@@ -453,7 +452,7 @@ mod tests {
 
         transport.add_incoming_data(&data).await;
 
-        let packet = transport.read_packet().await.unwrap();
+        let packet = transport.read_packet(5).await.unwrap();
         match packet {
             Packet::Publish(publish) => {
                 assert_eq!(publish.topic_name, "test/topic");
@@ -478,7 +477,7 @@ mod tests {
         data.extend_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF, 0xFF]);
         transport.add_incoming_data(&data).await;
 
-        let result = transport.read_packet().await;
+        let result = transport.read_packet(5).await;
         assert!(result.is_err());
         if let Err(e) = result {
             match e {
@@ -493,7 +492,7 @@ mod tests {
         let mut transport = MockTransport::new();
 
         // Don't add any data - read should return 0
-        let result = transport.read_packet().await;
+        let result = transport.read_packet(5).await;
         assert!(result.is_err());
     }
 
@@ -521,6 +520,7 @@ mod tests {
             dup: false,
             packet_id: Some(123),
             properties: Properties::new(),
+            protocol_version: 5,
         };
 
         transport
@@ -555,6 +555,7 @@ mod tests {
                     retain_handling: crate::packet::subscribe::RetainHandling::SendAtSubscribe,
                 },
             }],
+            protocol_version: 5,
         };
 
         transport
@@ -594,7 +595,7 @@ mod tests {
             read_transport.connect().await.unwrap();
             read_transport.add_incoming_data(&data).await;
 
-            let read_packet = read_transport.read_packet().await.unwrap();
+            let read_packet = read_transport.read_packet(5).await.unwrap();
 
             // Basic type check
             match (&packet, &read_packet) {
@@ -639,6 +640,7 @@ mod tests {
             dup: false,
             packet_id: None,
             properties: Properties::new(),
+            protocol_version: 5,
         };
 
         transport

@@ -47,6 +47,7 @@ pub struct WasmClientHandler {
     handler_id: u32,
     client_id: Option<String>,
     user_id: Option<String>,
+    protocol_version: u8,
     config: Arc<BrokerConfig>,
     router: Arc<MessageRouter>,
     auth_provider: Arc<dyn AuthProvider>,
@@ -83,6 +84,7 @@ impl WasmClientHandler {
             handler_id,
             client_id: None,
             user_id: None,
+            protocol_version: 5,
             config,
             router,
             auth_provider,
@@ -313,13 +315,15 @@ impl WasmClientHandler {
         mut connect: ConnectPacket,
         writer: &mut WasmWriter,
     ) -> Result<()> {
-        if connect.protocol_version != 5 {
-            let connack = ConnAckPacket::new(false, ReasonCode::UnsupportedProtocolVersion);
+        if connect.protocol_version != 4 && connect.protocol_version != 5 {
+            let mut connack = ConnAckPacket::new(false, ReasonCode::UnsupportedProtocolVersion);
+            connack.protocol_version = connect.protocol_version;
             self.write_packet(Packet::ConnAck(connack), writer).await?;
             return Err(MqttError::ProtocolError(
                 "Unsupported protocol version".to_string(),
             ));
         }
+        self.protocol_version = connect.protocol_version;
 
         let mut assigned_client_id = None;
         if connect.client_id.is_empty() {
@@ -334,22 +338,24 @@ impl WasmClientHandler {
         use std::net::{IpAddr, Ipv4Addr, SocketAddr};
         let dummy_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
 
-        if let Some(auth_method) = connect.properties.get_authentication_method() {
-            if self.auth_provider.supports_enhanced_auth() {
-                self.auth_method = Some(auth_method.clone());
-                self.auth_state = AuthState::InProgress;
-                self.pending_connect = Some(PendingConnect {
-                    connect: connect.clone(),
-                    assigned_client_id: assigned_client_id.clone(),
-                });
+        if self.protocol_version == 5 {
+            if let Some(auth_method) = connect.properties.get_authentication_method() {
+                if self.auth_provider.supports_enhanced_auth() {
+                    self.auth_method = Some(auth_method.clone());
+                    self.auth_state = AuthState::InProgress;
+                    self.pending_connect = Some(PendingConnect {
+                        connect: connect.clone(),
+                        assigned_client_id: assigned_client_id.clone(),
+                    });
 
-                let auth_data = connect.properties.get_authentication_data();
-                let result = self
-                    .auth_provider
-                    .authenticate_enhanced(auth_method, auth_data, &connect.client_id)
-                    .await?;
+                    let auth_data = connect.properties.get_authentication_data();
+                    let result = self
+                        .auth_provider
+                        .authenticate_enhanced(auth_method, auth_data, &connect.client_id)
+                        .await?;
 
-                return self.process_enhanced_auth_result(result, writer).await;
+                    return self.process_enhanced_auth_result(result, writer).await;
+                }
             }
         }
 
@@ -359,7 +365,8 @@ impl WasmClientHandler {
             .await?;
 
         if !auth_result.authenticated {
-            let connack = ConnAckPacket::new(false, auth_result.reason_code);
+            let mut connack = ConnAckPacket::new(false, auth_result.reason_code);
+            connack.protocol_version = self.protocol_version;
             self.write_packet(Packet::ConnAck(connack), writer).await?;
             return Err(MqttError::AuthenticationFailed);
         }
@@ -372,35 +379,38 @@ impl WasmClientHandler {
         let session_present = self.handle_session(&connect).await?;
 
         let mut connack = ConnAckPacket::new(session_present, ReasonCode::Success);
+        connack.protocol_version = self.protocol_version;
 
-        if let Some(ref assigned_id) = assigned_client_id {
+        if self.protocol_version == 5 {
+            if let Some(ref assigned_id) = assigned_client_id {
+                connack
+                    .properties
+                    .set_assigned_client_identifier(assigned_id.clone());
+            }
+
             connack
                 .properties
-                .set_assigned_client_identifier(assigned_id.clone());
+                .set_session_expiry_interval(self.config.session_expiry_interval.as_secs() as u32);
+            if self.config.maximum_qos < 2 {
+                connack.properties.set_maximum_qos(self.config.maximum_qos);
+            }
+            connack.properties.set_retain_available(true);
+            connack
+                .properties
+                .set_maximum_packet_size(self.config.max_packet_size as u32);
+            connack
+                .properties
+                .set_topic_alias_maximum(self.config.topic_alias_maximum);
+            connack
+                .properties
+                .set_wildcard_subscription_available(self.config.wildcard_subscription_available);
+            connack.properties.set_subscription_identifier_available(
+                self.config.subscription_identifier_available,
+            );
+            connack
+                .properties
+                .set_shared_subscription_available(self.config.shared_subscription_available);
         }
-
-        connack
-            .properties
-            .set_session_expiry_interval(self.config.session_expiry_interval.as_secs() as u32);
-        if self.config.maximum_qos < 2 {
-            connack.properties.set_maximum_qos(self.config.maximum_qos);
-        }
-        connack.properties.set_retain_available(true);
-        connack
-            .properties
-            .set_maximum_packet_size(self.config.max_packet_size as u32);
-        connack
-            .properties
-            .set_topic_alias_maximum(self.config.topic_alias_maximum);
-        connack
-            .properties
-            .set_wildcard_subscription_available(self.config.wildcard_subscription_available);
-        connack
-            .properties
-            .set_subscription_identifier_available(self.config.subscription_identifier_available);
-        connack
-            .properties
-            .set_shared_subscription_available(self.config.shared_subscription_available);
 
         self.write_packet(Packet::ConnAck(connack), writer).await?;
 
@@ -558,6 +568,7 @@ impl WasmClientHandler {
 
         let mut suback = SubAckPacket::new(subscribe.packet_id);
         suback.reason_codes = reason_codes;
+        suback.protocol_version = self.protocol_version;
 
         self.write_packet(Packet::SubAck(suback), writer).await?;
 
@@ -586,6 +597,7 @@ impl WasmClientHandler {
 
         let mut unsuback = UnsubAckPacket::new(unsubscribe.packet_id);
         unsuback.reason_codes = reason_codes;
+        unsuback.protocol_version = self.protocol_version;
 
         self.write_packet(Packet::UnsubAck(unsuback), writer)
             .await?;
@@ -874,6 +886,7 @@ impl WasmClientHandler {
                     let session_present = self.handle_session(&pending.connect).await?;
 
                     let mut connack = ConnAckPacket::new(session_present, ReasonCode::Success);
+                    connack.protocol_version = self.protocol_version;
                     if let Some(ref assigned_id) = pending.assigned_client_id {
                         connack
                             .properties
@@ -935,7 +948,8 @@ impl WasmClientHandler {
                 self.auth_state = AuthState::NotStarted;
                 self.pending_connect = None;
 
-                let connack = ConnAckPacket::new(false, result.reason_code);
+                let mut connack = ConnAckPacket::new(false, result.reason_code);
+                connack.protocol_version = self.protocol_version;
                 self.write_packet(Packet::ConnAck(connack), writer).await?;
                 Err(MqttError::AuthenticationFailed)
             }

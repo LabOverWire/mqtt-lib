@@ -18,6 +18,7 @@ pub struct WasmConnectOptions {
     pub(crate) authentication_method: Option<String>,
     pub(crate) authentication_data: Option<Vec<u8>>,
     pub(crate) user_properties: Vec<(String, String)>,
+    pub(crate) protocol_version: u8,
 }
 
 #[wasm_bindgen]
@@ -40,6 +41,7 @@ impl WasmConnectOptions {
             authentication_method: None,
             authentication_data: None,
             user_properties: Vec::new(),
+            protocol_version: 5,
         }
     }
 
@@ -159,6 +161,23 @@ impl WasmConnectOptions {
     #[wasm_bindgen(setter)]
     pub fn set_authenticationData(&mut self, value: &[u8]) {
         self.authentication_data = Some(value.to_vec());
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn protocolVersion(&self) -> u8 {
+        self.protocol_version
+    }
+
+    #[wasm_bindgen(setter)]
+    pub fn set_protocolVersion(&mut self, value: u8) {
+        if value == 4 || value == 5 {
+            self.protocol_version = value;
+        } else {
+            web_sys::console::warn_1(
+                &"Protocol version must be 4 (v3.1.1) or 5 (v5.0). Using 5.".into(),
+            );
+            self.protocol_version = 5;
+        }
     }
 
     pub fn addUserProperty(&mut self, key: String, value: String) {

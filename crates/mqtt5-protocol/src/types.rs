@@ -1,6 +1,41 @@
 pub use crate::protocol::v5::reason_codes::ReasonCode;
 use crate::time::Duration;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ProtocolVersion {
+    V311,
+    #[default]
+    V5,
+}
+
+impl ProtocolVersion {
+    #[must_use]
+    pub fn as_u8(self) -> u8 {
+        match self {
+            ProtocolVersion::V311 => 4,
+            ProtocolVersion::V5 => 5,
+        }
+    }
+}
+
+impl From<ProtocolVersion> for u8 {
+    fn from(version: ProtocolVersion) -> Self {
+        version.as_u8()
+    }
+}
+
+impl TryFrom<u8> for ProtocolVersion {
+    type Error = ();
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            4 => Ok(ProtocolVersion::V311),
+            5 => Ok(ProtocolVersion::V5),
+            _ => Err(()),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ConnectOptions {
     pub client_id: String,
@@ -10,6 +45,7 @@ pub struct ConnectOptions {
     pub password: Option<Vec<u8>>,
     pub will: Option<WillMessage>,
     pub properties: ConnectProperties,
+    pub protocol_version: ProtocolVersion,
 }
 
 impl Default for ConnectOptions {
@@ -22,6 +58,7 @@ impl Default for ConnectOptions {
             password: None,
             will: None,
             properties: ConnectProperties::default(),
+            protocol_version: ProtocolVersion::V5,
         }
     }
 }
@@ -37,7 +74,14 @@ impl ConnectOptions {
             password: None,
             will: None,
             properties: ConnectProperties::default(),
+            protocol_version: ProtocolVersion::V5,
         }
+    }
+
+    #[must_use]
+    pub fn with_protocol_version(mut self, version: ProtocolVersion) -> Self {
+        self.protocol_version = version;
+        self
     }
 
     #[must_use]

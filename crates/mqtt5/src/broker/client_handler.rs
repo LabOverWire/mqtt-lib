@@ -80,6 +80,7 @@ pub struct ClientHandler {
     external_packet_rx: Option<mpsc::Receiver<Packet>>,
     client_receive_maximum: u16,
     outbound_inflight: HashSet<u16>,
+    protocol_version: u8,
 }
 
 impl ClientHandler {
@@ -154,6 +155,7 @@ impl ClientHandler {
             external_packet_rx,
             client_receive_maximum: 65535,
             outbound_inflight: HashSet::new(),
+            protocol_version: 5,
         }
     }
 
@@ -308,7 +310,7 @@ impl ClientHandler {
 
     /// Waits for and processes CONNECT packet
     async fn wait_for_connect(&mut self) -> Result<()> {
-        let packet = self.transport.read_packet().await?;
+        let packet = self.transport.read_packet(5).await?;
 
         match packet {
             Packet::Connect(connect) => self.handle_connect(*connect).await,
@@ -326,7 +328,7 @@ impl ClientHandler {
         loop {
             tokio::select! {
                 // Read incoming packets from control stream
-                packet_result = self.transport.read_packet() => {
+                packet_result = self.transport.read_packet(self.protocol_version) => {
                     match packet_result {
                         Ok(packet) => {
                             self.handle_packet(packet).await?;
@@ -384,7 +386,7 @@ impl ClientHandler {
         loop {
             tokio::select! {
                 // Read incoming packets from control stream
-                packet_result = self.transport.read_packet() => {
+                packet_result = self.transport.read_packet(self.protocol_version) => {
                     match packet_result {
                         Ok(packet) => {
                             last_packet_time = tokio::time::Instant::now();
@@ -442,8 +444,10 @@ impl ClientHandler {
                 // Shutdown signal
                 _ = self.shutdown_rx.recv() => {
                     debug!("Shutdown signal received");
-                    let disconnect = DisconnectPacket::new(ReasonCode::ServerShuttingDown);
-                    let _ = self.transport.write_packet(Packet::Disconnect(disconnect)).await;
+                    if self.protocol_version == 5 {
+                        let disconnect = DisconnectPacket::new(ReasonCode::ServerShuttingDown);
+                        let _ = self.transport.write_packet(Packet::Disconnect(disconnect)).await;
+                    }
                     return Ok(false);
                 }
             }
@@ -454,11 +458,12 @@ impl ClientHandler {
     async fn handle_packet(&mut self, packet: Packet) -> Result<()> {
         match packet {
             Packet::Connect(_) => {
-                // Duplicate CONNECT
-                let disconnect = DisconnectPacket::new(ReasonCode::ProtocolError);
-                self.transport
-                    .write_packet(Packet::Disconnect(disconnect))
-                    .await?;
+                if self.protocol_version == 5 {
+                    let disconnect = DisconnectPacket::new(ReasonCode::ProtocolError);
+                    self.transport
+                        .write_packet(Packet::Disconnect(disconnect))
+                        .await?;
+                }
                 Err(MqttError::ProtocolError("Duplicate CONNECT".to_string()))
             }
             Packet::Subscribe(subscribe) => self.handle_subscribe(subscribe).await,
@@ -485,23 +490,30 @@ impl ClientHandler {
     }
 
     async fn validate_protocol_version(&mut self, protocol_version: u8) -> Result<()> {
-        if protocol_version != 5 {
-            info!(
-                protocol_version,
-                addr = %self.client_addr,
-                "Rejecting connection: unsupported protocol version (only MQTT v5.0 supported)"
-            );
-            let connack = if protocol_version == 4 {
-                ConnAckPacket::new_v311(false, ReasonCode::UnsupportedProtocolVersion)
-            } else {
-                ConnAckPacket::new(false, ReasonCode::UnsupportedProtocolVersion)
-            };
-            self.transport
-                .write_packet(Packet::ConnAck(connack))
-                .await?;
-            return Err(MqttError::UnsupportedProtocolVersion);
+        match protocol_version {
+            4 | 5 => {
+                self.protocol_version = protocol_version;
+                debug!(
+                    protocol_version,
+                    addr = %self.client_addr,
+                    "Client using MQTT v{}",
+                    if protocol_version == 5 { "5.0" } else { "3.1.1" }
+                );
+                Ok(())
+            }
+            _ => {
+                info!(
+                    protocol_version,
+                    addr = %self.client_addr,
+                    "Rejecting connection: unsupported protocol version"
+                );
+                let connack = ConnAckPacket::new(false, ReasonCode::UnsupportedProtocolVersion);
+                self.transport
+                    .write_packet(Packet::ConnAck(connack))
+                    .await?;
+                Err(MqttError::UnsupportedProtocolVersion)
+            }
         }
-        Ok(())
     }
 
     /// Handles CONNECT packet
@@ -578,8 +590,12 @@ impl ClientHandler {
                         return Ok(());
                     }
                     EnhancedAuthStatus::Failed => {
-                        let mut connack = ConnAckPacket::new(false, result.reason_code);
-                        if self.request_problem_information {
+                        let mut connack = if self.protocol_version == 4 {
+                            ConnAckPacket::new_v311(false, result.reason_code)
+                        } else {
+                            ConnAckPacket::new(false, result.reason_code)
+                        };
+                        if self.protocol_version == 5 && self.request_problem_information {
                             if let Some(reason) = result.reason_string {
                                 connack.properties.set_reason_string(reason);
                             }
@@ -591,8 +607,12 @@ impl ClientHandler {
                     }
                 }
             } else {
-                let mut connack = ConnAckPacket::new(false, ReasonCode::BadAuthenticationMethod);
-                if self.request_problem_information {
+                let mut connack = if self.protocol_version == 4 {
+                    ConnAckPacket::new_v311(false, ReasonCode::BadAuthenticationMethod)
+                } else {
+                    ConnAckPacket::new(false, ReasonCode::BadAuthenticationMethod)
+                };
+                if self.protocol_version == 5 && self.request_problem_information {
                     connack.properties.set_reason_string(
                         "Server does not support enhanced authentication".to_string(),
                     );
@@ -615,8 +635,12 @@ impl ClientHandler {
                     reason = ?auth_result.reason_code,
                     "Authentication failed"
                 );
-                let mut connack = ConnAckPacket::new(false, auth_result.reason_code);
-                if self.request_problem_information {
+                let mut connack = if self.protocol_version == 4 {
+                    ConnAckPacket::new_v311(false, auth_result.reason_code)
+                } else {
+                    ConnAckPacket::new(false, auth_result.reason_code)
+                };
+                if self.protocol_version == 5 && self.request_problem_information {
                     connack
                         .properties
                         .set_reason_string("Authentication failed".to_string());
@@ -646,54 +670,56 @@ impl ClientHandler {
         let session_present = self.handle_session(&connect).await?;
 
         // Send CONNACK
-        let mut connack = ConnAckPacket::new(session_present, ReasonCode::Success);
+        let mut connack = if self.protocol_version == 4 {
+            ConnAckPacket::new_v311(session_present, ReasonCode::Success)
+        } else {
+            ConnAckPacket::new(session_present, ReasonCode::Success)
+        };
 
-        // If we assigned a client ID, include it in the CONNACK properties
-        if let Some(ref assigned_id) = assigned_client_id {
-            debug!("Setting assigned client ID in CONNACK: {}", assigned_id);
-            connack
-                .properties
-                .set_assigned_client_identifier(assigned_id.clone());
-        }
-
-        // Set broker properties using setter methods
-        connack
-            .properties
-            .set_topic_alias_maximum(self.config.topic_alias_maximum);
-        connack
-            .properties
-            .set_retain_available(self.config.retain_available);
-        connack.properties.set_maximum_packet_size(
-            u32::try_from(self.config.max_packet_size).unwrap_or(u32::MAX),
-        );
-        connack
-            .properties
-            .set_wildcard_subscription_available(self.config.wildcard_subscription_available);
-        connack
-            .properties
-            .set_subscription_identifier_available(self.config.subscription_identifier_available);
-        connack
-            .properties
-            .set_shared_subscription_available(self.config.shared_subscription_available);
-
-        // Only send MaximumQoS if less than 2 (per MQTT v5 spec 3.2.2.3.4)
-        // MaximumQoS property value MUST be 0 or 1, never 2
-        // If absent, client assumes QoS 2 is supported
-        if self.config.maximum_qos < 2 {
-            connack.properties.set_maximum_qos(self.config.maximum_qos);
-        }
-
-        if let Some(keep_alive) = self.config.server_keep_alive {
-            connack
-                .properties
-                .set_server_keep_alive(u16::try_from(keep_alive.as_secs()).unwrap_or(u16::MAX));
-        }
-
-        if self.request_response_information {
-            if let Some(ref response_info) = self.config.response_information {
+        // v5.0 only: set CONNACK properties
+        if self.protocol_version == 5 {
+            if let Some(ref assigned_id) = assigned_client_id {
+                debug!("Setting assigned client ID in CONNACK: {}", assigned_id);
                 connack
                     .properties
-                    .set_response_information(response_info.clone());
+                    .set_assigned_client_identifier(assigned_id.clone());
+            }
+
+            connack
+                .properties
+                .set_topic_alias_maximum(self.config.topic_alias_maximum);
+            connack
+                .properties
+                .set_retain_available(self.config.retain_available);
+            connack.properties.set_maximum_packet_size(
+                u32::try_from(self.config.max_packet_size).unwrap_or(u32::MAX),
+            );
+            connack
+                .properties
+                .set_wildcard_subscription_available(self.config.wildcard_subscription_available);
+            connack.properties.set_subscription_identifier_available(
+                self.config.subscription_identifier_available,
+            );
+            connack
+                .properties
+                .set_shared_subscription_available(self.config.shared_subscription_available);
+
+            if self.config.maximum_qos < 2 {
+                connack.properties.set_maximum_qos(self.config.maximum_qos);
+            }
+
+            if let Some(keep_alive) = self.config.server_keep_alive {
+                connack
+                    .properties
+                    .set_server_keep_alive(u16::try_from(keep_alive.as_secs()).unwrap_or(u16::MAX));
+            }
+
+            if self.request_response_information {
+                if let Some(ref response_info) = self.config.response_information {
+                    connack
+                        .properties
+                        .set_response_information(response_info.clone());
+                }
             }
         }
 
@@ -769,6 +795,7 @@ impl ClientHandler {
                     subscribe.properties.get_subscription_identifier(),
                     filter.options.no_local,
                     filter.options.retain_as_published,
+                    self.protocol_version,
                 )
                 .await;
 
@@ -809,9 +836,13 @@ impl ClientHandler {
             ));
         }
 
-        let mut suback = SubAckPacket::new(subscribe.packet_id);
+        let mut suback = if self.protocol_version == 4 {
+            SubAckPacket::new_v311(subscribe.packet_id)
+        } else {
+            SubAckPacket::new(subscribe.packet_id)
+        };
         suback.reason_codes.clone_from(&reason_codes);
-        if self.request_problem_information {
+        if self.protocol_version == 5 && self.request_problem_information {
             if reason_codes.contains(&crate::packet::suback::SubAckReasonCode::NotAuthorized) {
                 suback
                     .properties
@@ -851,7 +882,11 @@ impl ClientHandler {
             });
         }
 
-        let mut unsuback = UnsubAckPacket::new(unsubscribe.packet_id);
+        let mut unsuback = if self.protocol_version == 4 {
+            UnsubAckPacket::new_v311(unsubscribe.packet_id)
+        } else {
+            UnsubAckPacket::new(unsubscribe.packet_id)
+        };
         unsuback.reason_codes = reason_codes;
         self.transport
             .write_packet(Packet::UnsubAck(unsuback))
@@ -1225,6 +1260,7 @@ impl ClientHandler {
                     stored.subscription_id,
                     stored.no_local,
                     stored.retain_as_published,
+                    self.protocol_version,
                 )
                 .await;
         }
@@ -1328,10 +1364,12 @@ impl ClientHandler {
 
         if let Some(ref expected_method) = self.auth_method {
             if auth_method != *expected_method {
-                let disconnect = DisconnectPacket::new(ReasonCode::BadAuthenticationMethod);
-                self.transport
-                    .write_packet(Packet::Disconnect(disconnect))
-                    .await?;
+                if self.protocol_version == 5 {
+                    let disconnect = DisconnectPacket::new(ReasonCode::BadAuthenticationMethod);
+                    self.transport
+                        .write_packet(Packet::Disconnect(disconnect))
+                        .await?;
+                }
                 return Err(MqttError::ProtocolError(
                     "Authentication method mismatch".to_string(),
                 ));
@@ -1352,24 +1390,29 @@ impl ClientHandler {
                         if let Some(pending) = self.pending_connect.take() {
                             let session_present = self.handle_session(&pending.connect).await?;
 
-                            let mut connack =
-                                ConnAckPacket::new(session_present, ReasonCode::Success);
+                            let mut connack = if self.protocol_version == 4 {
+                                ConnAckPacket::new_v311(session_present, ReasonCode::Success)
+                            } else {
+                                ConnAckPacket::new(session_present, ReasonCode::Success)
+                            };
 
-                            if let Some(ref assigned_id) = pending.assigned_client_id {
+                            if self.protocol_version == 5 {
+                                if let Some(ref assigned_id) = pending.assigned_client_id {
+                                    connack
+                                        .properties
+                                        .set_assigned_client_identifier(assigned_id.clone());
+                                }
+
                                 connack
                                     .properties
-                                    .set_assigned_client_identifier(assigned_id.clone());
+                                    .set_topic_alias_maximum(self.config.topic_alias_maximum);
+                                connack
+                                    .properties
+                                    .set_retain_available(self.config.retain_available);
+                                connack.properties.set_maximum_packet_size(
+                                    u32::try_from(self.config.max_packet_size).unwrap_or(u32::MAX),
+                                );
                             }
-
-                            connack
-                                .properties
-                                .set_topic_alias_maximum(self.config.topic_alias_maximum);
-                            connack
-                                .properties
-                                .set_retain_available(self.config.retain_available);
-                            connack.properties.set_maximum_packet_size(
-                                u32::try_from(self.config.max_packet_size).unwrap_or(u32::MAX),
-                            );
 
                             self.transport
                                 .write_packet(Packet::ConnAck(connack))
@@ -1439,19 +1482,23 @@ impl ClientHandler {
                             .await?;
                     }
                     EnhancedAuthStatus::Failed => {
-                        let disconnect = DisconnectPacket::new(result.reason_code);
-                        self.transport
-                            .write_packet(Packet::Disconnect(disconnect))
-                            .await?;
+                        if self.protocol_version == 5 {
+                            let disconnect = DisconnectPacket::new(result.reason_code);
+                            self.transport
+                                .write_packet(Packet::Disconnect(disconnect))
+                                .await?;
+                        }
                         return Err(MqttError::AuthenticationFailed);
                     }
                 }
             }
             _ => {
-                let disconnect = DisconnectPacket::new(ReasonCode::ProtocolError);
-                self.transport
-                    .write_packet(Packet::Disconnect(disconnect))
-                    .await?;
+                if self.protocol_version == 5 {
+                    let disconnect = DisconnectPacket::new(ReasonCode::ProtocolError);
+                    self.transport
+                        .write_packet(Packet::Disconnect(disconnect))
+                        .await?;
+                }
                 return Err(MqttError::ProtocolError(format!(
                     "Unexpected AUTH reason code: {:?}",
                     auth.reason_code

@@ -1,5 +1,6 @@
 use crate::error::Result;
 use crate::packet::publish::PublishPacket;
+use crate::validation::strip_shared_subscription_prefix;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -98,13 +99,7 @@ impl CallbackManager {
     ///
     /// Returns an error if the operation fails
     async fn register_internal(&self, topic_filter: String, entry: CallbackEntry) -> Result<()> {
-        // Check if it's a shared subscription
-        let actual_filter = if let Some(stripped) = Self::strip_shared_prefix(&topic_filter) {
-            // For shared subscriptions, register with the actual topic (without $share prefix)
-            stripped.to_string()
-        } else {
-            topic_filter
-        };
+        let actual_filter = strip_shared_subscription_prefix(&topic_filter).to_string();
 
         // Check if it's a wildcard subscription
         if actual_filter.contains('+') || actual_filter.contains('#') {
@@ -137,13 +132,8 @@ impl CallbackManager {
     /// Returns an error if the operation fails
     pub async fn restore_callback(&self, id: CallbackId) -> Result<bool> {
         if let Some(entry) = self.get_callback(id).await {
-            // Check if callback is already registered
             let topic_filter = &entry.topic_filter;
-            let actual_filter = if let Some(stripped) = Self::strip_shared_prefix(topic_filter) {
-                stripped.to_string()
-            } else {
-                topic_filter.clone()
-            };
+            let actual_filter = strip_shared_subscription_prefix(topic_filter).to_string();
 
             // Check if already registered
             let already_registered = if actual_filter.contains('+') || actual_filter.contains('#') {
@@ -178,12 +168,7 @@ impl CallbackManager {
     ///
     /// Returns an error if the operation fails
     pub async fn unregister(&self, topic_filter: &str) -> Result<bool> {
-        // Check if it's a shared subscription
-        let actual_filter = if let Some(stripped) = Self::strip_shared_prefix(topic_filter) {
-            stripped
-        } else {
-            topic_filter
-        };
+        let actual_filter = strip_shared_subscription_prefix(topic_filter);
 
         // Remove from registry and track if anything was removed
         let mut registry = self.callback_registry.write().await;
@@ -231,8 +216,7 @@ impl CallbackManager {
         {
             let wildcards = self.wildcard_callbacks.read().await;
             for entry in wildcards.iter() {
-                let match_filter =
-                    Self::strip_shared_prefix(&entry.topic_filter).unwrap_or(&entry.topic_filter);
+                let match_filter = strip_shared_subscription_prefix(&entry.topic_filter);
                 if crate::topic_matching::matches(&message.topic_name, match_filter) {
                     callbacks_to_call.push(entry.callback.clone());
                 }
@@ -278,21 +262,6 @@ impl CallbackManager {
         self.wildcard_callbacks.write().await.clear();
         self.callback_registry.write().await.clear();
     }
-
-    /// Strips the $share/groupname/ prefix from a shared subscription topic filter
-    fn strip_shared_prefix(topic_filter: &str) -> Option<&str> {
-        if let Some(after_share) = topic_filter.strip_prefix("$share/") {
-            // Find the second '/' after $share/
-            if let Some(group_end) = after_share.find('/') {
-                // Return the topic after $share/groupname/
-                Some(&after_share[group_end + 1..])
-            } else {
-                None
-            }
-        } else {
-            None
-        }
-    }
 }
 
 impl Default for CallbackManager {
@@ -331,6 +300,7 @@ mod tests {
             retain: false,
             dup: false,
             properties: Properties::default(),
+            protocol_version: 5,
         };
 
         manager.dispatch(&message).await.unwrap();
@@ -361,7 +331,6 @@ mod tests {
             .await
             .unwrap();
 
-        // Should match
         let message1 = PublishPacket {
             topic_name: "test/foo/topic".to_string(),
             packet_id: None,
@@ -370,12 +339,11 @@ mod tests {
             retain: false,
             dup: false,
             properties: Properties::default(),
+            protocol_version: 5,
         };
 
         manager.dispatch(&message1).await.unwrap();
         assert_eq!(counter.load(Ordering::Relaxed), 1);
-
-        // Should also match
         let message2 = PublishPacket {
             topic_name: "test/bar/topic".to_string(),
             ..message1.clone()
@@ -428,6 +396,7 @@ mod tests {
             retain: false,
             dup: false,
             properties: Properties::default(),
+            protocol_version: 5,
         };
 
         manager.dispatch(&message).await.unwrap();
@@ -459,12 +428,12 @@ mod tests {
             retain: false,
             dup: false,
             properties: Properties::default(),
+            protocol_version: 5,
         };
 
         manager.dispatch(&message).await.unwrap();
         assert_eq!(counter.load(Ordering::Relaxed), 1);
 
-        // Unregister and dispatch again
         manager.unregister("test/topic").await.unwrap();
         manager.dispatch(&message).await.unwrap();
         assert_eq!(counter.load(Ordering::Relaxed), 1); // Should not increment
@@ -523,6 +492,7 @@ mod tests {
             retain: false,
             dup: false,
             properties: Properties::default(),
+            protocol_version: 5,
         };
 
         manager.dispatch(&message).await.unwrap();

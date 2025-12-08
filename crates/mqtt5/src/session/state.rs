@@ -789,7 +789,6 @@ mod tests {
     async fn test_unacked_publish_tracking() {
         let session = SessionState::new("test-client".to_string(), SessionConfig::default(), true);
 
-        // Create a publish packet
         let packet = PublishPacket {
             topic_name: "test/topic".to_string(),
             packet_id: Some(123),
@@ -798,9 +797,9 @@ mod tests {
             retain: false,
             dup: false,
             properties: Properties::default(),
+            protocol_version: 5,
         };
 
-        // Store unacked publish
         session.store_unacked_publish(packet.clone()).await.unwrap();
 
         let unacked = session.get_unacked_publishes().await;
@@ -1043,7 +1042,6 @@ mod tests {
     async fn test_unacked_publish_no_packet_id() {
         let session = SessionState::new("test-client".to_string(), SessionConfig::default(), true);
 
-        // Create a publish packet without packet ID
         let packet = PublishPacket {
             topic_name: "test/topic".to_string(),
             packet_id: None,
@@ -1052,9 +1050,9 @@ mod tests {
             retain: false,
             dup: false,
             properties: Properties::default(),
+            protocol_version: 5,
         };
 
-        // Should fail to store
         assert!(session.store_unacked_publish(packet).await.is_err());
     }
 
@@ -1062,7 +1060,6 @@ mod tests {
     async fn test_qos2_flow() {
         let session = SessionState::new("test-client".to_string(), SessionConfig::default(), true);
 
-        // Store publish for QoS 2
         let packet = PublishPacket {
             topic_name: "test/topic".to_string(),
             packet_id: Some(123),
@@ -1071,11 +1068,11 @@ mod tests {
             retain: false,
             dup: false,
             properties: Properties::default(),
+            protocol_version: 5,
         };
 
         session.store_unacked_publish(packet).await.unwrap();
 
-        // Store PUBREC (doesn't remove publish yet)
         session.store_pubrec(123).await;
         assert_eq!(session.get_unacked_publishes().await.len(), 1);
 
@@ -1111,7 +1108,6 @@ mod tests {
     async fn test_retained_messages() {
         let session = SessionState::new("test-client".to_string(), SessionConfig::default(), true);
 
-        // Store retained message
         let packet1 = PublishPacket {
             topic_name: "test/retained".to_string(),
             packet_id: None,
@@ -1120,6 +1116,7 @@ mod tests {
             retain: true,
             dup: false,
             properties: Properties::default(),
+            protocol_version: 5,
         };
 
         session.store_retained_message(&packet1).await;
@@ -1129,7 +1126,6 @@ mod tests {
         assert_eq!(retained.len(), 1);
         assert_eq!(retained[0].payload, vec![1, 2, 3]);
 
-        // Clear retained message with empty payload
         let packet2 = PublishPacket {
             topic_name: "test/retained".to_string(),
             packet_id: None,
@@ -1138,6 +1134,7 @@ mod tests {
             retain: true,
             dup: false,
             properties: Properties::default(),
+            protocol_version: 5,
         };
 
         session.store_retained_message(&packet2).await;
@@ -1151,7 +1148,6 @@ mod tests {
     async fn test_retained_message_wildcard_matching() {
         let session = SessionState::new("test-client".to_string(), SessionConfig::default(), true);
 
-        // Store multiple retained messages
         let packet1 = PublishPacket {
             topic_name: "test/device1/status".to_string(),
             packet_id: None,
@@ -1160,6 +1156,7 @@ mod tests {
             retain: true,
             dup: false,
             properties: Properties::default(),
+            protocol_version: 5,
         };
 
         let packet2 = PublishPacket {
@@ -1170,6 +1167,7 @@ mod tests {
             retain: true,
             dup: false,
             properties: Properties::default(),
+            protocol_version: 5,
         };
 
         session.store_retained_message(&packet1).await;
@@ -1305,7 +1303,6 @@ mod tests {
     async fn test_complete_publish_flow() {
         let session = SessionState::new("test-client".to_string(), SessionConfig::default(), true);
 
-        // Store unacked publish
         let packet = PublishPacket {
             topic_name: "test/topic".to_string(),
             packet_id: Some(100),
@@ -1314,6 +1311,7 @@ mod tests {
             retain: false,
             dup: false,
             properties: Properties::default(),
+            protocol_version: 5,
         };
 
         session.store_unacked_publish(packet).await.unwrap();

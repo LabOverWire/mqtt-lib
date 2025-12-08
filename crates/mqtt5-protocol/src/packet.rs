@@ -378,6 +378,54 @@ impl Packet {
             }
         }
     }
+
+    /// Decode a packet body based on the packet type with protocol version
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if decoding fails
+    pub fn decode_from_body_with_version<B: Buf>(
+        packet_type: PacketType,
+        fixed_header: &FixedHeader,
+        buf: &mut B,
+        protocol_version: u8,
+    ) -> Result<Self> {
+        match packet_type {
+            PacketType::Publish => {
+                let packet = publish::PublishPacket::decode_body_with_version(
+                    buf,
+                    fixed_header,
+                    protocol_version,
+                )?;
+                Ok(Packet::Publish(packet))
+            }
+            PacketType::Subscribe => {
+                let packet = subscribe::SubscribePacket::decode_body_with_version(
+                    buf,
+                    fixed_header,
+                    protocol_version,
+                )?;
+                Ok(Packet::Subscribe(packet))
+            }
+            PacketType::SubAck => {
+                let packet = suback::SubAckPacket::decode_body_with_version(
+                    buf,
+                    fixed_header,
+                    protocol_version,
+                )?;
+                Ok(Packet::SubAck(packet))
+            }
+            PacketType::Unsubscribe => {
+                let packet = unsubscribe::UnsubscribePacket::decode_body_with_version(
+                    buf,
+                    fixed_header,
+                    protocol_version,
+                )?;
+                Ok(Packet::Unsubscribe(packet))
+            }
+            _ => Self::decode_from_body(packet_type, fixed_header, buf),
+        }
+    }
 }
 
 /// Trait for MQTT packets

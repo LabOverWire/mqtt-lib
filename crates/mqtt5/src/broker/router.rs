@@ -6,7 +6,7 @@
 use crate::broker::bridge::BridgeManager;
 use crate::broker::storage::{DynamicStorage, QueuedMessage, RetainedMessage, StorageBackend};
 use crate::packet::publish::PublishPacket;
-use crate::validation::topic_matches_filter;
+use crate::validation::{parse_shared_subscription, topic_matches_filter};
 use crate::QoS;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -34,6 +34,8 @@ pub struct Subscription {
     pub no_local: bool,
     /// Retain As Published option - if true, the retain flag is kept as-is when delivering
     pub retain_as_published: bool,
+    /// Protocol version of the subscriber (4 for v3.1.1, 5 for v5.0)
+    pub protocol_version: u8,
 }
 
 /// Message router for the broker
@@ -174,6 +176,7 @@ impl MessageRouter {
         debug!("Unregistered client: {}", client_id);
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn subscribe(
         &self,
         client_id: String,
@@ -182,8 +185,10 @@ impl MessageRouter {
         subscription_id: Option<u32>,
         no_local: bool,
         retain_as_published: bool,
+        protocol_version: u8,
     ) -> bool {
-        let (actual_filter, share_group) = Self::parse_shared_subscription(&topic_filter);
+        let (actual_filter, share_group) = parse_shared_subscription(&topic_filter);
+        let share_group = share_group.map(str::to_string);
 
         let mut subscriptions = self.subscriptions.write().await;
 
@@ -198,6 +203,7 @@ impl MessageRouter {
             share_group: share_group.clone(),
             no_local,
             retain_as_published,
+            protocol_version,
         };
 
         let is_new = if let Some(pos) = existing_pos {
@@ -223,23 +229,9 @@ impl MessageRouter {
         is_new
     }
 
-    /// Parses a shared subscription topic filter
-    /// Returns (actual_topic_filter, Option<share_group_name>)
-    fn parse_shared_subscription(topic_filter: &str) -> (&str, Option<String>) {
-        if let Some(after_share) = topic_filter.strip_prefix("$share/") {
-            // Find the second '/' after $share/
-            if let Some(slash_pos) = after_share.find('/') {
-                let group_name = &after_share[..slash_pos];
-                let actual_filter = &after_share[slash_pos + 1..];
-                return (actual_filter, Some(group_name.to_string()));
-            }
-        }
-        (topic_filter, None)
-    }
-
     /// Removes a subscription for a client
     pub async fn unsubscribe(&self, client_id: &str, topic_filter: &str) -> bool {
-        let (actual_filter, _) = Self::parse_shared_subscription(topic_filter);
+        let (actual_filter, _) = parse_shared_subscription(topic_filter);
 
         let mut subscriptions = self.subscriptions.write().await;
 
@@ -445,7 +437,6 @@ impl MessageRouter {
         }
 
         if let Some(client_info) = clients.get(&sub.client_id) {
-            // Calculate effective QoS (minimum of publish and subscription QoS)
             let effective_qos = match (publish.qos, sub.qos) {
                 (QoS::AtMostOnce, _) | (_, QoS::AtMostOnce) => QoS::AtMostOnce,
                 (QoS::AtLeastOnce | QoS::ExactlyOnce, QoS::AtLeastOnce)
@@ -455,6 +446,7 @@ impl MessageRouter {
 
             let mut message = publish.clone();
             message.qos = effective_qos;
+            message.protocol_version = sub.protocol_version;
 
             if !sub.retain_as_published {
                 message.retain = false;
@@ -491,37 +483,30 @@ impl MessageRouter {
                     e
                 );
             }
-        } else {
-            // Client is offline, queue message if QoS > 0
-            if let Some(storage) = storage {
-                if sub.qos != QoS::AtMostOnce {
-                    let mut message = publish.clone();
-                    message.qos = sub.qos;
+        } else if let Some(storage) = storage {
+            if sub.qos != QoS::AtMostOnce {
+                let mut message = publish.clone();
+                message.qos = sub.qos;
+                message.protocol_version = sub.protocol_version;
 
-                    let queued_msg = QueuedMessage::new(
-                        message,
-                        sub.client_id.clone(),
-                        sub.qos,
-                        None, // Will be assigned when delivered
+                let queued_msg = QueuedMessage::new(message, sub.client_id.clone(), sub.qos, None);
+                if let Err(e) = storage.queue_message(queued_msg).await {
+                    error!(
+                        "Failed to queue message for offline client {}: {}",
+                        sub.client_id, e
                     );
-                    if let Err(e) = storage.queue_message(queued_msg).await {
-                        error!(
-                            "Failed to queue message for offline client {}: {}",
-                            sub.client_id, e
-                        );
-                    } else {
-                        info!(
-                            "Queued message for offline client {} on topic {}",
-                            sub.client_id, publish.topic_name
-                        );
-                    }
+                } else {
+                    info!(
+                        "Queued message for offline client {} on topic {}",
+                        sub.client_id, publish.topic_name
+                    );
                 }
-            } else {
-                debug!(
-                    "No storage configured, cannot queue message for offline client {}",
-                    sub.client_id
-                );
             }
+        } else {
+            debug!(
+                "No storage configured, cannot queue message for offline client {}",
+                sub.client_id
+            );
         }
     }
 
@@ -561,7 +546,7 @@ impl MessageRouter {
     }
 
     pub async fn has_subscription(&self, client_id: &str, topic_filter: &str) -> bool {
-        let (actual_filter, _) = Self::parse_shared_subscription(topic_filter);
+        let (actual_filter, _) = parse_shared_subscription(topic_filter);
         let subscriptions = self.subscriptions.read().await;
         subscriptions
             .get(actual_filter)
@@ -613,6 +598,7 @@ mod tests {
                 None,
                 false,
                 false,
+                5,
             )
             .await;
 
@@ -647,6 +633,7 @@ mod tests {
                 None,
                 false,
                 false,
+                5,
             )
             .await;
         router
@@ -657,6 +644,7 @@ mod tests {
                 None,
                 false,
                 false,
+                5,
             )
             .await;
 
@@ -701,21 +689,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_shared_subscription_parsing() {
-        let (filter, group) = MessageRouter::parse_shared_subscription("$share/group1/test/topic");
-        assert_eq!(filter, "test/topic");
-        assert_eq!(group, Some("group1".to_string()));
-
-        let (filter, group) = MessageRouter::parse_shared_subscription("test/topic");
-        assert_eq!(filter, "test/topic");
-        assert_eq!(group, None);
-
-        let (filter, group) = MessageRouter::parse_shared_subscription("$share/group/test/+/data");
-        assert_eq!(filter, "test/+/data");
-        assert_eq!(group, Some("group".to_string()));
-    }
-
-    #[tokio::test]
     async fn test_shared_subscription_round_robin() {
         let router = MessageRouter::new();
         let (tx1, mut rx1) = tokio::sync::mpsc::channel(100);
@@ -744,6 +717,7 @@ mod tests {
                 None,
                 false,
                 false,
+                5,
             )
             .await;
         router
@@ -754,6 +728,7 @@ mod tests {
                 None,
                 false,
                 false,
+                5,
             )
             .await;
         router
@@ -764,6 +739,7 @@ mod tests {
                 None,
                 false,
                 false,
+                5,
             )
             .await;
 
@@ -823,6 +799,7 @@ mod tests {
                 None,
                 false,
                 false,
+                5,
             )
             .await;
         router
@@ -833,6 +810,7 @@ mod tests {
                 None,
                 false,
                 false,
+                5,
             )
             .await;
 
@@ -844,6 +822,7 @@ mod tests {
                 None,
                 false,
                 false,
+                5,
             )
             .await;
 

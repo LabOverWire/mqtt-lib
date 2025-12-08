@@ -41,21 +41,55 @@ use std::time::Duration as StdDuration;
 #[cfg(feature = "opentelemetry")]
 use crate::telemetry::propagation;
 
-/// Unified reader type that can handle TCP, TLS, WebSocket, and QUIC
-pub enum UnifiedReader {
+enum UnifiedReaderInner {
     Tcp(OwnedReadHalf),
     Tls(TlsReadHalf),
     WebSocket(WebSocketReadHandle),
     Quic(RecvStream),
 }
 
-impl PacketReader for UnifiedReader {
-    async fn read_packet(&mut self) -> Result<Packet> {
-        match self {
-            Self::Tcp(reader) => reader.read_packet().await,
-            Self::Tls(reader) => reader.read_packet().await,
-            Self::WebSocket(reader) => reader.read_packet().await,
-            Self::Quic(reader) => reader.read_packet().await,
+pub struct UnifiedReader {
+    inner: UnifiedReaderInner,
+    protocol_version: u8,
+}
+
+impl UnifiedReader {
+    pub fn tcp(reader: OwnedReadHalf, protocol_version: u8) -> Self {
+        Self {
+            inner: UnifiedReaderInner::Tcp(reader),
+            protocol_version,
+        }
+    }
+
+    pub fn tls(reader: TlsReadHalf, protocol_version: u8) -> Self {
+        Self {
+            inner: UnifiedReaderInner::Tls(reader),
+            protocol_version,
+        }
+    }
+
+    pub fn websocket(reader: WebSocketReadHandle, protocol_version: u8) -> Self {
+        Self {
+            inner: UnifiedReaderInner::WebSocket(reader),
+            protocol_version,
+        }
+    }
+
+    pub fn quic(reader: RecvStream, protocol_version: u8) -> Self {
+        Self {
+            inner: UnifiedReaderInner::Quic(reader),
+            protocol_version,
+        }
+    }
+
+    pub async fn read_packet(&mut self) -> Result<Packet> {
+        match &mut self.inner {
+            UnifiedReaderInner::Tcp(reader) => reader.read_packet(self.protocol_version).await,
+            UnifiedReaderInner::Tls(reader) => reader.read_packet(self.protocol_version).await,
+            UnifiedReaderInner::WebSocket(reader) => {
+                reader.read_packet(self.protocol_version).await
+            }
+            UnifiedReaderInner::Quic(reader) => reader.read_packet(self.protocol_version).await,
         }
     }
 }
@@ -214,9 +248,10 @@ impl DirectClientInner {
             .write_packet(Packet::Connect(Box::new(connect_packet)))
             .await?;
 
-        // Read CONNACK directly
         tracing::debug!("CLIENT: Waiting for CONNACK");
-        let packet = transport.read_packet().await?;
+        let packet = transport
+            .read_packet(self.options.protocol_version.as_u8())
+            .await?;
         tracing::debug!("CLIENT: Received packet after CONNECT");
         match packet {
             Packet::ConnAck(connack) => {
@@ -238,19 +273,28 @@ impl DirectClientInner {
                     *self.server_max_qos.write().await = None;
                 }
 
-                // Split the transport for concurrent access
+                let protocol_version = self.options.protocol_version.as_u8();
                 let (reader, writer) = match transport {
                     TransportType::Tcp(tcp) => {
                         let (r, w) = tcp.into_split()?;
-                        (UnifiedReader::Tcp(r), UnifiedWriter::Tcp(w))
+                        (
+                            UnifiedReader::tcp(r, protocol_version),
+                            UnifiedWriter::Tcp(w),
+                        )
                     }
                     TransportType::Tls(tls) => {
                         let (r, w) = (*tls).into_split()?;
-                        (UnifiedReader::Tls(r), UnifiedWriter::Tls(w))
+                        (
+                            UnifiedReader::tls(r, protocol_version),
+                            UnifiedWriter::Tls(w),
+                        )
                     }
                     TransportType::WebSocket(ws) => {
                         let (r, w) = (*ws).into_split()?;
-                        (UnifiedReader::WebSocket(r), UnifiedWriter::WebSocket(w))
+                        (
+                            UnifiedReader::websocket(r, protocol_version),
+                            UnifiedWriter::WebSocket(w),
+                        )
                     }
                     TransportType::Quic(quic) => {
                         let (w, r, conn, strategy, datagrams) = (*quic).into_split()?;
@@ -260,7 +304,10 @@ impl DirectClientInner {
                         self.quic_datagrams_enabled = datagrams;
                         self.quic_stream_manager =
                             Some(Arc::new(QuicStreamManager::new(conn_arc, strategy)));
-                        (UnifiedReader::Quic(r), UnifiedWriter::Quic(w))
+                        (
+                            UnifiedReader::quic(r, protocol_version),
+                            UnifiedWriter::Quic(w),
+                        )
                     }
                 };
 
@@ -372,6 +419,7 @@ impl DirectClientInner {
             retain: options.retain,
             dup: false,
             properties: options.properties.clone().into(),
+            protocol_version: self.options.protocol_version.as_u8(),
         };
 
         self.queued_messages.lock().await.push(publish);
@@ -521,7 +569,6 @@ impl DirectClientInner {
         // Get packet ID for QoS > 0
         let packet_id = (options.qos != QoS::AtMostOnce).then(|| self.packet_id_generator.next());
 
-        // Build publish packet
         let publish = PublishPacket {
             topic_name: topic,
             payload,
@@ -530,6 +577,7 @@ impl DirectClientInner {
             dup: false,
             packet_id,
             properties: options.properties.into(),
+            protocol_version: self.options.protocol_version.as_u8(),
         };
 
         // Check packet size limit
@@ -994,7 +1042,7 @@ impl DirectClientInner {
         };
 
         ConnectPacket {
-            protocol_version: 5, // MQTT v5.0
+            protocol_version: self.options.protocol_version.as_u8(),
             clean_start: self.options.clean_start,
             keep_alive: self
                 .options
@@ -1038,6 +1086,7 @@ impl DirectClientInner {
             pubcomp_channels,
             writer: writer_for_reader,
             connected,
+            protocol_version: self.options.protocol_version.as_u8(),
         };
 
         let ctx_for_packet_reader = ctx.clone();
@@ -1157,13 +1206,13 @@ struct PacketReaderContext {
     pubcomp_channels: Arc<Mutex<HashMap<u16, oneshot::Sender<ReasonCode>>>>,
     writer: Arc<tokio::sync::RwLock<UnifiedWriter>>,
     connected: Arc<AtomicBool>,
+    protocol_version: u8,
 }
 
 /// Packet reader task that handles response channels
 async fn packet_reader_task_with_responses(mut reader: UnifiedReader, ctx: PacketReaderContext) {
     tracing::debug!("Packet reader task started and ready to process incoming packets");
     loop {
-        // Read packet directly from reader - no mutex needed!
         let packet = reader.read_packet().await;
 
         match packet {
@@ -1405,7 +1454,7 @@ async fn quic_stream_reader_task(
     let stream_writer = Arc::new(tokio::sync::RwLock::new(UnifiedWriter::Quic(send)));
 
     loop {
-        match recv.read_packet().await {
+        match recv.read_packet(ctx.protocol_version).await {
             Ok(packet) => {
                 tracing::trace!(flow_id = ?flow_id, "Received packet on server-initiated QUIC stream: {:?}", packet);
                 if let Err(e) = handle_incoming_packet_with_writer(
@@ -1748,7 +1797,7 @@ mod tests {
         let client = create_test_client();
 
         let packet = SubscribePacket {
-            packet_id: 0, // Will be set by client
+            packet_id: 0,
             properties: Properties::default(),
             filters: vec![crate::packet::subscribe::TopicFilter {
                 filter: "test/+".to_string(),
@@ -1759,6 +1808,7 @@ mod tests {
                     retain_handling: crate::packet::subscribe::RetainHandling::SendAtSubscribe,
                 },
             }],
+            protocol_version: 5,
         };
 
         let result = client.subscribe_with_callback(packet, 0).await;
@@ -1770,9 +1820,10 @@ mod tests {
         let client = create_test_client();
 
         let packet = UnsubscribePacket {
-            packet_id: 0, // Will be set by client
+            packet_id: 0,
             properties: Properties::default(),
             filters: vec!["test/+".to_string()],
+            protocol_version: 5,
         };
 
         let result = client.unsubscribe(packet).await;

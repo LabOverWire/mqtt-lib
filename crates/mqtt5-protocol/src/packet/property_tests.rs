@@ -110,6 +110,7 @@ proptest! {
             dup,
             packet_id,
             properties: Properties::new(),
+            protocol_version: 5,
         };
 
         // Test encoding
@@ -152,6 +153,7 @@ proptest! {
             packet_id,
             filters: filters.clone(),
             properties: Properties::new(),
+            protocol_version: 5,
         };
 
         // Test encoding
@@ -273,7 +275,6 @@ mod property_invariant_tests {
                 prop_assert!(buffer.len() >= 10, "CONNECT packet too small: {} bytes", buffer.len());
             }
 
-            // Test publish packet size
             let publish = PublishPacket {
                 topic_name: topic.clone(),
                 payload: payload.clone(),
@@ -282,6 +283,7 @@ mod property_invariant_tests {
                 dup: false,
                 packet_id: None,
                 properties: Properties::new(),
+                protocol_version: 5,
             };
 
             let mut pub_buffer = Vec::new();

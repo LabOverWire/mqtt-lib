@@ -25,6 +25,7 @@ async fn test_retain_as_published_false_clears_retain_flag() {
             None,
             false,
             false,
+            5,
         )
         .await;
 
@@ -58,6 +59,7 @@ async fn test_retain_as_published_true_preserves_retain_flag() {
             None,
             false,
             true,
+            5,
         )
         .await;
 

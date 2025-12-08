@@ -276,16 +276,30 @@ pub struct SubscribePacket {
     pub filters: Vec<TopicFilter>,
     /// SUBSCRIBE properties (v5.0 only)
     pub properties: Properties,
+    /// Protocol version (4 = v3.1.1, 5 = v5.0)
+    pub protocol_version: u8,
 }
 
 impl SubscribePacket {
-    /// Creates a new SUBSCRIBE packet
+    /// Creates a new SUBSCRIBE packet (v5.0)
     #[must_use]
     pub fn new(packet_id: u16) -> Self {
         Self {
             packet_id,
             filters: Vec::new(),
             properties: Properties::default(),
+            protocol_version: 5,
+        }
+    }
+
+    /// Creates a new SUBSCRIBE packet for v3.1.1
+    #[must_use]
+    pub fn new_v311(packet_id: u16) -> Self {
+        Self {
+            packet_id,
+            filters: Vec::new(),
+            properties: Properties::default(),
+            protocol_version: 4,
         }
     }
 
@@ -328,13 +342,12 @@ impl MqttPacket for SubscribePacket {
     }
 
     fn encode_body<B: BufMut>(&self, buf: &mut B) -> Result<()> {
-        // Variable header
         buf.put_u16(self.packet_id);
 
-        // Properties (v5.0)
-        self.properties.encode(buf)?;
+        if self.protocol_version == 5 {
+            self.properties.encode(buf)?;
+        }
 
-        // Payload - topic filters
         if self.filters.is_empty() {
             return Err(MqttError::MalformedPacket(
                 "SUBSCRIBE packet must contain at least one topic filter".to_string(),
@@ -343,14 +356,32 @@ impl MqttPacket for SubscribePacket {
 
         for filter in &self.filters {
             encode_string(buf, &filter.filter)?;
-            buf.put_u8(filter.options.encode());
+            if self.protocol_version == 5 {
+                buf.put_u8(filter.options.encode());
+            } else {
+                buf.put_u8(filter.options.qos as u8);
+            }
         }
 
         Ok(())
     }
 
     fn decode_body<B: Buf>(buf: &mut B, fixed_header: &FixedHeader) -> Result<Self> {
-        // Validate flags
+        Self::decode_body_with_version(buf, fixed_header, 5)
+    }
+}
+
+impl SubscribePacket {
+    /// Decodes the packet body with a specific protocol version
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if decoding fails
+    pub fn decode_body_with_version<B: Buf>(
+        buf: &mut B,
+        fixed_header: &FixedHeader,
+        protocol_version: u8,
+    ) -> Result<Self> {
         if fixed_header.flags != 0x02 {
             return Err(MqttError::MalformedPacket(format!(
                 "Invalid SUBSCRIBE flags: expected 0x02, got 0x{:02X}",
@@ -358,7 +389,6 @@ impl MqttPacket for SubscribePacket {
             )));
         }
 
-        // Packet identifier
         if buf.remaining() < 2 {
             return Err(MqttError::MalformedPacket(
                 "SUBSCRIBE missing packet identifier".to_string(),
@@ -366,10 +396,12 @@ impl MqttPacket for SubscribePacket {
         }
         let packet_id = buf.get_u16();
 
-        // Properties (v5.0)
-        let properties = Properties::decode(buf)?;
+        let properties = if protocol_version == 5 {
+            Properties::decode(buf)?
+        } else {
+            Properties::default()
+        };
 
-        // Payload - topic filters
         let mut filters = Vec::new();
 
         if !buf.has_remaining() {
@@ -388,7 +420,14 @@ impl MqttPacket for SubscribePacket {
             }
 
             let options_byte = buf.get_u8();
-            let options = SubscriptionOptions::decode(options_byte)?;
+            let options = if protocol_version == 5 {
+                SubscriptionOptions::decode(options_byte)?
+            } else {
+                SubscriptionOptions {
+                    qos: QoS::from(options_byte & 0x03),
+                    ..Default::default()
+                }
+            };
 
             filters.push(TopicFilter {
                 filter: filter_str,
@@ -400,6 +439,7 @@ impl MqttPacket for SubscribePacket {
             packet_id,
             filters,
             properties,
+            protocol_version,
         })
     }
 }

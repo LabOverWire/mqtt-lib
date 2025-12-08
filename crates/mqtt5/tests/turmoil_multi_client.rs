@@ -54,6 +54,7 @@ fn test_multi_client_message_routing() {
                 None,
                 false,
                 false,
+                5,
             )
             .await;
 
@@ -77,6 +78,7 @@ fn test_multi_client_message_routing() {
                 None,
                 false,
                 false,
+                5,
             )
             .await;
 
@@ -100,6 +102,7 @@ fn test_multi_client_message_routing() {
                 None,
                 false,
                 false,
+                5,
             )
             .await;
 
@@ -123,6 +126,7 @@ fn test_multi_client_message_routing() {
                 None,
                 false,
                 false,
+                5,
             )
             .await;
 
@@ -218,6 +222,7 @@ fn test_client_subscription_changes() {
                 None,
                 false,
                 false,
+                5,
             )
             .await;
 
@@ -255,6 +260,7 @@ fn test_client_subscription_changes() {
                 None,
                 false,
                 false,
+                5,
             )
             .await;
 
@@ -308,6 +314,7 @@ fn test_message_ordering_with_multiple_clients() {
                 None,
                 false,
                 false,
+                5,
             )
             .await;
 
@@ -319,6 +326,7 @@ fn test_message_ordering_with_multiple_clients() {
                 None,
                 false,
                 false,
+                5,
             )
             .await;
 

@@ -54,6 +54,7 @@ fn test_shared_subscriptions_in_turmoil() {
                 None,
                 false,
                 false,
+                5,
             )
             .await;
 
@@ -65,6 +66,7 @@ fn test_shared_subscriptions_in_turmoil() {
                 None,
                 false,
                 false,
+                5,
             )
             .await;
 
@@ -76,6 +78,7 @@ fn test_shared_subscriptions_in_turmoil() {
                 None,
                 false,
                 false,
+                5,
             )
             .await;
 

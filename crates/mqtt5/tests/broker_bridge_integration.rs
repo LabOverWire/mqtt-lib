@@ -87,6 +87,7 @@ async fn test_bridge_message_routing() {
             None,
             false,
             false,
+            5,
         )
         .await;
 

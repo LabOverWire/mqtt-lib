@@ -41,6 +41,7 @@ fn test_basic_publish_subscribe() {
                 None,
                 false,
                 false,
+                5,
             )
             .await;
 
@@ -99,6 +100,7 @@ fn test_wildcard_subscriptions() {
                 None,
                 false,
                 false,
+                5,
             )
             .await;
 
@@ -111,6 +113,7 @@ fn test_wildcard_subscriptions() {
                 None,
                 false,
                 false,
+                5,
             )
             .await;
 
@@ -207,6 +210,7 @@ fn test_multiple_subscribers_same_topic() {
                     None,
                     false,
                     false,
+                    5,
                 )
                 .await;
         }
@@ -280,6 +284,7 @@ fn test_qos_levels() {
                 None,
                 false,
                 false,
+                5,
             )
             .await;
 
@@ -291,6 +296,7 @@ fn test_qos_levels() {
                 None,
                 false,
                 false,
+                5,
             )
             .await;
 
@@ -350,6 +356,7 @@ fn test_unsubscribe_functionality() {
                 None,
                 false,
                 false,
+                5,
             )
             .await;
 
