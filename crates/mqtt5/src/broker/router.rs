@@ -42,7 +42,8 @@ pub struct Subscription {
 
 /// Message router for the broker
 pub struct MessageRouter {
-    subscriptions: Arc<RwLock<HashMap<String, Vec<Subscription>>>>,
+    exact_subscriptions: Arc<RwLock<HashMap<String, Vec<Subscription>>>>,
+    wildcard_subscriptions: Arc<RwLock<HashMap<String, Vec<Subscription>>>>,
     retained_messages: Arc<RwLock<HashMap<String, RetainedMessage>>>,
     clients: Arc<RwLock<HashMap<String, ClientInfo>>>,
     storage: Option<Arc<DynamicStorage>>,
@@ -67,7 +68,8 @@ impl MessageRouter {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            subscriptions: Arc::new(RwLock::new(HashMap::new())),
+            exact_subscriptions: Arc::new(RwLock::new(HashMap::new())),
+            wildcard_subscriptions: Arc::new(RwLock::new(HashMap::new())),
             retained_messages: Arc::new(RwLock::new(HashMap::new())),
             clients: Arc::new(RwLock::new(HashMap::new())),
             storage: None,
@@ -83,7 +85,8 @@ impl MessageRouter {
     #[must_use]
     pub fn with_storage(storage: Arc<DynamicStorage>) -> Self {
         Self {
-            subscriptions: Arc::new(RwLock::new(HashMap::new())),
+            exact_subscriptions: Arc::new(RwLock::new(HashMap::new())),
+            wildcard_subscriptions: Arc::new(RwLock::new(HashMap::new())),
             retained_messages: Arc::new(RwLock::new(HashMap::new())),
             clients: Arc::new(RwLock::new(HashMap::new())),
             storage: Some(storage),
@@ -93,6 +96,10 @@ impl MessageRouter {
             #[cfg(target_arch = "wasm32")]
             wasm_bridge_callback: Arc::new(RwLock::new(None)),
         }
+    }
+
+    fn has_wildcards(topic_filter: &str) -> bool {
+        topic_filter.contains('+') || topic_filter.contains('#')
     }
 
     /// Sets the bridge manager for this router
@@ -166,14 +173,21 @@ impl MessageRouter {
         let mut clients = self.clients.write().await;
         clients.remove(client_id);
 
-        // Remove all subscriptions for this client
-        let mut subscriptions = self.subscriptions.write().await;
-        for subs in subscriptions.values_mut() {
-            subs.retain(|sub| sub.client_id != client_id);
+        {
+            let mut exact = self.exact_subscriptions.write().await;
+            for subs in exact.values_mut() {
+                subs.retain(|sub| sub.client_id != client_id);
+            }
+            exact.retain(|_, subs| !subs.is_empty());
         }
 
-        // Clean up empty subscription lists
-        subscriptions.retain(|_, subs| !subs.is_empty());
+        {
+            let mut wildcard = self.wildcard_subscriptions.write().await;
+            for subs in wildcard.values_mut() {
+                subs.retain(|sub| sub.client_id != client_id);
+            }
+            wildcard.retain(|_, subs| !subs.is_empty());
+        }
 
         debug!("Unregistered client: {}", client_id);
     }
@@ -196,12 +210,6 @@ impl MessageRouter {
         let (actual_filter, share_group) = parse_shared_subscription(&topic_filter);
         let share_group = share_group.map(str::to_string);
 
-        let mut subscriptions = self.subscriptions.write().await;
-
-        let subs = subscriptions.entry(actual_filter.to_string()).or_default();
-
-        let existing_pos = subs.iter().position(|s| s.client_id == client_id);
-
         let subscription = Subscription {
             client_id: client_id.clone(),
             qos,
@@ -212,17 +220,32 @@ impl MessageRouter {
             protocol_version,
         };
 
-        let is_new = if let Some(pos) = existing_pos {
-            subs[pos] = subscription;
-            debug!(
-                "Client {} updated subscription to {}",
-                client_id, topic_filter
-            );
-            false
+        let is_new = if Self::has_wildcards(actual_filter) {
+            let mut wildcard = self.wildcard_subscriptions.write().await;
+            let subs = wildcard.entry(actual_filter.to_string()).or_default();
+            let existing_pos = subs.iter().position(|s| s.client_id == client_id);
+            if let Some(pos) = existing_pos {
+                subs[pos] = subscription;
+                debug!("Client {} updated wildcard subscription to {}", client_id, topic_filter);
+                false
+            } else {
+                subs.push(subscription);
+                debug!("Client {} subscribed to wildcard {}", client_id, topic_filter);
+                true
+            }
         } else {
-            subs.push(subscription);
-            debug!("Client {} subscribed to {}", client_id, topic_filter);
-            true
+            let mut exact = self.exact_subscriptions.write().await;
+            let subs = exact.entry(actual_filter.to_string()).or_default();
+            let existing_pos = subs.iter().position(|s| s.client_id == client_id);
+            if let Some(pos) = existing_pos {
+                subs[pos] = subscription;
+                debug!("Client {} updated subscription to {}", client_id, topic_filter);
+                false
+            } else {
+                subs.push(subscription);
+                debug!("Client {} subscribed to {}", client_id, topic_filter);
+                true
+            }
         };
 
         if let Some(group) = share_group {
@@ -239,17 +262,22 @@ impl MessageRouter {
     pub async fn unsubscribe(&self, client_id: &str, topic_filter: &str) -> bool {
         let (actual_filter, _) = parse_shared_subscription(topic_filter);
 
-        let mut subscriptions = self.subscriptions.write().await;
+        let subscriptions = if Self::has_wildcards(actual_filter) {
+            &self.wildcard_subscriptions
+        } else {
+            &self.exact_subscriptions
+        };
 
-        if let Some(subs) = subscriptions.get_mut(actual_filter) {
+        let mut subs_map = subscriptions.write().await;
+
+        if let Some(subs) = subs_map.get_mut(actual_filter) {
             let initial_len = subs.len();
             subs.retain(|sub| sub.client_id != client_id);
 
             let removed = initial_len != subs.len();
 
-            // Remove empty entries after calculating removed flag
             if subs.is_empty() {
-                subscriptions.remove(actual_filter);
+                subs_map.remove(actual_filter);
             }
             if removed {
                 debug!("Client {} unsubscribed from {}", client_id, topic_filter);
@@ -327,13 +355,24 @@ impl MessageRouter {
             }
         }
 
-        let subscriptions = self.subscriptions.read().await;
+        let exact = self.exact_subscriptions.read().await;
+        let wildcard = self.wildcard_subscriptions.read().await;
         let clients = self.clients.read().await;
 
         let mut share_groups: HashMap<String, Vec<&Subscription>> = HashMap::new();
         let mut regular_subs: Vec<&Subscription> = Vec::new();
 
-        for (topic_filter, subs) in subscriptions.iter() {
+        if let Some(subs) = exact.get(&publish.topic_name) {
+            for sub in subs {
+                if let Some(ref group) = sub.share_group {
+                    share_groups.entry(group.clone()).or_default().push(sub);
+                } else {
+                    regular_subs.push(sub);
+                }
+            }
+        }
+
+        for (topic_filter, subs) in wildcard.iter() {
             if topic_matches_filter(&publish.topic_name, topic_filter) {
                 for sub in subs {
                     if let Some(ref group) = sub.share_group {
@@ -553,7 +592,9 @@ impl MessageRouter {
 
     /// Gets the number of unique topic filters with subscriptions
     pub async fn topic_count(&self) -> usize {
-        self.subscriptions.read().await.len()
+        let exact = self.exact_subscriptions.read().await;
+        let wildcard = self.wildcard_subscriptions.read().await;
+        exact.len() + wildcard.len()
     }
 
     /// Gets the number of retained messages
@@ -563,18 +604,30 @@ impl MessageRouter {
 
     /// Gets the number of subscriptions for a specific client
     pub async fn subscription_count_for_client(&self, client_id: &str) -> usize {
-        let subscriptions = self.subscriptions.read().await;
-        subscriptions
+        let exact = self.exact_subscriptions.read().await;
+        let wildcard = self.wildcard_subscriptions.read().await;
+        let exact_count = exact
             .values()
             .flat_map(|subs| subs.iter())
             .filter(|sub| sub.client_id == client_id)
-            .count()
+            .count();
+        let wildcard_count = wildcard
+            .values()
+            .flat_map(|subs| subs.iter())
+            .filter(|sub| sub.client_id == client_id)
+            .count();
+        exact_count + wildcard_count
     }
 
     pub async fn has_subscription(&self, client_id: &str, topic_filter: &str) -> bool {
         let (actual_filter, _) = parse_shared_subscription(topic_filter);
-        let subscriptions = self.subscriptions.read().await;
-        subscriptions
+        let subscriptions = if Self::has_wildcards(actual_filter) {
+            &self.wildcard_subscriptions
+        } else {
+            &self.exact_subscriptions
+        };
+        let subs_map = subscriptions.read().await;
+        subs_map
             .get(actual_filter)
             .is_some_and(|subs| subs.iter().any(|sub| sub.client_id == client_id))
     }
