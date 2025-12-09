@@ -27,6 +27,7 @@ use crate::packet::Packet;
 use crate::protocol::v5::reason_codes::ReasonCode;
 use crate::time::Duration;
 use crate::transport::packet_io::PacketIo;
+use crate::types::ProtocolVersion;
 use crate::QoS;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
@@ -795,7 +796,7 @@ impl ClientHandler {
                     subscribe.properties.get_subscription_identifier(),
                     filter.options.no_local,
                     filter.options.retain_as_published,
-                    self.protocol_version,
+                    ProtocolVersion::try_from(self.protocol_version).unwrap_or_default(),
                 )
                 .await?;
 
@@ -1261,7 +1262,7 @@ impl ClientHandler {
                     stored.subscription_id,
                     stored.no_local,
                     stored.retain_as_published,
-                    self.protocol_version,
+                    ProtocolVersion::try_from(self.protocol_version).unwrap_or_default(),
                 )
                 .await?;
         }

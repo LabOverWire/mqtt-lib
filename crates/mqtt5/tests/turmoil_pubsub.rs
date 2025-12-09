@@ -10,6 +10,8 @@ use mqtt5::packet::publish::PublishPacket;
 #[cfg(feature = "turmoil-testing")]
 use mqtt5::time::Duration;
 #[cfg(feature = "turmoil-testing")]
+use mqtt5::types::ProtocolVersion;
+#[cfg(feature = "turmoil-testing")]
 use mqtt5::QoS;
 #[cfg(feature = "turmoil-testing")]
 use std::sync::Arc;
@@ -41,7 +43,7 @@ fn test_basic_publish_subscribe() {
                 None,
                 false,
                 false,
-                5,
+                ProtocolVersion::V5,
             )
             .await
             .unwrap();
@@ -101,7 +103,7 @@ fn test_wildcard_subscriptions() {
                 None,
                 false,
                 false,
-                5,
+                ProtocolVersion::V5,
             )
             .await
             .unwrap();
@@ -115,7 +117,7 @@ fn test_wildcard_subscriptions() {
                 None,
                 false,
                 false,
-                5,
+                ProtocolVersion::V5,
             )
             .await
             .unwrap();
@@ -213,7 +215,7 @@ fn test_multiple_subscribers_same_topic() {
                     None,
                     false,
                     false,
-                    5,
+                    ProtocolVersion::V5,
                 )
                 .await
                 .unwrap();
@@ -288,7 +290,7 @@ fn test_qos_levels() {
                 None,
                 false,
                 false,
-                5,
+                ProtocolVersion::V5,
             )
             .await
             .unwrap();
@@ -301,7 +303,7 @@ fn test_qos_levels() {
                 None,
                 false,
                 false,
-                5,
+                ProtocolVersion::V5,
             )
             .await
             .unwrap();
@@ -362,7 +364,7 @@ fn test_unsubscribe_functionality() {
                 None,
                 false,
                 false,
-                5,
+                ProtocolVersion::V5,
             )
             .await
             .unwrap();

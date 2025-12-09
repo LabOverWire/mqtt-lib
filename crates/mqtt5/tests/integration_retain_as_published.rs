@@ -1,6 +1,7 @@
 use mqtt5::broker::router::MessageRouter;
 use mqtt5::packet::publish::PublishPacket;
 use mqtt5::time::Duration;
+use mqtt5::types::ProtocolVersion;
 use mqtt5::QoS;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -25,7 +26,7 @@ async fn test_retain_as_published_false_clears_retain_flag() {
             None,
             false,
             false,
-            5,
+            ProtocolVersion::V5,
         )
         .await
         .unwrap();
@@ -60,7 +61,7 @@ async fn test_retain_as_published_true_preserves_retain_flag() {
             None,
             false,
             true,
-            5,
+            ProtocolVersion::V5,
         )
         .await
         .unwrap();

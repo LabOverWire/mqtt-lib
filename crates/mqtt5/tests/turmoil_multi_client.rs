@@ -11,6 +11,8 @@ use mqtt5::packet::publish::PublishPacket;
 #[cfg(feature = "turmoil-testing")]
 use mqtt5::time::Duration;
 #[cfg(feature = "turmoil-testing")]
+use mqtt5::types::ProtocolVersion;
+#[cfg(feature = "turmoil-testing")]
 use mqtt5::QoS;
 #[cfg(feature = "turmoil-testing")]
 use std::collections::HashMap;
@@ -54,7 +56,7 @@ fn test_multi_client_message_routing() {
                 None,
                 false,
                 false,
-                5,
+                ProtocolVersion::V5,
             )
             .await
             .unwrap();
@@ -79,7 +81,7 @@ fn test_multi_client_message_routing() {
                 None,
                 false,
                 false,
-                5,
+                ProtocolVersion::V5,
             )
             .await
             .unwrap();
@@ -104,7 +106,7 @@ fn test_multi_client_message_routing() {
                 None,
                 false,
                 false,
-                5,
+                ProtocolVersion::V5,
             )
             .await
             .unwrap();
@@ -129,7 +131,7 @@ fn test_multi_client_message_routing() {
                 None,
                 false,
                 false,
-                5,
+                ProtocolVersion::V5,
             )
             .await
             .unwrap();
@@ -226,7 +228,7 @@ fn test_client_subscription_changes() {
                 None,
                 false,
                 false,
-                5,
+                ProtocolVersion::V5,
             )
             .await
             .unwrap();
@@ -265,7 +267,7 @@ fn test_client_subscription_changes() {
                 None,
                 false,
                 false,
-                5,
+                ProtocolVersion::V5,
             )
             .await
             .unwrap();
@@ -320,7 +322,7 @@ fn test_message_ordering_with_multiple_clients() {
                 None,
                 false,
                 false,
-                5,
+                ProtocolVersion::V5,
             )
             .await
             .unwrap();
@@ -333,7 +335,7 @@ fn test_message_ordering_with_multiple_clients() {
                 None,
                 false,
                 false,
-                5,
+                ProtocolVersion::V5,
             )
             .await
             .unwrap();

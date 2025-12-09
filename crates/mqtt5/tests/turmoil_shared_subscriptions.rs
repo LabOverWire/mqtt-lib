@@ -10,6 +10,8 @@ use mqtt5::packet::publish::PublishPacket;
 #[cfg(feature = "turmoil-testing")]
 use mqtt5::time::Duration;
 #[cfg(feature = "turmoil-testing")]
+use mqtt5::types::ProtocolVersion;
+#[cfg(feature = "turmoil-testing")]
 use mqtt5::QoS;
 #[cfg(feature = "turmoil-testing")]
 use std::sync::Arc;
@@ -54,7 +56,7 @@ fn test_shared_subscriptions_in_turmoil() {
                 None,
                 false,
                 false,
-                5,
+                ProtocolVersion::V5,
             )
             .await
             .unwrap();
@@ -67,7 +69,7 @@ fn test_shared_subscriptions_in_turmoil() {
                 None,
                 false,
                 false,
-                5,
+                ProtocolVersion::V5,
             )
             .await
             .unwrap();
@@ -80,7 +82,7 @@ fn test_shared_subscriptions_in_turmoil() {
                 None,
                 false,
                 false,
-                5,
+                ProtocolVersion::V5,
             )
             .await
             .unwrap();

@@ -1,6 +1,7 @@
 use mqtt5::broker::router::MessageRouter;
 use mqtt5::packet::publish::PublishPacket;
 use mqtt5::time::Duration;
+use mqtt5::types::ProtocolVersion;
 use mqtt5::QoS;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -25,7 +26,7 @@ async fn test_no_local_true_filters_own_messages() {
             None,
             true,
             false,
-            5,
+            ProtocolVersion::V5,
         )
         .await
         .unwrap();
@@ -59,7 +60,7 @@ async fn test_no_local_false_allows_own_messages() {
             None,
             false,
             false,
-            5,
+            ProtocolVersion::V5,
         )
         .await
         .unwrap();
@@ -103,7 +104,7 @@ async fn test_no_local_other_clients_receive_messages() {
             None,
             true,
             false,
-            5,
+            ProtocolVersion::V5,
         )
         .await
         .unwrap();
@@ -116,7 +117,7 @@ async fn test_no_local_other_clients_receive_messages() {
             None,
             false,
             false,
-            5,
+            ProtocolVersion::V5,
         )
         .await
         .unwrap();
@@ -160,7 +161,7 @@ async fn test_no_local_with_wildcards() {
             None,
             true,
             false,
-            5,
+            ProtocolVersion::V5,
         )
         .await
         .unwrap();
@@ -197,7 +198,7 @@ async fn test_no_local_with_multilevel_wildcard() {
             None,
             true,
             false,
-            5,
+            ProtocolVersion::V5,
         )
         .await
         .unwrap();
@@ -232,7 +233,7 @@ async fn test_no_local_server_generated_messages() {
             None,
             true,
             false,
-            5,
+            ProtocolVersion::V5,
         )
         .await
         .unwrap();
@@ -270,7 +271,7 @@ async fn test_no_local_multiple_subscriptions_same_client() {
             None,
             true,
             false,
-            5,
+            ProtocolVersion::V5,
         )
         .await
         .unwrap();
@@ -283,7 +284,7 @@ async fn test_no_local_multiple_subscriptions_same_client() {
             None,
             false,
             false,
-            5,
+            ProtocolVersion::V5,
         )
         .await
         .unwrap();
@@ -330,7 +331,7 @@ async fn test_no_local_with_qos_levels() {
             None,
             true,
             false,
-            5,
+            ProtocolVersion::V5,
         )
         .await
         .unwrap();

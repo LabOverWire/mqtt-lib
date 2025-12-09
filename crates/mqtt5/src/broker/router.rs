@@ -6,6 +6,7 @@
 use crate::broker::bridge::BridgeManager;
 use crate::broker::storage::{DynamicStorage, QueuedMessage, RetainedMessage, StorageBackend};
 use crate::packet::publish::PublishPacket;
+use crate::types::ProtocolVersion;
 use crate::validation::{parse_shared_subscription, topic_matches_filter};
 use crate::QoS;
 use crate::Result;
@@ -35,8 +36,8 @@ pub struct Subscription {
     pub no_local: bool,
     /// Retain As Published option - if true, the retain flag is kept as-is when delivering
     pub retain_as_published: bool,
-    /// Protocol version of the subscriber (4 for v3.1.1, 5 for v5.0)
-    pub protocol_version: u8,
+    /// Protocol version of the subscriber
+    pub protocol_version: ProtocolVersion,
 }
 
 /// Message router for the broker
@@ -190,7 +191,7 @@ impl MessageRouter {
         subscription_id: Option<u32>,
         no_local: bool,
         retain_as_published: bool,
-        protocol_version: u8,
+        protocol_version: ProtocolVersion,
     ) -> Result<bool> {
         let (actual_filter, share_group) = parse_shared_subscription(&topic_filter);
         let share_group = share_group.map(str::to_string);
@@ -452,7 +453,7 @@ impl MessageRouter {
             let mut message = publish.clone();
             message.qos = effective_qos;
             if publish.protocol_version == 5
-                && sub.protocol_version == 4
+                && sub.protocol_version == ProtocolVersion::V311
                 && !publish.properties.is_empty()
             {
                 trace!(
@@ -461,7 +462,7 @@ impl MessageRouter {
                     "Stripping v5 properties for v3.1.1 subscriber"
                 );
             }
-            message.protocol_version = sub.protocol_version;
+            message.protocol_version = sub.protocol_version.as_u8();
 
             if !sub.retain_as_published {
                 message.retain = false;
@@ -503,7 +504,7 @@ impl MessageRouter {
                 let mut message = publish.clone();
                 message.qos = sub.qos;
                 if publish.protocol_version == 5
-                    && sub.protocol_version == 4
+                    && sub.protocol_version == ProtocolVersion::V311
                     && !publish.properties.is_empty()
                 {
                     trace!(
@@ -512,7 +513,7 @@ impl MessageRouter {
                         "Stripping v5 properties for queued message to v3.1.1 subscriber"
                     );
                 }
-                message.protocol_version = sub.protocol_version;
+                message.protocol_version = sub.protocol_version.as_u8();
 
                 let queued_msg = QueuedMessage::new(message, sub.client_id.clone(), sub.qos, None);
                 if let Err(e) = storage.queue_message(queued_msg).await {
@@ -623,7 +624,7 @@ mod tests {
                 None,
                 false,
                 false,
-                5,
+                ProtocolVersion::V5,
             )
             .await
             .unwrap();
@@ -659,7 +660,7 @@ mod tests {
                 None,
                 false,
                 false,
-                5,
+                ProtocolVersion::V5,
             )
             .await
             .unwrap();
@@ -671,7 +672,7 @@ mod tests {
                 None,
                 false,
                 false,
-                5,
+                ProtocolVersion::V5,
             )
             .await
             .unwrap();
@@ -745,7 +746,7 @@ mod tests {
                 None,
                 false,
                 false,
-                5,
+                ProtocolVersion::V5,
             )
             .await
             .unwrap();
@@ -757,7 +758,7 @@ mod tests {
                 None,
                 false,
                 false,
-                5,
+                ProtocolVersion::V5,
             )
             .await
             .unwrap();
@@ -769,7 +770,7 @@ mod tests {
                 None,
                 false,
                 false,
-                5,
+                ProtocolVersion::V5,
             )
             .await
             .unwrap();
@@ -830,7 +831,7 @@ mod tests {
                 None,
                 false,
                 false,
-                5,
+                ProtocolVersion::V5,
             )
             .await
             .unwrap();
@@ -842,7 +843,7 @@ mod tests {
                 None,
                 false,
                 false,
-                5,
+                ProtocolVersion::V5,
             )
             .await
             .unwrap();
@@ -855,7 +856,7 @@ mod tests {
                 None,
                 false,
                 false,
-                5,
+                ProtocolVersion::V5,
             )
             .await
             .unwrap();
