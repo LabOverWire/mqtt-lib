@@ -1,6 +1,6 @@
 # mqtt5-protocol
 
-MQTT v5.0 protocol implementation - packets, encoding, and validation.
+MQTT v5.0 and v3.1.1 protocol implementation - packets, encoding, and validation.
 
 ## Usage
 

@@ -1,11 +1,11 @@
-# Complete MQTT v5.0 Platform
+# Complete MQTT Platform
 
 [![Crates.io](https://img.shields.io/crates/v/mqtt5.svg)](https://crates.io/crates/mqtt5)
 [![Documentation](https://docs.rs/mqtt5/badge.svg)](https://docs.rs/mqtt5)
 [![Rust CI](https://github.com/LabOverWire/mqtt-lib/actions/workflows/rust.yml/badge.svg)](https://github.com/LabOverWire/mqtt-lib/actions)
 [![License](https://img.shields.io/crates/l/mqtt5.svg)](https://github.com/LabOverWire/mqtt-lib#license)
 
-**MQTT v5.0 platform featuring client library and broker implementation**
+**MQTT v5.0 and v3.1.1 platform featuring client library and broker implementation**
 
 ## Dual Architecture: Client + Broker
 
@@ -20,7 +20,7 @@
 
 ```toml
 [dependencies]
-mqtt5 = "0.11.4"
+mqtt5 = "0.12"
 ```
 
 ### CLI Tool
@@ -119,6 +119,9 @@ mqttv5 pub --url mqtts://localhost:8883 --topic test --message "TLS"
 mqttv5 pub --url ws://localhost:8080/mqtt --topic test --message "WebSocket"
 mqttv5 pub --url quic://localhost:14567 --topic test --message "QUIC"
 
+# Connect using MQTT v3.1.1 protocol
+mqttv5 pub --protocol-version 3.1.1 --topic test --message "v3.1.1"
+
 # Smart prompting when arguments are missing
 mqttv5 pub
 # ? MQTT topic › sensors/
@@ -153,9 +156,9 @@ mqttv5 pub
 
 ## Broker Capabilities
 
-### Core MQTT v5.0
+### Core MQTT
 
-- Full MQTT v5.0 compliance - All packet types, properties, reason codes
+- MQTT v5.0 and v3.1.1 - Full compliance, cross-version interoperability
 - Multiple QoS levels - QoS 0, 1, 2 with flow control
 - Session persistence - Clean start, session expiry, message queuing
 - Retained messages - Persistent message storage
@@ -180,9 +183,9 @@ mqttv5 pub
 
 ## Client Capabilities
 
-### Core MQTT v5.0
+### Core MQTT
 
-- Full MQTT v5.0 protocol compliance
+- MQTT v5.0 and v3.1.1 protocol support
 - Callback-based message handling with automatic routing
 - Cloud SDK compatible - Subscribe returns `(packet_id, qos)` tuple
 - Automatic reconnection with exponential backoff
@@ -623,7 +626,7 @@ Distributed tracing with OpenTelemetry support:
 
 ```toml
 [dependencies]
-mqtt5 = { version = "0.11.0", features = ["opentelemetry"] }
+mqtt5 = { version = "0.12", features = ["opentelemetry"] }
 ```
 
 ### Features

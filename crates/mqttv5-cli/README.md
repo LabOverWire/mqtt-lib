@@ -1,17 +1,17 @@
-# mqttv5 - MQTT v5.0 Command Line Interface
+# mqttv5 - MQTT Command Line Interface
 
 [![Crates.io](https://img.shields.io/crates/v/mqttv5-cli.svg)](https://crates.io/crates/mqttv5-cli)
 [![Downloads](https://img.shields.io/crates/d/mqttv5-cli.svg)](https://crates.io/crates/mqttv5-cli)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](https://github.com/LabOverWire/mqtt-lib#license)
 
-A unified MQTT v5.0 CLI tool with pub, sub, and broker commands.
+A unified MQTT CLI tool with pub, sub, and broker commands. Supports v5.0 and v3.1.1.
 
 ## Features
 
 - Single binary: pub, sub, and broker subcommands
 - Interactive prompts for missing arguments
 - Input validation with error messages and suggestions
-- MQTT v5.0 protocol support
+- MQTT v5.0 and v3.1.1 protocol support (`--protocol-version 3.1.1`)
 - Session management: Clean start, session expiry, and persistence
 - Will message support: Last will and testament with delay and QoS options
 - Automatic reconnection: Opt-in reconnection with exponential backoff

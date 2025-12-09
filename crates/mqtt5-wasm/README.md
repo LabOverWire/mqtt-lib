@@ -1,6 +1,6 @@
 # mqtt5-wasm
 
-MQTT v5.0 WebAssembly client and broker for browser environments.
+MQTT v5.0 and v3.1.1 WebAssembly client and broker for browser environments.
 
 ## Features
 
@@ -23,7 +23,7 @@ npm install mqtt5-wasm
 
 ```toml
 [dependencies]
-mqtt5-wasm = "0.2"
+mqtt5-wasm = "0.3"
 ```
 
 Build with wasm-pack:

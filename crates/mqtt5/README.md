@@ -1,10 +1,10 @@
 # mqtt5
 
-MQTT v5.0 client and broker for native platforms (Linux, macOS, Windows).
+MQTT v5.0 and v3.1.1 client and broker for native platforms (Linux, macOS, Windows).
 
 ## Features
 
-- Full MQTT v5.0 protocol compliance
+- MQTT v5.0 and v3.1.1 protocol support
 - Multiple transports: TCP, TLS, WebSocket, QUIC
 - QUIC multistream support with flow headers
 - Automatic reconnection with exponential backoff
