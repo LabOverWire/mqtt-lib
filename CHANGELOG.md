@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.12.0] / [mqtt5-protocol 0.3.0] / [mqtt5-wasm 0.3.0] - 2025-12-07
 
+### Fixed
+
+- **QUIC stream frame transmission race condition** in `send_packet_on_stream()`
+  - Added `tokio::task::yield_now()` after `SendStream::finish()` to allow QUIC I/O driver to transmit frames
+  - Fixes issue where rapid sequential publishes could queue streams faster than transmission, causing data loss on disconnect
+
 ### Added
 
 - **MQTT v3.1.1 protocol support** for client, broker, and CLI
