@@ -446,6 +446,13 @@ impl MessageRouter {
 
             let mut message = publish.clone();
             message.qos = effective_qos;
+            if publish.protocol_version == 5 && sub.protocol_version == 4 && !publish.properties.is_empty() {
+                trace!(
+                    topic = %publish.topic_name,
+                    client = %sub.client_id,
+                    "Stripping v5 properties for v3.1.1 subscriber"
+                );
+            }
             message.protocol_version = sub.protocol_version;
 
             if !sub.retain_as_published {
@@ -487,6 +494,13 @@ impl MessageRouter {
             if sub.qos != QoS::AtMostOnce {
                 let mut message = publish.clone();
                 message.qos = sub.qos;
+                if publish.protocol_version == 5 && sub.protocol_version == 4 && !publish.properties.is_empty() {
+                    trace!(
+                        topic = %publish.topic_name,
+                        client = %sub.client_id,
+                        "Stripping v5 properties for queued message to v3.1.1 subscriber"
+                    );
+                }
                 message.protocol_version = sub.protocol_version;
 
                 let queued_msg = QueuedMessage::new(message, sub.client_id.clone(), sub.qos, None);
