@@ -226,11 +226,17 @@ impl MessageRouter {
             let existing_pos = subs.iter().position(|s| s.client_id == client_id);
             if let Some(pos) = existing_pos {
                 subs[pos] = subscription;
-                debug!("Client {} updated wildcard subscription to {}", client_id, topic_filter);
+                debug!(
+                    "Client {} updated wildcard subscription to {}",
+                    client_id, topic_filter
+                );
                 false
             } else {
                 subs.push(subscription);
-                debug!("Client {} subscribed to wildcard {}", client_id, topic_filter);
+                debug!(
+                    "Client {} subscribed to wildcard {}",
+                    client_id, topic_filter
+                );
                 true
             }
         } else {
@@ -239,7 +245,10 @@ impl MessageRouter {
             let existing_pos = subs.iter().position(|s| s.client_id == client_id);
             if let Some(pos) = existing_pos {
                 subs[pos] = subscription;
-                debug!("Client {} updated subscription to {}", client_id, topic_filter);
+                debug!(
+                    "Client {} updated subscription to {}",
+                    client_id, topic_filter
+                );
                 false
             } else {
                 subs.push(subscription);
