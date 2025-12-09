@@ -265,10 +265,8 @@ impl OptimizedMessageRouter {
         let tree = self.subscription_tree.read().await;
         let mut matches = Vec::new();
 
-        // Collect matches from the tree
-        self.collect_matches_from_tree(
+        Self::collect_matches_from_tree(
             &tree,
-            topic,
             &topic.split('/').collect::<Vec<_>>(),
             0,
             &mut matches,
@@ -280,54 +278,35 @@ impl OptimizedMessageRouter {
         matches
     }
 
-    /// Recursively collect matching subscriptions from tree
-    #[allow(clippy::only_used_in_recursion)]
     fn collect_matches_from_tree(
-        &self,
         node: &SubscriptionTreeNode,
-        topic: &str,
         topic_segments: &[&str],
         segment_idx: usize,
         matches: &mut Vec<OptimizedSubscription>,
     ) {
-        // Add multilevel wildcard matches (they match everything from this level down)
         matches.extend(node.multilevel_subscriptions.iter().cloned());
 
         if segment_idx >= topic_segments.len() {
-            // Reached end of topic - add exact matches
             matches.extend(node.exact_subscriptions.iter().cloned());
             return;
         }
 
         let current_segment = topic_segments[segment_idx];
 
-        // Check exact match child
         if let Some(child) = node.children.get(current_segment) {
             if segment_idx == topic_segments.len() - 1 {
-                // Last segment - add exact subscriptions
                 matches.extend(child.exact_subscriptions.iter().cloned());
             } else {
-                // Continue recursion
-                self.collect_matches_from_tree(
-                    child,
-                    topic,
-                    topic_segments,
-                    segment_idx + 1,
-                    matches,
-                );
+                Self::collect_matches_from_tree(child, topic_segments, segment_idx + 1, matches);
             }
         }
 
-        // Check wildcard match (+)
         if let Some(wildcard_child) = node.children.get("+") {
             if segment_idx == topic_segments.len() - 1 {
-                // Last segment - add wildcard subscriptions
                 matches.extend(wildcard_child.wildcard_subscriptions.iter().cloned());
             } else {
-                // Continue recursion
-                self.collect_matches_from_tree(
+                Self::collect_matches_from_tree(
                     wildcard_child,
-                    topic,
                     topic_segments,
                     segment_idx + 1,
                     matches,
@@ -547,13 +526,10 @@ impl OptimizedMessageRouter {
     /// Removes all subscriptions for a client (used during cleanup)
     async fn remove_all_subscriptions(&self, client_id: &str) {
         let mut tree = self.subscription_tree.write().await;
-        self.remove_client_from_tree(&mut tree, client_id);
+        Self::remove_client_from_tree(&mut tree, client_id);
     }
 
-    /// Recursively removes client subscriptions from tree
-    #[allow(clippy::only_used_in_recursion)]
-    fn remove_client_from_tree(&self, node: &mut SubscriptionTreeNode, client_id: &str) {
-        // Remove from all subscription lists
+    fn remove_client_from_tree(node: &mut SubscriptionTreeNode, client_id: &str) {
         node.exact_subscriptions
             .retain(|sub| sub.client_id != client_id);
         node.wildcard_subscriptions
@@ -561,12 +537,10 @@ impl OptimizedMessageRouter {
         node.multilevel_subscriptions
             .retain(|sub| sub.client_id != client_id);
 
-        // Recursively clean children
         for child in node.children.values_mut() {
-            self.remove_client_from_tree(child, client_id);
+            Self::remove_client_from_tree(child, client_id);
         }
 
-        // Remove empty child nodes
         node.children.retain(|_, child| {
             !child.exact_subscriptions.is_empty()
                 || !child.wildcard_subscriptions.is_empty()
