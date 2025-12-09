@@ -450,6 +450,7 @@ impl WasmClientHandler {
                                 stored.subscription_id,
                                 stored.no_local,
                                 stored.retain_as_published,
+                                self.protocol_version,
                             )
                             .await;
                     }
@@ -536,6 +537,7 @@ impl WasmClientHandler {
                     subscription_id,
                     filter.options.no_local,
                     filter.options.retain_as_published,
+                    self.protocol_version,
                 )
                 .await;
 
