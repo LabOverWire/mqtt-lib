@@ -548,6 +548,7 @@ impl WasmClientHandler {
                     retain_as_published: filter.options.retain_as_published,
                     retain_handling: filter.options.retain_handling as u8,
                     subscription_id,
+                    protocol_version: self.protocol_version,
                 };
                 session.add_subscription(filter.filter.clone(), stored);
                 self.storage.store_session(session.clone()).await.ok();

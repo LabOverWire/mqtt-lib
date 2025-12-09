@@ -2,6 +2,7 @@ use crate::encoding::{decode_string, encode_string};
 use crate::error::{MqttError, Result};
 use crate::packet::{FixedHeader, MqttPacket, PacketType};
 use crate::protocol::v5::properties::Properties;
+use crate::types::ProtocolVersion;
 use crate::QoS;
 use bebytes::BeBytes;
 use bytes::{Buf, BufMut};
@@ -382,6 +383,9 @@ impl SubscribePacket {
         fixed_header: &FixedHeader,
         protocol_version: u8,
     ) -> Result<Self> {
+        ProtocolVersion::try_from(protocol_version)
+            .map_err(|()| MqttError::UnsupportedProtocolVersion)?;
+
         if fixed_header.flags != 0x02 {
             return Err(MqttError::MalformedPacket(format!(
                 "Invalid SUBSCRIBE flags: expected 0x02, got 0x{:02X}",

@@ -806,6 +806,7 @@ impl ClientHandler {
                     retain_as_published: filter.options.retain_as_published,
                     retain_handling: filter.options.retain_handling as u8,
                     subscription_id: subscribe.properties.get_subscription_identifier(),
+                    protocol_version: self.protocol_version,
                 };
                 session.add_subscription(filter.filter.clone(), stored);
                 if let Some(ref storage) = self.storage {

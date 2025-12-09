@@ -1,6 +1,7 @@
 use crate::error::{MqttError, Result};
 use crate::packet::{FixedHeader, MqttPacket, PacketType};
 use crate::protocol::v5::properties::Properties;
+use crate::types::ProtocolVersion;
 use crate::QoS;
 use bytes::{Buf, BufMut};
 
@@ -207,6 +208,9 @@ impl SubAckPacket {
         _fixed_header: &FixedHeader,
         protocol_version: u8,
     ) -> Result<Self> {
+        ProtocolVersion::try_from(protocol_version)
+            .map_err(|()| MqttError::UnsupportedProtocolVersion)?;
+
         if buf.remaining() < 2 {
             return Err(MqttError::MalformedPacket(
                 "SUBACK missing packet identifier".to_string(),

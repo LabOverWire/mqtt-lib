@@ -3,6 +3,7 @@ use crate::error::{MqttError, Result};
 use crate::flags::PublishFlags;
 use crate::packet::{FixedHeader, MqttPacket, PacketType};
 use crate::protocol::v5::properties::{Properties, PropertyId, PropertyValue};
+use crate::types::ProtocolVersion;
 use crate::QoS;
 use bytes::{Buf, BufMut};
 
@@ -234,6 +235,9 @@ impl PublishPacket {
         fixed_header: &FixedHeader,
         protocol_version: u8,
     ) -> Result<Self> {
+        ProtocolVersion::try_from(protocol_version)
+            .map_err(|()| MqttError::UnsupportedProtocolVersion)?;
+
         let flags = PublishFlags::decompose(fixed_header.flags);
         let dup = flags.contains(&PublishFlags::Dup);
         let qos_val = PublishFlags::extract_qos(fixed_header.flags);
