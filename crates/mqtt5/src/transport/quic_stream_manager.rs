@@ -187,6 +187,12 @@ impl QuicStreamManager {
         send.finish()
             .map_err(|e| MqttError::ConnectionError(format!("QUIC stream finish error: {e}")))?;
 
+        // Yield to allow QUIC I/O driver to transmit stream frames before returning.
+        // Without this, rapid sequential publishes can queue many streams faster than
+        // the I/O driver can transmit them, and a subsequent disconnect() may close
+        // the connection before all frames are sent.
+        tokio::task::yield_now().await;
+
         debug!(flow_id = ?flow_id, "Sent packet on dedicated QUIC stream");
 
         Ok(())
