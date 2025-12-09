@@ -126,9 +126,7 @@ impl FileBackend {
     }
 
     /// Convert topic to safe filename
-    #[allow(clippy::unused_self)]
-    fn topic_to_filename(&self, topic: &str) -> String {
-        // Replace MQTT topic separators and wildcards with safe characters
+    fn topic_to_filename(topic: &str) -> String {
         topic
             .replace('/', "_slash_")
             .replace('+', "_plus_")
@@ -137,8 +135,7 @@ impl FileBackend {
     }
 
     /// Convert filename back to topic
-    #[allow(clippy::unused_self)]
-    fn filename_to_topic(&self, filename: &str) -> String {
+    fn filename_to_topic(filename: &str) -> String {
         filename
             .replace("_slash_", "/")
             .replace("_plus_", "+")
@@ -234,7 +231,7 @@ impl FileBackend {
 
 impl StorageBackend for FileBackend {
     async fn store_retained_message(&self, topic: &str, message: RetainedMessage) -> Result<()> {
-        let filename = format!("{}.json", self.topic_to_filename(topic));
+        let filename = format!("{}.json", Self::topic_to_filename(topic));
         let path = self.retained_dir.join(filename);
 
         debug!("Storing retained message for topic: {}", topic);
@@ -244,7 +241,7 @@ impl StorageBackend for FileBackend {
     }
 
     async fn get_retained_message(&self, topic: &str) -> Result<Option<RetainedMessage>> {
-        let filename = format!("{}.json", self.topic_to_filename(topic));
+        let filename = format!("{}.json", Self::topic_to_filename(topic));
         let path = self.retained_dir.join(filename);
 
         let message: Option<RetainedMessage> = self.read_file(path).await?;
@@ -261,7 +258,7 @@ impl StorageBackend for FileBackend {
     }
 
     async fn remove_retained_message(&self, topic: &str) -> Result<()> {
-        let filename = format!("{}.json", self.topic_to_filename(topic));
+        let filename = format!("{}.json", Self::topic_to_filename(topic));
         let path = self.retained_dir.join(filename);
 
         if path.exists() {
@@ -283,7 +280,7 @@ impl StorageBackend for FileBackend {
 
         for file_path in files {
             if let Some(filename) = file_path.file_stem().and_then(|s| s.to_str()) {
-                let topic = self.filename_to_topic(filename);
+                let topic = Self::filename_to_topic(filename);
 
                 if topic_matches_filter(&topic, topic_filter) {
                     if let Some(message) = self.read_file::<RetainedMessage>(file_path).await? {

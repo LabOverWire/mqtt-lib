@@ -83,9 +83,8 @@ impl TurmoilClient {
 
     /// Creates a client with configuration
     #[must_use]
-    #[allow(clippy::needless_pass_by_value)]
-    pub fn with_config(config: TurmoilClientConfig) -> Self {
-        Self::new(&config)
+    pub fn with_config(config: &TurmoilClientConfig) -> Self {
+        Self::new(config)
     }
 
     /// Creates a client with a specific ID
