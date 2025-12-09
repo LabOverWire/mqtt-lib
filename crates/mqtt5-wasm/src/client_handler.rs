@@ -452,7 +452,7 @@ impl WasmClientHandler {
                                 stored.retain_as_published,
                                 self.protocol_version,
                             )
-                            .await;
+                            .await?;
                     }
 
                     session.will_message.clone_from(&connect.will);
@@ -539,7 +539,7 @@ impl WasmClientHandler {
                     filter.options.retain_as_published,
                     self.protocol_version,
                 )
-                .await;
+                .await?;
 
             if let Some(ref mut session) = self.session {
                 let stored = StoredSubscription {

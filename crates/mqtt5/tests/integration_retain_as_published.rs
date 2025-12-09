@@ -27,7 +27,8 @@ async fn test_retain_as_published_false_clears_retain_flag() {
             false,
             5,
         )
-        .await;
+        .await
+        .unwrap();
 
     let mut packet = PublishPacket::new("test/topic".to_string(), b"test message", QoS::AtMostOnce);
     packet.retain = true;
@@ -61,7 +62,8 @@ async fn test_retain_as_published_true_preserves_retain_flag() {
             true,
             5,
         )
-        .await;
+        .await
+        .unwrap();
 
     let mut packet = PublishPacket::new("test/topic".to_string(), b"test message", QoS::AtMostOnce);
     packet.retain = true;

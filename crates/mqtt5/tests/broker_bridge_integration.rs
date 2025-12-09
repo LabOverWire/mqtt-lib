@@ -89,7 +89,8 @@ async fn test_bridge_message_routing() {
             false,
             5,
         )
-        .await;
+        .await
+        .unwrap();
 
     // Create and route a message
     let packet = PublishPacket::new("test/topic".to_string(), b"test message", QoS::AtMostOnce);

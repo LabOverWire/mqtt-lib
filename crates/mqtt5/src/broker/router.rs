@@ -8,6 +8,7 @@ use crate::broker::storage::{DynamicStorage, QueuedMessage, RetainedMessage, Sto
 use crate::packet::publish::PublishPacket;
 use crate::validation::{parse_shared_subscription, topic_matches_filter};
 use crate::QoS;
+use crate::Result;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -112,7 +113,7 @@ impl MessageRouter {
     ///
     /// # Errors
     /// Returns an error if the storage fails to load retained messages.
-    pub async fn initialize(&self) -> Result<(), crate::error::MqttError> {
+    pub async fn initialize(&self) -> Result<()> {
         if let Some(ref storage) = self.storage {
             // Load all retained messages from storage
             let stored_messages = storage.get_retained_messages("#").await?;
@@ -176,6 +177,10 @@ impl MessageRouter {
         debug!("Unregistered client: {}", client_id);
     }
 
+    /// Adds a subscription for a client.
+    ///
+    /// # Errors
+    /// Returns an error if subscription registration fails.
     #[allow(clippy::too_many_arguments)]
     pub async fn subscribe(
         &self,
@@ -186,7 +191,7 @@ impl MessageRouter {
         no_local: bool,
         retain_as_published: bool,
         protocol_version: u8,
-    ) -> bool {
+    ) -> Result<bool> {
         let (actual_filter, share_group) = parse_shared_subscription(&topic_filter);
         let share_group = share_group.map(str::to_string);
 
@@ -226,7 +231,7 @@ impl MessageRouter {
                 .or_insert_with(|| Arc::new(AtomicUsize::new(0)));
         }
 
-        is_new
+        Ok(is_new)
     }
 
     /// Removes a subscription for a client
@@ -446,7 +451,10 @@ impl MessageRouter {
 
             let mut message = publish.clone();
             message.qos = effective_qos;
-            if publish.protocol_version == 5 && sub.protocol_version == 4 && !publish.properties.is_empty() {
+            if publish.protocol_version == 5
+                && sub.protocol_version == 4
+                && !publish.properties.is_empty()
+            {
                 trace!(
                     topic = %publish.topic_name,
                     client = %sub.client_id,
@@ -494,7 +502,10 @@ impl MessageRouter {
             if sub.qos != QoS::AtMostOnce {
                 let mut message = publish.clone();
                 message.qos = sub.qos;
-                if publish.protocol_version == 5 && sub.protocol_version == 4 && !publish.properties.is_empty() {
+                if publish.protocol_version == 5
+                    && sub.protocol_version == 4
+                    && !publish.properties.is_empty()
+                {
                     trace!(
                         topic = %publish.topic_name,
                         client = %sub.client_id,
@@ -614,7 +625,8 @@ mod tests {
                 false,
                 5,
             )
-            .await;
+            .await
+            .unwrap();
 
         assert_eq!(router.topic_count().await, 1);
 
@@ -649,7 +661,8 @@ mod tests {
                 false,
                 5,
             )
-            .await;
+            .await
+            .unwrap();
         router
             .subscribe(
                 "client2".to_string(),
@@ -660,7 +673,8 @@ mod tests {
                 false,
                 5,
             )
-            .await;
+            .await
+            .unwrap();
 
         // Publish message
         let publish = PublishPacket::new("test/data", b"hello", QoS::ExactlyOnce);
@@ -733,7 +747,8 @@ mod tests {
                 false,
                 5,
             )
-            .await;
+            .await
+            .unwrap();
         router
             .subscribe(
                 "client2".to_string(),
@@ -744,7 +759,8 @@ mod tests {
                 false,
                 5,
             )
-            .await;
+            .await
+            .unwrap();
         router
             .subscribe(
                 "client3".to_string(),
@@ -755,7 +771,8 @@ mod tests {
                 false,
                 5,
             )
-            .await;
+            .await
+            .unwrap();
 
         // Publish 6 messages
         for i in 0..6 {
@@ -815,7 +832,8 @@ mod tests {
                 false,
                 5,
             )
-            .await;
+            .await
+            .unwrap();
         router
             .subscribe(
                 "shared2".to_string(),
@@ -826,7 +844,8 @@ mod tests {
                 false,
                 5,
             )
-            .await;
+            .await
+            .unwrap();
 
         router
             .subscribe(
@@ -838,7 +857,8 @@ mod tests {
                 false,
                 5,
             )
-            .await;
+            .await
+            .unwrap();
 
         // Publish message
         let publish = PublishPacket::new("test/data", b"hello", QoS::AtMostOnce);

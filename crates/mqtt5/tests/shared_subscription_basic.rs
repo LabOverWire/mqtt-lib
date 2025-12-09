@@ -37,7 +37,8 @@ async fn test_shared_subscription_distribution() {
             false,
             5,
         )
-        .await;
+        .await
+        .unwrap();
 
     router
         .subscribe(
@@ -49,7 +50,8 @@ async fn test_shared_subscription_distribution() {
             false,
             5,
         )
-        .await;
+        .await
+        .unwrap();
 
     router
         .subscribe(
@@ -61,7 +63,8 @@ async fn test_shared_subscription_distribution() {
             false,
             5,
         )
-        .await;
+        .await
+        .unwrap();
 
     for i in 0..9 {
         let publish = PublishPacket::new(
@@ -128,7 +131,8 @@ async fn test_mixed_shared_and_regular_subscriptions() {
             false,
             5,
         )
-        .await;
+        .await
+        .unwrap();
 
     router
         .subscribe(
@@ -140,7 +144,8 @@ async fn test_mixed_shared_and_regular_subscriptions() {
             false,
             5,
         )
-        .await;
+        .await
+        .unwrap();
 
     router
         .subscribe(
@@ -152,7 +157,8 @@ async fn test_mixed_shared_and_regular_subscriptions() {
             false,
             5,
         )
-        .await;
+        .await
+        .unwrap();
 
     for i in 0..4 {
         let publish = PublishPacket::new(

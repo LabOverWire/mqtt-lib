@@ -27,7 +27,8 @@ async fn test_no_local_true_filters_own_messages() {
             false,
             5,
         )
-        .await;
+        .await
+        .unwrap();
 
     let packet = PublishPacket::new("test/topic".to_string(), b"test message", QoS::AtMostOnce);
     router.route_message(&packet, Some("test_client")).await;
@@ -60,7 +61,8 @@ async fn test_no_local_false_allows_own_messages() {
             false,
             5,
         )
-        .await;
+        .await
+        .unwrap();
 
     let packet = PublishPacket::new("test/topic".to_string(), b"test message", QoS::AtMostOnce);
     router.route_message(&packet, Some("test_client")).await;
@@ -103,7 +105,8 @@ async fn test_no_local_other_clients_receive_messages() {
             false,
             5,
         )
-        .await;
+        .await
+        .unwrap();
 
     router
         .subscribe(
@@ -115,7 +118,8 @@ async fn test_no_local_other_clients_receive_messages() {
             false,
             5,
         )
-        .await;
+        .await
+        .unwrap();
 
     let packet = PublishPacket::new("test/topic".to_string(), b"test message", QoS::AtMostOnce);
     router.route_message(&packet, Some("publisher")).await;
@@ -158,7 +162,8 @@ async fn test_no_local_with_wildcards() {
             false,
             5,
         )
-        .await;
+        .await
+        .unwrap();
 
     let packet1 = PublishPacket::new("test/topic1".to_string(), b"message 1", QoS::AtMostOnce);
     router.route_message(&packet1, Some("test_client")).await;
@@ -194,7 +199,8 @@ async fn test_no_local_with_multilevel_wildcard() {
             false,
             5,
         )
-        .await;
+        .await
+        .unwrap();
 
     let packet = PublishPacket::new(
         "test/foo/bar/baz".to_string(),
@@ -228,7 +234,8 @@ async fn test_no_local_server_generated_messages() {
             false,
             5,
         )
-        .await;
+        .await
+        .unwrap();
 
     let packet = PublishPacket::new("test/topic".to_string(), b"server message", QoS::AtMostOnce);
     router.route_message(&packet, None).await;
@@ -265,7 +272,8 @@ async fn test_no_local_multiple_subscriptions_same_client() {
             false,
             5,
         )
-        .await;
+        .await
+        .unwrap();
 
     router
         .subscribe(
@@ -277,7 +285,8 @@ async fn test_no_local_multiple_subscriptions_same_client() {
             false,
             5,
         )
-        .await;
+        .await
+        .unwrap();
 
     let packet1 = PublishPacket::new("test/topic1".to_string(), b"message 1", QoS::AtMostOnce);
     router.route_message(&packet1, Some("test_client")).await;
@@ -323,7 +332,8 @@ async fn test_no_local_with_qos_levels() {
             false,
             5,
         )
-        .await;
+        .await
+        .unwrap();
 
     let packet = PublishPacket::new("test/topic".to_string(), b"qos1 message", QoS::AtLeastOnce);
     router.route_message(&packet, Some("test_client")).await;

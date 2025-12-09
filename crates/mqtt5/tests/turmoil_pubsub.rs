@@ -43,7 +43,8 @@ fn test_basic_publish_subscribe() {
                 false,
                 5,
             )
-            .await;
+            .await
+            .unwrap();
 
         // Publish a message
         let publish =
@@ -102,7 +103,8 @@ fn test_wildcard_subscriptions() {
                 false,
                 5,
             )
-            .await;
+            .await
+            .unwrap();
 
         // Multi-level wildcard subscription
         router
@@ -115,7 +117,8 @@ fn test_wildcard_subscriptions() {
                 false,
                 5,
             )
-            .await;
+            .await
+            .unwrap();
 
         // Publish messages to various topics
         let topics_and_payloads = vec![
@@ -212,7 +215,8 @@ fn test_multiple_subscribers_same_topic() {
                     false,
                     5,
                 )
-                .await;
+                .await
+                .unwrap();
         }
 
         // Publish multiple messages
@@ -286,7 +290,8 @@ fn test_qos_levels() {
                 false,
                 5,
             )
-            .await;
+            .await
+            .unwrap();
 
         router
             .subscribe(
@@ -298,7 +303,8 @@ fn test_qos_levels() {
                 false,
                 5,
             )
-            .await;
+            .await
+            .unwrap();
 
         // Publish with different QoS levels
         let qos0_msg =
@@ -358,7 +364,8 @@ fn test_unsubscribe_functionality() {
                 false,
                 5,
             )
-            .await;
+            .await
+            .unwrap();
 
         // Publish first message
         let msg1 = PublishPacket::new(

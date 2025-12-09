@@ -797,7 +797,7 @@ impl ClientHandler {
                     filter.options.retain_as_published,
                     self.protocol_version,
                 )
-                .await;
+                .await?;
 
             if let Some(ref mut session) = self.session {
                 let stored = StoredSubscription {
@@ -1263,7 +1263,7 @@ impl ClientHandler {
                     stored.retain_as_published,
                     self.protocol_version,
                 )
-                .await;
+                .await?;
         }
 
         // Update will message from new connection (replaces any existing will)

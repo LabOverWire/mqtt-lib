@@ -56,7 +56,8 @@ fn test_shared_subscriptions_in_turmoil() {
                 false,
                 5,
             )
-            .await;
+            .await
+            .unwrap();
 
         router
             .subscribe(
@@ -68,7 +69,8 @@ fn test_shared_subscriptions_in_turmoil() {
                 false,
                 5,
             )
-            .await;
+            .await
+            .unwrap();
 
         router
             .subscribe(
@@ -80,7 +82,8 @@ fn test_shared_subscriptions_in_turmoil() {
                 false,
                 5,
             )
-            .await;
+            .await
+            .unwrap();
 
         // Publish 9 messages
         for i in 0..9 {
