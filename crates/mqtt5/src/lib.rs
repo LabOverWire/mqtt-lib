@@ -182,6 +182,8 @@ pub mod broker;
 pub mod callback;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod client;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod crypto;
 pub mod session;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod tasks;

@@ -1,3 +1,4 @@
+use super::ack_common::is_valid_publish_ack_reason_code;
 use crate::error::{MqttError, Result};
 use crate::packet::{AckPacketHeader, FixedHeader, MqttPacket, PacketType};
 use crate::protocol::v5::properties::Properties;
@@ -50,22 +51,6 @@ impl PubRecPacket {
         self
     }
 
-    /// Validates the reason code for PUBREC
-    fn is_valid_pubrec_reason_code(code: ReasonCode) -> bool {
-        matches!(
-            code,
-            ReasonCode::Success
-                | ReasonCode::NoMatchingSubscribers
-                | ReasonCode::UnspecifiedError
-                | ReasonCode::ImplementationSpecificError
-                | ReasonCode::NotAuthorized
-                | ReasonCode::TopicNameInvalid
-                | ReasonCode::PacketIdentifierInUse
-                | ReasonCode::QuotaExceeded
-                | ReasonCode::PayloadFormatInvalid
-        )
-    }
-
     /// Creates a bebytes header for this packet
     #[must_use]
     pub fn create_header(&self) -> AckPacketHeader {
@@ -85,7 +70,7 @@ impl PubRecPacket {
             ))
         })?;
 
-        if !Self::is_valid_pubrec_reason_code(reason_code) {
+        if !is_valid_publish_ack_reason_code(reason_code) {
             return Err(MqttError::MalformedPacket(format!(
                 "Invalid PUBREC reason code: {reason_code:?}"
             )));
@@ -135,7 +120,7 @@ impl MqttPacket for PubRecPacket {
                 MqttError::MalformedPacket(format!("Invalid PUBREC reason code: {reason_byte}"))
             })?;
 
-            if !Self::is_valid_pubrec_reason_code(code) {
+            if !is_valid_publish_ack_reason_code(code) {
                 return Err(MqttError::MalformedPacket(format!(
                     "Invalid PUBREC reason code: {code:?}"
                 )));

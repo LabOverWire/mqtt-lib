@@ -1,3 +1,4 @@
+mod ack_common;
 pub mod auth;
 pub mod connack;
 pub mod connect;
@@ -13,6 +14,8 @@ pub mod suback;
 pub mod subscribe;
 pub mod unsuback;
 pub mod unsubscribe;
+
+pub use ack_common::{is_valid_publish_ack_reason_code, is_valid_pubrel_reason_code};
 
 #[cfg(test)]
 mod property_tests;

@@ -1,3 +1,4 @@
+use super::ack_common::is_valid_pubrel_reason_code;
 use crate::error::{MqttError, Result};
 use crate::packet::{FixedHeader, MqttPacket, PacketType};
 use crate::protocol::v5::properties::Properties;
@@ -49,14 +50,6 @@ impl PubRelPacket {
         self.properties.add_user_property(key, value);
         self
     }
-
-    /// Validates the reason code for PUBREL
-    fn is_valid_pubrel_reason_code(code: ReasonCode) -> bool {
-        matches!(
-            code,
-            ReasonCode::Success | ReasonCode::PacketIdentifierNotFound
-        )
-    }
 }
 
 impl MqttPacket for PubRelPacket {
@@ -107,7 +100,7 @@ impl MqttPacket for PubRelPacket {
                 MqttError::MalformedPacket(format!("Invalid PUBREL reason code: {reason_byte}"))
             })?;
 
-            if !Self::is_valid_pubrel_reason_code(code) {
+            if !is_valid_pubrel_reason_code(code) {
                 return Err(MqttError::MalformedPacket(format!(
                     "Invalid PUBREL reason code: {code:?}"
                 )));

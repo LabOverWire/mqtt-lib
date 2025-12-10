@@ -1,3 +1,4 @@
+use super::ack_common::is_valid_pubrel_reason_code;
 use crate::error::{MqttError, Result};
 use crate::packet::{FixedHeader, MqttPacket, PacketType};
 use crate::protocol::v5::properties::Properties;
@@ -49,14 +50,6 @@ impl PubCompPacket {
         self.properties.add_user_property(key, value);
         self
     }
-
-    /// Validates the reason code for PUBCOMP
-    fn is_valid_pubcomp_reason_code(code: ReasonCode) -> bool {
-        matches!(
-            code,
-            ReasonCode::Success | ReasonCode::PacketIdentifierNotFound
-        )
-    }
 }
 
 impl MqttPacket for PubCompPacket {
@@ -95,7 +88,7 @@ impl MqttPacket for PubCompPacket {
                 MqttError::MalformedPacket(format!("Invalid PUBCOMP reason code: {reason_byte}"))
             })?;
 
-            if !Self::is_valid_pubcomp_reason_code(code) {
+            if !is_valid_pubrel_reason_code(code) {
                 return Err(MqttError::MalformedPacket(format!(
                     "Invalid PUBCOMP reason code: {code:?}"
                 )));
