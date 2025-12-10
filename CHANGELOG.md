@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Added `tokio::task::yield_now()` after `SendStream::finish()` to allow QUIC I/O driver to transmit frames
   - Fixes issue where rapid sequential publishes could queue streams faster than transmission, causing data loss on disconnect
 
+### Changed
+
+- ACK packet macro refactored to eliminate duplication using helper macros
+- bebytes updated from 2.10 to 2.11
+
 ### Added
 
 - **MQTT v3.1.1 protocol support** for client, broker, and CLI
