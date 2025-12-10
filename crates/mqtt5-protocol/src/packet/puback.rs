@@ -1,66 +1,23 @@
-use super::ack_common::is_valid_publish_ack_reason_code;
+use super::ack_common::{define_ack_packet, is_valid_publish_ack_reason_code};
 use crate::error::{MqttError, Result};
-use crate::packet::{AckPacketHeader, FixedHeader, MqttPacket, PacketType};
+use crate::packet::{AckPacketHeader, PacketType};
 use crate::protocol::v5::properties::Properties;
-use crate::types::ReasonCode;
-use bytes::{Buf, BufMut};
 
-/// MQTT PUBACK packet (`QoS` 1 publish acknowledgment)
-#[derive(Debug, Clone)]
-pub struct PubAckPacket {
-    /// Packet identifier
-    pub packet_id: u16,
-    /// Reason code
-    pub reason_code: ReasonCode,
-    /// PUBACK properties (v5.0 only)
-    pub properties: Properties,
+define_ack_packet! {
+    /// MQTT PUBACK packet (`QoS` 1 publish acknowledgment)
+    pub struct PubAckPacket;
+    packet_type = PacketType::PubAck;
+    validator = is_valid_publish_ack_reason_code;
+    error_prefix = "PUBACK";
 }
 
 impl PubAckPacket {
-    /// Creates a new PUBACK packet
-    #[must_use]
-    pub fn new(packet_id: u16) -> Self {
-        Self {
-            packet_id,
-            reason_code: ReasonCode::Success,
-            properties: Properties::default(),
-        }
-    }
-
-    /// Creates a new PUBACK packet with a reason code
-    #[must_use]
-    pub fn new_with_reason(packet_id: u16, reason_code: ReasonCode) -> Self {
-        Self {
-            packet_id,
-            reason_code,
-            properties: Properties::default(),
-        }
-    }
-
-    /// Sets the reason string
-    #[must_use]
-    pub fn with_reason_string(mut self, reason: String) -> Self {
-        self.properties.set_reason_string(reason);
-        self
-    }
-
-    /// Adds a user property
-    #[must_use]
-    pub fn with_user_property(mut self, key: String, value: String) -> Self {
-        self.properties.add_user_property(key, value);
-        self
-    }
-
-    /// Creates a bebytes header for this packet
     #[must_use]
     pub fn create_header(&self) -> AckPacketHeader {
         AckPacketHeader::create(self.packet_id, self.reason_code)
     }
 
-    /// Creates a packet from a bebytes header and properties
-    ///
     /// # Errors
-    ///
     /// Returns an error if the reason code in the header is invalid
     pub fn from_header(header: AckPacketHeader, properties: Properties) -> Result<Self> {
         let reason_code = header.get_reason_code().ok_or_else(|| {
@@ -84,83 +41,13 @@ impl PubAckPacket {
     }
 }
 
-impl MqttPacket for PubAckPacket {
-    fn packet_type(&self) -> PacketType {
-        PacketType::PubAck
-    }
-
-    fn encode_body<B: BufMut>(&self, buf: &mut B) -> Result<()> {
-        // Always encode packet_id (required)
-        buf.put_u16(self.packet_id);
-
-        // For v5.0, encode reason code and properties if not default
-        // For v3.1.1, we would skip these if reason_code is Success and no properties
-        if self.reason_code != ReasonCode::Success || !self.properties.is_empty() {
-            buf.put_u8(u8::from(self.reason_code));
-            self.properties.encode(buf)?;
-        }
-
-        Ok(())
-    }
-
-    fn decode_body<B: Buf>(buf: &mut B, fixed_header: &FixedHeader) -> Result<Self> {
-        tracing::trace!(
-            fixed_header_remaining = fixed_header.remaining_length,
-            buf_remaining = buf.remaining(),
-            "PUBACK decode started"
-        );
-
-        // Packet identifier is always required (2 bytes minimum)
-        if buf.remaining() < 2 {
-            return Err(MqttError::MalformedPacket(
-                "PUBACK missing packet identifier".to_string(),
-            ));
-        }
-        let packet_id = buf.get_u16();
-
-        // MQTT v5.0: Reason code and properties are optional
-        // If remaining length is 2 (just packet ID), reason code defaults to Success (0x00)
-        let (reason_code, properties) = if buf.has_remaining() {
-            // Read reason code
-            let reason_byte = buf.get_u8();
-            let code = ReasonCode::from_u8(reason_byte).ok_or_else(|| {
-                MqttError::MalformedPacket(format!(
-                    "Invalid PUBACK reason code: {reason_byte} (0x{reason_byte:02X})"
-                ))
-            })?;
-
-            if !is_valid_publish_ack_reason_code(code) {
-                return Err(MqttError::MalformedPacket(format!(
-                    "Invalid PUBACK reason code: {code:?}"
-                )));
-            }
-
-            // Properties (if present)
-            let props = if buf.has_remaining() {
-                Properties::decode(buf)?
-            } else {
-                Properties::default()
-            };
-
-            (code, props)
-        } else {
-            // No reason code or properties - Success with empty properties
-            (ReasonCode::Success, Properties::default())
-        };
-
-        Ok(Self {
-            packet_id,
-            reason_code,
-            properties,
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::packet::{FixedHeader, MqttPacket};
     use crate::protocol::v5::properties::PropertyId;
-    use bytes::BytesMut;
+    use crate::types::ReasonCode;
+    use bytes::{BufMut, BytesMut};
 
     #[cfg(test)]
     mod bebytes_tests {
@@ -180,7 +67,7 @@ mod tests {
         fn test_ack_header_round_trip() {
             let header = AckPacketHeader::create(456, ReasonCode::QuotaExceeded);
             let bytes = header.to_be_bytes();
-            assert_eq!(bytes.len(), 3); // 2 bytes packet_id + 1 byte reason_code
+            assert_eq!(bytes.len(), 3);
 
             let (decoded, consumed) = AckPacketHeader::try_from_be_bytes(&bytes).unwrap();
             assert_eq!(consumed, 3);
@@ -273,7 +160,6 @@ mod tests {
 
     #[test]
     fn test_puback_v311_style() {
-        // v3.1.1 style - only packet ID
         let mut buf = BytesMut::new();
         buf.put_u16(1234);
 
@@ -289,7 +175,7 @@ mod tests {
     fn test_puback_invalid_reason_code() {
         let mut buf = BytesMut::new();
         buf.put_u16(123);
-        buf.put_u8(0xFF); // Invalid reason code
+        buf.put_u8(0xFF);
 
         let fixed_header = FixedHeader::new(PacketType::PubAck, 0, 3);
         let result = PubAckPacket::decode_body(&mut buf, &fixed_header);
@@ -299,7 +185,7 @@ mod tests {
     #[test]
     fn test_puback_missing_packet_id() {
         let mut buf = BytesMut::new();
-        buf.put_u8(0); // Only one byte, not enough for packet ID
+        buf.put_u8(0);
 
         let fixed_header = FixedHeader::new(PacketType::PubAck, 0, 1);
         let result = PubAckPacket::decode_body(&mut buf, &fixed_header);
