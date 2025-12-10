@@ -23,6 +23,7 @@ use mqtt5_protocol::packet::unsuback::{UnsubAckPacket, UnsubAckReasonCode};
 use mqtt5_protocol::packet::unsubscribe::UnsubscribePacket;
 use mqtt5_protocol::packet::Packet;
 use mqtt5_protocol::protocol::v5::reason_codes::ReasonCode;
+use mqtt5_protocol::types::ProtocolVersion;
 use mqtt5_protocol::QoS;
 use mqtt5_protocol::Transport;
 use std::collections::HashMap;
@@ -450,7 +451,8 @@ impl WasmClientHandler {
                                 stored.subscription_id,
                                 stored.no_local,
                                 stored.retain_as_published,
-                                self.protocol_version,
+                                ProtocolVersion::try_from(self.protocol_version)
+                                    .unwrap_or_default(),
                             )
                             .await?;
                     }
@@ -537,7 +539,7 @@ impl WasmClientHandler {
                     subscription_id,
                     filter.options.no_local,
                     filter.options.retain_as_published,
-                    self.protocol_version,
+                    ProtocolVersion::try_from(self.protocol_version).unwrap_or_default(),
                 )
                 .await?;
 
