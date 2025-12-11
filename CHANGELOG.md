@@ -9,12 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **WASM WebSocket** now sends `mqtt` subprotocol per spec [MQTT-6.0.0-3]
 - **QUIC stream frame transmission race condition** in `send_packet_on_stream()`
   - Added `tokio::task::yield_now()` after `SendStream::finish()` to allow QUIC I/O driver to transmit frames
   - Fixes issue where rapid sequential publishes could queue streams faster than transmission, causing data loss on disconnect
 
 ### Changed
 
+- **Secure-first CLI authentication UX** following Mosquitto 2.0+/EMQX 5.0+ patterns
+  - `--allow-anonymous` no longer defaults to true
+  - Password file provided without flag → anonymous defaults to false (secure)
+  - Non-interactive mode without auth config → clear error with options
+  - Interactive mode without auth config → prompts user for decision
+  - Explicit `--allow-anonymous` flag works as before
 - ACK packet macro refactored to eliminate duplication using helper macros
 - bebytes updated from 2.10 to 2.11
 

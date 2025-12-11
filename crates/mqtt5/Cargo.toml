@@ -131,7 +131,7 @@ opentelemetry = { version = "0.31", features = ["trace"], optional = true }
 mqtt5-protocol = { version = "0.3", path = "../mqtt5-protocol" }
 argon2 = "0.5"
 getrandom = "0.3"
-bebytes = "2.11"
+bebytes = { version = "2.11", features = ["bytes"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 humantime-serde = "1.1"

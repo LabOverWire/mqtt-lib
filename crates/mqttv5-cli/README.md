@@ -60,15 +60,20 @@ mqttv5 sub -t "sensors/+" --auto-reconnect
 
 ### Running a Broker
 
+The broker uses secure-first authentication. You must choose an authentication mode:
+
 ```bash
-# Start broker on default port
+# Anonymous access (for development/testing)
+mqttv5 broker --allow-anonymous
+
+# Password authentication (production)
+mqttv5 broker --auth-password-file passwords.txt
+
+# Interactive mode (prompts for auth choice)
 mqttv5 broker
 
 # Custom port and bind address
-mqttv5 broker --host 0.0.0.0:1883
-
-# Interactive configuration
-mqttv5 broker
+mqttv5 broker --host 0.0.0.0:1883 --allow-anonymous
 ```
 
 ## CLI Design

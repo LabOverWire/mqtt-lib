@@ -16,7 +16,7 @@ categories = ["network-programming", "encoding", "parsing"]
 default = []
 
 [dependencies]
-bebytes = "2.11"
+bebytes = { version = "2.11", features = ["bytes"] }
 bytes = "1.10"
 thiserror = "2.0"
 serde = { version = "1.0", features = ["derive"] }

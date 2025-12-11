@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use clap::{ArgAction, Args};
+use dialoguer::Confirm;
 use mqtt5::broker::{BrokerConfig, MqttBroker};
 use std::path::{Path, PathBuf};
 use tokio::signal;
@@ -19,9 +20,9 @@ pub struct BrokerCommand {
     #[arg(long, default_value = "10000")]
     pub max_clients: usize,
 
-    /// Allow anonymous access (no authentication required) - enabled by default
-    #[arg(long, default_value_t = true)]
-    pub allow_anonymous: bool,
+    /// Allow anonymous access (no authentication required)
+    #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+    pub allow_anonymous: Option<bool>,
 
     /// Password file path (format: username:password per line)
     #[arg(long)]
@@ -245,6 +246,35 @@ pub async fn execute(mut cmd: BrokerCommand, verbose: bool, debug: bool) -> Resu
     Ok(())
 }
 
+fn resolve_auth_settings(cmd: &BrokerCommand) -> Result<bool> {
+    if let Some(allow_anon) = cmd.allow_anonymous {
+        return Ok(allow_anon);
+    }
+
+    if cmd.auth_password_file.is_some() {
+        info!("Password file provided, anonymous access disabled by default");
+        return Ok(false);
+    }
+
+    if cmd.non_interactive {
+        anyhow::bail!(
+            "No authentication configured.\n\
+             Use one of:\n  \
+             --allow-anonymous           Allow connections without credentials\n  \
+             --auth-password-file <path> Require password authentication"
+        );
+    }
+
+    eprintln!("⚠️  No authentication configured.");
+    let allow_anon = Confirm::new()
+        .with_prompt("Allow anonymous connections? (not recommended for production)")
+        .default(false)
+        .interact()
+        .context("Failed to get authentication choice")?;
+
+    Ok(allow_anon)
+}
+
 async fn create_interactive_config(cmd: &mut BrokerCommand) -> Result<BrokerConfig> {
     use mqtt5::broker::config::{
         AuthConfig, AuthMethod, QuicConfig, StorageConfig, TlsConfig, WebSocketConfig,
@@ -284,8 +314,9 @@ async fn create_interactive_config(cmd: &mut BrokerCommand) -> Result<BrokerConf
         config.response_information = Some(response_info.clone());
     }
 
-    // Configure authentication
-    if cmd.auth_password_file.is_some() || cmd.acl_file.is_some() {
+    let allow_anonymous = resolve_auth_settings(cmd)?;
+
+    if cmd.auth_password_file.is_some() || cmd.acl_file.is_some() || !allow_anonymous {
         if let Some(password_file) = &cmd.auth_password_file {
             if !password_file.exists() {
                 anyhow::bail!(
@@ -302,7 +333,7 @@ async fn create_interactive_config(cmd: &mut BrokerCommand) -> Result<BrokerConf
         }
 
         let auth_config = AuthConfig {
-            allow_anonymous: cmd.allow_anonymous,
+            allow_anonymous,
             password_file: cmd.auth_password_file.clone(),
             acl_file: cmd.acl_file.clone(),
             auth_method: if cmd.auth_password_file.is_some() {
@@ -313,20 +344,21 @@ async fn create_interactive_config(cmd: &mut BrokerCommand) -> Result<BrokerConf
             auth_data: None,
         };
         config = config.with_auth(auth_config);
+    }
 
-        if cmd.auth_password_file.is_some() && cmd.acl_file.is_some() {
-            info!(
-                "Authentication enabled with password file: {:?} and ACL file: {:?}",
-                cmd.auth_password_file, cmd.acl_file
-            );
-        } else if let Some(password_file) = &cmd.auth_password_file {
-            info!(
-                "Authentication enabled with password file: {:?}",
-                password_file
-            );
-        } else if let Some(acl_file) = &cmd.acl_file {
-            info!("Authorization enabled with ACL file: {:?}", acl_file);
-        }
+    if allow_anonymous {
+        info!("Anonymous access enabled - clients can connect without credentials");
+    } else if cmd.auth_password_file.is_some() {
+        info!(
+            "Password authentication required (file: {:?})",
+            cmd.auth_password_file.as_ref().unwrap()
+        );
+    } else {
+        info!("Authentication required but no password file configured");
+    }
+
+    if let Some(acl_file) = &cmd.acl_file {
+        info!("ACL authorization enabled (file: {:?})", acl_file);
     }
 
     // Configure TLS

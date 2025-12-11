@@ -124,7 +124,7 @@ impl WasmWebSocketTransport {
 
 impl Transport for WasmWebSocketTransport {
     async fn connect(&mut self) -> Result<()> {
-        let ws = WebSocket::new(&self.url).map_err(|e| {
+        let ws = WebSocket::new_with_str(&self.url, "mqtt").map_err(|e| {
             MqttError::ConnectionError(format!("Failed to create WebSocket: {:?}", e))
         })?;
 
