@@ -1,6 +1,6 @@
 [package]
 name = "mqtt5-protocol"
-version = "0.2.1"
+version = "0.3.0"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -16,7 +16,7 @@ categories = ["network-programming", "encoding", "parsing"]
 default = []
 
 [dependencies]
-bebytes = "2.10"
+bebytes = { version = "2.11", features = ["bytes"] }
 bytes = "1.10"
 thiserror = "2.0"
 serde = { version = "1.0", features = ["derive"] }

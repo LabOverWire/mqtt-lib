@@ -16,6 +16,10 @@ MQTT broker running in a browser tab using MessagePort.
 
 Two in-browser brokers connected via MessagePort bridge, demonstrating bidirectional message forwarding.
 
+### Shared Subscription (shared-subscription/)
+
+Demonstrates MQTT v5.0 shared subscriptions for load balancing. Multiple workers subscribe to `$share/group/topic` and messages are distributed round-robin among them.
+
 ## Quick Start
 
 ### 1. Build the WASM Package
@@ -63,6 +67,17 @@ Two brokers connected via MessagePort bridge with bidirectional message forwardi
 
 ```bash
 cd broker-bridge
+python3 -m http.server 8000
+```
+
+Open http://localhost:8000 in your browser.
+
+#### Shared Subscription
+
+Demonstrates shared subscriptions for load balancing across workers.
+
+```bash
+cd shared-subscription
 python3 -m http.server 8000
 ```
 
@@ -130,6 +145,44 @@ The broker bridge:
 - Topic filtering with wildcard patterns
 - QoS level configuration per topic mapping
 - Optional local and remote topic prefixes
+
+### Shared Subscription Features
+
+```javascript
+import init, { WasmBroker, WasmBrokerConfig, WasmMqttClient } from "./pkg/mqtt5_wasm.js";
+
+await init();
+
+const config = new WasmBrokerConfig();
+config.shared_subscription_available = true;
+
+const broker = WasmBroker.with_config(config);
+
+const worker1 = new WasmMqttClient("worker-1");
+const worker2 = new WasmMqttClient("worker-2");
+
+const port1 = broker.create_client_port();
+await worker1.connect_message_port(port1);
+
+const port2 = broker.create_client_port();
+await worker2.connect_message_port(port2);
+
+await worker1.subscribe_with_callback("$share/workers/tasks/+", (topic, payload) => {
+  console.log("Worker 1 received:", topic);
+});
+
+await worker2.subscribe_with_callback("$share/workers/tasks/+", (topic, payload) => {
+  console.log("Worker 2 received:", topic);
+});
+```
+
+Shared subscriptions:
+
+- Topic format: `$share/{group-name}/{topic-filter}`
+- Messages distributed round-robin among group members
+- Each message delivered to exactly one subscriber in the group
+- Multiple groups can exist for the same topic
+- Regular and shared subscriptions can coexist
 
 ### Connection Events
 

@@ -24,10 +24,10 @@ pub async fn packet_reader_task(
     transport: Arc<tokio::sync::Mutex<crate::transport::TransportType>>,
     session: Arc<RwLock<SessionState>>,
     callback_manager: Arc<CallbackManager>,
+    protocol_version: u8,
 ) {
     loop {
-        // Read next packet
-        match transport.lock().await.read_packet().await {
+        match transport.lock().await.read_packet(protocol_version).await {
             Ok(packet) => {
                 if let Err(e) =
                     handle_incoming_packet(packet, &transport, &session, &callback_manager).await
@@ -303,7 +303,6 @@ mod tests {
         let session = create_test_session();
         let callback_manager = Arc::new(CallbackManager::new());
 
-        // Create a QoS 0 publish
         let publish = PublishPacket {
             topic_name: "test/topic".to_string(),
             payload: b"test payload".to_vec(),
@@ -312,9 +311,8 @@ mod tests {
             dup: false,
             packet_id: None,
             properties: Properties::default(),
+            protocol_version: 5,
         };
-
-        // For QoS 0, no ack should be sent
         let result = handle_publish(publish, &transport, &session, &callback_manager).await;
 
         assert!(result.is_ok());
@@ -334,10 +332,8 @@ mod tests {
             dup: false,
             packet_id: Some(123),
             properties: Properties::default(),
+            protocol_version: 5,
         };
-
-        // Test would verify PUBACK is sent
-        // For now, just ensure the code compiles
         assert_eq!(publish.packet_id, Some(123));
     }
 
@@ -351,9 +347,8 @@ mod tests {
             dup: false,
             packet_id: Some(456),
             properties: Properties::default(),
+            protocol_version: 5,
         };
-
-        // Test would verify PUBREC is sent and state is stored
         assert_eq!(publish.packet_id, Some(456));
     }
 
@@ -361,7 +356,6 @@ mod tests {
     async fn test_handle_puback() {
         let session = create_test_session();
 
-        // Store an unacked publish
         let publish = PublishPacket {
             topic_name: "test".to_string(),
             payload: vec![],
@@ -370,6 +364,7 @@ mod tests {
             dup: false,
             packet_id: Some(100),
             properties: Properties::default(),
+            protocol_version: 5,
         };
         session
             .write()
@@ -452,7 +447,6 @@ mod tests {
             .await
             .unwrap();
 
-        // Create a matching publish
         let publish = PublishPacket {
             topic_name: "test/data".to_string(),
             payload: b"hello".to_vec(),
@@ -461,9 +455,8 @@ mod tests {
             dup: false,
             packet_id: None,
             properties: Properties::default(),
+            protocol_version: 5,
         };
-
-        // Route the message
         route_message(publish, &callback_manager).await;
 
         // Verify callback was invoked

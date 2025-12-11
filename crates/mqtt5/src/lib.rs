@@ -182,6 +182,8 @@ pub mod broker;
 pub mod callback;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod client;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod crypto;
 pub mod session;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod tasks;
@@ -198,10 +200,11 @@ pub use client::{
     ConnectionEvent, DisconnectReason, MockCall, MockMqttClient, MqttClient, MqttClientTrait,
 };
 pub use mqtt5_protocol::{
-    is_valid_client_id, is_valid_topic_filter, is_valid_topic_name, topic_matches_filter,
-    validate_client_id, validate_topic_filter, validate_topic_name, ConnectProperties,
-    ConnectResult, FixedHeader, Message, MessageProperties, MqttError, Packet, PacketType,
-    Properties, PropertyId, PropertyValue, PropertyValueType, PublishOptions, PublishProperties,
+    is_valid_client_id, is_valid_topic_filter, is_valid_topic_name, parse_shared_subscription,
+    strip_shared_subscription_prefix, topic_matches_filter, validate_client_id,
+    validate_topic_filter, validate_topic_name, ConnectProperties, ConnectResult, FixedHeader,
+    Message, MessageProperties, MqttError, Packet, PacketType, Properties, PropertyId,
+    PropertyValue, PropertyValueType, ProtocolVersion, PublishOptions, PublishProperties,
     PublishResult, QoS, RestrictiveValidator, Result, RetainHandling, StandardValidator,
     SubscribeOptions, TopicValidator, Transport, WillMessage, WillProperties,
 };

@@ -11,6 +11,8 @@ use mqtt5::packet::publish::PublishPacket;
 #[cfg(feature = "turmoil-testing")]
 use mqtt5::time::Duration;
 #[cfg(feature = "turmoil-testing")]
+use mqtt5::types::ProtocolVersion;
+#[cfg(feature = "turmoil-testing")]
 use mqtt5::QoS;
 #[cfg(feature = "turmoil-testing")]
 use std::collections::HashMap;
@@ -54,8 +56,10 @@ fn test_multi_client_message_routing() {
                 None,
                 false,
                 false,
+                ProtocolVersion::V5,
             )
-            .await;
+            .await
+            .unwrap();
 
         // Client 2: Subscribes to humidity sensors
         let (tx2, rx2) = mpsc::channel(100);
@@ -77,8 +81,10 @@ fn test_multi_client_message_routing() {
                 None,
                 false,
                 false,
+                ProtocolVersion::V5,
             )
-            .await;
+            .await
+            .unwrap();
 
         // Client 3: Subscribes to all sensors (wildcard)
         let (tx3, rx3) = mpsc::channel(100);
@@ -100,8 +106,10 @@ fn test_multi_client_message_routing() {
                 None,
                 false,
                 false,
+                ProtocolVersion::V5,
             )
-            .await;
+            .await
+            .unwrap();
 
         // Client 4: Subscribes to specific room only
         let (tx4, rx4) = mpsc::channel(100);
@@ -123,8 +131,10 @@ fn test_multi_client_message_routing() {
                 None,
                 false,
                 false,
+                ProtocolVersion::V5,
             )
-            .await;
+            .await
+            .unwrap();
 
         // Publish various sensor messages
         let messages = vec![
@@ -218,8 +228,10 @@ fn test_client_subscription_changes() {
                 None,
                 false,
                 false,
+                ProtocolVersion::V5,
             )
-            .await;
+            .await
+            .unwrap();
 
         // Send error alert
         let error_msg = PublishPacket::new(
@@ -255,8 +267,10 @@ fn test_client_subscription_changes() {
                 None,
                 false,
                 false,
+                ProtocolVersion::V5,
             )
-            .await;
+            .await
+            .unwrap();
 
         // Send both types of alerts again
         router.route_message(&error_msg, None).await;
@@ -308,8 +322,10 @@ fn test_message_ordering_with_multiple_clients() {
                 None,
                 false,
                 false,
+                ProtocolVersion::V5,
             )
-            .await;
+            .await
+            .unwrap();
 
         router
             .subscribe(
@@ -319,8 +335,10 @@ fn test_message_ordering_with_multiple_clients() {
                 None,
                 false,
                 false,
+                ProtocolVersion::V5,
             )
-            .await;
+            .await
+            .unwrap();
 
         // Send messages in sequence
         for i in 0..5 {

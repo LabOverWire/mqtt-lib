@@ -6,8 +6,10 @@
 use crate::broker::bridge::BridgeManager;
 use crate::broker::storage::{DynamicStorage, QueuedMessage, RetainedMessage, StorageBackend};
 use crate::packet::publish::PublishPacket;
-use crate::validation::topic_matches_filter;
+use crate::types::ProtocolVersion;
+use crate::validation::{parse_shared_subscription, topic_matches_filter};
 use crate::QoS;
+use crate::Result;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -34,11 +36,14 @@ pub struct Subscription {
     pub no_local: bool,
     /// Retain As Published option - if true, the retain flag is kept as-is when delivering
     pub retain_as_published: bool,
+    /// Protocol version of the subscriber
+    pub protocol_version: ProtocolVersion,
 }
 
 /// Message router for the broker
 pub struct MessageRouter {
-    subscriptions: Arc<RwLock<HashMap<String, Vec<Subscription>>>>,
+    exact_subscriptions: Arc<RwLock<HashMap<String, Vec<Subscription>>>>,
+    wildcard_subscriptions: Arc<RwLock<HashMap<String, Vec<Subscription>>>>,
     retained_messages: Arc<RwLock<HashMap<String, RetainedMessage>>>,
     clients: Arc<RwLock<HashMap<String, ClientInfo>>>,
     storage: Option<Arc<DynamicStorage>>,
@@ -63,7 +68,8 @@ impl MessageRouter {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            subscriptions: Arc::new(RwLock::new(HashMap::new())),
+            exact_subscriptions: Arc::new(RwLock::new(HashMap::new())),
+            wildcard_subscriptions: Arc::new(RwLock::new(HashMap::new())),
             retained_messages: Arc::new(RwLock::new(HashMap::new())),
             clients: Arc::new(RwLock::new(HashMap::new())),
             storage: None,
@@ -79,7 +85,8 @@ impl MessageRouter {
     #[must_use]
     pub fn with_storage(storage: Arc<DynamicStorage>) -> Self {
         Self {
-            subscriptions: Arc::new(RwLock::new(HashMap::new())),
+            exact_subscriptions: Arc::new(RwLock::new(HashMap::new())),
+            wildcard_subscriptions: Arc::new(RwLock::new(HashMap::new())),
             retained_messages: Arc::new(RwLock::new(HashMap::new())),
             clients: Arc::new(RwLock::new(HashMap::new())),
             storage: Some(storage),
@@ -89,6 +96,10 @@ impl MessageRouter {
             #[cfg(target_arch = "wasm32")]
             wasm_bridge_callback: Arc::new(RwLock::new(None)),
         }
+    }
+
+    fn has_wildcards(topic_filter: &str) -> bool {
+        topic_filter.contains('+') || topic_filter.contains('#')
     }
 
     /// Sets the bridge manager for this router
@@ -110,7 +121,7 @@ impl MessageRouter {
     ///
     /// # Errors
     /// Returns an error if the storage fails to load retained messages.
-    pub async fn initialize(&self) -> Result<(), crate::error::MqttError> {
+    pub async fn initialize(&self) -> Result<()> {
         if let Some(ref storage) = self.storage {
             // Load all retained messages from storage
             let stored_messages = storage.get_retained_messages("#").await?;
@@ -162,18 +173,30 @@ impl MessageRouter {
         let mut clients = self.clients.write().await;
         clients.remove(client_id);
 
-        // Remove all subscriptions for this client
-        let mut subscriptions = self.subscriptions.write().await;
-        for subs in subscriptions.values_mut() {
-            subs.retain(|sub| sub.client_id != client_id);
+        {
+            let mut exact = self.exact_subscriptions.write().await;
+            for subs in exact.values_mut() {
+                subs.retain(|sub| sub.client_id != client_id);
+            }
+            exact.retain(|_, subs| !subs.is_empty());
         }
 
-        // Clean up empty subscription lists
-        subscriptions.retain(|_, subs| !subs.is_empty());
+        {
+            let mut wildcard = self.wildcard_subscriptions.write().await;
+            for subs in wildcard.values_mut() {
+                subs.retain(|sub| sub.client_id != client_id);
+            }
+            wildcard.retain(|_, subs| !subs.is_empty());
+        }
 
         debug!("Unregistered client: {}", client_id);
     }
 
+    /// Adds a subscription for a client.
+    ///
+    /// # Errors
+    /// Returns an error if subscription registration fails.
+    #[allow(clippy::too_many_arguments)]
     pub async fn subscribe(
         &self,
         client_id: String,
@@ -182,14 +205,10 @@ impl MessageRouter {
         subscription_id: Option<u32>,
         no_local: bool,
         retain_as_published: bool,
-    ) -> bool {
-        let (actual_filter, share_group) = Self::parse_shared_subscription(&topic_filter);
-
-        let mut subscriptions = self.subscriptions.write().await;
-
-        let subs = subscriptions.entry(actual_filter.to_string()).or_default();
-
-        let existing_pos = subs.iter().position(|s| s.client_id == client_id);
+        protocol_version: ProtocolVersion,
+    ) -> Result<bool> {
+        let (actual_filter, share_group) = parse_shared_subscription(&topic_filter);
+        let share_group = share_group.map(str::to_string);
 
         let subscription = Subscription {
             client_id: client_id.clone(),
@@ -198,19 +217,44 @@ impl MessageRouter {
             share_group: share_group.clone(),
             no_local,
             retain_as_published,
+            protocol_version,
         };
 
-        let is_new = if let Some(pos) = existing_pos {
-            subs[pos] = subscription;
-            debug!(
-                "Client {} updated subscription to {}",
-                client_id, topic_filter
-            );
-            false
+        let is_new = if Self::has_wildcards(actual_filter) {
+            let mut wildcard = self.wildcard_subscriptions.write().await;
+            let subs = wildcard.entry(actual_filter.to_string()).or_default();
+            let existing_pos = subs.iter().position(|s| s.client_id == client_id);
+            if let Some(pos) = existing_pos {
+                subs[pos] = subscription;
+                debug!(
+                    "Client {} updated wildcard subscription to {}",
+                    client_id, topic_filter
+                );
+                false
+            } else {
+                subs.push(subscription);
+                debug!(
+                    "Client {} subscribed to wildcard {}",
+                    client_id, topic_filter
+                );
+                true
+            }
         } else {
-            subs.push(subscription);
-            debug!("Client {} subscribed to {}", client_id, topic_filter);
-            true
+            let mut exact = self.exact_subscriptions.write().await;
+            let subs = exact.entry(actual_filter.to_string()).or_default();
+            let existing_pos = subs.iter().position(|s| s.client_id == client_id);
+            if let Some(pos) = existing_pos {
+                subs[pos] = subscription;
+                debug!(
+                    "Client {} updated subscription to {}",
+                    client_id, topic_filter
+                );
+                false
+            } else {
+                subs.push(subscription);
+                debug!("Client {} subscribed to {}", client_id, topic_filter);
+                true
+            }
         };
 
         if let Some(group) = share_group {
@@ -220,38 +264,29 @@ impl MessageRouter {
                 .or_insert_with(|| Arc::new(AtomicUsize::new(0)));
         }
 
-        is_new
-    }
-
-    /// Parses a shared subscription topic filter
-    /// Returns (actual_topic_filter, Option<share_group_name>)
-    fn parse_shared_subscription(topic_filter: &str) -> (&str, Option<String>) {
-        if let Some(after_share) = topic_filter.strip_prefix("$share/") {
-            // Find the second '/' after $share/
-            if let Some(slash_pos) = after_share.find('/') {
-                let group_name = &after_share[..slash_pos];
-                let actual_filter = &after_share[slash_pos + 1..];
-                return (actual_filter, Some(group_name.to_string()));
-            }
-        }
-        (topic_filter, None)
+        Ok(is_new)
     }
 
     /// Removes a subscription for a client
     pub async fn unsubscribe(&self, client_id: &str, topic_filter: &str) -> bool {
-        let (actual_filter, _) = Self::parse_shared_subscription(topic_filter);
+        let (actual_filter, _) = parse_shared_subscription(topic_filter);
 
-        let mut subscriptions = self.subscriptions.write().await;
+        let subscriptions = if Self::has_wildcards(actual_filter) {
+            &self.wildcard_subscriptions
+        } else {
+            &self.exact_subscriptions
+        };
 
-        if let Some(subs) = subscriptions.get_mut(actual_filter) {
+        let mut subs_map = subscriptions.write().await;
+
+        if let Some(subs) = subs_map.get_mut(actual_filter) {
             let initial_len = subs.len();
             subs.retain(|sub| sub.client_id != client_id);
 
             let removed = initial_len != subs.len();
 
-            // Remove empty entries after calculating removed flag
             if subs.is_empty() {
-                subscriptions.remove(actual_filter);
+                subs_map.remove(actual_filter);
             }
             if removed {
                 debug!("Client {} unsubscribed from {}", client_id, topic_filter);
@@ -329,13 +364,24 @@ impl MessageRouter {
             }
         }
 
-        let subscriptions = self.subscriptions.read().await;
+        let exact = self.exact_subscriptions.read().await;
+        let wildcard = self.wildcard_subscriptions.read().await;
         let clients = self.clients.read().await;
 
         let mut share_groups: HashMap<String, Vec<&Subscription>> = HashMap::new();
         let mut regular_subs: Vec<&Subscription> = Vec::new();
 
-        for (topic_filter, subs) in subscriptions.iter() {
+        if let Some(subs) = exact.get(&publish.topic_name) {
+            for sub in subs {
+                if let Some(ref group) = sub.share_group {
+                    share_groups.entry(group.clone()).or_default().push(sub);
+                } else {
+                    regular_subs.push(sub);
+                }
+            }
+        }
+
+        for (topic_filter, subs) in wildcard.iter() {
             if topic_matches_filter(&publish.topic_name, topic_filter) {
                 for sub in subs {
                     if let Some(ref group) = sub.share_group {
@@ -445,7 +491,6 @@ impl MessageRouter {
         }
 
         if let Some(client_info) = clients.get(&sub.client_id) {
-            // Calculate effective QoS (minimum of publish and subscription QoS)
             let effective_qos = match (publish.qos, sub.qos) {
                 (QoS::AtMostOnce, _) | (_, QoS::AtMostOnce) => QoS::AtMostOnce,
                 (QoS::AtLeastOnce | QoS::ExactlyOnce, QoS::AtLeastOnce)
@@ -455,6 +500,17 @@ impl MessageRouter {
 
             let mut message = publish.clone();
             message.qos = effective_qos;
+            if publish.protocol_version == 5
+                && sub.protocol_version == ProtocolVersion::V311
+                && !publish.properties.is_empty()
+            {
+                trace!(
+                    topic = %publish.topic_name,
+                    client = %sub.client_id,
+                    "Stripping v5 properties for v3.1.1 subscriber"
+                );
+            }
+            message.protocol_version = sub.protocol_version.as_u8();
 
             if !sub.retain_as_published {
                 message.retain = false;
@@ -491,37 +547,40 @@ impl MessageRouter {
                     e
                 );
             }
-        } else {
-            // Client is offline, queue message if QoS > 0
-            if let Some(storage) = storage {
-                if sub.qos != QoS::AtMostOnce {
-                    let mut message = publish.clone();
-                    message.qos = sub.qos;
-
-                    let queued_msg = QueuedMessage::new(
-                        message,
-                        sub.client_id.clone(),
-                        sub.qos,
-                        None, // Will be assigned when delivered
+        } else if let Some(storage) = storage {
+            if sub.qos != QoS::AtMostOnce {
+                let mut message = publish.clone();
+                message.qos = sub.qos;
+                if publish.protocol_version == 5
+                    && sub.protocol_version == ProtocolVersion::V311
+                    && !publish.properties.is_empty()
+                {
+                    trace!(
+                        topic = %publish.topic_name,
+                        client = %sub.client_id,
+                        "Stripping v5 properties for queued message to v3.1.1 subscriber"
                     );
-                    if let Err(e) = storage.queue_message(queued_msg).await {
-                        error!(
-                            "Failed to queue message for offline client {}: {}",
-                            sub.client_id, e
-                        );
-                    } else {
-                        info!(
-                            "Queued message for offline client {} on topic {}",
-                            sub.client_id, publish.topic_name
-                        );
-                    }
                 }
-            } else {
-                debug!(
-                    "No storage configured, cannot queue message for offline client {}",
-                    sub.client_id
-                );
+                message.protocol_version = sub.protocol_version.as_u8();
+
+                let queued_msg = QueuedMessage::new(message, sub.client_id.clone(), sub.qos, None);
+                if let Err(e) = storage.queue_message(queued_msg).await {
+                    error!(
+                        "Failed to queue message for offline client {}: {}",
+                        sub.client_id, e
+                    );
+                } else {
+                    info!(
+                        "Queued message for offline client {} on topic {}",
+                        sub.client_id, publish.topic_name
+                    );
+                }
             }
+        } else {
+            debug!(
+                "No storage configured, cannot queue message for offline client {}",
+                sub.client_id
+            );
         }
     }
 
@@ -542,7 +601,9 @@ impl MessageRouter {
 
     /// Gets the number of unique topic filters with subscriptions
     pub async fn topic_count(&self) -> usize {
-        self.subscriptions.read().await.len()
+        let exact = self.exact_subscriptions.read().await;
+        let wildcard = self.wildcard_subscriptions.read().await;
+        exact.len() + wildcard.len()
     }
 
     /// Gets the number of retained messages
@@ -552,18 +613,30 @@ impl MessageRouter {
 
     /// Gets the number of subscriptions for a specific client
     pub async fn subscription_count_for_client(&self, client_id: &str) -> usize {
-        let subscriptions = self.subscriptions.read().await;
-        subscriptions
+        let exact = self.exact_subscriptions.read().await;
+        let wildcard = self.wildcard_subscriptions.read().await;
+        let exact_count = exact
             .values()
             .flat_map(|subs| subs.iter())
             .filter(|sub| sub.client_id == client_id)
-            .count()
+            .count();
+        let wildcard_count = wildcard
+            .values()
+            .flat_map(|subs| subs.iter())
+            .filter(|sub| sub.client_id == client_id)
+            .count();
+        exact_count + wildcard_count
     }
 
     pub async fn has_subscription(&self, client_id: &str, topic_filter: &str) -> bool {
-        let (actual_filter, _) = Self::parse_shared_subscription(topic_filter);
-        let subscriptions = self.subscriptions.read().await;
-        subscriptions
+        let (actual_filter, _) = parse_shared_subscription(topic_filter);
+        let subscriptions = if Self::has_wildcards(actual_filter) {
+            &self.wildcard_subscriptions
+        } else {
+            &self.exact_subscriptions
+        };
+        let subs_map = subscriptions.read().await;
+        subs_map
             .get(actual_filter)
             .is_some_and(|subs| subs.iter().any(|sub| sub.client_id == client_id))
     }
@@ -613,8 +686,10 @@ mod tests {
                 None,
                 false,
                 false,
+                ProtocolVersion::V5,
             )
-            .await;
+            .await
+            .unwrap();
 
         assert_eq!(router.topic_count().await, 1);
 
@@ -647,8 +722,10 @@ mod tests {
                 None,
                 false,
                 false,
+                ProtocolVersion::V5,
             )
-            .await;
+            .await
+            .unwrap();
         router
             .subscribe(
                 "client2".to_string(),
@@ -657,8 +734,10 @@ mod tests {
                 None,
                 false,
                 false,
+                ProtocolVersion::V5,
             )
-            .await;
+            .await
+            .unwrap();
 
         // Publish message
         let publish = PublishPacket::new("test/data", b"hello", QoS::ExactlyOnce);
@@ -701,21 +780,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_shared_subscription_parsing() {
-        let (filter, group) = MessageRouter::parse_shared_subscription("$share/group1/test/topic");
-        assert_eq!(filter, "test/topic");
-        assert_eq!(group, Some("group1".to_string()));
-
-        let (filter, group) = MessageRouter::parse_shared_subscription("test/topic");
-        assert_eq!(filter, "test/topic");
-        assert_eq!(group, None);
-
-        let (filter, group) = MessageRouter::parse_shared_subscription("$share/group/test/+/data");
-        assert_eq!(filter, "test/+/data");
-        assert_eq!(group, Some("group".to_string()));
-    }
-
-    #[tokio::test]
     async fn test_shared_subscription_round_robin() {
         let router = MessageRouter::new();
         let (tx1, mut rx1) = tokio::sync::mpsc::channel(100);
@@ -744,8 +808,10 @@ mod tests {
                 None,
                 false,
                 false,
+                ProtocolVersion::V5,
             )
-            .await;
+            .await
+            .unwrap();
         router
             .subscribe(
                 "client2".to_string(),
@@ -754,8 +820,10 @@ mod tests {
                 None,
                 false,
                 false,
+                ProtocolVersion::V5,
             )
-            .await;
+            .await
+            .unwrap();
         router
             .subscribe(
                 "client3".to_string(),
@@ -764,8 +832,10 @@ mod tests {
                 None,
                 false,
                 false,
+                ProtocolVersion::V5,
             )
-            .await;
+            .await
+            .unwrap();
 
         // Publish 6 messages
         for i in 0..6 {
@@ -823,8 +893,10 @@ mod tests {
                 None,
                 false,
                 false,
+                ProtocolVersion::V5,
             )
-            .await;
+            .await
+            .unwrap();
         router
             .subscribe(
                 "shared2".to_string(),
@@ -833,8 +905,10 @@ mod tests {
                 None,
                 false,
                 false,
+                ProtocolVersion::V5,
             )
-            .await;
+            .await
+            .unwrap();
 
         router
             .subscribe(
@@ -844,8 +918,10 @@ mod tests {
                 None,
                 false,
                 false,
+                ProtocolVersion::V5,
             )
-            .await;
+            .await
+            .unwrap();
 
         // Publish message
         let publish = PublishPacket::new("test/data", b"hello", QoS::AtMostOnce);

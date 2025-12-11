@@ -1344,9 +1344,10 @@ impl MqttClient {
         };
 
         let mut packet = SubscribePacket {
-            packet_id: 0, // Will be assigned in subscribe method
+            packet_id: 0,
             filters: vec![filter],
             properties: Properties::default(),
+            protocol_version: inner.options.protocol_version.as_u8(),
         };
 
         // Add subscription identifier if provided
@@ -1396,14 +1397,13 @@ impl MqttClient {
         let inner = self.inner.read().await;
         inner.callback_manager.unregister(&topic_filter).await?;
 
-        // Create unsubscribe packet
         let packet = UnsubscribePacket {
-            packet_id: 0, // Will be assigned in unsubscribe method
+            packet_id: 0,
             filters: vec![topic_filter.clone()],
             properties: Properties::default(),
+            protocol_version: inner.options.protocol_version.as_u8(),
         };
 
-        // Direct unsubscribe - no command channels!
         match inner.unsubscribe(packet).await {
             Ok(()) => {
                 tracing::info!(
@@ -1992,18 +1992,16 @@ impl MqttClient {
         inner.callback_manager.restore_callback(callback_id).await?;
         drop(inner);
 
-        // Create subscribe packet
+        let inner = self.inner.read().await;
         let packet = SubscribePacket {
-            packet_id: self.inner.read().await.packet_id_generator.next(),
+            packet_id: inner.packet_id_generator.next(),
             filters: vec![crate::packet::subscribe::TopicFilter {
                 filter: topic.to_string(),
                 options,
             }],
             properties: Properties::new(),
+            protocol_version: inner.options.protocol_version.as_u8(),
         };
-
-        // Send the subscribe packet with the callback ID
-        let inner = self.inner.read().await;
         inner.subscribe_with_callback(packet, callback_id).await?;
         Ok(())
     }

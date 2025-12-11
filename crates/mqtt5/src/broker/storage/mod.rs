@@ -57,6 +57,12 @@ pub struct StoredSubscription {
     pub retain_as_published: bool,
     pub retain_handling: u8,
     pub subscription_id: Option<u32>,
+    #[serde(default = "default_protocol_version")]
+    pub protocol_version: u8,
+}
+
+fn default_protocol_version() -> u8 {
+    5
 }
 
 impl StoredSubscription {
@@ -67,6 +73,7 @@ impl StoredSubscription {
             retain_as_published: false,
             retain_handling: 0,
             subscription_id: None,
+            protocol_version: 5,
         }
     }
 }

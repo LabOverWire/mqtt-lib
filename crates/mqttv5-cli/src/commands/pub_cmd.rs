@@ -2,7 +2,9 @@ use anyhow::{Context, Result};
 use clap::Args;
 use dialoguer::{Input, Select};
 use mqtt5::time::Duration;
-use mqtt5::{ConnectOptions, ConnectionEvent, MqttClient, PublishOptions, QoS, WillMessage};
+use mqtt5::{
+    ConnectOptions, ConnectionEvent, MqttClient, ProtocolVersion, PublishOptions, QoS, WillMessage,
+};
 use std::fs;
 use std::io::{self, Read};
 use std::path::PathBuf;
@@ -82,6 +84,10 @@ pub struct PubCommand {
     /// Keep alive interval in seconds
     #[arg(long, short = 'k', default_value = "60")]
     pub keep_alive: u16,
+
+    /// MQTT protocol version (3.1.1 or 5, default: 5)
+    #[arg(long, value_parser = parse_protocol_version)]
+    pub protocol_version: Option<ProtocolVersion>,
 
     /// Will topic (last will and testament)
     #[arg(long)]
@@ -173,6 +179,14 @@ fn parse_qos(s: &str) -> Result<QoS, String> {
         "1" => Ok(QoS::AtLeastOnce),
         "2" => Ok(QoS::ExactlyOnce),
         _ => Err(format!("QoS must be 0, 1, or 2, got: {s}")),
+    }
+}
+
+fn parse_protocol_version(s: &str) -> Result<ProtocolVersion, String> {
+    match s {
+        "3.1.1" | "311" | "4" => Ok(ProtocolVersion::V311),
+        "5" | "5.0" => Ok(ProtocolVersion::V5),
+        _ => Err(format!("Invalid protocol version: {s}. Use '3.1.1' or '5'")),
     }
 }
 
@@ -293,6 +307,10 @@ pub async fn execute(mut cmd: PubCommand, verbose: bool, debug: bool) -> Result<
 
     if cmd.auto_reconnect {
         options = options.with_automatic_reconnect(true);
+    }
+
+    if let Some(version) = cmd.protocol_version {
+        options = options.with_protocol_version(version);
     }
 
     // Add session expiry if specified

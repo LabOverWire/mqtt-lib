@@ -100,6 +100,12 @@ impl ConnectOptions {
         self.reconnect_config.max_attempts = attempts;
         self
     }
+
+    #[must_use]
+    pub fn with_protocol_version(mut self, version: mqtt5_protocol::ProtocolVersion) -> Self {
+        self.protocol_options = self.protocol_options.with_protocol_version(version);
+        self
+    }
 }
 
 impl Deref for ConnectOptions {
@@ -117,7 +123,7 @@ impl DerefMut for ConnectOptions {
 }
 
 pub use mqtt5_protocol::{
-    ConnectProperties, ConnectResult, Message, MessageProperties, PublishOptions,
+    ConnectProperties, ConnectResult, Message, MessageProperties, ProtocolVersion, PublishOptions,
     PublishProperties, PublishResult, RetainHandling, SubscribeOptions, WillMessage,
     WillProperties,
 };

@@ -12,6 +12,8 @@ pub struct UnsubAckPacket {
     pub reason_codes: Vec<UnsubAckReasonCode>,
     /// UNSUBACK properties (v5.0 only)
     pub properties: Properties,
+    /// Protocol version (4 = v3.1.1, 5 = v5.0)
+    pub protocol_version: u8,
 }
 
 /// UNSUBACK reason codes
@@ -58,13 +60,25 @@ impl UnsubAckReasonCode {
 }
 
 impl UnsubAckPacket {
-    /// Creates a new UNSUBACK packet
+    /// Creates a new UNSUBACK packet (v5.0)
     #[must_use]
     pub fn new(packet_id: u16) -> Self {
         Self {
             packet_id,
             reason_codes: Vec::new(),
             properties: Properties::default(),
+            protocol_version: 5,
+        }
+    }
+
+    /// Creates a new UNSUBACK packet for v3.1.1
+    #[must_use]
+    pub fn new_v311(packet_id: u16) -> Self {
+        Self {
+            packet_id,
+            reason_codes: Vec::new(),
+            properties: Properties::default(),
+            protocol_version: 4,
         }
     }
 
@@ -103,21 +117,20 @@ impl MqttPacket for UnsubAckPacket {
     }
 
     fn encode_body<B: BufMut>(&self, buf: &mut B) -> Result<()> {
-        // Variable header
         buf.put_u16(self.packet_id);
 
-        // Properties (v5.0)
-        self.properties.encode(buf)?;
+        if self.protocol_version == 5 {
+            self.properties.encode(buf)?;
 
-        // Payload - reason codes
-        if self.reason_codes.is_empty() {
-            return Err(MqttError::MalformedPacket(
-                "UNSUBACK packet must contain at least one reason code".to_string(),
-            ));
-        }
+            if self.reason_codes.is_empty() {
+                return Err(MqttError::MalformedPacket(
+                    "UNSUBACK packet must contain at least one reason code".to_string(),
+                ));
+            }
 
-        for code in &self.reason_codes {
-            buf.put_u8(*code as u8);
+            for code in &self.reason_codes {
+                buf.put_u8(*code as u8);
+            }
         }
 
         Ok(())
@@ -158,6 +171,7 @@ impl MqttPacket for UnsubAckPacket {
             packet_id,
             reason_codes,
             properties,
+            protocol_version: 5,
         })
     }
 }

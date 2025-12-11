@@ -32,12 +32,13 @@ pub use protocol::v5::properties::{Properties, PropertyId, PropertyValue, Proper
 pub use protocol::v5::reason_codes::ReasonCode;
 pub use transport::Transport;
 pub use types::{
-    ConnectOptions, ConnectProperties, ConnectResult, Message, MessageProperties, PublishOptions,
-    PublishProperties, PublishResult, QoS, RetainHandling, SubscribeOptions, WillMessage,
-    WillProperties,
+    ConnectOptions, ConnectProperties, ConnectResult, Message, MessageProperties, ProtocolVersion,
+    PublishOptions, PublishProperties, PublishResult, QoS, RetainHandling, SubscribeOptions,
+    WillMessage, WillProperties,
 };
 pub use validation::{
-    is_valid_client_id, is_valid_topic_filter, is_valid_topic_name, topic_matches_filter,
-    validate_client_id, validate_topic_filter, validate_topic_name, RestrictiveValidator,
-    StandardValidator, TopicValidator,
+    is_valid_client_id, is_valid_topic_filter, is_valid_topic_name, parse_shared_subscription,
+    strip_shared_subscription_prefix, topic_matches_filter, validate_client_id,
+    validate_topic_filter, validate_topic_name, RestrictiveValidator, StandardValidator,
+    TopicValidator,
 };

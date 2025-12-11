@@ -5,6 +5,44 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0] / [mqtt5-protocol 0.3.0] / [mqtt5-wasm 0.3.0] - 2025-12-07
+
+### Fixed
+
+- **WASM WebSocket** now sends `mqtt` subprotocol per spec [MQTT-6.0.0-3]
+- **QUIC stream frame transmission race condition** in `send_packet_on_stream()`
+  - Added `tokio::task::yield_now()` after `SendStream::finish()` to allow QUIC I/O driver to transmit frames
+  - Fixes issue where rapid sequential publishes could queue streams faster than transmission, causing data loss on disconnect
+
+### Changed
+
+- **Secure-first CLI authentication UX** following Mosquitto 2.0+/EMQX 5.0+ patterns
+  - `--allow-anonymous` no longer defaults to true
+  - Password file provided without flag → anonymous defaults to false (secure)
+  - Non-interactive mode without auth config → clear error with options
+  - Interactive mode without auth config → prompts user for decision
+  - Explicit `--allow-anonymous` flag works as before
+- ACK packet macro refactored to eliminate duplication using helper macros
+- bebytes updated from 2.10 to 2.11
+
+### Added
+
+- **MQTT v3.1.1 protocol support** for client, broker, and CLI
+  - Full backwards compatibility with MQTT v3.1.1 brokers and clients
+  - CLI `--protocol-version` flag accepts `3.1.1`, `v3.1.1`, `4`, `5.0`, `v5.0`, or `5`
+  - Broker accepts both v3.1.1 and v5.0 clients simultaneously
+  - WASM client supports `protocolVersion` option (4 for v3.1.1, 5 for v5.0)
+
+- **Cross-protocol interoperability** between v3.1.1 and v5.0 clients
+  - v3.1.1 clients can publish to v5.0 subscribers and vice versa
+  - Messages encoded with subscriber's protocol version (not publisher's)
+  - Subscription stores subscriber's protocol version for correct message delivery
+
+- **WASM callback properties** for MQTT5 request-response patterns
+  - JavaScript callbacks now receive `(topic, payload, properties)` instead of `(topic, payload)`
+  - `WasmMessageProperties` struct exposes: `responseTopic`, `correlationData`, `contentType`, `payloadFormatIndicator`, `messageExpiryInterval`, `subscriptionIdentifiers`, `getUserProperties()`
+  - Enables request-response patterns with correlation data echo and dynamic response topics
+
 ## [0.11.4] / [mqtt5-protocol 0.2.1] - 2025-12-04
 
 ### Fixed

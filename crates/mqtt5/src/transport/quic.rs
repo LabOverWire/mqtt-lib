@@ -1,3 +1,4 @@
+use crate::crypto::NoVerification;
 use crate::error::{MqttError, Result};
 use crate::time::Duration;
 use crate::transport::flow::FlowFlags;
@@ -6,66 +7,11 @@ use crate::Transport;
 use bytes::{BufMut, BytesMut};
 use mqtt5_protocol::packet::{FixedHeader, Packet, PacketType};
 use quinn::{ClientConfig, Connection, Endpoint, RecvStream, SendStream};
-use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
-use rustls::{
-    ClientConfig as RustlsClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme,
-};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls::{ClientConfig as RustlsClientConfig, RootCertStore};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tracing::{debug, instrument};
-
-#[derive(Debug)]
-struct NoVerification;
-
-impl ServerCertVerifier for NoVerification {
-    fn verify_server_cert(
-        &self,
-        _end_entity: &CertificateDer<'_>,
-        _intermediates: &[CertificateDer<'_>],
-        _server_name: &ServerName<'_>,
-        _ocsp_response: &[u8],
-        _now: UnixTime,
-    ) -> std::result::Result<ServerCertVerified, rustls::Error> {
-        Ok(ServerCertVerified::assertion())
-    }
-
-    fn verify_tls12_signature(
-        &self,
-        _message: &[u8],
-        _cert: &CertificateDer<'_>,
-        _dss: &DigitallySignedStruct,
-    ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
-        Ok(HandshakeSignatureValid::assertion())
-    }
-
-    fn verify_tls13_signature(
-        &self,
-        _message: &[u8],
-        _cert: &CertificateDer<'_>,
-        _dss: &DigitallySignedStruct,
-    ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
-        Ok(HandshakeSignatureValid::assertion())
-    }
-
-    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        vec![
-            SignatureScheme::RSA_PKCS1_SHA1,
-            SignatureScheme::ECDSA_SHA1_Legacy,
-            SignatureScheme::RSA_PKCS1_SHA256,
-            SignatureScheme::ECDSA_NISTP256_SHA256,
-            SignatureScheme::RSA_PKCS1_SHA384,
-            SignatureScheme::ECDSA_NISTP384_SHA384,
-            SignatureScheme::RSA_PKCS1_SHA512,
-            SignatureScheme::ECDSA_NISTP521_SHA512,
-            SignatureScheme::RSA_PSS_SHA256,
-            SignatureScheme::RSA_PSS_SHA384,
-            SignatureScheme::RSA_PSS_SHA512,
-            SignatureScheme::ED25519,
-            SignatureScheme::ED448,
-        ]
-    }
-}
 
 // [MQoQ§5] Multi-stream modes
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -456,7 +402,7 @@ impl Transport for QuicTransport {
 
 // [MQTT5§2] Fixed header parsing
 impl PacketReader for RecvStream {
-    async fn read_packet(&mut self) -> Result<Packet> {
+    async fn read_packet(&mut self, protocol_version: u8) -> Result<Packet> {
         let mut header_buf = BytesMut::with_capacity(5);
 
         let mut byte = [0u8; 1];
@@ -510,8 +456,12 @@ impl PacketReader for RecvStream {
         }
 
         let mut payload_buf = BytesMut::from(&payload[..]);
-        let packet =
-            Packet::decode_from_body(fixed_header.packet_type, &fixed_header, &mut payload_buf)?;
+        let packet = Packet::decode_from_body_with_version(
+            fixed_header.packet_type,
+            &fixed_header,
+            &mut payload_buf,
+            protocol_version,
+        )?;
         debug!(
             packet_type = ?fixed_header.packet_type,
             packet_size = fixed_header.remaining_length,

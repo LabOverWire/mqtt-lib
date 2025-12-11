@@ -59,6 +59,7 @@ fn publish_packet(packet_id: u16, qos: QoS) -> PublishPacket {
         },
         properties: Properties::default(),
         payload: vec![1, 2, 3, 4],
+        protocol_version: 5,
     }
 }
 
@@ -629,6 +630,7 @@ mod retained_message_tests {
                         packet_id: Some((i as u16) + 1),
                         properties: Properties::default(),
                         payload: vec![i as u8],
+                        protocol_version: 5,
                     };
                     session.store_retained_message(&packet).await;
                 }
@@ -650,6 +652,7 @@ mod retained_message_tests {
                         packet_id: None,
                         properties: Properties::default(),
                         payload: vec![],
+                        protocol_version: 5,
                     };
                     session.store_retained_message(&clear_packet).await;
 
@@ -684,6 +687,7 @@ mod retained_message_tests {
                         packet_id: Some((i as u16) + 1),
                         properties: Properties::default(),
                         payload: vec![i as u8],
+                        protocol_version: 5,
                     };
                     session.store_retained_message(&packet).await;
                 }

@@ -10,6 +10,8 @@ use mqtt5::packet::publish::PublishPacket;
 #[cfg(feature = "turmoil-testing")]
 use mqtt5::time::Duration;
 #[cfg(feature = "turmoil-testing")]
+use mqtt5::types::ProtocolVersion;
+#[cfg(feature = "turmoil-testing")]
 use mqtt5::QoS;
 #[cfg(feature = "turmoil-testing")]
 use std::sync::Arc;
@@ -41,8 +43,10 @@ fn test_basic_publish_subscribe() {
                 None,
                 false,
                 false,
+                ProtocolVersion::V5,
             )
-            .await;
+            .await
+            .unwrap();
 
         // Publish a message
         let publish =
@@ -99,8 +103,10 @@ fn test_wildcard_subscriptions() {
                 None,
                 false,
                 false,
+                ProtocolVersion::V5,
             )
-            .await;
+            .await
+            .unwrap();
 
         // Multi-level wildcard subscription
         router
@@ -111,8 +117,10 @@ fn test_wildcard_subscriptions() {
                 None,
                 false,
                 false,
+                ProtocolVersion::V5,
             )
-            .await;
+            .await
+            .unwrap();
 
         // Publish messages to various topics
         let topics_and_payloads = vec![
@@ -207,8 +215,10 @@ fn test_multiple_subscribers_same_topic() {
                     None,
                     false,
                     false,
+                    ProtocolVersion::V5,
                 )
-                .await;
+                .await
+                .unwrap();
         }
 
         // Publish multiple messages
@@ -280,8 +290,10 @@ fn test_qos_levels() {
                 None,
                 false,
                 false,
+                ProtocolVersion::V5,
             )
-            .await;
+            .await
+            .unwrap();
 
         router
             .subscribe(
@@ -291,8 +303,10 @@ fn test_qos_levels() {
                 None,
                 false,
                 false,
+                ProtocolVersion::V5,
             )
-            .await;
+            .await
+            .unwrap();
 
         // Publish with different QoS levels
         let qos0_msg =
@@ -350,8 +364,10 @@ fn test_unsubscribe_functionality() {
                 None,
                 false,
                 false,
+                ProtocolVersion::V5,
             )
-            .await;
+            .await
+            .unwrap();
 
         // Publish first message
         let msg1 = PublishPacket::new(

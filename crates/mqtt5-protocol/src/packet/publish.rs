@@ -3,6 +3,7 @@ use crate::error::{MqttError, Result};
 use crate::flags::PublishFlags;
 use crate::packet::{FixedHeader, MqttPacket, PacketType};
 use crate::protocol::v5::properties::{Properties, PropertyId, PropertyValue};
+use crate::types::ProtocolVersion;
 use crate::QoS;
 use bytes::{Buf, BufMut};
 
@@ -23,16 +24,18 @@ pub struct PublishPacket {
     pub dup: bool,
     /// PUBLISH properties (v5.0 only)
     pub properties: Properties,
+    /// Protocol version (4 = v3.1.1, 5 = v5.0)
+    pub protocol_version: u8,
 }
 
 impl PublishPacket {
-    /// Creates a new PUBLISH packet
+    /// Creates a new PUBLISH packet (v5.0)
     #[must_use]
     pub fn new(topic_name: impl Into<String>, payload: impl Into<Vec<u8>>, qos: QoS) -> Self {
         let packet_id = if qos == QoS::AtMostOnce {
             None
         } else {
-            Some(0) // Will be assigned by the client
+            Some(0)
         };
 
         Self {
@@ -43,6 +46,28 @@ impl PublishPacket {
             retain: false,
             dup: false,
             properties: Properties::default(),
+            protocol_version: 5,
+        }
+    }
+
+    /// Creates a new PUBLISH packet for v3.1.1
+    #[must_use]
+    pub fn new_v311(topic_name: impl Into<String>, payload: impl Into<Vec<u8>>, qos: QoS) -> Self {
+        let packet_id = if qos == QoS::AtMostOnce {
+            None
+        } else {
+            Some(0)
+        };
+
+        Self {
+            topic_name: topic_name.into(),
+            packet_id,
+            payload: payload.into(),
+            qos,
+            retain: false,
+            dup: false,
+            properties: Properties::default(),
+            protocol_version: 4,
         }
     }
 
@@ -176,10 +201,8 @@ impl MqttPacket for PublishPacket {
     }
 
     fn encode_body<B: BufMut>(&self, buf: &mut B) -> Result<()> {
-        // Variable header
         encode_string(buf, &self.topic_name)?;
 
-        // Packet identifier (only for QoS > 0)
         if self.qos != QoS::AtMostOnce {
             let packet_id = self.packet_id.ok_or_else(|| {
                 MqttError::MalformedPacket("Packet ID required for QoS > 0".to_string())
@@ -187,18 +210,34 @@ impl MqttPacket for PublishPacket {
             buf.put_u16(packet_id);
         }
 
-        // Properties (v5.0 - always encode for v5.0)
-        // For v3.1.1 compatibility, we'd skip this
-        self.properties.encode(buf)?;
+        if self.protocol_version == 5 {
+            self.properties.encode(buf)?;
+        }
 
-        // Payload
         buf.put_slice(&self.payload);
 
         Ok(())
     }
 
     fn decode_body<B: Buf>(buf: &mut B, fixed_header: &FixedHeader) -> Result<Self> {
-        // Parse flags using BeBytes decomposition
+        Self::decode_body_with_version(buf, fixed_header, 5)
+    }
+}
+
+impl PublishPacket {
+    /// Decodes the packet body with a specific protocol version
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if decoding fails
+    pub fn decode_body_with_version<B: Buf>(
+        buf: &mut B,
+        fixed_header: &FixedHeader,
+        protocol_version: u8,
+    ) -> Result<Self> {
+        ProtocolVersion::try_from(protocol_version)
+            .map_err(|()| MqttError::UnsupportedProtocolVersion)?;
+
         let flags = PublishFlags::decompose(fixed_header.flags);
         let dup = flags.contains(&PublishFlags::Dup);
         let qos_val = PublishFlags::extract_qos(fixed_header.flags);
@@ -213,10 +252,8 @@ impl MqttPacket for PublishPacket {
             }
         };
 
-        // Variable header
         let topic_name = decode_string(buf)?;
 
-        // Packet identifier (only for QoS > 0)
         let packet_id = if qos == QoS::AtMostOnce {
             None
         } else {
@@ -228,25 +265,12 @@ impl MqttPacket for PublishPacket {
             Some(buf.get_u16())
         };
 
-        // Properties (v5.0)
-        // Always try to decode properties first
-        let properties = if buf.has_remaining() {
-            match Properties::decode(buf) {
-                Ok(props) => props,
-                Err(_) => {
-                    // If properties decode fails, it might be v3.1.1 format
-                    // In v3.1.1, there are no properties
-                    return Err(MqttError::MalformedPacket(
-                        "Failed to decode PUBLISH properties".to_string(),
-                    ));
-                }
-            }
+        let properties = if protocol_version == 5 {
+            Properties::decode(buf)?
         } else {
-            // No properties means empty properties in v5.0
             Properties::default()
         };
 
-        // Payload - all remaining bytes
         let payload = buf.copy_to_bytes(buf.remaining()).to_vec();
 
         Ok(Self {
@@ -257,6 +281,7 @@ impl MqttPacket for PublishPacket {
             retain,
             dup,
             properties,
+            protocol_version,
         })
     }
 }

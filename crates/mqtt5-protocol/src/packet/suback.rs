@@ -1,6 +1,7 @@
 use crate::error::{MqttError, Result};
 use crate::packet::{FixedHeader, MqttPacket, PacketType};
 use crate::protocol::v5::properties::Properties;
+use crate::types::ProtocolVersion;
 use crate::QoS;
 use bytes::{Buf, BufMut};
 
@@ -13,6 +14,8 @@ pub struct SubAckPacket {
     pub reason_codes: Vec<SubAckReasonCode>,
     /// SUBACK properties (v5.0 only)
     pub properties: Properties,
+    /// Protocol version (4 = v3.1.1, 5 = v5.0)
+    pub protocol_version: u8,
 }
 
 /// SUBACK reason codes
@@ -98,13 +101,34 @@ impl SubAckReasonCode {
 }
 
 impl SubAckPacket {
-    /// Creates a new SUBACK packet
+    /// Creates a new SUBACK packet (v5.0)
     #[must_use]
     pub fn new(packet_id: u16) -> Self {
         Self {
             packet_id,
             reason_codes: Vec::new(),
             properties: Properties::default(),
+            protocol_version: 5,
+        }
+    }
+
+    /// Creates a new SUBACK packet for v3.1.1
+    #[must_use]
+    pub fn new_v311(packet_id: u16) -> Self {
+        Self {
+            packet_id,
+            reason_codes: Vec::new(),
+            properties: Properties::default(),
+            protocol_version: 4,
+        }
+    }
+
+    fn reason_code_to_v311(code: SubAckReasonCode) -> u8 {
+        match code {
+            SubAckReasonCode::GrantedQoS0 => 0x00,
+            SubAckReasonCode::GrantedQoS1 => 0x01,
+            SubAckReasonCode::GrantedQoS2 => 0x02,
+            _ => 0x80,
         }
     }
 
@@ -143,28 +167,50 @@ impl MqttPacket for SubAckPacket {
     }
 
     fn encode_body<B: BufMut>(&self, buf: &mut B) -> Result<()> {
-        // Variable header
         buf.put_u16(self.packet_id);
 
-        // Properties (v5.0)
-        self.properties.encode(buf)?;
+        if self.protocol_version == 5 {
+            self.properties.encode(buf)?;
+        }
 
-        // Payload - reason codes
         if self.reason_codes.is_empty() {
             return Err(MqttError::MalformedPacket(
                 "SUBACK packet must contain at least one reason code".to_string(),
             ));
         }
 
-        for code in &self.reason_codes {
-            buf.put_u8(*code as u8);
+        if self.protocol_version == 5 {
+            for code in &self.reason_codes {
+                buf.put_u8(*code as u8);
+            }
+        } else {
+            for code in &self.reason_codes {
+                buf.put_u8(Self::reason_code_to_v311(*code));
+            }
         }
 
         Ok(())
     }
 
-    fn decode_body<B: Buf>(buf: &mut B, _fixed_header: &FixedHeader) -> Result<Self> {
-        // Packet identifier
+    fn decode_body<B: Buf>(buf: &mut B, fixed_header: &FixedHeader) -> Result<Self> {
+        Self::decode_body_with_version(buf, fixed_header, 5)
+    }
+}
+
+impl SubAckPacket {
+    /// Decodes the packet body with a specific protocol version
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if decoding fails
+    pub fn decode_body_with_version<B: Buf>(
+        buf: &mut B,
+        _fixed_header: &FixedHeader,
+        protocol_version: u8,
+    ) -> Result<Self> {
+        ProtocolVersion::try_from(protocol_version)
+            .map_err(|()| MqttError::UnsupportedProtocolVersion)?;
+
         if buf.remaining() < 2 {
             return Err(MqttError::MalformedPacket(
                 "SUBACK missing packet identifier".to_string(),
@@ -172,10 +218,12 @@ impl MqttPacket for SubAckPacket {
         }
         let packet_id = buf.get_u16();
 
-        // Properties (v5.0)
-        let properties = Properties::decode(buf)?;
+        let properties = if protocol_version == 5 {
+            Properties::decode(buf)?
+        } else {
+            Properties::default()
+        };
 
-        // Payload - reason codes
         let mut reason_codes = Vec::new();
 
         if !buf.has_remaining() {
@@ -196,6 +244,7 @@ impl MqttPacket for SubAckPacket {
             packet_id,
             reason_codes,
             properties,
+            protocol_version,
         })
     }
 }

@@ -1,4 +1,6 @@
-use crate::config::{WasmConnectOptions, WasmPublishOptions, WasmSubscribeOptions};
+use crate::config::{
+    WasmConnectOptions, WasmMessageProperties, WasmPublishOptions, WasmSubscribeOptions,
+};
 use crate::decoder::read_packet;
 use crate::transport::{WasmReader, WasmTransportType, WasmWriter};
 use bytes::BytesMut;
@@ -8,6 +10,7 @@ use mqtt5_protocol::packet::subscribe::SubscribePacket;
 use mqtt5_protocol::packet::unsubscribe::UnsubscribePacket;
 use mqtt5_protocol::packet::{MqttPacket, Packet};
 use mqtt5_protocol::protocol::v5::properties::Properties;
+use mqtt5_protocol::strip_shared_subscription_prefix;
 use mqtt5_protocol::QoS;
 use mqtt5_protocol::Transport;
 use std::cell::RefCell;
@@ -45,6 +48,7 @@ struct ClientState {
     writer: Option<Rc<RefCell<WasmWriter>>>,
     packet_id: u16,
     connected: bool,
+    protocol_version: u8,
     subscriptions: HashMap<String, js_sys::Function>,
     rust_subscriptions: HashMap<String, RustCallback>,
     pending_subacks: HashMap<u16, js_sys::Function>,
@@ -69,6 +73,7 @@ impl ClientState {
             writer: None,
             packet_id: 0,
             connected: false,
+            protocol_version: 5,
             subscriptions: HashMap::new(),
             rust_subscriptions: HashMap::new(),
             pending_subacks: HashMap::new(),
@@ -372,11 +377,14 @@ impl WasmMqttClient {
                                             let topic_js = JsValue::from_str(&topic);
                                             let payload_array =
                                                 js_sys::Uint8Array::from(&payload[..]);
+                                            let props_js: WasmMessageProperties =
+                                                properties.clone().into();
 
-                                            if let Err(e) = callback.call2(
+                                            if let Err(e) = callback.call3(
                                                 &JsValue::NULL,
                                                 &topic_js,
                                                 &payload_array.into(),
+                                                &props_js.into(),
                                             ) {
                                                 web_sys::console::error_1(
                                                     &format!("Callback error: {:?}", e).into(),
@@ -452,10 +460,14 @@ impl WasmMqttClient {
                         if mqtt5_protocol::validation::topic_matches_filter(&topic, filter) {
                             let topic_js = JsValue::from_str(&topic);
                             let payload_array = js_sys::Uint8Array::from(&payload[..]);
+                            let props_js: WasmMessageProperties = properties.clone().into();
 
-                            if let Err(e) =
-                                callback.call2(&JsValue::NULL, &topic_js, &payload_array.into())
-                            {
+                            if let Err(e) = callback.call3(
+                                &JsValue::NULL,
+                                &topic_js,
+                                &payload_array.into(),
+                                &props_js.into(),
+                            ) {
                                 web_sys::console::error_1(
                                     &format!("Callback error: {:?}", e).into(),
                                 );
@@ -760,8 +772,13 @@ impl WasmMqttClient {
             .map_err(|e| JsValue::from_str(&format!("Transport connection failed: {}", e)))?;
 
         let client_id = self.state.borrow().client_id.clone();
+        let protocol_version = config.protocol_version;
 
-        self.state.borrow_mut().keep_alive = config.keep_alive;
+        {
+            let mut state = self.state.borrow_mut();
+            state.keep_alive = config.keep_alive;
+            state.protocol_version = protocol_version;
+        }
 
         let (will, will_properties) = if let Some(will_config) = &config.will {
             let will_msg = will_config.to_will_message();
@@ -771,15 +788,21 @@ impl WasmMqttClient {
             (None, Properties::default())
         };
 
+        let (properties, will_properties) = if protocol_version == 5 {
+            (config.to_properties(), will_properties)
+        } else {
+            (Properties::default(), Properties::default())
+        };
+
         let connect_packet = ConnectPacket {
-            protocol_version: 5,
+            protocol_version,
             clean_start: config.clean_start,
             keep_alive: config.keep_alive,
             client_id,
             username: config.username.clone(),
             password: config.password.clone(),
             will,
-            properties: config.to_properties(),
+            properties,
             will_properties,
         };
 
@@ -899,6 +922,7 @@ impl WasmMqttClient {
             }
         }
 
+        let protocol_version = self.state.borrow().protocol_version;
         let publish_packet = PublishPacket {
             dup: false,
             qos: QoS::AtMostOnce,
@@ -907,6 +931,7 @@ impl WasmMqttClient {
             packet_id: None,
             properties: Properties::default(),
             payload: payload.to_vec(),
+            protocol_version,
         };
 
         let packet = Packet::Publish(publish_packet);
@@ -981,14 +1006,21 @@ impl WasmMqttClient {
             }
         }
 
+        let protocol_version = self.state.borrow().protocol_version;
+        let properties = if protocol_version == 5 {
+            options.to_properties()
+        } else {
+            Properties::default()
+        };
         let publish_packet = PublishPacket {
             dup: false,
             qos,
             retain: options.retain,
             topic_name: topic.to_string(),
             packet_id,
-            properties: options.to_properties(),
+            properties,
             payload: payload.to_vec(),
+            protocol_version,
         };
 
         let packet = Packet::Publish(publish_packet);
@@ -1052,6 +1084,7 @@ impl WasmMqttClient {
             }
         }
 
+        let protocol_version = self.state.borrow().protocol_version;
         let publish_packet = PublishPacket {
             dup: false,
             qos: QoS::AtLeastOnce,
@@ -1060,6 +1093,7 @@ impl WasmMqttClient {
             packet_id: Some(packet_id),
             properties: Properties::default(),
             payload: payload.to_vec(),
+            protocol_version,
         };
 
         let packet = Packet::Publish(publish_packet);
@@ -1124,6 +1158,7 @@ impl WasmMqttClient {
             }
         }
 
+        let protocol_version = self.state.borrow().protocol_version;
         let publish_packet = PublishPacket {
             dup: false,
             qos: QoS::ExactlyOnce,
@@ -1132,6 +1167,7 @@ impl WasmMqttClient {
             packet_id: Some(packet_id),
             properties: Properties::default(),
             payload: payload.to_vec(),
+            protocol_version,
         };
 
         let packet = Packet::Publish(publish_packet);
@@ -1178,6 +1214,7 @@ impl WasmMqttClient {
             }
         };
 
+        let protocol_version = self.state.borrow().protocol_version;
         let subscribe_packet = SubscribePacket {
             packet_id,
             properties: Properties::default(),
@@ -1185,6 +1222,7 @@ impl WasmMqttClient {
                 topic,
                 QoS::AtMostOnce,
             )],
+            protocol_version,
         };
 
         let packet = Packet::Subscribe(subscribe_packet);
@@ -1239,7 +1277,10 @@ impl WasmMqttClient {
         loop {
             match self.state.try_borrow_mut() {
                 Ok(mut state) => {
-                    state.subscriptions.insert(topic.to_string(), callback);
+                    let actual_filter = strip_shared_subscription_prefix(topic);
+                    state
+                        .subscriptions
+                        .insert(actual_filter.to_string(), callback);
                     break;
                 }
                 Err(_) => {
@@ -1273,10 +1314,17 @@ impl WasmMqttClient {
             }
         }
 
+        let protocol_version = self.state.borrow().protocol_version;
+        let properties = if protocol_version == 5 {
+            properties
+        } else {
+            Properties::default()
+        };
         let subscribe_packet = SubscribePacket {
             packet_id,
             properties,
             filters: vec![topic_filter],
+            protocol_version,
         };
 
         let packet = Packet::Subscribe(subscribe_packet);
@@ -1330,7 +1378,10 @@ impl WasmMqttClient {
         loop {
             match self.state.try_borrow_mut() {
                 Ok(mut state) => {
-                    state.subscriptions.insert(topic.to_string(), callback);
+                    let actual_filter = strip_shared_subscription_prefix(topic);
+                    state
+                        .subscriptions
+                        .insert(actual_filter.to_string(), callback);
                     break;
                 }
                 Err(_) => {
@@ -1339,6 +1390,7 @@ impl WasmMqttClient {
             }
         }
 
+        let protocol_version = self.state.borrow().protocol_version;
         let subscribe_packet = SubscribePacket {
             packet_id,
             properties: Properties::default(),
@@ -1346,6 +1398,7 @@ impl WasmMqttClient {
                 topic,
                 QoS::AtMostOnce,
             )],
+            protocol_version,
         };
 
         let packet = Packet::Subscribe(subscribe_packet);
@@ -1404,10 +1457,12 @@ impl WasmMqttClient {
             }
         }
 
+        let protocol_version = self.state.borrow().protocol_version;
         let unsubscribe_packet = UnsubscribePacket {
             packet_id,
             properties: Properties::default(),
             filters: vec![topic.to_string()],
+            protocol_version,
         };
 
         let packet = Packet::Unsubscribe(unsubscribe_packet);
@@ -1569,9 +1624,10 @@ impl WasmMqttClient {
         loop {
             match self.state.try_borrow_mut() {
                 Ok(mut state) => {
+                    let actual_filter = strip_shared_subscription_prefix(topic);
                     state
                         .rust_subscriptions
-                        .insert(topic.to_string(), Rc::new(callback));
+                        .insert(actual_filter.to_string(), Rc::new(callback));
                     break;
                 }
                 Err(_) => {
@@ -1583,12 +1639,14 @@ impl WasmMqttClient {
         let mut options = mqtt5_protocol::packet::subscribe::SubscriptionOptions::new(qos);
         options.no_local = no_local;
 
+        let protocol_version = self.state.borrow().protocol_version;
         let subscribe_packet = SubscribePacket {
             packet_id,
             properties: Properties::default(),
             filters: vec![
                 mqtt5_protocol::packet::subscribe::TopicFilter::with_options(topic, options),
             ],
+            protocol_version,
         };
 
         let packet = Packet::Subscribe(subscribe_packet);

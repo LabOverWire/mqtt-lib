@@ -4,6 +4,7 @@ use mqtt5::broker::bridge::{BridgeConfig, BridgeDirection, BridgeManager};
 use mqtt5::broker::router::MessageRouter;
 use mqtt5::packet::publish::PublishPacket;
 use mqtt5::time::Duration;
+use mqtt5::types::ProtocolVersion;
 use mqtt5::QoS;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -87,8 +88,10 @@ async fn test_bridge_message_routing() {
             None,
             false,
             false,
+            ProtocolVersion::V5,
         )
-        .await;
+        .await
+        .unwrap();
 
     // Create and route a message
     let packet = PublishPacket::new("test/topic".to_string(), b"test message", QoS::AtMostOnce);

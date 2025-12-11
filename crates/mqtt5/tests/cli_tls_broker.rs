@@ -26,6 +26,7 @@ async fn test_cli_broker_tls_starts() {
             "../../test_certs/server.pem",
             "--tls-key",
             "../../test_certs/server.key",
+            "--allow-anonymous",
             "--non-interactive",
         ])
         .stdout(std::process::Stdio::piped())
@@ -93,6 +94,7 @@ async fn test_cli_broker_tls_listens() {
             "../../test_certs/server.key",
             "--tls-host",
             "127.0.0.1:28883", // Use different port to avoid conflicts
+            "--allow-anonymous",
             "--verbose",
             "--non-interactive",
         ])

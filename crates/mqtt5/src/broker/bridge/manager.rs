@@ -41,7 +41,6 @@ impl BridgeManager {
     pub async fn add_bridge(&self, config: BridgeConfig) -> Result<()> {
         let name = config.name.clone();
 
-        // Check if bridge already exists
         if self.bridges.read().await.contains_key(&name) {
             return Err(BridgeError::ConfigurationError(format!(
                 "Bridge '{}' already exists",
@@ -49,13 +48,10 @@ impl BridgeManager {
             )));
         }
 
-        // Create bridge connection
         let bridge = Arc::new(BridgeConnection::new(config, self.router.clone())?);
 
-        // Start the bridge
         Box::pin(bridge.start()).await?;
 
-        // Spawn bridge task
         let bridge_clone = bridge.clone();
         let task = tokio::spawn(async move {
             if let Err(e) = Box::pin(bridge_clone.run()).await {
@@ -63,11 +59,10 @@ impl BridgeManager {
             }
         });
 
-        // Store bridge and task
-        self.bridges.write().await.insert(name.clone(), bridge);
-        self.tasks.write().await.insert(name.clone(), task);
+        let task_name = name.clone();
+        self.bridges.write().await.insert(name, bridge);
+        self.tasks.write().await.insert(task_name, task);
 
-        info!("Added bridge '{}'", name);
         Ok(())
     }
 
@@ -112,12 +107,17 @@ impl BridgeManager {
             return Ok(());
         }
 
-        // Forward to all bridges
-        let bridges = self.bridges.read().await;
-        for (name, bridge) in bridges.iter() {
+        let bridge_list: Vec<_> = {
+            let bridges = self.bridges.read().await;
+            bridges
+                .iter()
+                .map(|(name, bridge)| (name.clone(), bridge.clone()))
+                .collect()
+        };
+
+        for (name, bridge) in bridge_list {
             if let Err(e) = bridge.forward_message(packet).await {
                 error!("Bridge '{}' failed to forward message: {}", name, e);
-                // Continue with other bridges even if one fails
             }
         }
 
@@ -126,20 +126,28 @@ impl BridgeManager {
 
     /// Gets statistics for all bridges
     pub async fn get_all_stats(&self) -> HashMap<String, BridgeStats> {
+        let bridge_list: Vec<_> = {
+            let bridges = self.bridges.read().await;
+            bridges
+                .iter()
+                .map(|(name, bridge)| (name.clone(), bridge.clone()))
+                .collect()
+        };
+
         let mut stats = HashMap::new();
-        let bridges = self.bridges.read().await;
-
-        for (name, bridge) in bridges.iter() {
-            stats.insert(name.clone(), bridge.get_stats().await);
+        for (name, bridge) in bridge_list {
+            stats.insert(name, bridge.get_stats().await);
         }
-
         stats
     }
 
     /// Gets statistics for a specific bridge
     pub async fn get_bridge_stats(&self, name: &str) -> Option<BridgeStats> {
-        let bridges = self.bridges.read().await;
-        if let Some(bridge) = bridges.get(name) {
+        let bridge = {
+            let bridges = self.bridges.read().await;
+            bridges.get(name).cloned()
+        };
+        if let Some(bridge) = bridge {
             Some(bridge.get_stats().await)
         } else {
             None

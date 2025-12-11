@@ -57,6 +57,7 @@ impl TestPacketBuilder for PublishPacket {
             retain: false,
             dup: false,
             properties: Properties::new(),
+            protocol_version: 5,
         }
     }
 }
@@ -75,6 +76,7 @@ impl TestPacketBuilder for SubscribePacket {
                     retain_handling: crate::packet::subscribe::RetainHandling::SendAtSubscribe,
                 },
             }],
+            protocol_version: 5,
         }
     }
 }
@@ -85,6 +87,7 @@ impl TestPacketBuilder for SubAckPacket {
             packet_id: 1,
             properties: Properties::new(),
             reason_codes: vec![SubAckReasonCode::GrantedQoS1],
+            protocol_version: 5,
         }
     }
 }
@@ -122,6 +125,7 @@ pub fn create_test_publish(topic: &str, payload: &[u8], qos: QoS) -> Packet {
         retain: false,
         dup: false,
         properties: Properties::new(),
+        protocol_version: 5,
     })
 }
 
@@ -143,6 +147,7 @@ pub fn create_test_subscribe(topics: Vec<(&str, QoS)>) -> Packet {
                 },
             })
             .collect(),
+        protocol_version: 5,
     })
 }
 

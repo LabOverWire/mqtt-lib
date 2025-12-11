@@ -1,6 +1,7 @@
 use mqtt5::broker::router::MessageRouter;
 use mqtt5::packet::publish::PublishPacket;
 use mqtt5::time::Duration;
+use mqtt5::types::ProtocolVersion;
 use mqtt5::QoS;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -25,8 +26,10 @@ async fn test_retain_as_published_false_clears_retain_flag() {
             None,
             false,
             false,
+            ProtocolVersion::V5,
         )
-        .await;
+        .await
+        .unwrap();
 
     let mut packet = PublishPacket::new("test/topic".to_string(), b"test message", QoS::AtMostOnce);
     packet.retain = true;
@@ -58,8 +61,10 @@ async fn test_retain_as_published_true_preserves_retain_flag() {
             None,
             false,
             true,
+            ProtocolVersion::V5,
         )
-        .await;
+        .await
+        .unwrap();
 
     let mut packet = PublishPacket::new("test/topic".to_string(), b"test message", QoS::AtMostOnce);
     packet.retain = true;

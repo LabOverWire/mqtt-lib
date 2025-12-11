@@ -89,6 +89,7 @@ async fn test_session_persistence() {
             retain_as_published: true,
             retain_handling: 1,
             subscription_id: Some(42),
+            protocol_version: 5,
         },
     );
     session.add_subscription(
