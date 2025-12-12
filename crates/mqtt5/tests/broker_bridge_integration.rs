@@ -88,6 +88,7 @@ async fn test_bridge_message_routing() {
             None,
             false,
             false,
+            0,
             ProtocolVersion::V5,
         )
         .await

@@ -36,6 +36,8 @@ pub struct Subscription {
     pub no_local: bool,
     /// Retain As Published option - if true, the retain flag is kept as-is when delivering
     pub retain_as_published: bool,
+    /// Retain handling option - controls when retained messages are sent
+    pub retain_handling: u8,
     /// Protocol version of the subscriber
     pub protocol_version: ProtocolVersion,
 }
@@ -205,6 +207,7 @@ impl MessageRouter {
         subscription_id: Option<u32>,
         no_local: bool,
         retain_as_published: bool,
+        retain_handling: u8,
         protocol_version: ProtocolVersion,
     ) -> Result<bool> {
         let (actual_filter, share_group) = parse_shared_subscription(&topic_filter);
@@ -217,6 +220,7 @@ impl MessageRouter {
             share_group: share_group.clone(),
             no_local,
             retain_as_published,
+            retain_handling,
             protocol_version,
         };
 
@@ -686,6 +690,7 @@ mod tests {
                 None,
                 false,
                 false,
+                0,
                 ProtocolVersion::V5,
             )
             .await
@@ -722,6 +727,7 @@ mod tests {
                 None,
                 false,
                 false,
+                0,
                 ProtocolVersion::V5,
             )
             .await
@@ -734,6 +740,7 @@ mod tests {
                 None,
                 false,
                 false,
+                0,
                 ProtocolVersion::V5,
             )
             .await
@@ -808,6 +815,7 @@ mod tests {
                 None,
                 false,
                 false,
+                0,
                 ProtocolVersion::V5,
             )
             .await
@@ -820,6 +828,7 @@ mod tests {
                 None,
                 false,
                 false,
+                0,
                 ProtocolVersion::V5,
             )
             .await
@@ -832,6 +841,7 @@ mod tests {
                 None,
                 false,
                 false,
+                0,
                 ProtocolVersion::V5,
             )
             .await
@@ -893,6 +903,7 @@ mod tests {
                 None,
                 false,
                 false,
+                0,
                 ProtocolVersion::V5,
             )
             .await
@@ -905,6 +916,7 @@ mod tests {
                 None,
                 false,
                 false,
+                0,
                 ProtocolVersion::V5,
             )
             .await
@@ -918,6 +930,7 @@ mod tests {
                 None,
                 false,
                 false,
+                0,
                 ProtocolVersion::V5,
             )
             .await

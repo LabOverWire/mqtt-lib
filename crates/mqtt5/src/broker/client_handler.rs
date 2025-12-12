@@ -745,6 +745,7 @@ impl ClientHandler {
     }
 
     /// Handles SUBSCRIBE packet
+    #[allow(clippy::too_many_lines)]
     async fn handle_subscribe(&mut self, subscribe: SubscribePacket) -> Result<()> {
         let client_id = self.client_id.as_ref().unwrap();
         let mut reason_codes: Vec<crate::packet::suback::SubAckReasonCode> = Vec::new();
@@ -796,6 +797,7 @@ impl ClientHandler {
                     subscribe.properties.get_subscription_identifier(),
                     filter.options.no_local,
                     filter.options.retain_as_published,
+                    filter.options.retain_handling as u8,
                     ProtocolVersion::try_from(self.protocol_version).unwrap_or_default(),
                 )
                 .await?;
@@ -991,6 +993,41 @@ impl ClientHandler {
                             ));
                         }
                         debug!("Sending PUBREC with NotAuthorized");
+                        self.transport.write_packet(Packet::PubRec(pubrec)).await?;
+                    }
+                    QoS::AtMostOnce => {}
+                }
+            }
+            return Ok(());
+        }
+
+        if (publish.qos as u8) > self.config.maximum_qos {
+            debug!(
+                "Client {} sent QoS {} but max is {}",
+                client_id, publish.qos as u8, self.config.maximum_qos
+            );
+            if let Some(packet_id) = publish.packet_id {
+                match publish.qos {
+                    QoS::AtLeastOnce => {
+                        let mut puback = PubAckPacket::new(packet_id);
+                        puback.reason_code = ReasonCode::QoSNotSupported;
+                        if self.request_problem_information {
+                            puback.properties.set_reason_string(format!(
+                                "QoS {} not supported (maximum: {})",
+                                publish.qos as u8, self.config.maximum_qos
+                            ));
+                        }
+                        self.transport.write_packet(Packet::PubAck(puback)).await?;
+                    }
+                    QoS::ExactlyOnce => {
+                        let mut pubrec = PubRecPacket::new(packet_id);
+                        pubrec.reason_code = ReasonCode::QoSNotSupported;
+                        if self.request_problem_information {
+                            pubrec.properties.set_reason_string(format!(
+                                "QoS {} not supported (maximum: {})",
+                                publish.qos as u8, self.config.maximum_qos
+                            ));
+                        }
                         self.transport.write_packet(Packet::PubRec(pubrec)).await?;
                     }
                     QoS::AtMostOnce => {}
@@ -1262,6 +1299,7 @@ impl ClientHandler {
                     stored.subscription_id,
                     stored.no_local,
                     stored.retain_as_published,
+                    stored.retain_handling,
                     ProtocolVersion::try_from(self.protocol_version).unwrap_or_default(),
                 )
                 .await?;
