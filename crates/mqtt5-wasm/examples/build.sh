@@ -13,6 +13,7 @@ cp -r pkg examples/qos2/
 cp -r pkg examples/broker-bridge/
 cp -r pkg examples/will-message/
 cp -r pkg examples/shared-subscription/
+cp -r pkg examples/auth-tools/
 
 echo "✨ Build complete!"
 echo ""
@@ -40,6 +41,10 @@ echo "  python3 -m http.server 8000"
 echo ""
 echo "Shared Subscription (Load Balancing):"
 echo "  cd examples/shared-subscription"
+echo "  python3 -m http.server 8000"
+echo ""
+echo "Auth Tools (Password & ACL Generator):"
+echo "  cd examples/auth-tools"
 echo "  python3 -m http.server 8000"
 echo ""
 echo "Then open http://localhost:8000 in your browser"

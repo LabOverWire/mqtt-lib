@@ -209,12 +209,18 @@ impl WasmBroker {
 
     #[wasm_bindgen]
     pub async fn remove_user(&self, username: &str) -> bool {
-        self.auth_provider.password_provider().remove_user(username).await
+        self.auth_provider
+            .password_provider()
+            .remove_user(username)
+            .await
     }
 
     #[wasm_bindgen]
     pub async fn has_user(&self, username: &str) -> bool {
-        self.auth_provider.password_provider().has_user(username).await
+        self.auth_provider
+            .password_provider()
+            .has_user(username)
+            .await
     }
 
     #[wasm_bindgen]
