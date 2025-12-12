@@ -451,6 +451,7 @@ impl WasmClientHandler {
                                 stored.subscription_id,
                                 stored.no_local,
                                 stored.retain_as_published,
+                                stored.retain_handling,
                                 ProtocolVersion::try_from(self.protocol_version)
                                     .unwrap_or_default(),
                             )
@@ -539,6 +540,7 @@ impl WasmClientHandler {
                     subscription_id,
                     filter.options.no_local,
                     filter.options.retain_as_published,
+                    filter.options.retain_handling as u8,
                     ProtocolVersion::try_from(self.protocol_version).unwrap_or_default(),
                 )
                 .await?;
@@ -561,9 +563,7 @@ impl WasmClientHandler {
             {
                 let retained = self.router.get_retained_messages(&filter.filter).await;
                 for mut msg in retained {
-                    if !filter.options.retain_as_published {
-                        msg.retain = false;
-                    }
+                    msg.retain = true;
                     self.send_publish(msg, writer).await?;
                 }
             }
@@ -638,6 +638,29 @@ impl WasmClientHandler {
                     QoS::ExactlyOnce => {
                         let mut pubrec = PubRecPacket::new(packet_id);
                         pubrec.reason_code = ReasonCode::NotAuthorized;
+                        self.write_packet(Packet::PubRec(pubrec), writer).await?;
+                    }
+                    _ => {}
+                }
+            }
+            return Ok(());
+        }
+
+        if (publish.qos as u8) > self.config.maximum_qos {
+            debug!(
+                "Client {} sent QoS {} but max is {}",
+                client_id, publish.qos as u8, self.config.maximum_qos
+            );
+            if let Some(packet_id) = publish.packet_id {
+                match publish.qos {
+                    QoS::AtLeastOnce => {
+                        let mut puback = PubAckPacket::new(packet_id);
+                        puback.reason_code = ReasonCode::QoSNotSupported;
+                        self.write_packet(Packet::PubAck(puback), writer).await?;
+                    }
+                    QoS::ExactlyOnce => {
+                        let mut pubrec = PubRecPacket::new(packet_id);
+                        pubrec.reason_code = ReasonCode::QoSNotSupported;
                         self.write_packet(Packet::PubRec(pubrec), writer).await?;
                     }
                     _ => {}

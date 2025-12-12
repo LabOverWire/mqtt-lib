@@ -5,6 +5,48 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.0] / [mqtt5-protocol 0.4.0] / [mqtt5-wasm 0.4.0] - 2025-12-11
+
+### Fixed
+
+- **Retained message delivery** now always sets retain flag to true
+  - Previously incorrectly cleared retain flag based on `retain_as_published` option
+  - `retain_as_published` only affects normal message routing, not retained message delivery to new subscribers
+
+- **Max QoS validation** on incoming PUBLISH packets
+  - Broker now rejects PUBLISH messages that exceed advertised `maximum_qos`
+  - Returns `QoSNotSupported` reason code in PUBACK/PUBREC
+
+- **retain_handling** now passed during session restore
+  - Previously lost when client reconnected with `clean_start=false`
+
+### Changed
+
+- **`with_credentials()` password parameter** changed from `impl Into<Vec<u8>>` to `impl AsRef<[u8]>`
+  - Enables cleaner API: `.with_credentials("user", "password")` instead of `.with_credentials("user", b"password")`
+  - Accepts `&str`, `&[u8]`, `Vec<u8>`, and byte literals
+
+- **Broker config duration fields** now use human-readable format via `humantime_serde`
+  - `session_expiry_interval`, `server_keep_alive`, `cleanup_interval`
+  - Example: `session_expiry_interval = "1h"` instead of `{ secs = 3600, nanos = 0 }`
+
+- **WASM broker `allow_anonymous`** now defaults to `false`
+  - Configure via `WasmBrokerConfig.allow_anonymous = true` to allow anonymous connections
+  - Aligns with secure-by-default approach used in native broker
+
+### Added
+
+- **WASM broker ACL support**
+  - `add_acl_rule(username, topic_pattern, permission)` - permission: "read", "write", "readwrite", "deny"
+  - `clear_acl_rules()` - remove all ACL rules
+  - `acl_rule_count()` - get number of configured rules
+  - Uses `AclManager::allow_all()` by default (all authenticated users have full access)
+
+- **Auth Tools example** (`examples/auth-tools/`)
+  - Browser-based password hash generator using same Argon2 algorithm as CLI
+  - ACL rule builder with topic wildcard support
+  - Copy or download generated files for use with native broker
+
 ## [0.12.0] / [mqtt5-protocol 0.3.0] / [mqtt5-wasm 0.3.0] - 2025-12-07
 
 ### Fixed

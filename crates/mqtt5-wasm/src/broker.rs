@@ -1,6 +1,7 @@
 use crate::bridge::{WasmBridgeConfig, WasmBridgeManager};
 use crate::client_handler::WasmClientHandler;
-use mqtt5::broker::auth::PasswordAuthProvider;
+use mqtt5::broker::acl::{AclRule, Permission};
+use mqtt5::broker::auth::{ComprehensiveAuthProvider, PasswordAuthProvider};
 use mqtt5::broker::config::BrokerConfig;
 use mqtt5::broker::resource_monitor::{ResourceLimits, ResourceMonitor};
 use mqtt5::broker::router::MessageRouter;
@@ -26,6 +27,7 @@ pub struct WasmBrokerConfig {
     subscription_identifier_available: bool,
     shared_subscription_available: bool,
     server_keep_alive_secs: Option<u32>,
+    allow_anonymous: bool,
 }
 
 #[wasm_bindgen]
@@ -43,6 +45,7 @@ impl WasmBrokerConfig {
             subscription_identifier_available: true,
             shared_subscription_available: true,
             server_keep_alive_secs: None,
+            allow_anonymous: false,
         }
     }
 
@@ -96,6 +99,11 @@ impl WasmBrokerConfig {
         self.server_keep_alive_secs = value;
     }
 
+    #[wasm_bindgen(setter)]
+    pub fn set_allow_anonymous(&mut self, value: bool) {
+        self.allow_anonymous = value;
+    }
+
     fn to_broker_config(&self) -> BrokerConfig {
         BrokerConfig {
             max_clients: self.max_clients as usize,
@@ -127,7 +135,7 @@ impl Default for WasmBrokerConfig {
 pub struct WasmBroker {
     config: Arc<BrokerConfig>,
     router: Arc<MessageRouter>,
-    auth_provider: Arc<PasswordAuthProvider>,
+    auth_provider: Arc<ComprehensiveAuthProvider>,
     storage: Arc<DynamicStorage>,
     stats: Arc<BrokerStats>,
     resource_monitor: Arc<ResourceMonitor>,
@@ -144,12 +152,18 @@ impl WasmBroker {
     #[wasm_bindgen]
     #[allow(clippy::needless_pass_by_value)]
     pub fn with_config(wasm_config: WasmBrokerConfig) -> Result<WasmBroker, JsValue> {
+        let allow_anonymous = wasm_config.allow_anonymous;
         let config = Arc::new(wasm_config.to_broker_config());
 
         let storage = Arc::new(DynamicStorage::Memory(MemoryBackend::new()));
         let router = Arc::new(MessageRouter::with_storage(Arc::clone(&storage)));
 
-        let auth_provider = Arc::new(PasswordAuthProvider::new().with_anonymous(true));
+        let password_provider = PasswordAuthProvider::new().with_anonymous(allow_anonymous);
+        let acl_manager = mqtt5::broker::acl::AclManager::allow_all();
+        let auth_provider = Arc::new(ComprehensiveAuthProvider::with_providers(
+            password_provider,
+            acl_manager,
+        ));
 
         let stats = Arc::new(BrokerStats::new());
 
@@ -179,6 +193,7 @@ impl WasmBroker {
     #[wasm_bindgen]
     pub async fn add_user(&self, username: String, password: String) -> Result<(), JsValue> {
         self.auth_provider
+            .password_provider()
             .add_user(username, &password)
             .await
             .map_err(|e| JsValue::from_str(&e.to_string()))
@@ -187,35 +202,62 @@ impl WasmBroker {
     #[wasm_bindgen]
     pub async fn add_user_with_hash(&self, username: String, password_hash: String) {
         self.auth_provider
+            .password_provider()
             .add_user_with_hash(username, password_hash)
             .await;
     }
 
     #[wasm_bindgen]
     pub async fn remove_user(&self, username: &str) -> bool {
-        self.auth_provider.remove_user(username).await
+        self.auth_provider
+            .password_provider()
+            .remove_user(username)
+            .await
     }
 
     #[wasm_bindgen]
     pub async fn has_user(&self, username: &str) -> bool {
-        self.auth_provider.has_user(username).await
+        self.auth_provider
+            .password_provider()
+            .has_user(username)
+            .await
     }
 
     #[wasm_bindgen]
     pub async fn user_count(&self) -> usize {
-        self.auth_provider.user_count().await
-    }
-
-    #[wasm_bindgen]
-    pub fn set_allow_anonymous(&mut self, allow: bool) {
-        if let Some(provider) = Arc::get_mut(&mut self.auth_provider) {
-            provider.set_allow_anonymous(allow);
-        }
+        self.auth_provider.password_provider().user_count().await
     }
 
     #[wasm_bindgen]
     pub fn hash_password(password: &str) -> Result<String, JsValue> {
         PasswordAuthProvider::hash_password(password).map_err(|e| JsValue::from_str(&e.to_string()))
+    }
+
+    #[wasm_bindgen]
+    pub async fn add_acl_rule(
+        &self,
+        username: String,
+        topic_pattern: String,
+        permission: String,
+    ) -> Result<(), JsValue> {
+        let perm: Permission = permission
+            .parse()
+            .map_err(|e: mqtt5::error::MqttError| JsValue::from_str(&e.to_string()))?;
+        self.auth_provider
+            .acl_manager()
+            .add_rule(AclRule::new(username, topic_pattern, perm))
+            .await;
+        Ok(())
+    }
+
+    #[wasm_bindgen]
+    pub async fn clear_acl_rules(&self) {
+        self.auth_provider.acl_manager().clear_rules().await;
+    }
+
+    #[wasm_bindgen]
+    pub async fn acl_rule_count(&self) -> usize {
+        self.auth_provider.acl_manager().rule_count().await
     }
 
     pub fn create_client_port(&self) -> Result<MessagePort, JsValue> {

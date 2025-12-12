@@ -293,6 +293,30 @@ impl TestBroker {
         }
     }
 
+    #[allow(dead_code)]
+    pub async fn start_with_config(config: BrokerConfig) -> Self {
+        let mut broker = MqttBroker::with_config(config.clone())
+            .await
+            .expect("Failed to create test broker");
+
+        let addr = broker.local_addr().expect("Failed to get broker address");
+        let port = addr.port();
+        let address = format!("mqtt://{addr}");
+
+        let handle = tokio::spawn(async move {
+            let _ = broker.run().await;
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        Self {
+            address,
+            port,
+            config,
+            handle: Some(handle),
+        }
+    }
+
     /// Get the broker address
     #[allow(dead_code)]
     pub fn address(&self) -> &str {

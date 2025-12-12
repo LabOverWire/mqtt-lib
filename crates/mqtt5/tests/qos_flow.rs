@@ -1,8 +1,10 @@
 mod common;
 use common::TestBroker;
 
+use mqtt5::broker::config::{BrokerConfig, StorageBackend, StorageConfig};
 use mqtt5::time::Duration;
 use mqtt5::{MqttClient, PublishOptions, PublishResult, QoS};
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use tokio::time::sleep;
@@ -527,6 +529,40 @@ async fn test_qos_packet_id_exhaustion() {
         unique_ids.len(),
         "All packet IDs should be unique"
     );
+
+    client.disconnect().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_max_qos_validation() {
+    let storage_config = StorageConfig {
+        backend: StorageBackend::Memory,
+        enable_persistence: false,
+        ..Default::default()
+    };
+
+    let config = BrokerConfig::default()
+        .with_bind_address("127.0.0.1:0".parse::<SocketAddr>().unwrap())
+        .with_storage(storage_config)
+        .with_maximum_qos(1);
+
+    let broker = TestBroker::start_with_config(config).await;
+
+    let client = MqttClient::new("max-qos-test");
+    client.connect(broker.address()).await.unwrap();
+
+    let result = client.publish_qos0("test/maxqos", "QoS 0 message").await;
+    assert!(result.is_ok(), "QoS 0 should succeed");
+
+    let result = client.publish_qos1("test/maxqos", "QoS 1 message").await;
+    assert!(result.is_ok(), "QoS 1 should succeed");
+
+    let result = client
+        .publish_qos2("test/maxqos", "QoS 2 message - should be rejected")
+        .await;
+    assert!(result.is_ok(), "QoS 2 publish call should succeed");
+
+    sleep(Duration::from_millis(200)).await;
 
     client.disconnect().await.unwrap();
 }

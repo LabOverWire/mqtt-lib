@@ -55,6 +55,7 @@ pub struct StoredSubscription {
     pub qos: QoS,
     pub no_local: bool,
     pub retain_as_published: bool,
+    #[serde(default)]
     pub retain_handling: u8,
     pub subscription_id: Option<u32>,
     #[serde(default = "default_protocol_version")]

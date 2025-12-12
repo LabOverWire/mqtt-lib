@@ -20,6 +20,10 @@ Two in-browser brokers connected via MessagePort bridge, demonstrating bidirecti
 
 Demonstrates MQTT v5.0 shared subscriptions for load balancing. Multiple workers subscribe to `$share/group/topic` and messages are distributed round-robin among them.
 
+### Auth Tools (auth-tools/)
+
+Browser-based tools for generating password and ACL files for native broker authentication. Uses the same Argon2 hashing as the CLI.
+
 ## Quick Start
 
 ### 1. Build the WASM Package
@@ -78,6 +82,17 @@ Demonstrates shared subscriptions for load balancing across workers.
 
 ```bash
 cd shared-subscription
+python3 -m http.server 8000
+```
+
+Open http://localhost:8000 in your browser.
+
+#### Auth Tools
+
+Generate password and ACL files for broker authentication.
+
+```bash
+cd auth-tools
 python3 -m http.server 8000
 ```
 

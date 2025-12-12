@@ -125,11 +125,7 @@ async fn test_bridge_manager_stats() {
     let _all_stats = manager.get_all_stats().await;
 
     // Get specific bridge stats
-    let stats = manager.get_bridge_stats("stats-bridge").await;
-    if stats.is_some() {
-        let stats = stats.unwrap();
-        // Connection might succeed or fail depending on whether a broker is running
-        // Just check that we got stats
+    if let Some(stats) = manager.get_bridge_stats("stats-bridge").await {
         assert!(stats.connection_attempts > 0);
     }
 
