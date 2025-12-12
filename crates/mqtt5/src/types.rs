@@ -58,7 +58,7 @@ impl ConnectOptions {
     pub fn with_credentials(
         mut self,
         username: impl Into<String>,
-        password: impl Into<Vec<u8>>,
+        password: impl AsRef<[u8]>,
     ) -> Self {
         self.protocol_options = self.protocol_options.with_credentials(username, password);
         self

@@ -100,10 +100,10 @@ impl ConnectOptions {
     pub fn with_credentials(
         mut self,
         username: impl Into<String>,
-        password: impl Into<Vec<u8>>,
+        password: impl AsRef<[u8]>,
     ) -> Self {
         self.username = Some(username.into());
-        self.password = Some(password.into());
+        self.password = Some(password.as_ref().to_vec());
         self
     }
 
