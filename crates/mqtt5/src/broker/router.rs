@@ -197,7 +197,7 @@ impl MessageRouter {
     /// Adds a subscription for a client.
     ///
     /// # Errors
-    /// Returns an error if subscription registration fails.
+    /// Returns an error if subscription registration fails or retain_handling is invalid.
     #[allow(clippy::too_many_arguments)]
     pub async fn subscribe(
         &self,
@@ -210,6 +210,13 @@ impl MessageRouter {
         retain_handling: u8,
         protocol_version: ProtocolVersion,
     ) -> Result<bool> {
+        if retain_handling > 2 {
+            return Err(crate::MqttError::ProtocolError(format!(
+                "Invalid retain_handling value: {} (must be 0, 1, or 2)",
+                retain_handling
+            )));
+        }
+
         let (actual_filter, share_group) = parse_shared_subscription(&topic_filter);
         let share_group = share_group.map(str::to_string);
 

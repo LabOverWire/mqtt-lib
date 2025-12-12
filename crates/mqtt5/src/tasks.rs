@@ -427,7 +427,7 @@ mod tests {
         let start = tokio::time::Instant::now();
         interval.tick().await; // Second tick after interval
         let elapsed = start.elapsed();
-        assert!(elapsed >= keepalive_interval - Duration::from_millis(10)); // Allow small variance
+        assert!(elapsed >= keepalive_interval.saturating_sub(Duration::from_millis(10)));
     }
 
     #[tokio::test]
