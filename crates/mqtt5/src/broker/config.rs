@@ -24,6 +24,7 @@ pub struct BrokerConfig {
     pub max_clients: usize,
 
     /// Session expiry interval for disconnected clients
+    #[serde(with = "humantime_serde")]
     pub session_expiry_interval: Duration,
 
     /// Maximum packet size in bytes
@@ -60,6 +61,7 @@ pub struct BrokerConfig {
     pub max_retained_message_size: usize,
 
     /// Server keep alive time
+    #[serde(with = "humantime_serde")]
     pub server_keep_alive: Option<Duration>,
 
     /// Response information
@@ -550,6 +552,7 @@ pub struct StorageConfig {
     pub base_dir: PathBuf,
 
     /// Cleanup interval for expired entries
+    #[serde(with = "humantime_serde")]
     pub cleanup_interval: Duration,
 
     /// Enable storage persistence
