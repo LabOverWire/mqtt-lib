@@ -30,6 +30,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `session_expiry_interval`, `server_keep_alive`, `cleanup_interval`
   - Example: `session_expiry_interval = "1h"` instead of `{ secs = 3600, nanos = 0 }`
 
+- **WASM broker `allow_anonymous`** now defaults to `false`
+  - Configure via `WasmBrokerConfig.allow_anonymous = true` to allow anonymous connections
+  - Aligns with secure-by-default approach used in native broker
+
+### Added
+
+- **WASM broker ACL support**
+  - `add_acl_rule(username, topic_pattern, permission)` - permission: "read", "write", "readwrite", "deny"
+  - `clear_acl_rules()` - remove all ACL rules
+  - `acl_rule_count()` - get number of configured rules
+  - Uses `AclManager::allow_all()` by default (all authenticated users have full access)
+
+- **Auth Tools example** (`examples/auth-tools/`)
+  - Browser-based password hash generator using same Argon2 algorithm as CLI
+  - ACL rule builder with topic wildcard support
+  - Copy or download generated files for use with native broker
+
 ## [0.12.0] / [mqtt5-protocol 0.3.0] / [mqtt5-wasm 0.3.0] - 2025-12-07
 
 ### Fixed
