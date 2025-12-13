@@ -397,7 +397,6 @@ pub async fn execute(mut cmd: SubCommand, verbose: bool, debug: bool) -> Result<
     let verbose = cmd.verbose;
 
     info!("Subscribing to '{}' (QoS {})...", topic, qos as u8);
-    println!("✓ Subscribed to '{topic}' - waiting for messages (Ctrl+C to exit)");
 
     let message_count = Arc::new(AtomicU32::new(0));
     let message_count_clone = message_count.clone();
@@ -445,6 +444,8 @@ pub async fn execute(mut cmd: SubCommand, verbose: bool, debug: bool) -> Result<
         "Subscription confirmed - packet_id: {}, granted_qos: {:?}",
         packet_id, granted_qos
     );
+
+    println!("✓ Subscribed to '{topic}' (granted QoS {granted_qos:?}) - waiting for messages (Ctrl+C to exit)");
 
     // Wait for either Ctrl+C or target count reached
     if cmd.auto_reconnect {

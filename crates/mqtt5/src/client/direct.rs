@@ -871,19 +871,15 @@ impl DirectClientInner {
             }
         }
 
-        // Convert reason codes to (packet_id, QoS) tuples
-        let results: Vec<(u16, QoS)> = suback
-            .reason_codes
-            .iter()
-            .map(|rc| {
-                let qos = match rc {
-                    SubAckReasonCode::GrantedQoS1 => QoS::AtLeastOnce,
-                    SubAckReasonCode::GrantedQoS2 => QoS::ExactlyOnce,
-                    _ => QoS::AtMostOnce,
-                };
-                (packet_id, qos)
-            })
-            .collect();
+        let mut results: Vec<(u16, QoS)> = Vec::with_capacity(suback.reason_codes.len());
+
+        for rc in &suback.reason_codes {
+            if let Some(qos) = rc.granted_qos() {
+                results.push((packet_id, qos));
+            } else {
+                return Err(MqttError::SubscriptionDenied(*rc));
+            }
+        }
 
         Ok(results)
     }

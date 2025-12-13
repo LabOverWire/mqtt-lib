@@ -49,7 +49,7 @@ pub mod transport;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod websocket_server;
 
-pub use acl::{AclManager, AclRule, Permission};
+pub use acl::{AclManager, AclRule, Permission, Role, RoleRule};
 pub use auth::{
     AllowAllAuthProvider, AuthProvider, AuthResult, CertificateAuthProvider,
     ComprehensiveAuthProvider, PasswordAuthProvider,
