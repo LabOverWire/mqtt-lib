@@ -269,8 +269,7 @@ impl DirectClientInner {
                 match response {
                     AuthResponse::Continue(data) => {
                         let method = self.auth_method.clone().unwrap_or_default();
-                        let auth_packet =
-                            AuthPacket::continue_authentication(method, Some(data))?;
+                        let auth_packet = AuthPacket::continue_authentication(method, Some(data))?;
                         transport.write_packet(Packet::Auth(auth_packet)).await?;
                     }
                     AuthResponse::Success => {
@@ -442,7 +441,10 @@ impl DirectClientInner {
             .write_packet(Packet::Auth(auth_packet))
             .await?;
 
-        tracing::debug!("CLIENT: Initiated re-authentication with method: {}", method);
+        tracing::debug!(
+            "CLIENT: Initiated re-authentication with method: {}",
+            method
+        );
         Ok(())
     }
 
@@ -1447,9 +1449,7 @@ async fn handle_auth_packet(auth: AuthPacket, ctx: &PacketReaderContext) -> Resu
                         .await?;
                 }
                 AuthResponse::Success => {
-                    tracing::debug!(
-                        "CLIENT: Auth handler indicated success for re-auth challenge"
-                    );
+                    tracing::debug!("CLIENT: Auth handler indicated success for re-auth challenge");
                 }
                 AuthResponse::Abort(reason) => {
                     tracing::warn!("CLIENT: Re-auth aborted: {}", reason);

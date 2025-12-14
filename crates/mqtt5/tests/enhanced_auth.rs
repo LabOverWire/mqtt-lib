@@ -345,14 +345,12 @@ async fn test_client_enhanced_auth_success() {
         .unwrap()
         .with_auth_provider(auth_provider);
 
-    let broker_handle = tokio::spawn(async move {
-        broker.run().await
-    });
+    let broker_handle = tokio::spawn(async move { broker.run().await });
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let options = ConnectOptions::new("auth-test-client")
-        .with_authentication_method("CHALLENGE-RESPONSE");
+    let options =
+        ConnectOptions::new("auth-test-client").with_authentication_method("CHALLENGE-RESPONSE");
 
     let client = MqttClient::with_options(options);
     client
@@ -363,7 +361,11 @@ async fn test_client_enhanced_auth_success() {
         .await;
 
     let result = client.connect(&format!("mqtt://127.0.0.1:{port}")).await;
-    assert!(result.is_ok(), "Client should connect with enhanced auth: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "Client should connect with enhanced auth: {:?}",
+        result
+    );
 
     assert!(client.is_connected().await);
 
@@ -397,14 +399,12 @@ async fn test_client_enhanced_auth_failure() {
         .unwrap()
         .with_auth_provider(auth_provider);
 
-    let broker_handle = tokio::spawn(async move {
-        broker.run().await
-    });
+    let broker_handle = tokio::spawn(async move { broker.run().await });
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let options = ConnectOptions::new("auth-fail-client")
-        .with_authentication_method("CHALLENGE-RESPONSE");
+    let options =
+        ConnectOptions::new("auth-fail-client").with_authentication_method("CHALLENGE-RESPONSE");
 
     let client = MqttClient::with_options(options);
     client
@@ -446,14 +446,12 @@ async fn test_client_enhanced_auth_no_handler() {
         .unwrap()
         .with_auth_provider(auth_provider);
 
-    let broker_handle = tokio::spawn(async move {
-        broker.run().await
-    });
+    let broker_handle = tokio::spawn(async move { broker.run().await });
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let options = ConnectOptions::new("no-handler-client")
-        .with_authentication_method("CHALLENGE-RESPONSE");
+    let options =
+        ConnectOptions::new("no-handler-client").with_authentication_method("CHALLENGE-RESPONSE");
 
     let client = MqttClient::with_options(options);
 
