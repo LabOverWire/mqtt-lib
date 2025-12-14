@@ -197,7 +197,8 @@ pub mod types;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use client::{
-    ConnectionEvent, DisconnectReason, MockCall, MockMqttClient, MqttClient, MqttClientTrait,
+    AuthHandler, AuthResponse, ConnectionEvent, DisconnectReason, MockCall, MockMqttClient,
+    MqttClient, MqttClientTrait,
 };
 pub use mqtt5_protocol::{
     is_valid_client_id, is_valid_topic_filter, is_valid_topic_name, parse_shared_subscription,
