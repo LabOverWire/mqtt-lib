@@ -18,7 +18,8 @@ pub enum JwtVerifier {
 }
 
 impl JwtVerifier {
-    fn algorithm(&self) -> &'static str {
+    #[must_use]
+    pub fn algorithm(&self) -> &'static str {
         match self {
             Self::Hs256(_) => "HS256",
             Self::Rs256(_) => "RS256",
@@ -305,19 +306,77 @@ impl std::fmt::Display for JwtError {
 }
 
 #[derive(serde::Deserialize)]
-struct JwtHeader {
-    alg: String,
+pub struct JwtHeader {
+    pub alg: String,
+    pub kid: Option<String>,
 }
 
-#[derive(serde::Deserialize, Default)]
-struct JwtClaims {
-    sub: Option<String>,
-    iss: Option<String>,
-    aud: Option<String>,
-    exp: Option<u64>,
-    nbf: Option<u64>,
+#[derive(serde::Deserialize, Default, Clone)]
+pub struct JwtClaims {
+    pub sub: Option<String>,
+    pub iss: Option<String>,
+    pub aud: Option<String>,
+    pub exp: Option<u64>,
+    pub nbf: Option<u64>,
+    pub email: Option<String>,
+    pub groups: Option<Vec<String>>,
+    pub roles: Option<Vec<String>>,
     #[serde(flatten)]
-    _extra: HashMap<String, serde_json::Value>,
+    pub extra: HashMap<String, serde_json::Value>,
+}
+
+impl JwtClaims {
+    pub fn get_claim(&self, path: &str) -> Option<&serde_json::Value> {
+        let parts: Vec<&str> = path.split('.').collect();
+        let mut current: Option<&serde_json::Value> = self.extra.get(parts[0]);
+
+        for part in &parts[1..] {
+            current = current.and_then(|v| v.get(part));
+        }
+
+        current
+    }
+
+    pub fn get_claim_as_string(&self, path: &str) -> Option<String> {
+        if path == "sub" {
+            return self.sub.clone();
+        }
+        if path == "iss" {
+            return self.iss.clone();
+        }
+        if path == "email" {
+            return self.email.clone();
+        }
+
+        self.get_claim(path).and_then(|v| match v {
+            serde_json::Value::String(s) => Some(s.clone()),
+            _ => None,
+        })
+    }
+
+    pub fn get_claim_as_array(&self, path: &str) -> Option<Vec<String>> {
+        if path == "groups" {
+            return self.groups.clone();
+        }
+        if path == "roles" {
+            return self.roles.clone();
+        }
+
+        self.get_claim(path).and_then(|v| match v {
+            serde_json::Value::Array(arr) => {
+                let strings: Vec<String> = arr
+                    .iter()
+                    .filter_map(|item| item.as_str().map(String::from))
+                    .collect();
+                if strings.is_empty() {
+                    None
+                } else {
+                    Some(strings)
+                }
+            }
+            _ => None,
+        })
+    }
 }
 
 #[cfg(test)]

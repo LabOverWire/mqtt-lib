@@ -477,7 +477,9 @@ impl MqttClient {
         // Update the inner client with new options
         {
             let mut inner = self.inner.write().await;
-            inner.auth_method.clone_from(&options.properties.authentication_method);
+            inner
+                .auth_method
+                .clone_from(&options.properties.authentication_method);
             inner.options = options.clone();
             // Always store address for potential reconnection
             inner.last_address = Some(address.to_string());

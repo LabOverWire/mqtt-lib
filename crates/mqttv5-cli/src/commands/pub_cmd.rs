@@ -345,9 +345,10 @@ pub async fn execute(mut cmd: PubCommand, verbose: bool, debug: bool) -> Result<
             debug!("SCRAM-SHA-256 authentication configured");
         }
         Some("jwt") => {
-            let token = cmd.jwt_token.clone().ok_or_else(|| {
-                anyhow::anyhow!("--jwt-token is required for JWT authentication")
-            })?;
+            let token = cmd
+                .jwt_token
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("--jwt-token is required for JWT authentication"))?;
             options = options.with_authentication_method("JWT");
 
             use mqtt5::client::auth_handlers::JwtAuthHandler;

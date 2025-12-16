@@ -427,6 +427,156 @@ impl JwtConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum JwtKeySource {
+    StaticFile {
+        algorithm: JwtAlgorithm,
+        path: PathBuf,
+    },
+    Jwks {
+        uri: String,
+        fallback_key_file: PathBuf,
+        #[serde(default = "default_refresh_interval")]
+        refresh_interval_secs: u64,
+        #[serde(default = "default_cache_ttl")]
+        cache_ttl_secs: u64,
+    },
+}
+
+fn default_refresh_interval() -> u64 {
+    3600
+}
+
+fn default_cache_ttl() -> u64 {
+    86400
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JwtIssuerConfig {
+    pub name: String,
+    pub issuer: String,
+    pub key_source: JwtKeySource,
+    pub audience: Option<String>,
+    #[serde(default = "default_clock_skew")]
+    pub clock_skew_secs: u64,
+    #[serde(default)]
+    pub role_mappings: Vec<JwtRoleMapping>,
+    #[serde(default)]
+    pub default_roles: Vec<String>,
+    #[serde(default)]
+    pub role_merge_mode: RoleMergeMode,
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+}
+
+fn default_clock_skew() -> u64 {
+    60
+}
+
+fn default_enabled() -> bool {
+    true
+}
+
+impl JwtIssuerConfig {
+    #[must_use]
+    pub fn new(name: impl Into<String>, issuer: impl Into<String>, key_source: JwtKeySource) -> Self {
+        Self {
+            name: name.into(),
+            issuer: issuer.into(),
+            key_source,
+            audience: None,
+            clock_skew_secs: 60,
+            role_mappings: Vec::new(),
+            default_roles: Vec::new(),
+            role_merge_mode: RoleMergeMode::default(),
+            enabled: true,
+        }
+    }
+
+    #[must_use]
+    pub fn with_audience(mut self, audience: impl Into<String>) -> Self {
+        self.audience = Some(audience.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_role_mapping(mut self, mapping: JwtRoleMapping) -> Self {
+        self.role_mappings.push(mapping);
+        self
+    }
+
+    #[must_use]
+    pub fn with_default_roles(mut self, roles: Vec<String>) -> Self {
+        self.default_roles = roles;
+        self
+    }
+
+    #[must_use]
+    pub fn with_role_merge_mode(mut self, mode: RoleMergeMode) -> Self {
+        self.role_merge_mode = mode;
+        self
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum RoleMergeMode {
+    #[default]
+    Merge,
+    Replace,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JwtRoleMapping {
+    pub claim_path: String,
+    pub pattern: ClaimPattern,
+    pub assign_roles: Vec<String>,
+}
+
+impl JwtRoleMapping {
+    #[must_use]
+    pub fn new(claim_path: impl Into<String>, pattern: ClaimPattern, roles: Vec<String>) -> Self {
+        Self {
+            claim_path: claim_path.into(),
+            pattern,
+            assign_roles: roles,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ClaimPattern {
+    Equals(String),
+    Contains(String),
+    EndsWith(String),
+    StartsWith(String),
+    Regex(String),
+    Any,
+}
+
+impl ClaimPattern {
+    pub fn matches(&self, value: &str) -> bool {
+        match self {
+            Self::Equals(s) => value == s,
+            Self::Contains(s) => value.contains(s),
+            Self::EndsWith(s) => value.ends_with(s),
+            Self::StartsWith(s) => value.starts_with(s),
+            Self::Regex(pattern) => {
+                regex::Regex::new(pattern)
+                    .map(|re| re.is_match(value))
+                    .unwrap_or(false)
+            }
+            Self::Any => true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct FederatedJwtConfig {
+    pub issuers: Vec<JwtIssuerConfig>,
+    #[serde(default = "default_clock_skew")]
+    pub clock_skew_secs: u64,
+}
+
 /// TLS configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TlsConfig {

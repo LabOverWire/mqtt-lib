@@ -132,6 +132,7 @@ mqtt5-protocol = { version = "0.4", path = "../mqtt5-protocol" }
 argon2 = "0.5"
 getrandom = "0.3"
 bebytes = { version = "2.11", features = ["bytes"] }
+regex = "1.12.2"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 humantime-serde = "1.1"

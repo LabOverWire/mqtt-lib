@@ -88,6 +88,9 @@ pub enum EnhancedAuthStatus {
     Failed,
 }
 
+use super::config::RoleMergeMode;
+use std::collections::HashSet;
+
 #[derive(Debug, Clone)]
 pub struct EnhancedAuthResult {
     pub status: EnhancedAuthStatus,
@@ -96,6 +99,8 @@ pub struct EnhancedAuthResult {
     pub auth_data: Option<Vec<u8>>,
     pub reason_string: Option<String>,
     pub user_id: Option<String>,
+    pub roles: Option<HashSet<String>>,
+    pub role_merge_mode: Option<RoleMergeMode>,
 }
 
 impl EnhancedAuthResult {
@@ -108,6 +113,8 @@ impl EnhancedAuthResult {
             auth_data: None,
             reason_string: None,
             user_id: None,
+            roles: None,
+            role_merge_mode: None,
         }
     }
 
@@ -120,6 +127,27 @@ impl EnhancedAuthResult {
             auth_data: None,
             reason_string: None,
             user_id: Some(user_id),
+            roles: None,
+            role_merge_mode: None,
+        }
+    }
+
+    #[must_use]
+    pub fn success_with_user_and_roles(
+        auth_method: String,
+        user_id: String,
+        roles: HashSet<String>,
+        merge_mode: RoleMergeMode,
+    ) -> Self {
+        Self {
+            status: EnhancedAuthStatus::Success,
+            reason_code: ReasonCode::Success,
+            auth_method,
+            auth_data: None,
+            reason_string: None,
+            user_id: Some(user_id),
+            roles: Some(roles),
+            role_merge_mode: Some(merge_mode),
         }
     }
 
@@ -132,6 +160,8 @@ impl EnhancedAuthResult {
             auth_data,
             reason_string: None,
             user_id: None,
+            roles: None,
+            role_merge_mode: None,
         }
     }
 
@@ -144,6 +174,8 @@ impl EnhancedAuthResult {
             auth_data: None,
             reason_string: None,
             user_id: None,
+            roles: None,
+            role_merge_mode: None,
         }
     }
 
@@ -156,6 +188,8 @@ impl EnhancedAuthResult {
             auth_data: None,
             reason_string: Some(reason),
             user_id: None,
+            roles: None,
+            role_merge_mode: None,
         }
     }
 }

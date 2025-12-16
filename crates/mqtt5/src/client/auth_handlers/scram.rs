@@ -75,10 +75,8 @@ impl AuthHandler for ScramSha256AuthHandler {
 
             let server_message = String::from_utf8_lossy(data);
 
-            let state = std::mem::replace(
-                &mut *self.state.lock().unwrap(),
-                ScramClientState::Initial,
-            );
+            let state =
+                std::mem::replace(&mut *self.state.lock().unwrap(), ScramClientState::Initial);
 
             match state {
                 ScramClientState::WaitingForServerFirst {
@@ -92,7 +90,9 @@ impl AuthHandler for ScramSha256AuthHandler {
                     };
 
                     if !combined_nonce.starts_with(&client_nonce) {
-                        return Ok(AuthResponse::Abort("Server nonce doesn't contain client nonce".into()));
+                        return Ok(AuthResponse::Abort(
+                            "Server nonce doesn't contain client nonce".into(),
+                        ));
                     }
 
                     let Some(salt_b64) = attrs.get("s") else {
@@ -123,8 +123,9 @@ impl AuthHandler for ScramSha256AuthHandler {
                     let server_key = hmac_sha256(&salted_password, b"Server Key");
 
                     let client_final_without_proof = format!("c=biws,r={combined_nonce}");
-                    let auth_message =
-                        format!("{client_first_bare},{server_message},{client_final_without_proof}");
+                    let auth_message = format!(
+                        "{client_first_bare},{server_message},{client_final_without_proof}"
+                    );
 
                     let client_signature = hmac_sha256(&stored_key, auth_message.as_bytes());
                     let client_proof: Vec<u8> = client_key
@@ -133,7 +134,8 @@ impl AuthHandler for ScramSha256AuthHandler {
                         .map(|(a, b)| a ^ b)
                         .collect();
 
-                    let expected_server_signature = hmac_sha256(&server_key, auth_message.as_bytes());
+                    let expected_server_signature =
+                        hmac_sha256(&server_key, auth_message.as_bytes());
 
                     *self.state.lock().unwrap() = ScramClientState::WaitingForServerFinal {
                         expected_server_signature,
@@ -145,11 +147,15 @@ impl AuthHandler for ScramSha256AuthHandler {
                     debug!("SCRAM client: sending client-final message");
                     Ok(AuthResponse::Continue(client_final.into_bytes()))
                 }
-                ScramClientState::WaitingForServerFinal { expected_server_signature } => {
+                ScramClientState::WaitingForServerFinal {
+                    expected_server_signature,
+                } => {
                     let attrs = parse_scram_attributes(&server_message);
 
                     let Some(verifier_b64) = attrs.get("v") else {
-                        return Ok(AuthResponse::Abort("Missing verifier in server-final".into()));
+                        return Ok(AuthResponse::Abort(
+                            "Missing verifier in server-final".into(),
+                        ));
                     };
 
                     let Ok(received_signature) = BASE64_STANDARD.decode(verifier_b64) else {
@@ -161,7 +167,9 @@ impl AuthHandler for ScramSha256AuthHandler {
                     }
 
                     if !constant_time_compare(&received_signature, &expected_server_signature) {
-                        return Ok(AuthResponse::Abort("Server signature verification failed".into()));
+                        return Ok(AuthResponse::Abort(
+                            "Server signature verification failed".into(),
+                        ));
                     }
 
                     debug!("SCRAM client: server signature verified, authentication complete");

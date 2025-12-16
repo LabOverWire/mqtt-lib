@@ -97,13 +97,18 @@ impl FileBasedScramCredentialStore {
             }
         }
 
-        debug!(count = credentials.len(), "loaded SCRAM credentials from file");
+        debug!(
+            count = credentials.len(),
+            "loaded SCRAM credentials from file"
+        );
         Ok(Self {
             credentials: RwLock::new(credentials),
         })
     }
 
-    fn parse_credential_line(line: &str) -> std::result::Result<(String, ScramCredentials), &'static str> {
+    fn parse_credential_line(
+        line: &str,
+    ) -> std::result::Result<(String, ScramCredentials), &'static str> {
         let parts: Vec<&str> = line.split(':').collect();
         if parts.len() != 5 {
             return Err("expected 5 colon-separated fields");
@@ -114,29 +119,38 @@ impl FileBasedScramCredentialStore {
             return Err("username cannot be empty");
         }
 
-        let salt = BASE64_STANDARD.decode(parts[1]).map_err(|_| "invalid base64 salt")?;
+        let salt = BASE64_STANDARD
+            .decode(parts[1])
+            .map_err(|_| "invalid base64 salt")?;
         let iteration_count: u32 = parts[2].parse().map_err(|_| "invalid iteration count")?;
 
-        let stored_key_vec = BASE64_STANDARD.decode(parts[3]).map_err(|_| "invalid base64 stored_key")?;
+        let stored_key_vec = BASE64_STANDARD
+            .decode(parts[3])
+            .map_err(|_| "invalid base64 stored_key")?;
         if stored_key_vec.len() != 32 {
             return Err("stored_key must be 32 bytes");
         }
         let mut stored_key = [0u8; 32];
         stored_key.copy_from_slice(&stored_key_vec);
 
-        let server_key_vec = BASE64_STANDARD.decode(parts[4]).map_err(|_| "invalid base64 server_key")?;
+        let server_key_vec = BASE64_STANDARD
+            .decode(parts[4])
+            .map_err(|_| "invalid base64 server_key")?;
         if server_key_vec.len() != 32 {
             return Err("server_key must be 32 bytes");
         }
         let mut server_key = [0u8; 32];
         server_key.copy_from_slice(&server_key_vec);
 
-        Ok((username, ScramCredentials {
-            salt,
-            iteration_count,
-            stored_key,
-            server_key,
-        }))
+        Ok((
+            username,
+            ScramCredentials {
+                salt,
+                iteration_count,
+                stored_key,
+                server_key,
+            },
+        ))
     }
 }
 
@@ -164,7 +178,11 @@ pub fn generate_scram_credential_line(username: &str, password: &str) -> String 
     )
 }
 
-pub fn generate_scram_credential_line_with_iterations(username: &str, password: &str, iterations: u32) -> String {
+pub fn generate_scram_credential_line_with_iterations(
+    username: &str,
+    password: &str,
+    iterations: u32,
+) -> String {
     let creds = ScramCredentials::from_password_with_iterations(password, iterations);
     format!(
         "{}:{}:{}:{}:{}",
@@ -648,11 +666,7 @@ mod tests {
         let client_first = format!("n,,n=testuser,r={client_nonce}");
 
         let result = provider
-            .authenticate_enhanced(
-                "SCRAM-SHA-256",
-                Some(client_first.as_bytes()),
-                "client-1",
-            )
+            .authenticate_enhanced("SCRAM-SHA-256", Some(client_first.as_bytes()), "client-1")
             .await
             .unwrap();
 
@@ -718,7 +732,8 @@ mod tests {
     #[test]
     fn test_file_based_store_parse_line() {
         let line = generate_scram_credential_line("bob", "secret");
-        let (username, creds) = FileBasedScramCredentialStore::parse_credential_line(&line).unwrap();
+        let (username, creds) =
+            FileBasedScramCredentialStore::parse_credential_line(&line).unwrap();
         assert_eq!(username, "bob");
         assert_eq!(creds.iteration_count, SCRAM_ITERATION_COUNT);
         assert_eq!(creds.salt.len(), SCRAM_SALT_LENGTH);
