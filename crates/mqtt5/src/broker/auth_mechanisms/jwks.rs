@@ -470,7 +470,12 @@ fn rsa_jwk_to_der(n_b64: &str, e_b64: &str) -> Result<Vec<u8>, JwksError> {
 
     let _ = signature::UnparsedPublicKey::new(&signature::RSA_PKCS1_2048_8192_SHA256, &der);
 
-    debug!(n_len, e_len, der_len = der.len(), "RSA JWK converted to DER");
+    debug!(
+        n_len,
+        e_len,
+        der_len = der.len(),
+        "RSA JWK converted to DER"
+    );
 
     Ok(der)
 }

@@ -48,13 +48,15 @@ pub struct MqttBroker {
     ready_rx: tokio::sync::watch::Receiver<bool>,
 }
 
+#[allow(clippy::too_many_lines)]
 async fn create_auth_provider(
     config: &crate::broker::config::AuthConfig,
 ) -> Result<Arc<dyn AuthProvider>> {
     use crate::broker::acl::AclManager;
     use crate::broker::auth::{ComprehensiveAuthProvider, PasswordAuthProvider};
     use crate::broker::auth_mechanisms::{
-        FileBasedScramCredentialStore, JwtAuthProvider, ScramSha256AuthProvider,
+        FederatedJwtAuthProvider, FileBasedScramCredentialStore, JwtAuthProvider,
+        ScramSha256AuthProvider,
     };
     use crate::broker::config::{AuthMethod, JwtAlgorithm};
 
@@ -98,6 +100,42 @@ async fn create_auth_provider(
             }
             info!(algorithm = ?jwt_config.algorithm, "JWT authentication enabled");
             Ok(Arc::new(provider))
+        }
+        AuthMethod::JwtFederated => {
+            let Some(federated_config) = &config.federated_jwt_config else {
+                return Err(MqttError::Configuration(
+                    "Federated JWT authentication requires federated_jwt_config".to_string(),
+                ));
+            };
+
+            let provider = FederatedJwtAuthProvider::new(federated_config.issuers.clone())
+                .map_err(|e| {
+                    MqttError::Configuration(format!(
+                        "Failed to create federated JWT provider: {e}"
+                    ))
+                })?
+                .with_clock_skew(federated_config.clock_skew_secs);
+
+            if let Some(acl_file) = &config.acl_file {
+                let acl_manager = AclManager::from_file(acl_file).await?;
+                let provider =
+                    provider.with_acl_manager(Arc::new(tokio::sync::RwLock::new(acl_manager)));
+                provider.initial_fetch().await?;
+                provider.start_background_refresh();
+                info!(
+                    issuers = federated_config.issuers.len(),
+                    "Federated JWT authentication enabled with ACL"
+                );
+                Ok(Arc::new(provider))
+            } else {
+                provider.initial_fetch().await?;
+                provider.start_background_refresh();
+                info!(
+                    issuers = federated_config.issuers.len(),
+                    "Federated JWT authentication enabled"
+                );
+                Ok(Arc::new(provider))
+            }
         }
         AuthMethod::Password | AuthMethod::None => {
             match (&config.password_file, &config.acl_file) {

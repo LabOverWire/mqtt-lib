@@ -26,6 +26,7 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 enum Commands {
     /// Publish messages to MQTT topics
     Pub(commands::pub_cmd::PubCommand),

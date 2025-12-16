@@ -303,6 +303,7 @@ pub struct AuthConfig {
     pub auth_data: Option<Vec<u8>>,
     pub scram_file: Option<PathBuf>,
     pub jwt_config: Option<JwtConfig>,
+    pub federated_jwt_config: Option<FederatedJwtConfig>,
 }
 
 impl Default for AuthConfig {
@@ -315,6 +316,7 @@ impl Default for AuthConfig {
             auth_data: None,
             scram_file: None,
             jwt_config: None,
+            federated_jwt_config: None,
         }
     }
 }
@@ -347,6 +349,13 @@ impl AuthConfig {
     }
 
     #[must_use]
+    pub fn with_federated_jwt(mut self, config: FederatedJwtConfig) -> Self {
+        self.federated_jwt_config = Some(config);
+        self.auth_method = AuthMethod::JwtFederated;
+        self
+    }
+
+    #[must_use]
     pub fn with_acl_file(mut self, path: PathBuf) -> Self {
         self.acl_file = Some(path);
         self
@@ -366,6 +375,7 @@ pub enum AuthMethod {
     Password,
     ScramSha256,
     Jwt,
+    JwtFederated,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -479,7 +489,11 @@ fn default_enabled() -> bool {
 
 impl JwtIssuerConfig {
     #[must_use]
-    pub fn new(name: impl Into<String>, issuer: impl Into<String>, key_source: JwtKeySource) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        issuer: impl Into<String>,
+        key_source: JwtKeySource,
+    ) -> Self {
         Self {
             name: name.into(),
             issuer: issuer.into(),
@@ -560,11 +574,9 @@ impl ClaimPattern {
             Self::Contains(s) => value.contains(s),
             Self::EndsWith(s) => value.ends_with(s),
             Self::StartsWith(s) => value.starts_with(s),
-            Self::Regex(pattern) => {
-                regex::Regex::new(pattern)
-                    .map(|re| re.is_match(value))
-                    .unwrap_or(false)
-            }
+            Self::Regex(pattern) => regex::Regex::new(pattern)
+                .map(|re| re.is_match(value))
+                .unwrap_or(false),
             Self::Any => true,
         }
     }

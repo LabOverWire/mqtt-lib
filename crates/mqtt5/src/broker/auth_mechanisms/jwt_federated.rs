@@ -172,7 +172,10 @@ impl FederatedJwtAuthProvider {
             .map(|d| d.as_secs())
             .unwrap_or(0);
 
-        let clock_skew = issuer_state.config.clock_skew_secs.max(self.clock_skew_secs);
+        let clock_skew = issuer_state
+            .config
+            .clock_skew_secs
+            .max(self.clock_skew_secs);
 
         if let Some(exp) = claims.exp {
             if now > exp + clock_skew {
@@ -196,13 +199,7 @@ impl FederatedJwtAuthProvider {
         Ok((claims, issuer))
     }
 
-    fn verify_with_jwk_key(
-        &self,
-        key: &JwkKey,
-        alg: &str,
-        message: &[u8],
-        sig: &[u8],
-    ) -> bool {
+    fn verify_with_jwk_key(&self, key: &JwkKey, alg: &str, message: &[u8], sig: &[u8]) -> bool {
         match alg {
             "RS256" => {
                 let public_key = signature::UnparsedPublicKey::new(
@@ -259,12 +256,8 @@ impl FederatedJwtAuthProvider {
             return HashSet::new();
         };
 
-        let mut roles: HashSet<String> = issuer_state
-            .config
-            .default_roles
-            .iter()
-            .cloned()
-            .collect();
+        let mut roles: HashSet<String> =
+            issuer_state.config.default_roles.iter().cloned().collect();
 
         for mapping in &issuer_state.config.role_mappings {
             if self.mapping_matches(claims, mapping) {
