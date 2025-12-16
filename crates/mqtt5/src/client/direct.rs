@@ -1101,62 +1101,33 @@ impl DirectClientInner {
                 PropertyValue::TwoByteInteger(val),
             );
         }
-        if let Some(ref val) = self.options.properties.authentication_method {
+        if let Some(ref method) = self.options.properties.authentication_method {
             let _ = properties.add(
                 PropertyId::AuthenticationMethod,
-                PropertyValue::Utf8String(val.clone()),
+                PropertyValue::Utf8String(method.clone()),
             );
-        }
-        if let Some(ref val) = self.options.properties.authentication_data {
-            let _ = properties.add(
-                PropertyId::AuthenticationData,
-                PropertyValue::BinaryData(bytes::Bytes::from(val.clone())),
-            );
+
+            let auth_data = if let Some(ref handler) = self.auth_handler {
+                match handler.initial_response(method).await {
+                    Ok(data) => data,
+                    Err(e) => {
+                        tracing::warn!("Auth handler initial_response failed: {}", e);
+                        self.options.properties.authentication_data.clone()
+                    }
+                }
+            } else {
+                self.options.properties.authentication_data.clone()
+            };
+
+            if let Some(data) = auth_data {
+                let _ = properties.add(
+                    PropertyId::AuthenticationData,
+                    PropertyValue::BinaryData(bytes::Bytes::from(data)),
+                );
+            }
         }
 
-        // Build will properties if present
-        let will_properties = if let Some(ref will) = self.options.will {
-            let mut props = Properties::default();
-            if let Some(val) = will.properties.will_delay_interval {
-                let _ = props.add(
-                    PropertyId::WillDelayInterval,
-                    PropertyValue::FourByteInteger(val),
-                );
-            }
-            if let Some(val) = will.properties.payload_format_indicator {
-                let _ = props.add(
-                    PropertyId::PayloadFormatIndicator,
-                    PropertyValue::Byte(u8::from(val)),
-                );
-            }
-            if let Some(val) = will.properties.message_expiry_interval {
-                let _ = props.add(
-                    PropertyId::MessageExpiryInterval,
-                    PropertyValue::FourByteInteger(val),
-                );
-            }
-            if let Some(ref val) = will.properties.content_type {
-                let _ = props.add(
-                    PropertyId::ContentType,
-                    PropertyValue::Utf8String(val.clone()),
-                );
-            }
-            if let Some(ref val) = will.properties.response_topic {
-                let _ = props.add(
-                    PropertyId::ResponseTopic,
-                    PropertyValue::Utf8String(val.clone()),
-                );
-            }
-            if let Some(ref val) = will.properties.correlation_data {
-                let _ = props.add(
-                    PropertyId::CorrelationData,
-                    PropertyValue::BinaryData(bytes::Bytes::from(val.clone())),
-                );
-            }
-            props
-        } else {
-            Properties::default()
-        };
+        let will_properties = Self::build_will_properties(self.options.will.as_ref());
 
         ConnectPacket {
             protocol_version: self.options.protocol_version.as_u8(),
@@ -1174,6 +1145,53 @@ impl DirectClientInner {
             properties,
             will_properties,
         }
+    }
+
+    fn build_will_properties(will: Option<&crate::types::WillMessage>) -> Properties {
+        use crate::protocol::v5::properties::{PropertyId, PropertyValue};
+
+        let Some(will) = will else {
+            return Properties::default();
+        };
+
+        let mut props = Properties::default();
+        if let Some(val) = will.properties.will_delay_interval {
+            let _ = props.add(
+                PropertyId::WillDelayInterval,
+                PropertyValue::FourByteInteger(val),
+            );
+        }
+        if let Some(val) = will.properties.payload_format_indicator {
+            let _ = props.add(
+                PropertyId::PayloadFormatIndicator,
+                PropertyValue::Byte(u8::from(val)),
+            );
+        }
+        if let Some(val) = will.properties.message_expiry_interval {
+            let _ = props.add(
+                PropertyId::MessageExpiryInterval,
+                PropertyValue::FourByteInteger(val),
+            );
+        }
+        if let Some(ref val) = will.properties.content_type {
+            let _ = props.add(
+                PropertyId::ContentType,
+                PropertyValue::Utf8String(val.clone()),
+            );
+        }
+        if let Some(ref val) = will.properties.response_topic {
+            let _ = props.add(
+                PropertyId::ResponseTopic,
+                PropertyValue::Utf8String(val.clone()),
+            );
+        }
+        if let Some(ref val) = will.properties.correlation_data {
+            let _ = props.add(
+                PropertyId::CorrelationData,
+                PropertyValue::BinaryData(bytes::Bytes::from(val.clone())),
+            );
+        }
+        props
     }
 
     /// Start background tasks

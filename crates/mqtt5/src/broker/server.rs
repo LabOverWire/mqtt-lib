@@ -53,50 +53,98 @@ async fn create_auth_provider(
 ) -> Result<Arc<dyn AuthProvider>> {
     use crate::broker::acl::AclManager;
     use crate::broker::auth::{ComprehensiveAuthProvider, PasswordAuthProvider};
+    use crate::broker::auth_mechanisms::{
+        FileBasedScramCredentialStore, JwtAuthProvider, ScramSha256AuthProvider,
+    };
+    use crate::broker::config::{AuthMethod, JwtAlgorithm};
 
-    match (&config.password_file, &config.acl_file) {
-        (Some(password_file), Some(acl_file)) => {
-            let password_provider = PasswordAuthProvider::from_file(password_file)
-                .await?
-                .with_anonymous(config.allow_anonymous);
-            let acl_manager = AclManager::from_file(acl_file).await?;
-            let provider =
-                ComprehensiveAuthProvider::with_providers(password_provider, acl_manager);
-            info!(
-                "Comprehensive authentication enabled (password + ACL, anonymous: {})",
-                config.allow_anonymous
-            );
+    match config.auth_method {
+        AuthMethod::ScramSha256 => {
+            let Some(scram_file) = &config.scram_file else {
+                return Err(MqttError::Configuration(
+                    "SCRAM-SHA-256 authentication requires scram_file".to_string(),
+                ));
+            };
+            let store = FileBasedScramCredentialStore::load_from_file(scram_file)
+                .map_err(|e| MqttError::Configuration(format!("Failed to load SCRAM file: {e}")))?;
+            let provider = ScramSha256AuthProvider::new(Arc::new(store));
+            info!("SCRAM-SHA-256 authentication enabled");
             Ok(Arc::new(provider))
         }
-        (Some(password_file), None) => {
-            let provider = PasswordAuthProvider::from_file(password_file)
-                .await?
-                .with_anonymous(config.allow_anonymous);
-            info!(
-                "Password authentication enabled (anonymous: {})",
-                config.allow_anonymous
-            );
+        AuthMethod::Jwt => {
+            let Some(jwt_config) = &config.jwt_config else {
+                return Err(MqttError::Configuration(
+                    "JWT authentication requires jwt_config".to_string(),
+                ));
+            };
+            let key_data = std::fs::read(&jwt_config.secret_or_key_file).map_err(|e| {
+                MqttError::Configuration(format!("Failed to read JWT key file: {e}"))
+            })?;
+            let mut provider = match jwt_config.algorithm {
+                JwtAlgorithm::HS256 => {
+                    let secret = String::from_utf8_lossy(&key_data);
+                    let trimmed = secret.trim();
+                    JwtAuthProvider::with_hs256_secret(trimmed.as_bytes())
+                }
+                JwtAlgorithm::RS256 => JwtAuthProvider::with_rs256_public_key(&key_data),
+                JwtAlgorithm::ES256 => JwtAuthProvider::with_es256_public_key(&key_data),
+            };
+            provider = provider.with_clock_skew(jwt_config.clock_skew_secs);
+            if let Some(ref issuer) = jwt_config.issuer {
+                provider = provider.with_issuer(issuer);
+            }
+            if let Some(ref audience) = jwt_config.audience {
+                provider = provider.with_audience(audience);
+            }
+            info!(algorithm = ?jwt_config.algorithm, "JWT authentication enabled");
             Ok(Arc::new(provider))
         }
-        (None, Some(acl_file)) => {
-            let password_provider =
-                PasswordAuthProvider::new().with_anonymous(config.allow_anonymous);
-            let acl_manager = AclManager::from_file(acl_file).await?;
-            let provider =
-                ComprehensiveAuthProvider::with_providers(password_provider, acl_manager);
-            info!(
-                "ACL authorization enabled (anonymous: {})",
-                config.allow_anonymous
-            );
-            Ok(Arc::new(provider))
+        AuthMethod::Password | AuthMethod::None => {
+            match (&config.password_file, &config.acl_file) {
+                (Some(password_file), Some(acl_file)) => {
+                    let password_provider = PasswordAuthProvider::from_file(password_file)
+                        .await?
+                        .with_anonymous(config.allow_anonymous);
+                    let acl_manager = AclManager::from_file(acl_file).await?;
+                    let provider =
+                        ComprehensiveAuthProvider::with_providers(password_provider, acl_manager);
+                    info!(
+                        "Comprehensive authentication enabled (password + ACL, anonymous: {})",
+                        config.allow_anonymous
+                    );
+                    Ok(Arc::new(provider))
+                }
+                (Some(password_file), None) => {
+                    let provider = PasswordAuthProvider::from_file(password_file)
+                        .await?
+                        .with_anonymous(config.allow_anonymous);
+                    info!(
+                        "Password authentication enabled (anonymous: {})",
+                        config.allow_anonymous
+                    );
+                    Ok(Arc::new(provider))
+                }
+                (None, Some(acl_file)) => {
+                    let password_provider =
+                        PasswordAuthProvider::new().with_anonymous(config.allow_anonymous);
+                    let acl_manager = AclManager::from_file(acl_file).await?;
+                    let provider =
+                        ComprehensiveAuthProvider::with_providers(password_provider, acl_manager);
+                    info!(
+                        "ACL authorization enabled (anonymous: {})",
+                        config.allow_anonymous
+                    );
+                    Ok(Arc::new(provider))
+                }
+                (None, None) if config.allow_anonymous => {
+                    info!("Anonymous authentication enabled");
+                    Ok(Arc::new(AllowAllAuthProvider))
+                }
+                (None, None) => Err(MqttError::Configuration(
+                    "Authentication required but no password or ACL file specified".to_string(),
+                )),
+            }
         }
-        (None, None) if config.allow_anonymous => {
-            info!("Anonymous authentication enabled");
-            Ok(Arc::new(AllowAllAuthProvider))
-        }
-        (None, None) => Err(MqttError::Configuration(
-            "Authentication required but no password or ACL file specified".to_string(),
-        )),
     }
 }
 

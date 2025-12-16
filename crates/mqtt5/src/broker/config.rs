@@ -296,20 +296,13 @@ impl BrokerConfig {
 /// Authentication configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthConfig {
-    /// Whether anonymous connections are allowed
     pub allow_anonymous: bool,
-
-    /// Path to password file (username:password format)
     pub password_file: Option<PathBuf>,
-
-    /// Path to ACL file (user `<username>` topic `<pattern>` permission `<type>` format)
     pub acl_file: Option<PathBuf>,
-
-    /// Authentication method
     pub auth_method: AuthMethod,
-
-    /// Authentication data
     pub auth_data: Option<Vec<u8>>,
+    pub scram_file: Option<PathBuf>,
+    pub jwt_config: Option<JwtConfig>,
 }
 
 impl Default for AuthConfig {
@@ -320,19 +313,118 @@ impl Default for AuthConfig {
             acl_file: None,
             auth_method: AuthMethod::None,
             auth_data: None,
+            scram_file: None,
+            jwt_config: None,
         }
+    }
+}
+
+impl AuthConfig {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    #[must_use]
+    pub fn with_password_file(mut self, path: PathBuf) -> Self {
+        self.password_file = Some(path);
+        self.auth_method = AuthMethod::Password;
+        self
+    }
+
+    #[must_use]
+    pub fn with_scram_file(mut self, path: PathBuf) -> Self {
+        self.scram_file = Some(path);
+        self.auth_method = AuthMethod::ScramSha256;
+        self
+    }
+
+    #[must_use]
+    pub fn with_jwt(mut self, config: JwtConfig) -> Self {
+        self.jwt_config = Some(config);
+        self.auth_method = AuthMethod::Jwt;
+        self
+    }
+
+    #[must_use]
+    pub fn with_acl_file(mut self, path: PathBuf) -> Self {
+        self.acl_file = Some(path);
+        self
+    }
+
+    #[must_use]
+    pub fn with_allow_anonymous(mut self, allow: bool) -> Self {
+        self.allow_anonymous = allow;
+        self
     }
 }
 
 /// Authentication method
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AuthMethod {
-    /// No authentication
     None,
-    /// Simple username/password
     Password,
-    /// SCRAM-SHA-256
     ScramSha256,
+    Jwt,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum JwtAlgorithm {
+    HS256,
+    RS256,
+    ES256,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JwtConfig {
+    pub algorithm: JwtAlgorithm,
+    pub secret_or_key_file: PathBuf,
+    pub issuer: Option<String>,
+    pub audience: Option<String>,
+    pub clock_skew_secs: u64,
+}
+
+impl Default for JwtConfig {
+    fn default() -> Self {
+        Self {
+            algorithm: JwtAlgorithm::HS256,
+            secret_or_key_file: PathBuf::new(),
+            issuer: None,
+            audience: None,
+            clock_skew_secs: 60,
+        }
+    }
+}
+
+impl JwtConfig {
+    #[must_use]
+    pub fn new(algorithm: JwtAlgorithm, secret_or_key_file: PathBuf) -> Self {
+        Self {
+            algorithm,
+            secret_or_key_file,
+            issuer: None,
+            audience: None,
+            clock_skew_secs: 60,
+        }
+    }
+
+    #[must_use]
+    pub fn with_issuer(mut self, issuer: impl Into<String>) -> Self {
+        self.issuer = Some(issuer.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_audience(mut self, audience: impl Into<String>) -> Self {
+        self.audience = Some(audience.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_clock_skew(mut self, seconds: u64) -> Self {
+        self.clock_skew_secs = seconds;
+        self
+    }
 }
 
 /// TLS configuration

@@ -32,6 +32,34 @@ pub struct BrokerCommand {
     #[arg(long)]
     pub acl_file: Option<PathBuf>,
 
+    /// Authentication method: password, scram, jwt (default: password if auth file provided)
+    #[arg(long, value_parser = ["password", "scram", "jwt"])]
+    pub auth_method: Option<String>,
+
+    /// SCRAM credentials file path (format: username:salt:iterations:stored_key:server_key)
+    #[arg(long)]
+    pub scram_file: Option<PathBuf>,
+
+    /// JWT algorithm: hs256, rs256, es256
+    #[arg(long, value_parser = ["hs256", "rs256", "es256"])]
+    pub jwt_algorithm: Option<String>,
+
+    /// JWT secret file (for HS256) or public key file (for RS256/ES256)
+    #[arg(long)]
+    pub jwt_key_file: Option<PathBuf>,
+
+    /// JWT required issuer
+    #[arg(long)]
+    pub jwt_issuer: Option<String>,
+
+    /// JWT required audience
+    #[arg(long)]
+    pub jwt_audience: Option<String>,
+
+    /// JWT clock skew tolerance in seconds (default: 60)
+    #[arg(long, default_value = "60")]
+    pub jwt_clock_skew: u64,
+
     /// TLS certificate file path (PEM format)
     #[arg(long)]
     pub tls_cert: Option<PathBuf>,
@@ -256,12 +284,24 @@ fn resolve_auth_settings(cmd: &BrokerCommand) -> Result<bool> {
         return Ok(false);
     }
 
+    if cmd.scram_file.is_some() {
+        info!("SCRAM credentials file provided, anonymous access disabled by default");
+        return Ok(false);
+    }
+
+    if cmd.jwt_key_file.is_some() {
+        info!("JWT key file provided, anonymous access disabled by default");
+        return Ok(false);
+    }
+
     if cmd.non_interactive {
         anyhow::bail!(
             "No authentication configured.\n\
              Use one of:\n  \
              --allow-anonymous           Allow connections without credentials\n  \
-             --auth-password-file <path> Require password authentication"
+             --auth-password-file <path> Require password authentication\n  \
+             --scram-file <path>         Require SCRAM-SHA-256 authentication\n  \
+             --jwt-key-file <path>       Require JWT authentication"
         );
     }
 
@@ -277,7 +317,8 @@ fn resolve_auth_settings(cmd: &BrokerCommand) -> Result<bool> {
 
 async fn create_interactive_config(cmd: &mut BrokerCommand) -> Result<BrokerConfig> {
     use mqtt5::broker::config::{
-        AuthConfig, AuthMethod, QuicConfig, StorageConfig, TlsConfig, WebSocketConfig,
+        AuthConfig, AuthMethod, JwtAlgorithm, JwtConfig, QuicConfig, StorageConfig, TlsConfig,
+        WebSocketConfig,
     };
 
     let mut config = BrokerConfig::new();
@@ -316,45 +357,108 @@ async fn create_interactive_config(cmd: &mut BrokerCommand) -> Result<BrokerConf
 
     let allow_anonymous = resolve_auth_settings(cmd)?;
 
-    if cmd.auth_password_file.is_some() || cmd.acl_file.is_some() || !allow_anonymous {
-        if let Some(password_file) = &cmd.auth_password_file {
-            if !password_file.exists() {
-                anyhow::bail!(
-                    "Authentication password file not found: {}",
-                    password_file.display()
-                );
+    let auth_method = match cmd.auth_method.as_deref() {
+        Some("scram") => {
+            let Some(scram_file) = &cmd.scram_file else {
+                anyhow::bail!("--scram-file is required when using --auth-method scram");
+            };
+            if !scram_file.exists() {
+                anyhow::bail!("SCRAM credentials file not found: {}", scram_file.display());
             }
+            AuthMethod::ScramSha256
         }
-
-        if let Some(acl_file) = &cmd.acl_file {
-            if !acl_file.exists() {
-                anyhow::bail!("ACL file not found: {}", acl_file.display());
+        Some("jwt") => {
+            let Some(jwt_key_file) = &cmd.jwt_key_file else {
+                anyhow::bail!("--jwt-key-file is required when using --auth-method jwt");
+            };
+            if !jwt_key_file.exists() {
+                anyhow::bail!("JWT key file not found: {}", jwt_key_file.display());
             }
+            if cmd.jwt_algorithm.is_none() {
+                anyhow::bail!("--jwt-algorithm is required when using --auth-method jwt");
+            }
+            AuthMethod::Jwt
         }
-
-        let auth_config = AuthConfig {
-            allow_anonymous,
-            password_file: cmd.auth_password_file.clone(),
-            acl_file: cmd.acl_file.clone(),
-            auth_method: if cmd.auth_password_file.is_some() {
+        Some("password") | None => {
+            if cmd.auth_password_file.is_some() {
                 AuthMethod::Password
             } else {
                 AuthMethod::None
-            },
-            auth_data: None,
-        };
-        config = config.with_auth(auth_config);
+            }
+        }
+        Some(other) => anyhow::bail!("Unknown auth method: {other}"),
+    };
+
+    if let Some(password_file) = &cmd.auth_password_file {
+        if !password_file.exists() {
+            anyhow::bail!(
+                "Authentication password file not found: {}",
+                password_file.display()
+            );
+        }
     }
 
-    if allow_anonymous {
-        info!("Anonymous access enabled - clients can connect without credentials");
-    } else if cmd.auth_password_file.is_some() {
-        info!(
-            "Password authentication required (file: {:?})",
-            cmd.auth_password_file.as_ref().unwrap()
-        );
+    if let Some(acl_file) = &cmd.acl_file {
+        if !acl_file.exists() {
+            anyhow::bail!("ACL file not found: {}", acl_file.display());
+        }
+    }
+
+    let jwt_config = if auth_method == AuthMethod::Jwt {
+        let algorithm = match cmd.jwt_algorithm.as_deref() {
+            Some("hs256") => JwtAlgorithm::HS256,
+            Some("rs256") => JwtAlgorithm::RS256,
+            Some("es256") => JwtAlgorithm::ES256,
+            _ => anyhow::bail!("Invalid JWT algorithm"),
+        };
+        let mut jwt_cfg = JwtConfig::new(algorithm, cmd.jwt_key_file.clone().unwrap());
+        jwt_cfg.clock_skew_secs = cmd.jwt_clock_skew;
+        if let Some(ref issuer) = cmd.jwt_issuer {
+            jwt_cfg.issuer = Some(issuer.clone());
+        }
+        if let Some(ref audience) = cmd.jwt_audience {
+            jwt_cfg.audience = Some(audience.clone());
+        }
+        Some(jwt_cfg)
     } else {
-        info!("Authentication required but no password file configured");
+        None
+    };
+
+    let auth_config = AuthConfig {
+        allow_anonymous,
+        password_file: cmd.auth_password_file.clone(),
+        acl_file: cmd.acl_file.clone(),
+        auth_method,
+        auth_data: None,
+        scram_file: cmd.scram_file.clone(),
+        jwt_config,
+    };
+    config = config.with_auth(auth_config);
+
+    match auth_method {
+        AuthMethod::None if allow_anonymous => {
+            info!("Anonymous access enabled - clients can connect without credentials");
+        }
+        AuthMethod::Password => {
+            info!(
+                "Password authentication enabled (file: {:?})",
+                cmd.auth_password_file.as_ref().unwrap()
+            );
+        }
+        AuthMethod::ScramSha256 => {
+            info!(
+                "SCRAM-SHA-256 authentication enabled (file: {:?})",
+                cmd.scram_file.as_ref().unwrap()
+            );
+        }
+        AuthMethod::Jwt => {
+            info!(
+                "JWT authentication enabled (algorithm: {:?}, key: {:?})",
+                cmd.jwt_algorithm.as_ref().unwrap(),
+                cmd.jwt_key_file.as_ref().unwrap()
+            );
+        }
+        _ => {}
     }
 
     if let Some(acl_file) = &cmd.acl_file {

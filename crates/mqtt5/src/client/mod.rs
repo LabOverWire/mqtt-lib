@@ -32,6 +32,7 @@ use tokio::time::Duration;
 use tracing::instrument;
 
 mod auth_handler;
+pub mod auth_handlers;
 mod connection;
 #[cfg(not(target_arch = "wasm32"))]
 mod direct;
@@ -41,6 +42,7 @@ mod retry;
 pub mod r#trait;
 
 pub use auth_handler::{AuthHandler, AuthResponse};
+pub use auth_handlers::{JwtAuthHandler, PlainAuthHandler, ScramSha256AuthHandler};
 
 pub use self::connection::{ConnectionEvent, DisconnectReason, ReconnectConfig};
 pub use self::error_recovery::{ErrorCallback, ErrorRecoveryConfig, RecoverableError, RetryState};
@@ -475,6 +477,7 @@ impl MqttClient {
         // Update the inner client with new options
         {
             let mut inner = self.inner.write().await;
+            inner.auth_method.clone_from(&options.properties.authentication_method);
             inner.options = options.clone();
             // Always store address for potential reconnection
             inner.last_address = Some(address.to_string());

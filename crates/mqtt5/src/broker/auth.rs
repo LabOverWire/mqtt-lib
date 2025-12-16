@@ -95,6 +95,7 @@ pub struct EnhancedAuthResult {
     pub auth_method: String,
     pub auth_data: Option<Vec<u8>>,
     pub reason_string: Option<String>,
+    pub user_id: Option<String>,
 }
 
 impl EnhancedAuthResult {
@@ -106,6 +107,19 @@ impl EnhancedAuthResult {
             auth_method,
             auth_data: None,
             reason_string: None,
+            user_id: None,
+        }
+    }
+
+    #[must_use]
+    pub fn success_with_user(auth_method: String, user_id: String) -> Self {
+        Self {
+            status: EnhancedAuthStatus::Success,
+            reason_code: ReasonCode::Success,
+            auth_method,
+            auth_data: None,
+            reason_string: None,
+            user_id: Some(user_id),
         }
     }
 
@@ -117,6 +131,7 @@ impl EnhancedAuthResult {
             auth_method,
             auth_data,
             reason_string: None,
+            user_id: None,
         }
     }
 
@@ -128,6 +143,7 @@ impl EnhancedAuthResult {
             auth_method,
             auth_data: None,
             reason_string: None,
+            user_id: None,
         }
     }
 
@@ -139,6 +155,7 @@ impl EnhancedAuthResult {
             auth_method,
             auth_data: None,
             reason_string: Some(reason),
+            user_id: None,
         }
     }
 }
@@ -393,6 +410,24 @@ impl PasswordAuthProvider {
     /// Checks if a user exists
     pub async fn has_user(&self, username: &str) -> bool {
         self.users.read().await.contains_key(username)
+    }
+
+    /// Verifies a password for a user
+    /// Returns true if the password is valid, false otherwise
+    pub async fn verify_user_password(&self, username: &str, password: &str) -> bool {
+        let users = self.users.read().await;
+        users.get(username).map_or(false, |hash| {
+            Self::verify_password(password, hash).unwrap_or(false)
+        })
+    }
+
+    /// Verifies a password for a user (blocking version)
+    /// This is useful for sync contexts
+    pub fn verify_user_password_blocking(&self, username: &str, password: &str) -> bool {
+        let users = self.users.blocking_read();
+        users.get(username).map_or(false, |hash| {
+            Self::verify_password(password, hash).unwrap_or(false)
+        })
     }
 }
 

@@ -22,6 +22,7 @@
 
 pub mod acl;
 pub mod auth;
+pub mod auth_mechanisms;
 #[cfg(not(target_arch = "wasm32"))]
 mod binding;
 #[cfg(not(target_arch = "wasm32"))]
@@ -52,7 +53,11 @@ pub mod websocket_server;
 pub use acl::{AclManager, AclRule, Permission, Role, RoleRule};
 pub use auth::{
     AllowAllAuthProvider, AuthProvider, AuthResult, CertificateAuthProvider,
-    ComprehensiveAuthProvider, PasswordAuthProvider,
+    ComprehensiveAuthProvider, EnhancedAuthResult, EnhancedAuthStatus, PasswordAuthProvider,
+};
+pub use auth_mechanisms::{
+    JwtAuthProvider, PasswordCredentialStore, PlainAuthProvider, ScramCredentialStore,
+    ScramCredentials, ScramSha256AuthProvider,
 };
 pub use config::{BrokerConfig, StorageBackend as StorageBackendType, StorageConfig};
 pub use resource_monitor::{ResourceLimits, ResourceMonitor, ResourceStats};
