@@ -339,7 +339,10 @@ async fn fetch_jwks_http(uri: &str, timeout: Duration) -> Result<Vec<JwkKey>, Jw
     match reader.read_to_end(&mut response).await {
         Ok(_) => {}
         Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof && !response.is_empty() => {
-            debug!("Server closed connection without TLS close_notify (received {} bytes)", response.len());
+            debug!(
+                "Server closed connection without TLS close_notify (received {} bytes)",
+                response.len()
+            );
         }
         Err(e) => return Err(JwksError::ConnectionFailed(e.to_string())),
     }

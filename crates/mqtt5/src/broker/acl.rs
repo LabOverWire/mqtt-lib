@@ -602,10 +602,8 @@ impl AclManager {
             let user_roles_map = self.user_roles.read().await;
             let fed_roles_map = self.federated_user_roles.read().await;
 
-            let mut all_assigned_roles: HashSet<String> = user_roles_map
-                .get(user)
-                .cloned()
-                .unwrap_or_default();
+            let mut all_assigned_roles: HashSet<String> =
+                user_roles_map.get(user).cloned().unwrap_or_default();
 
             if let Some(fed_entry) = fed_roles_map.get(user) {
                 all_assigned_roles.extend(fed_entry.roles.iter().cloned());

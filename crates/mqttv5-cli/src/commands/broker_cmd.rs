@@ -516,12 +516,10 @@ async fn create_interactive_config(cmd: &mut BrokerCommand) -> Result<BrokerConf
                 Some("identity-only") => FederatedAuthMode::IdentityOnly,
                 Some("claim-binding") => FederatedAuthMode::ClaimBinding,
                 Some("trusted-roles") => FederatedAuthMode::TrustedRoles,
-                None => {
-                    match cmd.jwt_role_merge_mode.as_str() {
-                        "replace" => FederatedAuthMode::TrustedRoles,
-                        _ => FederatedAuthMode::ClaimBinding,
-                    }
-                }
+                None => match cmd.jwt_role_merge_mode.as_str() {
+                    "replace" => FederatedAuthMode::TrustedRoles,
+                    _ => FederatedAuthMode::ClaimBinding,
+                },
                 _ => FederatedAuthMode::IdentityOnly,
             };
 

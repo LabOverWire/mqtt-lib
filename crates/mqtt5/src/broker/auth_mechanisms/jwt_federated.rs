@@ -274,11 +274,7 @@ impl FederatedJwtAuthProvider {
         }
     }
 
-    fn extract_roles_for_mode(
-        &self,
-        claims: &JwtClaims,
-        issuer: &str,
-    ) -> HashSet<String> {
+    fn extract_roles_for_mode(&self, claims: &JwtClaims, issuer: &str) -> HashSet<String> {
         let Some(issuer_state) = self.issuers.get(issuer) else {
             return HashSet::new();
         };
@@ -303,7 +299,11 @@ impl FederatedJwtAuthProvider {
                 let claim_paths: Vec<&str> = if config.trusted_role_claims.is_empty() {
                     vec!["roles", "groups", "realm_access.roles"]
                 } else {
-                    config.trusted_role_claims.iter().map(String::as_str).collect()
+                    config
+                        .trusted_role_claims
+                        .iter()
+                        .map(String::as_str)
+                        .collect()
                 };
 
                 for path in claim_paths {
@@ -416,17 +416,18 @@ impl AuthProvider for FederatedJwtAuthProvider {
                     let session_scoped = config.map_or(true, |c| c.session_scoped_roles);
                     let auth_mode = config.map_or(FederatedAuthMode::default(), |c| c.auth_mode);
 
-                    let user_id = match compute_user_id(&issuer, claims.sub.as_deref(), issuer_prefix) {
-                        Ok(id) => id,
-                        Err(e) => {
-                            warn!(error = %e, "JWT authentication failed: invalid user ID");
-                            return Ok(EnhancedAuthResult::fail_with_reason(
-                                method,
-                                ReasonCode::NotAuthorized,
-                                e.to_string(),
-                            ));
-                        }
-                    };
+                    let user_id =
+                        match compute_user_id(&issuer, claims.sub.as_deref(), issuer_prefix) {
+                            Ok(id) => id,
+                            Err(e) => {
+                                warn!(error = %e, "JWT authentication failed: invalid user ID");
+                                return Ok(EnhancedAuthResult::fail_with_reason(
+                                    method,
+                                    ReasonCode::NotAuthorized,
+                                    e.to_string(),
+                                ));
+                            }
+                        };
 
                     let roles = self.extract_roles_for_mode(&claims, &issuer);
 
