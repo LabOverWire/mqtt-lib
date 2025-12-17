@@ -336,18 +336,22 @@ async fn fetch_jwks_http(uri: &str, timeout: Duration) -> Result<Vec<JwkKey>, Jw
         .map_err(|e| JwksError::ConnectionFailed(e.to_string()))?;
 
     let mut response = Vec::new();
-    reader
-        .read_to_end(&mut response)
-        .await
-        .map_err(|e| JwksError::ConnectionFailed(e.to_string()))?;
+    match reader.read_to_end(&mut response).await {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof && !response.is_empty() => {
+            debug!("Server closed connection without TLS close_notify (received {} bytes)", response.len());
+        }
+        Err(e) => return Err(JwksError::ConnectionFailed(e.to_string())),
+    }
 
     let response_str =
         String::from_utf8(response).map_err(|e| JwksError::ParseError(e.to_string()))?;
 
-    let body_start = response_str
+    let header_end = response_str
         .find("\r\n\r\n")
         .ok_or_else(|| JwksError::ParseError("invalid HTTP response".into()))?;
-    let body = &response_str[body_start + 4..];
+    let headers = &response_str[..header_end];
+    let body = &response_str[header_end + 4..];
 
     let first_line = response_str
         .lines()
@@ -357,7 +361,50 @@ async fn fetch_jwks_http(uri: &str, timeout: Duration) -> Result<Vec<JwkKey>, Jw
         return Err(JwksError::HttpError(first_line.to_string()));
     }
 
-    parse_jwks_json(body)
+    let is_chunked = headers
+        .to_lowercase()
+        .contains("transfer-encoding: chunked");
+
+    let decoded_body = if is_chunked {
+        decode_chunked_body(body)?
+    } else {
+        body.to_string()
+    };
+
+    parse_jwks_json(&decoded_body)
+}
+
+fn decode_chunked_body(body: &str) -> Result<String, JwksError> {
+    let mut result = String::new();
+    let mut remaining = body;
+
+    loop {
+        let line_end = remaining
+            .find("\r\n")
+            .ok_or_else(|| JwksError::ParseError("invalid chunked encoding".into()))?;
+        let size_str = &remaining[..line_end];
+
+        let chunk_size = usize::from_str_radix(size_str.trim(), 16)
+            .map_err(|_| JwksError::ParseError(format!("invalid chunk size: {size_str}")))?;
+
+        if chunk_size == 0 {
+            break;
+        }
+
+        remaining = &remaining[line_end + 2..];
+        if remaining.len() < chunk_size {
+            return Err(JwksError::ParseError("incomplete chunk".into()));
+        }
+
+        result.push_str(&remaining[..chunk_size]);
+        remaining = &remaining[chunk_size..];
+
+        if remaining.starts_with("\r\n") {
+            remaining = &remaining[2..];
+        }
+    }
+
+    Ok(result)
 }
 
 #[derive(Debug, Deserialize)]
@@ -686,6 +733,17 @@ mod tests {
 
         let decoded = base64url_decode("SGVsbG8gV29ybGQ").unwrap();
         assert_eq!(decoded, b"Hello World");
+    }
+
+    #[test]
+    fn test_decode_chunked_body() {
+        let chunked = "5\r\nHello\r\n6\r\n World\r\n0\r\n\r\n";
+        let decoded = decode_chunked_body(chunked).unwrap();
+        assert_eq!(decoded, "Hello World");
+
+        let chunked = "a\r\n0123456789\r\n0\r\n\r\n";
+        let decoded = decode_chunked_body(chunked).unwrap();
+        assert_eq!(decoded, "0123456789");
     }
 
     #[tokio::test]

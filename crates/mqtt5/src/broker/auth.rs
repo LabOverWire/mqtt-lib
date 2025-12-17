@@ -265,6 +265,13 @@ pub trait AuthProvider: Send + Sync {
             ))
         })
     }
+
+    fn cleanup_session<'a>(
+        &'a self,
+        _user_id: &'a str,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        Box::pin(async {})
+    }
 }
 
 /// Allow all authentication provider (for testing/development)

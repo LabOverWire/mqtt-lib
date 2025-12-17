@@ -84,9 +84,25 @@ pub struct BrokerCommand {
     #[arg(long)]
     pub jwt_default_roles: Option<String>,
 
-    /// Role merge mode: merge (combine with static ACL) or replace (JWT roles only)
+    /// Role merge mode: merge (combine with static ACL) or replace (JWT roles only) [DEPRECATED: use --jwt-auth-mode]
     #[arg(long, value_parser = ["merge", "replace"], default_value = "merge")]
     pub jwt_role_merge_mode: String,
+
+    /// Federated authentication mode: identity-only (external IdP for identity, internal ACL), claim-binding (admin-defined mappings), trusted-roles (trust JWT role claims)
+    #[arg(long, value_parser = ["identity-only", "claim-binding", "trusted-roles"])]
+    pub jwt_auth_mode: Option<String>,
+
+    /// Claim paths for extracting trusted roles (can be specified multiple times, e.g., "roles", "groups", "realm_access.roles")
+    #[arg(long, action = ArgAction::Append)]
+    pub jwt_trusted_role_claim: Vec<String>,
+
+    /// Whether JWT-derived roles are session-scoped (cleared on disconnect)
+    #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+    pub jwt_session_scoped_roles: Option<bool>,
+
+    /// Custom issuer prefix for user ID namespacing (default: issuer domain)
+    #[arg(long)]
+    pub jwt_issuer_prefix: Option<String>,
 
     /// Federated JWT config file (JSON) for multi-issuer setup
     #[arg(long)]
@@ -355,9 +371,9 @@ fn resolve_auth_settings(cmd: &BrokerCommand) -> Result<bool> {
 
 async fn create_interactive_config(cmd: &mut BrokerCommand) -> Result<BrokerConfig> {
     use mqtt5::broker::config::{
-        AuthConfig, AuthMethod, ClaimPattern, FederatedJwtConfig, JwtAlgorithm, JwtConfig,
-        JwtIssuerConfig, JwtKeySource, JwtRoleMapping, QuicConfig, RoleMergeMode, StorageConfig,
-        TlsConfig, WebSocketConfig,
+        AuthConfig, AuthMethod, ClaimPattern, FederatedAuthMode, FederatedJwtConfig, JwtAlgorithm,
+        JwtConfig, JwtIssuerConfig, JwtKeySource, JwtRoleMapping, QuicConfig, RoleMergeMode,
+        StorageConfig, TlsConfig, WebSocketConfig,
     };
 
     let mut config = BrokerConfig::new();
@@ -496,6 +512,20 @@ async fn create_interactive_config(cmd: &mut BrokerCommand) -> Result<BrokerConf
                 .with_context(|| "Failed to parse JWT config file as JSON")?;
             Some(config)
         } else {
+            let auth_mode = match cmd.jwt_auth_mode.as_deref() {
+                Some("identity-only") => FederatedAuthMode::IdentityOnly,
+                Some("claim-binding") => FederatedAuthMode::ClaimBinding,
+                Some("trusted-roles") => FederatedAuthMode::TrustedRoles,
+                None => {
+                    match cmd.jwt_role_merge_mode.as_str() {
+                        "replace" => FederatedAuthMode::TrustedRoles,
+                        _ => FederatedAuthMode::ClaimBinding,
+                    }
+                }
+                _ => FederatedAuthMode::IdentityOnly,
+            };
+
+            #[allow(deprecated)]
             let merge_mode = match cmd.jwt_role_merge_mode.as_str() {
                 "replace" => RoleMergeMode::Replace,
                 _ => RoleMergeMode::Merge,
@@ -520,7 +550,7 @@ async fn create_interactive_config(cmd: &mut BrokerCommand) -> Result<BrokerConf
                 }
             }
 
-            let issuer_config = JwtIssuerConfig::new(
+            let mut issuer_config = JwtIssuerConfig::new(
                 "cli-issuer",
                 cmd.jwt_issuer.clone().unwrap(),
                 JwtKeySource::Jwks {
@@ -530,16 +560,30 @@ async fn create_interactive_config(cmd: &mut BrokerCommand) -> Result<BrokerConf
                     cache_ttl_secs: cmd.jwt_jwks_refresh * 24,
                 },
             )
-            .with_role_merge_mode(merge_mode)
+            .with_auth_mode(auth_mode)
             .with_default_roles(default_roles);
 
-            let issuer_config = if let Some(ref audience) = cmd.jwt_audience {
-                issuer_config.with_audience(audience.clone())
-            } else {
-                issuer_config
-            };
+            #[allow(deprecated)]
+            {
+                issuer_config.role_merge_mode = merge_mode;
+            }
 
-            let mut issuer_config = issuer_config;
+            if let Some(ref audience) = cmd.jwt_audience {
+                issuer_config = issuer_config.with_audience(audience.clone());
+            }
+
+            if !cmd.jwt_trusted_role_claim.is_empty() {
+                issuer_config.trusted_role_claims = cmd.jwt_trusted_role_claim.clone();
+            }
+
+            if let Some(session_scoped) = cmd.jwt_session_scoped_roles {
+                issuer_config.session_scoped_roles = session_scoped;
+            }
+
+            if let Some(ref prefix) = cmd.jwt_issuer_prefix {
+                issuer_config.issuer_prefix = Some(prefix.clone());
+            }
+
             issuer_config.role_mappings = role_mappings;
 
             Some(FederatedJwtConfig {

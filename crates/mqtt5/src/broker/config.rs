@@ -470,17 +470,30 @@ pub struct JwtIssuerConfig {
     #[serde(default = "default_clock_skew")]
     pub clock_skew_secs: u64,
     #[serde(default)]
+    pub auth_mode: FederatedAuthMode,
+    #[serde(default)]
     pub role_mappings: Vec<JwtRoleMapping>,
     #[serde(default)]
     pub default_roles: Vec<String>,
     #[serde(default)]
-    pub role_merge_mode: RoleMergeMode,
+    pub trusted_role_claims: Vec<String>,
+    #[serde(default = "default_session_scoped_roles")]
+    pub session_scoped_roles: bool,
+    #[serde(default)]
+    pub issuer_prefix: Option<String>,
     #[serde(default = "default_enabled")]
     pub enabled: bool,
+    #[serde(default)]
+    #[deprecated(note = "Use auth_mode instead")]
+    pub role_merge_mode: RoleMergeMode,
 }
 
 fn default_clock_skew() -> u64 {
     60
+}
+
+fn default_session_scoped_roles() -> bool {
+    true
 }
 
 fn default_enabled() -> bool {
@@ -489,6 +502,7 @@ fn default_enabled() -> bool {
 
 impl JwtIssuerConfig {
     #[must_use]
+    #[allow(deprecated)]
     pub fn new(
         name: impl Into<String>,
         issuer: impl Into<String>,
@@ -500,16 +514,26 @@ impl JwtIssuerConfig {
             key_source,
             audience: None,
             clock_skew_secs: 60,
+            auth_mode: FederatedAuthMode::default(),
             role_mappings: Vec::new(),
             default_roles: Vec::new(),
-            role_merge_mode: RoleMergeMode::default(),
+            trusted_role_claims: Vec::new(),
+            session_scoped_roles: true,
+            issuer_prefix: None,
             enabled: true,
+            role_merge_mode: RoleMergeMode::default(),
         }
     }
 
     #[must_use]
     pub fn with_audience(mut self, audience: impl Into<String>) -> Self {
         self.audience = Some(audience.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_auth_mode(mut self, mode: FederatedAuthMode) -> Self {
+        self.auth_mode = mode;
         self
     }
 
@@ -526,8 +550,20 @@ impl JwtIssuerConfig {
     }
 
     #[must_use]
-    pub fn with_role_merge_mode(mut self, mode: RoleMergeMode) -> Self {
-        self.role_merge_mode = mode;
+    pub fn with_trusted_role_claims(mut self, claims: Vec<String>) -> Self {
+        self.trusted_role_claims = claims;
+        self
+    }
+
+    #[must_use]
+    pub fn with_session_scoped_roles(mut self, session_scoped: bool) -> Self {
+        self.session_scoped_roles = session_scoped;
+        self
+    }
+
+    #[must_use]
+    pub fn with_issuer_prefix(mut self, prefix: impl Into<String>) -> Self {
+        self.issuer_prefix = Some(prefix.into());
         self
     }
 }
@@ -537,6 +573,14 @@ pub enum RoleMergeMode {
     #[default]
     Merge,
     Replace,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum FederatedAuthMode {
+    #[default]
+    IdentityOnly,
+    ClaimBinding,
+    TrustedRoles,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

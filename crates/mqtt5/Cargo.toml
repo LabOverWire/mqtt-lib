@@ -49,8 +49,6 @@ anyhow = "1.0"
 wasm-bindgen-test = "0.3"
 
 url = "2.5.4"
-hyper = { version = "1.8.1", features = ["full"] }
-hyper-util = { version = "0.1.18", features = ["full"] }
 tempfile = "3.12.0"
 cucumber = "0.21.1"
 

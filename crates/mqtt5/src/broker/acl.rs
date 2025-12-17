@@ -152,6 +152,32 @@ impl Role {
     }
 }
 
+/// Entry for federated (JWT-derived) roles with metadata
+#[derive(Debug, Clone)]
+pub struct FederatedRoleEntry {
+    pub roles: HashSet<String>,
+    pub issuer: String,
+    pub mode: crate::broker::config::FederatedAuthMode,
+    pub session_bound: bool,
+}
+
+impl FederatedRoleEntry {
+    #[must_use]
+    pub fn new(
+        roles: HashSet<String>,
+        issuer: String,
+        mode: crate::broker::config::FederatedAuthMode,
+        session_bound: bool,
+    ) -> Self {
+        Self {
+            roles,
+            issuer,
+            mode,
+            session_bound,
+        }
+    }
+}
+
 /// Access Control List manager with RBAC support
 #[derive(Debug)]
 pub struct AclManager {
@@ -159,8 +185,10 @@ pub struct AclManager {
     rules: Arc<RwLock<Vec<AclRule>>>,
     /// Roles: role_name -> Role
     roles: Arc<RwLock<HashMap<String, Role>>>,
-    /// User-role assignments: username -> set of role names
+    /// User-role assignments: username -> set of role names (native/persistent)
     user_roles: Arc<RwLock<HashMap<String, HashSet<String>>>>,
+    /// Federated user-role assignments: user_id -> FederatedRoleEntry (session-scoped)
+    federated_user_roles: Arc<RwLock<HashMap<String, FederatedRoleEntry>>>,
     /// Path to ACL file (optional)
     acl_file: Option<std::path::PathBuf>,
     /// Default permission when no rules match
@@ -181,6 +209,7 @@ impl AclManager {
             rules: Arc::new(RwLock::new(Vec::new())),
             roles: Arc::new(RwLock::new(HashMap::new())),
             user_roles: Arc::new(RwLock::new(HashMap::new())),
+            federated_user_roles: Arc::new(RwLock::new(HashMap::new())),
             acl_file: None,
             default_permission: Permission::Deny,
         }
@@ -193,6 +222,7 @@ impl AclManager {
             rules: Arc::new(RwLock::new(Vec::new())),
             roles: Arc::new(RwLock::new(HashMap::new())),
             user_roles: Arc::new(RwLock::new(HashMap::new())),
+            federated_user_roles: Arc::new(RwLock::new(HashMap::new())),
             acl_file: None,
             default_permission: Permission::ReadWrite,
         }
@@ -227,6 +257,7 @@ impl AclManager {
             rules: Arc::new(RwLock::new(Vec::new())),
             roles: Arc::new(RwLock::new(HashMap::new())),
             user_roles: Arc::new(RwLock::new(HashMap::new())),
+            federated_user_roles: Arc::new(RwLock::new(HashMap::new())),
             acl_file: Some(path.clone()),
             default_permission: Permission::Deny,
         };
@@ -492,6 +523,34 @@ impl AclManager {
         self.user_roles.write().await.clear();
     }
 
+    /// Sets federated roles for a user (atomic operation)
+    pub async fn set_federated_roles(&self, user_id: &str, entry: FederatedRoleEntry) {
+        self.federated_user_roles
+            .write()
+            .await
+            .insert(user_id.to_string(), entry);
+    }
+
+    /// Gets federated roles for a user
+    pub async fn get_federated_roles(&self, user_id: &str) -> Option<FederatedRoleEntry> {
+        self.federated_user_roles.read().await.get(user_id).cloned()
+    }
+
+    /// Clears all federated roles for a user
+    pub async fn clear_federated_roles(&self, user_id: &str) {
+        self.federated_user_roles.write().await.remove(user_id);
+    }
+
+    /// Clears session-bound federated roles for a user (called on disconnect)
+    pub async fn clear_session_bound_roles(&self, user_id: &str) {
+        let mut fed_roles = self.federated_user_roles.write().await;
+        if let Some(entry) = fed_roles.get(user_id) {
+            if entry.session_bound {
+                fed_roles.remove(user_id);
+            }
+        }
+    }
+
     /// Check if a user is authorized to publish to a topic
     pub async fn check_publish(&self, username: Option<&str>, topic: &str) -> bool {
         self.check_permission(username, topic, |p| p.allows_write())
@@ -538,15 +597,26 @@ impl AclManager {
             }
         }
 
-        // Step 3 & 4: Check role-based rules
+        // Step 3 & 4: Check role-based rules (native + federated)
         if let Some(user) = username {
             let user_roles_map = self.user_roles.read().await;
-            if let Some(assigned_roles) = user_roles_map.get(user) {
+            let fed_roles_map = self.federated_user_roles.read().await;
+
+            let mut all_assigned_roles: HashSet<String> = user_roles_map
+                .get(user)
+                .cloned()
+                .unwrap_or_default();
+
+            if let Some(fed_entry) = fed_roles_map.get(user) {
+                all_assigned_roles.extend(fed_entry.roles.iter().cloned());
+            }
+
+            if !all_assigned_roles.is_empty() {
                 let roles_map = self.roles.read().await;
                 let mut found_deny = false;
                 let mut found_allow = false;
 
-                for role_name in assigned_roles {
+                for role_name in &all_assigned_roles {
                     if let Some(role) = roles_map.get(role_name) {
                         for rule in &role.rules {
                             if rule.matches(topic) {

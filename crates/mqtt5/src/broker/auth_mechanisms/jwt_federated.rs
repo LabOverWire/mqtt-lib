@@ -1,9 +1,9 @@
 use super::jwks::{JwkKey, JwksCache, JwksEndpointConfig};
 use super::jwt::{JwtClaims, JwtHeader, JwtVerifier};
-use crate::broker::acl::AclManager;
+use crate::broker::acl::{AclManager, FederatedRoleEntry};
 use crate::broker::auth::{AuthProvider, AuthResult, EnhancedAuthResult};
 use crate::broker::config::{
-    ClaimPattern, JwtIssuerConfig, JwtKeySource, JwtRoleMapping, RoleMergeMode,
+    ClaimPattern, FederatedAuthMode, JwtIssuerConfig, JwtKeySource, JwtRoleMapping,
 };
 use crate::error::Result;
 use crate::packet::connect::ConnectPacket;
@@ -23,6 +23,29 @@ use tracing::{debug, warn};
 struct IssuerState {
     config: JwtIssuerConfig,
     static_verifier: Option<JwtVerifier>,
+}
+
+fn extract_domain(issuer: &str) -> &str {
+    issuer
+        .strip_prefix("https://")
+        .or_else(|| issuer.strip_prefix("http://"))
+        .unwrap_or(issuer)
+        .split('/')
+        .next()
+        .unwrap_or(issuer)
+}
+
+fn compute_user_id(
+    issuer: &str,
+    sub: Option<&str>,
+    prefix: Option<&str>,
+) -> std::result::Result<String, JwtError> {
+    let sub = sub.ok_or(JwtError::InvalidClaim("missing sub claim"))?;
+    if sub.is_empty() {
+        return Err(JwtError::InvalidClaim("empty sub claim"));
+    }
+    let prefix = prefix.unwrap_or_else(|| extract_domain(issuer));
+    Ok(format!("{}:{}", prefix, sub))
 }
 
 pub struct FederatedJwtAuthProvider {
@@ -251,21 +274,49 @@ impl FederatedJwtAuthProvider {
         }
     }
 
-    fn extract_roles(&self, claims: &JwtClaims, issuer: &str) -> HashSet<String> {
+    fn extract_roles_for_mode(
+        &self,
+        claims: &JwtClaims,
+        issuer: &str,
+    ) -> HashSet<String> {
         let Some(issuer_state) = self.issuers.get(issuer) else {
             return HashSet::new();
         };
 
-        let mut roles: HashSet<String> =
-            issuer_state.config.default_roles.iter().cloned().collect();
+        let config = &issuer_state.config;
 
-        for mapping in &issuer_state.config.role_mappings {
-            if self.mapping_matches(claims, mapping) {
-                roles.extend(mapping.assign_roles.iter().cloned());
+        match config.auth_mode {
+            FederatedAuthMode::IdentityOnly => HashSet::new(),
+
+            FederatedAuthMode::ClaimBinding => {
+                let mut roles: HashSet<String> = config.default_roles.iter().cloned().collect();
+                for mapping in &config.role_mappings {
+                    if self.mapping_matches(claims, mapping) {
+                        roles.extend(mapping.assign_roles.iter().cloned());
+                    }
+                }
+                roles
+            }
+
+            FederatedAuthMode::TrustedRoles => {
+                let mut roles = HashSet::new();
+                let claim_paths: Vec<&str> = if config.trusted_role_claims.is_empty() {
+                    vec!["roles", "groups", "realm_access.roles"]
+                } else {
+                    config.trusted_role_claims.iter().map(String::as_str).collect()
+                };
+
+                for path in claim_paths {
+                    if let Some(values) = claims.get_claim_as_array(path) {
+                        roles.extend(values);
+                    } else if let Some(value) = claims.get_claim_as_string(path) {
+                        roles.insert(value);
+                    }
+                }
+                roles.extend(config.default_roles.iter().cloned());
+                roles
             }
         }
-
-        roles
     }
 
     fn mapping_matches(&self, claims: &JwtClaims, mapping: &JwtRoleMapping) -> bool {
@@ -284,11 +335,8 @@ impl FederatedJwtAuthProvider {
         matches!(mapping.pattern, ClaimPattern::Any)
     }
 
-    fn get_merge_mode(&self, issuer: &str) -> RoleMergeMode {
-        self.issuers
-            .get(issuer)
-            .map(|s| s.config.role_merge_mode)
-            .unwrap_or_default()
+    fn get_issuer_config(&self, issuer: &str) -> Option<&JwtIssuerConfig> {
+        self.issuers.get(issuer).map(|s| &s.config)
     }
 }
 
@@ -304,19 +352,31 @@ impl AuthProvider for FederatedJwtAuthProvider {
     fn authorize_publish<'a>(
         &'a self,
         _client_id: &str,
-        _user_id: Option<&'a str>,
-        _topic: &'a str,
+        user_id: Option<&'a str>,
+        topic: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<bool>> + Send + 'a>> {
-        Box::pin(async move { Ok(true) })
+        Box::pin(async move {
+            let Some(ref acl) = self.acl_manager else {
+                return Ok(true);
+            };
+            let acl_guard = acl.read().await;
+            Ok(acl_guard.check_publish(user_id, topic).await)
+        })
     }
 
     fn authorize_subscribe<'a>(
         &'a self,
         _client_id: &str,
-        _user_id: Option<&'a str>,
-        _topic_filter: &'a str,
+        user_id: Option<&'a str>,
+        topic_filter: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<bool>> + Send + 'a>> {
-        Box::pin(async move { Ok(true) })
+        Box::pin(async move {
+            let Some(ref acl) = self.acl_manager else {
+                return Ok(true);
+            };
+            let acl_guard = acl.read().await;
+            Ok(acl_guard.check_subscribe(user_id, topic_filter).await)
+        })
     }
 
     fn supports_enhanced_auth(&self) -> bool {
@@ -351,31 +411,44 @@ impl AuthProvider for FederatedJwtAuthProvider {
 
             match self.verify_jwt(token).await {
                 Ok((claims, issuer)) => {
-                    let user_id = claims.sub.clone().unwrap_or_default();
-                    let roles = self.extract_roles(&claims, &issuer);
-                    let merge_mode = self.get_merge_mode(&issuer);
+                    let config = self.get_issuer_config(&issuer);
+                    let issuer_prefix = config.and_then(|c| c.issuer_prefix.as_deref());
+                    let session_scoped = config.map_or(true, |c| c.session_scoped_roles);
+                    let auth_mode = config.map_or(FederatedAuthMode::default(), |c| c.auth_mode);
+
+                    let user_id = match compute_user_id(&issuer, claims.sub.as_deref(), issuer_prefix) {
+                        Ok(id) => id,
+                        Err(e) => {
+                            warn!(error = %e, "JWT authentication failed: invalid user ID");
+                            return Ok(EnhancedAuthResult::fail_with_reason(
+                                method,
+                                ReasonCode::NotAuthorized,
+                                e.to_string(),
+                            ));
+                        }
+                    };
+
+                    let roles = self.extract_roles_for_mode(&claims, &issuer);
 
                     if let Some(ref acl) = self.acl_manager {
                         let acl_guard = acl.read().await;
-                        match merge_mode {
-                            RoleMergeMode::Replace => {
-                                for role in acl_guard.get_user_roles(&user_id).await {
-                                    let _ = acl_guard.unassign_role(&user_id, &role).await;
-                                }
-                            }
-                            RoleMergeMode::Merge => {}
-                        }
-                        for role in &roles {
-                            if acl_guard.get_role(role).await.is_some() {
-                                let _ = acl_guard.assign_role(&user_id, role).await;
-                            }
-                        }
+                        let entry = FederatedRoleEntry {
+                            roles: roles.clone(),
+                            issuer: issuer.clone(),
+                            mode: auth_mode,
+                            session_bound: session_scoped,
+                        };
+                        acl_guard.set_federated_roles(&user_id, entry).await;
                     }
 
-                    debug!(user_id = %user_id, roles = ?roles, "JWT authentication successful");
-                    Ok(EnhancedAuthResult::success_with_user_and_roles(
-                        method, user_id, roles, merge_mode,
-                    ))
+                    debug!(
+                        user_id = %user_id,
+                        issuer = %issuer,
+                        mode = ?auth_mode,
+                        roles = ?roles,
+                        "JWT authentication successful"
+                    );
+                    Ok(EnhancedAuthResult::success_with_user(method, user_id))
                 }
                 Err(e) => {
                     warn!(error = %e, "JWT authentication failed");
@@ -397,6 +470,19 @@ impl AuthProvider for FederatedJwtAuthProvider {
         _user_id: Option<&'a str>,
     ) -> Pin<Box<dyn Future<Output = Result<EnhancedAuthResult>> + Send + 'a>> {
         self.authenticate_enhanced(auth_method, auth_data, client_id)
+    }
+
+    fn cleanup_session<'a>(
+        &'a self,
+        user_id: &'a str,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        Box::pin(async move {
+            if let Some(ref acl) = self.acl_manager {
+                let acl_guard = acl.read().await;
+                acl_guard.clear_session_bound_roles(user_id).await;
+                debug!(user_id = %user_id, "Cleaned up session-bound federated roles");
+            }
+        })
     }
 }
 
