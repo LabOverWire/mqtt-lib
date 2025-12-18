@@ -53,13 +53,9 @@ impl Default for ResourceLimits {
 /// Per-client resource tracking
 #[derive(Debug)]
 struct ClientResources {
-    /// Number of messages sent in current window
     message_count: AtomicU64,
-    /// Bytes transferred in current window
     bytes_transferred: AtomicU64,
-    /// Window start time
     window_start: Instant,
-    /// Client IP address
     ip_addr: IpAddr,
 }
 
@@ -73,14 +69,12 @@ impl ClientResources {
         }
     }
 
-    /// Reset counters for new time window
     fn reset_window(&mut self) {
         self.message_count.store(0, Ordering::Relaxed);
         self.bytes_transferred.store(0, Ordering::Relaxed);
         self.window_start = Instant::now();
     }
 
-    /// Check if window has expired
     fn is_window_expired(&self, window_duration: Duration) -> bool {
         self.window_start.elapsed() > window_duration
     }
@@ -250,19 +244,23 @@ impl ResourceMonitor {
 
     /// Check if client can send a message (rate limiting)
     pub async fn can_send_message(&self, client_id: &str, message_size: usize) -> bool {
+        if self.limits.max_message_rate_per_client >= 1_000_000 {
+            self.total_messages.fetch_add(1, Ordering::Relaxed);
+            self.total_bytes
+                .fetch_add(message_size as u64, Ordering::Relaxed);
+            return true;
+        }
+
         let mut client_resources = self.client_resources.write().await;
 
         let Some(resources) = client_resources.get_mut(client_id) else {
-            // Client not found, allow (might be in process of connecting)
             return true;
         };
 
-        // Check if we need to reset the window
         if resources.is_window_expired(self.limits.rate_limit_window) {
             resources.reset_window();
         }
 
-        // Check message rate limit
         let current_messages = resources.message_count.load(Ordering::Relaxed);
         if current_messages >= self.limits.max_message_rate_per_client as u64 {
             warn!(
@@ -274,7 +272,6 @@ impl ResourceMonitor {
             return false;
         }
 
-        // Check bandwidth limit
         let current_bytes = resources.bytes_transferred.load(Ordering::Relaxed);
         if current_bytes + message_size as u64 > self.limits.max_bandwidth_per_client {
             warn!(
@@ -286,13 +283,11 @@ impl ResourceMonitor {
             return false;
         }
 
-        // Update counters
         resources.message_count.fetch_add(1, Ordering::Relaxed);
         resources
             .bytes_transferred
             .fetch_add(message_size as u64, Ordering::Relaxed);
 
-        // Update global counters
         self.total_messages.fetch_add(1, Ordering::Relaxed);
         self.total_bytes
             .fetch_add(message_size as u64, Ordering::Relaxed);

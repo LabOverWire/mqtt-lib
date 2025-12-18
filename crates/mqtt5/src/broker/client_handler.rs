@@ -370,6 +370,9 @@ impl ClientHandler {
                 publish_result = self.publish_rx.recv_async() => {
                     if let Ok(publish) = publish_result {
                         self.send_publish(publish).await?;
+                        while let Ok(more) = self.publish_rx.try_recv() {
+                            self.send_publish(more).await?;
+                        }
                     } else {
                         warn!("Publish channel closed unexpectedly");
                         return Ok(false);
@@ -430,6 +433,9 @@ impl ClientHandler {
                 publish_result = self.publish_rx.recv_async() => {
                     if let Ok(publish) = publish_result {
                         self.send_publish(publish).await?;
+                        while let Ok(more) = self.publish_rx.try_recv() {
+                            self.send_publish(more).await?;
+                        }
                     } else {
                         warn!("Publish channel closed unexpectedly in handle_packets");
                         return Ok(false);
