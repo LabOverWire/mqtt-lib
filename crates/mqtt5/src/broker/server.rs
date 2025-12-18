@@ -1,6 +1,8 @@
 //! MQTT v5.0 Broker Server
 
-use crate::broker::auth::{AllowAllAuthProvider, AuthProvider};
+use crate::broker::auth::{
+    AllowAllAuthProvider, AuthProvider, AuthRateLimiter, RateLimitedAuthProvider,
+};
 use crate::broker::binding::{bind_tcp_addresses, format_binding_error};
 use crate::broker::bridge::BridgeManager;
 use crate::broker::client_handler::ClientHandler;
@@ -48,55 +50,168 @@ pub struct MqttBroker {
     ready_rx: tokio::sync::watch::Receiver<bool>,
 }
 
+#[allow(clippy::too_many_lines)]
 async fn create_auth_provider(
     config: &crate::broker::config::AuthConfig,
 ) -> Result<Arc<dyn AuthProvider>> {
     use crate::broker::acl::AclManager;
     use crate::broker::auth::{ComprehensiveAuthProvider, PasswordAuthProvider};
+    use crate::broker::auth_mechanisms::{
+        FederatedJwtAuthProvider, FileBasedScramCredentialStore, JwtAuthProvider,
+        ScramSha256AuthProvider,
+    };
+    use crate::broker::config::{AuthMethod, JwtAlgorithm};
 
-    match (&config.password_file, &config.acl_file) {
-        (Some(password_file), Some(acl_file)) => {
-            let password_provider = PasswordAuthProvider::from_file(password_file)
-                .await?
-                .with_anonymous(config.allow_anonymous);
-            let acl_manager = AclManager::from_file(acl_file).await?;
-            let provider =
-                ComprehensiveAuthProvider::with_providers(password_provider, acl_manager);
-            info!(
-                "Comprehensive authentication enabled (password + ACL, anonymous: {})",
-                config.allow_anonymous
-            );
-            Ok(Arc::new(provider))
+    let rate_limiter = if config.rate_limit.enabled {
+        Some(Arc::new(AuthRateLimiter::new(
+            config.rate_limit.max_attempts,
+            config.rate_limit.window_secs,
+            config.rate_limit.lockout_secs,
+        )))
+    } else {
+        None
+    };
+
+    let provider: Arc<dyn AuthProvider> = match config.auth_method {
+        AuthMethod::ScramSha256 => {
+            let Some(scram_file) = &config.scram_file else {
+                return Err(MqttError::Configuration(
+                    "SCRAM-SHA-256 authentication requires scram_file".to_string(),
+                ));
+            };
+            let store = FileBasedScramCredentialStore::load_from_file(scram_file)
+                .map_err(|e| MqttError::Configuration(format!("Failed to load SCRAM file: {e}")))?;
+            let provider = ScramSha256AuthProvider::new(Arc::new(store));
+            info!("SCRAM-SHA-256 authentication enabled");
+            Arc::new(provider) as Arc<dyn AuthProvider>
         }
-        (Some(password_file), None) => {
-            let provider = PasswordAuthProvider::from_file(password_file)
-                .await?
-                .with_anonymous(config.allow_anonymous);
-            info!(
-                "Password authentication enabled (anonymous: {})",
-                config.allow_anonymous
-            );
-            Ok(Arc::new(provider))
+        AuthMethod::Jwt => {
+            let Some(jwt_config) = &config.jwt_config else {
+                return Err(MqttError::Configuration(
+                    "JWT authentication requires jwt_config".to_string(),
+                ));
+            };
+            let key_data = std::fs::read(&jwt_config.secret_or_key_file).map_err(|e| {
+                MqttError::Configuration(format!("Failed to read JWT key file: {e}"))
+            })?;
+            let mut provider = match jwt_config.algorithm {
+                JwtAlgorithm::HS256 => {
+                    let secret = String::from_utf8_lossy(&key_data);
+                    let trimmed = secret.trim();
+                    JwtAuthProvider::with_hs256_secret(trimmed.as_bytes())
+                }
+                JwtAlgorithm::RS256 => JwtAuthProvider::with_rs256_public_key(&key_data),
+                JwtAlgorithm::ES256 => JwtAuthProvider::with_es256_public_key(&key_data),
+            };
+            provider = provider.with_clock_skew(jwt_config.clock_skew_secs);
+            if let Some(ref issuer) = jwt_config.issuer {
+                provider = provider.with_issuer(issuer);
+            }
+            if let Some(ref audience) = jwt_config.audience {
+                provider = provider.with_audience(audience);
+            }
+            info!(algorithm = ?jwt_config.algorithm, "JWT authentication enabled");
+            Arc::new(provider) as Arc<dyn AuthProvider>
         }
-        (None, Some(acl_file)) => {
-            let password_provider =
-                PasswordAuthProvider::new().with_anonymous(config.allow_anonymous);
-            let acl_manager = AclManager::from_file(acl_file).await?;
-            let provider =
-                ComprehensiveAuthProvider::with_providers(password_provider, acl_manager);
-            info!(
-                "ACL authorization enabled (anonymous: {})",
-                config.allow_anonymous
-            );
-            Ok(Arc::new(provider))
+        AuthMethod::JwtFederated => {
+            let Some(federated_config) = &config.federated_jwt_config else {
+                return Err(MqttError::Configuration(
+                    "Federated JWT authentication requires federated_jwt_config".to_string(),
+                ));
+            };
+
+            let provider = FederatedJwtAuthProvider::new(federated_config.issuers.clone())
+                .map_err(|e| {
+                    MqttError::Configuration(format!(
+                        "Failed to create federated JWT provider: {e}"
+                    ))
+                })?
+                .with_clock_skew(federated_config.clock_skew_secs);
+
+            if let Some(acl_file) = &config.acl_file {
+                let acl_manager = AclManager::from_file(acl_file).await?;
+                let provider =
+                    provider.with_acl_manager(Arc::new(tokio::sync::RwLock::new(acl_manager)));
+                provider.initial_fetch().await?;
+                provider.start_background_refresh();
+                info!(
+                    issuers = federated_config.issuers.len(),
+                    "Federated JWT authentication enabled with ACL"
+                );
+                Arc::new(provider) as Arc<dyn AuthProvider>
+            } else {
+                provider.initial_fetch().await?;
+                provider.start_background_refresh();
+                info!(
+                    issuers = federated_config.issuers.len(),
+                    "Federated JWT authentication enabled"
+                );
+                Arc::new(provider) as Arc<dyn AuthProvider>
+            }
         }
-        (None, None) if config.allow_anonymous => {
-            info!("Anonymous authentication enabled");
-            Ok(Arc::new(AllowAllAuthProvider))
+        AuthMethod::Password | AuthMethod::None => {
+            match (&config.password_file, &config.acl_file) {
+                (Some(password_file), Some(acl_file)) => {
+                    let password_provider = PasswordAuthProvider::from_file(password_file)
+                        .await?
+                        .with_anonymous(config.allow_anonymous);
+                    let acl_manager = AclManager::from_file(acl_file).await?;
+                    let provider =
+                        ComprehensiveAuthProvider::with_providers(password_provider, acl_manager);
+                    info!(
+                        "Comprehensive authentication enabled (password + ACL, anonymous: {})",
+                        config.allow_anonymous
+                    );
+                    Arc::new(provider) as Arc<dyn AuthProvider>
+                }
+                (Some(password_file), None) => {
+                    let provider = PasswordAuthProvider::from_file(password_file)
+                        .await?
+                        .with_anonymous(config.allow_anonymous);
+                    info!(
+                        "Password authentication enabled (anonymous: {})",
+                        config.allow_anonymous
+                    );
+                    Arc::new(provider) as Arc<dyn AuthProvider>
+                }
+                (None, Some(acl_file)) => {
+                    let password_provider =
+                        PasswordAuthProvider::new().with_anonymous(config.allow_anonymous);
+                    let acl_manager = AclManager::from_file(acl_file).await?;
+                    let provider =
+                        ComprehensiveAuthProvider::with_providers(password_provider, acl_manager);
+                    info!(
+                        "ACL authorization enabled (anonymous: {})",
+                        config.allow_anonymous
+                    );
+                    Arc::new(provider) as Arc<dyn AuthProvider>
+                }
+                (None, None) if config.allow_anonymous => {
+                    info!("Anonymous authentication enabled");
+                    Arc::new(AllowAllAuthProvider) as Arc<dyn AuthProvider>
+                }
+                (None, None) => {
+                    return Err(MqttError::Configuration(
+                        "Authentication required but no password or ACL file specified".to_string(),
+                    ));
+                }
+            }
         }
-        (None, None) => Err(MqttError::Configuration(
-            "Authentication required but no password or ACL file specified".to_string(),
-        )),
+    };
+
+    if let Some(rate_limiter) = rate_limiter {
+        info!(
+            max_attempts = config.rate_limit.max_attempts,
+            window_secs = config.rate_limit.window_secs,
+            lockout_secs = config.rate_limit.lockout_secs,
+            "Authentication rate limiting enabled"
+        );
+        Ok(Arc::new(RateLimitedAuthProvider::new(
+            provider,
+            rate_limiter,
+        )))
+    } else {
+        Ok(provider)
     }
 }
 

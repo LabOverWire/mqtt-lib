@@ -20,7 +20,7 @@
 
 ```toml
 [dependencies]
-mqtt5 = "0.13"
+mqtt5 = "0.14"
 ```
 
 ### CLI Tool
@@ -518,7 +518,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         allow_anonymous: false,
         password_file: Some("users.txt".into()),
         auth_method: AuthMethod::Password,
-        auth_data: None,
+        ..Default::default()
     };
 
     let config = BrokerConfig::default()
@@ -626,7 +626,7 @@ Distributed tracing with OpenTelemetry support:
 
 ```toml
 [dependencies]
-mqtt5 = { version = "0.12", features = ["opentelemetry"] }
+mqtt5 = { version = "0.14", features = ["opentelemetry"] }
 ```
 
 ### Features
@@ -728,14 +728,42 @@ This project follows Rust async patterns:
 - Shared state via `Arc<RwLock<T>>`
 - Connection pooling and buffer reuse
 
+## Authentication & Authorization
+
+The broker supports multiple authentication methods and fine-grained authorization:
+
+### Authentication Methods
+
+| Method | Description | Use Case |
+|--------|-------------|----------|
+| Password | Argon2id hashed passwords | Internal users |
+| SCRAM-SHA-256 | Challenge-response, no password transmission | High security |
+| JWT | Stateless token verification | Single IdP |
+| Federated JWT | Multi-issuer with JWKS auto-refresh | Google, Keycloak, Azure AD |
+
+### Federated Authentication Modes
+
+| Mode | Description |
+|------|-------------|
+| IdentityOnly | External IdP for identity, internal ACL for authorization |
+| ClaimBinding | Admin-defined claim-to-role mappings |
+| TrustedRoles | Trust role claims from IdP (Keycloak, Azure AD) |
+
+### Authorization
+
+- Role-based access control (RBAC)
+- Topic-level permissions (read, write, readwrite, deny)
+- Wildcard patterns (`+`, `#`)
+- Native and federated role support
+
+See [Authentication & Authorization Guide](AUTHENTICATION.md) for configuration details.
+
 ## Security
 
-- TLS 1.2+ support with certificate validation
-- Username/password authentication with argon2 hashing
-- Rate limiting
-- Resource monitoring
-- Client certificate authentication for mutual TLS
-- Access Control Lists (ACL) with `mqttv5 acl` CLI management (add, remove, list, check)
+- TLS 1.2+ with certificate validation
+- QUIC with built-in TLS 1.3
+- Mutual TLS (client certificates)
+- Rate limiting and resource monitoring
 
 ## License
 
@@ -753,5 +781,6 @@ We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guid
 ## Documentation
 
 - [Architecture Overview](ARCHITECTURE.md) - System design and principles
+- [Authentication & Authorization](AUTHENTICATION.md) - Auth methods, ACL, RBAC, federated JWT
 - [CLI Usage Guide](crates/mqttv5-cli/CLI_USAGE.md) - Complete CLI reference and examples
 - [API Documentation](https://docs.rs/mqtt5) - API reference

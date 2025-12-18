@@ -31,6 +31,8 @@ use tokio::sync::RwLock;
 use tokio::time::Duration;
 use tracing::instrument;
 
+mod auth_handler;
+pub mod auth_handlers;
 mod connection;
 #[cfg(not(target_arch = "wasm32"))]
 mod direct;
@@ -38,6 +40,9 @@ mod error_recovery;
 pub mod mock;
 mod retry;
 pub mod r#trait;
+
+pub use auth_handler::{AuthHandler, AuthResponse};
+pub use auth_handlers::{JwtAuthHandler, PlainAuthHandler, ScramSha256AuthHandler};
 
 pub use self::connection::{ConnectionEvent, DisconnectReason, ReconnectConfig};
 pub use self::error_recovery::{ErrorCallback, ErrorRecoveryConfig, RecoverableError, RetryState};
@@ -472,6 +477,9 @@ impl MqttClient {
         // Update the inner client with new options
         {
             let mut inner = self.inner.write().await;
+            inner
+                .auth_method
+                .clone_from(&options.properties.authentication_method);
             inner.options = options.clone();
             // Always store address for potential reconnection
             inner.last_address = Some(address.to_string());
@@ -1564,6 +1572,61 @@ impl MqttClient {
     #[cfg(test)]
     pub async fn session_state(&self) -> Arc<RwLock<crate::session::SessionState>> {
         Arc::clone(&self.inner.read().await.session)
+    }
+
+    /// Sets an authentication handler for enhanced authentication
+    ///
+    /// The handler will be called during connection if the server requires
+    /// challenge-response authentication, and for re-authentication requests.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use mqtt5::{MqttClient, ConnectOptions, AuthHandler, AuthResponse};
+    /// use std::future::Future;
+    /// use std::pin::Pin;
+    ///
+    /// struct MyAuthHandler;
+    ///
+    /// impl AuthHandler for MyAuthHandler {
+    ///     fn handle_challenge<'a>(
+    ///         &'a self,
+    ///         auth_method: &'a str,
+    ///         challenge_data: Option<&'a [u8]>,
+    ///     ) -> Pin<Box<dyn Future<Output = mqtt5::Result<AuthResponse>> + Send + 'a>> {
+    ///         Box::pin(async move {
+    ///             // Process challenge and return response
+    ///             Ok(AuthResponse::Continue(b"response".to_vec()))
+    ///         })
+    ///     }
+    /// }
+    ///
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let options = ConnectOptions::new("client")
+    ///     .with_authentication_method("SCRAM-SHA-256");
+    /// let client = MqttClient::with_options(options);
+    /// client.set_auth_handler(MyAuthHandler).await;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn set_auth_handler(&self, handler: impl AuthHandler + 'static) {
+        self.inner.write().await.set_auth_handler(handler);
+    }
+
+    /// Initiates re-authentication with the broker
+    ///
+    /// This sends an AUTH packet with ReAuthenticate reason code to the broker,
+    /// triggering a new authentication exchange using the same method as the
+    /// initial connection.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Client is not connected
+    /// - No auth handler is configured
+    /// - No authentication method was used during initial connection
+    pub async fn reauthenticate(&self) -> Result<()> {
+        self.inner.read().await.reauthenticate().await
     }
 }
 

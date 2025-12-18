@@ -11,7 +11,9 @@ use tokio::task::JoinHandle;
 use tokio::time::Duration;
 
 use crate::callback::{CallbackId, CallbackManager};
+use crate::client::auth_handler::{AuthHandler, AuthResponse};
 use crate::error::{MqttError, Result};
+use crate::packet::auth::AuthPacket;
 use crate::packet::connect::ConnectPacket;
 use crate::packet::publish::PublishPacket;
 use crate::packet::suback::{SubAckPacket, SubAckReasonCode};
@@ -155,6 +157,10 @@ pub struct DirectClientInner {
     pub queue_on_disconnect: bool,
     /// Server's maximum QoS level (from CONNACK)
     pub server_max_qos: Arc<RwLock<Option<u8>>>,
+    /// Authentication handler for enhanced authentication
+    pub auth_handler: Option<Arc<dyn AuthHandler>>,
+    /// Authentication method used during connection
+    pub auth_method: Option<String>,
 }
 
 impl DirectClientInner {
@@ -166,7 +172,8 @@ impl DirectClientInner {
             options.clean_start,
         )));
 
-        let queue_on_disconnect = !options.clean_start; // Enable queuing for persistent sessions by default
+        let queue_on_disconnect = !options.clean_start;
+        let auth_method = options.properties.authentication_method.clone();
 
         Self {
             writer: None,
@@ -193,7 +200,13 @@ impl DirectClientInner {
             stored_subscriptions: Arc::new(RwLock::new(Vec::new())),
             queue_on_disconnect,
             server_max_qos: Arc::new(RwLock::new(None)),
+            auth_handler: None,
+            auth_method,
         }
+    }
+
+    pub fn set_auth_handler(&mut self, handler: impl AuthHandler + 'static) {
+        self.auth_handler = Some(Arc::new(handler));
     }
 
     /// Check if connected
@@ -234,109 +247,205 @@ impl DirectClientInner {
 
 /// Direct async implementation of MQTT operations
 impl DirectClientInner {
+    async fn handle_connect_auth(
+        &self,
+        auth: AuthPacket,
+        transport: &mut TransportType,
+    ) -> Result<()> {
+        tracing::debug!("CLIENT: Got AUTH with reason code: {:?}", auth.reason_code);
+
+        match auth.reason_code {
+            ReasonCode::ContinueAuthentication => {
+                let handler = self
+                    .auth_handler
+                    .as_ref()
+                    .ok_or(MqttError::AuthenticationFailed)?;
+
+                let auth_method = auth.authentication_method().unwrap_or("");
+                let auth_data = auth.authentication_data();
+
+                let response = handler.handle_challenge(auth_method, auth_data).await?;
+
+                match response {
+                    AuthResponse::Continue(data) => {
+                        let method = self.auth_method.clone().unwrap_or_default();
+                        let auth_packet = AuthPacket::continue_authentication(method, Some(data))?;
+                        transport.write_packet(Packet::Auth(auth_packet)).await?;
+                    }
+                    AuthResponse::Success => {
+                        tracing::debug!(
+                            "CLIENT: Auth handler indicated success, waiting for server response"
+                        );
+                    }
+                    AuthResponse::Abort(reason) => {
+                        tracing::warn!("CLIENT: Auth aborted: {}", reason);
+                        return Err(MqttError::AuthenticationFailed);
+                    }
+                }
+            }
+            ReasonCode::Success => {
+                tracing::debug!("CLIENT: AUTH success, waiting for CONNACK");
+            }
+            _ => {
+                tracing::warn!(
+                    "CLIENT: AUTH failed with reason code: {:?}",
+                    auth.reason_code
+                );
+                return Err(MqttError::AuthenticationFailed);
+            }
+        }
+        Ok(())
+    }
+
+    async fn wait_for_connack(
+        &self,
+        transport: &mut TransportType,
+    ) -> Result<crate::packet::connack::ConnAckPacket> {
+        loop {
+            let packet = transport
+                .read_packet(self.options.protocol_version.as_u8())
+                .await?;
+
+            match packet {
+                Packet::Auth(auth) => {
+                    self.handle_connect_auth(auth, transport).await?;
+                }
+                Packet::ConnAck(connack) => {
+                    tracing::debug!(
+                        "CLIENT: Got CONNACK with reason code: {:?}",
+                        connack.reason_code
+                    );
+                    return Ok(connack);
+                }
+                _ => {
+                    return Err(MqttError::ProtocolError(
+                        "Expected CONNACK or AUTH".to_string(),
+                    ));
+                }
+            }
+        }
+    }
+
     /// Connect to broker
     ///
     /// # Errors
     ///
     /// Returns an error if the operation fails
     pub async fn connect(&mut self, mut transport: TransportType) -> Result<ConnectResult> {
-        // Build CONNECT packet
         let connect_packet = self.build_connect_packet().await;
 
-        // Send CONNECT packet
         transport
             .write_packet(Packet::Connect(Box::new(connect_packet)))
             .await?;
 
-        tracing::debug!("CLIENT: Waiting for CONNACK");
-        let packet = transport
-            .read_packet(self.options.protocol_version.as_u8())
-            .await?;
-        tracing::debug!("CLIENT: Received packet after CONNECT");
-        match packet {
-            Packet::ConnAck(connack) => {
-                tracing::debug!(
-                    "CLIENT: Got CONNACK with reason code: {:?}",
-                    connack.reason_code
-                );
-                // Check reason code
-                if connack.reason_code != ReasonCode::Success {
-                    return Err(MqttError::ConnectionRefused(connack.reason_code));
-                }
+        tracing::debug!("CLIENT: Waiting for CONNACK or AUTH");
 
-                // Store server's maximum QoS if present
-                if let Some(max_qos) = connack.properties.get_maximum_qos() {
-                    *self.server_max_qos.write().await = Some(max_qos);
-                    tracing::debug!("Server maximum QoS: {}", max_qos);
-                } else {
-                    // If not present, server supports QoS 2
-                    *self.server_max_qos.write().await = None;
-                }
+        let connack = self.wait_for_connack(&mut transport).await?;
 
-                let protocol_version = self.options.protocol_version.as_u8();
-                let (reader, writer) = match transport {
-                    TransportType::Tcp(tcp) => {
-                        let (r, w) = tcp.into_split()?;
-                        (
-                            UnifiedReader::tcp(r, protocol_version),
-                            UnifiedWriter::Tcp(w),
-                        )
-                    }
-                    TransportType::Tls(tls) => {
-                        let (r, w) = (*tls).into_split()?;
-                        (
-                            UnifiedReader::tls(r, protocol_version),
-                            UnifiedWriter::Tls(w),
-                        )
-                    }
-                    TransportType::WebSocket(ws) => {
-                        let (r, w) = (*ws).into_split()?;
-                        (
-                            UnifiedReader::websocket(r, protocol_version),
-                            UnifiedWriter::WebSocket(w),
-                        )
-                    }
-                    TransportType::Quic(quic) => {
-                        let (w, r, conn, strategy, datagrams) = (*quic).into_split()?;
-                        let conn_arc = Arc::new(conn);
-                        self.quic_connection = Some(conn_arc.clone());
-                        self.stream_strategy = Some(strategy);
-                        self.quic_datagrams_enabled = datagrams;
-                        self.quic_stream_manager =
-                            Some(Arc::new(QuicStreamManager::new(conn_arc, strategy)));
-                        (
-                            UnifiedReader::quic(r, protocol_version),
-                            UnifiedWriter::Quic(w),
-                        )
-                    }
-                };
-
-                // Store the writer half wrapped in Arc<RwLock<>>
-                self.writer = Some(Arc::new(tokio::sync::RwLock::new(writer)));
-
-                // Mark as connected
-                self.set_connected(true);
-
-                // Set client maximum packet size from options
-                if let Some(max_packet_size) = self.options.properties.maximum_packet_size {
-                    self.session
-                        .write()
-                        .await
-                        .set_client_maximum_packet_size(max_packet_size)
-                        .await;
-                }
-
-                // Start background tasks with reader half
-                tracing::debug!("Starting background tasks (packet reader and keepalive)");
-                self.start_background_tasks(reader)?;
-                tracing::debug!("Background tasks started successfully");
-
-                Ok(ConnectResult {
-                    session_present: connack.session_present,
-                })
-            }
-            _ => Err(MqttError::ProtocolError("Expected CONNACK".to_string())),
+        if connack.reason_code != ReasonCode::Success {
+            return Err(MqttError::ConnectionRefused(connack.reason_code));
         }
+
+        if let Some(max_qos) = connack.properties.get_maximum_qos() {
+            *self.server_max_qos.write().await = Some(max_qos);
+            tracing::debug!("Server maximum QoS: {}", max_qos);
+        } else {
+            *self.server_max_qos.write().await = None;
+        }
+
+        let protocol_version = self.options.protocol_version.as_u8();
+        let (reader, writer) = match transport {
+            TransportType::Tcp(tcp) => {
+                let (r, w) = tcp.into_split()?;
+                (
+                    UnifiedReader::tcp(r, protocol_version),
+                    UnifiedWriter::Tcp(w),
+                )
+            }
+            TransportType::Tls(tls) => {
+                let (r, w) = (*tls).into_split()?;
+                (
+                    UnifiedReader::tls(r, protocol_version),
+                    UnifiedWriter::Tls(w),
+                )
+            }
+            TransportType::WebSocket(ws) => {
+                let (r, w) = (*ws).into_split()?;
+                (
+                    UnifiedReader::websocket(r, protocol_version),
+                    UnifiedWriter::WebSocket(w),
+                )
+            }
+            TransportType::Quic(quic) => {
+                let (w, r, conn, strategy, datagrams) = (*quic).into_split()?;
+                let conn_arc = Arc::new(conn);
+                self.quic_connection = Some(conn_arc.clone());
+                self.stream_strategy = Some(strategy);
+                self.quic_datagrams_enabled = datagrams;
+                self.quic_stream_manager =
+                    Some(Arc::new(QuicStreamManager::new(conn_arc, strategy)));
+                (
+                    UnifiedReader::quic(r, protocol_version),
+                    UnifiedWriter::Quic(w),
+                )
+            }
+        };
+
+        self.writer = Some(Arc::new(tokio::sync::RwLock::new(writer)));
+        self.set_connected(true);
+
+        if let Some(max_packet_size) = self.options.properties.maximum_packet_size {
+            self.session
+                .write()
+                .await
+                .set_client_maximum_packet_size(max_packet_size)
+                .await;
+        }
+
+        tracing::debug!("Starting background tasks (packet reader and keepalive)");
+        self.start_background_tasks(reader)?;
+        tracing::debug!("Background tasks started successfully");
+
+        Ok(ConnectResult {
+            session_present: connack.session_present,
+        })
+    }
+
+    /// Initiate re-authentication with the broker
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the client is not connected, no auth handler is set,
+    /// or no authentication method was used during initial connection
+    pub async fn reauthenticate(&self) -> Result<()> {
+        if !self.is_connected() {
+            return Err(MqttError::NotConnected);
+        }
+
+        let handler = self
+            .auth_handler
+            .as_ref()
+            .ok_or(MqttError::AuthenticationFailed)?;
+        let method = self
+            .auth_method
+            .as_ref()
+            .ok_or(MqttError::AuthenticationFailed)?;
+
+        let initial_data = handler.initial_response(method).await?;
+        let auth_packet = AuthPacket::re_authenticate(method.clone(), initial_data)?;
+
+        let writer = self.writer.as_ref().ok_or(MqttError::NotConnected)?;
+        writer
+            .write()
+            .await
+            .write_packet(Packet::Auth(auth_packet))
+            .await?;
+
+        tracing::debug!(
+            "CLIENT: Initiated re-authentication with method: {}",
+            method
+        );
+        Ok(())
     }
 
     /// Disconnect from broker - DIRECT async method
@@ -871,19 +980,15 @@ impl DirectClientInner {
             }
         }
 
-        // Convert reason codes to (packet_id, QoS) tuples
-        let results: Vec<(u16, QoS)> = suback
-            .reason_codes
-            .iter()
-            .map(|rc| {
-                let qos = match rc {
-                    SubAckReasonCode::GrantedQoS1 => QoS::AtLeastOnce,
-                    SubAckReasonCode::GrantedQoS2 => QoS::ExactlyOnce,
-                    _ => QoS::AtMostOnce,
-                };
-                (packet_id, qos)
-            })
-            .collect();
+        let mut results: Vec<(u16, QoS)> = Vec::with_capacity(suback.reason_codes.len());
+
+        for rc in &suback.reason_codes {
+            if let Some(qos) = rc.granted_qos() {
+                results.push((packet_id, qos));
+            } else {
+                return Err(MqttError::SubscriptionDenied(*rc));
+            }
+        }
 
         Ok(results)
     }
@@ -996,50 +1101,33 @@ impl DirectClientInner {
                 PropertyValue::TwoByteInteger(val),
             );
         }
+        if let Some(ref method) = self.options.properties.authentication_method {
+            let _ = properties.add(
+                PropertyId::AuthenticationMethod,
+                PropertyValue::Utf8String(method.clone()),
+            );
 
-        // Build will properties if present
-        let will_properties = if let Some(ref will) = self.options.will {
-            let mut props = Properties::default();
-            if let Some(val) = will.properties.will_delay_interval {
-                let _ = props.add(
-                    PropertyId::WillDelayInterval,
-                    PropertyValue::FourByteInteger(val),
+            let auth_data = if let Some(ref handler) = self.auth_handler {
+                match handler.initial_response(method).await {
+                    Ok(data) => data,
+                    Err(e) => {
+                        tracing::warn!("Auth handler initial_response failed: {}", e);
+                        self.options.properties.authentication_data.clone()
+                    }
+                }
+            } else {
+                self.options.properties.authentication_data.clone()
+            };
+
+            if let Some(data) = auth_data {
+                let _ = properties.add(
+                    PropertyId::AuthenticationData,
+                    PropertyValue::BinaryData(bytes::Bytes::from(data)),
                 );
             }
-            if let Some(val) = will.properties.payload_format_indicator {
-                let _ = props.add(
-                    PropertyId::PayloadFormatIndicator,
-                    PropertyValue::Byte(u8::from(val)),
-                );
-            }
-            if let Some(val) = will.properties.message_expiry_interval {
-                let _ = props.add(
-                    PropertyId::MessageExpiryInterval,
-                    PropertyValue::FourByteInteger(val),
-                );
-            }
-            if let Some(ref val) = will.properties.content_type {
-                let _ = props.add(
-                    PropertyId::ContentType,
-                    PropertyValue::Utf8String(val.clone()),
-                );
-            }
-            if let Some(ref val) = will.properties.response_topic {
-                let _ = props.add(
-                    PropertyId::ResponseTopic,
-                    PropertyValue::Utf8String(val.clone()),
-                );
-            }
-            if let Some(ref val) = will.properties.correlation_data {
-                let _ = props.add(
-                    PropertyId::CorrelationData,
-                    PropertyValue::BinaryData(bytes::Bytes::from(val.clone())),
-                );
-            }
-            props
-        } else {
-            Properties::default()
-        };
+        }
+
+        let will_properties = Self::build_will_properties(self.options.will.as_ref());
 
         ConnectPacket {
             protocol_version: self.options.protocol_version.as_u8(),
@@ -1057,6 +1145,53 @@ impl DirectClientInner {
             properties,
             will_properties,
         }
+    }
+
+    fn build_will_properties(will: Option<&crate::types::WillMessage>) -> Properties {
+        use crate::protocol::v5::properties::{PropertyId, PropertyValue};
+
+        let Some(will) = will else {
+            return Properties::default();
+        };
+
+        let mut props = Properties::default();
+        if let Some(val) = will.properties.will_delay_interval {
+            let _ = props.add(
+                PropertyId::WillDelayInterval,
+                PropertyValue::FourByteInteger(val),
+            );
+        }
+        if let Some(val) = will.properties.payload_format_indicator {
+            let _ = props.add(
+                PropertyId::PayloadFormatIndicator,
+                PropertyValue::Byte(u8::from(val)),
+            );
+        }
+        if let Some(val) = will.properties.message_expiry_interval {
+            let _ = props.add(
+                PropertyId::MessageExpiryInterval,
+                PropertyValue::FourByteInteger(val),
+            );
+        }
+        if let Some(ref val) = will.properties.content_type {
+            let _ = props.add(
+                PropertyId::ContentType,
+                PropertyValue::Utf8String(val.clone()),
+            );
+        }
+        if let Some(ref val) = will.properties.response_topic {
+            let _ = props.add(
+                PropertyId::ResponseTopic,
+                PropertyValue::Utf8String(val.clone()),
+            );
+        }
+        if let Some(ref val) = will.properties.correlation_data {
+            let _ = props.add(
+                PropertyId::CorrelationData,
+                PropertyValue::BinaryData(bytes::Bytes::from(val.clone())),
+            );
+        }
+        props
     }
 
     /// Start background tasks
@@ -1087,6 +1222,8 @@ impl DirectClientInner {
             writer: writer_for_reader,
             connected,
             protocol_version: self.options.protocol_version.as_u8(),
+            auth_handler: self.auth_handler.clone(),
+            auth_method: self.auth_method.clone(),
         };
 
         let ctx_for_packet_reader = ctx.clone();
@@ -1207,6 +1344,8 @@ struct PacketReaderContext {
     writer: Arc<tokio::sync::RwLock<UnifiedWriter>>,
     connected: Arc<AtomicBool>,
     protocol_version: u8,
+    auth_handler: Option<Arc<dyn AuthHandler>>,
+    auth_method: Option<String>,
 }
 
 /// Packet reader task that handles response channels
@@ -1262,6 +1401,14 @@ async fn packet_reader_task_with_responses(mut reader: UnifiedReader, ctx: Packe
                             let _ = tx.send(pubcomp.reason_code);
                         }
                     }
+                    Packet::Auth(ref auth) => {
+                        if let Err(e) = handle_auth_packet(auth.clone(), &ctx).await {
+                            tracing::error!("Error handling AUTH packet: {e}");
+                            ctx.connected.store(false, Ordering::SeqCst);
+                            break;
+                        }
+                        continue;
+                    }
                     _ => {}
                 }
 
@@ -1289,6 +1436,58 @@ async fn packet_reader_task_with_responses(mut reader: UnifiedReader, ctx: Packe
 
     // Mark as disconnected when task exits
     ctx.connected.store(false, Ordering::SeqCst);
+}
+
+async fn handle_auth_packet(auth: AuthPacket, ctx: &PacketReaderContext) -> Result<()> {
+    tracing::debug!(
+        "CLIENT: Received AUTH during session with reason: {:?}",
+        auth.reason_code
+    );
+
+    match auth.reason_code {
+        ReasonCode::ContinueAuthentication => {
+            let handler = ctx
+                .auth_handler
+                .as_ref()
+                .ok_or(MqttError::AuthenticationFailed)?;
+
+            let auth_method = auth.authentication_method().unwrap_or("");
+            let auth_data = auth.authentication_data();
+
+            let response = handler.handle_challenge(auth_method, auth_data).await?;
+
+            match response {
+                AuthResponse::Continue(data) => {
+                    let method = ctx.auth_method.clone().unwrap_or_default();
+                    let auth_packet = AuthPacket::continue_authentication(method, Some(data))?;
+                    ctx.writer
+                        .write()
+                        .await
+                        .write_packet(Packet::Auth(auth_packet))
+                        .await?;
+                }
+                AuthResponse::Success => {
+                    tracing::debug!("CLIENT: Auth handler indicated success for re-auth challenge");
+                }
+                AuthResponse::Abort(reason) => {
+                    tracing::warn!("CLIENT: Re-auth aborted: {}", reason);
+                    return Err(MqttError::AuthenticationFailed);
+                }
+            }
+        }
+        ReasonCode::Success => {
+            tracing::info!("CLIENT: Re-authentication completed successfully");
+        }
+        _ => {
+            tracing::warn!(
+                "CLIENT: Re-authentication failed with reason: {:?}",
+                auth.reason_code
+            );
+            return Err(MqttError::AuthenticationFailed);
+        }
+    }
+
+    Ok(())
 }
 
 /// Keepalive task that uses the write half

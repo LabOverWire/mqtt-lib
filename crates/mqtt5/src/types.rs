@@ -106,6 +106,18 @@ impl ConnectOptions {
         self.protocol_options = self.protocol_options.with_protocol_version(version);
         self
     }
+
+    #[must_use]
+    pub fn with_authentication_method(mut self, method: impl Into<String>) -> Self {
+        self.protocol_options = self.protocol_options.with_authentication_method(method);
+        self
+    }
+
+    #[must_use]
+    pub fn with_authentication_data(mut self, data: impl AsRef<[u8]>) -> Self {
+        self.protocol_options = self.protocol_options.with_authentication_data(data);
+        self
+    }
 }
 
 impl Deref for ConnectOptions {

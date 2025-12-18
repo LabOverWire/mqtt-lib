@@ -66,15 +66,71 @@ The broker uses secure-first authentication. You must choose an authentication m
 # Anonymous access (for development/testing)
 mqttv5 broker --allow-anonymous
 
-# Password authentication (production)
-mqttv5 broker --auth-password-file passwords.txt
+# Password authentication
+mqttv5 broker --auth-password-file passwd.txt
 
-# Interactive mode (prompts for auth choice)
-mqttv5 broker
+# SCRAM-SHA-256 authentication
+mqttv5 broker --auth-method scram --scram-file scram.txt
 
-# Custom port and bind address
-mqttv5 broker --host 0.0.0.0:1883 --allow-anonymous
+# JWT authentication
+mqttv5 broker --auth-method jwt --jwt-algorithm rs256 \
+  --jwt-key-file public.pem --jwt-issuer "https://auth.example.com"
+
+# Federated JWT (Google OAuth)
+mqttv5 broker --auth-method jwt-federated \
+  --jwt-issuer "https://accounts.google.com" \
+  --jwt-jwks-uri "https://www.googleapis.com/oauth2/v3/certs" \
+  --jwt-fallback-key fallback.pem \
+  --jwt-auth-mode identity-only
+
+# Federated JWT with trusted roles (Keycloak)
+mqttv5 broker --auth-method jwt-federated \
+  --jwt-issuer "https://keycloak.example.com/realms/mqtt" \
+  --jwt-jwks-uri "https://keycloak.example.com/realms/mqtt/protocol/openid-connect/certs" \
+  --jwt-fallback-key fallback.pem \
+  --jwt-auth-mode trusted-roles \
+  --jwt-trusted-role-claim "realm_access.roles"
+
+# With ACL authorization
+mqttv5 broker --auth-password-file passwd.txt --acl-file acl.txt
 ```
+
+### Managing Passwords
+
+```bash
+# Create password file with new user
+mqttv5 passwd alice passwd.txt
+
+# Batch mode (password on command line)
+mqttv5 passwd -b bob secretpass passwd.txt
+
+# Delete user
+mqttv5 passwd -D alice passwd.txt
+```
+
+### Managing ACL Rules
+
+```bash
+# Add user permissions
+mqttv5 acl add alice "sensors/#" readwrite -f acl.txt
+mqttv5 acl add bob "sensors/temperature" read -f acl.txt
+
+# Define roles
+mqttv5 acl role-add admin "#" readwrite -f acl.txt
+mqttv5 acl role-add sensors "sensors/#" readwrite -f acl.txt
+
+# Assign roles to users
+mqttv5 acl assign alice admin -f acl.txt
+
+# Check permissions
+mqttv5 acl check alice "sensors/temp" write -f acl.txt
+
+# List rules
+mqttv5 acl list -f acl.txt
+mqttv5 acl user-roles alice -f acl.txt
+```
+
+See [Authentication & Authorization Guide](../../AUTHENTICATION.md) for details.
 
 ## CLI Design
 

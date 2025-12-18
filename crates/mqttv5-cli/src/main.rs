@@ -26,6 +26,7 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 enum Commands {
     /// Publish messages to MQTT topics
     Pub(commands::pub_cmd::PubCommand),
@@ -37,6 +38,8 @@ enum Commands {
     Acl(commands::acl_cmd::AclCommand),
     /// Manage password file for broker authentication
     Passwd(commands::passwd_cmd::PasswdCommand),
+    /// Manage SCRAM credentials file for SCRAM-SHA-256 authentication
+    Scram(commands::scram_cmd::ScramCommand),
 }
 
 #[tokio::main]
@@ -61,6 +64,10 @@ async fn main() -> Result<()> {
         Commands::Passwd(cmd) => {
             init_basic_tracing(verbose, debug);
             commands::passwd_cmd::execute(cmd)
+        }
+        Commands::Scram(cmd) => {
+            init_basic_tracing(verbose, debug);
+            commands::scram_cmd::execute(cmd)
         }
     }
 }

@@ -55,16 +55,29 @@ use mqtt5::broker::{MqttBroker, BrokerConfig};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let config = BrokerConfig::builder()
-        .with_tcp_bind("127.0.0.1:1883")?
-        .build()?;
-
-    let broker = MqttBroker::new(config);
-    broker.start().await?;
-
+    let mut broker = MqttBroker::bind("0.0.0.0:1883").await?;
+    broker.run().await?;
     Ok(())
 }
 ```
+
+### Broker with Authentication
+
+```rust
+use mqtt5::broker::{BrokerConfig, AuthConfig, AuthMethod};
+
+let config = BrokerConfig::default()
+    .with_auth(AuthConfig {
+        allow_anonymous: false,
+        password_file: Some("passwd.txt".into()),
+        auth_method: AuthMethod::Password,
+        ..Default::default()
+    });
+```
+
+Authentication methods: Password, SCRAM-SHA-256, JWT, Federated JWT (Google, Keycloak, etc.)
+
+See [Authentication & Authorization Guide](../../AUTHENTICATION.md) for details.
 
 ## Transport URLs
 

@@ -260,6 +260,73 @@ impl WasmBroker {
         self.auth_provider.acl_manager().rule_count().await
     }
 
+    #[wasm_bindgen]
+    pub async fn add_role(&self, name: String) {
+        self.auth_provider.acl_manager().add_role(name).await;
+    }
+
+    #[wasm_bindgen]
+    pub async fn remove_role(&self, name: &str) -> bool {
+        self.auth_provider.acl_manager().remove_role(name).await
+    }
+
+    #[wasm_bindgen]
+    pub async fn list_roles(&self) -> Vec<String> {
+        self.auth_provider.acl_manager().list_roles().await
+    }
+
+    #[wasm_bindgen]
+    pub async fn role_count(&self) -> usize {
+        self.auth_provider.acl_manager().role_count().await
+    }
+
+    #[wasm_bindgen]
+    pub async fn add_role_rule(
+        &self,
+        role_name: String,
+        topic_pattern: String,
+        permission: String,
+    ) -> Result<(), JsValue> {
+        let perm: Permission = permission
+            .parse()
+            .map_err(|e: mqtt5::error::MqttError| JsValue::from_str(&e.to_string()))?;
+        self.auth_provider
+            .acl_manager()
+            .add_role_rule(&role_name, topic_pattern, perm)
+            .await
+            .map_err(|e| JsValue::from_str(&e.to_string()))
+    }
+
+    #[wasm_bindgen]
+    pub async fn assign_role(&self, username: String, role_name: String) -> Result<(), JsValue> {
+        self.auth_provider
+            .acl_manager()
+            .assign_role(&username, &role_name)
+            .await
+            .map_err(|e| JsValue::from_str(&e.to_string()))
+    }
+
+    #[wasm_bindgen]
+    pub async fn unassign_role(&self, username: &str, role_name: &str) -> bool {
+        self.auth_provider
+            .acl_manager()
+            .unassign_role(username, role_name)
+            .await
+    }
+
+    #[wasm_bindgen]
+    pub async fn get_user_roles(&self, username: &str) -> Vec<String> {
+        self.auth_provider
+            .acl_manager()
+            .get_user_roles(username)
+            .await
+    }
+
+    #[wasm_bindgen]
+    pub async fn clear_roles(&self) {
+        self.auth_provider.acl_manager().clear_roles().await;
+    }
+
     pub fn create_client_port(&self) -> Result<MessagePort, JsValue> {
         let channel = web_sys::MessageChannel::new()?;
 

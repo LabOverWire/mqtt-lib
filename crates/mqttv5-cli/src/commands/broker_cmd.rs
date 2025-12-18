@@ -32,6 +32,82 @@ pub struct BrokerCommand {
     #[arg(long)]
     pub acl_file: Option<PathBuf>,
 
+    /// Authentication method: password, scram, jwt, jwt-federated (default: password if auth file provided)
+    #[arg(long, value_parser = ["password", "scram", "jwt", "jwt-federated"])]
+    pub auth_method: Option<String>,
+
+    /// SCRAM credentials file path (format: username:salt:iterations:stored_key:server_key)
+    #[arg(long)]
+    pub scram_file: Option<PathBuf>,
+
+    /// JWT algorithm: hs256, rs256, es256
+    #[arg(long, value_parser = ["hs256", "rs256", "es256"])]
+    pub jwt_algorithm: Option<String>,
+
+    /// JWT secret file (for HS256) or public key file (for RS256/ES256)
+    #[arg(long)]
+    pub jwt_key_file: Option<PathBuf>,
+
+    /// JWT required issuer
+    #[arg(long)]
+    pub jwt_issuer: Option<String>,
+
+    /// JWT required audience
+    #[arg(long)]
+    pub jwt_audience: Option<String>,
+
+    /// JWT clock skew tolerance in seconds (default: 60)
+    #[arg(long, default_value = "60")]
+    pub jwt_clock_skew: u64,
+
+    /// JWKS endpoint URL for federated JWT auth (e.g., <https://accounts.google.com/.well-known/jwks>)
+    #[arg(long)]
+    pub jwt_jwks_uri: Option<String>,
+
+    /// Fallback key file when JWKS is unavailable (required with --jwt-jwks-uri)
+    #[arg(long)]
+    pub jwt_fallback_key: Option<PathBuf>,
+
+    /// JWKS refresh interval in seconds (default: 3600)
+    #[arg(long, default_value = "3600")]
+    pub jwt_jwks_refresh: u64,
+
+    /// Claim path for extracting roles (e.g., "roles", "groups", "realm_access.roles")
+    #[arg(long)]
+    pub jwt_role_claim: Option<String>,
+
+    /// Role mapping in format "claim_value:mqtt_role" (can be specified multiple times)
+    #[arg(long, action = ArgAction::Append)]
+    pub jwt_role_map: Vec<String>,
+
+    /// Default roles for authenticated JWT users (comma-separated)
+    #[arg(long)]
+    pub jwt_default_roles: Option<String>,
+
+    /// Role merge mode: merge (combine with static ACL) or replace (JWT roles only) [DEPRECATED: use --jwt-auth-mode]
+    #[arg(long, value_parser = ["merge", "replace"], default_value = "merge")]
+    pub jwt_role_merge_mode: String,
+
+    /// Federated authentication mode: identity-only (external IdP for identity, internal ACL), claim-binding (admin-defined mappings), trusted-roles (trust JWT role claims)
+    #[arg(long, value_parser = ["identity-only", "claim-binding", "trusted-roles"])]
+    pub jwt_auth_mode: Option<String>,
+
+    /// Claim paths for extracting trusted roles (can be specified multiple times, e.g., "roles", "groups", "realm_access.roles")
+    #[arg(long, action = ArgAction::Append)]
+    pub jwt_trusted_role_claim: Vec<String>,
+
+    /// Whether JWT-derived roles are session-scoped (cleared on disconnect)
+    #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+    pub jwt_session_scoped_roles: Option<bool>,
+
+    /// Custom issuer prefix for user ID namespacing (default: issuer domain)
+    #[arg(long)]
+    pub jwt_issuer_prefix: Option<String>,
+
+    /// Federated JWT config file (JSON) for multi-issuer setup
+    #[arg(long)]
+    pub jwt_config_file: Option<PathBuf>,
+
     /// TLS certificate file path (PEM format)
     #[arg(long)]
     pub tls_cert: Option<PathBuf>,
@@ -256,12 +332,30 @@ fn resolve_auth_settings(cmd: &BrokerCommand) -> Result<bool> {
         return Ok(false);
     }
 
+    if cmd.scram_file.is_some() {
+        info!("SCRAM credentials file provided, anonymous access disabled by default");
+        return Ok(false);
+    }
+
+    if cmd.jwt_key_file.is_some() {
+        info!("JWT key file provided, anonymous access disabled by default");
+        return Ok(false);
+    }
+
+    if cmd.jwt_jwks_uri.is_some() || cmd.jwt_config_file.is_some() {
+        info!("Federated JWT auth configured, anonymous access disabled by default");
+        return Ok(false);
+    }
+
     if cmd.non_interactive {
         anyhow::bail!(
             "No authentication configured.\n\
              Use one of:\n  \
-             --allow-anonymous           Allow connections without credentials\n  \
-             --auth-password-file <path> Require password authentication"
+             --allow-anonymous             Allow connections without credentials\n  \
+             --auth-password-file <path>   Require password authentication\n  \
+             --scram-file <path>           Require SCRAM-SHA-256 authentication\n  \
+             --jwt-key-file <path>         Require JWT authentication\n  \
+             --jwt-jwks-uri <url>          Require federated JWT authentication"
         );
     }
 
@@ -277,7 +371,9 @@ fn resolve_auth_settings(cmd: &BrokerCommand) -> Result<bool> {
 
 async fn create_interactive_config(cmd: &mut BrokerCommand) -> Result<BrokerConfig> {
     use mqtt5::broker::config::{
-        AuthConfig, AuthMethod, QuicConfig, StorageConfig, TlsConfig, WebSocketConfig,
+        AuthConfig, AuthMethod, ClaimPattern, FederatedAuthMode, FederatedJwtConfig, JwtAlgorithm,
+        JwtConfig, JwtIssuerConfig, JwtKeySource, JwtRoleMapping, QuicConfig, RateLimitConfig,
+        RoleMergeMode, StorageConfig, TlsConfig, WebSocketConfig,
     };
 
     let mut config = BrokerConfig::new();
@@ -316,45 +412,238 @@ async fn create_interactive_config(cmd: &mut BrokerCommand) -> Result<BrokerConf
 
     let allow_anonymous = resolve_auth_settings(cmd)?;
 
-    if cmd.auth_password_file.is_some() || cmd.acl_file.is_some() || !allow_anonymous {
-        if let Some(password_file) = &cmd.auth_password_file {
-            if !password_file.exists() {
+    let auth_method = match cmd.auth_method.as_deref() {
+        Some("scram") => {
+            let Some(scram_file) = &cmd.scram_file else {
+                anyhow::bail!("--scram-file is required when using --auth-method scram");
+            };
+            if !scram_file.exists() {
+                anyhow::bail!("SCRAM credentials file not found: {}", scram_file.display());
+            }
+            AuthMethod::ScramSha256
+        }
+        Some("jwt") => {
+            let Some(jwt_key_file) = &cmd.jwt_key_file else {
+                anyhow::bail!("--jwt-key-file is required when using --auth-method jwt");
+            };
+            if !jwt_key_file.exists() {
+                anyhow::bail!("JWT key file not found: {}", jwt_key_file.display());
+            }
+            if cmd.jwt_algorithm.is_none() {
+                anyhow::bail!("--jwt-algorithm is required when using --auth-method jwt");
+            }
+            AuthMethod::Jwt
+        }
+        Some("jwt-federated") => {
+            if cmd.jwt_jwks_uri.is_none() && cmd.jwt_config_file.is_none() {
                 anyhow::bail!(
-                    "Authentication password file not found: {}",
-                    password_file.display()
+                    "--jwt-jwks-uri or --jwt-config-file is required when using --auth-method jwt-federated"
                 );
             }
-        }
-
-        if let Some(acl_file) = &cmd.acl_file {
-            if !acl_file.exists() {
-                anyhow::bail!("ACL file not found: {}", acl_file.display());
+            if cmd.jwt_jwks_uri.is_some() {
+                let Some(fallback) = &cmd.jwt_fallback_key else {
+                    anyhow::bail!("--jwt-fallback-key is required when using --jwt-jwks-uri");
+                };
+                if !fallback.exists() {
+                    anyhow::bail!("JWT fallback key file not found: {}", fallback.display());
+                }
+                if cmd.jwt_issuer.is_none() {
+                    anyhow::bail!("--jwt-issuer is required when using --jwt-jwks-uri");
+                }
             }
+            if let Some(config_file) = &cmd.jwt_config_file {
+                if !config_file.exists() {
+                    anyhow::bail!("JWT config file not found: {}", config_file.display());
+                }
+            }
+            AuthMethod::JwtFederated
         }
-
-        let auth_config = AuthConfig {
-            allow_anonymous,
-            password_file: cmd.auth_password_file.clone(),
-            acl_file: cmd.acl_file.clone(),
-            auth_method: if cmd.auth_password_file.is_some() {
+        Some("password") | None => {
+            if cmd.auth_password_file.is_some() {
                 AuthMethod::Password
             } else {
                 AuthMethod::None
-            },
-            auth_data: None,
-        };
-        config = config.with_auth(auth_config);
+            }
+        }
+        Some(other) => anyhow::bail!("Unknown auth method: {other}"),
+    };
+
+    if let Some(password_file) = &cmd.auth_password_file {
+        if !password_file.exists() {
+            anyhow::bail!(
+                "Authentication password file not found: {}",
+                password_file.display()
+            );
+        }
     }
 
-    if allow_anonymous {
-        info!("Anonymous access enabled - clients can connect without credentials");
-    } else if cmd.auth_password_file.is_some() {
-        info!(
-            "Password authentication required (file: {:?})",
-            cmd.auth_password_file.as_ref().unwrap()
-        );
+    if let Some(acl_file) = &cmd.acl_file {
+        if !acl_file.exists() {
+            anyhow::bail!("ACL file not found: {}", acl_file.display());
+        }
+    }
+
+    let jwt_config = if auth_method == AuthMethod::Jwt {
+        let algorithm = match cmd.jwt_algorithm.as_deref() {
+            Some("hs256") => JwtAlgorithm::HS256,
+            Some("rs256") => JwtAlgorithm::RS256,
+            Some("es256") => JwtAlgorithm::ES256,
+            _ => anyhow::bail!("Invalid JWT algorithm"),
+        };
+        let mut jwt_cfg = JwtConfig::new(algorithm, cmd.jwt_key_file.clone().unwrap());
+        jwt_cfg.clock_skew_secs = cmd.jwt_clock_skew;
+        if let Some(ref issuer) = cmd.jwt_issuer {
+            jwt_cfg.issuer = Some(issuer.clone());
+        }
+        if let Some(ref audience) = cmd.jwt_audience {
+            jwt_cfg.audience = Some(audience.clone());
+        }
+        Some(jwt_cfg)
     } else {
-        info!("Authentication required but no password file configured");
+        None
+    };
+
+    let federated_jwt_config = if auth_method == AuthMethod::JwtFederated {
+        if let Some(config_file) = &cmd.jwt_config_file {
+            let content = std::fs::read_to_string(config_file).with_context(|| {
+                format!("Failed to read JWT config file: {}", config_file.display())
+            })?;
+            let config: FederatedJwtConfig = serde_json::from_str(&content)
+                .with_context(|| "Failed to parse JWT config file as JSON")?;
+            Some(config)
+        } else {
+            let auth_mode = match cmd.jwt_auth_mode.as_deref() {
+                Some("identity-only") => FederatedAuthMode::IdentityOnly,
+                Some("claim-binding") => FederatedAuthMode::ClaimBinding,
+                Some("trusted-roles") => FederatedAuthMode::TrustedRoles,
+                None => match cmd.jwt_role_merge_mode.as_str() {
+                    "replace" => FederatedAuthMode::TrustedRoles,
+                    _ => FederatedAuthMode::ClaimBinding,
+                },
+                _ => FederatedAuthMode::IdentityOnly,
+            };
+
+            #[allow(deprecated)]
+            let merge_mode = match cmd.jwt_role_merge_mode.as_str() {
+                "replace" => RoleMergeMode::Replace,
+                _ => RoleMergeMode::Merge,
+            };
+
+            let default_roles: Vec<String> = cmd
+                .jwt_default_roles
+                .as_ref()
+                .map(|s| s.split(',').map(|r| r.trim().to_string()).collect())
+                .unwrap_or_default();
+
+            let mut role_mappings = Vec::new();
+            if let Some(claim_path) = &cmd.jwt_role_claim {
+                for mapping in &cmd.jwt_role_map {
+                    if let Some((value, role)) = mapping.split_once(':') {
+                        role_mappings.push(JwtRoleMapping::new(
+                            claim_path.clone(),
+                            ClaimPattern::Equals(value.to_string()),
+                            vec![role.to_string()],
+                        ));
+                    }
+                }
+            }
+
+            let mut issuer_config = JwtIssuerConfig::new(
+                "cli-issuer",
+                cmd.jwt_issuer.clone().unwrap(),
+                JwtKeySource::Jwks {
+                    uri: cmd.jwt_jwks_uri.clone().unwrap(),
+                    fallback_key_file: cmd.jwt_fallback_key.clone().unwrap(),
+                    refresh_interval_secs: cmd.jwt_jwks_refresh,
+                    cache_ttl_secs: cmd.jwt_jwks_refresh * 24,
+                },
+            )
+            .with_auth_mode(auth_mode)
+            .with_default_roles(default_roles);
+
+            #[allow(deprecated)]
+            {
+                issuer_config.role_merge_mode = merge_mode;
+            }
+
+            if let Some(ref audience) = cmd.jwt_audience {
+                issuer_config = issuer_config.with_audience(audience.clone());
+            }
+
+            if !cmd.jwt_trusted_role_claim.is_empty() {
+                issuer_config.trusted_role_claims = cmd.jwt_trusted_role_claim.clone();
+            }
+
+            if let Some(session_scoped) = cmd.jwt_session_scoped_roles {
+                issuer_config.session_scoped_roles = session_scoped;
+            }
+
+            if let Some(ref prefix) = cmd.jwt_issuer_prefix {
+                issuer_config.issuer_prefix = Some(prefix.clone());
+            }
+
+            issuer_config.role_mappings = role_mappings;
+
+            Some(FederatedJwtConfig {
+                issuers: vec![issuer_config],
+                clock_skew_secs: cmd.jwt_clock_skew,
+            })
+        }
+    } else {
+        None
+    };
+
+    let auth_config = AuthConfig {
+        allow_anonymous,
+        password_file: cmd.auth_password_file.clone(),
+        acl_file: cmd.acl_file.clone(),
+        auth_method,
+        auth_data: None,
+        scram_file: cmd.scram_file.clone(),
+        jwt_config,
+        federated_jwt_config,
+        rate_limit: RateLimitConfig::default(),
+    };
+    config = config.with_auth(auth_config);
+
+    match auth_method {
+        AuthMethod::None if allow_anonymous => {
+            info!("Anonymous access enabled - clients can connect without credentials");
+        }
+        AuthMethod::Password => {
+            info!(
+                "Password authentication enabled (file: {:?})",
+                cmd.auth_password_file.as_ref().unwrap()
+            );
+        }
+        AuthMethod::ScramSha256 => {
+            info!(
+                "SCRAM-SHA-256 authentication enabled (file: {:?})",
+                cmd.scram_file.as_ref().unwrap()
+            );
+        }
+        AuthMethod::Jwt => {
+            info!(
+                "JWT authentication enabled (algorithm: {:?}, key: {:?})",
+                cmd.jwt_algorithm.as_ref().unwrap(),
+                cmd.jwt_key_file.as_ref().unwrap()
+            );
+        }
+        AuthMethod::JwtFederated => {
+            if let Some(config_file) = &cmd.jwt_config_file {
+                info!(
+                    "Federated JWT authentication enabled (config: {:?})",
+                    config_file
+                );
+            } else {
+                info!(
+                    "Federated JWT authentication enabled (issuer: {:?}, jwks: {:?})",
+                    cmd.jwt_issuer.as_ref().unwrap(),
+                    cmd.jwt_jwks_uri.as_ref().unwrap()
+                );
+            }
+        }
+        _ => {}
     }
 
     if let Some(acl_file) = &cmd.acl_file {

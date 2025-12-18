@@ -1,3 +1,4 @@
+use crate::packet::suback::SubAckReasonCode;
 use crate::protocol::v5::reason_codes::ReasonCode;
 use thiserror::Error;
 
@@ -78,6 +79,9 @@ pub enum MqttError {
 
     #[error("Subscription failed: {0:?}")]
     SubscriptionFailed(ReasonCode),
+
+    #[error("Subscription denied: {0:?}")]
+    SubscriptionDenied(SubAckReasonCode),
 
     #[error("Unsubscription failed: {0:?}")]
     UnsubscriptionFailed(ReasonCode),

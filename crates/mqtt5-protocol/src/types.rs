@@ -124,6 +124,18 @@ impl ConnectOptions {
         self.properties.receive_maximum = Some(receive_maximum);
         self
     }
+
+    #[must_use]
+    pub fn with_authentication_method(mut self, method: impl Into<String>) -> Self {
+        self.properties.authentication_method = Some(method.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_authentication_data(mut self, data: impl AsRef<[u8]>) -> Self {
+        self.properties.authentication_data = Some(data.as_ref().to_vec());
+        self
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

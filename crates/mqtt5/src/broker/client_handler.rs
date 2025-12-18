@@ -299,6 +299,11 @@ impl ClientHandler {
             }
         }
 
+        // Clean up session-bound federated roles
+        if let Some(ref user_id) = self.user_id {
+            self.auth_provider.cleanup_session(user_id).await;
+        }
+
         // Handle will message if this was an abnormal disconnect
         if !self.normal_disconnect {
             self.publish_will_message(&client_id).await;

@@ -37,6 +37,14 @@ pub struct SubCommand {
     #[arg(long, short = 'P')]
     pub password: Option<String>,
 
+    /// Authentication method: password, scram, jwt (default: password)
+    #[arg(long, value_parser = ["password", "scram", "jwt"])]
+    pub auth_method: Option<String>,
+
+    /// JWT token for JWT authentication
+    #[arg(long)]
+    pub jwt_token: Option<String>,
+
     /// Client ID
     #[arg(long, short)]
     pub client_id: Option<String>,
@@ -294,11 +302,44 @@ pub async fn execute(mut cmd: SubCommand, verbose: bool, debug: bool) -> Result<
         options = options.with_session_expiry_interval(expiry);
     }
 
-    // Add authentication if provided
-    if let (Some(username), Some(password)) = (cmd.username.clone(), cmd.password.clone()) {
-        options = options.with_credentials(username, password.into_bytes());
-    } else if let Some(username) = cmd.username.clone() {
-        options = options.with_credentials(username, Vec::new());
+    // Add authentication based on method
+    match cmd.auth_method.as_deref() {
+        Some("scram") => {
+            let username = cmd.username.clone().ok_or_else(|| {
+                anyhow::anyhow!("--username is required for SCRAM authentication")
+            })?;
+            let password = cmd.password.clone().ok_or_else(|| {
+                anyhow::anyhow!("--password is required for SCRAM authentication")
+            })?;
+            options = options
+                .with_credentials(username.clone(), Vec::new())
+                .with_authentication_method("SCRAM-SHA-256");
+
+            use mqtt5::client::auth_handlers::ScramSha256AuthHandler;
+            let handler = ScramSha256AuthHandler::new(username, password);
+            client.set_auth_handler(handler).await;
+            debug!("SCRAM-SHA-256 authentication configured");
+        }
+        Some("jwt") => {
+            let token = cmd
+                .jwt_token
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("--jwt-token is required for JWT authentication"))?;
+            options = options.with_authentication_method("JWT");
+
+            use mqtt5::client::auth_handlers::JwtAuthHandler;
+            let handler = JwtAuthHandler::new(token);
+            client.set_auth_handler(handler).await;
+            debug!("JWT authentication configured");
+        }
+        Some("password") | None => {
+            if let (Some(username), Some(password)) = (cmd.username.clone(), cmd.password.clone()) {
+                options = options.with_credentials(username, password.into_bytes());
+            } else if let Some(username) = cmd.username.clone() {
+                options = options.with_credentials(username, Vec::new());
+            }
+        }
+        Some(other) => anyhow::bail!("Unknown auth method: {other}"),
     }
 
     // Add will message if specified
@@ -397,7 +438,6 @@ pub async fn execute(mut cmd: SubCommand, verbose: bool, debug: bool) -> Result<
     let verbose = cmd.verbose;
 
     info!("Subscribing to '{}' (QoS {})...", topic, qos as u8);
-    println!("✓ Subscribed to '{topic}' - waiting for messages (Ctrl+C to exit)");
 
     let message_count = Arc::new(AtomicU32::new(0));
     let message_count_clone = message_count.clone();
@@ -445,6 +485,8 @@ pub async fn execute(mut cmd: SubCommand, verbose: bool, debug: bool) -> Result<
         "Subscription confirmed - packet_id: {}, granted_qos: {:?}",
         packet_id, granted_qos
     );
+
+    println!("✓ Subscribed to '{topic}' (granted QoS {granted_qos:?}) - waiting for messages (Ctrl+C to exit)");
 
     // Wait for either Ctrl+C or target count reached
     if cmd.auto_reconnect {

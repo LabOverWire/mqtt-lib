@@ -264,6 +264,10 @@ impl TestBroker {
             acl_file: None,
             auth_method: AuthMethod::Password,
             auth_data: Some(std::fs::read(&password_file).expect("Failed to read password file")),
+            scram_file: None,
+            jwt_config: None,
+            federated_jwt_config: None,
+            rate_limit: Default::default(),
         };
 
         let config = BrokerConfig::default()
