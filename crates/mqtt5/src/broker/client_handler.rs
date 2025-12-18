@@ -1,5 +1,6 @@
 //! Client connection handler for the MQTT broker - simplified version
 
+use bytes::BytesMut;
 use crate::broker::auth::{AuthProvider, EnhancedAuthStatus};
 use crate::broker::config::BrokerConfig;
 use crate::broker::resource_monitor::ResourceMonitor;
@@ -26,7 +27,8 @@ use crate::packet::unsubscribe::UnsubscribePacket;
 use crate::packet::Packet;
 use crate::protocol::v5::reason_codes::ReasonCode;
 use crate::time::Duration;
-use crate::transport::packet_io::PacketIo;
+use crate::transport::packet_io::{encode_packet_to_buffer, PacketIo};
+use crate::Transport;
 use crate::types::ProtocolVersion;
 use crate::QoS;
 use std::collections::{HashMap, HashSet};
@@ -82,6 +84,7 @@ pub struct ClientHandler {
     client_receive_maximum: u16,
     outbound_inflight: HashSet<u16>,
     protocol_version: u8,
+    write_buffer: BytesMut,
 }
 
 impl ClientHandler {
@@ -157,6 +160,7 @@ impl ClientHandler {
             client_receive_maximum: 65535,
             outbound_inflight: HashSet::new(),
             protocol_version: 5,
+            write_buffer: BytesMut::with_capacity(4096),
         }
     }
 
@@ -1630,9 +1634,9 @@ impl ClientHandler {
         }
 
         let payload_size = publish.payload.len();
-        self.transport
-            .write_packet(Packet::Publish(publish))
-            .await?;
+        self.write_buffer.clear();
+        encode_packet_to_buffer(&Packet::Publish(publish), &mut self.write_buffer)?;
+        self.transport.write(&self.write_buffer).await?;
         self.stats.publish_sent(payload_size);
         Ok(())
     }
