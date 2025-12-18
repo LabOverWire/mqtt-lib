@@ -84,7 +84,8 @@ fn handle_stdout_mode(cmd: &ScramCommand) -> Result<()> {
         generate_scram_credential_line(&cmd.username, &password)
     } else {
         generate_scram_credential_line_with_iterations(&cmd.username, &password, cmd.iterations)
-    };
+    }
+    .context("Failed to generate SCRAM credentials")?;
     println!("{line}");
     Ok(())
 }
@@ -117,7 +118,8 @@ fn handle_add_or_update(cmd: &ScramCommand, file_path: &PathBuf) -> Result<()> {
         generate_scram_credential_line(&cmd.username, &password)
     } else {
         generate_scram_credential_line_with_iterations(&cmd.username, &password, cmd.iterations)
-    };
+    }
+    .context("Failed to generate SCRAM credentials")?;
 
     let action = if users.contains_key(&cmd.username) {
         "Updated"

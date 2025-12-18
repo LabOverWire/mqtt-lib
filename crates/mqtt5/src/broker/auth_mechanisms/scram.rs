@@ -12,11 +12,13 @@ use std::num::NonZeroU32;
 use std::pin::Pin;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
+use tokio::sync::RwLock as TokioRwLock;
 use tracing::{debug, warn};
 
 const SCRAM_ITERATION_COUNT: u32 = 310_000;
 const SCRAM_SALT_LENGTH: usize = 16;
 const SCRAM_STATE_TTL: Duration = Duration::from_secs(60);
+const DEFAULT_MAX_CONCURRENT_AUTH: usize = 1000;
 
 #[derive(Clone)]
 pub struct ScramCredentials {
@@ -27,18 +29,26 @@ pub struct ScramCredentials {
 }
 
 impl ScramCredentials {
-    #[must_use]
-    pub fn from_password(password: &str) -> Self {
+    /// Creates SCRAM credentials from a password using default iteration count.
+    ///
+    /// # Errors
+    /// Returns an error if random salt generation fails.
+    pub fn from_password(password: &str) -> std::result::Result<Self, getrandom::Error> {
         Self::from_password_with_iterations(password, SCRAM_ITERATION_COUNT)
     }
 
-    #[must_use]
-    #[allow(clippy::missing_panics_doc)]
-    pub fn from_password_with_iterations(password: &str, iterations: u32) -> Self {
+    /// Creates SCRAM credentials from a password with custom iteration count.
+    ///
+    /// # Errors
+    /// Returns an error if random salt generation fails.
+    pub fn from_password_with_iterations(
+        password: &str,
+        iterations: u32,
+    ) -> std::result::Result<Self, getrandom::Error> {
         let mut salt = vec![0u8; SCRAM_SALT_LENGTH];
-        getrandom::fill(&mut salt).expect("failed to generate random salt");
+        getrandom::fill(&mut salt)?;
 
-        Self::from_password_and_salt(password, &salt, iterations)
+        Ok(Self::from_password_and_salt(password, &salt, iterations))
     }
 
     #[must_use]
@@ -166,32 +176,43 @@ impl ScramCredentialStore for FileBasedScramCredentialStore {
     }
 }
 
-pub fn generate_scram_credential_line(username: &str, password: &str) -> String {
-    let creds = ScramCredentials::from_password(password);
-    format!(
+/// Generates a SCRAM credential line for storage in a credentials file.
+///
+/// # Errors
+/// Returns an error if random salt generation fails.
+pub fn generate_scram_credential_line(
+    username: &str,
+    password: &str,
+) -> std::result::Result<String, getrandom::Error> {
+    let creds = ScramCredentials::from_password(password)?;
+    Ok(format!(
         "{}:{}:{}:{}:{}",
         username,
         BASE64_STANDARD.encode(&creds.salt),
         creds.iteration_count,
         BASE64_STANDARD.encode(creds.stored_key),
         BASE64_STANDARD.encode(creds.server_key),
-    )
+    ))
 }
 
+/// Generates a SCRAM credential line with custom iteration count.
+///
+/// # Errors
+/// Returns an error if random salt generation fails.
 pub fn generate_scram_credential_line_with_iterations(
     username: &str,
     password: &str,
     iterations: u32,
-) -> String {
-    let creds = ScramCredentials::from_password_with_iterations(password, iterations);
-    format!(
+) -> std::result::Result<String, getrandom::Error> {
+    let creds = ScramCredentials::from_password_with_iterations(password, iterations)?;
+    Ok(format!(
         "{}:{}:{}:{}:{}",
         username,
         BASE64_STANDARD.encode(&creds.salt),
         creds.iteration_count,
         BASE64_STANDARD.encode(creds.stored_key),
         BASE64_STANDARD.encode(creds.server_key),
-    )
+    ))
 }
 
 struct ScramServerState {
@@ -205,22 +226,30 @@ struct ScramServerState {
 
 pub struct ScramSha256AuthProvider<S: ScramCredentialStore> {
     store: Arc<S>,
-    state: RwLock<HashMap<String, ScramServerState>>,
+    state: TokioRwLock<HashMap<String, ScramServerState>>,
+    max_states: usize,
 }
 
 impl<S: ScramCredentialStore> ScramSha256AuthProvider<S> {
     pub fn new(store: Arc<S>) -> Self {
         Self {
             store,
-            state: RwLock::new(HashMap::new()),
+            state: TokioRwLock::new(HashMap::new()),
+            max_states: DEFAULT_MAX_CONCURRENT_AUTH,
         }
     }
 
-    fn cleanup_expired_states(&self) {
+    #[must_use]
+    pub fn with_max_concurrent_auth(mut self, max_states: usize) -> Self {
+        self.max_states = max_states;
+        self
+    }
+
+    async fn cleanup_expired_states(&self) {
         let now = Instant::now();
         self.state
             .write()
-            .unwrap()
+            .await
             .retain(|_, state| now.duration_since(state.created_at) < SCRAM_STATE_TTL);
     }
 }
@@ -266,7 +295,7 @@ impl<S: ScramCredentialStore + 'static> AuthProvider for ScramSha256AuthProvider
         let cid = client_id.to_string();
 
         Box::pin(async move {
-            self.cleanup_expired_states();
+            self.cleanup_expired_states().await;
 
             if method != "SCRAM-SHA-256" {
                 debug!(method = %method, "SCRAM auth provider received non-SCRAM method");
@@ -287,12 +316,12 @@ impl<S: ScramCredentialStore + 'static> AuthProvider for ScramSha256AuthProvider
 
             let msg = String::from_utf8_lossy(data);
 
-            let has_state = self.state.read().unwrap().contains_key(&cid);
+            let has_state = self.state.read().await.contains_key(&cid);
 
             if has_state {
-                Ok(self.handle_client_final(&cid, &method, &msg))
+                Ok(self.handle_client_final(&cid, &method, &msg).await)
             } else {
-                Ok(self.handle_client_first(&cid, &method, &msg))
+                Ok(self.handle_client_first(&cid, &method, &msg).await)
             }
         })
     }
@@ -309,7 +338,7 @@ impl<S: ScramCredentialStore + 'static> AuthProvider for ScramSha256AuthProvider
 }
 
 impl<S: ScramCredentialStore> ScramSha256AuthProvider<S> {
-    fn handle_client_first(
+    async fn handle_client_first(
         &self,
         client_id: &str,
         method: &str,
@@ -355,7 +384,14 @@ impl<S: ScramCredentialStore> ScramSha256AuthProvider<S> {
         };
 
         let mut server_nonce_bytes = [0u8; 24];
-        getrandom::fill(&mut server_nonce_bytes).expect("failed to generate random nonce");
+        if let Err(e) = getrandom::fill(&mut server_nonce_bytes) {
+            warn!(error = %e, "failed to generate random nonce");
+            return EnhancedAuthResult::fail_with_reason(
+                method.to_string(),
+                ReasonCode::UnspecifiedError,
+                "Internal error".to_string(),
+            );
+        }
         let server_nonce = BASE64_STANDARD.encode(server_nonce_bytes);
         let combined_nonce = format!("{client_nonce}{server_nonce}");
 
@@ -374,22 +410,33 @@ impl<S: ScramCredentialStore> ScramSha256AuthProvider<S> {
             created_at: Instant::now(),
         };
 
-        self.state
-            .write()
-            .unwrap()
-            .insert(client_id.to_string(), state);
+        {
+            let mut states = self.state.write().await;
+            if states.len() >= self.max_states {
+                warn!(
+                    max_states = self.max_states,
+                    "SCRAM authentication rejected: too many concurrent authentications"
+                );
+                return EnhancedAuthResult::fail_with_reason(
+                    method.to_string(),
+                    ReasonCode::QuotaExceeded,
+                    "Too many concurrent authentications".to_string(),
+                );
+            }
+            states.insert(client_id.to_string(), state);
+        }
 
         debug!(username = %username, "SCRAM client-first processed, sending server-first");
         EnhancedAuthResult::continue_auth(method.to_string(), Some(server_first.into_bytes()))
     }
 
-    fn handle_client_final(
+    async fn handle_client_final(
         &self,
         client_id: &str,
         method: &str,
         message: &str,
     ) -> EnhancedAuthResult {
-        let Some(state) = self.state.write().unwrap().remove(client_id) else {
+        let Some(state) = self.state.write().await.remove(client_id) else {
             return EnhancedAuthResult::fail_with_reason(
                 method.to_string(),
                 ReasonCode::NotAuthorized,
@@ -544,7 +591,7 @@ mod tests {
         }
 
         fn add_user(&self, username: &str, password: &str) {
-            let creds = ScramCredentials::from_password(password);
+            let creds = ScramCredentials::from_password(password).unwrap();
             self.credentials
                 .write()
                 .unwrap()
@@ -568,7 +615,7 @@ mod tests {
 
     #[test]
     fn test_scram_credentials_from_password() {
-        let creds = ScramCredentials::from_password("testpassword");
+        let creds = ScramCredentials::from_password("testpassword").unwrap();
         assert_eq!(creds.salt.len(), SCRAM_SALT_LENGTH);
         assert_eq!(creds.iteration_count, SCRAM_ITERATION_COUNT);
         assert_eq!(creds.stored_key.len(), 32);
@@ -719,7 +766,7 @@ mod tests {
 
     #[test]
     fn test_generate_scram_credential_line() {
-        let line = generate_scram_credential_line("alice", "password123");
+        let line = generate_scram_credential_line("alice", "password123").unwrap();
         let parts: Vec<&str> = line.split(':').collect();
         assert_eq!(parts.len(), 5);
         assert_eq!(parts[0], "alice");
@@ -731,7 +778,7 @@ mod tests {
 
     #[test]
     fn test_file_based_store_parse_line() {
-        let line = generate_scram_credential_line("bob", "secret");
+        let line = generate_scram_credential_line("bob", "secret").unwrap();
         let (username, creds) =
             FileBasedScramCredentialStore::parse_credential_line(&line).unwrap();
         assert_eq!(username, "bob");
@@ -745,8 +792,8 @@ mod tests {
         let dir = std::env::temp_dir();
         let path = dir.join("test_scram_creds.txt");
 
-        let line1 = generate_scram_credential_line("user1", "pass1");
-        let line2 = generate_scram_credential_line("user2", "pass2");
+        let line1 = generate_scram_credential_line("user1", "pass1").unwrap();
+        let line2 = generate_scram_credential_line("user2", "pass2").unwrap();
 
         let mut file = std::fs::File::create(&path).unwrap();
         writeln!(file, "{line1}").unwrap();

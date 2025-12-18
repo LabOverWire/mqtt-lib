@@ -97,7 +97,18 @@ impl FederatedJwtAuthProvider {
                         request_timeout: Duration::from_secs(10),
                     });
 
-                    load_fallback_verifier(fallback_key_file).ok()
+                    match load_fallback_verifier(fallback_key_file) {
+                        Ok(verifier) => Some(verifier),
+                        Err(e) => {
+                            warn!(
+                                issuer = %config.issuer,
+                                path = %fallback_key_file.display(),
+                                error = %e,
+                                "failed to load fallback key file, JWKS endpoint will have no fallback"
+                            );
+                            None
+                        }
+                    }
                 }
             };
 
