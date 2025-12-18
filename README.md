@@ -518,7 +518,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         allow_anonymous: false,
         password_file: Some("users.txt".into()),
         auth_method: AuthMethod::Password,
-        auth_data: None,
+        ..Default::default()
     };
 
     let config = BrokerConfig::default()

@@ -1,10 +1,13 @@
 use base64::prelude::*;
+use http_body_util::BodyExt;
+use hyper::body::Bytes;
+use hyper_util::client::legacy::Client;
+use hyper_util::rt::TokioExecutor;
 use ring::signature;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{broadcast, RwLock};
 use tracing::{debug, info, warn};
 use url::Url;
@@ -283,30 +286,13 @@ impl Default for JwksCache {
 }
 
 async fn fetch_jwks_http(uri: &str, timeout: Duration) -> Result<Vec<JwkKey>, JwksError> {
+    use http_body_util::Empty;
+
     let parsed = Url::parse(uri).map_err(|e| JwksError::InvalidUri(e.to_string()))?;
 
-    let host = parsed
-        .host_str()
-        .ok_or_else(|| JwksError::InvalidUri("missing host".into()))?;
-
-    let port = parsed.port().unwrap_or(443);
-    let is_https = parsed.scheme() == "https";
-
-    if !is_https {
+    if parsed.scheme() != "https" {
         return Err(JwksError::InvalidUri("JWKS URI must use HTTPS".into()));
     }
-
-    let path = if parsed.query().is_some() {
-        format!("{}?{}", parsed.path(), parsed.query().unwrap_or(""))
-    } else {
-        parsed.path().to_string()
-    };
-
-    let addr = format!("{host}:{port}");
-    let stream = tokio::time::timeout(timeout, tokio::net::TcpStream::connect(&addr))
-        .await
-        .map_err(|_| JwksError::Timeout)?
-        .map_err(|e: std::io::Error| JwksError::ConnectionFailed(e.to_string()))?;
 
     let mut root_store = rustls::RootCertStore::empty();
     root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
@@ -315,99 +301,39 @@ async fn fetch_jwks_http(uri: &str, timeout: Duration) -> Result<Vec<JwkKey>, Jw
         .with_root_certificates(root_store)
         .with_no_client_auth();
 
-    let connector = tokio_rustls::TlsConnector::from(Arc::new(tls_config));
-    let server_name = rustls::pki_types::ServerName::try_from(host.to_string())
-        .map_err(|e| JwksError::TlsError(e.to_string()))?;
+    let https = hyper_rustls::HttpsConnectorBuilder::new()
+        .with_tls_config(tls_config)
+        .https_only()
+        .enable_http1()
+        .build();
 
-    let tls_stream = tokio::time::timeout(timeout, connector.connect(server_name, stream))
+    let client: Client<_, Empty<Bytes>> = Client::builder(TokioExecutor::new()).build(https);
+
+    let http_uri: http::Uri = parsed
+        .as_str()
+        .parse()
+        .map_err(|e: http::uri::InvalidUri| JwksError::InvalidUri(e.to_string()))?;
+
+    let response = tokio::time::timeout(timeout, client.get(http_uri))
         .await
         .map_err(|_| JwksError::Timeout)?
-        .map_err(|e: std::io::Error| JwksError::TlsError(e.to_string()))?;
-
-    let request = format!(
-        "GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nAccept: application/json\r\n\r\n"
-    );
-
-    let (mut reader, mut writer) = tokio::io::split(tls_stream);
-
-    writer
-        .write_all(request.as_bytes())
-        .await
         .map_err(|e| JwksError::ConnectionFailed(e.to_string()))?;
 
-    let mut response = Vec::new();
-    match reader.read_to_end(&mut response).await {
-        Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof && !response.is_empty() => {
-            debug!(
-                "Server closed connection without TLS close_notify (received {} bytes)",
-                response.len()
-            );
-        }
-        Err(e) => return Err(JwksError::ConnectionFailed(e.to_string())),
+    if response.status() != http::StatusCode::OK {
+        return Err(JwksError::HttpError(format!("HTTP {}", response.status())));
     }
 
-    let response_str =
-        String::from_utf8(response).map_err(|e| JwksError::ParseError(e.to_string()))?;
+    let body_bytes = response
+        .into_body()
+        .collect()
+        .await
+        .map_err(|e| JwksError::ConnectionFailed(e.to_string()))?
+        .to_bytes();
 
-    let header_end = response_str
-        .find("\r\n\r\n")
-        .ok_or_else(|| JwksError::ParseError("invalid HTTP response".into()))?;
-    let headers = &response_str[..header_end];
-    let body = &response_str[header_end + 4..];
+    let json =
+        String::from_utf8(body_bytes.to_vec()).map_err(|e| JwksError::ParseError(e.to_string()))?;
 
-    let first_line = response_str
-        .lines()
-        .next()
-        .ok_or_else(|| JwksError::ParseError("empty response".into()))?;
-    if !first_line.contains("200") {
-        return Err(JwksError::HttpError(first_line.to_string()));
-    }
-
-    let is_chunked = headers
-        .to_lowercase()
-        .contains("transfer-encoding: chunked");
-
-    let decoded_body = if is_chunked {
-        decode_chunked_body(body)?
-    } else {
-        body.to_string()
-    };
-
-    parse_jwks_json(&decoded_body)
-}
-
-fn decode_chunked_body(body: &str) -> Result<String, JwksError> {
-    let mut result = String::new();
-    let mut remaining = body;
-
-    loop {
-        let line_end = remaining
-            .find("\r\n")
-            .ok_or_else(|| JwksError::ParseError("invalid chunked encoding".into()))?;
-        let size_str = &remaining[..line_end];
-
-        let chunk_size = usize::from_str_radix(size_str.trim(), 16)
-            .map_err(|_| JwksError::ParseError(format!("invalid chunk size: {size_str}")))?;
-
-        if chunk_size == 0 {
-            break;
-        }
-
-        remaining = &remaining[line_end + 2..];
-        if remaining.len() < chunk_size {
-            return Err(JwksError::ParseError("incomplete chunk".into()));
-        }
-
-        result.push_str(&remaining[..chunk_size]);
-        remaining = &remaining[chunk_size..];
-
-        if remaining.starts_with("\r\n") {
-            remaining = &remaining[2..];
-        }
-    }
-
-    Ok(result)
+    parse_jwks_json(&json)
 }
 
 #[derive(Debug, Deserialize)]
@@ -736,17 +662,6 @@ mod tests {
 
         let decoded = base64url_decode("SGVsbG8gV29ybGQ").unwrap();
         assert_eq!(decoded, b"Hello World");
-    }
-
-    #[test]
-    fn test_decode_chunked_body() {
-        let chunked = "5\r\nHello\r\n6\r\n World\r\n0\r\n\r\n";
-        let decoded = decode_chunked_body(chunked).unwrap();
-        assert_eq!(decoded, "Hello World");
-
-        let chunked = "a\r\n0123456789\r\n0\r\n\r\n";
-        let decoded = decode_chunked_body(chunked).unwrap();
-        assert_eq!(decoded, "0123456789");
     }
 
     #[tokio::test]

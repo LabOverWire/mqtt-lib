@@ -252,3 +252,44 @@ mqttv5 broker \
 - Password/ACL files should have mode 0600
 - Deny rules evaluated before allow rules
 - Enable TLS to protect credentials in transit
+- Rate limiting enabled by default (5 attempts per 60s, 5-minute lockout)
+
+## Rate Limiting
+
+Authentication rate limiting protects against brute-force attacks. Enabled by default with configurable limits.
+
+### Default Settings
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `max_attempts` | 5 | Failed attempts before lockout |
+| `window_secs` | 60 | Time window for attempt counting |
+| `lockout_secs` | 300 | Lockout duration after exceeding limit |
+
+### Configuration
+
+Rate limiting is configured via the `rate_limit` section in `AuthConfig`:
+
+```rust
+AuthConfig {
+    rate_limit: RateLimitConfig {
+        enabled: true,
+        max_attempts: 5,
+        window_secs: 60,
+        lockout_secs: 300,
+    },
+    ..Default::default()
+}
+```
+
+To disable rate limiting:
+
+```rust
+AuthConfig {
+    rate_limit: RateLimitConfig {
+        enabled: false,
+        ..Default::default()
+    },
+    ..Default::default()
+}
+```

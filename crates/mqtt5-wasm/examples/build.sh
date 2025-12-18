@@ -14,6 +14,8 @@ cp -r pkg examples/broker-bridge/
 cp -r pkg examples/will-message/
 cp -r pkg examples/shared-subscription/
 cp -r pkg examples/auth-tools/
+cp -r pkg examples/google-jwt-auth/
+cp -r pkg examples/rapid-ports/
 
 echo "✨ Build complete!"
 echo ""
@@ -45,6 +47,14 @@ echo "  python3 -m http.server 8000"
 echo ""
 echo "Auth Tools (Password & ACL Generator):"
 echo "  cd examples/auth-tools"
+echo "  python3 -m http.server 8000"
+echo ""
+echo "Google JWT Auth (Federated Authentication):"
+echo "  cd examples/google-jwt-auth"
+echo "  ./run.sh"
+echo ""
+echo "Rapid Ports (Quick Port Testing):"
+echo "  cd examples/rapid-ports"
 echo "  python3 -m http.server 8000"
 echo ""
 echo "Then open http://localhost:8000 in your browser"

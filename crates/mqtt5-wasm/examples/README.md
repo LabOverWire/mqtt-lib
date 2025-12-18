@@ -24,6 +24,22 @@ Demonstrates MQTT v5.0 shared subscriptions for load balancing. Multiple workers
 
 Browser-based tools for generating password and ACL files for native broker authentication. Uses the same Argon2 hashing as the CLI.
 
+### QoS 2 Testing (qos2/)
+
+Demonstrates QoS 2 (exactly once) message delivery with full acknowledgment flow.
+
+### Will Message (will-message/)
+
+Demonstrates Last Will and Testament (LWT) functionality for detecting unexpected client disconnections.
+
+### Google JWT Auth (google-jwt-auth/)
+
+Federated JWT authentication with Google OAuth. Demonstrates identity-only auth mode with ACL-based authorization.
+
+### Rapid Ports (rapid-ports/)
+
+Quick testing tool for MessagePort-based broker connections.
+
 ## Quick Start
 
 ### 1. Build the WASM Package
@@ -93,6 +109,50 @@ Generate password and ACL files for broker authentication.
 
 ```bash
 cd auth-tools
+python3 -m http.server 8000
+```
+
+Open http://localhost:8000 in your browser.
+
+#### QoS 2 Testing
+
+Test QoS 2 exactly-once message delivery.
+
+```bash
+cd qos2
+python3 -m http.server 8000
+```
+
+Open http://localhost:8000 in your browser.
+
+#### Will Message
+
+Test Last Will and Testament functionality.
+
+```bash
+cd will-message
+python3 -m http.server 8000
+```
+
+Open http://localhost:8000 in your browser.
+
+#### Google JWT Auth
+
+Federated authentication with Google OAuth.
+
+```bash
+cd google-jwt-auth
+./run.sh
+```
+
+Open http://localhost:8000 in your browser.
+
+#### Rapid Ports
+
+Quick MessagePort connection testing.
+
+```bash
+cd rapid-ports
 python3 -m http.server 8000
 ```
 

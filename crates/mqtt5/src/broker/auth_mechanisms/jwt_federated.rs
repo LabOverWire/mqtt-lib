@@ -44,6 +44,19 @@ fn compute_user_id(
     if sub.is_empty() {
         return Err(JwtError::InvalidClaim("empty sub claim"));
     }
+    if sub.len() > 256 {
+        return Err(JwtError::InvalidClaim("sub claim too long"));
+    }
+    if sub.contains(':') {
+        return Err(JwtError::InvalidClaim(
+            "sub claim contains invalid character ':'",
+        ));
+    }
+    if sub.chars().any(char::is_control) {
+        return Err(JwtError::InvalidClaim(
+            "sub claim contains control characters",
+        ));
+    }
     let prefix = prefix.unwrap_or_else(|| extract_domain(issuer));
     Ok(format!("{}:{}", prefix, sub))
 }

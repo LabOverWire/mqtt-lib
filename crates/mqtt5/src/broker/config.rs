@@ -304,6 +304,27 @@ pub struct AuthConfig {
     pub scram_file: Option<PathBuf>,
     pub jwt_config: Option<JwtConfig>,
     pub federated_jwt_config: Option<FederatedJwtConfig>,
+    #[serde(default)]
+    pub rate_limit: RateLimitConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RateLimitConfig {
+    pub enabled: bool,
+    pub max_attempts: u32,
+    pub window_secs: u64,
+    pub lockout_secs: u64,
+}
+
+impl Default for RateLimitConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_attempts: 5,
+            window_secs: 60,
+            lockout_secs: 300,
+        }
+    }
 }
 
 impl Default for AuthConfig {
@@ -317,6 +338,7 @@ impl Default for AuthConfig {
             scram_file: None,
             jwt_config: None,
             federated_jwt_config: None,
+            rate_limit: RateLimitConfig::default(),
         }
     }
 }

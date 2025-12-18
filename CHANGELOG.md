@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.0] / [mqtt5-protocol 0.5.0] / [mqtt5-wasm 0.5.0] - 2025-12-18
+
+### Added
+
+- **Authentication rate limiting** protects against brute-force attacks
+  - Configurable via `RateLimitConfig` in `AuthConfig`
+  - Default: 5 attempts per 60 seconds, 5-minute lockout
+  - IP-based tracking with automatic cleanup
+
+- **Federated JWT authentication** with RBAC integration
+  - Multi-issuer support with automatic JWKS key refresh
+  - Three auth modes: `IdentityOnly`, `ClaimBinding`, `TrustedRoles`
+  - Session-scoped roles option for enhanced security
+  - Role mappings from JWT claims to broker roles
+
+### Changed
+
+- **JWKS HTTP client** now uses hyper instead of manual HTTP parsing
+  - Proper HTTP/1.1 compliance with automatic chunked encoding handling
+  - Better TLS validation via hyper-rustls
+
+### Security
+
+- **JWT sub claim validation** prevents namespace injection attacks
+  - Rejects sub claims containing `:` character
+  - Rejects control characters
+  - Enforces 256-character maximum length
+
 ## [0.13.0] / [mqtt5-protocol 0.4.0] / [mqtt5-wasm 0.4.0] - 2025-12-11
 
 ### Fixed

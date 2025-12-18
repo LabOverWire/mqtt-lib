@@ -372,8 +372,8 @@ fn resolve_auth_settings(cmd: &BrokerCommand) -> Result<bool> {
 async fn create_interactive_config(cmd: &mut BrokerCommand) -> Result<BrokerConfig> {
     use mqtt5::broker::config::{
         AuthConfig, AuthMethod, ClaimPattern, FederatedAuthMode, FederatedJwtConfig, JwtAlgorithm,
-        JwtConfig, JwtIssuerConfig, JwtKeySource, JwtRoleMapping, QuicConfig, RoleMergeMode,
-        StorageConfig, TlsConfig, WebSocketConfig,
+        JwtConfig, JwtIssuerConfig, JwtKeySource, JwtRoleMapping, QuicConfig, RateLimitConfig,
+        RoleMergeMode, StorageConfig, TlsConfig, WebSocketConfig,
     };
 
     let mut config = BrokerConfig::new();
@@ -602,6 +602,7 @@ async fn create_interactive_config(cmd: &mut BrokerCommand) -> Result<BrokerConf
         scram_file: cmd.scram_file.clone(),
         jwt_config,
         federated_jwt_config,
+        rate_limit: RateLimitConfig::default(),
     };
     config = config.with_auth(auth_config);
 

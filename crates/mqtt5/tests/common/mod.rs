@@ -267,6 +267,7 @@ impl TestBroker {
             scram_file: None,
             jwt_config: None,
             federated_jwt_config: None,
+            rate_limit: Default::default(),
         };
 
         let config = BrokerConfig::default()
