@@ -177,6 +177,43 @@ impl PublishPacket {
                 }
             })
     }
+
+    #[must_use]
+    pub fn body_encoded_size(&self) -> usize {
+        let mut size = 2 + self.topic_name.len();
+
+        if self.qos != QoS::AtMostOnce {
+            size += 2;
+        }
+
+        if self.protocol_version == 5 {
+            size += self.properties.encoded_len();
+        }
+
+        size += self.payload.len();
+        size
+    }
+
+    /// # Errors
+    /// Returns error if encoding fails
+    pub fn encode_body_direct<B: BufMut>(&self, buf: &mut B) -> Result<()> {
+        encode_string(buf, &self.topic_name)?;
+
+        if self.qos != QoS::AtMostOnce {
+            let packet_id = self.packet_id.ok_or_else(|| {
+                MqttError::MalformedPacket("Packet ID required for QoS > 0".to_string())
+            })?;
+            buf.put_u16(packet_id);
+        }
+
+        if self.protocol_version == 5 {
+            self.properties.encode_direct(buf)?;
+        }
+
+        buf.put_slice(&self.payload);
+
+        Ok(())
+    }
 }
 
 impl MqttPacket for PublishPacket {

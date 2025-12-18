@@ -26,7 +26,7 @@ use crate::packet::unsubscribe::UnsubscribePacket;
 use crate::packet::Packet;
 use crate::protocol::v5::reason_codes::ReasonCode;
 use crate::time::Duration;
-use crate::transport::packet_io::{encode_packet_to_buffer, PacketIo};
+use crate::transport::packet_io::{encode_packet_to_buffer, read_packet_reusing_buffer, PacketIo};
 use crate::types::ProtocolVersion;
 use crate::QoS;
 use crate::Transport;
@@ -85,6 +85,7 @@ pub struct ClientHandler {
     outbound_inflight: HashSet<u16>,
     protocol_version: u8,
     write_buffer: BytesMut,
+    read_buffer: BytesMut,
 }
 
 impl ClientHandler {
@@ -161,6 +162,7 @@ impl ClientHandler {
             outbound_inflight: HashSet::new(),
             protocol_version: 5,
             write_buffer: BytesMut::with_capacity(4096),
+            read_buffer: BytesMut::with_capacity(4096),
         }
     }
 
@@ -320,7 +322,8 @@ impl ClientHandler {
 
     /// Waits for and processes CONNECT packet
     async fn wait_for_connect(&mut self) -> Result<()> {
-        let packet = self.transport.read_packet(5).await?;
+        let packet =
+            read_packet_reusing_buffer(&mut self.transport, 5, &mut self.read_buffer).await?;
 
         match packet {
             Packet::Connect(connect) => self.handle_connect(*connect).await,
@@ -338,7 +341,7 @@ impl ClientHandler {
         loop {
             tokio::select! {
                 // Read incoming packets from control stream
-                packet_result = self.transport.read_packet(self.protocol_version) => {
+                packet_result = read_packet_reusing_buffer(&mut self.transport, self.protocol_version, &mut self.read_buffer) => {
                     match packet_result {
                         Ok(packet) => {
                             self.handle_packet(packet).await?;
@@ -399,7 +402,7 @@ impl ClientHandler {
         loop {
             tokio::select! {
                 // Read incoming packets from control stream
-                packet_result = self.transport.read_packet(self.protocol_version) => {
+                packet_result = read_packet_reusing_buffer(&mut self.transport, self.protocol_version, &mut self.read_buffer) => {
                     match packet_result {
                         Ok(packet) => {
                             last_packet_time = tokio::time::Instant::now();

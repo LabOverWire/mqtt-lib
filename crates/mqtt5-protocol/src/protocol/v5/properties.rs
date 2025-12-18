@@ -299,16 +299,10 @@ impl Properties {
     ///
     /// Returns an error if the operation fails
     fn encode_properties<B: BufMut>(&self, buf: &mut B) -> Result<()> {
-        // Sort properties by ID for consistent encoding
-        let mut sorted_props: Vec<_> = self.properties.iter().collect();
-        sorted_props.sort_by_key(|(id, _)| **id as u8);
-
-        for (id, values) in sorted_props {
+        for (id, values) in &self.properties {
             for value in values {
-                // Write property identifier as variable byte integer
                 encode_variable_int(buf, u32::from(*id as u8))?;
 
-                // Write property value
                 match value {
                     PropertyValue::Byte(v) => buf.put_u8(*v),
                     PropertyValue::TwoByteInteger(v) => buf.put_u16(*v),
@@ -324,6 +318,22 @@ impl Properties {
             }
         }
         Ok(())
+    }
+
+    /// # Errors
+    /// Returns error if encoding fails
+    pub fn encode_direct<B: BufMut>(&self, buf: &mut B) -> Result<()> {
+        let props_len = self.properties_encoded_len();
+        encode_variable_int(
+            buf,
+            props_len
+                .try_into()
+                .map_err(|_| MqttError::PacketTooLarge {
+                    size: props_len,
+                    max: u32::MAX as usize,
+                })?,
+        )?;
+        self.encode_properties(buf)
     }
 
     /// Decodes properties from the buffer

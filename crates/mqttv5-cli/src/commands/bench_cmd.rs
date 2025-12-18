@@ -84,10 +84,29 @@ struct ThroughputResults {
 }
 
 #[derive(Serialize)]
+struct LatencyResults {
+    messages: u64,
+    min_us: u64,
+    max_us: u64,
+    avg_us: f64,
+    p50_us: u64,
+    p95_us: u64,
+    p99_us: u64,
+    samples: Vec<u64>,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum BenchResults {
+    Throughput(ThroughputResults),
+    Latency(LatencyResults),
+}
+
+#[derive(Serialize)]
 struct BenchOutput {
     mode: String,
     config: BenchConfig,
-    results: ThroughputResults,
+    results: BenchResults,
 }
 
 pub async fn execute(cmd: BenchCommand, verbose: bool, debug: bool) -> Result<()> {
@@ -95,10 +114,7 @@ pub async fn execute(cmd: BenchCommand, verbose: bool, debug: bool) -> Result<()
 
     match cmd.mode {
         BenchMode::Throughput => run_throughput(cmd).await,
-        BenchMode::Latency => {
-            eprintln!("Latency mode not yet implemented");
-            Ok(())
-        }
+        BenchMode::Latency => run_latency(cmd).await,
     }
 }
 
@@ -239,13 +255,13 @@ async fn run_throughput(cmd: BenchCommand) -> Result<()> {
             publishers: cmd.publishers,
             subscribers: cmd.subscribers,
         },
-        results: ThroughputResults {
+        results: BenchResults::Throughput(ThroughputResults {
             published: total_published,
             received: total_received,
             elapsed_secs: elapsed,
             throughput_avg,
             samples,
-        },
+        }),
     };
 
     println!("{}", serde_json::to_string_pretty(&output)?);
@@ -262,5 +278,154 @@ async fn publish_message(client: &MqttClient, topic: &str, payload: &[u8], qos: 
         QoS::AtLeastOnce => client.publish_qos1(topic, payload.to_vec()).await?,
         QoS::ExactlyOnce => client.publish_qos2(topic, payload.to_vec()).await?,
     };
+    Ok(())
+}
+
+async fn run_latency(cmd: BenchCommand) -> Result<()> {
+    use std::sync::Mutex;
+    use std::time::SystemTime;
+
+    let broker_url = cmd
+        .url
+        .clone()
+        .unwrap_or_else(|| format!("mqtt://{}:{}", cmd.host, cmd.port));
+
+    let base_client_id = cmd
+        .client_id
+        .clone()
+        .unwrap_or_else(|| format!("mqttv5-lat-{}", rand::rng().random::<u32>()));
+
+    eprintln!("connecting to {} for latency test...", broker_url);
+
+    let pub_client = MqttClient::new(format!("{base_client_id}-pub"));
+    let pub_options = ConnectOptions::new(format!("{base_client_id}-pub"))
+        .with_clean_start(true)
+        .with_keep_alive(Duration::from_secs(30));
+
+    pub_client
+        .connect_with_options(&broker_url, pub_options)
+        .await
+        .context("failed to connect publisher")?;
+
+    let sub_client = MqttClient::new(format!("{base_client_id}-sub"));
+    let sub_options = ConnectOptions::new(format!("{base_client_id}-sub"))
+        .with_clean_start(true)
+        .with_keep_alive(Duration::from_secs(30));
+
+    sub_client
+        .connect_with_options(&broker_url, sub_options)
+        .await
+        .context("failed to connect subscriber")?;
+
+    let latencies = Arc::new(Mutex::new(Vec::with_capacity(10000)));
+    let latencies_clone = Arc::clone(&latencies);
+    let topic = cmd.topic.clone();
+
+    sub_client
+        .subscribe(&topic, move |msg| {
+            let payload = &msg.payload;
+            if payload.len() >= 8 {
+                let sent_nanos = u64::from_be_bytes(payload[0..8].try_into().unwrap());
+                let now_nanos = SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos() as u64;
+                let latency_us = (now_nanos.saturating_sub(sent_nanos)) / 1000;
+                latencies_clone.lock().unwrap().push(latency_us);
+            }
+        })
+        .await
+        .context("failed to subscribe")?;
+
+    eprintln!("warming up for {}s...", cmd.warmup);
+
+    let message_rate = 1000;
+    let interval_us = 1_000_000 / message_rate;
+    let mut payload = vec![0u8; cmd.payload_size.max(8)];
+
+    for _ in 0..(cmd.warmup * message_rate) {
+        let now_nanos = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+        payload[0..8].copy_from_slice(&now_nanos.to_be_bytes());
+        publish_message(&pub_client, &topic, &payload, cmd.qos).await?;
+        tokio::time::sleep(Duration::from_micros(interval_us)).await;
+    }
+
+    {
+        latencies.lock().unwrap().clear();
+    }
+
+    eprintln!(
+        "measuring for {}s at {} msg/s...",
+        cmd.duration, message_rate
+    );
+    let measure_start = Instant::now();
+    let measure_duration = Duration::from_secs(cmd.duration);
+
+    while measure_start.elapsed() < measure_duration {
+        let now_nanos = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+        payload[0..8].copy_from_slice(&now_nanos.to_be_bytes());
+        publish_message(&pub_client, &topic, &payload, cmd.qos).await?;
+        tokio::time::sleep(Duration::from_micros(interval_us)).await;
+    }
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let mut samples = latencies.lock().unwrap().clone();
+    samples.sort_unstable();
+
+    let (min_us, max_us, avg_us, p50_us, p95_us, p99_us) = if samples.is_empty() {
+        (0, 0, 0.0, 0, 0, 0)
+    } else {
+        let min = samples[0];
+        let max = samples[samples.len() - 1];
+        let avg = samples.iter().sum::<u64>() as f64 / samples.len() as f64;
+        let p50 = samples[samples.len() * 50 / 100];
+        let p95 = samples[samples.len() * 95 / 100];
+        let p99 = samples[samples.len() * 99 / 100];
+        (min, max, avg, p50, p95, p99)
+    };
+
+    eprintln!(
+        "  p50: {}us, p95: {}us, p99: {}us, min: {}us, max: {}us",
+        p50_us, p95_us, p99_us, min_us, max_us
+    );
+
+    let output = BenchOutput {
+        mode: "latency".to_string(),
+        config: BenchConfig {
+            duration_secs: cmd.duration,
+            warmup_secs: cmd.warmup,
+            payload_size: cmd.payload_size,
+            qos: cmd.qos as u8,
+            topic: cmd.topic,
+            publishers: 1,
+            subscribers: 1,
+        },
+        results: BenchResults::Latency(LatencyResults {
+            messages: samples.len() as u64,
+            min_us,
+            max_us,
+            avg_us,
+            p50_us,
+            p95_us,
+            p99_us,
+            samples: samples
+                .iter()
+                .step_by(samples.len().max(1) / 100)
+                .copied()
+                .collect(),
+        }),
+    };
+
+    println!("{}", serde_json::to_string_pretty(&output)?);
+
+    pub_client.disconnect().await.ok();
+    sub_client.disconnect().await.ok();
     Ok(())
 }
