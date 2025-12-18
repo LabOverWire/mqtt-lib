@@ -469,7 +469,7 @@ impl MqttBroker {
     fn default_resource_limits(max_clients: usize) -> ResourceLimits {
         ResourceLimits {
             max_connections: max_clients,
-            max_connections_per_ip: 100,
+            max_connections_per_ip: 10_000,
             max_memory_bytes: 1024 * 1024 * 1024,
             max_message_rate_per_client: 10_000_000,
             max_bandwidth_per_client: 1024 * 1024 * 1024,

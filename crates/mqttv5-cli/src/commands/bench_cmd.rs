@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use clap::{Args, ValueEnum};
 use mqtt5::time::Duration;
 use mqtt5::{ConnectOptions, MqttClient, QoS};
+use rand::Rng;
 use serde::Serialize;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -263,5 +264,3 @@ async fn publish_message(client: &MqttClient, topic: &str, payload: &[u8], qos: 
     };
     Ok(())
 }
-
-use rand::Rng;

@@ -1,6 +1,5 @@
 //! Client connection handler for the MQTT broker - simplified version
 
-use bytes::BytesMut;
 use crate::broker::auth::{AuthProvider, EnhancedAuthStatus};
 use crate::broker::config::BrokerConfig;
 use crate::broker::resource_monitor::ResourceMonitor;
@@ -28,9 +27,10 @@ use crate::packet::Packet;
 use crate::protocol::v5::reason_codes::ReasonCode;
 use crate::time::Duration;
 use crate::transport::packet_io::{encode_packet_to_buffer, PacketIo};
-use crate::Transport;
 use crate::types::ProtocolVersion;
 use crate::QoS;
+use crate::Transport;
+use bytes::BytesMut;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
