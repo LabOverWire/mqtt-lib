@@ -22,6 +22,7 @@
 
 pub mod acl;
 pub mod auth;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod auth_mechanisms;
 #[cfg(not(target_arch = "wasm32"))]
 mod binding;
@@ -55,6 +56,7 @@ pub use auth::{
     AllowAllAuthProvider, AuthProvider, AuthResult, CertificateAuthProvider,
     ComprehensiveAuthProvider, EnhancedAuthResult, EnhancedAuthStatus, PasswordAuthProvider,
 };
+#[cfg(not(target_arch = "wasm32"))]
 pub use auth_mechanisms::{
     JwtAuthProvider, PasswordCredentialStore, PlainAuthProvider, ScramCredentialStore,
     ScramCredentials, ScramSha256AuthProvider,

@@ -60,7 +60,7 @@ pub struct BrokerCommand {
     #[arg(long, default_value = "60")]
     pub jwt_clock_skew: u64,
 
-    /// JWKS endpoint URL for federated JWT auth (e.g., https://accounts.google.com/.well-known/jwks)
+    /// JWKS endpoint URL for federated JWT auth (e.g., <https://accounts.google.com/.well-known/jwks>)
     #[arg(long)]
     pub jwt_jwks_uri: Option<String>,
 
