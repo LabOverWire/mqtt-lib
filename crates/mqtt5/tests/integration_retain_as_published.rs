@@ -4,14 +4,14 @@ use mqtt5::time::Duration;
 use mqtt5::types::ProtocolVersion;
 use mqtt5::QoS;
 use std::sync::Arc;
-use tokio::sync::mpsc;
+
 use tokio::time::timeout;
 
 #[tokio::test]
 async fn test_retain_as_published_false_clears_retain_flag() {
     let router = Arc::new(MessageRouter::new());
 
-    let (tx, mut rx) = mpsc::channel(10);
+    let (tx, rx) = flume::bounded(10);
     let (dtx, _drx) = tokio::sync::oneshot::channel();
 
     router
@@ -36,7 +36,7 @@ async fn test_retain_as_published_false_clears_retain_flag() {
     packet.retain = true;
     router.route_message(&packet, Some("publisher")).await;
 
-    let received = timeout(Duration::from_millis(100), rx.recv())
+    let received = timeout(Duration::from_millis(100), rx.recv_async())
         .await
         .expect("timeout")
         .expect("message");
@@ -47,7 +47,7 @@ async fn test_retain_as_published_false_clears_retain_flag() {
 async fn test_retain_as_published_true_preserves_retain_flag() {
     let router = Arc::new(MessageRouter::new());
 
-    let (tx, mut rx) = mpsc::channel(10);
+    let (tx, rx) = flume::bounded(10);
     let (dtx, _drx) = tokio::sync::oneshot::channel();
 
     router
@@ -72,7 +72,7 @@ async fn test_retain_as_published_true_preserves_retain_flag() {
     packet.retain = true;
     router.route_message(&packet, Some("publisher")).await;
 
-    let received = timeout(Duration::from_millis(100), rx.recv())
+    let received = timeout(Duration::from_millis(100), rx.recv_async())
         .await
         .expect("timeout")
         .expect("message");

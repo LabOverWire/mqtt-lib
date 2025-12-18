@@ -1,4 +1,5 @@
 pub mod acl_cmd;
+pub mod bench_cmd;
 pub mod broker_cmd;
 pub mod passwd_cmd;
 pub mod pub_cmd;

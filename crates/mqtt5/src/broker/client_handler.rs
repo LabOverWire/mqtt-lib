@@ -66,8 +66,8 @@ pub struct ClientHandler {
     client_id: Option<String>,
     user_id: Option<String>,
     keep_alive: Duration,
-    publish_rx: mpsc::Receiver<PublishPacket>,
-    publish_tx: mpsc::Sender<PublishPacket>,
+    publish_rx: flume::Receiver<PublishPacket>,
+    publish_tx: flume::Sender<PublishPacket>,
     inflight_publishes: HashMap<u16, PublishPacket>,
     session: Option<ClientSession>,
     next_packet_id: u16,
@@ -126,7 +126,7 @@ impl ClientHandler {
         shutdown_rx: tokio::sync::broadcast::Receiver<()>,
         external_packet_rx: Option<mpsc::Receiver<Packet>>,
     ) -> Self {
-        let (publish_tx, publish_rx) = mpsc::channel(100);
+        let (publish_tx, publish_rx) = flume::bounded(10_000);
 
         Self {
             transport,
@@ -363,8 +363,8 @@ impl ClientHandler {
                 }
 
                 // Send outgoing publishes
-                publish_opt = self.publish_rx.recv() => {
-                    if let Some(publish) = publish_opt {
+                publish_result = self.publish_rx.recv_async() => {
+                    if let Ok(publish) = publish_result {
                         self.send_publish(publish).await?;
                     } else {
                         warn!("Publish channel closed unexpectedly");
@@ -423,8 +423,8 @@ impl ClientHandler {
                 }
 
                 // Send outgoing publishes
-                publish_opt = self.publish_rx.recv() => {
-                    if let Some(publish) = publish_opt {
+                publish_result = self.publish_rx.recv_async() => {
+                    if let Ok(publish) = publish_result {
                         self.send_publish(publish).await?;
                     } else {
                         warn!("Publish channel closed unexpectedly in handle_packets");
@@ -832,7 +832,7 @@ impl ClientHandler {
                 let retained = self.router.get_retained_messages(&filter.filter).await;
                 for mut msg in retained {
                     msg.retain = true;
-                    self.publish_tx.send(msg).await.map_err(|_| {
+                    self.publish_tx.send_async(msg).await.map_err(|_| {
                         MqttError::InvalidState("Failed to queue retained message".to_string())
                     })?;
                 }

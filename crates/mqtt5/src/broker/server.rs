@@ -471,10 +471,10 @@ impl MqttBroker {
             max_connections: max_clients,
             max_connections_per_ip: 100,
             max_memory_bytes: 1024 * 1024 * 1024,
-            max_message_rate_per_client: 1000,
-            max_bandwidth_per_client: 10 * 1024 * 1024,
-            max_connection_rate: 100,
-            rate_limit_window: crate::time::Duration::from_secs(60),
+            max_message_rate_per_client: 10_000_000,
+            max_bandwidth_per_client: 1024 * 1024 * 1024,
+            max_connection_rate: 10_000,
+            rate_limit_window: crate::time::Duration::from_secs(1),
         }
     }
 

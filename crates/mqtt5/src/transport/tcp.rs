@@ -154,7 +154,6 @@ impl Transport for TcpTransport {
         match &mut self.stream {
             Some(stream) => {
                 stream.write_all(buf).await?;
-                stream.flush().await?;
                 trace!(bytes_written = buf.len(), "TCP write complete");
                 Ok(())
             }

@@ -60,7 +60,7 @@ pub struct MessageRouter {
 #[derive(Debug)]
 pub struct ClientInfo {
     /// Channel to send messages to this client
-    pub sender: tokio::sync::mpsc::Sender<PublishPacket>,
+    pub sender: flume::Sender<PublishPacket>,
     /// Channel to signal disconnection (for session takeover)
     pub disconnect_tx: tokio::sync::oneshot::Sender<()>,
 }
@@ -142,7 +142,7 @@ impl MessageRouter {
     pub async fn register_client(
         &self,
         client_id: String,
-        sender: tokio::sync::mpsc::Sender<PublishPacket>,
+        sender: flume::Sender<PublishPacket>,
         new_disconnect_tx: tokio::sync::oneshot::Sender<()>,
     ) {
         let mut clients = self.clients.write().await;
@@ -531,32 +531,29 @@ impl MessageRouter {
                 message.properties.set_subscription_identifier(id);
             }
 
-            // Send to client (non-blocking)
-            if let Err(e) = client_info.sender.try_send(message.clone()) {
-                // Client's channel is full or disconnected, queue for later
-                if let Some(storage) = storage {
-                    if effective_qos != QoS::AtMostOnce {
-                        let queued_msg = QueuedMessage::new(
-                            message.clone(),
-                            sub.client_id.clone(),
-                            effective_qos,
-                            message.packet_id,
-                        );
-                        if let Err(e) = storage.queue_message(queued_msg).await {
-                            error!(
-                                "Failed to queue message for offline client {}: {}",
-                                sub.client_id, e
+            match client_info.sender.try_send(message) {
+                Ok(()) => {}
+                Err(e) => {
+                    let message = e.into_inner();
+                    if let Some(storage) = storage {
+                        if effective_qos != QoS::AtMostOnce {
+                            let queued_msg = QueuedMessage::new(
+                                message,
+                                sub.client_id.clone(),
+                                effective_qos,
+                                None,
                             );
-                        } else {
-                            debug!("Queued message for client {}", sub.client_id);
+                            if let Err(e) = storage.queue_message(queued_msg).await {
+                                error!(
+                                    "Failed to queue message for offline client {}: {}",
+                                    sub.client_id, e
+                                );
+                            } else {
+                                debug!("Queued message for client {}", sub.client_id);
+                            }
                         }
                     }
                 }
-                trace!(
-                    "Failed to send message to client {}: {:?}",
-                    sub.client_id,
-                    e
-                );
             }
         } else if let Some(storage) = storage {
             if sub.qos != QoS::AtMostOnce {
@@ -672,7 +669,7 @@ mod tests {
     #[tokio::test]
     async fn test_client_registration() {
         let router = MessageRouter::new();
-        let (tx, _rx) = tokio::sync::mpsc::channel(100);
+        let (tx, _rx) = flume::bounded(100);
 
         let (dtx, _drx) = tokio::sync::oneshot::channel();
         router.register_client("client1".to_string(), tx, dtx).await;
@@ -685,7 +682,7 @@ mod tests {
     #[tokio::test]
     async fn test_subscription_management() {
         let router = MessageRouter::new();
-        let (tx, _rx) = tokio::sync::mpsc::channel(100);
+        let (tx, _rx) = flume::bounded(100);
 
         let (dtx, _drx) = tokio::sync::oneshot::channel();
         router.register_client("client1".to_string(), tx, dtx).await;
@@ -713,8 +710,8 @@ mod tests {
     #[tokio::test]
     async fn test_message_routing() {
         let router = MessageRouter::new();
-        let (tx1, mut rx1) = tokio::sync::mpsc::channel(100);
-        let (tx2, mut rx2) = tokio::sync::mpsc::channel(100);
+        let (tx1, rx1) = flume::bounded(100);
+        let (tx2, rx2) = flume::bounded(100);
 
         // Register clients
         let (dtx1, _drx1) = tokio::sync::oneshot::channel();
@@ -796,9 +793,9 @@ mod tests {
     #[tokio::test]
     async fn test_shared_subscription_round_robin() {
         let router = MessageRouter::new();
-        let (tx1, mut rx1) = tokio::sync::mpsc::channel(100);
-        let (tx2, mut rx2) = tokio::sync::mpsc::channel(100);
-        let (tx3, mut rx3) = tokio::sync::mpsc::channel(100);
+        let (tx1, rx1) = flume::bounded(100);
+        let (tx2, rx2) = flume::bounded(100);
+        let (tx3, rx3) = flume::bounded(100);
 
         // Register three clients
         let (dtx1, _drx1) = tokio::sync::oneshot::channel();
@@ -884,9 +881,9 @@ mod tests {
     #[tokio::test]
     async fn test_shared_and_regular_subscriptions() {
         let router = MessageRouter::new();
-        let (tx1, mut rx1) = tokio::sync::mpsc::channel(100);
-        let (tx2, mut rx2) = tokio::sync::mpsc::channel(100);
-        let (tx3, mut rx3) = tokio::sync::mpsc::channel(100);
+        let (tx1, rx1) = flume::bounded(100);
+        let (tx2, rx2) = flume::bounded(100);
+        let (tx3, rx3) = flume::bounded(100);
 
         // Register clients
         let (dtx1, _drx1) = tokio::sync::oneshot::channel();

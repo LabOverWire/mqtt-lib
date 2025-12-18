@@ -79,20 +79,19 @@ pub trait PacketIo: Transport {
                 );
             }
 
-            let mut payload = vec![0u8; fixed_header.remaining_length as usize];
+            let mut payload_buf = BytesMut::with_capacity(fixed_header.remaining_length as usize);
+            payload_buf.resize(fixed_header.remaining_length as usize, 0);
             let mut bytes_read = 0;
-            while bytes_read < payload.len() {
-                let n = self.read(&mut payload[bytes_read..]).await?;
+            while bytes_read < payload_buf.len() {
+                let n = self.read(&mut payload_buf[bytes_read..]).await?;
                 if n == 0 {
                     return Err(MqttError::ClientClosed);
                 }
                 bytes_read += n;
             }
 
-            let mut payload_buf = BytesMut::from(&payload[..]);
-
             if fixed_header.packet_type == PacketType::PubAck {
-                tracing::trace!(payload_len = payload.len(), "Decoding PUBACK packet");
+                tracing::trace!(payload_len = payload_buf.len(), "Decoding PUBACK packet");
             }
 
             let packet = Packet::decode_from_body_with_version(
@@ -208,17 +207,17 @@ impl PacketReader for OwnedReadHalf {
         let mut header_buf = header_buf.freeze();
         let fixed_header = FixedHeader::decode(&mut header_buf)?;
 
-        let mut payload = vec![0u8; fixed_header.remaining_length as usize];
+        let mut payload_buf = BytesMut::with_capacity(fixed_header.remaining_length as usize);
+        payload_buf.resize(fixed_header.remaining_length as usize, 0);
         let mut bytes_read = 0;
-        while bytes_read < payload.len() {
-            let n = self.read(&mut payload[bytes_read..]).await?;
+        while bytes_read < payload_buf.len() {
+            let n = self.read(&mut payload_buf[bytes_read..]).await?;
             if n == 0 {
                 return Err(MqttError::ClientClosed);
             }
             bytes_read += n;
         }
 
-        let mut payload_buf = BytesMut::from(&payload[..]);
         Packet::decode_from_body_with_version(
             fixed_header.packet_type,
             &fixed_header,
@@ -286,7 +285,6 @@ impl PacketWriter for OwnedWriteHalf {
         let mut buf = BytesMut::with_capacity(1024);
         encode_packet_to_buffer(&packet, &mut buf)?;
         self.write_all(&buf).await?;
-        self.flush().await?;
         Ok(())
     }
 }
@@ -324,17 +322,17 @@ impl PacketReader for TlsReadHalf {
         let mut header_buf = header_buf.freeze();
         let fixed_header = FixedHeader::decode(&mut header_buf)?;
 
-        let mut payload = vec![0u8; fixed_header.remaining_length as usize];
+        let mut payload_buf = BytesMut::with_capacity(fixed_header.remaining_length as usize);
+        payload_buf.resize(fixed_header.remaining_length as usize, 0);
         let mut bytes_read = 0;
-        while bytes_read < payload.len() {
-            let n = self.read(&mut payload[bytes_read..]).await?;
+        while bytes_read < payload_buf.len() {
+            let n = self.read(&mut payload_buf[bytes_read..]).await?;
             if n == 0 {
                 return Err(MqttError::ClientClosed);
             }
             bytes_read += n;
         }
 
-        let mut payload_buf = BytesMut::from(&payload[..]);
         Packet::decode_from_body_with_version(
             fixed_header.packet_type,
             &fixed_header,
@@ -350,7 +348,6 @@ impl PacketWriter for TlsWriteHalf {
         let mut buf = BytesMut::with_capacity(1024);
         encode_packet_to_buffer(&packet, &mut buf)?;
         self.write_all(&buf).await?;
-        self.flush().await?;
         Ok(())
     }
 }

@@ -26,3 +26,8 @@ strip = "debuginfo"
 
 [profile.dev]
 debug = true
+
+[profile.profiling]
+inherits = "release"
+debug = 2
+lto = false

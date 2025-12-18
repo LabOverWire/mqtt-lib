@@ -29,7 +29,6 @@ impl Transport for TcpStreamWrapper {
 
     async fn write(&mut self, buf: &[u8]) -> Result<()> {
         self.stream.write_all(buf).await?;
-        self.stream.flush().await?;
         Ok(())
     }
 
