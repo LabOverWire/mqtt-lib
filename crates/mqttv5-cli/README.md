@@ -8,7 +8,7 @@ A unified MQTT CLI tool with pub, sub, and broker commands. Supports v5.0 and v3
 
 ## Features
 
-- Single binary: pub, sub, and broker subcommands
+- Single binary: pub, sub, broker, and bench subcommands
 - Interactive prompts for missing arguments
 - Input validation with error messages and suggestions
 - MQTT v5.0 and v3.1.1 protocol support (`--protocol-version 3.1.1`)
@@ -93,6 +93,9 @@ mqttv5 broker --auth-method jwt-federated \
 
 # With ACL authorization
 mqttv5 broker --auth-password-file passwd.txt --acl-file acl.txt
+
+# In-memory storage (no persistence)
+mqttv5 broker --allow-anonymous --storage-backend memory
 ```
 
 ### Managing Passwords
@@ -131,6 +134,25 @@ mqttv5 acl user-roles alice -f acl.txt
 ```
 
 See [Authentication & Authorization Guide](../../AUTHENTICATION.md) for details.
+
+### Benchmarking
+
+```bash
+# Throughput benchmark (default mode)
+mqttv5 bench --duration 15 --subscribers 5
+
+# Latency benchmark (measures p50/p95/p99)
+mqttv5 bench --mode latency --duration 10
+
+# Connection rate benchmark
+mqttv5 bench --mode connections --duration 10 --concurrency 10
+
+# Custom payload and QoS
+mqttv5 bench --payload-size 1024 --qos 1 --publishers 5 --subscribers 5
+
+# Wildcard subscription testing
+mqttv5 bench --topic "bench/test" --filter "bench/+"
+```
 
 ## CLI Design
 
