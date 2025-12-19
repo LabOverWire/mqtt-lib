@@ -7,14 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.15.0] / [mqtt5-protocol 0.6.0] / [mqtt5-wasm 0.6.0] - 2025-12-19
 
+### Performance
+
+- **Throughput: 180k → 540k msg/s** (3x improvement)
+  - RwLock→Mutex for client writer, write buffer reuse, batch message processing, rate limit fast path
+- **Zero-allocation PUBLISH encoding** - direct buffer writes, no intermediate Vec
+- **Read buffer reuse** - stack-allocated header, reusable payload buffer
+- **Write-behind session caching** for file storage (2.6k → 10k conn/s)
+- **Memory: 1.5MB → 155KB per connection** - reduced channel buffer capacity
+
+### Added
+
+- Benchmark modes: `connections`, `latency`
+- Benchmark options: `--storage-backend`, `--filter`
+
 ### Changed
 
-- **Code quality improvements**
-  - Removed `uninlined_format_args` clippy allow from CI and Makefile
-  - Added `#[must_use]` annotations to validation functions and getters
-  - Fixed unsafe u64→u8 cast in flow header decoding using `try_from`
-  - Removed dead code (ClusterSimulation, unused test helpers)
-  - Added error documentation for auth provider public methods
+- Consolidated transport configuration
+- Increased default `max_connections_per_ip`
+- **Code quality**: removed clippy allows, added `#[must_use]`, fixed unsafe cast, removed dead code
 
 ## [0.14.0] / [mqtt5-protocol 0.5.0] / [mqtt5-wasm 0.5.0] - 2025-12-18
 
