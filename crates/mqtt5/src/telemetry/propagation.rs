@@ -7,7 +7,9 @@ use opentelemetry::{
 #[cfg(feature = "opentelemetry")]
 use crate::protocol::v5::properties::{Properties, PropertyId, PropertyValue};
 
+#[cfg(feature = "opentelemetry")]
 const TRACEPARENT_HEADER: &str = "traceparent";
+#[cfg(feature = "opentelemetry")]
 const TRACESTATE_HEADER: &str = "tracestate";
 
 pub type UserProperty = (String, String);

@@ -408,22 +408,13 @@ impl OptimizedMessageSerializer {
 
 /// Connection manager that uses pooling for high performance
 pub struct PooledConnectionManager {
-    /// Connection pool
     connection_pool: Arc<ConnectionPool>,
-    /// Message serializer
-    serializer: OptimizedMessageSerializer,
 }
 
 impl PooledConnectionManager {
-    /// Creates a new pooled connection manager
     pub fn new(config: PoolConfig) -> Self {
         let connection_pool = Arc::new(ConnectionPool::new(config));
-        let serializer = OptimizedMessageSerializer::new(connection_pool.buffer_pool.clone());
-
-        Self {
-            connection_pool,
-            serializer,
-        }
+        Self { connection_pool }
     }
 
     /// Creates a new connection context for a client

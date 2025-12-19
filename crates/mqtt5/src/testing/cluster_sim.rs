@@ -108,6 +108,7 @@ impl ClusterConfig {
 }
 
 /// Represents a cluster simulation
+#[allow(dead_code)]
 pub struct ClusterSimulation {
     config: ClusterConfig,
     brokers: HashMap<String, TurmoilBroker>,

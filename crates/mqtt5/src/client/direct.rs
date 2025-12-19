@@ -790,6 +790,7 @@ impl DirectClientInner {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn datagrams_available(&self) -> bool {
         self.quic_datagrams_enabled
             && self
@@ -799,6 +800,7 @@ impl DirectClientInner {
                 .is_some()
     }
 
+    #[allow(dead_code)]
     pub fn max_datagram_size(&self) -> Option<usize> {
         if !self.quic_datagrams_enabled {
             return None;
@@ -808,6 +810,7 @@ impl DirectClientInner {
             .and_then(|c| c.max_datagram_size())
     }
 
+    #[allow(dead_code)]
     pub fn send_datagram(&self, data: bytes::Bytes) -> Result<()> {
         if !self.quic_datagrams_enabled {
             return Err(MqttError::InvalidState("Datagrams not enabled".to_string()));
@@ -820,6 +823,7 @@ impl DirectClientInner {
             .map_err(|e| MqttError::ConnectionError(format!("Datagram send failed: {e}")))
     }
 
+    #[allow(dead_code)]
     pub async fn send_datagram_wait(&self, data: bytes::Bytes) -> Result<()> {
         if !self.quic_datagrams_enabled {
             return Err(MqttError::InvalidState("Datagrams not enabled".to_string()));
@@ -833,6 +837,7 @@ impl DirectClientInner {
             .map_err(|e| MqttError::ConnectionError(format!("Datagram send failed: {e}")))
     }
 
+    #[allow(dead_code)]
     pub async fn read_datagram(&self) -> Result<bytes::Bytes> {
         if !self.quic_datagrams_enabled {
             return Err(MqttError::InvalidState("Datagrams not enabled".to_string()));
@@ -846,6 +851,7 @@ impl DirectClientInner {
             .map_err(|e| MqttError::ConnectionError(format!("Datagram read failed: {e}")))
     }
 
+    #[allow(dead_code)]
     pub fn send_publish_as_datagram(&self, publish: PublishPacket) -> Result<()> {
         if publish.qos != QoS::AtMostOnce {
             return Err(MqttError::ProtocolError(
@@ -1268,10 +1274,12 @@ impl DirectClientInner {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub async fn get_recoverable_flows(&self) -> Vec<(FlowId, FlowFlags)> {
         self.session.read().await.get_recoverable_flows().await
     }
 
+    #[allow(dead_code)]
     pub async fn recover_flows(&self) -> Result<usize> {
         let Some(manager) = &self.quic_stream_manager else {
             return Ok(0);
@@ -1307,10 +1315,12 @@ impl DirectClientInner {
         Ok(recovered)
     }
 
+    #[allow(dead_code)]
     pub async fn clear_flows(&self) {
         self.session.read().await.clear_flows().await;
     }
 
+    #[allow(dead_code)]
     pub async fn flow_count(&self) -> usize {
         self.session.read().await.flow_count().await
     }

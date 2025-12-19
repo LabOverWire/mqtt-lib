@@ -55,18 +55,6 @@ impl QuicStreamManager {
     }
 
     #[must_use]
-    pub fn with_max_cached_streams(mut self, max: usize) -> Self {
-        self.max_cached_streams = max;
-        self
-    }
-
-    #[must_use]
-    pub fn with_stream_idle_timeout(mut self, timeout: Duration) -> Self {
-        self.stream_idle_timeout = timeout;
-        self
-    }
-
-    #[must_use]
     pub fn with_flow_headers(mut self, enable: bool) -> Self {
         self.enable_flow_headers = enable;
         self
@@ -431,21 +419,6 @@ mod tests {
             StreamStrategy::DataPerSubscription,
             StreamStrategy::ControlOnly
         );
-    }
-
-    #[test]
-    fn test_flow_header_builder_methods() {
-        let flags = FlowFlags {
-            persistent_qos: 1,
-            persistent_subscriptions: 1,
-            ..Default::default()
-        };
-
-        let conn = Arc::new(std::mem::MaybeUninit::<Connection>::uninit());
-        let conn_ptr = unsafe { &*conn.as_ptr() };
-
-        let _ = flags;
-        let _ = conn_ptr;
     }
 
     #[test]

@@ -14,12 +14,6 @@ fn create_memory_storage() -> Storage<MemoryBackend> {
     Storage::new(MemoryBackend::new())
 }
 
-async fn create_file_storage() -> Storage<FileBackend> {
-    let dir = tempfile::tempdir().unwrap();
-    let backend = FileBackend::new(dir.path()).await.unwrap();
-    Storage::new(backend)
-}
-
 #[tokio::test]
 async fn test_retained_message_storage() {
     let storage = create_memory_storage();

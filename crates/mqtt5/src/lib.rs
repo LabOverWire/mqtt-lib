@@ -169,7 +169,6 @@
 #![allow(clippy::if_not_else)]
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::doc_markdown)]
-#![allow(dead_code)]
 #![allow(clippy::cast_lossless)]
 #![allow(clippy::single_component_path_imports)]
 

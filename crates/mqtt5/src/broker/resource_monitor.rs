@@ -56,16 +56,14 @@ struct ClientResources {
     message_count: AtomicU64,
     bytes_transferred: AtomicU64,
     window_start: Instant,
-    ip_addr: IpAddr,
 }
 
 impl ClientResources {
-    fn new(ip_addr: IpAddr) -> Self {
+    fn new() -> Self {
         Self {
             message_count: AtomicU64::new(0),
             bytes_transferred: AtomicU64::new(0),
             window_start: Instant::now(),
-            ip_addr,
         }
     }
 
@@ -83,17 +81,13 @@ impl ClientResources {
 /// Connection rate tracking
 #[derive(Debug)]
 struct ConnectionRateTracker {
-    /// Connection timestamps in current window
     connections: Vec<Instant>,
-    /// Window start time
-    window_start: Instant,
 }
 
 impl ConnectionRateTracker {
     fn new() -> Self {
         Self {
             connections: Vec::new(),
-            window_start: Instant::now(),
         }
     }
 
@@ -210,9 +204,8 @@ impl ResourceMonitor {
         *ip_connections.entry(ip_addr).or_insert(0) += 1;
         drop(ip_connections);
 
-        // Initialize client resource tracking
         let mut client_resources = self.client_resources.write().await;
-        client_resources.insert(client_id, ClientResources::new(ip_addr));
+        client_resources.insert(client_id, ClientResources::new());
     }
 
     /// Unregister a connection
