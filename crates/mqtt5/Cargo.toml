@@ -1,6 +1,6 @@
 [package]
 name = "mqtt5"
-version = "0.14.0"
+version = "0.15.0"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -126,7 +126,7 @@ opentelemetry-otlp = { version = "0.31", features = [
 ], optional = true }
 tracing-opentelemetry = { version = "0.32", optional = true }
 opentelemetry = { version = "0.31", features = ["trace"], optional = true }
-mqtt5-protocol = { version = "0.5", path = "../mqtt5-protocol" }
+mqtt5-protocol = { version = "0.6", path = "../mqtt5-protocol" }
 argon2 = "0.5"
 getrandom = "0.3"
 bebytes = { version = "2.11", features = ["bytes"] }
