@@ -13,6 +13,7 @@ pub enum BenchMode {
     #[default]
     Throughput,
     Latency,
+    Connections,
 }
 
 #[derive(Args)]
@@ -52,6 +53,9 @@ pub struct BenchCommand {
 
     #[arg(long, default_value = "1")]
     pub subscribers: usize,
+
+    #[arg(long, default_value = "10")]
+    pub concurrency: usize,
 }
 
 fn parse_qos(s: &str) -> Result<QoS, String> {
@@ -96,10 +100,25 @@ struct LatencyResults {
 }
 
 #[derive(Serialize)]
+struct ConnectionResults {
+    total_connections: u64,
+    successful: u64,
+    failed: u64,
+    elapsed_secs: f64,
+    connections_per_sec: f64,
+    avg_connect_us: f64,
+    p50_connect_us: u64,
+    p95_connect_us: u64,
+    p99_connect_us: u64,
+    samples: Vec<u64>,
+}
+
+#[derive(Serialize)]
 #[serde(untagged)]
 enum BenchResults {
     Throughput(ThroughputResults),
     Latency(LatencyResults),
+    Connections(ConnectionResults),
 }
 
 #[derive(Serialize)]
@@ -115,6 +134,7 @@ pub async fn execute(cmd: BenchCommand, verbose: bool, debug: bool) -> Result<()
     match cmd.mode {
         BenchMode::Throughput => run_throughput(cmd).await,
         BenchMode::Latency => run_latency(cmd).await,
+        BenchMode::Connections => run_connections(cmd).await,
     }
 }
 
@@ -427,5 +447,159 @@ async fn run_latency(cmd: BenchCommand) -> Result<()> {
 
     pub_client.disconnect().await.ok();
     sub_client.disconnect().await.ok();
+    Ok(())
+}
+
+async fn run_connections(cmd: BenchCommand) -> Result<()> {
+    use std::net::ToSocketAddrs;
+    use std::sync::Mutex;
+
+    let original_url = cmd
+        .url
+        .clone()
+        .unwrap_or_else(|| format!("mqtt://{}:{}", cmd.host, cmd.port));
+
+    let broker_url = if let Some(rest) = original_url.strip_prefix("mqtt://") {
+        let addr_str = rest.split('/').next().unwrap_or(rest);
+        let resolved: std::net::SocketAddr = addr_str
+            .to_socket_addrs()
+            .context("failed to resolve broker address")?
+            .next()
+            .context("no addresses resolved")?;
+        format!("mqtt://{resolved}")
+    } else {
+        original_url.clone()
+    };
+
+    let base_client_id = cmd
+        .client_id
+        .clone()
+        .unwrap_or_else(|| format!("mqttv5-conn-{}", rand::rng().random::<u32>()));
+
+    eprintln!(
+        "benchmarking connection rate to {} with {} concurrent workers for {}s...",
+        original_url, cmd.concurrency, cmd.duration
+    );
+    eprintln!("  (resolved to {})", broker_url);
+
+    let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let successful = Arc::new(AtomicU64::new(0));
+    let failed = Arc::new(AtomicU64::new(0));
+    let connect_times = Arc::new(Mutex::new(Vec::with_capacity(10000)));
+    let counter = Arc::new(AtomicU64::new(0));
+
+    let measure_duration = Duration::from_secs(cmd.duration);
+    let measure_start = Instant::now();
+
+    let mut handles = Vec::with_capacity(cmd.concurrency);
+    for _ in 0..cmd.concurrency {
+        let broker_url = broker_url.clone();
+        let base_client_id = base_client_id.clone();
+        let running = Arc::clone(&running);
+        let successful = Arc::clone(&successful);
+        let failed = Arc::clone(&failed);
+        let connect_times = Arc::clone(&connect_times);
+        let counter = Arc::clone(&counter);
+
+        handles.push(tokio::spawn(async move {
+            while running.load(Ordering::Relaxed) {
+                let id = counter.fetch_add(1, Ordering::Relaxed);
+                let client_id = format!("{base_client_id}-{id}");
+                let client = MqttClient::new(&client_id);
+                let options = ConnectOptions::new(client_id)
+                    .with_clean_start(true)
+                    .with_keep_alive(Duration::from_secs(30));
+
+                let start = Instant::now();
+                match client.connect_with_options(&broker_url, options).await {
+                    Ok(_) => {
+                        let elapsed_us = start.elapsed().as_micros() as u64;
+                        successful.fetch_add(1, Ordering::Relaxed);
+                        connect_times.lock().unwrap().push(elapsed_us);
+                        client.disconnect().await.ok();
+                    }
+                    Err(_) => {
+                        failed.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            }
+        }));
+    }
+
+    let mut samples: Vec<u64> = Vec::new();
+    let mut last_count = 0u64;
+    let mut next_sample = measure_start + Duration::from_secs(1);
+
+    while Instant::now() < measure_start + measure_duration {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        if Instant::now() >= next_sample {
+            let current = successful.load(Ordering::Relaxed);
+            let delta = current - last_count;
+            samples.push(delta);
+            eprintln!("  {} conn/s", delta);
+            last_count = current;
+            next_sample += Duration::from_secs(1);
+        }
+    }
+
+    running.store(false, Ordering::SeqCst);
+    for handle in handles {
+        handle.await.ok();
+    }
+
+    let total_successful = successful.load(Ordering::Relaxed);
+    let total_failed = failed.load(Ordering::Relaxed);
+    let elapsed = measure_start.elapsed().as_secs_f64();
+    let connections_per_sec = total_successful as f64 / elapsed;
+
+    let mut times = connect_times.lock().unwrap().clone();
+    times.sort_unstable();
+
+    let (avg_connect_us, p50_connect_us, p95_connect_us, p99_connect_us) = if times.is_empty() {
+        (0.0, 0, 0, 0)
+    } else {
+        let avg = times.iter().sum::<u64>() as f64 / times.len() as f64;
+        let p50 = times[times.len() * 50 / 100];
+        let p95 = times[times.len() * 95 / 100];
+        let p99 = times[times.len() * 99 / 100];
+        (avg, p50, p95, p99)
+    };
+
+    eprintln!(
+        "\n  total: {} successful, {} failed",
+        total_successful, total_failed
+    );
+    eprintln!(
+        "  avg: {:.0}us, p50: {}us, p95: {}us, p99: {}us",
+        avg_connect_us, p50_connect_us, p95_connect_us, p99_connect_us
+    );
+
+    let output = BenchOutput {
+        mode: "connections".to_string(),
+        config: BenchConfig {
+            duration_secs: cmd.duration,
+            warmup_secs: 0,
+            payload_size: 0,
+            qos: 0,
+            topic: String::new(),
+            publishers: 0,
+            subscribers: 0,
+        },
+        results: BenchResults::Connections(ConnectionResults {
+            total_connections: total_successful + total_failed,
+            successful: total_successful,
+            failed: total_failed,
+            elapsed_secs: elapsed,
+            connections_per_sec,
+            avg_connect_us,
+            p50_connect_us,
+            p95_connect_us,
+            p99_connect_us,
+            samples,
+        }),
+    };
+
+    println!("{}", serde_json::to_string_pretty(&output)?);
     Ok(())
 }
