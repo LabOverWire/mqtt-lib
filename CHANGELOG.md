@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.0] / [mqtt5-protocol 0.6.0] / [mqtt5-wasm 0.6.0] - 2025-12-19
+
+### Changed
+
+- **Code quality improvements**
+  - Removed `uninlined_format_args` clippy allow from CI and Makefile
+  - Added `#[must_use]` annotations to validation functions and getters
+  - Fixed unsafe u64→u8 cast in flow header decoding using `try_from`
+  - Removed dead code (ClusterSimulation, unused test helpers)
+  - Added error documentation for auth provider public methods
+
 ## [0.14.0] / [mqtt5-protocol 0.5.0] / [mqtt5-wasm 0.5.0] - 2025-12-18
 
 ### Added
