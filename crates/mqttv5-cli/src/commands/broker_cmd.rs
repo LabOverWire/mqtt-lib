@@ -6,11 +6,15 @@ use std::path::{Path, PathBuf};
 use tokio::signal;
 use tracing::{debug, info};
 
-fn parse_storage_backend(s: &str) -> std::result::Result<mqtt5::broker::config::StorageBackend, String> {
+fn parse_storage_backend(
+    s: &str,
+) -> std::result::Result<mqtt5::broker::config::StorageBackend, String> {
     match s.to_lowercase().as_str() {
         "file" => Ok(mqtt5::broker::config::StorageBackend::File),
         "memory" => Ok(mqtt5::broker::config::StorageBackend::Memory),
-        _ => Err(format!("unknown storage backend: {s} (expected 'file' or 'memory')")),
+        _ => Err(format!(
+            "unknown storage backend: {s} (expected 'file' or 'memory')"
+        )),
     }
 }
 

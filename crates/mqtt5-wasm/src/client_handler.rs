@@ -56,8 +56,8 @@ pub struct WasmClientHandler {
     stats: Arc<BrokerStats>,
     resource_monitor: Arc<ResourceMonitor>,
     session: Option<ClientSession>,
-    publish_rx: tokio::sync::mpsc::Receiver<PublishPacket>,
-    publish_tx: tokio::sync::mpsc::Sender<PublishPacket>,
+    publish_rx: flume::Receiver<PublishPacket>,
+    publish_tx: flume::Sender<PublishPacket>,
     inflight_publishes: HashMap<u16, PublishPacket>,
     normal_disconnect: bool,
     keep_alive: mqtt5::time::Duration,
@@ -78,7 +78,7 @@ impl WasmClientHandler {
         stats: Arc<BrokerStats>,
         resource_monitor: Arc<ResourceMonitor>,
     ) {
-        let (publish_tx, publish_rx) = tokio::sync::mpsc::channel(100);
+        let (publish_tx, publish_rx) = flume::bounded(100);
         let handler_id = HANDLER_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
         let handler = Self {
@@ -190,8 +190,7 @@ impl WasmClientHandler {
         let handler_id = self.handler_id;
 
         let running_forward = Rc::clone(&running);
-        let mut publish_rx =
-            std::mem::replace(&mut self.publish_rx, tokio::sync::mpsc::channel(1).1);
+        let publish_rx = std::mem::replace(&mut self.publish_rx, flume::bounded(1).1);
         let writer_shared = Rc::new(RefCell::new(writer));
         let writer_for_forward = Rc::clone(&writer_shared);
 
@@ -201,8 +200,8 @@ impl WasmClientHandler {
                     break;
                 }
 
-                match publish_rx.recv().await {
-                    Some(publish) => {
+                match publish_rx.recv_async().await {
+                    Ok(publish) => {
                         if let Ok(mut writer_guard) = writer_for_forward.try_borrow_mut() {
                             let result =
                                 Self::write_publish_packet(&publish, &mut *writer_guard).await;
@@ -214,7 +213,7 @@ impl WasmClientHandler {
                             error!("Handler #{} writer busy, cannot forward", handler_id);
                         }
                     }
-                    None => break,
+                    Err(_) => break,
                 }
             }
         });

@@ -508,7 +508,6 @@ impl MqttBroker {
         if let Some(ref storage) = self.storage {
             storage.cleanup_expired().await?;
 
-            // Start periodic cleanup task
             let storage_clone = Arc::clone(storage);
             let cleanup_interval = self.config.storage_config.cleanup_interval;
             let mut shutdown_rx = shutdown_tx.subscribe();
@@ -524,6 +523,31 @@ impl MqttBroker {
                         }
                         _ = shutdown_rx.recv() => {
                             debug!("Storage cleanup task shutting down");
+                            break;
+                        }
+                    }
+                }
+            });
+
+            let storage_clone = Arc::clone(storage);
+            let mut shutdown_rx = shutdown_tx.subscribe();
+            let flush_interval = std::time::Duration::from_secs(5);
+
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(flush_interval);
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    tokio::select! {
+                        _ = interval.tick() => {
+                            if let Err(e) = storage_clone.flush_sessions().await {
+                                error!("Session flush error: {}", e);
+                            }
+                        }
+                        _ = shutdown_rx.recv() => {
+                            debug!("Flushing sessions before shutdown");
+                            if let Err(e) = storage_clone.shutdown().await {
+                                error!("Session shutdown flush error: {}", e);
+                            }
                             break;
                         }
                     }

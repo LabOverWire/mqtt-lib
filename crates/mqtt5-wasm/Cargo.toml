@@ -43,6 +43,7 @@ futures-util = "0.3"
 tracing = "0.1.41"
 tokio = { version = "1.47", optional = true }
 gloo-timers = { version = "0.3.0", features = ["futures"] }
+flume = "0.12.0"
 
 [dependencies.web-sys]
 version = "0.3"

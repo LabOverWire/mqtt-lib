@@ -12,7 +12,7 @@ pub struct RetainedMessages<B: StorageBackend> {
     storage: Storage<B>,
 }
 
-impl<B: StorageBackend> RetainedMessages<B> {
+impl<B: StorageBackend + 'static> RetainedMessages<B> {
     /// Create new retained message manager
     pub fn new(storage: Storage<B>) -> Self {
         Self { storage }

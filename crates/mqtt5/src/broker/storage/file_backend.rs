@@ -6,9 +6,13 @@ use super::{ClientSession, QueuedMessage, RetainedMessage, StorageBackend};
 use crate::error::{MqttError, Result};
 use crate::validation::topic_matches_filter;
 use serde_json;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tokio::fs::{self, File};
 use tokio::io::AsyncWriteExt;
+use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
 /// Storage format version
@@ -22,18 +26,15 @@ use tracing::{debug, info, warn};
 /// - 1: Initial version (0.10.0)
 const STORAGE_VERSION: &str = "1";
 
-/// File-based storage backend
-#[derive(Debug)]
-#[allow(clippy::struct_field_names)]
+/// File-based storage backend with write-behind session caching
 pub struct FileBackend {
-    /// Base directory for all storage
     _base_dir: PathBuf,
-    /// Directory for retained messages
     retained_dir: PathBuf,
-    /// Directory for client sessions
     sessions_dir: PathBuf,
-    /// Directory for message queues
     queues_dir: PathBuf,
+    sessions_cache: Arc<RwLock<HashMap<String, ClientSession>>>,
+    dirty_sessions: Arc<RwLock<HashSet<String>>>,
+    shutdown: Arc<AtomicBool>,
 }
 
 impl FileBackend {
@@ -74,7 +75,77 @@ impl FileBackend {
             retained_dir,
             sessions_dir,
             queues_dir,
+            sessions_cache: Arc::new(RwLock::new(HashMap::new())),
+            dirty_sessions: Arc::new(RwLock::new(HashSet::new())),
+            shutdown: Arc::new(AtomicBool::new(false)),
         })
+    }
+
+    /// # Errors
+    /// Returns an error if any session fails to persist.
+    pub async fn flush_sessions(&self) -> Result<()> {
+        let to_flush: Vec<String> = self.dirty_sessions.read().await.iter().cloned().collect();
+
+        if to_flush.is_empty() {
+            return Ok(());
+        }
+
+        let cache = self.sessions_cache.read().await;
+        let mut failed = Vec::new();
+
+        for client_id in to_flush {
+            if let Some(session) = cache.get(&client_id) {
+                let filename = format!("{}.json", client_id);
+                let path = self.sessions_dir.join(filename);
+                if let Err(e) = self.write_file_atomic(path, session).await {
+                    warn!("failed to persist session {}: {}", client_id, e);
+                    failed.push(client_id);
+                } else {
+                    self.dirty_sessions.write().await.remove(&client_id);
+                }
+            } else {
+                self.dirty_sessions.write().await.remove(&client_id);
+            }
+        }
+
+        if failed.is_empty() {
+            Ok(())
+        } else {
+            Err(MqttError::Io(format!(
+                "failed to persist {} sessions",
+                failed.len()
+            )))
+        }
+    }
+
+    pub fn start_flush_task(self: &Arc<Self>, flush_interval: std::time::Duration) {
+        let backend = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(flush_interval);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+            loop {
+                interval.tick().await;
+
+                if backend.shutdown.load(Ordering::Relaxed) {
+                    if let Err(e) = backend.flush_sessions().await {
+                        warn!("failed to flush sessions on shutdown: {e}");
+                    }
+                    break;
+                }
+
+                if let Err(e) = backend.flush_sessions().await {
+                    warn!("failed to flush sessions: {e}");
+                }
+            }
+        });
+    }
+
+    /// # Errors
+    /// Returns an error if flushing sessions fails.
+    pub async fn shutdown(&self) -> Result<()> {
+        self.shutdown.store(true, Ordering::Relaxed);
+        self.flush_sessions().await
     }
 
     async fn check_storage_version(base_dir: &Path) -> Result<()> {
@@ -296,36 +367,48 @@ impl StorageBackend for FileBackend {
     }
 
     async fn store_session(&self, session: ClientSession) -> Result<()> {
-        let filename = format!("{}.json", session.client_id);
-        let path = self.sessions_dir.join(filename);
-
-        debug!("Storing session for client: {}", session.client_id);
-        self.write_file_atomic(path, &session).await?;
-
+        let client_id = session.client_id.clone();
+        self.sessions_cache
+            .write()
+            .await
+            .insert(client_id.clone(), session);
+        self.dirty_sessions.write().await.insert(client_id);
         Ok(())
     }
 
     async fn get_session(&self, client_id: &str) -> Result<Option<ClientSession>> {
+        if let Some(session) = self.sessions_cache.read().await.get(client_id).cloned() {
+            if session.is_expired() {
+                self.remove_session(client_id).await?;
+                return Ok(None);
+            }
+            return Ok(Some(session));
+        }
+
         let filename = format!("{}.json", client_id);
         let path = self.sessions_dir.join(filename);
-
         let session: Option<ClientSession> = self.read_file(path).await?;
 
-        // Check if session has expired
         if let Some(ref sess) = session {
             if sess.is_expired() {
                 self.remove_session(client_id).await?;
                 return Ok(None);
             }
+            self.sessions_cache
+                .write()
+                .await
+                .insert(client_id.to_string(), sess.clone());
         }
 
         Ok(session)
     }
 
     async fn remove_session(&self, client_id: &str) -> Result<()> {
+        self.sessions_cache.write().await.remove(client_id);
+        self.dirty_sessions.write().await.remove(client_id);
+
         let filename = format!("{}.json", client_id);
         let path = self.sessions_dir.join(filename);
-
         if path.exists() {
             fs::remove_file(&path)
                 .await
@@ -473,5 +556,9 @@ impl StorageBackend for FileBackend {
         }
 
         Ok(())
+    }
+
+    async fn flush_sessions(&self) -> Result<()> {
+        FileBackend::flush_sessions(self).await
     }
 }

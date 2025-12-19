@@ -25,7 +25,8 @@ use crate::packet::publish::PublishPacket;
 use crate::time::{Duration, SystemTime};
 use crate::QoS;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -196,10 +197,14 @@ pub trait StorageBackend: Send + Sync {
 
     /// Clean up expired messages and sessions
     fn cleanup_expired(&self) -> impl std::future::Future<Output = Result<()>> + Send;
+
+    /// Flush any cached session data to persistent storage (no-op for non-caching backends)
+    fn flush_sessions(&self) -> impl std::future::Future<Output = Result<()>> + Send {
+        async { Ok(()) }
+    }
 }
 
 /// In-memory storage for fast access with persistent backing
-#[derive(Debug)]
 pub struct Storage<B: StorageBackend> {
     /// Persistent storage backend
     backend: Arc<B>,
@@ -207,15 +212,21 @@ pub struct Storage<B: StorageBackend> {
     retained_cache: Arc<RwLock<HashMap<String, RetainedMessage>>>,
     /// In-memory sessions cache
     sessions_cache: Arc<RwLock<HashMap<String, ClientSession>>>,
+    /// Sessions that need to be flushed to backend (write-behind)
+    dirty_sessions: Arc<RwLock<HashSet<String>>>,
+    /// Flag to signal shutdown
+    shutdown: Arc<AtomicBool>,
 }
 
-impl<B: StorageBackend> Storage<B> {
+impl<B: StorageBackend + 'static> Storage<B> {
     /// Create new storage with backend
     pub fn new(backend: B) -> Self {
         Self {
             backend: Arc::new(backend),
             retained_cache: Arc::new(RwLock::new(HashMap::new())),
             sessions_cache: Arc::new(RwLock::new(HashMap::new())),
+            dirty_sessions: Arc::new(RwLock::new(HashSet::new())),
+            shutdown: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -310,21 +321,84 @@ impl<B: StorageBackend> Storage<B> {
             .collect()
     }
 
-    /// Store client session.
-    ///
-    /// # Errors
-    /// Returns an error if the backend fails to persist the session.
-    pub async fn store_session(&self, session: ClientSession) -> Result<()> {
+    /// Store client session (write-behind: caches immediately, flushes later).
+    pub async fn store_session(&self, session: ClientSession) {
         let client_id = session.client_id.clone();
 
-        // Update cache
         self.sessions_cache
             .write()
             .await
-            .insert(client_id, session.clone());
+            .insert(client_id.clone(), session);
 
-        // Persist to backend
-        self.backend.store_session(session).await
+        self.dirty_sessions.write().await.insert(client_id);
+    }
+
+    /// Flush all dirty sessions to backend.
+    ///
+    /// # Errors
+    /// Returns an error if the backend fails to persist any session.
+    pub async fn flush_sessions(&self) -> Result<()> {
+        let to_flush: Vec<String> = self.dirty_sessions.read().await.iter().cloned().collect();
+
+        if !to_flush.is_empty() {
+            let cache = self.sessions_cache.read().await;
+            let mut failed = Vec::new();
+
+            for client_id in to_flush {
+                if let Some(session) = cache.get(&client_id) {
+                    if let Err(e) = self.backend.store_session(session.clone()).await {
+                        tracing::warn!("failed to persist session {}: {}", client_id, e);
+                        failed.push(client_id);
+                    } else {
+                        self.dirty_sessions.write().await.remove(&client_id);
+                    }
+                } else {
+                    self.dirty_sessions.write().await.remove(&client_id);
+                }
+            }
+
+            if !failed.is_empty() {
+                return Err(crate::error::MqttError::Io(format!(
+                    "failed to persist {} sessions",
+                    failed.len()
+                )));
+            }
+        }
+
+        self.backend.flush_sessions().await
+    }
+
+    /// Start background flush task (call once after initialization).
+    pub fn start_flush_task(self: &Arc<Self>, flush_interval: Duration) {
+        let storage = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(flush_interval);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+            loop {
+                interval.tick().await;
+
+                if storage.shutdown.load(Ordering::Relaxed) {
+                    if let Err(e) = storage.flush_sessions().await {
+                        tracing::warn!("failed to flush sessions on shutdown: {e}");
+                    }
+                    break;
+                }
+
+                if let Err(e) = storage.flush_sessions().await {
+                    tracing::warn!("failed to flush sessions: {e}");
+                }
+            }
+        });
+    }
+
+    /// Signal shutdown and flush remaining data.
+    ///
+    /// # Errors
+    /// Returns an error if flushing sessions fails.
+    pub async fn shutdown(&self) -> Result<()> {
+        self.shutdown.store(true, Ordering::Relaxed);
+        self.flush_sessions().await
     }
 
     /// Get client session
@@ -361,10 +435,8 @@ impl<B: StorageBackend> Storage<B> {
     /// # Errors
     /// Returns an error if the backend fails to remove the session.
     pub async fn remove_session(&self, client_id: &str) -> Result<()> {
-        // Remove from cache
         self.sessions_cache.write().await.remove(client_id);
-
-        // Remove from backend
+        self.dirty_sessions.write().await.remove(client_id);
         self.backend.remove_session(client_id).await
     }
 
@@ -711,6 +783,28 @@ impl StorageBackend for DynamicStorage {
             #[cfg(not(target_arch = "wasm32"))]
             Self::File(backend) => backend.cleanup_expired().await,
             Self::Memory(backend) => backend.cleanup_expired().await,
+        }
+    }
+}
+
+impl DynamicStorage {
+    /// # Errors
+    /// Returns an error if any session fails to persist.
+    pub async fn flush_sessions(&self) -> Result<()> {
+        match self {
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::File(backend) => backend.flush_sessions().await,
+            Self::Memory(_) => Ok(()),
+        }
+    }
+
+    /// # Errors
+    /// Returns an error if flushing sessions fails.
+    pub async fn shutdown(&self) -> Result<()> {
+        match self {
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::File(backend) => backend.shutdown().await,
+            Self::Memory(_) => Ok(()),
         }
     }
 }
