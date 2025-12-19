@@ -70,8 +70,7 @@ async fn subscribe_to_topic(world: &mut BddWorld, topic: String) {
         &topic,
         world.expected_message_count,
         &[],
-    )
-    .await;
+    );
 
     world.pending_sub_handles.insert(topic.clone(), handle);
 
@@ -93,8 +92,7 @@ async fn subscribe_with_qos(world: &mut BddWorld, topic: String, qos: u8) {
         &topic,
         world.expected_message_count,
         &["--qos", &qos_arg],
-    )
-    .await;
+    );
 
     world.pending_sub_handles.insert(topic.clone(), handle);
 
@@ -387,8 +385,7 @@ async fn subscribe_with_qos_and_client_id(
         &topic,
         count,
         &["--qos", &qos_arg, "--client-id", &client_id],
-    )
-    .await;
+    );
 
     world.pending_sub_handles.insert(topic.clone(), handle);
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -446,7 +443,7 @@ async fn publish_using_tls(world: &mut BddWorld, message: String, topic: String)
 
 #[when(regex = r#"^I subscribe to "([^"]*)" expecting (\d+) messages? using TLS$"#)]
 async fn subscribe_using_tls(world: &mut BddWorld, topic: String, count: u32) {
-    let handle = run_cli_sub_async(world.broker_url(), &topic, count, &["--insecure"]).await;
+    let handle = run_cli_sub_async(world.broker_url(), &topic, count, &["--insecure"]);
     world.pending_sub_handles.insert(topic.clone(), handle);
     tokio::time::sleep(Duration::from_millis(500)).await;
 }
@@ -459,8 +456,7 @@ async fn subscribe_with_qos_using_tls(world: &mut BddWorld, topic: String, qos: 
         &topic,
         count,
         &["--insecure", "--qos", &qos_arg],
-    )
-    .await;
+    );
     world.pending_sub_handles.insert(topic.clone(), handle);
     tokio::time::sleep(Duration::from_millis(500)).await;
 }
@@ -488,7 +484,7 @@ async fn publish_using_websocket(world: &mut BddWorld, message: String, topic: S
 
 #[when(regex = r#"^I subscribe to "([^"]*)" expecting (\d+) messages? using WebSocket$"#)]
 async fn subscribe_using_websocket(world: &mut BddWorld, topic: String, count: u32) {
-    let handle = run_cli_sub_async(world.broker_url(), &topic, count, &[]).await;
+    let handle = run_cli_sub_async(world.broker_url(), &topic, count, &[]);
     world.pending_sub_handles.insert(topic.clone(), handle);
     tokio::time::sleep(Duration::from_millis(500)).await;
 }
@@ -503,7 +499,7 @@ async fn subscribe_with_qos_using_websocket(
     count: u32,
 ) {
     let qos_arg = qos.to_string();
-    let handle = run_cli_sub_async(world.broker_url(), &topic, count, &["--qos", &qos_arg]).await;
+    let handle = run_cli_sub_async(world.broker_url(), &topic, count, &["--qos", &qos_arg]);
     world.pending_sub_handles.insert(topic.clone(), handle);
     tokio::time::sleep(Duration::from_millis(500)).await;
 }

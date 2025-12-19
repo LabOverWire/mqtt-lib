@@ -18,8 +18,8 @@ use tracing::{debug, info, warn};
 /// Storage format version
 ///
 /// IMPORTANT: Only increment this version when the storage format changes:
-/// - Modifying RetainedMessage, ClientSession, or QueuedMessage struct fields
-/// - Changing file naming scheme (topic_to_filename, queue file names)
+/// - Modifying `RetainedMessage`, `ClientSession`, or `QueuedMessage` struct fields
+/// - Changing file naming scheme (`topic_to_filename`, queue file names)
 /// - Changing directory structure (retained/, sessions/, queues/)
 ///
 /// Version History:
@@ -95,7 +95,7 @@ impl FileBackend {
 
         for client_id in to_flush {
             if let Some(session) = cache.get(&client_id) {
-                let filename = format!("{}.json", client_id);
+                let filename = format!("{client_id}.json");
                 let path = self.sessions_dir.join(filename);
                 if let Err(e) = self.write_file_atomic(path, session).await {
                     warn!("failed to persist session {}: {}", client_id, e);
@@ -220,33 +220,33 @@ impl FileBackend {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
                 .await
-                .map_err(|e| MqttError::Io(format!("Failed to create parent directory: {}", e)))?;
+                .map_err(|e| MqttError::Io(format!("Failed to create parent directory: {e}")))?;
         }
 
         let temp_path = path.with_extension("tmp");
 
         // Write to temporary file first
         let serialized = serde_json::to_vec_pretty(data)
-            .map_err(|e| MqttError::Configuration(format!("Failed to serialize data: {}", e)))?;
+            .map_err(|e| MqttError::Configuration(format!("Failed to serialize data: {e}")))?;
 
         let mut file = File::create(&temp_path)
             .await
-            .map_err(|e| MqttError::Io(format!("Failed to create temp file: {}", e)))?;
+            .map_err(|e| MqttError::Io(format!("Failed to create temp file: {e}")))?;
 
         file.write_all(&serialized)
             .await
-            .map_err(|e| MqttError::Io(format!("Failed to write temp file: {}", e)))?;
+            .map_err(|e| MqttError::Io(format!("Failed to write temp file: {e}")))?;
 
         file.flush()
             .await
-            .map_err(|e| MqttError::Io(format!("Failed to flush temp file: {}", e)))?;
+            .map_err(|e| MqttError::Io(format!("Failed to flush temp file: {e}")))?;
 
         drop(file);
 
         // Atomically move temp file to final location
         fs::rename(&temp_path, &path)
             .await
-            .map_err(|e| MqttError::Io(format!("Failed to rename temp file: {}", e)))?;
+            .map_err(|e| MqttError::Io(format!("Failed to rename temp file: {e}")))?;
 
         Ok(())
     }
@@ -284,14 +284,14 @@ impl FileBackend {
         while let Some(entry) = entries
             .next_entry()
             .await
-            .map_err(|e| MqttError::Io(format!("Failed to read directory entry: {}", e)))?
+            .map_err(|e| MqttError::Io(format!("Failed to read directory entry: {e}")))?
         {
             let path = entry.path();
             let is_file = fs::metadata(&path)
                 .await
                 .map(|m| m.is_file())
                 .unwrap_or(false);
-            if is_file && path.extension().map_or(false, |ext| ext == extension) {
+            if is_file && path.extension().is_some_and(|ext| ext == extension) {
                 files.push(path);
             }
         }
@@ -334,7 +334,7 @@ impl StorageBackend for FileBackend {
 
         if path.exists() {
             fs::remove_file(&path).await.map_err(|e| {
-                MqttError::Io(format!("Failed to remove retained message file: {}", e))
+                MqttError::Io(format!("Failed to remove retained message file: {e}"))
             })?;
             debug!("Removed retained message for topic: {}", topic);
         }
@@ -385,7 +385,7 @@ impl StorageBackend for FileBackend {
             return Ok(Some(session));
         }
 
-        let filename = format!("{}.json", client_id);
+        let filename = format!("{client_id}.json");
         let path = self.sessions_dir.join(filename);
         let session: Option<ClientSession> = self.read_file(path).await?;
 
@@ -407,12 +407,12 @@ impl StorageBackend for FileBackend {
         self.sessions_cache.write().await.remove(client_id);
         self.dirty_sessions.write().await.remove(client_id);
 
-        let filename = format!("{}.json", client_id);
+        let filename = format!("{client_id}.json");
         let path = self.sessions_dir.join(filename);
         if path.exists() {
             fs::remove_file(&path)
                 .await
-                .map_err(|e| MqttError::Io(format!("Failed to remove session file: {}", e)))?;
+                .map_err(|e| MqttError::Io(format!("Failed to remove session file: {e}")))?;
             debug!("Removed session for client: {}", client_id);
         }
 
@@ -453,7 +453,7 @@ impl StorageBackend for FileBackend {
                 if !message.is_expired() {
                     messages.push(message);
                 } else if let Err(e) = fs::remove_file(&file_path).await {
-                    warn!("Failed to remove expired queued message: {}", e);
+                    warn!("Failed to remove expired queued message: {e}");
                 }
             }
         }
@@ -467,10 +467,7 @@ impl StorageBackend for FileBackend {
         let client_dir = self.queues_dir.join(client_id);
         if client_dir.exists() {
             fs::remove_dir_all(&client_dir).await.map_err(|e| {
-                MqttError::Io(format!(
-                    "Failed to remove queue dir for {}: {}",
-                    client_id, e
-                ))
+                MqttError::Io(format!("Failed to remove queue dir for {client_id}: {e}"))
             })?;
             debug!("Removed all queued messages for client: {}", client_id);
         }
@@ -487,7 +484,7 @@ impl StorageBackend for FileBackend {
             if let Some(message) = self.read_file::<RetainedMessage>(file_path.clone()).await? {
                 if message.is_expired() {
                     if let Err(e) = fs::remove_file(&file_path).await {
-                        warn!("Failed to remove expired retained message: {}", e);
+                        warn!("Failed to remove expired retained message: {e}");
                     } else {
                         removed_count += 1;
                     }
@@ -501,7 +498,7 @@ impl StorageBackend for FileBackend {
             if let Some(session) = self.read_file::<ClientSession>(file_path.clone()).await? {
                 if session.is_expired() {
                     if let Err(e) = fs::remove_file(&file_path).await {
-                        warn!("Failed to remove expired session: {}", e);
+                        warn!("Failed to remove expired session: {e}");
                     } else {
                         removed_count += 1;
                     }
@@ -512,12 +509,12 @@ impl StorageBackend for FileBackend {
         // Clean expired queued messages
         let mut queue_entries = fs::read_dir(&self.queues_dir)
             .await
-            .map_err(|e| MqttError::Io(format!("Failed to read queues directory: {}", e)))?;
+            .map_err(|e| MqttError::Io(format!("Failed to read queues directory: {e}")))?;
 
         while let Some(entry) = queue_entries
             .next_entry()
             .await
-            .map_err(|e| MqttError::Io(format!("Failed to read queue entry: {}", e)))?
+            .map_err(|e| MqttError::Io(format!("Failed to read queue entry: {e}")))?
         {
             let client_dir = entry.path();
             let is_dir = fs::metadata(&client_dir)
@@ -532,7 +529,7 @@ impl StorageBackend for FileBackend {
                     {
                         if message.is_expired() {
                             if let Err(e) = fs::remove_file(&file_path).await {
-                                warn!("Failed to remove expired queued message: {}", e);
+                                warn!("Failed to remove expired queued message: {e}");
                             } else {
                                 removed_count += 1;
                             }
@@ -544,7 +541,7 @@ impl StorageBackend for FileBackend {
                 if let Ok(mut dir) = fs::read_dir(&client_dir).await {
                     if dir.next_entry().await.ok().flatten().is_none() {
                         if let Err(e) = fs::remove_dir(&client_dir).await {
-                            warn!("Failed to remove empty queue directory: {}", e);
+                            warn!("Failed to remove empty queue directory: {e}");
                         }
                     }
                 }

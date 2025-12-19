@@ -133,7 +133,9 @@ impl HotReloadManager {
                                 let new_hash = Self::calculate_config_hash(&new_config);
                                 let old_hash = *config_hash.read().await;
 
-                                if new_hash != old_hash {
+                                if new_hash == old_hash {
+                                    debug!("Configuration file changed but content hash unchanged");
+                                } else {
                                     // Validate the new configuration
                                     if let Err(e) = new_config.validate() {
                                         error!(
@@ -160,16 +162,14 @@ impl HotReloadManager {
                                     };
 
                                     if let Err(e) = change_sender.send(event) {
-                                        warn!("Failed to send config change notification: {}", e);
+                                        warn!("Failed to send config change notification: {e}");
                                     }
 
                                     info!("Configuration successfully reloaded");
-                                } else {
-                                    debug!("Configuration file changed but content hash unchanged");
                                 }
                             }
                             Err(e) => {
-                                error!("Failed to reload configuration: {}", e);
+                                error!("Failed to reload configuration: {e}");
                             }
                         }
                     }
@@ -177,7 +177,7 @@ impl HotReloadManager {
                         // No change
                     }
                     Err(e) => {
-                        warn!("Error checking configuration file: {}", e);
+                        warn!("Error checking configuration file: {e}");
                     }
                 }
             }
@@ -193,11 +193,11 @@ impl HotReloadManager {
     ) -> Result<bool> {
         let metadata = fs::metadata(config_path)
             .await
-            .map_err(|e| MqttError::Io(format!("Failed to read config file metadata: {}", e)))?;
+            .map_err(|e| MqttError::Io(format!("Failed to read config file metadata: {e}")))?;
 
         let current_modified = metadata
             .modified()
-            .map_err(|e| MqttError::Io(format!("Failed to get file modification time: {}", e)))?;
+            .map_err(|e| MqttError::Io(format!("Failed to get file modification time: {e}")))?;
 
         let mut last_mod = last_modified.write().await;
 
@@ -217,15 +217,15 @@ impl HotReloadManager {
     async fn reload_config_file(config_path: &Path) -> Result<BrokerConfig> {
         let config_content = fs::read_to_string(config_path)
             .await
-            .map_err(|e| MqttError::Io(format!("Failed to read config file: {}", e)))?;
+            .map_err(|e| MqttError::Io(format!("Failed to read config file: {e}")))?;
 
         // Support both JSON and TOML formats
         let config = if config_path.extension().and_then(|s| s.to_str()) == Some("toml") {
             toml::from_str(&config_content)
-                .map_err(|e| MqttError::Configuration(format!("Invalid TOML config: {}", e)))?
+                .map_err(|e| MqttError::Configuration(format!("Invalid TOML config: {e}")))?
         } else {
             serde_json::from_str(&config_content)
-                .map_err(|e| MqttError::Configuration(format!("Invalid JSON config: {}", e)))?
+                .map_err(|e| MqttError::Configuration(format!("Invalid JSON config: {e}")))?
         };
 
         Ok(config)
@@ -283,7 +283,10 @@ impl HotReloadManager {
         let new_hash = Self::calculate_config_hash(&new_config);
         let old_hash = *self.config_hash.read().await;
 
-        if new_hash != old_hash {
+        if new_hash == old_hash {
+            info!("Configuration unchanged, no reload needed");
+            Ok(false)
+        } else {
             // Validate the new configuration
             new_config.validate()?;
 
@@ -304,18 +307,15 @@ impl HotReloadManager {
             };
 
             if let Err(e) = self.change_sender.send(event) {
-                warn!("Failed to send config change notification: {}", e);
+                warn!("Failed to send config change notification: {e}");
             }
 
             info!("Configuration manually reloaded successfully");
             Ok(true)
-        } else {
-            info!("Configuration unchanged, no reload needed");
-            Ok(false)
         }
     }
 
-    /// Subscribes to configuration change events
+    #[must_use]
     pub fn subscribe_to_changes(&self) -> broadcast::Receiver<ConfigChangeEvent> {
         self.change_sender.subscribe()
     }
@@ -358,14 +358,14 @@ impl HotReloadManager {
         };
 
         if let Err(e) = self.change_sender.send(event) {
-            warn!("Failed to send config change notification: {}", e);
+            warn!("Failed to send config change notification: {e}");
         }
 
         info!("Partial configuration change applied successfully");
         Ok(())
     }
 
-    /// Gets configuration change statistics
+    #[must_use]
     pub fn get_stats(&self) -> HotReloadStats {
         HotReloadStats {
             config_path: self.config_path.clone(),
@@ -390,7 +390,7 @@ pub struct ConfigSubscriber {
 }
 
 impl ConfigSubscriber {
-    /// Creates a new config subscriber for a broker component
+    #[allow(clippy::must_use_candidate)]
     pub fn new(receiver: broadcast::Receiver<ConfigChangeEvent>, component_name: String) -> Self {
         Self {
             receiver,
@@ -494,7 +494,7 @@ mod tests {
                 let current_config = manager.get_config().await;
                 assert_eq!(current_config.max_clients, 5000);
             }
-            Ok(Err(e)) => panic!("Failed to receive config change: {}", e),
+            Ok(Err(e)) => panic!("Failed to receive config change: {e}"),
             Err(_) => {
                 // Timeout - may happen in test environment, just verify manual reload works
                 println!("File watcher timeout, testing manual reload");

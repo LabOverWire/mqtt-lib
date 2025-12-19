@@ -14,6 +14,7 @@ pub struct RetainedMessages<B: StorageBackend> {
 
 impl<B: StorageBackend + 'static> RetainedMessages<B> {
     /// Create new retained message manager
+    #[must_use]
     pub fn new(storage: Storage<B>) -> Self {
         Self { storage }
     }

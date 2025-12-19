@@ -47,7 +47,7 @@ pub struct BridgeConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub insecure: Option<bool>,
 
-    /// ALPN protocols (e.g., `["x-amzn-mqtt-ca"]` for AWS IoT)
+    /// ALPN protocols (e.g., `["x-amzn-mqtt-ca"]` for AWS `IoT`)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub alpn_protocols: Option<Vec<String>>,
 
@@ -67,7 +67,7 @@ pub struct BridgeConfig {
     #[serde(default)]
     pub protocol_version: MqttVersion,
 
-    /// Delay between reconnection attempts (deprecated: use initial_reconnect_delay)
+    /// Delay between reconnection attempts (deprecated: use `initial_reconnect_delay`)
     #[serde(with = "humantime_serde", default = "default_reconnect_delay")]
     pub reconnect_delay: Duration,
 
@@ -201,7 +201,7 @@ impl BridgeConfig {
         Self {
             name: name.clone(),
             remote_address: remote_address.into(),
-            client_id: format!("bridge-{}", name),
+            client_id: format!("bridge-{name}"),
             username: None,
             password: None,
             use_tls: false,

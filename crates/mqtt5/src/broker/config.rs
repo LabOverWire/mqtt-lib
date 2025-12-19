@@ -634,6 +634,7 @@ pub enum ClaimPattern {
 }
 
 impl ClaimPattern {
+    #[must_use]
     pub fn matches(&self, value: &str) -> bool {
         match self {
             Self::Equals(s) => value == s,

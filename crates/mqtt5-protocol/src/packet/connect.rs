@@ -417,7 +417,7 @@ impl ConnectPacket {
         Ok((Some(will), will_properties))
     }
 
-    /// Convert Properties to WillProperties
+    /// Convert Properties to `WillProperties`
     fn properties_to_will_properties(props: &Properties) -> WillProperties {
         use crate::protocol::v5::properties::{PropertyId, PropertyValue};
 

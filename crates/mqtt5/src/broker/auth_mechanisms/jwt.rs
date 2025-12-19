@@ -117,7 +117,7 @@ impl JwtAuthProvider {
             return Err(JwtError::UnsupportedAlgorithm(header.alg));
         };
 
-        if !self.verify_signature(verifier, message_bytes, &signature_bytes) {
+        if !Self::verify_signature(verifier, message_bytes, &signature_bytes) {
             return Err(JwtError::InvalidSignature);
         }
 
@@ -158,7 +158,7 @@ impl JwtAuthProvider {
         Ok(claims)
     }
 
-    fn verify_signature(&self, verifier: &JwtVerifier, message: &[u8], sig: &[u8]) -> bool {
+    fn verify_signature(verifier: &JwtVerifier, message: &[u8], sig: &[u8]) -> bool {
         match verifier {
             JwtVerifier::Hs256(secret) => {
                 let key = hmac::Key::new(hmac::HMAC_SHA256, secret);
@@ -326,6 +326,7 @@ pub struct JwtClaims {
 }
 
 impl JwtClaims {
+    #[must_use]
     pub fn get_claim(&self, path: &str) -> Option<&serde_json::Value> {
         let parts: Vec<&str> = path.split('.').collect();
         let mut current: Option<&serde_json::Value> = self.extra.get(parts[0]);
@@ -337,6 +338,7 @@ impl JwtClaims {
         current
     }
 
+    #[must_use]
     pub fn get_claim_as_string(&self, path: &str) -> Option<String> {
         if path == "sub" {
             return self.sub.clone();
@@ -354,6 +356,7 @@ impl JwtClaims {
         })
     }
 
+    #[must_use]
     pub fn get_claim_as_array(&self, path: &str) -> Option<Vec<String>> {
         if path == "groups" {
             return self.groups.clone();

@@ -30,7 +30,7 @@ pub struct TlsAcceptorConfig {
 }
 
 impl TlsAcceptorConfig {
-    /// Creates a new TLS acceptor configuration
+    #[allow(clippy::must_use_candidate)]
     pub fn new(
         cert_chain: Vec<CertificateDer<'static>>,
         private_key: PrivateKeyDer<'static>,
@@ -125,7 +125,7 @@ impl TlsAcceptorConfig {
         self
     }
 
-    /// Builds a rustls ServerConfig from this configuration
+    /// Builds a rustls `ServerConfig` from this configuration
     ///
     /// # Errors
     ///

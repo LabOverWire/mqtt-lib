@@ -473,7 +473,7 @@ impl Properties {
             .push(PropertyValue::FourByteInteger(seconds));
     }
 
-    /// Gets the message expiry interval in seconds
+    #[allow(clippy::must_use_candidate)]
     pub fn get_message_expiry_interval(&self) -> Option<u32> {
         self.properties
             .get(&PropertyId::MessageExpiryInterval)
@@ -495,7 +495,7 @@ impl Properties {
             .push(PropertyValue::TwoByteInteger(alias));
     }
 
-    /// Gets the topic alias
+    #[allow(clippy::must_use_candidate)]
     pub fn get_topic_alias(&self) -> Option<u16> {
         self.properties
             .get(&PropertyId::TopicAlias)
@@ -563,7 +563,7 @@ impl Properties {
             .push(PropertyValue::FourByteInteger(seconds));
     }
 
-    /// Gets the session expiry interval
+    #[allow(clippy::must_use_candidate)]
     pub fn get_session_expiry_interval(&self) -> Option<u32> {
         self.properties
             .get(&PropertyId::SessionExpiryInterval)
@@ -609,6 +609,7 @@ impl Properties {
             .push(PropertyValue::BinaryData(data));
     }
 
+    #[allow(clippy::must_use_candidate)]
     pub fn get_authentication_method(&self) -> Option<&String> {
         self.properties
             .get(&PropertyId::AuthenticationMethod)
@@ -622,6 +623,7 @@ impl Properties {
             })
     }
 
+    #[allow(clippy::must_use_candidate)]
     pub fn get_authentication_data(&self) -> Option<&[u8]> {
         self.properties
             .get(&PropertyId::AuthenticationData)
@@ -643,7 +645,7 @@ impl Properties {
             .push(PropertyValue::Byte(u8::from(request)));
     }
 
-    /// Gets request problem information
+    #[allow(clippy::must_use_candidate)]
     pub fn get_request_problem_information(&self) -> Option<bool> {
         self.properties
             .get(&PropertyId::RequestProblemInformation)
@@ -673,7 +675,7 @@ impl Properties {
             .push(PropertyValue::Byte(u8::from(request)));
     }
 
-    /// Gets request response information
+    #[allow(clippy::must_use_candidate)]
     pub fn get_request_response_information(&self) -> Option<bool> {
         self.properties
             .get(&PropertyId::RequestResponseInformation)
@@ -719,7 +721,7 @@ impl Properties {
             .push(PropertyValue::TwoByteInteger(max));
     }
 
-    /// Gets the receive maximum
+    #[allow(clippy::must_use_candidate)]
     pub fn get_receive_maximum(&self) -> Option<u16> {
         self.properties
             .get(&PropertyId::ReceiveMaximum)
@@ -741,7 +743,7 @@ impl Properties {
             .push(PropertyValue::TwoByteInteger(max));
     }
 
-    /// Gets the topic alias maximum
+    #[allow(clippy::must_use_candidate)]
     pub fn get_topic_alias_maximum(&self) -> Option<u16> {
         self.properties
             .get(&PropertyId::TopicAliasMaximum)
@@ -803,7 +805,7 @@ impl Properties {
             .push(PropertyValue::Byte(u8::from(available)));
     }
 
-    /// Gets the maximum QoS
+    #[allow(clippy::must_use_candidate)]
     pub fn get_maximum_qos(&self) -> Option<u8> {
         self.properties
             .get(&PropertyId::MaximumQoS)

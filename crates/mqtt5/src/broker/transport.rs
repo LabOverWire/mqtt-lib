@@ -70,7 +70,7 @@ impl BrokerTransport {
         Self::WebSocket(Box::new(stream))
     }
 
-    /// Creates a new QUIC transport
+    #[must_use]
     pub fn quic(stream: QuicStreamWrapper) -> Self {
         Self::Quic(Box::new(stream))
     }

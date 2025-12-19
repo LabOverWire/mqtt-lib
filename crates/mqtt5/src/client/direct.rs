@@ -155,7 +155,7 @@ pub struct DirectClientInner {
     pub stored_subscriptions: Arc<RwLock<Vec<(String, SubscriptionOptions, CallbackId)>>>,
     /// Whether to queue messages when disconnected
     pub queue_on_disconnect: bool,
-    /// Server's maximum QoS level (from CONNACK)
+    /// Server's maximum `QoS` level (from CONNACK)
     pub server_max_qos: Arc<RwLock<Option<u8>>>,
     /// Authentication handler for enhanced authentication
     pub auth_handler: Option<Arc<dyn AuthHandler>>,
@@ -739,6 +739,27 @@ impl DirectClientInner {
     }
 
     async fn send_publish_packet(&self, publish: PublishPacket, qos: QoS) -> Result<()> {
+        if qos == QoS::AtMostOnce && self.datagrams_available() {
+            if let Some(max_size) = self.max_datagram_size() {
+                let overhead = 5 + publish.topic_name.len();
+                if publish.payload.len() + overhead <= max_size {
+                    let mut buf = bytes::BytesMut::new();
+                    crate::transport::packet_io::encode_packet_to_buffer(
+                        &Packet::Publish(publish.clone()),
+                        &mut buf,
+                    )?;
+                    if buf.len() <= max_size && self.send_datagram(buf.freeze()).is_ok() {
+                        tracing::debug!(
+                            topic = %publish.topic_name,
+                            payload_len = publish.payload.len(),
+                            "Sent QoS 0 PUBLISH via QUIC datagram"
+                        );
+                        return Ok(());
+                    }
+                }
+            }
+        }
+
         if let Some(manager) = &self.quic_stream_manager {
             match manager.strategy() {
                 StreamStrategy::DataPerPublish => {
@@ -790,8 +811,7 @@ impl DirectClientInner {
         Ok(())
     }
 
-    #[allow(dead_code)]
-    pub fn datagrams_available(&self) -> bool {
+    fn datagrams_available(&self) -> bool {
         self.quic_datagrams_enabled
             && self
                 .quic_connection
@@ -800,8 +820,7 @@ impl DirectClientInner {
                 .is_some()
     }
 
-    #[allow(dead_code)]
-    pub fn max_datagram_size(&self) -> Option<usize> {
+    fn max_datagram_size(&self) -> Option<usize> {
         if !self.quic_datagrams_enabled {
             return None;
         }
@@ -810,59 +829,13 @@ impl DirectClientInner {
             .and_then(|c| c.max_datagram_size())
     }
 
-    #[allow(dead_code)]
-    pub fn send_datagram(&self, data: bytes::Bytes) -> Result<()> {
-        if !self.quic_datagrams_enabled {
-            return Err(MqttError::InvalidState("Datagrams not enabled".to_string()));
-        }
+    fn send_datagram(&self, data: bytes::Bytes) -> Result<()> {
         let conn = self
             .quic_connection
             .as_ref()
             .ok_or(MqttError::NotConnected)?;
         conn.send_datagram(data)
             .map_err(|e| MqttError::ConnectionError(format!("Datagram send failed: {e}")))
-    }
-
-    #[allow(dead_code)]
-    pub async fn send_datagram_wait(&self, data: bytes::Bytes) -> Result<()> {
-        if !self.quic_datagrams_enabled {
-            return Err(MqttError::InvalidState("Datagrams not enabled".to_string()));
-        }
-        let conn = self
-            .quic_connection
-            .as_ref()
-            .ok_or(MqttError::NotConnected)?;
-        conn.send_datagram_wait(data)
-            .await
-            .map_err(|e| MqttError::ConnectionError(format!("Datagram send failed: {e}")))
-    }
-
-    #[allow(dead_code)]
-    pub async fn read_datagram(&self) -> Result<bytes::Bytes> {
-        if !self.quic_datagrams_enabled {
-            return Err(MqttError::InvalidState("Datagrams not enabled".to_string()));
-        }
-        let conn = self
-            .quic_connection
-            .as_ref()
-            .ok_or(MqttError::NotConnected)?;
-        conn.read_datagram()
-            .await
-            .map_err(|e| MqttError::ConnectionError(format!("Datagram read failed: {e}")))
-    }
-
-    #[allow(dead_code)]
-    pub fn send_publish_as_datagram(&self, publish: PublishPacket) -> Result<()> {
-        if publish.qos != QoS::AtMostOnce {
-            return Err(MqttError::ProtocolError(
-                "Only QoS 0 publishes can be sent as datagrams".to_string(),
-            ));
-        }
-
-        let mut buf = bytes::BytesMut::new();
-        crate::transport::packet_io::encode_packet_to_buffer(&Packet::Publish(publish), &mut buf)?;
-
-        self.send_datagram(buf.freeze())
     }
 
     /// Create a subscription from filter and reason code
@@ -1117,7 +1090,7 @@ impl DirectClientInner {
                 match handler.initial_response(method).await {
                     Ok(data) => data,
                     Err(e) => {
-                        tracing::warn!("Auth handler initial_response failed: {}", e);
+                        tracing::warn!("Auth handler initial_response failed: {e}");
                         self.options.properties.authentication_data.clone()
                     }
                 }
@@ -1241,15 +1214,15 @@ impl DirectClientInner {
 
         // Start keepalive task (only if keepalive is not zero)
         let keepalive_interval = self.options.keep_alive;
-        if !keepalive_interval.is_zero() {
+        if keepalive_interval.is_zero() {
+            tracing::debug!("💓 KEEPALIVE - Disabled (interval is zero)");
+        } else {
             let keepalive_writer = writer_for_keepalive;
             self.keepalive_handle = Some(tokio::spawn(async move {
                 tracing::debug!("💓 KEEPALIVE - Task starting");
                 keepalive_task_with_writer(keepalive_writer, keepalive_interval).await;
                 tracing::debug!("💓 KEEPALIVE - Task exited");
             }));
-        } else {
-            tracing::debug!("💓 KEEPALIVE - Disabled (interval is zero)");
         }
 
         if let Some(conn) = &self.quic_connection {
@@ -1274,13 +1247,11 @@ impl DirectClientInner {
         Ok(())
     }
 
-    #[allow(dead_code)]
-    pub async fn get_recoverable_flows(&self) -> Vec<(FlowId, FlowFlags)> {
+    async fn get_recoverable_flows(&self) -> Vec<(FlowId, FlowFlags)> {
         self.session.read().await.get_recoverable_flows().await
     }
 
-    #[allow(dead_code)]
-    pub async fn recover_flows(&self) -> Result<usize> {
+    pub(crate) async fn recover_flows(&self) -> Result<usize> {
         let Some(manager) = &self.quic_stream_manager else {
             return Ok(0);
         };
@@ -1313,16 +1284,6 @@ impl DirectClientInner {
         tracing::info!(recovered = recovered, "Flow recovery completed");
 
         Ok(recovered)
-    }
-
-    #[allow(dead_code)]
-    pub async fn clear_flows(&self) {
-        self.session.read().await.clear_flows().await;
-    }
-
-    #[allow(dead_code)]
-    pub async fn flow_count(&self) -> usize {
-        self.session.read().await.flow_count().await
     }
 
     /// Stop background tasks

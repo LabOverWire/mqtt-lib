@@ -14,6 +14,7 @@ pub struct SessionManager<B: StorageBackend> {
 
 impl<B: StorageBackend + 'static> SessionManager<B> {
     /// Create new session manager
+    #[must_use]
     pub fn new(storage: Storage<B>) -> Self {
         Self { storage }
     }

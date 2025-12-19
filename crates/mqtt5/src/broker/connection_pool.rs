@@ -107,7 +107,7 @@ pub struct BufferPool {
 }
 
 impl ConnectionPool {
-    /// Creates a new connection pool with the given configuration
+    #[allow(clippy::must_use_candidate)]
     pub fn new(config: PoolConfig) -> Self {
         Self {
             available_connections: Arc::new(Mutex::new(VecDeque::new())),
@@ -211,7 +211,7 @@ impl ConnectionPool {
         self.buffer_pool.return_write_buffer(buffer).await;
     }
 
-    /// Gets current pool metrics
+    #[must_use]
     pub fn get_metrics(&self) -> (usize, usize, usize, usize, usize, usize) {
         let connections_created = self
             .metrics
@@ -264,7 +264,7 @@ impl ConnectionPool {
 }
 
 impl BufferPool {
-    /// Creates a new buffer pool
+    #[allow(clippy::must_use_candidate)]
     pub fn new(config: PoolConfig) -> Self {
         Self {
             read_buffers: Mutex::new(VecDeque::new()),
@@ -412,6 +412,7 @@ pub struct PooledConnectionManager {
 }
 
 impl PooledConnectionManager {
+    #[allow(clippy::must_use_candidate)]
     pub fn new(config: PoolConfig) -> Self {
         let connection_pool = Arc::new(ConnectionPool::new(config));
         Self { connection_pool }
@@ -427,7 +428,7 @@ impl PooledConnectionManager {
         }
     }
 
-    /// Gets performance metrics from the connection pool
+    #[must_use]
     pub fn get_metrics(&self) -> (usize, usize, usize, usize, usize, usize) {
         self.connection_pool.get_metrics()
     }
@@ -468,7 +469,7 @@ impl ClientContext {
         }
     }
 
-    /// Gets the connection ID
+    #[must_use]
     pub fn client_id(&self) -> Option<String> {
         self.connection.as_ref().map(|c| c.id.clone())
     }

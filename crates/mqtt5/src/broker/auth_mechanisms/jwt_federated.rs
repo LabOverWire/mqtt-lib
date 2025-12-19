@@ -58,7 +58,7 @@ fn compute_user_id(
         ));
     }
     let prefix = prefix.unwrap_or_else(|| extract_domain(issuer));
-    Ok(format!("{}:{}", prefix, sub))
+    Ok(format!("{prefix}:{sub}"))
 }
 
 pub struct FederatedJwtAuthProvider {
@@ -69,7 +69,11 @@ pub struct FederatedJwtAuthProvider {
 }
 
 impl FederatedJwtAuthProvider {
-    #[allow(clippy::missing_errors_doc)]
+    /// Creates a new federated JWT authentication provider with the given issuer configurations.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any static key file cannot be read or if key source configuration is invalid.
     pub fn new(issuers: Vec<JwtIssuerConfig>) -> Result<Self> {
         let mut issuer_map = HashMap::new();
         let mut jwks_cache = JwksCache::new();
@@ -141,11 +145,17 @@ impl FederatedJwtAuthProvider {
         self
     }
 
-    #[allow(clippy::missing_errors_doc)]
+    /// Performs initial JWKS fetch for all configured issuers with JWKS endpoints.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if JWKS fetch fails for any issuer due to network issues,
+    /// invalid URI, TLS errors, or parsing failures.
     pub async fn initial_fetch(&self) -> Result<()> {
         self.jwks_cache.initial_fetch().await
     }
 
+    #[must_use]
     pub fn start_background_refresh(&self) -> tokio::task::JoinHandle<()> {
         self.jwks_cache.start_background_refresh()
     }
@@ -188,20 +198,20 @@ impl FederatedJwtAuthProvider {
                 .get_key_by_issuer(&issuer, kid, &header.alg)
                 .await
             {
-                self.verify_with_jwk_key(&jwk_key, &header.alg, message_bytes, &signature_bytes)
+                Self::verify_with_jwk_key(&jwk_key, &header.alg, message_bytes, &signature_bytes)
             } else if let Some(ref verifier) = issuer_state.static_verifier {
-                self.verify_with_static(verifier, &header.alg, message_bytes, &signature_bytes)
+                Self::verify_with_static(verifier, &header.alg, message_bytes, &signature_bytes)
             } else {
                 return Err(JwtError::KeyNotFound(kid.clone()));
             }
         } else if let Some(ref verifier) = issuer_state.static_verifier {
-            self.verify_with_static(verifier, &header.alg, message_bytes, &signature_bytes)
+            Self::verify_with_static(verifier, &header.alg, message_bytes, &signature_bytes)
         } else {
             let keys = self.jwks_cache.get_keys_for_issuer(&issuer).await;
             let mut found = false;
             for key in keys {
                 if key.algorithm == header.alg
-                    && self.verify_with_jwk_key(&key, &header.alg, message_bytes, &signature_bytes)
+                    && Self::verify_with_jwk_key(&key, &header.alg, message_bytes, &signature_bytes)
                 {
                     found = true;
                     break;
@@ -246,7 +256,7 @@ impl FederatedJwtAuthProvider {
         Ok((claims, issuer))
     }
 
-    fn verify_with_jwk_key(&self, key: &JwkKey, alg: &str, message: &[u8], sig: &[u8]) -> bool {
+    fn verify_with_jwk_key(key: &JwkKey, alg: &str, message: &[u8], sig: &[u8]) -> bool {
         match alg {
             "RS256" => {
                 let public_key = signature::UnparsedPublicKey::new(
@@ -266,13 +276,7 @@ impl FederatedJwtAuthProvider {
         }
     }
 
-    fn verify_with_static(
-        &self,
-        verifier: &JwtVerifier,
-        alg: &str,
-        message: &[u8],
-        sig: &[u8],
-    ) -> bool {
+    fn verify_with_static(verifier: &JwtVerifier, alg: &str, message: &[u8], sig: &[u8]) -> bool {
         if verifier.algorithm() != alg {
             return false;
         }
@@ -311,7 +315,7 @@ impl FederatedJwtAuthProvider {
             FederatedAuthMode::ClaimBinding => {
                 let mut roles: HashSet<String> = config.default_roles.iter().cloned().collect();
                 for mapping in &config.role_mappings {
-                    if self.mapping_matches(claims, mapping) {
+                    if Self::mapping_matches(claims, mapping) {
                         roles.extend(mapping.assign_roles.iter().cloned());
                     }
                 }
@@ -343,7 +347,7 @@ impl FederatedJwtAuthProvider {
         }
     }
 
-    fn mapping_matches(&self, claims: &JwtClaims, mapping: &JwtRoleMapping) -> bool {
+    fn mapping_matches(claims: &JwtClaims, mapping: &JwtRoleMapping) -> bool {
         if let Some(value) = claims.get_claim_as_string(&mapping.claim_path) {
             return mapping.pattern.matches(&value);
         }
@@ -437,7 +441,7 @@ impl AuthProvider for FederatedJwtAuthProvider {
                 Ok((claims, issuer)) => {
                     let config = self.get_issuer_config(&issuer);
                     let issuer_prefix = config.and_then(|c| c.issuer_prefix.as_deref());
-                    let session_scoped = config.map_or(true, |c| c.session_scoped_roles);
+                    let session_scoped = config.is_none_or(|c| c.session_scoped_roles);
                     let auth_mode = config.map_or(FederatedAuthMode::default(), |c| c.auth_mode);
 
                     let user_id =

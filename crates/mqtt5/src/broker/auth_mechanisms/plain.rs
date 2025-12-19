@@ -29,6 +29,7 @@ impl<S: PasswordCredentialStore> PlainAuthProvider<S> {
 }
 
 impl PlainAuthProvider<PasswordAuthProvider> {
+    #[must_use]
     pub fn from_password_provider(provider: Arc<PasswordAuthProvider>) -> Self {
         Self { store: provider }
     }
@@ -179,7 +180,7 @@ mod tests {
                 .read()
                 .unwrap()
                 .get(username)
-                .map_or(false, |stored| stored == password)
+                .is_some_and(|stored| stored == password)
         }
     }
 

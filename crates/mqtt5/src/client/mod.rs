@@ -221,7 +221,7 @@ impl MqttClient {
     ///             println!("Reconnecting attempt {}", attempt);
     ///         }
     ///         ConnectionEvent::ReconnectFailed { error } => {
-    ///             println!("Reconnection failed: {}", error);
+    ///             println!("Reconnection failed: {e}"rror);
     ///         }
     ///     }
     /// }).await?;
@@ -336,11 +336,11 @@ impl MqttClient {
 
             if let (Some(cert), Some(key)) = (cert_pem, key_pem) {
                 if let Err(e) = config.load_client_cert_pem_bytes(&cert) {
-                    tracing::error!("Failed to load client certificate: {}", e);
+                    tracing::error!("Failed to load client certificate: {e}");
                     return;
                 }
                 if let Err(e) = config.load_client_key_pem_bytes(&key) {
-                    tracing::error!("Failed to load client key: {}", e);
+                    tracing::error!("Failed to load client key: {e}");
                     return;
                 }
                 tracing::debug!("Loaded client cert and key");
@@ -348,7 +348,7 @@ impl MqttClient {
 
             if let Some(ca_cert) = ca_cert_pem {
                 if let Err(e) = config.load_ca_cert_pem_bytes(&ca_cert) {
-                    tracing::error!("Failed to load CA certificate: {}", e);
+                    tracing::error!("Failed to load CA certificate: {e}");
                     return;
                 }
                 config.use_system_roots = false;
@@ -673,14 +673,14 @@ impl MqttClient {
         );
 
         let (client_transport_type, host, port) = Self::parse_address(address)?;
-        let addrs = self.resolve_addresses(host, port)?;
-        let addresses_to_try = self.select_addresses_for_connection(&addrs, host);
+        let addrs = Self::resolve_addresses(host, port)?;
+        let addresses_to_try = Self::select_addresses_for_connection(&addrs, host);
 
         self.try_connect_to_addresses(addresses_to_try, client_transport_type, host)
             .await
     }
 
-    fn resolve_addresses(&self, host: &str, port: u16) -> Result<Vec<std::net::SocketAddr>> {
+    fn resolve_addresses(host: &str, port: u16) -> Result<Vec<std::net::SocketAddr>> {
         let addr_str = format!("{host}:{port}");
         tracing::debug!(addr_str = %addr_str, "🌐 DNS RESOLUTION - Starting address resolution");
 
@@ -704,7 +704,6 @@ impl MqttClient {
     }
 
     fn select_addresses_for_connection<'a>(
-        &self,
         addrs: &'a [std::net::SocketAddr],
         host: &str,
     ) -> &'a [std::net::SocketAddr] {
@@ -752,6 +751,7 @@ impl MqttClient {
 
                     self.trigger_connection_event(ConnectionEvent::Connected { session_present })
                         .await;
+                    self.recover_quic_flows().await;
                     self.restore_subscriptions_after_connect(stored_subs, session_present)
                         .await;
 
@@ -772,6 +772,15 @@ impl MqttClient {
     async fn reset_reconnect_counter(&self) {
         let mut inner = self.inner.write().await;
         inner.reconnect_attempt = 0;
+    }
+
+    async fn recover_quic_flows(&self) {
+        let inner = self.inner.read().await;
+        match inner.recover_flows().await {
+            Ok(0) => {}
+            Ok(n) => tracing::info!(recovered = n, "Recovered QUIC flows after reconnect"),
+            Err(e) => tracing::warn!(error = %e, "Failed to recover QUIC flows"),
+        }
     }
 
     async fn restore_subscriptions_after_connect(
@@ -843,6 +852,9 @@ impl MqttClient {
                 // Trigger connected event
                 self.trigger_connection_event(ConnectionEvent::Connected { session_present })
                     .await;
+
+                // Recover QUIC flows if applicable
+                self.recover_quic_flows().await;
 
                 // Restore callbacks and subscriptions
                 if !stored_subs.is_empty() {
@@ -1587,7 +1599,7 @@ impl MqttClient {
 
     /// Initiates re-authentication with the broker
     ///
-    /// This sends an AUTH packet with ReAuthenticate reason code to the broker,
+    /// This sends an AUTH packet with `ReAuthenticate` reason code to the broker,
     /// triggering a new authentication exchange using the same method as the
     /// initial connection.
     ///
@@ -1760,7 +1772,7 @@ impl MqttClient {
         inner.disconnect_with_packet(false).await
     }
 
-    /// Detects if the hostname is an AWS IoT endpoint
+    /// Detects if the hostname is an AWS `IoT` endpoint
     fn is_aws_iot_endpoint(hostname: &str) -> bool {
         // AWS IoT Core endpoints follow the pattern: *.iot.*.amazonaws.com
         hostname.contains(".iot.") && hostname.ends_with(".amazonaws.com")
@@ -1862,7 +1874,7 @@ impl MqttClient {
 
                     // Attempt reconnection with exponential backoff
                     if let Err(e) = self.attempt_reconnection(&address, &reconnect_config).await {
-                        tracing::error!("🔍 MONITOR TASK - Reconnection failed: {}", e);
+                        tracing::error!("🔍 MONITOR TASK - Reconnection failed: {e}");
                         break;
                     }
                 } else {
@@ -2006,7 +2018,7 @@ impl MqttClient {
             msg.dup = true;
 
             if let Err(e) = self.publish_packet(msg).await {
-                tracing::warn!("Failed to send queued message: {}", e);
+                tracing::warn!("Failed to send queued message: {e}");
             }
         }
     }

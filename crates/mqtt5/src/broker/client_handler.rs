@@ -212,10 +212,10 @@ impl ClientHandler {
             Ok(Err(e)) => {
                 // Log connection errors at appropriate level based on error type
                 if e.to_string().contains("Connection closed") {
-                    info!("Client disconnected during connect phase: {}", e);
+                    info!("Client disconnected during connect phase: {e}");
                     tracing::debug!("Connection closed error details: {:?}", e);
                 } else {
-                    warn!("Connect error: {}", e);
+                    warn!("Connect error: {e}");
                     tracing::debug!("Connect error details: {:?}", e);
                 }
                 return Err(e);
@@ -263,18 +263,20 @@ impl ClientHandler {
         };
 
         // Only unregister client if not taken over
-        if !session_taken_over {
-            info!("Unregistering client {} (not taken over)", client_id);
-            if !preserve_session {
-                self.router.unregister_client(&client_id).await;
-            } else {
-                self.router.disconnect_client(&client_id).await;
-            }
-        } else {
+
+        if session_taken_over {
             info!(
                 "Skipping unregister for client {} (session taken over)",
                 client_id
             );
+        } else {
+            info!("Unregistering client {} (not taken over)", client_id);
+
+            if preserve_session {
+                self.router.disconnect_client(&client_id).await;
+            } else {
+                self.router.unregister_client(&client_id).await;
+            }
         }
 
         // Unregister connection from resource monitor
@@ -958,8 +960,7 @@ impl ClientHandler {
                     publish.topic_name.clone_from(topic);
                 } else {
                     return Err(MqttError::ProtocolError(format!(
-                        "Topic alias {} not found",
-                        alias
+                        "Topic alias {alias} not found"
                     )));
                 }
             } else {

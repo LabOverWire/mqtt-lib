@@ -42,7 +42,7 @@ impl TurmoilBrokerConfig {
         } else {
             &self.address
         };
-        self.address = format!("{}:{}", host, port);
+        self.address = format!("{host}:{port}");
         self
     }
 
@@ -82,7 +82,7 @@ impl TurmoilBroker {
         let addr: SocketAddr = config
             .address
             .parse()
-            .map_err(|e| MqttError::Configuration(format!("Invalid address: {}", e)))?;
+            .map_err(|e| MqttError::Configuration(format!("Invalid address: {e}")))?;
 
         let broker_config = BrokerConfig::default()
             .with_bind_address(addr)
@@ -93,7 +93,7 @@ impl TurmoilBroker {
         Ok(Self { inner, config })
     }
 
-    /// Creates a new Turmoil broker with configuration (placeholder for tests)
+    #[allow(clippy::must_use_candidate)]
     pub fn with_config(config: TurmoilBrokerConfig) -> TurmoilBrokerBuilder {
         TurmoilBrokerBuilder { config }
     }
@@ -113,7 +113,7 @@ impl TurmoilBroker {
     }
 }
 
-/// Builder for TurmoilBroker to match test expectations
+/// Builder for `TurmoilBroker` to match test expectations
 pub struct TurmoilBrokerBuilder {
     config: TurmoilBrokerConfig,
 }

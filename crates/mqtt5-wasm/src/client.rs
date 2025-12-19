@@ -171,7 +171,7 @@ impl WasmMqttClient {
                         };
 
                         if was_connected {
-                            let error_msg = format!("Packet read error: {}", e);
+                            let error_msg = format!("Packet read error: {e}");
                             web_sys::console::error_1(&error_msg.clone().into());
                             Self::trigger_error_callback(&state, &error_msg);
                             Self::trigger_disconnect_callback(&state);
@@ -244,7 +244,7 @@ impl WasmMqttClient {
                 let packet = Packet::PingReq;
                 let mut buf = BytesMut::new();
                 if let Err(e) = encode_packet(&packet, &mut buf) {
-                    web_sys::console::error_1(&format!("Ping encode error: {}", e).into());
+                    web_sys::console::error_1(&format!("Ping encode error: {e}").into());
                     continue;
                 }
 
@@ -259,7 +259,7 @@ impl WasmMqttClient {
                     Some(writer_rc) => match writer_rc.borrow_mut().write(&buf) {
                         Ok(()) => {}
                         Err(e) => {
-                            let error_msg = format!("Ping send error: {}", e);
+                            let error_msg = format!("Ping send error: {e}");
                             web_sys::console::error_1(&error_msg.clone().into());
                             state.borrow_mut().connected = false;
                             Self::trigger_error_callback(&state, &error_msg);
@@ -423,7 +423,7 @@ impl WasmMqttClient {
                                         &mut buf,
                                     ) {
                                         web_sys::console::error_1(
-                                            &format!("PUBREC encode error: {}", e).into(),
+                                            &format!("PUBREC encode error: {e}").into(),
                                         );
                                         continue;
                                     }
@@ -433,7 +433,7 @@ impl WasmMqttClient {
                                         spawn_local(async move {
                                             if let Err(e) = writer_rc.borrow_mut().write(&buf) {
                                                 web_sys::console::error_1(
-                                                    &format!("PUBREC send error: {}", e).into(),
+                                                    &format!("PUBREC send error: {e}").into(),
                                                 );
                                             }
                                         });
@@ -542,7 +542,7 @@ impl WasmMqttClient {
                                 &mut buf,
                             ) {
                                 web_sys::console::error_1(
-                                    &format!("PUBREL encode error: {}", e).into(),
+                                    &format!("PUBREL encode error: {e}").into(),
                                 );
                                 continue;
                             }
@@ -552,7 +552,7 @@ impl WasmMqttClient {
                                 spawn_local(async move {
                                     if let Err(e) = writer_rc.borrow_mut().write(&buf) {
                                         web_sys::console::error_1(
-                                            &format!("PUBREL send error: {}", e).into(),
+                                            &format!("PUBREL send error: {e}").into(),
                                         );
                                     }
                                 });
@@ -650,7 +650,7 @@ impl WasmMqttClient {
                                 &mut buf,
                             ) {
                                 web_sys::console::error_1(
-                                    &format!("PUBCOMP encode error: {}", e).into(),
+                                    &format!("PUBCOMP encode error: {e}").into(),
                                 );
                                 continue;
                             }
@@ -660,7 +660,7 @@ impl WasmMqttClient {
                                 spawn_local(async move {
                                     if let Err(e) = writer_rc.borrow_mut().write(&buf) {
                                         web_sys::console::error_1(
-                                            &format!("PUBCOMP send error: {}", e).into(),
+                                            &format!("PUBCOMP send error: {e}").into(),
                                         );
                                     }
                                 });
@@ -769,7 +769,7 @@ impl WasmMqttClient {
         transport
             .connect()
             .await
-            .map_err(|e| JsValue::from_str(&format!("Transport connection failed: {}", e)))?;
+            .map_err(|e| JsValue::from_str(&format!("Transport connection failed: {e}")))?;
 
         let client_id = self.state.borrow().client_id.clone();
         let protocol_version = config.protocol_version;
@@ -809,12 +809,12 @@ impl WasmMqttClient {
         let packet = Packet::Connect(Box::new(connect_packet));
         let mut buf = BytesMut::new();
         encode_packet(&packet, &mut buf)
-            .map_err(|e| JsValue::from_str(&format!("Packet encoding failed: {}", e)))?;
+            .map_err(|e| JsValue::from_str(&format!("Packet encoding failed: {e}")))?;
 
         transport
             .write(&buf)
             .await
-            .map_err(|e| JsValue::from_str(&format!("Write failed: {}", e)))?;
+            .map_err(|e| JsValue::from_str(&format!("Write failed: {e}")))?;
 
         if let Some(method) = &config.authentication_method {
             self.state.borrow_mut().auth_method = Some(method.clone());
@@ -822,7 +822,7 @@ impl WasmMqttClient {
 
         let (mut reader, writer) = transport
             .into_split()
-            .map_err(|e| JsValue::from_str(&format!("Transport split failed: {}", e)))?;
+            .map_err(|e| JsValue::from_str(&format!("Transport split failed: {e}")))?;
 
         let writer_rc = Rc::new(RefCell::new(writer));
         self.state.borrow_mut().writer = Some(Rc::clone(&writer_rc));
@@ -830,7 +830,7 @@ impl WasmMqttClient {
         loop {
             let packet = read_packet(&mut reader)
                 .await
-                .map_err(|e| JsValue::from_str(&format!("Packet read failed: {}", e)))?;
+                .map_err(|e| JsValue::from_str(&format!("Packet read failed: {e}")))?;
 
             match packet {
                 Packet::ConnAck(connack) => {
@@ -937,7 +937,7 @@ impl WasmMqttClient {
         let packet = Packet::Publish(publish_packet);
         let mut buf = BytesMut::new();
         encode_packet(&packet, &mut buf)
-            .map_err(|e| JsValue::from_str(&format!("Packet encoding failed: {}", e)))?;
+            .map_err(|e| JsValue::from_str(&format!("Packet encoding failed: {e}")))?;
 
         let writer_rc = self
             .state
@@ -949,7 +949,7 @@ impl WasmMqttClient {
         writer_rc
             .borrow_mut()
             .write(&buf)
-            .map_err(|e| JsValue::from_str(&format!("Write failed: {}", e)))?;
+            .map_err(|e| JsValue::from_str(&format!("Write failed: {e}")))?;
 
         Ok(())
     }
@@ -1026,7 +1026,7 @@ impl WasmMqttClient {
         let packet = Packet::Publish(publish_packet);
         let mut buf = BytesMut::new();
         encode_packet(&packet, &mut buf)
-            .map_err(|e| JsValue::from_str(&format!("Packet encoding failed: {}", e)))?;
+            .map_err(|e| JsValue::from_str(&format!("Packet encoding failed: {e}")))?;
 
         let writer_rc = self
             .state
@@ -1038,7 +1038,7 @@ impl WasmMqttClient {
         writer_rc
             .borrow_mut()
             .write(&buf)
-            .map_err(|e| JsValue::from_str(&format!("Write failed: {}", e)))?;
+            .map_err(|e| JsValue::from_str(&format!("Write failed: {e}")))?;
 
         Ok(())
     }
@@ -1099,7 +1099,7 @@ impl WasmMqttClient {
         let packet = Packet::Publish(publish_packet);
         let mut buf = BytesMut::new();
         encode_packet(&packet, &mut buf)
-            .map_err(|e| JsValue::from_str(&format!("Packet encoding failed: {}", e)))?;
+            .map_err(|e| JsValue::from_str(&format!("Packet encoding failed: {e}")))?;
 
         let writer_rc = self
             .state
@@ -1111,7 +1111,7 @@ impl WasmMqttClient {
         writer_rc
             .borrow_mut()
             .write(&buf)
-            .map_err(|e| JsValue::from_str(&format!("Write failed: {}", e)))?;
+            .map_err(|e| JsValue::from_str(&format!("Write failed: {e}")))?;
 
         Ok(packet_id)
     }
@@ -1173,7 +1173,7 @@ impl WasmMqttClient {
         let packet = Packet::Publish(publish_packet);
         let mut buf = BytesMut::new();
         encode_packet(&packet, &mut buf)
-            .map_err(|e| JsValue::from_str(&format!("Packet encoding failed: {}", e)))?;
+            .map_err(|e| JsValue::from_str(&format!("Packet encoding failed: {e}")))?;
 
         let writer_rc = self
             .state
@@ -1185,7 +1185,7 @@ impl WasmMqttClient {
         writer_rc
             .borrow_mut()
             .write(&buf)
-            .map_err(|e| JsValue::from_str(&format!("Write failed: {}", e)))?;
+            .map_err(|e| JsValue::from_str(&format!("Write failed: {e}")))?;
 
         Ok(packet_id)
     }
@@ -1228,7 +1228,7 @@ impl WasmMqttClient {
         let packet = Packet::Subscribe(subscribe_packet);
         let mut buf = BytesMut::new();
         encode_packet(&packet, &mut buf)
-            .map_err(|e| JsValue::from_str(&format!("Packet encoding failed: {}", e)))?;
+            .map_err(|e| JsValue::from_str(&format!("Packet encoding failed: {e}")))?;
 
         let writer_rc = self
             .state
@@ -1240,7 +1240,7 @@ impl WasmMqttClient {
         writer_rc
             .borrow_mut()
             .write(&buf)
-            .map_err(|e| JsValue::from_str(&format!("Write failed: {}", e)))?;
+            .map_err(|e| JsValue::from_str(&format!("Write failed: {e}")))?;
 
         Ok(packet_id)
     }
@@ -1330,7 +1330,7 @@ impl WasmMqttClient {
         let packet = Packet::Subscribe(subscribe_packet);
         let mut buf = BytesMut::new();
         encode_packet(&packet, &mut buf)
-            .map_err(|e| JsValue::from_str(&format!("Packet encoding failed: {}", e)))?;
+            .map_err(|e| JsValue::from_str(&format!("Packet encoding failed: {e}")))?;
 
         let writer_rc = self
             .state
@@ -1342,7 +1342,7 @@ impl WasmMqttClient {
         writer_rc
             .borrow_mut()
             .write(&buf)
-            .map_err(|e| JsValue::from_str(&format!("Write failed: {}", e)))?;
+            .map_err(|e| JsValue::from_str(&format!("Write failed: {e}")))?;
 
         Ok(packet_id)
     }
@@ -1404,7 +1404,7 @@ impl WasmMqttClient {
         let packet = Packet::Subscribe(subscribe_packet);
         let mut buf = BytesMut::new();
         encode_packet(&packet, &mut buf)
-            .map_err(|e| JsValue::from_str(&format!("Packet encoding failed: {}", e)))?;
+            .map_err(|e| JsValue::from_str(&format!("Packet encoding failed: {e}")))?;
 
         let writer_rc = self
             .state
@@ -1416,7 +1416,7 @@ impl WasmMqttClient {
         writer_rc
             .borrow_mut()
             .write(&buf)
-            .map_err(|e| JsValue::from_str(&format!("Write failed: {}", e)))?;
+            .map_err(|e| JsValue::from_str(&format!("Write failed: {e}")))?;
 
         Ok(packet_id)
     }
@@ -1468,7 +1468,7 @@ impl WasmMqttClient {
         let packet = Packet::Unsubscribe(unsubscribe_packet);
         let mut buf = BytesMut::new();
         encode_packet(&packet, &mut buf)
-            .map_err(|e| JsValue::from_str(&format!("Packet encoding failed: {}", e)))?;
+            .map_err(|e| JsValue::from_str(&format!("Packet encoding failed: {e}")))?;
 
         let writer_rc = self
             .state
@@ -1480,7 +1480,7 @@ impl WasmMqttClient {
         writer_rc
             .borrow_mut()
             .write(&buf)
-            .map_err(|e| JsValue::from_str(&format!("Write failed: {}", e)))?;
+            .map_err(|e| JsValue::from_str(&format!("Write failed: {e}")))?;
 
         Ok(packet_id)
     }
@@ -1493,7 +1493,7 @@ impl WasmMqttClient {
         let packet = Packet::Disconnect(disconnect_packet);
         let mut buf = BytesMut::new();
         encode_packet(&packet, &mut buf)
-            .map_err(|e| JsValue::from_str(&format!("DISCONNECT packet encoding failed: {}", e)))?;
+            .map_err(|e| JsValue::from_str(&format!("DISCONNECT packet encoding failed: {e}")))?;
 
         let writer_rc = loop {
             match self.state.try_borrow_mut() {
@@ -1511,10 +1511,10 @@ impl WasmMqttClient {
             let mut writer = writer_rc.borrow_mut();
             writer
                 .write(&buf)
-                .map_err(|e| JsValue::from_str(&format!("DISCONNECT packet send failed: {}", e)))?;
+                .map_err(|e| JsValue::from_str(&format!("DISCONNECT packet send failed: {e}")))?;
             writer
                 .close()
-                .map_err(|e| JsValue::from_str(&format!("Close failed: {}", e)))?;
+                .map_err(|e| JsValue::from_str(&format!("Close failed: {e}")))?;
         }
 
         Self::trigger_disconnect_callback(&self.state);
@@ -1562,7 +1562,7 @@ impl WasmMqttClient {
         let packet = Packet::Auth(auth_packet);
         let mut buf = BytesMut::new();
         encode_packet(&packet, &mut buf)
-            .map_err(|e| JsValue::from_str(&format!("AUTH packet encoding failed: {}", e)))?;
+            .map_err(|e| JsValue::from_str(&format!("AUTH packet encoding failed: {e}")))?;
 
         let writer_rc = self
             .state
@@ -1574,7 +1574,7 @@ impl WasmMqttClient {
         writer_rc
             .borrow_mut()
             .write(&buf)
-            .map_err(|e| JsValue::from_str(&format!("AUTH send failed: {}", e)))?;
+            .map_err(|e| JsValue::from_str(&format!("AUTH send failed: {e}")))?;
 
         Ok(())
     }
@@ -1652,7 +1652,7 @@ impl WasmMqttClient {
         let packet = Packet::Subscribe(subscribe_packet);
         let mut buf = BytesMut::new();
         encode_packet(&packet, &mut buf)
-            .map_err(|e| JsValue::from_str(&format!("Packet encoding failed: {}", e)))?;
+            .map_err(|e| JsValue::from_str(&format!("Packet encoding failed: {e}")))?;
 
         let writer_rc = self
             .state
@@ -1664,7 +1664,7 @@ impl WasmMqttClient {
         writer_rc
             .borrow_mut()
             .write(&buf)
-            .map_err(|e| JsValue::from_str(&format!("Write failed: {}", e)))?;
+            .map_err(|e| JsValue::from_str(&format!("Write failed: {e}")))?;
 
         Ok(packet_id)
     }
@@ -1726,7 +1726,7 @@ impl WasmMqttClient {
         let packet = Packet::Publish(publish_packet);
         let mut buf = BytesMut::new();
         encode_packet(&packet, &mut buf)
-            .map_err(|e| JsValue::from_str(&format!("PUBLISH packet encoding failed: {}", e)))?;
+            .map_err(|e| JsValue::from_str(&format!("PUBLISH packet encoding failed: {e}")))?;
 
         let writer_rc = self
             .state
@@ -1738,7 +1738,7 @@ impl WasmMqttClient {
         writer_rc
             .borrow_mut()
             .write(&buf)
-            .map_err(|e| JsValue::from_str(&format!("PUBLISH send failed: {}", e)))?;
+            .map_err(|e| JsValue::from_str(&format!("PUBLISH send failed: {e}")))?;
 
         Ok(())
     }

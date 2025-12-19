@@ -15,6 +15,7 @@ const TRACESTATE_HEADER: &str = "tracestate";
 pub type UserProperty = (String, String);
 
 #[cfg(feature = "opentelemetry")]
+#[must_use]
 pub fn extract_user_properties(properties: &Properties) -> Vec<UserProperty> {
     if let Some(values) = properties.get_all(PropertyId::UserProperty) {
         values

@@ -39,6 +39,7 @@ pub struct QuicStreamManager {
 }
 
 impl QuicStreamManager {
+    #[must_use]
     pub fn new(connection: Arc<Connection>, strategy: StreamStrategy) -> Self {
         Self {
             connection,
@@ -153,6 +154,7 @@ impl QuicStreamManager {
         self.flow_flags.clean = u8::from(!enable);
     }
 
+    #[must_use]
     pub fn current_flow_flags(&self) -> FlowFlags {
         self.flow_flags
     }
@@ -186,10 +188,12 @@ impl QuicStreamManager {
         Ok(())
     }
 
+    #[must_use]
     pub fn strategy(&self) -> StreamStrategy {
         self.strategy
     }
 
+    #[must_use]
     pub fn flow_headers_enabled(&self) -> bool {
         self.enable_flow_headers
     }

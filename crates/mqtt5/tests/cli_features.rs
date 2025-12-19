@@ -329,7 +329,7 @@ async fn test_cli_sub_count() {
     let broker_url = broker.address();
 
     // Start subscriber with count=2
-    let sub_handle = run_cli_sub_async(broker_url, "test/count", 2, &[]).await;
+    let sub_handle = run_cli_sub_async(broker_url, "test/count", 2, &[]);
 
     // Give subscriber time to connect
     tokio::time::sleep(Duration::from_millis(500)).await;

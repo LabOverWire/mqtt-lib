@@ -63,7 +63,7 @@ async fn test_cli_pub_sub_functionality() {
     );
 
     // Test with verbose flag
-    let sub_handle = run_cli_sub_async(broker_url, "test/verbose", 1, &["--verbose"]).await;
+    let sub_handle = run_cli_sub_async(broker_url, "test/verbose", 1, &["--verbose"]);
 
     tokio::time::sleep(Duration::from_millis(500)).await;
 
@@ -136,7 +136,7 @@ async fn test_cli_topic_patterns() {
     let broker_url = broker.address();
 
     // Test multilevel wildcard
-    let sub_handle = run_cli_sub_async(broker_url, "sensors/#", 3, &["--verbose"]).await;
+    let sub_handle = run_cli_sub_async(broker_url, "sensors/#", 3, &["--verbose"]);
 
     tokio::time::sleep(Duration::from_millis(500)).await;
 
@@ -170,7 +170,7 @@ async fn test_cli_message_throughput() {
     let broker_url = broker.address();
 
     // Start subscriber for throughput test
-    let sub_handle = run_cli_sub_async(broker_url, "perf/test", 10, &[]).await;
+    let sub_handle = run_cli_sub_async(broker_url, "perf/test", 10, &[]);
 
     tokio::time::sleep(Duration::from_millis(500)).await;
 

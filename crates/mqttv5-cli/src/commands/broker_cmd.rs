@@ -312,7 +312,7 @@ pub async fn execute(mut cmd: BrokerCommand, verbose: bool, debug: bool) -> Resu
                 println!("\n🛑 Received Ctrl+C, shutting down gracefully...");
             }
             Err(err) => {
-                tracing::error!("Unable to listen for shutdown signal: {}", err);
+                tracing::error!("Unable to listen for shutdown signal: {err}");
             }
         }
     };

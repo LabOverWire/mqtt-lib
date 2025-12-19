@@ -37,6 +37,7 @@ pub struct AuthRateLimiter {
 }
 
 impl AuthRateLimiter {
+    #[must_use]
     pub fn new(max_attempts: u32, window_secs: u64, lockout_secs: u64) -> Self {
         Self {
             entries: Arc::new(RwLock::new(HashMap::new())),
@@ -645,18 +646,19 @@ impl PasswordAuthProvider {
     /// Returns true if the password is valid, false otherwise
     pub async fn verify_user_password(&self, username: &str, password: &str) -> bool {
         let users = self.users.read().await;
-        users.get(username).map_or(false, |hash| {
-            Self::verify_password(password, hash).unwrap_or(false)
-        })
+        users
+            .get(username)
+            .is_some_and(|hash| Self::verify_password(password, hash).unwrap_or(false))
     }
 
     /// Verifies a password for a user (blocking version)
     /// This is useful for sync contexts
+    #[must_use]
     pub fn verify_user_password_blocking(&self, username: &str, password: &str) -> bool {
         let users = self.users.blocking_read();
-        users.get(username).map_or(false, |hash| {
-            Self::verify_password(password, hash).unwrap_or(false)
-        })
+        users
+            .get(username)
+            .is_some_and(|hash| Self::verify_password(password, hash).unwrap_or(false))
     }
 }
 
@@ -1168,11 +1170,11 @@ impl PasswordAuthProvider {
     pub fn hash_password(password: &str) -> Result<String> {
         let mut bytes = [0u8; Salt::RECOMMENDED_LENGTH];
         getrandom::fill(&mut bytes).map_err(|e| {
-            error!("Failed to generate random salt: {}", e);
+            error!("Failed to generate random salt: {e}");
             MqttError::AuthenticationFailed
         })?;
         let salt = SaltString::encode_b64(&bytes).map_err(|e| {
-            error!("Failed to encode salt: {}", e);
+            error!("Failed to encode salt: {e}");
             MqttError::AuthenticationFailed
         })?;
         let argon2 = Argon2::default();
@@ -1180,7 +1182,7 @@ impl PasswordAuthProvider {
             .hash_password(password.as_bytes(), &salt)
             .map(|hash| hash.to_string())
             .map_err(|e| {
-                error!("Failed to hash password: {}", e);
+                error!("Failed to hash password: {e}");
                 MqttError::AuthenticationFailed
             })
     }
@@ -1192,7 +1194,7 @@ impl PasswordAuthProvider {
     /// Returns an error if Argon2 verification fails
     pub fn verify_password(password: &str, hash: &str) -> Result<bool> {
         let parsed_hash = PasswordHash::new(hash).map_err(|e| {
-            error!("Failed to parse password hash: {}", e);
+            error!("Failed to parse password hash: {e}");
             MqttError::AuthenticationFailed
         })?;
         Ok(Argon2::default()
@@ -1351,10 +1353,9 @@ mod tests {
         let bob_hash = PasswordAuthProvider::hash_password("password456").unwrap();
 
         writeln!(temp_file, "# Password file").unwrap();
-        writeln!(temp_file, "alice:{}", alice_hash).unwrap();
-        writeln!(temp_file, "bob:{}", bob_hash).unwrap();
-        writeln!(temp_file, "# Comment line").unwrap();
-        writeln!(temp_file, "").unwrap(); // Empty line
+        writeln!(temp_file, "alice:{alice_hash}").unwrap();
+        writeln!(temp_file, "bob:{bob_hash}").unwrap();
+        writeln!(temp_file, "# Comment line\n").unwrap();
         writeln!(temp_file, "invalid_line_without_colon").unwrap();
         temp_file.flush().unwrap();
 
@@ -1404,7 +1405,7 @@ mod tests {
         // Create temporary password file with one user
         let mut temp_file = NamedTempFile::new().unwrap();
         let alice_hash = PasswordAuthProvider::hash_password("secret123").unwrap();
-        writeln!(temp_file, "alice:{}", alice_hash).unwrap();
+        writeln!(temp_file, "alice:{alice_hash}").unwrap();
         temp_file.flush().unwrap();
 
         let provider = PasswordAuthProvider::from_file(temp_file.path())
@@ -1414,7 +1415,7 @@ mod tests {
 
         // Update file with additional user
         let bob_hash = PasswordAuthProvider::hash_password("password456").unwrap();
-        writeln!(temp_file, "bob:{}", bob_hash).unwrap();
+        writeln!(temp_file, "bob:{bob_hash}").unwrap();
         temp_file.flush().unwrap();
 
         // Reload should pick up the new user
@@ -1433,8 +1434,8 @@ mod tests {
         let mut password_file = NamedTempFile::new().unwrap();
         let alice_hash = PasswordAuthProvider::hash_password("secret123").unwrap();
         let bob_hash = PasswordAuthProvider::hash_password("password456").unwrap();
-        writeln!(password_file, "alice:{}", alice_hash).unwrap();
-        writeln!(password_file, "bob:{}", bob_hash).unwrap();
+        writeln!(password_file, "alice:{alice_hash}").unwrap();
+        writeln!(password_file, "bob:{bob_hash}").unwrap();
         password_file.flush().unwrap();
 
         // Create temporary ACL file
@@ -1515,7 +1516,7 @@ mod tests {
         // Create temporary password file
         let mut password_file = NamedTempFile::new().unwrap();
         let alice_hash = PasswordAuthProvider::hash_password("secret123").unwrap();
-        writeln!(password_file, "alice:{}", alice_hash).unwrap();
+        writeln!(password_file, "alice:{alice_hash}").unwrap();
         password_file.flush().unwrap();
 
         // Create auth provider with allow-all ACL
@@ -1561,9 +1562,8 @@ mod tests {
         let addr = "127.0.0.1:12345".parse().unwrap();
 
         // Test successful cert auth
-        let mut connect = ConnectPacket::new(mqtt5_protocol::ConnectOptions::new(&format!(
-            "cert:{}",
-            fingerprint
+        let mut connect = ConnectPacket::new(mqtt5_protocol::ConnectOptions::new(format!(
+            "cert:{fingerprint}"
         )));
         let result = provider.authenticate(&connect, addr).await.unwrap();
         assert!(result.authenticated);
@@ -1572,7 +1572,7 @@ mod tests {
         // Test unknown fingerprint
         let unknown_fingerprint =
             "c3d4e5f6789012345678901234567890abcdef123456789012345678901234567b";
-        connect.client_id = format!("cert:{}", unknown_fingerprint);
+        connect.client_id = format!("cert:{unknown_fingerprint}");
         let result = provider.authenticate(&connect, addr).await.unwrap();
         assert!(!result.authenticated);
         assert_eq!(result.reason_code, ReasonCode::NotAuthorized);
@@ -1650,8 +1650,7 @@ mod tests {
             "abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd:bob"
         )
         .unwrap();
-        writeln!(temp_file, "# Another comment").unwrap();
-        writeln!(temp_file, "").unwrap(); // Empty line
+        writeln!(temp_file, "# Another comment\n").unwrap();
         writeln!(temp_file, "invalid:line:too:many:colons").unwrap();
         writeln!(temp_file, "short:charlie").unwrap(); // Invalid fingerprint (too short)
         writeln!(

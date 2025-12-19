@@ -20,9 +20,13 @@ impl<T> BindResult<T> {
         self.successful.is_empty()
     }
 
-    #[allow(dead_code)]
-    pub fn has_failures(&self) -> bool {
-        !self.failures.is_empty()
+    pub fn warn_partial_failures(&self, transport_name: &str) {
+        for failure in &self.failures {
+            warn!(
+                "{} partial binding failure: {} - {}",
+                transport_name, failure.address, failure.error
+            );
+        }
     }
 }
 
@@ -60,10 +64,7 @@ pub fn format_binding_error(
     failures: &[BindFailure],
     attempted_addrs: &[SocketAddr],
 ) -> String {
-    let mut msg = format!(
-        "Failed to bind to any {} address. Attempted addresses:\n",
-        transport_name
-    );
+    let mut msg = format!("Failed to bind to any {transport_name} address. Attempted addresses:\n");
 
     for failure in failures {
         writeln!(
@@ -80,8 +81,7 @@ pub fn format_binding_error(
         let successful_count = attempted_addrs.len() - failures.len();
         writeln!(
             msg,
-            "\nNote: {} address(es) bound successfully.",
-            successful_count
+            "\nNote: {successful_count} address(es) bound successfully."
         )
         .ok();
     }
@@ -106,8 +106,7 @@ pub fn format_binding_error(
         };
         write!(
             msg,
-            "Check for processes using {} with 'lsof -i :<port>' or use different ports.",
-            ports_str
+            "Check for processes using {ports_str} with 'lsof -i :<port>' or use different ports."
         )
         .ok();
     } else if failures

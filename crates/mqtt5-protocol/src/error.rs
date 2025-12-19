@@ -211,6 +211,7 @@ pub enum MqttError {
 }
 
 impl MqttError {
+    #[must_use]
     pub fn is_normal_disconnect(&self) -> bool {
         match self {
             Self::ClientClosed | Self::ConnectionClosedByPeer => true,

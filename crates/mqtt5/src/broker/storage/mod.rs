@@ -45,7 +45,7 @@ pub struct RetainedMessage {
     pub stored_at_secs: u64,
     /// Original message expiry interval in seconds (if any)
     pub message_expiry_interval: Option<u32>,
-    /// Message expiry time (computed from stored_at + interval)
+    /// Message expiry time (computed from `stored_at` + interval)
     #[serde(skip)]
     pub expires_at: Option<SystemTime>,
 }
@@ -68,6 +68,7 @@ fn default_protocol_version() -> u8 {
 }
 
 impl StoredSubscription {
+    #[must_use]
     pub fn new(qos: QoS) -> Self {
         Self {
             qos,
@@ -119,16 +120,16 @@ pub struct QueuedMessage {
     pub payload: Vec<u8>,
     /// Target client ID
     pub client_id: String,
-    /// QoS level for delivery
+    /// `QoS` level for delivery
     pub qos: QoS,
     /// When the message was queued (Unix timestamp in seconds)
     pub queued_at_secs: u64,
     /// Original message expiry interval in seconds (if any)
     pub message_expiry_interval: Option<u32>,
-    /// Message expiry time (computed from queued_at + interval)
+    /// Message expiry time (computed from `queued_at` + interval)
     #[serde(skip)]
     pub expires_at: Option<SystemTime>,
-    /// Packet ID for QoS 1/2 delivery
+    /// Packet ID for `QoS` 1/2 delivery
     pub packet_id: Option<u16>,
 }
 
@@ -474,7 +475,7 @@ impl<B: StorageBackend + 'static> Storage<B> {
         // Clean expired retained messages from cache
         {
             let mut cache = self.retained_cache.write().await;
-            cache.retain(|_, msg| msg.expires_at.map_or(true, |expiry| expiry > now));
+            cache.retain(|_, msg| msg.expires_at.is_none_or(|expiry| expiry > now));
         }
 
         // Clean expired sessions from cache
@@ -483,7 +484,7 @@ impl<B: StorageBackend + 'static> Storage<B> {
             cache.retain(|_, session| {
                 if let Some(expiry_interval) = session.expiry_interval {
                     let expiry_time =
-                        session.last_seen + Duration::from_secs(expiry_interval as u64);
+                        session.last_seen + Duration::from_secs(u64::from(expiry_interval));
                     expiry_time > now
                 } else {
                     true
@@ -498,6 +499,7 @@ impl<B: StorageBackend + 'static> Storage<B> {
 
 impl RetainedMessage {
     /// Create new retained message from PUBLISH packet
+    #[must_use]
     pub fn new(packet: PublishPacket) -> Self {
         let now = SystemTime::now();
         let stored_at_secs = now
@@ -519,7 +521,7 @@ impl RetainedMessage {
         }
     }
 
-    /// Recompute expires_at from stored fields (call after deserialization)
+    /// Recompute `expires_at` from stored fields (call after deserialization)
     pub fn recompute_expiry(&mut self) {
         if let Some(interval) = self.message_expiry_interval {
             let stored_at = SystemTime::UNIX_EPOCH + Duration::from_secs(self.stored_at_secs);
@@ -527,7 +529,8 @@ impl RetainedMessage {
         }
     }
 
-    /// Convert to PublishPacket for delivery
+    /// Convert to `PublishPacket` for delivery
+    #[must_use]
     pub fn to_publish_packet(&self) -> PublishPacket {
         let mut packet = PublishPacket::new(&self.topic, self.payload.clone(), self.qos)
             .with_retain(self.retain);
@@ -550,6 +553,7 @@ impl RetainedMessage {
     }
 
     /// Check if message has expired
+    #[must_use]
     pub fn is_expired(&self) -> bool {
         self.expires_at
             .is_some_and(|expiry| SystemTime::now() > expiry)
@@ -558,6 +562,7 @@ impl RetainedMessage {
 
 impl ClientSession {
     /// Create new client session
+    #[must_use]
     pub fn new(client_id: String, persistent: bool, expiry_interval: Option<u32>) -> Self {
         let now = SystemTime::now();
         Self {
@@ -574,6 +579,7 @@ impl ClientSession {
     }
 
     /// Create new client session with will message
+    #[must_use]
     pub fn new_with_will(
         client_id: String,
         persistent: bool,
@@ -613,6 +619,7 @@ impl ClientSession {
     }
 
     /// Check if session has expired
+    #[must_use]
     pub fn is_expired(&self) -> bool {
         if let Some(expiry_interval) = self.expiry_interval {
             let expiry_time = self.last_seen + Duration::from_secs(u64::from(expiry_interval));
@@ -625,6 +632,7 @@ impl ClientSession {
 
 impl QueuedMessage {
     /// Create new queued message from PUBLISH packet
+    #[must_use]
     pub fn new(packet: PublishPacket, client_id: String, qos: QoS, packet_id: Option<u16>) -> Self {
         let now = SystemTime::now();
         let queued_at_secs = now
@@ -647,7 +655,7 @@ impl QueuedMessage {
         }
     }
 
-    /// Recompute expires_at from stored fields (call after deserialization)
+    /// Recompute `expires_at` from stored fields (call after deserialization)
     pub fn recompute_expiry(&mut self) {
         if let Some(interval) = self.message_expiry_interval {
             let queued_at = SystemTime::UNIX_EPOCH + Duration::from_secs(self.queued_at_secs);
@@ -655,7 +663,8 @@ impl QueuedMessage {
         }
     }
 
-    /// Convert to PublishPacket for delivery
+    /// Convert to `PublishPacket` for delivery
+    #[must_use]
     pub fn to_publish_packet(&self) -> PublishPacket {
         let mut packet = PublishPacket::new(&self.topic, self.payload.clone(), self.qos);
         packet.packet_id = self.packet_id;
@@ -678,6 +687,7 @@ impl QueuedMessage {
     }
 
     /// Check if message has expired
+    #[must_use]
     pub fn is_expired(&self) -> bool {
         self.expires_at
             .is_some_and(|expiry| SystemTime::now() > expiry)

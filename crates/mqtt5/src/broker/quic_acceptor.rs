@@ -38,6 +38,7 @@ pub struct QuicAcceptorConfig {
 }
 
 impl QuicAcceptorConfig {
+    #[allow(clippy::must_use_candidate)]
     pub fn new(
         cert_chain: Vec<CertificateDer<'static>>,
         private_key: PrivateKeyDer<'static>,
@@ -174,6 +175,7 @@ pub struct QuicStreamWrapper {
 }
 
 impl QuicStreamWrapper {
+    #[allow(clippy::must_use_candidate)]
     pub fn new(send: SendStream, recv: RecvStream, peer_addr: SocketAddr) -> Self {
         Self {
             send,
@@ -182,10 +184,12 @@ impl QuicStreamWrapper {
         }
     }
 
+    #[must_use]
     pub fn peer_addr(&self) -> SocketAddr {
         self.peer_addr
     }
 
+    #[must_use]
     pub fn split(self) -> (SendStream, RecvStream) {
         (self.send, self.recv)
     }
@@ -511,7 +515,7 @@ pub async fn run_quic_connection_handler(
             if e.is_normal_disconnect() {
                 debug!("QUIC client handler finished");
             } else {
-                warn!("QUIC client handler error: {}", e);
+                warn!("QUIC client handler error: {e}");
             }
         }
     });
@@ -577,7 +581,7 @@ fn spawn_data_stream_reader(
                     if matches!(e, MqttError::ClientClosed) {
                         debug!(flow_id = ?flow_id, "QUIC data stream closed from {}", peer_addr);
                     } else {
-                        warn!(flow_id = ?flow_id, "Error reading from QUIC data stream: {}", e);
+                        warn!(flow_id = ?flow_id, "Error reading from QUIC data stream: {e}");
                     }
                     break;
                 }

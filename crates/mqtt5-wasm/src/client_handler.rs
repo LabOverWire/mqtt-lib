@@ -106,7 +106,7 @@ impl WasmClientHandler {
         spawn_local(async move {
             match handler.run(port).await {
                 Ok(()) => debug!("Client handler completed normally"),
-                Err(e) => error!("Client handler error: {}", e),
+                Err(e) => error!("Client handler error: {e}"),
             }
         });
     }
@@ -261,7 +261,7 @@ impl WasmClientHandler {
                         last_packet_time.set(mqtt5::time::Instant::now());
                         if let Ok(mut writer_guard) = writer_shared.try_borrow_mut() {
                             if let Err(e) = self.handle_packet(packet, &mut *writer_guard).await {
-                                error!("Error handling packet: {}", e);
+                                error!("Error handling packet: {e}");
                                 return Err(e);
                             }
                         } else {
@@ -269,7 +269,7 @@ impl WasmClientHandler {
                         }
                     }
                     Err(e) => {
-                        debug!("Connection closed: {}", e);
+                        debug!("Connection closed: {e}");
                         return Ok(());
                     }
                 },

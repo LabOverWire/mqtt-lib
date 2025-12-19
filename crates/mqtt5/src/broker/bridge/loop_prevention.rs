@@ -35,7 +35,7 @@ impl Default for LoopPrevention {
 }
 
 impl LoopPrevention {
-    /// Creates a new loop prevention instance
+    #[allow(clippy::must_use_candidate)]
     pub fn new(ttl: Duration, max_cache_size: usize) -> Self {
         Self {
             seen_messages: Arc::new(RwLock::new(HashMap::new())),
@@ -46,7 +46,7 @@ impl LoopPrevention {
 
     /// Checks if a message should be forwarded (returns false if loop detected)
     pub async fn check_message(&self, packet: &PublishPacket) -> bool {
-        let fingerprint = self.calculate_fingerprint(packet);
+        let fingerprint = Self::calculate_fingerprint(packet);
         let mut cache = self.seen_messages.write().await;
 
         // Clean up old entries if cache is getting large
@@ -78,7 +78,7 @@ impl LoopPrevention {
     }
 
     /// Calculates a fingerprint for a message
-    fn calculate_fingerprint(&self, packet: &PublishPacket) -> MessageFingerprint {
+    fn calculate_fingerprint(packet: &PublishPacket) -> MessageFingerprint {
         let mut hasher = Sha256::new();
 
         // Include topic name
@@ -88,10 +88,10 @@ impl LoopPrevention {
         hasher.update(&packet.payload);
 
         // Include QoS to differentiate same content at different QoS levels
-        hasher.update(&[packet.qos as u8]);
+        hasher.update([u8::from(packet.qos)]);
 
         // Include retain flag
-        hasher.update(&[packet.retain as u8]);
+        hasher.update([u8::from(packet.retain)]);
 
         // If packet has properties that affect content, include them
         // For now, we're using basic fields only

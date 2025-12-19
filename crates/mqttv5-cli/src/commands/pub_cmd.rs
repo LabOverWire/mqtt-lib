@@ -517,7 +517,7 @@ pub async fn execute(mut cmd: PubCommand, verbose: bool, debug: bool) -> Result<
                         info!("Reconnecting (attempt {})...", attempt);
                     }
                     ConnectionEvent::ReconnectFailed { error } => {
-                        warn!("⚠ Reconnection failed: {}", error);
+                        warn!("⚠ Reconnection failed: {error}");
                     }
                 })
                 .await?;

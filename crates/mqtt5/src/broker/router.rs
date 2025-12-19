@@ -197,7 +197,7 @@ impl MessageRouter {
     /// Adds a subscription for a client.
     ///
     /// # Errors
-    /// Returns an error if subscription registration fails or retain_handling is invalid.
+    /// Returns an error if subscription registration fails or `retain_handling` is invalid.
     #[allow(clippy::too_many_arguments)]
     pub async fn subscribe(
         &self,
@@ -212,8 +212,7 @@ impl MessageRouter {
     ) -> Result<bool> {
         if retain_handling > 2 {
             return Err(crate::MqttError::ProtocolError(format!(
-                "Invalid retain_handling value: {} (must be 0, 1, or 2)",
-                retain_handling
+                "Invalid retain_handling value: {retain_handling} (must be 0, 1, or 2)"
             )));
         }
 
@@ -322,7 +321,7 @@ impl MessageRouter {
     ///
     /// # Arguments
     /// * `publish` - The publish packet to route
-    /// * `publishing_client_id` - Optional client ID that published the message (used for no_local filtering)
+    /// * `publishing_client_id` - Optional client ID that published the message (used for `no_local` filtering)
     pub async fn route_message_local_only(
         &self,
         publish: &PublishPacket,
@@ -356,7 +355,7 @@ impl MessageRouter {
 
                 if let Some(ref storage) = self.storage {
                     if let Err(e) = storage.remove_retained_message(&publish.topic_name).await {
-                        tracing::error!("Failed to remove retained message from storage: {}", e);
+                        tracing::error!("Failed to remove retained message from storage: {e}");
                     }
                 }
             } else {
@@ -369,7 +368,7 @@ impl MessageRouter {
                         .store_retained_message(&publish.topic_name, retained_msg)
                         .await
                     {
-                        tracing::error!("Failed to store retained message to storage: {}", e);
+                        tracing::error!("Failed to store retained message to storage: {e}");
                     }
                 }
             }
@@ -464,7 +463,7 @@ impl MessageRouter {
                 if let Some(weak) = bridge_manager_weak {
                     if let Some(bridge_manager) = weak.upgrade() {
                         if let Err(e) = bridge_manager.handle_outgoing(publish).await {
-                            error!("Failed to forward message to bridges: {}", e);
+                            error!("Failed to forward message to bridges: {e}");
                         }
                     }
                 }
@@ -854,7 +853,7 @@ mod tests {
         // Publish 6 messages
         for i in 0..6 {
             let publish =
-                PublishPacket::new("test/data", format!("msg{}", i).as_bytes(), QoS::AtMostOnce);
+                PublishPacket::new("test/data", format!("msg{i}").as_bytes(), QoS::AtMostOnce);
             router.route_message(&publish, None).await;
         }
 

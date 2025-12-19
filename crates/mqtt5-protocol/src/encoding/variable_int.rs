@@ -218,7 +218,7 @@ impl BeBytes for VariableInt {
 
 /// Encodes a u32 value as a variable byte integer (compatibility function)
 ///
-/// This function provides compatibility with the old variable_byte module API.
+/// This function provides compatibility with the old `variable_byte` module API.
 /// Prefer using `VariableInt::new(value)?.encode(buf)` for new code.
 ///
 /// # Errors
@@ -230,7 +230,7 @@ pub fn encode_variable_int<B: BufMut>(buf: &mut B, value: u32) -> Result<()> {
 
 /// Decodes a variable byte integer from the buffer (compatibility function)
 ///
-/// This function provides compatibility with the old variable_byte module API.
+/// This function provides compatibility with the old `variable_byte` module API.
 /// Prefer using `VariableInt::decode(buf)?.value()` for new code.
 ///
 /// # Errors
@@ -242,7 +242,7 @@ pub fn decode_variable_int<B: Buf>(buf: &mut B) -> Result<u32> {
 
 /// Calculates the number of bytes needed to encode a value (compatibility function)
 ///
-/// This function provides compatibility with the old variable_byte module API.
+/// This function provides compatibility with the old `variable_byte` module API.
 /// Prefer using `VariableInt::new(value)?.encoded_size()` for new code.
 #[must_use]
 pub fn variable_int_len(value: u32) -> usize {

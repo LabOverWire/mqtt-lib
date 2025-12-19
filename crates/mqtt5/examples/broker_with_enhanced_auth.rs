@@ -179,7 +179,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         result = broker.run() => {
             match result {
                 Ok(()) => info!("Broker stopped normally"),
-                Err(e) => error!("Broker error: {}", e),
+                Err(e) => error!("Broker error: {e}"),
             }
         }
         _ = shutdown => {

@@ -255,7 +255,7 @@ impl ResourceMonitor {
         }
 
         let current_messages = resources.message_count.load(Ordering::Relaxed);
-        if current_messages >= self.limits.max_message_rate_per_client as u64 {
+        if current_messages >= u64::from(self.limits.max_message_rate_per_client) {
             warn!(
                 "Message rejected for {}: rate limit exceeded ({} msg/{}s)",
                 client_id,
@@ -356,8 +356,8 @@ pub struct ResourceStats {
 }
 
 impl ResourceStats {
-    /// Get connection utilization as percentage
     #[allow(clippy::cast_precision_loss)]
+    #[must_use]
     pub fn connection_utilization(&self) -> f64 {
         if self.max_connections == 0 {
             0.0

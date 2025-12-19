@@ -287,6 +287,7 @@ impl QuicTransport {
         Ok((send, recv, conn, strategy, datagrams_enabled))
     }
 
+    #[must_use]
     pub fn datagrams_enabled(&self) -> bool {
         self.config.enable_datagrams
     }

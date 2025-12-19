@@ -44,6 +44,7 @@ pub enum QoS2Action {
 }
 
 impl QoS2Action {
+    #[must_use]
     pub fn to_pubrec_packet(&self) -> Option<PubRecPacket> {
         match self {
             QoS2Action::SendPubRec {
@@ -54,6 +55,7 @@ impl QoS2Action {
         }
     }
 
+    #[must_use]
     pub fn to_pubrel_packet(&self) -> Option<PubRelPacket> {
         match self {
             QoS2Action::SendPubRel { packet_id } => Some(PubRelPacket::new(*packet_id)),
@@ -61,6 +63,7 @@ impl QoS2Action {
         }
     }
 
+    #[must_use]
     pub fn to_pubcomp_packet(&self) -> Option<PubCompPacket> {
         match self {
             QoS2Action::SendPubComp {
@@ -72,10 +75,12 @@ impl QoS2Action {
     }
 }
 
+#[must_use]
 pub fn handle_outgoing_publish_qos2(packet_id: u16) -> Vec<QoS2Action> {
     vec![QoS2Action::TrackOutgoingPubRel { packet_id }]
 }
 
+#[must_use]
 pub fn handle_incoming_pubrec(
     packet_id: u16,
     reason_code: ReasonCode,
@@ -101,6 +106,7 @@ pub fn handle_incoming_pubrec(
     ]
 }
 
+#[must_use]
 pub fn handle_incoming_pubcomp(
     packet_id: u16,
     reason_code: ReasonCode,
@@ -123,6 +129,7 @@ pub fn handle_incoming_pubcomp(
     ]
 }
 
+#[must_use]
 pub fn handle_incoming_publish_qos2(packet_id: u16, is_duplicate: bool) -> Vec<QoS2Action> {
     if is_duplicate {
         vec![QoS2Action::SendPubRec {
@@ -141,6 +148,7 @@ pub fn handle_incoming_publish_qos2(packet_id: u16, is_duplicate: bool) -> Vec<Q
     }
 }
 
+#[must_use]
 pub fn handle_incoming_pubrel(packet_id: u16, has_pending_pubrec: bool) -> Vec<QoS2Action> {
     if has_pending_pubrec {
         vec![

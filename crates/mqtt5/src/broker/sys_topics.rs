@@ -150,8 +150,8 @@ impl SysTopicsProvider {
         self
     }
 
-    /// Start publishing $SYS topics
     #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
     pub fn start(self) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             let mut interval = interval(self.update_interval);
