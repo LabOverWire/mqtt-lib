@@ -33,6 +33,13 @@ pub struct BenchCommand {
     #[arg(long, short, default_value = "bench/test")]
     pub topic: String,
 
+    #[arg(
+        long,
+        short = 'f',
+        help = "Topic filter for subscriptions (defaults to topic)"
+    )]
+    pub filter: Option<String>,
+
     #[arg(long, short, default_value = "0", value_parser = parse_qos)]
     pub qos: QoS,
 
@@ -74,6 +81,7 @@ struct BenchConfig {
     payload_size: usize,
     qos: u8,
     topic: String,
+    filter: String,
     publishers: usize,
     subscribers: usize,
 }
@@ -171,6 +179,7 @@ async fn run_throughput(cmd: BenchCommand) -> Result<()> {
 
     let received = Arc::new(AtomicU64::new(0));
     let topic = cmd.topic.clone();
+    let filter = cmd.filter.clone().unwrap_or_else(|| topic.clone());
 
     let mut sub_clients = Vec::with_capacity(cmd.subscribers);
     for i in 0..cmd.subscribers {
@@ -187,7 +196,7 @@ async fn run_throughput(cmd: BenchCommand) -> Result<()> {
 
         let received_clone = Arc::clone(&received);
         sub_client
-            .subscribe(&topic, move |_| {
+            .subscribe(&filter, move |_| {
                 received_clone.fetch_add(1, Ordering::Relaxed);
             })
             .await
@@ -196,7 +205,7 @@ async fn run_throughput(cmd: BenchCommand) -> Result<()> {
         sub_clients.push(sub_client);
     }
 
-    eprintln!("subscribed {} client(s) to {}", cmd.subscribers, topic);
+    eprintln!("subscribed {} client(s) to {}", cmd.subscribers, filter);
 
     let payload: Arc<[u8]> = vec![0u8; cmd.payload_size].into();
     let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
@@ -272,6 +281,7 @@ async fn run_throughput(cmd: BenchCommand) -> Result<()> {
             payload_size: cmd.payload_size,
             qos: cmd.qos as u8,
             topic: cmd.topic,
+            filter,
             publishers: cmd.publishers,
             subscribers: cmd.subscribers,
         },
@@ -340,9 +350,10 @@ async fn run_latency(cmd: BenchCommand) -> Result<()> {
     let latencies = Arc::new(Mutex::new(Vec::with_capacity(10000)));
     let latencies_clone = Arc::clone(&latencies);
     let topic = cmd.topic.clone();
+    let filter = cmd.filter.clone().unwrap_or_else(|| topic.clone());
 
     sub_client
-        .subscribe(&topic, move |msg| {
+        .subscribe(&filter, move |msg| {
             let payload = &msg.payload;
             if payload.len() >= 8 {
                 let sent_nanos = u64::from_be_bytes(payload[0..8].try_into().unwrap());
@@ -424,6 +435,7 @@ async fn run_latency(cmd: BenchCommand) -> Result<()> {
             payload_size: cmd.payload_size,
             qos: cmd.qos as u8,
             topic: cmd.topic,
+            filter,
             publishers: 1,
             subscribers: 1,
         },
@@ -583,6 +595,7 @@ async fn run_connections(cmd: BenchCommand) -> Result<()> {
             payload_size: 0,
             qos: 0,
             topic: String::new(),
+            filter: String::new(),
             publishers: 0,
             subscribers: 0,
         },
