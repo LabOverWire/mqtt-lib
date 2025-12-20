@@ -168,7 +168,7 @@ impl SysTopicsProvider {
     }
 
     /// Publish static $SYS topics (version, etc.)
-    async fn publish_static_topics(&self) {
+    pub async fn publish_static_topics(&self) {
         // Broker version
         self.publish_sys_topic("$SYS/broker/version", &self.version)
             .await;
@@ -183,7 +183,7 @@ impl SysTopicsProvider {
     }
 
     /// Publish dynamic $SYS topics (stats that change)
-    async fn publish_dynamic_topics(&self) {
+    pub async fn publish_dynamic_topics(&self) {
         // Uptime
         let uptime = self.stats.uptime_seconds();
         self.publish_sys_topic("$SYS/broker/uptime", &uptime.to_string())
@@ -242,7 +242,7 @@ impl SysTopicsProvider {
     }
 
     /// Publish a single $SYS topic
-    async fn publish_sys_topic(&self, topic: &str, value: &str) {
+    pub async fn publish_sys_topic(&self, topic: &str, value: &str) {
         let packet = PublishPacket::new(topic, value.as_bytes(), QoS::AtMostOnce).with_retain(true);
 
         debug!("Publishing $SYS topic: {} = {}", topic, value);

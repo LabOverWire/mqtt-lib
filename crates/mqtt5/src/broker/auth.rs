@@ -501,6 +501,7 @@ pub struct PasswordAuthProvider {
     /// Map of username to password hash
     users: Arc<RwLock<HashMap<String, String>>>,
     /// Path to password file (optional)
+    #[cfg(not(target_arch = "wasm32"))]
     password_file: Option<std::path::PathBuf>,
     /// Allow anonymous connections (no username/password)
     allow_anonymous: bool,
@@ -512,6 +513,7 @@ impl PasswordAuthProvider {
     pub fn new() -> Self {
         Self {
             users: Arc::new(RwLock::new(HashMap::new())),
+            #[cfg(not(target_arch = "wasm32"))]
             password_file: None,
             allow_anonymous: false,
         }
@@ -896,6 +898,7 @@ pub struct CertificateAuthProvider {
     /// Map of certificate fingerprints to user identifiers
     allowed_certs: Arc<RwLock<HashMap<String, String>>>,
     /// Path to certificate file (optional)
+    #[cfg(not(target_arch = "wasm32"))]
     cert_file: Option<std::path::PathBuf>,
 }
 
@@ -905,6 +908,7 @@ impl CertificateAuthProvider {
     pub fn new() -> Self {
         Self {
             allowed_certs: Arc::new(RwLock::new(HashMap::new())),
+            #[cfg(not(target_arch = "wasm32"))]
             cert_file: None,
         }
     }
