@@ -8,7 +8,7 @@ use mqtt5::broker::router::MessageRouter;
 use mqtt5::broker::storage::{DynamicStorage, MemoryBackend};
 use mqtt5::broker::sys_topics::{BrokerStats, SysTopicsProvider};
 use mqtt5::time::Duration;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 use wasm_bindgen::prelude::*;
@@ -140,6 +140,7 @@ pub struct WasmBroker {
     stats: Arc<BrokerStats>,
     resource_monitor: Arc<ResourceMonitor>,
     bridge_manager: Rc<RefCell<WasmBridgeManager>>,
+    sys_topics_running: Rc<Cell<bool>>,
 }
 
 #[wasm_bindgen]
@@ -183,6 +184,7 @@ impl WasmBroker {
             stats,
             resource_monitor,
             bridge_manager,
+            sys_topics_running: Rc::new(Cell::new(false)),
         };
 
         broker.setup_bridge_callback();
@@ -380,18 +382,32 @@ impl WasmBroker {
 
     #[wasm_bindgen]
     pub fn start_sys_topics_with_interval_secs(&self, interval_secs: u32) {
+        if self.sys_topics_running.get() {
+            return;
+        }
+        self.sys_topics_running.set(true);
+
         let provider = SysTopicsProvider::new(Arc::clone(&self.router), Arc::clone(&self.stats));
         let interval_ms = u64::from(interval_secs) * 1000;
+        let running = Rc::clone(&self.sys_topics_running);
 
         wasm_bindgen_futures::spawn_local(async move {
             gloo_timers::future::sleep(std::time::Duration::from_millis(interval_ms)).await;
             provider.publish_static_topics().await;
 
-            loop {
+            while running.get() {
                 gloo_timers::future::sleep(std::time::Duration::from_millis(interval_ms)).await;
+                if !running.get() {
+                    break;
+                }
                 provider.publish_dynamic_topics().await;
             }
         });
+    }
+
+    #[wasm_bindgen]
+    pub fn stop_sys_topics(&self) {
+        self.sys_topics_running.set(false);
     }
 
     fn setup_bridge_callback(&self) {

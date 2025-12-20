@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.1] / [mqtt5-wasm 0.6.1] - 2025-12-20
+
+### Added
+
+- `WasmBroker.start_sys_topics()` for $SYS topic publishing in WASM broker
+- `WasmBroker.stop_sys_topics()` to stop the $SYS publisher
+- Made `SysTopicsProvider` publish methods public for reuse
+
+### Fixed
+
+- WASM build warnings for unused fields (`acl_file`, `password_file`, `cert_file`)
+
 ## [0.15.0] / [mqtt5-protocol 0.6.0] / [mqtt5-wasm 0.6.0] - 2025-12-19
 
 ### Performance
