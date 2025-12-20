@@ -16,9 +16,6 @@ use mqtt5::QoS;
 #[cfg(feature = "turmoil-testing")]
 use std::sync::Arc;
 #[cfg(feature = "turmoil-testing")]
-use tokio::sync::mpsc;
-
-#[cfg(feature = "turmoil-testing")]
 #[test]
 fn test_basic_publish_subscribe() {
     let mut sim = turmoil::Builder::new()
@@ -29,7 +26,7 @@ fn test_basic_publish_subscribe() {
         let router = Arc::new(MessageRouter::new());
 
         // Create publisher and subscriber
-        let (sub_tx, mut sub_rx) = mpsc::channel(100);
+        let (sub_tx, sub_rx) = flume::bounded(100);
 
         let (dtx, _drx) = tokio::sync::oneshot::channel();
         router
@@ -83,8 +80,8 @@ fn test_wildcard_subscriptions() {
         let router = Arc::new(MessageRouter::new());
 
         // Create subscribers with different wildcard patterns
-        let (single_tx, mut single_rx) = mpsc::channel(100);
-        let (multi_tx, mut multi_rx) = mpsc::channel(100);
+        let (single_tx, single_rx) = flume::bounded(100);
+        let (multi_tx, multi_rx) = flume::bounded(100);
 
         let (dtx1, _drx1) = tokio::sync::oneshot::channel();
         router
@@ -190,9 +187,9 @@ fn test_multiple_subscribers_same_topic() {
         let router = Arc::new(MessageRouter::new());
 
         // Create multiple subscribers to the same topic
-        let (sub1_tx, mut sub1_rx) = mpsc::channel(100);
-        let (sub2_tx, mut sub2_rx) = mpsc::channel(100);
-        let (sub3_tx, mut sub3_rx) = mpsc::channel(100);
+        let (sub1_tx, mut sub1_rx) = flume::bounded(100);
+        let (sub2_tx, mut sub2_rx) = flume::bounded(100);
+        let (sub3_tx, mut sub3_rx) = flume::bounded(100);
 
         let (dtx1, _drx1) = tokio::sync::oneshot::channel();
         router
@@ -273,8 +270,8 @@ fn test_qos_levels() {
         let router = Arc::new(MessageRouter::new());
 
         // Create subscribers for different QoS levels
-        let (qos0_tx, mut qos0_rx) = mpsc::channel(100);
-        let (qos1_tx, mut qos1_rx) = mpsc::channel(100);
+        let (qos0_tx, qos0_rx) = flume::bounded(100);
+        let (qos1_tx, qos1_rx) = flume::bounded(100);
 
         let (dtx1, _drx1) = tokio::sync::oneshot::channel();
         router
@@ -355,7 +352,7 @@ fn test_unsubscribe_functionality() {
     sim.host("unsubscribe-test", || async {
         let router = Arc::new(MessageRouter::new());
 
-        let (sub_tx, mut sub_rx) = mpsc::channel(100);
+        let (sub_tx, sub_rx) = flume::bounded(100);
         let (dtx, _drx) = tokio::sync::oneshot::channel();
         router
             .register_client("test_client".to_string(), sub_tx, dtx)

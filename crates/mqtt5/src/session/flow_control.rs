@@ -19,7 +19,7 @@ pub struct FlowControlManager {
     pending_queue: Arc<RwLock<VecDeque<PendingPublish>>>,
     /// Flow control configuration
     config: FlowControlConfig,
-    /// Our receive maximum (max in-flight QoS 1/2 messages server can send us)
+    /// Our receive maximum (max in-flight `QoS` 1/2 messages server can send us)
     inbound_receive_maximum: u16,
     /// Currently in-flight inbound messages from server (`packet_id` -> timestamp)
     inbound_in_flight: Arc<RwLock<HashMap<u16, Instant>>>,

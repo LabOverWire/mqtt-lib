@@ -16,9 +16,6 @@ use mqtt5::QoS;
 #[cfg(feature = "turmoil-testing")]
 use std::sync::Arc;
 #[cfg(feature = "turmoil-testing")]
-use tokio::sync::mpsc;
-
-#[cfg(feature = "turmoil-testing")]
 #[test]
 fn test_shared_subscriptions_in_turmoil() {
     let mut sim = turmoil::Builder::new()
@@ -30,9 +27,9 @@ fn test_shared_subscriptions_in_turmoil() {
         let router = Arc::new(MessageRouter::new());
 
         // Create channels for three workers
-        let (tx1, mut rx1) = mpsc::channel(100);
-        let (tx2, mut rx2) = mpsc::channel(100);
-        let (tx3, mut rx3) = mpsc::channel(100);
+        let (tx1, rx1) = flume::bounded(100);
+        let (tx2, rx2) = flume::bounded(100);
+        let (tx3, rx3) = flume::bounded(100);
 
         // Register workers
         let (dtx1, _drx1) = tokio::sync::oneshot::channel();

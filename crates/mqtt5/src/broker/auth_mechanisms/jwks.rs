@@ -109,6 +109,7 @@ pub struct JwksCache {
 }
 
 impl JwksCache {
+    #[must_use]
     pub fn new() -> Self {
         let (shutdown_tx, _) = broadcast::channel(1);
         Self {
@@ -123,7 +124,12 @@ impl JwksCache {
         self.endpoints.push(config);
     }
 
-    #[allow(clippy::missing_errors_doc)]
+    /// Performs initial JWKS fetch for all configured endpoints.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any JWKS endpoint fetch fails due to network issues,
+    /// invalid URI, TLS errors, or parsing failures.
     pub async fn initial_fetch(&self) -> crate::error::Result<()> {
         for endpoint in &self.endpoints {
             match self.fetch_jwks_from_endpoint(endpoint).await {
@@ -147,6 +153,7 @@ impl JwksCache {
         Ok(())
     }
 
+    #[must_use]
     pub fn start_background_refresh(&self) -> tokio::task::JoinHandle<()> {
         let endpoints = self.endpoints.clone();
         let keys = Arc::clone(&self.keys);

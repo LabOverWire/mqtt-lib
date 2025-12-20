@@ -126,7 +126,7 @@ impl ScenarioBuilder {
     pub fn with_clients(mut self, count: usize, prefix: &str) -> Self {
         for i in 0..count {
             self.clients.push(TurmoilClientConfig {
-                client_id: format!("{}-{}", prefix, i),
+                client_id: format!("{prefix}-{i}"),
                 ..Default::default()
             });
         }
@@ -141,7 +141,7 @@ impl ScenarioBuilder {
         to: &str,
         conditions: NetworkConditions,
     ) -> Self {
-        let key = format!("{}->{}", from, to);
+        let key = format!("{from}->{to}");
         self.network_conditions.insert(key, conditions);
         self
     }

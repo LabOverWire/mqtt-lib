@@ -14,12 +14,6 @@ fn create_memory_storage() -> Storage<MemoryBackend> {
     Storage::new(MemoryBackend::new())
 }
 
-async fn create_file_storage() -> Storage<FileBackend> {
-    let dir = tempfile::tempdir().unwrap();
-    let backend = FileBackend::new(dir.path()).await.unwrap();
-    Storage::new(backend)
-}
-
 #[tokio::test]
 async fn test_retained_message_storage() {
     let storage = create_memory_storage();
@@ -97,9 +91,8 @@ async fn test_session_persistence() {
         StoredSubscription::new(QoS::ExactlyOnce),
     );
 
-    storage.store_session(session.clone()).await.unwrap();
+    storage.store_session(session.clone()).await;
 
-    // Retrieve session and verify full options
     let retrieved = storage.get_session("client1").await;
     assert!(retrieved.is_some());
     let retrieved_session = retrieved.unwrap();
@@ -117,9 +110,8 @@ async fn test_session_persistence() {
     assert!(!sub2.no_local);
     assert!(!sub2.retain_as_published);
 
-    // Remove subscription
     session.remove_subscription("test/+");
-    storage.store_session(session.clone()).await.unwrap();
+    storage.store_session(session.clone()).await;
 
     let retrieved = storage.get_session("client1").await.unwrap();
     assert_eq!(retrieved.subscriptions.len(), 1);
@@ -210,7 +202,8 @@ async fn test_file_backend_persistence() {
             "persistent/+".to_string(),
             StoredSubscription::new(QoS::AtLeastOnce),
         );
-        storage.store_session(session).await.unwrap();
+        storage.store_session(session).await;
+        storage.flush_sessions().await.unwrap();
     }
 
     // Create new storage instance and verify data persisted
@@ -272,9 +265,8 @@ async fn test_concurrent_access() {
 async fn test_session_expiry() {
     let storage = create_memory_storage();
 
-    // Create session with 1 second expiry
     let session = ClientSession::new("expiring_client".to_string(), true, Some(1));
-    storage.store_session(session).await.unwrap();
+    storage.store_session(session).await;
 
     // Should exist immediately
     assert!(storage.get_session("expiring_client").await.is_some());

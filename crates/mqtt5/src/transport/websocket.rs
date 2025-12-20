@@ -527,7 +527,7 @@ impl Transport for WebSocketTransport {
                 .config
                 .tls_config
                 .as_ref()
-                .map_or(false, |cfg| !cfg.verify_server_cert)
+                .is_some_and(|cfg| !cfg.verify_server_cert)
         {
             use tokio_tungstenite::Connector;
 

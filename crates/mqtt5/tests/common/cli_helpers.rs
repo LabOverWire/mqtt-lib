@@ -120,8 +120,7 @@ pub async fn run_cli_pub(
     run_cli_command(&args).await
 }
 
-#[allow(clippy::unused_async)]
-pub async fn run_cli_sub_async(
+pub fn run_cli_sub_async(
     broker_url: &str,
     topic: &str,
     count: u32,
@@ -168,7 +167,7 @@ pub async fn verify_pub_sub_delivery(
     extra_args: &[&str],
 ) -> Result<bool, String> {
     // Start subscriber first
-    let sub_handle = run_cli_sub_async(broker_url, topic, 1, extra_args).await;
+    let sub_handle = run_cli_sub_async(broker_url, topic, 1, extra_args);
 
     // Give subscriber time to connect
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -298,7 +297,7 @@ pub async fn verify_will_delivery(
     let cli_binary = get_cli_binary_path();
 
     // Start subscriber for will topic
-    let sub_handle = run_cli_sub_async(broker_url, will_topic, 1, &[]).await;
+    let sub_handle = run_cli_sub_async(broker_url, will_topic, 1, &[]);
 
     // Give subscriber time to connect
     tokio::time::sleep(Duration::from_millis(500)).await;

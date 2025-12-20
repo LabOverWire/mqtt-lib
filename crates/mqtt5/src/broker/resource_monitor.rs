@@ -53,34 +53,26 @@ impl Default for ResourceLimits {
 /// Per-client resource tracking
 #[derive(Debug)]
 struct ClientResources {
-    /// Number of messages sent in current window
     message_count: AtomicU64,
-    /// Bytes transferred in current window
     bytes_transferred: AtomicU64,
-    /// Window start time
     window_start: Instant,
-    /// Client IP address
-    ip_addr: IpAddr,
 }
 
 impl ClientResources {
-    fn new(ip_addr: IpAddr) -> Self {
+    fn new() -> Self {
         Self {
             message_count: AtomicU64::new(0),
             bytes_transferred: AtomicU64::new(0),
             window_start: Instant::now(),
-            ip_addr,
         }
     }
 
-    /// Reset counters for new time window
     fn reset_window(&mut self) {
         self.message_count.store(0, Ordering::Relaxed);
         self.bytes_transferred.store(0, Ordering::Relaxed);
         self.window_start = Instant::now();
     }
 
-    /// Check if window has expired
     fn is_window_expired(&self, window_duration: Duration) -> bool {
         self.window_start.elapsed() > window_duration
     }
@@ -89,17 +81,13 @@ impl ClientResources {
 /// Connection rate tracking
 #[derive(Debug)]
 struct ConnectionRateTracker {
-    /// Connection timestamps in current window
     connections: Vec<Instant>,
-    /// Window start time
-    window_start: Instant,
 }
 
 impl ConnectionRateTracker {
     fn new() -> Self {
         Self {
             connections: Vec::new(),
-            window_start: Instant::now(),
         }
     }
 
@@ -216,9 +204,8 @@ impl ResourceMonitor {
         *ip_connections.entry(ip_addr).or_insert(0) += 1;
         drop(ip_connections);
 
-        // Initialize client resource tracking
         let mut client_resources = self.client_resources.write().await;
-        client_resources.insert(client_id, ClientResources::new(ip_addr));
+        client_resources.insert(client_id, ClientResources::new());
     }
 
     /// Unregister a connection
@@ -250,21 +237,25 @@ impl ResourceMonitor {
 
     /// Check if client can send a message (rate limiting)
     pub async fn can_send_message(&self, client_id: &str, message_size: usize) -> bool {
+        if self.limits.max_message_rate_per_client >= 1_000_000 {
+            self.total_messages.fetch_add(1, Ordering::Relaxed);
+            self.total_bytes
+                .fetch_add(message_size as u64, Ordering::Relaxed);
+            return true;
+        }
+
         let mut client_resources = self.client_resources.write().await;
 
         let Some(resources) = client_resources.get_mut(client_id) else {
-            // Client not found, allow (might be in process of connecting)
             return true;
         };
 
-        // Check if we need to reset the window
         if resources.is_window_expired(self.limits.rate_limit_window) {
             resources.reset_window();
         }
 
-        // Check message rate limit
         let current_messages = resources.message_count.load(Ordering::Relaxed);
-        if current_messages >= self.limits.max_message_rate_per_client as u64 {
+        if current_messages >= u64::from(self.limits.max_message_rate_per_client) {
             warn!(
                 "Message rejected for {}: rate limit exceeded ({} msg/{}s)",
                 client_id,
@@ -274,7 +265,6 @@ impl ResourceMonitor {
             return false;
         }
 
-        // Check bandwidth limit
         let current_bytes = resources.bytes_transferred.load(Ordering::Relaxed);
         if current_bytes + message_size as u64 > self.limits.max_bandwidth_per_client {
             warn!(
@@ -286,13 +276,11 @@ impl ResourceMonitor {
             return false;
         }
 
-        // Update counters
         resources.message_count.fetch_add(1, Ordering::Relaxed);
         resources
             .bytes_transferred
             .fetch_add(message_size as u64, Ordering::Relaxed);
 
-        // Update global counters
         self.total_messages.fetch_add(1, Ordering::Relaxed);
         self.total_bytes
             .fetch_add(message_size as u64, Ordering::Relaxed);
@@ -368,8 +356,8 @@ pub struct ResourceStats {
 }
 
 impl ResourceStats {
-    /// Get connection utilization as percentage
     #[allow(clippy::cast_precision_loss)]
+    #[must_use]
     pub fn connection_utilization(&self) -> f64 {
         if self.max_connections == 0 {
             0.0

@@ -38,7 +38,7 @@ impl Default for WebSocketServerConfig {
 }
 
 impl WebSocketServerConfig {
-    /// Creates a new WebSocket server configuration
+    #[allow(clippy::must_use_candidate)]
     pub fn new() -> Self {
         Self::default()
     }
@@ -57,7 +57,7 @@ impl WebSocketServerConfig {
         self
     }
 
-    /// Builds the WebSocket configuration
+    #[must_use]
     pub fn build_ws_config(&self) -> Option<WebSocketConfig> {
         // For now return None to use default config
         // TODO: Update when tokio-tungstenite exposes proper config
@@ -88,7 +88,7 @@ where
         }
     }
 
-    /// Gets the peer address (only works for TcpStream).
+    /// Gets the peer address (only works for `TcpStream`).
     ///
     /// # Errors
     /// Returns an error if the peer address cannot be retrieved.

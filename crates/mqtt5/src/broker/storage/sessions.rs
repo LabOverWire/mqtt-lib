@@ -12,16 +12,15 @@ pub struct SessionManager<B: StorageBackend> {
     storage: Storage<B>,
 }
 
-impl<B: StorageBackend> SessionManager<B> {
+impl<B: StorageBackend + 'static> SessionManager<B> {
     /// Create new session manager
+    #[must_use]
     pub fn new(storage: Storage<B>) -> Self {
         Self { storage }
     }
 
-    /// Create or restore client session.
-    ///
     /// # Errors
-    /// Returns an error if the storage backend fails.
+    /// Returns an error if removing an existing session fails.
     pub async fn get_or_create_session(
         &self,
         client_id: &str,
@@ -29,7 +28,6 @@ impl<B: StorageBackend> SessionManager<B> {
         session_expiry_interval: Option<u32>,
     ) -> Result<ClientSession> {
         if clean_start {
-            // Clean start: remove any existing session
             debug!("Clean start for client: {}", client_id);
             let _ = self.storage.remove_session(client_id).await;
 
@@ -39,92 +37,68 @@ impl<B: StorageBackend> SessionManager<B> {
                 session_expiry_interval,
             );
 
-            self.storage.store_session(session.clone()).await?;
+            self.storage.store_session(session.clone()).await;
+            return Ok(session);
+        }
+
+        if let Some(mut session) = self.storage.get_session(client_id).await {
+            debug!("Restored session for client: {}", client_id);
+            session.touch();
+            self.storage.store_session(session.clone()).await;
             Ok(session)
         } else {
-            // Try to restore existing session
-            if let Some(mut session) = self.storage.get_session(client_id).await {
-                debug!("Restored session for client: {}", client_id);
-                session.touch(); // Update last seen time
-                self.storage.store_session(session.clone()).await?;
-                Ok(session)
-            } else {
-                // Create new persistent session
-                debug!("Creating new persistent session for client: {}", client_id);
-                let session =
-                    ClientSession::new(client_id.to_string(), true, session_expiry_interval);
+            debug!("Creating new persistent session for client: {}", client_id);
+            let session = ClientSession::new(client_id.to_string(), true, session_expiry_interval);
 
-                self.storage.store_session(session.clone()).await?;
-                Ok(session)
-            }
+            self.storage.store_session(session.clone()).await;
+            Ok(session)
         }
     }
 
-    /// Update session subscriptions.
-    ///
-    /// # Errors
-    /// Returns an error if the storage backend fails.
     pub async fn update_subscriptions(
         &self,
         client_id: &str,
         subscriptions: HashMap<String, StoredSubscription>,
-    ) -> Result<()> {
+    ) {
         if let Some(mut session) = self.storage.get_session(client_id).await {
             session.subscriptions = subscriptions;
             session.touch();
-
             debug!("Updated subscriptions for client: {}", client_id);
-            self.storage.store_session(session).await
+            self.storage.store_session(session).await;
         } else {
-            // Session doesn't exist, this shouldn't happen
             debug!(
                 "Attempted to update subscriptions for non-existent session: {}",
                 client_id
             );
-            Ok(())
         }
     }
 
-    /// Add subscription to session.
-    ///
-    /// # Errors
-    /// Returns an error if the storage backend fails.
     pub async fn add_subscription(
         &self,
         client_id: &str,
         topic_filter: &str,
         subscription: StoredSubscription,
-    ) -> Result<()> {
+    ) {
         if let Some(mut session) = self.storage.get_session(client_id).await {
             session.add_subscription(topic_filter.to_string(), subscription);
             session.touch();
-
             debug!(
                 "Added subscription {} for client: {}",
                 topic_filter, client_id
             );
-            self.storage.store_session(session).await
-        } else {
-            Ok(())
+            self.storage.store_session(session).await;
         }
     }
 
-    /// Remove subscription from session.
-    ///
-    /// # Errors
-    /// Returns an error if the storage backend fails.
-    pub async fn remove_subscription(&self, client_id: &str, topic_filter: &str) -> Result<()> {
+    pub async fn remove_subscription(&self, client_id: &str, topic_filter: &str) {
         if let Some(mut session) = self.storage.get_session(client_id).await {
             session.remove_subscription(topic_filter);
             session.touch();
-
             debug!(
                 "Removed subscription {} for client: {}",
                 topic_filter, client_id
             );
-            self.storage.store_session(session).await
-        } else {
-            Ok(())
+            self.storage.store_session(session).await;
         }
     }
 
@@ -146,16 +120,10 @@ impl<B: StorageBackend> SessionManager<B> {
         self.storage.remove_session(client_id).await
     }
 
-    /// Touch session to update last seen time.
-    ///
-    /// # Errors
-    /// Returns an error if the storage backend fails.
-    pub async fn touch_session(&self, client_id: &str) -> Result<()> {
+    pub async fn touch_session(&self, client_id: &str) {
         if let Some(mut session) = self.storage.get_session(client_id).await {
             session.touch();
-            self.storage.store_session(session).await
-        } else {
-            Ok(())
+            self.storage.store_session(session).await;
         }
     }
 }

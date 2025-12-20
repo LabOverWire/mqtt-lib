@@ -5,15 +5,14 @@ use mqtt5::packet::publish::PublishPacket;
 use mqtt5::types::ProtocolVersion;
 use mqtt5::QoS;
 use std::sync::Arc;
-use tokio::sync::mpsc;
 
 #[tokio::test]
 async fn test_shared_subscription_distribution() {
     let router = Arc::new(MessageRouter::new());
 
-    let (tx1, mut rx1) = mpsc::channel(100);
-    let (tx2, mut rx2) = mpsc::channel(100);
-    let (tx3, mut rx3) = mpsc::channel(100);
+    let (tx1, rx1) = flume::bounded(100);
+    let (tx2, rx2) = flume::bounded(100);
+    let (tx3, rx3) = flume::bounded(100);
 
     let (dtx1, _drx1) = tokio::sync::oneshot::channel();
     router
@@ -108,9 +107,9 @@ async fn test_shared_subscription_distribution() {
 async fn test_mixed_shared_and_regular_subscriptions() {
     let router = Arc::new(MessageRouter::new());
 
-    let (tx_shared1, mut rx_shared1) = mpsc::channel(100);
-    let (tx_shared2, mut rx_shared2) = mpsc::channel(100);
-    let (tx_regular, mut rx_regular) = mpsc::channel(100);
+    let (tx_shared1, rx_shared1) = flume::bounded(100);
+    let (tx_shared2, rx_shared2) = flume::bounded(100);
+    let (tx_regular, rx_regular) = flume::bounded(100);
 
     let (dtx1, _drx1) = tokio::sync::oneshot::channel();
     router

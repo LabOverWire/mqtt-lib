@@ -24,7 +24,7 @@ pub struct BridgeManager {
 }
 
 impl BridgeManager {
-    /// Creates a new bridge manager
+    #[allow(clippy::must_use_candidate)]
     pub fn new(router: Arc<MessageRouter>) -> Self {
         Self {
             bridges: Arc::new(RwLock::new(HashMap::new())),
@@ -43,8 +43,7 @@ impl BridgeManager {
 
         if self.bridges.read().await.contains_key(&name) {
             return Err(BridgeError::ConfigurationError(format!(
-                "Bridge '{}' already exists",
-                name
+                "Bridge '{name}' already exists"
             )));
         }
 
@@ -55,7 +54,7 @@ impl BridgeManager {
         let bridge_clone = bridge.clone();
         let task = tokio::spawn(async move {
             if let Err(e) = Box::pin(bridge_clone.run()).await {
-                error!("Bridge task error: {}", e);
+                error!("Bridge task error: {e}");
             }
         });
 
@@ -87,13 +86,12 @@ impl BridgeManager {
             Ok(())
         } else {
             Err(BridgeError::ConfigurationError(format!(
-                "Bridge '{}' not found",
-                name
+                "Bridge '{name}' not found"
             )))
         }
     }
 
-    /// Handles outgoing messages (called by MessageRouter).
+    /// Handles outgoing messages (called by `MessageRouter`).
     ///
     /// # Errors
     /// Returns an error if message forwarding fails.
@@ -170,7 +168,7 @@ impl BridgeManager {
         let bridges: Vec<_> = self.bridges.read().await.values().cloned().collect();
         for bridge in bridges {
             if let Err(e) = bridge.stop().await {
-                error!("Failed to stop bridge: {}", e);
+                error!("Failed to stop bridge: {e}");
             }
         }
 
@@ -242,7 +240,7 @@ mod tests {
         tokio::time::sleep(crate::time::Duration::from_millis(100)).await;
 
         // Create test bridge config pointing to our test broker
-        let config = BridgeConfig::new("test-bridge", &format!("{}", broker_addr)).add_topic(
+        let config = BridgeConfig::new("test-bridge", format!("{broker_addr}")).add_topic(
             "test/#",
             BridgeDirection::Both,
             QoS::AtMostOnce,

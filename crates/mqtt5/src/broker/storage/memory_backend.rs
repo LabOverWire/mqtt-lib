@@ -23,6 +23,7 @@ pub struct MemoryBackend {
 
 impl MemoryBackend {
     /// Create new memory storage backend
+    #[must_use]
     pub fn new() -> Self {
         Self {
             retained: Arc::new(RwLock::new(HashMap::new())),

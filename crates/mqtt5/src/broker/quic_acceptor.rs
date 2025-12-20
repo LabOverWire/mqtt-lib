@@ -38,6 +38,7 @@ pub struct QuicAcceptorConfig {
 }
 
 impl QuicAcceptorConfig {
+    #[allow(clippy::must_use_candidate)]
     pub fn new(
         cert_chain: Vec<CertificateDer<'static>>,
         private_key: PrivateKeyDer<'static>,
@@ -151,6 +152,8 @@ impl QuicAcceptorConfig {
                 .try_into()
                 .expect("valid duration"),
         ));
+        transport_config.datagram_receive_buffer_size(Some(65536));
+        transport_config.datagram_send_buffer_size(65536);
         server_config.transport_config(Arc::new(transport_config));
 
         Ok(server_config)
@@ -174,6 +177,7 @@ pub struct QuicStreamWrapper {
 }
 
 impl QuicStreamWrapper {
+    #[allow(clippy::must_use_candidate)]
     pub fn new(send: SendStream, recv: RecvStream, peer_addr: SocketAddr) -> Self {
         Self {
             send,
@@ -182,10 +186,12 @@ impl QuicStreamWrapper {
         }
     }
 
+    #[must_use]
     pub fn peer_addr(&self) -> SocketAddr {
         self.peer_addr
     }
 
+    #[must_use]
     pub fn split(self) -> (SendStream, RecvStream) {
         (self.send, self.recv)
     }
@@ -511,7 +517,38 @@ pub async fn run_quic_connection_handler(
             if e.is_normal_disconnect() {
                 debug!("QUIC client handler finished");
             } else {
-                warn!("QUIC client handler error: {}", e);
+                warn!("QUIC client handler error: {e}");
+            }
+        }
+    });
+
+    let datagram_connection = connection.clone();
+    let datagram_packet_tx = packet_tx.clone();
+    tokio::spawn(async move {
+        loop {
+            match datagram_connection.read_datagram().await {
+                Ok(datagram) => {
+                    trace!(
+                        len = datagram.len(),
+                        "Received QUIC datagram from {}",
+                        peer_addr
+                    );
+                    match decode_datagram_packet(&datagram) {
+                        Ok(packet) => {
+                            if datagram_packet_tx.send(packet).await.is_err() {
+                                debug!("Datagram packet channel closed for {}", peer_addr);
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Failed to decode datagram from {}: {}", peer_addr, e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    debug!("Datagram read ended for {}: {}", peer_addr, e);
+                    break;
+                }
             }
         }
     });
@@ -527,6 +564,18 @@ pub async fn run_quic_connection_handler(
             }
         }
     });
+}
+
+fn decode_datagram_packet(data: &Bytes) -> Result<Packet> {
+    if data.is_empty() {
+        return Err(MqttError::MalformedPacket(
+            "Empty datagram received".to_string(),
+        ));
+    }
+
+    let mut buf = BytesMut::from(data.as_ref());
+    let fixed_header = FixedHeader::decode(&mut buf)?;
+    Packet::decode_from_body(fixed_header.packet_type, &fixed_header, &mut buf)
 }
 
 // [MQoQ§5] Data stream processing
@@ -577,7 +626,7 @@ fn spawn_data_stream_reader(
                     if matches!(e, MqttError::ClientClosed) {
                         debug!(flow_id = ?flow_id, "QUIC data stream closed from {}", peer_addr);
                     } else {
-                        warn!(flow_id = ?flow_id, "Error reading from QUIC data stream: {}", e);
+                        warn!(flow_id = ?flow_id, "Error reading from QUIC data stream: {e}");
                     }
                     break;
                 }

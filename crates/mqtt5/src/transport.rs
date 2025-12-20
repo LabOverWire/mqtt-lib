@@ -27,7 +27,7 @@ pub use manager::{ConnectionState, ConnectionStats, ManagerConfig, TransportMana
 #[cfg(not(target_arch = "wasm32"))]
 pub use packet_io::{PacketIo, PacketReader, PacketWriter};
 #[cfg(not(target_arch = "wasm32"))]
-pub use quic::{QuicConfig, QuicTransport, StreamStrategy};
+pub use quic::{ClientTransportConfig, QuicConfig, QuicTransport, StreamStrategy};
 #[cfg(not(target_arch = "wasm32"))]
 pub use quic_stream_manager::QuicStreamManager;
 #[cfg(not(target_arch = "wasm32"))]

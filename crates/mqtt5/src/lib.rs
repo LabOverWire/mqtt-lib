@@ -68,7 +68,7 @@
 //!                 println!("Reconnecting... attempt {}", attempt);
 //!             }
 //!             ConnectionEvent::ReconnectFailed { error } => {
-//!                 println!("Reconnection failed: {}", error);
+//!                 println!("Reconnection failed: {e}"rror);
 //!             }
 //!         }
 //!     }).await?;
@@ -161,17 +161,6 @@
 //! ```
 
 #![warn(clippy::pedantic)]
-#![allow(clippy::uninlined_format_args)]
-#![allow(clippy::unused_self)]
-#![allow(clippy::needless_borrows_for_generic_args)]
-#![allow(clippy::writeln_empty_string)]
-#![allow(clippy::unnecessary_map_or)]
-#![allow(clippy::if_not_else)]
-#![allow(clippy::must_use_candidate)]
-#![allow(clippy::doc_markdown)]
-#![allow(dead_code)]
-#![allow(clippy::cast_lossless)]
-#![allow(clippy::single_component_path_imports)]
 
 pub use mqtt5_protocol::{
     constants, encoding, error, flags, packet, packet_id, protocol, qos2, time, topic_matching,

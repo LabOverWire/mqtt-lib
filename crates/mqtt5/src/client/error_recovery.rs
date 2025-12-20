@@ -49,7 +49,7 @@ pub enum RecoverableError {
     SessionTakenOver,
     /// Server is shutting down
     ServerShuttingDown,
-    /// [MQoQ§Error] MQoQ flow recoverable error (Level 2)
+    /// [MQoQ§Error] `MQoQ` flow recoverable error (Level 2)
     MqoqFlowRecoverable,
 }
 

@@ -499,7 +499,6 @@ impl Transport for TlsTransport {
         match &mut self.stream {
             Some(stream) => {
                 stream.write_all(buf).await?;
-                stream.flush().await?;
                 trace!(bytes_written = buf.len(), "TLS write complete");
                 Ok(())
             }

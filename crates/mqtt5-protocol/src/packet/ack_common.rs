@@ -187,6 +187,7 @@ pub(crate) use ack_validate_flags;
 pub(crate) use define_ack_packet;
 pub(crate) use define_ack_packet_inner;
 
+#[must_use]
 pub fn is_valid_publish_ack_reason_code(code: ReasonCode) -> bool {
     matches!(
         code,
@@ -202,6 +203,7 @@ pub fn is_valid_publish_ack_reason_code(code: ReasonCode) -> bool {
     )
 }
 
+#[must_use]
 pub fn is_valid_pubrel_reason_code(code: ReasonCode) -> bool {
     matches!(
         code,

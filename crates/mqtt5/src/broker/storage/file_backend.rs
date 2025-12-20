@@ -6,34 +6,35 @@ use super::{ClientSession, QueuedMessage, RetainedMessage, StorageBackend};
 use crate::error::{MqttError, Result};
 use crate::validation::topic_matches_filter;
 use serde_json;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tokio::fs::{self, File};
 use tokio::io::AsyncWriteExt;
+use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
 /// Storage format version
 ///
 /// IMPORTANT: Only increment this version when the storage format changes:
-/// - Modifying RetainedMessage, ClientSession, or QueuedMessage struct fields
-/// - Changing file naming scheme (topic_to_filename, queue file names)
+/// - Modifying `RetainedMessage`, `ClientSession`, or `QueuedMessage` struct fields
+/// - Changing file naming scheme (`topic_to_filename`, queue file names)
 /// - Changing directory structure (retained/, sessions/, queues/)
 ///
 /// Version History:
 /// - 1: Initial version (0.10.0)
 const STORAGE_VERSION: &str = "1";
 
-/// File-based storage backend
-#[derive(Debug)]
-#[allow(clippy::struct_field_names)]
+/// File-based storage backend with write-behind session caching
 pub struct FileBackend {
-    /// Base directory for all storage
     _base_dir: PathBuf,
-    /// Directory for retained messages
     retained_dir: PathBuf,
-    /// Directory for client sessions
     sessions_dir: PathBuf,
-    /// Directory for message queues
     queues_dir: PathBuf,
+    sessions_cache: Arc<RwLock<HashMap<String, ClientSession>>>,
+    dirty_sessions: Arc<RwLock<HashSet<String>>>,
+    shutdown: Arc<AtomicBool>,
 }
 
 impl FileBackend {
@@ -74,7 +75,77 @@ impl FileBackend {
             retained_dir,
             sessions_dir,
             queues_dir,
+            sessions_cache: Arc::new(RwLock::new(HashMap::new())),
+            dirty_sessions: Arc::new(RwLock::new(HashSet::new())),
+            shutdown: Arc::new(AtomicBool::new(false)),
         })
+    }
+
+    /// # Errors
+    /// Returns an error if any session fails to persist.
+    pub async fn flush_sessions(&self) -> Result<()> {
+        let to_flush: Vec<String> = self.dirty_sessions.read().await.iter().cloned().collect();
+
+        if to_flush.is_empty() {
+            return Ok(());
+        }
+
+        let cache = self.sessions_cache.read().await;
+        let mut failed = Vec::new();
+
+        for client_id in to_flush {
+            if let Some(session) = cache.get(&client_id) {
+                let filename = format!("{client_id}.json");
+                let path = self.sessions_dir.join(filename);
+                if let Err(e) = self.write_file_atomic(path, session).await {
+                    warn!("failed to persist session {}: {}", client_id, e);
+                    failed.push(client_id);
+                } else {
+                    self.dirty_sessions.write().await.remove(&client_id);
+                }
+            } else {
+                self.dirty_sessions.write().await.remove(&client_id);
+            }
+        }
+
+        if failed.is_empty() {
+            Ok(())
+        } else {
+            Err(MqttError::Io(format!(
+                "failed to persist {} sessions",
+                failed.len()
+            )))
+        }
+    }
+
+    pub fn start_flush_task(self: &Arc<Self>, flush_interval: std::time::Duration) {
+        let backend = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(flush_interval);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+            loop {
+                interval.tick().await;
+
+                if backend.shutdown.load(Ordering::Relaxed) {
+                    if let Err(e) = backend.flush_sessions().await {
+                        warn!("failed to flush sessions on shutdown: {e}");
+                    }
+                    break;
+                }
+
+                if let Err(e) = backend.flush_sessions().await {
+                    warn!("failed to flush sessions: {e}");
+                }
+            }
+        });
+    }
+
+    /// # Errors
+    /// Returns an error if flushing sessions fails.
+    pub async fn shutdown(&self) -> Result<()> {
+        self.shutdown.store(true, Ordering::Relaxed);
+        self.flush_sessions().await
     }
 
     async fn check_storage_version(base_dir: &Path) -> Result<()> {
@@ -149,33 +220,33 @@ impl FileBackend {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
                 .await
-                .map_err(|e| MqttError::Io(format!("Failed to create parent directory: {}", e)))?;
+                .map_err(|e| MqttError::Io(format!("Failed to create parent directory: {e}")))?;
         }
 
         let temp_path = path.with_extension("tmp");
 
         // Write to temporary file first
         let serialized = serde_json::to_vec_pretty(data)
-            .map_err(|e| MqttError::Configuration(format!("Failed to serialize data: {}", e)))?;
+            .map_err(|e| MqttError::Configuration(format!("Failed to serialize data: {e}")))?;
 
         let mut file = File::create(&temp_path)
             .await
-            .map_err(|e| MqttError::Io(format!("Failed to create temp file: {}", e)))?;
+            .map_err(|e| MqttError::Io(format!("Failed to create temp file: {e}")))?;
 
         file.write_all(&serialized)
             .await
-            .map_err(|e| MqttError::Io(format!("Failed to write temp file: {}", e)))?;
+            .map_err(|e| MqttError::Io(format!("Failed to write temp file: {e}")))?;
 
         file.flush()
             .await
-            .map_err(|e| MqttError::Io(format!("Failed to flush temp file: {}", e)))?;
+            .map_err(|e| MqttError::Io(format!("Failed to flush temp file: {e}")))?;
 
         drop(file);
 
         // Atomically move temp file to final location
         fs::rename(&temp_path, &path)
             .await
-            .map_err(|e| MqttError::Io(format!("Failed to rename temp file: {}", e)))?;
+            .map_err(|e| MqttError::Io(format!("Failed to rename temp file: {e}")))?;
 
         Ok(())
     }
@@ -213,14 +284,14 @@ impl FileBackend {
         while let Some(entry) = entries
             .next_entry()
             .await
-            .map_err(|e| MqttError::Io(format!("Failed to read directory entry: {}", e)))?
+            .map_err(|e| MqttError::Io(format!("Failed to read directory entry: {e}")))?
         {
             let path = entry.path();
             let is_file = fs::metadata(&path)
                 .await
                 .map(|m| m.is_file())
                 .unwrap_or(false);
-            if is_file && path.extension().map_or(false, |ext| ext == extension) {
+            if is_file && path.extension().is_some_and(|ext| ext == extension) {
                 files.push(path);
             }
         }
@@ -263,7 +334,7 @@ impl StorageBackend for FileBackend {
 
         if path.exists() {
             fs::remove_file(&path).await.map_err(|e| {
-                MqttError::Io(format!("Failed to remove retained message file: {}", e))
+                MqttError::Io(format!("Failed to remove retained message file: {e}"))
             })?;
             debug!("Removed retained message for topic: {}", topic);
         }
@@ -296,40 +367,52 @@ impl StorageBackend for FileBackend {
     }
 
     async fn store_session(&self, session: ClientSession) -> Result<()> {
-        let filename = format!("{}.json", session.client_id);
-        let path = self.sessions_dir.join(filename);
-
-        debug!("Storing session for client: {}", session.client_id);
-        self.write_file_atomic(path, &session).await?;
-
+        let client_id = session.client_id.clone();
+        self.sessions_cache
+            .write()
+            .await
+            .insert(client_id.clone(), session);
+        self.dirty_sessions.write().await.insert(client_id);
         Ok(())
     }
 
     async fn get_session(&self, client_id: &str) -> Result<Option<ClientSession>> {
-        let filename = format!("{}.json", client_id);
-        let path = self.sessions_dir.join(filename);
+        if let Some(session) = self.sessions_cache.read().await.get(client_id).cloned() {
+            if session.is_expired() {
+                self.remove_session(client_id).await?;
+                return Ok(None);
+            }
+            return Ok(Some(session));
+        }
 
+        let filename = format!("{client_id}.json");
+        let path = self.sessions_dir.join(filename);
         let session: Option<ClientSession> = self.read_file(path).await?;
 
-        // Check if session has expired
         if let Some(ref sess) = session {
             if sess.is_expired() {
                 self.remove_session(client_id).await?;
                 return Ok(None);
             }
+            self.sessions_cache
+                .write()
+                .await
+                .insert(client_id.to_string(), sess.clone());
         }
 
         Ok(session)
     }
 
     async fn remove_session(&self, client_id: &str) -> Result<()> {
-        let filename = format!("{}.json", client_id);
-        let path = self.sessions_dir.join(filename);
+        self.sessions_cache.write().await.remove(client_id);
+        self.dirty_sessions.write().await.remove(client_id);
 
+        let filename = format!("{client_id}.json");
+        let path = self.sessions_dir.join(filename);
         if path.exists() {
             fs::remove_file(&path)
                 .await
-                .map_err(|e| MqttError::Io(format!("Failed to remove session file: {}", e)))?;
+                .map_err(|e| MqttError::Io(format!("Failed to remove session file: {e}")))?;
             debug!("Removed session for client: {}", client_id);
         }
 
@@ -370,7 +453,7 @@ impl StorageBackend for FileBackend {
                 if !message.is_expired() {
                     messages.push(message);
                 } else if let Err(e) = fs::remove_file(&file_path).await {
-                    warn!("Failed to remove expired queued message: {}", e);
+                    warn!("Failed to remove expired queued message: {e}");
                 }
             }
         }
@@ -384,10 +467,7 @@ impl StorageBackend for FileBackend {
         let client_dir = self.queues_dir.join(client_id);
         if client_dir.exists() {
             fs::remove_dir_all(&client_dir).await.map_err(|e| {
-                MqttError::Io(format!(
-                    "Failed to remove queue dir for {}: {}",
-                    client_id, e
-                ))
+                MqttError::Io(format!("Failed to remove queue dir for {client_id}: {e}"))
             })?;
             debug!("Removed all queued messages for client: {}", client_id);
         }
@@ -404,7 +484,7 @@ impl StorageBackend for FileBackend {
             if let Some(message) = self.read_file::<RetainedMessage>(file_path.clone()).await? {
                 if message.is_expired() {
                     if let Err(e) = fs::remove_file(&file_path).await {
-                        warn!("Failed to remove expired retained message: {}", e);
+                        warn!("Failed to remove expired retained message: {e}");
                     } else {
                         removed_count += 1;
                     }
@@ -418,7 +498,7 @@ impl StorageBackend for FileBackend {
             if let Some(session) = self.read_file::<ClientSession>(file_path.clone()).await? {
                 if session.is_expired() {
                     if let Err(e) = fs::remove_file(&file_path).await {
-                        warn!("Failed to remove expired session: {}", e);
+                        warn!("Failed to remove expired session: {e}");
                     } else {
                         removed_count += 1;
                     }
@@ -429,12 +509,12 @@ impl StorageBackend for FileBackend {
         // Clean expired queued messages
         let mut queue_entries = fs::read_dir(&self.queues_dir)
             .await
-            .map_err(|e| MqttError::Io(format!("Failed to read queues directory: {}", e)))?;
+            .map_err(|e| MqttError::Io(format!("Failed to read queues directory: {e}")))?;
 
         while let Some(entry) = queue_entries
             .next_entry()
             .await
-            .map_err(|e| MqttError::Io(format!("Failed to read queue entry: {}", e)))?
+            .map_err(|e| MqttError::Io(format!("Failed to read queue entry: {e}")))?
         {
             let client_dir = entry.path();
             let is_dir = fs::metadata(&client_dir)
@@ -449,7 +529,7 @@ impl StorageBackend for FileBackend {
                     {
                         if message.is_expired() {
                             if let Err(e) = fs::remove_file(&file_path).await {
-                                warn!("Failed to remove expired queued message: {}", e);
+                                warn!("Failed to remove expired queued message: {e}");
                             } else {
                                 removed_count += 1;
                             }
@@ -461,7 +541,7 @@ impl StorageBackend for FileBackend {
                 if let Ok(mut dir) = fs::read_dir(&client_dir).await {
                     if dir.next_entry().await.ok().flatten().is_none() {
                         if let Err(e) = fs::remove_dir(&client_dir).await {
-                            warn!("Failed to remove empty queue directory: {}", e);
+                            warn!("Failed to remove empty queue directory: {e}");
                         }
                     }
                 }
@@ -473,5 +553,9 @@ impl StorageBackend for FileBackend {
         }
 
         Ok(())
+    }
+
+    async fn flush_sessions(&self) -> Result<()> {
+        FileBackend::flush_sessions(self).await
     }
 }

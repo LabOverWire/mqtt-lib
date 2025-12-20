@@ -76,6 +76,7 @@ pub struct FileBasedScramCredentialStore {
 }
 
 impl FileBasedScramCredentialStore {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             credentials: RwLock::new(HashMap::new()),
@@ -756,8 +757,7 @@ mod tests {
         assert_eq!(
             result.status,
             crate::broker::auth::EnhancedAuthStatus::Success,
-            "Expected success, got: {:?}",
-            result
+            "Expected success, got: {result:?}"
         );
 
         let server_final = String::from_utf8_lossy(result.auth_data.as_ref().unwrap());
@@ -797,8 +797,7 @@ mod tests {
 
         let mut file = std::fs::File::create(&path).unwrap();
         writeln!(file, "{line1}").unwrap();
-        writeln!(file, "# comment line").unwrap();
-        writeln!(file, "").unwrap();
+        writeln!(file, "# comment line\n").unwrap();
         writeln!(file, "{line2}").unwrap();
 
         let store = FileBasedScramCredentialStore::load_from_file(&path).unwrap();

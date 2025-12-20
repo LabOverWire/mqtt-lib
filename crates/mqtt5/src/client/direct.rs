@@ -118,7 +118,7 @@ impl PacketWriter for UnifiedWriter {
 /// Internal client state
 pub struct DirectClientInner {
     /// Write half of the transport for client operations
-    pub writer: Option<Arc<tokio::sync::RwLock<UnifiedWriter>>>,
+    pub writer: Option<Arc<tokio::sync::Mutex<UnifiedWriter>>>,
     pub quic_connection: Option<Arc<Connection>>,
     pub stream_strategy: Option<StreamStrategy>,
     pub quic_datagrams_enabled: bool,
@@ -155,7 +155,7 @@ pub struct DirectClientInner {
     pub stored_subscriptions: Arc<RwLock<Vec<(String, SubscriptionOptions, CallbackId)>>>,
     /// Whether to queue messages when disconnected
     pub queue_on_disconnect: bool,
-    /// Server's maximum QoS level (from CONNACK)
+    /// Server's maximum `QoS` level (from CONNACK)
     pub server_max_qos: Arc<RwLock<Option<u8>>>,
     /// Authentication handler for enhanced authentication
     pub auth_handler: Option<Arc<dyn AuthHandler>>,
@@ -236,7 +236,7 @@ impl DirectClientInner {
     /// Returns an error if the operation fails
     pub async fn send_packet(&mut self, packet: Packet) -> Result<()> {
         if let Some(writer) = &self.writer {
-            let mut writer_guard = writer.write().await;
+            let mut writer_guard = writer.lock().await;
             writer_guard.write_packet(packet).await?;
             Ok(())
         } else {
@@ -391,7 +391,7 @@ impl DirectClientInner {
             }
         };
 
-        self.writer = Some(Arc::new(tokio::sync::RwLock::new(writer)));
+        self.writer = Some(Arc::new(tokio::sync::Mutex::new(writer)));
         self.set_connected(true);
 
         if let Some(max_packet_size) = self.options.properties.maximum_packet_size {
@@ -436,7 +436,7 @@ impl DirectClientInner {
 
         let writer = self.writer.as_ref().ok_or(MqttError::NotConnected)?;
         writer
-            .write()
+            .lock()
             .await
             .write_packet(Packet::Auth(auth_packet))
             .await?;
@@ -483,7 +483,7 @@ impl DirectClientInner {
                     properties: crate::protocol::v5::properties::Properties::default(),
                 };
                 let _ = writer
-                    .write()
+                    .lock()
                     .await
                     .write_packet(Packet::Disconnect(disconnect))
                     .await;
@@ -739,6 +739,27 @@ impl DirectClientInner {
     }
 
     async fn send_publish_packet(&self, publish: PublishPacket, qos: QoS) -> Result<()> {
+        if qos == QoS::AtMostOnce && self.datagrams_available() {
+            if let Some(max_size) = self.max_datagram_size() {
+                let overhead = 5 + publish.topic_name.len();
+                if publish.payload.len() + overhead <= max_size {
+                    let mut buf = bytes::BytesMut::new();
+                    crate::transport::packet_io::encode_packet_to_buffer(
+                        &Packet::Publish(publish.clone()),
+                        &mut buf,
+                    )?;
+                    if buf.len() <= max_size && self.send_datagram(buf.freeze()).is_ok() {
+                        tracing::debug!(
+                            topic = %publish.topic_name,
+                            payload_len = publish.payload.len(),
+                            "Sent QoS 0 PUBLISH via QUIC datagram"
+                        );
+                        return Ok(());
+                    }
+                }
+            }
+        }
+
         if let Some(manager) = &self.quic_stream_manager {
             match manager.strategy() {
                 StreamStrategy::DataPerPublish => {
@@ -783,14 +804,14 @@ impl DirectClientInner {
 
         let writer = self.writer.as_ref().ok_or(MqttError::NotConnected)?;
         writer
-            .write()
+            .lock()
             .await
             .write_packet(Packet::Publish(publish))
             .await?;
         Ok(())
     }
 
-    pub fn datagrams_available(&self) -> bool {
+    fn datagrams_available(&self) -> bool {
         self.quic_datagrams_enabled
             && self
                 .quic_connection
@@ -799,7 +820,7 @@ impl DirectClientInner {
                 .is_some()
     }
 
-    pub fn max_datagram_size(&self) -> Option<usize> {
+    fn max_datagram_size(&self) -> Option<usize> {
         if !self.quic_datagrams_enabled {
             return None;
         }
@@ -808,55 +829,13 @@ impl DirectClientInner {
             .and_then(|c| c.max_datagram_size())
     }
 
-    pub fn send_datagram(&self, data: bytes::Bytes) -> Result<()> {
-        if !self.quic_datagrams_enabled {
-            return Err(MqttError::InvalidState("Datagrams not enabled".to_string()));
-        }
+    fn send_datagram(&self, data: bytes::Bytes) -> Result<()> {
         let conn = self
             .quic_connection
             .as_ref()
             .ok_or(MqttError::NotConnected)?;
         conn.send_datagram(data)
             .map_err(|e| MqttError::ConnectionError(format!("Datagram send failed: {e}")))
-    }
-
-    pub async fn send_datagram_wait(&self, data: bytes::Bytes) -> Result<()> {
-        if !self.quic_datagrams_enabled {
-            return Err(MqttError::InvalidState("Datagrams not enabled".to_string()));
-        }
-        let conn = self
-            .quic_connection
-            .as_ref()
-            .ok_or(MqttError::NotConnected)?;
-        conn.send_datagram_wait(data)
-            .await
-            .map_err(|e| MqttError::ConnectionError(format!("Datagram send failed: {e}")))
-    }
-
-    pub async fn read_datagram(&self) -> Result<bytes::Bytes> {
-        if !self.quic_datagrams_enabled {
-            return Err(MqttError::InvalidState("Datagrams not enabled".to_string()));
-        }
-        let conn = self
-            .quic_connection
-            .as_ref()
-            .ok_or(MqttError::NotConnected)?;
-        conn.read_datagram()
-            .await
-            .map_err(|e| MqttError::ConnectionError(format!("Datagram read failed: {e}")))
-    }
-
-    pub fn send_publish_as_datagram(&self, publish: PublishPacket) -> Result<()> {
-        if publish.qos != QoS::AtMostOnce {
-            return Err(MqttError::ProtocolError(
-                "Only QoS 0 publishes can be sent as datagrams".to_string(),
-            ));
-        }
-
-        let mut buf = bytes::BytesMut::new();
-        crate::transport::packet_io::encode_packet_to_buffer(&Packet::Publish(publish), &mut buf)?;
-
-        self.send_datagram(buf.freeze())
     }
 
     /// Create a subscription from filter and reason code
@@ -959,7 +938,7 @@ impl DirectClientInner {
 
         // Send SUBSCRIBE directly
         writer
-            .write()
+            .lock()
             .await
             .write_packet(Packet::Subscribe(packet.clone()))
             .await?;
@@ -1023,7 +1002,7 @@ impl DirectClientInner {
 
         // Send UNSUBSCRIBE directly
         writer
-            .write()
+            .lock()
             .await
             .write_packet(Packet::Unsubscribe(packet.clone()))
             .await?;
@@ -1111,7 +1090,7 @@ impl DirectClientInner {
                 match handler.initial_response(method).await {
                     Ok(data) => data,
                     Err(e) => {
-                        tracing::warn!("Auth handler initial_response failed: {}", e);
+                        tracing::warn!("Auth handler initial_response failed: {e}");
                         self.options.properties.authentication_data.clone()
                     }
                 }
@@ -1235,15 +1214,15 @@ impl DirectClientInner {
 
         // Start keepalive task (only if keepalive is not zero)
         let keepalive_interval = self.options.keep_alive;
-        if !keepalive_interval.is_zero() {
+        if keepalive_interval.is_zero() {
+            tracing::debug!("💓 KEEPALIVE - Disabled (interval is zero)");
+        } else {
             let keepalive_writer = writer_for_keepalive;
             self.keepalive_handle = Some(tokio::spawn(async move {
                 tracing::debug!("💓 KEEPALIVE - Task starting");
                 keepalive_task_with_writer(keepalive_writer, keepalive_interval).await;
                 tracing::debug!("💓 KEEPALIVE - Task exited");
             }));
-        } else {
-            tracing::debug!("💓 KEEPALIVE - Disabled (interval is zero)");
         }
 
         if let Some(conn) = &self.quic_connection {
@@ -1268,11 +1247,11 @@ impl DirectClientInner {
         Ok(())
     }
 
-    pub async fn get_recoverable_flows(&self) -> Vec<(FlowId, FlowFlags)> {
+    async fn get_recoverable_flows(&self) -> Vec<(FlowId, FlowFlags)> {
         self.session.read().await.get_recoverable_flows().await
     }
 
-    pub async fn recover_flows(&self) -> Result<usize> {
+    pub(crate) async fn recover_flows(&self) -> Result<usize> {
         let Some(manager) = &self.quic_stream_manager else {
             return Ok(0);
         };
@@ -1307,14 +1286,6 @@ impl DirectClientInner {
         Ok(recovered)
     }
 
-    pub async fn clear_flows(&self) {
-        self.session.read().await.clear_flows().await;
-    }
-
-    pub async fn flow_count(&self) -> usize {
-        self.session.read().await.flow_count().await
-    }
-
     /// Stop background tasks
     fn stop_background_tasks(&mut self) {
         if let Some(handle) = self.packet_reader_handle.take() {
@@ -1341,7 +1312,7 @@ struct PacketReaderContext {
     unsuback_channels: Arc<Mutex<HashMap<u16, oneshot::Sender<UnsubAckPacket>>>>,
     puback_channels: Arc<Mutex<HashMap<u16, oneshot::Sender<ReasonCode>>>>,
     pubcomp_channels: Arc<Mutex<HashMap<u16, oneshot::Sender<ReasonCode>>>>,
-    writer: Arc<tokio::sync::RwLock<UnifiedWriter>>,
+    writer: Arc<tokio::sync::Mutex<UnifiedWriter>>,
     connected: Arc<AtomicBool>,
     protocol_version: u8,
     auth_handler: Option<Arc<dyn AuthHandler>>,
@@ -1461,7 +1432,7 @@ async fn handle_auth_packet(auth: AuthPacket, ctx: &PacketReaderContext) -> Resu
                     let method = ctx.auth_method.clone().unwrap_or_default();
                     let auth_packet = AuthPacket::continue_authentication(method, Some(data))?;
                     ctx.writer
-                        .write()
+                        .lock()
                         .await
                         .write_packet(Packet::Auth(auth_packet))
                         .await?;
@@ -1492,7 +1463,7 @@ async fn handle_auth_packet(auth: AuthPacket, ctx: &PacketReaderContext) -> Resu
 
 /// Keepalive task that uses the write half
 async fn keepalive_task_with_writer(
-    writer: Arc<tokio::sync::RwLock<UnifiedWriter>>,
+    writer: Arc<tokio::sync::Mutex<UnifiedWriter>>,
     keepalive_interval: Duration,
 ) {
     // Send pings at 75% of the keepalive interval to ensure we stay well within the timeout
@@ -1510,7 +1481,7 @@ async fn keepalive_task_with_writer(
         interval.tick().await;
 
         // Send PINGREQ directly using writer
-        if let Err(e) = writer.write().await.write_packet(Packet::PingReq).await {
+        if let Err(e) = writer.lock().await.write_packet(Packet::PingReq).await {
             tracing::error!("Error sending PINGREQ: {e}");
             break;
         }
@@ -1650,7 +1621,7 @@ async fn quic_stream_reader_task(
         }
     };
 
-    let stream_writer = Arc::new(tokio::sync::RwLock::new(UnifiedWriter::Quic(send)));
+    let stream_writer = Arc::new(tokio::sync::Mutex::new(UnifiedWriter::Quic(send)));
 
     loop {
         match recv.read_packet(ctx.protocol_version).await {
@@ -1680,7 +1651,7 @@ async fn quic_stream_reader_task(
 /// Handle incoming packet with writer access for acknowledgments
 async fn handle_incoming_packet_with_writer(
     packet: Packet,
-    writer: &Arc<tokio::sync::RwLock<UnifiedWriter>>,
+    writer: &Arc<tokio::sync::Mutex<UnifiedWriter>>,
     session: &Arc<RwLock<SessionState>>,
     callback_manager: &Arc<CallbackManager>,
     flow_id: Option<crate::transport::flow::FlowId>,
@@ -1721,7 +1692,7 @@ async fn handle_incoming_packet_with_writer(
 /// Handle PUBLISH packet with proper `QoS` acknowledgments
 async fn handle_publish_with_ack(
     publish: crate::packet::publish::PublishPacket,
-    writer: &Arc<tokio::sync::RwLock<UnifiedWriter>>,
+    writer: &Arc<tokio::sync::Mutex<UnifiedWriter>>,
     session: &Arc<RwLock<SessionState>>,
     callback_manager: &Arc<CallbackManager>,
     flow_id: Option<crate::transport::flow::FlowId>,
@@ -1752,7 +1723,7 @@ async fn handle_publish_with_ack(
                     properties: Properties::default(),
                 };
                 writer
-                    .write()
+                    .lock()
                     .await
                     .write_packet(Packet::PubAck(puback))
                     .await?;
@@ -1796,7 +1767,7 @@ async fn handle_publish_with_ack(
                     properties: Properties::default(),
                 };
                 writer
-                    .write()
+                    .lock()
                     .await
                     .write_packet(Packet::PubRec(pubrec))
                     .await?;
@@ -1813,7 +1784,7 @@ async fn handle_publish_with_ack(
 /// Handle PUBREC packet for outgoing `QoS` 2 messages
 async fn handle_pubrec_outgoing(
     pubrec: crate::packet::pubrec::PubRecPacket,
-    writer: &Arc<tokio::sync::RwLock<UnifiedWriter>>,
+    writer: &Arc<tokio::sync::Mutex<UnifiedWriter>>,
     session: &Arc<RwLock<SessionState>>,
 ) -> Result<()> {
     // Move from unacked publish to unacked pubrel
@@ -1831,7 +1802,7 @@ async fn handle_pubrec_outgoing(
     };
 
     writer
-        .write()
+        .lock()
         .await
         .write_packet(crate::packet::Packet::PubRel(pub_rel))
         .await?;
@@ -1860,7 +1831,7 @@ async fn handle_pubcomp_outgoing(
 /// Handle PUBREL packet for `QoS` 2 flow
 async fn handle_pubrel(
     pubrel: crate::packet::pubrel::PubRelPacket,
-    writer: &Arc<tokio::sync::RwLock<UnifiedWriter>>,
+    writer: &Arc<tokio::sync::Mutex<UnifiedWriter>>,
     session: &Arc<RwLock<SessionState>>,
 ) -> Result<()> {
     let has_pubrec = session.read().await.has_pubrec(pubrel.packet_id).await;
@@ -1875,7 +1846,7 @@ async fn handle_pubrel(
         };
 
         writer
-            .write()
+            .lock()
             .await
             .write_packet(Packet::PubComp(pubcomp))
             .await?;
@@ -1887,7 +1858,7 @@ async fn handle_pubrel(
         };
 
         writer
-            .write()
+            .lock()
             .await
             .write_packet(Packet::PubComp(pubcomp))
             .await?;

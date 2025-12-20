@@ -38,6 +38,7 @@ pub struct FlowState {
 }
 
 impl FlowState {
+    #[allow(clippy::must_use_candidate)]
     pub fn new_control() -> Self {
         Self {
             id: FlowId::control(),
@@ -54,6 +55,7 @@ impl FlowState {
         }
     }
 
+    #[allow(clippy::must_use_candidate)]
     pub fn new_client_data(
         id: FlowId,
         flags: FlowFlags,
@@ -74,6 +76,7 @@ impl FlowState {
         }
     }
 
+    #[allow(clippy::must_use_candidate)]
     pub fn new_server_data(
         id: FlowId,
         flags: FlowFlags,
@@ -98,6 +101,7 @@ impl FlowState {
         self.last_activity = Instant::now();
     }
 
+    #[must_use]
     pub fn is_expired(&self) -> bool {
         if let Some(interval) = self.expire_interval {
             self.last_activity.elapsed() > interval
@@ -120,6 +124,7 @@ impl FlowState {
         self.topic_aliases.insert(alias, topic);
     }
 
+    #[must_use]
     pub fn get_topic_alias(&self, alias: u16) -> Option<&String> {
         self.topic_aliases.get(&alias)
     }
@@ -188,10 +193,12 @@ impl FlowState {
         self.transition_to(FlowLifecycle::Closed)
     }
 
+    #[must_use]
     pub fn is_open(&self) -> bool {
         self.lifecycle == FlowLifecycle::Open
     }
 
+    #[must_use]
     pub fn is_closed(&self) -> bool {
         self.lifecycle == FlowLifecycle::Closed
     }
@@ -210,6 +217,7 @@ pub struct FlowRegistry {
 }
 
 impl FlowRegistry {
+    #[allow(clippy::must_use_candidate)]
     pub fn new(max_flows: usize) -> Self {
         Self {
             flows: HashMap::new(),
@@ -270,6 +278,7 @@ impl FlowRegistry {
         true
     }
 
+    #[must_use]
     pub fn get(&self, id: FlowId) -> Option<&FlowState> {
         self.flows.get(&id)
     }
@@ -282,6 +291,7 @@ impl FlowRegistry {
         self.flows.remove(&id)
     }
 
+    #[must_use]
     pub fn contains(&self, id: FlowId) -> bool {
         self.flows.contains_key(&id)
     }
@@ -316,10 +326,12 @@ impl FlowRegistry {
         expired
     }
 
+    #[must_use]
     pub fn len(&self) -> usize {
         self.flows.len()
     }
 
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.flows.is_empty()
     }
@@ -344,6 +356,7 @@ impl FlowRegistry {
         self.flows.clear();
     }
 
+    #[must_use]
     pub fn flows_for_subscription(&self, topic_filter: &str) -> Vec<FlowId> {
         self.flows
             .iter()

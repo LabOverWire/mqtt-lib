@@ -20,8 +20,13 @@ impl<T> BindResult<T> {
         self.successful.is_empty()
     }
 
-    pub fn has_failures(&self) -> bool {
-        !self.failures.is_empty()
+    pub fn warn_partial_failures(&self, transport_name: &str) {
+        for failure in &self.failures {
+            warn!(
+                "{} partial binding failure: {} - {}",
+                transport_name, failure.address, failure.error
+            );
+        }
     }
 }
 
@@ -59,10 +64,7 @@ pub fn format_binding_error(
     failures: &[BindFailure],
     attempted_addrs: &[SocketAddr],
 ) -> String {
-    let mut msg = format!(
-        "Failed to bind to any {} address. Attempted addresses:\n",
-        transport_name
-    );
+    let mut msg = format!("Failed to bind to any {transport_name} address. Attempted addresses:\n");
 
     for failure in failures {
         writeln!(
@@ -79,8 +81,7 @@ pub fn format_binding_error(
         let successful_count = attempted_addrs.len() - failures.len();
         writeln!(
             msg,
-            "\nNote: {} address(es) bound successfully.",
-            successful_count
+            "\nNote: {successful_count} address(es) bound successfully."
         )
         .ok();
     }
@@ -105,8 +106,7 @@ pub fn format_binding_error(
         };
         write!(
             msg,
-            "Check for processes using {} with 'lsof -i :<port>' or use different ports.",
-            ports_str
+            "Check for processes using {ports_str} with 'lsof -i :<port>' or use different ports."
         )
         .ok();
     } else if failures
@@ -121,43 +121,11 @@ pub fn format_binding_error(
     msg
 }
 
-fn format_single_binding_error(addr: SocketAddr, error: &std::io::Error) -> String {
-    format!(
-        "Failed to bind to {}: {} ({}). Suggestion: {}",
-        addr,
-        error,
-        error_kind_to_hint(error),
-        get_suggestion_for_error(addr, error)
-    )
-}
-
 fn error_kind_to_hint(error: &std::io::Error) -> &'static str {
     match error.kind() {
         std::io::ErrorKind::AddrInUse => "address already in use",
         std::io::ErrorKind::PermissionDenied => "permission denied",
         std::io::ErrorKind::AddrNotAvailable => "address not available",
         _ => "see error above",
-    }
-}
-
-fn get_suggestion_for_error(addr: SocketAddr, error: &std::io::Error) -> String {
-    match error.kind() {
-        std::io::ErrorKind::AddrInUse => {
-            format!("Check 'lsof -i :{}' or try a different port", addr.port())
-        }
-        std::io::ErrorKind::PermissionDenied => {
-            if addr.port() < 1024 {
-                format!(
-                    "Port {} requires elevated privileges, try port > 1024",
-                    addr.port()
-                )
-            } else {
-                "Check firewall or security settings".to_string()
-            }
-        }
-        std::io::ErrorKind::AddrNotAvailable => {
-            "Verify the IP address is configured on this system".to_string()
-        }
-        _ => "Check network configuration".to_string(),
     }
 }

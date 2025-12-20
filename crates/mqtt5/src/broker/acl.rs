@@ -183,11 +183,11 @@ impl FederatedRoleEntry {
 pub struct AclManager {
     /// List of direct user ACL rules (highest priority)
     rules: Arc<RwLock<Vec<AclRule>>>,
-    /// Roles: role_name -> Role
+    /// Roles: `role_name` -> Role
     roles: Arc<RwLock<HashMap<String, Role>>>,
     /// User-role assignments: username -> set of role names (native/persistent)
     user_roles: Arc<RwLock<HashMap<String, HashSet<String>>>>,
-    /// Federated user-role assignments: user_id -> FederatedRoleEntry (session-scoped)
+    /// Federated user-role assignments: `user_id` -> `FederatedRoleEntry` (session-scoped)
     federated_user_roles: Arc<RwLock<HashMap<String, FederatedRoleEntry>>>,
     /// Path to ACL file (optional)
     acl_file: Option<std::path::PathBuf>,
@@ -374,7 +374,7 @@ impl AclManager {
         Ok(())
     }
 
-    /// Reloads the ACL file (alias for load_acl_file).
+    /// Reloads the ACL file (alias for `load_acl_file`).
     ///
     /// # Errors
     /// Returns an error if the ACL file cannot be read or parsed.
@@ -468,8 +468,7 @@ impl AclManager {
     pub async fn assign_role(&self, username: &str, role_name: &str) -> Result<()> {
         if !self.roles.read().await.contains_key(role_name) {
             return Err(MqttError::Configuration(format!(
-                "Role '{}' does not exist",
-                role_name
+                "Role '{role_name}' does not exist"
             )));
         }
         self.user_roles
@@ -580,7 +579,7 @@ impl AclManager {
 
         // Step 1 & 2: Check direct user rules (non-wildcard)
         let (direct_match, direct_specificity) =
-            self.find_best_direct_rule(&rules, username, topic, false);
+            Self::find_best_direct_rule(&rules, username, topic, false);
 
         if let Some(rule) = direct_match {
             debug!(
@@ -648,7 +647,7 @@ impl AclManager {
 
         // Step 5: Check wildcard user rules
         let (wildcard_match, wildcard_specificity) =
-            self.find_best_direct_rule(&rules, username, topic, true);
+            Self::find_best_direct_rule(&rules, username, topic, true);
 
         if let Some(rule) = wildcard_match {
             debug!(
@@ -677,7 +676,6 @@ impl AclManager {
     }
 
     fn find_best_direct_rule<'a>(
-        &self,
         rules: &'a [AclRule],
         username: Option<&str>,
         topic: &str,

@@ -94,7 +94,7 @@ async fn test_cli_wildcard_subscriptions() {
     let broker_url = broker.address();
 
     // Start subscriber for wildcard topic
-    let sub_handle = run_cli_sub_async(broker_url, "test/wild/+/data", 2, &["--verbose"]).await;
+    let sub_handle = run_cli_sub_async(broker_url, "test/wild/+/data", 2, &["--verbose"]);
 
     // Give subscriber time to connect
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -159,7 +159,7 @@ async fn test_cli_stdin_message() {
     let broker_url = broker.address();
 
     // Start subscriber first
-    let sub_handle = run_cli_sub_async(broker_url, "test/stdin", 1, &[]).await;
+    let sub_handle = run_cli_sub_async(broker_url, "test/stdin", 1, &[]);
 
     tokio::time::sleep(Duration::from_millis(500)).await;
 
@@ -205,7 +205,7 @@ async fn test_cli_file_message() {
     std::fs::write(temp_file, "Message from file").expect("Failed to write temp file");
 
     // Start subscriber
-    let sub_handle = run_cli_sub_async(broker_url, "test/file", 1, &[]).await;
+    let sub_handle = run_cli_sub_async(broker_url, "test/file", 1, &[]);
 
     tokio::time::sleep(Duration::from_millis(500)).await;
 

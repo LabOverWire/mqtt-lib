@@ -6,6 +6,18 @@ use std::path::{Path, PathBuf};
 use tokio::signal;
 use tracing::{debug, info};
 
+fn parse_storage_backend(
+    s: &str,
+) -> std::result::Result<mqtt5::broker::config::StorageBackend, String> {
+    match s.to_lowercase().as_str() {
+        "file" => Ok(mqtt5::broker::config::StorageBackend::File),
+        "memory" => Ok(mqtt5::broker::config::StorageBackend::Memory),
+        _ => Err(format!(
+            "unknown storage backend: {s} (expected 'file' or 'memory')"
+        )),
+    }
+}
+
 #[derive(Args)]
 pub struct BrokerCommand {
     /// Configuration file path (JSON format)
@@ -147,6 +159,10 @@ pub struct BrokerCommand {
     /// Storage directory for persistent data
     #[arg(long, default_value = "./mqtt_storage")]
     pub storage_dir: PathBuf,
+
+    /// Storage backend type: file or memory
+    #[arg(long, default_value = "file", value_parser = parse_storage_backend)]
+    pub storage_backend: mqtt5::broker::config::StorageBackend,
 
     /// Disable message persistence
     #[arg(long)]
@@ -296,7 +312,7 @@ pub async fn execute(mut cmd: BrokerCommand, verbose: bool, debug: bool) -> Resu
                 println!("\n🛑 Received Ctrl+C, shutting down gracefully...");
             }
             Err(err) => {
-                tracing::error!("Unable to listen for shutdown signal: {}", err);
+                tracing::error!("Unable to listen for shutdown signal: {err}");
             }
         }
     };
@@ -791,7 +807,7 @@ async fn create_interactive_config(cmd: &mut BrokerCommand) -> Result<BrokerConf
     let storage_config = StorageConfig {
         enable_persistence: !cmd.no_persistence,
         base_dir: cmd.storage_dir.clone(),
-        backend: mqtt5::broker::config::StorageBackend::File,
+        backend: cmd.storage_backend,
         cleanup_interval: std::time::Duration::from_secs(300), // 5 minutes
     };
     config.storage_config = storage_config;

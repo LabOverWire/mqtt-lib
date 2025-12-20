@@ -14,30 +14,37 @@ pub const FLOW_TYPE_USER_DEFINED: u8 = 0x14;
 pub struct FlowId(u64);
 
 impl FlowId {
+    #[must_use]
     pub fn client(id: u64) -> Self {
         Self((id << 1) & !1)
     }
 
+    #[must_use]
     pub fn server(id: u64) -> Self {
         Self((id << 1) | 1)
     }
 
+    #[must_use]
     pub fn control() -> Self {
         Self(0)
     }
 
+    #[must_use]
     pub fn is_client_initiated(&self) -> bool {
         self.0 & 1 == 0
     }
 
+    #[must_use]
     pub fn is_server_initiated(&self) -> bool {
         self.0 & 1 == 1
     }
 
+    #[must_use]
     pub fn raw(&self) -> u64 {
         self.0
     }
 
+    #[must_use]
     pub fn sequence(&self) -> u64 {
         self.0 >> 1
     }
@@ -69,10 +76,12 @@ pub struct FlowFlags {
 }
 
 impl FlowFlags {
+    #[must_use]
     pub fn encode(&self) -> u8 {
         self.to_be_bytes()[0]
     }
 
+    #[must_use]
     pub fn decode(byte: u8) -> Self {
         match Self::try_from_be_bytes(&[byte]) {
             Ok((flags, _)) => flags,
@@ -89,6 +98,7 @@ pub struct ControlFlowHeader {
 }
 
 impl ControlFlowHeader {
+    #[must_use]
     pub fn new(flags: FlowFlags) -> Self {
         Self {
             flow_id: FlowId::control(),
@@ -97,7 +107,7 @@ impl ControlFlowHeader {
     }
 
     pub fn encode(&self, buf: &mut BytesMut) {
-        encode_varint(FLOW_TYPE_CONTROL as u64, buf);
+        encode_varint(u64::from(FLOW_TYPE_CONTROL), buf);
         encode_varint(self.flow_id.raw(), buf);
         buf.put_u8(self.flags.encode());
     }
@@ -126,6 +136,7 @@ pub struct DataFlowHeader {
 }
 
 impl DataFlowHeader {
+    #[must_use]
     pub fn client(flow_id: FlowId, expire_interval: u64, flags: FlowFlags) -> Self {
         Self {
             flow_type: FLOW_TYPE_CLIENT_DATA,
@@ -135,6 +146,7 @@ impl DataFlowHeader {
         }
     }
 
+    #[must_use]
     pub fn server(flow_id: FlowId, expire_interval: u64, flags: FlowFlags) -> Self {
         Self {
             flow_type: FLOW_TYPE_SERVER_DATA,
@@ -145,7 +157,7 @@ impl DataFlowHeader {
     }
 
     pub fn encode(&self, buf: &mut BytesMut) {
-        encode_varint(self.flow_type as u64, buf);
+        encode_varint(u64::from(self.flow_type), buf);
         encode_varint(self.flow_id.raw(), buf);
         encode_varint(self.expire_interval, buf);
         buf.put_u8(self.flags.encode());
@@ -170,10 +182,12 @@ impl DataFlowHeader {
         })
     }
 
+    #[must_use]
     pub fn is_client_flow(&self) -> bool {
         self.flow_type == FLOW_TYPE_CLIENT_DATA
     }
 
+    #[must_use]
     pub fn is_server_flow(&self) -> bool {
         self.flow_type == FLOW_TYPE_SERVER_DATA
     }
@@ -194,7 +208,7 @@ impl FlowHeader {
             Self::Control(h) => h.encode(buf),
             Self::ClientData(h) | Self::ServerData(h) => h.encode(buf),
             Self::UserDefined(data) => {
-                encode_varint(FLOW_TYPE_USER_DEFINED as u64, buf);
+                encode_varint(u64::from(FLOW_TYPE_USER_DEFINED), buf);
                 buf.extend_from_slice(data);
             }
         }
@@ -204,9 +218,10 @@ impl FlowHeader {
     ///
     /// # Errors
     /// Returns an error if the flow type is unknown or the buffer is malformed.
-    #[allow(clippy::cast_possible_truncation)]
     pub fn decode(buf: &mut Bytes) -> Result<Self> {
-        let flow_type = decode_varint(buf)? as u8;
+        let flow_type_raw = decode_varint(buf)?;
+        let flow_type = u8::try_from(flow_type_raw)
+            .map_err(|_| MqttError::ProtocolError(format!("invalid flow type: {flow_type_raw}")))?;
         match flow_type {
             FLOW_TYPE_CONTROL => Ok(Self::Control(ControlFlowHeader::decode(buf)?)),
             FLOW_TYPE_CLIENT_DATA => Ok(Self::ClientData(DataFlowHeader::decode(flow_type, buf)?)),
@@ -265,7 +280,7 @@ pub fn decode_varint(buf: &mut Bytes) -> Result<u64> {
     let first = buf.get_u8();
     let prefix = first >> 6;
     match prefix {
-        0b00 => Ok((first & 0x3F) as u64),
+        0b00 => Ok(u64::from(first & 0x3F)),
         0b01 => {
             if buf.remaining() < 1 {
                 return Err(MqttError::ProtocolError(
@@ -273,7 +288,7 @@ pub fn decode_varint(buf: &mut Bytes) -> Result<u64> {
                 ));
             }
             let second = buf.get_u8();
-            Ok((((first & 0x3F) as u64) << 8) | (second as u64))
+            Ok(((u64::from(first & 0x3F)) << 8) | u64::from(second))
         }
         0b10 => {
             if buf.remaining() < 3 {
@@ -284,10 +299,10 @@ pub fn decode_varint(buf: &mut Bytes) -> Result<u64> {
             let b1 = buf.get_u8();
             let b2 = buf.get_u8();
             let b3 = buf.get_u8();
-            Ok((((first & 0x3F) as u64) << 24)
-                | ((b1 as u64) << 16)
-                | ((b2 as u64) << 8)
-                | (b3 as u64))
+            Ok((u64::from(first & 0x3F) << 24)
+                | ((u64::from(b1)) << 16)
+                | ((u64::from(b2)) << 8)
+                | (u64::from(b3)))
         }
         0b11 => {
             if buf.remaining() < 7 {
@@ -302,19 +317,20 @@ pub fn decode_varint(buf: &mut Bytes) -> Result<u64> {
             let b5 = buf.get_u8();
             let b6 = buf.get_u8();
             let b7 = buf.get_u8();
-            Ok((((first & 0x3F) as u64) << 56)
-                | ((b1 as u64) << 48)
-                | ((b2 as u64) << 40)
-                | ((b3 as u64) << 32)
-                | ((b4 as u64) << 24)
-                | ((b5 as u64) << 16)
-                | ((b6 as u64) << 8)
-                | (b7 as u64))
+            Ok(((u64::from(first & 0x3F)) << 56)
+                | ((u64::from(b1)) << 48)
+                | ((u64::from(b2)) << 40)
+                | ((u64::from(b3)) << 32)
+                | ((u64::from(b4)) << 24)
+                | ((u64::from(b5)) << 16)
+                | ((u64::from(b6)) << 8)
+                | (u64::from(b7)))
         }
         _ => unreachable!(),
     }
 }
 
+#[must_use]
 pub fn varint_len(value: u64) -> usize {
     if value <= 63 {
         1
@@ -335,6 +351,7 @@ pub struct FlowIdGenerator {
 }
 
 impl FlowIdGenerator {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             next_client: 1,

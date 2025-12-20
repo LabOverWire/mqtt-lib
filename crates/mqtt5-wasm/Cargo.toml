@@ -1,6 +1,6 @@
 [package]
 name = "mqtt5-wasm"
-version = "0.5.0"
+version = "0.6.0"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -26,8 +26,8 @@ client = [
 broker = ["client", "dep:mqtt5", "dep:tokio"]
 
 [dependencies]
-mqtt5-protocol = { path = "../mqtt5-protocol", version = "0.5" }
-mqtt5 = { path = "../mqtt5", version = "0.14", optional = true, default-features = false, features = [
+mqtt5-protocol = { path = "../mqtt5-protocol", version = "0.6" }
+mqtt5 = { path = "../mqtt5", version = "0.15", optional = true, default-features = false, features = [
     "tokio",
 ] }
 
@@ -43,6 +43,7 @@ futures-util = "0.3"
 tracing = "0.1.41"
 tokio = { version = "1.47", optional = true }
 gloo-timers = { version = "0.3.0", features = ["futures"] }
+flume = "0.12.0"
 
 [dependencies.web-sys]
 version = "0.3"

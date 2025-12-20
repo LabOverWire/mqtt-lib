@@ -1,7 +1,7 @@
 //! Bridge connection implementation
 //!
 //! Manages a single bridge connection to a remote broker using our existing
-//! MqttClient implementation.
+//! `MqttClient` implementation.
 
 use crate::broker::bridge::{BridgeConfig, BridgeDirection, BridgeError, BridgeStats, Result};
 use crate::broker::router::MessageRouter;
@@ -23,7 +23,7 @@ use tracing::{debug, error, info, warn};
 pub enum ConnectedBroker {
     /// Connected to the primary broker
     Primary,
-    /// Connected to a backup broker (index in backup_brokers list)
+    /// Connected to a backup broker (index in `backup_brokers` list)
     Backup(usize),
 }
 
@@ -136,7 +136,7 @@ impl BridgeConnection {
     fn build_tls_config(&self, address: &str) -> Result<TlsConfig> {
         let addr = address
             .to_socket_addrs()
-            .map_err(|e| BridgeError::ConfigurationError(format!("Invalid address: {}", e)))?
+            .map_err(|e| BridgeError::ConfigurationError(format!("Invalid address: {e}")))?
             .next()
             .ok_or_else(|| {
                 BridgeError::ConfigurationError("Could not resolve address".to_string())
@@ -158,19 +158,19 @@ impl BridgeConnection {
 
         if let Some(ref ca_file) = self.config.ca_file {
             tls_config.load_ca_cert_pem(ca_file).map_err(|e| {
-                BridgeError::ConfigurationError(format!("Failed to load CA cert: {}", e))
+                BridgeError::ConfigurationError(format!("Failed to load CA cert: {e}"))
             })?;
         }
 
         if let Some(ref cert_file) = self.config.client_cert_file {
             tls_config.load_client_cert_pem(cert_file).map_err(|e| {
-                BridgeError::ConfigurationError(format!("Failed to load client cert: {}", e))
+                BridgeError::ConfigurationError(format!("Failed to load client cert: {e}"))
             })?;
         }
 
         if let Some(ref key_file) = self.config.client_key_file {
             tls_config.load_client_key_pem(key_file).map_err(|e| {
-                BridgeError::ConfigurationError(format!("Failed to load client key: {}", e))
+                BridgeError::ConfigurationError(format!("Failed to load client key: {e}"))
             })?;
         }
 
@@ -190,7 +190,7 @@ impl BridgeConnection {
     fn build_connect_options(&self) -> ConnectOptions {
         let mut options = ConnectOptions::new(&self.config.client_id);
         options.clean_start = self.config.clean_start;
-        options.keep_alive = Duration::from_secs(self.config.keepalive as u64);
+        options.keep_alive = Duration::from_secs(u64::from(self.config.keepalive));
 
         if let Some(ref username) = self.config.username {
             options.username = Some(username.clone());
@@ -227,7 +227,7 @@ impl BridgeConnection {
                 return Ok(ConnectedBroker::Primary);
             }
             Err(e) => {
-                warn!("Failed to connect to primary broker: {}", e);
+                warn!("Failed to connect to primary broker: {e}");
                 self.update_error_stats(e.to_string()).await;
             }
         }
@@ -279,13 +279,13 @@ impl BridgeConnection {
                 return Ok(ConnectedBroker::Primary);
             }
             Err(e) => {
-                warn!("Failed to connect to primary broker: {}", e);
+                warn!("Failed to connect to primary broker: {e}");
                 self.update_error_stats(e.to_string()).await;
             }
         }
 
         for (idx, backup) in self.config.backup_brokers.iter().enumerate() {
-            let backup_connection_string = format!("mqtt://{}", backup);
+            let backup_connection_string = format!("mqtt://{backup}");
             match Box::pin(
                 self.client
                     .connect_with_options(&backup_connection_string, options.clone()),
@@ -407,6 +407,7 @@ impl BridgeConnection {
         }
     }
 
+    #[must_use]
     pub fn current_broker(&self) -> Arc<RwLock<Option<ConnectedBroker>>> {
         self.current_broker.clone()
     }
@@ -521,7 +522,7 @@ impl BridgeConnection {
                                     .fetch_add(packet.payload.len() as u64, Ordering::Relaxed);
                             }
                             Err(e) => {
-                                error!("Failed to forward message: {}", e);
+                                error!("Failed to forward message: {e}");
                                 return Err(BridgeError::ClientError(e));
                             }
                         }
@@ -545,7 +546,7 @@ impl BridgeConnection {
         for mapping in &self.config.topics {
             if mapping.pattern == topic {
                 if let Some(ref prefix) = mapping.remote_prefix {
-                    return format!("{}{}", prefix, topic);
+                    return format!("{prefix}{topic}");
                 }
             }
         }

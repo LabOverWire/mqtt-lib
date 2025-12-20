@@ -7,7 +7,7 @@ use mqtt5::time::Duration;
 use mqtt5::types::ProtocolVersion;
 use mqtt5::QoS;
 use std::sync::Arc;
-use tokio::sync::mpsc;
+
 use tokio::time::timeout;
 
 #[tokio::test]
@@ -75,7 +75,7 @@ async fn test_bridge_message_routing() {
     let router = Arc::new(MessageRouter::new());
 
     // Register a test client to receive messages
-    let (tx, mut rx) = mpsc::channel(10);
+    let (tx, rx) = flume::bounded(10);
     let (dtx, _drx) = tokio::sync::oneshot::channel();
     router
         .register_client("test-client".to_string(), tx, dtx)
@@ -99,7 +99,7 @@ async fn test_bridge_message_routing() {
     router.route_message(&packet, None).await;
 
     // Verify message was routed locally
-    let received = timeout(Duration::from_millis(500), rx.recv())
+    let received = timeout(Duration::from_millis(500), rx.recv_async())
         .await
         .expect("Timeout waiting for message")
         .expect("Should receive message");

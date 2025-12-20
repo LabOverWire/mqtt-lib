@@ -19,9 +19,6 @@ use std::collections::HashMap;
 #[cfg(feature = "turmoil-testing")]
 use std::sync::Arc;
 #[cfg(feature = "turmoil-testing")]
-use tokio::sync::mpsc;
-
-#[cfg(feature = "turmoil-testing")]
 #[test]
 #[allow(clippy::too_many_lines)]
 fn test_multi_client_message_routing() {
@@ -37,7 +34,7 @@ fn test_multi_client_message_routing() {
         let mut receivers = HashMap::new();
 
         // Client 1: Subscribes to temperature sensors
-        let (tx1, rx1) = mpsc::channel(100);
+        let (tx1, rx1) = flume::bounded(100);
         clients.insert("temp_monitor", tx1);
         receivers.insert("temp_monitor", rx1);
         let (dtx1, _drx1) = tokio::sync::oneshot::channel();
@@ -63,7 +60,7 @@ fn test_multi_client_message_routing() {
             .unwrap();
 
         // Client 2: Subscribes to humidity sensors
-        let (tx2, rx2) = mpsc::channel(100);
+        let (tx2, rx2) = flume::bounded(100);
         clients.insert("humidity_monitor", tx2);
         receivers.insert("humidity_monitor", rx2);
         let (dtx2, _drx2) = tokio::sync::oneshot::channel();
@@ -89,7 +86,7 @@ fn test_multi_client_message_routing() {
             .unwrap();
 
         // Client 3: Subscribes to all sensors (wildcard)
-        let (tx3, rx3) = mpsc::channel(100);
+        let (tx3, rx3) = flume::bounded(100);
         clients.insert("all_monitor", tx3);
         receivers.insert("all_monitor", rx3);
         let (dtx3, _drx3) = tokio::sync::oneshot::channel();
@@ -115,7 +112,7 @@ fn test_multi_client_message_routing() {
             .unwrap();
 
         // Client 4: Subscribes to specific room only
-        let (tx4, rx4) = mpsc::channel(100);
+        let (tx4, rx4) = flume::bounded(100);
         clients.insert("room1_monitor", tx4);
         receivers.insert("room1_monitor", rx4);
         let (dtx4, _drx4) = tokio::sync::oneshot::channel();
@@ -217,7 +214,7 @@ fn test_client_subscription_changes() {
         let router = Arc::new(MessageRouter::new());
 
         // Create a client
-        let (tx, mut rx) = mpsc::channel(100);
+        let (tx, rx) = flume::bounded(100);
         let (dtx, _drx) = tokio::sync::oneshot::channel();
         router
             .register_client("dynamic_client".to_string(), tx, dtx)
@@ -308,8 +305,8 @@ fn test_message_ordering_with_multiple_clients() {
         let router = Arc::new(MessageRouter::new());
 
         // Create two clients subscribing to the same topic
-        let (tx1, mut rx1) = mpsc::channel(100);
-        let (tx2, mut rx2) = mpsc::channel(100);
+        let (tx1, rx1) = flume::bounded(100);
+        let (tx2, rx2) = flume::bounded(100);
 
         let (dtx1, _drx1) = tokio::sync::oneshot::channel();
         router

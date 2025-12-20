@@ -13,8 +13,9 @@ pub struct MessageQueue<B: StorageBackend> {
     storage: Storage<B>,
 }
 
-impl<B: StorageBackend> MessageQueue<B> {
+impl<B: StorageBackend + 'static> MessageQueue<B> {
     /// Create new message queue manager
+    #[must_use]
     pub fn new(storage: Storage<B>) -> Self {
         Self { storage }
     }

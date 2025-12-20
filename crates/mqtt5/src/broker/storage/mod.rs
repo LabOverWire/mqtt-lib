@@ -25,7 +25,8 @@ use crate::packet::publish::PublishPacket;
 use crate::time::{Duration, SystemTime};
 use crate::QoS;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -44,7 +45,7 @@ pub struct RetainedMessage {
     pub stored_at_secs: u64,
     /// Original message expiry interval in seconds (if any)
     pub message_expiry_interval: Option<u32>,
-    /// Message expiry time (computed from stored_at + interval)
+    /// Message expiry time (computed from `stored_at` + interval)
     #[serde(skip)]
     pub expires_at: Option<SystemTime>,
 }
@@ -67,6 +68,7 @@ fn default_protocol_version() -> u8 {
 }
 
 impl StoredSubscription {
+    #[must_use]
     pub fn new(qos: QoS) -> Self {
         Self {
             qos,
@@ -118,16 +120,16 @@ pub struct QueuedMessage {
     pub payload: Vec<u8>,
     /// Target client ID
     pub client_id: String,
-    /// QoS level for delivery
+    /// `QoS` level for delivery
     pub qos: QoS,
     /// When the message was queued (Unix timestamp in seconds)
     pub queued_at_secs: u64,
     /// Original message expiry interval in seconds (if any)
     pub message_expiry_interval: Option<u32>,
-    /// Message expiry time (computed from queued_at + interval)
+    /// Message expiry time (computed from `queued_at` + interval)
     #[serde(skip)]
     pub expires_at: Option<SystemTime>,
-    /// Packet ID for QoS 1/2 delivery
+    /// Packet ID for `QoS` 1/2 delivery
     pub packet_id: Option<u16>,
 }
 
@@ -196,10 +198,14 @@ pub trait StorageBackend: Send + Sync {
 
     /// Clean up expired messages and sessions
     fn cleanup_expired(&self) -> impl std::future::Future<Output = Result<()>> + Send;
+
+    /// Flush any cached session data to persistent storage (no-op for non-caching backends)
+    fn flush_sessions(&self) -> impl std::future::Future<Output = Result<()>> + Send {
+        async { Ok(()) }
+    }
 }
 
 /// In-memory storage for fast access with persistent backing
-#[derive(Debug)]
 pub struct Storage<B: StorageBackend> {
     /// Persistent storage backend
     backend: Arc<B>,
@@ -207,15 +213,21 @@ pub struct Storage<B: StorageBackend> {
     retained_cache: Arc<RwLock<HashMap<String, RetainedMessage>>>,
     /// In-memory sessions cache
     sessions_cache: Arc<RwLock<HashMap<String, ClientSession>>>,
+    /// Sessions that need to be flushed to backend (write-behind)
+    dirty_sessions: Arc<RwLock<HashSet<String>>>,
+    /// Flag to signal shutdown
+    shutdown: Arc<AtomicBool>,
 }
 
-impl<B: StorageBackend> Storage<B> {
+impl<B: StorageBackend + 'static> Storage<B> {
     /// Create new storage with backend
     pub fn new(backend: B) -> Self {
         Self {
             backend: Arc::new(backend),
             retained_cache: Arc::new(RwLock::new(HashMap::new())),
             sessions_cache: Arc::new(RwLock::new(HashMap::new())),
+            dirty_sessions: Arc::new(RwLock::new(HashSet::new())),
+            shutdown: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -310,21 +322,84 @@ impl<B: StorageBackend> Storage<B> {
             .collect()
     }
 
-    /// Store client session.
-    ///
-    /// # Errors
-    /// Returns an error if the backend fails to persist the session.
-    pub async fn store_session(&self, session: ClientSession) -> Result<()> {
+    /// Store client session (write-behind: caches immediately, flushes later).
+    pub async fn store_session(&self, session: ClientSession) {
         let client_id = session.client_id.clone();
 
-        // Update cache
         self.sessions_cache
             .write()
             .await
-            .insert(client_id, session.clone());
+            .insert(client_id.clone(), session);
 
-        // Persist to backend
-        self.backend.store_session(session).await
+        self.dirty_sessions.write().await.insert(client_id);
+    }
+
+    /// Flush all dirty sessions to backend.
+    ///
+    /// # Errors
+    /// Returns an error if the backend fails to persist any session.
+    pub async fn flush_sessions(&self) -> Result<()> {
+        let to_flush: Vec<String> = self.dirty_sessions.read().await.iter().cloned().collect();
+
+        if !to_flush.is_empty() {
+            let cache = self.sessions_cache.read().await;
+            let mut failed = Vec::new();
+
+            for client_id in to_flush {
+                if let Some(session) = cache.get(&client_id) {
+                    if let Err(e) = self.backend.store_session(session.clone()).await {
+                        tracing::warn!("failed to persist session {}: {}", client_id, e);
+                        failed.push(client_id);
+                    } else {
+                        self.dirty_sessions.write().await.remove(&client_id);
+                    }
+                } else {
+                    self.dirty_sessions.write().await.remove(&client_id);
+                }
+            }
+
+            if !failed.is_empty() {
+                return Err(crate::error::MqttError::Io(format!(
+                    "failed to persist {} sessions",
+                    failed.len()
+                )));
+            }
+        }
+
+        self.backend.flush_sessions().await
+    }
+
+    /// Start background flush task (call once after initialization).
+    pub fn start_flush_task(self: &Arc<Self>, flush_interval: Duration) {
+        let storage = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(flush_interval);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+            loop {
+                interval.tick().await;
+
+                if storage.shutdown.load(Ordering::Relaxed) {
+                    if let Err(e) = storage.flush_sessions().await {
+                        tracing::warn!("failed to flush sessions on shutdown: {e}");
+                    }
+                    break;
+                }
+
+                if let Err(e) = storage.flush_sessions().await {
+                    tracing::warn!("failed to flush sessions: {e}");
+                }
+            }
+        });
+    }
+
+    /// Signal shutdown and flush remaining data.
+    ///
+    /// # Errors
+    /// Returns an error if flushing sessions fails.
+    pub async fn shutdown(&self) -> Result<()> {
+        self.shutdown.store(true, Ordering::Relaxed);
+        self.flush_sessions().await
     }
 
     /// Get client session
@@ -361,10 +436,8 @@ impl<B: StorageBackend> Storage<B> {
     /// # Errors
     /// Returns an error if the backend fails to remove the session.
     pub async fn remove_session(&self, client_id: &str) -> Result<()> {
-        // Remove from cache
         self.sessions_cache.write().await.remove(client_id);
-
-        // Remove from backend
+        self.dirty_sessions.write().await.remove(client_id);
         self.backend.remove_session(client_id).await
     }
 
@@ -402,7 +475,7 @@ impl<B: StorageBackend> Storage<B> {
         // Clean expired retained messages from cache
         {
             let mut cache = self.retained_cache.write().await;
-            cache.retain(|_, msg| msg.expires_at.map_or(true, |expiry| expiry > now));
+            cache.retain(|_, msg| msg.expires_at.is_none_or(|expiry| expiry > now));
         }
 
         // Clean expired sessions from cache
@@ -411,7 +484,7 @@ impl<B: StorageBackend> Storage<B> {
             cache.retain(|_, session| {
                 if let Some(expiry_interval) = session.expiry_interval {
                     let expiry_time =
-                        session.last_seen + Duration::from_secs(expiry_interval as u64);
+                        session.last_seen + Duration::from_secs(u64::from(expiry_interval));
                     expiry_time > now
                 } else {
                     true
@@ -426,6 +499,7 @@ impl<B: StorageBackend> Storage<B> {
 
 impl RetainedMessage {
     /// Create new retained message from PUBLISH packet
+    #[must_use]
     pub fn new(packet: PublishPacket) -> Self {
         let now = SystemTime::now();
         let stored_at_secs = now
@@ -447,7 +521,7 @@ impl RetainedMessage {
         }
     }
 
-    /// Recompute expires_at from stored fields (call after deserialization)
+    /// Recompute `expires_at` from stored fields (call after deserialization)
     pub fn recompute_expiry(&mut self) {
         if let Some(interval) = self.message_expiry_interval {
             let stored_at = SystemTime::UNIX_EPOCH + Duration::from_secs(self.stored_at_secs);
@@ -455,7 +529,8 @@ impl RetainedMessage {
         }
     }
 
-    /// Convert to PublishPacket for delivery
+    /// Convert to `PublishPacket` for delivery
+    #[must_use]
     pub fn to_publish_packet(&self) -> PublishPacket {
         let mut packet = PublishPacket::new(&self.topic, self.payload.clone(), self.qos)
             .with_retain(self.retain);
@@ -478,6 +553,7 @@ impl RetainedMessage {
     }
 
     /// Check if message has expired
+    #[must_use]
     pub fn is_expired(&self) -> bool {
         self.expires_at
             .is_some_and(|expiry| SystemTime::now() > expiry)
@@ -486,6 +562,7 @@ impl RetainedMessage {
 
 impl ClientSession {
     /// Create new client session
+    #[must_use]
     pub fn new(client_id: String, persistent: bool, expiry_interval: Option<u32>) -> Self {
         let now = SystemTime::now();
         Self {
@@ -502,6 +579,7 @@ impl ClientSession {
     }
 
     /// Create new client session with will message
+    #[must_use]
     pub fn new_with_will(
         client_id: String,
         persistent: bool,
@@ -541,6 +619,7 @@ impl ClientSession {
     }
 
     /// Check if session has expired
+    #[must_use]
     pub fn is_expired(&self) -> bool {
         if let Some(expiry_interval) = self.expiry_interval {
             let expiry_time = self.last_seen + Duration::from_secs(u64::from(expiry_interval));
@@ -553,6 +632,7 @@ impl ClientSession {
 
 impl QueuedMessage {
     /// Create new queued message from PUBLISH packet
+    #[must_use]
     pub fn new(packet: PublishPacket, client_id: String, qos: QoS, packet_id: Option<u16>) -> Self {
         let now = SystemTime::now();
         let queued_at_secs = now
@@ -575,7 +655,7 @@ impl QueuedMessage {
         }
     }
 
-    /// Recompute expires_at from stored fields (call after deserialization)
+    /// Recompute `expires_at` from stored fields (call after deserialization)
     pub fn recompute_expiry(&mut self) {
         if let Some(interval) = self.message_expiry_interval {
             let queued_at = SystemTime::UNIX_EPOCH + Duration::from_secs(self.queued_at_secs);
@@ -583,7 +663,8 @@ impl QueuedMessage {
         }
     }
 
-    /// Convert to PublishPacket for delivery
+    /// Convert to `PublishPacket` for delivery
+    #[must_use]
     pub fn to_publish_packet(&self) -> PublishPacket {
         let mut packet = PublishPacket::new(&self.topic, self.payload.clone(), self.qos);
         packet.packet_id = self.packet_id;
@@ -606,6 +687,7 @@ impl QueuedMessage {
     }
 
     /// Check if message has expired
+    #[must_use]
     pub fn is_expired(&self) -> bool {
         self.expires_at
             .is_some_and(|expiry| SystemTime::now() > expiry)
@@ -711,6 +793,28 @@ impl StorageBackend for DynamicStorage {
             #[cfg(not(target_arch = "wasm32"))]
             Self::File(backend) => backend.cleanup_expired().await,
             Self::Memory(backend) => backend.cleanup_expired().await,
+        }
+    }
+}
+
+impl DynamicStorage {
+    /// # Errors
+    /// Returns an error if any session fails to persist.
+    pub async fn flush_sessions(&self) -> Result<()> {
+        match self {
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::File(backend) => backend.flush_sessions().await,
+            Self::Memory(_) => Ok(()),
+        }
+    }
+
+    /// # Errors
+    /// Returns an error if flushing sessions fails.
+    pub async fn shutdown(&self) -> Result<()> {
+        match self {
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::File(backend) => backend.shutdown().await,
+            Self::Memory(_) => Ok(()),
         }
     }
 }

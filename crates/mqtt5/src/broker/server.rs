@@ -133,7 +133,7 @@ async fn create_auth_provider(
                 let provider =
                     provider.with_acl_manager(Arc::new(tokio::sync::RwLock::new(acl_manager)));
                 provider.initial_fetch().await?;
-                provider.start_background_refresh();
+                drop(provider.start_background_refresh());
                 info!(
                     issuers = federated_config.issuers.len(),
                     "Federated JWT authentication enabled with ACL"
@@ -141,7 +141,7 @@ async fn create_auth_provider(
                 Arc::new(provider) as Arc<dyn AuthProvider>
             } else {
                 provider.initial_fetch().await?;
-                provider.start_background_refresh();
+                drop(provider.start_background_refresh());
                 info!(
                     issuers = federated_config.issuers.len(),
                     "Federated JWT authentication enabled"
@@ -245,6 +245,7 @@ impl MqttBroker {
                 format_binding_error("TCP", &bind_result.failures, &config.bind_addresses);
             return Err(MqttError::Configuration(error_msg));
         }
+        bind_result.warn_partial_failures("TCP");
         let listeners = bind_result.successful;
 
         let (ws_listeners, ws_config) = Self::setup_websocket(&config).await?;
@@ -278,7 +279,9 @@ impl MqttBroker {
             telemetry::init_tracing_subscriber(otel_config)?;
         }
 
-        let bridge_manager = if !config.bridges.is_empty() {
+        let bridge_manager = if config.bridges.is_empty() {
+            None
+        } else {
             info!("Initializing {} bridge(s)", config.bridges.len());
 
             let manager = Arc::new(BridgeManager::new(Arc::clone(&router)));
@@ -292,8 +295,6 @@ impl MqttBroker {
             }
 
             Some(manager)
-        } else {
-            None
         };
 
         Ok(Self {
@@ -333,6 +334,7 @@ impl MqttBroker {
                 warn!("{}, WebSocket disabled", error_msg);
                 return Ok((Vec::new(), None));
             }
+            bind_result.warn_partial_failures("WebSocket");
             let server_config = WebSocketServerConfig::new()
                 .with_path(ws_config.path.clone())
                 .with_subprotocol(ws_config.subprotocol.clone());
@@ -378,6 +380,7 @@ impl MqttBroker {
                     warn!("{}, WebSocket TLS disabled", error_msg);
                     return Ok((Vec::new(), None, None));
                 }
+                bind_result.warn_partial_failures("WebSocket TLS");
 
                 let server_config = WebSocketServerConfig::new()
                     .with_path(ws_tls_config.path.clone())
@@ -419,6 +422,7 @@ impl MqttBroker {
                 warn!("{}, TLS disabled", error_msg);
                 return Ok((Vec::new(), None));
             }
+            bind_result.warn_partial_failures("TLS");
 
             Ok((bind_result.successful, Some(acceptor)))
         } else {
@@ -469,12 +473,12 @@ impl MqttBroker {
     fn default_resource_limits(max_clients: usize) -> ResourceLimits {
         ResourceLimits {
             max_connections: max_clients,
-            max_connections_per_ip: 100,
+            max_connections_per_ip: 10_000,
             max_memory_bytes: 1024 * 1024 * 1024,
-            max_message_rate_per_client: 1000,
-            max_bandwidth_per_client: 10 * 1024 * 1024,
-            max_connection_rate: 100,
-            rate_limit_window: crate::time::Duration::from_secs(60),
+            max_message_rate_per_client: 10_000_000,
+            max_bandwidth_per_client: 1024 * 1024 * 1024,
+            max_connection_rate: 10_000,
+            rate_limit_window: crate::time::Duration::from_secs(1),
         }
     }
 
@@ -508,7 +512,6 @@ impl MqttBroker {
         if let Some(ref storage) = self.storage {
             storage.cleanup_expired().await?;
 
-            // Start periodic cleanup task
             let storage_clone = Arc::clone(storage);
             let cleanup_interval = self.config.storage_config.cleanup_interval;
             let mut shutdown_rx = shutdown_tx.subscribe();
@@ -519,11 +522,36 @@ impl MqttBroker {
                     tokio::select! {
                         _ = interval.tick() => {
                             if let Err(e) = storage_clone.cleanup_expired().await {
-                                error!("Storage cleanup error: {}", e);
+                                error!("Storage cleanup error: {e}");
                             }
                         }
                         _ = shutdown_rx.recv() => {
                             debug!("Storage cleanup task shutting down");
+                            break;
+                        }
+                    }
+                }
+            });
+
+            let storage_clone = Arc::clone(storage);
+            let mut shutdown_rx = shutdown_tx.subscribe();
+            let flush_interval = std::time::Duration::from_secs(5);
+
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(flush_interval);
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    tokio::select! {
+                        _ = interval.tick() => {
+                            if let Err(e) = storage_clone.flush_sessions().await {
+                                error!("Session flush error: {e}");
+                            }
+                        }
+                        _ = shutdown_rx.recv() => {
+                            debug!("Flushing sessions before shutdown");
+                            if let Err(e) = storage_clone.shutdown().await {
+                                error!("Session shutdown flush error: {e}");
+                            }
                             break;
                         }
                     }
@@ -572,7 +600,7 @@ impl MqttBroker {
         // Start $SYS topics provider
         let sys_provider =
             SysTopicsProvider::new(Arc::clone(&self.router), Arc::clone(&self.stats));
-        sys_provider.start();
+        drop(sys_provider.start());
 
         info!("Router initialized, starting resource monitor cleanup task");
 
@@ -647,18 +675,18 @@ impl MqttBroker {
                                                         if e.is_normal_disconnect() {
                                                             debug!("Client handler finished");
                                                         } else {
-                                                            warn!("Client handler error: {}", e);
+                                                            warn!("Client handler error: {e}");
                                                         }
                                                     }
                                                 });
                                             }
                                             Err(e) => {
-                                                error!("WebSocket handshake failed: {}", e);
+                                                error!("WebSocket handshake failed: {e}");
                                             }
                                         }
                                     }
                                     Err(e) => {
-                                        error!("WebSocket accept error: {}", e);
+                                        error!("WebSocket accept error: {e}");
                                     }
                                 }
                             }
@@ -733,25 +761,25 @@ impl MqttBroker {
 
                                                             if let Err(e) = handler.run().await {
                                                                 if e.to_string().contains("Connection closed") {
-                                                                    info!("Client handler finished: {}", e);
+                                                                    info!("Client handler finished: {e}");
                                                                 } else {
-                                                                    warn!("Client handler error: {}", e);
+                                                                    warn!("Client handler error: {e}");
                                                                 }
                                                             }
                                                         }
                                                         Err(e) => {
-                                                            error!("WebSocket TLS handshake failed: {}", e);
+                                                            error!("WebSocket TLS handshake failed: {e}");
                                                         }
                                                     }
                                                 }
                                                 Err(e) => {
-                                                    error!("TLS handshake failed for WebSocket: {}", e);
+                                                    error!("TLS handshake failed for WebSocket: {e}");
                                                 }
                                             }
                                         });
                                     }
                                     Err(e) => {
-                                        error!("WebSocket TLS accept error: {}", e);
+                                        error!("WebSocket TLS accept error: {e}");
                                     }
                                 }
                             }
@@ -818,18 +846,18 @@ impl MqttBroker {
                                                         if e.is_normal_disconnect() {
                                                             debug!("Client handler finished");
                                                         } else {
-                                                            warn!("Client handler error: {}", e);
+                                                            warn!("Client handler error: {e}");
                                                         }
                                                     }
                                                 });
                                             }
                                             Err(e) => {
-                                                error!("TLS handshake failed: {}", e);
+                                                error!("TLS handshake failed: {e}");
                                             }
                                         }
                                     }
                                     Err(e) => {
-                                        error!("TLS accept error: {}", e);
+                                        error!("TLS accept error: {e}");
                                     }
                                 }
                             }
@@ -901,7 +929,7 @@ impl MqttBroker {
                                 }
                                 Err(e) => {
                                     if !e.to_string().contains("endpoint closed") {
-                                        error!("QUIC accept error: {}", e);
+                                        error!("QUIC accept error: {e}");
                                     }
                                 }
                             }
@@ -965,13 +993,13 @@ impl MqttBroker {
                                     if e.is_normal_disconnect() {
                                         debug!("Client handler finished");
                                     } else {
-                                        warn!("Client handler error: {}", e);
+                                        warn!("Client handler error: {e}");
                                     }
                                 }
                             });
                         }
                         Err(e) => {
-                            error!("TCP accept error: {}", e);
+                            error!("TCP accept error: {e}");
                             // Continue accepting other connections
                         }
                     }
@@ -1012,7 +1040,7 @@ impl MqttBroker {
         if let Some(ref bridge_manager) = self.bridge_manager {
             info!("Stopping all bridges");
             if let Err(e) = bridge_manager.stop_all().await {
-                error!("Error stopping bridges: {}", e);
+                error!("Error stopping bridges: {e}");
             }
         }
 
@@ -1035,7 +1063,7 @@ impl MqttBroker {
         Arc::clone(&self.resource_monitor)
     }
 
-    /// Gets the first local address the broker is bound to (used by tests)
+    #[must_use]
     pub fn local_addr(&self) -> Option<std::net::SocketAddr> {
         self.listeners.first()?.local_addr().ok()
     }

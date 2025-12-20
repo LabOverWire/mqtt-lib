@@ -26,9 +26,11 @@ use crate::packet::unsubscribe::UnsubscribePacket;
 use crate::packet::Packet;
 use crate::protocol::v5::reason_codes::ReasonCode;
 use crate::time::Duration;
-use crate::transport::packet_io::PacketIo;
+use crate::transport::packet_io::{encode_packet_to_buffer, read_packet_reusing_buffer, PacketIo};
 use crate::types::ProtocolVersion;
 use crate::QoS;
+use crate::Transport;
+use bytes::BytesMut;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -66,8 +68,8 @@ pub struct ClientHandler {
     client_id: Option<String>,
     user_id: Option<String>,
     keep_alive: Duration,
-    publish_rx: mpsc::Receiver<PublishPacket>,
-    publish_tx: mpsc::Sender<PublishPacket>,
+    publish_rx: flume::Receiver<PublishPacket>,
+    publish_tx: flume::Sender<PublishPacket>,
     inflight_publishes: HashMap<u16, PublishPacket>,
     session: Option<ClientSession>,
     next_packet_id: u16,
@@ -82,6 +84,8 @@ pub struct ClientHandler {
     client_receive_maximum: u16,
     outbound_inflight: HashSet<u16>,
     protocol_version: u8,
+    write_buffer: BytesMut,
+    read_buffer: BytesMut,
 }
 
 impl ClientHandler {
@@ -126,7 +130,7 @@ impl ClientHandler {
         shutdown_rx: tokio::sync::broadcast::Receiver<()>,
         external_packet_rx: Option<mpsc::Receiver<Packet>>,
     ) -> Self {
-        let (publish_tx, publish_rx) = mpsc::channel(100);
+        let (publish_tx, publish_rx) = flume::bounded(1000);
 
         Self {
             transport,
@@ -157,6 +161,8 @@ impl ClientHandler {
             client_receive_maximum: 65535,
             outbound_inflight: HashSet::new(),
             protocol_version: 5,
+            write_buffer: BytesMut::with_capacity(4096),
+            read_buffer: BytesMut::with_capacity(4096),
         }
     }
 
@@ -206,10 +212,10 @@ impl ClientHandler {
             Ok(Err(e)) => {
                 // Log connection errors at appropriate level based on error type
                 if e.to_string().contains("Connection closed") {
-                    info!("Client disconnected during connect phase: {}", e);
+                    info!("Client disconnected during connect phase: {e}");
                     tracing::debug!("Connection closed error details: {:?}", e);
                 } else {
-                    warn!("Connect error: {}", e);
+                    warn!("Connect error: {e}");
                     tracing::debug!("Connect error details: {:?}", e);
                 }
                 return Err(e);
@@ -257,18 +263,20 @@ impl ClientHandler {
         };
 
         // Only unregister client if not taken over
-        if !session_taken_over {
-            info!("Unregistering client {} (not taken over)", client_id);
-            if !preserve_session {
-                self.router.unregister_client(&client_id).await;
-            } else {
-                self.router.disconnect_client(&client_id).await;
-            }
-        } else {
+
+        if session_taken_over {
             info!(
                 "Skipping unregister for client {} (session taken over)",
                 client_id
             );
+        } else {
+            info!("Unregistering client {} (not taken over)", client_id);
+
+            if preserve_session {
+                self.router.disconnect_client(&client_id).await;
+            } else {
+                self.router.unregister_client(&client_id).await;
+            }
         }
 
         // Unregister connection from resource monitor
@@ -316,7 +324,8 @@ impl ClientHandler {
 
     /// Waits for and processes CONNECT packet
     async fn wait_for_connect(&mut self) -> Result<()> {
-        let packet = self.transport.read_packet(5).await?;
+        let packet =
+            read_packet_reusing_buffer(&mut self.transport, 5, &mut self.read_buffer).await?;
 
         match packet {
             Packet::Connect(connect) => self.handle_connect(*connect).await,
@@ -334,7 +343,7 @@ impl ClientHandler {
         loop {
             tokio::select! {
                 // Read incoming packets from control stream
-                packet_result = self.transport.read_packet(self.protocol_version) => {
+                packet_result = read_packet_reusing_buffer(&mut self.transport, self.protocol_version, &mut self.read_buffer) => {
                     match packet_result {
                         Ok(packet) => {
                             self.handle_packet(packet).await?;
@@ -363,9 +372,12 @@ impl ClientHandler {
                 }
 
                 // Send outgoing publishes
-                publish_opt = self.publish_rx.recv() => {
-                    if let Some(publish) = publish_opt {
+                publish_result = self.publish_rx.recv_async() => {
+                    if let Ok(publish) = publish_result {
                         self.send_publish(publish).await?;
+                        while let Ok(more) = self.publish_rx.try_recv() {
+                            self.send_publish(more).await?;
+                        }
                     } else {
                         warn!("Publish channel closed unexpectedly");
                         return Ok(false);
@@ -392,7 +404,7 @@ impl ClientHandler {
         loop {
             tokio::select! {
                 // Read incoming packets from control stream
-                packet_result = self.transport.read_packet(self.protocol_version) => {
+                packet_result = read_packet_reusing_buffer(&mut self.transport, self.protocol_version, &mut self.read_buffer) => {
                     match packet_result {
                         Ok(packet) => {
                             last_packet_time = tokio::time::Instant::now();
@@ -423,9 +435,12 @@ impl ClientHandler {
                 }
 
                 // Send outgoing publishes
-                publish_opt = self.publish_rx.recv() => {
-                    if let Some(publish) = publish_opt {
+                publish_result = self.publish_rx.recv_async() => {
+                    if let Ok(publish) = publish_result {
                         self.send_publish(publish).await?;
+                        while let Ok(more) = self.publish_rx.try_recv() {
+                            self.send_publish(more).await?;
+                        }
                     } else {
                         warn!("Publish channel closed unexpectedly in handle_packets");
                         return Ok(false);
@@ -832,7 +847,7 @@ impl ClientHandler {
                 let retained = self.router.get_retained_messages(&filter.filter).await;
                 for mut msg in retained {
                     msg.retain = true;
-                    self.publish_tx.send(msg).await.map_err(|_| {
+                    self.publish_tx.send_async(msg).await.map_err(|_| {
                         MqttError::InvalidState("Failed to queue retained message".to_string())
                     })?;
                 }
@@ -945,8 +960,7 @@ impl ClientHandler {
                     publish.topic_name.clone_from(topic);
                 } else {
                     return Err(MqttError::ProtocolError(format!(
-                        "Topic alias {} not found",
-                        alias
+                        "Topic alias {alias} not found"
                     )));
                 }
             } else {
@@ -1630,9 +1644,9 @@ impl ClientHandler {
         }
 
         let payload_size = publish.payload.len();
-        self.transport
-            .write_packet(Packet::Publish(publish))
-            .await?;
+        self.write_buffer.clear();
+        encode_packet_to_buffer(&Packet::Publish(publish), &mut self.write_buffer)?;
+        self.transport.write(&self.write_buffer).await?;
         self.stats.publish_sent(payload_size);
         Ok(())
     }

@@ -373,7 +373,9 @@ pub async fn execute(mut cmd: SubCommand, verbose: bool, debug: bool) -> Result<
         client.set_quic_flow_headers(true).await;
         debug!("QUIC flow headers enabled");
     }
-    client.set_quic_flow_expire(cmd.quic_flow_expire).await;
+    client
+        .set_quic_flow_expire(std::time::Duration::from_secs(cmd.quic_flow_expire))
+        .await;
     if let Some(max) = cmd.quic_max_streams {
         client.set_quic_max_streams(Some(max)).await;
         debug!("QUIC max streams: {max}");
