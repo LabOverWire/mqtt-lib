@@ -152,6 +152,8 @@ impl QuicAcceptorConfig {
                 .try_into()
                 .expect("valid duration"),
         ));
+        transport_config.datagram_receive_buffer_size(Some(65536));
+        transport_config.datagram_send_buffer_size(65536);
         server_config.transport_config(Arc::new(transport_config));
 
         Ok(server_config)
@@ -520,6 +522,37 @@ pub async fn run_quic_connection_handler(
         }
     });
 
+    let datagram_connection = connection.clone();
+    let datagram_packet_tx = packet_tx.clone();
+    tokio::spawn(async move {
+        loop {
+            match datagram_connection.read_datagram().await {
+                Ok(datagram) => {
+                    trace!(
+                        len = datagram.len(),
+                        "Received QUIC datagram from {}",
+                        peer_addr
+                    );
+                    match decode_datagram_packet(&datagram) {
+                        Ok(packet) => {
+                            if datagram_packet_tx.send(packet).await.is_err() {
+                                debug!("Datagram packet channel closed for {}", peer_addr);
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Failed to decode datagram from {}: {}", peer_addr, e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    debug!("Datagram read ended for {}: {}", peer_addr, e);
+                    break;
+                }
+            }
+        }
+    });
+
     tokio::spawn(async move {
         loop {
             if let Ok((_send, recv)) = connection.accept_bi().await {
@@ -531,6 +564,18 @@ pub async fn run_quic_connection_handler(
             }
         }
     });
+}
+
+fn decode_datagram_packet(data: &Bytes) -> Result<Packet> {
+    if data.is_empty() {
+        return Err(MqttError::MalformedPacket(
+            "Empty datagram received".to_string(),
+        ));
+    }
+
+    let mut buf = BytesMut::from(data.as_ref());
+    let fixed_header = FixedHeader::decode(&mut buf)?;
+    Packet::decode_from_body(fixed_header.packet_type, &fixed_header, &mut buf)
 }
 
 // [MQoQ§5] Data stream processing

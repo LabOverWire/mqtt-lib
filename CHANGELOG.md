@@ -21,6 +21,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Benchmark modes: `connections`, `latency`
 - Benchmark options: `--storage-backend`, `--filter`
 
+### Fixed
+
+- **QUIC datagram receiving** - broker now processes incoming QUIC datagrams
+  - Added `datagram_receive_buffer_size` configuration to enable datagram reception
+  - Added datagram reader loop to decode and route MQTT packets received via datagrams
+  - Enables ultra-low-latency QoS 0 PUBLISH via `--quic-datagrams` flag
+
 ### Changed
 
 - Consolidated transport configuration
