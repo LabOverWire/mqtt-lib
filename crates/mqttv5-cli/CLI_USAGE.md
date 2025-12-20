@@ -9,6 +9,7 @@ The `mqttv5` CLI provides commands for:
 - **broker** - Run an MQTT v5.0 broker
 - **pub** - Publish MQTT messages
 - **sub** - Subscribe to MQTT topics
+- **bench** - Run performance benchmarks
 - **passwd** - Manage password file for authentication
 
 Global flags:
@@ -42,6 +43,7 @@ Start an MQTT v5.0 broker.
 | `--ws-path <PATH>`            | WebSocket path                                                  | `/mqtt`                     |
 | `--quic-host <ADDR>`          | QUIC bind address(es), requires TLS cert/key                    | None                        |
 | `--storage-dir <DIR>`         | Storage directory for persistence                               | `./mqtt_storage`            |
+| `--storage-backend <TYPE>`    | Storage backend: `memory` or `file`                             | `file`                      |
 | `--no-persistence`            | Disable message persistence                                     | `false`                     |
 | `--session-expiry <SECS>`     | Default session expiry interval in seconds                      | `3600`                      |
 | `--max-qos <0\|1\|2>`         | Maximum QoS level                                               | `2`                         |
@@ -385,6 +387,59 @@ mqttv5 sub -t test/# \
   --otel-endpoint http://localhost:4317 \
   --otel-service-name my-subscriber \
   -v
+```
+
+### mqttv5 bench
+
+Run performance benchmarks against a broker.
+
+#### Bench Flags
+
+| Flag                      | Description                                      | Default        |
+| ------------------------- | ------------------------------------------------ | -------------- |
+| `--mode <MODE>`           | Benchmark mode: `throughput`, `latency`, `connections` | `throughput`   |
+| `--duration <SECS>`       | Test duration in seconds                         | `10`           |
+| `--warmup <SECS>`         | Warmup period in seconds                         | `2`            |
+| `--host <HOST>`           | Broker hostname                                  | `localhost`    |
+| `--port <PORT>`           | Broker port                                      | `1883`         |
+| `--publishers <N>`        | Number of publisher clients                      | `1`            |
+| `--subscribers <N>`       | Number of subscriber clients                     | `1`            |
+| `--concurrency <N>`       | Concurrent connections (connections mode)        | `10`           |
+| `--payload-size <BYTES>`  | Message payload size in bytes                    | `100`          |
+| `--topic <TOPIC>`         | Publish topic                                    | `bench/test`   |
+| `--filter <FILTER>`       | Subscription filter (supports wildcards)         | Same as topic  |
+| `--qos <0\|1\|2>`         | QoS level                                        | `0`            |
+
+#### Bench Examples
+
+Throughput benchmark (default):
+
+```bash
+mqttv5 bench --duration 15 --subscribers 5
+```
+
+Latency benchmark (measures p50/p95/p99):
+
+```bash
+mqttv5 bench --mode latency --duration 10
+```
+
+Connection rate benchmark:
+
+```bash
+mqttv5 bench --mode connections --duration 10 --concurrency 10
+```
+
+Custom payload and QoS:
+
+```bash
+mqttv5 bench --payload-size 1024 --qos 1 --publishers 5 --subscribers 5
+```
+
+Wildcard subscription testing:
+
+```bash
+mqttv5 bench --topic "bench/test" --filter "bench/+"
 ```
 
 ### mqttv5 passwd
