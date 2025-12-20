@@ -190,6 +190,7 @@ pub struct AclManager {
     /// Federated user-role assignments: `user_id` -> `FederatedRoleEntry` (session-scoped)
     federated_user_roles: Arc<RwLock<HashMap<String, FederatedRoleEntry>>>,
     /// Path to ACL file (optional)
+    #[cfg(not(target_arch = "wasm32"))]
     acl_file: Option<std::path::PathBuf>,
     /// Default permission when no rules match
     default_permission: Permission,
@@ -210,6 +211,7 @@ impl AclManager {
             roles: Arc::new(RwLock::new(HashMap::new())),
             user_roles: Arc::new(RwLock::new(HashMap::new())),
             federated_user_roles: Arc::new(RwLock::new(HashMap::new())),
+            #[cfg(not(target_arch = "wasm32"))]
             acl_file: None,
             default_permission: Permission::Deny,
         }
@@ -223,6 +225,7 @@ impl AclManager {
             roles: Arc::new(RwLock::new(HashMap::new())),
             user_roles: Arc::new(RwLock::new(HashMap::new())),
             federated_user_roles: Arc::new(RwLock::new(HashMap::new())),
+            #[cfg(not(target_arch = "wasm32"))]
             acl_file: None,
             default_permission: Permission::ReadWrite,
         }
