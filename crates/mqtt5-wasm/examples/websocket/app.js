@@ -53,13 +53,26 @@ function addMessage(topic, payload, direction = 'received') {
         payloadStr = new TextDecoder().decode(payload);
     }
 
-    messageDiv.innerHTML = `
-        <div class="message-header">
-            <span class="message-topic">${topic}</span>
-            <span class="message-time">${timeStr} (${direction})</span>
-        </div>
-        <div class="message-payload">${payloadStr}</div>
-    `;
+    const headerDiv = document.createElement('div');
+    headerDiv.className = 'message-header';
+
+    const topicSpan = document.createElement('span');
+    topicSpan.className = 'message-topic';
+    topicSpan.textContent = topic;
+
+    const timeSpan = document.createElement('span');
+    timeSpan.className = 'message-time';
+    timeSpan.textContent = `${timeStr} (${direction})`;
+
+    headerDiv.appendChild(topicSpan);
+    headerDiv.appendChild(timeSpan);
+
+    const payloadDiv = document.createElement('div');
+    payloadDiv.className = 'message-payload';
+    payloadDiv.textContent = payloadStr;
+
+    messageDiv.appendChild(headerDiv);
+    messageDiv.appendChild(payloadDiv);
 
     messagesEl.insertBefore(messageDiv, messagesEl.firstChild);
 
@@ -90,10 +103,18 @@ function updateSubscriptionsList() {
     subscriptions.forEach(topic => {
         const subDiv = document.createElement('div');
         subDiv.className = 'subscription-item';
-        subDiv.innerHTML = `
-            <span class="subscription-topic">${topic}</span>
-            <button class="btn btn-secondary btn-sm unsubscribe-btn" data-topic="${topic}">Unsubscribe</button>
-        `;
+
+        const topicSpan = document.createElement('span');
+        topicSpan.className = 'subscription-topic';
+        topicSpan.textContent = topic;
+
+        const unsubBtn = document.createElement('button');
+        unsubBtn.className = 'btn btn-secondary btn-sm unsubscribe-btn';
+        unsubBtn.dataset.topic = topic;
+        unsubBtn.textContent = 'Unsubscribe';
+
+        subDiv.appendChild(topicSpan);
+        subDiv.appendChild(unsubBtn);
         subsEl.appendChild(subDiv);
     });
 
