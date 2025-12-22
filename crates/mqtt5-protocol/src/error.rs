@@ -1,213 +1,277 @@
 use crate::packet::suback::SubAckReasonCode;
+use crate::prelude::String;
 use crate::protocol::v5::reason_codes::ReasonCode;
+
+#[cfg(feature = "std")]
 use thiserror::Error;
 
+#[cfg(not(feature = "std"))]
+use core::fmt;
+
+#[cfg(feature = "std")]
 pub type Result<T> = std::result::Result<T, MqttError>;
 
-/// MQTT protocol errors
-///
-/// This enum provides specific error variants for all possible MQTT protocol
-/// errors, validation failures, and operational issues.
-///
-/// # Error Categories
-///
-/// - **I/O and Network**: `Io`, `ConnectionError`, `Timeout`, `NotConnected`
-/// - **Validation**: `InvalidTopicName`, `InvalidTopicFilter`, `InvalidClientId`
-/// - **Protocol**: `ProtocolError`, `MalformedPacket`, `InvalidPacketType`
-/// - **Authentication**: `AuthenticationFailed`, `NotAuthorized`, `BadUsernameOrPassword`
-/// - **Operations**: `SubscriptionFailed`, `PublishFailed`, `UnsubscriptionFailed`
-/// - **Server Status**: `ServerUnavailable`, `ServerBusy`, `ServerShuttingDown`
-/// - **Flow Control**: `ReceiveMaximumExceeded`, `FlowControlExceeded`, `PacketIdExhausted`
-///
-/// # Examples
-///
-/// ```
-/// use mqtt5_protocol::{MqttError, Result};
-///
-/// fn validate_topic(topic: &str) -> Result<()> {
-///     if topic.contains('#') && !topic.ends_with('#') {
-///         return Err(MqttError::InvalidTopicName(
-///             "# wildcard must be at the end".to_string()
-///         ));
-///     }
-///     Ok(())
-/// }
-/// ```
-#[derive(Error, Debug, Clone)]
+#[cfg(not(feature = "std"))]
+pub type Result<T> = core::result::Result<T, MqttError>;
+
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "std", derive(Error))]
 pub enum MqttError {
-    #[error("IO error: {0}")]
+    #[cfg_attr(feature = "std", error("IO error: {0}"))]
     Io(String),
 
-    #[error("Invalid topic name: {0}")]
+    #[cfg_attr(feature = "std", error("Invalid topic name: {0}"))]
     InvalidTopicName(String),
 
-    #[error("Invalid topic filter: {0}")]
+    #[cfg_attr(feature = "std", error("Invalid topic filter: {0}"))]
     InvalidTopicFilter(String),
 
-    #[error("Invalid client ID: {0}")]
+    #[cfg_attr(feature = "std", error("Invalid client ID: {0}"))]
     InvalidClientId(String),
 
-    #[error("Connection error: {0}")]
+    #[cfg_attr(feature = "std", error("Connection error: {0}"))]
     ConnectionError(String),
 
-    #[error("Connection refused: {0:?}")]
+    #[cfg_attr(feature = "std", error("Connection refused: {0:?}"))]
     ConnectionRefused(ReasonCode),
 
-    #[error("Protocol error: {0}")]
+    #[cfg_attr(feature = "std", error("Protocol error: {0}"))]
     ProtocolError(String),
 
-    #[error("Malformed packet: {0}")]
+    #[cfg_attr(feature = "std", error("Malformed packet: {0}"))]
     MalformedPacket(String),
 
-    #[error("Packet too large: size {size} exceeds maximum {max}")]
+    #[cfg_attr(
+        feature = "std",
+        error("Packet too large: size {size} exceeds maximum {max}")
+    )]
     PacketTooLarge { size: usize, max: usize },
 
-    #[error("Authentication failed")]
+    #[cfg_attr(feature = "std", error("Authentication failed"))]
     AuthenticationFailed,
 
-    #[error("Not authorized")]
+    #[cfg_attr(feature = "std", error("Not authorized"))]
     NotAuthorized,
 
-    #[error("Not connected")]
+    #[cfg_attr(feature = "std", error("Not connected"))]
     NotConnected,
 
-    #[error("Already connected")]
+    #[cfg_attr(feature = "std", error("Already connected"))]
     AlreadyConnected,
 
-    #[error("Timeout")]
+    #[cfg_attr(feature = "std", error("Timeout"))]
     Timeout,
 
-    #[error("Subscription failed: {0:?}")]
+    #[cfg_attr(feature = "std", error("Subscription failed: {0:?}"))]
     SubscriptionFailed(ReasonCode),
 
-    #[error("Subscription denied: {0:?}")]
+    #[cfg_attr(feature = "std", error("Subscription denied: {0:?}"))]
     SubscriptionDenied(SubAckReasonCode),
 
-    #[error("Unsubscription failed: {0:?}")]
+    #[cfg_attr(feature = "std", error("Unsubscription failed: {0:?}"))]
     UnsubscriptionFailed(ReasonCode),
 
-    #[error("Publish failed: {0:?}")]
+    #[cfg_attr(feature = "std", error("Publish failed: {0:?}"))]
     PublishFailed(ReasonCode),
 
-    #[error("Packet identifier not found: {0}")]
+    #[cfg_attr(feature = "std", error("Packet identifier not found: {0}"))]
     PacketIdNotFound(u16),
 
-    #[error("Packet identifier already in use: {0}")]
+    #[cfg_attr(feature = "std", error("Packet identifier already in use: {0}"))]
     PacketIdInUse(u16),
 
-    #[error("Invalid QoS: {0}")]
+    #[cfg_attr(feature = "std", error("Invalid QoS: {0}"))]
     InvalidQoS(u8),
 
-    #[error("Invalid packet type: {0}")]
+    #[cfg_attr(feature = "std", error("Invalid packet type: {0}"))]
     InvalidPacketType(u8),
 
-    #[error("Invalid reason code: {0}")]
+    #[cfg_attr(feature = "std", error("Invalid reason code: {0}"))]
     InvalidReasonCode(u8),
 
-    #[error("Invalid property ID: {0}")]
+    #[cfg_attr(feature = "std", error("Invalid property ID: {0}"))]
     InvalidPropertyId(u8),
 
-    #[error("Duplicate property ID: {0}")]
+    #[cfg_attr(feature = "std", error("Duplicate property ID: {0}"))]
     DuplicatePropertyId(u8),
 
-    #[error("Session expired")]
+    #[cfg_attr(feature = "std", error("Session expired"))]
     SessionExpired,
 
-    #[error("Keep alive timeout")]
+    #[cfg_attr(feature = "std", error("Keep alive timeout"))]
     KeepAliveTimeout,
 
-    #[error("Server shutting down")]
+    #[cfg_attr(feature = "std", error("Server shutting down"))]
     ServerShuttingDown,
 
-    #[error("Client closed connection")]
+    #[cfg_attr(feature = "std", error("Client closed connection"))]
     ClientClosed,
 
-    #[error("Connection closed by peer")]
+    #[cfg_attr(feature = "std", error("Connection closed by peer"))]
     ConnectionClosedByPeer,
 
-    #[error("Maximum connect time exceeded")]
+    #[cfg_attr(feature = "std", error("Maximum connect time exceeded"))]
     MaxConnectTime,
 
-    #[error("Topic alias invalid: {0}")]
+    #[cfg_attr(feature = "std", error("Topic alias invalid: {0}"))]
     TopicAliasInvalid(u16),
 
-    #[error("Receive maximum exceeded")]
+    #[cfg_attr(feature = "std", error("Receive maximum exceeded"))]
     ReceiveMaximumExceeded,
 
-    #[error("Will message rejected")]
+    #[cfg_attr(feature = "std", error("Will message rejected"))]
     WillRejected,
 
-    #[error("Implementation specific error: {0}")]
+    #[cfg_attr(feature = "std", error("Implementation specific error: {0}"))]
     ImplementationSpecific(String),
 
-    #[error("Unsupported protocol version")]
+    #[cfg_attr(feature = "std", error("Unsupported protocol version"))]
     UnsupportedProtocolVersion,
 
-    #[error("Invalid state: {0}")]
+    #[cfg_attr(feature = "std", error("Invalid state: {0}"))]
     InvalidState(String),
 
-    #[error("Client identifier not valid")]
+    #[cfg_attr(feature = "std", error("Client identifier not valid"))]
     ClientIdentifierNotValid,
 
-    #[error("Bad username or password")]
+    #[cfg_attr(feature = "std", error("Bad username or password"))]
     BadUsernameOrPassword,
 
-    #[error("Server unavailable")]
+    #[cfg_attr(feature = "std", error("Server unavailable"))]
     ServerUnavailable,
 
-    #[error("Server busy")]
+    #[cfg_attr(feature = "std", error("Server busy"))]
     ServerBusy,
 
-    #[error("Banned")]
+    #[cfg_attr(feature = "std", error("Banned"))]
     Banned,
 
-    #[error("Bad authentication method")]
+    #[cfg_attr(feature = "std", error("Bad authentication method"))]
     BadAuthenticationMethod,
 
-    #[error("Quota exceeded")]
+    #[cfg_attr(feature = "std", error("Quota exceeded"))]
     QuotaExceeded,
 
-    #[error("Payload format invalid")]
+    #[cfg_attr(feature = "std", error("Payload format invalid"))]
     PayloadFormatInvalid,
 
-    #[error("Retain not supported")]
+    #[cfg_attr(feature = "std", error("Retain not supported"))]
     RetainNotSupported,
 
-    #[error("QoS not supported")]
+    #[cfg_attr(feature = "std", error("QoS not supported"))]
     QoSNotSupported,
 
-    #[error("Use another server")]
+    #[cfg_attr(feature = "std", error("Use another server"))]
     UseAnotherServer,
 
-    #[error("Server moved")]
+    #[cfg_attr(feature = "std", error("Server moved"))]
     ServerMoved,
 
-    #[error("Shared subscriptions not supported")]
+    #[cfg_attr(feature = "std", error("Shared subscriptions not supported"))]
     SharedSubscriptionsNotSupported,
 
-    #[error("Connection rate exceeded")]
+    #[cfg_attr(feature = "std", error("Connection rate exceeded"))]
     ConnectionRateExceeded,
 
-    #[error("Subscription identifiers not supported")]
+    #[cfg_attr(feature = "std", error("Subscription identifiers not supported"))]
     SubscriptionIdentifiersNotSupported,
 
-    #[error("Wildcard subscriptions not supported")]
+    #[cfg_attr(feature = "std", error("Wildcard subscriptions not supported"))]
     WildcardSubscriptionsNotSupported,
 
-    #[error("Message too large for queue")]
+    #[cfg_attr(feature = "std", error("Message too large for queue"))]
     MessageTooLarge,
 
-    #[error("Flow control exceeded")]
+    #[cfg_attr(feature = "std", error("Flow control exceeded"))]
     FlowControlExceeded,
 
-    #[error("Packet ID exhausted")]
+    #[cfg_attr(feature = "std", error("Packet ID exhausted"))]
     PacketIdExhausted,
 
-    #[error("String too long: {0} bytes exceeds maximum of 65535")]
+    #[cfg_attr(
+        feature = "std",
+        error("String too long: {0} bytes exceeds maximum of 65535")
+    )]
     StringTooLong(usize),
 
-    #[error("Configuration error: {0}")]
+    #[cfg_attr(feature = "std", error("Configuration error: {0}"))]
     Configuration(String),
+}
+
+#[cfg(not(feature = "std"))]
+impl fmt::Display for MqttError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io(s) => write!(f, "IO error: {s}"),
+            Self::InvalidTopicName(s) => write!(f, "Invalid topic name: {s}"),
+            Self::InvalidTopicFilter(s) => write!(f, "Invalid topic filter: {s}"),
+            Self::InvalidClientId(s) => write!(f, "Invalid client ID: {s}"),
+            Self::ConnectionError(s) => write!(f, "Connection error: {s}"),
+            Self::ConnectionRefused(r) => write!(f, "Connection refused: {r:?}"),
+            Self::ProtocolError(s) => write!(f, "Protocol error: {s}"),
+            Self::MalformedPacket(s) => write!(f, "Malformed packet: {s}"),
+            Self::PacketTooLarge { size, max } => {
+                write!(f, "Packet too large: size {size} exceeds maximum {max}")
+            }
+            Self::AuthenticationFailed => write!(f, "Authentication failed"),
+            Self::NotAuthorized => write!(f, "Not authorized"),
+            Self::NotConnected => write!(f, "Not connected"),
+            Self::AlreadyConnected => write!(f, "Already connected"),
+            Self::Timeout => write!(f, "Timeout"),
+            Self::SubscriptionFailed(r) => write!(f, "Subscription failed: {r:?}"),
+            Self::SubscriptionDenied(r) => write!(f, "Subscription denied: {r:?}"),
+            Self::UnsubscriptionFailed(r) => write!(f, "Unsubscription failed: {r:?}"),
+            Self::PublishFailed(r) => write!(f, "Publish failed: {r:?}"),
+            Self::PacketIdNotFound(id) => write!(f, "Packet identifier not found: {id}"),
+            Self::PacketIdInUse(id) => write!(f, "Packet identifier already in use: {id}"),
+            Self::InvalidQoS(q) => write!(f, "Invalid QoS: {q}"),
+            Self::InvalidPacketType(t) => write!(f, "Invalid packet type: {t}"),
+            Self::InvalidReasonCode(r) => write!(f, "Invalid reason code: {r}"),
+            Self::InvalidPropertyId(p) => write!(f, "Invalid property ID: {p}"),
+            Self::DuplicatePropertyId(p) => write!(f, "Duplicate property ID: {p}"),
+            Self::SessionExpired => write!(f, "Session expired"),
+            Self::KeepAliveTimeout => write!(f, "Keep alive timeout"),
+            Self::ServerShuttingDown => write!(f, "Server shutting down"),
+            Self::ClientClosed => write!(f, "Client closed connection"),
+            Self::ConnectionClosedByPeer => write!(f, "Connection closed by peer"),
+            Self::MaxConnectTime => write!(f, "Maximum connect time exceeded"),
+            Self::TopicAliasInvalid(a) => write!(f, "Topic alias invalid: {a}"),
+            Self::ReceiveMaximumExceeded => write!(f, "Receive maximum exceeded"),
+            Self::WillRejected => write!(f, "Will message rejected"),
+            Self::ImplementationSpecific(s) => write!(f, "Implementation specific error: {s}"),
+            Self::UnsupportedProtocolVersion => write!(f, "Unsupported protocol version"),
+            Self::InvalidState(s) => write!(f, "Invalid state: {s}"),
+            Self::ClientIdentifierNotValid => write!(f, "Client identifier not valid"),
+            Self::BadUsernameOrPassword => write!(f, "Bad username or password"),
+            Self::ServerUnavailable => write!(f, "Server unavailable"),
+            Self::ServerBusy => write!(f, "Server busy"),
+            Self::Banned => write!(f, "Banned"),
+            Self::BadAuthenticationMethod => write!(f, "Bad authentication method"),
+            Self::QuotaExceeded => write!(f, "Quota exceeded"),
+            Self::PayloadFormatInvalid => write!(f, "Payload format invalid"),
+            Self::RetainNotSupported => write!(f, "Retain not supported"),
+            Self::QoSNotSupported => write!(f, "QoS not supported"),
+            Self::UseAnotherServer => write!(f, "Use another server"),
+            Self::ServerMoved => write!(f, "Server moved"),
+            Self::SharedSubscriptionsNotSupported => {
+                write!(f, "Shared subscriptions not supported")
+            }
+            Self::ConnectionRateExceeded => write!(f, "Connection rate exceeded"),
+            Self::SubscriptionIdentifiersNotSupported => {
+                write!(f, "Subscription identifiers not supported")
+            }
+            Self::WildcardSubscriptionsNotSupported => {
+                write!(f, "Wildcard subscriptions not supported")
+            }
+            Self::MessageTooLarge => write!(f, "Message too large for queue"),
+            Self::FlowControlExceeded => write!(f, "Flow control exceeded"),
+            Self::PacketIdExhausted => write!(f, "Packet ID exhausted"),
+            Self::StringTooLong(len) => {
+                write!(f, "String too long: {len} bytes exceeds maximum of 65535")
+            }
+            Self::Configuration(s) => write!(f, "Configuration error: {s}"),
+        }
+    }
 }
 
 impl MqttError {
@@ -226,13 +290,13 @@ impl MqttError {
     }
 }
 
+#[cfg(feature = "std")]
 impl From<std::io::Error> for MqttError {
     fn from(err: std::io::Error) -> Self {
         MqttError::Io(err.to_string())
     }
 }
 
-// Error conversions for BeBytes compatibility
 impl From<String> for MqttError {
     fn from(msg: String) -> Self {
         MqttError::MalformedPacket(msg)
@@ -241,14 +305,13 @@ impl From<String> for MqttError {
 
 impl From<&str> for MqttError {
     fn from(msg: &str) -> Self {
-        MqttError::MalformedPacket(msg.to_string())
+        MqttError::MalformedPacket(crate::prelude::ToString::to_string(msg))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io;
 
     #[test]
     fn test_error_display() {
@@ -268,8 +331,10 @@ mod tests {
         assert_eq!(err.to_string(), "Connection refused: BadUsernameOrPassword");
     }
 
+    #[cfg(feature = "std")]
     #[test]
     fn test_error_from_io() {
+        use std::io;
         let io_err = io::Error::new(io::ErrorKind::ConnectionRefused, "test");
         let mqtt_err: MqttError = io_err.into();
         match mqtt_err {

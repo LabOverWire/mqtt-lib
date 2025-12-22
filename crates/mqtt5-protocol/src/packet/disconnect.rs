@@ -1,5 +1,6 @@
 use crate::error::{MqttError, Result};
 use crate::packet::{FixedHeader, MqttPacket, PacketType};
+use crate::prelude::{format, String};
 use crate::protocol::v5::properties::Properties;
 use crate::protocol::v5::reason_codes::NORMAL_DISCONNECTION;
 use crate::types::ReasonCode;

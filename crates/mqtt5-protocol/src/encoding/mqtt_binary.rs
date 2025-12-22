@@ -3,6 +3,7 @@
 //! MQTT binary data is prefixed with a 2-byte length field in big-endian format.
 
 use crate::error::{MqttError, Result};
+use crate::prelude::{format, ToString, Vec};
 use bebytes::BeBytes;
 use bytes::Bytes;
 
@@ -168,6 +169,7 @@ pub fn optional_binary_len(data: Option<&[u8]>) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::prelude::vec;
     use bytes::BytesMut;
 
     #[test]

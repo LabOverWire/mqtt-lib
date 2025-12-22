@@ -4,7 +4,9 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use tokio::sync::{Notify, RwLock, Semaphore};
 
-/// Flow control manager for handling Receive Maximum
+pub use mqtt5_protocol::session::flow_control::{FlowControlConfig, FlowControlStats};
+pub use mqtt5_protocol::session::topic_alias::TopicAliasManager;
+
 #[derive(Debug, Clone)]
 pub struct FlowControlManager {
     /// Receive Maximum value (max in-flight `QoS` 1/2 messages we can send)
@@ -23,30 +25,6 @@ pub struct FlowControlManager {
     inbound_receive_maximum: u16,
     /// Currently in-flight inbound messages from server (`packet_id` -> timestamp)
     inbound_in_flight: Arc<RwLock<HashMap<u16, Instant>>>,
-}
-
-/// Configuration for flow control behavior
-#[derive(Debug, Clone)]
-pub struct FlowControlConfig {
-    /// Enable backpressure (block when quota exhausted)
-    pub enable_backpressure: bool,
-    /// Maximum time to wait for quota (None = wait forever)
-    pub backpressure_timeout: Option<Duration>,
-    /// Maximum number of pending requests to queue
-    pub max_pending_queue_size: usize,
-    /// Timeout for in-flight messages before considering them stale
-    pub in_flight_timeout: Duration,
-}
-
-impl Default for FlowControlConfig {
-    fn default() -> Self {
-        Self {
-            enable_backpressure: true,
-            backpressure_timeout: Some(Duration::from_secs(30)),
-            max_pending_queue_size: 1000,
-            in_flight_timeout: Duration::from_secs(60),
-        }
-    }
 }
 
 /// A pending publish request waiting for quota
@@ -361,133 +339,6 @@ impl FlowControlManager {
     /// Gets available quota permits
     pub fn available_permits(&self) -> usize {
         self.quota_semaphore.available_permits()
-    }
-}
-
-/// Flow control statistics
-#[derive(Debug, Clone)]
-pub struct FlowControlStats {
-    /// Configured receive maximum
-    pub receive_maximum: u16,
-    /// Current number of in-flight messages
-    pub in_flight_count: usize,
-    /// Available quota permits
-    pub available_quota: usize,
-    /// Number of pending requests waiting for quota
-    pub pending_requests: usize,
-    /// Timestamp of the oldest in-flight message
-    pub oldest_in_flight: Option<Instant>,
-}
-
-/// Topic alias manager for MQTT v5.0
-#[derive(Debug)]
-pub struct TopicAliasManager {
-    /// Maximum topic alias allowed
-    topic_alias_maximum: u16,
-    /// Map of alias to topic
-    alias_to_topic: HashMap<u16, String>,
-    /// Map of topic to alias
-    topic_to_alias: HashMap<String, u16>,
-    /// Next alias to allocate
-    next_alias: u16,
-}
-
-impl TopicAliasManager {
-    /// Creates a new topic alias manager
-    #[must_use]
-    pub fn new(topic_alias_maximum: u16) -> Self {
-        Self {
-            topic_alias_maximum,
-            alias_to_topic: HashMap::new(),
-            topic_to_alias: HashMap::new(),
-            next_alias: 1,
-        }
-    }
-
-    #[must_use]
-    /// Gets or creates an alias for a topic
-    pub fn get_or_create_alias(&mut self, topic: &str) -> Option<u16> {
-        // Check if we already have an alias for this topic
-        if let Some(&alias) = self.topic_to_alias.get(topic) {
-            return Some(alias);
-        }
-
-        // Check if we can allocate a new alias
-        if self.topic_alias_maximum == 0
-            || self.alias_to_topic.len() >= usize::from(self.topic_alias_maximum)
-        {
-            return None;
-        }
-
-        // Find the next available alias
-        while self.alias_to_topic.contains_key(&self.next_alias)
-            && self.next_alias <= self.topic_alias_maximum
-        {
-            self.next_alias += 1;
-            if self.next_alias > self.topic_alias_maximum {
-                self.next_alias = 1;
-            }
-        }
-
-        let alias = self.next_alias;
-        self.alias_to_topic.insert(alias, topic.to_string());
-        self.topic_to_alias.insert(topic.to_string(), alias);
-
-        // Increment for next allocation
-        self.next_alias += 1;
-        if self.next_alias > self.topic_alias_maximum {
-            self.next_alias = 1;
-        }
-
-        Some(alias)
-    }
-
-    /// Registers a topic alias received from peer
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the operation fails
-    pub fn register_alias(&mut self, alias: u16, topic: &str) -> Result<()> {
-        if alias == 0 || alias > self.topic_alias_maximum {
-            return Err(MqttError::TopicAliasInvalid(alias));
-        }
-
-        // Remove old mapping if exists
-        if let Some(old_topic) = self.alias_to_topic.get(&alias) {
-            self.topic_to_alias.remove(old_topic);
-        }
-
-        self.alias_to_topic.insert(alias, topic.to_string());
-        self.topic_to_alias.insert(topic.to_string(), alias);
-
-        Ok(())
-    }
-
-    #[must_use]
-    /// Gets the topic for an alias
-    pub fn get_topic(&self, alias: u16) -> Option<&str> {
-        self.alias_to_topic
-            .get(&alias)
-            .map(std::string::String::as_str)
-    }
-
-    #[must_use]
-    /// Gets the alias for a topic
-    pub fn get_alias(&self, topic: &str) -> Option<u16> {
-        self.topic_to_alias.get(topic).copied()
-    }
-
-    /// Clears all aliases
-    pub fn clear(&mut self) {
-        self.alias_to_topic.clear();
-        self.topic_to_alias.clear();
-        self.next_alias = 1;
-    }
-
-    #[must_use]
-    /// Gets the topic alias maximum
-    pub fn topic_alias_maximum(&self) -> u16 {
-        self.topic_alias_maximum
     }
 }
 

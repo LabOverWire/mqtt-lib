@@ -2,6 +2,7 @@
 /// This module provides the core topic matching algorithm with full support
 /// for single-level (+) and multi-level (#) wildcards according to MQTT spec
 use crate::error::{MqttError, Result};
+use crate::prelude::{format, Vec};
 
 /// Matches a topic name against a topic filter with wildcard support
 ///

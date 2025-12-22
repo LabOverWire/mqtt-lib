@@ -4,9 +4,10 @@
 //! for automatic serialization/deserialization with size expressions support.
 
 use crate::error::{MqttError, Result};
+use crate::prelude::{format, ToString, Vec};
 use bebytes::BeBytes;
 use bytes::{Buf, BufMut};
-use std::fmt;
+use core::fmt;
 
 /// Maximum value that can be encoded as a variable byte integer (268,435,455)
 pub const VARIABLE_INT_MAX: u32 = 268_435_455;
@@ -186,7 +187,7 @@ impl BeBytes for VariableInt {
 
     fn try_from_be_bytes(
         bytes: &[u8],
-    ) -> std::result::Result<(Self, usize), bebytes::BeBytesError> {
+    ) -> core::result::Result<(Self, usize), bebytes::BeBytesError> {
         use bytes::Bytes;
         let mut buf = Bytes::copy_from_slice(bytes);
         let start_len = buf.len();
@@ -210,7 +211,7 @@ impl BeBytes for VariableInt {
 
     fn try_from_le_bytes(
         bytes: &[u8],
-    ) -> std::result::Result<(Self, usize), bebytes::BeBytesError> {
+    ) -> core::result::Result<(Self, usize), bebytes::BeBytesError> {
         // MQTT uses big-endian encoding only
         Self::try_from_be_bytes(bytes)
     }

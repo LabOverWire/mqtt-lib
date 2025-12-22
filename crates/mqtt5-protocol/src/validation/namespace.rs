@@ -1,4 +1,5 @@
 use crate::error::{MqttError, Result};
+use crate::prelude::{format, String, ToString, Vec};
 use crate::validation::{validate_topic_filter, validate_topic_name, TopicValidator};
 
 /// Namespace-based topic validator for hierarchical topic isolation

@@ -1,6 +1,7 @@
 use crate::packet::pubcomp::PubCompPacket;
 use crate::packet::pubrec::PubRecPacket;
 use crate::packet::pubrel::PubRelPacket;
+use crate::prelude::{vec, Vec};
 use crate::protocol::v5::reason_codes::ReasonCode;
 
 #[derive(Debug, Clone, PartialEq)]

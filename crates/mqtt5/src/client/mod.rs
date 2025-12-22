@@ -221,7 +221,7 @@ impl MqttClient {
     ///             println!("Reconnecting attempt {}", attempt);
     ///         }
     ///         ConnectionEvent::ReconnectFailed { error } => {
-    ///             println!("Reconnection failed: {e}"rror);
+    ///             println!("Reconnection failed: {error}");
     ///         }
     ///     }
     /// }).await?;

@@ -3,8 +3,8 @@ use crate::encoding::{
     encode_variable_int,
 };
 use crate::error::{MqttError, Result};
+use crate::prelude::{format, HashMap, String, ToString, Vec};
 use bytes::{Buf, BufMut, Bytes};
-use std::collections::HashMap;
 
 /// MQTT v5.0 Property Identifiers
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -234,7 +234,7 @@ impl Properties {
     /// Gets all values for a property (for properties that allow multiple values)
     #[must_use]
     pub fn get_all(&self, id: PropertyId) -> Option<&[PropertyValue]> {
-        self.properties.get(&id).map(std::vec::Vec::as_slice)
+        self.properties.get(&id).map(Vec::as_slice)
     }
 
     /// Checks if a property is present

@@ -1,3 +1,4 @@
+use crate::prelude::{String, Vec};
 pub use crate::protocol::v5::reason_codes::ReasonCode;
 use crate::time::Duration;
 
@@ -239,7 +240,7 @@ impl From<WillProperties> for crate::protocol::v5::properties::Properties {
                 )
                 .is_err()
             {
-                tracing::warn!("Failed to add will delay interval property");
+                crate::prelude::warn_log!("Failed to add will delay interval property");
             }
         }
 
@@ -251,7 +252,7 @@ impl From<WillProperties> for crate::protocol::v5::properties::Properties {
                 )
                 .is_err()
             {
-                tracing::warn!("Failed to add payload format indicator property");
+                crate::prelude::warn_log!("Failed to add payload format indicator property");
             }
         }
 
@@ -263,7 +264,7 @@ impl From<WillProperties> for crate::protocol::v5::properties::Properties {
                 )
                 .is_err()
             {
-                tracing::warn!("Failed to add message expiry interval property");
+                crate::prelude::warn_log!("Failed to add message expiry interval property");
             }
         }
 
@@ -275,7 +276,7 @@ impl From<WillProperties> for crate::protocol::v5::properties::Properties {
                 )
                 .is_err()
             {
-                tracing::warn!("Failed to add content type property");
+                crate::prelude::warn_log!("Failed to add content type property");
             }
         }
 
@@ -287,7 +288,7 @@ impl From<WillProperties> for crate::protocol::v5::properties::Properties {
                 )
                 .is_err()
             {
-                tracing::warn!("Failed to add response topic property");
+                crate::prelude::warn_log!("Failed to add response topic property");
             }
         }
 
@@ -301,7 +302,7 @@ impl From<WillProperties> for crate::protocol::v5::properties::Properties {
                 )
                 .is_err()
             {
-                tracing::warn!("Failed to add correlation data property");
+                crate::prelude::warn_log!("Failed to add correlation data property");
             }
         }
 
@@ -313,7 +314,7 @@ impl From<WillProperties> for crate::protocol::v5::properties::Properties {
                 )
                 .is_err()
             {
-                tracing::warn!("Failed to add user property");
+                crate::prelude::warn_log!("Failed to add user property");
             }
         }
 
@@ -377,7 +378,7 @@ impl From<PublishProperties> for crate::protocol::v5::properties::Properties {
                 )
                 .is_err()
             {
-                tracing::warn!("Failed to add payload format indicator property");
+                crate::prelude::warn_log!("Failed to add payload format indicator property");
             }
         }
         if let Some(val) = props.message_expiry_interval {
@@ -388,7 +389,7 @@ impl From<PublishProperties> for crate::protocol::v5::properties::Properties {
                 )
                 .is_err()
             {
-                tracing::warn!("Failed to add message expiry interval property");
+                crate::prelude::warn_log!("Failed to add message expiry interval property");
             }
         }
         if let Some(val) = props.topic_alias {
@@ -396,7 +397,7 @@ impl From<PublishProperties> for crate::protocol::v5::properties::Properties {
                 .add(PropertyId::TopicAlias, PropertyValue::TwoByteInteger(val))
                 .is_err()
             {
-                tracing::warn!("Failed to add topic alias property");
+                crate::prelude::warn_log!("Failed to add topic alias property");
             }
         }
         if let Some(val) = props.response_topic {
@@ -404,7 +405,7 @@ impl From<PublishProperties> for crate::protocol::v5::properties::Properties {
                 .add(PropertyId::ResponseTopic, PropertyValue::Utf8String(val))
                 .is_err()
             {
-                tracing::warn!("Failed to add response topic property");
+                crate::prelude::warn_log!("Failed to add response topic property");
             }
         }
         if let Some(val) = props.correlation_data {
@@ -415,7 +416,7 @@ impl From<PublishProperties> for crate::protocol::v5::properties::Properties {
                 )
                 .is_err()
             {
-                tracing::warn!("Failed to add correlation data property");
+                crate::prelude::warn_log!("Failed to add correlation data property");
             }
         }
         for id in props.subscription_identifiers {
@@ -426,7 +427,7 @@ impl From<PublishProperties> for crate::protocol::v5::properties::Properties {
                 )
                 .is_err()
             {
-                tracing::warn!("Failed to add subscription identifier property");
+                crate::prelude::warn_log!("Failed to add subscription identifier property");
             }
         }
         if let Some(val) = props.content_type {
@@ -434,7 +435,7 @@ impl From<PublishProperties> for crate::protocol::v5::properties::Properties {
                 .add(PropertyId::ContentType, PropertyValue::Utf8String(val))
                 .is_err()
             {
-                tracing::warn!("Failed to add content type property");
+                crate::prelude::warn_log!("Failed to add content type property");
             }
         }
         for (key, value) in props.user_properties {
@@ -445,7 +446,7 @@ impl From<PublishProperties> for crate::protocol::v5::properties::Properties {
                 )
                 .is_err()
             {
-                tracing::warn!("Failed to add user property");
+                crate::prelude::warn_log!("Failed to add user property");
             }
         }
 

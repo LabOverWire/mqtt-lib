@@ -1,4 +1,5 @@
 use crate::error::{MqttError, Result};
+use crate::prelude::{format, String, ToString, Vec};
 
 pub mod namespace;
 

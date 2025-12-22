@@ -1,5 +1,6 @@
 use super::ack_common::{define_ack_packet, is_valid_pubrel_reason_code};
 use crate::packet::PacketType;
+use crate::prelude::{format, String, ToString};
 
 define_ack_packet! {
     /// MQTT PUBREL packet (`QoS` 2 publish release, part 2)

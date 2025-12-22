@@ -1,4 +1,5 @@
 use crate::error::{MqttError, Result};
+use crate::prelude::{format, ToString};
 use bytes::{Buf, BufMut, Bytes};
 
 /// Encodes binary data with a 2-byte length prefix
@@ -83,6 +84,7 @@ pub fn optional_binary_len(data: Option<&[u8]>) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::prelude::{vec, Vec};
     use bytes::BytesMut;
 
     #[test]

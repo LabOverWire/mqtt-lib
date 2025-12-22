@@ -7,9 +7,11 @@ pub mod retained;
 pub mod state;
 pub mod subscription;
 
-pub use flow_control::{FlowControlManager, TopicAliasManager};
+pub use flow_control::{
+    FlowControlConfig, FlowControlManager, FlowControlStats, TopicAliasManager,
+};
 pub use limits::{ExpiringMessage, LimitsConfig, LimitsManager};
-pub use queue::{MessageQueue, QueueStats, QueuedMessage};
+pub use queue::{MessageQueue, QueueResult, QueueStats, QueuedMessage};
 #[cfg(not(target_arch = "wasm32"))]
 pub use quic_flow::{FlowRegistry, FlowState, FlowType};
 pub use retained::{RetainedMessage, RetainedMessageStore};
