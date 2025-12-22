@@ -13,6 +13,7 @@
 | --------------- | -------------------------------- | --------------------------------------------------------- |
 | **MQTT Broker** | Run your own MQTT infrastructure | TLS, WebSocket, QUIC, Authentication, Bridging, Monitoring |
 | **MQTT Client** | Connect to any MQTT broker       | Cloud compatible, QUIC multistream, Auto-reconnect, Mock testing |
+| **Protocol (no_std)** | Embedded IoT devices       | ARM Cortex-M, RISC-V, ESP32, bare-metal compatible |
 
 ## 📦 Installation
 
@@ -33,7 +34,7 @@ cargo install mqttv5-cli
 
 The platform is organized into three crates:
 
-- **mqtt5-protocol** - Platform-agnostic MQTT v5.0 core (packets, types, Transport trait)
+- **mqtt5-protocol** - Platform-agnostic MQTT v5.0 core (packets, types, Transport trait). Supports `no_std` for embedded targets.
 - **mqtt5** - Native client and broker for Linux, macOS, Windows
 - **mqtt5-wasm** - WebAssembly client and broker for browsers
 
@@ -153,6 +154,13 @@ mqttv5 pub
 - Automatic reconnection with exponential backoff
 - Direct async/await patterns
 - Comprehensive testing support
+
+### Embedded (no_std)
+
+- Protocol crate works on bare-metal embedded targets
+- ARM Cortex-M, RISC-V, ESP32 support
+- Configurable time provider for hardware timers
+- Session state management without heap allocation overhead
 
 ## Broker Capabilities
 
@@ -467,6 +475,69 @@ See `crates/mqtt5-wasm/examples/` for browser examples:
 - `local-broker/` - In-tab broker with MessagePort
 - Complete HTML/JavaScript/CSS applications
 - Build instructions with `wasm-pack`
+
+## Embedded Support (no_std)
+
+The `mqtt5-protocol` crate supports `no_std` environments for embedded systems.
+
+### Supported Targets
+
+| Target | Platform | Notes |
+|--------|----------|-------|
+| `thumbv7em-none-eabihf` | ARM Cortex-M4F | STM32F4, nRF52, etc. |
+| `riscv32imc-unknown-none-elf` | RISC-V | ESP32-C3, BL602, etc. |
+
+### Installation
+
+```toml
+[dependencies]
+mqtt5-protocol = { version = "0.6", default-features = false }
+
+# For single-core MCUs (more efficient atomics)
+mqtt5-protocol = { version = "0.6", default-features = false, features = ["embedded-single-core"] }
+```
+
+### Time Provider
+
+Embedded targets require a time source since there's no OS clock:
+
+```rust
+#![no_std]
+extern crate alloc;
+
+use mqtt5_protocol::time::{set_time_source, update_monotonic_time, Instant};
+
+fn init() {
+    set_time_source(0, 0);
+}
+
+fn timer_tick(millis: u64) {
+    update_monotonic_time(millis);
+}
+
+fn example() {
+    let start = Instant::now();
+    // ... work ...
+    let elapsed = start.elapsed();
+}
+```
+
+### What's Included
+
+- Full packet encoding/decoding
+- Session state management (flow control, message queues, subscriptions)
+- Topic validation and matching
+- Properties and reason codes
+- Platform-agnostic time types
+
+### What's Not Included
+
+The `no_std` build excludes async runtime dependencies. You'll need to:
+- Provide your own transport layer (UART, TCP stack, etc.)
+- Integrate with your embedded async runtime (embassy, RTIC, etc.)
+- Manage connection state at the application level
+
+See the [mqtt5-protocol README](crates/mqtt5-protocol/README.md) for detailed embedded usage.
 
 ## Advanced Broker Configuration
 
