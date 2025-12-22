@@ -25,9 +25,13 @@ impl PacketIdGenerator {
     #[must_use]
     /// Gets the next available packet ID
     ///
-    /// Packet IDs are in the range 1..=65535 (0 is invalid)
+    /// Packet IDs are in the range 1..=65535 (0 is invalid).
+    /// Uses compare-and-swap with a retry limit to prevent infinite loops
+    /// on embedded systems without preemption.
     pub fn next(&self) -> u16 {
-        loop {
+        const MAX_RETRIES: u32 = 1000;
+
+        for _ in 0..MAX_RETRIES {
             let current = self.next_id.load(Ordering::SeqCst);
             let next = if current == u16::MAX { 1 } else { current + 1 };
 
@@ -38,6 +42,14 @@ impl PacketIdGenerator {
             {
                 return current;
             }
+        }
+
+        let current = self.next_id.fetch_add(1, Ordering::SeqCst);
+        if current == 0 {
+            self.next_id.store(2, Ordering::SeqCst);
+            1
+        } else {
+            current
         }
     }
 }

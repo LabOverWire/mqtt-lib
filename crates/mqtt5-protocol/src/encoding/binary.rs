@@ -112,7 +112,7 @@ mod tests {
     #[test]
     fn test_encode_binary_too_long() {
         let mut buf = BytesMut::new();
-        let data = vec![0u8; crate::constants::limits::MAX_BINARY_LENGTH as usize];
+        let data = vec![0u8; crate::constants::limits::MAX_BINARY_LENGTH as usize + 1];
         let result = encode_binary(&mut buf, &data);
         assert!(result.is_err());
     }

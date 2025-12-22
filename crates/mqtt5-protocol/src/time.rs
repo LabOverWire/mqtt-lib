@@ -6,6 +6,45 @@ pub use web_time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[cfg(all(not(feature = "std"), not(target_arch = "wasm32")))]
 mod embedded {
+    use portable_atomic::{AtomicU32, Ordering};
+
+    static TIME_SOURCE_MILLIS_LO: AtomicU32 = AtomicU32::new(0);
+    static TIME_SOURCE_MILLIS_HI: AtomicU32 = AtomicU32::new(0);
+    static EPOCH_MILLIS_LO: AtomicU32 = AtomicU32::new(0);
+    static EPOCH_MILLIS_HI: AtomicU32 = AtomicU32::new(0);
+
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn set_time_source(monotonic_millis: u64, epoch_millis: u64) {
+        TIME_SOURCE_MILLIS_LO.store(monotonic_millis as u32, Ordering::SeqCst);
+        TIME_SOURCE_MILLIS_HI.store((monotonic_millis >> 32) as u32, Ordering::SeqCst);
+        EPOCH_MILLIS_LO.store(epoch_millis as u32, Ordering::SeqCst);
+        EPOCH_MILLIS_HI.store((epoch_millis >> 32) as u32, Ordering::SeqCst);
+    }
+
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn update_monotonic_time(millis: u64) {
+        TIME_SOURCE_MILLIS_LO.store(millis as u32, Ordering::SeqCst);
+        TIME_SOURCE_MILLIS_HI.store((millis >> 32) as u32, Ordering::SeqCst);
+    }
+
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn update_epoch_time(millis_since_epoch: u64) {
+        EPOCH_MILLIS_LO.store(millis_since_epoch as u32, Ordering::SeqCst);
+        EPOCH_MILLIS_HI.store((millis_since_epoch >> 32) as u32, Ordering::SeqCst);
+    }
+
+    fn get_monotonic_millis() -> u64 {
+        let lo = u64::from(TIME_SOURCE_MILLIS_LO.load(Ordering::SeqCst));
+        let hi = u64::from(TIME_SOURCE_MILLIS_HI.load(Ordering::SeqCst));
+        (hi << 32) | lo
+    }
+
+    fn get_epoch_millis() -> u64 {
+        let lo = u64::from(EPOCH_MILLIS_LO.load(Ordering::SeqCst));
+        let hi = u64::from(EPOCH_MILLIS_HI.load(Ordering::SeqCst));
+        (hi << 32) | lo
+    }
+
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
     pub struct Duration {
         millis: u64,
@@ -15,7 +54,7 @@ mod embedded {
         #[must_use]
         pub const fn from_secs(secs: u64) -> Self {
             Self {
-                millis: secs * 1000,
+                millis: secs.saturating_mul(1000),
             }
         }
 
@@ -59,7 +98,7 @@ mod embedded {
 
         fn add(self, rhs: Self) -> Self::Output {
             Self {
-                millis: self.millis + rhs.millis,
+                millis: self.millis.saturating_add(rhs.millis),
             }
         }
     }
@@ -82,12 +121,15 @@ mod embedded {
     impl Instant {
         #[must_use]
         pub fn now() -> Self {
-            Self { millis: 0 }
+            Self {
+                millis: get_monotonic_millis(),
+            }
         }
 
         #[must_use]
         pub fn elapsed(&self) -> Duration {
-            Duration::from_millis(0)
+            let now = get_monotonic_millis();
+            Duration::from_millis(now.saturating_sub(self.millis))
         }
 
         #[must_use]
@@ -108,7 +150,7 @@ mod embedded {
 
         fn add(self, rhs: Duration) -> Self::Output {
             Self {
-                millis: self.millis + rhs.millis,
+                millis: self.millis.saturating_add(rhs.millis),
             }
         }
     }
@@ -132,20 +174,29 @@ mod embedded {
         #[must_use]
         pub fn now() -> Self {
             Self {
-                millis_since_epoch: 0,
+                millis_since_epoch: get_epoch_millis(),
             }
         }
 
-        #[allow(clippy::result_unit_err, clippy::missing_errors_doc)]
-        pub fn duration_since(&self, earlier: Self) -> Result<Duration, ()> {
+        /// Returns the duration since an earlier `SystemTime`.
+        ///
+        /// # Errors
+        ///
+        /// Returns `TimeError::EarlierTime` if `earlier` is after `self`.
+        pub fn duration_since(&self, earlier: Self) -> Result<Duration, TimeError> {
             if self.millis_since_epoch >= earlier.millis_since_epoch {
                 Ok(Duration::from_millis(
                     self.millis_since_epoch - earlier.millis_since_epoch,
                 ))
             } else {
-                Err(())
+                Err(TimeError::EarlierTime)
             }
         }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum TimeError {
+        EarlierTime,
     }
 
     pub const UNIX_EPOCH: SystemTime = SystemTime {
@@ -154,7 +205,10 @@ mod embedded {
 }
 
 #[cfg(all(not(feature = "std"), not(target_arch = "wasm32")))]
-pub use embedded::{Duration, Instant, SystemTime, UNIX_EPOCH};
+pub use embedded::{
+    set_time_source, update_epoch_time, update_monotonic_time, Duration, Instant, SystemTime,
+    TimeError, UNIX_EPOCH,
+};
 
 #[must_use]
 pub fn is_using_web_time() -> bool {
