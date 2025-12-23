@@ -397,29 +397,28 @@ pub async fn execute(mut cmd: SubCommand, verbose: bool, debug: bool) -> Result<
     if broker_url.starts_with("ssl://") || broker_url.starts_with("mqtts://") {
         // Configure with certificates if provided
         if cmd.cert.is_some() || cmd.key.is_some() || cmd.ca_cert.is_some() {
-            let cert_pem =
-                if let Some(cert_path) = &cmd.cert {
-                    Some(std::fs::read(cert_path).with_context(|| {
-                        format!("Failed to read certificate file: {}", cert_path.display())
-                    })?)
-                } else {
-                    None
-                };
-            let key_pem = if let Some(key_path) = &cmd.key {
-                Some(std::fs::read(key_path).with_context(|| {
-                    format!("Failed to read key file: {}", key_path.display())
+            let cert_pem = if let Some(cert_path) = &cmd.cert {
+                Some(std::fs::read(cert_path).with_context(|| {
+                    format!("Failed to read certificate file: {}", cert_path.display())
                 })?)
             } else {
                 None
             };
-            let ca_pem =
-                if let Some(ca_path) = &cmd.ca_cert {
-                    Some(std::fs::read(ca_path).with_context(|| {
-                        format!("Failed to read CA certificate file: {}", ca_path.display())
+            let key_pem =
+                if let Some(key_path) = &cmd.key {
+                    Some(std::fs::read(key_path).with_context(|| {
+                        format!("Failed to read key file: {}", key_path.display())
                     })?)
                 } else {
                     None
                 };
+            let ca_pem = if let Some(ca_path) = &cmd.ca_cert {
+                Some(std::fs::read(ca_path).with_context(|| {
+                    format!("Failed to read CA certificate file: {}", ca_path.display())
+                })?)
+            } else {
+                None
+            };
 
             client.set_tls_config(cert_pem, key_pem, ca_pem).await;
         }

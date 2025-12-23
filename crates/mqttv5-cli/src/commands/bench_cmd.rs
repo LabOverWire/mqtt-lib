@@ -426,7 +426,9 @@ async fn run_latency(cmd: BenchCommand) -> Result<()> {
         (min, max, avg, p50, p95, p99)
     };
 
-    eprintln!("  p50: {p50_us}us, p95: {p95_us}us, p99: {p99_us}us, min: {min_us}us, max: {max_us}us");
+    eprintln!(
+        "  p50: {p50_us}us, p95: {p95_us}us, p99: {p99_us}us, min: {min_us}us, max: {max_us}us"
+    );
 
     let output = BenchOutput {
         mode: "latency".to_string(),
