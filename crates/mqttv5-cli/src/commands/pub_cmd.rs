@@ -5,7 +5,6 @@ use mqtt5::time::Duration;
 use mqtt5::{
     ConnectOptions, ConnectionEvent, MqttClient, ProtocolVersion, PublishOptions, QoS, WillMessage,
 };
-use std::fs;
 use std::io::{self, Read};
 use std::path::PathBuf;
 use tokio::signal;
@@ -552,9 +551,10 @@ async fn get_message_content(cmd: &mut PubCommand) -> Result<String> {
 
     if let Some(file_path) = &cmd.file {
         debug!("Reading message from file: {}", file_path);
-        return fs::read_to_string(file_path)
-            .with_context(|| format!("Failed to read file: {file_path}"))
-            .map(|s| s.trim().to_string());
+        let content = tokio::fs::read_to_string(file_path)
+            .await
+            .with_context(|| format!("Failed to read file: {file_path}"))?;
+        return Ok(content.trim().to_string());
     }
 
     if let Some(message) = &cmd.message {

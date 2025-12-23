@@ -1,8 +1,7 @@
 use anyhow::{bail, Context, Result};
 use clap::{Args, Subcommand};
-use std::fs::{self, OpenOptions};
-use std::io::Write;
 use std::path::PathBuf;
+use tokio::io::AsyncWriteExt;
 
 #[derive(Args)]
 pub struct AclCommand {
@@ -577,7 +576,8 @@ async fn handle_user_roles(username: &str, file_path: &PathBuf) -> Result<()> {
 }
 
 async fn read_acl_file(path: &PathBuf) -> Result<Vec<String>> {
-    let content = fs::read_to_string(path)
+    let content = tokio::fs::read_to_string(path)
+        .await
         .with_context(|| format!("Failed to read ACL file: {}", path.display()))?;
 
     let mut rules = Vec::new();
@@ -603,21 +603,24 @@ async fn write_acl_file(path: &PathBuf, rules: &[String]) -> Result<()> {
         content.push('\n');
     }
 
-    let mut file = OpenOptions::new()
+    let mut file = tokio::fs::OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
         .open(path)
+        .await
         .with_context(|| format!("Failed to open ACL file: {}", path.display()))?;
 
     file.write_all(content.as_bytes())
+        .await
         .with_context(|| format!("Failed to write ACL file: {}", path.display()))?;
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let permissions = std::fs::Permissions::from_mode(0o600);
-        std::fs::set_permissions(path, permissions)
+        tokio::fs::set_permissions(path, permissions)
+            .await
             .with_context(|| format!("Failed to set file permissions: {}", path.display()))?;
     }
 

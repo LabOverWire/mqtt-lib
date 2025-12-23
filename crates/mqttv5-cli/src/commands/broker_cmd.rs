@@ -521,9 +521,11 @@ async fn create_interactive_config(cmd: &mut BrokerCommand) -> Result<BrokerConf
 
     let federated_jwt_config = if auth_method == AuthMethod::JwtFederated {
         if let Some(config_file) = &cmd.jwt_config_file {
-            let content = std::fs::read_to_string(config_file).with_context(|| {
-                format!("Failed to read JWT config file: {}", config_file.display())
-            })?;
+            let content = tokio::fs::read_to_string(config_file)
+                .await
+                .with_context(|| {
+                    format!("Failed to read JWT config file: {}", config_file.display())
+                })?;
             let config: FederatedJwtConfig = serde_json::from_str(&content)
                 .with_context(|| "Failed to parse JWT config file as JSON")?;
             Some(config)
@@ -829,7 +831,9 @@ async fn create_interactive_config(cmd: &mut BrokerCommand) -> Result<BrokerConf
 }
 
 async fn load_config_from_file(config_path: &Path) -> Result<BrokerConfig> {
-    let contents = std::fs::read_to_string(config_path).context("Failed to read config file")?;
+    let contents = tokio::fs::read_to_string(config_path)
+        .await
+        .context("Failed to read config file")?;
 
     serde_json::from_str(&contents).context("Failed to parse config file as JSON")
 }

@@ -4,7 +4,7 @@ use crate::broker::auth::{AuthProvider, EnhancedAuthStatus};
 use crate::broker::config::BrokerConfig;
 use crate::broker::events::{
     ClientConnectEvent, ClientDisconnectEvent, ClientPublishEvent, ClientSubscribeEvent,
-    ClientUnsubscribeEvent, SubAckReasonCode, SubscriptionInfo,
+    ClientUnsubscribeEvent, MessageDeliveredEvent, SubAckReasonCode, SubscriptionInfo,
 };
 use crate::broker::resource_monitor::ResourceMonitor;
 use crate::broker::router::MessageRouter;
@@ -543,13 +543,13 @@ impl ClientHandler {
             Packet::Unsubscribe(unsubscribe) => self.handle_unsubscribe(unsubscribe).await,
             Packet::Publish(publish) => self.handle_publish(publish).await,
             Packet::PubAck(ref puback) => {
-                self.handle_puback(puback);
+                self.handle_puback(puback).await;
                 Ok(())
             }
             Packet::PubRec(pubrec) => self.handle_pubrec(pubrec).await,
             Packet::PubRel(pubrel) => self.handle_pubrel(pubrel).await,
             Packet::PubComp(ref pubcomp) => {
-                self.handle_pubcomp(pubcomp);
+                self.handle_pubcomp(pubcomp).await;
                 Ok(())
             }
             Packet::PingReq => self.handle_pingreq().await,
@@ -1297,13 +1297,24 @@ impl ClientHandler {
         Ok(())
     }
 
-    fn handle_puback(&mut self, puback: &PubAckPacket) {
+    async fn handle_puback(&mut self, puback: &PubAckPacket) {
         if self.outbound_inflight.remove(&puback.packet_id) {
             tracing::trace!(
                 packet_id = puback.packet_id,
                 inflight = self.outbound_inflight.len(),
                 "Released outbound flow control quota on PUBACK"
             );
+
+            if let Some(ref handler) = self.config.event_handler {
+                if let Some(ref client_id) = self.client_id {
+                    let event = MessageDeliveredEvent {
+                        client_id: Arc::from(client_id.as_str()),
+                        packet_id: puback.packet_id,
+                        qos: QoS::AtLeastOnce,
+                    };
+                    handler.on_message_delivered(event).await;
+                }
+            }
         }
     }
 
@@ -1331,13 +1342,24 @@ impl ClientHandler {
         self.transport.write_packet(Packet::PubComp(pubcomp)).await
     }
 
-    fn handle_pubcomp(&mut self, pubcomp: &PubCompPacket) {
+    async fn handle_pubcomp(&mut self, pubcomp: &PubCompPacket) {
         if self.outbound_inflight.remove(&pubcomp.packet_id) {
             tracing::trace!(
                 packet_id = pubcomp.packet_id,
                 inflight = self.outbound_inflight.len(),
                 "Released outbound flow control quota on PUBCOMP"
             );
+
+            if let Some(ref handler) = self.config.event_handler {
+                if let Some(ref client_id) = self.client_id {
+                    let event = MessageDeliveredEvent {
+                        client_id: Arc::from(client_id.as_str()),
+                        packet_id: pubcomp.packet_id,
+                        qos: QoS::ExactlyOnce,
+                    };
+                    handler.on_message_delivered(event).await;
+                }
+            }
         }
     }
 

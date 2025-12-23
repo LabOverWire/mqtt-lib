@@ -96,6 +96,21 @@ pub struct ClientDisconnectEvent {
     pub unexpected: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct RetainedSetEvent {
+    pub topic: Arc<str>,
+    pub payload: Bytes,
+    pub qos: QoS,
+    pub cleared: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct MessageDeliveredEvent {
+    pub client_id: Arc<str>,
+    pub packet_id: u16,
+    pub qos: QoS,
+}
+
 pub trait BrokerEventHandler: Send + Sync {
     fn on_client_connect<'a>(
         &'a self,
@@ -128,6 +143,20 @@ pub trait BrokerEventHandler: Send + Sync {
     fn on_client_disconnect<'a>(
         &'a self,
         _event: ClientDisconnectEvent,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        Box::pin(async {})
+    }
+
+    fn on_retained_set<'a>(
+        &'a self,
+        _event: RetainedSetEvent,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        Box::pin(async {})
+    }
+
+    fn on_message_delivered<'a>(
+        &'a self,
+        _event: MessageDeliveredEvent,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
         Box::pin(async {})
     }

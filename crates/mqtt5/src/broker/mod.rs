@@ -63,7 +63,8 @@ pub use auth_mechanisms::{
 pub use config::{BrokerConfig, StorageBackend as StorageBackendType, StorageConfig};
 pub use events::{
     BrokerEventHandler, ClientConnectEvent, ClientDisconnectEvent, ClientPublishEvent,
-    ClientSubscribeEvent, ClientUnsubscribeEvent, SubAckReasonCode, SubscriptionInfo,
+    ClientSubscribeEvent, ClientUnsubscribeEvent, MessageDeliveredEvent, RetainedSetEvent,
+    SubAckReasonCode, SubscriptionInfo,
 };
 pub use resource_monitor::{ResourceLimits, ResourceMonitor, ResourceStats};
 #[cfg(not(target_arch = "wasm32"))]
