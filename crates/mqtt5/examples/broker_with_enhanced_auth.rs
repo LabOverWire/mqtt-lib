@@ -1,3 +1,6 @@
+#![allow(clippy::doc_markdown)]
+#![allow(clippy::must_use_candidate)]
+
 //! MQTT v5.0 Broker with Enhanced Authentication Example
 //!
 //! This example demonstrates how to implement enhanced authentication

@@ -1,3 +1,5 @@
+#![allow(clippy::large_futures)]
+
 use mqtt5::broker::bridge::{BridgeConfig, BridgeDirection};
 use mqtt5::broker::config::StorageConfig;
 use mqtt5::broker::{BrokerConfig, MqttBroker};

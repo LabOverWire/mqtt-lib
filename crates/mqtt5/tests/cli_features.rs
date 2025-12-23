@@ -283,7 +283,7 @@ async fn test_cli_will_message() {
     println!("✅ Will message configuration and delivery verified");
 }
 
-/// Test QoS levels
+/// Test `QoS` levels
 #[tokio::test]
 async fn test_cli_qos_levels() {
     let broker = TestBroker::start().await;

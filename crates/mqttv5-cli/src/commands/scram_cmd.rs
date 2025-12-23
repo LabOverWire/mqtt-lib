@@ -53,7 +53,7 @@ pub struct ScramCommand {
     pub iterations: u32,
 }
 
-pub fn execute(cmd: ScramCommand) -> Result<()> {
+pub fn execute(cmd: &ScramCommand) -> Result<()> {
     if cmd.username.contains(':') {
         bail!("Username cannot contain ':' character");
     }
@@ -63,7 +63,7 @@ pub fn execute(cmd: ScramCommand) -> Result<()> {
     }
 
     if cmd.stdout {
-        return handle_stdout_mode(&cmd);
+        return handle_stdout_mode(cmd);
     }
 
     let file_path = cmd
@@ -72,10 +72,10 @@ pub fn execute(cmd: ScramCommand) -> Result<()> {
         .context("SCRAM file path required (use -n for stdout mode)")?;
 
     if cmd.delete {
-        return handle_delete(&cmd, file_path);
+        return handle_delete(cmd, file_path);
     }
 
-    handle_add_or_update(&cmd, file_path)
+    handle_add_or_update(cmd, file_path)
 }
 
 fn handle_stdout_mode(cmd: &ScramCommand) -> Result<()> {

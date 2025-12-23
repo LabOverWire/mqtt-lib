@@ -1,5 +1,8 @@
+#![allow(clippy::redundant_else)]
+
 use anyhow::{bail, Context, Result};
 use clap::{Args, Subcommand};
+use mqtt5::broker::acl::AclManager;
 use std::path::PathBuf;
 use tokio::io::AsyncWriteExt;
 
@@ -329,8 +332,6 @@ async fn handle_check(
     if !file_path.exists() {
         bail!("ACL file does not exist: {}", file_path.display());
     }
-
-    use mqtt5::broker::acl::AclManager;
 
     let acl_manager = AclManager::from_file(file_path).await?;
 

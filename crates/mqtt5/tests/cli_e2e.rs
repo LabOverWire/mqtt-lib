@@ -1,3 +1,4 @@
+#![allow(clippy::doc_markdown)]
 //! End-to-end CLI integration tests
 //!
 //! Tests real publish/subscribe scenarios with the CLI

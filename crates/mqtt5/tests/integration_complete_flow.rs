@@ -1,3 +1,6 @@
+#![allow(clippy::implicit_clone)]
+#![allow(clippy::large_futures)]
+
 mod common;
 
 use common::{create_test_client_with_broker, test_client_id, TestBroker};

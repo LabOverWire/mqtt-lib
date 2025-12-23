@@ -8,10 +8,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bob_hash = PasswordAuthProvider::hash_password("bob123")?;
     let charlie_hash = PasswordAuthProvider::hash_password("charlie123")?;
 
-    let passwd_content = format!(
-        "alice:{}\nbob:{}\ncharlie:{}\n",
-        alice_hash, bob_hash, charlie_hash
-    );
+    let passwd_content = format!("alice:{alice_hash}\nbob:{bob_hash}\ncharlie:{charlie_hash}\n");
 
     let mut passwd_file = File::create("/tmp/mqtt_test_passwd.txt")?;
     passwd_file.write_all(passwd_content.as_bytes())?;

@@ -22,9 +22,7 @@ fn find_workspace_root() -> PathBuf {
             }
         }
 
-        if !current.pop() {
-            panic!("Could not find workspace root");
-        }
+        assert!(current.pop(), "Could not find workspace root");
     }
 }
 
@@ -221,7 +219,7 @@ impl TestBroker {
     #[allow(dead_code)]
     pub async fn start_with_authentication() -> Self {
         use mqtt5::broker::config::{
-            AuthConfig, AuthMethod, BrokerConfig, StorageBackend, StorageConfig,
+            AuthConfig, AuthMethod, BrokerConfig, RateLimitConfig, StorageBackend, StorageConfig,
         };
         use std::process::Command;
 
@@ -267,7 +265,7 @@ impl TestBroker {
             scram_file: None,
             jwt_config: None,
             federated_jwt_config: None,
-            rate_limit: Default::default(),
+            rate_limit: RateLimitConfig::default(),
         };
 
         let config = BrokerConfig::default()

@@ -363,8 +363,7 @@ async fn test_client_enhanced_auth_success() {
     let result = client.connect(&format!("mqtt://127.0.0.1:{port}")).await;
     assert!(
         result.is_ok(),
-        "Client should connect with enhanced auth: {:?}",
-        result
+        "Client should connect with enhanced auth: {result:?}"
     );
 
     assert!(client.is_connected().await);
@@ -417,8 +416,7 @@ async fn test_client_enhanced_auth_failure() {
     let result = client.connect(&format!("mqtt://127.0.0.1:{port}")).await;
     assert!(
         result.is_err(),
-        "Client should fail with wrong response, but got: {:?}",
-        result
+        "Client should fail with wrong response, but got: {result:?}"
     );
 
     broker_handle.abort();
@@ -460,7 +458,7 @@ async fn test_client_enhanced_auth_no_handler() {
 
     if let Err(MqttError::AuthenticationFailed) = result {
     } else {
-        panic!("Expected AuthenticationFailed error, got {:?}", result);
+        panic!("Expected AuthenticationFailed error, got {result:?}");
     }
 
     broker_handle.abort();

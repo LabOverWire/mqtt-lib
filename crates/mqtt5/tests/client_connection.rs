@@ -1,3 +1,5 @@
+#![allow(clippy::large_futures)]
+
 use mqtt5::{ConnectOptions, MqttClient, MqttError};
 
 #[tokio::test]

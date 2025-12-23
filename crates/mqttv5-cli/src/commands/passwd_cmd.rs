@@ -3,6 +3,7 @@ use argon2::password_hash::{PasswordHasher, Salt, SaltString};
 use argon2::Argon2;
 use clap::Args;
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
@@ -42,13 +43,13 @@ pub struct PasswdCommand {
     pub stdout: bool,
 }
 
-pub fn execute(cmd: PasswdCommand) -> Result<()> {
+pub fn execute(cmd: &PasswdCommand) -> Result<()> {
     if cmd.username.contains(':') {
         bail!("Username cannot contain ':' character");
     }
 
     if cmd.stdout {
-        return handle_stdout_mode(&cmd);
+        return handle_stdout_mode(cmd);
     }
 
     let file_path = cmd
@@ -57,10 +58,10 @@ pub fn execute(cmd: PasswdCommand) -> Result<()> {
         .context("Password file path required (use -n for stdout mode)")?;
 
     if cmd.delete {
-        return handle_delete(&cmd, file_path);
+        return handle_delete(cmd, file_path);
     }
 
-    handle_add_or_update(&cmd, file_path)
+    handle_add_or_update(cmd, file_path)
 }
 
 fn hash_password(password: &str) -> Result<String> {
@@ -188,7 +189,7 @@ fn write_password_file(path: &PathBuf, users: &HashMap<String, String>) -> Resul
 
     for username in usernames {
         if let Some(hash) = users.get(username) {
-            content.push_str(&format!("{username}:{hash}\n"));
+            let _ = writeln!(content, "{username}:{hash}");
         }
     }
 

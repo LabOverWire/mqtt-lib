@@ -1,3 +1,7 @@
+#![allow(clippy::cast_possible_truncation)]
+#![allow(clippy::cast_precision_loss)]
+#![allow(clippy::too_many_lines)]
+
 use anyhow::{Context, Result};
 use clap::{Args, ValueEnum};
 use mqtt5::time::Duration;
@@ -255,7 +259,7 @@ async fn run_throughput(cmd: BenchCommand) -> Result<()> {
             let current = received.load(Ordering::Relaxed);
             let delta = current - last_received;
             samples.push(delta);
-            eprintln!("  {} msg/s", delta);
+            eprintln!("  {delta} msg/s");
             last_received = current;
             next_sample += Duration::from_secs(1);
         }
@@ -325,7 +329,7 @@ async fn run_latency(cmd: BenchCommand) -> Result<()> {
         .clone()
         .unwrap_or_else(|| format!("mqttv5-lat-{}", rand::rng().random::<u32>()));
 
-    eprintln!("connecting to {} for latency test...", broker_url);
+    eprintln!("connecting to {broker_url} for latency test...");
 
     let pub_client = MqttClient::new(format!("{base_client_id}-pub"));
     let pub_options = ConnectOptions::new(format!("{base_client_id}-pub"))
@@ -422,10 +426,7 @@ async fn run_latency(cmd: BenchCommand) -> Result<()> {
         (min, max, avg, p50, p95, p99)
     };
 
-    eprintln!(
-        "  p50: {}us, p95: {}us, p99: {}us, min: {}us, max: {}us",
-        p50_us, p95_us, p99_us, min_us, max_us
-    );
+    eprintln!("  p50: {p50_us}us, p95: {p95_us}us, p99: {p99_us}us, min: {min_us}us, max: {max_us}us");
 
     let output = BenchOutput {
         mode: "latency".to_string(),
@@ -492,7 +493,7 @@ async fn run_connections(cmd: BenchCommand) -> Result<()> {
         "benchmarking connection rate to {} with {} concurrent workers for {}s...",
         original_url, cmd.concurrency, cmd.duration
     );
-    eprintln!("  (resolved to {})", broker_url);
+    eprintln!("  (resolved to {broker_url})");
 
     let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let successful = Arc::new(AtomicU64::new(0));
@@ -549,7 +550,7 @@ async fn run_connections(cmd: BenchCommand) -> Result<()> {
             let current = successful.load(Ordering::Relaxed);
             let delta = current - last_count;
             samples.push(delta);
-            eprintln!("  {} conn/s", delta);
+            eprintln!("  {delta} conn/s");
             last_count = current;
             next_sample += Duration::from_secs(1);
         }
@@ -578,14 +579,8 @@ async fn run_connections(cmd: BenchCommand) -> Result<()> {
         (avg, p50, p95, p99)
     };
 
-    eprintln!(
-        "\n  total: {} successful, {} failed",
-        total_successful, total_failed
-    );
-    eprintln!(
-        "  avg: {:.0}us, p50: {}us, p95: {}us, p99: {}us",
-        avg_connect_us, p50_connect_us, p95_connect_us, p99_connect_us
-    );
+    eprintln!("\n  total: {total_successful} successful, {total_failed} failed");
+    eprintln!("  avg: {avg_connect_us:.0}us, p50: {p50_connect_us}us, p95: {p95_connect_us}us, p99: {p99_connect_us}us");
 
     let output = BenchOutput {
         mode: "connections".to_string(),
