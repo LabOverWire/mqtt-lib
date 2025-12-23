@@ -6,6 +6,7 @@ extern crate alloc;
 
 mod prelude;
 
+pub mod client;
 pub mod constants;
 pub mod encoding;
 pub mod error;
@@ -44,3 +45,5 @@ pub use session::{
     MessageQueue, QueueResult, QueueStats, QueuedMessage, Subscription, SubscriptionManager,
     TopicAliasManager,
 };
+
+pub use client::{AckType, ClientProtocol, ClientSession, ClientState, ProtocolAction, TimeoutId};
