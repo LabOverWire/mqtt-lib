@@ -31,11 +31,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `riscv32imac-unknown-none-elf` (RISC-V with atomics)
   - `riscv32imc-unknown-none-elf` (RISC-V single-core)
 
-- **Client protocol layer** (`ClientProtocol`)
-  - Sans-io pattern returning `Vec<ProtocolAction>`
-  - `ClientState`, `ClientSession` for state management
-  - `TimeoutId`, `AckType` for tracking pending operations
-
 ### Changed
 
 - **Session module refactored** to mqtt5-protocol for embedded reuse
