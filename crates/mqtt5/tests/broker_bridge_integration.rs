@@ -56,7 +56,11 @@ async fn test_loop_prevention() {
     let loop_prevention = LoopPrevention::new(Duration::from_secs(5), 100);
 
     // Create a test message
-    let packet = PublishPacket::new("test/topic".to_string(), b"test payload", QoS::AtLeastOnce);
+    let packet = PublishPacket::new(
+        "test/topic".to_string(),
+        &b"test payload"[..],
+        QoS::AtLeastOnce,
+    );
 
     // First time should pass
     assert!(loop_prevention.check_message(&packet).await);
@@ -65,7 +69,11 @@ async fn test_loop_prevention() {
     assert!(!loop_prevention.check_message(&packet).await);
 
     // Different message should pass
-    let packet2 = PublishPacket::new("test/topic2".to_string(), b"test payload", QoS::AtLeastOnce);
+    let packet2 = PublishPacket::new(
+        "test/topic2".to_string(),
+        &b"test payload"[..],
+        QoS::AtLeastOnce,
+    );
     assert!(loop_prevention.check_message(&packet2).await);
 }
 
@@ -95,7 +103,11 @@ async fn test_bridge_message_routing() {
         .unwrap();
 
     // Create and route a message
-    let packet = PublishPacket::new("test/topic".to_string(), b"test message", QoS::AtMostOnce);
+    let packet = PublishPacket::new(
+        "test/topic".to_string(),
+        &b"test message"[..],
+        QoS::AtMostOnce,
+    );
     router.route_message(&packet, None).await;
 
     // Verify message was routed locally
@@ -105,7 +117,7 @@ async fn test_bridge_message_routing() {
         .expect("Should receive message");
 
     assert_eq!(received.topic_name, "test/topic");
-    assert_eq!(received.payload, b"test message");
+    assert_eq!(&received.payload[..], b"test message");
 }
 
 #[tokio::test]

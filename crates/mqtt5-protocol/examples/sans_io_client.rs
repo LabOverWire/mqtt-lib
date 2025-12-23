@@ -52,7 +52,7 @@ fn main() {
     process_actions(&actions, "Publish QoS0");
 
     println!("\n6. Simulating incoming PUBLISH from broker...");
-    let incoming_publish = PublishPacket::new("sensors/temperature", b"25.5", QoS::AtMostOnce);
+    let incoming_publish = PublishPacket::new("sensors/temperature", &b"25.5"[..], QoS::AtMostOnce);
     let actions = protocol.handle_publish(&incoming_publish);
     process_actions(&actions, "Incoming PUBLISH");
 

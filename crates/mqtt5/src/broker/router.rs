@@ -664,6 +664,7 @@ impl Default for MessageRouter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
 
     #[tokio::test]
     async fn test_client_registration() {
@@ -750,7 +751,7 @@ mod tests {
             .unwrap();
 
         // Publish message
-        let publish = PublishPacket::new("test/data", b"hello", QoS::ExactlyOnce);
+        let publish = PublishPacket::new("test/data", &b"hello"[..], QoS::ExactlyOnce);
 
         router.route_message(&publish, None).await;
 
@@ -770,7 +771,7 @@ mod tests {
         let router = MessageRouter::new();
 
         // Store retained message
-        let mut publish = PublishPacket::new("test/status", b"online", QoS::AtMostOnce);
+        let mut publish = PublishPacket::new("test/status", &b"online"[..], QoS::AtMostOnce);
         publish.retain = true;
         router.route_message(&publish, None).await;
 
@@ -782,7 +783,7 @@ mod tests {
         assert_eq!(retained[0].topic_name, "test/status");
 
         // Delete retained message
-        let mut delete = PublishPacket::new("test/status", b"", QoS::AtMostOnce);
+        let mut delete = PublishPacket::new("test/status", &b""[..], QoS::AtMostOnce);
         delete.retain = true;
         router.route_message(&delete, None).await;
 
@@ -852,8 +853,11 @@ mod tests {
 
         // Publish 6 messages
         for i in 0..6 {
-            let publish =
-                PublishPacket::new("test/data", format!("msg{i}").as_bytes(), QoS::AtMostOnce);
+            let publish = PublishPacket::new(
+                "test/data",
+                Bytes::copy_from_slice(format!("msg{i}").as_bytes()),
+                QoS::AtMostOnce,
+            );
             router.route_message(&publish, None).await;
         }
 
@@ -940,12 +944,12 @@ mod tests {
             .unwrap();
 
         // Publish message
-        let publish = PublishPacket::new("test/data", b"hello", QoS::AtMostOnce);
+        let publish = PublishPacket::new("test/data", &b"hello"[..], QoS::AtMostOnce);
         router.route_message(&publish, None).await;
 
         // Regular subscriber should receive the message
         let regular_msg = rx3.try_recv().unwrap();
-        assert_eq!(regular_msg.payload, b"hello");
+        assert_eq!(&regular_msg.payload[..], b"hello");
 
         // Only one of the shared subscribers should receive it
         let shared1_received = rx1.try_recv().is_ok();

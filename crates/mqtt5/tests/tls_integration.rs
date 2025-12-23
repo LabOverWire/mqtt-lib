@@ -66,7 +66,7 @@ async fn test_tls_connection() {
         let msgs = received_msgs.lock().unwrap();
         assert_eq!(msgs.len(), 1, "Expected 1 message, got {}", msgs.len());
         assert_eq!(msgs[0].topic, "test/tls/topic");
-        assert_eq!(msgs[0].payload, b"TLS test message");
+        assert_eq!(&msgs[0].payload[..], b"TLS test message");
     }
 
     // Disconnect
@@ -142,7 +142,7 @@ async fn test_mtls_connection() {
         let msgs = received_msgs.lock().unwrap();
         assert_eq!(msgs.len(), 1, "Expected 1 message, got {}", msgs.len());
         assert_eq!(msgs[0].topic, "test/mtls/topic");
-        assert_eq!(msgs[0].payload, b"mTLS test message");
+        assert_eq!(&msgs[0].payload[..], b"mTLS test message");
     }
 
     // Disconnect

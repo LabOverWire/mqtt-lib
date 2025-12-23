@@ -112,14 +112,15 @@ fn test_topic_alias_manager_wraparound() {
 
 #[test]
 fn test_publish_packet_topic_alias() {
-    let packet = PublishPacket::new("test/topic", b"payload", QoS::AtLeastOnce).with_topic_alias(5);
+    let packet =
+        PublishPacket::new("test/topic", &b"payload"[..], QoS::AtLeastOnce).with_topic_alias(5);
 
     assert_eq!(packet.topic_alias(), Some(5));
 }
 
 #[test]
 fn test_publish_packet_no_topic_alias() {
-    let packet = PublishPacket::new("test/topic", b"payload", QoS::AtLeastOnce);
+    let packet = PublishPacket::new("test/topic", &b"payload"[..], QoS::AtLeastOnce);
 
     assert_eq!(packet.topic_alias(), None);
 }

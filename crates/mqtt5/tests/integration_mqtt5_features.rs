@@ -148,7 +148,7 @@ async fn test_will_message_with_delay() {
             let will_received_clone = will_received_clone.clone();
             let receive_time_clone = receive_time_clone.clone();
             tokio::spawn(async move {
-                assert_eq!(msg.payload, b"Client disconnected unexpectedly");
+                assert_eq!(&msg.payload[..], b"Client disconnected unexpectedly");
                 will_received_clone.store(true, Ordering::SeqCst);
                 *receive_time_clone.lock().await = Some(std::time::Instant::now());
             });

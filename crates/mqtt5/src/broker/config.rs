@@ -12,9 +12,12 @@ use crate::time::Duration;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
+
+use super::events::BrokerEventHandler;
 
 /// Broker configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct BrokerConfig {
     /// TCP listener addresses (supports multiple addresses for dual-stack IPv4/IPv6)
@@ -94,6 +97,55 @@ pub struct BrokerConfig {
     #[cfg(feature = "opentelemetry")]
     #[serde(skip)]
     pub opentelemetry_config: Option<TelemetryConfig>,
+
+    /// Event handler for broker events (connect, subscribe, publish, disconnect)
+    #[serde(skip)]
+    pub event_handler: Option<Arc<dyn BrokerEventHandler>>,
+}
+
+impl std::fmt::Debug for BrokerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut d = f.debug_struct("BrokerConfig");
+        d.field("bind_addresses", &self.bind_addresses)
+            .field("max_clients", &self.max_clients)
+            .field("session_expiry_interval", &self.session_expiry_interval)
+            .field("max_packet_size", &self.max_packet_size)
+            .field("topic_alias_maximum", &self.topic_alias_maximum)
+            .field("retain_available", &self.retain_available)
+            .field("maximum_qos", &self.maximum_qos)
+            .field(
+                "wildcard_subscription_available",
+                &self.wildcard_subscription_available,
+            )
+            .field(
+                "subscription_identifier_available",
+                &self.subscription_identifier_available,
+            )
+            .field(
+                "shared_subscription_available",
+                &self.shared_subscription_available,
+            )
+            .field(
+                "max_subscriptions_per_client",
+                &self.max_subscriptions_per_client,
+            )
+            .field("max_retained_messages", &self.max_retained_messages)
+            .field("max_retained_message_size", &self.max_retained_message_size)
+            .field("server_keep_alive", &self.server_keep_alive)
+            .field("response_information", &self.response_information)
+            .field("auth_config", &self.auth_config)
+            .field("tls_config", &self.tls_config)
+            .field("websocket_config", &self.websocket_config)
+            .field("websocket_tls_config", &self.websocket_tls_config)
+            .field("quic_config", &self.quic_config)
+            .field("storage_config", &self.storage_config);
+        #[cfg(not(target_arch = "wasm32"))]
+        d.field("bridges", &self.bridges);
+        #[cfg(feature = "opentelemetry")]
+        d.field("opentelemetry_config", &self.opentelemetry_config);
+        d.field("event_handler", &self.event_handler.as_ref().map(|_| "..."))
+            .finish()
+    }
 }
 
 impl Default for BrokerConfig {
@@ -127,6 +179,7 @@ impl Default for BrokerConfig {
             bridges: vec![],
             #[cfg(feature = "opentelemetry")]
             opentelemetry_config: None,
+            event_handler: None,
         }
     }
 }
@@ -262,6 +315,13 @@ impl BrokerConfig {
     #[cfg(feature = "opentelemetry")]
     pub fn with_opentelemetry(mut self, config: TelemetryConfig) -> Self {
         self.opentelemetry_config = Some(config);
+        self
+    }
+
+    /// Sets the event handler for broker events
+    #[must_use]
+    pub fn with_event_handler(mut self, handler: Arc<dyn BrokerEventHandler>) -> Self {
+        self.event_handler = Some(handler);
         self
     }
 

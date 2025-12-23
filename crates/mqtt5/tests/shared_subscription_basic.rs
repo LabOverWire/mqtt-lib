@@ -1,5 +1,6 @@
 //! Basic test for shared subscriptions
 
+use bytes::Bytes;
 use mqtt5::broker::router::MessageRouter;
 use mqtt5::packet::publish::PublishPacket;
 use mqtt5::types::ProtocolVersion;
@@ -72,7 +73,7 @@ async fn test_shared_subscription_distribution() {
     for i in 0..9 {
         let publish = PublishPacket::new(
             format!("tasks/job{}", i % 3),
-            format!("Task {i}").as_bytes(),
+            Bytes::copy_from_slice(format!("Task {i}").as_bytes()),
             QoS::AtMostOnce,
         );
         router.route_message(&publish, None).await;
@@ -169,7 +170,7 @@ async fn test_mixed_shared_and_regular_subscriptions() {
     for i in 0..4 {
         let publish = PublishPacket::new(
             format!("alerts/critical{i}"),
-            format!("Alert {i}").as_bytes(),
+            Bytes::copy_from_slice(format!("Alert {i}").as_bytes()),
             QoS::AtMostOnce,
         );
         router.route_message(&publish, None).await;

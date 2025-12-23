@@ -523,7 +523,7 @@ impl DirectClientInner {
         let publish = PublishPacket {
             topic_name: topic,
             packet_id: Some(packet_id),
-            payload,
+            payload: payload.into(),
             qos: options.qos,
             retain: options.retain,
             dup: false,
@@ -680,7 +680,7 @@ impl DirectClientInner {
 
         let publish = PublishPacket {
             topic_name: topic,
-            payload,
+            payload: payload.into(),
             qos: options.qos,
             retain: options.retain,
             dup: false,
@@ -2039,7 +2039,7 @@ mod tests {
         assert!(connect_packet.will.is_some());
         let will = connect_packet.will.unwrap();
         assert_eq!(will.topic, "test/will");
-        assert_eq!(will.payload, b"offline");
+        assert_eq!(&will.payload[..], b"offline");
         assert_eq!(will.qos, QoS::AtLeastOnce);
         assert!(will.retain);
     }

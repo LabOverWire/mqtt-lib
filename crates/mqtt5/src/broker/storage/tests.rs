@@ -7,6 +7,7 @@ use crate::packet::publish::PublishPacket;
 use crate::protocol::v5::properties::{PropertyId, PropertyValue};
 use crate::time::Duration;
 use crate::QoS;
+use bytes::Bytes;
 use std::sync::Arc;
 use tokio::time::sleep;
 
@@ -19,7 +20,7 @@ async fn test_retained_message_storage() {
     let storage = create_memory_storage();
 
     // Store retained message
-    let packet = PublishPacket::new("test/topic", b"hello world", QoS::AtLeastOnce);
+    let packet = PublishPacket::new("test/topic", &b"hello world"[..], QoS::AtLeastOnce);
     let retained = RetainedMessage::new(packet);
 
     storage
@@ -30,7 +31,7 @@ async fn test_retained_message_storage() {
     // Retrieve it
     let retrieved = storage.get_retained("test/topic").await;
     assert!(retrieved.is_some());
-    assert_eq!(retrieved.unwrap().payload, b"hello world");
+    assert_eq!(&retrieved.unwrap().payload[..], b"hello world");
 
     // Remove it
     storage.remove_retained("test/topic").await.unwrap();
@@ -126,8 +127,8 @@ async fn test_message_queuing() {
     let storage = create_memory_storage();
 
     // Queue messages
-    let packet1 = PublishPacket::new("test/1", b"msg1", QoS::AtLeastOnce);
-    let packet2 = PublishPacket::new("test/2", b"msg2", QoS::ExactlyOnce);
+    let packet1 = PublishPacket::new("test/1", &b"msg1"[..], QoS::AtLeastOnce);
+    let packet2 = PublishPacket::new("test/2", &b"msg2"[..], QoS::ExactlyOnce);
 
     let msg1 = QueuedMessage::new(packet1, "client1".to_string(), QoS::AtLeastOnce, Some(1));
     let msg2 = QueuedMessage::new(packet2, "client1".to_string(), QoS::ExactlyOnce, Some(2));
@@ -138,8 +139,8 @@ async fn test_message_queuing() {
     // Retrieve queued messages
     let messages = storage.get_queued_messages("client1").await.unwrap();
     assert_eq!(messages.len(), 2);
-    assert_eq!(messages[0].payload, b"msg1");
-    assert_eq!(messages[1].payload, b"msg2");
+    assert_eq!(&messages[0].payload[..], b"msg1");
+    assert_eq!(&messages[1].payload[..], b"msg2");
 
     // Remove queued messages
     storage.remove_queued_messages("client1").await.unwrap();
@@ -152,7 +153,7 @@ async fn test_expiry_cleanup() {
     let storage = create_memory_storage();
 
     // Create message with very short expiry
-    let mut packet = PublishPacket::new("test/expire", b"will expire", QoS::AtMostOnce);
+    let mut packet = PublishPacket::new("test/expire", &b"will expire"[..], QoS::AtMostOnce);
     packet
         .properties
         .add(
@@ -189,7 +190,11 @@ async fn test_file_backend_persistence() {
         let storage = Storage::new(backend);
 
         // Store retained message
-        let packet = PublishPacket::new("persistent/topic", b"persistent data", QoS::AtLeastOnce);
+        let packet = PublishPacket::new(
+            "persistent/topic",
+            &b"persistent data"[..],
+            QoS::AtLeastOnce,
+        );
         let retained = RetainedMessage::new(packet);
         storage
             .store_retained("persistent/topic", retained)
@@ -217,7 +222,7 @@ async fn test_file_backend_persistence() {
         // Check retained message
         let retained = storage.get_retained("persistent/topic").await;
         assert!(retained.is_some());
-        assert_eq!(retained.unwrap().payload, b"persistent data");
+        assert_eq!(&retained.unwrap().payload[..], b"persistent data");
 
         // Check session
         let session = storage
@@ -241,7 +246,11 @@ async fn test_concurrent_access() {
         let storage_clone = Arc::clone(&storage);
         let handle = tokio::spawn(async move {
             let topic = format!("concurrent/topic{i}");
-            let packet = PublishPacket::new(&topic, format!("data{i}").as_bytes(), QoS::AtMostOnce);
+            let packet = PublishPacket::new(
+                &topic,
+                Bytes::copy_from_slice(format!("data{i}").as_bytes()),
+                QoS::AtMostOnce,
+            );
             let retained = RetainedMessage::new(packet);
             storage_clone
                 .store_retained(&topic, retained)
@@ -284,7 +293,7 @@ async fn test_dynamic_storage_backends() {
     let memory_backend = MemoryBackend::new();
     let dynamic = DynamicStorage::Memory(memory_backend);
 
-    let packet = PublishPacket::new("dynamic/test", b"test data", QoS::AtMostOnce);
+    let packet = PublishPacket::new("dynamic/test", &b"test data"[..], QoS::AtMostOnce);
     let retained = RetainedMessage::new(packet);
 
     dynamic

@@ -305,7 +305,7 @@ mod tests {
 
         let publish = PublishPacket {
             topic_name: "test/topic".to_string(),
-            payload: b"test payload".to_vec(),
+            payload: b"test payload".to_vec().into(),
             qos: crate::QoS::AtMostOnce,
             retain: false,
             dup: false,
@@ -326,7 +326,7 @@ mod tests {
 
         let publish = PublishPacket {
             topic_name: "test/topic".to_string(),
-            payload: b"test payload".to_vec(),
+            payload: b"test payload".to_vec().into(),
             qos: crate::QoS::AtLeastOnce,
             retain: false,
             dup: false,
@@ -341,7 +341,7 @@ mod tests {
     async fn test_handle_publish_qos2() {
         let publish = PublishPacket {
             topic_name: "test/topic".to_string(),
-            payload: b"test payload".to_vec(),
+            payload: b"test payload".to_vec().into(),
             qos: crate::QoS::ExactlyOnce,
             retain: false,
             dup: false,
@@ -358,7 +358,7 @@ mod tests {
 
         let publish = PublishPacket {
             topic_name: "test".to_string(),
-            payload: vec![],
+            payload: vec![].into(),
             qos: crate::QoS::AtLeastOnce,
             retain: false,
             dup: false,
@@ -449,7 +449,7 @@ mod tests {
 
         let publish = PublishPacket {
             topic_name: "test/data".to_string(),
-            payload: b"hello".to_vec(),
+            payload: b"hello".to_vec().into(),
             qos: crate::QoS::AtMostOnce,
             retain: false,
             dup: false,

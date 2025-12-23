@@ -34,7 +34,7 @@ async fn test_will_message_storage_and_retrieval() {
 
     let stored_will = stored_will.unwrap();
     assert_eq!(stored_will.topic, "will/topic");
-    assert_eq!(stored_will.payload, b"last will message");
+    assert_eq!(&stored_will.payload[..], b"last will message");
     assert_eq!(stored_will.qos, QoS::AtLeastOnce);
     assert!(stored_will.retain);
 }
@@ -49,7 +49,7 @@ async fn test_will_message_with_properties() {
 
     let will = WillMessage {
         topic: "will/topic/with/props".to_string(),
-        payload: b"will message with properties".to_vec(),
+        payload: b"will message with properties".to_vec().into(),
         qos: QoS::ExactlyOnce,
         retain: false,
         properties: will_props,
@@ -121,7 +121,7 @@ async fn test_will_message_abnormal_disconnect_trigger() {
 
     let triggered_will = triggered_will.unwrap();
     assert_eq!(triggered_will.topic, "will/trigger/topic");
-    assert_eq!(triggered_will.payload, b"connection lost");
+    assert_eq!(&triggered_will.payload[..], b"connection lost");
     assert_eq!(triggered_will.qos, QoS::AtLeastOnce);
 }
 
@@ -132,7 +132,7 @@ async fn test_will_message_delay_interval() {
 
     let will = WillMessage {
         topic: "will/delayed/topic".to_string(),
-        payload: b"delayed will message".to_vec(),
+        payload: b"delayed will message".to_vec().into(),
         qos: QoS::AtMostOnce,
         retain: false,
         properties: will_props,
@@ -168,7 +168,7 @@ async fn test_will_message_without_delay() {
 
     let will = WillMessage {
         topic: "will/immediate/topic".to_string(),
-        payload: b"immediate will message".to_vec(),
+        payload: b"immediate will message".to_vec().into(),
         qos: QoS::AtMostOnce,
         retain: false,
         properties: will_props,
@@ -190,7 +190,7 @@ async fn test_will_message_without_delay() {
 
     let triggered_will = triggered_will.unwrap();
     assert_eq!(triggered_will.topic, "will/immediate/topic");
-    assert_eq!(triggered_will.payload, b"immediate will message");
+    assert_eq!(&triggered_will.payload[..], b"immediate will message");
 }
 
 #[tokio::test]
@@ -255,7 +255,7 @@ async fn test_will_message_delay_cancellation() {
 
     let will = WillMessage {
         topic: "will/cancel_delay/topic".to_string(),
-        payload: b"delayed will that gets cancelled".to_vec(),
+        payload: b"delayed will that gets cancelled".to_vec().into(),
         qos: QoS::AtMostOnce,
         retain: false,
         properties: will_props,

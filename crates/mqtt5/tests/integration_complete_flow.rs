@@ -403,7 +403,7 @@ async fn test_session_persistence() {
                 "RECEIVED MESSAGE AFTER RE-SUBSCRIBE: {:?}",
                 std::str::from_utf8(&msg.payload)
             );
-            assert_eq!(msg.payload, b"Offline message");
+            assert_eq!(&msg.payload[..], b"Offline message");
             received_clone.fetch_add(1, Ordering::SeqCst);
         })
         .await
@@ -492,7 +492,7 @@ async fn test_publish_options_and_properties() {
 
     let msg = &msgs[0];
     assert_eq!(msg.topic, "test/properties");
-    assert_eq!(msg.payload, b"Message with properties");
+    assert_eq!(&msg.payload[..], b"Message with properties");
     // Note: The first message is the normal delivery (retain: false)
     // The retained message will be tested with a new subscription below
 
@@ -502,7 +502,7 @@ async fn test_publish_options_and_properties() {
 
     client
         .subscribe("test/properties", move |msg| {
-            assert_eq!(msg.payload, b"Message with properties");
+            assert_eq!(&msg.payload[..], b"Message with properties");
             assert!(msg.retain);
             retained_clone.fetch_add(1, Ordering::SeqCst);
         })

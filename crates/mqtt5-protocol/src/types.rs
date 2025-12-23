@@ -503,7 +503,7 @@ impl From<crate::packet::publish::PublishPacket> for Message {
     fn from(packet: crate::packet::publish::PublishPacket) -> Self {
         Self {
             topic: packet.topic_name,
-            payload: packet.payload,
+            payload: packet.payload.to_vec(),
             qos: packet.qos,
             retain: packet.retain,
             properties: MessageProperties::from(packet.properties),
