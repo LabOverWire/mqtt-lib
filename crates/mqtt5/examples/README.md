@@ -39,6 +39,11 @@ Start with these examples:
 - **broker_with_monitoring.rs** - Metrics and monitoring
 - **broker_bridge_demo.rs** - Broker-to-broker bridging
 - **broker_with_opentelemetry.rs** - Distributed tracing with OpenTelemetry (requires `--features opentelemetry`)
+- **broker_with_enhanced_auth.rs** - SCRAM-SHA-256 enhanced authentication
+
+### Utilities
+
+- **generate_acl_test_files.rs** - Generate password and ACL files for testing
 
 ## Running Examples
 
@@ -154,6 +159,16 @@ mosquitto_pub -h localhost -t 'test/topic' -m 'Hello!'
 - W3C trace context propagation
 - OTLP exporter configuration
 - End-to-end trace visibility
+
+#### broker_with_enhanced_auth.rs
+- SCRAM-SHA-256 authentication
+- Enhanced authentication flow with AUTH packets
+- Challenge-response mechanism
+
+#### generate_acl_test_files.rs
+- Password file generation with Argon2
+- ACL file generation with topic patterns
+- Test user setup for development
 
 ## Common Patterns
 

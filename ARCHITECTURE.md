@@ -251,6 +251,22 @@ Broker-to-broker connections:
 - Enforces rate limits and quotas
 - Direct checks, no monitoring loops
 
+### Event Hooks
+
+Custom event handlers via `BrokerEventHandler` trait:
+
+| Hook | Event Type | Trigger |
+|------|------------|---------|
+| `on_client_connect` | `ClientConnectEvent` | Client CONNECT packet accepted |
+| `on_client_subscribe` | `ClientSubscribeEvent` | Client SUBSCRIBE processed |
+| `on_client_unsubscribe` | `ClientUnsubscribeEvent` | Client UNSUBSCRIBE processed |
+| `on_client_publish` | `ClientPublishEvent` | Client PUBLISH received |
+| `on_client_disconnect` | `ClientDisconnectEvent` | Client disconnects (clean or unexpected) |
+| `on_retained_set` | `RetainedSetEvent` | Retained message stored or cleared |
+| `on_message_delivered` | `MessageDeliveredEvent` | QoS 1/2 message delivered to subscriber |
+
+Usage: `BrokerConfig::default().with_event_handler(Arc::new(handler))`
+
 ## QUIC Transport Architecture
 
 QUIC provides MQTT over QUIC (RFC 9000) with multistream support:

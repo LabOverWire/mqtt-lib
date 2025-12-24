@@ -36,8 +36,8 @@ The script will:
 ### 1. Build the WASM Package
 
 ```bash
-cd ../../crates/mqtt5-wasm
-wasm-pack build --target web --out-dir ../../examples/google-jwt-auth-wasm/pkg
+cd crates/mqtt5-wasm
+wasm-pack build --target web --out-dir examples/google-jwt-auth/pkg
 ```
 
 ### 2. Start the MQTT Broker

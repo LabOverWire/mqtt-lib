@@ -21,7 +21,7 @@
 
 ```toml
 [dependencies]
-mqtt5 = "0.15"
+mqtt5 = "0.16"
 ```
 
 ### CLI Tool
@@ -188,6 +188,7 @@ mqttv5 pub
 - Resource monitoring - $SYS topics, connection metrics
 - Hot configuration reload - Update settings without restart
 - Storage backends - File-based or in-memory persistence
+- Event hooks - Custom handlers for connect, publish, subscribe, disconnect events
 
 ## Client Capabilities
 
@@ -620,6 +621,56 @@ let bridge_config = BridgeConfig::new("edge-to-cloud", "cloud-broker:1883")
 // Add bridge to broker (broker handles connection management)
 // broker.add_bridge(bridge_config).await?;
 ```
+
+### Broker Event Hooks
+
+Monitor and react to broker events with custom handlers:
+
+```rust
+use mqtt5::broker::config::BrokerConfig;
+use mqtt5::broker::events::{
+    BrokerEventHandler, ClientConnectEvent, ClientPublishEvent, ClientDisconnectEvent,
+};
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+
+struct MetricsHandler;
+
+impl BrokerEventHandler for MetricsHandler {
+    fn on_client_connect<'a>(
+        &'a self,
+        event: ClientConnectEvent,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        Box::pin(async move {
+            println!("Client connected: {}", event.client_id);
+        })
+    }
+
+    fn on_client_publish<'a>(
+        &'a self,
+        event: ClientPublishEvent,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        Box::pin(async move {
+            println!("Message published to {}: {} bytes", event.topic, event.payload.len());
+        })
+    }
+
+    fn on_client_disconnect<'a>(
+        &'a self,
+        event: ClientDisconnectEvent,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        Box::pin(async move {
+            println!("Client disconnected: {} (reason: {:?})", event.client_id, event.reason);
+        })
+    }
+}
+
+let config = BrokerConfig::default()
+    .with_event_handler(Arc::new(MetricsHandler));
+```
+
+Available hooks: `on_client_connect`, `on_client_subscribe`, `on_client_unsubscribe`, `on_client_publish`, `on_client_disconnect`, `on_retained_set`, `on_message_delivered`.
 
 ## Testing Support
 

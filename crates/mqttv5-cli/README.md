@@ -133,6 +133,19 @@ mqttv5 acl list -f acl.txt
 mqttv5 acl user-roles alice -f acl.txt
 ```
 
+### Managing SCRAM Credentials
+
+```bash
+# Create SCRAM credential file with new user
+mqttv5 scram alice scram.txt
+
+# Batch mode (password on command line)
+mqttv5 scram -b bob secretpass scram.txt
+
+# Use SCRAM authentication with broker
+mqttv5 broker --auth-method scram --scram-file scram.txt
+```
+
 See [Authentication & Authorization Guide](../../AUTHENTICATION.md) for details.
 
 ### Benchmarking

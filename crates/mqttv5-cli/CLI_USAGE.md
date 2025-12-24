@@ -167,7 +167,7 @@ Publish an MQTT message.
 | `--otel-sampling <0.0-1.0>` | OpenTelemetry sampling ratio                | `1.0`          |
 | `--quic-stream-strategy <S>` | QUIC stream strategy (control-only, per-publish, per-topic, per-subscription) | `control-only` |
 | `--quic-flow-headers`     | Enable QUIC flow headers for state recovery   | `false`        |
-| `--quic-flow-expire <SECS>` | Flow header expiry interval in seconds      | `3600`         |
+| `--quic-flow-expire <SECS>` | Flow header expiry interval in seconds      | `300`          |
 | `--quic-max-streams <N>`  | Maximum concurrent QUIC streams               | None           |
 | `--quic-datagrams`        | Enable QUIC datagrams for unreliable transport | `false`       |
 | `--quic-connect-timeout <SECS>` | QUIC connection timeout in seconds      | `30`           |
@@ -295,7 +295,7 @@ Subscribe to MQTT topics.
 | `--otel-sampling <0.0-1.0>` | OpenTelemetry sampling ratio                      | `1.0`          |
 | `--quic-stream-strategy <S>` | QUIC stream strategy (control-only, per-publish, per-topic, per-subscription) | `control-only` |
 | `--quic-flow-headers`     | Enable QUIC flow headers for state recovery         | `false`        |
-| `--quic-flow-expire <SECS>` | Flow header expiry interval in seconds            | `3600`         |
+| `--quic-flow-expire <SECS>` | Flow header expiry interval in seconds            | `300`          |
 | `--quic-max-streams <N>`  | Maximum concurrent QUIC streams                     | None           |
 | `--quic-datagrams`        | Enable QUIC datagrams for unreliable transport      | `false`        |
 | `--quic-connect-timeout <SECS>` | QUIC connection timeout in seconds            | `30`           |

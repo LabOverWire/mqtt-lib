@@ -45,13 +45,13 @@ From the repository root:
 wasm-pack build --target web --features wasm-client
 
 # Copy the output to the example directory
-cp -r pkg crates/mqtt5/examples/wasm/websocket/
+cp -r pkg crates/mqtt5-wasm/examples/websocket/
 ```
 
 Or use the provided build script:
 
 ```bash
-./crates/mqtt5/examples/wasm/build.sh
+./crates/mqtt5-wasm/examples/build.sh
 ```
 
 ## Running
@@ -60,13 +60,13 @@ Start a local HTTP server in the example directory:
 
 ### Using Python 3:
 ```bash
-cd crates/mqtt5/examples/wasm/websocket
+cd crates/mqtt5-wasm/examples/websocket
 python3 -m http.server 8000
 ```
 
 ### Using Node.js (with http-server):
 ```bash
-cd crates/mqtt5/examples/wasm/websocket
+cd crates/mqtt5-wasm/examples/websocket
 npx http-server -p 8000
 ```
 
@@ -249,8 +249,8 @@ This example demonstrates:
 
 ## Next Steps
 
-- Try the [MessagePort example](../message-port/) for Service Worker-based broker
-- Try the [BroadcastChannel example](../broadcast-channel/) for cross-tab messaging
+- Try the [Local Broker example](../local-broker/) for in-browser MQTT broker
+- Try the [Broker Bridge example](../broker-bridge/) for MessagePort connections
 - Explore the [source code](../../../src/wasm/client.rs) for the WASM client implementation
 
 ## License

@@ -16,7 +16,7 @@ MQTT v5.0 and v3.1.1 protocol implementation - packets, encoding, and validation
 
 ```toml
 [dependencies]
-mqtt5-protocol = "0.6"
+mqtt5-protocol = "0.7"
 ```
 
 ### For Embedded (no_std)
