@@ -104,7 +104,7 @@ proptest! {
 
         let publish = PublishPacket {
             topic_name: topic,
-            payload,
+            payload: payload.into(),
             qos,
             retain,
             dup,
@@ -277,7 +277,7 @@ mod property_invariant_tests {
 
             let publish = PublishPacket {
                 topic_name: topic.clone(),
-                payload: payload.clone(),
+                payload: payload.clone().into(),
                 qos: QoS::AtMostOnce,
                 retain: false,
                 dup: false,

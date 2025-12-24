@@ -84,7 +84,7 @@ impl From<&PublishPacket> for RetainedMessage {
     fn from(packet: &PublishPacket) -> Self {
         Self {
             topic: packet.topic_name.clone(),
-            payload: packet.payload.clone(),
+            payload: packet.payload.to_vec(),
             qos: packet.qos,
             properties: packet.properties.clone(),
         }
@@ -125,7 +125,7 @@ mod tests {
 
         let retrieved = retrieved.unwrap();
         assert_eq!(retrieved.topic, "test/topic");
-        assert_eq!(retrieved.payload, b"test payload");
+        assert_eq!(&retrieved.payload[..], b"test payload");
         assert_eq!(retrieved.qos, QoS::AtLeastOnce);
     }
 

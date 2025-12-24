@@ -3,6 +3,7 @@
 //! MQTT strings are prefixed with a 2-byte length field in big-endian format.
 
 use crate::error::{MqttError, Result};
+use crate::prelude::{format, vec, String, ToString, Vec};
 use bebytes::BeBytes;
 
 /// MQTT string with automatic size handling via `BeBytes` size expressions
@@ -21,8 +22,16 @@ impl MqttString {
     /// Create a new MQTT string
     ///
     /// # Errors
-    /// Returns an error if the string is longer than 65535 bytes
+    /// Returns an error if:
+    /// - The string is longer than 65535 bytes
+    /// - The string contains null characters (forbidden by MQTT spec)
     pub fn create(s: &str) -> Result<Self> {
+        if s.contains('\0') {
+            return Err(MqttError::MalformedPacket(
+                "String contains null character".to_string(),
+            ));
+        }
+
         let len = s.len();
         if len > u16::MAX as usize {
             return Err(MqttError::StringTooLong(len));
@@ -30,7 +39,7 @@ impl MqttString {
 
         Ok(Self {
             #[allow(clippy::cast_possible_truncation)]
-            length: len as u16, // Safe: we checked len <= u16::MAX above
+            length: len as u16,
             data: s.to_string(),
         })
     }

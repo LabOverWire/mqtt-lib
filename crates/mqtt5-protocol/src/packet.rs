@@ -79,6 +79,7 @@ mod bebytes_tests {
 
 use crate::encoding::{decode_variable_int, encode_variable_int};
 use crate::error::{MqttError, Result};
+use crate::prelude::{Box, ToString, Vec};
 use bebytes::BeBytes;
 use bytes::{Buf, BufMut};
 
@@ -225,11 +226,7 @@ impl FixedHeader {
     ///
     /// # Errors
     ///
-    /// Returns an error if the remaining length is too large
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the operation fails
+    /// Returns an error if the remaining length is too large to encode
     pub fn encode<B: BufMut>(&self, buf: &mut B) -> Result<()> {
         let byte1 =
             (u8::from(self.packet_type) << 4) | (self.flags & crate::constants::masks::FLAGS);
@@ -245,11 +242,7 @@ impl FixedHeader {
     /// Returns an error if:
     /// - Insufficient bytes in buffer
     /// - Invalid packet type
-    /// - Invalid remaining length
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the operation fails
+    /// - Invalid remaining length encoding
     pub fn decode<B: Buf>(buf: &mut B) -> Result<Self> {
         if !buf.has_remaining() {
             return Err(MqttError::MalformedPacket(
@@ -446,10 +439,6 @@ pub trait MqttPacket: Sized {
     /// # Errors
     ///
     /// Returns an error if encoding fails
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the operation fails
     fn encode_body<B: BufMut>(&self, buf: &mut B) -> Result<()>;
 
     /// Decodes the packet body (without fixed header)

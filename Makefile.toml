@@ -41,9 +41,23 @@ echo "  cargo doc --open              Generate and open docs in browser"
 echo ""
 echo "🌐 WASM BUILD (mqtt5-wasm crate)"
 echo "  cargo make wasm-check         Check WASM compilation"
+echo "  cargo make wasm-clippy        Run clippy for WASM target"
+echo "  cargo make wasm-test          Run WASM crate tests (native)"
 echo "  cargo make wasm-build         Build WASM package with wasm-pack"
+echo "  cargo make wasm-verify        Run all WASM checks"
 echo "  cargo make wasm-examples      Build WASM and copy to examples"
 echo "  cargo make wasm-publish       Build and publish to npm"
+echo ""
+echo "🔧 NO_STD / EMBEDDED (mqtt5-protocol crate)"
+echo "  cargo make nostd-check        Check no_std build"
+echo "  cargo make nostd-clippy       Run clippy on no_std (pedantic)"
+echo "  cargo make nostd-test         Run protocol crate tests"
+echo "  cargo make nostd-verify       Run all no_std checks"
+echo "  cargo make embedded-cortex-m4 Build for Cortex-M4 (ARM)"
+echo "  cargo make embedded-riscv     Build for RISC-V with atomics"
+echo "  cargo make embedded-esp32     Build for ESP32-C3 (single-core)"
+echo "  cargo make embedded-verify    Build for all embedded targets"
+echo "  cargo make all-targets        Verify ALL targets (std+wasm+embedded)"
 echo ""
 echo "🔒 SECURITY & MAINTENANCE"
 echo "  cargo make audit              Check for security vulnerabilities"
@@ -74,11 +88,11 @@ args = ["fmt", "--all", "--", "--check"]
 
 [tasks.clippy]
 command = "cargo"
-args = ["clippy", "--all-targets", "--all-features", "--workspace", "--", "-D", "warnings"]
+args = ["clippy", "--all-targets", "--workspace", "--", "-D", "warnings"]
 
 [tasks.test]
 command = "cargo"
-args = ["test", "--all-features", "--verbose"]
+args = ["test", "--verbose"]
 
 [tasks.test-fast]
 command = "cargo"
@@ -98,16 +112,16 @@ description = "Build the mqttv5 CLI tool"
 
 [tasks.build]
 command = "cargo"
-args = ["build", "--all-features", "--verbose"]
+args = ["build", "--verbose"]
 
 [tasks.build-release]
 command = "cargo"
-args = ["build", "--release", "--all-features", "--verbose"]
+args = ["build", "--release", "--verbose"]
 description = "Build optimized release version"
 
 [tasks.check]
 command = "cargo"
-args = ["check", "--all-features"]
+args = ["check"]
 
 [tasks.ci-verify]
 dependencies = ["fmt-check", "clippy", "build", "test-fast", "test-cli"]
@@ -119,7 +133,7 @@ description = "Run before committing - formats code and runs fast tests"
 
 [tasks.doc]
 command = "cargo"
-args = ["doc", "--no-deps", "--all-features"]
+args = ["doc", "--no-deps"]
 env = { "RUSTDOCFLAGS" = "-D warnings" }
 
 [tasks.clean]
@@ -133,7 +147,7 @@ args = ["audit"]
 [tasks.msrv-check]
 toolchain = "1.83"
 command = "cargo"
-args = ["check", "--all-features"]
+args = ["check"]
 
 [tasks.wasm-check]
 command = "cargo"
@@ -176,3 +190,59 @@ npm publish
 echo "✨ Published mqtt5-wasm to npm!"
 '''
 description = "Build and publish WASM package to npm"
+
+[tasks.wasm-clippy]
+command = "cargo"
+args = ["clippy", "--target", "wasm32-unknown-unknown", "-p", "mqtt5-wasm", "--", "-W", "clippy::all"]
+description = "Run clippy for WASM target (warnings only)"
+
+[tasks.wasm-test]
+command = "cargo"
+args = ["test", "-p", "mqtt5-wasm"]
+description = "Run WASM crate tests (native)"
+
+[tasks.wasm-verify]
+dependencies = ["wasm-check", "wasm-clippy", "wasm-test"]
+description = "Run all WASM checks"
+
+[tasks.nostd-check]
+command = "cargo"
+args = ["check", "-p", "mqtt5-protocol", "--no-default-features"]
+description = "Check no_std build (protocol crate)"
+
+[tasks.nostd-clippy]
+command = "cargo"
+args = ["clippy", "-p", "mqtt5-protocol", "--no-default-features", "--", "-D", "warnings", "-W", "clippy::pedantic"]
+description = "Run clippy on no_std build"
+
+[tasks.nostd-test]
+command = "cargo"
+args = ["test", "-p", "mqtt5-protocol"]
+description = "Run protocol crate tests"
+
+[tasks.nostd-verify]
+dependencies = ["nostd-check", "nostd-clippy", "nostd-test"]
+description = "Run all no_std checks"
+
+[tasks.embedded-cortex-m4]
+command = "cargo"
+args = ["build", "-p", "mqtt5-protocol", "--target", "thumbv7em-none-eabihf", "--no-default-features"]
+description = "Build for Cortex-M4 (ARM embedded)"
+
+[tasks.embedded-riscv]
+command = "cargo"
+args = ["build", "-p", "mqtt5-protocol", "--target", "riscv32imac-unknown-none-elf", "--no-default-features"]
+description = "Build for RISC-V with atomics"
+
+[tasks.embedded-esp32]
+command = "cargo"
+args = ["build", "-p", "mqtt5-protocol", "--target", "riscv32imc-unknown-none-elf", "--no-default-features", "--features", "embedded-single-core"]
+description = "Build for ESP32-C3 (single-core, no atomics)"
+
+[tasks.embedded-verify]
+dependencies = ["embedded-cortex-m4", "embedded-riscv", "embedded-esp32"]
+description = "Build for all embedded targets"
+
+[tasks.all-targets]
+dependencies = ["ci-verify", "wasm-verify", "nostd-verify", "embedded-verify"]
+description = "Verify all targets (std, wasm, no_std, embedded)"

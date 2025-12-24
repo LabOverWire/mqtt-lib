@@ -512,7 +512,7 @@ impl RetainedMessage {
 
         Self {
             topic: packet.topic_name,
-            payload: packet.payload,
+            payload: packet.payload.to_vec(),
             qos: packet.qos,
             retain: packet.retain,
             stored_at_secs,
@@ -645,7 +645,7 @@ impl QueuedMessage {
 
         Self {
             topic: packet.topic_name,
-            payload: packet.payload,
+            payload: packet.payload.to_vec(),
             client_id,
             qos,
             queued_at_secs,

@@ -1,3 +1,7 @@
+#![allow(clippy::implicit_clone)]
+#![allow(clippy::needless_pass_by_value)]
+#![allow(clippy::unused_async)]
+
 use cucumber::{given, then, when};
 use mqtt5::time::Duration;
 
@@ -126,7 +130,7 @@ fn set_password(world: &mut BddWorld, password: String) {
     world.password = Some(password);
 }
 
-#[when(regex = r#"^I wait (\d+) milliseconds$"#)]
+#[when(regex = r"^I wait (\d+) milliseconds$")]
 async fn wait_milliseconds(_world: &mut BddWorld, millis: u64) {
     tokio::time::sleep(Duration::from_millis(millis)).await;
 }
@@ -249,8 +253,9 @@ fn output_should_contain(world: &mut BddWorld, expected_text: String) {
     );
 }
 
-#[then(regex = r#"^the message QoS should be (\d+)$"#)]
-async fn message_qos_should_be(world: &mut BddWorld, _expected_qos: u8) {
+#[then(regex = r"^the message QoS should be (\d+)$")]
+async fn message_qos_should_be(world: &mut BddWorld, expected_qos: u8) {
+    let _ = expected_qos;
     let result = world
         .last_sub_result
         .as_ref()
@@ -263,7 +268,7 @@ async fn message_qos_should_be(world: &mut BddWorld, _expected_qos: u8) {
     );
 }
 
-#[then(regex = r#"^I should receive all (\d+) messages$"#)]
+#[then(regex = r"^I should receive all (\d+) messages$")]
 async fn should_receive_all_messages(world: &mut BddWorld, count: u32) {
     let topic_key = world.pending_sub_handles.keys().next().unwrap().clone();
     let result = world.wait_for_subscriber(&topic_key).await;

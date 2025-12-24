@@ -135,8 +135,11 @@ mod tests {
         let loop_prevention = LoopPrevention::new(Duration::from_secs(5), 100);
 
         // Create a test message
-        let packet =
-            PublishPacket::new("test/topic".to_string(), b"test payload", QoS::AtLeastOnce);
+        let packet = PublishPacket::new(
+            "test/topic".to_string(),
+            &b"test payload"[..],
+            QoS::AtLeastOnce,
+        );
 
         // First time should pass
         assert!(loop_prevention.check_message(&packet).await);
@@ -145,8 +148,11 @@ mod tests {
         assert!(!loop_prevention.check_message(&packet).await);
 
         // Different message should pass
-        let packet2 =
-            PublishPacket::new("test/topic2".to_string(), b"test payload", QoS::AtLeastOnce);
+        let packet2 = PublishPacket::new(
+            "test/topic2".to_string(),
+            &b"test payload"[..],
+            QoS::AtLeastOnce,
+        );
         assert!(loop_prevention.check_message(&packet2).await);
     }
 
@@ -154,7 +160,11 @@ mod tests {
     async fn test_ttl_expiration() {
         let loop_prevention = LoopPrevention::new(Duration::from_millis(100), 100);
 
-        let packet = PublishPacket::new("test/topic".to_string(), b"test payload", QoS::AtMostOnce);
+        let packet = PublishPacket::new(
+            "test/topic".to_string(),
+            &b"test payload"[..],
+            QoS::AtMostOnce,
+        );
 
         // First time should pass
         assert!(loop_prevention.check_message(&packet).await);
@@ -171,11 +181,17 @@ mod tests {
         let loop_prevention = LoopPrevention::new(Duration::from_secs(5), 100);
 
         // Same content but different QoS
-        let packet1 =
-            PublishPacket::new("test/topic".to_string(), b"test payload", QoS::AtMostOnce);
+        let packet1 = PublishPacket::new(
+            "test/topic".to_string(),
+            &b"test payload"[..],
+            QoS::AtMostOnce,
+        );
 
-        let packet2 =
-            PublishPacket::new("test/topic".to_string(), b"test payload", QoS::AtLeastOnce);
+        let packet2 = PublishPacket::new(
+            "test/topic".to_string(),
+            &b"test payload"[..],
+            QoS::AtLeastOnce,
+        );
 
         // Both should pass as they have different fingerprints
         assert!(loop_prevention.check_message(&packet1).await);

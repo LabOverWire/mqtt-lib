@@ -32,6 +32,7 @@ pub mod bridge;
 pub mod client_handler;
 pub mod config;
 pub mod connection_pool;
+pub mod events;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod hot_reload;
 #[cfg(not(target_arch = "wasm32"))]
@@ -60,6 +61,11 @@ pub use auth_mechanisms::{
     ScramCredentials, ScramSha256AuthProvider,
 };
 pub use config::{BrokerConfig, StorageBackend as StorageBackendType, StorageConfig};
+pub use events::{
+    BrokerEventHandler, ClientConnectEvent, ClientDisconnectEvent, ClientPublishEvent,
+    ClientSubscribeEvent, ClientUnsubscribeEvent, MessageDeliveredEvent, RetainedSetEvent,
+    SubAckReasonCode, SubscriptionInfo,
+};
 pub use resource_monitor::{ResourceLimits, ResourceMonitor, ResourceStats};
 #[cfg(not(target_arch = "wasm32"))]
 pub use server::MqttBroker;

@@ -119,8 +119,8 @@ pub mod limits {
     /// Maximum packet size (256 MB)
     pub const MAX_PACKET_SIZE: u32 = 268_435_456;
 
-    /// Maximum binary data length (65536)
-    pub const MAX_BINARY_LENGTH: u32 = 65_536;
+    /// Maximum binary data length (65535, limited by 2-byte length prefix)
+    pub const MAX_BINARY_LENGTH: u32 = 65_535;
 }
 
 /// Time-related constants

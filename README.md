@@ -13,6 +13,7 @@
 | --------------- | -------------------------------- | --------------------------------------------------------- |
 | **MQTT Broker** | Run your own MQTT infrastructure | TLS, WebSocket, QUIC, Authentication, Bridging, Monitoring |
 | **MQTT Client** | Connect to any MQTT broker       | Cloud compatible, QUIC multistream, Auto-reconnect, Mock testing |
+| **Protocol (no_std)** | Embedded IoT devices       | ARM Cortex-M, RISC-V, ESP32, bare-metal compatible |
 
 ## 📦 Installation
 
@@ -20,7 +21,7 @@
 
 ```toml
 [dependencies]
-mqtt5 = "0.15"
+mqtt5 = "0.16"
 ```
 
 ### CLI Tool
@@ -33,7 +34,7 @@ cargo install mqttv5-cli
 
 The platform is organized into three crates:
 
-- **mqtt5-protocol** - Platform-agnostic MQTT v5.0 core (packets, types, Transport trait)
+- **mqtt5-protocol** - Platform-agnostic MQTT v5.0 core (packets, types, Transport trait). Supports `no_std` for embedded targets.
 - **mqtt5** - Native client and broker for Linux, macOS, Windows
 - **mqtt5-wasm** - WebAssembly client and broker for browsers
 
@@ -154,6 +155,13 @@ mqttv5 pub
 - Direct async/await patterns
 - Comprehensive testing support
 
+### Embedded (no_std)
+
+- Protocol crate works on bare-metal embedded targets
+- ARM Cortex-M, RISC-V, ESP32 support
+- Configurable time provider for hardware timers
+- Session state management without heap allocation overhead
+
 ## Broker Capabilities
 
 ### Core MQTT
@@ -180,6 +188,7 @@ mqttv5 pub
 - Resource monitoring - $SYS topics, connection metrics
 - Hot configuration reload - Update settings without restart
 - Storage backends - File-based or in-memory persistence
+- Event hooks - Custom handlers for connect, publish, subscribe, disconnect events
 
 ## Client Capabilities
 
@@ -468,6 +477,69 @@ See `crates/mqtt5-wasm/examples/` for browser examples:
 - Complete HTML/JavaScript/CSS applications
 - Build instructions with `wasm-pack`
 
+## Embedded Support (no_std)
+
+The `mqtt5-protocol` crate supports `no_std` environments for embedded systems.
+
+### Supported Targets
+
+| Target | Platform | Notes |
+|--------|----------|-------|
+| `thumbv7em-none-eabihf` | ARM Cortex-M4F | STM32F4, nRF52, etc. |
+| `riscv32imc-unknown-none-elf` | RISC-V | ESP32-C3, BL602, etc. |
+
+### Installation
+
+```toml
+[dependencies]
+mqtt5-protocol = { version = "0.6", default-features = false }
+
+# For single-core MCUs (more efficient atomics)
+mqtt5-protocol = { version = "0.6", default-features = false, features = ["embedded-single-core"] }
+```
+
+### Time Provider
+
+Embedded targets require a time source since there's no OS clock:
+
+```rust
+#![no_std]
+extern crate alloc;
+
+use mqtt5_protocol::time::{set_time_source, update_monotonic_time, Instant};
+
+fn init() {
+    set_time_source(0, 0);
+}
+
+fn timer_tick(millis: u64) {
+    update_monotonic_time(millis);
+}
+
+fn example() {
+    let start = Instant::now();
+    // ... work ...
+    let elapsed = start.elapsed();
+}
+```
+
+### What's Included
+
+- Full packet encoding/decoding
+- Session state management (flow control, message queues, subscriptions)
+- Topic validation and matching
+- Properties and reason codes
+- Platform-agnostic time types
+
+### What's Not Included
+
+The `no_std` build excludes async runtime dependencies. You'll need to:
+- Provide your own transport layer (UART, TCP stack, etc.)
+- Integrate with your embedded async runtime (embassy, RTIC, etc.)
+- Manage connection state at the application level
+
+See the [mqtt5-protocol README](crates/mqtt5-protocol/README.md) for detailed embedded usage.
+
 ## Advanced Broker Configuration
 
 ### Multi-Transport Broker
@@ -549,6 +621,56 @@ let bridge_config = BridgeConfig::new("edge-to-cloud", "cloud-broker:1883")
 // Add bridge to broker (broker handles connection management)
 // broker.add_bridge(bridge_config).await?;
 ```
+
+### Broker Event Hooks
+
+Monitor and react to broker events with custom handlers:
+
+```rust
+use mqtt5::broker::config::BrokerConfig;
+use mqtt5::broker::events::{
+    BrokerEventHandler, ClientConnectEvent, ClientPublishEvent, ClientDisconnectEvent,
+};
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+
+struct MetricsHandler;
+
+impl BrokerEventHandler for MetricsHandler {
+    fn on_client_connect<'a>(
+        &'a self,
+        event: ClientConnectEvent,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        Box::pin(async move {
+            println!("Client connected: {}", event.client_id);
+        })
+    }
+
+    fn on_client_publish<'a>(
+        &'a self,
+        event: ClientPublishEvent,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        Box::pin(async move {
+            println!("Message published to {}: {} bytes", event.topic, event.payload.len());
+        })
+    }
+
+    fn on_client_disconnect<'a>(
+        &'a self,
+        event: ClientDisconnectEvent,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        Box::pin(async move {
+            println!("Client disconnected: {} (reason: {:?})", event.client_id, event.reason);
+        })
+    }
+}
+
+let config = BrokerConfig::default()
+    .with_event_handler(Arc::new(MetricsHandler));
+```
+
+Available hooks: `on_client_connect`, `on_client_subscribe`, `on_client_unsubscribe`, `on_client_publish`, `on_client_disconnect`, `on_retained_set`, `on_message_delivered`.
 
 ## Testing Support
 

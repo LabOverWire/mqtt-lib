@@ -1,3 +1,5 @@
+#![allow(clippy::similar_names)]
+
 use mqtt5::time::Duration;
 use mqtt5::transport::StreamStrategy;
 use mqtt5::{MqttClient, QoS, SubscribeOptions};
@@ -17,7 +19,7 @@ fn test_topic(test_name: &str) -> String {
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires EMQX broker with QUIC support"]
 async fn test_quic_basic_connection() {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let client_id = test_client_id("quic-basic");
@@ -30,7 +32,7 @@ async fn test_quic_basic_connection() {
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires EMQX broker with QUIC support"]
 async fn test_quic_basic_pubsub() {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let pub_client_id = test_client_id("quic-pub");
@@ -72,7 +74,7 @@ async fn test_quic_basic_pubsub() {
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires EMQX broker with QUIC support"]
 async fn test_quic_qos0_fire_and_forget() {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let pub_client_id = test_client_id("quic-qos0-pub");
@@ -116,7 +118,7 @@ async fn test_quic_qos0_fire_and_forget() {
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires EMQX broker with QUIC support"]
 async fn test_quic_qos1_at_least_once() {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let pub_client_id = test_client_id("quic-qos1-pub");
@@ -170,7 +172,7 @@ async fn test_quic_qos1_at_least_once() {
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires EMQX broker with QUIC support"]
 async fn test_quic_qos2_exactly_once() {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let pub_client_id = test_client_id("quic-qos2-pub");
@@ -224,7 +226,7 @@ async fn test_quic_qos2_exactly_once() {
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires EMQX broker with QUIC support"]
 async fn test_quic_control_only_strategy() {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let client_id = test_client_id("quic-control-only");
@@ -270,7 +272,7 @@ async fn test_quic_control_only_strategy() {
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires EMQX broker with QUIC support"]
 async fn test_quic_data_per_publish_strategy() {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let client_id = test_client_id("quic-data-per-publish");
@@ -316,7 +318,7 @@ async fn test_quic_data_per_publish_strategy() {
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires EMQX broker with QUIC support"]
 async fn test_quic_data_per_topic_strategy() {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let client_id = test_client_id("quic-data-per-topic");
@@ -334,19 +336,19 @@ async fn test_quic_data_per_topic_strategy() {
 
     let received_a = Arc::new(AtomicU32::new(0));
     let received_b = Arc::new(AtomicU32::new(0));
-    let received_a_clone = received_a.clone();
-    let received_b_clone = received_b.clone();
+    let topic_a_counter = received_a.clone();
+    let topic_b_counter = received_b.clone();
 
     client
         .subscribe(&topic1, move |_msg| {
-            received_a_clone.fetch_add(1, Ordering::Relaxed);
+            topic_a_counter.fetch_add(1, Ordering::Relaxed);
         })
         .await
         .unwrap();
 
     client
         .subscribe(&topic2, move |_msg| {
-            received_b_clone.fetch_add(1, Ordering::Relaxed);
+            topic_b_counter.fetch_add(1, Ordering::Relaxed);
         })
         .await
         .unwrap();
@@ -381,7 +383,7 @@ async fn test_quic_data_per_topic_strategy() {
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires EMQX broker with QUIC support"]
 async fn test_quic_data_per_subscription_strategy() {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let client_id = test_client_id("quic-data-per-subscription");
@@ -399,19 +401,19 @@ async fn test_quic_data_per_subscription_strategy() {
 
     let received_a = Arc::new(AtomicU32::new(0));
     let received_b = Arc::new(AtomicU32::new(0));
-    let received_a_clone = received_a.clone();
-    let received_b_clone = received_b.clone();
+    let sub_a_counter = received_a.clone();
+    let sub_b_counter = received_b.clone();
 
     client
         .subscribe(&topic1, move |_msg| {
-            received_a_clone.fetch_add(1, Ordering::Relaxed);
+            sub_a_counter.fetch_add(1, Ordering::Relaxed);
         })
         .await
         .unwrap();
 
     client
         .subscribe(&topic2, move |_msg| {
-            received_b_clone.fetch_add(1, Ordering::Relaxed);
+            sub_b_counter.fetch_add(1, Ordering::Relaxed);
         })
         .await
         .unwrap();
@@ -446,7 +448,7 @@ async fn test_quic_data_per_subscription_strategy() {
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires EMQX broker with QUIC support"]
 async fn test_quic_concurrent_publishes() {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let client_id = test_client_id("quic-concurrent");
@@ -502,7 +504,7 @@ async fn test_quic_concurrent_publishes() {
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires EMQX broker with QUIC support"]
 async fn test_quic_large_message() {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let client_id = test_client_id("quic-large");
@@ -540,7 +542,7 @@ async fn test_quic_large_message() {
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires EMQX broker with QUIC support"]
 async fn test_quic_reconnect() {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let client_id = test_client_id("quic-reconnect");

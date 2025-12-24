@@ -1,4 +1,5 @@
 use crate::error::{MqttError, Result};
+use crate::prelude::{format, String, ToString, Vec};
 
 pub mod namespace;
 
@@ -439,7 +440,7 @@ mod tests {
         assert!(!is_valid_topic_name("sport/tennis/#"));
         assert!(!is_valid_topic_name("home\0temperature"));
 
-        let too_long = "a".repeat(crate::constants::limits::MAX_BINARY_LENGTH as usize);
+        let too_long = "a".repeat(crate::constants::limits::MAX_BINARY_LENGTH as usize + 1);
         assert!(!is_valid_topic_name(&too_long));
     }
 

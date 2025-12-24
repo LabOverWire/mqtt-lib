@@ -10,7 +10,7 @@ use tokio::time::sleep;
 async fn test_basic_loop_detection() {
     let loop_prevention = LoopPrevention::new(Duration::from_secs(60), 1000);
 
-    let packet = PublishPacket::new("test/topic".to_string(), b"payload", QoS::AtMostOnce);
+    let packet = PublishPacket::new("test/topic".to_string(), &b"payload"[..], QoS::AtMostOnce);
 
     // First time should pass
     assert!(loop_prevention.check_message(&packet).await);
@@ -26,8 +26,8 @@ async fn test_basic_loop_detection() {
 async fn test_different_topics() {
     let loop_prevention = LoopPrevention::new(Duration::from_secs(60), 1000);
 
-    let packet1 = PublishPacket::new("topic/one".to_string(), b"payload", QoS::AtMostOnce);
-    let packet2 = PublishPacket::new("topic/two".to_string(), b"payload", QoS::AtMostOnce);
+    let packet1 = PublishPacket::new("topic/one".to_string(), &b"payload"[..], QoS::AtMostOnce);
+    let packet2 = PublishPacket::new("topic/two".to_string(), &b"payload"[..], QoS::AtMostOnce);
 
     // Different topics should both pass
     assert!(loop_prevention.check_message(&packet1).await);
@@ -41,8 +41,8 @@ async fn test_different_topics() {
 async fn test_different_payloads() {
     let loop_prevention = LoopPrevention::new(Duration::from_secs(60), 1000);
 
-    let packet1 = PublishPacket::new("same/topic".to_string(), b"payload1", QoS::AtMostOnce);
-    let packet2 = PublishPacket::new("same/topic".to_string(), b"payload2", QoS::AtMostOnce);
+    let packet1 = PublishPacket::new("same/topic".to_string(), &b"payload1"[..], QoS::AtMostOnce);
+    let packet2 = PublishPacket::new("same/topic".to_string(), &b"payload2"[..], QoS::AtMostOnce);
 
     // Same topic but different payloads should both pass
     assert!(loop_prevention.check_message(&packet1).await);
@@ -54,9 +54,9 @@ async fn test_different_qos_levels() {
     let loop_prevention = LoopPrevention::new(Duration::from_secs(60), 1000);
 
     // Same topic and payload but different QoS
-    let packet_qos0 = PublishPacket::new("test/qos".to_string(), b"data", QoS::AtMostOnce);
-    let packet_qos1 = PublishPacket::new("test/qos".to_string(), b"data", QoS::AtLeastOnce);
-    let packet_qos2 = PublishPacket::new("test/qos".to_string(), b"data", QoS::ExactlyOnce);
+    let packet_qos0 = PublishPacket::new("test/qos".to_string(), &b"data"[..], QoS::AtMostOnce);
+    let packet_qos1 = PublishPacket::new("test/qos".to_string(), &b"data"[..], QoS::AtLeastOnce);
+    let packet_qos2 = PublishPacket::new("test/qos".to_string(), &b"data"[..], QoS::ExactlyOnce);
 
     // All should pass as they have different QoS
     assert!(loop_prevention.check_message(&packet_qos0).await);
@@ -72,11 +72,11 @@ async fn test_different_retain_flags() {
     let loop_prevention = LoopPrevention::new(Duration::from_secs(60), 1000);
 
     let mut packet_retained =
-        PublishPacket::new("test/retain".to_string(), b"data", QoS::AtMostOnce);
+        PublishPacket::new("test/retain".to_string(), &b"data"[..], QoS::AtMostOnce);
     packet_retained.retain = true;
 
     let packet_not_retained =
-        PublishPacket::new("test/retain".to_string(), b"data", QoS::AtMostOnce);
+        PublishPacket::new("test/retain".to_string(), &b"data"[..], QoS::AtMostOnce);
 
     // Different retain flags should create different fingerprints
     assert!(loop_prevention.check_message(&packet_retained).await);
@@ -88,7 +88,7 @@ async fn test_ttl_expiration() {
     let ttl = Duration::from_millis(100);
     let loop_prevention = LoopPrevention::new(ttl, 1000);
 
-    let packet = PublishPacket::new("test/ttl".to_string(), b"data", QoS::AtMostOnce);
+    let packet = PublishPacket::new("test/ttl".to_string(), &b"data"[..], QoS::AtMostOnce);
 
     // First time should pass
     assert!(loop_prevention.check_message(&packet).await);
@@ -109,7 +109,7 @@ async fn test_cache_size_management() {
 
     // Add more than max cache size
     for i in 0..20 {
-        let packet = PublishPacket::new(format!("topic/{i}"), b"data", QoS::AtMostOnce);
+        let packet = PublishPacket::new(format!("topic/{i}"), &b"data"[..], QoS::AtMostOnce);
         assert!(loop_prevention.check_message(&packet).await);
     }
 
@@ -122,7 +122,7 @@ async fn test_cache_size_management() {
 async fn test_manual_cache_clear() {
     let loop_prevention = LoopPrevention::new(Duration::from_secs(60), 1000);
 
-    let packet = PublishPacket::new("test/clear".to_string(), b"data", QoS::AtMostOnce);
+    let packet = PublishPacket::new("test/clear".to_string(), &b"data"[..], QoS::AtMostOnce);
 
     // First time should pass
     assert!(loop_prevention.check_message(&packet).await);
@@ -147,7 +147,8 @@ async fn test_concurrent_access() {
     for i in 0..10 {
         let loop_prevention_clone = loop_prevention.clone();
         let handle = tokio::spawn(async move {
-            let packet = PublishPacket::new(format!("concurrent/{i}"), b"data", QoS::AtMostOnce);
+            let packet =
+                PublishPacket::new(format!("concurrent/{i}"), &b"data"[..], QoS::AtMostOnce);
 
             // Each unique message should pass once
             assert!(loop_prevention_clone.check_message(&packet).await);
@@ -168,8 +169,9 @@ async fn test_concurrent_access() {
 async fn test_empty_payload_handling() {
     let loop_prevention = LoopPrevention::new(Duration::from_secs(60), 1000);
 
-    let packet_empty = PublishPacket::new("test/empty".to_string(), b"", QoS::AtMostOnce);
-    let packet_with_data = PublishPacket::new("test/empty".to_string(), b"data", QoS::AtMostOnce);
+    let packet_empty = PublishPacket::new("test/empty".to_string(), &b""[..], QoS::AtMostOnce);
+    let packet_with_data =
+        PublishPacket::new("test/empty".to_string(), &b"data"[..], QoS::AtMostOnce);
 
     // Both should pass as they're different
     assert!(loop_prevention.check_message(&packet_empty).await);
@@ -207,7 +209,7 @@ async fn test_special_topic_characters() {
     ];
 
     for topic in special_topics {
-        let packet = PublishPacket::new(topic.to_string(), b"data", QoS::AtMostOnce);
+        let packet = PublishPacket::new(topic.to_string(), &b"data"[..], QoS::AtMostOnce);
         assert!(loop_prevention.check_message(&packet).await);
         assert!(!loop_prevention.check_message(&packet).await);
     }
@@ -224,12 +226,12 @@ async fn test_loop_prevention_sharing() {
 
     // Use in different tasks
     let handle1 = tokio::spawn(async move {
-        let packet = PublishPacket::new("shared/1".to_string(), b"data", QoS::AtMostOnce);
+        let packet = PublishPacket::new("shared/1".to_string(), &b"data"[..], QoS::AtMostOnce);
         lp1.check_message(&packet).await
     });
 
     let handle2 = tokio::spawn(async move {
-        let packet = PublishPacket::new("shared/2".to_string(), b"data", QoS::AtMostOnce);
+        let packet = PublishPacket::new("shared/2".to_string(), &b"data"[..], QoS::AtMostOnce);
         lp2.check_message(&packet).await
     });
 

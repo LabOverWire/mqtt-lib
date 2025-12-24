@@ -295,7 +295,7 @@ mod tests {
         let message = PublishPacket {
             topic_name: "test/topic".to_string(),
             packet_id: None,
-            payload: vec![1, 2, 3],
+            payload: vec![1, 2, 3].into(),
             qos: QoS::AtMostOnce,
             retain: false,
             dup: false,
@@ -334,7 +334,7 @@ mod tests {
         let message1 = PublishPacket {
             topic_name: "test/foo/topic".to_string(),
             packet_id: None,
-            payload: vec![],
+            payload: vec![].into(),
             qos: QoS::AtMostOnce,
             retain: false,
             dup: false,
@@ -391,7 +391,7 @@ mod tests {
         let message = PublishPacket {
             topic_name: "test/topic".to_string(),
             packet_id: None,
-            payload: vec![],
+            payload: vec![].into(),
             qos: QoS::AtMostOnce,
             retain: false,
             dup: false,
@@ -423,7 +423,7 @@ mod tests {
         let message = PublishPacket {
             topic_name: "test/topic".to_string(),
             packet_id: None,
-            payload: vec![],
+            payload: vec![].into(),
             qos: QoS::AtMostOnce,
             retain: false,
             dup: false,
@@ -487,7 +487,7 @@ mod tests {
         let message = PublishPacket {
             topic_name: "tasks/job1".to_string(),
             packet_id: None,
-            payload: vec![1, 2, 3],
+            payload: vec![1, 2, 3].into(),
             qos: QoS::AtMostOnce,
             retain: false,
             dup: false,

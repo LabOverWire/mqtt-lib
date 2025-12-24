@@ -1,6 +1,7 @@
 use super::ack_common::{define_ack_packet, is_valid_publish_ack_reason_code};
 use crate::error::{MqttError, Result};
 use crate::packet::{AckPacketHeader, PacketType};
+use crate::prelude::{format, String, ToString};
 use crate::protocol::v5::properties::Properties;
 
 define_ack_packet! {

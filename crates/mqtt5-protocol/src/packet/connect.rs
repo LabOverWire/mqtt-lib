@@ -2,6 +2,7 @@ use crate::encoding::{decode_binary, decode_string, encode_binary, encode_string
 use crate::error::{MqttError, Result};
 use crate::flags::ConnectFlags;
 use crate::packet::{FixedHeader, MqttPacket, PacketType};
+use crate::prelude::{format, String, ToString, Vec};
 use crate::protocol::v5::properties::{Properties, PropertyId, PropertyValue};
 use crate::types::{ConnectOptions, WillMessage, WillProperties};
 use crate::QoS;

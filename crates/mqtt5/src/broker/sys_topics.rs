@@ -7,6 +7,7 @@ use crate::broker::router::MessageRouter;
 use crate::packet::publish::PublishPacket;
 use crate::time::{Duration, SystemTime};
 use crate::QoS;
+use bytes::Bytes;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
@@ -243,7 +244,12 @@ impl SysTopicsProvider {
 
     /// Publish a single $SYS topic
     pub async fn publish_sys_topic(&self, topic: &str, value: &str) {
-        let packet = PublishPacket::new(topic, value.as_bytes(), QoS::AtMostOnce).with_retain(true);
+        let packet = PublishPacket::new(
+            topic,
+            Bytes::copy_from_slice(value.as_bytes()),
+            QoS::AtMostOnce,
+        )
+        .with_retain(true);
 
         debug!("Publishing $SYS topic: {} = {}", topic, value);
         self.router.route_message(&packet, None).await;
@@ -343,7 +349,7 @@ mod tests {
             .iter()
             .find(|msg| msg.topic_name == "$SYS/broker/clients/connected");
         assert!(clients_msg.is_some());
-        assert_eq!(clients_msg.unwrap().payload, b"1");
+        assert_eq!(&clients_msg.unwrap().payload[..], b"1");
 
         // Cleanup
         handle.abort();

@@ -4,6 +4,7 @@
 
 #[cfg(not(target_arch = "wasm32"))]
 use crate::broker::bridge::BridgeManager;
+use crate::broker::events::{BrokerEventHandler, RetainedSetEvent};
 use crate::broker::storage::{DynamicStorage, QueuedMessage, RetainedMessage, StorageBackend};
 use crate::packet::publish::PublishPacket;
 use crate::types::ProtocolVersion;
@@ -50,6 +51,7 @@ pub struct MessageRouter {
     clients: Arc<RwLock<HashMap<String, ClientInfo>>>,
     storage: Option<Arc<DynamicStorage>>,
     share_group_counters: Arc<RwLock<HashMap<String, Arc<AtomicUsize>>>>,
+    event_handler: Option<Arc<dyn BrokerEventHandler>>,
     #[cfg(not(target_arch = "wasm32"))]
     bridge_manager: Arc<RwLock<Option<Weak<BridgeManager>>>>,
     #[cfg(target_arch = "wasm32")]
@@ -76,6 +78,7 @@ impl MessageRouter {
             clients: Arc::new(RwLock::new(HashMap::new())),
             storage: None,
             share_group_counters: Arc::new(RwLock::new(HashMap::new())),
+            event_handler: None,
             #[cfg(not(target_arch = "wasm32"))]
             bridge_manager: Arc::new(RwLock::new(None)),
             #[cfg(target_arch = "wasm32")]
@@ -93,11 +96,18 @@ impl MessageRouter {
             clients: Arc::new(RwLock::new(HashMap::new())),
             storage: Some(storage),
             share_group_counters: Arc::new(RwLock::new(HashMap::new())),
+            event_handler: None,
             #[cfg(not(target_arch = "wasm32"))]
             bridge_manager: Arc::new(RwLock::new(None)),
             #[cfg(target_arch = "wasm32")]
             wasm_bridge_callback: Arc::new(RwLock::new(None)),
         }
+    }
+
+    #[must_use]
+    pub fn with_event_handler(mut self, handler: Arc<dyn BrokerEventHandler>) -> Self {
+        self.event_handler = Some(handler);
+        self
     }
 
     fn has_wildcards(topic_filter: &str) -> bool {
@@ -371,6 +381,16 @@ impl MessageRouter {
                         tracing::error!("Failed to store retained message to storage: {e}");
                     }
                 }
+            }
+
+            if let Some(ref handler) = self.event_handler {
+                let event = RetainedSetEvent {
+                    topic: Arc::from(publish.topic_name.as_str()),
+                    payload: publish.payload.clone(),
+                    qos: publish.qos,
+                    cleared: publish.payload.is_empty(),
+                };
+                handler.on_retained_set(event).await;
             }
         }
 
@@ -664,6 +684,7 @@ impl Default for MessageRouter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
 
     #[tokio::test]
     async fn test_client_registration() {
@@ -750,7 +771,7 @@ mod tests {
             .unwrap();
 
         // Publish message
-        let publish = PublishPacket::new("test/data", b"hello", QoS::ExactlyOnce);
+        let publish = PublishPacket::new("test/data", &b"hello"[..], QoS::ExactlyOnce);
 
         router.route_message(&publish, None).await;
 
@@ -770,7 +791,7 @@ mod tests {
         let router = MessageRouter::new();
 
         // Store retained message
-        let mut publish = PublishPacket::new("test/status", b"online", QoS::AtMostOnce);
+        let mut publish = PublishPacket::new("test/status", &b"online"[..], QoS::AtMostOnce);
         publish.retain = true;
         router.route_message(&publish, None).await;
 
@@ -782,7 +803,7 @@ mod tests {
         assert_eq!(retained[0].topic_name, "test/status");
 
         // Delete retained message
-        let mut delete = PublishPacket::new("test/status", b"", QoS::AtMostOnce);
+        let mut delete = PublishPacket::new("test/status", &b""[..], QoS::AtMostOnce);
         delete.retain = true;
         router.route_message(&delete, None).await;
 
@@ -852,8 +873,11 @@ mod tests {
 
         // Publish 6 messages
         for i in 0..6 {
-            let publish =
-                PublishPacket::new("test/data", format!("msg{i}").as_bytes(), QoS::AtMostOnce);
+            let publish = PublishPacket::new(
+                "test/data",
+                Bytes::copy_from_slice(format!("msg{i}").as_bytes()),
+                QoS::AtMostOnce,
+            );
             router.route_message(&publish, None).await;
         }
 
@@ -940,12 +964,12 @@ mod tests {
             .unwrap();
 
         // Publish message
-        let publish = PublishPacket::new("test/data", b"hello", QoS::AtMostOnce);
+        let publish = PublishPacket::new("test/data", &b"hello"[..], QoS::AtMostOnce);
         router.route_message(&publish, None).await;
 
         // Regular subscriber should receive the message
         let regular_msg = rx3.try_recv().unwrap();
-        assert_eq!(regular_msg.payload, b"hello");
+        assert_eq!(&regular_msg.payload[..], b"hello");
 
         // Only one of the shared subscribers should receive it
         let shared1_received = rx1.try_recv().is_ok();

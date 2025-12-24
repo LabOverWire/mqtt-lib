@@ -3,8 +3,8 @@ use crate::encoding::{
     encode_variable_int,
 };
 use crate::error::{MqttError, Result};
+use crate::prelude::{format, HashMap, String, ToString, Vec};
 use bytes::{Buf, BufMut, Bytes};
-use std::collections::HashMap;
 
 /// MQTT v5.0 Property Identifiers
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -201,10 +201,6 @@ impl Properties {
     /// Returns an error if:
     /// - The value type doesn't match the property's expected type
     /// - The property doesn't allow multiple values and already exists
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the operation fails
     pub fn add(&mut self, id: PropertyId, value: PropertyValue) -> Result<()> {
         // Validate value type
         if !value.matches_type(id.value_type()) {
@@ -234,7 +230,7 @@ impl Properties {
     /// Gets all values for a property (for properties that allow multiple values)
     #[must_use]
     pub fn get_all(&self, id: PropertyId) -> Option<&[PropertyValue]> {
-        self.properties.get(&id).map(std::vec::Vec::as_slice)
+        self.properties.get(&id).map(Vec::as_slice)
     }
 
     /// Checks if a property is present
@@ -267,10 +263,6 @@ impl Properties {
     /// # Errors
     ///
     /// Returns an error if encoding fails
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the operation fails
     pub fn encode<B: BufMut>(&self, buf: &mut B) -> Result<()> {
         // First calculate the total properties length
         let mut props_buf = Vec::new();
@@ -345,10 +337,6 @@ impl Properties {
     /// - Invalid property ID
     /// - Type mismatch
     /// - Duplicate property that doesn't allow multiples
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the operation fails
     pub fn decode<B: Buf>(buf: &mut B) -> Result<Self> {
         // Read properties length
         let props_len = decode_variable_int(buf)? as usize;
@@ -473,7 +461,7 @@ impl Properties {
             .push(PropertyValue::FourByteInteger(seconds));
     }
 
-    #[allow(clippy::must_use_candidate)]
+    #[must_use]
     pub fn get_message_expiry_interval(&self) -> Option<u32> {
         self.properties
             .get(&PropertyId::MessageExpiryInterval)
@@ -495,7 +483,7 @@ impl Properties {
             .push(PropertyValue::TwoByteInteger(alias));
     }
 
-    #[allow(clippy::must_use_candidate)]
+    #[must_use]
     pub fn get_topic_alias(&self) -> Option<u16> {
         self.properties
             .get(&PropertyId::TopicAlias)
@@ -563,7 +551,7 @@ impl Properties {
             .push(PropertyValue::FourByteInteger(seconds));
     }
 
-    #[allow(clippy::must_use_candidate)]
+    #[must_use]
     pub fn get_session_expiry_interval(&self) -> Option<u32> {
         self.properties
             .get(&PropertyId::SessionExpiryInterval)
@@ -609,7 +597,7 @@ impl Properties {
             .push(PropertyValue::BinaryData(data));
     }
 
-    #[allow(clippy::must_use_candidate)]
+    #[must_use]
     pub fn get_authentication_method(&self) -> Option<&String> {
         self.properties
             .get(&PropertyId::AuthenticationMethod)
@@ -623,7 +611,7 @@ impl Properties {
             })
     }
 
-    #[allow(clippy::must_use_candidate)]
+    #[must_use]
     pub fn get_authentication_data(&self) -> Option<&[u8]> {
         self.properties
             .get(&PropertyId::AuthenticationData)
@@ -645,7 +633,7 @@ impl Properties {
             .push(PropertyValue::Byte(u8::from(request)));
     }
 
-    #[allow(clippy::must_use_candidate)]
+    #[must_use]
     pub fn get_request_problem_information(&self) -> Option<bool> {
         self.properties
             .get(&PropertyId::RequestProblemInformation)
@@ -675,7 +663,7 @@ impl Properties {
             .push(PropertyValue::Byte(u8::from(request)));
     }
 
-    #[allow(clippy::must_use_candidate)]
+    #[must_use]
     pub fn get_request_response_information(&self) -> Option<bool> {
         self.properties
             .get(&PropertyId::RequestResponseInformation)
@@ -721,7 +709,7 @@ impl Properties {
             .push(PropertyValue::TwoByteInteger(max));
     }
 
-    #[allow(clippy::must_use_candidate)]
+    #[must_use]
     pub fn get_receive_maximum(&self) -> Option<u16> {
         self.properties
             .get(&PropertyId::ReceiveMaximum)
@@ -743,7 +731,7 @@ impl Properties {
             .push(PropertyValue::TwoByteInteger(max));
     }
 
-    #[allow(clippy::must_use_candidate)]
+    #[must_use]
     pub fn get_topic_alias_maximum(&self) -> Option<u16> {
         self.properties
             .get(&PropertyId::TopicAliasMaximum)
@@ -805,7 +793,7 @@ impl Properties {
             .push(PropertyValue::Byte(u8::from(available)));
     }
 
-    #[allow(clippy::must_use_candidate)]
+    #[must_use]
     pub fn get_maximum_qos(&self) -> Option<u8> {
         self.properties
             .get(&PropertyId::MaximumQoS)

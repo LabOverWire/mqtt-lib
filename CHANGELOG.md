@@ -5,6 +5,53 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.0] / [mqtt5-protocol 0.7.0] / [mqtt5-wasm 0.7.0] - 2025-12-22
+
+### Added
+
+- **`no_std` support for mqtt5-protocol** enabling embedded/bare-metal MQTT clients
+  - Works on ARM Cortex-M, RISC-V, and ESP32 microcontrollers
+  - Full packet encoding/decoding without standard library
+  - Session state management (flow control, message queues, subscriptions)
+  - Topic validation and matching
+  - Platform-agnostic time types (Duration, Instant, SystemTime)
+
+- **Embedded time provider** for `no_std` environments
+  - `set_time_source(monotonic_millis, epoch_millis)` - initialize time sources
+  - `update_monotonic_time(millis)` - update monotonic clock from hardware timer
+  - `update_epoch_time(millis)` - update wall clock if available
+  - Uses `AtomicU32` pairs for 32-bit target compatibility
+
+- **Embedded single-core feature** (`embedded-single-core`)
+  - Enables `portable-atomic/unsafe-assume-single-core` for more efficient atomics
+  - Use on single-core MCUs like ESP32-C3, STM32F4
+
+- **CI embedded target verification**
+  - `thumbv7em-none-eabihf` (ARM Cortex-M4F)
+  - `riscv32imac-unknown-none-elf` (RISC-V with atomics)
+  - `riscv32imc-unknown-none-elf` (RISC-V single-core)
+
+### Changed
+
+- **Session module refactored** to mqtt5-protocol for embedded reuse
+  - `FlowControlConfig`, `FlowControlState` moved from mqtt5
+  - `SessionLimits`, `MessageQueue`, `SubscriptionManager` moved from mqtt5
+  - mqtt5 crate re-exports for backwards compatibility
+
+- **Dependencies updated** for `no_std` compatibility
+  - `portable-atomic` for cross-platform atomics
+  - `portable-atomic-util` for Arc without std
+  - `hashbrown` for HashMap/HashSet without std
+  - `bytes` with `extra-platforms` feature
+
+### Fixed
+
+- **Packet ID generator** no longer has potential infinite loop under contention
+  - Added retry limit with `fetch_add` fallback
+- **MAX_BINARY_LENGTH** corrected from 65536 to 65535 per MQTT spec
+- **MqttString::create()** now validates null characters per MQTT spec
+- **Code quality** - replaced `#[allow(clippy::must_use_candidate)]` with `#[must_use]`
+
 ## [0.15.2] / [mqtt5-protocol 0.6.1] / [mqtt5-wasm 0.6.2] - 2025-12-20
 
 ### Changed

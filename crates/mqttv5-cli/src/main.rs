@@ -1,4 +1,5 @@
 #![cfg(not(target_arch = "wasm32"))]
+#![allow(clippy::large_futures)]
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -66,11 +67,11 @@ async fn main() -> Result<()> {
         }
         Commands::Passwd(cmd) => {
             init_basic_tracing(verbose, debug);
-            commands::passwd_cmd::execute(cmd)
+            commands::passwd_cmd::execute(&cmd)
         }
         Commands::Scram(cmd) => {
             init_basic_tracing(verbose, debug);
-            commands::scram_cmd::execute(cmd)
+            commands::scram_cmd::execute(&cmd)
         }
     }
 }

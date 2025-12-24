@@ -28,9 +28,7 @@ fn find_workspace_root() -> PathBuf {
             }
         }
 
-        if !current.pop() {
-            panic!("Could not find workspace root");
-        }
+        assert!(current.pop(), "Could not find workspace root");
     }
 }
 

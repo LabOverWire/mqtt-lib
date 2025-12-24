@@ -38,7 +38,7 @@ pub struct FlowState {
 }
 
 impl FlowState {
-    #[allow(clippy::must_use_candidate)]
+    #[must_use]
     pub fn new_control() -> Self {
         Self {
             id: FlowId::control(),
@@ -55,7 +55,7 @@ impl FlowState {
         }
     }
 
-    #[allow(clippy::must_use_candidate)]
+    #[must_use]
     pub fn new_client_data(
         id: FlowId,
         flags: FlowFlags,
@@ -76,7 +76,7 @@ impl FlowState {
         }
     }
 
-    #[allow(clippy::must_use_candidate)]
+    #[must_use]
     pub fn new_server_data(
         id: FlowId,
         flags: FlowFlags,
@@ -217,7 +217,7 @@ pub struct FlowRegistry {
 }
 
 impl FlowRegistry {
-    #[allow(clippy::must_use_candidate)]
+    #[must_use]
     pub fn new(max_flows: usize) -> Self {
         Self {
             flows: HashMap::new(),

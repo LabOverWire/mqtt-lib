@@ -399,7 +399,7 @@ impl WasmMqttClient {
                                         ) {
                                             let msg = RustMessage {
                                                 topic: topic.clone(),
-                                                payload: payload.clone(),
+                                                payload: payload.to_vec(),
                                                 qos,
                                                 retain,
                                                 properties: properties.clone(),
@@ -479,7 +479,7 @@ impl WasmMqttClient {
                         if mqtt5_protocol::validation::topic_matches_filter(&topic, filter) {
                             let msg = RustMessage {
                                 topic: topic.clone(),
-                                payload: payload.clone(),
+                                payload: payload.to_vec(),
                                 qos,
                                 retain,
                                 properties: properties.clone(),
@@ -930,7 +930,7 @@ impl WasmMqttClient {
             topic_name: topic.to_string(),
             packet_id: None,
             properties: Properties::default(),
-            payload: payload.to_vec(),
+            payload: payload.to_vec().into(),
             protocol_version,
         };
 
@@ -1019,7 +1019,7 @@ impl WasmMqttClient {
             topic_name: topic.to_string(),
             packet_id,
             properties,
-            payload: payload.to_vec(),
+            payload: payload.to_vec().into(),
             protocol_version,
         };
 
@@ -1092,7 +1092,7 @@ impl WasmMqttClient {
             topic_name: topic.to_string(),
             packet_id: Some(packet_id),
             properties: Properties::default(),
-            payload: payload.to_vec(),
+            payload: payload.to_vec().into(),
             protocol_version,
         };
 
@@ -1166,7 +1166,7 @@ impl WasmMqttClient {
             topic_name: topic.to_string(),
             packet_id: Some(packet_id),
             properties: Properties::default(),
-            payload: payload.to_vec(),
+            payload: payload.to_vec().into(),
             protocol_version,
         };
 

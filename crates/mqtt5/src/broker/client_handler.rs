@@ -2,6 +2,10 @@
 
 use crate::broker::auth::{AuthProvider, EnhancedAuthStatus};
 use crate::broker::config::BrokerConfig;
+use crate::broker::events::{
+    ClientConnectEvent, ClientDisconnectEvent, ClientPublishEvent, ClientSubscribeEvent,
+    ClientUnsubscribeEvent, MessageDeliveredEvent, SubAckReasonCode, SubscriptionInfo,
+};
 use crate::broker::resource_monitor::ResourceMonitor;
 use crate::broker::router::MessageRouter;
 use crate::broker::storage::{
@@ -30,7 +34,7 @@ use crate::transport::packet_io::{encode_packet_to_buffer, read_packet_reusing_b
 use crate::types::ProtocolVersion;
 use crate::QoS;
 use crate::Transport;
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -74,6 +78,7 @@ pub struct ClientHandler {
     session: Option<ClientSession>,
     next_packet_id: u16,
     normal_disconnect: bool,
+    disconnect_reason: Option<ReasonCode>,
     request_problem_information: bool,
     request_response_information: bool,
     auth_method: Option<String>,
@@ -151,6 +156,7 @@ impl ClientHandler {
             session: None,
             next_packet_id: 1,
             normal_disconnect: false,
+            disconnect_reason: None,
             request_problem_information: true,
             request_response_information: false,
             auth_method: None,
@@ -204,7 +210,7 @@ impl ClientHandler {
 
                 // Register connection with resource monitor
                 self.resource_monitor
-                    .register_connection(client_id, self.client_addr.ip())
+                    .register_connection(client_id.clone(), self.client_addr.ip())
                     .await;
 
                 self.stats.client_connected();
@@ -234,6 +240,39 @@ impl ClientHandler {
         self.router
             .register_client(client_id.clone(), self.publish_tx.clone(), disconnect_tx)
             .await;
+
+        if let Some(ref handler) = self.config.event_handler {
+            let event = ClientConnectEvent {
+                client_id: client_id.clone().into(),
+                clean_start: self
+                    .pending_connect
+                    .as_ref()
+                    .is_none_or(|p| p.connect.clean_start),
+                session_expiry_interval: self
+                    .session
+                    .as_ref()
+                    .and_then(|s| s.expiry_interval)
+                    .unwrap_or(0),
+                will_topic: self
+                    .session
+                    .as_ref()
+                    .and_then(|s| s.will_message.as_ref().map(|w| w.topic.clone().into())),
+                will_payload: self.session.as_ref().and_then(|s| {
+                    s.will_message
+                        .as_ref()
+                        .map(|w| Bytes::from(w.payload.clone()))
+                }),
+                will_qos: self
+                    .session
+                    .as_ref()
+                    .and_then(|s| s.will_message.as_ref().map(|w| w.qos)),
+                will_retain: self
+                    .session
+                    .as_ref()
+                    .and_then(|s| s.will_message.as_ref().map(|w| w.retain)),
+            };
+            handler.on_client_connect(event).await;
+        }
 
         // Handle packets until disconnect
         let (result, session_taken_over) = if self.keep_alive.is_zero() {
@@ -315,6 +354,19 @@ impl ClientHandler {
         // Handle will message if this was an abnormal disconnect
         if !self.normal_disconnect {
             self.publish_will_message(&client_id).await;
+        }
+
+        if let Some(ref handler) = self.config.event_handler {
+            let event = ClientDisconnectEvent {
+                client_id: client_id.clone().into(),
+                reason: self.disconnect_reason.unwrap_or(if self.normal_disconnect {
+                    ReasonCode::Success
+                } else {
+                    ReasonCode::UnspecifiedError
+                }),
+                unexpected: !self.normal_disconnect,
+            };
+            handler.on_client_disconnect(event).await;
         }
 
         info!("Client {} disconnected", client_id);
@@ -491,17 +543,17 @@ impl ClientHandler {
             Packet::Unsubscribe(unsubscribe) => self.handle_unsubscribe(unsubscribe).await,
             Packet::Publish(publish) => self.handle_publish(publish).await,
             Packet::PubAck(ref puback) => {
-                self.handle_puback(puback);
+                self.handle_puback(puback).await;
                 Ok(())
             }
             Packet::PubRec(pubrec) => self.handle_pubrec(pubrec).await,
             Packet::PubRel(pubrel) => self.handle_pubrel(pubrel).await,
             Packet::PubComp(ref pubcomp) => {
-                self.handle_pubcomp(pubcomp);
+                self.handle_pubcomp(pubcomp).await;
                 Ok(())
             }
             Packet::PingReq => self.handle_pingreq().await,
-            Packet::Disconnect(disconnect) => self.handle_disconnect(disconnect),
+            Packet::Disconnect(disconnect) => self.handle_disconnect(&disconnect),
             Packet::Auth(auth) => self.handle_auth(auth).await,
             _ => {
                 warn!("Unexpected packet type");
@@ -876,7 +928,26 @@ impl ClientHandler {
                     .set_reason_string("Subscription quota exceeded".to_string());
             }
         }
-        self.transport.write_packet(Packet::SubAck(suback)).await
+        let result = self.transport.write_packet(Packet::SubAck(suback)).await;
+
+        if let Some(ref handler) = self.config.event_handler {
+            let subscriptions: Vec<SubscriptionInfo> = reason_codes
+                .iter()
+                .zip(subscribe.filters.iter())
+                .map(|(rc, filter)| SubscriptionInfo {
+                    topic_filter: filter.filter.clone().into(),
+                    qos: filter.options.qos,
+                    result: SubAckReasonCode::from(*rc),
+                })
+                .collect();
+            let event = ClientSubscribeEvent {
+                client_id: client_id.clone().into(),
+                subscriptions,
+            };
+            handler.on_client_subscribe(event).await;
+        }
+
+        result
     }
 
     /// Handles UNSUBSCRIBE packet
@@ -910,9 +981,24 @@ impl ClientHandler {
             UnsubAckPacket::new(unsubscribe.packet_id)
         };
         unsuback.reason_codes = reason_codes;
-        self.transport
+        let result = self
+            .transport
             .write_packet(Packet::UnsubAck(unsuback))
-            .await
+            .await;
+
+        if let Some(ref handler) = self.config.event_handler {
+            let event = ClientUnsubscribeEvent {
+                client_id: client_id.clone().into(),
+                topic_filters: unsubscribe
+                    .filters
+                    .iter()
+                    .map(|f| f.clone().into())
+                    .collect(),
+            };
+            handler.on_client_unsubscribe(event).await;
+        }
+
+        result
     }
 
     #[cfg(feature = "opentelemetry")]
@@ -1170,6 +1256,18 @@ impl ClientHandler {
             return Ok(());
         }
 
+        if let Some(ref handler) = self.config.event_handler {
+            let event = ClientPublishEvent {
+                client_id: client_id.clone().into(),
+                topic: publish.topic_name.clone().into(),
+                payload: publish.payload.clone(),
+                qos: publish.qos,
+                retain: publish.retain,
+                packet_id: publish.packet_id,
+            };
+            handler.on_client_publish(event).await;
+        }
+
         match publish.qos {
             QoS::AtMostOnce => {
                 #[cfg(feature = "opentelemetry")]
@@ -1199,13 +1297,24 @@ impl ClientHandler {
         Ok(())
     }
 
-    fn handle_puback(&mut self, puback: &PubAckPacket) {
+    async fn handle_puback(&mut self, puback: &PubAckPacket) {
         if self.outbound_inflight.remove(&puback.packet_id) {
             tracing::trace!(
                 packet_id = puback.packet_id,
                 inflight = self.outbound_inflight.len(),
                 "Released outbound flow control quota on PUBACK"
             );
+
+            if let Some(ref handler) = self.config.event_handler {
+                if let Some(ref client_id) = self.client_id {
+                    let event = MessageDeliveredEvent {
+                        client_id: Arc::from(client_id.as_str()),
+                        packet_id: puback.packet_id,
+                        qos: QoS::AtLeastOnce,
+                    };
+                    handler.on_message_delivered(event).await;
+                }
+            }
         }
     }
 
@@ -1233,13 +1342,24 @@ impl ClientHandler {
         self.transport.write_packet(Packet::PubComp(pubcomp)).await
     }
 
-    fn handle_pubcomp(&mut self, pubcomp: &PubCompPacket) {
+    async fn handle_pubcomp(&mut self, pubcomp: &PubCompPacket) {
         if self.outbound_inflight.remove(&pubcomp.packet_id) {
             tracing::trace!(
                 packet_id = pubcomp.packet_id,
                 inflight = self.outbound_inflight.len(),
                 "Released outbound flow control quota on PUBCOMP"
             );
+
+            if let Some(ref handler) = self.config.event_handler {
+                if let Some(ref client_id) = self.client_id {
+                    let event = MessageDeliveredEvent {
+                        client_id: Arc::from(client_id.as_str()),
+                        packet_id: pubcomp.packet_id,
+                        qos: QoS::ExactlyOnce,
+                    };
+                    handler.on_message_delivered(event).await;
+                }
+            }
         }
     }
 
@@ -1387,17 +1507,15 @@ impl ClientHandler {
     }
 
     /// Handles DISCONNECT packet
-    fn handle_disconnect(&mut self, _disconnect: DisconnectPacket) -> Result<()> {
-        // Mark as normal disconnect (client sent DISCONNECT packet)
+    fn handle_disconnect(&mut self, disconnect: &DisconnectPacket) -> Result<()> {
         self.normal_disconnect = true;
+        self.disconnect_reason = Some(disconnect.reason_code);
 
-        // Clear will message since this is a normal disconnect
         if let Some(ref mut session) = self.session {
             session.will_message = None;
             session.will_delay_interval = None;
         }
 
-        // Client initiated disconnect
         Err(MqttError::ClientClosed)
     }
 

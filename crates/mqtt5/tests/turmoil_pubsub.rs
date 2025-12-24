@@ -47,8 +47,11 @@ fn test_basic_publish_subscribe() {
             .unwrap();
 
         // Publish a message
-        let publish =
-            PublishPacket::new("test/topic".to_string(), b"Hello, World!", QoS::AtMostOnce);
+        let publish = PublishPacket::new(
+            "test/topic".to_string(),
+            &b"Hello, World!"[..],
+            QoS::AtMostOnce,
+        );
         router.route_message(&publish, None).await;
 
         // Give time for message routing
@@ -56,7 +59,7 @@ fn test_basic_publish_subscribe() {
 
         // Verify message received
         let msg = sub_rx.try_recv().expect("Should receive message");
-        assert_eq!(msg.payload, b"Hello, World!");
+        assert_eq!(&msg.payload[..], b"Hello, World!");
         assert_eq!(msg.topic_name, "test/topic");
         assert_eq!(msg.qos, QoS::AtMostOnce);
 
@@ -312,24 +315,30 @@ fn test_qos_levels() {
             .unwrap();
 
         // Publish with different QoS levels
-        let qos0_msg =
-            PublishPacket::new("data/qos0".to_string(), b"QoS 0 message", QoS::AtMostOnce);
+        let qos0_msg = PublishPacket::new(
+            "data/qos0".to_string(),
+            &b"QoS 0 message"[..],
+            QoS::AtMostOnce,
+        );
         router.route_message(&qos0_msg, None).await;
 
-        let qos1_msg =
-            PublishPacket::new("data/qos1".to_string(), b"QoS 1 message", QoS::AtLeastOnce);
+        let qos1_msg = PublishPacket::new(
+            "data/qos1".to_string(),
+            &b"QoS 1 message"[..],
+            QoS::AtLeastOnce,
+        );
         router.route_message(&qos1_msg, None).await;
 
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Verify QoS 0 message
         let msg0 = qos0_rx.try_recv().expect("Should receive QoS 0 message");
-        assert_eq!(msg0.payload, b"QoS 0 message");
+        assert_eq!(&msg0.payload[..], b"QoS 0 message");
         assert_eq!(msg0.qos, QoS::AtMostOnce);
 
         // Verify QoS 1 message
         let msg1 = qos1_rx.try_recv().expect("Should receive QoS 1 message");
-        assert_eq!(msg1.payload, b"QoS 1 message");
+        assert_eq!(&msg1.payload[..], b"QoS 1 message");
         assert_eq!(msg1.qos, QoS::AtLeastOnce);
 
         // No additional messages
@@ -387,7 +396,7 @@ fn test_unsubscribe_functionality() {
         let received = sub_rx
             .try_recv()
             .expect("Should receive message before unsubscribe");
-        assert_eq!(received.payload, b"Before unsubscribe");
+        assert_eq!(&received.payload[..], b"Before unsubscribe");
 
         // Unsubscribe
         router.unsubscribe("test_client", "test/unsubscribe").await;

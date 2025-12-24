@@ -520,7 +520,7 @@ mod tests {
         match packet {
             Packet::Publish(publish) => {
                 assert_eq!(publish.topic_name, "test/topic");
-                assert_eq!(publish.payload, b"Hello MQTT");
+                assert_eq!(&publish.payload[..], b"Hello MQTT");
                 assert_eq!(publish.qos, QoS::AtMostOnce);
                 assert_eq!(publish.packet_id, None);
             }
@@ -578,7 +578,7 @@ mod tests {
 
         let publish = PublishPacket {
             topic_name: "test".to_string(),
-            payload: vec![1, 2, 3],
+            payload: vec![1, 2, 3].into(),
             qos: QoS::AtLeastOnce,
             retain: false,
             dup: false,
@@ -698,7 +698,7 @@ mod tests {
 
         let publish = PublishPacket {
             topic_name: "test".to_string(),
-            payload: large_payload,
+            payload: large_payload.into(),
             qos: QoS::AtMostOnce,
             retain: false,
             dup: false,

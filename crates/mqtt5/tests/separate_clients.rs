@@ -1,3 +1,5 @@
+#![allow(clippy::large_futures)]
+
 mod common;
 use common::TestBroker;
 

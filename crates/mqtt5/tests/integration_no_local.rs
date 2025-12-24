@@ -32,7 +32,11 @@ async fn test_no_local_true_filters_own_messages() {
         .await
         .unwrap();
 
-    let packet = PublishPacket::new("test/topic".to_string(), b"test message", QoS::AtMostOnce);
+    let packet = PublishPacket::new(
+        "test/topic".to_string(),
+        &b"test message"[..],
+        QoS::AtMostOnce,
+    );
     router.route_message(&packet, Some("test_client")).await;
 
     let result = timeout(Duration::from_millis(100), rx.recv_async()).await;
@@ -67,7 +71,11 @@ async fn test_no_local_false_allows_own_messages() {
         .await
         .unwrap();
 
-    let packet = PublishPacket::new("test/topic".to_string(), b"test message", QoS::AtMostOnce);
+    let packet = PublishPacket::new(
+        "test/topic".to_string(),
+        &b"test message"[..],
+        QoS::AtMostOnce,
+    );
     router.route_message(&packet, Some("test_client")).await;
 
     let result = timeout(Duration::from_millis(100), rx.recv_async()).await;
@@ -78,7 +86,7 @@ async fn test_no_local_false_allows_own_messages() {
 
     let received = result.unwrap().unwrap();
     assert_eq!(received.topic_name, "test/topic");
-    assert_eq!(received.payload, b"test message");
+    assert_eq!(&received.payload[..], b"test message");
 }
 
 #[tokio::test]
@@ -126,7 +134,11 @@ async fn test_no_local_other_clients_receive_messages() {
         .await
         .unwrap();
 
-    let packet = PublishPacket::new("test/topic".to_string(), b"test message", QoS::AtMostOnce);
+    let packet = PublishPacket::new(
+        "test/topic".to_string(),
+        &b"test message"[..],
+        QoS::AtMostOnce,
+    );
     router.route_message(&packet, Some("publisher")).await;
 
     let pub_result = timeout(Duration::from_millis(100), rx1.recv_async()).await;
@@ -143,7 +155,7 @@ async fn test_no_local_other_clients_receive_messages() {
 
     let received = sub_result.unwrap().unwrap();
     assert_eq!(received.topic_name, "test/topic");
-    assert_eq!(received.payload, b"test message");
+    assert_eq!(&received.payload[..], b"test message");
 }
 
 #[tokio::test]
@@ -171,10 +183,18 @@ async fn test_no_local_with_wildcards() {
         .await
         .unwrap();
 
-    let packet1 = PublishPacket::new("test/topic1".to_string(), b"message 1", QoS::AtMostOnce);
+    let packet1 = PublishPacket::new(
+        "test/topic1".to_string(),
+        &b"message 1"[..],
+        QoS::AtMostOnce,
+    );
     router.route_message(&packet1, Some("test_client")).await;
 
-    let packet2 = PublishPacket::new("test/topic2".to_string(), b"message 2", QoS::AtMostOnce);
+    let packet2 = PublishPacket::new(
+        "test/topic2".to_string(),
+        &b"message 2"[..],
+        QoS::AtMostOnce,
+    );
     router.route_message(&packet2, Some("test_client")).await;
 
     let result = timeout(Duration::from_millis(100), rx.recv_async()).await;
@@ -211,7 +231,7 @@ async fn test_no_local_with_multilevel_wildcard() {
 
     let packet = PublishPacket::new(
         "test/foo/bar/baz".to_string(),
-        b"nested message",
+        &b"nested message"[..],
         QoS::AtMostOnce,
     );
     router.route_message(&packet, Some("test_client")).await;
@@ -245,7 +265,11 @@ async fn test_no_local_server_generated_messages() {
         .await
         .unwrap();
 
-    let packet = PublishPacket::new("test/topic".to_string(), b"server message", QoS::AtMostOnce);
+    let packet = PublishPacket::new(
+        "test/topic".to_string(),
+        &b"server message"[..],
+        QoS::AtMostOnce,
+    );
     router.route_message(&packet, None).await;
 
     let result = timeout(Duration::from_millis(100), rx.recv_async()).await;
@@ -256,7 +280,7 @@ async fn test_no_local_server_generated_messages() {
 
     let received = result.unwrap().unwrap();
     assert_eq!(received.topic_name, "test/topic");
-    assert_eq!(received.payload, b"server message");
+    assert_eq!(&received.payload[..], b"server message");
 }
 
 #[tokio::test]
@@ -298,10 +322,18 @@ async fn test_no_local_multiple_subscriptions_same_client() {
         .await
         .unwrap();
 
-    let packet1 = PublishPacket::new("test/topic1".to_string(), b"message 1", QoS::AtMostOnce);
+    let packet1 = PublishPacket::new(
+        "test/topic1".to_string(),
+        &b"message 1"[..],
+        QoS::AtMostOnce,
+    );
     router.route_message(&packet1, Some("test_client")).await;
 
-    let packet2 = PublishPacket::new("test/topic2".to_string(), b"message 2", QoS::AtMostOnce);
+    let packet2 = PublishPacket::new(
+        "test/topic2".to_string(),
+        &b"message 2"[..],
+        QoS::AtMostOnce,
+    );
     router.route_message(&packet2, Some("test_client")).await;
 
     let result1 = timeout(Duration::from_millis(100), rx.recv_async()).await;
@@ -312,7 +344,7 @@ async fn test_no_local_multiple_subscriptions_same_client() {
 
     let received = result1.unwrap().unwrap();
     assert_eq!(received.topic_name, "test/topic2");
-    assert_eq!(received.payload, b"message 2");
+    assert_eq!(&received.payload[..], b"message 2");
 
     let result2 = timeout(Duration::from_millis(100), rx.recv_async()).await;
     assert!(
@@ -346,7 +378,11 @@ async fn test_no_local_with_qos_levels() {
         .await
         .unwrap();
 
-    let packet = PublishPacket::new("test/topic".to_string(), b"qos1 message", QoS::AtLeastOnce);
+    let packet = PublishPacket::new(
+        "test/topic".to_string(),
+        &b"qos1 message"[..],
+        QoS::AtLeastOnce,
+    );
     router.route_message(&packet, Some("test_client")).await;
 
     let result = timeout(Duration::from_millis(100), rx.recv_async()).await;

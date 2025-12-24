@@ -1,3 +1,7 @@
+#![allow(clippy::doc_markdown)]
+#![allow(clippy::struct_excessive_bools)]
+#![allow(clippy::too_many_lines)]
+
 use anyhow::{Context, Result};
 use clap::{ArgAction, Args};
 use dialoguer::Confirm;
@@ -172,7 +176,7 @@ pub struct BrokerCommand {
     #[arg(long, default_value = "3600")]
     pub session_expiry: u64,
 
-    /// Maximum QoS level supported (0, 1, or 2)
+    /// Maximum `QoS` level supported (0, 1, or 2)
     #[arg(long, default_value = "2")]
     pub max_qos: u8,
 
@@ -230,7 +234,7 @@ pub async fn execute(mut cmd: BrokerCommand, verbose: bool, debug: bool) -> Resu
         debug!("Loading configuration from: {:?}", config_path);
         load_config_from_file(config_path)
             .await
-            .with_context(|| format!("Failed to load config from {config_path:?}"))?
+            .with_context(|| format!("Failed to load config from {}", config_path.display()))?
     } else {
         // Smart prompting for configuration
         create_interactive_config(&mut cmd).await?
@@ -256,7 +260,7 @@ pub async fn execute(mut cmd: BrokerCommand, verbose: bool, debug: bool) -> Resu
         config
             .bind_addresses
             .iter()
-            .map(|a| a.to_string())
+            .map(ToString::to_string)
             .collect::<Vec<_>>()
             .join(", ")
     );
@@ -266,7 +270,7 @@ pub async fn execute(mut cmd: BrokerCommand, verbose: bool, debug: bool) -> Resu
             tls_cfg
                 .bind_addresses
                 .iter()
-                .map(|a| a.to_string())
+                .map(ToString::to_string)
                 .collect::<Vec<_>>()
                 .join(", ")
         );
@@ -277,7 +281,7 @@ pub async fn execute(mut cmd: BrokerCommand, verbose: bool, debug: bool) -> Resu
             ws_cfg
                 .bind_addresses
                 .iter()
-                .map(|a| a.to_string())
+                .map(ToString::to_string)
                 .collect::<Vec<_>>()
                 .join(", "),
             ws_cfg.path
@@ -289,7 +293,7 @@ pub async fn execute(mut cmd: BrokerCommand, verbose: bool, debug: bool) -> Resu
             ws_tls_cfg
                 .bind_addresses
                 .iter()
-                .map(|a| a.to_string())
+                .map(ToString::to_string)
                 .collect::<Vec<_>>()
                 .join(", "),
             ws_tls_cfg.path
@@ -329,7 +333,7 @@ pub async fn execute(mut cmd: BrokerCommand, verbose: bool, debug: bool) -> Resu
                 }
             }
         }
-        _ = shutdown_signal => {
+        () = shutdown_signal => {
             info!("Shutdown signal received, stopping broker...");
         }
     }
@@ -419,7 +423,7 @@ async fn create_interactive_config(cmd: &mut BrokerCommand) -> Result<BrokerConf
     config.wildcard_subscription_available = !cmd.no_wildcards;
 
     if let Some(keep_alive) = cmd.keep_alive {
-        config.server_keep_alive = Some(std::time::Duration::from_secs(keep_alive as u64));
+        config.server_keep_alive = Some(std::time::Duration::from_secs(u64::from(keep_alive)));
     }
 
     if let Some(ref response_info) = cmd.response_information {
@@ -521,22 +525,23 @@ async fn create_interactive_config(cmd: &mut BrokerCommand) -> Result<BrokerConf
 
     let federated_jwt_config = if auth_method == AuthMethod::JwtFederated {
         if let Some(config_file) = &cmd.jwt_config_file {
-            let content = std::fs::read_to_string(config_file).with_context(|| {
-                format!("Failed to read JWT config file: {}", config_file.display())
-            })?;
+            let content = tokio::fs::read_to_string(config_file)
+                .await
+                .with_context(|| {
+                    format!("Failed to read JWT config file: {}", config_file.display())
+                })?;
             let config: FederatedJwtConfig = serde_json::from_str(&content)
                 .with_context(|| "Failed to parse JWT config file as JSON")?;
             Some(config)
         } else {
             let auth_mode = match cmd.jwt_auth_mode.as_deref() {
-                Some("identity-only") => FederatedAuthMode::IdentityOnly,
                 Some("claim-binding") => FederatedAuthMode::ClaimBinding,
                 Some("trusted-roles") => FederatedAuthMode::TrustedRoles,
                 None => match cmd.jwt_role_merge_mode.as_str() {
                     "replace" => FederatedAuthMode::TrustedRoles,
                     _ => FederatedAuthMode::ClaimBinding,
                 },
-                _ => FederatedAuthMode::IdentityOnly,
+                Some("identity-only" | _) => FederatedAuthMode::IdentityOnly,
             };
 
             #[allow(deprecated)]
@@ -587,7 +592,9 @@ async fn create_interactive_config(cmd: &mut BrokerCommand) -> Result<BrokerConf
             }
 
             if !cmd.jwt_trusted_role_claim.is_empty() {
-                issuer_config.trusted_role_claims = cmd.jwt_trusted_role_claim.clone();
+                issuer_config
+                    .trusted_role_claims
+                    .clone_from(&cmd.jwt_trusted_role_claim);
             }
 
             if let Some(session_scoped) = cmd.jwt_session_scoped_roles {
@@ -659,7 +666,7 @@ async fn create_interactive_config(cmd: &mut BrokerCommand) -> Result<BrokerConf
                 );
             }
         }
-        _ => {}
+        AuthMethod::None => {}
     }
 
     if let Some(acl_file) = &cmd.acl_file {
@@ -829,7 +836,9 @@ async fn create_interactive_config(cmd: &mut BrokerCommand) -> Result<BrokerConf
 }
 
 async fn load_config_from_file(config_path: &Path) -> Result<BrokerConfig> {
-    let contents = std::fs::read_to_string(config_path).context("Failed to read config file")?;
+    let contents = tokio::fs::read_to_string(config_path)
+        .await
+        .context("Failed to read config file")?;
 
     serde_json::from_str(&contents).context("Failed to parse config file as JSON")
 }

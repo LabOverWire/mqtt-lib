@@ -52,7 +52,7 @@ impl TestPacketBuilder for PublishPacket {
         Self {
             topic_name: "test/topic".to_string(),
             packet_id: None,
-            payload: b"test payload".to_vec(),
+            payload: b"test payload".to_vec().into(),
             qos: QoS::AtMostOnce,
             retain: false,
             dup: false,
@@ -120,7 +120,7 @@ pub fn create_test_publish(topic: &str, payload: &[u8], qos: QoS) -> Packet {
     Packet::Publish(PublishPacket {
         topic_name: topic.to_string(),
         packet_id,
-        payload: payload.to_vec(),
+        payload: payload.to_vec().into(),
         qos,
         retain: false,
         dup: false,
@@ -445,7 +445,7 @@ mod tests {
         match packet {
             Packet::Publish(p) => {
                 assert_eq!(p.topic_name, "test/topic");
-                assert_eq!(p.payload, b"hello");
+                assert_eq!(&p.payload[..], b"hello");
                 assert_eq!(p.qos, QoS::AtLeastOnce);
                 assert_eq!(p.packet_id, Some(1));
             }

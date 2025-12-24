@@ -63,8 +63,11 @@ async fn test_bridge_topic_mapping_out() {
     let bridge = BridgeConnection::new(config, router.clone()).unwrap();
 
     // Create a test packet that should be forwarded (matches Out pattern)
-    let sensor_packet =
-        PublishPacket::new("sensors/temp/data".to_string(), b"25.5", QoS::AtLeastOnce);
+    let sensor_packet = PublishPacket::new(
+        "sensors/temp/data".to_string(),
+        &b"25.5"[..],
+        QoS::AtLeastOnce,
+    );
 
     // This should attempt to forward (will fail due to no connection)
     let result = bridge.forward_message(&sensor_packet).await;
@@ -72,8 +75,11 @@ async fn test_bridge_topic_mapping_out() {
     assert!(result.is_ok());
 
     // Create a packet that should NOT be forwarded (In direction only)
-    let command_packet =
-        PublishPacket::new("commands/hvac/device".to_string(), b"on", QoS::AtMostOnce);
+    let command_packet = PublishPacket::new(
+        "commands/hvac/device".to_string(),
+        &b"on"[..],
+        QoS::AtMostOnce,
+    );
 
     // This should also be Ok but won't actually forward
     let result = bridge.forward_message(&command_packet).await;
@@ -96,7 +102,11 @@ async fn test_bridge_message_prefix_transformation() {
     let bridge = BridgeConnection::new(config, router).unwrap();
 
     // Test prefix application
-    let packet = PublishPacket::new("local/sensors/temp".to_string(), b"22.5", QoS::AtMostOnce);
+    let packet = PublishPacket::new(
+        "local/sensors/temp".to_string(),
+        &b"22.5"[..],
+        QoS::AtMostOnce,
+    );
 
     // Forward should work (even without connection)
     assert!(bridge.forward_message(&packet).await.is_ok());
@@ -117,9 +127,9 @@ async fn test_bridge_qos_mapping() {
 
     // Test that QoS is mapped correctly based on topic pattern
     let packets = vec![
-        PublishPacket::new("qos0/test".to_string(), b"data", QoS::ExactlyOnce),
-        PublishPacket::new("qos1/test".to_string(), b"data", QoS::AtMostOnce),
-        PublishPacket::new("qos2/test".to_string(), b"data", QoS::AtMostOnce),
+        PublishPacket::new("qos0/test".to_string(), &b"data"[..], QoS::ExactlyOnce),
+        PublishPacket::new("qos1/test".to_string(), &b"data"[..], QoS::AtMostOnce),
+        PublishPacket::new("qos2/test".to_string(), &b"data"[..], QoS::AtMostOnce),
     ];
 
     for packet in packets {
@@ -196,7 +206,7 @@ async fn test_bridge_multiple_topic_patterns() {
     ];
 
     for (topic, _should_forward) in test_packets {
-        let packet = PublishPacket::new(topic.to_string(), b"test", QoS::AtMostOnce);
+        let packet = PublishPacket::new(topic.to_string(), &b"test"[..], QoS::AtMostOnce);
         assert!(bridge.forward_message(&packet).await.is_ok());
     }
 }

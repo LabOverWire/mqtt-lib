@@ -68,7 +68,7 @@
 //!                 println!("Reconnecting... attempt {}", attempt);
 //!             }
 //!             ConnectionEvent::ReconnectFailed { error } => {
-//!                 println!("Reconnection failed: {e}"rror);
+//!                 println!("Reconnection failed: {error}");
 //!             }
 //!         }
 //!     }).await?;
@@ -163,7 +163,7 @@
 #![warn(clippy::pedantic)]
 
 pub use mqtt5_protocol::{
-    constants, encoding, error, flags, packet, packet_id, protocol, qos2, time, topic_matching,
+    constants, encoding, error, flags, packet, packet_id, protocol, time, topic_matching,
     validation,
 };
 

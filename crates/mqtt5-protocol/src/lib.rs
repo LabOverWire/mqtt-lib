@@ -1,4 +1,10 @@
+#![cfg_attr(not(feature = "std"), no_std)]
 #![warn(clippy::pedantic)]
+
+#[cfg(not(feature = "std"))]
+extern crate alloc;
+
+mod prelude;
 
 pub mod constants;
 pub mod encoding;
@@ -8,6 +14,7 @@ pub mod packet;
 pub mod packet_id;
 pub mod protocol;
 pub mod qos2;
+pub mod session;
 pub mod time;
 pub mod topic_matching;
 pub mod transport;
@@ -30,4 +37,10 @@ pub use validation::{
     strip_shared_subscription_prefix, topic_matches_filter, validate_client_id,
     validate_topic_filter, validate_topic_name, RestrictiveValidator, StandardValidator,
     TopicValidator,
+};
+
+pub use session::{
+    ExpiringMessage, FlowControlConfig, FlowControlStats, LimitsConfig, LimitsManager,
+    MessageQueue, QueueResult, QueueStats, QueuedMessage, Subscription, SubscriptionManager,
+    TopicAliasManager,
 };

@@ -58,7 +58,7 @@ fn publish_packet(packet_id: u16, qos: QoS) -> PublishPacket {
             Some(packet_id)
         },
         properties: Properties::default(),
-        payload: vec![1, 2, 3, 4],
+        payload: vec![1, 2, 3, 4].into(),
         protocol_version: 5,
     }
 }
@@ -629,7 +629,7 @@ mod retained_message_tests {
                         topic_name: topic.clone(),
                         packet_id: Some((i as u16) + 1),
                         properties: Properties::default(),
-                        payload: vec![i as u8],
+                        payload: vec![i as u8].into(),
                         protocol_version: 5,
                     };
                     session.store_retained_message(&packet).await;
@@ -651,7 +651,7 @@ mod retained_message_tests {
                         topic_name: topic.clone(),
                         packet_id: None,
                         properties: Properties::default(),
-                        payload: vec![],
+                        payload: vec![].into(),
                         protocol_version: 5,
                     };
                     session.store_retained_message(&clear_packet).await;
@@ -686,7 +686,7 @@ mod retained_message_tests {
                         topic_name: topic,
                         packet_id: Some((i as u16) + 1),
                         properties: Properties::default(),
-                        payload: vec![i as u8],
+                        payload: vec![i as u8].into(),
                         protocol_version: 5,
                     };
                     session.store_retained_message(&packet).await;
@@ -843,7 +843,6 @@ mod performance_property_tests {
                             let _ = session.add_subscription(topic_filter, sub).await;
                         }
                         1 => {
-                            // Queue message
                             let msg = QueuedMessage {
                                 topic: format!("topic/{i}"),
                                 payload: vec![i as u8],

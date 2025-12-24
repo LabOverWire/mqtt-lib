@@ -1,3 +1,5 @@
+#![allow(clippy::match_wild_err_arm)]
+
 use cucumber::World;
 use std::collections::HashMap;
 use std::process::Child;

@@ -2,10 +2,11 @@ use crate::encoding::{decode_string, encode_string};
 use crate::error::{MqttError, Result};
 use crate::flags::PublishFlags;
 use crate::packet::{FixedHeader, MqttPacket, PacketType};
+use crate::prelude::{String, ToString, Vec};
 use crate::protocol::v5::properties::{Properties, PropertyId, PropertyValue};
 use crate::types::ProtocolVersion;
 use crate::QoS;
-use bytes::{Buf, BufMut};
+use bytes::{Buf, BufMut, Bytes};
 
 /// MQTT PUBLISH packet
 #[derive(Debug, Clone)]
@@ -15,7 +16,7 @@ pub struct PublishPacket {
     /// Packet identifier (required for `QoS` > 0)
     pub packet_id: Option<u16>,
     /// Message payload
-    pub payload: Vec<u8>,
+    pub payload: Bytes,
     /// Quality of Service level
     pub qos: QoS,
     /// Retain flag
@@ -31,7 +32,7 @@ pub struct PublishPacket {
 impl PublishPacket {
     /// Creates a new PUBLISH packet (v5.0)
     #[must_use]
-    pub fn new(topic_name: impl Into<String>, payload: impl Into<Vec<u8>>, qos: QoS) -> Self {
+    pub fn new(topic_name: impl Into<String>, payload: impl Into<Bytes>, qos: QoS) -> Self {
         let packet_id = if qos == QoS::AtMostOnce {
             None
         } else {
@@ -52,7 +53,7 @@ impl PublishPacket {
 
     /// Creates a new PUBLISH packet for v3.1.1
     #[must_use]
-    pub fn new_v311(topic_name: impl Into<String>, payload: impl Into<Vec<u8>>, qos: QoS) -> Self {
+    pub fn new_v311(topic_name: impl Into<String>, payload: impl Into<Bytes>, qos: QoS) -> Self {
         let packet_id = if qos == QoS::AtMostOnce {
             None
         } else {
@@ -308,7 +309,7 @@ impl PublishPacket {
             Properties::default()
         };
 
-        let payload = buf.copy_to_bytes(buf.remaining()).to_vec();
+        let payload = buf.copy_to_bytes(buf.remaining());
 
         Ok(Self {
             topic_name,
@@ -330,10 +331,10 @@ mod tests {
 
     #[test]
     fn test_publish_packet_qos0() {
-        let packet = PublishPacket::new("test/topic", b"Hello, MQTT!", QoS::AtMostOnce);
+        let packet = PublishPacket::new("test/topic", &b"Hello, MQTT!"[..], QoS::AtMostOnce);
 
         assert_eq!(packet.topic_name, "test/topic");
-        assert_eq!(packet.payload, b"Hello, MQTT!");
+        assert_eq!(&packet.payload[..], b"Hello, MQTT!");
         assert_eq!(packet.qos, QoS::AtMostOnce);
         assert!(packet.packet_id.is_none());
         assert!(!packet.retain);
@@ -343,7 +344,7 @@ mod tests {
     #[test]
     fn test_publish_packet_qos1() {
         let packet =
-            PublishPacket::new("test/topic", b"Hello", QoS::AtLeastOnce).with_packet_id(123);
+            PublishPacket::new("test/topic", &b"Hello"[..], QoS::AtLeastOnce).with_packet_id(123);
 
         assert_eq!(packet.qos, QoS::AtLeastOnce);
         assert_eq!(packet.packet_id, Some(123));
@@ -351,7 +352,7 @@ mod tests {
 
     #[test]
     fn test_publish_packet_with_properties() {
-        let packet = PublishPacket::new("test/topic", b"data", QoS::AtMostOnce)
+        let packet = PublishPacket::new("test/topic", &b"data"[..], QoS::AtMostOnce)
             .with_retain(true)
             .with_payload_format_indicator(true)
             .with_message_expiry_interval(3600)
@@ -371,25 +372,25 @@ mod tests {
 
     #[test]
     fn test_publish_flags() {
-        let packet = PublishPacket::new("topic", b"data", QoS::AtMostOnce);
+        let packet = PublishPacket::new("topic", &b"data"[..], QoS::AtMostOnce);
         assert_eq!(packet.flags(), 0x00);
 
-        let packet = PublishPacket::new("topic", b"data", QoS::AtLeastOnce).with_retain(true);
-        assert_eq!(packet.flags(), 0x03); // QoS 1 + Retain
+        let packet = PublishPacket::new("topic", &b"data"[..], QoS::AtLeastOnce).with_retain(true);
+        assert_eq!(packet.flags(), 0x03);
 
-        let packet = PublishPacket::new("topic", b"data", QoS::ExactlyOnce).with_dup(true);
-        assert_eq!(packet.flags(), 0x0C); // DUP + QoS 2
+        let packet = PublishPacket::new("topic", &b"data"[..], QoS::ExactlyOnce).with_dup(true);
+        assert_eq!(packet.flags(), 0x0C);
 
-        let packet = PublishPacket::new("topic", b"data", QoS::ExactlyOnce)
+        let packet = PublishPacket::new("topic", &b"data"[..], QoS::ExactlyOnce)
             .with_dup(true)
             .with_retain(true);
-        assert_eq!(packet.flags(), 0x0D); // DUP + QoS 2 + Retain
+        assert_eq!(packet.flags(), 0x0D);
     }
 
     #[test]
     fn test_publish_encode_decode_qos0() {
-        let packet =
-            PublishPacket::new("sensor/temperature", b"23.5", QoS::AtMostOnce).with_retain(true);
+        let packet = PublishPacket::new("sensor/temperature", &b"23.5"[..], QoS::AtMostOnce)
+            .with_retain(true);
 
         let mut buf = BytesMut::new();
         packet.encode(&mut buf).unwrap();
@@ -403,7 +404,7 @@ mod tests {
 
         let decoded = PublishPacket::decode_body(&mut buf, &fixed_header).unwrap();
         assert_eq!(decoded.topic_name, "sensor/temperature");
-        assert_eq!(decoded.payload, b"23.5");
+        assert_eq!(&decoded.payload[..], b"23.5");
         assert_eq!(decoded.qos, QoS::AtMostOnce);
         assert!(decoded.retain);
         assert!(decoded.packet_id.is_none());
@@ -411,8 +412,8 @@ mod tests {
 
     #[test]
     fn test_publish_encode_decode_qos1() {
-        let packet =
-            PublishPacket::new("test/qos1", b"QoS 1 message", QoS::AtLeastOnce).with_packet_id(456);
+        let packet = PublishPacket::new("test/qos1", &b"QoS 1 message"[..], QoS::AtLeastOnce)
+            .with_packet_id(456);
 
         let mut buf = BytesMut::new();
         packet.encode(&mut buf).unwrap();
@@ -421,14 +422,14 @@ mod tests {
         let decoded = PublishPacket::decode_body(&mut buf, &fixed_header).unwrap();
 
         assert_eq!(decoded.topic_name, "test/qos1");
-        assert_eq!(decoded.payload, b"QoS 1 message");
+        assert_eq!(&decoded.payload[..], b"QoS 1 message");
         assert_eq!(decoded.qos, QoS::AtLeastOnce);
         assert_eq!(decoded.packet_id, Some(456));
     }
 
     #[test]
     fn test_publish_encode_decode_with_properties() {
-        let packet = PublishPacket::new("test/props", b"data", QoS::ExactlyOnce)
+        let packet = PublishPacket::new("test/props", &b"data"[..], QoS::ExactlyOnce)
             .with_packet_id(789)
             .with_message_expiry_interval(7200)
             .with_content_type("application/json".to_string());

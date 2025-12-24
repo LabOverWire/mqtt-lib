@@ -38,7 +38,7 @@ async fn test_retained_message_storage_and_retrieval() {
     // Create a retained message
     let packet = mqtt5::packet::publish::PublishPacket {
         topic_name: "test/retained/topic".to_string(),
-        payload: b"retained message".to_vec(),
+        payload: b"retained message".to_vec().into(),
         qos: QoS::AtLeastOnce,
         retain: true,
         dup: false,
@@ -53,13 +53,13 @@ async fn test_retained_message_storage_and_retrieval() {
     let retained = session.get_retained_messages("test/retained/topic").await;
     assert_eq!(retained.len(), 1);
     assert_eq!(retained[0].topic, "test/retained/topic");
-    assert_eq!(retained[0].payload, b"retained message");
+    assert_eq!(&retained[0].payload[..], b"retained message");
     assert_eq!(retained[0].qos, QoS::AtLeastOnce);
 
     // Clear retained message with empty payload
     let clear_packet = mqtt5::packet::publish::PublishPacket {
         topic_name: "test/retained/topic".to_string(),
-        payload: vec![],
+        payload: vec![].into(),
         qos: QoS::AtMostOnce,
         retain: true,
         dup: false,
@@ -174,7 +174,7 @@ async fn test_retained_message_store_isolation() {
     // Store retained message in client1's session
     let packet = mqtt5::packet::publish::PublishPacket {
         topic_name: "test/isolated".to_string(),
-        payload: b"client1 message".to_vec(),
+        payload: b"client1 message".to_vec().into(),
         qos: QoS::AtMostOnce,
         retain: true,
         dup: false,
@@ -206,7 +206,7 @@ async fn test_retained_message_properties() {
 
     let packet = mqtt5::packet::publish::PublishPacket {
         topic_name: "test/with/properties".to_string(),
-        payload: b"message with props".to_vec(),
+        payload: b"message with props".to_vec().into(),
         qos: QoS::AtLeastOnce,
         retain: true,
         dup: false,

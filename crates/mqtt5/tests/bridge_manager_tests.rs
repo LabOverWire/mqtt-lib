@@ -189,7 +189,11 @@ async fn test_bridge_manager_handle_outgoing() {
     let manager = Arc::new(BridgeManager::new(router));
 
     // Create a test packet
-    let packet = PublishPacket::new("test/topic".to_string(), b"test payload", QoS::AtMostOnce);
+    let packet = PublishPacket::new(
+        "test/topic".to_string(),
+        &b"test payload"[..],
+        QoS::AtMostOnce,
+    );
 
     // Should handle gracefully even with no bridges
     let result = manager.handle_outgoing(&packet).await;

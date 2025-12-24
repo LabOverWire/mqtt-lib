@@ -1,5 +1,6 @@
 //! MQTT packet flag definitions using `BeBytes` v2.1.0 flag decomposition
 
+use crate::prelude::Vec;
 use bebytes::BeBytes;
 
 /// Flags for MQTT CONNECT packet

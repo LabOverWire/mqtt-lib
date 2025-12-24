@@ -1,6 +1,7 @@
 use crate::error::{MqttError, Result};
 use crate::flags::ConnAckFlags;
 use crate::packet::{FixedHeader, MqttPacket, PacketType};
+use crate::prelude::{format, String, ToString, Vec};
 use crate::protocol::v5::properties::{Properties, PropertyId, PropertyValue};
 use crate::types::ReasonCode;
 use bytes::{Buf, BufMut};

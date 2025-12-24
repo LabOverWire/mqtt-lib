@@ -792,7 +792,7 @@ mod tests {
         let packet = PublishPacket {
             topic_name: "test/topic".to_string(),
             packet_id: Some(123),
-            payload: vec![1, 2, 3],
+            payload: vec![1, 2, 3].into(),
             qos: QoS::AtLeastOnce,
             retain: false,
             dup: false,
@@ -1045,7 +1045,7 @@ mod tests {
         let packet = PublishPacket {
             topic_name: "test/topic".to_string(),
             packet_id: None,
-            payload: vec![1, 2, 3],
+            payload: vec![1, 2, 3].into(),
             qos: QoS::AtMostOnce,
             retain: false,
             dup: false,
@@ -1063,7 +1063,7 @@ mod tests {
         let packet = PublishPacket {
             topic_name: "test/topic".to_string(),
             packet_id: Some(123),
-            payload: vec![1, 2, 3],
+            payload: vec![1, 2, 3].into(),
             qos: QoS::ExactlyOnce,
             retain: false,
             dup: false,
@@ -1111,7 +1111,7 @@ mod tests {
         let packet1 = PublishPacket {
             topic_name: "test/retained".to_string(),
             packet_id: None,
-            payload: vec![1, 2, 3],
+            payload: vec![1, 2, 3].into(),
             qos: QoS::AtMostOnce,
             retain: true,
             dup: false,
@@ -1129,7 +1129,7 @@ mod tests {
         let packet2 = PublishPacket {
             topic_name: "test/retained".to_string(),
             packet_id: None,
-            payload: vec![],
+            payload: vec![].into(),
             qos: QoS::AtMostOnce,
             retain: true,
             dup: false,
@@ -1151,7 +1151,7 @@ mod tests {
         let packet1 = PublishPacket {
             topic_name: "test/device1/status".to_string(),
             packet_id: None,
-            payload: b"online".to_vec(),
+            payload: b"online".to_vec().into(),
             qos: QoS::AtMostOnce,
             retain: true,
             dup: false,
@@ -1162,7 +1162,7 @@ mod tests {
         let packet2 = PublishPacket {
             topic_name: "test/device2/status".to_string(),
             packet_id: None,
-            payload: b"offline".to_vec(),
+            payload: b"offline".to_vec().into(),
             qos: QoS::AtMostOnce,
             retain: true,
             dup: false,
@@ -1306,7 +1306,7 @@ mod tests {
         let packet = PublishPacket {
             topic_name: "test/topic".to_string(),
             packet_id: Some(100),
-            payload: vec![1, 2, 3],
+            payload: vec![1, 2, 3].into(),
             qos: QoS::AtLeastOnce,
             retain: false,
             dup: false,
@@ -1317,7 +1317,6 @@ mod tests {
         session.store_unacked_publish(packet).await.unwrap();
         assert_eq!(session.get_unacked_publishes().await.len(), 1);
 
-        // Complete publish
         session.complete_publish(100).await;
         assert_eq!(session.get_unacked_publishes().await.len(), 0);
     }

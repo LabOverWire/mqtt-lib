@@ -45,7 +45,8 @@ jobs:
       - name: Cache dependencies
         uses: Swatinem/rust-cache@v2
       - name: Run clippy
-        run: cargo clippy --all-targets --all-features --workspace -- -D warnings
+        # Note: We exclude embedded-single-core feature as it only works on embedded targets
+        run: cargo clippy --all-targets --workspace --features opentelemetry -- -D warnings
 
   # Build and test
   test:
@@ -120,7 +121,8 @@ jobs:
           chmod +x scripts/generate_test_certs.sh
           ./scripts/generate_test_certs.sh
       - name: Check MSRV
-        run: cargo check --all-features
+        # Note: We exclude embedded-single-core feature as it only works on embedded targets
+        run: cargo check --workspace
 
   # Build documentation
   docs:
@@ -133,7 +135,8 @@ jobs:
       - name: Cache dependencies
         uses: Swatinem/rust-cache@v2
       - name: Build documentation
-        run: cargo doc --no-deps --all-features
+        # Note: We exclude embedded-single-core feature as it only works on embedded targets
+        run: cargo doc --no-deps --workspace
         env:
           RUSTDOCFLAGS: -D warnings
 
@@ -167,3 +170,30 @@ jobs:
         run: |
           ls -lh crates/mqtt5-wasm/pkg/
           echo "✅ WASM package built successfully"
+
+  # Build for embedded targets (no_std)
+  embedded:
+    name: Embedded Targets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv7em-none-eabihf,riscv32imac-unknown-none-elf,riscv32imc-unknown-none-elf
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build for ARM Cortex-M4
+        run: cargo build -p mqtt5-protocol --target thumbv7em-none-eabihf --no-default-features
+
+      - name: Build for RISC-V (with atomics)
+        run: cargo build -p mqtt5-protocol --target riscv32imac-unknown-none-elf --no-default-features
+
+      - name: Build for RISC-V (single-core)
+        run: cargo build -p mqtt5-protocol --target riscv32imc-unknown-none-elf --no-default-features --features embedded-single-core
+
+      - name: Verify no_std builds
+        run: echo "✅ All embedded targets built successfully"

@@ -1,11 +1,15 @@
+#![allow(clippy::large_futures)]
+#![allow(clippy::struct_excessive_bools)]
+#![allow(clippy::too_many_lines)]
+
 use anyhow::{Context, Result};
 use clap::Args;
 use dialoguer::{Input, Select};
+use mqtt5::client::auth_handlers::{JwtAuthHandler, ScramSha256AuthHandler};
 use mqtt5::time::Duration;
 use mqtt5::{
     ConnectOptions, ConnectionEvent, MqttClient, ProtocolVersion, PublishOptions, QoS, WillMessage,
 };
-use std::fs;
 use std::io::{self, Read};
 use std::path::PathBuf;
 use tokio::signal;
@@ -105,7 +109,7 @@ pub struct PubCommand {
     #[arg(long)]
     pub will_message: Option<String>,
 
-    /// Will QoS level (0, 1, or 2)
+    /// Will `QoS` level (0, 1, or 2)
     #[arg(long, value_parser = parse_qos)]
     pub will_qos: Option<QoS>,
 
@@ -145,7 +149,7 @@ pub struct PubCommand {
     #[arg(long, value_parser = parse_stream_strategy)]
     pub quic_stream_strategy: Option<mqtt5::transport::StreamStrategy>,
 
-    /// Enable MQoQ flow headers for stream state tracking
+    /// Enable `MQoQ` flow headers for stream state tracking
     #[arg(long)]
     pub quic_flow_headers: bool,
 
@@ -274,7 +278,6 @@ pub async fn execute(mut cmd: PubCommand, verbose: bool, debug: bool) -> Result<
             .context("Failed to get QoS selection")?;
 
         match selection {
-            0 => QoS::AtMostOnce,
             1 => QoS::AtLeastOnce,
             2 => QoS::ExactlyOnce,
             _ => QoS::AtMostOnce,
@@ -339,7 +342,6 @@ pub async fn execute(mut cmd: PubCommand, verbose: bool, debug: bool) -> Result<
                 .with_credentials(username.clone(), Vec::new())
                 .with_authentication_method("SCRAM-SHA-256");
 
-            use mqtt5::client::auth_handlers::ScramSha256AuthHandler;
             let handler = ScramSha256AuthHandler::new(username, password);
             client.set_auth_handler(handler).await;
             debug!("SCRAM-SHA-256 authentication configured");
@@ -351,7 +353,6 @@ pub async fn execute(mut cmd: PubCommand, verbose: bool, debug: bool) -> Result<
                 .ok_or_else(|| anyhow::anyhow!("--jwt-token is required for JWT authentication"))?;
             options = options.with_authentication_method("JWT");
 
-            use mqtt5::client::auth_handlers::JwtAuthHandler;
             let handler = JwtAuthHandler::new(token);
             client.set_auth_handler(handler).await;
             debug!("JWT authentication configured");
@@ -416,30 +417,28 @@ pub async fn execute(mut cmd: PubCommand, verbose: bool, debug: bool) -> Result<
     if broker_url.starts_with("ssl://") || broker_url.starts_with("mqtts://") {
         // Configure with certificates if provided
         if cmd.cert.is_some() || cmd.key.is_some() || cmd.ca_cert.is_some() {
-            let cert_pem =
-                if let Some(cert_path) = &cmd.cert {
-                    Some(std::fs::read(cert_path).with_context(|| {
-                        format!("Failed to read certificate file: {cert_path:?}")
-                    })?)
-                } else {
-                    None
-                };
-            let key_pem = if let Some(key_path) = &cmd.key {
-                Some(
-                    std::fs::read(key_path)
-                        .with_context(|| format!("Failed to read key file: {key_path:?}"))?,
-                )
+            let cert_pem = if let Some(cert_path) = &cmd.cert {
+                Some(std::fs::read(cert_path).with_context(|| {
+                    format!("Failed to read certificate file: {}", cert_path.display())
+                })?)
             } else {
                 None
             };
-            let ca_pem =
-                if let Some(ca_path) = &cmd.ca_cert {
-                    Some(std::fs::read(ca_path).with_context(|| {
-                        format!("Failed to read CA certificate file: {ca_path:?}")
+            let key_pem =
+                if let Some(key_path) = &cmd.key {
+                    Some(std::fs::read(key_path).with_context(|| {
+                        format!("Failed to read key file: {}", key_path.display())
                     })?)
                 } else {
                     None
                 };
+            let ca_pem = if let Some(ca_path) = &cmd.ca_cert {
+                Some(std::fs::read(ca_path).with_context(|| {
+                    format!("Failed to read CA certificate file: {}", ca_path.display())
+                })?)
+            } else {
+                None
+            };
 
             client.set_tls_config(cert_pem, key_pem, ca_pem).await;
         }
@@ -552,9 +551,10 @@ async fn get_message_content(cmd: &mut PubCommand) -> Result<String> {
 
     if let Some(file_path) = &cmd.file {
         debug!("Reading message from file: {}", file_path);
-        return fs::read_to_string(file_path)
-            .with_context(|| format!("Failed to read file: {file_path}"))
-            .map(|s| s.trim().to_string());
+        let content = tokio::fs::read_to_string(file_path)
+            .await
+            .with_context(|| format!("Failed to read file: {file_path}"))?;
+        return Ok(content.trim().to_string());
     }
 
     if let Some(message) = &cmd.message {

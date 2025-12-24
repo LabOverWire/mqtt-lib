@@ -260,10 +260,18 @@ impl MqttBroker {
             None
         };
 
-        let router = if let Some(ref storage) = storage {
-            Arc::new(MessageRouter::with_storage(Arc::clone(storage)))
-        } else {
-            Arc::new(MessageRouter::new())
+        let router = {
+            let base = if let Some(ref storage) = storage {
+                MessageRouter::with_storage(Arc::clone(storage))
+            } else {
+                MessageRouter::new()
+            };
+            let router = if let Some(ref handler) = config.event_handler {
+                base.with_event_handler(Arc::clone(handler))
+            } else {
+                base
+            };
+            Arc::new(router)
         };
 
         let auth_provider = create_auth_provider(&config.auth_config).await?;

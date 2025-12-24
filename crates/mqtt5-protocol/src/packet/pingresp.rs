@@ -1,5 +1,6 @@
 use crate::error::Result;
 use crate::packet::{FixedHeader, MqttPacket, PacketType};
+use crate::prelude::{format, Vec};
 use bebytes::BeBytes;
 use bytes::{Buf, BufMut};
 
