@@ -45,7 +45,8 @@ jobs:
       - name: Cache dependencies
         uses: Swatinem/rust-cache@v2
       - name: Run clippy
-        run: cargo clippy --all-targets --all-features --workspace -- -D warnings
+        # Note: We exclude embedded-single-core feature as it only works on embedded targets
+        run: cargo clippy --all-targets --workspace --features opentelemetry -- -D warnings
 
   # Build and test
   test:
@@ -120,7 +121,8 @@ jobs:
           chmod +x scripts/generate_test_certs.sh
           ./scripts/generate_test_certs.sh
       - name: Check MSRV
-        run: cargo check --all-features
+        # Note: We exclude embedded-single-core feature as it only works on embedded targets
+        run: cargo check --workspace
 
   # Build documentation
   docs:
@@ -133,7 +135,8 @@ jobs:
       - name: Cache dependencies
         uses: Swatinem/rust-cache@v2
       - name: Build documentation
-        run: cargo doc --no-deps --all-features
+        # Note: We exclude embedded-single-core feature as it only works on embedded targets
+        run: cargo doc --no-deps --workspace
         env:
           RUSTDOCFLAGS: -D warnings
 
