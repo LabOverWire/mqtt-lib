@@ -399,7 +399,7 @@ impl WasmMqttClient {
                                         ) {
                                             let msg = RustMessage {
                                                 topic: topic.clone(),
-                                                payload: payload.clone(),
+                                                payload: payload.to_vec(),
                                                 qos,
                                                 retain,
                                                 properties: properties.clone(),
@@ -479,7 +479,7 @@ impl WasmMqttClient {
                         if mqtt5_protocol::validation::topic_matches_filter(&topic, filter) {
                             let msg = RustMessage {
                                 topic: topic.clone(),
-                                payload: payload.clone(),
+                                payload: payload.to_vec(),
                                 qos,
                                 retain,
                                 properties: properties.clone(),
