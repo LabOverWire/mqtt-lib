@@ -20,8 +20,8 @@ pub struct MessageFingerprint {
 /// Loop prevention mechanism
 #[derive(Clone)]
 pub struct LoopPrevention {
-    /// Cache of seen messages with their timestamps
-    seen_messages: Arc<RwLock<HashMap<MessageFingerprint, Instant>>>,
+    /// Cache of seen messages: fingerprint -> (`first_seen`, `already_warned`)
+    seen_messages: Arc<RwLock<HashMap<MessageFingerprint, (Instant, bool)>>>,
     /// Time-to-live for message fingerprints
     ttl: Duration,
     /// Maximum cache size before cleanup
@@ -49,25 +49,21 @@ impl LoopPrevention {
         let fingerprint = Self::calculate_fingerprint(packet);
         let mut cache = self.seen_messages.write().await;
 
-        // Clean up old entries if cache is getting large
         if cache.len() > self.max_cache_size {
             self.cleanup_cache(&mut cache);
         }
 
-        // Check if we've seen this message recently
-        if let Some(last_seen) = cache.get(&fingerprint) {
-            if last_seen.elapsed() < self.ttl {
-                warn!(
-                    "Message loop detected for topic: {}, elapsed: {:?}",
-                    packet.topic_name,
-                    last_seen.elapsed()
-                );
+        if let Some((first_seen, already_warned)) = cache.get_mut(&fingerprint) {
+            if first_seen.elapsed() < self.ttl {
+                if !*already_warned {
+                    warn!("Message loop detected for topic: {}", packet.topic_name);
+                    *already_warned = true;
+                }
                 return false;
             }
         }
 
-        // Record this message
-        cache.insert(fingerprint, Instant::now());
+        cache.insert(fingerprint, (Instant::now(), false));
         debug!(
             "Message fingerprint recorded for topic: {}, cache size: {}",
             packet.topic_name,
@@ -104,11 +100,11 @@ impl LoopPrevention {
     }
 
     /// Removes expired entries from the cache
-    fn cleanup_cache(&self, cache: &mut HashMap<MessageFingerprint, Instant>) {
+    fn cleanup_cache(&self, cache: &mut HashMap<MessageFingerprint, (Instant, bool)>) {
         let now = Instant::now();
         let ttl = self.ttl;
 
-        cache.retain(|_, timestamp| now.duration_since(*timestamp) < ttl);
+        cache.retain(|_, (first_seen, _)| now.duration_since(*first_seen) < ttl);
 
         debug!("Loop prevention cache cleaned, size: {}", cache.len());
     }
