@@ -124,7 +124,7 @@ command = "cargo"
 args = ["check"]
 
 [tasks.ci-verify]
-dependencies = ["fmt-check", "clippy", "build", "test-fast", "test-cli"]
+dependencies = ["fmt-check", "clippy", "wasm-clippy", "build", "test-fast", "test-cli"]
 description = "Run all CI checks locally - MUST pass before pushing"
 
 [tasks.pre-commit]
@@ -193,8 +193,8 @@ description = "Build and publish WASM package to npm"
 
 [tasks.wasm-clippy]
 command = "cargo"
-args = ["clippy", "--target", "wasm32-unknown-unknown", "-p", "mqtt5-wasm", "--", "-W", "clippy::all"]
-description = "Run clippy for WASM target (warnings only)"
+args = ["clippy", "--target", "wasm32-unknown-unknown", "-p", "mqtt5-wasm", "--features", "broker", "--", "-D", "warnings", "-W", "clippy::pedantic"]
+description = "Run clippy for WASM target (strict, pedantic)"
 
 [tasks.wasm-test]
 command = "cargo"

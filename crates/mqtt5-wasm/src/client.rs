@@ -114,8 +114,7 @@ fn encode_packet(packet: &Packet, buf: &mut BytesMut) -> mqtt5_protocol::error::
         Packet::Unsubscribe(p) => p.encode(buf),
         Packet::Auth(p) => p.encode(buf),
         _ => Err(mqtt5_protocol::error::MqttError::ProtocolError(format!(
-            "Encoding not yet implemented for packet type: {:?}",
-            packet
+            "Encoding not yet implemented for packet type: {packet:?}"
         ))),
     }
 }
@@ -130,7 +129,7 @@ impl WasmMqttClient {
         let callback = state.borrow().on_disconnect.clone();
         if let Some(callback) = callback {
             if let Err(e) = callback.call0(&JsValue::NULL) {
-                web_sys::console::error_1(&format!("onDisconnect callback error: {:?}", e).into());
+                web_sys::console::error_1(&format!("onDisconnect callback error: {e:?}").into());
             }
         }
     }
@@ -140,7 +139,7 @@ impl WasmMqttClient {
         if let Some(callback) = callback {
             let error_js = JsValue::from_str(error_msg);
             if let Err(e) = callback.call1(&JsValue::NULL, &error_js) {
-                web_sys::console::error_1(&format!("onError callback error: {:?}", e).into());
+                web_sys::console::error_1(&format!("onError callback error: {e:?}").into());
             }
         }
     }
@@ -307,12 +306,12 @@ impl WasmMqttClient {
                     for (packet_id, callback) in timed_out_pubcomps {
                         state_ref.pending_pubcomps.remove(&packet_id);
                         web_sys::console::warn_1(
-                            &format!("QoS 2 publish timeout for packet {}", packet_id).into(),
+                            &format!("QoS 2 publish timeout for packet {packet_id}").into(),
                         );
                         let error = JsValue::from_str("Timeout");
                         if let Err(e) = callback.call1(&JsValue::NULL, &error) {
                             web_sys::console::error_1(
-                                &format!("QoS 2 timeout callback error: {:?}", e).into(),
+                                &format!("QoS 2 timeout callback error: {e:?}").into(),
                             );
                         }
                     }
@@ -335,12 +334,12 @@ impl WasmMqttClient {
             Packet::ConnAck(connack) => {
                 let callback = state.borrow().on_connect.clone();
                 if let Some(callback) = callback {
-                    let reason_code = JsValue::from_f64(connack.reason_code as u8 as f64);
+                    let reason_code = JsValue::from_f64(f64::from(connack.reason_code as u8));
                     let session_present = JsValue::from_bool(connack.session_present);
 
                     if let Err(e) = callback.call2(&JsValue::NULL, &reason_code, &session_present) {
                         web_sys::console::error_1(
-                            &format!("onConnect callback error: {:?}", e).into(),
+                            &format!("onConnect callback error: {e:?}").into(),
                         );
                     }
                 }
@@ -387,7 +386,7 @@ impl WasmMqttClient {
                                                 &props_js.into(),
                                             ) {
                                                 web_sys::console::error_1(
-                                                    &format!("Callback error: {:?}", e).into(),
+                                                    &format!("Callback error: {e:?}").into(),
                                                 );
                                             }
                                         }
@@ -468,9 +467,7 @@ impl WasmMqttClient {
                                 &payload_array.into(),
                                 &props_js.into(),
                             ) {
-                                web_sys::console::error_1(
-                                    &format!("Callback error: {:?}", e).into(),
-                                );
+                                web_sys::console::error_1(&format!("Callback error: {e:?}").into());
                             }
                         }
                     }
@@ -495,13 +492,11 @@ impl WasmMqttClient {
                     let reason_codes = suback
                         .reason_codes
                         .iter()
-                        .map(|rc| JsValue::from_f64(*rc as u8 as f64))
+                        .map(|rc| JsValue::from_f64(f64::from(*rc as u8)))
                         .collect::<js_sys::Array>();
 
                     if let Err(e) = callback.call1(&JsValue::NULL, &reason_codes.into()) {
-                        web_sys::console::error_1(
-                            &format!("SUBACK callback error: {:?}", e).into(),
-                        );
+                        web_sys::console::error_1(&format!("SUBACK callback error: {e:?}").into());
                     }
                 }
             }
@@ -512,11 +507,9 @@ impl WasmMqttClient {
             Packet::PubAck(puback) => {
                 let callback = state.borrow_mut().pending_pubacks.remove(&puback.packet_id);
                 if let Some(callback) = callback {
-                    let reason_code = JsValue::from_f64(puback.reason_code as u8 as f64);
+                    let reason_code = JsValue::from_f64(f64::from(puback.reason_code as u8));
                     if let Err(e) = callback.call1(&JsValue::NULL, &reason_code) {
-                        web_sys::console::error_1(
-                            &format!("PUBACK callback error: {:?}", e).into(),
-                        );
+                        web_sys::console::error_1(&format!("PUBACK callback error: {e:?}").into());
                     }
                 }
             }
@@ -565,10 +558,11 @@ impl WasmMqttClient {
                             if let Some((callback, _)) =
                                 state.borrow_mut().pending_pubcomps.remove(&packet_id)
                             {
-                                let reason_code_js = JsValue::from_f64(reason_code as u8 as f64);
+                                let reason_code_js =
+                                    JsValue::from_f64(f64::from(reason_code as u8));
                                 if let Err(e) = callback.call1(&JsValue::NULL, &reason_code_js) {
                                     web_sys::console::error_1(
-                                        &format!("QoS 2 error callback error: {:?}", e).into(),
+                                        &format!("QoS 2 error callback error: {e:?}").into(),
                                     );
                                 }
                             }
@@ -595,10 +589,10 @@ impl WasmMqttClient {
                                 state.borrow_mut().pending_pubcomps.remove(&packet_id)
                             {
                                 let reason_code_js =
-                                    JsValue::from_f64(pubcomp.reason_code as u8 as f64);
+                                    JsValue::from_f64(f64::from(pubcomp.reason_code as u8));
                                 if let Err(e) = callback.call1(&JsValue::NULL, &reason_code_js) {
                                     web_sys::console::error_1(
-                                        &format!("PUBCOMP callback error: {:?}", e).into(),
+                                        &format!("PUBCOMP callback error: {e:?}").into(),
                                     );
                                 }
                             }
@@ -610,10 +604,11 @@ impl WasmMqttClient {
                             if let Some((callback, _)) =
                                 state.borrow_mut().pending_pubcomps.remove(&packet_id)
                             {
-                                let reason_code_js = JsValue::from_f64(reason_code as u8 as f64);
+                                let reason_code_js =
+                                    JsValue::from_f64(f64::from(reason_code as u8));
                                 if let Err(e) = callback.call1(&JsValue::NULL, &reason_code_js) {
                                     web_sys::console::error_1(
-                                        &format!("QoS 2 error callback error: {:?}", e).into(),
+                                        &format!("QoS 2 error callback error: {e:?}").into(),
                                     );
                                 }
                             }
@@ -692,7 +687,7 @@ impl WasmMqttClient {
 
                         if let Err(e) = callback.call2(&JsValue::NULL, &method_js, &data_js) {
                             web_sys::console::error_1(
-                                &format!("onAuthChallenge callback error: {:?}", e).into(),
+                                &format!("onAuthChallenge callback error: {e:?}").into(),
                             );
                         }
                     }
@@ -701,7 +696,7 @@ impl WasmMqttClient {
                 }
             }
             _ => {
-                web_sys::console::warn_1(&format!("Unhandled packet type: {:?}", packet).into());
+                web_sys::console::warn_1(&format!("Unhandled packet type: {packet:?}").into());
             }
         }
     }
@@ -710,6 +705,7 @@ impl WasmMqttClient {
 #[wasm_bindgen]
 impl WasmMqttClient {
     #[wasm_bindgen(constructor)]
+    #[allow(clippy::must_use_candidate)]
     pub fn new(client_id: String) -> Self {
         console_error_panic_hook::set_once();
 
@@ -718,11 +714,15 @@ impl WasmMqttClient {
         }
     }
 
+    /// # Errors
+    /// Returns an error if connection fails.
     pub async fn connect(&self, url: &str) -> Result<(), JsValue> {
         let config = WasmConnectOptions::default();
         self.connect_with_options(url, &config).await
     }
 
+    /// # Errors
+    /// Returns an error if connection fails.
     pub async fn connect_with_options(
         &self,
         url: &str,
@@ -735,11 +735,15 @@ impl WasmMqttClient {
             .await
     }
 
+    /// # Errors
+    /// Returns an error if connection fails.
     pub async fn connect_message_port(&self, port: MessagePort) -> Result<(), JsValue> {
         let config = WasmConnectOptions::default();
         self.connect_message_port_with_options(port, &config).await
     }
 
+    /// # Errors
+    /// Returns an error if connection fails.
     pub async fn connect_message_port_with_options(
         &self,
         port: MessagePort,
@@ -752,6 +756,8 @@ impl WasmMqttClient {
             .await
     }
 
+    /// # Errors
+    /// Returns an error if connection fails.
     pub async fn connect_broadcast_channel(&self, channel_name: &str) -> Result<(), JsValue> {
         let config = WasmConnectOptions::default();
         let transport = WasmTransportType::BroadcastChannel(
@@ -761,6 +767,7 @@ impl WasmMqttClient {
             .await
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn connect_with_transport_and_config(
         &self,
         mut transport: WasmTransportType,
@@ -845,14 +852,14 @@ impl WasmMqttClient {
 
                     let callback = self.state.borrow().on_connect.clone();
                     if let Some(callback) = callback {
-                        let reason_code_js = JsValue::from_f64(reason_code as u8 as f64);
+                        let reason_code_js = JsValue::from_f64(f64::from(reason_code as u8));
                         let session_present_js = JsValue::from_bool(session_present);
 
                         if let Err(e) =
                             callback.call2(&JsValue::NULL, &reason_code_js, &session_present_js)
                         {
                             web_sys::console::error_1(
-                                &format!("onConnect callback error: {:?}", e).into(),
+                                &format!("onConnect callback error: {e:?}").into(),
                             );
                         }
                     }
@@ -882,7 +889,7 @@ impl WasmMqttClient {
 
                             if let Err(e) = callback.call2(&JsValue::NULL, &method_js, &data_js) {
                                 web_sys::console::error_1(
-                                    &format!("onAuthChallenge callback error: {:?}", e).into(),
+                                    &format!("onAuthChallenge callback error: {e:?}").into(),
                                 );
                             }
                         } else {
@@ -892,21 +899,21 @@ impl WasmMqttClient {
                         }
                     } else {
                         return Err(JsValue::from_str(&format!(
-                            "Unexpected AUTH reason code: {:?}",
-                            auth_reason
+                            "Unexpected AUTH reason code: {auth_reason:?}"
                         )));
                     }
                 }
                 _ => {
                     return Err(JsValue::from_str(&format!(
-                        "Expected CONNACK or AUTH, received: {:?}",
-                        packet
+                        "Expected CONNACK or AUTH, received: {packet:?}"
                     )));
                 }
             }
         }
     }
 
+    /// # Errors
+    /// Returns an error if not connected or publish fails.
     pub async fn publish(&self, topic: &str, payload: &[u8]) -> Result<(), JsValue> {
         loop {
             match self.state.try_borrow() {
@@ -954,6 +961,8 @@ impl WasmMqttClient {
         Ok(())
     }
 
+    /// # Errors
+    /// Returns an error if not connected or publish fails.
     pub async fn publish_with_options(
         &self,
         topic: &str,
@@ -975,7 +984,9 @@ impl WasmMqttClient {
         }
 
         let qos = options.to_qos();
-        let packet_id = if qos != QoS::AtMostOnce {
+        let packet_id = if qos == QoS::AtMostOnce {
+            None
+        } else {
             Some(loop {
                 match self.state.try_borrow_mut() {
                     Ok(mut state) => break state.next_packet_id(),
@@ -984,8 +995,6 @@ impl WasmMqttClient {
                     }
                 }
             })
-        } else {
-            None
         };
 
         if qos == QoS::ExactlyOnce {
@@ -1043,6 +1052,8 @@ impl WasmMqttClient {
         Ok(())
     }
 
+    /// # Errors
+    /// Returns an error if not connected or publish fails.
     pub async fn publish_qos1(
         &self,
         topic: &str,
@@ -1116,6 +1127,8 @@ impl WasmMqttClient {
         Ok(packet_id)
     }
 
+    /// # Errors
+    /// Returns an error if not connected or publish fails.
     pub async fn publish_qos2(
         &self,
         topic: &str,
@@ -1190,6 +1203,8 @@ impl WasmMqttClient {
         Ok(packet_id)
     }
 
+    /// # Errors
+    /// Returns an error if not connected or subscribe fails.
     pub async fn subscribe(&self, topic: &str) -> Result<u16, JsValue> {
         loop {
             match self.state.try_borrow() {
@@ -1245,6 +1260,8 @@ impl WasmMqttClient {
         Ok(packet_id)
     }
 
+    /// # Errors
+    /// Returns an error if not connected or subscribe fails.
     pub async fn subscribe_with_options(
         &self,
         topic: &str,
@@ -1347,6 +1364,8 @@ impl WasmMqttClient {
         Ok(packet_id)
     }
 
+    /// # Errors
+    /// Returns an error if not connected or subscribe fails.
     pub async fn subscribe_with_callback(
         &self,
         topic: &str,
@@ -1421,6 +1440,8 @@ impl WasmMqttClient {
         Ok(packet_id)
     }
 
+    /// # Errors
+    /// Returns an error if not connected or unsubscribe fails.
     pub async fn unsubscribe(&self, topic: &str) -> Result<u16, JsValue> {
         loop {
             match self.state.try_borrow() {
@@ -1485,6 +1506,8 @@ impl WasmMqttClient {
         Ok(packet_id)
     }
 
+    /// # Errors
+    /// Returns an error if disconnect fails.
     pub async fn disconnect(&self) -> Result<(), JsValue> {
         let disconnect_packet = mqtt5_protocol::packet::disconnect::DisconnectPacket {
             reason_code: mqtt5_protocol::protocol::v5::reason_codes::ReasonCode::Success,
@@ -1521,6 +1544,7 @@ impl WasmMqttClient {
         Ok(())
     }
 
+    #[must_use]
     pub fn is_connected(&self) -> bool {
         self.state.borrow().connected
     }
@@ -1541,7 +1565,9 @@ impl WasmMqttClient {
         self.state.borrow_mut().on_auth_challenge = Some(callback);
     }
 
-    pub async fn respond_auth(&self, auth_data: &[u8]) -> Result<(), JsValue> {
+    /// # Errors
+    /// Returns an error if no auth method is set or send fails.
+    pub fn respond_auth(&self, auth_data: &[u8]) -> Result<(), JsValue> {
         let auth_method = self
             .state
             .borrow()
@@ -1581,6 +1607,8 @@ impl WasmMqttClient {
 }
 
 impl WasmMqttClient {
+    /// # Errors
+    /// Returns an error if not connected or subscribe fails.
     pub async fn subscribe_with_callback_internal(
         &self,
         topic: &str,
@@ -1591,6 +1619,8 @@ impl WasmMqttClient {
             .await
     }
 
+    /// # Errors
+    /// Returns an error if not connected or subscribe fails.
     pub async fn subscribe_with_callback_internal_opts(
         &self,
         topic: &str,
@@ -1669,6 +1699,8 @@ impl WasmMqttClient {
         Ok(packet_id)
     }
 
+    /// # Errors
+    /// Returns an error if not connected or publish fails.
     pub async fn publish_internal(
         &self,
         topic: &str,
@@ -1689,7 +1721,9 @@ impl WasmMqttClient {
             }
         }
 
-        let packet_id = if qos != QoS::AtMostOnce {
+        let packet_id = if qos == QoS::AtMostOnce {
+            None
+        } else {
             Some(loop {
                 match self.state.try_borrow_mut() {
                     Ok(mut state) => break state.next_packet_id(),
@@ -1698,8 +1732,6 @@ impl WasmMqttClient {
                     }
                 }
             })
-        } else {
-            None
         };
 
         if qos == QoS::ExactlyOnce {

@@ -33,6 +33,7 @@ pub struct WasmBrokerConfig {
 #[wasm_bindgen]
 impl WasmBrokerConfig {
     #[wasm_bindgen(constructor)]
+    #[allow(clippy::must_use_candidate)]
     pub fn new() -> Self {
         Self {
             max_clients: 1000,
@@ -145,13 +146,18 @@ pub struct WasmBroker {
 
 #[wasm_bindgen]
 impl WasmBroker {
+    /// # Errors
+    /// Returns an error if broker initialization fails.
     #[wasm_bindgen(constructor)]
+    #[allow(clippy::must_use_candidate)]
     pub fn new() -> Result<WasmBroker, JsValue> {
         Self::with_config(WasmBrokerConfig::new())
     }
 
+    /// # Errors
+    /// Returns an error if broker initialization fails.
     #[wasm_bindgen]
-    #[allow(clippy::needless_pass_by_value)]
+    #[allow(clippy::needless_pass_by_value, clippy::arc_with_non_send_sync)]
     pub fn with_config(wasm_config: WasmBrokerConfig) -> Result<WasmBroker, JsValue> {
         let allow_anonymous = wasm_config.allow_anonymous;
         let config = Arc::new(wasm_config.to_broker_config());
@@ -192,6 +198,8 @@ impl WasmBroker {
         Ok(broker)
     }
 
+    /// # Errors
+    /// Returns an error if adding the user fails.
     #[wasm_bindgen]
     pub async fn add_user(&self, username: String, password: String) -> Result<(), JsValue> {
         self.auth_provider
@@ -230,11 +238,15 @@ impl WasmBroker {
         self.auth_provider.password_provider().user_count().await
     }
 
+    /// # Errors
+    /// Returns an error if password hashing fails.
     #[wasm_bindgen]
     pub fn hash_password(password: &str) -> Result<String, JsValue> {
         PasswordAuthProvider::hash_password(password).map_err(|e| JsValue::from_str(&e.to_string()))
     }
 
+    /// # Errors
+    /// Returns an error if the permission string is invalid.
     #[wasm_bindgen]
     pub async fn add_acl_rule(
         &self,
@@ -282,6 +294,8 @@ impl WasmBroker {
         self.auth_provider.acl_manager().role_count().await
     }
 
+    /// # Errors
+    /// Returns an error if the permission string is invalid or role does not exist.
     #[wasm_bindgen]
     pub async fn add_role_rule(
         &self,
@@ -299,6 +313,8 @@ impl WasmBroker {
             .map_err(|e| JsValue::from_str(&e.to_string()))
     }
 
+    /// # Errors
+    /// Returns an error if the role does not exist.
     #[wasm_bindgen]
     pub async fn assign_role(&self, username: String, role_name: String) -> Result<(), JsValue> {
         self.auth_provider
@@ -329,6 +345,9 @@ impl WasmBroker {
         self.auth_provider.acl_manager().clear_roles().await;
     }
 
+    /// # Errors
+    /// Returns an error if the `MessageChannel` cannot be created.
+    #[wasm_bindgen]
     pub fn create_client_port(&self) -> Result<MessagePort, JsValue> {
         let channel = web_sys::MessageChannel::new()?;
 
@@ -348,6 +367,8 @@ impl WasmBroker {
         Ok(client_port)
     }
 
+    /// # Errors
+    /// Returns an error if the bridge cannot be added.
     #[wasm_bindgen]
     pub async fn add_bridge(
         &self,
@@ -358,12 +379,15 @@ impl WasmBroker {
         manager.add_bridge(config, remote_port).await
     }
 
+    /// # Errors
+    /// Returns an error if the bridge cannot be removed.
     #[wasm_bindgen]
     pub async fn remove_bridge(&self, name: &str) -> Result<(), JsValue> {
         let manager = self.bridge_manager.borrow().clone();
         manager.remove_bridge(name).await
     }
 
+    #[must_use]
     #[wasm_bindgen]
     pub fn list_bridges(&self) -> Vec<String> {
         self.bridge_manager.borrow().list_bridges()

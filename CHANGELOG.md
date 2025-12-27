@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.1] / [mqtt5-wasm 0.7.1] - 2025-12-26
+
+### Changed
+
+- **mqtt5-wasm**: Fixed all clippy pedantic warnings
+  - Added `#[must_use]` annotations to getter methods
+  - Added `/// # Errors` documentation to fallible methods
+  - Removed `async` from functions that don't await
+  - Converted `match` to `if let`/`let...else` patterns where appropriate
+  - Fixed format strings to use inline variables
+
+### Added
+
+- **CI**: Added `wasm-clippy` with strict pedantic linting to `ci-verify`
+  - Uses `-D warnings -W clippy::pedantic` with `--features broker`
+  - Ensures WASM crate maintains code quality standards
+
 ## [0.16.0] / [mqtt5-protocol 0.7.0] / [mqtt5-wasm 0.7.0] - 2025-12-22
 
 ### Added

@@ -3,6 +3,8 @@ use bytes::Buf;
 use mqtt5_protocol::error::{MqttError, Result};
 use mqtt5_protocol::packet::{FixedHeader, Packet};
 
+/// # Errors
+/// Returns an error if the connection is closed or packet decoding fails.
 pub async fn read_packet(reader: &mut WasmReader) -> Result<Packet> {
     let mut header_buf = vec![0u8; 5];
     let n = reader.read(&mut header_buf).await?;

@@ -25,10 +25,22 @@ pub struct MessagePortReader {
 pub struct MessagePortWriter {
     port: MessagePort,
     connected: Arc<AtomicBool>,
-    _closure: Closure<dyn FnMut(MessageEvent)>,
+    _closure: Option<Closure<dyn FnMut(MessageEvent)>>,
 }
 
 impl MessagePortReader {
+    #[allow(clippy::must_use_candidate)]
+    pub fn new(rx: mpsc::UnboundedReceiver<Vec<u8>>, connected: Arc<AtomicBool>) -> Self {
+        Self {
+            rx,
+            connected,
+            buffer: Vec::new(),
+            buffer_pos: 0,
+        }
+    }
+
+    /// # Errors
+    /// Returns an error if reading from the port fails.
     pub async fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
         if self.buffer_pos < self.buffer.len() {
             let available = self.buffer.len() - self.buffer_pos;
@@ -62,32 +74,48 @@ impl MessagePortReader {
         Ok(to_copy)
     }
 
+    #[must_use]
     pub fn is_connected(&self) -> bool {
         self.connected.load(Ordering::SeqCst)
     }
 }
 
 impl MessagePortWriter {
+    #[allow(clippy::must_use_candidate)]
+    pub fn new(port: MessagePort, connected: Arc<AtomicBool>) -> Self {
+        Self {
+            port,
+            connected,
+            _closure: None,
+        }
+    }
+
+    /// # Errors
+    /// Returns an error if writing to the port fails.
     pub fn write(&mut self, buf: &[u8]) -> Result<()> {
         let array = js_sys::Uint8Array::from(buf);
         self.port
             .post_message(&array.buffer())
-            .map_err(|e| MqttError::Io(format!("MessagePort send failed: {:?}", e)))?;
+            .map_err(|e| MqttError::Io(format!("MessagePort send failed: {e:?}")))?;
         Ok(())
     }
 
+    /// # Errors
+    /// Returns an error if closing the port fails.
     pub fn close(&mut self) -> Result<()> {
         self.port.close();
         self.connected.store(false, Ordering::SeqCst);
         Ok(())
     }
 
+    #[must_use]
     pub fn is_connected(&self) -> bool {
         self.connected.load(Ordering::SeqCst)
     }
 }
 
 impl MessagePortTransport {
+    #[allow(clippy::must_use_candidate)]
     pub fn new(port: MessagePort) -> Self {
         Self {
             port,
@@ -97,6 +125,8 @@ impl MessagePortTransport {
         }
     }
 
+    /// # Errors
+    /// Returns an error if the transport is not connected.
     pub fn into_split(self) -> Result<(MessagePortReader, MessagePortWriter)> {
         let port = self.port;
         let rx = self.rx.ok_or(MqttError::NotConnected)?;
@@ -112,7 +142,7 @@ impl MessagePortTransport {
         let writer = MessagePortWriter {
             port,
             connected: self.connected,
-            _closure: closure,
+            _closure: Some(closure),
         };
 
         Ok((reader, writer))
@@ -124,13 +154,14 @@ impl Transport for MessagePortTransport {
         let (msg_tx, msg_rx) = mpsc::unbounded();
 
         let msg_tx_clone = msg_tx.clone();
-        let onmessage = Closure::new(move |e: MessageEvent| {
-            if let Ok(abuf) = e.data().dyn_into::<js_sys::ArrayBuffer>() {
-                let array = js_sys::Uint8Array::new(&abuf);
-                let vec = array.to_vec();
-                let _ = msg_tx_clone.unbounded_send(vec);
-            }
-        });
+        let onmessage: Closure<dyn FnMut(MessageEvent)> =
+            Closure::wrap(Box::new(move |e: MessageEvent| {
+                if let Ok(abuf) = e.data().dyn_into::<js_sys::ArrayBuffer>() {
+                    let array = js_sys::Uint8Array::new(&abuf);
+                    let vec = array.to_vec();
+                    let _ = msg_tx_clone.unbounded_send(vec);
+                }
+            }));
 
         self.port
             .set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
@@ -166,7 +197,7 @@ impl Transport for MessagePortTransport {
         let array = js_sys::Uint8Array::from(buf);
         self.port
             .post_message(&array.buffer())
-            .map_err(|e| MqttError::Io(format!("MessagePort send failed: {:?}", e)))?;
+            .map_err(|e| MqttError::Io(format!("MessagePort send failed: {e:?}")))?;
 
         Ok(())
     }

@@ -31,6 +31,7 @@ pub struct WasmTopicMapping {
 #[wasm_bindgen]
 impl WasmTopicMapping {
     #[wasm_bindgen(constructor)]
+    #[allow(clippy::must_use_candidate)]
     pub fn new(pattern: String, direction: WasmBridgeDirection) -> Self {
         Self {
             pattern,
@@ -80,6 +81,7 @@ pub struct WasmBridgeConfig {
 #[wasm_bindgen]
 impl WasmBridgeConfig {
     #[wasm_bindgen(constructor)]
+    #[allow(clippy::must_use_candidate)]
     pub fn new(name: String) -> Self {
         let client_id = format!("bridge-{name}");
         Self {
@@ -123,6 +125,8 @@ impl WasmBridgeConfig {
         self.topics.push(mapping);
     }
 
+    /// # Errors
+    /// Returns an error if the bridge configuration is invalid.
     pub fn validate(&self) -> Result<(), String> {
         if self.name.is_empty() {
             return Err("Bridge name cannot be empty".into());
@@ -152,6 +156,8 @@ pub struct WasmBridgeConnection {
 }
 
 impl WasmBridgeConnection {
+    /// # Errors
+    /// Returns an error if the bridge configuration is invalid.
     pub fn new(config: WasmBridgeConfig, router: Arc<MessageRouter>) -> Result<Self, String> {
         config.validate()?;
 
@@ -167,6 +173,8 @@ impl WasmBridgeConnection {
         })
     }
 
+    /// # Errors
+    /// Returns an error if connection or subscription setup fails.
     pub async fn connect(&self, port: MessagePort) -> Result<(), JsValue> {
         self.client.connect_message_port(port).await?;
         *self.running.borrow_mut() = true;
@@ -232,6 +240,8 @@ impl WasmBridgeConnection {
         topic.to_string()
     }
 
+    /// # Errors
+    /// Returns an error if publishing the message fails.
     pub async fn forward_message(&self, packet: &PublishPacket) -> Result<(), JsValue> {
         if !*self.running.borrow() {
             return Ok(());
@@ -261,23 +271,29 @@ impl WasmBridgeConnection {
         Ok(())
     }
 
+    /// # Errors
+    /// Returns an error if disconnection fails.
     pub async fn stop(&self) -> Result<(), JsValue> {
         *self.running.borrow_mut() = false;
         self.client.disconnect().await
     }
 
+    #[must_use]
     pub fn name(&self) -> &str {
         &self.config.name
     }
 
+    #[must_use]
     pub fn is_connected(&self) -> bool {
         self.client.is_connected()
     }
 
+    #[must_use]
     pub fn messages_sent(&self) -> u64 {
         *self.messages_sent.borrow()
     }
 
+    #[must_use]
     pub fn messages_received(&self) -> u64 {
         *self.messages_received.borrow()
     }
@@ -290,6 +306,7 @@ pub struct WasmBridgeManager {
 }
 
 impl WasmBridgeManager {
+    #[allow(clippy::must_use_candidate)]
     pub fn new(router: Arc<MessageRouter>) -> Self {
         Self {
             bridges: Rc::new(RefCell::new(HashMap::new())),
@@ -297,6 +314,8 @@ impl WasmBridgeManager {
         }
     }
 
+    /// # Errors
+    /// Returns an error if the bridge already exists or connection fails.
     pub async fn add_bridge(
         &self,
         config: WasmBridgeConfig,
@@ -318,6 +337,8 @@ impl WasmBridgeManager {
         Ok(())
     }
 
+    /// # Errors
+    /// Returns an error if the bridge is not found or disconnection fails.
     pub async fn remove_bridge(&self, name: &str) -> Result<(), JsValue> {
         let bridge = self.bridges.borrow_mut().remove(name);
         if let Some(bridge) = bridge {
@@ -339,6 +360,7 @@ impl WasmBridgeManager {
         }
     }
 
+    #[must_use]
     pub fn list_bridges(&self) -> Vec<String> {
         self.bridges.borrow().keys().cloned().collect()
     }
