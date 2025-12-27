@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.2] - 2025-12-26
+
+### Fixed
+
+- **Bridge loop prevention**: Rate-limit warnings to one per message fingerprint
+  - Previously logged a warning on every duplicate detection (~600/minute for heartbeats)
+  - Now logs only on first detection, then suppresses until TTL expires
+  - Reduces log spam when `BridgeDirection::Both` causes expected duplicates
+
 ## [0.16.1] / [mqtt5-wasm 0.7.1] - 2025-12-26
 
 ### Changed
