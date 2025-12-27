@@ -37,6 +37,8 @@ pub struct WasmWriter {
 }
 
 impl WasmReader {
+    /// # Errors
+    /// Returns an error if the connection is closed or if there is no data available.
     pub async fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
         if !self.buffer.is_empty() {
             let len = self.buffer.len().min(buf.len());
@@ -61,19 +63,24 @@ impl WasmReader {
         Ok(len)
     }
 
+    #[must_use]
     pub fn is_connected(&self) -> bool {
         self.connected.load(Ordering::SeqCst)
     }
 }
 
 impl WasmWriter {
+    /// # Errors
+    /// Returns an error if the WebSocket send operation fails.
     pub fn write(&mut self, buf: &[u8]) -> Result<()> {
         self.ws
             .send_with_u8_array(buf)
-            .map_err(|e| MqttError::Io(format!("WebSocket send failed: {:?}", e)))?;
+            .map_err(|e| MqttError::Io(format!("WebSocket send failed: {e:?}")))?;
         Ok(())
     }
 
+    /// # Errors
+    /// This method does not currently return errors but uses Result for API consistency.
     pub fn close(&mut self) -> Result<()> {
         self.ws.set_onmessage(None);
         self.ws.set_onopen(None);
@@ -84,12 +91,14 @@ impl WasmWriter {
         Ok(())
     }
 
+    #[must_use]
     pub fn is_connected(&self) -> bool {
         self.connected.load(Ordering::SeqCst)
     }
 }
 
 impl WasmWebSocketTransport {
+    #[allow(clippy::must_use_candidate)]
     pub fn new(url: impl Into<String>) -> Self {
         Self {
             url: url.into(),
@@ -101,6 +110,8 @@ impl WasmWebSocketTransport {
         }
     }
 
+    /// # Errors
+    /// Returns an error if the transport is not connected.
     pub fn into_split(self) -> Result<(WasmReader, WasmWriter)> {
         let ws = self.ws.ok_or(MqttError::NotConnected)?;
         let rx = self.rx.ok_or(MqttError::NotConnected)?;
@@ -125,7 +136,7 @@ impl WasmWebSocketTransport {
 impl Transport for WasmWebSocketTransport {
     async fn connect(&mut self) -> Result<()> {
         let ws = WebSocket::new_with_str(&self.url, "mqtt").map_err(|e| {
-            MqttError::ConnectionError(format!("Failed to create WebSocket: {:?}", e))
+            MqttError::ConnectionError(format!("Failed to create WebSocket: {e:?}"))
         })?;
 
         ws.set_binary_type(web_sys::BinaryType::Arraybuffer);
@@ -237,7 +248,7 @@ impl Transport for WasmWebSocketTransport {
         let ws = self.ws.as_ref().ok_or(MqttError::NotConnected)?;
 
         ws.send_with_u8_array(buf)
-            .map_err(|e| MqttError::Io(format!("WebSocket send failed: {:?}", e)))?;
+            .map_err(|e| MqttError::Io(format!("WebSocket send failed: {e:?}")))?;
 
         Ok(())
     }

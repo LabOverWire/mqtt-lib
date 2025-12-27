@@ -72,6 +72,8 @@ pub enum WasmWriter {
 }
 
 impl WasmReader {
+    /// # Errors
+    /// Returns an error if reading from the transport fails.
     pub async fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
         match self {
             Self::WebSocket(r) => r.read(buf).await,
@@ -80,6 +82,7 @@ impl WasmReader {
         }
     }
 
+    #[must_use]
     pub fn is_connected(&self) -> bool {
         match self {
             Self::WebSocket(r) => r.is_connected(),
@@ -90,6 +93,8 @@ impl WasmReader {
 }
 
 impl WasmWriter {
+    /// # Errors
+    /// Returns an error if writing to the transport fails.
     pub fn write(&mut self, buf: &[u8]) -> Result<()> {
         match self {
             Self::WebSocket(w) => w.write(buf),
@@ -98,6 +103,8 @@ impl WasmWriter {
         }
     }
 
+    /// # Errors
+    /// Returns an error if closing the transport fails.
     pub fn close(&mut self) -> Result<()> {
         match self {
             Self::WebSocket(w) => w.close(),
@@ -106,6 +113,7 @@ impl WasmWriter {
         }
     }
 
+    #[must_use]
     pub fn is_connected(&self) -> bool {
         match self {
             Self::WebSocket(w) => w.is_connected(),
@@ -116,6 +124,8 @@ impl WasmWriter {
 }
 
 impl WasmTransportType {
+    /// # Errors
+    /// Returns an error if the transport is not connected.
     pub fn into_split(self) -> Result<(WasmReader, WasmWriter)> {
         match self {
             Self::WebSocket(t) => {

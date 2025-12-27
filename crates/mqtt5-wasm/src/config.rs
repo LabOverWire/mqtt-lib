@@ -26,6 +26,7 @@ pub struct WasmConnectOptions {
 #[allow(non_snake_case)]
 impl WasmConnectOptions {
     #[wasm_bindgen(constructor)]
+    #[allow(clippy::must_use_candidate)]
     pub fn new() -> Self {
         Self {
             keep_alive: 60,
@@ -47,6 +48,7 @@ impl WasmConnectOptions {
     }
 
     #[wasm_bindgen(getter)]
+    #[must_use]
     pub fn keepAlive(&self) -> u16 {
         self.keep_alive
     }
@@ -57,6 +59,7 @@ impl WasmConnectOptions {
     }
 
     #[wasm_bindgen(getter)]
+    #[must_use]
     pub fn cleanStart(&self) -> bool {
         self.clean_start
     }
@@ -67,6 +70,7 @@ impl WasmConnectOptions {
     }
 
     #[wasm_bindgen(getter)]
+    #[must_use]
     pub fn username(&self) -> Option<String> {
         self.username.clone()
     }
@@ -90,6 +94,7 @@ impl WasmConnectOptions {
     }
 
     #[wasm_bindgen(getter)]
+    #[must_use]
     pub fn sessionExpiryInterval(&self) -> Option<u32> {
         self.session_expiry_interval
     }
@@ -100,6 +105,7 @@ impl WasmConnectOptions {
     }
 
     #[wasm_bindgen(getter)]
+    #[must_use]
     pub fn receiveMaximum(&self) -> Option<u16> {
         self.receive_maximum
     }
@@ -110,6 +116,7 @@ impl WasmConnectOptions {
     }
 
     #[wasm_bindgen(getter)]
+    #[must_use]
     pub fn maximumPacketSize(&self) -> Option<u32> {
         self.maximum_packet_size
     }
@@ -120,6 +127,7 @@ impl WasmConnectOptions {
     }
 
     #[wasm_bindgen(getter)]
+    #[must_use]
     pub fn topicAliasMaximum(&self) -> Option<u16> {
         self.topic_alias_maximum
     }
@@ -130,6 +138,7 @@ impl WasmConnectOptions {
     }
 
     #[wasm_bindgen(getter)]
+    #[must_use]
     pub fn requestResponseInformation(&self) -> Option<bool> {
         self.request_response_information
     }
@@ -140,6 +149,7 @@ impl WasmConnectOptions {
     }
 
     #[wasm_bindgen(getter)]
+    #[must_use]
     pub fn requestProblemInformation(&self) -> Option<bool> {
         self.request_problem_information
     }
@@ -150,6 +160,7 @@ impl WasmConnectOptions {
     }
 
     #[wasm_bindgen(getter)]
+    #[must_use]
     pub fn authenticationMethod(&self) -> Option<String> {
         self.authentication_method.clone()
     }
@@ -165,6 +176,7 @@ impl WasmConnectOptions {
     }
 
     #[wasm_bindgen(getter)]
+    #[must_use]
     pub fn protocolVersion(&self) -> u8 {
         self.protocol_version
     }
@@ -332,6 +344,7 @@ pub struct WasmPublishOptions {
 #[allow(non_snake_case)]
 impl WasmPublishOptions {
     #[wasm_bindgen(constructor)]
+    #[allow(clippy::must_use_candidate)]
     pub fn new() -> Self {
         Self {
             qos: 0,
@@ -347,6 +360,7 @@ impl WasmPublishOptions {
     }
 
     #[wasm_bindgen(getter)]
+    #[must_use]
     pub fn qos(&self) -> u8 {
         self.qos
     }
@@ -362,6 +376,7 @@ impl WasmPublishOptions {
     }
 
     #[wasm_bindgen(getter)]
+    #[must_use]
     pub fn retain(&self) -> bool {
         self.retain
     }
@@ -372,6 +387,7 @@ impl WasmPublishOptions {
     }
 
     #[wasm_bindgen(getter)]
+    #[must_use]
     pub fn payloadFormatIndicator(&self) -> Option<bool> {
         self.payload_format_indicator
     }
@@ -382,6 +398,7 @@ impl WasmPublishOptions {
     }
 
     #[wasm_bindgen(getter)]
+    #[must_use]
     pub fn messageExpiryInterval(&self) -> Option<u32> {
         self.message_expiry_interval
     }
@@ -392,6 +409,7 @@ impl WasmPublishOptions {
     }
 
     #[wasm_bindgen(getter)]
+    #[must_use]
     pub fn topicAlias(&self) -> Option<u16> {
         self.topic_alias
     }
@@ -402,6 +420,7 @@ impl WasmPublishOptions {
     }
 
     #[wasm_bindgen(getter)]
+    #[must_use]
     pub fn responseTopic(&self) -> Option<String> {
         self.response_topic.clone()
     }
@@ -417,6 +436,7 @@ impl WasmPublishOptions {
     }
 
     #[wasm_bindgen(getter)]
+    #[must_use]
     pub fn contentType(&self) -> Option<String> {
         self.content_type.clone()
     }
@@ -549,6 +569,7 @@ pub struct WasmSubscribeOptions {
 #[allow(non_snake_case)]
 impl WasmSubscribeOptions {
     #[wasm_bindgen(constructor)]
+    #[allow(clippy::must_use_candidate)]
     pub fn new() -> Self {
         Self {
             qos: 0,
@@ -560,6 +581,7 @@ impl WasmSubscribeOptions {
     }
 
     #[wasm_bindgen(getter)]
+    #[must_use]
     pub fn qos(&self) -> u8 {
         self.qos
     }
@@ -575,6 +597,7 @@ impl WasmSubscribeOptions {
     }
 
     #[wasm_bindgen(getter)]
+    #[must_use]
     pub fn noLocal(&self) -> bool {
         self.no_local
     }
@@ -585,6 +608,7 @@ impl WasmSubscribeOptions {
     }
 
     #[wasm_bindgen(getter)]
+    #[must_use]
     pub fn retainAsPublished(&self) -> bool {
         self.retain_as_published
     }
@@ -595,6 +619,7 @@ impl WasmSubscribeOptions {
     }
 
     #[wasm_bindgen(getter)]
+    #[must_use]
     pub fn retainHandling(&self) -> u8 {
         self.retain_handling
     }
@@ -610,6 +635,7 @@ impl WasmSubscribeOptions {
     }
 
     #[wasm_bindgen(getter)]
+    #[must_use]
     pub fn subscriptionIdentifier(&self) -> Option<u32> {
         self.subscription_identifier
     }
@@ -650,6 +676,7 @@ pub struct WasmWillMessage {
 #[allow(non_snake_case)]
 impl WasmWillMessage {
     #[wasm_bindgen(constructor)]
+    #[allow(clippy::must_use_candidate)]
     pub fn new(topic: String, payload: Vec<u8>) -> Self {
         Self {
             topic,
@@ -664,6 +691,7 @@ impl WasmWillMessage {
     }
 
     #[wasm_bindgen(getter)]
+    #[must_use]
     pub fn topic(&self) -> String {
         self.topic.clone()
     }
@@ -674,6 +702,7 @@ impl WasmWillMessage {
     }
 
     #[wasm_bindgen(getter)]
+    #[must_use]
     pub fn qos(&self) -> u8 {
         self.qos
     }
@@ -689,6 +718,7 @@ impl WasmWillMessage {
     }
 
     #[wasm_bindgen(getter)]
+    #[must_use]
     pub fn retain(&self) -> bool {
         self.retain
     }
@@ -699,6 +729,7 @@ impl WasmWillMessage {
     }
 
     #[wasm_bindgen(getter)]
+    #[must_use]
     pub fn willDelayInterval(&self) -> Option<u32> {
         self.will_delay_interval
     }
@@ -709,6 +740,7 @@ impl WasmWillMessage {
     }
 
     #[wasm_bindgen(getter)]
+    #[must_use]
     pub fn messageExpiryInterval(&self) -> Option<u32> {
         self.message_expiry_interval
     }
@@ -719,6 +751,7 @@ impl WasmWillMessage {
     }
 
     #[wasm_bindgen(getter)]
+    #[must_use]
     pub fn contentType(&self) -> Option<String> {
         self.content_type.clone()
     }
@@ -729,6 +762,7 @@ impl WasmWillMessage {
     }
 
     #[wasm_bindgen(getter)]
+    #[must_use]
     pub fn responseTopic(&self) -> Option<String> {
         self.response_topic.clone()
     }
@@ -777,35 +811,42 @@ pub struct WasmMessageProperties {
 #[allow(non_snake_case)]
 impl WasmMessageProperties {
     #[wasm_bindgen(getter)]
+    #[must_use]
     pub fn responseTopic(&self) -> Option<String> {
         self.response_topic.clone()
     }
 
     #[wasm_bindgen(getter)]
+    #[must_use]
     pub fn correlationData(&self) -> Option<Vec<u8>> {
         self.correlation_data.clone()
     }
 
     #[wasm_bindgen(getter)]
+    #[must_use]
     pub fn contentType(&self) -> Option<String> {
         self.content_type.clone()
     }
 
     #[wasm_bindgen(getter)]
+    #[must_use]
     pub fn payloadFormatIndicator(&self) -> Option<bool> {
         self.payload_format_indicator
     }
 
     #[wasm_bindgen(getter)]
+    #[must_use]
     pub fn messageExpiryInterval(&self) -> Option<u32> {
         self.message_expiry_interval
     }
 
     #[wasm_bindgen(getter)]
+    #[must_use]
     pub fn subscriptionIdentifiers(&self) -> Vec<u32> {
         self.subscription_identifiers.clone()
     }
 
+    #[must_use]
     pub fn getUserProperties(&self) -> js_sys::Array {
         let arr = js_sys::Array::new();
         for (key, value) in &self.user_properties {

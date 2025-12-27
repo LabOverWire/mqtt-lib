@@ -28,6 +28,8 @@ pub struct BroadcastChannelWriter {
 }
 
 impl BroadcastChannelReader {
+    /// # Errors
+    /// Returns an error if the connection is closed or if there is no data available.
     pub async fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
         let data = self
             .rx
@@ -40,32 +42,39 @@ impl BroadcastChannelReader {
         Ok(len)
     }
 
+    #[must_use]
     pub fn is_connected(&self) -> bool {
         self.connected.load(Ordering::SeqCst)
     }
 }
 
 impl BroadcastChannelWriter {
+    /// # Errors
+    /// Returns an error if the `BroadcastChannel` send operation fails.
     pub fn write(&mut self, buf: &[u8]) -> Result<()> {
         let array = js_sys::Uint8Array::from(buf);
         self.channel
             .post_message(&array.buffer())
-            .map_err(|e| MqttError::Io(format!("BroadcastChannel send failed: {:?}", e)))?;
+            .map_err(|e| MqttError::Io(format!("BroadcastChannel send failed: {e:?}")))?;
         Ok(())
     }
 
+    /// # Errors
+    /// This method does not currently return errors but uses Result for API consistency.
     pub fn close(&mut self) -> Result<()> {
         self.channel.close();
         self.connected.store(false, Ordering::SeqCst);
         Ok(())
     }
 
+    #[must_use]
     pub fn is_connected(&self) -> bool {
         self.connected.load(Ordering::SeqCst)
     }
 }
 
 impl BroadcastChannelTransport {
+    #[allow(clippy::must_use_candidate)]
     pub fn new(channel_name: impl Into<String>) -> Self {
         Self {
             channel_name: channel_name.into(),
@@ -76,6 +85,8 @@ impl BroadcastChannelTransport {
         }
     }
 
+    /// # Errors
+    /// Returns an error if the transport is not connected.
     pub fn into_split(self) -> Result<(BroadcastChannelReader, BroadcastChannelWriter)> {
         let channel = self.channel.ok_or(MqttError::NotConnected)?;
         let rx = self.rx.ok_or(MqttError::NotConnected)?;
@@ -99,7 +110,7 @@ impl BroadcastChannelTransport {
 impl Transport for BroadcastChannelTransport {
     async fn connect(&mut self) -> Result<()> {
         let channel = BroadcastChannel::new(&self.channel_name).map_err(|e| {
-            MqttError::ConnectionError(format!("Failed to create BroadcastChannel: {:?}", e))
+            MqttError::ConnectionError(format!("Failed to create BroadcastChannel: {e:?}"))
         })?;
 
         let (msg_tx, msg_rx) = mpsc::unbounded();
@@ -143,7 +154,7 @@ impl Transport for BroadcastChannelTransport {
         let array = js_sys::Uint8Array::from(buf);
         channel
             .post_message(&array.buffer())
-            .map_err(|e| MqttError::Io(format!("BroadcastChannel send failed: {:?}", e)))?;
+            .map_err(|e| MqttError::Io(format!("BroadcastChannel send failed: {e:?}")))?;
 
         Ok(())
     }

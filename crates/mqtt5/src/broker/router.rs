@@ -82,6 +82,7 @@ impl MessageRouter {
             #[cfg(not(target_arch = "wasm32"))]
             bridge_manager: Arc::new(RwLock::new(None)),
             #[cfg(target_arch = "wasm32")]
+            #[allow(clippy::arc_with_non_send_sync)]
             wasm_bridge_callback: Arc::new(RwLock::new(None)),
         }
     }
@@ -100,6 +101,7 @@ impl MessageRouter {
             #[cfg(not(target_arch = "wasm32"))]
             bridge_manager: Arc::new(RwLock::new(None)),
             #[cfg(target_arch = "wasm32")]
+            #[allow(clippy::arc_with_non_send_sync)]
             wasm_bridge_callback: Arc::new(RwLock::new(None)),
         }
     }

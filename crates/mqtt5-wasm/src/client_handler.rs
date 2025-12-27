@@ -69,6 +69,58 @@ pub struct WasmClientHandler {
 static HANDLER_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
 
 impl WasmClientHandler {
+    #[allow(dead_code)]
+    pub fn start_deferred(
+        port: MessagePort,
+        config: Arc<BrokerConfig>,
+        router: Arc<MessageRouter>,
+        auth_provider: Arc<dyn AuthProvider>,
+        storage: Arc<DynamicStorage>,
+        stats: Arc<BrokerStats>,
+        resource_monitor: Arc<ResourceMonitor>,
+    ) {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        use wasm_bindgen::JsCast;
+
+        let port = Rc::new(RefCell::new(Some(port)));
+        let port_clone = Rc::clone(&port);
+
+        let config = Rc::new(config);
+        let router = Rc::new(router);
+        let auth_provider: Rc<Arc<dyn AuthProvider>> = Rc::new(auth_provider);
+        let storage = Rc::new(storage);
+        let stats = Rc::new(stats);
+        let resource_monitor = Rc::new(resource_monitor);
+
+        let callback = wasm_bindgen::closure::Closure::<dyn FnMut()>::new(move || {
+            if let Some(p) = port_clone.borrow_mut().take() {
+                let config = (*config).clone();
+                let router = (*router).clone();
+                let auth_provider = (*auth_provider).clone();
+                let storage = (*storage).clone();
+                let stats = (*stats).clone();
+                let resource_monitor = (*resource_monitor).clone();
+
+                Self::new(
+                    p,
+                    config,
+                    router,
+                    auth_provider,
+                    storage,
+                    stats,
+                    resource_monitor,
+                );
+            }
+        });
+
+        if let Some(window) = web_sys::window() {
+            let _ = window.set_timeout_with_callback(callback.as_ref().unchecked_ref());
+        }
+        callback.forget();
+    }
+
+    #[allow(clippy::must_use_candidate, clippy::new_ret_no_self)]
     pub fn new(
         port: MessagePort,
         config: Arc<BrokerConfig>,
@@ -78,8 +130,27 @@ impl WasmClientHandler {
         stats: Arc<BrokerStats>,
         resource_monitor: Arc<ResourceMonitor>,
     ) {
+        use futures::channel::mpsc;
+        use wasm_bindgen::JsCast;
+
         let (publish_tx, publish_rx) = flume::bounded(100);
         let handler_id = HANDLER_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
+        let (msg_tx, msg_rx) = mpsc::unbounded();
+        let msg_tx_clone = msg_tx.clone();
+
+        let handler_fn = wasm_bindgen::closure::Closure::<dyn FnMut(web_sys::MessageEvent)>::new(
+            move |e: web_sys::MessageEvent| {
+                if let Ok(abuf) = e.data().dyn_into::<js_sys::ArrayBuffer>() {
+                    let array = js_sys::Uint8Array::new(&abuf);
+                    let vec = array.to_vec();
+                    let _ = msg_tx_clone.unbounded_send(vec);
+                }
+            },
+        );
+        let js_fn: js_sys::Function = handler_fn.into_js_value().unchecked_into();
+        let _ = port.add_event_listener_with_callback("message", &js_fn);
+        port.start();
 
         let handler = Self {
             handler_id,
@@ -104,18 +175,57 @@ impl WasmClientHandler {
         };
 
         spawn_local(async move {
-            match handler.run(port).await {
-                Ok(()) => debug!("Client handler completed normally"),
-                Err(e) => error!("Client handler error: {e}"),
+            if let Err(e) = handler.run_with_receiver(port, msg_rx).await {
+                error!("Client handler error: {e}");
             }
         });
     }
 
+    #[allow(dead_code)]
     async fn run(mut self, port: MessagePort) -> Result<()> {
         let mut transport = MessagePortTransport::new(port);
         transport.connect().await?;
 
         let (reader, writer) = transport.into_split()?;
+        let mut reader = WasmReader::MessagePort(reader);
+        let mut writer = WasmWriter::MessagePort(writer);
+
+        self.wait_for_connect(&mut reader, &mut writer).await?;
+
+        let client_id = self.client_id.clone().unwrap();
+        let (disconnect_tx, disconnect_rx) = tokio::sync::oneshot::channel();
+
+        self.router
+            .register_client(client_id.clone(), self.publish_tx.clone(), disconnect_tx)
+            .await;
+
+        self.stats.client_connected();
+
+        let result = self.packet_loop(&mut reader, writer, disconnect_rx).await;
+
+        if !self.normal_disconnect {
+            self.publish_will_message(&client_id).await;
+        }
+
+        self.router.unregister_client(&client_id).await;
+        self.stats.client_disconnected();
+
+        result
+    }
+
+    async fn run_with_receiver(
+        mut self,
+        port: MessagePort,
+        msg_rx: futures::channel::mpsc::UnboundedReceiver<Vec<u8>>,
+    ) -> Result<()> {
+        use crate::transport::message_port::{MessagePortReader, MessagePortWriter};
+        use std::sync::{atomic::AtomicBool, Arc};
+
+        let connected = Arc::new(AtomicBool::new(true));
+
+        let reader = MessagePortReader::new(msg_rx, Arc::clone(&connected));
+        let writer = MessagePortWriter::new(port, connected);
+
         let mut reader = WasmReader::MessagePort(reader);
         let mut writer = WasmWriter::MessagePort(writer);
 
@@ -149,17 +259,17 @@ impl WasmClientHandler {
     ) -> Result<()> {
         let packet = read_packet(reader).await?;
 
-        match packet {
-            Packet::Connect(connect) => self.handle_connect(*connect, writer).await,
-            _ => {
-                error!("First packet must be CONNECT");
-                Err(MqttError::ProtocolError(
-                    "First packet must be CONNECT".to_string(),
-                ))
-            }
+        if let Packet::Connect(connect) = packet {
+            self.handle_connect(*connect, writer).await
+        } else {
+            error!("First packet must be CONNECT");
+            Err(MqttError::ProtocolError(
+                "First packet must be CONNECT".to_string(),
+            ))
         }
     }
 
+    #[allow(clippy::await_holding_refcell_ref, clippy::too_many_lines)]
     async fn packet_loop(
         &mut self,
         reader: &mut WasmReader,
@@ -203,8 +313,7 @@ impl WasmClientHandler {
                 match publish_rx.recv_async().await {
                     Ok(publish) => {
                         if let Ok(mut writer_guard) = writer_for_forward.try_borrow_mut() {
-                            let result =
-                                Self::write_publish_packet(&publish, &mut *writer_guard).await;
+                            let result = Self::write_publish_packet(&publish, &mut writer_guard);
                             if let Err(e) = result {
                                 error!("Handler #{} error forwarding publish: {}", handler_id, e);
                                 break;
@@ -260,7 +369,7 @@ impl WasmClientHandler {
                     Ok(packet) => {
                         last_packet_time.set(mqtt5::time::Instant::now());
                         if let Ok(mut writer_guard) = writer_shared.try_borrow_mut() {
-                            if let Err(e) = self.handle_packet(packet, &mut *writer_guard).await {
+                            if let Err(e) = self.handle_packet(packet, &mut writer_guard).await {
                                 error!("Error handling packet: {e}");
                                 return Err(e);
                             }
@@ -281,7 +390,7 @@ impl WasmClientHandler {
         }
     }
 
-    async fn write_publish_packet(publish: &PublishPacket, writer: &mut WasmWriter) -> Result<()> {
+    fn write_publish_packet(publish: &PublishPacket, writer: &mut WasmWriter) -> Result<()> {
         use bytes::BytesMut;
         use mqtt5_protocol::packet::MqttPacket;
 
@@ -296,12 +405,12 @@ impl WasmClientHandler {
             Packet::Subscribe(subscribe) => self.handle_subscribe(subscribe, writer).await,
             Packet::Unsubscribe(unsubscribe) => self.handle_unsubscribe(unsubscribe, writer).await,
             Packet::Publish(publish) => self.handle_publish(publish, writer).await,
-            Packet::PubAck(puback) => self.handle_puback(puback).await,
-            Packet::PubRec(pubrec) => self.handle_pubrec(pubrec, writer).await,
+            Packet::PubAck(puback) => self.handle_puback(puback),
+            Packet::PubRec(pubrec) => self.handle_pubrec(&pubrec, writer),
             Packet::PubRel(pubrel) => self.handle_pubrel(pubrel, writer).await,
-            Packet::PubComp(pubcomp) => self.handle_pubcomp(pubcomp).await,
-            Packet::PingReq => self.handle_pingreq(writer).await,
-            Packet::Disconnect(disconnect) => self.handle_disconnect(disconnect).await,
+            Packet::PubComp(pubcomp) => self.handle_pubcomp(pubcomp),
+            Packet::PingReq => self.handle_pingreq(writer),
+            Packet::Disconnect(disconnect) => self.handle_disconnect(disconnect),
             Packet::Auth(auth) => self.handle_auth(auth, writer).await,
             _ => {
                 warn!("Unexpected packet type");
@@ -310,15 +419,18 @@ impl WasmClientHandler {
         }
     }
 
+    #[allow(clippy::cast_possible_truncation)]
     async fn handle_connect(
         &mut self,
         mut connect: ConnectPacket,
         writer: &mut WasmWriter,
     ) -> Result<()> {
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
         if connect.protocol_version != 4 && connect.protocol_version != 5 {
             let mut connack = ConnAckPacket::new(false, ReasonCode::UnsupportedProtocolVersion);
             connack.protocol_version = connect.protocol_version;
-            self.write_packet(Packet::ConnAck(connack), writer).await?;
+            self.write_packet(&Packet::ConnAck(connack), writer)?;
             return Err(MqttError::ProtocolError(
                 "Unsupported protocol version".to_string(),
             ));
@@ -335,8 +447,7 @@ impl WasmClientHandler {
             assigned_client_id = Some(generated_id);
         }
 
-        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-        let dummy_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
+        let dummy_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
 
         if self.protocol_version == 5 {
             if let Some(auth_method) = connect.properties.get_authentication_method() {
@@ -367,7 +478,7 @@ impl WasmClientHandler {
         if !auth_result.authenticated {
             let mut connack = ConnAckPacket::new(false, auth_result.reason_code);
             connack.protocol_version = self.protocol_version;
-            self.write_packet(Packet::ConnAck(connack), writer).await?;
+            self.write_packet(&Packet::ConnAck(connack), writer)?;
             return Err(MqttError::AuthenticationFailed);
         }
 
@@ -412,7 +523,7 @@ impl WasmClientHandler {
                 .set_shared_subscription_available(self.config.shared_subscription_available);
         }
 
-        self.write_packet(Packet::ConnAck(connack), writer).await?;
+        self.write_packet(&Packet::ConnAck(connack), writer)?;
 
         if session_present {
             self.deliver_queued_messages(&connect.client_id, writer)
@@ -498,7 +609,7 @@ impl WasmClientHandler {
             );
             for msg in queued_messages {
                 let publish = msg.to_publish_packet();
-                self.send_publish(publish, writer).await?;
+                self.send_publish(publish, writer)?;
             }
         }
         Ok(())
@@ -563,7 +674,7 @@ impl WasmClientHandler {
                 let retained = self.router.get_retained_messages(&filter.filter).await;
                 for mut msg in retained {
                     msg.retain = true;
-                    self.send_publish(msg, writer).await?;
+                    self.send_publish(msg, writer)?;
                 }
             }
 
@@ -574,7 +685,7 @@ impl WasmClientHandler {
         suback.reason_codes = reason_codes;
         suback.protocol_version = self.protocol_version;
 
-        self.write_packet(Packet::SubAck(suback), writer).await?;
+        self.write_packet(&Packet::SubAck(suback), writer)?;
 
         debug!("Client {} subscribed to topics", client_id);
         Ok(())
@@ -603,8 +714,7 @@ impl WasmClientHandler {
         unsuback.reason_codes = reason_codes;
         unsuback.protocol_version = self.protocol_version;
 
-        self.write_packet(Packet::UnsubAck(unsuback), writer)
-            .await?;
+        self.write_packet(&Packet::UnsubAck(unsuback), writer)?;
 
         Ok(())
     }
@@ -632,14 +742,14 @@ impl WasmClientHandler {
                     QoS::AtLeastOnce => {
                         let mut puback = PubAckPacket::new(packet_id);
                         puback.reason_code = ReasonCode::NotAuthorized;
-                        self.write_packet(Packet::PubAck(puback), writer).await?;
+                        self.write_packet(&Packet::PubAck(puback), writer)?;
                     }
                     QoS::ExactlyOnce => {
                         let mut pubrec = PubRecPacket::new(packet_id);
                         pubrec.reason_code = ReasonCode::NotAuthorized;
-                        self.write_packet(Packet::PubRec(pubrec), writer).await?;
+                        self.write_packet(&Packet::PubRec(pubrec), writer)?;
                     }
-                    _ => {}
+                    QoS::AtMostOnce => {}
                 }
             }
             return Ok(());
@@ -655,14 +765,14 @@ impl WasmClientHandler {
                     QoS::AtLeastOnce => {
                         let mut puback = PubAckPacket::new(packet_id);
                         puback.reason_code = ReasonCode::QoSNotSupported;
-                        self.write_packet(Packet::PubAck(puback), writer).await?;
+                        self.write_packet(&Packet::PubAck(puback), writer)?;
                     }
                     QoS::ExactlyOnce => {
                         let mut pubrec = PubRecPacket::new(packet_id);
                         pubrec.reason_code = ReasonCode::QoSNotSupported;
-                        self.write_packet(Packet::PubRec(pubrec), writer).await?;
+                        self.write_packet(&Packet::PubRec(pubrec), writer)?;
                     }
-                    _ => {}
+                    QoS::AtMostOnce => {}
                 }
             }
             return Ok(());
@@ -680,14 +790,14 @@ impl WasmClientHandler {
                     QoS::AtLeastOnce => {
                         let mut puback = PubAckPacket::new(packet_id);
                         puback.reason_code = ReasonCode::QuotaExceeded;
-                        self.write_packet(Packet::PubAck(puback), writer).await?;
+                        self.write_packet(&Packet::PubAck(puback), writer)?;
                     }
                     QoS::ExactlyOnce => {
                         let mut pubrec = PubRecPacket::new(packet_id);
                         pubrec.reason_code = ReasonCode::QuotaExceeded;
-                        self.write_packet(Packet::PubRec(pubrec), writer).await?;
+                        self.write_packet(&Packet::PubRec(pubrec), writer)?;
                     }
-                    _ => {}
+                    QoS::AtMostOnce => {}
                 }
             }
             return Ok(());
@@ -700,27 +810,28 @@ impl WasmClientHandler {
             QoS::AtLeastOnce => {
                 self.router.route_message(&publish, Some(client_id)).await;
                 let puback = PubAckPacket::new(publish.packet_id.unwrap());
-                self.write_packet(Packet::PubAck(puback), writer).await?;
+                self.write_packet(&Packet::PubAck(puback), writer)?;
             }
             QoS::ExactlyOnce => {
                 let packet_id = publish.packet_id.unwrap();
                 self.inflight_publishes.insert(packet_id, publish);
                 let pubrec = PubRecPacket::new(packet_id);
-                self.write_packet(Packet::PubRec(pubrec), writer).await?;
+                self.write_packet(&Packet::PubRec(pubrec), writer)?;
             }
         }
 
         Ok(())
     }
 
-    async fn handle_puback(&mut self, _puback: PubAckPacket) -> Result<()> {
+    #[allow(clippy::unused_self, clippy::unnecessary_wraps)]
+    fn handle_puback(&self, _puback: PubAckPacket) -> Result<()> {
         Ok(())
     }
 
     #[allow(clippy::similar_names)]
-    async fn handle_pubrec(&mut self, pubrec: PubRecPacket, writer: &mut WasmWriter) -> Result<()> {
+    fn handle_pubrec(&self, pubrec: &PubRecPacket, writer: &mut WasmWriter) -> Result<()> {
         let pubrel = PubRelPacket::new(pubrec.packet_id);
-        self.write_packet(Packet::PubRel(pubrel), writer).await?;
+        self.write_packet(&Packet::PubRel(pubrel), writer)?;
         Ok(())
     }
 
@@ -731,19 +842,20 @@ impl WasmClientHandler {
         }
 
         let pubcomp = PubCompPacket::new(pubrel.packet_id);
-        self.write_packet(Packet::PubComp(pubcomp), writer).await?;
+        self.write_packet(&Packet::PubComp(pubcomp), writer)?;
         Ok(())
     }
 
-    async fn handle_pubcomp(&mut self, _pubcomp: PubCompPacket) -> Result<()> {
+    #[allow(clippy::unused_self, clippy::unnecessary_wraps)]
+    fn handle_pubcomp(&self, _pubcomp: PubCompPacket) -> Result<()> {
         Ok(())
     }
 
-    async fn handle_pingreq(&mut self, writer: &mut WasmWriter) -> Result<()> {
-        self.write_packet(Packet::PingResp, writer).await
+    fn handle_pingreq(&self, writer: &mut WasmWriter) -> Result<()> {
+        self.write_packet(&Packet::PingResp, writer)
     }
 
-    async fn handle_disconnect(&mut self, _disconnect: DisconnectPacket) -> Result<()> {
+    fn handle_disconnect(&mut self, _disconnect: DisconnectPacket) -> Result<()> {
         debug!("Client disconnected normally");
         self.normal_disconnect = true;
 
@@ -767,18 +879,14 @@ impl WasmClientHandler {
                         reason_code: ReasonCode::ProtocolError,
                         properties: mqtt5_protocol::protocol::v5::properties::Properties::default(),
                     };
-                    self.write_packet(Packet::Disconnect(disconnect), writer)
-                        .await?;
+                    self.write_packet(&Packet::Disconnect(disconnect), writer)?;
                     return Err(MqttError::ProtocolError(
                         "AUTH received outside of auth flow".to_string(),
                     ));
                 }
 
-                let auth_method = match self.auth_method.clone() {
-                    Some(m) => m,
-                    None => {
-                        return Err(MqttError::ProtocolError("No auth method set".to_string()));
-                    }
+                let Some(auth_method) = self.auth_method.clone() else {
+                    return Err(MqttError::ProtocolError("No auth method set".to_string()));
                 };
 
                 let packet_method = auth
@@ -795,8 +903,7 @@ impl WasmClientHandler {
                         reason_code: ReasonCode::ProtocolError,
                         properties: mqtt5_protocol::protocol::v5::properties::Properties::default(),
                     };
-                    self.write_packet(Packet::Disconnect(disconnect), writer)
-                        .await?;
+                    self.write_packet(&Packet::Disconnect(disconnect), writer)?;
                     return Err(MqttError::ProtocolError("AUTH method mismatch".to_string()));
                 }
 
@@ -821,27 +928,21 @@ impl WasmClientHandler {
                         reason_code: ReasonCode::ProtocolError,
                         properties: mqtt5_protocol::protocol::v5::properties::Properties::default(),
                     };
-                    self.write_packet(Packet::Disconnect(disconnect), writer)
-                        .await?;
+                    self.write_packet(&Packet::Disconnect(disconnect), writer)?;
                     return Err(MqttError::ProtocolError(
                         "Re-auth before initial auth".to_string(),
                     ));
                 }
 
-                let auth_method = match auth.properties.get_authentication_method() {
-                    Some(m) => m.clone(),
-                    None => {
-                        let disconnect = DisconnectPacket {
-                            reason_code: ReasonCode::ProtocolError,
-                            properties:
-                                mqtt5_protocol::protocol::v5::properties::Properties::default(),
-                        };
-                        self.write_packet(Packet::Disconnect(disconnect), writer)
-                            .await?;
-                        return Err(MqttError::ProtocolError(
-                            "Re-auth missing method".to_string(),
-                        ));
-                    }
+                let Some(auth_method) = auth.properties.get_authentication_method().cloned() else {
+                    let disconnect = DisconnectPacket {
+                        reason_code: ReasonCode::ProtocolError,
+                        properties: mqtt5_protocol::protocol::v5::properties::Properties::default(),
+                    };
+                    self.write_packet(&Packet::Disconnect(disconnect), writer)?;
+                    return Err(MqttError::ProtocolError(
+                        "Re-auth missing method".to_string(),
+                    ));
                 };
 
                 let auth_data = auth.properties.get_authentication_data();
@@ -862,7 +963,7 @@ impl WasmClientHandler {
                         if let Some(data) = result.auth_data {
                             response.properties.set_authentication_data(data.into());
                         }
-                        self.write_packet(Packet::Auth(response), writer).await?;
+                        self.write_packet(&Packet::Auth(response), writer)?;
                         Ok(())
                     }
                     EnhancedAuthStatus::Continue => {
@@ -873,7 +974,7 @@ impl WasmClientHandler {
                         if let Some(data) = result.auth_data {
                             response.properties.set_authentication_data(data.into());
                         }
-                        self.write_packet(Packet::Auth(response), writer).await?;
+                        self.write_packet(&Packet::Auth(response), writer)?;
                         Ok(())
                     }
                     EnhancedAuthStatus::Failed => {
@@ -883,8 +984,7 @@ impl WasmClientHandler {
                             properties:
                                 mqtt5_protocol::protocol::v5::properties::Properties::default(),
                         };
-                        self.write_packet(Packet::Disconnect(disconnect), writer)
-                            .await?;
+                        self.write_packet(&Packet::Disconnect(disconnect), writer)?;
                         Err(MqttError::AuthenticationFailed)
                     }
                 }
@@ -896,6 +996,7 @@ impl WasmClientHandler {
         }
     }
 
+    #[allow(clippy::cast_possible_truncation)]
     async fn process_enhanced_auth_result(
         &mut self,
         result: EnhancedAuthResult,
@@ -950,7 +1051,7 @@ impl WasmClientHandler {
                         self.config.shared_subscription_available,
                     );
 
-                    self.write_packet(Packet::ConnAck(connack), writer).await?;
+                    self.write_packet(&Packet::ConnAck(connack), writer)?;
 
                     if session_present {
                         self.deliver_queued_messages(&pending.connect.client_id, writer)
@@ -968,7 +1069,7 @@ impl WasmClientHandler {
                 if let Some(data) = result.auth_data {
                     auth_packet.properties.set_authentication_data(data.into());
                 }
-                self.write_packet(Packet::Auth(auth_packet), writer).await?;
+                self.write_packet(&Packet::Auth(auth_packet), writer)?;
                 Ok(())
             }
             EnhancedAuthStatus::Failed => {
@@ -977,7 +1078,7 @@ impl WasmClientHandler {
 
                 let mut connack = ConnAckPacket::new(false, result.reason_code);
                 connack.protocol_version = self.protocol_version;
-                self.write_packet(Packet::ConnAck(connack), writer).await?;
+                self.write_packet(&Packet::ConnAck(connack), writer)?;
                 Err(MqttError::AuthenticationFailed)
             }
         }
@@ -1016,21 +1117,18 @@ impl WasmClientHandler {
         }
     }
 
-    async fn send_publish(
-        &mut self,
-        publish: PublishPacket,
-        writer: &mut WasmWriter,
-    ) -> Result<()> {
-        self.write_packet(Packet::Publish(publish), writer).await
+    fn send_publish(&self, publish: PublishPacket, writer: &mut WasmWriter) -> Result<()> {
+        self.write_packet(&Packet::Publish(publish), writer)
     }
 
-    async fn write_packet(&self, packet: Packet, writer: &mut WasmWriter) -> Result<()> {
+    #[allow(clippy::unused_self)]
+    fn write_packet(&self, packet: &Packet, writer: &mut WasmWriter) -> Result<()> {
         use bytes::BytesMut;
         use mqtt5_protocol::packet::MqttPacket;
 
         let mut buf = BytesMut::new();
 
-        match &packet {
+        match packet {
             Packet::ConnAck(p) => p.encode(&mut buf)?,
             Packet::SubAck(p) => p.encode(&mut buf)?,
             Packet::UnsubAck(p) => p.encode(&mut buf)?,
@@ -1040,14 +1138,13 @@ impl WasmClientHandler {
             Packet::PubRel(p) => p.encode(&mut buf)?,
             Packet::PubComp(p) => p.encode(&mut buf)?,
             Packet::PingResp => {
-                mqtt5_protocol::packet::pingresp::PingRespPacket::default().encode(&mut buf)?
+                mqtt5_protocol::packet::pingresp::PingRespPacket::default().encode(&mut buf)?;
             }
             Packet::Disconnect(p) => p.encode(&mut buf)?,
             Packet::Auth(p) => p.encode(&mut buf)?,
             _ => {
                 return Err(MqttError::ProtocolError(format!(
-                    "Encoding not yet implemented for packet type: {:?}",
-                    packet
+                    "Encoding not yet implemented for packet type: {packet:?}"
                 )));
             }
         }
