@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{debug, warn};
+use tracing::debug;
 
 /// Message fingerprint for loop detection
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -56,7 +56,7 @@ impl LoopPrevention {
         if let Some((first_seen, already_warned)) = cache.get_mut(&fingerprint) {
             if first_seen.elapsed() < self.ttl {
                 if !*already_warned {
-                    warn!("Message loop detected for topic: {}", packet.topic_name);
+                    debug!("Message loop detected for topic: {}", packet.topic_name);
                     *already_warned = true;
                 }
                 return false;
