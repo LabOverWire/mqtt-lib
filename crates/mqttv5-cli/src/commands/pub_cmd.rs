@@ -502,6 +502,9 @@ pub async fn execute(mut cmd: PubCommand, verbose: bool, debug: bool) -> Result<
         if cmd.auto_reconnect {
             client
                 .on_connection_event(move |event| match event {
+                    ConnectionEvent::Connecting => {
+                        info!("Connecting to broker...");
+                    }
                     ConnectionEvent::Connected { session_present } => {
                         if session_present {
                             info!("✓ Reconnected (session present)");

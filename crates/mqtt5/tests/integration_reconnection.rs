@@ -29,6 +29,9 @@ async fn test_automatic_reconnection() {
 
     client
         .on_connection_event(move |event| match event {
+            ConnectionEvent::Connecting => {
+                println!("Connecting event");
+            }
             ConnectionEvent::Connected { .. } => {
                 println!("Connected event");
                 connected_clone.fetch_add(1, Ordering::SeqCst);

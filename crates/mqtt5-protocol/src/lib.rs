@@ -6,6 +6,7 @@ extern crate alloc;
 
 mod prelude;
 
+pub mod connection;
 pub mod constants;
 pub mod encoding;
 pub mod error;
@@ -43,4 +44,9 @@ pub use session::{
     ExpiringMessage, FlowControlConfig, FlowControlStats, LimitsConfig, LimitsManager,
     MessageQueue, QueueResult, QueueStats, QueuedMessage, Subscription, SubscriptionManager,
     TopicAliasManager,
+};
+
+pub use connection::{
+    ConnectionEvent, ConnectionInfo, ConnectionState, ConnectionStateMachine, DisconnectReason,
+    ReconnectConfig,
 };
