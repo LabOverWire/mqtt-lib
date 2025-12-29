@@ -1888,11 +1888,7 @@ impl MqttClient {
     /// # Errors
     ///
     /// Returns an error if the operation fails
-    async fn attempt_reconnection(
-        &self,
-        address: &str,
-        config: &ReconnectConfig,
-    ) -> Result<()> {
+    async fn attempt_reconnection(&self, address: &str, config: &ReconnectConfig) -> Result<()> {
         tracing::info!(
             address = %address,
             max_attempts = ?config.max_attempts,
@@ -1999,9 +1995,7 @@ impl MqttClient {
                     #[allow(clippy::cast_possible_truncation)]
                     {
                         delay = std::cmp::min(
-                            Duration::from_secs_f64(
-                                delay.as_secs_f64() * config.backoff_factor(),
-                            ),
+                            Duration::from_secs_f64(delay.as_secs_f64() * config.backoff_factor()),
                             config.max_delay,
                         );
                     }
