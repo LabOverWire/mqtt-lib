@@ -9,7 +9,7 @@ pub mod connection;
 pub mod loop_prevention;
 pub mod manager;
 
-pub use config::{BridgeConfig, BridgeDirection, TopicMapping};
+pub use config::{BridgeConfig, BridgeDirection, BridgeProtocol, TopicMapping};
 pub use connection::{BridgeConnection, ConnectedBroker};
 pub use loop_prevention::LoopPrevention;
 pub use manager::BridgeManager;

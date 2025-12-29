@@ -3,7 +3,9 @@
 //! Manages a single bridge connection to a remote broker using our existing
 //! `MqttClient` implementation.
 
-use crate::broker::bridge::{BridgeConfig, BridgeDirection, BridgeError, BridgeStats, Result};
+use crate::broker::bridge::{
+    BridgeConfig, BridgeDirection, BridgeError, BridgeProtocol, BridgeStats, Result,
+};
 use crate::broker::router::MessageRouter;
 use crate::client::MqttClient;
 use crate::packet::publish::PublishPacket;
@@ -313,6 +315,69 @@ impl BridgeConnection {
         ))
     }
 
+    /// Attempts to connect using QUIC to primary and backup brokers
+    async fn connect_quic(&self, options: &ConnectOptions, secure: bool) -> Result<ConnectedBroker> {
+        let scheme = if secure { "quics" } else { "quic" };
+        let connection_string = format!("{scheme}://{}", self.config.remote_address);
+
+        if !secure || self.config.insecure == Some(true) {
+            self.client.set_insecure_tls(true).await;
+        }
+
+        match Box::pin(
+            self.client
+                .connect_with_options(&connection_string, options.clone()),
+        )
+        .await
+        {
+            Ok(_) => {
+                info!(
+                    "Bridge '{}' connected to primary broker: {} (QUIC{})",
+                    self.config.name,
+                    self.config.remote_address,
+                    if secure { "S" } else { "" }
+                );
+                self.update_connected_stats(ConnectedBroker::Primary, &self.config.remote_address)
+                    .await;
+                return Ok(ConnectedBroker::Primary);
+            }
+            Err(e) => {
+                warn!("Failed to connect to primary broker via QUIC: {e}");
+                self.update_error_stats(e.to_string()).await;
+            }
+        }
+
+        for (idx, backup) in self.config.backup_brokers.iter().enumerate() {
+            let backup_connection_string = format!("{scheme}://{backup}");
+            match Box::pin(
+                self.client
+                    .connect_with_options(&backup_connection_string, options.clone()),
+            )
+            .await
+            {
+                Ok(_) => {
+                    info!(
+                        "Bridge '{}' connected to backup broker: {} (QUIC{})",
+                        self.config.name,
+                        backup,
+                        if secure { "S" } else { "" }
+                    );
+                    self.update_connected_stats(ConnectedBroker::Backup(idx), backup)
+                        .await;
+                    return Ok(ConnectedBroker::Backup(idx));
+                }
+                Err(e) => {
+                    warn!("Failed to connect to backup broker {} via QUIC: {}", backup, e);
+                    self.update_error_stats(e.to_string()).await;
+                }
+            }
+        }
+
+        Err(BridgeError::ConnectionFailed(
+            "Failed to connect to any broker via QUIC".to_string(),
+        ))
+    }
+
     /// Connects to the remote broker with failover support
     async fn connect(&self) -> Result<ConnectedBroker> {
         let mut stats = self.stats.write().await;
@@ -321,10 +386,17 @@ impl BridgeConnection {
 
         let options = self.build_connect_options();
 
-        let broker = if self.config.use_tls {
-            Box::pin(self.connect_tls(&options)).await?
-        } else {
-            Box::pin(self.connect_plain(&options)).await?
+        let broker = match self.config.protocol {
+            BridgeProtocol::Tcp => {
+                if self.config.use_tls {
+                    Box::pin(self.connect_tls(&options)).await?
+                } else {
+                    Box::pin(self.connect_plain(&options)).await?
+                }
+            }
+            BridgeProtocol::Tls => Box::pin(self.connect_tls(&options)).await?,
+            BridgeProtocol::Quic => Box::pin(self.connect_quic(&options, false)).await?,
+            BridgeProtocol::QuicSecure => Box::pin(self.connect_quic(&options, true)).await?,
         };
 
         if matches!(broker, ConnectedBroker::Backup(_)) && self.config.enable_failback {

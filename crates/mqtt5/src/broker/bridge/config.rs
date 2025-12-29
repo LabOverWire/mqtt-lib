@@ -23,7 +23,11 @@ pub struct BridgeConfig {
     /// Password for authentication (optional)
     pub password: Option<String>,
 
-    /// Whether to use TLS (optional)
+    /// Transport protocol to use for the bridge connection
+    #[serde(default)]
+    pub protocol: BridgeProtocol,
+
+    /// Whether to use TLS (optional, deprecated: use `protocol` instead)
     #[serde(default)]
     pub use_tls: bool,
 
@@ -141,6 +145,21 @@ pub enum BridgeDirection {
     Both,
 }
 
+/// Transport protocol for bridge connections
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum BridgeProtocol {
+    /// Plain TCP (mqtt://)
+    #[default]
+    Tcp,
+    /// TLS over TCP (mqtts://)
+    Tls,
+    /// QUIC without certificate verification (quic://)
+    Quic,
+    /// QUIC with certificate verification (quics://)
+    QuicSecure,
+}
+
 /// MQTT protocol version
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -204,6 +223,7 @@ impl BridgeConfig {
             client_id: format!("bridge-{name}"),
             username: None,
             password: None,
+            protocol: BridgeProtocol::Tcp,
             use_tls: false,
             tls_server_name: None,
             ca_file: None,
