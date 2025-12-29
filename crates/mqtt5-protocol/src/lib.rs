@@ -8,6 +8,7 @@ mod prelude;
 
 pub mod connection;
 pub mod constants;
+pub mod keepalive;
 pub mod encoding;
 pub mod error;
 pub mod flags;
@@ -50,3 +51,5 @@ pub use connection::{
     ConnectionEvent, ConnectionInfo, ConnectionState, ConnectionStateMachine, DisconnectReason,
     ReconnectConfig,
 };
+
+pub use keepalive::{calculate_ping_interval, is_keepalive_timeout, KeepaliveConfig};

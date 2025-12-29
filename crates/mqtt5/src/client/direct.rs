@@ -43,6 +43,32 @@ use std::time::Duration as StdDuration;
 #[cfg(feature = "opentelemetry")]
 use crate::telemetry::propagation;
 
+#[derive(Debug, Default)]
+pub(crate) struct KeepaliveState {
+    last_ping_sent: Option<tokio::time::Instant>,
+    last_pong_received: Option<tokio::time::Instant>,
+}
+
+impl KeepaliveState {
+    fn record_ping_sent(&mut self) {
+        self.last_ping_sent = Some(tokio::time::Instant::now());
+    }
+
+    fn record_pong_received(&mut self) {
+        self.last_pong_received = Some(tokio::time::Instant::now());
+    }
+
+    fn is_timeout(&self, timeout_duration: Duration) -> bool {
+        match (self.last_ping_sent, self.last_pong_received) {
+            (Some(sent_at), Some(received_at)) => {
+                sent_at > received_at && sent_at.elapsed() > timeout_duration
+            }
+            (Some(sent_at), None) => sent_at.elapsed() > timeout_duration,
+            _ => false,
+        }
+    }
+}
+
 enum UnifiedReaderInner {
     Tcp(OwnedReadHalf),
     Tls(TlsReadHalf),
@@ -161,6 +187,8 @@ pub struct DirectClientInner {
     pub auth_handler: Option<Arc<dyn AuthHandler>>,
     /// Authentication method used during connection
     pub auth_method: Option<String>,
+    /// Keepalive state for timeout detection
+    pub keepalive_state: Arc<RwLock<KeepaliveState>>,
 }
 
 impl DirectClientInner {
@@ -202,6 +230,7 @@ impl DirectClientInner {
             server_max_qos: Arc::new(RwLock::new(None)),
             auth_handler: None,
             auth_method,
+            keepalive_state: Arc::new(RwLock::new(KeepaliveState::default())),
         }
     }
 
@@ -1190,6 +1219,7 @@ impl DirectClientInner {
         let connected = self.connected.clone();
 
         let writer_for_reader = writer_for_keepalive.clone();
+        let keepalive_state = self.keepalive_state.clone();
 
         let ctx = PacketReaderContext {
             session: reader_session,
@@ -1203,6 +1233,7 @@ impl DirectClientInner {
             protocol_version: self.options.protocol_version.as_u8(),
             auth_handler: self.auth_handler.clone(),
             auth_method: self.auth_method.clone(),
+            keepalive_state: keepalive_state.clone(),
         };
 
         let ctx_for_packet_reader = ctx.clone();
@@ -1218,9 +1249,16 @@ impl DirectClientInner {
             tracing::debug!("💓 KEEPALIVE - Disabled (interval is zero)");
         } else {
             let keepalive_writer = writer_for_keepalive;
+            let keepalive_connected = self.connected.clone();
             self.keepalive_handle = Some(tokio::spawn(async move {
                 tracing::debug!("💓 KEEPALIVE - Task starting");
-                keepalive_task_with_writer(keepalive_writer, keepalive_interval).await;
+                keepalive_task_with_writer(
+                    keepalive_writer,
+                    keepalive_interval,
+                    keepalive_state,
+                    keepalive_connected,
+                )
+                .await;
                 tracing::debug!("💓 KEEPALIVE - Task exited");
             }));
         }
@@ -1317,6 +1355,7 @@ struct PacketReaderContext {
     protocol_version: u8,
     auth_handler: Option<Arc<dyn AuthHandler>>,
     auth_method: Option<String>,
+    keepalive_state: Arc<RwLock<KeepaliveState>>,
 }
 
 /// Packet reader task that handles response channels
@@ -1389,6 +1428,7 @@ async fn packet_reader_task_with_responses(mut reader: UnifiedReader, ctx: Packe
                     &ctx.session,
                     &ctx.callback_manager,
                     None,
+                    &ctx.keepalive_state,
                 )
                 .await
                 {
@@ -1461,26 +1501,34 @@ async fn handle_auth_packet(auth: AuthPacket, ctx: &PacketReaderContext) -> Resu
     Ok(())
 }
 
-/// Keepalive task that uses the write half
 async fn keepalive_task_with_writer(
     writer: Arc<tokio::sync::Mutex<UnifiedWriter>>,
     keepalive_interval: Duration,
+    keepalive_state: Arc<RwLock<KeepaliveState>>,
+    connected: Arc<AtomicBool>,
 ) {
-    // Send pings at 75% of the keepalive interval to ensure we stay well within the timeout
-    let ping_millis = keepalive_interval.as_millis() * 3 / 4;
-    // Saturate at u64::MAX if the value is too large (unlikely in practice)
-    let ping_millis_u64 = u64::try_from(ping_millis).unwrap_or(u64::MAX);
-    let ping_interval = Duration::from_millis(ping_millis_u64);
+    let config = mqtt5_protocol::KeepaliveConfig::default();
+    let ping_interval = config.ping_interval(keepalive_interval);
+    let timeout_duration = config.timeout_duration(keepalive_interval);
     let mut interval = tokio::time::interval(ping_interval);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-    // Skip the first immediate tick
     interval.tick().await;
 
     loop {
         interval.tick().await;
 
-        // Send PINGREQ directly using writer
+        {
+            let state = keepalive_state.read().await;
+            if state.is_timeout(timeout_duration) {
+                tracing::error!("Keepalive timeout - no PINGRESP received");
+                connected.store(false, Ordering::SeqCst);
+                break;
+            }
+        }
+
+        keepalive_state.write().await.record_ping_sent();
+
         if let Err(e) = writer.lock().await.write_packet(Packet::PingReq).await {
             tracing::error!("Error sending PINGREQ: {e}");
             break;
@@ -1633,6 +1681,7 @@ async fn quic_stream_reader_task(
                     &ctx.session,
                     &ctx.callback_manager,
                     flow_id,
+                    &ctx.keepalive_state,
                 )
                 .await
                 {
@@ -1655,13 +1704,14 @@ async fn handle_incoming_packet_with_writer(
     session: &Arc<RwLock<SessionState>>,
     callback_manager: &Arc<CallbackManager>,
     flow_id: Option<crate::transport::flow::FlowId>,
+    keepalive_state: &Arc<RwLock<KeepaliveState>>,
 ) -> Result<()> {
     match packet {
         Packet::Publish(publish) => {
             handle_publish_with_ack(publish, writer, session, callback_manager, flow_id).await
         }
         Packet::PingResp => {
-            // PINGRESP received, connection is alive
+            keepalive_state.write().await.record_pong_received();
             Ok(())
         }
         Packet::PubRec(pubrec) => {

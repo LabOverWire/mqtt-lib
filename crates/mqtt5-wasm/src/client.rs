@@ -12,6 +12,8 @@ use mqtt5_protocol::packet::{MqttPacket, Packet};
 use mqtt5_protocol::packet_id::PacketIdGenerator;
 use mqtt5_protocol::protocol::v5::properties::Properties;
 use mqtt5_protocol::strip_shared_subscription_prefix;
+use mqtt5_protocol::time::Duration;
+use mqtt5_protocol::KeepaliveConfig;
 use mqtt5_protocol::QoS;
 use mqtt5_protocol::Transport;
 use std::cell::RefCell;
@@ -92,7 +94,6 @@ impl ClientState {
             auth_method: None,
         }
     }
-
 }
 
 fn encode_packet(packet: &Packet, buf: &mut BytesMut) -> mqtt5_protocol::error::Result<()> {
@@ -178,13 +179,14 @@ impl WasmMqttClient {
 
     fn spawn_keepalive_task(&self) {
         let state = Rc::clone(&self.state);
+        let keepalive_config = KeepaliveConfig::conservative();
 
         spawn_local(async move {
             loop {
-                let (keep_alive_ms, connected) = if let Ok(state_ref) = state.try_borrow() {
-                    let ms = f64::from(state_ref.keep_alive) * 1000.0;
+                let (keepalive_duration, connected) = if let Ok(state_ref) = state.try_borrow() {
+                    let duration = Duration::from_secs(u64::from(state_ref.keep_alive));
                     let conn = state_ref.connected;
-                    (ms, conn)
+                    (duration, conn)
                 } else {
                     sleep_ms(100).await;
                     continue;
@@ -194,9 +196,14 @@ impl WasmMqttClient {
                     break;
                 }
 
-                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                let sleep_duration = (keep_alive_ms / 2.0) as u32;
+                let ping_interval = keepalive_config.ping_interval(keepalive_duration);
+                #[allow(clippy::cast_possible_truncation)]
+                let sleep_duration = ping_interval.as_millis() as u32;
                 sleep_ms(sleep_duration).await;
+
+                let timeout_duration = keepalive_config.timeout_duration(keepalive_duration);
+                #[allow(clippy::cast_precision_loss)]
+                let timeout_ms = timeout_duration.as_millis() as f64;
 
                 let should_disconnect = if let Ok(state_ref) = state.try_borrow() {
                     if !state_ref.connected {
@@ -206,14 +213,10 @@ impl WasmMqttClient {
                     let now = js_sys::Date::now();
 
                     if let Some(last_ping) = state_ref.last_ping_sent {
-                        if let Some(last_pong) = state_ref.last_pong_received {
-                            if last_ping > last_pong && (now - last_ping) > keep_alive_ms * 1.5 {
-                                web_sys::console::error_1(&"Keepalive timeout".into());
-                                true
-                            } else {
-                                false
-                            }
-                        } else if (now - last_ping) > keep_alive_ms * 1.5 {
+                        let pong_received = state_ref
+                            .last_pong_received
+                            .is_some_and(|pong| pong > last_ping);
+                        if !pong_received && (now - last_ping) > timeout_ms {
                             web_sys::console::error_1(&"Keepalive timeout".into());
                             true
                         } else {
@@ -983,7 +986,7 @@ impl WasmMqttClient {
         } else {
             Some(loop {
                 match self.state.try_borrow_mut() {
-                    Ok(mut state) => break state.packet_id.next(),
+                    Ok(state) => break state.packet_id.next(),
                     Err(_) => {
                         sleep_ms(10).await;
                     }
@@ -1070,7 +1073,7 @@ impl WasmMqttClient {
 
         let packet_id = loop {
             match self.state.try_borrow_mut() {
-                Ok(mut state) => break state.packet_id.next(),
+                Ok(state) => break state.packet_id.next(),
                 Err(_) => {
                     sleep_ms(10).await;
                 }
@@ -1145,7 +1148,7 @@ impl WasmMqttClient {
 
         let packet_id = loop {
             match self.state.try_borrow_mut() {
-                Ok(mut state) => break state.packet_id.next(),
+                Ok(state) => break state.packet_id.next(),
                 Err(_) => {
                     sleep_ms(10).await;
                 }
@@ -1216,7 +1219,7 @@ impl WasmMqttClient {
 
         let packet_id = loop {
             match self.state.try_borrow_mut() {
-                Ok(mut state) => break state.packet_id.next(),
+                Ok(state) => break state.packet_id.next(),
                 Err(_) => {
                     sleep_ms(10).await;
                 }
@@ -1278,7 +1281,7 @@ impl WasmMqttClient {
 
         let packet_id = loop {
             match self.state.try_borrow_mut() {
-                Ok(mut state) => break state.packet_id.next(),
+                Ok(state) => break state.packet_id.next(),
                 Err(_) => {
                     sleep_ms(10).await;
                 }
@@ -1381,7 +1384,7 @@ impl WasmMqttClient {
 
         let packet_id = loop {
             match self.state.try_borrow_mut() {
-                Ok(mut state) => break state.packet_id.next(),
+                Ok(state) => break state.packet_id.next(),
                 Err(_) => {
                     sleep_ms(10).await;
                 }
@@ -1453,7 +1456,7 @@ impl WasmMqttClient {
 
         let packet_id = loop {
             match self.state.try_borrow_mut() {
-                Ok(mut state) => break state.packet_id.next(),
+                Ok(state) => break state.packet_id.next(),
                 Err(_) => {
                     sleep_ms(10).await;
                 }
@@ -1638,7 +1641,7 @@ impl WasmMqttClient {
 
         let packet_id = loop {
             match self.state.try_borrow_mut() {
-                Ok(mut state) => break state.packet_id.next(),
+                Ok(state) => break state.packet_id.next(),
                 Err(_) => {
                     sleep_ms(10).await;
                 }
@@ -1720,7 +1723,7 @@ impl WasmMqttClient {
         } else {
             Some(loop {
                 match self.state.try_borrow_mut() {
-                    Ok(mut state) => break state.packet_id.next(),
+                    Ok(state) => break state.packet_id.next(),
                     Err(_) => {
                         sleep_ms(10).await;
                     }

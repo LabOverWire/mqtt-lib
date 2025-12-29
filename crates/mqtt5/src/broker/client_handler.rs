@@ -31,6 +31,7 @@ use crate::packet::Packet;
 use crate::protocol::v5::reason_codes::ReasonCode;
 use crate::time::Duration;
 use crate::transport::packet_io::{encode_packet_to_buffer, read_packet_reusing_buffer, PacketIo};
+use mqtt5_protocol::KeepaliveConfig;
 use crate::types::ProtocolVersion;
 use crate::QoS;
 use crate::Transport;
@@ -502,7 +503,8 @@ impl ClientHandler {
                 // Keep-alive check
                 _ = keep_alive_interval.tick() => {
                     let elapsed = last_packet_time.elapsed();
-                    if elapsed > self.keep_alive + Duration::from_secs(self.keep_alive.as_secs() / 2) {
+                    let timeout_duration = KeepaliveConfig::default().timeout_duration(self.keep_alive);
+                    if elapsed > timeout_duration {
                         warn!("Keep-alive timeout");
                         return Err(MqttError::KeepAliveTimeout);
                     }
