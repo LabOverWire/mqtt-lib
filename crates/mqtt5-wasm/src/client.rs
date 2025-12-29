@@ -9,6 +9,7 @@ use mqtt5_protocol::packet::publish::PublishPacket;
 use mqtt5_protocol::packet::subscribe::SubscribePacket;
 use mqtt5_protocol::packet::unsubscribe::UnsubscribePacket;
 use mqtt5_protocol::packet::{MqttPacket, Packet};
+use mqtt5_protocol::packet_id::PacketIdGenerator;
 use mqtt5_protocol::protocol::v5::properties::Properties;
 use mqtt5_protocol::strip_shared_subscription_prefix;
 use mqtt5_protocol::QoS;
@@ -46,7 +47,7 @@ type RustCallback = Rc<dyn Fn(RustMessage)>;
 struct ClientState {
     client_id: String,
     writer: Option<Rc<RefCell<WasmWriter>>>,
-    packet_id: u16,
+    packet_id: PacketIdGenerator,
     connected: bool,
     protocol_version: u8,
     subscriptions: HashMap<String, js_sys::Function>,
@@ -71,7 +72,7 @@ impl ClientState {
         Self {
             client_id,
             writer: None,
-            packet_id: 0,
+            packet_id: PacketIdGenerator::new(),
             connected: false,
             protocol_version: 5,
             subscriptions: HashMap::new(),
@@ -92,13 +93,6 @@ impl ClientState {
         }
     }
 
-    fn next_packet_id(&mut self) -> u16 {
-        self.packet_id = self.packet_id.wrapping_add(1);
-        if self.packet_id == 0 {
-            self.packet_id = 1;
-        }
-        self.packet_id
-    }
 }
 
 fn encode_packet(packet: &Packet, buf: &mut BytesMut) -> mqtt5_protocol::error::Result<()> {
@@ -989,7 +983,7 @@ impl WasmMqttClient {
         } else {
             Some(loop {
                 match self.state.try_borrow_mut() {
-                    Ok(mut state) => break state.next_packet_id(),
+                    Ok(mut state) => break state.packet_id.next(),
                     Err(_) => {
                         sleep_ms(10).await;
                     }
@@ -1076,7 +1070,7 @@ impl WasmMqttClient {
 
         let packet_id = loop {
             match self.state.try_borrow_mut() {
-                Ok(mut state) => break state.next_packet_id(),
+                Ok(mut state) => break state.packet_id.next(),
                 Err(_) => {
                     sleep_ms(10).await;
                 }
@@ -1151,7 +1145,7 @@ impl WasmMqttClient {
 
         let packet_id = loop {
             match self.state.try_borrow_mut() {
-                Ok(mut state) => break state.next_packet_id(),
+                Ok(mut state) => break state.packet_id.next(),
                 Err(_) => {
                     sleep_ms(10).await;
                 }
@@ -1222,7 +1216,7 @@ impl WasmMqttClient {
 
         let packet_id = loop {
             match self.state.try_borrow_mut() {
-                Ok(mut state) => break state.next_packet_id(),
+                Ok(mut state) => break state.packet_id.next(),
                 Err(_) => {
                     sleep_ms(10).await;
                 }
@@ -1284,7 +1278,7 @@ impl WasmMqttClient {
 
         let packet_id = loop {
             match self.state.try_borrow_mut() {
-                Ok(mut state) => break state.next_packet_id(),
+                Ok(mut state) => break state.packet_id.next(),
                 Err(_) => {
                     sleep_ms(10).await;
                 }
@@ -1387,7 +1381,7 @@ impl WasmMqttClient {
 
         let packet_id = loop {
             match self.state.try_borrow_mut() {
-                Ok(mut state) => break state.next_packet_id(),
+                Ok(mut state) => break state.packet_id.next(),
                 Err(_) => {
                     sleep_ms(10).await;
                 }
@@ -1459,7 +1453,7 @@ impl WasmMqttClient {
 
         let packet_id = loop {
             match self.state.try_borrow_mut() {
-                Ok(mut state) => break state.next_packet_id(),
+                Ok(mut state) => break state.packet_id.next(),
                 Err(_) => {
                     sleep_ms(10).await;
                 }
@@ -1644,7 +1638,7 @@ impl WasmMqttClient {
 
         let packet_id = loop {
             match self.state.try_borrow_mut() {
-                Ok(mut state) => break state.next_packet_id(),
+                Ok(mut state) => break state.packet_id.next(),
                 Err(_) => {
                     sleep_ms(10).await;
                 }
@@ -1726,7 +1720,7 @@ impl WasmMqttClient {
         } else {
             Some(loop {
                 match self.state.try_borrow_mut() {
-                    Ok(mut state) => break state.next_packet_id(),
+                    Ok(mut state) => break state.packet_id.next(),
                     Err(_) => {
                         sleep_ms(10).await;
                     }

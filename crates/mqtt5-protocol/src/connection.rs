@@ -8,7 +8,9 @@ pub enum ConnectionState {
     Disconnected,
     Connecting,
     Connected,
-    Reconnecting { attempt: u32 },
+    Reconnecting {
+        attempt: u32,
+    },
 }
 
 impl ConnectionState {
