@@ -28,6 +28,7 @@ use crate::packet::subscribe::SubscribePacket;
 use crate::packet::unsuback::UnsubAckPacket;
 use crate::packet::unsubscribe::UnsubscribePacket;
 use crate::packet::Packet;
+use crate::protocol::v5::properties::{PropertyId, PropertyValue};
 use crate::protocol::v5::reason_codes::ReasonCode;
 use crate::time::Duration;
 use crate::transport::packet_io::{encode_packet_to_buffer, read_packet_reusing_buffer, PacketIo};
@@ -1259,6 +1260,28 @@ impl ClientHandler {
         }
 
         if let Some(ref handler) = self.config.event_handler {
+            let response_topic = publish
+                .properties
+                .get(PropertyId::ResponseTopic)
+                .and_then(|v| {
+                    if let PropertyValue::Utf8String(s) = v {
+                        Some(Arc::from(s.as_str()))
+                    } else {
+                        None
+                    }
+                });
+
+            let correlation_data = publish
+                .properties
+                .get(PropertyId::CorrelationData)
+                .and_then(|v| {
+                    if let PropertyValue::BinaryData(b) = v {
+                        Some(b.clone())
+                    } else {
+                        None
+                    }
+                });
+
             let event = ClientPublishEvent {
                 client_id: client_id.clone().into(),
                 topic: publish.topic_name.clone().into(),
@@ -1266,6 +1289,8 @@ impl ClientHandler {
                 qos: publish.qos,
                 retain: publish.retain,
                 packet_id: publish.packet_id,
+                response_topic,
+                correlation_data,
             };
             handler.on_client_publish(event).await;
         }

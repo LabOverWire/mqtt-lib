@@ -87,6 +87,8 @@ pub struct ClientPublishEvent {
     pub qos: QoS,
     pub retain: bool,
     pub packet_id: Option<u16>,
+    pub response_topic: Option<Arc<str>>,
+    pub correlation_data: Option<Bytes>,
 }
 
 #[derive(Debug, Clone)]
