@@ -21,7 +21,7 @@
 
 ```toml
 [dependencies]
-mqtt5 = "0.16"
+mqtt5 = "0.17"
 ```
 
 ### CLI Tool
@@ -492,10 +492,10 @@ The `mqtt5-protocol` crate supports `no_std` environments for embedded systems.
 
 ```toml
 [dependencies]
-mqtt5-protocol = { version = "0.6", default-features = false }
+mqtt5-protocol = { version = "0.8", default-features = false }
 
 # For single-core MCUs (more efficient atomics)
-mqtt5-protocol = { version = "0.6", default-features = false, features = ["embedded-single-core"] }
+mqtt5-protocol = { version = "0.8", default-features = false, features = ["embedded-single-core"] }
 ```
 
 ### Time Provider
@@ -653,6 +653,13 @@ impl BrokerEventHandler for MetricsHandler {
     ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
             println!("Message published to {}: {} bytes", event.topic, event.payload.len());
+            // MQTT 5.0 request/response support
+            if let Some(response_topic) = &event.response_topic {
+                println!("  Response topic: {response_topic}");
+            }
+            if let Some(correlation_data) = &event.correlation_data {
+                println!("  Correlation data: {} bytes", correlation_data.len());
+            }
         })
     }
 
@@ -671,6 +678,8 @@ let config = BrokerConfig::default()
 ```
 
 Available hooks: `on_client_connect`, `on_client_subscribe`, `on_client_unsubscribe`, `on_client_publish`, `on_client_disconnect`, `on_retained_set`, `on_message_delivered`.
+
+The `ClientPublishEvent` includes MQTT 5.0 request/response fields (`response_topic`, `correlation_data`) enabling event handlers to see where clients want responses sent and echo back correlation data.
 
 ## Testing Support
 
@@ -748,7 +757,7 @@ Distributed tracing with OpenTelemetry support:
 
 ```toml
 [dependencies]
-mqtt5 = { version = "0.15", features = ["opentelemetry"] }
+mqtt5 = { version = "0.17", features = ["opentelemetry"] }
 ```
 
 ### Features

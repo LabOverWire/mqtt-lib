@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] - Protocol Unification
+
+### Added
+
+- **MQTT 5.0 request/response support** in `ClientPublishEvent`
+  - `response_topic` field exposed for request/response patterns
+  - `correlation_data` field exposed for correlating requests with responses
+  - Enables server-side request/response handling via broker event hooks
+
+- **Shared error classification** in mqtt5-protocol crate
+  - Unified `ErrorClassification` trait for categorizing connection errors
+  - `classify_error()` function for determining retry behavior
+  - Shared between mqtt5 and mqtt5-wasm crates
+
+- **Shared keepalive logic** in mqtt5-protocol crate
+  - `KeepaliveConfig` for configurable keepalive timing
+  - `KeepaliveTracker` for timeout detection
+  - Unified keepalive behavior across native and WASM clients
+
+### Changed
+
+- **ReconnectConfig unified** to use mqtt5-protocol crate
+  - Moved reconnection configuration to shared protocol crate
+  - Consistent reconnection behavior across platforms
+
+- **PacketIdGenerator** in mqtt5-wasm now uses mqtt5-protocol implementation
+  - Eliminates duplicate packet ID generation logic
+  - Ensures consistent packet ID handling across all platforms
+
 ## [0.16.3] - 2025-12-27
 
 ### Changed
