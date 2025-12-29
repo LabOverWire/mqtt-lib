@@ -45,7 +45,9 @@ pub use auth_handler::{AuthHandler, AuthResponse};
 pub use auth_handlers::{JwtAuthHandler, PlainAuthHandler, ScramSha256AuthHandler};
 
 pub use self::connection::{ConnectionEvent, DisconnectReason, ReconnectConfig};
-pub use self::error_recovery::{ErrorCallback, ErrorRecoveryConfig, RecoverableError, RetryState};
+pub use self::error_recovery::{
+    is_recoverable, retry_delay, ErrorCallback, ErrorRecoveryConfig, RecoverableError, RetryState,
+};
 pub use self::mock::{MockCall, MockMqttClient};
 pub use self::r#trait::MqttClientTrait;
 
@@ -474,14 +476,10 @@ impl MqttClient {
             // For initial connection failures, don't trigger disconnect events
             // Only connections that were previously established should trigger disconnect events
 
-            // Check if this error should trigger automatic reconnection
             let error_recovery_config =
                 crate::client::error_recovery::ErrorRecoveryConfig::default();
             if let Some(_recoverable_error) =
-                crate::client::error_recovery::RecoverableError::is_recoverable(
-                    error,
-                    &error_recovery_config,
-                )
+                crate::client::error_recovery::is_recoverable(error, &error_recovery_config)
             {
                 // This is a recoverable error and automatic reconnection is enabled
                 if options.reconnect_config.enabled {

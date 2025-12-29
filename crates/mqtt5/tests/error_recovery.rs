@@ -1,4 +1,4 @@
-use mqtt5::client::{ErrorRecoveryConfig, RecoverableError};
+use mqtt5::client::{is_recoverable, retry_delay, ErrorRecoveryConfig, RecoverableError};
 use mqtt5::time::Duration;
 use mqtt5::types::ReasonCode;
 use mqtt5::{MqttClient, MqttError};
@@ -64,41 +64,35 @@ async fn test_error_recovery_config() {
 async fn test_recoverable_error_classification() {
     let config = ErrorRecoveryConfig::default();
 
-    // Network errors should be recoverable
     let error = MqttError::ConnectionError("Connection refused".to_string());
     assert_eq!(
-        RecoverableError::is_recoverable(&error, &config),
+        is_recoverable(&error, &config),
         Some(RecoverableError::NetworkError)
     );
 
-    // Quota exceeded should be recoverable
     let error = MqttError::ConnectionRefused(ReasonCode::QuotaExceeded);
     assert_eq!(
-        RecoverableError::is_recoverable(&error, &config),
+        is_recoverable(&error, &config),
         Some(RecoverableError::QuotaExceeded)
     );
 
-    // Flow control exceeded should be recoverable
     let error = MqttError::FlowControlExceeded;
     assert_eq!(
-        RecoverableError::is_recoverable(&error, &config),
+        is_recoverable(&error, &config),
         Some(RecoverableError::FlowControlLimited)
     );
 
-    // Packet ID exhausted should be recoverable
     let error = MqttError::PacketIdExhausted;
     assert_eq!(
-        RecoverableError::is_recoverable(&error, &config),
+        is_recoverable(&error, &config),
         Some(RecoverableError::PacketIdExhausted)
     );
 
-    // Protocol errors should not be recoverable
     let error = MqttError::ProtocolError("Invalid packet".to_string());
-    assert!(RecoverableError::is_recoverable(&error, &config).is_none());
+    assert!(is_recoverable(&error, &config).is_none());
 
-    // Authentication errors should not be recoverable by default
     let error = MqttError::AuthenticationFailed;
-    assert!(RecoverableError::is_recoverable(&error, &config).is_none());
+    assert!(is_recoverable(&error, &config).is_none());
 }
 
 #[tokio::test]
@@ -126,19 +120,16 @@ async fn test_disable_auto_retry() {
 async fn test_recoverable_errors_configuration() {
     let mut config = ErrorRecoveryConfig::default();
 
-    // Remove NetworkError from recoverable errors
     config
         .recoverable_errors
         .retain(|&e| e != RecoverableError::NetworkError);
 
-    // Network error should no longer be recoverable
     let error = MqttError::ConnectionError("Connection refused".to_string());
-    assert!(RecoverableError::is_recoverable(&error, &config).is_none());
+    assert!(is_recoverable(&error, &config).is_none());
 
-    // But quota exceeded should still be recoverable
     let error = MqttError::ConnectionRefused(ReasonCode::QuotaExceeded);
     assert_eq!(
-        RecoverableError::is_recoverable(&error, &config),
+        is_recoverable(&error, &config),
         Some(RecoverableError::QuotaExceeded)
     );
 }
@@ -152,45 +143,41 @@ async fn test_retry_delay_calculation() {
         ..Default::default()
     };
 
-    // Network error delays
-    let error_type = RecoverableError::NetworkError;
     assert_eq!(
-        error_type.retry_delay(0, &config),
+        retry_delay(RecoverableError::NetworkError, 0, &config),
         Duration::from_millis(100)
     );
     assert_eq!(
-        error_type.retry_delay(1, &config),
+        retry_delay(RecoverableError::NetworkError, 1, &config),
         Duration::from_millis(200)
     );
     assert_eq!(
-        error_type.retry_delay(2, &config),
+        retry_delay(RecoverableError::NetworkError, 2, &config),
         Duration::from_millis(400)
     );
 
-    // Quota exceeded should have longer initial delay
-    let error_type = RecoverableError::QuotaExceeded;
     assert_eq!(
-        error_type.retry_delay(0, &config),
+        retry_delay(RecoverableError::QuotaExceeded, 0, &config),
         Duration::from_millis(1000)
     );
     assert_eq!(
-        error_type.retry_delay(1, &config),
+        retry_delay(RecoverableError::QuotaExceeded, 1, &config),
         Duration::from_millis(2000)
     );
 
-    // Flow control should have 2x initial delay
-    let error_type = RecoverableError::FlowControlLimited;
     assert_eq!(
-        error_type.retry_delay(0, &config),
+        retry_delay(RecoverableError::FlowControlLimited, 0, &config),
         Duration::from_millis(200)
     );
     assert_eq!(
-        error_type.retry_delay(1, &config),
+        retry_delay(RecoverableError::FlowControlLimited, 1, &config),
         Duration::from_millis(400)
     );
 
-    // Should be capped at max_retry_delay
-    assert_eq!(error_type.retry_delay(20, &config), Duration::from_secs(10));
+    assert_eq!(
+        retry_delay(RecoverableError::FlowControlLimited, 20, &config),
+        Duration::from_secs(10)
+    );
 }
 
 #[tokio::test]
@@ -247,15 +234,13 @@ async fn test_publish_with_retry_disabled() {
 async fn test_custom_recoverable_errors() {
     let mut config = ErrorRecoveryConfig::default();
 
-    // Add SessionTakenOver as recoverable
     config
         .recoverable_errors
         .push(RecoverableError::SessionTakenOver);
 
-    // Session taken over should now be recoverable
     let error = MqttError::ConnectionRefused(ReasonCode::SessionTakenOver);
     assert_eq!(
-        RecoverableError::is_recoverable(&error, &config),
+        is_recoverable(&error, &config),
         Some(RecoverableError::SessionTakenOver)
     );
 }

@@ -8,10 +8,11 @@ mod prelude;
 
 pub mod connection;
 pub mod constants;
-pub mod keepalive;
 pub mod encoding;
 pub mod error;
+pub mod error_classification;
 pub mod flags;
+pub mod keepalive;
 pub mod packet;
 pub mod packet_id;
 pub mod protocol;
@@ -53,3 +54,5 @@ pub use connection::{
 };
 
 pub use keepalive::{calculate_ping_interval, is_keepalive_timeout, KeepaliveConfig};
+
+pub use error_classification::RecoverableError;

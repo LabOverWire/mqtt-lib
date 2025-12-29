@@ -150,6 +150,11 @@ mod tests {
     fn test_is_keepalive_timeout_not_expired() {
         let keepalive = Duration::from_secs(60);
         let time_since_ping = Duration::from_secs(80);
-        assert!(!is_keepalive_timeout(time_since_ping, false, keepalive, 150));
+        assert!(!is_keepalive_timeout(
+            time_since_ping,
+            false,
+            keepalive,
+            150
+        ));
     }
 }
