@@ -3,27 +3,7 @@ use mqtt5_protocol::time::Duration;
 use std::ops::{Deref, DerefMut};
 
 pub use mqtt5_protocol::ReasonCode;
-
-#[derive(Debug, Clone)]
-pub struct ReconnectConfig {
-    pub enabled: bool,
-    pub initial_delay: Duration,
-    pub max_delay: Duration,
-    pub max_attempts: u32,
-    pub backoff_multiplier: f32,
-}
-
-impl Default for ReconnectConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            initial_delay: Duration::from_secs(1),
-            max_delay: Duration::from_secs(60),
-            max_attempts: 0,
-            backoff_multiplier: 2.0,
-        }
-    }
-}
+pub use mqtt5_protocol::ReconnectConfig;
 
 #[derive(Debug, Clone, Default)]
 pub struct ConnectOptions {
@@ -97,7 +77,7 @@ impl ConnectOptions {
 
     #[must_use]
     pub fn with_max_reconnect_attempts(mut self, attempts: u32) -> Self {
-        self.reconnect_config.max_attempts = attempts;
+        self.reconnect_config.max_attempts = Some(attempts);
         self
     }
 

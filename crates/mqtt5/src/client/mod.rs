@@ -1891,11 +1891,11 @@ impl MqttClient {
     async fn attempt_reconnection(
         &self,
         address: &str,
-        config: &crate::types::ReconnectConfig,
+        config: &ReconnectConfig,
     ) -> Result<()> {
         tracing::info!(
             address = %address,
-            max_attempts = config.max_attempts,
+            max_attempts = ?config.max_attempts,
             initial_delay = ?config.initial_delay,
             "🔄 RECONNECTION - Starting reconnection loop"
         );
@@ -1920,21 +1920,23 @@ impl MqttClient {
 
             tracing::info!(
                 attempt = attempt,
-                max_attempts = config.max_attempts,
+                max_attempts = ?config.max_attempts,
                 delay = ?delay,
                 "🔄 RECONNECTION - Attempting reconnection #{}", attempt
             );
 
-            // Check max attempts
-            if config.max_attempts > 0 && attempt > config.max_attempts {
-                tracing::error!(
-                    attempt = attempt,
-                    max_attempts = config.max_attempts,
-                    "🔄 RECONNECTION - Max attempts exceeded"
-                );
-                return Err(MqttError::ConnectionError(
-                    "Max reconnection attempts exceeded".to_string(),
-                ));
+            // Check max attempts (None means unlimited)
+            if let Some(max) = config.max_attempts {
+                if attempt > max {
+                    tracing::error!(
+                        attempt = attempt,
+                        max_attempts = max,
+                        "🔄 RECONNECTION - Max attempts exceeded"
+                    );
+                    return Err(MqttError::ConnectionError(
+                        "Max reconnection attempts exceeded".to_string(),
+                    ));
+                }
             }
 
             // Trigger reconnecting event
@@ -1994,10 +1996,15 @@ impl MqttClient {
                     tracing::warn!("Reconnection attempt {} failed: {}", attempt, e);
 
                     // Calculate next delay with exponential backoff
-                    delay = std::cmp::min(
-                        Duration::from_secs_f32(delay.as_secs_f32() * config.backoff_multiplier),
-                        config.max_delay,
-                    );
+                    #[allow(clippy::cast_possible_truncation)]
+                    {
+                        delay = std::cmp::min(
+                            Duration::from_secs_f64(
+                                delay.as_secs_f64() * config.backoff_factor(),
+                            ),
+                            config.max_delay,
+                        );
+                    }
                 }
             }
         }
