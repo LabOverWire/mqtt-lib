@@ -316,7 +316,11 @@ impl BridgeConnection {
     }
 
     /// Attempts to connect using QUIC to primary and backup brokers
-    async fn connect_quic(&self, options: &ConnectOptions, secure: bool) -> Result<ConnectedBroker> {
+    async fn connect_quic(
+        &self,
+        options: &ConnectOptions,
+        secure: bool,
+    ) -> Result<ConnectedBroker> {
         let scheme = if secure { "quics" } else { "quic" };
         let connection_string = format!("{scheme}://{}", self.config.remote_address);
 
@@ -367,7 +371,10 @@ impl BridgeConnection {
                     return Ok(ConnectedBroker::Backup(idx));
                 }
                 Err(e) => {
-                    warn!("Failed to connect to backup broker {} via QUIC: {}", backup, e);
+                    warn!(
+                        "Failed to connect to backup broker {} via QUIC: {}",
+                        backup, e
+                    );
                     self.update_error_stats(e.to_string()).await;
                 }
             }
