@@ -61,6 +61,14 @@ pub struct PubCommand {
     #[arg(long)]
     pub topic_alias: Option<u16>,
 
+    /// Response topic for request/response pattern (MQTT 5.0)
+    #[arg(long)]
+    pub response_topic: Option<String>,
+
+    /// Correlation data for request/response pattern (MQTT 5.0, hex-encoded)
+    #[arg(long)]
+    pub correlation_data: Option<String>,
+
     /// Username for authentication
     #[arg(long, short)]
     pub username: Option<String>,
@@ -465,8 +473,11 @@ pub async fn execute(mut cmd: PubCommand, verbose: bool, debug: bool) -> Result<
         anyhow::bail!("Topic alias must be between 1 and 65535, got: 0");
     }
 
-    let has_properties =
-        cmd.retain || cmd.message_expiry_interval.is_some() || cmd.topic_alias.is_some();
+    let has_properties = cmd.retain
+        || cmd.message_expiry_interval.is_some()
+        || cmd.topic_alias.is_some()
+        || cmd.response_topic.is_some()
+        || cmd.correlation_data.is_some();
 
     if has_properties {
         let mut options = PublishOptions {
@@ -476,6 +487,11 @@ pub async fn execute(mut cmd: PubCommand, verbose: bool, debug: bool) -> Result<
         };
         options.properties.message_expiry_interval = cmd.message_expiry_interval;
         options.properties.topic_alias = cmd.topic_alias;
+        options.properties.response_topic = cmd.response_topic.clone();
+        if let Some(ref hex_data) = cmd.correlation_data {
+            options.properties.correlation_data =
+                Some(hex::decode(hex_data).context("Invalid hex in --correlation-data")?);
+        }
         client
             .publish_with_options(&topic, message.as_bytes(), options)
             .await?;

@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `ca_cert`, `client_cert`, `client_key` fields work with `quics://` protocol
   - Enables mutual TLS authentication for secure broker-to-broker communication
 
+- **CLI request/response options**: `--response-topic` and `--correlation-data` flags for `mqttv5 pub`
+  - Enables MQTT 5.0 request/response messaging patterns from the command line
+  - Correlation data accepts hex-encoded bytes
+
 ### Fixed
 
 - **CLI mTLS for QUIC**: TLS certificate options (`--ca-cert`, `--cert`, `--key`) now apply to `quics://` URLs
