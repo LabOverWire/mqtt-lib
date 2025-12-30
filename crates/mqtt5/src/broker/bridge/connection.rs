@@ -452,7 +452,10 @@ impl BridgeConnection {
 
         let options = self.build_connect_options();
 
-        match self.connect_with_protocol(self.config.protocol, &options).await {
+        match self
+            .connect_with_protocol(self.config.protocol, &options)
+            .await
+        {
             Ok(broker) => {
                 if matches!(broker, ConnectedBroker::Backup(_)) && self.config.enable_failback {
                     self.start_health_check().await;
