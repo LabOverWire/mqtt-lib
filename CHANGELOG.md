@@ -5,9 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] - Protocol Unification
+## [0.17.0] - 2025-12-30
 
 ### Added
+
+- **QUIC bridge support**: Broker-to-broker bridges can now use QUIC transport
+  - New `protocol` field in `BridgeConfig` with options: `tcp`, `tls`, `quic`, `quics`
+  - `quic` for unverified QUIC, `quics` for certificate-verified QUIC
+  - Deprecates `use_tls` field in favor of `protocol`
 
 - **MQTT 5.0 request/response support** in `ClientPublishEvent`
   - `response_topic` field exposed for request/response patterns
@@ -15,19 +20,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Enables server-side request/response handling via broker event hooks
 
 - **Shared error classification** in mqtt5-protocol crate
-  - Unified `ErrorClassification` trait for categorizing connection errors
-  - `classify_error()` function for determining retry behavior
+  - `RecoverableError` enum for categorizing connection errors
+  - `MqttError::classify()` method for determining retry behavior
   - Shared between mqtt5 and mqtt5-wasm crates
 
 - **Shared keepalive logic** in mqtt5-protocol crate
   - `KeepaliveConfig` for configurable keepalive timing
-  - `KeepaliveTracker` for timeout detection
+  - `calculate_ping_interval()` and `is_keepalive_timeout()` functions
   - Unified keepalive behavior across native and WASM clients
+
+- **Connection state machine** in mqtt5-protocol crate
+  - `ConnectionState`, `ConnectionEvent`, `ConnectionStateMachine` types
+  - Shared connection lifecycle management across platforms
 
 ### Changed
 
 - **ReconnectConfig unified** to use mqtt5-protocol crate
   - Moved reconnection configuration to shared protocol crate
+  - Uses integer-only math for no_std compatibility
   - Consistent reconnection behavior across platforms
 
 - **PacketIdGenerator** in mqtt5-wasm now uses mqtt5-protocol implementation
