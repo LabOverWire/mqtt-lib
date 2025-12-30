@@ -11,7 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **QUIC bridge support**: Broker-to-broker bridges can now use QUIC transport
   - New `protocol` field in `BridgeConfig` with options: `tcp`, `tls`, `quic`, `quics`
-  - `quic` for unverified QUIC, `quics` for certificate-verified QUIC
+  - `quic` skips certificate verification (self-signed certs, testing)
+  - `quics` verifies certificates (production)
   - Deprecates `use_tls` field in favor of `protocol`
 
 - **MQTT 5.0 request/response support** in `ClientPublishEvent`
