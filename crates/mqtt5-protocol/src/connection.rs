@@ -118,12 +118,20 @@ impl ReconnectConfig {
             return self.initial_delay;
         }
 
-        let factor = self.backoff_factor();
-        let multiplier = factor.powi(attempt as i32);
-        let delay_ms = (self.initial_delay.as_millis() as f64 * multiplier) as u64;
+        let initial_ms = self.initial_delay.as_millis() as u64;
         let max_ms = self.max_delay.as_millis() as u64;
 
-        Duration::from_millis(delay_ms.min(max_ms))
+        let factor_tenths = u64::from(self.backoff_factor_tenths);
+        let mut delay_tenths = initial_ms.saturating_mul(10);
+
+        for _ in 0..attempt {
+            delay_tenths = delay_tenths.saturating_mul(factor_tenths) / 10;
+            if delay_tenths / 10 >= max_ms {
+                return self.max_delay;
+            }
+        }
+
+        Duration::from_millis((delay_tenths / 10).min(max_ms))
     }
 
     #[must_use]
