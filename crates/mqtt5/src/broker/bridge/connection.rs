@@ -188,6 +188,30 @@ impl BridgeConnection {
         Ok(tls_config)
     }
 
+    async fn configure_quic_tls(&self) {
+        let cert_pem = self.config.client_cert_file.as_ref().and_then(|cert_file| {
+            std::fs::read(cert_file)
+                .map_err(|e| warn!("Failed to read client cert file {}: {}", cert_file, e))
+                .ok()
+        });
+
+        let key_pem = self.config.client_key_file.as_ref().and_then(|key_file| {
+            std::fs::read(key_file)
+                .map_err(|e| warn!("Failed to read client key file {}: {}", key_file, e))
+                .ok()
+        });
+
+        let ca_pem = self.config.ca_file.as_ref().and_then(|ca_file| {
+            std::fs::read(ca_file)
+                .map_err(|e| warn!("Failed to read CA cert file {}: {}", ca_file, e))
+                .ok()
+        });
+
+        if cert_pem.is_some() || key_pem.is_some() || ca_pem.is_some() {
+            self.client.set_tls_config(cert_pem, key_pem, ca_pem).await;
+        }
+    }
+
     /// Builds connection options from config
     fn build_connect_options(&self) -> ConnectOptions {
         let mut options = ConnectOptions::new(&self.config.client_id);
@@ -328,6 +352,21 @@ impl BridgeConnection {
             self.client.set_insecure_tls(true).await;
         }
 
+        if let Some(strategy) = self.config.quic_stream_strategy {
+            self.client.set_quic_stream_strategy(strategy).await;
+        }
+        if let Some(enable) = self.config.quic_flow_headers {
+            self.client.set_quic_flow_headers(enable).await;
+        }
+        if let Some(enable) = self.config.quic_datagrams {
+            self.client.set_quic_datagrams(enable).await;
+        }
+        if let Some(max) = self.config.quic_max_streams {
+            self.client.set_quic_max_streams(Some(max)).await;
+        }
+
+        self.configure_quic_tls().await;
+
         match Box::pin(
             self.client
                 .connect_with_options(&connection_string, options.clone()),
@@ -385,6 +424,26 @@ impl BridgeConnection {
         ))
     }
 
+    /// Attempts connection with a specific protocol
+    async fn connect_with_protocol(
+        &self,
+        protocol: BridgeProtocol,
+        options: &ConnectOptions,
+    ) -> Result<ConnectedBroker> {
+        match protocol {
+            BridgeProtocol::Tcp => {
+                if self.config.use_tls {
+                    Box::pin(self.connect_tls(options)).await
+                } else {
+                    Box::pin(self.connect_plain(options)).await
+                }
+            }
+            BridgeProtocol::Tls => Box::pin(self.connect_tls(options)).await,
+            BridgeProtocol::Quic => Box::pin(self.connect_quic(options, false)).await,
+            BridgeProtocol::QuicSecure => Box::pin(self.connect_quic(options, true)).await,
+        }
+    }
+
     /// Connects to the remote broker with failover support
     async fn connect(&self) -> Result<ConnectedBroker> {
         let mut stats = self.stats.write().await;
@@ -393,24 +452,56 @@ impl BridgeConnection {
 
         let options = self.build_connect_options();
 
-        let broker = match self.config.protocol {
-            BridgeProtocol::Tcp => {
-                if self.config.use_tls {
-                    Box::pin(self.connect_tls(&options)).await?
-                } else {
-                    Box::pin(self.connect_plain(&options)).await?
+        match self.connect_with_protocol(self.config.protocol, &options).await {
+            Ok(broker) => {
+                if matches!(broker, ConnectedBroker::Backup(_)) && self.config.enable_failback {
+                    self.start_health_check().await;
                 }
+                Ok(broker)
             }
-            BridgeProtocol::Tls => Box::pin(self.connect_tls(&options)).await?,
-            BridgeProtocol::Quic => Box::pin(self.connect_quic(&options, false)).await?,
-            BridgeProtocol::QuicSecure => Box::pin(self.connect_quic(&options, true)).await?,
-        };
+            Err(primary_err) => {
+                if self.config.fallback_protocols.is_empty() {
+                    return Err(primary_err);
+                }
 
-        if matches!(broker, ConnectedBroker::Backup(_)) && self.config.enable_failback {
-            self.start_health_check().await;
+                warn!(
+                    "Bridge '{}' primary protocol {:?} failed: {}, trying fallback protocols",
+                    self.config.name, self.config.protocol, primary_err
+                );
+
+                for fallback in &self.config.fallback_protocols {
+                    info!(
+                        "Bridge '{}' attempting fallback protocol {:?}",
+                        self.config.name, fallback
+                    );
+                    match self.connect_with_protocol(*fallback, &options).await {
+                        Ok(broker) => {
+                            info!(
+                                "Bridge '{}' connected via fallback protocol {:?}",
+                                self.config.name, fallback
+                            );
+                            if matches!(broker, ConnectedBroker::Backup(_))
+                                && self.config.enable_failback
+                            {
+                                self.start_health_check().await;
+                            }
+                            return Ok(broker);
+                        }
+                        Err(e) => {
+                            warn!(
+                                "Bridge '{}' fallback protocol {:?} failed: {}",
+                                self.config.name, fallback, e
+                            );
+                        }
+                    }
+                }
+
+                Err(BridgeError::ConnectionFailed(format!(
+                    "All protocols failed for bridge '{}' (primary: {:?}, fallbacks: {:?})",
+                    self.config.name, self.config.protocol, self.config.fallback_protocols
+                )))
+            }
         }
-
-        Ok(broker)
     }
 
     async fn start_health_check(&self) {
