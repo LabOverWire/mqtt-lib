@@ -19,3 +19,4 @@ pub use bridge::{WasmBridgeConfig, WasmBridgeDirection, WasmTopicMapping};
 pub use broker::{WasmBroker, WasmBrokerConfig};
 pub use client::WasmMqttClient;
 pub use config::{WasmConnectOptions, WasmPublishOptions, WasmSubscribeOptions, WasmWillMessage};
+pub use mqtt5_protocol::RecoverableError;

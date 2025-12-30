@@ -45,7 +45,9 @@ pub use auth_handler::{AuthHandler, AuthResponse};
 pub use auth_handlers::{JwtAuthHandler, PlainAuthHandler, ScramSha256AuthHandler};
 
 pub use self::connection::{ConnectionEvent, DisconnectReason, ReconnectConfig};
-pub use self::error_recovery::{ErrorCallback, ErrorRecoveryConfig, RecoverableError, RetryState};
+pub use self::error_recovery::{
+    is_recoverable, retry_delay, ErrorCallback, ErrorRecoveryConfig, RecoverableError, RetryState,
+};
 pub use self::mock::{MockCall, MockMqttClient};
 pub use self::r#trait::MqttClientTrait;
 
@@ -474,14 +476,10 @@ impl MqttClient {
             // For initial connection failures, don't trigger disconnect events
             // Only connections that were previously established should trigger disconnect events
 
-            // Check if this error should trigger automatic reconnection
             let error_recovery_config =
                 crate::client::error_recovery::ErrorRecoveryConfig::default();
             if let Some(_recoverable_error) =
-                crate::client::error_recovery::RecoverableError::is_recoverable(
-                    error,
-                    &error_recovery_config,
-                )
+                crate::client::error_recovery::is_recoverable(error, &error_recovery_config)
             {
                 // This is a recoverable error and automatic reconnection is enabled
                 if options.reconnect_config.enabled {
@@ -1890,14 +1888,10 @@ impl MqttClient {
     /// # Errors
     ///
     /// Returns an error if the operation fails
-    async fn attempt_reconnection(
-        &self,
-        address: &str,
-        config: &crate::types::ReconnectConfig,
-    ) -> Result<()> {
+    async fn attempt_reconnection(&self, address: &str, config: &ReconnectConfig) -> Result<()> {
         tracing::info!(
             address = %address,
-            max_attempts = config.max_attempts,
+            max_attempts = ?config.max_attempts,
             initial_delay = ?config.initial_delay,
             "🔄 RECONNECTION - Starting reconnection loop"
         );
@@ -1922,21 +1916,23 @@ impl MqttClient {
 
             tracing::info!(
                 attempt = attempt,
-                max_attempts = config.max_attempts,
+                max_attempts = ?config.max_attempts,
                 delay = ?delay,
                 "🔄 RECONNECTION - Attempting reconnection #{}", attempt
             );
 
-            // Check max attempts
-            if config.max_attempts > 0 && attempt > config.max_attempts {
-                tracing::error!(
-                    attempt = attempt,
-                    max_attempts = config.max_attempts,
-                    "🔄 RECONNECTION - Max attempts exceeded"
-                );
-                return Err(MqttError::ConnectionError(
-                    "Max reconnection attempts exceeded".to_string(),
-                ));
+            // Check max attempts (None means unlimited)
+            if let Some(max) = config.max_attempts {
+                if attempt > max {
+                    tracing::error!(
+                        attempt = attempt,
+                        max_attempts = max,
+                        "🔄 RECONNECTION - Max attempts exceeded"
+                    );
+                    return Err(MqttError::ConnectionError(
+                        "Max reconnection attempts exceeded".to_string(),
+                    ));
+                }
             }
 
             // Trigger reconnecting event
@@ -1996,10 +1992,13 @@ impl MqttClient {
                     tracing::warn!("Reconnection attempt {} failed: {}", attempt, e);
 
                     // Calculate next delay with exponential backoff
-                    delay = std::cmp::min(
-                        Duration::from_secs_f32(delay.as_secs_f32() * config.backoff_multiplier),
-                        config.max_delay,
-                    );
+                    #[allow(clippy::cast_possible_truncation)]
+                    {
+                        delay = std::cmp::min(
+                            Duration::from_secs_f64(delay.as_secs_f64() * config.backoff_factor()),
+                            config.max_delay,
+                        );
+                    }
                 }
             }
         }

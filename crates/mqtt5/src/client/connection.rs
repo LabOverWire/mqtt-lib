@@ -1,76 +1,10 @@
-use crate::error::MqttError;
-use crate::time::Duration;
-
-/// Connection events
-#[derive(Debug, Clone)]
-pub enum ConnectionEvent {
-    /// Successfully connected
-    Connected {
-        /// Session present flag from CONNACK
-        session_present: bool,
-    },
-    /// Disconnected from broker
-    Disconnected {
-        /// Reason for disconnection
-        reason: DisconnectReason,
-    },
-    /// Attempting to reconnect
-    Reconnecting {
-        /// Reconnect attempt number
-        attempt: u32,
-    },
-    /// Reconnection failed
-    ReconnectFailed {
-        /// Error that caused the failure
-        error: MqttError,
-    },
-}
-
-/// Reasons for disconnection
-#[derive(Debug, Clone)]
-pub enum DisconnectReason {
-    /// Client initiated disconnect
-    ClientInitiated,
-    /// Server closed connection
-    ServerClosed,
-    /// Network error
-    NetworkError(String),
-    /// Protocol error
-    ProtocolError(String),
-    /// Keep-alive timeout
-    KeepAliveTimeout,
-}
-
-/// Reconnection configuration
-#[derive(Debug, Clone)]
-pub struct ReconnectConfig {
-    /// Whether automatic reconnection is enabled
-    pub enabled: bool,
-    /// Initial reconnect delay
-    pub initial_delay: Duration,
-    /// Maximum reconnect delay
-    pub max_delay: Duration,
-    /// Exponential backoff factor
-    pub backoff_factor: f64,
-    /// Maximum number of reconnect attempts (None = unlimited)
-    pub max_attempts: Option<u32>,
-}
-
-impl Default for ReconnectConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            initial_delay: Duration::from_secs(1),
-            max_delay: Duration::from_secs(60),
-            backoff_factor: 2.0,
-            max_attempts: None,
-        }
-    }
-}
+pub use mqtt5_protocol::connection::{ConnectionEvent, DisconnectReason};
+pub use mqtt5_protocol::ReconnectConfig;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::time::Duration;
 
     #[test]
     fn test_reconnect_config_default() {
@@ -78,7 +12,24 @@ mod tests {
         assert!(config.enabled);
         assert_eq!(config.initial_delay, Duration::from_secs(1));
         assert_eq!(config.max_delay, Duration::from_secs(60));
-        assert!((config.backoff_factor - 2.0).abs() < f64::EPSILON);
+        assert!((config.backoff_factor() - 2.0).abs() < f64::EPSILON);
         assert_eq!(config.max_attempts, None);
+    }
+
+    #[test]
+    fn test_reconnect_config_custom() {
+        let config = ReconnectConfig {
+            enabled: true,
+            initial_delay: Duration::from_secs(2),
+            max_delay: Duration::from_secs(30),
+            backoff_factor_tenths: 15,
+            max_attempts: Some(5),
+        };
+
+        assert!(config.enabled);
+        assert_eq!(config.initial_delay, Duration::from_secs(2));
+        assert_eq!(config.max_delay, Duration::from_secs(30));
+        assert!((config.backoff_factor() - 1.5).abs() < 0.01);
+        assert_eq!(config.max_attempts, Some(5));
     }
 }

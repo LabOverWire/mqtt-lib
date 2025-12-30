@@ -69,6 +69,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Set up connection event handler
     client
         .on_connection_event(|event| match event {
+            ConnectionEvent::Connecting => {
+                println!("🔌 Connecting to MQTT broker...");
+            }
             ConnectionEvent::Connected { session_present } => {
                 println!("✅ Connected to MQTT broker (session_present: {session_present})");
             }

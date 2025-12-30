@@ -24,6 +24,7 @@ use mqtt5_protocol::packet::unsubscribe::UnsubscribePacket;
 use mqtt5_protocol::packet::Packet;
 use mqtt5_protocol::protocol::v5::reason_codes::ReasonCode;
 use mqtt5_protocol::types::ProtocolVersion;
+use mqtt5_protocol::KeepaliveConfig;
 use mqtt5_protocol::QoS;
 use mqtt5_protocol::Transport;
 use std::collections::HashMap;
@@ -332,8 +333,7 @@ impl WasmClientHandler {
         if !keep_alive.is_zero() {
             let running_timeout = Rc::clone(&running);
             let last_packet_time_timeout = Rc::clone(&last_packet_time);
-            let timeout_duration =
-                keep_alive + mqtt5::time::Duration::from_secs(keep_alive.as_secs() / 2);
+            let timeout_duration = KeepaliveConfig::default().timeout_duration(keep_alive);
             spawn_local(async move {
                 loop {
                     gloo_timers::future::sleep(std::time::Duration::from_secs(1)).await;
