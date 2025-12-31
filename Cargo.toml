@@ -19,6 +19,7 @@ repository = "https://github.com/LabOverWire/mqtt-lib"
 lto = true
 codegen-units = 1
 panic = "abort"
+strip = true
 
 [profile.release.package.mqtt5-wasm]
 opt-level = "z"
