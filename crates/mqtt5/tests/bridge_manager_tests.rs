@@ -121,15 +121,14 @@ async fn test_bridge_manager_stats() {
 
     let _ = manager.add_bridge(config).await;
 
-    // Get all stats
+    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+
     let _all_stats = manager.get_all_stats().await;
 
-    // Get specific bridge stats
     if let Some(stats) = manager.get_bridge_stats("stats-bridge").await {
         assert!(stats.connection_attempts > 0);
     }
 
-    // Non-existent bridge should return None
     let stats = manager.get_bridge_stats("non-existent").await;
     assert!(stats.is_none());
 }

@@ -120,6 +120,18 @@ pub struct BridgeConfig {
     #[serde(default = "default_connection_retries")]
     pub connection_retries: u8,
 
+    /// Delay before first retry attempt (quick retry)
+    #[serde(with = "humantime_serde", default = "default_first_retry_delay")]
+    pub first_retry_delay: Duration,
+
+    /// Connection timeout for each attempt
+    #[serde(with = "humantime_serde", default = "default_connect_timeout")]
+    pub connect_timeout: Duration,
+
+    /// Enable jitter on retry delays (±25%) to prevent thundering herd
+    #[serde(default = "default_retry_jitter")]
+    pub retry_jitter: bool,
+
     /// Backup broker addresses for failover
     #[serde(default)]
     pub backup_brokers: Vec<String>,
@@ -246,6 +258,18 @@ fn default_connection_retries() -> u8 {
     3
 }
 
+fn default_first_retry_delay() -> Duration {
+    Duration::from_secs(1)
+}
+
+fn default_connect_timeout() -> Duration {
+    Duration::from_secs(30)
+}
+
+fn default_retry_jitter() -> bool {
+    true
+}
+
 impl BridgeConfig {
     /// Creates a new bridge configuration
     pub fn new(name: impl Into<String>, remote_address: impl Into<String>) -> Self {
@@ -280,6 +304,9 @@ impl BridgeConfig {
             backoff_multiplier: 2.0,
             max_reconnect_attempts: None,
             connection_retries: 3,
+            first_retry_delay: Duration::from_secs(1),
+            connect_timeout: Duration::from_secs(30),
+            retry_jitter: true,
             backup_brokers: Vec::new(),
             primary_health_check_interval: Duration::from_secs(30),
             enable_failback: true,
