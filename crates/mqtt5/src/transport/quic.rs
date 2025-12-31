@@ -14,7 +14,8 @@ use std::sync::Arc;
 use tracing::{debug, instrument};
 
 // [MQoQ§5] Multi-stream modes
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum StreamStrategy {
     #[default]
     ControlOnly,

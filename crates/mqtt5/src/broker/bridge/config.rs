@@ -1,6 +1,7 @@
 //! Bridge configuration types
 
 use crate::time::Duration;
+use crate::transport::StreamStrategy;
 use crate::QoS;
 use serde::{Deserialize, Serialize};
 
@@ -50,6 +51,26 @@ pub struct BridgeConfig {
     /// Disable TLS certificate verification (for testing only)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub insecure: Option<bool>,
+
+    /// QUIC stream strategy (only used when protocol is quic or quics)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quic_stream_strategy: Option<StreamStrategy>,
+
+    /// Enable `MQoQ` flow headers for QUIC connections
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quic_flow_headers: Option<bool>,
+
+    /// Enable QUIC datagrams for `QoS` 0 messages
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quic_datagrams: Option<bool>,
+
+    /// Maximum concurrent QUIC streams
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quic_max_streams: Option<usize>,
+
+    /// Fallback protocols to try if primary protocol fails
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fallback_protocols: Vec<BridgeProtocol>,
 
     /// ALPN protocols (e.g., `["x-amzn-mqtt-ca"]` for AWS `IoT`)
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -230,6 +251,11 @@ impl BridgeConfig {
             client_cert_file: None,
             client_key_file: None,
             insecure: None,
+            quic_stream_strategy: None,
+            quic_flow_headers: None,
+            quic_datagrams: None,
+            quic_max_streams: None,
+            fallback_protocols: Vec::new(),
             alpn_protocols: None,
             try_private: true,
             clean_start: false,

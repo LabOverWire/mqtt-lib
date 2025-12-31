@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.1] / [mqttv5-cli 0.16.1] - 2025-12-30
+
+### Added
+
+- **QUIC transport options for bridges**: Fine-grained control over QUIC bridge behavior
+  - `quic_stream_strategy`: Control stream usage (`control_only`, `data_per_publish`, `data_per_topic`, `data_per_subscription`)
+  - `quic_flow_headers`: Enable/disable flow control headers in QUIC streams
+  - `quic_datagrams`: Enable/disable QUIC datagram support for low-latency messaging
+  - `quic_max_streams`: Limit concurrent QUIC streams per bridge connection
+
+- **mTLS support for QUIC bridges**: Client certificate authentication over QUIC
+  - `ca_cert`, `client_cert`, `client_key` fields work with `quics://` protocol
+  - Enables mutual TLS authentication for secure broker-to-broker communication
+
+- **CLI request/response options**: `--response-topic` and `--correlation-data` flags for `mqttv5 pub`
+  - Enables MQTT 5.0 request/response messaging patterns from the command line
+  - Correlation data accepts hex-encoded bytes
+
+### Fixed
+
+- **CLI mTLS for QUIC**: TLS certificate options (`--ca-cert`, `--cert`, `--key`) now apply to `quics://` URLs
+  - Previously only worked with `ssl://` and `mqtts://` schemes
+
 ## [0.17.0] - 2025-12-30
 
 ### Added
