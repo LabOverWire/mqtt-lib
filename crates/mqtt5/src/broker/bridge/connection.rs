@@ -486,7 +486,10 @@ impl BridgeConnection {
                 Ok(broker)
             }
             Err(primary_err) => {
-                if self.config.fallback_protocols.is_empty() {
+                let has_fallbacks =
+                    !self.config.fallback_protocols.is_empty() || self.config.fallback_tcp;
+
+                if !has_fallbacks {
                     return Err(primary_err);
                 }
 
@@ -495,12 +498,24 @@ impl BridgeConnection {
                     self.config.name, self.config.protocol, primary_err
                 );
 
-                for fallback in &self.config.fallback_protocols {
+                let tcp_fallback = self.config.fallback_tcp
+                    && !self
+                        .config
+                        .fallback_protocols
+                        .contains(&BridgeProtocol::Tcp);
+
+                for fallback in self
+                    .config
+                    .fallback_protocols
+                    .iter()
+                    .copied()
+                    .chain(tcp_fallback.then_some(BridgeProtocol::Tcp))
+                {
                     info!(
                         "Bridge '{}' attempting fallback protocol {:?}",
                         self.config.name, fallback
                     );
-                    match self.connect_with_protocol(*fallback, &options).await {
+                    match self.connect_with_protocol(fallback, &options).await {
                         Ok(broker) => {
                             info!(
                                 "Bridge '{}' connected via fallback protocol {:?}",
@@ -523,8 +538,8 @@ impl BridgeConnection {
                 }
 
                 Err(BridgeError::ConnectionFailed(format!(
-                    "All protocols failed for bridge '{}' (primary: {:?}, fallbacks: {:?})",
-                    self.config.name, self.config.protocol, self.config.fallback_protocols
+                    "All protocols failed for bridge '{}' (primary: {:?}, fallback_tcp: {})",
+                    self.config.name, self.config.protocol, self.config.fallback_tcp
                 )))
             }
         }

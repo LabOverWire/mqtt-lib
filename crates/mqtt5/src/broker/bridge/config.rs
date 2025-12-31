@@ -72,6 +72,10 @@ pub struct BridgeConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fallback_protocols: Vec<BridgeProtocol>,
 
+    /// Convenience flag: fall back to TCP if primary protocol fails
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fallback_tcp: bool,
+
     /// ALPN protocols (e.g., `["x-amzn-mqtt-ca"]` for AWS `IoT`)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub alpn_protocols: Option<Vec<String>>,
@@ -256,6 +260,7 @@ impl BridgeConfig {
             quic_datagrams: None,
             quic_max_streams: None,
             fallback_protocols: Vec::new(),
+            fallback_tcp: false,
             alpn_protocols: None,
             try_private: true,
             clean_start: false,
