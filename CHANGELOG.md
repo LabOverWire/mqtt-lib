@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Set `fallback_tcp: true` instead of manually adding `Tcp` to `fallback_protocols`
   - TCP is appended to fallback list only if not already present
 
+- **`connection_retries` for bridge connections**: Retry primary protocol before falling back
+  - Default: 3 retries with 1 second delay between attempts
+  - Only falls back to secondary protocols after all retries exhausted
+
 ### Changed
 
 - **Reduced binary size by ~19%**: Optimized crypto backend selection

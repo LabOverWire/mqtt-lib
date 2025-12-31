@@ -474,75 +474,88 @@ impl BridgeConnection {
         drop(stats);
 
         let options = self.build_connect_options();
+        let max_retries = self.config.connection_retries.max(1);
 
-        match self
-            .connect_with_protocol(self.config.protocol, &options)
-            .await
-        {
-            Ok(broker) => {
-                if matches!(broker, ConnectedBroker::Backup(_)) && self.config.enable_failback {
-                    self.start_health_check().await;
-                }
-                Ok(broker)
-            }
-            Err(primary_err) => {
-                let has_fallbacks =
-                    !self.config.fallback_protocols.is_empty() || self.config.fallback_tcp;
-
-                if !has_fallbacks {
-                    return Err(primary_err);
-                }
-
-                warn!(
-                    "Bridge '{}' primary protocol {:?} failed: {}, trying fallback protocols",
-                    self.config.name, self.config.protocol, primary_err
-                );
-
-                let tcp_fallback = self.config.fallback_tcp
-                    && !self
-                        .config
-                        .fallback_protocols
-                        .contains(&BridgeProtocol::Tcp);
-
-                for fallback in self
-                    .config
-                    .fallback_protocols
-                    .iter()
-                    .copied()
-                    .chain(tcp_fallback.then_some(BridgeProtocol::Tcp))
-                {
-                    info!(
-                        "Bridge '{}' attempting fallback protocol {:?}",
-                        self.config.name, fallback
-                    );
-                    match self.connect_with_protocol(fallback, &options).await {
-                        Ok(broker) => {
-                            info!(
-                                "Bridge '{}' connected via fallback protocol {:?}",
-                                self.config.name, fallback
-                            );
-                            if matches!(broker, ConnectedBroker::Backup(_))
-                                && self.config.enable_failback
-                            {
-                                self.start_health_check().await;
-                            }
-                            return Ok(broker);
-                        }
-                        Err(e) => {
-                            warn!(
-                                "Bridge '{}' fallback protocol {:?} failed: {}",
-                                self.config.name, fallback, e
-                            );
-                        }
+        let mut last_err = None;
+        for attempt in 1..=max_retries {
+            match self
+                .connect_with_protocol(self.config.protocol, &options)
+                .await
+            {
+                Ok(broker) => {
+                    if matches!(broker, ConnectedBroker::Backup(_)) && self.config.enable_failback {
+                        self.start_health_check().await;
                     }
+                    return Ok(broker);
                 }
-
-                Err(BridgeError::ConnectionFailed(format!(
-                    "All protocols failed for bridge '{}' (primary: {:?}, fallback_tcp: {})",
-                    self.config.name, self.config.protocol, self.config.fallback_tcp
-                )))
+                Err(e) => {
+                    if attempt < max_retries {
+                        warn!(
+                            "Bridge '{}' {:?} connection attempt {}/{} failed: {}, retrying...",
+                            self.config.name, self.config.protocol, attempt, max_retries, e
+                        );
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    }
+                    last_err = Some(e);
+                }
             }
         }
+
+        let primary_err = last_err
+            .unwrap_or_else(|| BridgeError::ConnectionFailed("Connection failed".to_string()));
+
+        let has_fallbacks = !self.config.fallback_protocols.is_empty() || self.config.fallback_tcp;
+
+        if !has_fallbacks {
+            return Err(primary_err);
+        }
+
+        warn!(
+            "Bridge '{}' primary protocol {:?} failed after {} attempts: {}, trying fallback protocols",
+            self.config.name, self.config.protocol, max_retries, primary_err
+        );
+
+        let tcp_fallback = self.config.fallback_tcp
+            && !self
+                .config
+                .fallback_protocols
+                .contains(&BridgeProtocol::Tcp);
+
+        for fallback in self
+            .config
+            .fallback_protocols
+            .iter()
+            .copied()
+            .chain(tcp_fallback.then_some(BridgeProtocol::Tcp))
+        {
+            info!(
+                "Bridge '{}' attempting fallback protocol {:?}",
+                self.config.name, fallback
+            );
+            match self.connect_with_protocol(fallback, &options).await {
+                Ok(broker) => {
+                    info!(
+                        "Bridge '{}' connected via fallback protocol {:?}",
+                        self.config.name, fallback
+                    );
+                    if matches!(broker, ConnectedBroker::Backup(_)) && self.config.enable_failback {
+                        self.start_health_check().await;
+                    }
+                    return Ok(broker);
+                }
+                Err(e) => {
+                    warn!(
+                        "Bridge '{}' fallback protocol {:?} failed: {}",
+                        self.config.name, fallback, e
+                    );
+                }
+            }
+        }
+
+        Err(BridgeError::ConnectionFailed(format!(
+            "All protocols failed for bridge '{}' (primary: {:?}, fallback_tcp: {})",
+            self.config.name, self.config.protocol, self.config.fallback_tcp
+        )))
     }
 
     async fn start_health_check(&self) {

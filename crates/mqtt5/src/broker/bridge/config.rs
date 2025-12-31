@@ -116,6 +116,10 @@ pub struct BridgeConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_reconnect_attempts: Option<u32>,
 
+    /// Number of connection retries per broker before trying fallback protocol
+    #[serde(default = "default_connection_retries")]
+    pub connection_retries: u8,
+
     /// Backup broker addresses for failover
     #[serde(default)]
     pub backup_brokers: Vec<String>,
@@ -238,6 +242,10 @@ fn default_enable_failback() -> bool {
     true
 }
 
+fn default_connection_retries() -> u8 {
+    3
+}
+
 impl BridgeConfig {
     /// Creates a new bridge configuration
     pub fn new(name: impl Into<String>, remote_address: impl Into<String>) -> Self {
@@ -271,6 +279,7 @@ impl BridgeConfig {
             max_reconnect_delay: Duration::from_secs(300),
             backoff_multiplier: 2.0,
             max_reconnect_attempts: None,
+            connection_retries: 3,
             backup_brokers: Vec::new(),
             primary_health_check_interval: Duration::from_secs(30),
             enable_failback: true,
