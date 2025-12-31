@@ -221,6 +221,7 @@ async fn test_quic_bridge_inbound() {
 }
 
 #[tokio::test]
+#[allow(clippy::similar_names)]
 async fn test_quic_bridge_bidirectional() {
     let _ = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::DEBUG)

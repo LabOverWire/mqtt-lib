@@ -487,7 +487,7 @@ pub async fn execute(mut cmd: PubCommand, verbose: bool, debug: bool) -> Result<
         };
         options.properties.message_expiry_interval = cmd.message_expiry_interval;
         options.properties.topic_alias = cmd.topic_alias;
-        options.properties.response_topic = cmd.response_topic.clone();
+        options.properties.response_topic = cmd.response_topic.take();
         if let Some(ref hex_data) = cmd.correlation_data {
             options.properties.correlation_data =
                 Some(hex::decode(hex_data).context("Invalid hex in --correlation-data")?);

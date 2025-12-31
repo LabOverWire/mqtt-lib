@@ -188,28 +188,51 @@ impl BridgeConnection {
         Ok(tls_config)
     }
 
-    async fn configure_quic_tls(&self) {
-        let cert_pem = self.config.client_cert_file.as_ref().and_then(|cert_file| {
-            std::fs::read(cert_file)
-                .map_err(|e| warn!("Failed to read client cert file {}: {}", cert_file, e))
-                .ok()
-        });
+    async fn configure_quic_tls(&self) -> Result<()> {
+        let cert_pem = self
+            .config
+            .client_cert_file
+            .as_ref()
+            .map(|cert_file| {
+                std::fs::read(cert_file).map_err(|e| {
+                    BridgeError::ConfigurationError(format!(
+                        "Failed to read client cert file {cert_file}: {e}"
+                    ))
+                })
+            })
+            .transpose()?;
 
-        let key_pem = self.config.client_key_file.as_ref().and_then(|key_file| {
-            std::fs::read(key_file)
-                .map_err(|e| warn!("Failed to read client key file {}: {}", key_file, e))
-                .ok()
-        });
+        let key_pem = self
+            .config
+            .client_key_file
+            .as_ref()
+            .map(|key_file| {
+                std::fs::read(key_file).map_err(|e| {
+                    BridgeError::ConfigurationError(format!(
+                        "Failed to read client key file {key_file}: {e}"
+                    ))
+                })
+            })
+            .transpose()?;
 
-        let ca_pem = self.config.ca_file.as_ref().and_then(|ca_file| {
-            std::fs::read(ca_file)
-                .map_err(|e| warn!("Failed to read CA cert file {}: {}", ca_file, e))
-                .ok()
-        });
+        let ca_pem = self
+            .config
+            .ca_file
+            .as_ref()
+            .map(|ca_file| {
+                std::fs::read(ca_file).map_err(|e| {
+                    BridgeError::ConfigurationError(format!(
+                        "Failed to read CA cert file {ca_file}: {e}"
+                    ))
+                })
+            })
+            .transpose()?;
 
         if cert_pem.is_some() || key_pem.is_some() || ca_pem.is_some() {
             self.client.set_tls_config(cert_pem, key_pem, ca_pem).await;
         }
+
+        Ok(())
     }
 
     /// Builds connection options from config
@@ -365,7 +388,7 @@ impl BridgeConnection {
             self.client.set_quic_max_streams(Some(max)).await;
         }
 
-        self.configure_quic_tls().await;
+        self.configure_quic_tls().await?;
 
         match Box::pin(
             self.client
