@@ -37,7 +37,7 @@ impl BridgeManager {
     /// Adds a new bridge.
     ///
     /// # Errors
-    /// Returns an error if the bridge already exists or connection fails.
+    /// Returns an error if the bridge already exists.
     pub async fn add_bridge(&self, config: BridgeConfig) -> Result<()> {
         let name = config.name.clone();
 
@@ -49,7 +49,7 @@ impl BridgeManager {
 
         let bridge = Arc::new(BridgeConnection::new(config, self.router.clone())?);
 
-        Box::pin(bridge.start()).await?;
+        bridge.start();
 
         let bridge_clone = bridge.clone();
         let task = tokio::spawn(async move {

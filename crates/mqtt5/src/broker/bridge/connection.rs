@@ -88,24 +88,13 @@ impl BridgeConnection {
     }
 
     /// Starts the bridge connection.
-    ///
-    /// # Errors
-    /// Returns an error if the connection or subscription setup fails.
-    pub async fn start(&self) -> Result<()> {
+    pub fn start(&self) {
         if self.running.load(Ordering::Relaxed) {
-            return Ok(());
+            return;
         }
 
         self.running.store(true, Ordering::Relaxed);
         info!("Starting bridge '{}'", self.config.name);
-
-        // Connect to remote broker
-        Box::pin(self.connect()).await?;
-
-        // Set up subscriptions for incoming topics
-        self.setup_subscriptions().await?;
-
-        Ok(())
     }
 
     /// Stops the bridge connection.
