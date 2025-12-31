@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.2] / [mqttv5-cli 0.16.2] - 2025-12-30
+
+### Added
+
+- **`fallback_tcp` convenience field for bridges**: Simple boolean to fall back to TCP if primary protocol fails
+  - Set `fallback_tcp: true` instead of manually adding `Tcp` to `fallback_protocols`
+  - TCP is appended to fallback list only if not already present
+
+### Changed
+
+- **Reduced binary size by ~19%**: Optimized crypto backend selection
+  - Use only `ring` crypto backend (removed `aws-lc-rs` dual compilation)
+  - Enable symbol stripping in release builds
+  - Binary reduced from 8.4MB to 6.8MB
+
 ## [0.17.1] / [mqttv5-cli 0.16.1] - 2025-12-30
 
 ### Added
