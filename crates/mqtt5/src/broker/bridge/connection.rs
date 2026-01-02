@@ -14,9 +14,10 @@ use crate::transport::tls::TlsConfig;
 use crate::types::ConnectOptions;
 use crate::validation::topic_matches_filter;
 use rand::Rng;
+use std::collections::VecDeque;
 use std::net::ToSocketAddrs;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::sync::{broadcast, RwLock};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
@@ -63,6 +64,8 @@ pub struct BridgeConnection {
     current_broker: Arc<RwLock<Option<ConnectedBroker>>>,
     /// Handle to the health check task (runs when on backup)
     health_check_handle: Arc<RwLock<Option<JoinHandle<()>>>>,
+    /// Pending messages to forward when connection is established
+    pending_messages: Arc<Mutex<VecDeque<PublishPacket>>>,
 }
 
 impl BridgeConnection {
@@ -95,6 +98,7 @@ impl BridgeConnection {
             bytes_received: Arc::new(AtomicU64::new(0)),
             current_broker: Arc::new(RwLock::new(None)),
             health_check_handle: Arc::new(RwLock::new(None)),
+            pending_messages: Arc::new(Mutex::new(VecDeque::new())),
         })
     }
 
@@ -722,14 +726,12 @@ impl BridgeConnection {
             "forward_message called"
         );
 
-        if !is_running || !is_connected {
-            warn!(
-                bridge = %bridge_name,
-                topic = %packet.topic_name,
-                running = is_running,
-                connected = is_connected,
-                "forward_message: not running or not connected, dropping message"
-            );
+        if !is_running {
+            return Ok(());
+        }
+
+        if !is_connected {
+            self.queue_pending_message(packet.clone());
             return Ok(());
         }
 
@@ -840,6 +842,57 @@ impl BridgeConnection {
 
         // Store which broker we're connected to
         *self.current_broker.write().await = Some(broker);
+
+        // Flush any pending messages that were queued while disconnected
+        self.flush_pending_messages().await;
+    }
+
+    fn queue_pending_message(&self, packet: PublishPacket) {
+        const MAX_PENDING: usize = 1000;
+        let Ok(mut queue) = self.pending_messages.lock() else {
+            return;
+        };
+        if queue.len() < MAX_PENDING {
+            queue.push_back(packet);
+        } else {
+            warn!(
+                bridge = %self.config.name,
+                "pending message queue full, dropping oldest message"
+            );
+            queue.pop_front();
+            queue.push_back(packet);
+        }
+    }
+
+    /// Flushes pending messages that were queued while disconnected
+    async fn flush_pending_messages(&self) {
+        let pending: Vec<PublishPacket> = {
+            let Ok(mut queue) = self.pending_messages.lock() else {
+                return;
+            };
+            queue.drain(..).collect()
+        };
+
+        if pending.is_empty() {
+            return;
+        }
+
+        info!(
+            bridge = %self.config.name,
+            count = pending.len(),
+            "flushing pending messages after connection established"
+        );
+
+        for packet in pending {
+            if let Err(e) = self.forward_message(&packet).await {
+                warn!(
+                    bridge = %self.config.name,
+                    topic = %packet.topic_name,
+                    error = %e,
+                    "failed to forward pending message"
+                );
+            }
+        }
     }
 
     /// Updates stats when an error occurs
