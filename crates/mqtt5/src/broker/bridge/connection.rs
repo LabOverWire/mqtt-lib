@@ -710,19 +710,48 @@ impl BridgeConnection {
     /// # Errors
     /// Returns an error if the message forwarding fails.
     pub async fn forward_message(&self, packet: &PublishPacket) -> Result<()> {
-        if !self.running.load(Ordering::Relaxed) || !self.client.is_connected().await {
+        let bridge_name = &self.config.name;
+        let is_running = self.running.load(Ordering::Relaxed);
+        let is_connected = self.client.is_connected().await;
+
+        debug!(
+            bridge = %bridge_name,
+            topic = %packet.topic_name,
+            running = is_running,
+            connected = is_connected,
+            "forward_message called"
+        );
+
+        if !is_running || !is_connected {
+            warn!(
+                bridge = %bridge_name,
+                topic = %packet.topic_name,
+                running = is_running,
+                connected = is_connected,
+                "forward_message: not running or not connected, dropping message"
+            );
             return Ok(());
         }
 
+        let mut matched = false;
         for mapping in &self.config.topics {
             match mapping.direction {
                 BridgeDirection::Out | BridgeDirection::Both => {
                     if topic_matches_filter(&packet.topic_name, &mapping.pattern) {
+                        matched = true;
                         let remote_topic = if let Some(ref prefix) = mapping.remote_prefix {
                             format!("{}{}", prefix, packet.topic_name)
                         } else {
                             packet.topic_name.clone()
                         };
+
+                        debug!(
+                            bridge = %bridge_name,
+                            local_topic = %packet.topic_name,
+                            remote_topic = %remote_topic,
+                            pattern = %mapping.pattern,
+                            "topic matched, spawning publish task"
+                        );
 
                         let msg_props: crate::types::MessageProperties =
                             packet.properties.clone().into();
@@ -737,19 +766,34 @@ impl BridgeConnection {
                         let messages_sent = self.messages_sent.clone();
                         let bytes_sent = self.bytes_sent.clone();
                         let payload_len = payload.len();
+                        let bridge_name_clone = bridge_name.clone();
 
                         tokio::spawn(async move {
+                            debug!(
+                                bridge = %bridge_name_clone,
+                                topic = %remote_topic,
+                                "publish task started"
+                            );
                             match client
                                 .publish_with_options(&remote_topic, payload, options)
                                 .await
                             {
                                 Ok(_) => {
-                                    debug!("Forwarded message to remote topic: {}", remote_topic);
+                                    debug!(
+                                        bridge = %bridge_name_clone,
+                                        topic = %remote_topic,
+                                        "publish succeeded"
+                                    );
                                     messages_sent.fetch_add(1, Ordering::Relaxed);
                                     bytes_sent.fetch_add(payload_len as u64, Ordering::Relaxed);
                                 }
                                 Err(e) => {
-                                    error!("Failed to forward message to {}: {e}", remote_topic);
+                                    error!(
+                                        bridge = %bridge_name_clone,
+                                        topic = %remote_topic,
+                                        error = %e,
+                                        "publish failed"
+                                    );
                                 }
                             }
                         });
@@ -759,6 +803,14 @@ impl BridgeConnection {
                 }
                 BridgeDirection::In => {}
             }
+        }
+
+        if !matched {
+            debug!(
+                bridge = %bridge_name,
+                topic = %packet.topic_name,
+                "no matching topic pattern found"
+            );
         }
 
         Ok(())
