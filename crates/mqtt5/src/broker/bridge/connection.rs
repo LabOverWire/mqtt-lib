@@ -13,12 +13,23 @@ use crate::time::{Duration, Instant};
 use crate::transport::tls::TlsConfig;
 use crate::types::ConnectOptions;
 use crate::validation::topic_matches_filter;
+use rand::Rng;
 use std::net::ToSocketAddrs;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
+
+fn apply_jitter(delay: Duration, enable: bool) -> Duration {
+    if !enable {
+        return delay;
+    }
+    let secs = delay.as_secs_f64();
+    let jitter_range = secs * 0.25;
+    let jitter = (rand::rng().random::<f64>() - 0.5) * 2.0 * jitter_range;
+    Duration::from_secs_f64((secs + jitter).max(0.1))
+}
 
 /// Which broker the bridge is currently connected to
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,24 +99,13 @@ impl BridgeConnection {
     }
 
     /// Starts the bridge connection.
-    ///
-    /// # Errors
-    /// Returns an error if the connection or subscription setup fails.
-    pub async fn start(&self) -> Result<()> {
+    pub fn start(&self) {
         if self.running.load(Ordering::Relaxed) {
-            return Ok(());
+            return;
         }
 
         self.running.store(true, Ordering::Relaxed);
         info!("Starting bridge '{}'", self.config.name);
-
-        // Connect to remote broker
-        Box::pin(self.connect()).await?;
-
-        // Set up subscriptions for incoming topics
-        self.setup_subscriptions().await?;
-
-        Ok(())
     }
 
     /// Stops the bridge connection.
@@ -467,65 +467,95 @@ impl BridgeConnection {
         }
     }
 
-    /// Connects to the remote broker with failover support
-    async fn connect(&self) -> Result<ConnectedBroker> {
-        let mut stats = self.stats.write().await;
-        stats.connection_attempts += 1;
-        drop(stats);
+    fn get_fallback_protocols(&self) -> Vec<BridgeProtocol> {
+        let tcp_fallback = self.config.fallback_tcp
+            && !self
+                .config
+                .fallback_protocols
+                .contains(&BridgeProtocol::Tcp);
 
-        let options = self.build_connect_options();
+        self.config
+            .fallback_protocols
+            .iter()
+            .copied()
+            .chain(tcp_fallback.then_some(BridgeProtocol::Tcp))
+            .collect()
+    }
 
-        match self
-            .connect_with_protocol(self.config.protocol, &options)
+    async fn try_all_protocols(&self, options: &ConnectOptions) -> Result<ConnectedBroker> {
+        if let Ok(broker) = self
+            .connect_with_protocol(self.config.protocol, options)
             .await
         {
-            Ok(broker) => {
-                if matches!(broker, ConnectedBroker::Backup(_)) && self.config.enable_failback {
-                    self.start_health_check().await;
-                }
-                Ok(broker)
-            }
-            Err(primary_err) => {
-                if self.config.fallback_protocols.is_empty() {
-                    return Err(primary_err);
-                }
+            return Ok(broker);
+        }
 
-                warn!(
-                    "Bridge '{}' primary protocol {:?} failed: {}, trying fallback protocols",
-                    self.config.name, self.config.protocol, primary_err
+        for fallback in self.get_fallback_protocols() {
+            if let Ok(broker) = self.connect_with_protocol(fallback, options).await {
+                info!(
+                    "Bridge '{}' connected via fallback protocol {:?}",
+                    self.config.name, fallback
                 );
+                return Ok(broker);
+            }
+        }
 
-                for fallback in &self.config.fallback_protocols {
-                    info!(
-                        "Bridge '{}' attempting fallback protocol {:?}",
-                        self.config.name, fallback
-                    );
-                    match self.connect_with_protocol(*fallback, &options).await {
-                        Ok(broker) => {
-                            info!(
-                                "Bridge '{}' connected via fallback protocol {:?}",
-                                self.config.name, fallback
+        Err(BridgeError::ConnectionFailed(format!(
+            "All protocols failed for bridge '{}'",
+            self.config.name
+        )))
+    }
+
+    async fn connect(&self) -> Result<ConnectedBroker> {
+        let options = self.build_connect_options();
+        let mut attempt = 0u32;
+
+        loop {
+            attempt += 1;
+
+            {
+                let mut stats = self.stats.write().await;
+                stats.connection_attempts += 1;
+            }
+
+            match self.try_all_protocols(&options).await {
+                Ok(broker) => {
+                    if matches!(broker, ConnectedBroker::Backup(_)) && self.config.enable_failback {
+                        self.start_health_check().await;
+                    }
+                    return Ok(broker);
+                }
+                Err(e) => {
+                    if let Some(max) = self.config.max_reconnect_attempts {
+                        if attempt >= max {
+                            error!(
+                                "Bridge '{}' exceeded max connection attempts ({})",
+                                self.config.name, max
                             );
-                            if matches!(broker, ConnectedBroker::Backup(_))
-                                && self.config.enable_failback
-                            {
-                                self.start_health_check().await;
-                            }
-                            return Ok(broker);
-                        }
-                        Err(e) => {
-                            warn!(
-                                "Bridge '{}' fallback protocol {:?} failed: {}",
-                                self.config.name, fallback, e
-                            );
+                            return Err(e);
                         }
                     }
-                }
 
-                Err(BridgeError::ConnectionFailed(format!(
-                    "All protocols failed for bridge '{}' (primary: {:?}, fallbacks: {:?})",
-                    self.config.name, self.config.protocol, self.config.fallback_protocols
-                )))
+                    let base_delay = if attempt == 1 {
+                        self.config.first_retry_delay
+                    } else {
+                        let exponent = attempt.saturating_sub(2).min(30);
+                        let delay_secs = self.config.initial_reconnect_delay.as_secs_f64()
+                            * self.config.backoff_multiplier.powf(f64::from(exponent));
+                        Duration::from_secs_f64(delay_secs).min(self.config.max_reconnect_delay)
+                    };
+
+                    let delay = apply_jitter(base_delay, self.config.retry_jitter);
+                    warn!(
+                        "Bridge '{}' connection attempt {} failed: {}, retrying in {:?}",
+                        self.config.name, attempt, e, delay
+                    );
+                    tokio::time::sleep(delay).await;
+
+                    if !self.running.load(Ordering::Relaxed) {
+                        return Err(BridgeError::ConnectionFailed("Bridge stopped".to_string()));
+                    }
+                }
             }
         }
     }
@@ -680,23 +710,49 @@ impl BridgeConnection {
     /// # Errors
     /// Returns an error if the message forwarding fails.
     pub async fn forward_message(&self, packet: &PublishPacket) -> Result<()> {
-        if !self.running.load(Ordering::Relaxed) {
+        let bridge_name = &self.config.name;
+        let is_running = self.running.load(Ordering::Relaxed);
+        let is_connected = self.client.is_connected().await;
+
+        debug!(
+            bridge = %bridge_name,
+            topic = %packet.topic_name,
+            running = is_running,
+            connected = is_connected,
+            "forward_message called"
+        );
+
+        if !is_running || !is_connected {
+            warn!(
+                bridge = %bridge_name,
+                topic = %packet.topic_name,
+                running = is_running,
+                connected = is_connected,
+                "forward_message: not running or not connected, dropping message"
+            );
             return Ok(());
         }
 
-        // Check which topic mappings match
+        let mut matched = false;
         for mapping in &self.config.topics {
             match mapping.direction {
                 BridgeDirection::Out | BridgeDirection::Both => {
                     if topic_matches_filter(&packet.topic_name, &mapping.pattern) {
-                        // Apply remote prefix if configured
+                        matched = true;
                         let remote_topic = if let Some(ref prefix) = mapping.remote_prefix {
                             format!("{}{}", prefix, packet.topic_name)
                         } else {
                             packet.topic_name.clone()
                         };
 
-                        // Forward with configured QoS (may be different from original)
+                        debug!(
+                            bridge = %bridge_name,
+                            local_topic = %packet.topic_name,
+                            remote_topic = %remote_topic,
+                            pattern = %mapping.pattern,
+                            "topic matched, spawning publish task"
+                        );
+
                         let msg_props: crate::types::MessageProperties =
                             packet.properties.clone().into();
                         let options = crate::types::PublishOptions {
@@ -705,32 +761,56 @@ impl BridgeConnection {
                             properties: msg_props.into(),
                         };
 
-                        let result = self
-                            .client
-                            .publish_with_options(&remote_topic, packet.payload.clone(), options)
-                            .await;
+                        let client = self.client.clone();
+                        let payload = packet.payload.clone();
+                        let messages_sent = self.messages_sent.clone();
+                        let bytes_sent = self.bytes_sent.clone();
+                        let payload_len = payload.len();
+                        let bridge_name_clone = bridge_name.clone();
 
-                        match result {
-                            Ok(_) => {
-                                debug!("Forwarded message to remote topic: {}", remote_topic);
-                                self.messages_sent.fetch_add(1, Ordering::Relaxed);
-                                self.bytes_sent
-                                    .fetch_add(packet.payload.len() as u64, Ordering::Relaxed);
+                        tokio::spawn(async move {
+                            debug!(
+                                bridge = %bridge_name_clone,
+                                topic = %remote_topic,
+                                "publish task started"
+                            );
+                            match client
+                                .publish_with_options(&remote_topic, payload, options)
+                                .await
+                            {
+                                Ok(_) => {
+                                    debug!(
+                                        bridge = %bridge_name_clone,
+                                        topic = %remote_topic,
+                                        "publish succeeded"
+                                    );
+                                    messages_sent.fetch_add(1, Ordering::Relaxed);
+                                    bytes_sent.fetch_add(payload_len as u64, Ordering::Relaxed);
+                                }
+                                Err(e) => {
+                                    error!(
+                                        bridge = %bridge_name_clone,
+                                        topic = %remote_topic,
+                                        error = %e,
+                                        "publish failed"
+                                    );
+                                }
                             }
-                            Err(e) => {
-                                error!("Failed to forward message: {e}");
-                                return Err(BridgeError::ClientError(e));
-                            }
-                        }
+                        });
 
-                        // Only forward once per message (first matching rule wins)
                         break;
                     }
                 }
-                BridgeDirection::In => {
-                    // Skip incoming-only mappings
-                }
+                BridgeDirection::In => {}
             }
+        }
+
+        if !matched {
+            debug!(
+                bridge = %bridge_name,
+                topic = %packet.topic_name,
+                "no matching topic pattern found"
+            );
         }
 
         Ok(())
@@ -786,8 +866,6 @@ impl BridgeConnection {
     /// Returns an error if the maximum reconnect attempts is exceeded.
     pub async fn run(&self) -> Result<()> {
         let mut shutdown_rx = self.shutdown_tx.subscribe();
-        let mut attempt = 0u32;
-        let mut current_delay = self.config.initial_reconnect_delay;
 
         while self.running.load(Ordering::Relaxed) {
             tokio::select! {
@@ -800,28 +878,10 @@ impl BridgeConnection {
                         break;
                     }
 
-                    if let Ok(()) = result {
-                        current_delay = self.config.initial_reconnect_delay;
+                    if let Err(e) = result {
+                        error!("Bridge '{}' connection failed: {}", self.config.name, e);
+                        break;
                     }
-
-                    attempt += 1;
-
-                    if let Some(max) = self.config.max_reconnect_attempts {
-                        if attempt >= max {
-                            error!("Bridge '{}' exceeded max reconnection attempts", self.config.name);
-                            break;
-                        }
-                    }
-
-                    warn!("Bridge '{}' disconnected, reconnecting in {:?} (attempt {})",
-                        self.config.name, current_delay, attempt);
-
-                    tokio::time::sleep(current_delay).await;
-
-                    let next_delay = Duration::from_secs_f64(
-                        current_delay.as_secs_f64() * self.config.backoff_multiplier
-                    );
-                    current_delay = next_delay.min(self.config.max_reconnect_delay);
                 }
             }
         }

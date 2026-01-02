@@ -239,12 +239,19 @@ impl QuicConfig {
 
         let mut client_config = ClientConfig::new(Arc::new(quic_crypto));
 
+        let mut transport_config = quinn::TransportConfig::default();
+        transport_config.max_idle_timeout(Some(
+            std::time::Duration::from_secs(120)
+                .try_into()
+                .expect("valid duration"),
+        ));
+
         if self.enable_datagrams {
-            let mut transport_config = quinn::TransportConfig::default();
             transport_config.datagram_send_buffer_size(self.datagram_send_buffer_size);
             transport_config.datagram_receive_buffer_size(Some(self.datagram_receive_buffer_size));
-            client_config.transport_config(Arc::new(transport_config));
         }
+
+        client_config.transport_config(Arc::new(transport_config));
 
         Ok(client_config)
     }
