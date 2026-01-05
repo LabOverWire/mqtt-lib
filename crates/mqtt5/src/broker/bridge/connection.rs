@@ -487,14 +487,35 @@ impl BridgeConnection {
     }
 
     async fn try_all_protocols(&self, options: &ConnectOptions) -> Result<ConnectedBroker> {
-        if let Ok(broker) = self
-            .connect_with_protocol(self.config.protocol, options)
-            .await
-        {
-            return Ok(broker);
+        let max_retries = self.config.connection_retries.max(1);
+
+        for attempt in 1..=max_retries {
+            if let Ok(broker) = self
+                .connect_with_protocol(self.config.protocol, options)
+                .await
+            {
+                return Ok(broker);
+            }
+
+            if attempt < max_retries {
+                let delay = apply_jitter(self.config.first_retry_delay, self.config.retry_jitter);
+                debug!(
+                    "Bridge '{}' {:?} attempt {}/{} failed, retrying in {:?}",
+                    self.config.name, self.config.protocol, attempt, max_retries, delay
+                );
+                tokio::time::sleep(delay).await;
+            }
         }
 
-        for fallback in self.get_fallback_protocols() {
+        let fallbacks = self.get_fallback_protocols();
+        if !fallbacks.is_empty() {
+            warn!(
+                "Bridge '{}' primary protocol {:?} failed after {} attempts, trying fallbacks",
+                self.config.name, self.config.protocol, max_retries
+            );
+        }
+
+        for fallback in fallbacks {
             if let Ok(broker) = self.connect_with_protocol(fallback, options).await {
                 info!(
                     "Bridge '{}' connected via fallback protocol {:?}",
