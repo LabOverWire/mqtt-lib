@@ -72,6 +72,10 @@ pub struct BridgeConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fallback_protocols: Vec<BridgeProtocol>,
 
+    /// Convenience flag: fall back to TCP if primary protocol fails
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fallback_tcp: bool,
+
     /// ALPN protocols (e.g., `["x-amzn-mqtt-ca"]` for AWS `IoT`)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub alpn_protocols: Option<Vec<String>>,
@@ -111,6 +115,18 @@ pub struct BridgeConfig {
     /// Maximum reconnection attempts (None = infinite)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_reconnect_attempts: Option<u32>,
+
+    /// Number of connection retries per broker before trying fallback protocol
+    #[serde(default = "default_connection_retries")]
+    pub connection_retries: u8,
+
+    /// Delay before first retry attempt (quick retry)
+    #[serde(with = "humantime_serde", default = "default_first_retry_delay")]
+    pub first_retry_delay: Duration,
+
+    /// Enable jitter on retry delays (±25%) to prevent thundering herd
+    #[serde(default = "default_retry_jitter")]
+    pub retry_jitter: bool,
 
     /// Backup broker addresses for failover
     #[serde(default)]
@@ -234,6 +250,18 @@ fn default_enable_failback() -> bool {
     true
 }
 
+fn default_connection_retries() -> u8 {
+    3
+}
+
+fn default_first_retry_delay() -> Duration {
+    Duration::from_secs(1)
+}
+
+fn default_retry_jitter() -> bool {
+    true
+}
+
 impl BridgeConfig {
     /// Creates a new bridge configuration
     pub fn new(name: impl Into<String>, remote_address: impl Into<String>) -> Self {
@@ -256,6 +284,7 @@ impl BridgeConfig {
             quic_datagrams: None,
             quic_max_streams: None,
             fallback_protocols: Vec::new(),
+            fallback_tcp: false,
             alpn_protocols: None,
             try_private: true,
             clean_start: false,
@@ -266,6 +295,9 @@ impl BridgeConfig {
             max_reconnect_delay: Duration::from_secs(300),
             backoff_multiplier: 2.0,
             max_reconnect_attempts: None,
+            connection_retries: 3,
+            first_retry_delay: Duration::from_secs(1),
+            retry_jitter: true,
             backup_brokers: Vec::new(),
             primary_health_check_interval: Duration::from_secs(30),
             enable_failback: true,

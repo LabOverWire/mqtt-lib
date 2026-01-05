@@ -37,7 +37,7 @@ impl BridgeManager {
     /// Adds a new bridge.
     ///
     /// # Errors
-    /// Returns an error if the bridge already exists or connection fails.
+    /// Returns an error if the bridge already exists.
     pub async fn add_bridge(&self, config: BridgeConfig) -> Result<()> {
         let name = config.name.clone();
 
@@ -49,7 +49,7 @@ impl BridgeManager {
 
         let bridge = Arc::new(BridgeConnection::new(config, self.router.clone())?);
 
-        Box::pin(bridge.start()).await?;
+        bridge.start();
 
         let bridge_clone = bridge.clone();
         let task = tokio::spawn(async move {
@@ -96,12 +96,22 @@ impl BridgeManager {
     /// # Errors
     /// Returns an error if message forwarding fails.
     pub async fn handle_outgoing(&self, packet: &PublishPacket) -> Result<()> {
+        debug!(
+            topic = %packet.topic_name,
+            payload_len = packet.payload.len(),
+            "handle_outgoing called"
+        );
+
         if packet.topic_name.starts_with("$SYS/") {
+            debug!(topic = %packet.topic_name, "skipping $SYS topic");
             return Ok(());
         }
 
         if !self.loop_prevention.check_message(packet).await {
-            debug!("Message loop detected, not forwarding to bridges");
+            debug!(
+                topic = %packet.topic_name,
+                "Message loop detected, not forwarding to bridges"
+            );
             return Ok(());
         }
 
@@ -113,7 +123,19 @@ impl BridgeManager {
                 .collect()
         };
 
+        if bridge_list.is_empty() {
+            debug!(topic = %packet.topic_name, "no bridges configured");
+            return Ok(());
+        }
+
+        debug!(
+            topic = %packet.topic_name,
+            bridge_count = bridge_list.len(),
+            "forwarding to bridges"
+        );
+
         for (name, bridge) in bridge_list {
+            debug!(bridge = %name, topic = %packet.topic_name, "calling forward_message");
             if let Err(e) = bridge.forward_message(packet).await {
                 error!("Bridge '{}' failed to forward message: {}", name, e);
             }

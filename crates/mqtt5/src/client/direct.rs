@@ -1445,8 +1445,12 @@ async fn packet_reader_task_with_responses(mut reader: UnifiedReader, ctx: Packe
         }
     }
 
-    // Mark as disconnected when task exits
     ctx.connected.store(false, Ordering::SeqCst);
+
+    ctx.puback_channels.lock().await.drain();
+    ctx.pubcomp_channels.lock().await.drain();
+    ctx.suback_channels.lock().await.drain();
+    ctx.unsuback_channels.lock().await.drain();
 }
 
 async fn handle_auth_packet(auth: AuthPacket, ctx: &PacketReaderContext) -> Result<()> {

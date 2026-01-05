@@ -1,6 +1,6 @@
 [package]
 name = "mqtt5"
-version = "0.17.1"
+version = "0.17.2"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -135,7 +135,7 @@ flume = { version = "0.12.0", features = ["async"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 hyper = { version = "1.8.1", features = ["http1", "client"] }
-hyper-rustls = { version = "0.27.7", features = ["http1"] }
+hyper-rustls = { version = "0.27.7", default-features = false, features = ["http1", "ring", "native-tokio", "tls12"] }
 hyper-util = { version = "0.1.19", features = [
     "client",
     "client-legacy",
@@ -146,13 +146,13 @@ http-body-util = "0.1.3"
 http = "1.4.0"
 humantime-serde = "1.1"
 ring = "0.17.14"
-rustls = { version = "0.23", features = ["ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-pemfile = "2.2"
 rustls-pki-types = "1.13.0"
 tokio = { version = "1.47", features = ["full"] }
-tokio-rustls = "0.26"
-tokio-tungstenite = { version = "0.28", features = ["rustls-tls-native-roots"] }
-quinn = "0.11"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+tokio-tungstenite = { version = "0.28", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
+quinn = { version = "0.11", default-features = false, features = ["rustls-ring", "runtime-tokio", "platform-verifier"] }
 webpki-roots = "1.0"
 
 [target.wasm32-unknown-unknown.dependencies]
