@@ -6,6 +6,7 @@ extern crate alloc;
 
 mod prelude;
 
+pub mod bridge;
 pub mod connection;
 pub mod constants;
 pub mod encoding;
@@ -56,3 +57,7 @@ pub use connection::{
 pub use keepalive::{calculate_ping_interval, is_keepalive_timeout, KeepaliveConfig};
 
 pub use error_classification::RecoverableError;
+
+pub use bridge::{
+    evaluate_forwarding, BridgeDirection, BridgeStats, ForwardingDecision, TopicMappingCore,
+};

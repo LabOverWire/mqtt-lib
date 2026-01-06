@@ -3,6 +3,7 @@
 use crate::time::Duration;
 use crate::transport::StreamStrategy;
 use crate::QoS;
+pub use mqtt5_protocol::BridgeDirection;
 use serde::{Deserialize, Serialize};
 
 /// Bridge connection configuration
@@ -168,18 +169,6 @@ pub struct TopicMapping {
     /// Prefix to add to remote topics (optional)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remote_prefix: Option<String>,
-}
-
-/// Direction of message flow for a bridge topic
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum BridgeDirection {
-    /// Messages flow from remote broker to local broker
-    In,
-    /// Messages flow from local broker to remote broker
-    Out,
-    /// Messages flow in both directions
-    Both,
 }
 
 /// Transport protocol for bridge connections
