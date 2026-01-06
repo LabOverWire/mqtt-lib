@@ -28,7 +28,7 @@ use mqtt5_protocol::KeepaliveConfig;
 use mqtt5_protocol::QoS;
 use mqtt5_protocol::Transport;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use tracing::{debug, error, info, warn};
 use wasm_bindgen_futures::spawn_local;
 use web_sys::MessagePort;
@@ -50,7 +50,7 @@ pub struct WasmClientHandler {
     client_id: Option<String>,
     user_id: Option<String>,
     protocol_version: u8,
-    config: Arc<BrokerConfig>,
+    config: Arc<RwLock<BrokerConfig>>,
     router: Arc<MessageRouter>,
     auth_provider: Arc<dyn AuthProvider>,
     storage: Arc<DynamicStorage>,
@@ -73,7 +73,7 @@ impl WasmClientHandler {
     #[allow(dead_code)]
     pub fn start_deferred(
         port: MessagePort,
-        config: Arc<BrokerConfig>,
+        config: Arc<RwLock<BrokerConfig>>,
         router: Arc<MessageRouter>,
         auth_provider: Arc<dyn AuthProvider>,
         storage: Arc<DynamicStorage>,
@@ -124,7 +124,7 @@ impl WasmClientHandler {
     #[allow(clippy::must_use_candidate, clippy::new_ret_no_self)]
     pub fn new(
         port: MessagePort,
-        config: Arc<BrokerConfig>,
+        config: Arc<RwLock<BrokerConfig>>,
         router: Arc<MessageRouter>,
         auth_provider: Arc<dyn AuthProvider>,
         storage: Arc<DynamicStorage>,
@@ -499,28 +499,30 @@ impl WasmClientHandler {
                     .set_assigned_client_identifier(assigned_id.clone());
             }
 
-            connack
-                .properties
-                .set_session_expiry_interval(self.config.session_expiry_interval.as_secs() as u32);
-            if self.config.maximum_qos < 2 {
-                connack.properties.set_maximum_qos(self.config.maximum_qos);
+            if let Ok(config) = self.config.read() {
+                connack
+                    .properties
+                    .set_session_expiry_interval(config.session_expiry_interval.as_secs() as u32);
+                if config.maximum_qos < 2 {
+                    connack.properties.set_maximum_qos(config.maximum_qos);
+                }
+                connack.properties.set_retain_available(true);
+                connack
+                    .properties
+                    .set_maximum_packet_size(config.max_packet_size as u32);
+                connack
+                    .properties
+                    .set_topic_alias_maximum(config.topic_alias_maximum);
+                connack
+                    .properties
+                    .set_wildcard_subscription_available(config.wildcard_subscription_available);
+                connack.properties.set_subscription_identifier_available(
+                    config.subscription_identifier_available,
+                );
+                connack
+                    .properties
+                    .set_shared_subscription_available(config.shared_subscription_available);
             }
-            connack.properties.set_retain_available(true);
-            connack
-                .properties
-                .set_maximum_packet_size(self.config.max_packet_size as u32);
-            connack
-                .properties
-                .set_topic_alias_maximum(self.config.topic_alias_maximum);
-            connack
-                .properties
-                .set_wildcard_subscription_available(self.config.wildcard_subscription_available);
-            connack.properties.set_subscription_identifier_available(
-                self.config.subscription_identifier_available,
-            );
-            connack
-                .properties
-                .set_shared_subscription_available(self.config.shared_subscription_available);
         }
 
         self.write_packet(&Packet::ConnAck(connack), writer)?;
@@ -634,8 +636,9 @@ impl WasmClientHandler {
                 continue;
             }
 
-            let granted_qos = if filter.options.qos as u8 > self.config.maximum_qos {
-                QoS::from(self.config.maximum_qos)
+            let max_qos = self.config.read().map(|c| c.maximum_qos).unwrap_or(2);
+            let granted_qos = if filter.options.qos as u8 > max_qos {
+                QoS::from(max_qos)
             } else {
                 filter.options.qos
             };
@@ -755,10 +758,11 @@ impl WasmClientHandler {
             return Ok(());
         }
 
-        if (publish.qos as u8) > self.config.maximum_qos {
+        let max_qos = self.config.read().map(|c| c.maximum_qos).unwrap_or(2);
+        if (publish.qos as u8) > max_qos {
             debug!(
                 "Client {} sent QoS {} but max is {}",
-                client_id, publish.qos as u8, self.config.maximum_qos
+                client_id, publish.qos as u8, max_qos
             );
             if let Some(packet_id) = publish.packet_id {
                 match publish.qos {
@@ -1028,28 +1032,30 @@ impl WasmClientHandler {
                         connack.properties.set_authentication_data(data.into());
                     }
 
-                    connack.properties.set_session_expiry_interval(
-                        self.config.session_expiry_interval.as_secs() as u32,
-                    );
-                    if self.config.maximum_qos < 2 {
-                        connack.properties.set_maximum_qos(self.config.maximum_qos);
+                    if let Ok(config) = self.config.read() {
+                        connack.properties.set_session_expiry_interval(
+                            config.session_expiry_interval.as_secs() as u32,
+                        );
+                        if config.maximum_qos < 2 {
+                            connack.properties.set_maximum_qos(config.maximum_qos);
+                        }
+                        connack.properties.set_retain_available(true);
+                        connack
+                            .properties
+                            .set_maximum_packet_size(config.max_packet_size as u32);
+                        connack
+                            .properties
+                            .set_topic_alias_maximum(config.topic_alias_maximum);
+                        connack.properties.set_wildcard_subscription_available(
+                            config.wildcard_subscription_available,
+                        );
+                        connack.properties.set_subscription_identifier_available(
+                            config.subscription_identifier_available,
+                        );
+                        connack.properties.set_shared_subscription_available(
+                            config.shared_subscription_available,
+                        );
                     }
-                    connack.properties.set_retain_available(true);
-                    connack
-                        .properties
-                        .set_maximum_packet_size(self.config.max_packet_size as u32);
-                    connack
-                        .properties
-                        .set_topic_alias_maximum(self.config.topic_alias_maximum);
-                    connack.properties.set_wildcard_subscription_available(
-                        self.config.wildcard_subscription_available,
-                    );
-                    connack.properties.set_subscription_identifier_available(
-                        self.config.subscription_identifier_available,
-                    );
-                    connack.properties.set_shared_subscription_available(
-                        self.config.shared_subscription_available,
-                    );
 
                     self.write_packet(&Packet::ConnAck(connack), writer)?;
 

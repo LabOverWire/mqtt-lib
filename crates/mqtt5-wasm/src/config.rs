@@ -1,7 +1,128 @@
+use mqtt5_protocol::connection::ReconnectConfig;
 use mqtt5_protocol::protocol::v5::properties::{Properties, PropertyId, PropertyValue};
+use mqtt5_protocol::time::Duration;
 use mqtt5_protocol::types::MessageProperties;
 use mqtt5_protocol::QoS;
 use wasm_bindgen::prelude::*;
+
+#[wasm_bindgen]
+pub struct WasmReconnectOptions {
+    pub(crate) enabled: bool,
+    pub(crate) initial_delay_ms: u32,
+    pub(crate) max_delay_ms: u32,
+    pub(crate) backoff_factor: f64,
+    pub(crate) max_attempts: Option<u32>,
+}
+
+#[wasm_bindgen]
+#[allow(non_snake_case)]
+impl WasmReconnectOptions {
+    #[wasm_bindgen(constructor)]
+    #[allow(clippy::must_use_candidate)]
+    pub fn new() -> Self {
+        Self {
+            enabled: true,
+            initial_delay_ms: 1000,
+            max_delay_ms: 60000,
+            backoff_factor: 2.0,
+            max_attempts: None,
+        }
+    }
+
+    #[must_use]
+    pub fn disabled() -> Self {
+        Self {
+            enabled: false,
+            ..Self::new()
+        }
+    }
+
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    #[wasm_bindgen(setter)]
+    pub fn set_enabled(&mut self, value: bool) {
+        self.enabled = value;
+    }
+
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn initialDelayMs(&self) -> u32 {
+        self.initial_delay_ms
+    }
+
+    #[wasm_bindgen(setter)]
+    pub fn set_initialDelayMs(&mut self, value: u32) {
+        self.initial_delay_ms = value;
+    }
+
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn maxDelayMs(&self) -> u32 {
+        self.max_delay_ms
+    }
+
+    #[wasm_bindgen(setter)]
+    pub fn set_maxDelayMs(&mut self, value: u32) {
+        self.max_delay_ms = value;
+    }
+
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn backoffFactor(&self) -> f64 {
+        self.backoff_factor
+    }
+
+    #[wasm_bindgen(setter)]
+    pub fn set_backoffFactor(&mut self, value: f64) {
+        self.backoff_factor = value;
+    }
+
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn maxAttempts(&self) -> Option<u32> {
+        self.max_attempts
+    }
+
+    #[wasm_bindgen(setter)]
+    pub fn set_maxAttempts(&mut self, value: Option<u32>) {
+        self.max_attempts = value;
+    }
+
+    #[must_use]
+    pub(crate) fn to_reconnect_config(&self) -> ReconnectConfig {
+        let mut config = ReconnectConfig {
+            enabled: self.enabled,
+            initial_delay: Duration::from_millis(u64::from(self.initial_delay_ms)),
+            max_delay: Duration::from_millis(u64::from(self.max_delay_ms)),
+            backoff_factor_tenths: 20,
+            max_attempts: self.max_attempts,
+        };
+        config.set_backoff_factor(self.backoff_factor);
+        config
+    }
+}
+
+impl Default for WasmReconnectOptions {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Clone for WasmReconnectOptions {
+    fn clone(&self) -> Self {
+        Self {
+            enabled: self.enabled,
+            initial_delay_ms: self.initial_delay_ms,
+            max_delay_ms: self.max_delay_ms,
+            backoff_factor: self.backoff_factor,
+            max_attempts: self.max_attempts,
+        }
+    }
+}
 
 #[wasm_bindgen]
 pub struct WasmConnectOptions {
@@ -20,6 +141,7 @@ pub struct WasmConnectOptions {
     pub(crate) authentication_data: Option<Vec<u8>>,
     pub(crate) user_properties: Vec<(String, String)>,
     pub(crate) protocol_version: u8,
+    pub(crate) backup_urls: Vec<String>,
 }
 
 #[wasm_bindgen]
@@ -44,6 +166,7 @@ impl WasmConnectOptions {
             authentication_data: None,
             user_properties: Vec::new(),
             protocol_version: 5,
+            backup_urls: Vec::new(),
         }
     }
 
@@ -199,6 +322,19 @@ impl WasmConnectOptions {
 
     pub fn clearUserProperties(&mut self) {
         self.user_properties.clear();
+    }
+
+    pub fn addBackupUrl(&mut self, url: String) {
+        self.backup_urls.push(url);
+    }
+
+    pub fn clearBackupUrls(&mut self) {
+        self.backup_urls.clear();
+    }
+
+    #[must_use]
+    pub fn getBackupUrls(&self) -> Vec<String> {
+        self.backup_urls.clone()
     }
 
     #[allow(clippy::too_many_lines)]
