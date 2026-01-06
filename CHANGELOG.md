@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [mqtt5-wasm 0.8.0] - 2026-01-06
+
+### Added
+
+- **Auto-reconnection for WASM client**: Automatic reconnection with exponential backoff
+  - `WasmReconnectOptions` for configuring initial delay, max delay, backoff factor, and max attempts
+  - `on_reconnecting` and `on_reconnect_failed` callbacks for monitoring reconnection state
+  - `set_reconnect_options()` and `enable_auto_reconnect()` methods
+
+- **Failover/backup brokers for WASM client**: Multiple broker URLs for high availability
+  - `addBackupUrl()`, `clearBackupUrls()`, `getBackupUrls()` methods on `WasmConnectOptions`
+  - Backup URLs tried in order during reconnection when primary fails
+
+- **Hot reload config for WASM broker**: Runtime configuration updates
+  - `update_config()` method to apply new broker configuration
+  - `on_config_change()` callback with hash-based change detection
+  - `get_config_hash()`, `get_max_clients()`, `get_max_packet_size()`, `get_session_expiry_interval_secs()` getters
+
 ## [0.17.2] / [mqttv5-cli 0.16.2] - 2025-12-30
 
 ### Added
