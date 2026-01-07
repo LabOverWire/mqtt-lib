@@ -237,9 +237,11 @@ impl WasmMqttClient {
                 let (attempt, delay, should_continue, primary_url, options) = {
                     let state_ref = state.borrow();
                     let attempt = state_ref.reconnect_attempt;
-                    let delay = state_ref.reconnect_config.calculate_delay(attempt);
+                    let base_delay = state_ref.reconnect_config.calculate_delay(attempt);
                     #[allow(clippy::cast_possible_truncation)]
-                    let delay_ms = delay.as_millis() as u32;
+                    let base_delay_ms = base_delay.as_millis() as u32;
+                    let jitter = (js_sys::Math::random() * f64::from(base_delay_ms / 4)) as u32;
+                    let delay_ms = base_delay_ms.saturating_add(jitter);
                     let should_continue = state_ref.reconnect_config.should_retry(attempt);
                     let url = state_ref.last_url.clone();
                     let options = state_ref.last_options.clone();

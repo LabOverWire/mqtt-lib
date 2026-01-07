@@ -636,7 +636,14 @@ impl WasmClientHandler {
                 continue;
             }
 
-            let max_qos = self.config.read().map(|c| c.maximum_qos).unwrap_or(2);
+            let max_qos = self
+                .config
+                .read()
+                .map(|c| c.maximum_qos)
+                .unwrap_or_else(|_| {
+                    warn!("Config read failed for max_qos, using default 2");
+                    2
+                });
             let granted_qos = if filter.options.qos as u8 > max_qos {
                 QoS::from(max_qos)
             } else {
@@ -758,7 +765,14 @@ impl WasmClientHandler {
             return Ok(());
         }
 
-        let max_qos = self.config.read().map(|c| c.maximum_qos).unwrap_or(2);
+        let max_qos = self
+            .config
+            .read()
+            .map(|c| c.maximum_qos)
+            .unwrap_or_else(|_| {
+                warn!("Config read failed for max_qos, using default 2");
+                2
+            });
         if (publish.qos as u8) > max_qos {
             debug!(
                 "Client {} sent QoS {} but max is {}",

@@ -16,6 +16,21 @@ use std::sync::{Arc, RwLock};
 use wasm_bindgen::prelude::*;
 use web_sys::MessagePort;
 
+#[derive(Hash)]
+struct ConfigHashFields {
+    max_clients: u32,
+    session_expiry_interval_secs: u32,
+    max_packet_size: u32,
+    topic_alias_maximum: u16,
+    retain_available: bool,
+    maximum_qos: u8,
+    wildcard_subscription_available: bool,
+    subscription_identifier_available: bool,
+    shared_subscription_available: bool,
+    server_keep_alive_secs: Option<u32>,
+    allow_anonymous: bool,
+}
+
 #[wasm_bindgen]
 #[allow(clippy::struct_excessive_bools)]
 pub struct WasmBrokerConfig {
@@ -128,18 +143,21 @@ impl WasmBrokerConfig {
     }
 
     fn calculate_hash(&self) -> u64 {
+        let fields = ConfigHashFields {
+            max_clients: self.max_clients,
+            session_expiry_interval_secs: self.session_expiry_interval_secs,
+            max_packet_size: self.max_packet_size,
+            topic_alias_maximum: self.topic_alias_maximum,
+            retain_available: self.retain_available,
+            maximum_qos: self.maximum_qos,
+            wildcard_subscription_available: self.wildcard_subscription_available,
+            subscription_identifier_available: self.subscription_identifier_available,
+            shared_subscription_available: self.shared_subscription_available,
+            server_keep_alive_secs: self.server_keep_alive_secs,
+            allow_anonymous: self.allow_anonymous,
+        };
         let mut hasher = DefaultHasher::new();
-        self.max_clients.hash(&mut hasher);
-        self.session_expiry_interval_secs.hash(&mut hasher);
-        self.max_packet_size.hash(&mut hasher);
-        self.topic_alias_maximum.hash(&mut hasher);
-        self.retain_available.hash(&mut hasher);
-        self.maximum_qos.hash(&mut hasher);
-        self.wildcard_subscription_available.hash(&mut hasher);
-        self.subscription_identifier_available.hash(&mut hasher);
-        self.shared_subscription_available.hash(&mut hasher);
-        self.server_keep_alive_secs.hash(&mut hasher);
-        self.allow_anonymous.hash(&mut hasher);
+        fields.hash(&mut hasher);
         hasher.finish()
     }
 }
@@ -487,10 +505,18 @@ impl WasmBroker {
 
         let broker_config = new_config.to_broker_config();
 
-        if let Ok(mut config) = self.config.write() {
-            *config = broker_config;
-        } else {
-            return Err(JsValue::from_str("Failed to acquire config write lock"));
+        match self.config.try_write() {
+            Ok(mut config) => {
+                *config = broker_config;
+            }
+            Err(_) => {
+                web_sys::console::error_1(
+                    &"Config update failed: lock contention (config in use)".into(),
+                );
+                return Err(JsValue::from_str(
+                    "Failed to acquire config write lock: resource busy",
+                ));
+            }
         }
 
         self.config_hash.set(new_hash);
@@ -523,7 +549,10 @@ impl WasmBroker {
         self.config
             .read()
             .map(|c| c.max_clients as u32)
-            .unwrap_or(1000)
+            .unwrap_or_else(|_| {
+                web_sys::console::warn_1(&"Config read failed, using default max_clients".into());
+                1000
+            })
     }
 
     #[wasm_bindgen]
@@ -531,7 +560,12 @@ impl WasmBroker {
         self.config
             .read()
             .map(|c| c.max_packet_size as u32)
-            .unwrap_or(268_435_456)
+            .unwrap_or_else(|_| {
+                web_sys::console::warn_1(
+                    &"Config read failed, using default max_packet_size".into(),
+                );
+                268_435_456
+            })
     }
 
     #[wasm_bindgen]
@@ -539,6 +573,11 @@ impl WasmBroker {
         self.config
             .read()
             .map(|c| c.session_expiry_interval.as_secs() as u32)
-            .unwrap_or(3600)
+            .unwrap_or_else(|_| {
+                web_sys::console::warn_1(
+                    &"Config read failed, using default session_expiry_interval".into(),
+                );
+                3600
+            })
     }
 }
