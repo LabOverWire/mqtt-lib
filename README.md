@@ -21,7 +21,7 @@
 
 ```toml
 [dependencies]
-mqtt5 = "0.17"
+mqtt5 = "0.18"
 ```
 
 ### CLI Tool
@@ -492,10 +492,10 @@ The `mqtt5-protocol` crate supports `no_std` environments for embedded systems.
 
 ```toml
 [dependencies]
-mqtt5-protocol = { version = "0.8", default-features = false }
+mqtt5-protocol = { version = "0.9", default-features = false }
 
 # For single-core MCUs (more efficient atomics)
-mqtt5-protocol = { version = "0.8", default-features = false, features = ["embedded-single-core"] }
+mqtt5-protocol = { version = "0.9", default-features = false, features = ["embedded-single-core"] }
 ```
 
 ### Time Provider
@@ -757,7 +757,7 @@ Distributed tracing with OpenTelemetry support:
 
 ```toml
 [dependencies]
-mqtt5 = { version = "0.17", features = ["opentelemetry"] }
+mqtt5 = { version = "0.18", features = ["opentelemetry"] }
 ```
 
 ### Features
