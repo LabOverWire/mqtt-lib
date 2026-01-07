@@ -1,8 +1,7 @@
 use crate::client::{RustMessage, WasmMqttClient};
 use mqtt5::broker::router::MessageRouter;
 use mqtt5::packet::publish::PublishPacket;
-use mqtt5::validation::topic_matches_filter;
-use mqtt5_protocol::QoS;
+use mqtt5_protocol::{evaluate_forwarding, BridgeDirection, BridgeStats, QoS, TopicMappingCore};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -18,14 +17,30 @@ pub enum WasmBridgeDirection {
     Both,
 }
 
+impl From<WasmBridgeDirection> for BridgeDirection {
+    fn from(dir: WasmBridgeDirection) -> Self {
+        match dir {
+            WasmBridgeDirection::In => BridgeDirection::In,
+            WasmBridgeDirection::Out => BridgeDirection::Out,
+            WasmBridgeDirection::Both => BridgeDirection::Both,
+        }
+    }
+}
+
+impl From<BridgeDirection> for WasmBridgeDirection {
+    fn from(dir: BridgeDirection) -> Self {
+        match dir {
+            BridgeDirection::In => WasmBridgeDirection::In,
+            BridgeDirection::Out => WasmBridgeDirection::Out,
+            BridgeDirection::Both => WasmBridgeDirection::Both,
+        }
+    }
+}
+
 #[wasm_bindgen]
 #[derive(Debug, Clone)]
 pub struct WasmTopicMapping {
-    pattern: String,
-    direction: WasmBridgeDirection,
-    qos: u8,
-    local_prefix: Option<String>,
-    remote_prefix: Option<String>,
+    core: TopicMappingCore,
 }
 
 #[wasm_bindgen]
@@ -34,35 +49,41 @@ impl WasmTopicMapping {
     #[allow(clippy::must_use_candidate)]
     pub fn new(pattern: String, direction: WasmBridgeDirection) -> Self {
         Self {
-            pattern,
-            direction,
-            qos: 0,
-            local_prefix: None,
-            remote_prefix: None,
+            core: TopicMappingCore::new(pattern, direction.into()),
         }
     }
 
     #[wasm_bindgen(setter)]
     pub fn set_qos(&mut self, qos: u8) {
-        self.qos = qos.min(2);
+        self.core.qos = QoS::from(qos.min(2));
     }
 
     #[wasm_bindgen(setter)]
     pub fn set_local_prefix(&mut self, prefix: Option<String>) {
-        self.local_prefix = prefix;
+        self.core.local_prefix = prefix;
     }
 
     #[wasm_bindgen(setter)]
     pub fn set_remote_prefix(&mut self, prefix: Option<String>) {
-        self.remote_prefix = prefix;
+        self.core.remote_prefix = prefix;
+    }
+}
+
+impl WasmTopicMapping {
+    fn direction(&self) -> WasmBridgeDirection {
+        self.core.direction.into()
+    }
+
+    fn pattern(&self) -> &str {
+        &self.core.pattern
     }
 
     fn qos_level(&self) -> QoS {
-        match self.qos {
-            0 => QoS::AtMostOnce,
-            1 => QoS::AtLeastOnce,
-            _ => QoS::ExactlyOnce,
-        }
+        self.core.qos
+    }
+
+    fn to_core(&self) -> TopicMappingCore {
+        self.core.clone()
     }
 }
 
@@ -138,7 +159,7 @@ impl WasmBridgeConfig {
             return Err("Bridge must have at least one topic mapping".into());
         }
         for topic in &self.topics {
-            if topic.pattern.is_empty() {
+            if topic.pattern().is_empty() {
                 return Err("Topic pattern cannot be empty".into());
             }
         }
@@ -151,8 +172,7 @@ pub struct WasmBridgeConnection {
     client: Rc<WasmMqttClient>,
     router: Arc<MessageRouter>,
     running: Rc<RefCell<bool>>,
-    messages_sent: Rc<RefCell<u64>>,
-    messages_received: Rc<RefCell<u64>>,
+    stats: Rc<RefCell<BridgeStats>>,
 }
 
 impl WasmBridgeConnection {
@@ -168,8 +188,7 @@ impl WasmBridgeConnection {
             client,
             router,
             running: Rc::new(RefCell::new(false)),
-            messages_sent: Rc::new(RefCell::new(0)),
-            messages_received: Rc::new(RefCell::new(0)),
+            stats: Rc::new(RefCell::new(BridgeStats::new())),
         })
     }
 
@@ -184,12 +203,13 @@ impl WasmBridgeConnection {
 
     async fn setup_subscriptions(&self) -> Result<(), JsValue> {
         for mapping in &self.config.topics {
-            match mapping.direction {
+            let direction = mapping.direction();
+            match direction {
                 WasmBridgeDirection::In | WasmBridgeDirection::Both => {
-                    let remote_topic = self.apply_remote_prefix(&mapping.pattern);
+                    let remote_topic = mapping.core.apply_remote_prefix(mapping.pattern());
                     let router = self.router.clone();
-                    let local_prefix = mapping.local_prefix.clone();
-                    let messages_received = self.messages_received.clone();
+                    let local_prefix = mapping.core.local_prefix.clone();
+                    let stats = self.stats.clone();
                     let qos = mapping.qos_level();
 
                     self.client
@@ -201,7 +221,7 @@ impl WasmBridgeConnection {
                                 let router = router.clone();
                                 let local_prefix = local_prefix.clone();
 
-                                *messages_received.borrow_mut() += 1;
+                                stats.borrow_mut().record_received();
 
                                 let local_topic = if let Some(ref prefix) = local_prefix {
                                     format!("{prefix}{}", msg.topic)
@@ -229,17 +249,6 @@ impl WasmBridgeConnection {
         Ok(())
     }
 
-    fn apply_remote_prefix(&self, topic: &str) -> String {
-        for mapping in &self.config.topics {
-            if mapping.pattern == topic {
-                if let Some(ref prefix) = mapping.remote_prefix {
-                    return format!("{prefix}{topic}");
-                }
-            }
-        }
-        topic.to_string()
-    }
-
     /// # Errors
     /// Returns an error if publishing the message fails.
     pub async fn forward_message(&self, packet: &PublishPacket) -> Result<(), JsValue> {
@@ -247,26 +256,19 @@ impl WasmBridgeConnection {
             return Ok(());
         }
 
-        for mapping in &self.config.topics {
-            match mapping.direction {
-                WasmBridgeDirection::Out | WasmBridgeDirection::Both => {
-                    if topic_matches_filter(&packet.topic_name, &mapping.pattern) {
-                        let remote_topic = if let Some(ref prefix) = mapping.remote_prefix {
-                            format!("{prefix}{}", packet.topic_name)
-                        } else {
-                            packet.topic_name.clone()
-                        };
+        let core_mappings: Vec<TopicMappingCore> = self
+            .config
+            .topics
+            .iter()
+            .map(WasmTopicMapping::to_core)
+            .collect();
 
-                        self.client
-                            .publish_internal(&remote_topic, &packet.payload, mapping.qos_level())
-                            .await?;
+        if let Some(decision) = evaluate_forwarding(&packet.topic_name, &core_mappings, true) {
+            self.client
+                .publish_internal(&decision.transformed_topic, &packet.payload, decision.qos)
+                .await?;
 
-                        *self.messages_sent.borrow_mut() += 1;
-                        break;
-                    }
-                }
-                WasmBridgeDirection::In => {}
-            }
+            self.stats.borrow_mut().record_sent();
         }
         Ok(())
     }
@@ -290,12 +292,12 @@ impl WasmBridgeConnection {
 
     #[must_use]
     pub fn messages_sent(&self) -> u64 {
-        *self.messages_sent.borrow()
+        self.stats.borrow().messages_sent
     }
 
     #[must_use]
     pub fn messages_received(&self) -> u64 {
-        *self.messages_received.borrow()
+        self.stats.borrow().messages_received
     }
 }
 

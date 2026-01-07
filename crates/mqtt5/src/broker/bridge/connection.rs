@@ -3,16 +3,14 @@
 //! Manages a single bridge connection to a remote broker using our existing
 //! `MqttClient` implementation.
 
-use crate::broker::bridge::{
-    BridgeConfig, BridgeDirection, BridgeError, BridgeProtocol, BridgeStats, Result,
-};
+use crate::broker::bridge::{BridgeConfig, BridgeError, BridgeProtocol, BridgeStats, Result};
 use crate::broker::router::MessageRouter;
 use crate::client::MqttClient;
 use crate::packet::publish::PublishPacket;
 use crate::time::{Duration, Instant};
 use crate::transport::tls::TlsConfig;
 use crate::types::ConnectOptions;
-use crate::validation::topic_matches_filter;
+use mqtt5_protocol::bridge::{evaluate_forwarding, TopicMappingCore};
 use rand::Rng;
 use std::collections::VecDeque;
 use std::net::ToSocketAddrs;
@@ -675,56 +673,49 @@ impl BridgeConnection {
     /// Sets up subscriptions for incoming topics
     async fn setup_subscriptions(&self) -> Result<()> {
         for mapping in &self.config.topics {
-            match mapping.direction {
-                BridgeDirection::In | BridgeDirection::Both => {
-                    let remote_topic = self.apply_remote_prefix(&mapping.pattern);
-
-                    // Subscribe with a callback that forwards to local broker
-                    let router = self.router.clone();
-                    let local_prefix = mapping.local_prefix.clone();
-                    let stats_received = self.messages_received.clone();
-                    let stats_bytes = self.bytes_received.clone();
-
-                    self.client
-                        .subscribe(&remote_topic, move |msg| {
-                            let router = router.clone();
-                            let local_prefix = local_prefix.clone();
-                            let stats_received = stats_received.clone();
-                            let stats_bytes = stats_bytes.clone();
-
-                            // Update stats
-                            stats_received.fetch_add(1, Ordering::Relaxed);
-                            stats_bytes.fetch_add(msg.payload.len() as u64, Ordering::Relaxed);
-
-                            // Apply local prefix if configured
-                            let local_topic = if let Some(ref prefix) = local_prefix {
-                                format!("{}{}", prefix, msg.topic)
-                            } else {
-                                msg.topic.clone()
-                            };
-
-                            // Create packet for local routing
-                            let mut packet =
-                                PublishPacket::new(local_topic, msg.payload.clone(), msg.qos);
-                            let pub_props: crate::types::PublishProperties = msg.properties.into();
-                            packet.properties = pub_props.into();
-                            packet.retain = msg.retain;
-
-                            tokio::spawn(async move {
-                                router.route_message_local_only(&packet, None).await;
-                            });
-                        })
-                        .await?;
-
-                    info!(
-                        "Bridge '{}' subscribed to remote topic: {} (QoS: {:?})",
-                        self.config.name, remote_topic, mapping.qos
-                    );
-                }
-                BridgeDirection::Out => {
-                    // No subscription needed for outgoing only
-                }
+            let core_mapping = TopicMappingCore::from(mapping);
+            if !core_mapping.direction.allows_incoming() {
+                continue;
             }
+
+            let remote_topic = core_mapping.apply_remote_prefix(&core_mapping.pattern);
+            let local_prefix = core_mapping.local_prefix.clone();
+            let qos = core_mapping.qos;
+
+            let router = self.router.clone();
+            let stats_received = self.messages_received.clone();
+            let stats_bytes = self.bytes_received.clone();
+
+            self.client
+                .subscribe(&remote_topic, move |msg| {
+                    let router = router.clone();
+                    let local_prefix = local_prefix.clone();
+                    let stats_received = stats_received.clone();
+                    let stats_bytes = stats_bytes.clone();
+
+                    stats_received.fetch_add(1, Ordering::Relaxed);
+                    stats_bytes.fetch_add(msg.payload.len() as u64, Ordering::Relaxed);
+
+                    let local_topic = match &local_prefix {
+                        Some(prefix) => format!("{prefix}{}", msg.topic),
+                        None => msg.topic.clone(),
+                    };
+
+                    let mut packet = PublishPacket::new(local_topic, msg.payload.clone(), msg.qos);
+                    let pub_props: crate::types::PublishProperties = msg.properties.into();
+                    packet.properties = pub_props.into();
+                    packet.retain = msg.retain;
+
+                    tokio::spawn(async move {
+                        router.route_message_local_only(&packet, None).await;
+                    });
+                })
+                .await?;
+
+            info!(
+                "Bridge '{}' subscribed to remote topic: {} (QoS: {:?})",
+                self.config.name, remote_topic, qos
+            );
         }
 
         Ok(())
@@ -756,100 +747,74 @@ impl BridgeConnection {
             return Ok(());
         }
 
-        let mut matched = false;
-        for mapping in &self.config.topics {
-            match mapping.direction {
-                BridgeDirection::Out | BridgeDirection::Both => {
-                    if topic_matches_filter(&packet.topic_name, &mapping.pattern) {
-                        matched = true;
-                        let remote_topic = if let Some(ref prefix) = mapping.remote_prefix {
-                            format!("{}{}", prefix, packet.topic_name)
-                        } else {
-                            packet.topic_name.clone()
-                        };
-
-                        debug!(
-                            bridge = %bridge_name,
-                            local_topic = %packet.topic_name,
-                            remote_topic = %remote_topic,
-                            pattern = %mapping.pattern,
-                            "topic matched, spawning publish task"
-                        );
-
-                        let msg_props: crate::types::MessageProperties =
-                            packet.properties.clone().into();
-                        let options = crate::types::PublishOptions {
-                            qos: mapping.qos,
-                            retain: packet.retain,
-                            properties: msg_props.into(),
-                        };
-
-                        let client = self.client.clone();
-                        let payload = packet.payload.clone();
-                        let messages_sent = self.messages_sent.clone();
-                        let bytes_sent = self.bytes_sent.clone();
-                        let payload_len = payload.len();
-                        let bridge_name_clone = bridge_name.clone();
-
-                        tokio::spawn(async move {
-                            debug!(
-                                bridge = %bridge_name_clone,
-                                topic = %remote_topic,
-                                "publish task started"
-                            );
-                            match client
-                                .publish_with_options(&remote_topic, payload, options)
-                                .await
-                            {
-                                Ok(_) => {
-                                    debug!(
-                                        bridge = %bridge_name_clone,
-                                        topic = %remote_topic,
-                                        "publish succeeded"
-                                    );
-                                    messages_sent.fetch_add(1, Ordering::Relaxed);
-                                    bytes_sent.fetch_add(payload_len as u64, Ordering::Relaxed);
-                                }
-                                Err(e) => {
-                                    error!(
-                                        bridge = %bridge_name_clone,
-                                        topic = %remote_topic,
-                                        error = %e,
-                                        "publish failed"
-                                    );
-                                }
-                            }
-                        });
-
-                        break;
-                    }
-                }
-                BridgeDirection::In => {}
-            }
-        }
-
-        if !matched {
+        let mappings: Vec<TopicMappingCore> = self
+            .config
+            .topics
+            .iter()
+            .map(TopicMappingCore::from)
+            .collect();
+        let Some(decision) = evaluate_forwarding(&packet.topic_name, &mappings, true) else {
             debug!(
                 bridge = %bridge_name,
                 topic = %packet.topic_name,
                 "no matching topic pattern found"
             );
-        }
+            return Ok(());
+        };
 
-        Ok(())
-    }
+        let remote_topic = decision.transformed_topic;
+        debug!(
+            bridge = %bridge_name,
+            local_topic = %packet.topic_name,
+            remote_topic = %remote_topic,
+            "topic matched, spawning publish task"
+        );
 
-    /// Applies remote prefix to a topic
-    fn apply_remote_prefix(&self, topic: &str) -> String {
-        // Find the mapping for this topic to get its remote prefix
-        for mapping in &self.config.topics {
-            if mapping.pattern == topic {
-                if let Some(ref prefix) = mapping.remote_prefix {
-                    return format!("{prefix}{topic}");
+        let msg_props: crate::types::MessageProperties = packet.properties.clone().into();
+        let options = crate::types::PublishOptions {
+            qos: decision.qos,
+            retain: packet.retain,
+            properties: msg_props.into(),
+        };
+
+        let client = self.client.clone();
+        let payload = packet.payload.clone();
+        let messages_sent = self.messages_sent.clone();
+        let bytes_sent = self.bytes_sent.clone();
+        let payload_len = payload.len();
+        let bridge_name_clone = bridge_name.clone();
+
+        tokio::spawn(async move {
+            debug!(
+                bridge = %bridge_name_clone,
+                topic = %remote_topic,
+                "publish task started"
+            );
+            match client
+                .publish_with_options(&remote_topic, payload, options)
+                .await
+            {
+                Ok(_) => {
+                    debug!(
+                        bridge = %bridge_name_clone,
+                        topic = %remote_topic,
+                        "publish succeeded"
+                    );
+                    messages_sent.fetch_add(1, Ordering::Relaxed);
+                    bytes_sent.fetch_add(payload_len as u64, Ordering::Relaxed);
+                }
+                Err(e) => {
+                    error!(
+                        bridge = %bridge_name_clone,
+                        topic = %remote_topic,
+                        error = %e,
+                        "publish failed"
+                    );
                 }
             }
-        }
-        topic.to_string()
+        });
+
+        Ok(())
     }
 
     /// Updates stats when connected

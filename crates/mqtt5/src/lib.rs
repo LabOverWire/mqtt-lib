@@ -58,6 +58,9 @@
 //!     // Monitor connection events
 //!     client.on_connection_event(|event| {
 //!         match event {
+//!             ConnectionEvent::Connecting => {
+//!                 println!("Connecting...");
+//!             }
 //!             ConnectionEvent::Connected { session_present } => {
 //!                 println!("Connected! Session present: {}", session_present);
 //!             }

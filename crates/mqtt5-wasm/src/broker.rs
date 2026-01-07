@@ -9,10 +9,27 @@ use mqtt5::broker::storage::{DynamicStorage, MemoryBackend};
 use mqtt5::broker::sys_topics::{BrokerStats, SysTopicsProvider};
 use mqtt5::time::Duration;
 use std::cell::{Cell, RefCell};
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use wasm_bindgen::prelude::*;
 use web_sys::MessagePort;
+
+#[derive(Hash)]
+struct ConfigHashFields {
+    max_clients: u32,
+    session_expiry_interval_secs: u32,
+    max_packet_size: u32,
+    topic_alias_maximum: u16,
+    retain_available: bool,
+    maximum_qos: u8,
+    wildcard_subscription_available: bool,
+    subscription_identifier_available: bool,
+    shared_subscription_available: bool,
+    server_keep_alive_secs: Option<u32>,
+    allow_anonymous: bool,
+}
 
 #[wasm_bindgen]
 #[allow(clippy::struct_excessive_bools)]
@@ -124,6 +141,25 @@ impl WasmBrokerConfig {
             ..Default::default()
         }
     }
+
+    fn calculate_hash(&self) -> u64 {
+        let fields = ConfigHashFields {
+            max_clients: self.max_clients,
+            session_expiry_interval_secs: self.session_expiry_interval_secs,
+            max_packet_size: self.max_packet_size,
+            topic_alias_maximum: self.topic_alias_maximum,
+            retain_available: self.retain_available,
+            maximum_qos: self.maximum_qos,
+            wildcard_subscription_available: self.wildcard_subscription_available,
+            subscription_identifier_available: self.subscription_identifier_available,
+            shared_subscription_available: self.shared_subscription_available,
+            server_keep_alive_secs: self.server_keep_alive_secs,
+            allow_anonymous: self.allow_anonymous,
+        };
+        let mut hasher = DefaultHasher::new();
+        fields.hash(&mut hasher);
+        hasher.finish()
+    }
 }
 
 impl Default for WasmBrokerConfig {
@@ -134,7 +170,7 @@ impl Default for WasmBrokerConfig {
 
 #[wasm_bindgen]
 pub struct WasmBroker {
-    config: Arc<BrokerConfig>,
+    config: Arc<RwLock<BrokerConfig>>,
     router: Arc<MessageRouter>,
     auth_provider: Arc<ComprehensiveAuthProvider>,
     storage: Arc<DynamicStorage>,
@@ -142,6 +178,8 @@ pub struct WasmBroker {
     resource_monitor: Arc<ResourceMonitor>,
     bridge_manager: Rc<RefCell<WasmBridgeManager>>,
     sys_topics_running: Rc<Cell<bool>>,
+    config_hash: Rc<Cell<u64>>,
+    on_config_change: Rc<RefCell<Option<js_sys::Function>>>,
 }
 
 #[wasm_bindgen]
@@ -160,7 +198,8 @@ impl WasmBroker {
     #[allow(clippy::needless_pass_by_value, clippy::arc_with_non_send_sync)]
     pub fn with_config(wasm_config: WasmBrokerConfig) -> Result<WasmBroker, JsValue> {
         let allow_anonymous = wasm_config.allow_anonymous;
-        let config = Arc::new(wasm_config.to_broker_config());
+        let config_hash = wasm_config.calculate_hash();
+        let config = Arc::new(RwLock::new(wasm_config.to_broker_config()));
 
         let storage = Arc::new(DynamicStorage::Memory(MemoryBackend::new()));
         let router = Arc::new(MessageRouter::with_storage(Arc::clone(&storage)));
@@ -174,8 +213,9 @@ impl WasmBroker {
 
         let stats = Arc::new(BrokerStats::new());
 
+        let max_clients = config.read().map(|c| c.max_clients).unwrap_or(1000);
         let limits = ResourceLimits {
-            max_connections: config.max_clients,
+            max_connections: max_clients,
             ..Default::default()
         };
         let resource_monitor = Arc::new(ResourceMonitor::new(limits));
@@ -191,6 +231,8 @@ impl WasmBroker {
             resource_monitor,
             bridge_manager,
             sys_topics_running: Rc::new(Cell::new(false)),
+            config_hash: Rc::new(Cell::new(config_hash)),
+            on_config_change: Rc::new(RefCell::new(None)),
         };
 
         broker.setup_bridge_callback();
@@ -449,5 +491,93 @@ impl WasmBroker {
                 })
                 .await;
         });
+    }
+
+    #[wasm_bindgen]
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn update_config(&self, new_config: WasmBrokerConfig) -> Result<(), JsValue> {
+        let new_hash = new_config.calculate_hash();
+        let old_hash = self.config_hash.get();
+
+        if new_hash == old_hash {
+            return Ok(());
+        }
+
+        let broker_config = new_config.to_broker_config();
+
+        match self.config.try_write() {
+            Ok(mut config) => {
+                *config = broker_config;
+            }
+            Err(_) => {
+                web_sys::console::error_1(
+                    &"Config update failed: lock contention (config in use)".into(),
+                );
+                return Err(JsValue::from_str(
+                    "Failed to acquire config write lock: resource busy",
+                ));
+            }
+        }
+
+        self.config_hash.set(new_hash);
+
+        if let Some(callback) = self.on_config_change.borrow().as_ref() {
+            let old_hash_js = JsValue::from_f64(old_hash as f64);
+            let new_hash_js = JsValue::from_f64(new_hash as f64);
+            if let Err(e) = callback.call2(&JsValue::NULL, &old_hash_js, &new_hash_js) {
+                web_sys::console::error_1(&format!("Config change callback error: {e:?}").into());
+            }
+        }
+
+        web_sys::console::log_1(&"Broker config updated".into());
+        Ok(())
+    }
+
+    #[wasm_bindgen]
+    #[must_use]
+    pub fn get_config_hash(&self) -> f64 {
+        self.config_hash.get() as f64
+    }
+
+    #[wasm_bindgen]
+    pub fn on_config_change(&self, callback: js_sys::Function) {
+        *self.on_config_change.borrow_mut() = Some(callback);
+    }
+
+    #[wasm_bindgen]
+    pub fn get_max_clients(&self) -> u32 {
+        self.config
+            .read()
+            .map(|c| c.max_clients as u32)
+            .unwrap_or_else(|_| {
+                web_sys::console::warn_1(&"Config read failed, using default max_clients".into());
+                1000
+            })
+    }
+
+    #[wasm_bindgen]
+    pub fn get_max_packet_size(&self) -> u32 {
+        self.config
+            .read()
+            .map(|c| c.max_packet_size as u32)
+            .unwrap_or_else(|_| {
+                web_sys::console::warn_1(
+                    &"Config read failed, using default max_packet_size".into(),
+                );
+                268_435_456
+            })
+    }
+
+    #[wasm_bindgen]
+    pub fn get_session_expiry_interval_secs(&self) -> u32 {
+        self.config
+            .read()
+            .map(|c| c.session_expiry_interval.as_secs() as u32)
+            .unwrap_or_else(|_| {
+                web_sys::console::warn_1(
+                    &"Config read failed, using default session_expiry_interval".into(),
+                );
+                3600
+            })
     }
 }

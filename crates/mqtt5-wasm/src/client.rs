@@ -1,9 +1,11 @@
 use crate::config::{
-    WasmConnectOptions, WasmMessageProperties, WasmPublishOptions, WasmSubscribeOptions,
+    WasmConnectOptions, WasmMessageProperties, WasmPublishOptions, WasmReconnectOptions,
+    WasmSubscribeOptions,
 };
 use crate::decoder::read_packet;
 use crate::transport::{WasmReader, WasmTransportType, WasmWriter};
 use bytes::BytesMut;
+use mqtt5_protocol::connection::ReconnectConfig;
 use mqtt5_protocol::packet::connect::ConnectPacket;
 use mqtt5_protocol::packet::publish::PublishPacket;
 use mqtt5_protocol::packet::subscribe::SubscribePacket;
@@ -66,7 +68,55 @@ struct ClientState {
     on_disconnect: Option<js_sys::Function>,
     on_error: Option<js_sys::Function>,
     on_auth_challenge: Option<js_sys::Function>,
+    on_reconnecting: Option<js_sys::Function>,
+    on_reconnect_failed: Option<js_sys::Function>,
     auth_method: Option<String>,
+    reconnect_config: ReconnectConfig,
+    reconnect_attempt: u32,
+    reconnecting: bool,
+    last_url: Option<String>,
+    last_options: Option<StoredConnectOptions>,
+    user_initiated_disconnect: bool,
+    current_broker_index: usize,
+}
+
+#[derive(Clone)]
+struct StoredConnectOptions {
+    keep_alive: u16,
+    username: Option<String>,
+    password: Option<Vec<u8>>,
+    session_expiry_interval: Option<u32>,
+    receive_maximum: Option<u16>,
+    maximum_packet_size: Option<u32>,
+    topic_alias_maximum: Option<u16>,
+    request_response_information: Option<bool>,
+    request_problem_information: Option<bool>,
+    authentication_method: Option<String>,
+    authentication_data: Option<Vec<u8>>,
+    user_properties: Vec<(String, String)>,
+    protocol_version: u8,
+    backup_urls: Vec<String>,
+}
+
+impl From<&WasmConnectOptions> for StoredConnectOptions {
+    fn from(opts: &WasmConnectOptions) -> Self {
+        Self {
+            keep_alive: opts.keep_alive,
+            username: opts.username.clone(),
+            password: opts.password.clone(),
+            session_expiry_interval: opts.session_expiry_interval,
+            receive_maximum: opts.receive_maximum,
+            maximum_packet_size: opts.maximum_packet_size,
+            topic_alias_maximum: opts.topic_alias_maximum,
+            request_response_information: opts.request_response_information,
+            request_problem_information: opts.request_problem_information,
+            authentication_method: opts.authentication_method.clone(),
+            authentication_data: opts.authentication_data.clone(),
+            user_properties: opts.user_properties.clone(),
+            protocol_version: opts.protocol_version,
+            backup_urls: opts.backup_urls.clone(),
+        }
+    }
 }
 
 impl ClientState {
@@ -91,7 +141,16 @@ impl ClientState {
             on_disconnect: None,
             on_error: None,
             on_auth_challenge: None,
+            on_reconnecting: None,
+            on_reconnect_failed: None,
             auth_method: None,
+            reconnect_config: ReconnectConfig::disabled(),
+            reconnect_attempt: 0,
+            reconnecting: false,
+            last_url: None,
+            last_options: None,
+            user_initiated_disconnect: false,
+            current_broker_index: 0,
         }
     }
 }
@@ -139,9 +198,308 @@ impl WasmMqttClient {
         }
     }
 
-    fn spawn_packet_reader(&self, mut reader: WasmReader) {
-        let state = Rc::clone(&self.state);
+    fn trigger_reconnecting_callback(
+        state: &Rc<RefCell<ClientState>>,
+        attempt: u32,
+        delay_ms: u32,
+    ) {
+        let callback = state.borrow().on_reconnecting.clone();
+        if let Some(callback) = callback {
+            let attempt_js = JsValue::from_f64(f64::from(attempt));
+            let delay_js = JsValue::from_f64(f64::from(delay_ms));
+            if let Err(e) = callback.call2(&JsValue::NULL, &attempt_js, &delay_js) {
+                web_sys::console::error_1(&format!("onReconnecting callback error: {e:?}").into());
+            }
+        }
+    }
 
+    fn trigger_reconnect_failed_callback(state: &Rc<RefCell<ClientState>>, error_msg: &str) {
+        let callback = state.borrow().on_reconnect_failed.clone();
+        if let Some(callback) = callback {
+            let error_js = JsValue::from_str(error_msg);
+            if let Err(e) = callback.call1(&JsValue::NULL, &error_js) {
+                web_sys::console::error_1(
+                    &format!("onReconnectFailed callback error: {e:?}").into(),
+                );
+            }
+        }
+    }
+
+    fn spawn_reconnection_task(state: Rc<RefCell<ClientState>>) {
+        spawn_local(async move {
+            {
+                let mut state_ref = state.borrow_mut();
+                state_ref.reconnecting = true;
+                state_ref.reconnect_attempt = 0;
+            }
+
+            loop {
+                let (attempt, delay, should_continue, primary_url, options) = {
+                    let state_ref = state.borrow();
+                    let attempt = state_ref.reconnect_attempt;
+                    let base_delay = state_ref.reconnect_config.calculate_delay(attempt);
+                    #[allow(clippy::cast_possible_truncation)]
+                    let base_delay_ms = base_delay.as_millis() as u32;
+                    let jitter = (js_sys::Math::random() * f64::from(base_delay_ms / 4)) as u32;
+                    let delay_ms = base_delay_ms.saturating_add(jitter);
+                    let should_continue = state_ref.reconnect_config.should_retry(attempt);
+                    let url = state_ref.last_url.clone();
+                    let options = state_ref.last_options.clone();
+                    (attempt, delay_ms, should_continue, url, options)
+                };
+
+                if !should_continue {
+                    Self::trigger_reconnect_failed_callback(
+                        &state,
+                        "Max reconnection attempts exceeded",
+                    );
+                    state.borrow_mut().reconnecting = false;
+                    return;
+                }
+
+                let (primary_url, options) = match (primary_url, options) {
+                    (Some(u), Some(o)) => (u, o),
+                    _ => {
+                        Self::trigger_reconnect_failed_callback(
+                            &state,
+                            "No stored connection parameters",
+                        );
+                        state.borrow_mut().reconnecting = false;
+                        return;
+                    }
+                };
+
+                Self::trigger_reconnecting_callback(&state, attempt + 1, delay);
+
+                sleep_ms(delay).await;
+
+                if state.borrow().user_initiated_disconnect {
+                    state.borrow_mut().reconnecting = false;
+                    return;
+                }
+
+                let mut all_urls = vec![primary_url.clone()];
+                all_urls.extend(options.backup_urls.clone());
+
+                let mut connected = false;
+                for (idx, url) in all_urls.iter().enumerate() {
+                    match Self::attempt_reconnect(&state, url, &options).await {
+                        Ok(()) => {
+                            {
+                                let mut state_ref = state.borrow_mut();
+                                state_ref.reconnecting = false;
+                                state_ref.reconnect_attempt = 0;
+                                state_ref.current_broker_index = idx;
+                            }
+                            if idx == 0 {
+                                web_sys::console::log_1(
+                                    &format!(
+                                        "Reconnected to primary after {0} attempt(s)",
+                                        attempt + 1
+                                    )
+                                    .into(),
+                                );
+                            } else {
+                                web_sys::console::log_1(
+                                    &format!(
+                                        "Reconnected to backup {idx} after {0} attempt(s)",
+                                        attempt + 1
+                                    )
+                                    .into(),
+                                );
+                            }
+                            connected = true;
+                            break;
+                        }
+                        Err(e) => {
+                            if idx == 0 {
+                                web_sys::console::warn_1(
+                                    &format!("Primary connection failed: {e}").into(),
+                                );
+                            } else {
+                                web_sys::console::warn_1(
+                                    &format!("Backup {idx} connection failed: {e}").into(),
+                                );
+                            }
+                        }
+                    }
+                }
+
+                if connected {
+                    return;
+                }
+
+                web_sys::console::warn_1(
+                    &format!("All brokers failed on attempt {0}", attempt + 1).into(),
+                );
+                state.borrow_mut().reconnect_attempt = attempt + 1;
+            }
+        });
+    }
+
+    async fn attempt_reconnect(
+        state: &Rc<RefCell<ClientState>>,
+        url: &str,
+        options: &StoredConnectOptions,
+    ) -> Result<(), String> {
+        let mut transport = WasmTransportType::WebSocket(
+            crate::transport::websocket::WasmWebSocketTransport::new(url),
+        );
+
+        transport
+            .connect()
+            .await
+            .map_err(|e| format!("Transport connection failed: {e}"))?;
+
+        let client_id = state.borrow().client_id.clone();
+
+        {
+            let mut state_mut = state.borrow_mut();
+            state_mut.keep_alive = options.keep_alive;
+            state_mut.protocol_version = options.protocol_version;
+        }
+
+        let properties = Self::build_properties_from_stored(options);
+
+        let connect_packet = ConnectPacket {
+            protocol_version: options.protocol_version,
+            clean_start: false,
+            keep_alive: options.keep_alive,
+            client_id,
+            username: options.username.clone(),
+            password: options.password.clone(),
+            will: None,
+            properties,
+            will_properties: Properties::default(),
+        };
+
+        let packet = Packet::Connect(Box::new(connect_packet));
+        let mut buf = BytesMut::new();
+        encode_packet(&packet, &mut buf).map_err(|e| format!("Packet encoding failed: {e}"))?;
+
+        transport
+            .write(&buf)
+            .await
+            .map_err(|e| format!("Write failed: {e}"))?;
+
+        if let Some(method) = &options.authentication_method {
+            state.borrow_mut().auth_method = Some(method.clone());
+        }
+
+        let (mut reader, writer) = transport
+            .into_split()
+            .map_err(|e| format!("Transport split failed: {e}"))?;
+
+        let packet = read_packet(&mut reader)
+            .await
+            .map_err(|e| format!("Packet read failed: {e}"))?;
+
+        match packet {
+            Packet::ConnAck(connack) => {
+                let reason_code = connack.reason_code as u8;
+                if reason_code != 0 {
+                    return Err(format!("CONNACK error: {reason_code}"));
+                }
+
+                let writer_rc = Rc::new(RefCell::new(writer));
+                {
+                    let mut state_mut = state.borrow_mut();
+                    state_mut.connected = true;
+                    state_mut.writer = Some(Rc::clone(&writer_rc));
+                }
+
+                Self::spawn_packet_reader_internal(Rc::clone(state), reader);
+                Self::spawn_keepalive_task_internal(Rc::clone(state));
+                Self::spawn_qos2_cleanup_task_internal(Rc::clone(state));
+
+                let callback = state.borrow().on_connect.clone();
+                if let Some(callback) = callback {
+                    let reason_code_js = JsValue::from_f64(f64::from(connack.reason_code as u8));
+                    let session_present_js = JsValue::from_bool(connack.session_present);
+                    let _ = callback.call2(&JsValue::NULL, &reason_code_js, &session_present_js);
+                }
+
+                Ok(())
+            }
+            _ => Err(format!("Expected CONNACK, received: {packet:?}")),
+        }
+    }
+
+    fn build_properties_from_stored(options: &StoredConnectOptions) -> Properties {
+        let mut properties = Properties::default();
+
+        if let Some(interval) = options.session_expiry_interval {
+            let _ = properties.add(
+                mqtt5_protocol::protocol::v5::properties::PropertyId::SessionExpiryInterval,
+                mqtt5_protocol::protocol::v5::properties::PropertyValue::FourByteInteger(interval),
+            );
+        }
+
+        if let Some(max) = options.receive_maximum {
+            let _ = properties.add(
+                mqtt5_protocol::protocol::v5::properties::PropertyId::ReceiveMaximum,
+                mqtt5_protocol::protocol::v5::properties::PropertyValue::TwoByteInteger(max),
+            );
+        }
+
+        if let Some(size) = options.maximum_packet_size {
+            let _ = properties.add(
+                mqtt5_protocol::protocol::v5::properties::PropertyId::MaximumPacketSize,
+                mqtt5_protocol::protocol::v5::properties::PropertyValue::FourByteInteger(size),
+            );
+        }
+
+        if let Some(max) = options.topic_alias_maximum {
+            let _ = properties.add(
+                mqtt5_protocol::protocol::v5::properties::PropertyId::TopicAliasMaximum,
+                mqtt5_protocol::protocol::v5::properties::PropertyValue::TwoByteInteger(max),
+            );
+        }
+
+        if let Some(req) = options.request_response_information {
+            let _ = properties.add(
+                mqtt5_protocol::protocol::v5::properties::PropertyId::RequestResponseInformation,
+                mqtt5_protocol::protocol::v5::properties::PropertyValue::Byte(u8::from(req)),
+            );
+        }
+
+        if let Some(req) = options.request_problem_information {
+            let _ = properties.add(
+                mqtt5_protocol::protocol::v5::properties::PropertyId::RequestProblemInformation,
+                mqtt5_protocol::protocol::v5::properties::PropertyValue::Byte(u8::from(req)),
+            );
+        }
+
+        if let Some(method) = &options.authentication_method {
+            let _ = properties.add(
+                mqtt5_protocol::protocol::v5::properties::PropertyId::AuthenticationMethod,
+                mqtt5_protocol::protocol::v5::properties::PropertyValue::Utf8String(method.clone()),
+            );
+        }
+
+        if let Some(data) = &options.authentication_data {
+            let _ = properties.add(
+                mqtt5_protocol::protocol::v5::properties::PropertyId::AuthenticationData,
+                mqtt5_protocol::protocol::v5::properties::PropertyValue::BinaryData(
+                    data.clone().into(),
+                ),
+            );
+        }
+
+        for (key, value) in &options.user_properties {
+            let _ = properties.add(
+                mqtt5_protocol::protocol::v5::properties::PropertyId::UserProperty,
+                mqtt5_protocol::protocol::v5::properties::PropertyValue::Utf8StringPair(
+                    key.clone(),
+                    value.clone(),
+                ),
+            );
+        }
+
+        properties
+    }
+
+    fn spawn_packet_reader_internal(state: Rc<RefCell<ClientState>>, mut reader: WasmReader) {
         spawn_local(async move {
             loop {
                 let packet_result = read_packet(&mut reader).await;
@@ -151,12 +509,16 @@ impl WasmMqttClient {
                         Self::handle_incoming_packet(&state, packet);
                     }
                     Err(e) => {
-                        let was_connected = loop {
+                        let (was_connected, should_reconnect) = loop {
                             match state.try_borrow_mut() {
                                 Ok(mut state_ref) => {
                                     let connected = state_ref.connected;
                                     state_ref.connected = false;
-                                    break connected;
+                                    let should = state_ref.reconnect_config.enabled
+                                        && !state_ref.user_initiated_disconnect
+                                        && !state_ref.reconnecting
+                                        && state_ref.last_url.is_some();
+                                    break (connected, should);
                                 }
                                 Err(_) => {
                                     sleep_ms(10).await;
@@ -169,6 +531,10 @@ impl WasmMqttClient {
                             web_sys::console::error_1(&error_msg.clone().into());
                             Self::trigger_error_callback(&state, &error_msg);
                             Self::trigger_disconnect_callback(&state);
+
+                            if should_reconnect {
+                                Self::spawn_reconnection_task(Rc::clone(&state));
+                            }
                         }
                         break;
                     }
@@ -177,8 +543,7 @@ impl WasmMqttClient {
         });
     }
 
-    fn spawn_keepalive_task(&self) {
-        let state = Rc::clone(&self.state);
+    fn spawn_keepalive_task_internal(state: Rc<RefCell<ClientState>>) {
         let keepalive_config = KeepaliveConfig::conservative();
 
         spawn_local(async move {
@@ -231,9 +596,21 @@ impl WasmMqttClient {
                 };
 
                 if should_disconnect {
-                    state.borrow_mut().connected = false;
+                    let should_reconnect = {
+                        let mut state_ref = state.borrow_mut();
+                        state_ref.connected = false;
+                        state_ref.reconnect_config.enabled
+                            && !state_ref.user_initiated_disconnect
+                            && !state_ref.reconnecting
+                            && state_ref.last_url.is_some()
+                    };
+
                     Self::trigger_error_callback(&state, "Keepalive timeout");
                     Self::trigger_disconnect_callback(&state);
+
+                    if should_reconnect {
+                        Self::spawn_reconnection_task(Rc::clone(&state));
+                    }
                     break;
                 }
 
@@ -257,9 +634,21 @@ impl WasmMqttClient {
                         Err(e) => {
                             let error_msg = format!("Ping send error: {e}");
                             web_sys::console::error_1(&error_msg.clone().into());
-                            state.borrow_mut().connected = false;
+                            let should_reconnect = {
+                                let mut state_ref = state.borrow_mut();
+                                state_ref.connected = false;
+                                state_ref.reconnect_config.enabled
+                                    && !state_ref.user_initiated_disconnect
+                                    && !state_ref.reconnecting
+                                    && state_ref.last_url.is_some()
+                            };
+
                             Self::trigger_error_callback(&state, &error_msg);
                             Self::trigger_disconnect_callback(&state);
+
+                            if should_reconnect {
+                                Self::spawn_reconnection_task(Rc::clone(&state));
+                            }
                             break;
                         }
                     },
@@ -271,9 +660,7 @@ impl WasmMqttClient {
         });
     }
 
-    fn spawn_qos2_cleanup_task(&self) {
-        let state = Rc::clone(&self.state);
-
+    fn spawn_qos2_cleanup_task_internal(state: Rc<RefCell<ClientState>>) {
         spawn_local(async move {
             loop {
                 sleep_ms(5000).await;
@@ -323,6 +710,18 @@ impl WasmMqttClient {
                 }
             }
         });
+    }
+
+    fn spawn_packet_reader(&self, reader: WasmReader) {
+        Self::spawn_packet_reader_internal(Rc::clone(&self.state), reader);
+    }
+
+    fn spawn_keepalive_task(&self) {
+        Self::spawn_keepalive_task_internal(Rc::clone(&self.state));
+    }
+
+    fn spawn_qos2_cleanup_task(&self) {
+        Self::spawn_qos2_cleanup_task_internal(Rc::clone(&self.state));
     }
 
     #[allow(clippy::too_many_lines)]
@@ -725,6 +1124,7 @@ impl WasmMqttClient {
         url: &str,
         config: &WasmConnectOptions,
     ) -> Result<(), JsValue> {
+        self.state.borrow_mut().last_url = Some(url.to_string());
         let transport = WasmTransportType::WebSocket(
             crate::transport::websocket::WasmWebSocketTransport::new(url),
         );
@@ -782,6 +1182,9 @@ impl WasmMqttClient {
             let mut state = self.state.borrow_mut();
             state.keep_alive = config.keep_alive;
             state.protocol_version = protocol_version;
+            state.last_options = Some(StoredConnectOptions::from(config));
+            state.user_initiated_disconnect = false;
+            state.reconnect_attempt = 0;
         }
 
         let (will, will_properties) = if let Some(will_config) = &config.will {
@@ -1519,6 +1922,7 @@ impl WasmMqttClient {
             match self.state.try_borrow_mut() {
                 Ok(mut state) => {
                     state.connected = false;
+                    state.user_initiated_disconnect = true;
                     break state.writer.take();
                 }
                 Err(_) => {
@@ -1560,6 +1964,27 @@ impl WasmMqttClient {
 
     pub fn on_auth_challenge(&self, callback: js_sys::Function) {
         self.state.borrow_mut().on_auth_challenge = Some(callback);
+    }
+
+    pub fn on_reconnecting(&self, callback: js_sys::Function) {
+        self.state.borrow_mut().on_reconnecting = Some(callback);
+    }
+
+    pub fn on_reconnect_failed(&self, callback: js_sys::Function) {
+        self.state.borrow_mut().on_reconnect_failed = Some(callback);
+    }
+
+    pub fn set_reconnect_options(&self, options: &WasmReconnectOptions) {
+        self.state.borrow_mut().reconnect_config = options.to_reconnect_config();
+    }
+
+    pub fn enable_auto_reconnect(&self, enabled: bool) {
+        self.state.borrow_mut().reconnect_config.enabled = enabled;
+    }
+
+    #[must_use]
+    pub fn is_reconnecting(&self) -> bool {
+        self.state.borrow().reconnecting
     }
 
     /// # Errors
