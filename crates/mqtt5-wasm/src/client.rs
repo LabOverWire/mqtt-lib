@@ -1245,8 +1245,26 @@ impl WasmMqttClient {
                     let session_present = connack.session_present;
 
                     if reason_code != 0 {
+                        let reason_desc = match reason_code {
+                            0x80 => "Unspecified error",
+                            0x81 => "Malformed packet",
+                            0x82 => "Protocol error",
+                            0x83 => "Implementation specific error",
+                            0x84 => "Unsupported protocol version",
+                            0x85 => "Client identifier not valid",
+                            0x86 => "Bad username or password",
+                            0x87 => "Not authorized",
+                            0x88 => "Server unavailable",
+                            0x89 => "Server busy",
+                            0x8A => "Banned",
+                            0x8C => "Bad authentication method",
+                            0x90 => "Topic name invalid",
+                            0x97 => "Quota exceeded",
+                            0x9F => "Connection rate exceeded",
+                            _ => "Unknown error",
+                        };
                         return Err(JsValue::from_str(&format!(
-                            "Connection rejected with reason code: {reason_code}"
+                            "Connection rejected: {reason_desc}"
                         )));
                     }
 
