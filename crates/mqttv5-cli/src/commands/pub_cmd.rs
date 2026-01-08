@@ -201,6 +201,14 @@ pub struct PubCommand {
     #[arg(long, value_parser = parse_duration_secs)]
     pub delay: Option<u64>,
 
+    /// Repeat publishing N times (0 = infinite until Ctrl+C)
+    #[arg(long)]
+    pub repeat: Option<u64>,
+
+    /// Interval between repeated publishes (e.g., 1s, 500ms, 1m)
+    #[arg(long, value_parser = parse_duration_millis, requires = "repeat")]
+    pub interval: Option<u64>,
+
     /// OpenTelemetry OTLP endpoint (e.g., http://localhost:4317)
     #[cfg(feature = "opentelemetry")]
     #[arg(long)]
@@ -253,6 +261,16 @@ fn parse_duration_secs(s: &str) -> Result<u64, String> {
     }
     humantime::parse_duration(s)
         .map(|d| d.as_secs())
+        .map_err(|e| e.to_string())
+}
+
+#[allow(clippy::cast_possible_truncation)]
+fn parse_duration_millis(s: &str) -> Result<u64, String> {
+    if let Ok(secs) = s.parse::<u64>() {
+        return Ok(secs * 1000);
+    }
+    humantime::parse_duration(s)
+        .map(|d| d.as_millis() as u64)
         .map_err(|e| e.to_string())
 }
 
@@ -597,42 +615,71 @@ pub async fn execute(mut cmd: PubCommand, verbose: bool, debug: bool) -> Result<
         || cmd.response_topic.is_some()
         || correlation_data.is_some();
 
-    if has_properties {
-        let mut options = PublishOptions {
-            qos,
-            retain: cmd.retain,
-            ..Default::default()
-        };
-        options.properties.message_expiry_interval = cmd.message_expiry_interval;
-        options.properties.topic_alias = cmd.topic_alias;
-        options
-            .properties
-            .response_topic
-            .clone_from(&cmd.response_topic);
-        options
-            .properties
-            .correlation_data
-            .clone_from(&correlation_data);
-        client
-            .publish_with_options(&topic, message.as_bytes(), options)
-            .await?;
-    } else {
-        match qos {
-            QoS::AtMostOnce => {
-                client.publish(&topic, message.as_bytes()).await?;
-            }
-            QoS::AtLeastOnce => {
-                client.publish_qos1(&topic, message.as_bytes()).await?;
-            }
-            QoS::ExactlyOnce => {
-                client.publish_qos2(&topic, message.as_bytes()).await?;
+    let repeat_count = cmd.repeat.unwrap_or(1);
+    let interval_millis = cmd.interval.unwrap_or(1000);
+    let infinite_repeat = cmd.repeat == Some(0);
+    let mut iteration = 0u64;
+
+    loop {
+        iteration += 1;
+
+        if has_properties {
+            let mut options = PublishOptions {
+                qos,
+                retain: cmd.retain,
+                ..Default::default()
+            };
+            options.properties.message_expiry_interval = cmd.message_expiry_interval;
+            options.properties.topic_alias = cmd.topic_alias;
+            options
+                .properties
+                .response_topic
+                .clone_from(&cmd.response_topic);
+            options
+                .properties
+                .correlation_data
+                .clone_from(&correlation_data);
+            client
+                .publish_with_options(&topic, message.as_bytes(), options)
+                .await?;
+        } else {
+            match qos {
+                QoS::AtMostOnce => {
+                    client.publish(&topic, message.as_bytes()).await?;
+                }
+                QoS::AtLeastOnce => {
+                    client.publish_qos1(&topic, message.as_bytes()).await?;
+                }
+                QoS::ExactlyOnce => {
+                    client.publish_qos2(&topic, message.as_bytes()).await?;
+                }
             }
         }
-    }
 
-    println!("✓ Published message to '{}' (QoS {})", topic, qos as u8);
-    if cmd.retain {
-        println!("  Message retained on broker");
+        if cmd.repeat.is_some() {
+            println!(
+                "✓ Published message {} to '{}' (QoS {})",
+                iteration, topic, qos as u8
+            );
+        } else {
+            println!("✓ Published message to '{}' (QoS {})", topic, qos as u8);
+        }
+        if cmd.retain {
+            println!("  Message retained on broker");
+        }
+
+        if !infinite_repeat && iteration >= repeat_count {
+            break;
+        }
+
+        tokio::select! {
+            () = tokio::time::sleep(std::time::Duration::from_millis(interval_millis)) => {}
+            _ = signal::ctrl_c() => {
+                println!("\n✓ Interrupted after {iteration} publishes");
+                client.disconnect().await?;
+                return Ok(());
+            }
+        }
     }
 
     if cmd.wait_response {
