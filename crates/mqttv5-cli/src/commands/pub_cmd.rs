@@ -574,7 +574,10 @@ pub async fn execute(mut cmd: PubCommand, verbose: bool, debug: bool) -> Result<
         };
         options.properties.message_expiry_interval = cmd.message_expiry_interval;
         options.properties.topic_alias = cmd.topic_alias;
-        options.properties.response_topic = cmd.response_topic.take();
+        options
+            .properties
+            .response_topic
+            .clone_from(&cmd.response_topic);
         options
             .properties
             .correlation_data
