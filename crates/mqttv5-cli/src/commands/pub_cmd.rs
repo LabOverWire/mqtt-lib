@@ -8,11 +8,15 @@ use dialoguer::{Input, Select};
 use mqtt5::client::auth_handlers::{JwtAuthHandler, ScramSha256AuthHandler};
 use mqtt5::time::Duration;
 use mqtt5::{
-    ConnectOptions, ConnectionEvent, MqttClient, ProtocolVersion, PublishOptions, QoS, WillMessage,
+    ConnectOptions, ConnectionEvent, Message, MqttClient, ProtocolVersion, PublishOptions, QoS,
+    WillMessage,
 };
 use std::io::{self, Read};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 use tokio::signal;
+use tokio::sync::Notify;
 use tracing::{debug, info, warn};
 
 #[derive(Args)]
@@ -68,6 +72,22 @@ pub struct PubCommand {
     /// Correlation data for request/response pattern (MQTT 5.0, hex-encoded)
     #[arg(long)]
     pub correlation_data: Option<String>,
+
+    /// Wait for response after publishing (requires --response-topic)
+    #[arg(long)]
+    pub wait_response: bool,
+
+    /// Timeout in seconds when waiting for response (default: 30)
+    #[arg(long, default_value = "30")]
+    pub timeout: u64,
+
+    /// Number of responses to wait for (default: 1, 0 = unlimited until timeout)
+    #[arg(long, default_value = "1")]
+    pub response_count: u32,
+
+    /// Output format for responses: raw, json, verbose
+    #[arg(long, default_value = "raw", value_parser = ["raw", "json", "verbose"])]
+    pub output_format: String,
 
     /// Username for authentication
     #[arg(long, short)]
@@ -264,6 +284,10 @@ pub async fn execute(mut cmd: PubCommand, verbose: bool, debug: bool) -> Result<
             topic,
             topic.trim_end_matches('/')
         );
+    }
+
+    if cmd.wait_response && cmd.response_topic.is_none() {
+        anyhow::bail!("--response-topic is required when using --wait-response");
     }
 
     // Get message content with smart prompting
@@ -473,11 +497,74 @@ pub async fn execute(mut cmd: PubCommand, verbose: bool, debug: bool) -> Result<
         anyhow::bail!("Topic alias must be between 1 and 65535, got: 0");
     }
 
+    let correlation_data: Option<Vec<u8>> = if cmd.wait_response && cmd.correlation_data.is_none() {
+        Some(format!("rr-{}", rand::rng().random::<u64>()).into_bytes())
+    } else if let Some(ref hex_data) = cmd.correlation_data {
+        Some(hex::decode(hex_data).context("Invalid hex in --correlation-data")?)
+    } else {
+        None
+    };
+
+    let received_count = Arc::new(AtomicU32::new(0));
+    let done_notify = Arc::new(Notify::new());
+
+    if cmd.wait_response {
+        let response_topic = cmd.response_topic.as_ref().unwrap().clone();
+        let expected_correlation = correlation_data.clone();
+        let target_count = cmd.response_count;
+        let output_format = cmd.output_format.clone();
+        let received_clone = received_count.clone();
+        let done_clone = done_notify.clone();
+
+        client
+            .subscribe(&response_topic, move |msg: Message| {
+                if let Some(ref expected) = expected_correlation {
+                    match &msg.properties.correlation_data {
+                        Some(received) if received == expected => {}
+                        _ => return,
+                    }
+                }
+
+                match output_format.as_str() {
+                    "json" => {
+                        if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&msg.payload)
+                        {
+                            println!(
+                                "{}",
+                                serde_json::to_string_pretty(&json).unwrap_or_default()
+                            );
+                        } else {
+                            println!("{}", String::from_utf8_lossy(&msg.payload));
+                        }
+                    }
+                    "verbose" => {
+                        println!("Topic: {}", msg.topic);
+                        if let Some(corr) = &msg.properties.correlation_data {
+                            println!("Correlation: {}", hex::encode(corr));
+                        }
+                        println!("Payload: {}", String::from_utf8_lossy(&msg.payload));
+                        println!("---");
+                    }
+                    _ => {
+                        println!("{}", String::from_utf8_lossy(&msg.payload));
+                    }
+                }
+
+                let count = received_clone.fetch_add(1, Ordering::Relaxed) + 1;
+                if target_count > 0 && count >= target_count {
+                    done_clone.notify_one();
+                }
+            })
+            .await?;
+
+        info!("Subscribed to response topic '{}'", response_topic);
+    }
+
     let has_properties = cmd.retain
         || cmd.message_expiry_interval.is_some()
         || cmd.topic_alias.is_some()
         || cmd.response_topic.is_some()
-        || cmd.correlation_data.is_some();
+        || correlation_data.is_some();
 
     if has_properties {
         let mut options = PublishOptions {
@@ -488,10 +575,10 @@ pub async fn execute(mut cmd: PubCommand, verbose: bool, debug: bool) -> Result<
         options.properties.message_expiry_interval = cmd.message_expiry_interval;
         options.properties.topic_alias = cmd.topic_alias;
         options.properties.response_topic = cmd.response_topic.take();
-        if let Some(ref hex_data) = cmd.correlation_data {
-            options.properties.correlation_data =
-                Some(hex::decode(hex_data).context("Invalid hex in --correlation-data")?);
-        }
+        options
+            .properties
+            .correlation_data
+            .clone_from(&correlation_data);
         client
             .publish_with_options(&topic, message.as_bytes(), options)
             .await?;
@@ -512,6 +599,35 @@ pub async fn execute(mut cmd: PubCommand, verbose: bool, debug: bool) -> Result<
     println!("✓ Published message to '{}' (QoS {})", topic, qos as u8);
     if cmd.retain {
         println!("  Message retained on broker");
+    }
+
+    if cmd.wait_response {
+        let timeout_secs = cmd.timeout;
+        let target_count = cmd.response_count;
+
+        println!(
+            "Waiting for response on '{}'...",
+            cmd.response_topic.as_ref().unwrap()
+        );
+
+        tokio::select! {
+            () = done_notify.notified() => {
+            }
+            () = tokio::time::sleep(std::time::Duration::from_secs(timeout_secs)) => {
+                let count = received_count.load(Ordering::Relaxed);
+                if count == 0 {
+                    client.disconnect().await?;
+                    anyhow::bail!("Timeout: no response received within {timeout_secs}s");
+                } else if target_count > 0 && count < target_count {
+                    eprintln!(
+                        "Warning: timeout after receiving {count} of {target_count} expected responses"
+                    );
+                }
+            }
+            _ = signal::ctrl_c() => {
+                println!("\n✓ Interrupted");
+            }
+        }
     }
 
     // Keep connection alive if requested (for testing will messages)
