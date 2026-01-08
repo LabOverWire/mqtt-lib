@@ -318,6 +318,10 @@ pub async fn execute(mut cmd: PubCommand, verbose: bool, debug: bool) -> Result<
         cmd.qos.unwrap_or(QoS::AtMostOnce)
     };
 
+    if cmd.wait_response && qos == QoS::AtMostOnce {
+        warn!("Using --wait-response with QoS 0 may be unreliable; consider using -q 1 or -q 2");
+    }
+
     // Build broker URL
     let broker_url = cmd
         .url
@@ -557,7 +561,10 @@ pub async fn execute(mut cmd: PubCommand, verbose: bool, debug: bool) -> Result<
             })
             .await?;
 
-        info!("Subscribed to response topic '{}'", response_topic);
+        debug!(
+            "SUBACK received for '{}', subscription ready before publish",
+            response_topic
+        );
     }
 
     let has_properties = cmd.retain

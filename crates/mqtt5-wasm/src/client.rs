@@ -38,6 +38,67 @@ async fn sleep_ms(millis: u32) {
     JsFuture::from(promise).await.ok();
 }
 
+fn create_ack_promises(
+    state: &Rc<RefCell<ClientState>>,
+    qos: QoS,
+    packet_id: Option<u16>,
+) -> (Option<js_sys::Promise>, Option<js_sys::Promise>) {
+    let puback_promise = if qos == QoS::AtLeastOnce {
+        packet_id.map(|pid| {
+            let state = Rc::clone(state);
+            js_sys::Promise::new(&mut move |resolve, _reject| {
+                state.borrow_mut().pending_pubacks.insert(pid, resolve);
+            })
+        })
+    } else {
+        None
+    };
+
+    let pubcomp_promise = if qos == QoS::ExactlyOnce {
+        packet_id.map(|pid| {
+            let now = js_sys::Date::now();
+            let state = Rc::clone(state);
+            js_sys::Promise::new(&mut move |resolve, _reject| {
+                state
+                    .borrow_mut()
+                    .pending_pubcomps
+                    .insert(pid, (resolve, now));
+            })
+        })
+    } else {
+        None
+    };
+
+    (puback_promise, pubcomp_promise)
+}
+
+async fn await_ack_promises(
+    puback_promise: Option<js_sys::Promise>,
+    pubcomp_promise: Option<js_sys::Promise>,
+) -> Result<(), JsValue> {
+    if let Some(promise) = puback_promise {
+        let result = JsFuture::from(promise).await?;
+        let reason_code = result.as_f64().unwrap_or(0.0) as u8;
+        if reason_code >= 0x80 {
+            return Err(JsValue::from_str(&format!(
+                "Publish rejected with reason code: {reason_code}"
+            )));
+        }
+    }
+
+    if let Some(promise) = pubcomp_promise {
+        let result = JsFuture::from(promise).await?;
+        let reason_code = result.as_f64().unwrap_or(0.0) as u8;
+        if reason_code >= 0x80 {
+            return Err(JsValue::from_str(&format!(
+                "Publish rejected with reason code: {reason_code}"
+            )));
+        }
+    }
+
+    Ok(())
+}
+
 pub struct RustMessage {
     pub topic: String,
     pub payload: Vec<u8>,
@@ -1411,45 +1472,10 @@ impl WasmMqttClient {
         let packet_id = if qos == QoS::AtMostOnce {
             None
         } else {
-            Some(loop {
-                match self.state.try_borrow_mut() {
-                    Ok(state) => break state.packet_id.next(),
-                    Err(_) => {
-                        sleep_ms(10).await;
-                    }
-                }
-            })
+            Some(self.state.borrow_mut().packet_id.next())
         };
 
-        let puback_promise = if qos == QoS::AtLeastOnce {
-            if let Some(pid) = packet_id {
-                let state = Rc::clone(&self.state);
-                Some(js_sys::Promise::new(&mut move |resolve, _reject| {
-                    state.borrow_mut().pending_pubacks.insert(pid, resolve);
-                }))
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        let pubcomp_promise = if qos == QoS::ExactlyOnce {
-            if let Some(pid) = packet_id {
-                let now = js_sys::Date::now();
-                let state = Rc::clone(&self.state);
-                Some(js_sys::Promise::new(&mut move |resolve, _reject| {
-                    state
-                        .borrow_mut()
-                        .pending_pubcomps
-                        .insert(pid, (resolve, now));
-                }))
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+        let (puback_promise, pubcomp_promise) = create_ack_promises(&self.state, qos, packet_id);
 
         let protocol_version = self.state.borrow().protocol_version;
         let properties = if protocol_version == 5 {
@@ -1485,25 +1511,7 @@ impl WasmMqttClient {
             .write(&buf)
             .map_err(|e| JsValue::from_str(&format!("Write failed: {e}")))?;
 
-        if let Some(promise) = puback_promise {
-            let result = JsFuture::from(promise).await?;
-            let reason_code = result.as_f64().unwrap_or(0.0) as u8;
-            if reason_code >= 0x80 {
-                return Err(JsValue::from_str(&format!(
-                    "Publish rejected with reason code: {reason_code}"
-                )));
-            }
-        }
-
-        if let Some(promise) = pubcomp_promise {
-            let result = JsFuture::from(promise).await?;
-            let reason_code = result.as_f64().unwrap_or(0.0) as u8;
-            if reason_code >= 0x80 {
-                return Err(JsValue::from_str(&format!(
-                    "Publish rejected with reason code: {reason_code}"
-                )));
-            }
-        }
+        await_ack_promises(puback_promise, pubcomp_promise).await?;
 
         Ok(())
     }
@@ -1530,26 +1538,11 @@ impl WasmMqttClient {
             }
         }
 
-        let packet_id = loop {
-            match self.state.try_borrow_mut() {
-                Ok(state) => break state.packet_id.next(),
-                Err(_) => {
-                    sleep_ms(10).await;
-                }
-            }
-        };
-
-        loop {
-            match self.state.try_borrow_mut() {
-                Ok(mut state) => {
-                    state.pending_pubacks.insert(packet_id, callback);
-                    break;
-                }
-                Err(_) => {
-                    sleep_ms(10).await;
-                }
-            }
-        }
+        let packet_id = self.state.borrow_mut().packet_id.next();
+        self.state
+            .borrow_mut()
+            .pending_pubacks
+            .insert(packet_id, callback);
 
         let protocol_version = self.state.borrow().protocol_version;
         let publish_packet = PublishPacket {
@@ -1605,27 +1598,12 @@ impl WasmMqttClient {
             }
         }
 
-        let packet_id = loop {
-            match self.state.try_borrow_mut() {
-                Ok(state) => break state.packet_id.next(),
-                Err(_) => {
-                    sleep_ms(10).await;
-                }
-            }
-        };
-
+        let packet_id = self.state.borrow_mut().packet_id.next();
         let now = js_sys::Date::now();
-        loop {
-            match self.state.try_borrow_mut() {
-                Ok(mut state) => {
-                    state.pending_pubcomps.insert(packet_id, (callback, now));
-                    break;
-                }
-                Err(_) => {
-                    sleep_ms(10).await;
-                }
-            }
-        }
+        self.state
+            .borrow_mut()
+            .pending_pubcomps
+            .insert(packet_id, (callback, now));
 
         let protocol_version = self.state.borrow().protocol_version;
         let publish_packet = PublishPacket {
@@ -1662,28 +1640,11 @@ impl WasmMqttClient {
     /// # Errors
     /// Returns an error if not connected or subscribe fails.
     pub async fn subscribe(&self, topic: &str) -> Result<u16, JsValue> {
-        loop {
-            match self.state.try_borrow() {
-                Ok(state) => {
-                    if !state.connected {
-                        return Err(JsValue::from_str("Not connected"));
-                    }
-                    break;
-                }
-                Err(_) => {
-                    sleep_ms(10).await;
-                }
-            }
+        if !self.state.borrow().connected {
+            return Err(JsValue::from_str("Not connected"));
         }
 
-        let packet_id = loop {
-            match self.state.try_borrow_mut() {
-                Ok(state) => break state.packet_id.next(),
-                Err(_) => {
-                    sleep_ms(10).await;
-                }
-            }
-        };
+        let packet_id = self.state.borrow_mut().packet_id.next();
 
         let protocol_version = self.state.borrow().protocol_version;
         let subscribe_packet = SubscribePacket {
@@ -1724,43 +1685,16 @@ impl WasmMqttClient {
         callback: js_sys::Function,
         options: &WasmSubscribeOptions,
     ) -> Result<u16, JsValue> {
-        loop {
-            match self.state.try_borrow() {
-                Ok(state) => {
-                    if !state.connected {
-                        return Err(JsValue::from_str("Not connected"));
-                    }
-                    break;
-                }
-                Err(_) => {
-                    sleep_ms(10).await;
-                }
-            }
+        if !self.state.borrow().connected {
+            return Err(JsValue::from_str("Not connected"));
         }
 
-        let packet_id = loop {
-            match self.state.try_borrow_mut() {
-                Ok(state) => break state.packet_id.next(),
-                Err(_) => {
-                    sleep_ms(10).await;
-                }
-            }
-        };
-
-        loop {
-            match self.state.try_borrow_mut() {
-                Ok(mut state) => {
-                    let actual_filter = strip_shared_subscription_prefix(topic);
-                    state
-                        .subscriptions
-                        .insert(actual_filter.to_string(), callback);
-                    break;
-                }
-                Err(_) => {
-                    sleep_ms(10).await;
-                }
-            }
-        }
+        let packet_id = self.state.borrow_mut().packet_id.next();
+        let actual_filter = strip_shared_subscription_prefix(topic);
+        self.state
+            .borrow_mut()
+            .subscriptions
+            .insert(actual_filter.to_string(), callback);
 
         let mut topic_filter =
             mqtt5_protocol::packet::subscribe::TopicFilter::new(topic, options.to_qos());
@@ -1831,18 +1765,8 @@ impl WasmMqttClient {
         if reason_codes.length() > 0 {
             let first_code = reason_codes.get(0).as_f64().unwrap_or(0.0) as u8;
             if first_code >= 0x80 {
-                loop {
-                    match self.state.try_borrow_mut() {
-                        Ok(mut state) => {
-                            let actual_filter = strip_shared_subscription_prefix(topic);
-                            state.subscriptions.remove(actual_filter);
-                            break;
-                        }
-                        Err(_) => {
-                            sleep_ms(10).await;
-                        }
-                    }
-                }
+                let actual_filter = strip_shared_subscription_prefix(topic);
+                self.state.borrow_mut().subscriptions.remove(actual_filter);
                 return Err(JsValue::from_str(&format!(
                     "Subscribe rejected with reason code: {first_code}"
                 )));
@@ -1859,43 +1783,16 @@ impl WasmMqttClient {
         topic: &str,
         callback: js_sys::Function,
     ) -> Result<u16, JsValue> {
-        loop {
-            match self.state.try_borrow() {
-                Ok(state) => {
-                    if !state.connected {
-                        return Err(JsValue::from_str("Not connected"));
-                    }
-                    break;
-                }
-                Err(_) => {
-                    sleep_ms(10).await;
-                }
-            }
+        if !self.state.borrow().connected {
+            return Err(JsValue::from_str("Not connected"));
         }
 
-        let packet_id = loop {
-            match self.state.try_borrow_mut() {
-                Ok(state) => break state.packet_id.next(),
-                Err(_) => {
-                    sleep_ms(10).await;
-                }
-            }
-        };
-
-        loop {
-            match self.state.try_borrow_mut() {
-                Ok(mut state) => {
-                    let actual_filter = strip_shared_subscription_prefix(topic);
-                    state
-                        .subscriptions
-                        .insert(actual_filter.to_string(), callback);
-                    break;
-                }
-                Err(_) => {
-                    sleep_ms(10).await;
-                }
-            }
-        }
+        let packet_id = self.state.borrow_mut().packet_id.next();
+        let actual_filter = strip_shared_subscription_prefix(topic);
+        self.state
+            .borrow_mut()
+            .subscriptions
+            .insert(actual_filter.to_string(), callback);
 
         let protocol_version = self.state.borrow().protocol_version;
         let subscribe_packet = SubscribePacket {
@@ -1931,40 +1828,12 @@ impl WasmMqttClient {
     /// # Errors
     /// Returns an error if not connected or unsubscribe fails.
     pub async fn unsubscribe(&self, topic: &str) -> Result<u16, JsValue> {
-        loop {
-            match self.state.try_borrow() {
-                Ok(state) => {
-                    if !state.connected {
-                        return Err(JsValue::from_str("Not connected"));
-                    }
-                    break;
-                }
-                Err(_) => {
-                    sleep_ms(10).await;
-                }
-            }
+        if !self.state.borrow().connected {
+            return Err(JsValue::from_str("Not connected"));
         }
 
-        let packet_id = loop {
-            match self.state.try_borrow_mut() {
-                Ok(state) => break state.packet_id.next(),
-                Err(_) => {
-                    sleep_ms(10).await;
-                }
-            }
-        };
-
-        loop {
-            match self.state.try_borrow_mut() {
-                Ok(mut state) => {
-                    state.subscriptions.remove(topic);
-                    break;
-                }
-                Err(_) => {
-                    sleep_ms(10).await;
-                }
-            }
-        }
+        let packet_id = self.state.borrow_mut().packet_id.next();
+        self.state.borrow_mut().subscriptions.remove(topic);
 
         let protocol_version = self.state.borrow().protocol_version;
         let unsubscribe_packet = UnsubscribePacket {
@@ -2138,43 +2007,16 @@ impl WasmMqttClient {
         no_local: bool,
         callback: Box<dyn Fn(RustMessage)>,
     ) -> Result<u16, JsValue> {
-        loop {
-            match self.state.try_borrow() {
-                Ok(state) => {
-                    if !state.connected {
-                        return Err(JsValue::from_str("Not connected"));
-                    }
-                    break;
-                }
-                Err(_) => {
-                    sleep_ms(10).await;
-                }
-            }
+        if !self.state.borrow().connected {
+            return Err(JsValue::from_str("Not connected"));
         }
 
-        let packet_id = loop {
-            match self.state.try_borrow_mut() {
-                Ok(state) => break state.packet_id.next(),
-                Err(_) => {
-                    sleep_ms(10).await;
-                }
-            }
-        };
-
-        loop {
-            match self.state.try_borrow_mut() {
-                Ok(mut state) => {
-                    let actual_filter = strip_shared_subscription_prefix(topic);
-                    state
-                        .rust_subscriptions
-                        .insert(actual_filter.to_string(), Rc::new(callback));
-                    break;
-                }
-                Err(_) => {
-                    sleep_ms(10).await;
-                }
-            }
-        }
+        let packet_id = self.state.borrow_mut().packet_id.next();
+        let actual_filter = strip_shared_subscription_prefix(topic);
+        self.state
+            .borrow_mut()
+            .rust_subscriptions
+            .insert(actual_filter.to_string(), Rc::new(callback));
 
         let mut options = mqtt5_protocol::packet::subscribe::SubscriptionOptions::new(qos);
         options.no_local = no_local;
@@ -2217,62 +2059,17 @@ impl WasmMqttClient {
         payload: &[u8],
         qos: QoS,
     ) -> Result<(), JsValue> {
-        loop {
-            match self.state.try_borrow() {
-                Ok(state) => {
-                    if !state.connected {
-                        return Err(JsValue::from_str("Not connected"));
-                    }
-                    break;
-                }
-                Err(_) => {
-                    sleep_ms(10).await;
-                }
-            }
+        if !self.state.borrow().connected {
+            return Err(JsValue::from_str("Not connected"));
         }
 
         let packet_id = if qos == QoS::AtMostOnce {
             None
         } else {
-            Some(loop {
-                match self.state.try_borrow_mut() {
-                    Ok(state) => break state.packet_id.next(),
-                    Err(_) => {
-                        sleep_ms(10).await;
-                    }
-                }
-            })
+            Some(self.state.borrow_mut().packet_id.next())
         };
 
-        let puback_promise = if qos == QoS::AtLeastOnce {
-            if let Some(pid) = packet_id {
-                let state = Rc::clone(&self.state);
-                Some(js_sys::Promise::new(&mut move |resolve, _reject| {
-                    state.borrow_mut().pending_pubacks.insert(pid, resolve);
-                }))
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        let pubcomp_promise = if qos == QoS::ExactlyOnce {
-            if let Some(pid) = packet_id {
-                let now = js_sys::Date::now();
-                let state = Rc::clone(&self.state);
-                Some(js_sys::Promise::new(&mut move |resolve, _reject| {
-                    state
-                        .borrow_mut()
-                        .pending_pubcomps
-                        .insert(pid, (resolve, now));
-                }))
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+        let (puback_promise, pubcomp_promise) = create_ack_promises(&self.state, qos, packet_id);
 
         let mut publish_packet = PublishPacket::new(topic.to_string(), payload.to_vec(), qos);
         publish_packet.packet_id = packet_id;
@@ -2294,25 +2091,7 @@ impl WasmMqttClient {
             .write(&buf)
             .map_err(|e| JsValue::from_str(&format!("PUBLISH send failed: {e}")))?;
 
-        if let Some(promise) = puback_promise {
-            let result = JsFuture::from(promise).await?;
-            let reason_code = result.as_f64().unwrap_or(0.0) as u8;
-            if reason_code >= 0x80 {
-                return Err(JsValue::from_str(&format!(
-                    "Publish rejected with reason code: {reason_code}"
-                )));
-            }
-        }
-
-        if let Some(promise) = pubcomp_promise {
-            let result = JsFuture::from(promise).await?;
-            let reason_code = result.as_f64().unwrap_or(0.0) as u8;
-            if reason_code >= 0x80 {
-                return Err(JsValue::from_str(&format!(
-                    "Publish rejected with reason code: {reason_code}"
-                )));
-            }
-        }
+        await_ack_promises(puback_promise, pubcomp_promise).await?;
 
         Ok(())
     }
