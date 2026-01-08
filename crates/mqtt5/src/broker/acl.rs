@@ -193,7 +193,7 @@ pub struct AclManager {
     #[cfg(not(target_arch = "wasm32"))]
     acl_file: Option<std::path::PathBuf>,
     /// Default permission when no rules match
-    default_permission: Permission,
+    default_permission: RwLock<Permission>,
 }
 
 impl Default for AclManager {
@@ -213,7 +213,7 @@ impl AclManager {
             federated_user_roles: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(not(target_arch = "wasm32"))]
             acl_file: None,
-            default_permission: Permission::Deny,
+            default_permission: RwLock::new(Permission::Deny),
         }
     }
 
@@ -227,7 +227,7 @@ impl AclManager {
             federated_user_roles: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(not(target_arch = "wasm32"))]
             acl_file: None,
-            default_permission: Permission::ReadWrite,
+            default_permission: RwLock::new(Permission::ReadWrite),
         }
     }
 
@@ -262,7 +262,7 @@ impl AclManager {
             user_roles: Arc::new(RwLock::new(HashMap::new())),
             federated_user_roles: Arc::new(RwLock::new(HashMap::new())),
             acl_file: Some(path.clone()),
-            default_permission: Permission::Deny,
+            default_permission: RwLock::new(Permission::Deny),
         };
 
         manager.load_acl_file().await?;
@@ -272,8 +272,18 @@ impl AclManager {
     /// Sets the default permission for when no rules match
     #[must_use]
     pub fn with_default_permission(mut self, permission: Permission) -> Self {
-        self.default_permission = permission;
+        self.default_permission = RwLock::new(permission);
         self
+    }
+
+    /// Sets the default permission at runtime
+    pub async fn set_default_permission(&self, permission: Permission) {
+        *self.default_permission.write().await = permission;
+    }
+
+    /// Returns the current default permission
+    pub async fn get_default_permission(&self) -> Permission {
+        *self.default_permission.read().await
     }
 
     /// Loads or reloads the ACL file
@@ -666,15 +676,16 @@ impl AclManager {
         }
 
         // Step 6: Default permission
+        let default_perm = *self.default_permission.read().await;
         debug!(
             "No ACL rule matched for user={:?}, topic={}, using default permission={:?}",
-            username, topic, self.default_permission
+            username, topic, default_perm
         );
 
-        if self.default_permission.is_deny() {
+        if default_perm.is_deny() {
             false
         } else {
-            check(self.default_permission)
+            check(default_perm)
         }
     }
 
