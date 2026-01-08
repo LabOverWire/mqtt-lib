@@ -1241,8 +1241,14 @@ impl WasmMqttClient {
 
             match packet {
                 Packet::ConnAck(connack) => {
-                    let reason_code = connack.reason_code;
+                    let reason_code = connack.reason_code as u8;
                     let session_present = connack.session_present;
+
+                    if reason_code != 0 {
+                        return Err(JsValue::from_str(&format!(
+                            "Connection rejected with reason code: {reason_code}"
+                        )));
+                    }
 
                     self.state.borrow_mut().connected = true;
 
@@ -1252,7 +1258,7 @@ impl WasmMqttClient {
 
                     let callback = self.state.borrow().on_connect.clone();
                     if let Some(callback) = callback {
-                        let reason_code_js = JsValue::from_f64(f64::from(reason_code as u8));
+                        let reason_code_js = JsValue::from_f64(f64::from(reason_code));
                         let session_present_js = JsValue::from_bool(session_present);
 
                         if let Err(e) =
@@ -1397,23 +1403,35 @@ impl WasmMqttClient {
             })
         };
 
-        if qos == QoS::ExactlyOnce {
+        let puback_promise = if qos == QoS::AtLeastOnce {
+            if let Some(pid) = packet_id {
+                let state = Rc::clone(&self.state);
+                Some(js_sys::Promise::new(&mut move |resolve, _reject| {
+                    state.borrow_mut().pending_pubacks.insert(pid, resolve);
+                }))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let pubcomp_promise = if qos == QoS::ExactlyOnce {
             if let Some(pid) = packet_id {
                 let now = js_sys::Date::now();
-                let noop_callback = js_sys::Function::new_no_args("");
-                loop {
-                    match self.state.try_borrow_mut() {
-                        Ok(mut state) => {
-                            state.pending_pubcomps.insert(pid, (noop_callback, now));
-                            break;
-                        }
-                        Err(_) => {
-                            sleep_ms(10).await;
-                        }
-                    }
-                }
+                let state = Rc::clone(&self.state);
+                Some(js_sys::Promise::new(&mut move |resolve, _reject| {
+                    state
+                        .borrow_mut()
+                        .pending_pubcomps
+                        .insert(pid, (resolve, now));
+                }))
+            } else {
+                None
             }
-        }
+        } else {
+            None
+        };
 
         let protocol_version = self.state.borrow().protocol_version;
         let properties = if protocol_version == 5 {
@@ -1448,6 +1466,26 @@ impl WasmMqttClient {
             .borrow_mut()
             .write(&buf)
             .map_err(|e| JsValue::from_str(&format!("Write failed: {e}")))?;
+
+        if let Some(promise) = puback_promise {
+            let result = JsFuture::from(promise).await?;
+            let reason_code = result.as_f64().unwrap_or(0.0) as u8;
+            if reason_code >= 0x80 {
+                return Err(JsValue::from_str(&format!(
+                    "Publish rejected with reason code: {reason_code}"
+                )));
+            }
+        }
+
+        if let Some(promise) = pubcomp_promise {
+            let result = JsFuture::from(promise).await?;
+            let reason_code = result.as_f64().unwrap_or(0.0) as u8;
+            if reason_code >= 0x80 {
+                return Err(JsValue::from_str(&format!(
+                    "Publish rejected with reason code: {reason_code}"
+                )));
+            }
+        }
 
         Ok(())
     }
@@ -1760,6 +1798,38 @@ impl WasmMqttClient {
             .borrow_mut()
             .write(&buf)
             .map_err(|e| JsValue::from_str(&format!("Write failed: {e}")))?;
+
+        let state = Rc::clone(&self.state);
+        let promise = js_sys::Promise::new(&mut move |resolve, _reject| {
+            state
+                .borrow_mut()
+                .pending_subacks
+                .insert(packet_id, resolve);
+        });
+
+        let result = JsFuture::from(promise).await?;
+        let reason_codes = js_sys::Array::from(&result);
+
+        if reason_codes.length() > 0 {
+            let first_code = reason_codes.get(0).as_f64().unwrap_or(0.0) as u8;
+            if first_code >= 0x80 {
+                loop {
+                    match self.state.try_borrow_mut() {
+                        Ok(mut state) => {
+                            let actual_filter = strip_shared_subscription_prefix(topic);
+                            state.subscriptions.remove(actual_filter);
+                            break;
+                        }
+                        Err(_) => {
+                            sleep_ms(10).await;
+                        }
+                    }
+                }
+                return Err(JsValue::from_str(&format!(
+                    "Subscribe rejected with reason code: {first_code}"
+                )));
+            }
+        }
 
         Ok(packet_id)
     }
@@ -2156,23 +2226,35 @@ impl WasmMqttClient {
             })
         };
 
-        if qos == QoS::ExactlyOnce {
+        let puback_promise = if qos == QoS::AtLeastOnce {
+            if let Some(pid) = packet_id {
+                let state = Rc::clone(&self.state);
+                Some(js_sys::Promise::new(&mut move |resolve, _reject| {
+                    state.borrow_mut().pending_pubacks.insert(pid, resolve);
+                }))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let pubcomp_promise = if qos == QoS::ExactlyOnce {
             if let Some(pid) = packet_id {
                 let now = js_sys::Date::now();
-                let noop_callback = js_sys::Function::new_no_args("");
-                loop {
-                    match self.state.try_borrow_mut() {
-                        Ok(mut state) => {
-                            state.pending_pubcomps.insert(pid, (noop_callback, now));
-                            break;
-                        }
-                        Err(_) => {
-                            sleep_ms(10).await;
-                        }
-                    }
-                }
+                let state = Rc::clone(&self.state);
+                Some(js_sys::Promise::new(&mut move |resolve, _reject| {
+                    state
+                        .borrow_mut()
+                        .pending_pubcomps
+                        .insert(pid, (resolve, now));
+                }))
+            } else {
+                None
             }
-        }
+        } else {
+            None
+        };
 
         let mut publish_packet = PublishPacket::new(topic.to_string(), payload.to_vec(), qos);
         publish_packet.packet_id = packet_id;
@@ -2193,6 +2275,26 @@ impl WasmMqttClient {
             .borrow_mut()
             .write(&buf)
             .map_err(|e| JsValue::from_str(&format!("PUBLISH send failed: {e}")))?;
+
+        if let Some(promise) = puback_promise {
+            let result = JsFuture::from(promise).await?;
+            let reason_code = result.as_f64().unwrap_or(0.0) as u8;
+            if reason_code >= 0x80 {
+                return Err(JsValue::from_str(&format!(
+                    "Publish rejected with reason code: {reason_code}"
+                )));
+            }
+        }
+
+        if let Some(promise) = pubcomp_promise {
+            let result = JsFuture::from(promise).await?;
+            let reason_code = result.as_f64().unwrap_or(0.0) as u8;
+            if reason_code >= 0x80 {
+                return Err(JsValue::from_str(&format!(
+                    "Publish rejected with reason code: {reason_code}"
+                )));
+            }
+        }
 
         Ok(())
     }
