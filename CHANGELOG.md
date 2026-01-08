@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.1] / [mqtt5-wasm 0.8.1] / [mqttv5-cli 0.17.1] - 2026-01-07
+
+### Added
+
+- **`--wait-response` for pub command**: Request-response pattern support in CLI
+  - Auto-generates correlation data, subscribes to response topic before publishing
+  - `--timeout`, `--response-count`, `--output-format` options
+  - JSON pretty-printing and verbose output modes
+
+- **Runtime ACL default permission**: Change default allow/deny at runtime
+  - `set_default_permission()` and `get_default_permission()` methods on `AclManager`
+  - `set_acl_default_deny()` and `set_acl_default_allow()` in WASM broker
+
+### Fixed
+
+- **WASM client PUBACK/PUBCOMP handling**: QoS 1 and QoS 2 publishes now properly await acknowledgments
+- **WASM client SUBACK handling**: Subscribe now awaits SUBACK and checks for rejection
+- **QoS 2 PUBREC rejection cleanup**: Session state properly cleaned up when PUBREC indicates failure
+- **Human-readable CONNACK messages**: Connection rejections now show descriptive error messages
+
 ## [0.18.0] / [mqtt5-protocol 0.9.0] / [mqtt5-wasm 0.8.0] / [mqttv5-cli 0.17.0] - 2026-01-06
 
 ### Added
