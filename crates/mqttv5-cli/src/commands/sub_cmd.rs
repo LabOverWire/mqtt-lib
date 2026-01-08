@@ -73,13 +73,13 @@ pub struct SubCommand {
     #[arg(long = "no-clean-start")]
     pub no_clean_start: bool,
 
-    /// Session expiry interval in seconds (0 = expire on disconnect)
-    #[arg(long)]
-    pub session_expiry: Option<u32>,
+    /// Session expiry interval (e.g., 1h, 30m) (0 = expire on disconnect)
+    #[arg(long, value_parser = parse_duration_secs)]
+    pub session_expiry: Option<u64>,
 
-    /// Keep alive interval in seconds
-    #[arg(long, short = 'k', default_value = "60")]
-    pub keep_alive: u16,
+    /// Keep alive interval (e.g., 60s, 1m) (default: 60s)
+    #[arg(long, short = 'k', default_value = "60", value_parser = parse_duration_secs)]
+    pub keep_alive: u64,
 
     /// MQTT protocol version (3.1.1 or 5, default: 5)
     #[arg(long, value_parser = parse_protocol_version)]
@@ -101,9 +101,9 @@ pub struct SubCommand {
     #[arg(long)]
     pub will_retain: bool,
 
-    /// Will delay interval in seconds
-    #[arg(long)]
-    pub will_delay: Option<u32>,
+    /// Will delay interval (e.g., 5m, 1h)
+    #[arg(long, value_parser = parse_duration_secs)]
+    pub will_delay: Option<u64>,
 
     /// TLS certificate file (PEM format) for secure connections
     #[arg(long)]
@@ -149,8 +149,8 @@ pub struct SubCommand {
     #[arg(long)]
     pub quic_flow_headers: bool,
 
-    /// Flow expiration interval in seconds (default: 300)
-    #[arg(long, default_value = "300")]
+    /// Flow expiration interval (e.g., 5m, 1h) (default: 5m)
+    #[arg(long, default_value = "300", value_parser = parse_duration_secs)]
     pub quic_flow_expire: u64,
 
     /// Maximum concurrent QUIC streams
@@ -161,8 +161,8 @@ pub struct SubCommand {
     #[arg(long)]
     pub quic_datagrams: bool,
 
-    /// QUIC connection timeout in seconds (default: 30)
-    #[arg(long, default_value = "30")]
+    /// QUIC connection timeout (e.g., 30s, 1m) (default: 30s)
+    #[arg(long, default_value = "30", value_parser = parse_duration_secs)]
     pub quic_connect_timeout: u64,
 
     /// OpenTelemetry OTLP endpoint (e.g., http://localhost:4317)
@@ -218,6 +218,15 @@ fn parse_stream_strategy(s: &str) -> Result<mqtt5::transport::StreamStrategy, St
             "Invalid stream strategy: {s}. Valid: control-only, per-publish, per-topic, per-subscription"
         )),
     }
+}
+
+fn parse_duration_secs(s: &str) -> Result<u64, String> {
+    if let Ok(secs) = s.parse::<u64>() {
+        return Ok(secs);
+    }
+    humantime::parse_duration(s)
+        .map(|d| d.as_secs())
+        .map_err(|e| e.to_string())
 }
 
 pub async fn execute(mut cmd: SubCommand, verbose: bool, debug: bool) -> Result<()> {
@@ -294,7 +303,7 @@ pub async fn execute(mut cmd: SubCommand, verbose: bool, debug: bool) -> Result<
     // Build connection options
     let mut options = ConnectOptions::new(client_id.clone())
         .with_clean_start(!cmd.no_clean_start)
-        .with_keep_alive(Duration::from_secs(cmd.keep_alive.into()));
+        .with_keep_alive(Duration::from_secs(cmd.keep_alive));
 
     if cmd.auto_reconnect {
         options = options.with_automatic_reconnect(true);
@@ -304,9 +313,10 @@ pub async fn execute(mut cmd: SubCommand, verbose: bool, debug: bool) -> Result<
         options = options.with_protocol_version(version);
     }
 
-    // Add session expiry if specified
     if let Some(expiry) = cmd.session_expiry {
-        options = options.with_session_expiry_interval(expiry);
+        #[allow(clippy::cast_possible_truncation)]
+        let expiry_u32 = expiry as u32;
+        options = options.with_session_expiry_interval(expiry_u32);
     }
 
     // Add authentication based on method
@@ -357,7 +367,9 @@ pub async fn execute(mut cmd: SubCommand, verbose: bool, debug: bool) -> Result<
         }
 
         if let Some(delay) = cmd.will_delay {
-            will.properties.will_delay_interval = Some(delay);
+            #[allow(clippy::cast_possible_truncation)]
+            let delay_u32 = delay as u32;
+            will.properties.will_delay_interval = Some(delay_u32);
         }
 
         options = options.with_will(will);

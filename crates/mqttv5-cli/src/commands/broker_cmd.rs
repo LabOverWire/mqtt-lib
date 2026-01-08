@@ -22,6 +22,15 @@ fn parse_storage_backend(
     }
 }
 
+fn parse_duration_secs(s: &str) -> Result<u64, String> {
+    if let Ok(secs) = s.parse::<u64>() {
+        return Ok(secs);
+    }
+    humantime::parse_duration(s)
+        .map(|d| d.as_secs())
+        .map_err(|e| e.to_string())
+}
+
 #[derive(Args)]
 pub struct BrokerCommand {
     /// Configuration file path (JSON format)
@@ -72,8 +81,8 @@ pub struct BrokerCommand {
     #[arg(long)]
     pub jwt_audience: Option<String>,
 
-    /// JWT clock skew tolerance in seconds (default: 60)
-    #[arg(long, default_value = "60")]
+    /// JWT clock skew tolerance (e.g., 60, 60s, 1m)
+    #[arg(long, default_value = "60", value_parser = parse_duration_secs)]
     pub jwt_clock_skew: u64,
 
     /// JWKS endpoint URL for federated JWT auth (e.g., <https://accounts.google.com/.well-known/jwks>)
@@ -84,8 +93,8 @@ pub struct BrokerCommand {
     #[arg(long)]
     pub jwt_fallback_key: Option<PathBuf>,
 
-    /// JWKS refresh interval in seconds (default: 3600)
-    #[arg(long, default_value = "3600")]
+    /// JWKS refresh interval (e.g., 3600, 1h, 30m)
+    #[arg(long, default_value = "3600", value_parser = parse_duration_secs)]
     pub jwt_jwks_refresh: u64,
 
     /// Claim path for extracting roles (e.g., "roles", "groups", "realm_access.roles")
@@ -172,17 +181,17 @@ pub struct BrokerCommand {
     #[arg(long)]
     pub no_persistence: bool,
 
-    /// Session expiry interval in seconds (default: 3600)
-    #[arg(long, default_value = "3600")]
+    /// Session expiry interval (e.g., 3600, 1h, 30m)
+    #[arg(long, default_value = "3600", value_parser = parse_duration_secs)]
     pub session_expiry: u64,
 
     /// Maximum `QoS` level supported (0, 1, or 2)
     #[arg(long, default_value = "2")]
     pub max_qos: u8,
 
-    /// Server keep-alive time in seconds (optional)
-    #[arg(long)]
-    pub keep_alive: Option<u16>,
+    /// Server keep-alive time (e.g., 60, 60s, 2m)
+    #[arg(long, value_parser = parse_duration_secs)]
+    pub keep_alive: Option<u64>,
 
     /// Response information string sent to clients that request it
     #[arg(long)]
@@ -423,7 +432,7 @@ async fn create_interactive_config(cmd: &mut BrokerCommand) -> Result<BrokerConf
     config.wildcard_subscription_available = !cmd.no_wildcards;
 
     if let Some(keep_alive) = cmd.keep_alive {
-        config.server_keep_alive = Some(std::time::Duration::from_secs(u64::from(keep_alive)));
+        config.server_keep_alive = Some(std::time::Duration::from_secs(keep_alive));
     }
 
     if let Some(ref response_info) = cmd.response_information {
