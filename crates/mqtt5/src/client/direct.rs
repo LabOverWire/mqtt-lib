@@ -1396,11 +1396,21 @@ async fn packet_reader_task_with_responses(mut reader: UnifiedReader, ctx: Packe
                     }
                     Packet::PubRec(pubrec) => {
                         if pubrec.reason_code.is_error() {
+                            tracing::debug!(
+                                packet_id = pubrec.packet_id,
+                                reason_code = ?pubrec.reason_code,
+                                "QoS 2 PUBREC rejected"
+                            );
                             if let Some(tx) =
                                 ctx.pubcomp_channels.lock().await.remove(&pubrec.packet_id)
                             {
                                 let _ = tx.send(pubrec.reason_code);
                             }
+                            ctx.session
+                                .write()
+                                .await
+                                .remove_unacked_publish(pubrec.packet_id)
+                                .await;
                             continue;
                         }
                     }
