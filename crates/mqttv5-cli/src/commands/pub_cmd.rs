@@ -209,6 +209,10 @@ pub struct PubCommand {
     #[arg(long, value_parser = parse_duration_millis, requires = "repeat")]
     pub interval: Option<u64>,
 
+    /// Schedule publish at specific time (e.g., 14:30, 14:30:00, 2025-01-15T14:30:00)
+    #[arg(long, conflicts_with = "delay")]
+    pub at: Option<String>,
+
     /// OpenTelemetry OTLP endpoint (e.g., http://localhost:4317)
     #[cfg(feature = "opentelemetry")]
     #[arg(long)]
@@ -272,6 +276,53 @@ fn parse_duration_millis(s: &str) -> Result<u64, String> {
     humantime::parse_duration(s)
         .map(|d| d.as_millis() as u64)
         .map_err(|e| e.to_string())
+}
+
+#[allow(clippy::cast_sign_loss)]
+fn calculate_wait_until(time_str: &str) -> Result<std::time::Duration> {
+    use time::{OffsetDateTime, Time};
+
+    let now = OffsetDateTime::now_local().unwrap_or_else(|_| OffsetDateTime::now_utc());
+
+    if let Ok(target) = OffsetDateTime::parse(
+        time_str,
+        &time::format_description::well_known::Iso8601::DEFAULT,
+    ) {
+        let duration = target - now;
+        if duration.is_negative() {
+            anyhow::bail!("Scheduled time '{time_str}' is in the past");
+        }
+        return Ok(std::time::Duration::from_secs(
+            duration.whole_seconds() as u64
+        ));
+    }
+
+    let time_formats = [
+        time::format_description::parse("[hour]:[minute]:[second]").unwrap(),
+        time::format_description::parse("[hour]:[minute]").unwrap(),
+    ];
+
+    for format in &time_formats {
+        if let Ok(target_time) = Time::parse(time_str, format) {
+            let today = now.date();
+            let target_datetime = today.with_time(target_time).assume_offset(now.offset());
+
+            let duration = if target_datetime > now {
+                target_datetime - now
+            } else {
+                let tomorrow = today.next_day().expect("valid date");
+                tomorrow.with_time(target_time).assume_offset(now.offset()) - now
+            };
+
+            return Ok(std::time::Duration::from_secs(
+                duration.whole_seconds() as u64
+            ));
+        }
+    }
+
+    anyhow::bail!(
+        "Invalid time format '{time_str}'. Use HH:MM, HH:MM:SS, or ISO 8601 (2025-01-15T14:30:00)"
+    );
 }
 
 pub async fn execute(mut cmd: PubCommand, verbose: bool, debug: bool) -> Result<()> {
@@ -607,6 +658,16 @@ pub async fn execute(mut cmd: PubCommand, verbose: bool, debug: bool) -> Result<
             humantime::format_duration(std::time::Duration::from_secs(delay_secs))
         );
         tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
+    } else if let Some(ref at_time) = cmd.at {
+        let wait_duration = calculate_wait_until(at_time)?;
+        if wait_duration.as_secs() > 0 {
+            info!(
+                "Scheduled for {}, waiting {}...",
+                at_time,
+                humantime::format_duration(wait_duration)
+            );
+            tokio::time::sleep(wait_duration).await;
+        }
     }
 
     let has_properties = cmd.retain
