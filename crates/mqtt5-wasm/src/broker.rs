@@ -387,6 +387,22 @@ impl WasmBroker {
         self.auth_provider.acl_manager().clear_roles().await;
     }
 
+    #[wasm_bindgen]
+    pub async fn set_acl_default_deny(&self) {
+        self.auth_provider
+            .acl_manager()
+            .set_default_permission(Permission::Deny)
+            .await;
+    }
+
+    #[wasm_bindgen]
+    pub async fn set_acl_default_allow(&self) {
+        self.auth_provider
+            .acl_manager()
+            .set_default_permission(Permission::ReadWrite)
+            .await;
+    }
+
     /// # Errors
     /// Returns an error if the `MessageChannel` cannot be created.
     #[wasm_bindgen]
