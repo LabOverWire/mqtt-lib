@@ -19,6 +19,10 @@ use tokio::signal;
 use tokio::sync::Notify;
 use tracing::{debug, info, warn};
 
+use super::parsers::{
+    calculate_wait_until, duration_secs_to_u32, parse_duration_millis, parse_duration_secs,
+};
+
 #[derive(Args)]
 pub struct PubCommand {
     /// MQTT topic to publish to
@@ -77,8 +81,8 @@ pub struct PubCommand {
     #[arg(long)]
     pub wait_response: bool,
 
-    /// Timeout in seconds when waiting for response (default: 30)
-    #[arg(long, default_value = "30")]
+    /// Timeout when waiting for response (e.g., 30s, 1m) (default: 30s)
+    #[arg(long, default_value = "30", value_parser = parse_duration_secs)]
     pub timeout: u64,
 
     /// Number of responses to wait for (default: 1, 0 = unlimited until timeout)
@@ -117,13 +121,13 @@ pub struct PubCommand {
     #[arg(long = "no-clean-start")]
     pub no_clean_start: bool,
 
-    /// Session expiry interval in seconds (0 = expire on disconnect)
-    #[arg(long)]
-    pub session_expiry: Option<u32>,
+    /// Session expiry interval (e.g., 1h, 30m) (0 = expire on disconnect)
+    #[arg(long, value_parser = parse_duration_secs)]
+    pub session_expiry: Option<u64>,
 
-    /// Keep alive interval in seconds
-    #[arg(long, short = 'k', default_value = "60")]
-    pub keep_alive: u16,
+    /// Keep alive interval (e.g., 60s, 1m) (default: 60s)
+    #[arg(long, short = 'k', default_value = "60", value_parser = parse_duration_secs)]
+    pub keep_alive: u64,
 
     /// MQTT protocol version (3.1.1 or 5, default: 5)
     #[arg(long, value_parser = parse_protocol_version)]
@@ -161,9 +165,9 @@ pub struct PubCommand {
     #[arg(long)]
     pub insecure: bool,
 
-    /// Will delay interval in seconds
-    #[arg(long)]
-    pub will_delay: Option<u32>,
+    /// Will delay interval (e.g., 5m, 1h)
+    #[arg(long, value_parser = parse_duration_secs)]
+    pub will_delay: Option<u64>,
 
     /// Keep connection alive after publishing (for testing will messages)
     #[arg(long, hide = true)]
@@ -181,8 +185,8 @@ pub struct PubCommand {
     #[arg(long)]
     pub quic_flow_headers: bool,
 
-    /// Flow expiration interval in seconds (default: 300)
-    #[arg(long, default_value = "300")]
+    /// Flow expiration interval (e.g., 5m, 1h) (default: 5m)
+    #[arg(long, default_value = "300", value_parser = parse_duration_secs)]
     pub quic_flow_expire: u64,
 
     /// Maximum concurrent QUIC streams
@@ -193,9 +197,25 @@ pub struct PubCommand {
     #[arg(long)]
     pub quic_datagrams: bool,
 
-    /// QUIC connection timeout in seconds (default: 30)
-    #[arg(long, default_value = "30")]
+    /// QUIC connection timeout (e.g., 30s, 1m) (default: 30s)
+    #[arg(long, default_value = "30", value_parser = parse_duration_secs)]
     pub quic_connect_timeout: u64,
+
+    /// Delay before publishing (e.g., 5s, 1m30s)
+    #[arg(long, value_parser = parse_duration_secs)]
+    pub delay: Option<u64>,
+
+    /// Repeat publishing N times (0 = infinite until Ctrl+C)
+    #[arg(long)]
+    pub repeat: Option<u64>,
+
+    /// Interval between repeated publishes in ms (e.g., 1000, 1s, 500ms)
+    #[arg(long, value_parser = parse_duration_millis, requires = "repeat")]
+    pub interval: Option<u64>,
+
+    /// Schedule publish at specific time (e.g., 14:30, 14:30:00, 2025-01-15T14:30:00)
+    #[arg(long, conflicts_with = "delay")]
+    pub at: Option<String>,
 
     /// OpenTelemetry OTLP endpoint (e.g., http://localhost:4317)
     #[cfg(feature = "opentelemetry")]
@@ -350,7 +370,7 @@ pub async fn execute(mut cmd: PubCommand, verbose: bool, debug: bool) -> Result<
     // Build connection options
     let mut options = ConnectOptions::new(client_id.clone())
         .with_clean_start(!cmd.no_clean_start)
-        .with_keep_alive(Duration::from_secs(cmd.keep_alive.into()));
+        .with_keep_alive(Duration::from_secs(cmd.keep_alive));
 
     if cmd.auto_reconnect {
         options = options.with_automatic_reconnect(true);
@@ -360,9 +380,8 @@ pub async fn execute(mut cmd: PubCommand, verbose: bool, debug: bool) -> Result<
         options = options.with_protocol_version(version);
     }
 
-    // Add session expiry if specified
     if let Some(expiry) = cmd.session_expiry {
-        options = options.with_session_expiry_interval(expiry);
+        options = options.with_session_expiry_interval(duration_secs_to_u32(expiry));
     }
 
     // Add authentication based on method
@@ -413,7 +432,7 @@ pub async fn execute(mut cmd: PubCommand, verbose: bool, debug: bool) -> Result<
         }
 
         if let Some(delay) = cmd.will_delay {
-            will.properties.will_delay_interval = Some(delay);
+            will.properties.will_delay_interval = Some(duration_secs_to_u32(delay));
         }
 
         options = options.with_will(will);
@@ -567,48 +586,95 @@ pub async fn execute(mut cmd: PubCommand, verbose: bool, debug: bool) -> Result<
         );
     }
 
+    if let Some(delay_secs) = cmd.delay {
+        info!(
+            "Waiting {} before publishing...",
+            humantime::format_duration(std::time::Duration::from_secs(delay_secs))
+        );
+        tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
+    } else if let Some(ref at_time) = cmd.at {
+        let wait_duration = calculate_wait_until(at_time)?;
+        if wait_duration.as_secs() > 0 {
+            info!(
+                "Scheduled for {}, waiting {}...",
+                at_time,
+                humantime::format_duration(wait_duration)
+            );
+            tokio::time::sleep(wait_duration).await;
+        }
+    }
+
     let has_properties = cmd.retain
         || cmd.message_expiry_interval.is_some()
         || cmd.topic_alias.is_some()
         || cmd.response_topic.is_some()
         || correlation_data.is_some();
 
-    if has_properties {
-        let mut options = PublishOptions {
-            qos,
-            retain: cmd.retain,
-            ..Default::default()
-        };
-        options.properties.message_expiry_interval = cmd.message_expiry_interval;
-        options.properties.topic_alias = cmd.topic_alias;
-        options
-            .properties
-            .response_topic
-            .clone_from(&cmd.response_topic);
-        options
-            .properties
-            .correlation_data
-            .clone_from(&correlation_data);
-        client
-            .publish_with_options(&topic, message.as_bytes(), options)
-            .await?;
-    } else {
-        match qos {
-            QoS::AtMostOnce => {
-                client.publish(&topic, message.as_bytes()).await?;
-            }
-            QoS::AtLeastOnce => {
-                client.publish_qos1(&topic, message.as_bytes()).await?;
-            }
-            QoS::ExactlyOnce => {
-                client.publish_qos2(&topic, message.as_bytes()).await?;
+    let repeat_count = cmd.repeat.unwrap_or(1);
+    let interval_millis = cmd.interval.unwrap_or(1000);
+    let infinite_repeat = cmd.repeat == Some(0);
+    let mut iteration = 0u64;
+
+    loop {
+        iteration += 1;
+
+        if has_properties {
+            let mut options = PublishOptions {
+                qos,
+                retain: cmd.retain,
+                ..Default::default()
+            };
+            options.properties.message_expiry_interval = cmd.message_expiry_interval;
+            options.properties.topic_alias = cmd.topic_alias;
+            options
+                .properties
+                .response_topic
+                .clone_from(&cmd.response_topic);
+            options
+                .properties
+                .correlation_data
+                .clone_from(&correlation_data);
+            client
+                .publish_with_options(&topic, message.as_bytes(), options)
+                .await?;
+        } else {
+            match qos {
+                QoS::AtMostOnce => {
+                    client.publish(&topic, message.as_bytes()).await?;
+                }
+                QoS::AtLeastOnce => {
+                    client.publish_qos1(&topic, message.as_bytes()).await?;
+                }
+                QoS::ExactlyOnce => {
+                    client.publish_qos2(&topic, message.as_bytes()).await?;
+                }
             }
         }
-    }
 
-    println!("✓ Published message to '{}' (QoS {})", topic, qos as u8);
-    if cmd.retain {
-        println!("  Message retained on broker");
+        if cmd.repeat.is_some() {
+            println!(
+                "✓ Published message {} to '{}' (QoS {})",
+                iteration, topic, qos as u8
+            );
+        } else {
+            println!("✓ Published message to '{}' (QoS {})", topic, qos as u8);
+        }
+        if cmd.retain {
+            println!("  Message retained on broker");
+        }
+
+        if !infinite_repeat && iteration >= repeat_count {
+            break;
+        }
+
+        tokio::select! {
+            () = tokio::time::sleep(std::time::Duration::from_millis(interval_millis)) => {}
+            _ = signal::ctrl_c() => {
+                println!("\n✓ Interrupted after {iteration} publishes");
+                client.disconnect().await?;
+                return Ok(());
+            }
+        }
     }
 
     if cmd.wait_response {

@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [mqttv5-cli 0.18.0] - 2026-01-08
+
+### Added
+
+- **Human-readable duration parsing**: All duration CLI flags now accept humantime formats
+  - Supports: `30s`, `5m`, `1h`, `1m30s`, `500ms` in addition to raw numbers
+  - Applies to: `--timeout`, `--keep-alive`, `--session-expiry`, `--will-delay`, `--delay`, `--interval`
+  - Backward compatible: raw numbers interpreted as seconds (except `--interval` which uses milliseconds)
+
+- **`--delay` flag for pub command**: Delay before publishing the first message
+  - Example: `mqttv5 pub -t test -m hello --delay 5s`
+
+- **`--repeat` and `--interval` flags for pub command**: Repeated message publishing
+  - `--repeat N`: Publish N times (0 = infinite until Ctrl+C)
+  - `--interval`: Time between publishes (e.g., `1s`, `500ms`, `2m`)
+  - Graceful Ctrl+C handling with publish count summary
+
+- **`--at` flag for pub command**: Scheduled publishing at specific time
+  - Time formats: `14:30`, `14:30:00` (today/tomorrow), ISO 8601 (`2025-01-15T14:30:00`)
+  - Auto-rolls to tomorrow if time-of-day already passed
+  - Conflicts with `--delay` (mutually exclusive)
+
 ## [0.18.1] / [mqtt5-wasm 0.8.1] / [mqttv5-cli 0.17.1] - 2026-01-07
 
 ### Added
