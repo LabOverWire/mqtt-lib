@@ -10,9 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **Human-readable duration parsing**: All duration CLI flags now accept humantime formats
-  - Supports: `30s`, `5m`, `1h`, `1m30s`, `500ms` in addition to raw seconds
+  - Supports: `30s`, `5m`, `1h`, `1m30s`, `500ms` in addition to raw numbers
   - Applies to: `--timeout`, `--keep-alive`, `--session-expiry`, `--will-delay`, `--delay`, `--interval`
-  - Backward compatible: raw numbers still work (interpreted as seconds)
+  - Backward compatible: raw numbers interpreted as seconds (except `--interval` which uses milliseconds)
 
 - **`--delay` flag for pub command**: Delay before publishing the first message
   - Example: `mqttv5 pub -t test -m hello --delay 5s`
