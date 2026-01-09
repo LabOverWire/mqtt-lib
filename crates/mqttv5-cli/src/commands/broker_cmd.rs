@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 use tokio::signal;
 use tracing::{debug, info};
 
+use super::parsers::parse_duration_secs;
+
 fn parse_storage_backend(
     s: &str,
 ) -> std::result::Result<mqtt5::broker::config::StorageBackend, String> {
@@ -20,15 +22,6 @@ fn parse_storage_backend(
             "unknown storage backend: {s} (expected 'file' or 'memory')"
         )),
     }
-}
-
-fn parse_duration_secs(s: &str) -> Result<u64, String> {
-    if let Ok(secs) = s.parse::<u64>() {
-        return Ok(secs);
-    }
-    humantime::parse_duration(s)
-        .map(|d| d.as_secs())
-        .map_err(|e| e.to_string())
 }
 
 #[derive(Args)]

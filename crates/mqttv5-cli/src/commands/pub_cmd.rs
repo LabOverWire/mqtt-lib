@@ -19,6 +19,10 @@ use tokio::signal;
 use tokio::sync::Notify;
 use tracing::{debug, info, warn};
 
+use super::parsers::{
+    calculate_wait_until, duration_secs_to_u32, parse_duration_millis, parse_duration_secs,
+};
+
 #[derive(Args)]
 pub struct PubCommand {
     /// MQTT topic to publish to
@@ -259,74 +263,6 @@ fn parse_stream_strategy(s: &str) -> Result<mqtt5::transport::StreamStrategy, St
     }
 }
 
-fn parse_duration_secs(s: &str) -> Result<u64, String> {
-    if let Ok(secs) = s.parse::<u64>() {
-        return Ok(secs);
-    }
-    humantime::parse_duration(s)
-        .map(|d| d.as_secs())
-        .map_err(|e| e.to_string())
-}
-
-#[allow(clippy::cast_possible_truncation)]
-fn parse_duration_millis(s: &str) -> Result<u64, String> {
-    if let Ok(secs) = s.parse::<u64>() {
-        return Ok(secs * 1000);
-    }
-    humantime::parse_duration(s)
-        .map(|d| d.as_millis() as u64)
-        .map_err(|e| e.to_string())
-}
-
-#[allow(clippy::cast_sign_loss)]
-fn calculate_wait_until(time_str: &str) -> Result<std::time::Duration> {
-    use time::macros::format_description;
-    use time::{OffsetDateTime, PrimitiveDateTime, Time};
-
-    let now = OffsetDateTime::now_local().unwrap_or_else(|_| OffsetDateTime::now_utc());
-
-    let datetime_format = format_description!("[year]-[month]-[day]T[hour]:[minute]:[second]");
-    if let Ok(target) = PrimitiveDateTime::parse(time_str, datetime_format) {
-        let target = target.assume_offset(now.offset());
-        let duration = target - now;
-        if duration.is_negative() {
-            anyhow::bail!("Scheduled time '{time_str}' is in the past");
-        }
-        return Ok(std::time::Duration::from_secs(
-            duration.whole_seconds() as u64
-        ));
-    }
-
-    let format_hms = format_description!("[hour]:[minute]:[second]");
-    let format_hm = format_description!("[hour]:[minute]");
-
-    let target_time = Time::parse(time_str, format_hms)
-        .or_else(|_| Time::parse(time_str, format_hm))
-        .ok();
-
-    if let Some(target_time) = target_time {
-        let today = now.date();
-        let target_datetime = today.with_time(target_time).assume_offset(now.offset());
-
-        let duration = if target_datetime > now {
-            target_datetime - now
-        } else {
-            let tomorrow = today
-                .next_day()
-                .ok_or_else(|| anyhow::anyhow!("Cannot schedule for tomorrow (date overflow)"))?;
-            tomorrow.with_time(target_time).assume_offset(now.offset()) - now
-        };
-
-        return Ok(std::time::Duration::from_secs(
-            duration.whole_seconds() as u64
-        ));
-    }
-
-    anyhow::bail!(
-        "Invalid time format '{time_str}'. Use HH:MM, HH:MM:SS, or ISO 8601 (2025-01-15T14:30:00)"
-    );
-}
-
 pub async fn execute(mut cmd: PubCommand, verbose: bool, debug: bool) -> Result<()> {
     #[cfg(feature = "opentelemetry")]
     let has_otel = cmd.otel_endpoint.is_some();
@@ -445,9 +381,7 @@ pub async fn execute(mut cmd: PubCommand, verbose: bool, debug: bool) -> Result<
     }
 
     if let Some(expiry) = cmd.session_expiry {
-        #[allow(clippy::cast_possible_truncation)]
-        let expiry_u32 = expiry as u32;
-        options = options.with_session_expiry_interval(expiry_u32);
+        options = options.with_session_expiry_interval(duration_secs_to_u32(expiry));
     }
 
     // Add authentication based on method
@@ -498,9 +432,7 @@ pub async fn execute(mut cmd: PubCommand, verbose: bool, debug: bool) -> Result<
         }
 
         if let Some(delay) = cmd.will_delay {
-            #[allow(clippy::cast_possible_truncation)]
-            let delay_u32 = delay as u32;
-            will.properties.will_delay_interval = Some(delay_u32);
+            will.properties.will_delay_interval = Some(duration_secs_to_u32(delay));
         }
 
         options = options.with_will(will);

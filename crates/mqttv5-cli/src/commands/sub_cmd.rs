@@ -15,6 +15,8 @@ use tokio::signal;
 use tokio::sync::Notify;
 use tracing::{debug, info};
 
+use super::parsers::{duration_secs_to_u32, parse_duration_secs};
+
 #[derive(Args)]
 pub struct SubCommand {
     /// MQTT topic to subscribe to (supports wildcards + and #)
@@ -220,15 +222,6 @@ fn parse_stream_strategy(s: &str) -> Result<mqtt5::transport::StreamStrategy, St
     }
 }
 
-fn parse_duration_secs(s: &str) -> Result<u64, String> {
-    if let Ok(secs) = s.parse::<u64>() {
-        return Ok(secs);
-    }
-    humantime::parse_duration(s)
-        .map(|d| d.as_secs())
-        .map_err(|e| e.to_string())
-}
-
 pub async fn execute(mut cmd: SubCommand, verbose: bool, debug: bool) -> Result<()> {
     #[cfg(feature = "opentelemetry")]
     let has_otel = cmd.otel_endpoint.is_some();
@@ -314,9 +307,7 @@ pub async fn execute(mut cmd: SubCommand, verbose: bool, debug: bool) -> Result<
     }
 
     if let Some(expiry) = cmd.session_expiry {
-        #[allow(clippy::cast_possible_truncation)]
-        let expiry_u32 = expiry as u32;
-        options = options.with_session_expiry_interval(expiry_u32);
+        options = options.with_session_expiry_interval(duration_secs_to_u32(expiry));
     }
 
     // Add authentication based on method
@@ -367,9 +358,7 @@ pub async fn execute(mut cmd: SubCommand, verbose: bool, debug: bool) -> Result<
         }
 
         if let Some(delay) = cmd.will_delay {
-            #[allow(clippy::cast_possible_truncation)]
-            let delay_u32 = delay as u32;
-            will.properties.will_delay_interval = Some(delay_u32);
+            will.properties.will_delay_interval = Some(duration_secs_to_u32(delay));
         }
 
         options = options.with_will(will);
