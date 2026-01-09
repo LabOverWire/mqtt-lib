@@ -280,13 +280,13 @@ fn parse_duration_millis(s: &str) -> Result<u64, String> {
 
 #[allow(clippy::cast_sign_loss)]
 fn calculate_wait_until(time_str: &str) -> Result<std::time::Duration> {
+    use time::macros::format_description;
     use time::{OffsetDateTime, PrimitiveDateTime, Time};
 
     let now = OffsetDateTime::now_local().unwrap_or_else(|_| OffsetDateTime::now_utc());
 
-    let datetime_format =
-        time::format_description::parse("[year]-[month]-[day]T[hour]:[minute]:[second]").unwrap();
-    if let Ok(target) = PrimitiveDateTime::parse(time_str, &datetime_format) {
+    let datetime_format = format_description!("[year]-[month]-[day]T[hour]:[minute]:[second]");
+    if let Ok(target) = PrimitiveDateTime::parse(time_str, datetime_format) {
         let target = target.assume_offset(now.offset());
         let duration = target - now;
         if duration.is_negative() {
@@ -297,27 +297,29 @@ fn calculate_wait_until(time_str: &str) -> Result<std::time::Duration> {
         ));
     }
 
-    let time_formats = [
-        time::format_description::parse("[hour]:[minute]:[second]").unwrap(),
-        time::format_description::parse("[hour]:[minute]").unwrap(),
-    ];
+    let format_hms = format_description!("[hour]:[minute]:[second]");
+    let format_hm = format_description!("[hour]:[minute]");
 
-    for format in &time_formats {
-        if let Ok(target_time) = Time::parse(time_str, format) {
-            let today = now.date();
-            let target_datetime = today.with_time(target_time).assume_offset(now.offset());
+    let target_time = Time::parse(time_str, format_hms)
+        .or_else(|_| Time::parse(time_str, format_hm))
+        .ok();
 
-            let duration = if target_datetime > now {
-                target_datetime - now
-            } else {
-                let tomorrow = today.next_day().expect("valid date");
-                tomorrow.with_time(target_time).assume_offset(now.offset()) - now
-            };
+    if let Some(target_time) = target_time {
+        let today = now.date();
+        let target_datetime = today.with_time(target_time).assume_offset(now.offset());
 
-            return Ok(std::time::Duration::from_secs(
-                duration.whole_seconds() as u64
-            ));
-        }
+        let duration = if target_datetime > now {
+            target_datetime - now
+        } else {
+            let tomorrow = today
+                .next_day()
+                .ok_or_else(|| anyhow::anyhow!("Cannot schedule for tomorrow (date overflow)"))?;
+            tomorrow.with_time(target_time).assume_offset(now.offset()) - now
+        };
+
+        return Ok(std::time::Duration::from_secs(
+            duration.whole_seconds() as u64
+        ));
     }
 
     anyhow::bail!(
