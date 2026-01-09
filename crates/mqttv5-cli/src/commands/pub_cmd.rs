@@ -280,14 +280,14 @@ fn parse_duration_millis(s: &str) -> Result<u64, String> {
 
 #[allow(clippy::cast_sign_loss)]
 fn calculate_wait_until(time_str: &str) -> Result<std::time::Duration> {
-    use time::{OffsetDateTime, Time};
+    use time::{OffsetDateTime, PrimitiveDateTime, Time};
 
     let now = OffsetDateTime::now_local().unwrap_or_else(|_| OffsetDateTime::now_utc());
 
-    if let Ok(target) = OffsetDateTime::parse(
-        time_str,
-        &time::format_description::well_known::Iso8601::DEFAULT,
-    ) {
+    let datetime_format =
+        time::format_description::parse("[year]-[month]-[day]T[hour]:[minute]:[second]").unwrap();
+    if let Ok(target) = PrimitiveDateTime::parse(time_str, &datetime_format) {
+        let target = target.assume_offset(now.offset());
         let duration = target - now;
         if duration.is_negative() {
             anyhow::bail!("Scheduled time '{time_str}' is in the past");
