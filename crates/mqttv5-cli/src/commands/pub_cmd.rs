@@ -209,7 +209,7 @@ pub struct PubCommand {
     #[arg(long)]
     pub repeat: Option<u64>,
 
-    /// Interval between repeated publishes (e.g., 1s, 500ms, 1m)
+    /// Interval between repeated publishes in ms (e.g., 1000, 1s, 500ms)
     #[arg(long, value_parser = parse_duration_millis, requires = "repeat")]
     pub interval: Option<u64>,
 
