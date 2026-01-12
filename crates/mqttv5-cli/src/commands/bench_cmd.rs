@@ -47,12 +47,15 @@ pub struct BenchCommand {
     #[arg(long, short, default_value = "0", value_parser = parse_qos)]
     pub qos: QoS,
 
+    /// Full broker URL for TLS/WebSocket/QUIC (e.g., mqtts://host:8883, wss://host/mqtt)
     #[arg(long, short = 'U', conflicts_with_all = &["host", "port"])]
     pub url: Option<String>,
 
+    /// Broker hostname (builds mqtt:// URL, use --url for TLS/WebSocket/QUIC)
     #[arg(long, short = 'H', default_value = "localhost")]
     pub host: String,
 
+    /// Broker port (used with --host)
     #[arg(long, short, default_value = "1883")]
     pub port: u16,
 
