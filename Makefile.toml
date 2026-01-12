@@ -55,7 +55,6 @@ echo "  cargo make nostd-test         Run protocol crate tests"
 echo "  cargo make nostd-verify       Run all no_std checks"
 echo "  cargo make embedded-cortex-m4 Build for Cortex-M4 (ARM)"
 echo "  cargo make embedded-riscv     Build for RISC-V with atomics"
-echo "  cargo make embedded-esp32     Build for ESP32-C3 (single-core)"
 echo "  cargo make embedded-verify    Build for all embedded targets"
 echo "  cargo make all-targets        Verify ALL targets (std+wasm+embedded)"
 echo ""
@@ -234,13 +233,8 @@ command = "cargo"
 args = ["build", "-p", "mqtt5-protocol", "--target", "riscv32imac-unknown-none-elf", "--no-default-features"]
 description = "Build for RISC-V with atomics"
 
-[tasks.embedded-esp32]
-command = "cargo"
-args = ["build", "-p", "mqtt5-protocol", "--target", "riscv32imc-unknown-none-elf", "--no-default-features", "--features", "embedded-single-core"]
-description = "Build for ESP32-C3 (single-core, no atomics)"
-
 [tasks.embedded-verify]
-dependencies = ["embedded-cortex-m4", "embedded-riscv", "embedded-esp32"]
+dependencies = ["embedded-cortex-m4", "embedded-riscv"]
 description = "Build for all embedded targets"
 
 [tasks.all-targets]

@@ -23,7 +23,6 @@ std = [
     "bebytes/std",
     "bebytes/bytes",
 ]
-embedded-single-core = ["portable-atomic/unsafe-assume-single-core"]
 
 [dependencies]
 bebytes = { version = "3.0", default-features = false }

@@ -48,7 +48,8 @@ Platform-agnostic MQTT v5.0 protocol for native, WASM, and embedded targets. Sup
 | Feature | Description |
 |---------|-------------|
 | `std` (default) | Full std support with thiserror, tracing |
-| `embedded-single-core` | For targets without hardware atomics (ESP32-C3) |
+
+For single-core targets, use cfg: `rustflags = ["--cfg", "portable_atomic_unsafe_assume_single_core"]`
 
 **Dependencies:** `bebytes`, `bytes`, `serde`, `hashbrown`, `portable-atomic`, `portable-atomic-util`
 
@@ -121,13 +122,18 @@ The protocol crate supports embedded targets via `no_std`:
 |--------|---------|-------|
 | Cortex-M4 (ARM) | `--target thumbv7em-none-eabihf` | Has hardware atomics |
 | RISC-V (atomics) | `--target riscv32imac-unknown-none-elf` | Has atomic extension |
-| ESP32-C3 | `--target riscv32imc-unknown-none-elf --features embedded-single-core` | No hardware atomics |
+| ESP32-C3 | `--target riscv32imc-unknown-none-elf` | Configure single-core via .cargo/config.toml |
+
+For single-core targets without hardware atomics, add to `.cargo/config.toml`:
+```toml
+[target.riscv32imc-unknown-none-elf]
+rustflags = ["--cfg", "portable_atomic_unsafe_assume_single_core"]
+```
 
 Build commands:
 ```bash
 cargo make embedded-cortex-m4   # ARM Cortex-M4
 cargo make embedded-riscv       # RISC-V with atomics
-cargo make embedded-esp32       # ESP32-C3 (single-core)
 cargo make embedded-verify      # All embedded targets
 ```
 

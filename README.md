@@ -493,9 +493,13 @@ The `mqtt5-protocol` crate supports `no_std` environments for embedded systems.
 ```toml
 [dependencies]
 mqtt5-protocol = { version = "0.9", default-features = false }
+```
 
-# For single-core MCUs (more efficient atomics)
-mqtt5-protocol = { version = "0.9", default-features = false, features = ["embedded-single-core"] }
+For single-core MCUs (more efficient atomics), configure via `.cargo/config.toml`:
+
+```toml
+[target.riscv32imc-unknown-none-elf]
+rustflags = ["--cfg", "portable_atomic_unsafe_assume_single_core"]
 ```
 
 ### Time Provider
