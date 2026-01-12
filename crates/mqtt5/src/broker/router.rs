@@ -17,7 +17,7 @@ use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::Weak;
 use tokio::sync::RwLock;
-use tracing::{debug, error, info, trace};
+use tracing::{debug, error, info, trace, warn};
 
 #[cfg(target_arch = "wasm32")]
 type WasmBridgeCallback = Box<dyn Fn(&PublishPacket)>;
@@ -502,6 +502,7 @@ impl MessageRouter {
     }
 
     /// Delivers a message to a specific subscriber
+    #[allow(clippy::too_many_lines)]
     async fn deliver_to_subscriber(
         &self,
         sub: &Subscription,
@@ -555,6 +556,11 @@ impl MessageRouter {
             match client_info.sender.try_send(message) {
                 Ok(()) => {}
                 Err(e) => {
+                    warn!(
+                        client_id = %sub.client_id,
+                        topic = %publish.topic_name,
+                        "Channel send failed - message may be dropped"
+                    );
                     let message = e.into_inner();
                     if let Some(storage) = storage {
                         if effective_qos != QoS::AtMostOnce {

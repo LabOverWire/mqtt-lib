@@ -137,7 +137,7 @@ impl ClientHandler {
         shutdown_rx: tokio::sync::broadcast::Receiver<()>,
         external_packet_rx: Option<mpsc::Receiver<Packet>>,
     ) -> Self {
-        let (publish_tx, publish_rx) = flume::bounded(1000);
+        let (publish_tx, publish_rx) = flume::bounded(config.client_channel_capacity);
 
         Self {
             transport,

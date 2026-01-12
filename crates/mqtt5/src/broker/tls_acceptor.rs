@@ -132,7 +132,6 @@ impl TlsAcceptorConfig {
     /// Returns an error if the configuration is invalid
     pub fn build_server_config(&self) -> Result<ServerConfig> {
         let mut config = if let Some(ref client_ca_certs) = self.client_ca_certs {
-            // Set up client certificate verification
             let mut root_store = RootCertStore::empty();
             for cert in client_ca_certs {
                 root_store.add(cert.clone()).map_err(|e| {
@@ -140,11 +139,16 @@ impl TlsAcceptorConfig {
                 })?;
             }
 
-            let client_verifier = WebPkiClientVerifier::builder(Arc::new(root_store))
-                .build()
-                .map_err(|e| {
-                    MqttError::Configuration(format!("Failed to build client verifier: {e}"))
-                })?;
+            let verifier_builder = WebPkiClientVerifier::builder(Arc::new(root_store));
+
+            let client_verifier = if self.require_client_cert {
+                verifier_builder.build()
+            } else {
+                verifier_builder.allow_unauthenticated().build()
+            }
+            .map_err(|e| {
+                MqttError::Configuration(format!("Failed to build client verifier: {e}"))
+            })?;
 
             ServerConfig::builder()
                 .with_client_cert_verifier(client_verifier)
@@ -153,7 +157,6 @@ impl TlsAcceptorConfig {
                     MqttError::Configuration(format!("Failed to configure server cert: {e}"))
                 })?
         } else {
-            // No client certificate verification
             ServerConfig::builder()
                 .with_no_client_auth()
                 .with_single_cert(self.cert_chain.clone(), self.private_key.clone_key())
