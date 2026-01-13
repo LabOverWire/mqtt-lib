@@ -20,6 +20,7 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
+opt-level = "z"
 
 [profile.release.package.mqtt5-wasm]
 opt-level = "z"
