@@ -23,7 +23,7 @@ pub struct SubCommand {
     #[arg(long, short)]
     pub topic: Option<String>,
 
-    /// Full broker URL for TLS/WebSocket/QUIC (e.g., mqtts://host:8883, wss://host/mqtt)
+    /// Full broker URL for TLS/WebSocket/QUIC (e.g., <mqtts://host:8883>, <wss://host/mqtt>)
     #[arg(long, short = 'U', conflicts_with_all = &["host", "port"])]
     pub url: Option<String>,
 

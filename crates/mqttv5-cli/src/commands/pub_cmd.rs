@@ -41,7 +41,7 @@ pub struct PubCommand {
     #[arg(long)]
     pub stdin: bool,
 
-    /// Full broker URL for TLS/WebSocket/QUIC (e.g., mqtts://host:8883, wss://host/mqtt)
+    /// Full broker URL for TLS/WebSocket/QUIC (e.g., <mqtts://host:8883>, <wss://host/mqtt>)
     #[arg(long, short = 'U', conflicts_with_all = &["host", "port"])]
     pub url: Option<String>,
 

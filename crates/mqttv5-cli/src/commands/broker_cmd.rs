@@ -3,7 +3,7 @@
 #![allow(clippy::too_many_lines)]
 
 use anyhow::{Context, Result};
-use clap::{ArgAction, Args};
+use clap::{ArgAction, Args, Subcommand};
 use dialoguer::Confirm;
 use mqtt5::broker::{BrokerConfig, MqttBroker};
 use std::path::{Path, PathBuf};
@@ -26,6 +26,32 @@ fn parse_storage_backend(
 
 #[derive(Args)]
 pub struct BrokerCommand {
+    #[command(subcommand)]
+    pub command: Option<BrokerSubcommand>,
+
+    #[command(flatten)]
+    pub run_args: RunArgs,
+}
+
+#[derive(Subcommand)]
+pub enum BrokerSubcommand {
+    /// Generate a full configuration file with all options
+    GenerateConfig(GenerateConfigArgs),
+}
+
+#[derive(Args)]
+pub struct GenerateConfigArgs {
+    /// Output file path (default: stdout)
+    #[arg(long, short)]
+    pub output: Option<PathBuf>,
+
+    /// Output format (json or toml)
+    #[arg(long, short, default_value = "json")]
+    pub format: String,
+}
+
+#[derive(Args)]
+pub struct RunArgs {
     /// Configuration file path (JSON format)
     #[arg(long, short)]
     pub config: Option<PathBuf>,
@@ -218,7 +244,122 @@ pub struct BrokerCommand {
     pub otel_sampling: f64,
 }
 
-pub async fn execute(mut cmd: BrokerCommand, verbose: bool, debug: bool) -> Result<()> {
+pub async fn execute(cmd: BrokerCommand, verbose: bool, debug: bool) -> Result<()> {
+    if let Some(BrokerSubcommand::GenerateConfig(args)) = cmd.command {
+        return execute_generate_config(args).await;
+    }
+
+    execute_run(cmd.run_args, verbose, debug).await
+}
+
+async fn execute_generate_config(args: GenerateConfigArgs) -> Result<()> {
+    use mqtt5::broker::config::{
+        AuthConfig, AuthMethod, QuicConfig, RateLimitConfig, StorageBackend, StorageConfig,
+        TlsConfig, WebSocketConfig,
+    };
+
+    let config = BrokerConfig {
+        bind_addresses: vec![
+            "0.0.0.0:1883".parse().unwrap(),
+            "[::]:1883".parse().unwrap(),
+        ],
+        max_clients: 10000,
+        session_expiry_interval: std::time::Duration::from_secs(3600),
+        max_packet_size: 268_435_456,
+        topic_alias_maximum: 65535,
+        retain_available: true,
+        maximum_qos: 2,
+        wildcard_subscription_available: true,
+        subscription_identifier_available: true,
+        shared_subscription_available: true,
+        max_subscriptions_per_client: 0,
+        max_retained_messages: 0,
+        max_retained_message_size: 0,
+        client_channel_capacity: 10000,
+        server_keep_alive: None,
+        response_information: None,
+        auth_config: AuthConfig {
+            allow_anonymous: true,
+            password_file: None,
+            acl_file: None,
+            auth_method: AuthMethod::None,
+            auth_data: None,
+            scram_file: None,
+            jwt_config: None,
+            federated_jwt_config: None,
+            rate_limit: RateLimitConfig::default(),
+        },
+        tls_config: Some(TlsConfig {
+            cert_file: PathBuf::from("/path/to/server.crt"),
+            key_file: PathBuf::from("/path/to/server.key"),
+            ca_file: None,
+            require_client_cert: false,
+            bind_addresses: vec![
+                "0.0.0.0:8883".parse().unwrap(),
+                "[::]:8883".parse().unwrap(),
+            ],
+        }),
+        websocket_config: Some(WebSocketConfig {
+            bind_addresses: vec![
+                "0.0.0.0:8080".parse().unwrap(),
+                "[::]:8080".parse().unwrap(),
+            ],
+            path: "/mqtt".to_string(),
+            subprotocol: "mqtt".to_string(),
+            use_tls: false,
+        }),
+        websocket_tls_config: Some(WebSocketConfig {
+            bind_addresses: vec![
+                "0.0.0.0:8443".parse().unwrap(),
+                "[::]:8443".parse().unwrap(),
+            ],
+            path: "/mqtt".to_string(),
+            subprotocol: "mqtt".to_string(),
+            use_tls: true,
+        }),
+        quic_config: Some(QuicConfig {
+            cert_file: PathBuf::from("/path/to/server.crt"),
+            key_file: PathBuf::from("/path/to/server.key"),
+            ca_file: None,
+            require_client_cert: false,
+            bind_addresses: vec![
+                "0.0.0.0:14567".parse().unwrap(),
+                "[::]:14567".parse().unwrap(),
+            ],
+        }),
+        storage_config: StorageConfig {
+            backend: StorageBackend::File,
+            base_dir: PathBuf::from("./mqtt_storage"),
+            cleanup_interval: std::time::Duration::from_secs(3600),
+            enable_persistence: true,
+        },
+        bridges: vec![],
+        #[cfg(feature = "opentelemetry")]
+        opentelemetry_config: None,
+        event_handler: None,
+    };
+
+    let output = match args.format.to_lowercase().as_str() {
+        "json" => {
+            serde_json::to_string_pretty(&config).context("Failed to serialize config to JSON")?
+        }
+        "toml" => toml::to_string_pretty(&config).context("Failed to serialize config to TOML")?,
+        _ => anyhow::bail!("Unsupported format: {}. Use 'json' or 'toml'", args.format),
+    };
+
+    if let Some(path) = args.output {
+        tokio::fs::write(&path, &output)
+            .await
+            .with_context(|| format!("Failed to write config to {}", path.display()))?;
+        eprintln!("Configuration written to: {}", path.display());
+    } else {
+        println!("{output}");
+    }
+
+    Ok(())
+}
+
+async fn execute_run(mut cmd: RunArgs, verbose: bool, debug: bool) -> Result<()> {
     #[cfg(feature = "opentelemetry")]
     let has_otel = cmd.otel_endpoint.is_some();
 
@@ -231,7 +372,6 @@ pub async fn execute(mut cmd: BrokerCommand, verbose: bool, debug: bool) -> Resu
 
     info!("Starting MQTT v5.0 broker...");
 
-    // Create broker configuration
     let config = if let Some(config_path) = &cmd.config {
         debug!("Loading configuration from: {:?}", config_path);
         load_config_from_file(config_path)
@@ -344,7 +484,7 @@ pub async fn execute(mut cmd: BrokerCommand, verbose: bool, debug: bool) -> Resu
     Ok(())
 }
 
-fn resolve_auth_settings(cmd: &BrokerCommand) -> Result<bool> {
+fn resolve_auth_settings(cmd: &RunArgs) -> Result<bool> {
     if let Some(allow_anon) = cmd.allow_anonymous {
         return Ok(allow_anon);
     }
@@ -391,7 +531,7 @@ fn resolve_auth_settings(cmd: &BrokerCommand) -> Result<bool> {
     Ok(allow_anon)
 }
 
-async fn create_interactive_config(cmd: &mut BrokerCommand) -> Result<BrokerConfig> {
+async fn create_interactive_config(cmd: &mut RunArgs) -> Result<BrokerConfig> {
     use mqtt5::broker::config::{
         AuthConfig, AuthMethod, ClaimPattern, FederatedAuthMode, FederatedJwtConfig, JwtAlgorithm,
         JwtConfig, JwtIssuerConfig, JwtKeySource, JwtRoleMapping, QuicConfig, RateLimitConfig,
