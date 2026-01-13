@@ -108,11 +108,16 @@ impl QuicAcceptorConfig {
                 })?;
             }
 
-            let client_verifier = WebPkiClientVerifier::builder(Arc::new(root_store))
-                .build()
-                .map_err(|e| {
-                    MqttError::Configuration(format!("Failed to build client verifier: {e}"))
-                })?;
+            let verifier_builder = WebPkiClientVerifier::builder(Arc::new(root_store));
+
+            let client_verifier = if self.require_client_cert {
+                verifier_builder.build()
+            } else {
+                verifier_builder.allow_unauthenticated().build()
+            }
+            .map_err(|e| {
+                MqttError::Configuration(format!("Failed to build client verifier: {e}"))
+            })?;
 
             rustls::ServerConfig::builder_with_provider(crypto_provider)
                 .with_safe_default_protocol_versions()

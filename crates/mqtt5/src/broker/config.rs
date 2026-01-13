@@ -63,6 +63,12 @@ pub struct BrokerConfig {
     #[serde(default)]
     pub max_retained_message_size: usize,
 
+    /// Client message channel capacity (default: 10000)
+    /// This is the buffer size for messages waiting to be sent to each client.
+    /// Increase this value for high-throughput scenarios.
+    #[serde(default = "default_client_channel_capacity")]
+    pub client_channel_capacity: usize,
+
     /// Server keep alive time
     #[cfg_attr(not(target_arch = "wasm32"), serde(with = "humantime_serde"))]
     pub server_keep_alive: Option<Duration>,
@@ -131,6 +137,7 @@ impl std::fmt::Debug for BrokerConfig {
             )
             .field("max_retained_messages", &self.max_retained_messages)
             .field("max_retained_message_size", &self.max_retained_message_size)
+            .field("client_channel_capacity", &self.client_channel_capacity)
             .field("server_keep_alive", &self.server_keep_alive)
             .field("response_information", &self.response_information)
             .field("auth_config", &self.auth_config)
@@ -167,6 +174,7 @@ impl Default for BrokerConfig {
             max_subscriptions_per_client: 0,
             max_retained_messages: 0,
             max_retained_message_size: 0,
+            client_channel_capacity: default_client_channel_capacity(),
             server_keep_alive: None,
             response_information: None,
             auth_config: AuthConfig::default(),
@@ -265,6 +273,13 @@ impl BrokerConfig {
     #[must_use]
     pub fn with_max_retained_message_size(mut self, max: usize) -> Self {
         self.max_retained_message_size = max;
+        self
+    }
+
+    /// Sets the client message channel capacity
+    #[must_use]
+    pub fn with_client_channel_capacity(mut self, capacity: usize) -> Self {
+        self.client_channel_capacity = capacity;
         self
     }
 
@@ -533,6 +548,10 @@ pub enum JwtKeySource {
         #[serde(default = "default_cache_ttl")]
         cache_ttl_secs: u64,
     },
+}
+
+fn default_client_channel_capacity() -> usize {
+    10000
 }
 
 fn default_refresh_interval() -> u64 {

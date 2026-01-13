@@ -17,7 +17,7 @@ use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::Weak;
 use tokio::sync::RwLock;
-use tracing::{debug, error, info, trace};
+use tracing::{debug, error, info, trace, warn};
 
 #[cfg(target_arch = "wasm32")]
 type WasmBridgeCallback = Box<dyn Fn(&PublishPacket)>;
@@ -501,7 +501,42 @@ impl MessageRouter {
         }
     }
 
-    /// Delivers a message to a specific subscriber
+    fn effective_qos(publish_qos: QoS, sub_qos: QoS) -> QoS {
+        match (publish_qos, sub_qos) {
+            (QoS::AtMostOnce, _) | (_, QoS::AtMostOnce) => QoS::AtMostOnce,
+            (QoS::AtLeastOnce | QoS::ExactlyOnce, QoS::AtLeastOnce)
+            | (QoS::AtLeastOnce, QoS::ExactlyOnce) => QoS::AtLeastOnce,
+            (QoS::ExactlyOnce, QoS::ExactlyOnce) => QoS::ExactlyOnce,
+        }
+    }
+
+    fn prepare_message(publish: &PublishPacket, sub: &Subscription, qos: QoS) -> PublishPacket {
+        let mut message = publish.clone();
+        message.qos = qos;
+        message.protocol_version = sub.protocol_version.as_u8();
+        if !sub.retain_as_published {
+            message.retain = false;
+        }
+        if let Some(id) = sub.subscription_id {
+            message.properties.set_subscription_identifier(id);
+        }
+        message
+    }
+
+    async fn queue_message(
+        storage: &Arc<DynamicStorage>,
+        message: PublishPacket,
+        client_id: &str,
+        qos: QoS,
+    ) {
+        let queued_msg = QueuedMessage::new(message, client_id.to_string(), qos, None);
+        if let Err(e) = storage.queue_message(queued_msg).await {
+            error!("Failed to queue message for offline client {client_id}: {e}");
+        } else {
+            debug!("Queued message for client {client_id}");
+        }
+    }
+
     async fn deliver_to_subscriber(
         &self,
         sub: &Subscription,
@@ -510,100 +545,34 @@ impl MessageRouter {
         storage: Option<&Arc<DynamicStorage>>,
         publishing_client_id: Option<&str>,
     ) {
-        if sub.no_local {
-            if let Some(publisher_id) = publishing_client_id {
-                if publisher_id == sub.client_id {
-                    trace!(
-                        "Skipping delivery to {} due to No Local flag",
-                        sub.client_id
-                    );
-                    return;
-                }
-            }
+        if sub.no_local && publishing_client_id == Some(&sub.client_id) {
+            trace!(
+                "Skipping delivery to {} due to No Local flag",
+                sub.client_id
+            );
+            return;
         }
 
         if let Some(client_info) = clients.get(&sub.client_id) {
-            let effective_qos = match (publish.qos, sub.qos) {
-                (QoS::AtMostOnce, _) | (_, QoS::AtMostOnce) => QoS::AtMostOnce,
-                (QoS::AtLeastOnce | QoS::ExactlyOnce, QoS::AtLeastOnce)
-                | (QoS::AtLeastOnce, QoS::ExactlyOnce) => QoS::AtLeastOnce,
-                (QoS::ExactlyOnce, QoS::ExactlyOnce) => QoS::ExactlyOnce,
-            };
+            let qos = Self::effective_qos(publish.qos, sub.qos);
+            let message = Self::prepare_message(publish, sub, qos);
 
-            let mut message = publish.clone();
-            message.qos = effective_qos;
-            if publish.protocol_version == 5
-                && sub.protocol_version == ProtocolVersion::V311
-                && !publish.properties.is_empty()
-            {
-                trace!(
+            if let Err(e) = client_info.sender.try_send(message) {
+                warn!(
+                    client_id = %sub.client_id,
                     topic = %publish.topic_name,
-                    client = %sub.client_id,
-                    "Stripping v5 properties for v3.1.1 subscriber"
+                    "Channel send failed - message may be dropped"
                 );
-            }
-            message.protocol_version = sub.protocol_version.as_u8();
-
-            if !sub.retain_as_published {
-                message.retain = false;
-            }
-
-            if let Some(id) = sub.subscription_id {
-                message.properties.set_subscription_identifier(id);
-            }
-
-            match client_info.sender.try_send(message) {
-                Ok(()) => {}
-                Err(e) => {
-                    let message = e.into_inner();
-                    if let Some(storage) = storage {
-                        if effective_qos != QoS::AtMostOnce {
-                            let queued_msg = QueuedMessage::new(
-                                message,
-                                sub.client_id.clone(),
-                                effective_qos,
-                                None,
-                            );
-                            if let Err(e) = storage.queue_message(queued_msg).await {
-                                error!(
-                                    "Failed to queue message for offline client {}: {}",
-                                    sub.client_id, e
-                                );
-                            } else {
-                                debug!("Queued message for client {}", sub.client_id);
-                            }
-                        }
+                if let Some(storage) = storage {
+                    if qos != QoS::AtMostOnce {
+                        Self::queue_message(storage, e.into_inner(), &sub.client_id, qos).await;
                     }
                 }
             }
         } else if let Some(storage) = storage {
             if sub.qos != QoS::AtMostOnce {
-                let mut message = publish.clone();
-                message.qos = sub.qos;
-                if publish.protocol_version == 5
-                    && sub.protocol_version == ProtocolVersion::V311
-                    && !publish.properties.is_empty()
-                {
-                    trace!(
-                        topic = %publish.topic_name,
-                        client = %sub.client_id,
-                        "Stripping v5 properties for queued message to v3.1.1 subscriber"
-                    );
-                }
-                message.protocol_version = sub.protocol_version.as_u8();
-
-                let queued_msg = QueuedMessage::new(message, sub.client_id.clone(), sub.qos, None);
-                if let Err(e) = storage.queue_message(queued_msg).await {
-                    error!(
-                        "Failed to queue message for offline client {}: {}",
-                        sub.client_id, e
-                    );
-                } else {
-                    info!(
-                        "Queued message for offline client {} on topic {}",
-                        sub.client_id, publish.topic_name
-                    );
-                }
+                let message = Self::prepare_message(publish, sub, sub.qos);
+                Self::queue_message(storage, message, &sub.client_id, sub.qos).await;
             }
         } else {
             debug!(

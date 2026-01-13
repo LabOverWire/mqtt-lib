@@ -229,7 +229,7 @@ fn test_multiple_subscribers_same_topic() {
         for i in 0..5 {
             let publish = PublishPacket::new(
                 topic.to_string(),
-                format!("Message {i}").as_bytes(),
+                format!("Message {i}").into_bytes(),
                 QoS::AtMostOnce,
             );
             router.route_message(&publish, None).await;
@@ -247,7 +247,7 @@ fn test_multiple_subscribers_same_topic() {
             let mut messages = Vec::new();
             while let Ok(msg) = rx.try_recv() {
                 count += 1;
-                messages.push(String::from_utf8(msg.payload).unwrap());
+                messages.push(String::from_utf8(msg.payload.to_vec()).unwrap());
             }
 
             assert_eq!(count, 5, "{name} should receive 5 messages");
@@ -385,7 +385,7 @@ fn test_unsubscribe_functionality() {
         // Publish first message
         let msg1 = PublishPacket::new(
             "test/unsubscribe".to_string(),
-            b"Before unsubscribe",
+            b"Before unsubscribe".to_vec(),
             QoS::AtMostOnce,
         );
         router.route_message(&msg1, None).await;
@@ -404,7 +404,7 @@ fn test_unsubscribe_functionality() {
         // Publish second message
         let msg2 = PublishPacket::new(
             "test/unsubscribe".to_string(),
-            b"After unsubscribe",
+            b"After unsubscribe".to_vec(),
             QoS::AtMostOnce,
         );
         router.route_message(&msg2, None).await;

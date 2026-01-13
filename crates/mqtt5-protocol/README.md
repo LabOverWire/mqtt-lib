@@ -28,9 +28,11 @@ mqtt5-protocol = { version = "0.9", default-features = false }
 
 ### For Single-Core Embedded
 
+For single-core MCUs, configure via `.cargo/config.toml`:
+
 ```toml
-[dependencies]
-mqtt5-protocol = { version = "0.9", default-features = false, features = ["embedded-single-core"] }
+[target.riscv32imc-unknown-none-elf]
+rustflags = ["--cfg", "portable_atomic_unsafe_assume_single_core"]
 ```
 
 ## Supported Targets
@@ -150,7 +152,6 @@ This crate provides the protocol layer used by:
 | Feature | Description | Default |
 |---------|-------------|---------|
 | `std` | Standard library support, enables thiserror and tracing | Yes |
-| `embedded-single-core` | Assume single-core for atomic operations | No |
 
 ## License
 

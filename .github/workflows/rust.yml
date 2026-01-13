@@ -192,8 +192,5 @@ jobs:
       - name: Build for RISC-V (with atomics)
         run: cargo build -p mqtt5-protocol --target riscv32imac-unknown-none-elf --no-default-features
 
-      - name: Build for RISC-V (single-core)
-        run: cargo build -p mqtt5-protocol --target riscv32imc-unknown-none-elf --no-default-features --features embedded-single-core
-
       - name: Verify no_std builds
         run: echo "✅ All embedded targets built successfully"

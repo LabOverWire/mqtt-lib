@@ -238,7 +238,7 @@ fn test_client_subscription_changes() {
         // Send error alert
         let error_msg = PublishPacket::new(
             "alerts/error".to_string(),
-            b"Critical error occurred",
+            b"Critical error occurred".to_vec(),
             QoS::AtMostOnce,
         );
         router.route_message(&error_msg, None).await;
@@ -246,7 +246,7 @@ fn test_client_subscription_changes() {
         // Send warning alert (should not be received)
         let warning_msg = PublishPacket::new(
             "alerts/warning".to_string(),
-            b"Warning message",
+            b"Warning message".to_vec(),
             QoS::AtMostOnce,
         );
         router.route_message(&warning_msg, None).await;
@@ -349,7 +349,7 @@ fn test_message_ordering_with_multiple_clients() {
         for i in 0..5 {
             let msg = PublishPacket::new(
                 "sequence/test".to_string(),
-                format!("Message {i}").as_bytes(),
+                format!("Message {i}").into_bytes(),
                 QoS::AtMostOnce,
             );
             router.route_message(&msg, None).await;
@@ -365,11 +365,11 @@ fn test_message_ordering_with_multiple_clients() {
         let mut client2_messages = Vec::new();
 
         while let Ok(msg) = rx1.try_recv() {
-            client1_messages.push(String::from_utf8(msg.payload).unwrap());
+            client1_messages.push(String::from_utf8(msg.payload.to_vec()).unwrap());
         }
 
         while let Ok(msg) = rx2.try_recv() {
-            client2_messages.push(String::from_utf8(msg.payload).unwrap());
+            client2_messages.push(String::from_utf8(msg.payload.to_vec()).unwrap());
         }
 
         assert_eq!(client1_messages.len(), 5);
