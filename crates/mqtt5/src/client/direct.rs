@@ -1243,13 +1243,13 @@ impl DirectClientInner {
             tracing::debug!("📦 PACKET READER - Task exited");
         }));
 
-        // Start keepalive task (only if keepalive is not zero)
         let keepalive_interval = self.options.keep_alive;
         if keepalive_interval.is_zero() {
             tracing::debug!("💓 KEEPALIVE - Disabled (interval is zero)");
         } else {
             let keepalive_writer = writer_for_keepalive;
             let keepalive_connected = self.connected.clone();
+            let keepalive_config = self.options.keepalive_config;
             self.keepalive_handle = Some(tokio::spawn(async move {
                 tracing::debug!("💓 KEEPALIVE - Task starting");
                 keepalive_task_with_writer(
@@ -1257,6 +1257,7 @@ impl DirectClientInner {
                     keepalive_interval,
                     keepalive_state,
                     keepalive_connected,
+                    keepalive_config,
                 )
                 .await;
                 tracing::debug!("💓 KEEPALIVE - Task exited");
@@ -1515,13 +1516,40 @@ async fn handle_auth_packet(auth: AuthPacket, ctx: &PacketReaderContext) -> Resu
     Ok(())
 }
 
+async fn send_pingreq_with_priority(writer: &Arc<tokio::sync::Mutex<UnifiedWriter>>) -> Result<()> {
+    const MAX_ATTEMPTS: u32 = 100;
+    const RETRY_DELAY: Duration = Duration::from_millis(50);
+
+    for attempt in 0..MAX_ATTEMPTS {
+        if let Ok(mut guard) = writer.try_lock() {
+            return guard.write_packet(Packet::PingReq).await;
+        }
+
+        if attempt > 0 && attempt % 20 == 0 {
+            tracing::warn!(
+                attempt,
+                "PINGREQ waiting for writer lock - possible contention"
+            );
+        }
+
+        tokio::time::sleep(RETRY_DELAY).await;
+    }
+
+    tracing::error!(
+        "Failed to acquire writer lock for PINGREQ after {} attempts",
+        MAX_ATTEMPTS
+    );
+    writer.lock().await.write_packet(Packet::PingReq).await
+}
+
 async fn keepalive_task_with_writer(
     writer: Arc<tokio::sync::Mutex<UnifiedWriter>>,
     keepalive_interval: Duration,
     keepalive_state: Arc<RwLock<KeepaliveState>>,
     connected: Arc<AtomicBool>,
+    keepalive_config: Option<mqtt5_protocol::KeepaliveConfig>,
 ) {
-    let config = mqtt5_protocol::KeepaliveConfig::default();
+    let config = keepalive_config.unwrap_or_default();
     let ping_interval = config.ping_interval(keepalive_interval);
     let timeout_duration = config.timeout_duration(keepalive_interval);
     let mut interval = tokio::time::interval(ping_interval);
@@ -1543,7 +1571,8 @@ async fn keepalive_task_with_writer(
 
         keepalive_state.write().await.record_ping_sent();
 
-        if let Err(e) = writer.lock().await.write_packet(Packet::PingReq).await {
+        let send_result = send_pingreq_with_priority(&writer).await;
+        if let Err(e) = send_result {
             tracing::error!("Error sending PINGREQ: {e}");
             break;
         }

@@ -223,28 +223,32 @@ impl CallbackManager {
             }
         }
 
-        // Call all matching callbacks
         for callback in callbacks_to_call {
+            let message = message.clone();
             #[cfg(feature = "opentelemetry")]
             {
                 use crate::telemetry::propagation;
                 let user_props = propagation::extract_user_properties(&message.properties);
-                propagation::with_remote_context(&user_props, || {
-                    let span = tracing::info_span!(
-                        "message_received",
-                        topic = %message.topic_name,
-                        qos = ?message.qos,
-                        payload_size = message.payload.len(),
-                        retain = message.retain,
-                    );
-                    let _enter = span.enter();
-                    callback(message.clone());
+                tokio::spawn(async move {
+                    propagation::with_remote_context(&user_props, || {
+                        let span = tracing::info_span!(
+                            "message_received",
+                            topic = %message.topic_name,
+                            qos = ?message.qos,
+                            payload_size = message.payload.len(),
+                            retain = message.retain,
+                        );
+                        let _enter = span.enter();
+                        callback(message);
+                    });
                 });
             }
 
             #[cfg(not(feature = "opentelemetry"))]
             {
-                callback(message.clone());
+                tokio::spawn(async move {
+                    callback(message);
+                });
             }
         }
 
@@ -304,15 +308,16 @@ mod tests {
         };
 
         manager.dispatch(&message).await.unwrap();
+        tokio::task::yield_now().await;
         assert_eq!(counter.load(Ordering::Relaxed), 1);
 
-        // Different topic shouldn't trigger callback
         let message2 = PublishPacket {
             topic_name: "test/other".to_string(),
             ..message.clone()
         };
 
         manager.dispatch(&message2).await.unwrap();
+        tokio::task::yield_now().await;
         assert_eq!(counter.load(Ordering::Relaxed), 1);
     }
 
@@ -343,6 +348,7 @@ mod tests {
         };
 
         manager.dispatch(&message1).await.unwrap();
+        tokio::task::yield_now().await;
         assert_eq!(counter.load(Ordering::Relaxed), 1);
         let message2 = PublishPacket {
             topic_name: "test/bar/topic".to_string(),
@@ -350,15 +356,16 @@ mod tests {
         };
 
         manager.dispatch(&message2).await.unwrap();
+        tokio::task::yield_now().await;
         assert_eq!(counter.load(Ordering::Relaxed), 2);
 
-        // Should not match
         let message3 = PublishPacket {
             topic_name: "test/topic".to_string(),
             ..message1.clone()
         };
 
         manager.dispatch(&message3).await.unwrap();
+        tokio::task::yield_now().await;
         assert_eq!(counter.load(Ordering::Relaxed), 2);
     }
 
@@ -400,6 +407,7 @@ mod tests {
         };
 
         manager.dispatch(&message).await.unwrap();
+        tokio::task::yield_now().await;
 
         assert_eq!(counter1.load(Ordering::Relaxed), 1);
         assert_eq!(counter2.load(Ordering::Relaxed), 2);
@@ -432,11 +440,13 @@ mod tests {
         };
 
         manager.dispatch(&message).await.unwrap();
+        tokio::task::yield_now().await;
         assert_eq!(counter.load(Ordering::Relaxed), 1);
 
         manager.unregister("test/topic").await.unwrap();
         manager.dispatch(&message).await.unwrap();
-        assert_eq!(counter.load(Ordering::Relaxed), 1); // Should not increment
+        tokio::task::yield_now().await;
+        assert_eq!(counter.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test]
@@ -496,6 +506,7 @@ mod tests {
         };
 
         manager.dispatch(&message).await.unwrap();
+        tokio::task::yield_now().await;
         assert_eq!(counter.load(Ordering::Relaxed), 1);
 
         let message2 = PublishPacket {
@@ -504,6 +515,7 @@ mod tests {
         };
 
         manager.dispatch(&message2).await.unwrap();
+        tokio::task::yield_now().await;
         assert_eq!(counter.load(Ordering::Relaxed), 2);
 
         let message3 = PublishPacket {
@@ -512,6 +524,89 @@ mod tests {
         };
 
         manager.dispatch(&message3).await.unwrap();
+        tokio::task::yield_now().await;
         assert_eq!(counter.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_does_not_block_on_slow_callback() {
+        let manager = CallbackManager::new();
+        let started = Arc::new(AtomicU32::new(0));
+        let started_clone = Arc::clone(&started);
+
+        let callback: PublishCallback = Arc::new(move |_msg| {
+            started_clone.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        });
+
+        manager
+            .register("test/topic".to_string(), callback)
+            .await
+            .unwrap();
+
+        let message = PublishPacket {
+            topic_name: "test/topic".to_string(),
+            packet_id: None,
+            payload: vec![].into(),
+            qos: QoS::AtMostOnce,
+            retain: false,
+            dup: false,
+            properties: Properties::default(),
+            protocol_version: 5,
+        };
+
+        let start = std::time::Instant::now();
+        manager.dispatch(&message).await.unwrap();
+        let dispatch_time = start.elapsed();
+
+        assert!(
+            dispatch_time < std::time::Duration::from_millis(50),
+            "dispatch should return immediately, took {dispatch_time:?}"
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        assert_eq!(started.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_handles_multiple_concurrent_callbacks() {
+        let manager = CallbackManager::new();
+        let counter = Arc::new(AtomicU32::new(0));
+
+        for i in 0..5 {
+            let counter_clone = Arc::clone(&counter);
+            let callback: PublishCallback = Arc::new(move |_msg| {
+                counter_clone.fetch_add(1, Ordering::SeqCst);
+            });
+            manager
+                .register(format!("test/topic{i}"), callback)
+                .await
+                .unwrap();
+        }
+
+        let wildcard_counter = Arc::clone(&counter);
+        let wildcard_callback: PublishCallback = Arc::new(move |_msg| {
+            wildcard_counter.fetch_add(10, Ordering::SeqCst);
+        });
+        manager
+            .register("test/#".to_string(), wildcard_callback)
+            .await
+            .unwrap();
+
+        let message = PublishPacket {
+            topic_name: "test/topic0".to_string(),
+            packet_id: None,
+            payload: vec![].into(),
+            qos: QoS::AtMostOnce,
+            retain: false,
+            dup: false,
+            properties: Properties::default(),
+            protocol_version: 5,
+        };
+
+        manager.dispatch(&message).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        assert_eq!(counter.load(Ordering::SeqCst), 11);
     }
 }

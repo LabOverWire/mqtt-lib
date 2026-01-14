@@ -10,6 +10,7 @@ pub struct ConnectOptions {
     pub protocol_options: mqtt5_protocol::ConnectOptions,
     pub session_config: SessionConfig,
     pub reconnect_config: ReconnectConfig,
+    pub keepalive_config: Option<mqtt5_protocol::KeepaliveConfig>,
 }
 
 impl ConnectOptions {
@@ -19,6 +20,7 @@ impl ConnectOptions {
             protocol_options: mqtt5_protocol::ConnectOptions::new(client_id),
             session_config: SessionConfig::default(),
             reconnect_config: ReconnectConfig::default(),
+            keepalive_config: None,
         }
     }
 
@@ -98,6 +100,22 @@ impl ConnectOptions {
         self.protocol_options = self.protocol_options.with_authentication_data(data);
         self
     }
+
+    #[must_use]
+    pub fn with_keepalive_config(mut self, config: mqtt5_protocol::KeepaliveConfig) -> Self {
+        self.keepalive_config = Some(config);
+        self
+    }
+
+    #[must_use]
+    pub fn with_keepalive_timeout_percent(mut self, timeout_percent: u8) -> Self {
+        let config = self.keepalive_config.unwrap_or_default();
+        self.keepalive_config = Some(mqtt5_protocol::KeepaliveConfig::new(
+            config.ping_interval_percent,
+            timeout_percent,
+        ));
+        self
+    }
 }
 
 impl Deref for ConnectOptions {
@@ -115,9 +133,9 @@ impl DerefMut for ConnectOptions {
 }
 
 pub use mqtt5_protocol::{
-    ConnectProperties, ConnectResult, Message, MessageProperties, ProtocolVersion, PublishOptions,
-    PublishProperties, PublishResult, RetainHandling, SubscribeOptions, WillMessage,
-    WillProperties,
+    ConnectProperties, ConnectResult, KeepaliveConfig, Message, MessageProperties, ProtocolVersion,
+    PublishOptions, PublishProperties, PublishResult, RetainHandling, SubscribeOptions,
+    WillMessage, WillProperties,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -128,4 +146,54 @@ pub struct ConnectionStats {
     pub bytes_received: u64,
     pub connect_time: Option<crate::time::Instant>,
     pub last_message_time: Option<crate::time::Instant>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_connect_options_default_keepalive_config() {
+        let options = ConnectOptions::new("test-client");
+        assert!(options.keepalive_config.is_none());
+    }
+
+    #[test]
+    fn test_connect_options_with_keepalive_config() {
+        let config = KeepaliveConfig::new(50, 200);
+        let options = ConnectOptions::new("test-client").with_keepalive_config(config);
+
+        let stored = options.keepalive_config.unwrap();
+        assert_eq!(stored.ping_interval_percent, 50);
+        assert_eq!(stored.timeout_percent, 200);
+    }
+
+    #[test]
+    fn test_connect_options_with_keepalive_timeout_percent() {
+        let options = ConnectOptions::new("test-client").with_keepalive_timeout_percent(250);
+
+        let stored = options.keepalive_config.unwrap();
+        assert_eq!(stored.ping_interval_percent, 75);
+        assert_eq!(stored.timeout_percent, 250);
+    }
+
+    #[test]
+    fn test_connect_options_keepalive_timeout_preserves_ping_interval() {
+        let options = ConnectOptions::new("test-client")
+            .with_keepalive_config(KeepaliveConfig::new(60, 150))
+            .with_keepalive_timeout_percent(200);
+
+        let stored = options.keepalive_config.unwrap();
+        assert_eq!(stored.ping_interval_percent, 60);
+        assert_eq!(stored.timeout_percent, 200);
+    }
+
+    #[test]
+    fn test_keepalive_config_timeout_calculation() {
+        let config = KeepaliveConfig::new(75, 200);
+        let keepalive = Duration::from_secs(60);
+
+        let timeout = config.timeout_duration(keepalive);
+        assert_eq!(timeout, Duration::from_secs(120));
+    }
 }

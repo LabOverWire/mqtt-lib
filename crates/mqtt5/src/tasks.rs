@@ -458,8 +458,8 @@ mod tests {
             protocol_version: 5,
         };
         route_message(publish, &callback_manager).await;
+        tokio::task::yield_now().await;
 
-        // Verify callback was invoked
         assert_eq!(counter.load(Ordering::SeqCst), 1);
     }
 
