@@ -91,6 +91,9 @@ pub struct BrokerConfig {
     /// QUIC configuration
     pub quic_config: Option<QuicConfig>,
 
+    /// Cluster listener configuration for inter-node communication
+    pub cluster_listener_config: Option<ClusterListenerConfig>,
+
     /// Storage configuration
     pub storage_config: StorageConfig,
 
@@ -145,6 +148,7 @@ impl std::fmt::Debug for BrokerConfig {
             .field("websocket_config", &self.websocket_config)
             .field("websocket_tls_config", &self.websocket_tls_config)
             .field("quic_config", &self.quic_config)
+            .field("cluster_listener_config", &self.cluster_listener_config)
             .field("storage_config", &self.storage_config);
         #[cfg(not(target_arch = "wasm32"))]
         d.field("bridges", &self.bridges);
@@ -182,6 +186,7 @@ impl Default for BrokerConfig {
             websocket_config: None,
             websocket_tls_config: None,
             quic_config: None,
+            cluster_listener_config: None,
             storage_config: StorageConfig::default(),
             #[cfg(not(target_arch = "wasm32"))]
             bridges: vec![],
@@ -315,6 +320,13 @@ impl BrokerConfig {
     #[must_use]
     pub fn with_quic(mut self, quic: QuicConfig) -> Self {
         self.quic_config = Some(quic);
+        self
+    }
+
+    /// Sets the cluster listener configuration
+    #[must_use]
+    pub fn with_cluster_listener(mut self, cluster: ClusterListenerConfig) -> Self {
+        self.cluster_listener_config = Some(cluster);
         self
     }
 
@@ -939,6 +951,101 @@ impl WebSocketConfig {
     pub fn with_tls(mut self, use_tls: bool) -> Self {
         self.use_tls = use_tls;
         self
+    }
+}
+
+/// Cluster listener transport type
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ClusterTransport {
+    #[default]
+    Tcp,
+    Quic,
+}
+
+/// Cluster listener configuration for inter-node communication
+///
+/// Connections on cluster listeners automatically have bridge forwarding disabled
+/// to prevent message loops in distributed broker deployments.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClusterListenerConfig {
+    pub bind_addresses: Vec<SocketAddr>,
+    pub transport: ClusterTransport,
+    pub cert_file: Option<PathBuf>,
+    pub key_file: Option<PathBuf>,
+    pub ca_file: Option<PathBuf>,
+    pub require_client_cert: bool,
+}
+
+impl ClusterListenerConfig {
+    #[must_use]
+    pub fn new(bind_addresses: Vec<SocketAddr>) -> Self {
+        Self {
+            bind_addresses,
+            transport: ClusterTransport::Tcp,
+            cert_file: None,
+            key_file: None,
+            ca_file: None,
+            require_client_cert: false,
+        }
+    }
+
+    #[must_use]
+    pub fn quic(bind_addresses: Vec<SocketAddr>, cert_file: PathBuf, key_file: PathBuf) -> Self {
+        Self {
+            bind_addresses,
+            transport: ClusterTransport::Quic,
+            cert_file: Some(cert_file),
+            key_file: Some(key_file),
+            ca_file: None,
+            require_client_cert: false,
+        }
+    }
+
+    #[must_use]
+    pub fn with_bind_address(mut self, addr: impl Into<SocketAddr>) -> Self {
+        self.bind_addresses = vec![addr.into()];
+        self
+    }
+
+    #[must_use]
+    pub fn add_bind_address(mut self, addr: impl Into<SocketAddr>) -> Self {
+        self.bind_addresses.push(addr.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_transport(mut self, transport: ClusterTransport) -> Self {
+        self.transport = transport;
+        self
+    }
+
+    #[must_use]
+    pub fn with_tls(mut self, cert_file: PathBuf, key_file: PathBuf) -> Self {
+        self.cert_file = Some(cert_file);
+        self.key_file = Some(key_file);
+        self
+    }
+
+    #[must_use]
+    pub fn with_ca_file(mut self, ca_file: PathBuf) -> Self {
+        self.ca_file = Some(ca_file);
+        self
+    }
+
+    #[must_use]
+    pub fn with_require_client_cert(mut self, require: bool) -> Self {
+        self.require_client_cert = require;
+        self
+    }
+
+    #[must_use]
+    pub fn uses_tls(&self) -> bool {
+        self.cert_file.is_some() && self.key_file.is_some()
+    }
+
+    #[must_use]
+    pub fn is_quic(&self) -> bool {
+        self.transport == ClusterTransport::Quic
     }
 }
 

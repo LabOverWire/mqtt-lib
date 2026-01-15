@@ -27,6 +27,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Prevents message loops in distributed broker deployments
   - Replaces client ID naming conventions for internal traffic identification
 
+- **Cluster listener configuration**: `ClusterListenerConfig` for dedicated inter-node communication ports
+  - `BrokerConfig::with_cluster_listener()` to configure cluster listener addresses
+  - Connections on cluster listeners automatically have bridge forwarding disabled
+  - Supports TCP, TCP+TLS, and QUIC transports via `ClusterTransport` enum
+  - Use `ClusterListenerConfig::quic()` for QUIC-based cluster communication
+
 ### Changed
 
 - **Async callback dispatch**: Message callbacks now dispatched via spawned tasks

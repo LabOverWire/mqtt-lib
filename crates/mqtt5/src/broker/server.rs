@@ -8,7 +8,8 @@ use crate::broker::bridge::BridgeManager;
 use crate::broker::client_handler::ClientHandler;
 use crate::broker::config::{BrokerConfig, StorageBackend as StorageBackendType};
 use crate::broker::quic_acceptor::{
-    accept_quic_connection, run_quic_connection_handler, QuicAcceptorConfig,
+    accept_quic_connection, run_quic_cluster_connection_handler, run_quic_connection_handler,
+    QuicAcceptorConfig,
 };
 use crate::broker::resource_monitor::{ResourceLimits, ResourceMonitor};
 use crate::broker::router::MessageRouter;
@@ -45,6 +46,9 @@ pub struct MqttBroker {
     ws_tls_config: Option<WebSocketServerConfig>,
     ws_tls_acceptor: Option<TlsAcceptor>,
     quic_endpoints: Vec<Endpoint>,
+    cluster_listeners: Vec<TcpListener>,
+    cluster_tls_acceptor: Option<TlsAcceptor>,
+    cluster_quic_endpoints: Vec<Endpoint>,
     shutdown_tx: Option<tokio::sync::broadcast::Sender<()>>,
     ready_tx: Option<tokio::sync::watch::Sender<bool>>,
     ready_rx: tokio::sync::watch::Receiver<bool>,
@@ -253,6 +257,8 @@ impl MqttBroker {
             Self::setup_websocket_tls(&config).await?;
         let (tls_listeners, tls_acceptor) = Self::setup_tls(&config).await?;
         let quic_endpoints = Self::setup_quic(&config).await?;
+        let (cluster_listeners, cluster_tls_acceptor, cluster_quic_endpoints) =
+            Self::setup_cluster_listener(&config).await?;
 
         let storage = if config.storage_config.enable_persistence {
             Some(Self::create_storage_backend(&config.storage_config).await?)
@@ -322,6 +328,9 @@ impl MqttBroker {
             ws_tls_config,
             ws_tls_acceptor,
             quic_endpoints,
+            cluster_listeners,
+            cluster_tls_acceptor,
+            cluster_quic_endpoints,
             shutdown_tx: Some(shutdown_tx),
             ready_tx: Some(ready_tx),
             ready_rx,
@@ -478,6 +487,90 @@ impl MqttBroker {
         }
     }
 
+    async fn setup_cluster_listener(
+        config: &BrokerConfig,
+    ) -> Result<(Vec<TcpListener>, Option<TlsAcceptor>, Vec<Endpoint>)> {
+        if let Some(ref cluster_config) = config.cluster_listener_config {
+            if cluster_config.is_quic() {
+                let cert_file = cluster_config.cert_file.as_ref().ok_or_else(|| {
+                    MqttError::Configuration("QUIC cluster listener requires cert_file".to_string())
+                })?;
+                let key_file = cluster_config.key_file.as_ref().ok_or_else(|| {
+                    MqttError::Configuration("QUIC cluster listener requires key_file".to_string())
+                })?;
+
+                let cert_chain = QuicAcceptorConfig::load_cert_chain_from_file(cert_file).await?;
+                let private_key = QuicAcceptorConfig::load_private_key_from_file(key_file).await?;
+
+                let mut acceptor_config = QuicAcceptorConfig::new(cert_chain, private_key);
+
+                if let Some(ref ca_file) = cluster_config.ca_file {
+                    let ca_certs = QuicAcceptorConfig::load_cert_chain_from_file(ca_file).await?;
+                    acceptor_config = acceptor_config.with_client_ca_certs(ca_certs);
+                }
+
+                acceptor_config =
+                    acceptor_config.with_require_client_cert(cluster_config.require_client_cert);
+
+                let mut endpoints = Vec::new();
+                for addr in &cluster_config.bind_addresses {
+                    match acceptor_config.build_endpoint(*addr) {
+                        Ok(endpoint) => {
+                            info!("Cluster QUIC endpoint bound to {}", addr);
+                            endpoints.push(endpoint);
+                        }
+                        Err(e) => {
+                            warn!("Failed to bind Cluster QUIC endpoint to {}: {}", addr, e);
+                        }
+                    }
+                }
+
+                if endpoints.is_empty() {
+                    warn!("No Cluster QUIC endpoints could be bound, Cluster listener disabled");
+                }
+
+                return Ok((Vec::new(), None, endpoints));
+            }
+
+            let bind_result = bind_tcp_addresses(&cluster_config.bind_addresses, "Cluster").await;
+            if bind_result.is_empty() {
+                let error_msg = format_binding_error(
+                    "Cluster",
+                    &bind_result.failures,
+                    &cluster_config.bind_addresses,
+                );
+                warn!("{}, Cluster listener disabled", error_msg);
+                return Ok((Vec::new(), None, Vec::new()));
+            }
+            bind_result.warn_partial_failures("Cluster");
+
+            let acceptor = if cluster_config.uses_tls() {
+                let cert_file = cluster_config.cert_file.as_ref().unwrap();
+                let key_file = cluster_config.key_file.as_ref().unwrap();
+
+                let cert_chain = TlsAcceptorConfig::load_cert_chain_from_file(cert_file).await?;
+                let private_key = TlsAcceptorConfig::load_private_key_from_file(key_file).await?;
+
+                let mut acceptor_config = TlsAcceptorConfig::new(cert_chain, private_key);
+
+                if let Some(ref ca_file) = cluster_config.ca_file {
+                    let ca_certs = TlsAcceptorConfig::load_cert_chain_from_file(ca_file).await?;
+                    acceptor_config = acceptor_config.with_client_ca_certs(ca_certs);
+                }
+
+                acceptor_config =
+                    acceptor_config.with_require_client_cert(cluster_config.require_client_cert);
+                Some(acceptor_config.build_acceptor()?)
+            } else {
+                None
+            };
+
+            Ok((bind_result.successful, acceptor, Vec::new()))
+        } else {
+            Ok((Vec::new(), None, Vec::new()))
+        }
+    }
+
     fn default_resource_limits(max_clients: usize) -> ResourceLimits {
         ResourceLimits {
             max_connections: max_clients,
@@ -595,6 +688,9 @@ impl MqttBroker {
         let ws_tls_config = self.ws_tls_config.take();
         let ws_tls_acceptor = self.ws_tls_acceptor.take();
         let quic_endpoints = std::mem::take(&mut self.quic_endpoints);
+        let cluster_listeners = std::mem::take(&mut self.cluster_listeners);
+        let cluster_tls_acceptor = self.cluster_tls_acceptor.take();
+        let cluster_quic_endpoints = std::mem::take(&mut self.cluster_quic_endpoints);
 
         let Some(shutdown_tx) = self.shutdown_tx.take() else {
             return Err(MqttError::InvalidState(
@@ -952,11 +1048,199 @@ impl MqttBroker {
             });
         }
 
+        if !cluster_listeners.is_empty() {
+            info!(
+                "Starting Cluster accept tasks for {} listeners",
+                cluster_listeners.len()
+            );
+        }
+
+        let cluster_tls_acceptor = cluster_tls_acceptor.map(Arc::new);
+        for cluster_listener in cluster_listeners {
+            let config = Arc::clone(&self.config);
+            let router = Arc::clone(&self.router);
+            let auth_provider = Arc::clone(&self.auth_provider);
+            let storage = self.storage.clone();
+            let stats = Arc::clone(&self.stats);
+            let resource_monitor = Arc::clone(&self.resource_monitor);
+            let shutdown_tx_clone = shutdown_tx.clone();
+            let mut shutdown_rx_cluster = shutdown_tx.subscribe();
+            let acceptor = cluster_tls_acceptor.clone();
+
+            tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        accept_result = cluster_listener.accept() => {
+                            match accept_result {
+                                Ok((tcp_stream, addr)) => {
+                                    debug!(addr = %addr, "New Cluster connection");
+
+                                    if !resource_monitor.can_accept_connection(addr.ip()).await {
+                                        warn!("Cluster connection rejected from {}: resource limits exceeded", addr);
+                                        continue;
+                                    }
+
+                                    if let Some(ref tls_acceptor) = acceptor {
+                                        let acc_clone = Arc::clone(tls_acceptor);
+                                        let config_clone = Arc::clone(&config);
+                                        let router_clone = Arc::clone(&router);
+                                        let auth_clone = Arc::clone(&auth_provider);
+                                        let storage_clone = storage.clone();
+                                        let stats_clone = Arc::clone(&stats);
+                                        let monitor_clone = Arc::clone(&resource_monitor);
+                                        let shutdown_for_handler = shutdown_tx_clone.clone();
+
+                                        tokio::spawn(async move {
+                                            match accept_tls_connection(&acc_clone, tcp_stream, addr).await {
+                                                Ok(tls_stream) => {
+                                                    let transport = BrokerTransport::tls(tls_stream);
+
+                                                    let handler = ClientHandler::new(
+                                                        transport,
+                                                        addr,
+                                                        config_clone,
+                                                        router_clone,
+                                                        auth_clone,
+                                                        storage_clone,
+                                                        stats_clone,
+                                                        monitor_clone,
+                                                        shutdown_for_handler.subscribe(),
+                                                    )
+                                                    .with_skip_bridge_forwarding(true);
+
+                                                    if let Err(e) = handler.run().await {
+                                                        if e.is_normal_disconnect() {
+                                                            debug!("Cluster client handler finished");
+                                                        } else {
+                                                            warn!("Cluster client handler error: {e}");
+                                                        }
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    error!("Cluster TLS handshake failed: {e}");
+                                                }
+                                            }
+                                        });
+                                    } else {
+                                        let transport = BrokerTransport::tcp(tcp_stream);
+
+                                        let handler = ClientHandler::new(
+                                            transport,
+                                            addr,
+                                            Arc::clone(&config),
+                                            Arc::clone(&router),
+                                            Arc::clone(&auth_provider),
+                                            storage.clone(),
+                                            Arc::clone(&stats),
+                                            Arc::clone(&resource_monitor),
+                                            shutdown_tx_clone.subscribe(),
+                                        )
+                                        .with_skip_bridge_forwarding(true);
+
+                                        tokio::spawn(async move {
+                                            if let Err(e) = handler.run().await {
+                                                if e.is_normal_disconnect() {
+                                                    debug!("Cluster client handler finished");
+                                                } else {
+                                                    warn!("Cluster client handler error: {e}");
+                                                }
+                                            }
+                                        });
+                                    }
+                                }
+                                Err(e) => {
+                                    error!("Cluster accept error: {e}");
+                                }
+                            }
+                        }
+
+                        _ = shutdown_rx_cluster.recv() => {
+                            debug!("Cluster accept task shutting down");
+                            break;
+                        }
+                    }
+                }
+            });
+        }
+
+        if !cluster_quic_endpoints.is_empty() {
+            info!(
+                "Starting Cluster QUIC accept tasks for {} endpoints",
+                cluster_quic_endpoints.len()
+            );
+        }
+
+        for cluster_quic_endpoint in cluster_quic_endpoints {
+            let config = Arc::clone(&self.config);
+            let router = Arc::clone(&self.router);
+            let auth_provider = Arc::clone(&self.auth_provider);
+            let storage = self.storage.clone();
+            let stats = Arc::clone(&self.stats);
+            let resource_monitor = Arc::clone(&self.resource_monitor);
+            let shutdown_tx_clone = shutdown_tx.clone();
+            let mut shutdown_rx_quic_cluster = shutdown_tx.subscribe();
+
+            let local_addr = cluster_quic_endpoint.local_addr();
+            tokio::spawn(async move {
+                debug!("Cluster QUIC accept loop starting for {:?}", local_addr);
+                loop {
+                    tokio::select! {
+                        accept_result = accept_quic_connection(&cluster_quic_endpoint) => {
+                            match accept_result {
+                                Ok((connection, peer_addr)) => {
+                                    debug!("New Cluster QUIC connection from {}", peer_addr);
+
+                                    if !resource_monitor.can_accept_connection(peer_addr.ip()).await {
+                                        warn!("Cluster QUIC connection rejected from {}: resource limits exceeded", peer_addr);
+                                        connection.close(0u32.into(), b"resource limit");
+                                        continue;
+                                    }
+
+                                    let conn = Arc::new(connection);
+                                    let config_clone = Arc::clone(&config);
+                                    let router_clone = Arc::clone(&router);
+                                    let auth_clone = Arc::clone(&auth_provider);
+                                    let storage_clone = storage.clone();
+                                    let stats_clone = Arc::clone(&stats);
+                                    let monitor_clone = Arc::clone(&resource_monitor);
+                                    let shutdown_for_handler = shutdown_tx_clone.clone();
+
+                                    tokio::spawn(async move {
+                                        run_quic_cluster_connection_handler(
+                                            conn,
+                                            peer_addr,
+                                            config_clone,
+                                            router_clone,
+                                            auth_clone,
+                                            storage_clone,
+                                            stats_clone,
+                                            monitor_clone,
+                                            shutdown_for_handler.subscribe(),
+                                        )
+                                        .await;
+                                    });
+                                }
+                                Err(e) => {
+                                    if !e.to_string().contains("endpoint closed") {
+                                        error!("Cluster QUIC accept error: {e}");
+                                    }
+                                }
+                            }
+                        }
+
+                        _ = shutdown_rx_quic_cluster.recv() => {
+                            debug!("Cluster QUIC accept task shutting down");
+                            break;
+                        }
+                    }
+                }
+            });
+        }
+
         info!(
             "Starting TCP accept tasks for {} listeners",
             listeners.len()
         );
-        // Spawn TCP accept tasks (one per listener)
         for listener in listeners {
             let config = Arc::clone(&self.config);
             let router = Arc::clone(&self.router);

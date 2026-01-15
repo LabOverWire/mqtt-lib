@@ -571,6 +571,111 @@ pub async fn run_quic_connection_handler(
     });
 }
 
+#[allow(clippy::too_many_arguments)]
+pub async fn run_quic_cluster_connection_handler(
+    connection: Arc<Connection>,
+    peer_addr: SocketAddr,
+    config: Arc<BrokerConfig>,
+    router: Arc<MessageRouter>,
+    auth_provider: Arc<dyn AuthProvider>,
+    storage: Option<Arc<DynamicStorage>>,
+    stats: Arc<BrokerStats>,
+    resource_monitor: Arc<ResourceMonitor>,
+    shutdown_rx: broadcast::Receiver<()>,
+) {
+    let (packet_tx, packet_rx) = mpsc::channel::<Packet>(100);
+    let flow_registry = Arc::new(Mutex::new(FlowRegistry::new(256)));
+
+    let (send, recv) = match connection.accept_bi().await {
+        Ok(streams) => streams,
+        Err(e) => {
+            error!("Failed to accept control stream from {}: {}", peer_addr, e);
+            return;
+        }
+    };
+
+    debug!(
+        "Cluster QUIC control stream accepted from {}, starting handler",
+        peer_addr
+    );
+
+    let stream = QuicStreamWrapper::new(send, recv, peer_addr);
+    let transport = BrokerTransport::quic(stream);
+
+    let handler = ClientHandler::new_with_external_packets(
+        transport,
+        peer_addr,
+        config,
+        router,
+        auth_provider,
+        storage,
+        stats,
+        resource_monitor,
+        shutdown_rx,
+        Some(packet_rx),
+    )
+    .with_skip_bridge_forwarding(true);
+
+    tokio::spawn(async move {
+        if let Err(e) = handler.run().await {
+            if e.is_normal_disconnect() {
+                debug!("Cluster QUIC client handler finished");
+            } else {
+                warn!("Cluster QUIC client handler error: {e}");
+            }
+        }
+    });
+
+    let datagram_connection = connection.clone();
+    let datagram_packet_tx = packet_tx.clone();
+    tokio::spawn(async move {
+        loop {
+            match datagram_connection.read_datagram().await {
+                Ok(datagram) => {
+                    trace!(
+                        len = datagram.len(),
+                        "Received Cluster QUIC datagram from {}",
+                        peer_addr
+                    );
+                    match decode_datagram_packet(&datagram) {
+                        Ok(packet) => {
+                            if datagram_packet_tx.send(packet).await.is_err() {
+                                debug!("Datagram packet channel closed for {}", peer_addr);
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Failed to decode datagram from {}: {}", peer_addr, e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    debug!("Datagram read ended for {}: {}", peer_addr, e);
+                    break;
+                }
+            }
+        }
+    });
+
+    tokio::spawn(async move {
+        loop {
+            if let Ok((_send, recv)) = connection.accept_bi().await {
+                debug!(
+                    "Additional Cluster QUIC data stream accepted from {}",
+                    peer_addr
+                );
+                spawn_data_stream_reader(recv, packet_tx.clone(), peer_addr, flow_registry.clone());
+            } else {
+                debug!(
+                    "Cluster QUIC connection stream accept loop ended for {}",
+                    peer_addr
+                );
+                break;
+            }
+        }
+    });
+}
+
 fn decode_datagram_packet(data: &Bytes) -> Result<Packet> {
     if data.is_empty() {
         return Err(MqttError::MalformedPacket(
