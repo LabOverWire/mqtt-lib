@@ -11,6 +11,7 @@ MQTT v5.0 and v3.1.1 WebAssembly client and broker for browser environments.
 - **Full QoS support** - QoS 0, 1, and 2 with proper acknowledgment
 - **Shared subscriptions** - Load balancing across multiple subscribers
 - **Event callbacks** - Connection, disconnect, and error event handlers
+- **Broker lifecycle events** - Monitor client connections, publishes, and subscriptions
 - **Automatic keepalive** - Connection health monitoring with timeout detection
 - **Will messages** - Last Will and Testament (LWT) support
 
@@ -88,6 +89,38 @@ const port = broker.create_client_port();
 
 const client = new WasmMqttClient("local-client");
 await client.connect_message_port(port);
+```
+
+### Broker Lifecycle Events
+
+Monitor broker activity with lifecycle callbacks:
+
+```javascript
+const broker = new WasmBroker();
+
+broker.on_client_connect((event) => {
+  console.log(`Client connected: ${event.clientId}, cleanStart: ${event.cleanStart}`);
+});
+
+broker.on_client_disconnect((event) => {
+  console.log(`Client disconnected: ${event.clientId}, reason: ${event.reason}`);
+});
+
+broker.on_client_publish((event) => {
+  console.log(`Publish: ${event.topic} (${event.payloadSize} bytes, QoS ${event.qos})`);
+});
+
+broker.on_client_subscribe((event) => {
+  console.log(`Subscribe: ${event.clientId} -> ${event.subscriptions.map(s => s.topic)}`);
+});
+
+broker.on_client_unsubscribe((event) => {
+  console.log(`Unsubscribe: ${event.clientId} -> ${event.topics}`);
+});
+
+broker.on_message_delivered((event) => {
+  console.log(`Message delivered: packetId=${event.packetId}, QoS ${event.qos}`);
+});
 ```
 
 ## Documentation
