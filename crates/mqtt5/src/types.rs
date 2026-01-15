@@ -110,10 +110,12 @@ impl ConnectOptions {
     #[must_use]
     pub fn with_keepalive_timeout_percent(mut self, timeout_percent: u8) -> Self {
         let config = self.keepalive_config.unwrap_or_default();
-        self.keepalive_config = Some(mqtt5_protocol::KeepaliveConfig::new(
-            config.ping_interval_percent,
+        self.keepalive_config = Some(mqtt5_protocol::KeepaliveConfig {
+            ping_interval_percent: config.ping_interval_percent,
             timeout_percent,
-        ));
+            lock_retry_attempts: config.lock_retry_attempts,
+            lock_retry_delay_ms: config.lock_retry_delay_ms,
+        });
         self
     }
 }
@@ -195,5 +197,16 @@ mod tests {
 
         let timeout = config.timeout_duration(keepalive);
         assert_eq!(timeout, Duration::from_secs(120));
+    }
+
+    #[test]
+    fn test_keepalive_timeout_percent_preserves_lock_retry() {
+        let options = ConnectOptions::new("test-client")
+            .with_keepalive_config(KeepaliveConfig::new(60, 150).with_lock_retry(50, 25))
+            .with_keepalive_timeout_percent(200);
+
+        let stored = options.keepalive_config.unwrap();
+        assert_eq!(stored.lock_retry_attempts, 50);
+        assert_eq!(stored.lock_retry_delay_ms, 25);
     }
 }

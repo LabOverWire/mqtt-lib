@@ -605,7 +605,7 @@ mod tests {
         };
 
         manager.dispatch(&message).await.unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        tokio::task::yield_now().await;
 
         assert_eq!(counter.load(Ordering::SeqCst), 11);
     }
