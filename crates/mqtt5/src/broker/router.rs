@@ -478,9 +478,7 @@ impl MessageRouter {
             .await;
         }
 
-        let is_from_bridge_client = publishing_client_id.is_some_and(|id| id.contains("-to-node-"));
-
-        if forward_to_bridges && !is_from_bridge_client {
+        if forward_to_bridges {
             #[cfg(not(target_arch = "wasm32"))]
             {
                 let bridge_manager_weak = self.bridge_manager.read().await.clone();

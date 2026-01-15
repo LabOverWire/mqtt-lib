@@ -61,6 +61,7 @@ struct PendingConnect {
 }
 
 /// Handles a single client connection
+#[allow(clippy::struct_excessive_bools)]
 pub struct ClientHandler {
     transport: BrokerTransport,
     client_addr: SocketAddr,
@@ -93,6 +94,7 @@ pub struct ClientHandler {
     protocol_version: u8,
     write_buffer: BytesMut,
     read_buffer: BytesMut,
+    skip_bridge_forwarding: bool,
 }
 
 impl ClientHandler {
@@ -171,6 +173,27 @@ impl ClientHandler {
             protocol_version: 5,
             write_buffer: BytesMut::with_capacity(4096),
             read_buffer: BytesMut::with_capacity(4096),
+            skip_bridge_forwarding: false,
+        }
+    }
+
+    /// Configures this handler to skip forwarding messages to bridges.
+    ///
+    /// Use this for internal/replica connections where messages should only
+    /// be routed to local subscribers and not forwarded to bridges.
+    #[must_use]
+    pub fn with_skip_bridge_forwarding(mut self, skip: bool) -> Self {
+        self.skip_bridge_forwarding = skip;
+        self
+    }
+
+    async fn route_publish(&self, publish: &PublishPacket, client_id: Option<&str>) {
+        if self.skip_bridge_forwarding {
+            self.router
+                .route_message_local_only(publish, client_id)
+                .await;
+        } else {
+            self.router.route_message(publish, client_id).await;
         }
     }
 
@@ -1021,12 +1044,11 @@ impl ClientHandler {
             let span = tracing::info_span!("broker_publish");
             let _ = span.set_parent(parent_cx);
 
-            self.router
-                .route_message(publish, Some(client_id))
+            self.route_publish(publish, Some(client_id))
                 .instrument(span)
                 .await;
         } else {
-            self.router.route_message(publish, Some(client_id)).await;
+            self.route_publish(publish, Some(client_id)).await;
         }
         Ok(())
     }
@@ -1300,13 +1322,13 @@ impl ClientHandler {
                 #[cfg(feature = "opentelemetry")]
                 self.route_with_trace_context(&publish, client_id).await?;
                 #[cfg(not(feature = "opentelemetry"))]
-                self.router.route_message(&publish, Some(client_id)).await;
+                self.route_publish(&publish, Some(client_id)).await;
             }
             QoS::AtLeastOnce => {
                 #[cfg(feature = "opentelemetry")]
                 self.route_with_trace_context(&publish, client_id).await?;
                 #[cfg(not(feature = "opentelemetry"))]
-                self.router.route_message(&publish, Some(client_id)).await;
+                self.route_publish(&publish, Some(client_id)).await;
 
                 let mut puback = PubAckPacket::new(publish.packet_id.unwrap());
                 puback.reason_code = ReasonCode::Success;
@@ -1361,7 +1383,7 @@ impl ClientHandler {
             #[cfg(feature = "opentelemetry")]
             self.route_with_trace_context(&publish, client_id).await?;
             #[cfg(not(feature = "opentelemetry"))]
-            self.router.route_message(&publish, Some(client_id)).await;
+            self.route_publish(&publish, Some(client_id)).await;
         }
 
         let mut pubcomp = PubCompPacket::new(pubrel.packet_id);
@@ -1502,10 +1524,10 @@ impl ClientHandler {
                     debug!("Using will delay from session: {} seconds", delay);
                     if delay > 0 {
                         debug!("Spawning task to publish will after {} seconds", delay);
-                        // Spawn task to publish will after delay
                         let router = Arc::clone(&self.router);
                         let publish_clone = publish.clone();
                         let client_id_clone = client_id.to_string();
+                        let skip_bridges = self.skip_bridge_forwarding;
                         tokio::spawn(async move {
                             debug!(
                                 "Task started: waiting {} seconds before publishing will for {}",
@@ -1516,18 +1538,20 @@ impl ClientHandler {
                                 "Task completed: publishing delayed will message for {}",
                                 client_id_clone
                             );
-                            router.route_message(&publish_clone, None).await;
+                            if skip_bridges {
+                                router.route_message_local_only(&publish_clone, None).await;
+                            } else {
+                                router.route_message(&publish_clone, None).await;
+                            }
                         });
                         debug!("Spawned delayed will task for {}", client_id);
                     } else {
                         debug!("Publishing will immediately (delay = 0)");
-                        // Publish immediately
-                        self.router.route_message(&publish, None).await;
+                        self.route_publish(&publish, None).await;
                     }
                 } else {
                     debug!("Publishing will immediately (no delay specified)");
-                    // No delay specified, publish immediately
-                    self.router.route_message(&publish, None).await;
+                    self.route_publish(&publish, None).await;
                 }
             }
         }
