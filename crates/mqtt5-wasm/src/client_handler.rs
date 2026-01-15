@@ -1,3 +1,4 @@
+use crate::broker::WasmEventCallbacks;
 use crate::decoder::read_packet;
 use crate::transport::message_port::MessagePortTransport;
 use crate::transport::{WasmReader, WasmWriter};
@@ -30,6 +31,7 @@ use mqtt5_protocol::Transport;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use tracing::{debug, error, info, warn};
+use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::spawn_local;
 use web_sys::MessagePort;
 
@@ -65,6 +67,7 @@ pub struct WasmClientHandler {
     auth_method: Option<String>,
     auth_state: AuthState,
     pending_connect: Option<PendingConnect>,
+    event_callbacks: WasmEventCallbacks,
 }
 
 static HANDLER_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
@@ -79,6 +82,7 @@ impl WasmClientHandler {
         storage: Arc<DynamicStorage>,
         stats: Arc<BrokerStats>,
         resource_monitor: Arc<ResourceMonitor>,
+        event_callbacks: WasmEventCallbacks,
     ) {
         use std::cell::RefCell;
         use std::rc::Rc;
@@ -93,6 +97,7 @@ impl WasmClientHandler {
         let storage = Rc::new(storage);
         let stats = Rc::new(stats);
         let resource_monitor = Rc::new(resource_monitor);
+        let event_callbacks = Rc::new(event_callbacks);
 
         let callback = wasm_bindgen::closure::Closure::<dyn FnMut()>::new(move || {
             if let Some(p) = port_clone.borrow_mut().take() {
@@ -102,6 +107,7 @@ impl WasmClientHandler {
                 let storage = (*storage).clone();
                 let stats = (*stats).clone();
                 let resource_monitor = (*resource_monitor).clone();
+                let event_callbacks = (*event_callbacks).clone();
 
                 Self::new(
                     p,
@@ -111,6 +117,7 @@ impl WasmClientHandler {
                     storage,
                     stats,
                     resource_monitor,
+                    event_callbacks,
                 );
             }
         });
@@ -130,6 +137,7 @@ impl WasmClientHandler {
         storage: Arc<DynamicStorage>,
         stats: Arc<BrokerStats>,
         resource_monitor: Arc<ResourceMonitor>,
+        event_callbacks: WasmEventCallbacks,
     ) {
         use futures::channel::mpsc;
         use wasm_bindgen::JsCast;
@@ -173,6 +181,7 @@ impl WasmClientHandler {
             auth_method: None,
             auth_state: AuthState::NotStarted,
             pending_connect: None,
+            event_callbacks,
         };
 
         spawn_local(async move {
@@ -243,9 +252,14 @@ impl WasmClientHandler {
 
         let result = self.packet_loop(&mut reader, writer, disconnect_rx).await;
 
-        if !self.normal_disconnect {
+        let (reason, unexpected) = if self.normal_disconnect {
+            ("client disconnected", false)
+        } else {
             self.publish_will_message(&client_id).await;
-        }
+            ("connection lost", true)
+        };
+
+        self.fire_client_disconnect(&client_id, reason, unexpected);
 
         self.router.unregister_client(&client_id).await;
         self.stats.client_disconnected();
@@ -527,6 +541,8 @@ impl WasmClientHandler {
 
         self.write_packet(&Packet::ConnAck(connack), writer)?;
 
+        self.fire_client_connect(&connect.client_id, connect.clean_start);
+
         if session_present {
             self.deliver_queued_messages(&connect.client_id, writer)
                 .await?;
@@ -624,6 +640,7 @@ impl WasmClientHandler {
     ) -> Result<()> {
         let client_id = self.client_id.clone().unwrap();
         let mut reason_codes = Vec::new();
+        let mut successful_subscriptions = Vec::new();
 
         for filter in &subscribe.filters {
             let authorized = self
@@ -688,6 +705,7 @@ impl WasmClientHandler {
                 }
             }
 
+            successful_subscriptions.push((filter.filter.clone(), granted_qos as u8));
             reason_codes.push(SubAckReasonCode::from_qos(granted_qos));
         }
 
@@ -696,6 +714,10 @@ impl WasmClientHandler {
         suback.protocol_version = self.protocol_version;
 
         self.write_packet(&Packet::SubAck(suback), writer)?;
+
+        if !successful_subscriptions.is_empty() {
+            self.fire_client_subscribe(&client_id, &successful_subscriptions);
+        }
 
         debug!("Client {} subscribed to topics", client_id);
         Ok(())
@@ -725,6 +747,10 @@ impl WasmClientHandler {
         unsuback.protocol_version = self.protocol_version;
 
         self.write_packet(&Packet::UnsubAck(unsuback), writer)?;
+
+        if !unsubscribe.filters.is_empty() {
+            self.fire_client_unsubscribe(client_id, &unsubscribe.filters);
+        }
 
         Ok(())
     }
@@ -823,14 +849,35 @@ impl WasmClientHandler {
 
         match publish.qos {
             QoS::AtMostOnce => {
+                self.fire_client_publish(
+                    client_id,
+                    &publish.topic_name,
+                    publish.qos as u8,
+                    publish.retain,
+                    payload_size,
+                );
                 self.router.route_message(&publish, Some(client_id)).await;
             }
             QoS::AtLeastOnce => {
+                self.fire_client_publish(
+                    client_id,
+                    &publish.topic_name,
+                    publish.qos as u8,
+                    publish.retain,
+                    payload_size,
+                );
                 self.router.route_message(&publish, Some(client_id)).await;
                 let puback = PubAckPacket::new(publish.packet_id.unwrap());
                 self.write_packet(&Packet::PubAck(puback), writer)?;
             }
             QoS::ExactlyOnce => {
+                self.fire_client_publish(
+                    client_id,
+                    &publish.topic_name,
+                    publish.qos as u8,
+                    publish.retain,
+                    payload_size,
+                );
                 let packet_id = publish.packet_id.unwrap();
                 self.inflight_publishes.insert(packet_id, publish);
                 let pubrec = PubRecPacket::new(packet_id);
@@ -841,8 +888,10 @@ impl WasmClientHandler {
         Ok(())
     }
 
-    #[allow(clippy::unused_self, clippy::unnecessary_wraps)]
-    fn handle_puback(&self, _puback: PubAckPacket) -> Result<()> {
+    fn handle_puback(&self, puback: PubAckPacket) -> Result<()> {
+        if let Some(client_id) = self.client_id.as_ref() {
+            self.fire_message_delivered(client_id, puback.packet_id, 1);
+        }
         Ok(())
     }
 
@@ -864,8 +913,10 @@ impl WasmClientHandler {
         Ok(())
     }
 
-    #[allow(clippy::unused_self, clippy::unnecessary_wraps)]
-    fn handle_pubcomp(&self, _pubcomp: PubCompPacket) -> Result<()> {
+    fn handle_pubcomp(&self, pubcomp: PubCompPacket) -> Result<()> {
+        if let Some(client_id) = self.client_id.as_ref() {
+            self.fire_message_delivered(client_id, pubcomp.packet_id, 2);
+        }
         Ok(())
     }
 
@@ -1073,6 +1124,11 @@ impl WasmClientHandler {
 
                     self.write_packet(&Packet::ConnAck(connack), writer)?;
 
+                    self.fire_client_connect(
+                        &pending.connect.client_id,
+                        pending.connect.clean_start,
+                    );
+
                     if session_present {
                         self.deliver_queued_messages(&pending.connect.client_id, writer)
                             .await?;
@@ -1171,5 +1227,95 @@ impl WasmClientHandler {
 
         writer.write(&buf)?;
         Ok(())
+    }
+
+    fn fire_client_connect(&self, client_id: &str, clean_start: bool) {
+        if let Some(callback) = self.event_callbacks.on_client_connect.borrow().as_ref() {
+            let obj = js_sys::Object::new();
+            js_sys::Reflect::set(&obj, &"clientId".into(), &client_id.into()).ok();
+            js_sys::Reflect::set(&obj, &"cleanStart".into(), &clean_start.into()).ok();
+            let _ = callback.call1(&JsValue::NULL, &obj);
+        }
+    }
+
+    fn fire_client_disconnect(&self, client_id: &str, reason: &str, unexpected: bool) {
+        if let Some(callback) = self.event_callbacks.on_client_disconnect.borrow().as_ref() {
+            let obj = js_sys::Object::new();
+            js_sys::Reflect::set(&obj, &"clientId".into(), &client_id.into()).ok();
+            js_sys::Reflect::set(&obj, &"reason".into(), &reason.into()).ok();
+            js_sys::Reflect::set(&obj, &"unexpected".into(), &unexpected.into()).ok();
+            let _ = callback.call1(&JsValue::NULL, &obj);
+        }
+    }
+
+    fn fire_client_publish(
+        &self,
+        client_id: &str,
+        topic: &str,
+        qos: u8,
+        retain: bool,
+        payload_size: usize,
+    ) {
+        if let Some(callback) = self.event_callbacks.on_client_publish.borrow().as_ref() {
+            let obj = js_sys::Object::new();
+            js_sys::Reflect::set(&obj, &"clientId".into(), &client_id.into()).ok();
+            js_sys::Reflect::set(&obj, &"topic".into(), &topic.into()).ok();
+            js_sys::Reflect::set(&obj, &"qos".into(), &JsValue::from_f64(f64::from(qos))).ok();
+            js_sys::Reflect::set(&obj, &"retain".into(), &retain.into()).ok();
+            js_sys::Reflect::set(
+                &obj,
+                &"payloadSize".into(),
+                &JsValue::from_f64(payload_size as f64),
+            )
+            .ok();
+            let _ = callback.call1(&JsValue::NULL, &obj);
+        }
+    }
+
+    fn fire_client_subscribe(&self, client_id: &str, subscriptions: &[(String, u8)]) {
+        if let Some(callback) = self.event_callbacks.on_client_subscribe.borrow().as_ref() {
+            let obj = js_sys::Object::new();
+            js_sys::Reflect::set(&obj, &"clientId".into(), &client_id.into()).ok();
+
+            let subs_array = js_sys::Array::new();
+            for (topic, qos) in subscriptions {
+                let sub_obj = js_sys::Object::new();
+                js_sys::Reflect::set(&sub_obj, &"topic".into(), &topic.into()).ok();
+                js_sys::Reflect::set(&sub_obj, &"qos".into(), &JsValue::from_f64(f64::from(*qos)))
+                    .ok();
+                subs_array.push(&sub_obj);
+            }
+            js_sys::Reflect::set(&obj, &"subscriptions".into(), &subs_array).ok();
+            let _ = callback.call1(&JsValue::NULL, &obj);
+        }
+    }
+
+    fn fire_client_unsubscribe(&self, client_id: &str, topics: &[String]) {
+        if let Some(callback) = self.event_callbacks.on_client_unsubscribe.borrow().as_ref() {
+            let obj = js_sys::Object::new();
+            js_sys::Reflect::set(&obj, &"clientId".into(), &client_id.into()).ok();
+
+            let topics_array = js_sys::Array::new();
+            for topic in topics {
+                topics_array.push(&JsValue::from_str(topic));
+            }
+            js_sys::Reflect::set(&obj, &"topics".into(), &topics_array).ok();
+            let _ = callback.call1(&JsValue::NULL, &obj);
+        }
+    }
+
+    fn fire_message_delivered(&self, client_id: &str, packet_id: u16, qos: u8) {
+        if let Some(callback) = self.event_callbacks.on_message_delivered.borrow().as_ref() {
+            let obj = js_sys::Object::new();
+            js_sys::Reflect::set(&obj, &"clientId".into(), &client_id.into()).ok();
+            js_sys::Reflect::set(
+                &obj,
+                &"packetId".into(),
+                &JsValue::from_f64(f64::from(packet_id)),
+            )
+            .ok();
+            js_sys::Reflect::set(&obj, &"qos".into(), &JsValue::from_f64(f64::from(qos))).ok();
+            let _ = callback.call1(&JsValue::NULL, &obj);
+        }
     }
 }

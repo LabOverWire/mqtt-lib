@@ -16,6 +16,16 @@ use std::sync::{Arc, RwLock};
 use wasm_bindgen::prelude::*;
 use web_sys::MessagePort;
 
+#[derive(Clone, Default)]
+pub struct WasmEventCallbacks {
+    pub on_client_connect: Rc<RefCell<Option<js_sys::Function>>>,
+    pub on_client_disconnect: Rc<RefCell<Option<js_sys::Function>>>,
+    pub on_client_publish: Rc<RefCell<Option<js_sys::Function>>>,
+    pub on_client_subscribe: Rc<RefCell<Option<js_sys::Function>>>,
+    pub on_client_unsubscribe: Rc<RefCell<Option<js_sys::Function>>>,
+    pub on_message_delivered: Rc<RefCell<Option<js_sys::Function>>>,
+}
+
 #[derive(Hash)]
 struct ConfigHashFields {
     max_clients: u32,
@@ -180,6 +190,7 @@ pub struct WasmBroker {
     sys_topics_running: Rc<Cell<bool>>,
     config_hash: Rc<Cell<u64>>,
     on_config_change: Rc<RefCell<Option<js_sys::Function>>>,
+    event_callbacks: WasmEventCallbacks,
 }
 
 #[wasm_bindgen]
@@ -233,6 +244,7 @@ impl WasmBroker {
             sys_topics_running: Rc::new(Cell::new(false)),
             config_hash: Rc::new(Cell::new(config_hash)),
             on_config_change: Rc::new(RefCell::new(None)),
+            event_callbacks: WasmEventCallbacks::default(),
         };
 
         broker.setup_bridge_callback();
@@ -420,6 +432,7 @@ impl WasmBroker {
             Arc::clone(&self.storage),
             Arc::clone(&self.stats),
             Arc::clone(&self.resource_monitor),
+            self.event_callbacks.clone(),
         );
 
         Ok(client_port)
@@ -558,6 +571,36 @@ impl WasmBroker {
     #[wasm_bindgen]
     pub fn on_config_change(&self, callback: js_sys::Function) {
         *self.on_config_change.borrow_mut() = Some(callback);
+    }
+
+    #[wasm_bindgen]
+    pub fn on_client_connect(&self, callback: js_sys::Function) {
+        *self.event_callbacks.on_client_connect.borrow_mut() = Some(callback);
+    }
+
+    #[wasm_bindgen]
+    pub fn on_client_disconnect(&self, callback: js_sys::Function) {
+        *self.event_callbacks.on_client_disconnect.borrow_mut() = Some(callback);
+    }
+
+    #[wasm_bindgen]
+    pub fn on_client_publish(&self, callback: js_sys::Function) {
+        *self.event_callbacks.on_client_publish.borrow_mut() = Some(callback);
+    }
+
+    #[wasm_bindgen]
+    pub fn on_client_subscribe(&self, callback: js_sys::Function) {
+        *self.event_callbacks.on_client_subscribe.borrow_mut() = Some(callback);
+    }
+
+    #[wasm_bindgen]
+    pub fn on_client_unsubscribe(&self, callback: js_sys::Function) {
+        *self.event_callbacks.on_client_unsubscribe.borrow_mut() = Some(callback);
+    }
+
+    #[wasm_bindgen]
+    pub fn on_message_delivered(&self, callback: js_sys::Function) {
+        *self.event_callbacks.on_message_delivered.borrow_mut() = Some(callback);
     }
 
     #[wasm_bindgen]
