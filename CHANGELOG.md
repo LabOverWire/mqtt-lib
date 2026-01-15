@@ -20,6 +20,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Configurable keepalive timeout**: `KeepaliveConfig` type for fine-tuning keepalive behavior
   - `with_keepalive_config()` and `with_keepalive_timeout_percent()` on `ConnectOptions`
   - Allows longer timeout tolerance for high-latency connections
+  - `with_lock_retry()` for configuring PINGREQ lock acquisition behavior
+
+- **Skip bridge forwarding flag**: `ClientHandler::with_skip_bridge_forwarding(true)` for internal connections
+  - Messages from flagged connections route to local subscribers only
+  - Prevents message loops in distributed broker deployments
+  - Replaces client ID naming conventions for internal traffic identification
 
 ### Changed
 
