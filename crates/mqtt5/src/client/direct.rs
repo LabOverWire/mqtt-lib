@@ -1516,11 +1516,14 @@ async fn handle_auth_packet(auth: AuthPacket, ctx: &PacketReaderContext) -> Resu
     Ok(())
 }
 
-async fn send_pingreq_with_priority(writer: &Arc<tokio::sync::Mutex<UnifiedWriter>>) -> Result<()> {
-    const MAX_ATTEMPTS: u32 = 100;
-    const RETRY_DELAY: Duration = Duration::from_millis(50);
+async fn send_pingreq_with_priority(
+    writer: &Arc<tokio::sync::Mutex<UnifiedWriter>>,
+    config: &mqtt5_protocol::KeepaliveConfig,
+) -> Result<()> {
+    let max_attempts = config.lock_retry_attempts;
+    let retry_delay = Duration::from_millis(u64::from(config.lock_retry_delay_ms));
 
-    for attempt in 0..MAX_ATTEMPTS {
+    for attempt in 0..max_attempts {
         if let Ok(mut guard) = writer.try_lock() {
             return guard.write_packet(Packet::PingReq).await;
         }
@@ -1528,16 +1531,17 @@ async fn send_pingreq_with_priority(writer: &Arc<tokio::sync::Mutex<UnifiedWrite
         if attempt > 0 && attempt % 20 == 0 {
             tracing::warn!(
                 attempt,
+                max_attempts,
                 "PINGREQ waiting for writer lock - possible contention"
             );
         }
 
-        tokio::time::sleep(RETRY_DELAY).await;
+        tokio::time::sleep(retry_delay).await;
     }
 
     tracing::error!(
-        "Failed to acquire writer lock for PINGREQ after {} attempts",
-        MAX_ATTEMPTS
+        max_attempts,
+        "Failed to acquire writer lock for PINGREQ, falling back to blocking"
     );
     writer.lock().await.write_packet(Packet::PingReq).await
 }
@@ -1571,7 +1575,7 @@ async fn keepalive_task_with_writer(
 
         keepalive_state.write().await.record_ping_sent();
 
-        let send_result = send_pingreq_with_priority(&writer).await;
+        let send_result = send_pingreq_with_priority(&writer, &config).await;
         if let Err(e) = send_result {
             tracing::error!("Error sending PINGREQ: {e}");
             break;
