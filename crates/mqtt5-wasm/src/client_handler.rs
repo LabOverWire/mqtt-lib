@@ -1229,32 +1229,33 @@ impl WasmClientHandler {
         Ok(())
     }
 
-    fn set_js_prop(obj: &js_sys::Object, key: &str, value: &JsValue) {
-        if let Err(e) = js_sys::Reflect::set(obj, &key.into(), value) {
-            debug!("Failed to set JS property '{}': {:?}", key, e);
-        }
-    }
-
     fn fire_client_connect(&self, client_id: &str, clean_start: bool) {
-        if let Some(callback) = self.event_callbacks.on_client_connect.borrow().as_ref() {
-            let obj = js_sys::Object::new();
-            Self::set_js_prop(&obj, "clientId", &client_id.into());
-            Self::set_js_prop(&obj, "cleanStart", &clean_start.into());
-            if let Err(e) = callback.call1(&JsValue::NULL, &obj) {
-                debug!("on_client_connect callback failed: {:?}", e);
-            }
+        if let Some(callback) = self.event_callbacks.on_client_connect.borrow().clone() {
+            let client_id = client_id.to_string();
+            spawn_local(async move {
+                let obj = js_sys::Object::new();
+                let _ = js_sys::Reflect::set(&obj, &"clientId".into(), &client_id.into());
+                let _ = js_sys::Reflect::set(&obj, &"cleanStart".into(), &clean_start.into());
+                if let Err(e) = callback.call1(&JsValue::NULL, &obj) {
+                    debug!("on_client_connect callback failed: {:?}", e);
+                }
+            });
         }
     }
 
     fn fire_client_disconnect(&self, client_id: &str, reason: &str, unexpected: bool) {
-        if let Some(callback) = self.event_callbacks.on_client_disconnect.borrow().as_ref() {
-            let obj = js_sys::Object::new();
-            Self::set_js_prop(&obj, "clientId", &client_id.into());
-            Self::set_js_prop(&obj, "reason", &reason.into());
-            Self::set_js_prop(&obj, "unexpected", &unexpected.into());
-            if let Err(e) = callback.call1(&JsValue::NULL, &obj) {
-                debug!("on_client_disconnect callback failed: {:?}", e);
-            }
+        if let Some(callback) = self.event_callbacks.on_client_disconnect.borrow().clone() {
+            let client_id = client_id.to_string();
+            let reason = reason.to_string();
+            spawn_local(async move {
+                let obj = js_sys::Object::new();
+                let _ = js_sys::Reflect::set(&obj, &"clientId".into(), &client_id.into());
+                let _ = js_sys::Reflect::set(&obj, &"reason".into(), &reason.into());
+                let _ = js_sys::Reflect::set(&obj, &"unexpected".into(), &unexpected.into());
+                if let Err(e) = callback.call1(&JsValue::NULL, &obj) {
+                    debug!("on_client_disconnect callback failed: {:?}", e);
+                }
+            });
         }
     }
 
@@ -1266,63 +1267,91 @@ impl WasmClientHandler {
         retain: bool,
         payload_size: usize,
     ) {
-        if let Some(callback) = self.event_callbacks.on_client_publish.borrow().as_ref() {
-            let obj = js_sys::Object::new();
-            Self::set_js_prop(&obj, "clientId", &client_id.into());
-            Self::set_js_prop(&obj, "topic", &topic.into());
-            Self::set_js_prop(&obj, "qos", &JsValue::from_f64(f64::from(qos)));
-            Self::set_js_prop(&obj, "retain", &retain.into());
-            Self::set_js_prop(&obj, "payloadSize", &JsValue::from_f64(payload_size as f64));
-            if let Err(e) = callback.call1(&JsValue::NULL, &obj) {
-                debug!("on_client_publish callback failed: {:?}", e);
-            }
+        if let Some(callback) = self.event_callbacks.on_client_publish.borrow().clone() {
+            let client_id = client_id.to_string();
+            let topic = topic.to_string();
+            spawn_local(async move {
+                let obj = js_sys::Object::new();
+                let _ = js_sys::Reflect::set(&obj, &"clientId".into(), &client_id.into());
+                let _ = js_sys::Reflect::set(&obj, &"topic".into(), &topic.into());
+                let _ =
+                    js_sys::Reflect::set(&obj, &"qos".into(), &JsValue::from_f64(f64::from(qos)));
+                let _ = js_sys::Reflect::set(&obj, &"retain".into(), &retain.into());
+                #[allow(clippy::cast_precision_loss)]
+                let _ = js_sys::Reflect::set(
+                    &obj,
+                    &"payloadSize".into(),
+                    &JsValue::from_f64(payload_size as f64),
+                );
+                if let Err(e) = callback.call1(&JsValue::NULL, &obj) {
+                    debug!("on_client_publish callback failed: {:?}", e);
+                }
+            });
         }
     }
 
     fn fire_client_subscribe(&self, client_id: &str, subscriptions: &[(String, u8)]) {
-        if let Some(callback) = self.event_callbacks.on_client_subscribe.borrow().as_ref() {
-            let obj = js_sys::Object::new();
-            Self::set_js_prop(&obj, "clientId", &client_id.into());
-
-            let subs_array = js_sys::Array::new();
-            for (topic, qos) in subscriptions {
-                let sub_obj = js_sys::Object::new();
-                Self::set_js_prop(&sub_obj, "topic", &topic.into());
-                Self::set_js_prop(&sub_obj, "qos", &JsValue::from_f64(f64::from(*qos)));
-                subs_array.push(&sub_obj);
-            }
-            Self::set_js_prop(&obj, "subscriptions", &subs_array);
-            if let Err(e) = callback.call1(&JsValue::NULL, &obj) {
-                debug!("on_client_subscribe callback failed: {:?}", e);
-            }
+        if let Some(callback) = self.event_callbacks.on_client_subscribe.borrow().clone() {
+            let client_id = client_id.to_string();
+            let subscriptions = subscriptions.to_vec();
+            spawn_local(async move {
+                let obj = js_sys::Object::new();
+                let _ = js_sys::Reflect::set(&obj, &"clientId".into(), &client_id.into());
+                let subs_array = js_sys::Array::new();
+                for (topic, qos) in &subscriptions {
+                    let sub_obj = js_sys::Object::new();
+                    let _ = js_sys::Reflect::set(&sub_obj, &"topic".into(), &topic.into());
+                    let _ = js_sys::Reflect::set(
+                        &sub_obj,
+                        &"qos".into(),
+                        &JsValue::from_f64(f64::from(*qos)),
+                    );
+                    subs_array.push(&sub_obj);
+                }
+                let _ = js_sys::Reflect::set(&obj, &"subscriptions".into(), &subs_array);
+                if let Err(e) = callback.call1(&JsValue::NULL, &obj) {
+                    debug!("on_client_subscribe callback failed: {:?}", e);
+                }
+            });
         }
     }
 
     fn fire_client_unsubscribe(&self, client_id: &str, topics: &[String]) {
-        if let Some(callback) = self.event_callbacks.on_client_unsubscribe.borrow().as_ref() {
-            let obj = js_sys::Object::new();
-            Self::set_js_prop(&obj, "clientId", &client_id.into());
-
-            let topics_array = js_sys::Array::new();
-            for topic in topics {
-                topics_array.push(&JsValue::from_str(topic));
-            }
-            Self::set_js_prop(&obj, "topics", &topics_array);
-            if let Err(e) = callback.call1(&JsValue::NULL, &obj) {
-                debug!("on_client_unsubscribe callback failed: {:?}", e);
-            }
+        if let Some(callback) = self.event_callbacks.on_client_unsubscribe.borrow().clone() {
+            let client_id = client_id.to_string();
+            let topics = topics.to_vec();
+            spawn_local(async move {
+                let obj = js_sys::Object::new();
+                let _ = js_sys::Reflect::set(&obj, &"clientId".into(), &client_id.into());
+                let topics_array = js_sys::Array::new();
+                for topic in &topics {
+                    topics_array.push(&JsValue::from_str(topic));
+                }
+                let _ = js_sys::Reflect::set(&obj, &"topics".into(), &topics_array);
+                if let Err(e) = callback.call1(&JsValue::NULL, &obj) {
+                    debug!("on_client_unsubscribe callback failed: {:?}", e);
+                }
+            });
         }
     }
 
     fn fire_message_delivered(&self, client_id: &str, packet_id: u16, qos: u8) {
-        if let Some(callback) = self.event_callbacks.on_message_delivered.borrow().as_ref() {
-            let obj = js_sys::Object::new();
-            Self::set_js_prop(&obj, "clientId", &client_id.into());
-            Self::set_js_prop(&obj, "packetId", &JsValue::from_f64(f64::from(packet_id)));
-            Self::set_js_prop(&obj, "qos", &JsValue::from_f64(f64::from(qos)));
-            if let Err(e) = callback.call1(&JsValue::NULL, &obj) {
-                debug!("on_message_delivered callback failed: {:?}", e);
-            }
+        if let Some(callback) = self.event_callbacks.on_message_delivered.borrow().clone() {
+            let client_id = client_id.to_string();
+            spawn_local(async move {
+                let obj = js_sys::Object::new();
+                let _ = js_sys::Reflect::set(&obj, &"clientId".into(), &client_id.into());
+                let _ = js_sys::Reflect::set(
+                    &obj,
+                    &"packetId".into(),
+                    &JsValue::from_f64(f64::from(packet_id)),
+                );
+                let _ =
+                    js_sys::Reflect::set(&obj, &"qos".into(), &JsValue::from_f64(f64::from(qos)));
+                if let Err(e) = callback.call1(&JsValue::NULL, &obj) {
+                    debug!("on_message_delivered callback failed: {:?}", e);
+                }
+            });
         }
     }
 }

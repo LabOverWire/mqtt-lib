@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `on_client_subscribe(callback)`: Fires on subscribe with `{clientId, subscriptions: [{topic, qos}]}`
   - `on_client_unsubscribe(callback)`: Fires on unsubscribe with `{clientId, topics}`
   - `on_message_delivered(callback)`: Fires on QoS 1/2 ACK with `{clientId, packetId, qos}`
+  - Callbacks dispatched asynchronously via `spawn_local` to prevent blocking packet handling
 
 - **Configurable keepalive timeout**: `KeepaliveConfig` type for fine-tuning keepalive behavior
   - `with_keepalive_config()` and `with_keepalive_timeout_percent()` on `ConnectOptions`
