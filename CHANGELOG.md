@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [mqtt5 0.18.3] / [mqtt5-wasm 0.8.3] - 2026-01-14
+
+### Added
+
+- **Lifecycle event callbacks for WASM broker**: JavaScript callbacks for broker activity monitoring
+  - `on_client_connect(callback)`: Fires when client connects with `{clientId, cleanStart}`
+  - `on_client_disconnect(callback)`: Fires when client disconnects with `{clientId, reason, unexpected}`
+  - `on_client_publish(callback)`: Fires on publish with `{clientId, topic, qos, retain, payloadSize}`
+  - `on_client_subscribe(callback)`: Fires on subscribe with `{clientId, subscriptions: [{topic, qos}]}`
+  - `on_client_unsubscribe(callback)`: Fires on unsubscribe with `{clientId, topics}`
+  - `on_message_delivered(callback)`: Fires on QoS 1/2 ACK with `{clientId, packetId, qos}`
+
+- **Configurable keepalive timeout**: `KeepaliveConfig` type for fine-tuning keepalive behavior
+  - `with_keepalive_config()` and `with_keepalive_timeout_percent()` on `ConnectOptions`
+  - Allows longer timeout tolerance for high-latency connections
+
+### Changed
+
+- **Async callback dispatch**: Message callbacks now dispatched via spawned tasks
+  - Prevents reader task from blocking when callbacks are slow
+  - Improves connection stability under high message load
+
+- **Priority keepalive mechanism**: Keepalive uses try_lock with retry for shared state access
+  - Falls back to spawned task if lock contention detected
+  - Ensures keepalive pings are sent even during heavy publish activity
+
 ## [mqttv5-cli 0.18.0] - 2026-01-08
 
 ### Added
