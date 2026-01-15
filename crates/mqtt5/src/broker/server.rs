@@ -491,6 +491,10 @@ impl MqttBroker {
         config: &BrokerConfig,
     ) -> Result<(Vec<TcpListener>, Option<TlsAcceptor>, Vec<Endpoint>)> {
         if let Some(ref cluster_config) = config.cluster_listener_config {
+            if let Err(e) = cluster_config.validate() {
+                return Err(MqttError::Configuration(e));
+            }
+
             if cluster_config.is_quic() {
                 let cert_file = cluster_config.cert_file.as_ref().ok_or_else(|| {
                     MqttError::Configuration("QUIC cluster listener requires cert_file".to_string())

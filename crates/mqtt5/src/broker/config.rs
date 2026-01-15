@@ -1047,6 +1047,35 @@ impl ClusterListenerConfig {
     pub fn is_quic(&self) -> bool {
         self.transport == ClusterTransport::Quic
     }
+
+    /// Validates the configuration, returning an error description if invalid.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string if:
+    /// - No bind addresses are configured
+    /// - QUIC transport is selected but `cert_file` or `key_file` is missing
+    /// - TLS is partially configured (only cert or only key)
+    pub fn validate(&self) -> std::result::Result<(), String> {
+        if self.bind_addresses.is_empty() {
+            return Err("cluster listener requires at least one bind address".to_string());
+        }
+
+        if self.is_quic() && !self.uses_tls() {
+            return Err("QUIC cluster listener requires cert_file and key_file".to_string());
+        }
+
+        let has_cert = self.cert_file.is_some();
+        let has_key = self.key_file.is_some();
+        if has_cert != has_key {
+            return Err(
+                "TLS configuration incomplete: both cert_file and key_file are required"
+                    .to_string(),
+            );
+        }
+
+        Ok(())
+    }
 }
 
 /// Storage configuration

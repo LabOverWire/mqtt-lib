@@ -1,5 +1,8 @@
 use crate::time::Duration;
 
+pub const DEFAULT_LOCK_RETRY_ATTEMPTS: u32 = 100;
+pub const DEFAULT_LOCK_RETRY_DELAY_MS: u32 = 50;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KeepaliveConfig {
     pub ping_interval_percent: u8,
@@ -13,8 +16,8 @@ impl Default for KeepaliveConfig {
         Self {
             ping_interval_percent: 75,
             timeout_percent: 150,
-            lock_retry_attempts: 100,
-            lock_retry_delay_ms: 50,
+            lock_retry_attempts: DEFAULT_LOCK_RETRY_ATTEMPTS,
+            lock_retry_delay_ms: DEFAULT_LOCK_RETRY_DELAY_MS,
         }
     }
 }
@@ -25,8 +28,8 @@ impl KeepaliveConfig {
         Self {
             ping_interval_percent,
             timeout_percent,
-            lock_retry_attempts: 100,
-            lock_retry_delay_ms: 50,
+            lock_retry_attempts: DEFAULT_LOCK_RETRY_ATTEMPTS,
+            lock_retry_delay_ms: DEFAULT_LOCK_RETRY_DELAY_MS,
         }
     }
 
@@ -35,8 +38,8 @@ impl KeepaliveConfig {
         Self {
             ping_interval_percent: 50,
             timeout_percent: 150,
-            lock_retry_attempts: 100,
-            lock_retry_delay_ms: 50,
+            lock_retry_attempts: DEFAULT_LOCK_RETRY_ATTEMPTS,
+            lock_retry_delay_ms: DEFAULT_LOCK_RETRY_DELAY_MS,
         }
     }
 
