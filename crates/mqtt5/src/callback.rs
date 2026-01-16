@@ -53,24 +53,22 @@ impl CallbackManager {
     /// # Errors
     ///
     /// Returns an error if the operation fails
-    pub async fn register_with_id(
+    pub fn register_with_id(
         &self,
-        topic_filter: String,
+        topic_filter: &str,
         callback: PublishCallback,
     ) -> Result<CallbackId> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
 
-        // Create callback entry
         let entry = CallbackEntry {
             id,
             callback,
-            topic_filter: topic_filter.clone(),
+            topic_filter: topic_filter.to_string(),
         };
 
         self.callback_registry.lock().insert(id, entry.clone());
 
-        // Register using existing logic
-        self.register_internal(topic_filter, entry).await?;
+        self.register_internal(topic_filter, entry);
 
         Ok(id)
     }
@@ -79,26 +77,15 @@ impl CallbackManager {
     ///
     /// # Errors
     ///
-    /// Returns an error if a callback with the same ID is already registered
-    ///
-    /// # Errors
-    ///
     /// Returns an error if the operation fails
-    pub async fn register(&self, topic_filter: String, callback: PublishCallback) -> Result<()> {
-        self.register_with_id(topic_filter, callback).await?;
+    pub fn register(&self, topic_filter: &str, callback: PublishCallback) -> Result<()> {
+        self.register_with_id(topic_filter, callback)?;
         Ok(())
     }
 
-    /// Internal registration logic
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the operation fails
-    #[allow(clippy::unused_async)]
-    async fn register_internal(&self, topic_filter: String, entry: CallbackEntry) -> Result<()> {
-        let actual_filter = strip_shared_subscription_prefix(&topic_filter).to_string();
+    fn register_internal(&self, topic_filter: &str, entry: CallbackEntry) {
+        let actual_filter = strip_shared_subscription_prefix(topic_filter).to_string();
 
-        // Check if it's a wildcard subscription
         if actual_filter.contains('+') || actual_filter.contains('#') {
             let mut wildcards = self.wildcard_callbacks.lock();
             wildcards.push(entry);
@@ -106,11 +93,9 @@ impl CallbackManager {
             let mut exact = self.exact_callbacks.lock();
             exact.entry(actual_filter).or_default().push(entry);
         }
-        Ok(())
     }
 
-    #[allow(clippy::unused_async)]
-    async fn get_callback(&self, id: CallbackId) -> Option<CallbackEntry> {
+    fn get_callback(&self, id: CallbackId) -> Option<CallbackEntry> {
         self.callback_registry.lock().get(&id).cloned()
     }
 
@@ -123,8 +108,8 @@ impl CallbackManager {
     /// # Errors
     ///
     /// Returns an error if the operation fails
-    pub async fn restore_callback(&self, id: CallbackId) -> Result<bool> {
-        if let Some(entry) = self.get_callback(id).await {
+    pub fn restore_callback(&self, id: CallbackId) -> Result<bool> {
+        if let Some(entry) = self.get_callback(id) {
             let topic_filter = &entry.topic_filter;
             let actual_filter = strip_shared_subscription_prefix(topic_filter).to_string();
 
@@ -140,8 +125,8 @@ impl CallbackManager {
             };
 
             if !already_registered {
-                self.register_internal(entry.topic_filter.clone(), entry)
-                    .await?;
+                let topic_filter = entry.topic_filter.clone();
+                self.register_internal(&topic_filter, entry);
             }
             Ok(true)
         } else {
@@ -160,8 +145,7 @@ impl CallbackManager {
     /// # Errors
     ///
     /// Returns an error if the operation fails
-    #[allow(clippy::unused_async)]
-    pub async fn unregister(&self, topic_filter: &str) -> Result<bool> {
+    pub fn unregister(&self, topic_filter: &str) -> Result<bool> {
         let actual_filter = strip_shared_subscription_prefix(topic_filter);
 
         // Remove from registry and track if anything was removed
@@ -193,8 +177,7 @@ impl CallbackManager {
     /// # Errors
     ///
     /// Returns an error if the operation fails
-    #[allow(clippy::unused_async)]
-    pub async fn dispatch(&self, message: &PublishPacket) -> Result<()> {
+    pub fn dispatch(&self, message: &PublishPacket) -> Result<()> {
         let mut callbacks_to_call = Vec::new();
 
         {
@@ -248,13 +231,12 @@ impl CallbackManager {
         Ok(())
     }
 
-    #[allow(clippy::unused_async)]
-    pub async fn callback_count(&self) -> usize {
+    #[must_use]
+    pub fn callback_count(&self) -> usize {
         self.callback_registry.lock().len()
     }
 
-    #[allow(clippy::unused_async)]
-    pub async fn clear(&self) {
+    pub fn clear(&self) {
         self.exact_callbacks.lock().clear();
         self.wildcard_callbacks.lock().clear();
         self.callback_registry.lock().clear();
@@ -284,10 +266,7 @@ mod tests {
             counter_clone.fetch_add(1, Ordering::Relaxed);
         });
 
-        manager
-            .register("test/topic".to_string(), callback)
-            .await
-            .unwrap();
+        manager.register("test/topic", callback).unwrap();
 
         let message = PublishPacket {
             topic_name: "test/topic".to_string(),
@@ -300,7 +279,7 @@ mod tests {
             protocol_version: 5,
         };
 
-        manager.dispatch(&message).await.unwrap();
+        manager.dispatch(&message).unwrap();
         tokio::task::yield_now().await;
         assert_eq!(counter.load(Ordering::Relaxed), 1);
 
@@ -309,7 +288,7 @@ mod tests {
             ..message.clone()
         };
 
-        manager.dispatch(&message2).await.unwrap();
+        manager.dispatch(&message2).unwrap();
         tokio::task::yield_now().await;
         assert_eq!(counter.load(Ordering::Relaxed), 1);
     }
@@ -324,10 +303,7 @@ mod tests {
             counter_clone.fetch_add(1, Ordering::Relaxed);
         });
 
-        manager
-            .register("test/+/topic".to_string(), callback)
-            .await
-            .unwrap();
+        manager.register("test/+/topic", callback).unwrap();
 
         let message1 = PublishPacket {
             topic_name: "test/foo/topic".to_string(),
@@ -340,7 +316,7 @@ mod tests {
             protocol_version: 5,
         };
 
-        manager.dispatch(&message1).await.unwrap();
+        manager.dispatch(&message1).unwrap();
         tokio::task::yield_now().await;
         assert_eq!(counter.load(Ordering::Relaxed), 1);
         let message2 = PublishPacket {
@@ -348,7 +324,7 @@ mod tests {
             ..message1.clone()
         };
 
-        manager.dispatch(&message2).await.unwrap();
+        manager.dispatch(&message2).unwrap();
         tokio::task::yield_now().await;
         assert_eq!(counter.load(Ordering::Relaxed), 2);
 
@@ -357,7 +333,7 @@ mod tests {
             ..message1.clone()
         };
 
-        manager.dispatch(&message3).await.unwrap();
+        manager.dispatch(&message3).unwrap();
         tokio::task::yield_now().await;
         assert_eq!(counter.load(Ordering::Relaxed), 2);
     }
@@ -379,14 +355,8 @@ mod tests {
         });
 
         // Register both callbacks for same topic
-        manager
-            .register("test/topic".to_string(), callback1)
-            .await
-            .unwrap();
-        manager
-            .register("test/topic".to_string(), callback2)
-            .await
-            .unwrap();
+        manager.register("test/topic", callback1).unwrap();
+        manager.register("test/topic", callback2).unwrap();
 
         let message = PublishPacket {
             topic_name: "test/topic".to_string(),
@@ -399,7 +369,7 @@ mod tests {
             protocol_version: 5,
         };
 
-        manager.dispatch(&message).await.unwrap();
+        manager.dispatch(&message).unwrap();
         tokio::task::yield_now().await;
 
         assert_eq!(counter1.load(Ordering::Relaxed), 1);
@@ -416,10 +386,7 @@ mod tests {
             counter_clone.fetch_add(1, Ordering::Relaxed);
         });
 
-        manager
-            .register("test/topic".to_string(), callback)
-            .await
-            .unwrap();
+        manager.register("test/topic", callback).unwrap();
 
         let message = PublishPacket {
             topic_name: "test/topic".to_string(),
@@ -432,12 +399,12 @@ mod tests {
             protocol_version: 5,
         };
 
-        manager.dispatch(&message).await.unwrap();
+        manager.dispatch(&message).unwrap();
         tokio::task::yield_now().await;
         assert_eq!(counter.load(Ordering::Relaxed), 1);
 
-        manager.unregister("test/topic").await.unwrap();
-        manager.dispatch(&message).await.unwrap();
+        manager.unregister("test/topic").unwrap();
+        manager.dispatch(&message).unwrap();
         tokio::task::yield_now().await;
         assert_eq!(counter.load(Ordering::Relaxed), 1);
     }
@@ -446,30 +413,23 @@ mod tests {
     async fn test_callback_count() {
         let manager = CallbackManager::new();
 
-        assert_eq!(manager.callback_count().await, 0);
+        assert_eq!(manager.callback_count(), 0);
 
         let callback: PublishCallback = Arc::new(|_msg| {});
 
-        manager
-            .register("test/exact".to_string(), callback.clone())
-            .await
-            .unwrap();
-        assert_eq!(manager.callback_count().await, 1);
+        manager.register("test/exact", callback.clone()).unwrap();
+        assert_eq!(manager.callback_count(), 1);
 
         manager
-            .register("test/+/wildcard".to_string(), callback.clone())
-            .await
+            .register("test/+/wildcard", callback.clone())
             .unwrap();
-        assert_eq!(manager.callback_count().await, 2);
+        assert_eq!(manager.callback_count(), 2);
 
-        manager
-            .register("test/exact".to_string(), callback)
-            .await
-            .unwrap();
-        assert_eq!(manager.callback_count().await, 3); // Multiple callbacks for same topic
+        manager.register("test/exact", callback).unwrap();
+        assert_eq!(manager.callback_count(), 3); // Multiple callbacks for same topic
 
-        manager.clear().await;
-        assert_eq!(manager.callback_count().await, 0);
+        manager.clear();
+        assert_eq!(manager.callback_count(), 0);
     }
 
     #[tokio::test]
@@ -483,8 +443,7 @@ mod tests {
         });
 
         manager
-            .register("$share/workers/tasks/#".to_string(), callback)
-            .await
+            .register("$share/workers/tasks/#", callback)
             .unwrap();
 
         let message = PublishPacket {
@@ -498,7 +457,7 @@ mod tests {
             protocol_version: 5,
         };
 
-        manager.dispatch(&message).await.unwrap();
+        manager.dispatch(&message).unwrap();
         tokio::task::yield_now().await;
         assert_eq!(counter.load(Ordering::Relaxed), 1);
 
@@ -507,7 +466,7 @@ mod tests {
             ..message.clone()
         };
 
-        manager.dispatch(&message2).await.unwrap();
+        manager.dispatch(&message2).unwrap();
         tokio::task::yield_now().await;
         assert_eq!(counter.load(Ordering::Relaxed), 2);
 
@@ -516,7 +475,7 @@ mod tests {
             ..message.clone()
         };
 
-        manager.dispatch(&message3).await.unwrap();
+        manager.dispatch(&message3).unwrap();
         tokio::task::yield_now().await;
         assert_eq!(counter.load(Ordering::Relaxed), 2);
     }
@@ -532,10 +491,7 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(100));
         });
 
-        manager
-            .register("test/topic".to_string(), callback)
-            .await
-            .unwrap();
+        manager.register("test/topic", callback).unwrap();
 
         let message = PublishPacket {
             topic_name: "test/topic".to_string(),
@@ -549,7 +505,7 @@ mod tests {
         };
 
         let start = std::time::Instant::now();
-        manager.dispatch(&message).await.unwrap();
+        manager.dispatch(&message).unwrap();
         let dispatch_time = start.elapsed();
 
         assert!(
@@ -571,20 +527,15 @@ mod tests {
             let callback: PublishCallback = Arc::new(move |_msg| {
                 counter_clone.fetch_add(1, Ordering::SeqCst);
             });
-            manager
-                .register(format!("test/topic{i}"), callback)
-                .await
-                .unwrap();
+            let topic = format!("test/topic{i}");
+            manager.register(&topic, callback).unwrap();
         }
 
         let wildcard_counter = Arc::clone(&counter);
         let wildcard_callback: PublishCallback = Arc::new(move |_msg| {
             wildcard_counter.fetch_add(10, Ordering::SeqCst);
         });
-        manager
-            .register("test/#".to_string(), wildcard_callback)
-            .await
-            .unwrap();
+        manager.register("test/#", wildcard_callback).unwrap();
 
         let message = PublishPacket {
             topic_name: "test/topic0".to_string(),
@@ -597,7 +548,7 @@ mod tests {
             protocol_version: 5,
         };
 
-        manager.dispatch(&message).await.unwrap();
+        manager.dispatch(&message).unwrap();
         tokio::task::yield_now().await;
 
         assert_eq!(counter.load(Ordering::SeqCst), 11);

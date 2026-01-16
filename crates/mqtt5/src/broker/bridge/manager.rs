@@ -37,8 +37,7 @@ impl BridgeManager {
     ///
     /// # Errors
     /// Returns an error if the bridge already exists.
-    #[allow(clippy::unused_async)]
-    pub async fn add_bridge(&self, config: BridgeConfig) -> Result<()> {
+    pub fn add_bridge(&self, config: BridgeConfig) -> Result<()> {
         let name = config.name.clone();
 
         if self.bridges.read().contains_key(&name) {
@@ -173,8 +172,8 @@ impl BridgeManager {
         }
     }
 
-    #[allow(clippy::unused_async)]
-    pub async fn list_bridges(&self) -> Vec<String> {
+    #[must_use]
+    pub fn list_bridges(&self) -> Vec<String> {
         self.bridges.read().keys().cloned().collect()
     }
 
@@ -218,7 +217,7 @@ impl BridgeManager {
         }
 
         // Add new bridge with updated config
-        Box::pin(self.add_bridge(config)).await
+        self.add_bridge(config)
     }
 }
 
@@ -267,15 +266,15 @@ mod tests {
         );
 
         // Add bridge
-        assert!(Box::pin(manager.add_bridge(config.clone())).await.is_ok());
+        assert!(manager.add_bridge(config.clone()).is_ok());
 
         // Check bridge exists
-        let bridges = manager.list_bridges().await;
+        let bridges = manager.list_bridges();
         assert_eq!(bridges.len(), 1);
         assert!(bridges.contains(&"test-bridge".to_string()));
 
         // Try to add duplicate
-        assert!(Box::pin(manager.add_bridge(config)).await.is_err());
+        assert!(manager.add_bridge(config).is_err());
 
         // Clean up
         broker_handle.abort();
@@ -284,7 +283,7 @@ mod tests {
         assert!(manager.remove_bridge("test-bridge").await.is_ok());
 
         // Check bridge removed
-        let bridges = manager.list_bridges().await;
+        let bridges = manager.list_bridges();
         assert_eq!(bridges.len(), 0);
     }
 }

@@ -303,7 +303,7 @@ impl MqttBroker {
 
             for bridge_config in &config.bridges {
                 info!("Adding bridge '{}'", bridge_config.name);
-                if let Err(e) = manager.add_bridge(bridge_config.clone()).await {
+                if let Err(e) = manager.add_bridge(bridge_config.clone()) {
                     error!("Failed to add bridge '{}': {}", bridge_config.name, e);
                 }
             }

@@ -797,7 +797,7 @@ impl MqttClient {
             tracing::info!("Session resumed, restoring {} callbacks", stored_subs.len());
             let inner = self.inner.read().await;
             for (topic, _, callback_id) in stored_subs {
-                if let Err(e) = inner.callback_manager.restore_callback(callback_id).await {
+                if let Err(e) = inner.callback_manager.restore_callback(callback_id) {
                     tracing::warn!("Failed to restore callback for {}: {}", topic, e);
                 }
             }
@@ -866,9 +866,7 @@ impl MqttClient {
                         );
                         let inner = self.inner.read().await;
                         for (topic, _, callback_id) in stored_subs {
-                            if let Err(e) =
-                                inner.callback_manager.restore_callback(callback_id).await
-                            {
+                            if let Err(e) = inner.callback_manager.restore_callback(callback_id) {
                                 tracing::warn!("Failed to restore callback for {}: {}", topic, e);
                             }
                         }
@@ -1311,8 +1309,7 @@ impl MqttClient {
         let callback: PublishCallback = Arc::new(callback);
         let callback_id = inner
             .callback_manager
-            .register_with_id(topic_filter.clone(), callback)
-            .await?;
+            .register_with_id(&topic_filter, callback)?;
 
         // Create subscribe packet
         let filter = TopicFilter {
@@ -1354,7 +1351,7 @@ impl MqttClient {
                     Ok((packet_id, qos))
                 } else {
                     // Unregister callback on failure
-                    inner.callback_manager.unregister(&topic_filter).await?;
+                    inner.callback_manager.unregister(&topic_filter)?;
                     Err(MqttError::ProtocolError(
                         "No results returned for subscription".to_string(),
                     ))
@@ -1362,7 +1359,7 @@ impl MqttClient {
             }
             Err(e) => {
                 // Unregister callback on failure
-                inner.callback_manager.unregister(&topic_filter).await?;
+                inner.callback_manager.unregister(&topic_filter)?;
                 Err(e)
             }
         }
@@ -1387,7 +1384,7 @@ impl MqttClient {
 
         // Unregister callback first
         let inner = self.inner.read().await;
-        inner.callback_manager.unregister(&topic_filter).await?;
+        inner.callback_manager.unregister(&topic_filter)?;
 
         let packet = UnsubscribePacket {
             packet_id: 0,
@@ -2036,7 +2033,7 @@ impl MqttClient {
     ) -> Result<()> {
         // Restore the callback first
         let inner = self.inner.read().await;
-        inner.callback_manager.restore_callback(callback_id).await?;
+        inner.callback_manager.restore_callback(callback_id)?;
         drop(inner);
 
         let inner = self.inner.read().await;

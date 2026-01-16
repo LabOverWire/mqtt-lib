@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [mqtt5 0.19.0] - 2026-01-15
+
+### Changed
+
+- **BREAKING: Sync function signatures**: Removed `async` from functions that don't await internally
+  - `CallbackManager`: `register`, `register_with_id`, `unregister`, `dispatch`, `callback_count`, `clear`, `restore_callback`
+  - `PasswordAuthProvider`: `add_user`, `add_user_with_hash`, `remove_user`, `user_count`, `has_user`, `verify_user_password`
+  - `CertificateAuthProvider`: `add_certificate`, `remove_certificate`, `cert_count`, `has_certificate`
+  - `AuthRateLimiter`: `check_rate_limit`, `record_attempt`, `cleanup_expired`
+  - `BridgeManager`: `add_bridge`, `list_bridges`
+  - `DirectClient`: `queue_publish_message`, `setup_publish_acknowledgment`
+  - Callers must remove `.await` from these function calls
+
+- **Parameter type changes**: Some functions now take `&str` instead of `String`
+  - `CallbackManager::register` and `register_with_id`: `topic_filter: &str`
+  - `CertificateAuthProvider::add_certificate`: `fingerprint: &str, username: &str`
+
 ## [mqtt5 0.18.3] / [mqtt5-wasm 0.8.3] - 2026-01-14
 
 ### Added

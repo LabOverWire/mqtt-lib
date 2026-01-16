@@ -539,17 +539,12 @@ impl DirectClientInner {
     }
 
     /// Queue a publish message when disconnected
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the operation fails
-    #[allow(clippy::unused_async)]
-    async fn queue_publish_message(
+    fn queue_publish_message(
         &self,
         topic: String,
         payload: Vec<u8>,
         options: &PublishOptions,
-    ) -> Result<PublishResult> {
+    ) -> PublishResult {
         let packet_id = self.packet_id_generator.next();
         let publish = PublishPacket {
             topic_name: topic,
@@ -563,11 +558,10 @@ impl DirectClientInner {
         };
 
         self.queued_messages.lock().push(publish);
-        Ok(PublishResult::QoS1Or2 { packet_id })
+        PublishResult::QoS1Or2 { packet_id }
     }
 
-    #[allow(clippy::unused_async)]
-    async fn setup_publish_acknowledgment(
+    fn setup_publish_acknowledgment(
         &self,
         qos: QoS,
         packet_id: Option<u16>,
@@ -652,7 +646,7 @@ impl DirectClientInner {
     ) -> Result<PublishResult> {
         // Check if we should queue the message
         if !self.is_connected() && self.queue_on_disconnect && options.qos != QoS::AtMostOnce {
-            return self.queue_publish_message(topic, payload, &options).await;
+            return Ok(self.queue_publish_message(topic, payload, &options));
         }
 
         // Enforce server's maximum QoS limit
@@ -733,9 +727,7 @@ impl DirectClientInner {
         }
 
         // For QoS > 0, set up acknowledgment waiting
-        let rx = self
-            .setup_publish_acknowledgment(options.qos, packet_id)
-            .await;
+        let rx = self.setup_publish_acknowledgment(options.qos, packet_id);
 
         // Send PUBLISH packet
         if publish.payload.len() > 10000 {
@@ -1850,7 +1842,7 @@ async fn handle_publish_with_ack(
         }
     }
 
-    let _ = callback_manager.dispatch(&publish).await;
+    let _ = callback_manager.dispatch(&publish);
 
     Ok(())
 }

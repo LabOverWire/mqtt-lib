@@ -47,8 +47,7 @@ impl AuthRateLimiter {
         }
     }
 
-    #[allow(clippy::unused_async)]
-    pub async fn check_rate_limit(&self, addr: IpAddr) -> bool {
+    pub fn check_rate_limit(&self, addr: IpAddr) -> bool {
         let mut entries = self.entries.lock();
         let now = Instant::now();
 
@@ -66,8 +65,7 @@ impl AuthRateLimiter {
         true
     }
 
-    #[allow(clippy::unused_async)]
-    pub async fn record_attempt(&self, addr: IpAddr, success: bool) {
+    pub fn record_attempt(&self, addr: IpAddr, success: bool) {
         if success {
             self.entries.lock().remove(&addr);
             return;
@@ -89,8 +87,7 @@ impl AuthRateLimiter {
         }
     }
 
-    #[allow(clippy::unused_async)]
-    pub async fn cleanup_expired(&self) {
+    pub fn cleanup_expired(&self) {
         let mut entries = self.entries.lock();
         let now = Instant::now();
         entries.retain(|_, entry| now.duration_since(entry.window_start) < self.lockout_duration);
@@ -382,7 +379,7 @@ impl AuthProvider for RateLimitedAuthProvider {
         Box::pin(async move {
             let ip = client_addr.ip();
 
-            if !self.rate_limiter.check_rate_limit(ip).await {
+            if !self.rate_limiter.check_rate_limit(ip) {
                 return Ok(AuthResult::fail_with_reason(
                     ReasonCode::ConnectionRateExceeded,
                     "Rate limit exceeded".to_string(),
@@ -390,9 +387,7 @@ impl AuthProvider for RateLimitedAuthProvider {
             }
 
             let result = self.inner.authenticate(connect, client_addr).await?;
-            self.rate_limiter
-                .record_attempt(ip, result.authenticated)
-                .await;
+            self.rate_limiter.record_attempt(ip, result.authenticated);
             Ok(result)
         })
     }
@@ -621,35 +616,33 @@ impl PasswordAuthProvider {
     /// # Errors
     ///
     /// Returns an error if Argon2 hashing fails
-    #[allow(clippy::unused_async)]
-    pub async fn add_user(&self, username: String, password: &str) -> Result<()> {
+    pub fn add_user(&self, username: String, password: &str) -> Result<()> {
         let password_hash = Self::hash_password(password)?;
         self.users.write().insert(username, password_hash);
         Ok(())
     }
 
-    #[allow(clippy::unused_async)]
-    pub async fn add_user_with_hash(&self, username: String, password_hash: String) {
+    pub fn add_user_with_hash(&self, username: String, password_hash: String) {
         self.users.write().insert(username, password_hash);
     }
 
-    #[allow(clippy::unused_async)]
-    pub async fn remove_user(&self, username: &str) -> bool {
+    #[must_use]
+    pub fn remove_user(&self, username: &str) -> bool {
         self.users.write().remove(username).is_some()
     }
 
-    #[allow(clippy::unused_async)]
-    pub async fn user_count(&self) -> usize {
+    #[must_use]
+    pub fn user_count(&self) -> usize {
         self.users.read().len()
     }
 
-    #[allow(clippy::unused_async)]
-    pub async fn has_user(&self, username: &str) -> bool {
+    #[must_use]
+    pub fn has_user(&self, username: &str) -> bool {
         self.users.read().contains_key(username)
     }
 
-    #[allow(clippy::unused_async)]
-    pub async fn verify_user_password(&self, username: &str, password: &str) -> bool {
+    #[must_use]
+    pub fn verify_user_password(&self, username: &str, password: &str) -> bool {
         let users = self.users.read();
         users
             .get(username)
@@ -1006,16 +999,15 @@ impl CertificateAuthProvider {
         Ok(())
     }
 
-    #[allow(clippy::unused_async)]
-    pub async fn add_certificate(&self, fingerprint: String, username: String) {
+    pub fn add_certificate(&self, fingerprint: &str, username: &str) {
         let normalized_fingerprint = fingerprint.to_lowercase();
         self.allowed_certs
             .write()
-            .insert(normalized_fingerprint, username);
+            .insert(normalized_fingerprint, username.to_string());
     }
 
-    #[allow(clippy::unused_async)]
-    pub async fn remove_certificate(&self, fingerprint: &str) -> bool {
+    #[must_use]
+    pub fn remove_certificate(&self, fingerprint: &str) -> bool {
         let normalized_fingerprint = fingerprint.to_lowercase();
         self.allowed_certs
             .write()
@@ -1023,13 +1015,13 @@ impl CertificateAuthProvider {
             .is_some()
     }
 
-    #[allow(clippy::unused_async)]
-    pub async fn cert_count(&self) -> usize {
+    #[must_use]
+    pub fn cert_count(&self) -> usize {
         self.allowed_certs.read().len()
     }
 
-    #[allow(clippy::unused_async)]
-    pub async fn has_certificate(&self, fingerprint: &str) -> bool {
+    #[must_use]
+    pub fn has_certificate(&self, fingerprint: &str) -> bool {
         let normalized_fingerprint = fingerprint.to_lowercase();
         self.allowed_certs
             .read()
@@ -1236,10 +1228,7 @@ mod tests {
     #[tokio::test]
     async fn test_password_provider() {
         let provider = PasswordAuthProvider::new();
-        provider
-            .add_user("alice".to_string(), "secret123")
-            .await
-            .unwrap();
+        provider.add_user("alice".to_string(), "secret123").unwrap();
 
         let addr = "127.0.0.1:12345".parse().unwrap();
 
@@ -1317,31 +1306,28 @@ mod tests {
         let provider = PasswordAuthProvider::new();
 
         // Initially empty
-        assert_eq!(provider.user_count().await, 0);
-        assert!(!provider.has_user("alice").await);
+        assert_eq!(provider.user_count(), 0);
+        assert!(!provider.has_user("alice"));
 
         // Add user with plaintext password (gets hashed)
-        provider
-            .add_user("alice".to_string(), "secret123")
-            .await
-            .unwrap();
-        assert_eq!(provider.user_count().await, 1);
-        assert!(provider.has_user("alice").await);
+        provider.add_user("alice".to_string(), "secret123").unwrap();
+        assert_eq!(provider.user_count(), 1);
+        assert!(provider.has_user("alice"));
 
         // Add user with pre-hashed password
         let hash = PasswordAuthProvider::hash_password("password456").unwrap();
-        provider.add_user_with_hash("bob".to_string(), hash).await;
-        assert_eq!(provider.user_count().await, 2);
-        assert!(provider.has_user("bob").await);
+        provider.add_user_with_hash("bob".to_string(), hash);
+        assert_eq!(provider.user_count(), 2);
+        assert!(provider.has_user("bob"));
 
         // Remove user
-        assert!(provider.remove_user("alice").await);
-        assert_eq!(provider.user_count().await, 1);
-        assert!(!provider.has_user("alice").await);
+        assert!(provider.remove_user("alice"));
+        assert_eq!(provider.user_count(), 1);
+        assert!(!provider.has_user("alice"));
 
         // Remove non-existent user
-        assert!(!provider.remove_user("charlie").await);
-        assert_eq!(provider.user_count().await, 1);
+        assert!(!provider.remove_user("charlie"));
+        assert_eq!(provider.user_count(), 1);
     }
 
     #[tokio::test]
@@ -1365,9 +1351,9 @@ mod tests {
         let provider = PasswordAuthProvider::from_file(temp_file.path())
             .await
             .unwrap();
-        assert_eq!(provider.user_count().await, 2);
-        assert!(provider.has_user("alice").await);
-        assert!(provider.has_user("bob").await);
+        assert_eq!(provider.user_count(), 2);
+        assert!(provider.has_user("alice"));
+        assert!(provider.has_user("bob"));
 
         // Test authentication
         let addr = "127.0.0.1:12345".parse().unwrap();
@@ -1413,7 +1399,7 @@ mod tests {
         let provider = PasswordAuthProvider::from_file(temp_file.path())
             .await
             .unwrap();
-        assert_eq!(provider.user_count().await, 1);
+        assert_eq!(provider.user_count(), 1);
 
         // Update file with additional user
         let bob_hash = PasswordAuthProvider::hash_password("password456").unwrap();
@@ -1422,9 +1408,9 @@ mod tests {
 
         // Reload should pick up the new user
         provider.load_password_file().await.unwrap();
-        assert_eq!(provider.user_count().await, 2);
-        assert!(provider.has_user("alice").await);
-        assert!(provider.has_user("bob").await);
+        assert_eq!(provider.user_count(), 2);
+        assert!(provider.has_user("alice"));
+        assert!(provider.has_user("bob"));
     }
 
     #[tokio::test]
@@ -1557,9 +1543,7 @@ mod tests {
     async fn test_certificate_provider() {
         let provider = CertificateAuthProvider::new();
         let fingerprint = "1234567890123456789012345678901234567890123456789012345678901234";
-        provider
-            .add_certificate(fingerprint.to_string(), "alice".to_string())
-            .await;
+        provider.add_certificate(fingerprint, "alice");
 
         let addr = "127.0.0.1:12345".parse().unwrap();
 
@@ -1610,27 +1594,25 @@ mod tests {
         let provider = CertificateAuthProvider::new();
 
         // Initially empty
-        assert_eq!(provider.cert_count().await, 0);
-        assert!(!provider.has_certificate("abc123").await);
+        assert_eq!(provider.cert_count(), 0);
+        assert!(!provider.has_certificate("abc123"));
 
         // Add certificate
         let fingerprint = "1234567890123456789012345678901234567890123456789012345678901234";
-        provider
-            .add_certificate(fingerprint.to_string(), "alice".to_string())
-            .await;
-        assert_eq!(provider.cert_count().await, 1);
-        assert!(provider.has_certificate(fingerprint).await);
+        provider.add_certificate(fingerprint, "alice");
+        assert_eq!(provider.cert_count(), 1);
+        assert!(provider.has_certificate(fingerprint));
 
         // Case insensitive
-        assert!(provider.has_certificate(&fingerprint.to_uppercase()).await);
+        assert!(provider.has_certificate(&fingerprint.to_uppercase()));
 
         // Remove certificate
-        assert!(provider.remove_certificate(fingerprint).await);
-        assert_eq!(provider.cert_count().await, 0);
-        assert!(!provider.has_certificate(fingerprint).await);
+        assert!(provider.remove_certificate(fingerprint));
+        assert_eq!(provider.cert_count(), 0);
+        assert!(!provider.has_certificate(fingerprint));
 
         // Remove non-existent certificate
-        assert!(!provider.remove_certificate("nonexistent").await);
+        assert!(!provider.remove_certificate("nonexistent"));
     }
 
     #[tokio::test]
@@ -1671,17 +1653,11 @@ mod tests {
         let provider = CertificateAuthProvider::from_file(temp_file.path())
             .await
             .unwrap();
-        assert_eq!(provider.cert_count().await, 2); // Only valid entries
-        assert!(
-            provider
-                .has_certificate("1234567890123456789012345678901234567890123456789012345678901234")
-                .await
-        );
-        assert!(
-            provider
-                .has_certificate("abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd")
-                .await
-        );
+        assert_eq!(provider.cert_count(), 2); // Only valid entries
+        assert!(provider
+            .has_certificate("1234567890123456789012345678901234567890123456789012345678901234"));
+        assert!(provider
+            .has_certificate("abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd"));
 
         // Test authentication with loaded certificates
         let addr = "127.0.0.1:12345".parse().unwrap();
@@ -1725,7 +1701,7 @@ mod tests {
         let provider = CertificateAuthProvider::from_file(temp_file.path())
             .await
             .unwrap();
-        assert_eq!(provider.cert_count().await, 1);
+        assert_eq!(provider.cert_count(), 1);
 
         // Update file with additional certificate
         writeln!(
@@ -1737,17 +1713,11 @@ mod tests {
 
         // Reload should pick up the new certificate
         provider.load_cert_file().await.unwrap();
-        assert_eq!(provider.cert_count().await, 2);
-        assert!(
-            provider
-                .has_certificate("1234567890123456789012345678901234567890123456789012345678901234")
-                .await
-        );
-        assert!(
-            provider
-                .has_certificate("abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd")
-                .await
-        );
+        assert_eq!(provider.cert_count(), 2);
+        assert!(provider
+            .has_certificate("1234567890123456789012345678901234567890123456789012345678901234"));
+        assert!(provider
+            .has_certificate("abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd"));
     }
 
     #[test]

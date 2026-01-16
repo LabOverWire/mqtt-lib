@@ -36,12 +36,12 @@ async fn test_bridge_manager_lifecycle() {
     );
 
     // Add bridge (will fail to connect but that's ok for this test)
-    let result = manager.add_bridge(config.clone()).await;
+    let result = manager.add_bridge(config.clone());
     // We expect this to fail since there's no broker at localhost:1883
     assert!(result.is_err() || result.is_ok());
 
     // List bridges
-    let bridges = manager.list_bridges().await;
+    let bridges = manager.list_bridges();
     // Bridge might not be added if connection failed immediately
     assert!(bridges.len() <= 1);
 
