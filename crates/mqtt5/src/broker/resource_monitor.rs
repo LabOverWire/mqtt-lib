@@ -4,6 +4,7 @@
 //! limits to prevent resource exhaustion attacks.
 
 use crate::time::{Duration, Instant};
+use mqtt5_protocol::usize_to_f64_saturating;
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -356,14 +357,14 @@ pub struct ResourceStats {
 }
 
 impl ResourceStats {
-    #[allow(clippy::cast_precision_loss)]
     #[must_use]
     pub fn connection_utilization(&self) -> f64 {
         if self.max_connections == 0 {
-            0.0
-        } else {
-            (self.current_connections as f64 / self.max_connections as f64) * 100.0
+            return 0.0;
         }
+        let current = usize_to_f64_saturating(self.current_connections);
+        let max = usize_to_f64_saturating(self.max_connections);
+        (current / max) * 100.0
     }
 }
 

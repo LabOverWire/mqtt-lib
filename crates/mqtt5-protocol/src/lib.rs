@@ -14,6 +14,7 @@ pub mod error;
 pub mod error_classification;
 pub mod flags;
 pub mod keepalive;
+pub mod numeric;
 pub mod packet;
 pub mod packet_id;
 pub mod protocol;
@@ -57,6 +58,12 @@ pub use connection::{
 pub use keepalive::{calculate_ping_interval, is_keepalive_timeout, KeepaliveConfig};
 
 pub use error_classification::RecoverableError;
+
+pub use numeric::{
+    i32_to_u32_saturating, u128_to_f64_saturating, u128_to_u32_saturating, u128_to_u64_saturating,
+    u64_to_f64_saturating, u64_to_u16_saturating, u64_to_u32_saturating, usize_to_f64_saturating,
+    usize_to_u16_saturating, usize_to_u32_saturating, F64_MAX_SAFE_INTEGER,
+};
 
 pub use bridge::{
     evaluate_forwarding, BridgeDirection, BridgeStats, ForwardingDecision, TopicMappingCore,

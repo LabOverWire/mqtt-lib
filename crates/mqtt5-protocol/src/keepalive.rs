@@ -1,3 +1,4 @@
+use crate::numeric::u128_to_u64_saturating;
 use crate::time::Duration;
 
 pub const DEFAULT_LOCK_RETRY_ATTEMPTS: u32 = 100;
@@ -51,34 +52,23 @@ impl KeepaliveConfig {
     }
 
     #[must_use]
-    #[allow(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        clippy::cast_precision_loss
-    )]
     pub fn ping_interval(&self, keepalive: Duration) -> Duration {
-        let millis = keepalive.as_millis() as u64;
+        let millis = u128_to_u64_saturating(keepalive.as_millis());
         let ping_millis = millis * u64::from(self.ping_interval_percent) / 100;
         Duration::from_millis(ping_millis)
     }
 
     #[must_use]
-    #[allow(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        clippy::cast_precision_loss
-    )]
     pub fn timeout_duration(&self, keepalive: Duration) -> Duration {
-        let millis = keepalive.as_millis() as u64;
+        let millis = u128_to_u64_saturating(keepalive.as_millis());
         let timeout_millis = millis * u64::from(self.timeout_percent) / 100;
         Duration::from_millis(timeout_millis)
     }
 }
 
 #[must_use]
-#[allow(clippy::cast_possible_truncation)]
 pub fn calculate_ping_interval(keepalive: Duration, percent: u8) -> Duration {
-    let millis = keepalive.as_millis() as u64;
+    let millis = u128_to_u64_saturating(keepalive.as_millis());
     let ping_millis = millis * u64::from(percent) / 100;
     Duration::from_millis(ping_millis)
 }

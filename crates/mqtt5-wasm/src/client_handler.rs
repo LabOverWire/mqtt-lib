@@ -28,6 +28,7 @@ use mqtt5_protocol::types::ProtocolVersion;
 use mqtt5_protocol::KeepaliveConfig;
 use mqtt5_protocol::QoS;
 use mqtt5_protocol::Transport;
+use mqtt5_protocol::{u64_to_u32_saturating, usize_to_u32_saturating};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use tracing::{debug, error, info, warn};
@@ -433,7 +434,6 @@ impl WasmClientHandler {
         }
     }
 
-    #[allow(clippy::cast_possible_truncation)]
     async fn handle_connect(
         &mut self,
         mut connect: ConnectPacket,
@@ -516,14 +516,16 @@ impl WasmClientHandler {
             if let Ok(config) = self.config.read() {
                 connack
                     .properties
-                    .set_session_expiry_interval(config.session_expiry_interval.as_secs() as u32);
+                    .set_session_expiry_interval(u64_to_u32_saturating(
+                        config.session_expiry_interval.as_secs(),
+                    ));
                 if config.maximum_qos < 2 {
                     connack.properties.set_maximum_qos(config.maximum_qos);
                 }
                 connack.properties.set_retain_available(true);
                 connack
                     .properties
-                    .set_maximum_packet_size(config.max_packet_size as u32);
+                    .set_maximum_packet_size(usize_to_u32_saturating(config.max_packet_size));
                 connack
                     .properties
                     .set_topic_alias_maximum(config.topic_alias_maximum);
@@ -1065,7 +1067,6 @@ impl WasmClientHandler {
         }
     }
 
-    #[allow(clippy::cast_possible_truncation)]
     async fn process_enhanced_auth_result(
         &mut self,
         result: EnhancedAuthResult,
@@ -1098,16 +1099,20 @@ impl WasmClientHandler {
                     }
 
                     if let Ok(config) = self.config.read() {
-                        connack.properties.set_session_expiry_interval(
-                            config.session_expiry_interval.as_secs() as u32,
-                        );
+                        connack
+                            .properties
+                            .set_session_expiry_interval(u64_to_u32_saturating(
+                                config.session_expiry_interval.as_secs(),
+                            ));
                         if config.maximum_qos < 2 {
                             connack.properties.set_maximum_qos(config.maximum_qos);
                         }
                         connack.properties.set_retain_available(true);
                         connack
                             .properties
-                            .set_maximum_packet_size(config.max_packet_size as u32);
+                            .set_maximum_packet_size(usize_to_u32_saturating(
+                                config.max_packet_size,
+                            ));
                         connack
                             .properties
                             .set_topic_alias_maximum(config.topic_alias_maximum);

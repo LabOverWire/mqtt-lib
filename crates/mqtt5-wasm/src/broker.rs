@@ -8,6 +8,7 @@ use mqtt5::broker::router::MessageRouter;
 use mqtt5::broker::storage::{DynamicStorage, MemoryBackend};
 use mqtt5::broker::sys_topics::{BrokerStats, SysTopicsProvider};
 use mqtt5::time::Duration;
+use mqtt5_protocol::{u64_to_f64_saturating, u64_to_u32_saturating};
 use std::cell::{Cell, RefCell};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -255,41 +256,33 @@ impl WasmBroker {
     /// # Errors
     /// Returns an error if adding the user fails.
     #[wasm_bindgen]
-    pub async fn add_user(&self, username: String, password: String) -> Result<(), JsValue> {
+    pub fn add_user(&self, username: String, password: String) -> Result<(), JsValue> {
         self.auth_provider
             .password_provider()
             .add_user(username, &password)
-            .await
             .map_err(|e| JsValue::from_str(&e.to_string()))
     }
 
     #[wasm_bindgen]
-    pub async fn add_user_with_hash(&self, username: String, password_hash: String) {
+    pub fn add_user_with_hash(&self, username: String, password_hash: String) {
         self.auth_provider
             .password_provider()
-            .add_user_with_hash(username, password_hash)
-            .await;
+            .add_user_with_hash(username, password_hash);
     }
 
     #[wasm_bindgen]
-    pub async fn remove_user(&self, username: &str) -> bool {
-        self.auth_provider
-            .password_provider()
-            .remove_user(username)
-            .await
+    pub fn remove_user(&self, username: &str) -> bool {
+        self.auth_provider.password_provider().remove_user(username)
     }
 
     #[wasm_bindgen]
-    pub async fn has_user(&self, username: &str) -> bool {
-        self.auth_provider
-            .password_provider()
-            .has_user(username)
-            .await
+    pub fn has_user(&self, username: &str) -> bool {
+        self.auth_provider.password_provider().has_user(username)
     }
 
     #[wasm_bindgen]
-    pub async fn user_count(&self) -> usize {
-        self.auth_provider.password_provider().user_count().await
+    pub fn user_count(&self) -> usize {
+        self.auth_provider.password_provider().user_count()
     }
 
     /// # Errors
@@ -565,7 +558,7 @@ impl WasmBroker {
     #[wasm_bindgen]
     #[must_use]
     pub fn get_config_hash(&self) -> f64 {
-        self.config_hash.get() as f64
+        u64_to_f64_saturating(self.config_hash.get())
     }
 
     #[wasm_bindgen]
@@ -631,7 +624,7 @@ impl WasmBroker {
     pub fn get_session_expiry_interval_secs(&self) -> u32 {
         self.config
             .read()
-            .map(|c| c.session_expiry_interval.as_secs() as u32)
+            .map(|c| u64_to_u32_saturating(c.session_expiry_interval.as_secs()))
             .unwrap_or_else(|_| {
                 web_sys::console::warn_1(
                     &"Config read failed, using default session_expiry_interval".into(),

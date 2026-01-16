@@ -15,6 +15,7 @@ use mqtt5_protocol::packet_id::PacketIdGenerator;
 use mqtt5_protocol::protocol::v5::properties::Properties;
 use mqtt5_protocol::strip_shared_subscription_prefix;
 use mqtt5_protocol::time::Duration;
+use mqtt5_protocol::u128_to_u32_saturating;
 use mqtt5_protocol::KeepaliveConfig;
 use mqtt5_protocol::QoS;
 use mqtt5_protocol::Transport;
@@ -299,9 +300,15 @@ impl WasmMqttClient {
                     let state_ref = state.borrow();
                     let attempt = state_ref.reconnect_attempt;
                     let base_delay = state_ref.reconnect_config.calculate_delay(attempt);
-                    #[allow(clippy::cast_possible_truncation)]
-                    let base_delay_ms = base_delay.as_millis() as u32;
-                    let jitter = (js_sys::Math::random() * f64::from(base_delay_ms / 4)) as u32;
+                    let base_delay_ms = u128_to_u32_saturating(base_delay.as_millis());
+                    let jitter_f64 = js_sys::Math::random() * f64::from(base_delay_ms / 4);
+                    let jitter = if jitter_f64 >= f64::from(u32::MAX) {
+                        u32::MAX
+                    } else {
+                        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                        let result = jitter_f64 as u32;
+                        result
+                    };
                     let delay_ms = base_delay_ms.saturating_add(jitter);
                     let should_continue = state_ref.reconnect_config.should_retry(attempt);
                     let url = state_ref.last_url.clone();
@@ -623,8 +630,7 @@ impl WasmMqttClient {
                 }
 
                 let ping_interval = keepalive_config.ping_interval(keepalive_duration);
-                #[allow(clippy::cast_possible_truncation)]
-                let sleep_duration = ping_interval.as_millis() as u32;
+                let sleep_duration = u128_to_u32_saturating(ping_interval.as_millis());
                 sleep_ms(sleep_duration).await;
 
                 let timeout_duration = keepalive_config.timeout_duration(keepalive_duration);
