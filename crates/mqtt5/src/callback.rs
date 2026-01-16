@@ -1,10 +1,10 @@
 use crate::error::Result;
 use crate::packet::publish::PublishPacket;
 use crate::validation::strip_shared_subscription_prefix;
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use tokio::sync::RwLock;
 
 /// Type alias for publish callback functions
 pub type PublishCallback = Arc<dyn Fn(PublishPacket) + Send + Sync>;
@@ -23,11 +23,11 @@ pub(crate) struct CallbackEntry {
 /// Manages message callbacks for topic subscriptions
 pub struct CallbackManager {
     /// Callbacks indexed by topic filter for exact matches
-    exact_callbacks: Arc<RwLock<HashMap<String, Vec<CallbackEntry>>>>,
+    exact_callbacks: Arc<Mutex<HashMap<String, Vec<CallbackEntry>>>>,
     /// Callbacks for wildcard subscriptions
-    wildcard_callbacks: Arc<RwLock<Vec<CallbackEntry>>>,
+    wildcard_callbacks: Arc<Mutex<Vec<CallbackEntry>>>,
     /// Registry of all callbacks by ID for restoration
-    callback_registry: Arc<RwLock<HashMap<CallbackId, CallbackEntry>>>,
+    callback_registry: Arc<Mutex<HashMap<CallbackId, CallbackEntry>>>,
     /// Next callback ID
     next_id: Arc<AtomicU64>,
 }
@@ -37,9 +37,9 @@ impl CallbackManager {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            exact_callbacks: Arc::new(RwLock::new(HashMap::new())),
-            wildcard_callbacks: Arc::new(RwLock::new(Vec::new())),
-            callback_registry: Arc::new(RwLock::new(HashMap::new())),
+            exact_callbacks: Arc::new(Mutex::new(HashMap::new())),
+            wildcard_callbacks: Arc::new(Mutex::new(Vec::new())),
+            callback_registry: Arc::new(Mutex::new(HashMap::new())),
             next_id: Arc::new(AtomicU64::new(1)),
         }
     }
@@ -67,11 +67,7 @@ impl CallbackManager {
             topic_filter: topic_filter.clone(),
         };
 
-        // Store in registry
-        self.callback_registry
-            .write()
-            .await
-            .insert(id, entry.clone());
+        self.callback_registry.lock().insert(id, entry.clone());
 
         // Register using existing logic
         self.register_internal(topic_filter, entry).await?;
@@ -98,27 +94,24 @@ impl CallbackManager {
     /// # Errors
     ///
     /// Returns an error if the operation fails
+    #[allow(clippy::unused_async)]
     async fn register_internal(&self, topic_filter: String, entry: CallbackEntry) -> Result<()> {
         let actual_filter = strip_shared_subscription_prefix(&topic_filter).to_string();
 
         // Check if it's a wildcard subscription
         if actual_filter.contains('+') || actual_filter.contains('#') {
-            let mut wildcards = self.wildcard_callbacks.write().await;
+            let mut wildcards = self.wildcard_callbacks.lock();
             wildcards.push(entry);
         } else {
-            // Exact match - use HashMap for O(1) lookup
-            let mut exact = self.exact_callbacks.write().await;
-            exact
-                .entry(actual_filter)
-                .or_insert_with(Vec::new)
-                .push(entry);
+            let mut exact = self.exact_callbacks.lock();
+            exact.entry(actual_filter).or_default().push(entry);
         }
         Ok(())
     }
 
-    /// Gets a callback by ID from the registry
+    #[allow(clippy::unused_async)]
     async fn get_callback(&self, id: CallbackId) -> Option<CallbackEntry> {
-        self.callback_registry.read().await.get(&id).cloned()
+        self.callback_registry.lock().get(&id).cloned()
     }
 
     /// Re-registers a callback using its stored ID
@@ -137,10 +130,10 @@ impl CallbackManager {
 
             // Check if already registered
             let already_registered = if actual_filter.contains('+') || actual_filter.contains('#') {
-                let wildcards = self.wildcard_callbacks.read().await;
+                let wildcards = self.wildcard_callbacks.lock();
                 wildcards.iter().any(|e| e.id == id)
             } else {
-                let exact = self.exact_callbacks.read().await;
+                let exact = self.exact_callbacks.lock();
                 exact
                     .get(&actual_filter)
                     .is_some_and(|entries| entries.iter().any(|e| e.id == id))
@@ -167,23 +160,24 @@ impl CallbackManager {
     /// # Errors
     ///
     /// Returns an error if the operation fails
+    #[allow(clippy::unused_async)]
     pub async fn unregister(&self, topic_filter: &str) -> Result<bool> {
         let actual_filter = strip_shared_subscription_prefix(topic_filter);
 
         // Remove from registry and track if anything was removed
-        let mut registry = self.callback_registry.write().await;
+        let mut registry = self.callback_registry.lock();
         let registry_count_before = registry.len();
         registry.retain(|_, entry| entry.topic_filter != topic_filter);
         let removed_from_registry = registry.len() < registry_count_before;
         drop(registry);
 
         let removed_from_callbacks = if actual_filter.contains('+') || actual_filter.contains('#') {
-            let mut wildcards = self.wildcard_callbacks.write().await;
+            let mut wildcards = self.wildcard_callbacks.lock();
             let count_before = wildcards.len();
             wildcards.retain(|entry| entry.topic_filter != topic_filter);
             wildcards.len() < count_before
         } else {
-            let mut exact = self.exact_callbacks.write().await;
+            let mut exact = self.exact_callbacks.lock();
             exact.remove(actual_filter).is_some()
         };
 
@@ -199,12 +193,12 @@ impl CallbackManager {
     /// # Errors
     ///
     /// Returns an error if the operation fails
+    #[allow(clippy::unused_async)]
     pub async fn dispatch(&self, message: &PublishPacket) -> Result<()> {
         let mut callbacks_to_call = Vec::new();
 
-        // Check exact matches first (O(1) lookup)
         {
-            let exact = self.exact_callbacks.read().await;
+            let exact = self.exact_callbacks.lock();
             if let Some(entries) = exact.get(&message.topic_name) {
                 for entry in entries {
                     callbacks_to_call.push(entry.callback.clone());
@@ -212,9 +206,8 @@ impl CallbackManager {
             }
         }
 
-        // Check wildcard matches
         {
-            let wildcards = self.wildcard_callbacks.read().await;
+            let wildcards = self.wildcard_callbacks.lock();
             for entry in wildcards.iter() {
                 let match_filter = strip_shared_subscription_prefix(&entry.topic_filter);
                 if crate::topic_matching::matches(&message.topic_name, match_filter) {
@@ -255,16 +248,16 @@ impl CallbackManager {
         Ok(())
     }
 
-    /// Returns the number of registered callbacks
+    #[allow(clippy::unused_async)]
     pub async fn callback_count(&self) -> usize {
-        self.callback_registry.read().await.len()
+        self.callback_registry.lock().len()
     }
 
-    /// Clears all callbacks
+    #[allow(clippy::unused_async)]
     pub async fn clear(&self) {
-        self.exact_callbacks.write().await.clear();
-        self.wildcard_callbacks.write().await.clear();
-        self.callback_registry.write().await.clear();
+        self.exact_callbacks.lock().clear();
+        self.wildcard_callbacks.lock().clear();
+        self.callback_registry.lock().clear();
     }
 }
 

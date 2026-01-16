@@ -5,20 +5,20 @@
 use super::{ClientSession, QueuedMessage, RetainedMessage, StorageBackend};
 use crate::error::Result;
 use crate::validation::topic_matches_filter;
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::RwLock;
 use tracing::debug;
 
 /// In-memory storage backend
 #[derive(Debug)]
 pub struct MemoryBackend {
     /// Retained messages by topic
-    retained: Arc<RwLock<HashMap<String, RetainedMessage>>>,
+    retained: Arc<Mutex<HashMap<String, RetainedMessage>>>,
     /// Client sessions by client ID
-    sessions: Arc<RwLock<HashMap<String, ClientSession>>>,
+    sessions: Arc<Mutex<HashMap<String, ClientSession>>>,
     /// Queued messages by client ID
-    queues: Arc<RwLock<HashMap<String, Vec<QueuedMessage>>>>,
+    queues: Arc<Mutex<HashMap<String, Vec<QueuedMessage>>>>,
 }
 
 impl MemoryBackend {
@@ -26,9 +26,9 @@ impl MemoryBackend {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            retained: Arc::new(RwLock::new(HashMap::new())),
-            sessions: Arc::new(RwLock::new(HashMap::new())),
-            queues: Arc::new(RwLock::new(HashMap::new())),
+            retained: Arc::new(Mutex::new(HashMap::new())),
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+            queues: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -41,20 +41,20 @@ impl Default for MemoryBackend {
 
 impl StorageBackend for MemoryBackend {
     async fn store_retained_message(&self, topic: &str, message: RetainedMessage) -> Result<()> {
-        let mut retained = self.retained.write().await;
+        let mut retained = self.retained.lock();
         retained.insert(topic.to_string(), message);
         debug!("Stored retained message for topic: {}", topic);
         Ok(())
     }
 
     async fn get_retained_message(&self, topic: &str) -> Result<Option<RetainedMessage>> {
-        let retained = self.retained.read().await;
-        let message = retained.get(topic).cloned();
+        let message = {
+            let retained = self.retained.lock();
+            retained.get(topic).cloned()
+        };
 
-        // Check if message has expired
         if let Some(ref msg) = message {
             if msg.is_expired() {
-                drop(retained);
                 self.remove_retained_message(topic).await?;
                 return Ok(None);
             }
@@ -64,7 +64,7 @@ impl StorageBackend for MemoryBackend {
     }
 
     async fn remove_retained_message(&self, topic: &str) -> Result<()> {
-        let mut retained = self.retained.write().await;
+        let mut retained = self.retained.lock();
         retained.remove(topic);
         debug!("Removed retained message for topic: {}", topic);
         Ok(())
@@ -74,7 +74,7 @@ impl StorageBackend for MemoryBackend {
         &self,
         topic_filter: &str,
     ) -> Result<Vec<(String, RetainedMessage)>> {
-        let retained = self.retained.read().await;
+        let retained = self.retained.lock();
         let mut messages = Vec::new();
 
         for (topic, message) in retained.iter() {
@@ -88,20 +88,20 @@ impl StorageBackend for MemoryBackend {
 
     async fn store_session(&self, session: ClientSession) -> Result<()> {
         let client_id = session.client_id.clone();
-        let mut sessions = self.sessions.write().await;
+        let mut sessions = self.sessions.lock();
         sessions.insert(client_id.clone(), session);
         debug!("Stored session for client: {}", client_id);
         Ok(())
     }
 
     async fn get_session(&self, client_id: &str) -> Result<Option<ClientSession>> {
-        let sessions = self.sessions.read().await;
-        let session = sessions.get(client_id).cloned();
+        let session = {
+            let sessions = self.sessions.lock();
+            sessions.get(client_id).cloned()
+        };
 
-        // Check if session has expired
         if let Some(ref sess) = session {
             if sess.is_expired() {
-                drop(sessions);
                 self.remove_session(client_id).await?;
                 return Ok(None);
             }
@@ -111,14 +111,14 @@ impl StorageBackend for MemoryBackend {
     }
 
     async fn remove_session(&self, client_id: &str) -> Result<()> {
-        let mut sessions = self.sessions.write().await;
+        let mut sessions = self.sessions.lock();
         sessions.remove(client_id);
         debug!("Removed session for client: {}", client_id);
         Ok(())
     }
 
     async fn queue_message(&self, message: QueuedMessage) -> Result<()> {
-        let mut queues = self.queues.write().await;
+        let mut queues = self.queues.lock();
         let queue = queues.entry(message.client_id.clone()).or_default();
         queue.push(message.clone());
         debug!("Queued message for client: {}", message.client_id);
@@ -126,7 +126,7 @@ impl StorageBackend for MemoryBackend {
     }
 
     async fn get_queued_messages(&self, client_id: &str) -> Result<Vec<QueuedMessage>> {
-        let queues = self.queues.read().await;
+        let queues = self.queues.lock();
         if let Some(messages) = queues.get(client_id) {
             let mut valid_messages = Vec::new();
             for message in messages {
@@ -141,7 +141,7 @@ impl StorageBackend for MemoryBackend {
     }
 
     async fn remove_queued_messages(&self, client_id: &str) -> Result<()> {
-        let mut queues = self.queues.write().await;
+        let mut queues = self.queues.lock();
         queues.remove(client_id);
         debug!("Removed all queued messages for client: {}", client_id);
         Ok(())
@@ -150,9 +150,8 @@ impl StorageBackend for MemoryBackend {
     async fn cleanup_expired(&self) -> Result<()> {
         let mut removed_count = 0;
 
-        // Clean expired retained messages
         {
-            let mut retained = self.retained.write().await;
+            let mut retained = self.retained.lock();
             retained.retain(|_, message| {
                 if message.is_expired() {
                     removed_count += 1;
@@ -163,9 +162,8 @@ impl StorageBackend for MemoryBackend {
             });
         }
 
-        // Clean expired sessions
         {
-            let mut sessions = self.sessions.write().await;
+            let mut sessions = self.sessions.lock();
             sessions.retain(|_, session| {
                 if session.is_expired() {
                     removed_count += 1;
@@ -176,15 +174,13 @@ impl StorageBackend for MemoryBackend {
             });
         }
 
-        // Clean expired queued messages
         {
-            let mut queues = self.queues.write().await;
+            let mut queues = self.queues.lock();
             for queue in queues.values_mut() {
                 let original_len = queue.len();
                 queue.retain(|message| !message.is_expired());
                 removed_count += original_len - queue.len();
             }
-            // Remove empty queues
             queues.retain(|_, queue| !queue.is_empty());
         }
 

@@ -132,6 +132,7 @@ getrandom = "0.3"
 bebytes = { version = "3.0", features = ["bytes"] }
 regex = "1.12.2"
 flume = { version = "0.12.0", features = ["async"] }
+parking_lot = "0.12.5"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 hyper = { version = "1.8.1", features = ["http1", "client"] }

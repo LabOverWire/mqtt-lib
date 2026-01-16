@@ -746,7 +746,7 @@ impl MqttClient {
             let mut inner = self.inner.write().await;
             match inner.connect(transport).await {
                 Ok(result) => {
-                    let stored_subs = inner.stored_subscriptions.read().await.clone();
+                    let stored_subs = inner.stored_subscriptions.lock().clone();
                     let session_present = result.session_present;
                     drop(inner);
 
@@ -845,8 +845,7 @@ impl MqttClient {
         let mut inner = self.inner.write().await;
         match inner.connect(transport).await {
             Ok(result) => {
-                // Get stored subscriptions before releasing the lock
-                let stored_subs = inner.stored_subscriptions.read().await.clone();
+                let stored_subs = inner.stored_subscriptions.lock().clone();
                 let session_present = result.session_present;
                 drop(inner); // Release lock before potentially resubscribing
 
@@ -1972,10 +1971,9 @@ impl MqttClient {
                         attempt
                     );
 
-                    // Restore subscriptions if session was not resumed
                     let inner = self.inner.read().await;
-                    let stored_subs = inner.stored_subscriptions.read().await.clone();
-                    drop(inner); // Release lock before resubscribing
+                    let stored_subs = inner.stored_subscriptions.lock().clone();
+                    drop(inner);
 
                     for (topic, options, callback_id) in stored_subs {
                         if let Err(e) = self
@@ -2011,7 +2009,7 @@ impl MqttClient {
     async fn send_queued_messages(&self) {
         let messages = {
             let inner = self.inner.read().await;
-            let mut queued = inner.queued_messages.lock().await;
+            let mut queued = inner.queued_messages.lock();
             std::mem::take(&mut *queued)
         };
 

@@ -8,6 +8,7 @@ use crate::protocol::v5::reason_codes::ReasonCode;
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, Salt, SaltString};
 use argon2::Argon2;
 use base64::prelude::*;
+use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
@@ -18,7 +19,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::fs;
-use tokio::sync::RwLock;
 #[cfg(not(target_arch = "wasm32"))]
 use tracing::info;
 use tracing::{debug, error, warn};
@@ -30,7 +30,7 @@ struct RateLimitEntry {
 }
 
 pub struct AuthRateLimiter {
-    entries: Arc<RwLock<HashMap<IpAddr, RateLimitEntry>>>,
+    entries: Arc<Mutex<HashMap<IpAddr, RateLimitEntry>>>,
     max_attempts: u32,
     window_duration: Duration,
     lockout_duration: Duration,
@@ -40,15 +40,16 @@ impl AuthRateLimiter {
     #[must_use]
     pub fn new(max_attempts: u32, window_secs: u64, lockout_secs: u64) -> Self {
         Self {
-            entries: Arc::new(RwLock::new(HashMap::new())),
+            entries: Arc::new(Mutex::new(HashMap::new())),
             max_attempts,
             window_duration: Duration::from_secs(window_secs),
             lockout_duration: Duration::from_secs(lockout_secs),
         }
     }
 
+    #[allow(clippy::unused_async)]
     pub async fn check_rate_limit(&self, addr: IpAddr) -> bool {
-        let mut entries = self.entries.write().await;
+        let mut entries = self.entries.lock();
         let now = Instant::now();
 
         if let Some(entry) = entries.get(&addr) {
@@ -65,13 +66,14 @@ impl AuthRateLimiter {
         true
     }
 
+    #[allow(clippy::unused_async)]
     pub async fn record_attempt(&self, addr: IpAddr, success: bool) {
         if success {
-            self.entries.write().await.remove(&addr);
+            self.entries.lock().remove(&addr);
             return;
         }
 
-        let mut entries = self.entries.write().await;
+        let mut entries = self.entries.lock();
         let now = Instant::now();
 
         let entry = entries.entry(addr).or_insert(RateLimitEntry {
@@ -87,8 +89,9 @@ impl AuthRateLimiter {
         }
     }
 
+    #[allow(clippy::unused_async)]
     pub async fn cleanup_expired(&self) {
-        let mut entries = self.entries.write().await;
+        let mut entries = self.entries.lock();
         let now = Instant::now();
         entries.retain(|_, entry| now.duration_since(entry.window_start) < self.lockout_duration);
     }
@@ -603,11 +606,11 @@ impl PasswordAuthProvider {
         }
 
         // Update the users map atomically
-        *self.users.write().await = users;
+        *self.users.write() = users;
 
         info!(
             "Loaded {} users from password file: {}",
-            self.users.read().await.len(),
+            self.users.read().len(),
             path.display()
         );
         Ok(())
@@ -618,46 +621,44 @@ impl PasswordAuthProvider {
     /// # Errors
     ///
     /// Returns an error if Argon2 hashing fails
+    #[allow(clippy::unused_async)]
     pub async fn add_user(&self, username: String, password: &str) -> Result<()> {
         let password_hash = Self::hash_password(password)?;
-        self.users.write().await.insert(username, password_hash);
+        self.users.write().insert(username, password_hash);
         Ok(())
     }
 
-    /// Adds a user with pre-hashed password
+    #[allow(clippy::unused_async)]
     pub async fn add_user_with_hash(&self, username: String, password_hash: String) {
-        self.users.write().await.insert(username, password_hash);
+        self.users.write().insert(username, password_hash);
     }
 
-    /// Removes a user
+    #[allow(clippy::unused_async)]
     pub async fn remove_user(&self, username: &str) -> bool {
-        self.users.write().await.remove(username).is_some()
+        self.users.write().remove(username).is_some()
     }
 
-    /// Gets the number of users
+    #[allow(clippy::unused_async)]
     pub async fn user_count(&self) -> usize {
-        self.users.read().await.len()
+        self.users.read().len()
     }
 
-    /// Checks if a user exists
+    #[allow(clippy::unused_async)]
     pub async fn has_user(&self, username: &str) -> bool {
-        self.users.read().await.contains_key(username)
+        self.users.read().contains_key(username)
     }
 
-    /// Verifies a password for a user
-    /// Returns true if the password is valid, false otherwise
+    #[allow(clippy::unused_async)]
     pub async fn verify_user_password(&self, username: &str, password: &str) -> bool {
-        let users = self.users.read().await;
+        let users = self.users.read();
         users
             .get(username)
             .is_some_and(|hash| Self::verify_password(password, hash).unwrap_or(false))
     }
 
-    /// Verifies a password for a user (blocking version)
-    /// This is useful for sync contexts
     #[must_use]
     pub fn verify_user_password_blocking(&self, username: &str, password: &str) -> bool {
-        let users = self.users.blocking_read();
+        let users = self.users.read();
         users
             .get(username)
             .is_some_and(|hash| Self::verify_password(password, hash).unwrap_or(false))
@@ -695,7 +696,7 @@ impl AuthProvider for PasswordAuthProvider {
                 return Ok(AuthResult::fail(ReasonCode::BadUsernameOrPassword));
             };
 
-            let users = self.users.read().await;
+            let users = self.users.read();
             if let Some(password_hash) = users.get(username) {
                 let password_str = String::from_utf8_lossy(password);
 
@@ -995,46 +996,43 @@ impl CertificateAuthProvider {
         }
 
         // Update the certificates map atomically
-        *self.allowed_certs.write().await = certs;
+        *self.allowed_certs.write() = certs;
 
         info!(
             "Loaded {} certificate mappings from file: {}",
-            self.allowed_certs.read().await.len(),
+            self.allowed_certs.read().len(),
             path.display()
         );
         Ok(())
     }
 
-    /// Adds an allowed certificate by fingerprint
+    #[allow(clippy::unused_async)]
     pub async fn add_certificate(&self, fingerprint: String, username: String) {
         let normalized_fingerprint = fingerprint.to_lowercase();
         self.allowed_certs
             .write()
-            .await
             .insert(normalized_fingerprint, username);
     }
 
-    /// Removes an allowed certificate
+    #[allow(clippy::unused_async)]
     pub async fn remove_certificate(&self, fingerprint: &str) -> bool {
         let normalized_fingerprint = fingerprint.to_lowercase();
         self.allowed_certs
             .write()
-            .await
             .remove(&normalized_fingerprint)
             .is_some()
     }
 
-    /// Gets the number of allowed certificates
+    #[allow(clippy::unused_async)]
     pub async fn cert_count(&self) -> usize {
-        self.allowed_certs.read().await.len()
+        self.allowed_certs.read().len()
     }
 
-    /// Checks if a certificate is allowed
+    #[allow(clippy::unused_async)]
     pub async fn has_certificate(&self, fingerprint: &str) -> bool {
         let normalized_fingerprint = fingerprint.to_lowercase();
         self.allowed_certs
             .read()
-            .await
             .contains_key(&normalized_fingerprint)
     }
 
@@ -1113,7 +1111,7 @@ impl AuthProvider for CertificateAuthProvider {
             if connect.client_id.starts_with("cert:") {
                 let fingerprint = &connect.client_id[5..]; // Remove "cert:" prefix
 
-                let certs = self.allowed_certs.read().await;
+                let certs = self.allowed_certs.read();
                 if let Some(username) = certs.get(&fingerprint.to_lowercase()) {
                     debug!(
                         "Certificate authentication successful for fingerprint: {}",

@@ -2,11 +2,12 @@
 //!
 //! This module implements the MQTT client using direct async calls.
 
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::sync::{oneshot, Mutex, RwLock};
+use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tokio::time::Duration;
 
@@ -149,7 +150,7 @@ pub struct DirectClientInner {
     pub stream_strategy: Option<StreamStrategy>,
     pub quic_datagrams_enabled: bool,
     pub quic_stream_manager: Option<Arc<QuicStreamManager>>,
-    pub session: Arc<RwLock<SessionState>>,
+    pub session: Arc<tokio::sync::RwLock<SessionState>>,
     /// Connection status
     pub connected: Arc<AtomicBool>,
     /// Callback manager for subscriptions
@@ -178,23 +179,23 @@ pub struct DirectClientInner {
     /// Queued messages during disconnection
     pub queued_messages: Arc<Mutex<Vec<PublishPacket>>>,
     /// Stored subscriptions for restoration (topic, options, `callback_id`)
-    pub stored_subscriptions: Arc<RwLock<Vec<(String, SubscriptionOptions, CallbackId)>>>,
+    pub stored_subscriptions: Arc<Mutex<Vec<(String, SubscriptionOptions, CallbackId)>>>,
     /// Whether to queue messages when disconnected
     pub queue_on_disconnect: bool,
     /// Server's maximum `QoS` level (from CONNACK)
-    pub server_max_qos: Arc<RwLock<Option<u8>>>,
+    pub server_max_qos: Arc<Mutex<Option<u8>>>,
     /// Authentication handler for enhanced authentication
     pub auth_handler: Option<Arc<dyn AuthHandler>>,
     /// Authentication method used during connection
     pub auth_method: Option<String>,
     /// Keepalive state for timeout detection
-    pub keepalive_state: Arc<RwLock<KeepaliveState>>,
+    pub keepalive_state: Arc<Mutex<KeepaliveState>>,
 }
 
 impl DirectClientInner {
     /// Create new client inner state
     pub fn new(options: ConnectOptions) -> Self {
-        let session = Arc::new(RwLock::new(SessionState::new(
+        let session = Arc::new(tokio::sync::RwLock::new(SessionState::new(
             options.client_id.clone(),
             options.session_config.clone(),
             options.clean_start,
@@ -225,12 +226,12 @@ impl DirectClientInner {
             reconnect_attempt: 0,
             last_address: None,
             queued_messages: Arc::new(Mutex::new(Vec::new())),
-            stored_subscriptions: Arc::new(RwLock::new(Vec::new())),
+            stored_subscriptions: Arc::new(Mutex::new(Vec::new())),
             queue_on_disconnect,
-            server_max_qos: Arc::new(RwLock::new(None)),
+            server_max_qos: Arc::new(Mutex::new(None)),
             auth_handler: None,
             auth_method,
-            keepalive_state: Arc::new(RwLock::new(KeepaliveState::default())),
+            keepalive_state: Arc::new(Mutex::new(KeepaliveState::default())),
         }
     }
 
@@ -376,10 +377,10 @@ impl DirectClientInner {
         }
 
         if let Some(max_qos) = connack.properties.get_maximum_qos() {
-            *self.server_max_qos.write().await = Some(max_qos);
+            *self.server_max_qos.lock() = Some(max_qos);
             tracing::debug!("Server maximum QoS: {}", max_qos);
         } else {
-            *self.server_max_qos.write().await = None;
+            *self.server_max_qos.lock() = None;
         }
 
         let protocol_version = self.options.protocol_version.as_u8();
@@ -542,6 +543,7 @@ impl DirectClientInner {
     /// # Errors
     ///
     /// Returns an error if the operation fails
+    #[allow(clippy::unused_async)]
     async fn queue_publish_message(
         &self,
         topic: String,
@@ -560,11 +562,11 @@ impl DirectClientInner {
             protocol_version: self.options.protocol_version.as_u8(),
         };
 
-        self.queued_messages.lock().await.push(publish);
+        self.queued_messages.lock().push(publish);
         Ok(PublishResult::QoS1Or2 { packet_id })
     }
 
-    /// Set up acknowledgment channel for `QoS` > 0
+    #[allow(clippy::unused_async)]
     async fn setup_publish_acknowledgment(
         &self,
         qos: QoS,
@@ -575,14 +577,14 @@ impl DirectClientInner {
             QoS::AtLeastOnce => {
                 let (tx, rx) = oneshot::channel();
                 if let Some(pid) = packet_id {
-                    self.pending_pubacks.lock().await.insert(pid, tx);
+                    self.pending_pubacks.lock().insert(pid, tx);
                 }
                 Some(rx)
             }
             QoS::ExactlyOnce => {
                 let (tx, rx) = oneshot::channel();
                 if let Some(pid) = packet_id {
-                    self.pending_pubcomps.lock().await.insert(pid, tx);
+                    self.pending_pubcomps.lock().insert(pid, tx);
                 }
                 Some(rx)
             }
@@ -612,20 +614,13 @@ impl DirectClientInner {
                 "Acknowledgment channel closed".to_string(),
             )),
             Err(_) => {
-                // Timeout - remove from pending in a separate task to avoid blocking
                 if let Some(pid) = packet_id {
                     match qos {
                         QoS::AtLeastOnce => {
-                            let pending = self.pending_pubacks.clone();
-                            tokio::spawn(async move {
-                                pending.lock().await.remove(&pid);
-                            });
+                            self.pending_pubacks.lock().remove(&pid);
                         }
                         QoS::ExactlyOnce => {
-                            let pending = self.pending_pubcomps.clone();
-                            tokio::spawn(async move {
-                                pending.lock().await.remove(&pid);
-                            });
+                            self.pending_pubcomps.lock().remove(&pid);
                         }
                         QoS::AtMostOnce => {}
                     }
@@ -661,7 +656,7 @@ impl DirectClientInner {
         }
 
         // Enforce server's maximum QoS limit
-        let effective_qos = if let Some(max_qos) = *self.server_max_qos.read().await {
+        let effective_qos = if let Some(max_qos) = *self.server_max_qos.lock() {
             let qos_value = match options.qos {
                 QoS::AtMostOnce => 0,
                 QoS::AtLeastOnce => 1,
@@ -921,11 +916,7 @@ impl DirectClientInner {
                 "SUBACK channel closed".to_string(),
             )),
             Err(_) => {
-                // Timeout - remove from pending in a separate task to avoid blocking
-                let pending = self.pending_subacks.clone();
-                tokio::spawn(async move {
-                    pending.lock().await.remove(&packet_id);
-                });
+                self.pending_subacks.lock().remove(&packet_id);
                 Err(MqttError::Timeout)
             }
         }
@@ -954,11 +945,11 @@ impl DirectClientInner {
 
         // Create oneshot channel for SUBACK response
         let (tx, rx) = oneshot::channel();
-        self.pending_subacks.lock().await.insert(packet_id, tx);
+        self.pending_subacks.lock().insert(packet_id, tx);
 
         // Store subscription info for restoration with callback ID
         for filter in &packet.filters {
-            self.stored_subscriptions.write().await.push((
+            self.stored_subscriptions.lock().push((
                 filter.filter.clone(),
                 filter.options,
                 callback_id,
@@ -1020,14 +1011,14 @@ impl DirectClientInner {
 
         // Create oneshot channel for UNSUBACK response
         let (tx, rx) = oneshot::channel();
-        self.pending_unsubacks.lock().await.insert(packet_id, tx);
+        self.pending_unsubacks.lock().insert(packet_id, tx);
 
-        // Remove from stored subscriptions
-        let mut stored = self.stored_subscriptions.write().await;
-        for topic in &packet.filters {
-            stored.retain(|(stored_topic, _, _)| stored_topic != topic);
+        {
+            let mut stored = self.stored_subscriptions.lock();
+            for topic in &packet.filters {
+                stored.retain(|(stored_topic, _, _)| stored_topic != topic);
+            }
         }
-        drop(stored);
 
         // Send UNSUBSCRIBE directly
         writer
@@ -1046,11 +1037,7 @@ impl DirectClientInner {
                 ))
             }
             Err(_) => {
-                // Timeout - remove from pending in a separate task to avoid blocking
-                let pending = self.pending_unsubacks.clone();
-                tokio::spawn(async move {
-                    pending.lock().await.remove(&packet_id);
-                });
+                self.pending_unsubacks.lock().remove(&packet_id);
                 return Err(MqttError::Timeout);
             }
         };
@@ -1345,7 +1332,7 @@ impl DirectClientInner {
 /// Context for packet reader task
 #[derive(Clone)]
 struct PacketReaderContext {
-    session: Arc<RwLock<SessionState>>,
+    session: Arc<tokio::sync::RwLock<SessionState>>,
     callback_manager: Arc<CallbackManager>,
     suback_channels: Arc<Mutex<HashMap<u16, oneshot::Sender<SubAckPacket>>>>,
     unsuback_channels: Arc<Mutex<HashMap<u16, oneshot::Sender<UnsubAckPacket>>>>,
@@ -1356,7 +1343,7 @@ struct PacketReaderContext {
     protocol_version: u8,
     auth_handler: Option<Arc<dyn AuthHandler>>,
     auth_method: Option<String>,
-    keepalive_state: Arc<RwLock<KeepaliveState>>,
+    keepalive_state: Arc<Mutex<KeepaliveState>>,
 }
 
 /// Packet reader task that handles response channels
@@ -1371,26 +1358,19 @@ async fn packet_reader_task_with_responses(mut reader: UnifiedReader, ctx: Packe
                 // Check if this is a response we're waiting for
                 match &packet {
                     Packet::SubAck(suback) => {
-                        if let Some(tx) = ctx.suback_channels.lock().await.remove(&suback.packet_id)
-                        {
+                        if let Some(tx) = ctx.suback_channels.lock().remove(&suback.packet_id) {
                             let _ = tx.send(suback.clone());
                             continue;
                         }
                     }
                     Packet::UnsubAck(unsuback) => {
-                        if let Some(tx) = ctx
-                            .unsuback_channels
-                            .lock()
-                            .await
-                            .remove(&unsuback.packet_id)
-                        {
+                        if let Some(tx) = ctx.unsuback_channels.lock().remove(&unsuback.packet_id) {
                             let _ = tx.send(unsuback.clone());
                             continue;
                         }
                     }
                     Packet::PubAck(puback) => {
-                        if let Some(tx) = ctx.puback_channels.lock().await.remove(&puback.packet_id)
-                        {
+                        if let Some(tx) = ctx.puback_channels.lock().remove(&puback.packet_id) {
                             let _ = tx.send(puback.reason_code);
                             continue;
                         }
@@ -1402,8 +1382,7 @@ async fn packet_reader_task_with_responses(mut reader: UnifiedReader, ctx: Packe
                                 reason_code = ?pubrec.reason_code,
                                 "QoS 2 PUBREC rejected"
                             );
-                            if let Some(tx) =
-                                ctx.pubcomp_channels.lock().await.remove(&pubrec.packet_id)
+                            if let Some(tx) = ctx.pubcomp_channels.lock().remove(&pubrec.packet_id)
                             {
                                 let _ = tx.send(pubrec.reason_code);
                             }
@@ -1416,9 +1395,7 @@ async fn packet_reader_task_with_responses(mut reader: UnifiedReader, ctx: Packe
                         }
                     }
                     Packet::PubComp(pubcomp) => {
-                        if let Some(tx) =
-                            ctx.pubcomp_channels.lock().await.remove(&pubcomp.packet_id)
-                        {
+                        if let Some(tx) = ctx.pubcomp_channels.lock().remove(&pubcomp.packet_id) {
                             let _ = tx.send(pubcomp.reason_code);
                         }
                     }
@@ -1458,10 +1435,10 @@ async fn packet_reader_task_with_responses(mut reader: UnifiedReader, ctx: Packe
 
     ctx.connected.store(false, Ordering::SeqCst);
 
-    ctx.puback_channels.lock().await.drain();
-    ctx.pubcomp_channels.lock().await.drain();
-    ctx.suback_channels.lock().await.drain();
-    ctx.unsuback_channels.lock().await.drain();
+    ctx.puback_channels.lock().drain();
+    ctx.pubcomp_channels.lock().drain();
+    ctx.suback_channels.lock().drain();
+    ctx.unsuback_channels.lock().drain();
 }
 
 async fn handle_auth_packet(auth: AuthPacket, ctx: &PacketReaderContext) -> Result<()> {
@@ -1549,7 +1526,7 @@ async fn send_pingreq_with_priority(
 async fn keepalive_task_with_writer(
     writer: Arc<tokio::sync::Mutex<UnifiedWriter>>,
     keepalive_interval: Duration,
-    keepalive_state: Arc<RwLock<KeepaliveState>>,
+    keepalive_state: Arc<Mutex<KeepaliveState>>,
     connected: Arc<AtomicBool>,
     keepalive_config: Option<mqtt5_protocol::KeepaliveConfig>,
 ) {
@@ -1565,7 +1542,7 @@ async fn keepalive_task_with_writer(
         interval.tick().await;
 
         {
-            let state = keepalive_state.read().await;
+            let state = keepalive_state.lock();
             if state.is_timeout(timeout_duration) {
                 tracing::error!("Keepalive timeout - no PINGRESP received");
                 connected.store(false, Ordering::SeqCst);
@@ -1573,7 +1550,7 @@ async fn keepalive_task_with_writer(
             }
         }
 
-        keepalive_state.write().await.record_ping_sent();
+        keepalive_state.lock().record_ping_sent();
 
         let send_result = send_pingreq_with_priority(&writer, &config).await;
         if let Err(e) = send_result {
@@ -1583,7 +1560,7 @@ async fn keepalive_task_with_writer(
     }
 }
 
-async fn flow_expiration_task(session: Arc<RwLock<SessionState>>) {
+async fn flow_expiration_task(session: Arc<tokio::sync::RwLock<SessionState>>) {
     let check_interval = Duration::from_secs(60);
     let mut interval = tokio::time::interval(check_interval);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -1748,17 +1725,17 @@ async fn quic_stream_reader_task(
 async fn handle_incoming_packet_with_writer(
     packet: Packet,
     writer: &Arc<tokio::sync::Mutex<UnifiedWriter>>,
-    session: &Arc<RwLock<SessionState>>,
+    session: &Arc<tokio::sync::RwLock<SessionState>>,
     callback_manager: &Arc<CallbackManager>,
     flow_id: Option<crate::transport::flow::FlowId>,
-    keepalive_state: &Arc<RwLock<KeepaliveState>>,
+    keepalive_state: &Arc<Mutex<KeepaliveState>>,
 ) -> Result<()> {
     match packet {
         Packet::Publish(publish) => {
             handle_publish_with_ack(publish, writer, session, callback_manager, flow_id).await
         }
         Packet::PingResp => {
-            keepalive_state.write().await.record_pong_received();
+            keepalive_state.lock().record_pong_received();
             Ok(())
         }
         Packet::PubRec(pubrec) => {
@@ -1790,7 +1767,7 @@ async fn handle_incoming_packet_with_writer(
 async fn handle_publish_with_ack(
     publish: crate::packet::publish::PublishPacket,
     writer: &Arc<tokio::sync::Mutex<UnifiedWriter>>,
-    session: &Arc<RwLock<SessionState>>,
+    session: &Arc<tokio::sync::RwLock<SessionState>>,
     callback_manager: &Arc<CallbackManager>,
     flow_id: Option<crate::transport::flow::FlowId>,
 ) -> Result<()> {
@@ -1882,7 +1859,7 @@ async fn handle_publish_with_ack(
 async fn handle_pubrec_outgoing(
     pubrec: crate::packet::pubrec::PubRecPacket,
     writer: &Arc<tokio::sync::Mutex<UnifiedWriter>>,
-    session: &Arc<RwLock<SessionState>>,
+    session: &Arc<tokio::sync::RwLock<SessionState>>,
 ) -> Result<()> {
     // Move from unacked publish to unacked pubrel
     session
@@ -1913,7 +1890,7 @@ async fn handle_pubrec_outgoing(
 /// Handle PUBCOMP packet for outgoing `QoS` 2 messages
 async fn handle_pubcomp_outgoing(
     pubcomp: crate::packet::pubcomp::PubCompPacket,
-    session: &Arc<RwLock<SessionState>>,
+    session: &Arc<tokio::sync::RwLock<SessionState>>,
 ) -> Result<()> {
     // Complete the QoS 2 flow by removing the PUBREL
     session
@@ -1929,7 +1906,7 @@ async fn handle_pubcomp_outgoing(
 async fn handle_pubrel(
     pubrel: crate::packet::pubrel::PubRelPacket,
     writer: &Arc<tokio::sync::Mutex<UnifiedWriter>>,
-    session: &Arc<RwLock<SessionState>>,
+    session: &Arc<tokio::sync::RwLock<SessionState>>,
 ) -> Result<()> {
     let has_pubrec = session.read().await.has_pubrec(pubrel.packet_id).await;
 

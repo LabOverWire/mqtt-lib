@@ -5,9 +5,9 @@ use crate::broker::bridge::{
 };
 use crate::broker::router::MessageRouter;
 use crate::packet::publish::PublishPacket;
+use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info};
 
@@ -15,8 +15,7 @@ use tracing::{debug, error, info};
 pub struct BridgeManager {
     /// Active bridge connections
     bridges: Arc<RwLock<HashMap<String, Arc<BridgeConnection>>>>,
-    /// Bridge tasks
-    tasks: Arc<RwLock<HashMap<String, JoinHandle<()>>>>,
+    tasks: Arc<Mutex<HashMap<String, JoinHandle<()>>>>,
     /// Message router
     router: Arc<MessageRouter>,
     /// Loop prevention
@@ -28,7 +27,7 @@ impl BridgeManager {
     pub fn new(router: Arc<MessageRouter>) -> Self {
         Self {
             bridges: Arc::new(RwLock::new(HashMap::new())),
-            tasks: Arc::new(RwLock::new(HashMap::new())),
+            tasks: Arc::new(Mutex::new(HashMap::new())),
             router,
             loop_prevention: Arc::new(LoopPrevention::default()),
         }
@@ -38,10 +37,11 @@ impl BridgeManager {
     ///
     /// # Errors
     /// Returns an error if the bridge already exists.
+    #[allow(clippy::unused_async)]
     pub async fn add_bridge(&self, config: BridgeConfig) -> Result<()> {
         let name = config.name.clone();
 
-        if self.bridges.read().await.contains_key(&name) {
+        if self.bridges.read().contains_key(&name) {
             return Err(BridgeError::ConfigurationError(format!(
                 "Bridge '{name}' already exists"
             )));
@@ -59,8 +59,8 @@ impl BridgeManager {
         });
 
         let task_name = name.clone();
-        self.bridges.write().await.insert(name, bridge);
-        self.tasks.write().await.insert(task_name, task);
+        self.bridges.write().insert(name, bridge);
+        self.tasks.lock().insert(task_name, task);
 
         Ok(())
     }
@@ -71,14 +71,13 @@ impl BridgeManager {
     /// Returns an error if the bridge is not found or stop fails.
     pub async fn remove_bridge(&self, name: &str) -> Result<()> {
         // Get and remove the bridge
-        let bridge = self.bridges.write().await.remove(name);
+        let bridge = self.bridges.write().remove(name);
 
         if let Some(bridge) = bridge {
             // Stop the bridge
             bridge.stop().await?;
 
-            // Cancel the task
-            if let Some(task) = self.tasks.write().await.remove(name) {
+            if let Some(task) = self.tasks.lock().remove(name) {
                 task.abort();
             }
 
@@ -116,7 +115,7 @@ impl BridgeManager {
         }
 
         let bridge_list: Vec<_> = {
-            let bridges = self.bridges.read().await;
+            let bridges = self.bridges.read();
             bridges
                 .iter()
                 .map(|(name, bridge)| (name.clone(), bridge.clone()))
@@ -147,7 +146,7 @@ impl BridgeManager {
     /// Gets statistics for all bridges
     pub async fn get_all_stats(&self) -> HashMap<String, BridgeStats> {
         let bridge_list: Vec<_> = {
-            let bridges = self.bridges.read().await;
+            let bridges = self.bridges.read();
             bridges
                 .iter()
                 .map(|(name, bridge)| (name.clone(), bridge.clone()))
@@ -164,7 +163,7 @@ impl BridgeManager {
     /// Gets statistics for a specific bridge
     pub async fn get_bridge_stats(&self, name: &str) -> Option<BridgeStats> {
         let bridge = {
-            let bridges = self.bridges.read().await;
+            let bridges = self.bridges.read();
             bridges.get(name).cloned()
         };
         if let Some(bridge) = bridge {
@@ -174,9 +173,9 @@ impl BridgeManager {
         }
     }
 
-    /// Lists all bridge names
+    #[allow(clippy::unused_async)]
     pub async fn list_bridges(&self) -> Vec<String> {
-        self.bridges.read().await.keys().cloned().collect()
+        self.bridges.read().keys().cloned().collect()
     }
 
     /// Stops all bridges.
@@ -187,22 +186,21 @@ impl BridgeManager {
         info!("Stopping all bridges");
 
         // Stop all bridges
-        let bridges: Vec<_> = self.bridges.read().await.values().cloned().collect();
+        let bridges: Vec<_> = self.bridges.read().values().cloned().collect();
         for bridge in bridges {
             if let Err(e) = bridge.stop().await {
                 error!("Failed to stop bridge: {e}");
             }
         }
 
-        // Cancel all tasks
-        let mut tasks = self.tasks.write().await;
+        let mut tasks = self.tasks.lock();
         for (name, task) in tasks.drain() {
             debug!("Cancelling task for bridge '{}'", name);
             task.abort();
         }
 
         // Clear bridges
-        self.bridges.write().await.clear();
+        self.bridges.write().clear();
 
         Ok(())
     }
@@ -215,7 +213,7 @@ impl BridgeManager {
         let name = config.name.clone();
 
         // Remove existing bridge if present
-        if self.bridges.read().await.contains_key(&name) {
+        if self.bridges.read().contains_key(&name) {
             self.remove_bridge(&name).await?;
         }
 
