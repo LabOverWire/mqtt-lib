@@ -41,7 +41,6 @@ bytes = "1.10"
 futures = "0.3"
 futures-util = "0.3"
 tracing = "0.1.41"
-tokio = { version = "1.47", optional = true }
 gloo-timers = { version = "0.3.0", features = ["futures"] }
 flume = "0.12.0"
 
@@ -65,11 +64,5 @@ features = [
     "Window",
     "console",
 ]
-[target.wasm32-unknown-unknown.dependencies]
-tokio = { version = "1.47", optional = true, features = [
-    "sync",
-    "macros",
-    "io-util",
-    "time",
-    "rt",
-] }
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+tokio = { version = "1.47", optional = true, features = ["sync"] }
