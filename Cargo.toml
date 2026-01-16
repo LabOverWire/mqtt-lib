@@ -33,3 +33,6 @@ debug = true
 inherits = "release"
 debug = 2
 lto = false
+
+[patch.crates-io]
+mqtt5-protocol = { path = "crates/mqtt5-protocol" }
