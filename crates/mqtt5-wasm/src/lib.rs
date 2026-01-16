@@ -12,6 +12,7 @@ mod client_handler;
 pub mod config;
 pub mod decoder;
 pub mod transport;
+mod utils;
 
 #[cfg(feature = "broker")]
 pub use bridge::{WasmBridgeConfig, WasmBridgeDirection, WasmTopicMapping};

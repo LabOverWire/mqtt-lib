@@ -628,8 +628,7 @@ impl WasmMqttClient {
                 sleep_ms(sleep_duration).await;
 
                 let timeout_duration = keepalive_config.timeout_duration(keepalive_duration);
-                #[allow(clippy::cast_precision_loss)]
-                let timeout_ms = timeout_duration.as_millis() as f64;
+                let timeout_ms = crate::utils::u128_to_f64_saturating(timeout_duration.as_millis());
 
                 let should_disconnect = if let Ok(state_ref) = state.try_borrow() {
                     if !state_ref.connected {

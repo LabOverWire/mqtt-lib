@@ -1277,11 +1277,11 @@ impl WasmClientHandler {
                 let _ =
                     js_sys::Reflect::set(&obj, &"qos".into(), &JsValue::from_f64(f64::from(qos)));
                 let _ = js_sys::Reflect::set(&obj, &"retain".into(), &retain.into());
-                #[allow(clippy::cast_precision_loss)]
+                let safe_size = crate::utils::usize_to_f64_saturating(payload_size);
                 let _ = js_sys::Reflect::set(
                     &obj,
                     &"payloadSize".into(),
-                    &JsValue::from_f64(payload_size as f64),
+                    &JsValue::from_f64(safe_size),
                 );
                 if let Err(e) = callback.call1(&JsValue::NULL, &obj) {
                     debug!("on_client_publish callback failed: {:?}", e);
