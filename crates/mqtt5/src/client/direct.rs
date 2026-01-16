@@ -1485,6 +1485,8 @@ async fn handle_auth_packet(auth: AuthPacket, ctx: &PacketReaderContext) -> Resu
     Ok(())
 }
 
+const PINGREQ_LOG_INTERVAL: u32 = 20;
+
 async fn send_pingreq_with_priority(
     writer: &Arc<tokio::sync::Mutex<UnifiedWriter>>,
     config: &mqtt5_protocol::KeepaliveConfig,
@@ -1497,7 +1499,7 @@ async fn send_pingreq_with_priority(
             return guard.write_packet(Packet::PingReq).await;
         }
 
-        if attempt > 0 && attempt % 20 == 0 {
+        if attempt > 0 && attempt % PINGREQ_LOG_INTERVAL == 0 {
             tracing::warn!(
                 attempt,
                 max_attempts,

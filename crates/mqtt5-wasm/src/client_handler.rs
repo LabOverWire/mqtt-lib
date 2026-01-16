@@ -1235,33 +1235,23 @@ impl WasmClientHandler {
     }
 
     fn fire_client_connect(&self, client_id: &str, clean_start: bool) {
-        if let Some(callback) = self.event_callbacks.on_client_connect.borrow().clone() {
-            let client_id = client_id.to_string();
-            spawn_local(async move {
-                let obj = js_sys::Object::new();
-                let _ = js_sys::Reflect::set(&obj, &"clientId".into(), &client_id.into());
-                let _ = js_sys::Reflect::set(&obj, &"cleanStart".into(), &clean_start.into());
-                if let Err(e) = callback.call1(&JsValue::NULL, &obj) {
-                    debug!("on_client_connect callback failed: {:?}", e);
-                }
-            });
-        }
+        let callback = self.event_callbacks.on_client_connect.borrow().clone();
+        let client_id = client_id.to_string();
+        fire_event(callback, "on_client_connect", move |obj| {
+            set_prop(obj, "clientId", &client_id.into());
+            set_prop(obj, "cleanStart", &clean_start.into());
+        });
     }
 
     fn fire_client_disconnect(&self, client_id: &str, reason: &str, unexpected: bool) {
-        if let Some(callback) = self.event_callbacks.on_client_disconnect.borrow().clone() {
-            let client_id = client_id.to_string();
-            let reason = reason.to_string();
-            spawn_local(async move {
-                let obj = js_sys::Object::new();
-                let _ = js_sys::Reflect::set(&obj, &"clientId".into(), &client_id.into());
-                let _ = js_sys::Reflect::set(&obj, &"reason".into(), &reason.into());
-                let _ = js_sys::Reflect::set(&obj, &"unexpected".into(), &unexpected.into());
-                if let Err(e) = callback.call1(&JsValue::NULL, &obj) {
-                    debug!("on_client_disconnect callback failed: {:?}", e);
-                }
-            });
-        }
+        let callback = self.event_callbacks.on_client_disconnect.borrow().clone();
+        let client_id = client_id.to_string();
+        let reason = reason.to_string();
+        fire_event(callback, "on_client_disconnect", move |obj| {
+            set_prop(obj, "clientId", &client_id.into());
+            set_prop(obj, "reason", &reason.into());
+            set_prop(obj, "unexpected", &unexpected.into());
+        });
     }
 
     fn fire_client_publish(
@@ -1272,91 +1262,76 @@ impl WasmClientHandler {
         retain: bool,
         payload_size: usize,
     ) {
-        if let Some(callback) = self.event_callbacks.on_client_publish.borrow().clone() {
-            let client_id = client_id.to_string();
-            let topic = topic.to_string();
-            spawn_local(async move {
-                let obj = js_sys::Object::new();
-                let _ = js_sys::Reflect::set(&obj, &"clientId".into(), &client_id.into());
-                let _ = js_sys::Reflect::set(&obj, &"topic".into(), &topic.into());
-                let _ =
-                    js_sys::Reflect::set(&obj, &"qos".into(), &JsValue::from_f64(f64::from(qos)));
-                let _ = js_sys::Reflect::set(&obj, &"retain".into(), &retain.into());
-                let safe_size = crate::utils::usize_to_f64_saturating(payload_size);
-                let _ = js_sys::Reflect::set(
-                    &obj,
-                    &"payloadSize".into(),
-                    &JsValue::from_f64(safe_size),
-                );
-                if let Err(e) = callback.call1(&JsValue::NULL, &obj) {
-                    debug!("on_client_publish callback failed: {:?}", e);
-                }
-            });
-        }
+        let callback = self.event_callbacks.on_client_publish.borrow().clone();
+        let client_id = client_id.to_string();
+        let topic = topic.to_string();
+        let safe_size = crate::utils::usize_to_f64_saturating(payload_size);
+        fire_event(callback, "on_client_publish", move |obj| {
+            set_prop(obj, "clientId", &client_id.into());
+            set_prop(obj, "topic", &topic.into());
+            set_prop(obj, "qos", &JsValue::from_f64(f64::from(qos)));
+            set_prop(obj, "retain", &retain.into());
+            set_prop(obj, "payloadSize", &JsValue::from_f64(safe_size));
+        });
     }
 
     fn fire_client_subscribe(&self, client_id: &str, subscriptions: &[(String, u8)]) {
-        if let Some(callback) = self.event_callbacks.on_client_subscribe.borrow().clone() {
-            let client_id = client_id.to_string();
-            let subscriptions = subscriptions.to_vec();
-            spawn_local(async move {
-                let obj = js_sys::Object::new();
-                let _ = js_sys::Reflect::set(&obj, &"clientId".into(), &client_id.into());
-                let subs_array = js_sys::Array::new();
-                for (topic, qos) in &subscriptions {
-                    let sub_obj = js_sys::Object::new();
-                    let _ = js_sys::Reflect::set(&sub_obj, &"topic".into(), &topic.into());
-                    let _ = js_sys::Reflect::set(
-                        &sub_obj,
-                        &"qos".into(),
-                        &JsValue::from_f64(f64::from(*qos)),
-                    );
-                    subs_array.push(&sub_obj);
-                }
-                let _ = js_sys::Reflect::set(&obj, &"subscriptions".into(), &subs_array);
-                if let Err(e) = callback.call1(&JsValue::NULL, &obj) {
-                    debug!("on_client_subscribe callback failed: {:?}", e);
-                }
-            });
-        }
+        let callback = self.event_callbacks.on_client_subscribe.borrow().clone();
+        let client_id = client_id.to_string();
+        let subscriptions = subscriptions.to_vec();
+        fire_event(callback, "on_client_subscribe", move |obj| {
+            set_prop(obj, "clientId", &client_id.into());
+            let subs_array = js_sys::Array::new();
+            for (topic, qos) in &subscriptions {
+                let sub_obj = js_sys::Object::new();
+                set_prop(&sub_obj, "topic", &topic.into());
+                set_prop(&sub_obj, "qos", &JsValue::from_f64(f64::from(*qos)));
+                subs_array.push(&sub_obj);
+            }
+            set_prop(obj, "subscriptions", &subs_array);
+        });
     }
 
     fn fire_client_unsubscribe(&self, client_id: &str, topics: &[String]) {
-        if let Some(callback) = self.event_callbacks.on_client_unsubscribe.borrow().clone() {
-            let client_id = client_id.to_string();
-            let topics = topics.to_vec();
-            spawn_local(async move {
-                let obj = js_sys::Object::new();
-                let _ = js_sys::Reflect::set(&obj, &"clientId".into(), &client_id.into());
-                let topics_array = js_sys::Array::new();
-                for topic in &topics {
-                    topics_array.push(&JsValue::from_str(topic));
-                }
-                let _ = js_sys::Reflect::set(&obj, &"topics".into(), &topics_array);
-                if let Err(e) = callback.call1(&JsValue::NULL, &obj) {
-                    debug!("on_client_unsubscribe callback failed: {:?}", e);
-                }
-            });
-        }
+        let callback = self.event_callbacks.on_client_unsubscribe.borrow().clone();
+        let client_id = client_id.to_string();
+        let topics = topics.to_vec();
+        fire_event(callback, "on_client_unsubscribe", move |obj| {
+            set_prop(obj, "clientId", &client_id.into());
+            let topics_array = js_sys::Array::new();
+            for topic in &topics {
+                topics_array.push(&JsValue::from_str(topic));
+            }
+            set_prop(obj, "topics", &topics_array);
+        });
     }
 
     fn fire_message_delivered(&self, client_id: &str, packet_id: u16, qos: u8) {
-        if let Some(callback) = self.event_callbacks.on_message_delivered.borrow().clone() {
-            let client_id = client_id.to_string();
-            spawn_local(async move {
-                let obj = js_sys::Object::new();
-                let _ = js_sys::Reflect::set(&obj, &"clientId".into(), &client_id.into());
-                let _ = js_sys::Reflect::set(
-                    &obj,
-                    &"packetId".into(),
-                    &JsValue::from_f64(f64::from(packet_id)),
-                );
-                let _ =
-                    js_sys::Reflect::set(&obj, &"qos".into(), &JsValue::from_f64(f64::from(qos)));
-                if let Err(e) = callback.call1(&JsValue::NULL, &obj) {
-                    debug!("on_message_delivered callback failed: {:?}", e);
-                }
-            });
-        }
+        let callback = self.event_callbacks.on_message_delivered.borrow().clone();
+        let client_id = client_id.to_string();
+        fire_event(callback, "on_message_delivered", move |obj| {
+            set_prop(obj, "clientId", &client_id.into());
+            set_prop(obj, "packetId", &JsValue::from_f64(f64::from(packet_id)));
+            set_prop(obj, "qos", &JsValue::from_f64(f64::from(qos)));
+        });
+    }
+}
+
+fn set_prop(obj: &js_sys::Object, key: &str, value: &JsValue) {
+    let _ = js_sys::Reflect::set(obj, &key.into(), value);
+}
+
+fn fire_event<F>(callback: Option<js_sys::Function>, name: &'static str, build_obj: F)
+where
+    F: FnOnce(&js_sys::Object) + 'static,
+{
+    if let Some(cb) = callback {
+        spawn_local(async move {
+            let obj = js_sys::Object::new();
+            build_obj(&obj);
+            if let Err(e) = cb.call1(&JsValue::NULL, &obj) {
+                debug!("{} callback failed: {:?}", name, e);
+            }
+        });
     }
 }
