@@ -501,15 +501,9 @@ impl MessageRouter {
 
             #[cfg(target_arch = "wasm32")]
             {
-                let callback_opt = {
-                    let callback = self.wasm_bridge_callback.read().await;
-                    callback.as_ref().map(|_| ())
-                };
-                if callback_opt.is_some() {
-                    let callback = self.wasm_bridge_callback.read().await;
-                    if let Some(ref cb) = *callback {
-                        cb(publish);
-                    }
+                let callback = self.wasm_bridge_callback.read().await;
+                if let Some(ref cb) = *callback {
+                    cb(publish);
                 }
             }
         }
