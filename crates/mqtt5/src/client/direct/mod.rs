@@ -2,11 +2,15 @@
 //!
 //! This module implements the MQTT client using direct async calls.
 
+mod handlers;
+mod keepalive;
+mod reader;
+mod unified;
+
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tokio::time::Duration;
@@ -27,173 +31,51 @@ use crate::protocol::v5::properties::Properties;
 use crate::protocol::v5::reason_codes::ReasonCode;
 use crate::session::subscription::Subscription;
 use crate::session::SessionState;
-use crate::transport::flow::{
-    FlowFlags, FlowHeader, FlowId, FLOW_TYPE_CLIENT_DATA, FLOW_TYPE_CONTROL, FLOW_TYPE_SERVER_DATA,
-};
-use crate::transport::tls::{TlsReadHalf, TlsWriteHalf};
-use crate::transport::websocket::{WebSocketReadHandle, WebSocketWriteHandle};
-use crate::transport::{
-    PacketIo, PacketReader, PacketWriter, QuicStreamManager, StreamStrategy, TransportType,
-};
+use crate::transport::flow::{FlowFlags, FlowId};
+use crate::transport::{PacketIo, PacketWriter, QuicStreamManager, StreamStrategy, TransportType};
 use crate::types::{ConnectOptions, ConnectResult, PublishOptions, PublishResult};
 use crate::QoS;
-use bytes::Bytes;
-use quinn::{Connection, RecvStream, SendStream};
-use std::time::Duration as StdDuration;
+use quinn::Connection;
 
 #[cfg(feature = "opentelemetry")]
 use crate::telemetry::propagation;
 
-#[derive(Debug, Default)]
-pub(crate) struct KeepaliveState {
-    last_ping_sent: Option<tokio::time::Instant>,
-    last_pong_received: Option<tokio::time::Instant>,
-}
+pub use unified::{UnifiedReader, UnifiedWriter};
 
-impl KeepaliveState {
-    fn record_ping_sent(&mut self) {
-        self.last_ping_sent = Some(tokio::time::Instant::now());
-    }
+use keepalive::{flow_expiration_task, keepalive_task_with_writer, KeepaliveState};
+use reader::{packet_reader_task_with_responses, quic_stream_acceptor_task, PacketReaderContext};
 
-    fn record_pong_received(&mut self) {
-        self.last_pong_received = Some(tokio::time::Instant::now());
-    }
-
-    fn is_timeout(&self, timeout_duration: Duration) -> bool {
-        match (self.last_ping_sent, self.last_pong_received) {
-            (Some(sent_at), Some(received_at)) => {
-                sent_at > received_at && sent_at.elapsed() > timeout_duration
-            }
-            (Some(sent_at), None) => sent_at.elapsed() > timeout_duration,
-            _ => false,
-        }
-    }
-}
-
-enum UnifiedReaderInner {
-    Tcp(OwnedReadHalf),
-    Tls(TlsReadHalf),
-    WebSocket(WebSocketReadHandle),
-    Quic(RecvStream),
-}
-
-pub struct UnifiedReader {
-    inner: UnifiedReaderInner,
-    protocol_version: u8,
-}
-
-impl UnifiedReader {
-    pub fn tcp(reader: OwnedReadHalf, protocol_version: u8) -> Self {
-        Self {
-            inner: UnifiedReaderInner::Tcp(reader),
-            protocol_version,
-        }
-    }
-
-    pub fn tls(reader: TlsReadHalf, protocol_version: u8) -> Self {
-        Self {
-            inner: UnifiedReaderInner::Tls(reader),
-            protocol_version,
-        }
-    }
-
-    pub fn websocket(reader: WebSocketReadHandle, protocol_version: u8) -> Self {
-        Self {
-            inner: UnifiedReaderInner::WebSocket(reader),
-            protocol_version,
-        }
-    }
-
-    pub fn quic(reader: RecvStream, protocol_version: u8) -> Self {
-        Self {
-            inner: UnifiedReaderInner::Quic(reader),
-            protocol_version,
-        }
-    }
-
-    pub async fn read_packet(&mut self) -> Result<Packet> {
-        match &mut self.inner {
-            UnifiedReaderInner::Tcp(reader) => reader.read_packet(self.protocol_version).await,
-            UnifiedReaderInner::Tls(reader) => reader.read_packet(self.protocol_version).await,
-            UnifiedReaderInner::WebSocket(reader) => {
-                reader.read_packet(self.protocol_version).await
-            }
-            UnifiedReaderInner::Quic(reader) => reader.read_packet(self.protocol_version).await,
-        }
-    }
-}
-
-/// Unified writer type that can handle TCP, TLS, WebSocket, and QUIC
-pub enum UnifiedWriter {
-    Tcp(OwnedWriteHalf),
-    Tls(TlsWriteHalf),
-    WebSocket(WebSocketWriteHandle),
-    Quic(SendStream),
-}
-
-impl PacketWriter for UnifiedWriter {
-    async fn write_packet(&mut self, packet: Packet) -> Result<()> {
-        match self {
-            Self::Tcp(writer) => writer.write_packet(packet).await,
-            Self::Tls(writer) => writer.write_packet(packet).await,
-            Self::WebSocket(writer) => writer.write_packet(packet).await,
-            Self::Quic(writer) => writer.write_packet(packet).await,
-        }
-    }
-}
-
-/// Internal client state
 pub struct DirectClientInner {
-    /// Write half of the transport for client operations
     pub writer: Option<Arc<tokio::sync::Mutex<UnifiedWriter>>>,
     pub quic_connection: Option<Arc<Connection>>,
     pub stream_strategy: Option<StreamStrategy>,
     pub quic_datagrams_enabled: bool,
     pub quic_stream_manager: Option<Arc<QuicStreamManager>>,
     pub session: Arc<tokio::sync::RwLock<SessionState>>,
-    /// Connection status
     pub connected: Arc<AtomicBool>,
-    /// Callback manager for subscriptions
     pub callback_manager: Arc<CallbackManager>,
-    /// Background task handles
     pub packet_reader_handle: Option<JoinHandle<()>>,
     pub keepalive_handle: Option<JoinHandle<()>>,
     pub quic_stream_acceptor_handle: Option<JoinHandle<()>>,
     pub flow_expiration_handle: Option<JoinHandle<()>>,
-    /// Connection options
     pub options: ConnectOptions,
-    /// Packet ID generator
     pub packet_id_generator: PacketIdGenerator,
-    /// Pending SUBACK responses (`packet_id` -> oneshot sender)
     pub pending_subacks: Arc<Mutex<HashMap<u16, oneshot::Sender<SubAckPacket>>>>,
-    /// Pending UNSUBACK responses (`packet_id` -> oneshot sender)
     pub pending_unsubacks: Arc<Mutex<HashMap<u16, oneshot::Sender<UnsubAckPacket>>>>,
-    /// Pending PUBACK responses (`packet_id` -> oneshot sender)
     pub pending_pubacks: Arc<Mutex<HashMap<u16, oneshot::Sender<ReasonCode>>>>,
-    /// Pending PUBCOMP responses (`packet_id` -> oneshot sender) - for `QoS` 2
     pub pending_pubcomps: Arc<Mutex<HashMap<u16, oneshot::Sender<ReasonCode>>>>,
-    /// Reconnection state
     pub reconnect_attempt: u32,
-    /// Last connection address (for reconnection)
     pub last_address: Option<String>,
-    /// Queued messages during disconnection
     pub queued_messages: Arc<Mutex<Vec<PublishPacket>>>,
-    /// Stored subscriptions for restoration (topic, options, `callback_id`)
     pub stored_subscriptions: Arc<Mutex<Vec<(String, SubscriptionOptions, CallbackId)>>>,
-    /// Whether to queue messages when disconnected
     pub queue_on_disconnect: bool,
-    /// Server's maximum `QoS` level (from CONNACK)
     pub server_max_qos: Arc<Mutex<Option<u8>>>,
-    /// Authentication handler for enhanced authentication
     pub auth_handler: Option<Arc<dyn AuthHandler>>,
-    /// Authentication method used during connection
     pub auth_method: Option<String>,
-    /// Keepalive state for timeout detection
     pub keepalive_state: Arc<Mutex<KeepaliveState>>,
 }
 
 impl DirectClientInner {
-    /// Create new client inner state
     pub fn new(options: ConnectOptions) -> Self {
         let session = Arc::new(tokio::sync::RwLock::new(SessionState::new(
             options.client_id.clone(),
@@ -239,28 +121,22 @@ impl DirectClientInner {
         self.auth_handler = Some(Arc::new(handler));
     }
 
-    /// Check if connected
     pub fn is_connected(&self) -> bool {
         self.connected.load(Ordering::SeqCst)
     }
 
-    /// Set connected status
     pub fn set_connected(&self, connected: bool) {
         self.connected.store(connected, Ordering::SeqCst);
     }
 
-    /// Check if message queuing is enabled
     pub fn is_queue_on_disconnect(&self) -> bool {
         self.queue_on_disconnect
     }
 
-    /// Set whether to queue messages when disconnected
     pub fn set_queue_on_disconnect(&mut self, enabled: bool) {
         self.queue_on_disconnect = enabled;
     }
 
-    /// Send a packet to the broker
-    ///
     /// # Errors
     ///
     /// Returns an error if the operation fails
@@ -275,7 +151,6 @@ impl DirectClientInner {
     }
 }
 
-/// Direct async implementation of MQTT operations
 impl DirectClientInner {
     async fn handle_connect_auth(
         &self,
@@ -356,8 +231,6 @@ impl DirectClientInner {
         }
     }
 
-    /// Connect to broker
-    ///
     /// # Errors
     ///
     /// Returns an error if the operation fails
@@ -441,8 +314,6 @@ impl DirectClientInner {
         })
     }
 
-    /// Initiate re-authentication with the broker
-    ///
     /// # Errors
     ///
     /// Returns an error if the client is not connected, no auth handler is set,
@@ -478,12 +349,6 @@ impl DirectClientInner {
         Ok(())
     }
 
-    /// Disconnect from broker - DIRECT async method
-    ///
-    /// # Errors
-    ///
-    /// Returns `MqttError::NotConnected` if the client is not connected
-    ///
     /// # Errors
     ///
     /// Returns an error if the operation fails
@@ -491,21 +356,14 @@ impl DirectClientInner {
         self.disconnect_with_packet(true).await
     }
 
-    /// Disconnect with option to send DISCONNECT packet
-    ///
-    /// # Errors
-    ///
-    /// Returns `MqttError::NotConnected` if the client is not connected
-    ///
     /// # Errors
     ///
     /// Returns an error if the operation fails
     pub async fn disconnect_with_packet(&mut self, send_disconnect: bool) -> Result<()> {
         if !self.is_connected() {
-            return Err(MqttError::NotConnected);
+            return Ok(());
         }
 
-        // Send DISCONNECT directly if requested
         if send_disconnect {
             if let Some(ref writer) = self.writer {
                 let disconnect = crate::packet::disconnect::DisconnectPacket {
@@ -520,15 +378,12 @@ impl DirectClientInner {
             }
         }
 
-        // Stop background tasks
         self.stop_background_tasks();
 
-        // Clean up QUIC stream manager
         if let Some(manager) = self.quic_stream_manager.take() {
             manager.close_all_streams().await;
         }
 
-        // Clear state
         self.set_connected(false);
         self.writer = None;
         self.quic_connection = None;
@@ -538,7 +393,6 @@ impl DirectClientInner {
         Ok(())
     }
 
-    /// Queue a publish message when disconnected
     fn queue_publish_message(
         &self,
         topic: String,
@@ -585,11 +439,6 @@ impl DirectClientInner {
         }
     }
 
-    /// Wait for acknowledgment with timeout
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the operation fails
     async fn wait_for_acknowledgment(
         &self,
         rx: oneshot::Receiver<ReasonCode>,
@@ -624,17 +473,6 @@ impl DirectClientInner {
         }
     }
 
-    /// Publish a message - DIRECT async method
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - `MqttError::NotConnected` - The client is not connected
-    /// - `MqttError::InvalidTopicName` - The topic name is invalid
-    /// - `MqttError::PacketIdExhausted` - No packet IDs available for `QoS` 1/2
-    /// - `MqttError::FlowControlExceeded` - Flow control limit reached
-    /// - `MqttError::Io` - Transport write error
-    ///
     /// # Errors
     ///
     /// Returns an error if the operation fails
@@ -644,12 +482,10 @@ impl DirectClientInner {
         payload: Vec<u8>,
         options: PublishOptions,
     ) -> Result<PublishResult> {
-        // Check if we should queue the message
         if !self.is_connected() && self.queue_on_disconnect && options.qos != QoS::AtMostOnce {
             return Ok(self.queue_publish_message(topic, payload, &options));
         }
 
-        // Enforce server's maximum QoS limit
         let effective_qos = if let Some(max_qos) = *self.server_max_qos.lock() {
             let qos_value = match options.qos {
                 QoS::AtMostOnce => 0,
@@ -663,7 +499,6 @@ impl DirectClientInner {
                     max_qos,
                     max_qos
                 );
-                // Downgrade QoS to server's maximum
                 match max_qos {
                     0 => QoS::AtMostOnce,
                     1 => QoS::AtLeastOnce,
@@ -676,7 +511,6 @@ impl DirectClientInner {
             options.qos
         };
 
-        // Create adjusted options with effective QoS
         let options = PublishOptions {
             qos: effective_qos,
             ..options
@@ -693,7 +527,6 @@ impl DirectClientInner {
             return Err(MqttError::NotConnected);
         }
 
-        // Get packet ID for QoS > 0
         let packet_id = (options.qos != QoS::AtMostOnce).then(|| self.packet_id_generator.next());
 
         let publish = PublishPacket {
@@ -707,7 +540,6 @@ impl DirectClientInner {
             protocol_version: self.options.protocol_version.as_u8(),
         };
 
-        // Check packet size limit
         let mut buf = bytes::BytesMut::new();
         publish.encode(&mut buf)?;
         let packet_size = buf.len();
@@ -717,7 +549,6 @@ impl DirectClientInner {
             .check_packet_size(packet_size)
             .await?;
 
-        // Store for QoS handling
         if options.qos != QoS::AtMostOnce {
             self.session
                 .write()
@@ -726,10 +557,8 @@ impl DirectClientInner {
                 .await?;
         }
 
-        // For QoS > 0, set up acknowledgment waiting
         let rx = self.setup_publish_acknowledgment(options.qos, packet_id);
 
-        // Send PUBLISH packet
         if publish.payload.len() > 10000 {
             tracing::debug!(
                 topic = %publish.topic_name,
@@ -742,7 +571,6 @@ impl DirectClientInner {
 
         self.send_publish_packet(publish, options.qos).await?;
 
-        // Wait for acknowledgment if QoS > 0
         if let Some(rx) = rx {
             self.wait_for_acknowledgment(rx, options.qos, packet_id)
                 .await?;
@@ -854,7 +682,6 @@ impl DirectClientInner {
             .map_err(|e| MqttError::ConnectionError(format!("Datagram send failed: {e}")))
     }
 
-    /// Create a subscription from filter and reason code
     fn create_subscription_from_filter(
         filter: &TopicFilter,
         reason_code: SubAckReasonCode,
@@ -887,15 +714,10 @@ impl DirectClientInner {
                     retain_handling: filter.options.retain_handling,
                 },
             }),
-            _ => None, // Failed subscription
+            _ => None,
         }
     }
 
-    /// Wait for SUBACK with timeout
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the operation fails
     async fn wait_for_suback(
         &self,
         rx: oneshot::Receiver<SubAckPacket>,
@@ -914,8 +736,6 @@ impl DirectClientInner {
         }
     }
 
-    /// Subscribe to topics with callback ID - DIRECT async method
-    ///
     /// # Errors
     ///
     /// Returns an error if the operation fails
@@ -930,16 +750,13 @@ impl DirectClientInner {
 
         let writer = self.writer.as_ref().ok_or(MqttError::NotConnected)?;
 
-        // Get packet ID
         let packet_id = self.packet_id_generator.next();
         let mut packet = packet;
         packet.packet_id = packet_id;
 
-        // Create oneshot channel for SUBACK response
         let (tx, rx) = oneshot::channel();
         self.pending_subacks.lock().insert(packet_id, tx);
 
-        // Store subscription info for restoration with callback ID
         for filter in &packet.filters {
             self.stored_subscriptions.lock().push((
                 filter.filter.clone(),
@@ -948,17 +765,14 @@ impl DirectClientInner {
             ));
         }
 
-        // Send SUBSCRIBE directly
         writer
             .lock()
             .await
             .write_packet(Packet::Subscribe(packet.clone()))
             .await?;
 
-        // Wait for SUBACK from packet reader task
         let suback = self.wait_for_suback(rx, packet_id).await?;
 
-        // Update session
         for (filter, reason_code) in packet.filters.iter().zip(suback.reason_codes.iter()) {
             if let Some(subscription) = Self::create_subscription_from_filter(filter, *reason_code)
             {
@@ -984,8 +798,6 @@ impl DirectClientInner {
         Ok(results)
     }
 
-    /// Unsubscribe from topics - DIRECT async method
-    ///
     /// # Errors
     ///
     /// Returns an error if the operation fails
@@ -996,12 +808,10 @@ impl DirectClientInner {
 
         let writer = self.writer.as_ref().ok_or(MqttError::NotConnected)?;
 
-        // Get packet ID
         let packet_id = self.packet_id_generator.next();
         let mut packet = packet;
         packet.packet_id = packet_id;
 
-        // Create oneshot channel for UNSUBACK response
         let (tx, rx) = oneshot::channel();
         self.pending_unsubacks.lock().insert(packet_id, tx);
 
@@ -1012,14 +822,12 @@ impl DirectClientInner {
             }
         }
 
-        // Send UNSUBSCRIBE directly
         writer
             .lock()
             .await
             .write_packet(Packet::Unsubscribe(packet.clone()))
             .await?;
 
-        // Wait for UNSUBACK from packet reader task
         let timeout = Duration::from_secs(10);
         let unsuback = match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(unsuback)) => unsuback,
@@ -1034,7 +842,6 @@ impl DirectClientInner {
             }
         };
 
-        // Validate UNSUBACK packet ID matches
         if unsuback.packet_id != packet_id {
             return Err(MqttError::ProtocolError(format!(
                 "UNSUBACK packet ID mismatch: expected {}, got {}",
@@ -1042,7 +849,6 @@ impl DirectClientInner {
             )));
         }
 
-        // Remove subscriptions from session
         for filter in packet.filters {
             let _ = self
                 .session
@@ -1055,13 +861,11 @@ impl DirectClientInner {
         Ok(())
     }
 
-    /// Build CONNECT packet
-    async fn build_connect_packet(&self) -> ConnectPacket {
+    pub(crate) async fn build_connect_packet(&self) -> ConnectPacket {
         use crate::protocol::v5::properties::{PropertyId, PropertyValue};
 
         let session = self.session.read().await;
 
-        // Build CONNECT properties
         let mut properties = Properties::default();
 
         if let Some(val) = self.options.properties.session_expiry_interval {
@@ -1181,13 +985,7 @@ impl DirectClientInner {
         props
     }
 
-    /// Start background tasks
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the operation fails
     fn start_background_tasks(&mut self, reader: UnifiedReader) -> Result<()> {
-        // Start packet reader task
         let reader_session = self.session.clone();
         let reader_callbacks = self.callback_manager.clone();
         let suback_channels = self.pending_subacks.clone();
@@ -1304,7 +1102,6 @@ impl DirectClientInner {
         Ok(recovered)
     }
 
-    /// Stop background tasks
     fn stop_background_tasks(&mut self) {
         if let Some(handle) = self.packet_reader_handle.take() {
             handle.abort();
@@ -1321,631 +1118,8 @@ impl DirectClientInner {
     }
 }
 
-/// Context for packet reader task
-#[derive(Clone)]
-struct PacketReaderContext {
-    session: Arc<tokio::sync::RwLock<SessionState>>,
-    callback_manager: Arc<CallbackManager>,
-    suback_channels: Arc<Mutex<HashMap<u16, oneshot::Sender<SubAckPacket>>>>,
-    unsuback_channels: Arc<Mutex<HashMap<u16, oneshot::Sender<UnsubAckPacket>>>>,
-    puback_channels: Arc<Mutex<HashMap<u16, oneshot::Sender<ReasonCode>>>>,
-    pubcomp_channels: Arc<Mutex<HashMap<u16, oneshot::Sender<ReasonCode>>>>,
-    writer: Arc<tokio::sync::Mutex<UnifiedWriter>>,
-    connected: Arc<AtomicBool>,
-    protocol_version: u8,
-    auth_handler: Option<Arc<dyn AuthHandler>>,
-    auth_method: Option<String>,
-    keepalive_state: Arc<Mutex<KeepaliveState>>,
-}
-
-/// Packet reader task that handles response channels
-async fn packet_reader_task_with_responses(mut reader: UnifiedReader, ctx: PacketReaderContext) {
-    tracing::debug!("Packet reader task started and ready to process incoming packets");
-    loop {
-        let packet = reader.read_packet().await;
-
-        match packet {
-            Ok(packet) => {
-                tracing::trace!("Received packet: {:?}", packet);
-                // Check if this is a response we're waiting for
-                match &packet {
-                    Packet::SubAck(suback) => {
-                        if let Some(tx) = ctx.suback_channels.lock().remove(&suback.packet_id) {
-                            let _ = tx.send(suback.clone());
-                            continue;
-                        }
-                    }
-                    Packet::UnsubAck(unsuback) => {
-                        if let Some(tx) = ctx.unsuback_channels.lock().remove(&unsuback.packet_id) {
-                            let _ = tx.send(unsuback.clone());
-                            continue;
-                        }
-                    }
-                    Packet::PubAck(puback) => {
-                        if let Some(tx) = ctx.puback_channels.lock().remove(&puback.packet_id) {
-                            let _ = tx.send(puback.reason_code);
-                            continue;
-                        }
-                    }
-                    Packet::PubRec(pubrec) => {
-                        if pubrec.reason_code.is_error() {
-                            tracing::debug!(
-                                packet_id = pubrec.packet_id,
-                                reason_code = ?pubrec.reason_code,
-                                "QoS 2 PUBREC rejected"
-                            );
-                            if let Some(tx) = ctx.pubcomp_channels.lock().remove(&pubrec.packet_id)
-                            {
-                                let _ = tx.send(pubrec.reason_code);
-                            }
-                            ctx.session
-                                .write()
-                                .await
-                                .remove_unacked_publish(pubrec.packet_id)
-                                .await;
-                            continue;
-                        }
-                    }
-                    Packet::PubComp(pubcomp) => {
-                        if let Some(tx) = ctx.pubcomp_channels.lock().remove(&pubcomp.packet_id) {
-                            let _ = tx.send(pubcomp.reason_code);
-                        }
-                    }
-                    Packet::Auth(ref auth) => {
-                        if let Err(e) = handle_auth_packet(auth.clone(), &ctx).await {
-                            tracing::error!("Error handling AUTH packet: {e}");
-                            ctx.connected.store(false, Ordering::SeqCst);
-                            break;
-                        }
-                        continue;
-                    }
-                    _ => {}
-                }
-
-                if let Err(e) = handle_incoming_packet_with_writer(
-                    packet,
-                    &ctx.writer,
-                    &ctx.session,
-                    &ctx.callback_manager,
-                    None,
-                    &ctx.keepalive_state,
-                )
-                .await
-                {
-                    tracing::error!("Error handling packet: {e}");
-                    ctx.connected.store(false, Ordering::SeqCst);
-                    break;
-                }
-            }
-            Err(e) => {
-                tracing::error!("Error reading packet: {e}");
-                ctx.connected.store(false, Ordering::SeqCst);
-                break;
-            }
-        }
-    }
-
-    ctx.connected.store(false, Ordering::SeqCst);
-
-    ctx.puback_channels.lock().drain();
-    ctx.pubcomp_channels.lock().drain();
-    ctx.suback_channels.lock().drain();
-    ctx.unsuback_channels.lock().drain();
-}
-
-async fn handle_auth_packet(auth: AuthPacket, ctx: &PacketReaderContext) -> Result<()> {
-    tracing::debug!(
-        "CLIENT: Received AUTH during session with reason: {:?}",
-        auth.reason_code
-    );
-
-    match auth.reason_code {
-        ReasonCode::ContinueAuthentication => {
-            let handler = ctx
-                .auth_handler
-                .as_ref()
-                .ok_or(MqttError::AuthenticationFailed)?;
-
-            let auth_method = auth.authentication_method().unwrap_or("");
-            let auth_data = auth.authentication_data();
-
-            let response = handler.handle_challenge(auth_method, auth_data).await?;
-
-            match response {
-                AuthResponse::Continue(data) => {
-                    let method = ctx.auth_method.clone().unwrap_or_default();
-                    let auth_packet = AuthPacket::continue_authentication(method, Some(data))?;
-                    ctx.writer
-                        .lock()
-                        .await
-                        .write_packet(Packet::Auth(auth_packet))
-                        .await?;
-                }
-                AuthResponse::Success => {
-                    tracing::debug!("CLIENT: Auth handler indicated success for re-auth challenge");
-                }
-                AuthResponse::Abort(reason) => {
-                    tracing::warn!("CLIENT: Re-auth aborted: {}", reason);
-                    return Err(MqttError::AuthenticationFailed);
-                }
-            }
-        }
-        ReasonCode::Success => {
-            tracing::info!("CLIENT: Re-authentication completed successfully");
-        }
-        _ => {
-            tracing::warn!(
-                "CLIENT: Re-authentication failed with reason: {:?}",
-                auth.reason_code
-            );
-            return Err(MqttError::AuthenticationFailed);
-        }
-    }
-
-    Ok(())
-}
-
-const PINGREQ_LOG_INTERVAL: u32 = 20;
-
-async fn send_pingreq_with_priority(
-    writer: &Arc<tokio::sync::Mutex<UnifiedWriter>>,
-    config: &mqtt5_protocol::KeepaliveConfig,
-) -> Result<()> {
-    let max_attempts = config.lock_retry_attempts;
-    let retry_delay = Duration::from_millis(u64::from(config.lock_retry_delay_ms));
-
-    for attempt in 0..max_attempts {
-        if let Ok(mut guard) = writer.try_lock() {
-            return guard.write_packet(Packet::PingReq).await;
-        }
-
-        if attempt > 0 && attempt % PINGREQ_LOG_INTERVAL == 0 {
-            tracing::warn!(
-                attempt,
-                max_attempts,
-                "PINGREQ waiting for writer lock - possible contention"
-            );
-        }
-
-        tokio::time::sleep(retry_delay).await;
-    }
-
-    tracing::error!(
-        max_attempts,
-        "Failed to acquire writer lock for PINGREQ, falling back to blocking"
-    );
-    writer.lock().await.write_packet(Packet::PingReq).await
-}
-
-async fn keepalive_task_with_writer(
-    writer: Arc<tokio::sync::Mutex<UnifiedWriter>>,
-    keepalive_interval: Duration,
-    keepalive_state: Arc<Mutex<KeepaliveState>>,
-    connected: Arc<AtomicBool>,
-    keepalive_config: Option<mqtt5_protocol::KeepaliveConfig>,
-) {
-    let config = keepalive_config.unwrap_or_default();
-    let ping_interval = config.ping_interval(keepalive_interval);
-    let timeout_duration = config.timeout_duration(keepalive_interval);
-    let mut interval = tokio::time::interval(ping_interval);
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-    interval.tick().await;
-
-    loop {
-        interval.tick().await;
-
-        {
-            let state = keepalive_state.lock();
-            if state.is_timeout(timeout_duration) {
-                tracing::error!("Keepalive timeout - no PINGRESP received");
-                connected.store(false, Ordering::SeqCst);
-                break;
-            }
-        }
-
-        keepalive_state.lock().record_ping_sent();
-
-        let send_result = send_pingreq_with_priority(&writer, &config).await;
-        if let Err(e) = send_result {
-            tracing::error!("Error sending PINGREQ: {e}");
-            break;
-        }
-    }
-}
-
-async fn flow_expiration_task(session: Arc<tokio::sync::RwLock<SessionState>>) {
-    let check_interval = Duration::from_secs(60);
-    let mut interval = tokio::time::interval(check_interval);
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-    interval.tick().await;
-
-    loop {
-        interval.tick().await;
-
-        let expired = session.read().await.expire_flows().await;
-        if !expired.is_empty() {
-            tracing::debug!(count = expired.len(), "Expired {} flows", expired.len());
-        }
-    }
-}
-
-async fn quic_stream_acceptor_task(connection: Arc<Connection>, ctx: PacketReaderContext) {
-    loop {
-        match connection.accept_bi().await {
-            Ok((send, recv)) => {
-                tracing::debug!("Accepted new QUIC stream");
-                let ctx_for_reader = ctx.clone();
-                tokio::spawn(async move {
-                    quic_stream_reader_task(recv, send, ctx_for_reader).await;
-                });
-            }
-            Err(e) => {
-                tracing::error!("Error accepting QUIC stream: {e}");
-                ctx.connected.store(false, Ordering::SeqCst);
-                break;
-            }
-        }
-    }
-}
-
-fn is_flow_header_byte(b: u8) -> bool {
-    matches!(
-        b,
-        FLOW_TYPE_CONTROL | FLOW_TYPE_CLIENT_DATA | FLOW_TYPE_SERVER_DATA
-    )
-}
-
-async fn try_read_server_flow_header(
-    recv: &mut quinn::RecvStream,
-) -> Result<Option<(FlowId, FlowFlags, Option<StdDuration>)>> {
-    let chunk = recv
-        .read_chunk(1, true)
-        .await
-        .map_err(|e| MqttError::ConnectionError(format!("Failed to peek stream: {e}")))?;
-
-    let Some(chunk) = chunk else {
-        return Ok(None);
-    };
-
-    if chunk.bytes.is_empty() {
-        return Ok(None);
-    }
-
-    let first_byte = chunk.bytes[0];
-    if !is_flow_header_byte(first_byte) {
-        return Ok(None);
-    }
-
-    let mut header_buf = Vec::with_capacity(32);
-    header_buf.extend_from_slice(&chunk.bytes);
-
-    while header_buf.len() < 32 {
-        match recv.read_chunk(32 - header_buf.len(), true).await {
-            Ok(Some(chunk)) if !chunk.bytes.is_empty() => {
-                header_buf.extend_from_slice(&chunk.bytes);
-            }
-            Ok(_) => break,
-            Err(e) => {
-                return Err(MqttError::ConnectionError(format!(
-                    "Failed to read flow header: {e}"
-                )));
-            }
-        }
-    }
-
-    let mut bytes = Bytes::from(header_buf);
-    let flow_header = FlowHeader::decode(&mut bytes)?;
-
-    match flow_header {
-        FlowHeader::Control(h) => {
-            tracing::trace!(flow_id = ?h.flow_id, "Parsed control flow header from server");
-            Ok(Some((h.flow_id, h.flags, None)))
-        }
-        FlowHeader::ClientData(h) | FlowHeader::ServerData(h) => {
-            let expire = if h.expire_interval > 0 {
-                Some(StdDuration::from_secs(h.expire_interval))
-            } else {
-                None
-            };
-            tracing::debug!(flow_id = ?h.flow_id, is_server = h.is_server_flow(), expire = ?expire, "Parsed data flow header from server");
-            Ok(Some((h.flow_id, h.flags, expire)))
-        }
-        FlowHeader::UserDefined(_) => {
-            tracing::trace!("Ignoring user-defined flow header");
-            Ok(None)
-        }
-    }
-}
-
-async fn quic_stream_reader_task(
-    mut recv: quinn::RecvStream,
-    send: quinn::SendStream,
-    ctx: PacketReaderContext,
-) {
-    use crate::transport::PacketReader;
-
-    let flow_id = match try_read_server_flow_header(&mut recv).await {
-        Ok(Some((id, flags, expire))) => {
-            tracing::debug!(
-                flow_id = ?id,
-                is_server_initiated = id.is_server_initiated(),
-                ?flags,
-                ?expire,
-                "Server-initiated stream with flow header"
-            );
-            Some(id)
-        }
-        Ok(None) => {
-            tracing::trace!("No flow header on server-initiated stream");
-            None
-        }
-        Err(e) => {
-            tracing::warn!("Error parsing server flow header: {e}");
-            None
-        }
-    };
-
-    let stream_writer = Arc::new(tokio::sync::Mutex::new(UnifiedWriter::Quic(send)));
-
-    loop {
-        match recv.read_packet(ctx.protocol_version).await {
-            Ok(packet) => {
-                tracing::trace!(flow_id = ?flow_id, "Received packet on server-initiated QUIC stream: {:?}", packet);
-                if let Err(e) = handle_incoming_packet_with_writer(
-                    packet,
-                    &stream_writer,
-                    &ctx.session,
-                    &ctx.callback_manager,
-                    flow_id,
-                    &ctx.keepalive_state,
-                )
-                .await
-                {
-                    tracing::error!(flow_id = ?flow_id, "Error handling packet from server stream: {e}");
-                    break;
-                }
-            }
-            Err(e) => {
-                tracing::debug!(flow_id = ?flow_id, "Server-initiated QUIC stream closed or error: {e}");
-                break;
-            }
-        }
-    }
-}
-
-/// Handle incoming packet with writer access for acknowledgments
-async fn handle_incoming_packet_with_writer(
-    packet: Packet,
-    writer: &Arc<tokio::sync::Mutex<UnifiedWriter>>,
-    session: &Arc<tokio::sync::RwLock<SessionState>>,
-    callback_manager: &Arc<CallbackManager>,
-    flow_id: Option<crate::transport::flow::FlowId>,
-    keepalive_state: &Arc<Mutex<KeepaliveState>>,
-) -> Result<()> {
-    match packet {
-        Packet::Publish(publish) => {
-            handle_publish_with_ack(publish, writer, session, callback_manager, flow_id).await
-        }
-        Packet::PingResp => {
-            keepalive_state.lock().record_pong_received();
-            Ok(())
-        }
-        Packet::PubRec(pubrec) => {
-            // Handle QoS 2 PUBREC for outgoing messages - send PUBREL
-            handle_pubrec_outgoing(pubrec, writer, session).await
-        }
-        Packet::PubRel(pubrel) => {
-            // Handle QoS 2 PUBREL for incoming messages - complete the QoS 2 flow
-            handle_pubrel(pubrel, writer, session).await
-        }
-        Packet::PubComp(pubcomp) => {
-            // Handle QoS 2 PUBCOMP for outgoing messages - complete the flow
-            handle_pubcomp_outgoing(pubcomp, session).await
-        }
-        Packet::Disconnect(disconnect) => {
-            tracing::info!("Server sent DISCONNECT: {:?}", disconnect.reason_code);
-            Err(MqttError::ConnectionError(
-                "Server disconnected".to_string(),
-            ))
-        }
-        _ => {
-            // Other packet types handled elsewhere or not needed here
-            Ok(())
-        }
-    }
-}
-
-/// Handle PUBLISH packet with proper `QoS` acknowledgments
-async fn handle_publish_with_ack(
-    publish: crate::packet::publish::PublishPacket,
-    writer: &Arc<tokio::sync::Mutex<UnifiedWriter>>,
-    session: &Arc<tokio::sync::RwLock<SessionState>>,
-    callback_manager: &Arc<CallbackManager>,
-    flow_id: Option<crate::transport::flow::FlowId>,
-) -> Result<()> {
-    match publish.qos {
-        crate::QoS::AtMostOnce => {}
-        crate::QoS::AtLeastOnce => {
-            if let Some(packet_id) = publish.packet_id {
-                session
-                    .read()
-                    .await
-                    .flow_control()
-                    .read()
-                    .await
-                    .register_inbound_publish(packet_id)
-                    .await?;
-
-                if let Some(fid) = flow_id {
-                    session
-                        .read()
-                        .await
-                        .store_publish_flow(packet_id, fid)
-                        .await;
-                }
-                let puback = crate::packet::puback::PubAckPacket {
-                    packet_id,
-                    reason_code: crate::protocol::v5::reason_codes::ReasonCode::Success,
-                    properties: Properties::default(),
-                };
-                writer
-                    .lock()
-                    .await
-                    .write_packet(Packet::PubAck(puback))
-                    .await?;
-
-                session
-                    .read()
-                    .await
-                    .flow_control()
-                    .read()
-                    .await
-                    .acknowledge_inbound(packet_id)
-                    .await;
-            }
-        }
-        crate::QoS::ExactlyOnce => {
-            if let Some(packet_id) = publish.packet_id {
-                session
-                    .read()
-                    .await
-                    .flow_control()
-                    .read()
-                    .await
-                    .register_inbound_publish(packet_id)
-                    .await?;
-
-                if let Some(fid) = flow_id {
-                    session
-                        .read()
-                        .await
-                        .store_publish_flow(packet_id, fid)
-                        .await;
-                }
-                session
-                    .write()
-                    .await
-                    .store_unacked_publish(publish.clone())
-                    .await?;
-                let pubrec = crate::packet::pubrec::PubRecPacket {
-                    packet_id,
-                    reason_code: crate::protocol::v5::reason_codes::ReasonCode::Success,
-                    properties: Properties::default(),
-                };
-                writer
-                    .lock()
-                    .await
-                    .write_packet(Packet::PubRec(pubrec))
-                    .await?;
-                session.write().await.store_pubrec(packet_id).await;
-            }
-        }
-    }
-
-    let _ = callback_manager.dispatch(&publish);
-
-    Ok(())
-}
-
-/// Handle PUBREC packet for outgoing `QoS` 2 messages
-async fn handle_pubrec_outgoing(
-    pubrec: crate::packet::pubrec::PubRecPacket,
-    writer: &Arc<tokio::sync::Mutex<UnifiedWriter>>,
-    session: &Arc<tokio::sync::RwLock<SessionState>>,
-) -> Result<()> {
-    // Move from unacked publish to unacked pubrel
-    session
-        .write()
-        .await
-        .complete_pubrec(pubrec.packet_id)
-        .await;
-
-    // Send PUBREL to complete QoS 2 flow
-    let pub_rel = crate::packet::pubrel::PubRelPacket {
-        packet_id: pubrec.packet_id,
-        reason_code: crate::protocol::v5::reason_codes::ReasonCode::Success,
-        properties: Properties::default(),
-    };
-
-    writer
-        .lock()
-        .await
-        .write_packet(crate::packet::Packet::PubRel(pub_rel))
-        .await?;
-
-    // Store PUBREL for completion tracking
-    session.write().await.store_pubrel(pubrec.packet_id).await;
-
-    Ok(())
-}
-
-/// Handle PUBCOMP packet for outgoing `QoS` 2 messages
-async fn handle_pubcomp_outgoing(
-    pubcomp: crate::packet::pubcomp::PubCompPacket,
-    session: &Arc<tokio::sync::RwLock<SessionState>>,
-) -> Result<()> {
-    // Complete the QoS 2 flow by removing the PUBREL
-    session
-        .write()
-        .await
-        .complete_pubrel(pubcomp.packet_id)
-        .await;
-
-    Ok(())
-}
-
-/// Handle PUBREL packet for `QoS` 2 flow
-async fn handle_pubrel(
-    pubrel: crate::packet::pubrel::PubRelPacket,
-    writer: &Arc<tokio::sync::Mutex<UnifiedWriter>>,
-    session: &Arc<tokio::sync::RwLock<SessionState>>,
-) -> Result<()> {
-    let has_pubrec = session.read().await.has_pubrec(pubrel.packet_id).await;
-
-    if has_pubrec {
-        session.write().await.remove_pubrec(pubrel.packet_id).await;
-
-        let pubcomp = crate::packet::pubcomp::PubCompPacket {
-            packet_id: pubrel.packet_id,
-            reason_code: crate::protocol::v5::reason_codes::ReasonCode::Success,
-            properties: Properties::default(),
-        };
-
-        writer
-            .lock()
-            .await
-            .write_packet(Packet::PubComp(pubcomp))
-            .await?;
-    } else {
-        let pubcomp = crate::packet::pubcomp::PubCompPacket {
-            packet_id: pubrel.packet_id,
-            reason_code: crate::protocol::v5::reason_codes::ReasonCode::Success,
-            properties: Properties::default(),
-        };
-
-        writer
-            .lock()
-            .await
-            .write_packet(Packet::PubComp(pubcomp))
-            .await?;
-    }
-
-    session
-        .read()
-        .await
-        .flow_control()
-        .read()
-        .await
-        .acknowledge_inbound(pubrel.packet_id)
-        .await;
-
-    Ok(())
-}
-
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
     use crate::packet::connack::ConnAckPacket;
     use crate::protocol::v5::reason_codes::ReasonCode;
@@ -1960,7 +1134,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_client_creation() {
+    pub async fn test_client_creation() {
         let client = create_test_client();
         assert!(!client.is_connected());
         assert!(client.writer.is_none());
@@ -1973,7 +1147,6 @@ mod tests {
         let client = create_test_client();
         let transport = MockTransport::new();
 
-        // Prepare CONNACK response
         let connack = ConnAckPacket {
             protocol_version: 5,
             session_present: false,
@@ -1983,13 +1156,10 @@ mod tests {
         let connack_bytes = encode_packet(&Packet::ConnAck(connack)).unwrap();
         transport.inject_packet(connack_bytes).await;
 
-        // Connect with mock transport
         let transport_type = TransportType::Tcp(crate::transport::tcp::TcpTransport::from_addr(
             std::net::SocketAddr::from(([127, 0, 0, 1], 1883)),
         ));
 
-        // For testing, we'll use the mock transport directly
-        // In real usage, this would be determined by the connection string
         let mock_transport = MockTransport::new();
         mock_transport
             .inject_packet(
@@ -2003,12 +1173,9 @@ mod tests {
             )
             .await;
 
-        // Since we can't easily inject mock transport into TransportType,
-        // we'll test the connection logic separately
-        let _ = transport_type; // suppress unused warning
+        let _ = transport_type;
         assert!(!client.is_connected());
 
-        // Test that we can create the CONNECT packet
         let connect_packet = client.build_connect_packet().await;
         assert_eq!(connect_packet.client_id, "test-client");
         assert_eq!(connect_packet.keep_alive, 60);
@@ -2072,19 +1239,17 @@ mod tests {
     async fn test_disconnect_not_connected() {
         let mut client = create_test_client();
         let result = client.disconnect().await;
-        assert!(matches!(result, Err(MqttError::NotConnected)));
+        assert!(result.is_ok());
     }
 
     #[tokio::test]
     async fn test_packet_id_generation() {
         let client = create_test_client();
 
-        // Generate multiple packet IDs
         let id1 = client.packet_id_generator.next();
         let id2 = client.packet_id_generator.next();
         let id3 = client.packet_id_generator.next();
 
-        // They should be sequential and unique
         assert_eq!(id1, 1);
         assert_eq!(id2, 2);
         assert_eq!(id3, 3);
@@ -2130,14 +1295,11 @@ mod tests {
     async fn test_session_state_sharing() {
         let client = create_test_client();
 
-        // Test that session state can be accessed
         let session = client.session.read().await;
         assert_eq!(session.client_id(), "test-client");
         drop(session);
 
-        // Test that session state can be modified
         let session = client.session.write().await;
-        // In a real test, we'd modify the session state here
         assert_eq!(session.client_id(), "test-client");
     }
 }
