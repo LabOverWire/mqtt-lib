@@ -3,8 +3,11 @@
 //! Provides fine-grained topic-based access control for publish and subscribe operations.
 //! Supports pattern matching with wildcards, user-based permissions, and role-based access control (RBAC).
 
+mod rules;
+
+pub use rules::{AclRule, FederatedRoleEntry, Permission, Role, RoleRule};
+
 use crate::error::{MqttError, Result};
-use crate::validation::topic_matches_filter;
 use std::collections::{HashMap, HashSet};
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
@@ -16,183 +19,15 @@ use tracing::debug;
 #[cfg(not(target_arch = "wasm32"))]
 use tracing::{info, warn};
 
-/// Access permissions for topics
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Permission {
-    /// Read access (subscribe)
-    Read,
-    /// Write access (publish)
-    Write,
-    /// Both read and write access
-    ReadWrite,
-    /// Explicitly deny access
-    Deny,
-}
-
-impl Permission {
-    /// Check if this permission allows reading (subscribing)
-    #[must_use]
-    pub fn allows_read(&self) -> bool {
-        matches!(self, Permission::Read | Permission::ReadWrite)
-    }
-
-    /// Check if this permission allows writing (publishing)
-    #[must_use]
-    pub fn allows_write(&self) -> bool {
-        matches!(self, Permission::Write | Permission::ReadWrite)
-    }
-
-    /// Check if this permission explicitly denies access
-    #[must_use]
-    pub fn is_deny(&self) -> bool {
-        matches!(self, Permission::Deny)
-    }
-}
-
-impl std::str::FromStr for Permission {
-    type Err = MqttError;
-
-    fn from_str(s: &str) -> Result<Self> {
-        match s.to_lowercase().as_str() {
-            "read" | "subscribe" => Ok(Permission::Read),
-            "write" | "publish" => Ok(Permission::Write),
-            "readwrite" | "rw" | "all" => Ok(Permission::ReadWrite),
-            "deny" | "none" => Ok(Permission::Deny),
-            _ => Err(MqttError::Configuration(format!("Invalid permission: {s}"))),
-        }
-    }
-}
-
-/// ACL rule for a specific user and topic pattern
-#[derive(Debug, Clone)]
-pub struct AclRule {
-    /// Username (or "*" for all users)
-    pub username: String,
-    /// Topic pattern (supports MQTT wildcards + and #)
-    pub topic_pattern: String,
-    /// Permission level
-    pub permission: Permission,
-}
-
-impl AclRule {
-    /// Creates a new ACL rule
-    #[must_use]
-    pub fn new(username: String, topic_pattern: String, permission: Permission) -> Self {
-        Self {
-            username,
-            topic_pattern,
-            permission,
-        }
-    }
-
-    /// Check if this rule matches the given user and topic
-    #[must_use]
-    pub fn matches(&self, username: Option<&str>, topic: &str) -> bool {
-        // Check username match
-        let username_matches = match username {
-            Some(user) => self.username == "*" || self.username == user,
-            None => self.username == "*" || self.username == "anonymous",
-        };
-
-        if !username_matches {
-            return false;
-        }
-
-        // Check topic pattern match
-        topic_matches_filter(topic, &self.topic_pattern)
-    }
-}
-
-/// A rule within a role (topic pattern and permission)
-#[derive(Debug, Clone)]
-pub struct RoleRule {
-    pub topic_pattern: String,
-    pub permission: Permission,
-}
-
-impl RoleRule {
-    #[must_use]
-    pub fn new(topic_pattern: String, permission: Permission) -> Self {
-        Self {
-            topic_pattern,
-            permission,
-        }
-    }
-
-    #[must_use]
-    pub fn matches(&self, topic: &str) -> bool {
-        topic_matches_filter(topic, &self.topic_pattern)
-    }
-}
-
-/// A named role containing a set of topic/permission rules
-#[derive(Debug, Clone)]
-pub struct Role {
-    pub name: String,
-    pub rules: Vec<RoleRule>,
-}
-
-impl Role {
-    #[must_use]
-    pub fn new(name: String) -> Self {
-        Self {
-            name,
-            rules: Vec::new(),
-        }
-    }
-
-    pub fn add_rule(&mut self, rule: RoleRule) {
-        self.rules.push(rule);
-    }
-
-    pub fn remove_rule(&mut self, topic_pattern: &str) -> bool {
-        let len_before = self.rules.len();
-        self.rules.retain(|r| r.topic_pattern != topic_pattern);
-        self.rules.len() < len_before
-    }
-}
-
-/// Entry for federated (JWT-derived) roles with metadata
-#[derive(Debug, Clone)]
-pub struct FederatedRoleEntry {
-    pub roles: HashSet<String>,
-    pub issuer: String,
-    pub mode: crate::broker::config::FederatedAuthMode,
-    pub session_bound: bool,
-}
-
-impl FederatedRoleEntry {
-    #[must_use]
-    pub fn new(
-        roles: HashSet<String>,
-        issuer: String,
-        mode: crate::broker::config::FederatedAuthMode,
-        session_bound: bool,
-    ) -> Self {
-        Self {
-            roles,
-            issuer,
-            mode,
-            session_bound,
-        }
-    }
-}
-
 /// Access Control List manager with RBAC support
 #[derive(Debug)]
 pub struct AclManager {
-    /// List of direct user ACL rules (highest priority)
     rules: Arc<RwLock<Vec<AclRule>>>,
-    /// Roles: `role_name` -> Role
     roles: Arc<RwLock<HashMap<String, Role>>>,
-    /// User-role assignments: username -> set of role names (native/persistent)
     user_roles: Arc<RwLock<HashMap<String, HashSet<String>>>>,
-    /// Federated user-role assignments: `user_id` -> `FederatedRoleEntry` (session-scoped)
     federated_user_roles: Arc<RwLock<HashMap<String, FederatedRoleEntry>>>,
-    /// Path to ACL file (optional)
     #[cfg(not(target_arch = "wasm32"))]
     acl_file: Option<std::path::PathBuf>,
-    /// Default permission when no rules match
     default_permission: RwLock<Permission>,
 }
 
@@ -203,7 +38,6 @@ impl Default for AclManager {
 }
 
 impl AclManager {
-    /// Creates a new ACL manager with default permissions
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -217,7 +51,6 @@ impl AclManager {
         }
     }
 
-    /// Creates an ACL manager that allows all access by default
     #[must_use]
     pub fn allow_all() -> Self {
         Self {
@@ -232,23 +65,6 @@ impl AclManager {
     }
 
     /// Creates an ACL manager from a file
-    ///
-    /// File format (one rule per line):
-    /// ```text
-    /// # Comments start with #
-    /// # Direct user rules
-    /// user alice topic sensors/+ permission read
-    /// user bob topic actuators/# permission write
-    /// user * topic public/# permission readwrite
-    ///
-    /// # Role definitions
-    /// role admin topic admin/# permission readwrite
-    /// role reader topic public/# permission read
-    ///
-    /// # User-role assignments
-    /// assign alice admin
-    /// assign bob reader
-    /// ```
     ///
     /// # Errors
     ///
@@ -269,19 +85,16 @@ impl AclManager {
         Ok(manager)
     }
 
-    /// Sets the default permission for when no rules match
     #[must_use]
     pub fn with_default_permission(mut self, permission: Permission) -> Self {
         self.default_permission = RwLock::new(permission);
         self
     }
 
-    /// Sets the default permission at runtime
     pub async fn set_default_permission(&self, permission: Permission) {
         *self.default_permission.write().await = permission;
     }
 
-    /// Returns the current default permission
     pub async fn get_default_permission(&self) -> Permission {
         *self.default_permission.read().await
     }
@@ -387,37 +200,33 @@ impl AclManager {
         Ok(())
     }
 
-    /// Reloads the ACL file (alias for `load_acl_file`).
+    /// Reloads the ACL file
     ///
     /// # Errors
-    /// Returns an error if the ACL file cannot be read or parsed.
+    ///
+    /// Returns an error if the ACL file cannot be read or parsed
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn reload(&self) -> Result<()> {
         self.load_acl_file().await
     }
 
-    /// Adds an ACL rule
     pub async fn add_rule(&self, rule: AclRule) {
         self.rules.write().await.push(rule);
     }
 
-    /// Removes all ACL rules
     pub async fn clear_rules(&self) {
         self.rules.write().await.clear();
     }
 
-    /// Gets the number of direct user ACL rules
     pub async fn rule_count(&self) -> usize {
         self.rules.read().await.len()
     }
 
-    /// Creates a new role (or returns existing one)
     pub async fn add_role(&self, name: String) {
         let mut roles = self.roles.write().await;
         roles.entry(name.clone()).or_insert_with(|| Role::new(name));
     }
 
-    /// Removes a role and all user assignments to it
     pub async fn remove_role(&self, name: &str) -> bool {
         let removed = self.roles.write().await.remove(name).is_some();
         if removed {
@@ -429,17 +238,14 @@ impl AclManager {
         removed
     }
 
-    /// Gets a role by name
     pub async fn get_role(&self, name: &str) -> Option<Role> {
         self.roles.read().await.get(name).cloned()
     }
 
-    /// Lists all role names
     pub async fn list_roles(&self) -> Vec<String> {
         self.roles.read().await.keys().cloned().collect()
     }
 
-    /// Gets the number of roles
     pub async fn role_count(&self) -> usize {
         self.roles.read().await.len()
     }
@@ -463,7 +269,6 @@ impl AclManager {
         Ok(())
     }
 
-    /// Removes a rule from a role
     pub async fn remove_role_rule(&self, role_name: &str, topic_pattern: &str) -> bool {
         let mut roles = self.roles.write().await;
         if let Some(role) = roles.get_mut(role_name) {
@@ -493,7 +298,6 @@ impl AclManager {
         Ok(())
     }
 
-    /// Unassigns a user from a role
     pub async fn unassign_role(&self, username: &str, role_name: &str) -> bool {
         let mut user_roles = self.user_roles.write().await;
         if let Some(roles) = user_roles.get_mut(username) {
@@ -503,7 +307,6 @@ impl AclManager {
         }
     }
 
-    /// Gets all roles assigned to a user
     pub async fn get_user_roles(&self, username: &str) -> Vec<String> {
         self.user_roles
             .read()
@@ -513,7 +316,6 @@ impl AclManager {
             .unwrap_or_default()
     }
 
-    /// Gets all users assigned to a role
     pub async fn get_role_users(&self, role_name: &str) -> Vec<String> {
         self.user_roles
             .read()
@@ -529,13 +331,11 @@ impl AclManager {
             .collect()
     }
 
-    /// Clears all roles and user-role assignments
     pub async fn clear_roles(&self) {
         self.roles.write().await.clear();
         self.user_roles.write().await.clear();
     }
 
-    /// Sets federated roles for a user (atomic operation)
     pub async fn set_federated_roles(&self, user_id: &str, entry: FederatedRoleEntry) {
         self.federated_user_roles
             .write()
@@ -543,17 +343,14 @@ impl AclManager {
             .insert(user_id.to_string(), entry);
     }
 
-    /// Gets federated roles for a user
     pub async fn get_federated_roles(&self, user_id: &str) -> Option<FederatedRoleEntry> {
         self.federated_user_roles.read().await.get(user_id).cloned()
     }
 
-    /// Clears all federated roles for a user
     pub async fn clear_federated_roles(&self, user_id: &str) {
         self.federated_user_roles.write().await.remove(user_id);
     }
 
-    /// Clears session-bound federated roles for a user (called on disconnect)
     pub async fn clear_session_bound_roles(&self, user_id: &str) {
         let mut fed_roles = self.federated_user_roles.write().await;
         if let Some(entry) = fed_roles.get(user_id) {
@@ -563,34 +360,22 @@ impl AclManager {
         }
     }
 
-    /// Check if a user is authorized to publish to a topic
     pub async fn check_publish(&self, username: Option<&str>, topic: &str) -> bool {
         self.check_permission(username, topic, |p| p.allows_write())
             .await
     }
 
-    /// Check if a user is authorized to subscribe to a topic filter
     pub async fn check_subscribe(&self, username: Option<&str>, topic_filter: &str) -> bool {
         self.check_permission(username, topic_filter, |p| p.allows_read())
             .await
     }
 
-    /// Check permission with a custom predicate
-    ///
-    /// Permission resolution order:
-    /// 1. Direct user deny - absolute priority
-    /// 2. Direct user allow - explicit user permission
-    /// 3. Role deny - deny in ANY assigned role blocks access
-    /// 4. Role allow - most permissive across all assigned roles
-    /// 5. Wildcard user rules (user *)
-    /// 6. Default permission
     async fn check_permission<F>(&self, username: Option<&str>, topic: &str, check: F) -> bool
     where
         F: Fn(Permission) -> bool,
     {
         let rules = self.rules.read().await;
 
-        // Step 1 & 2: Check direct user rules (non-wildcard)
         let (direct_match, direct_specificity) =
             Self::find_best_direct_rule(&rules, username, topic, false);
 
@@ -609,7 +394,6 @@ impl AclManager {
             }
         }
 
-        // Step 3 & 4: Check role-based rules (native + federated)
         if let Some(user) = username {
             let user_roles_map = self.user_roles.read().await;
             let fed_roles_map = self.federated_user_roles.read().await;
@@ -658,7 +442,6 @@ impl AclManager {
             }
         }
 
-        // Step 5: Check wildcard user rules
         let (wildcard_match, wildcard_specificity) =
             Self::find_best_direct_rule(&rules, username, topic, true);
 
@@ -675,7 +458,6 @@ impl AclManager {
             return check(rule.permission);
         }
 
-        // Step 6: Default permission
         let default_perm = *self.default_permission.read().await;
         debug!(
             "No ACL rule matched for user={:?}, topic={}, using default permission={:?}",
@@ -778,18 +560,15 @@ mod tests {
             Permission::Read,
         );
 
-        // Username matching
         assert!(rule.matches(Some("alice"), "sensors/temp"));
         assert!(!rule.matches(Some("bob"), "sensors/temp"));
         assert!(!rule.matches(None, "sensors/temp"));
 
-        // Topic matching
         assert!(rule.matches(Some("alice"), "sensors/temp"));
         assert!(rule.matches(Some("alice"), "sensors/humidity"));
         assert!(!rule.matches(Some("alice"), "actuators/fan"));
         assert!(!rule.matches(Some("alice"), "sensors/temp/room1"));
 
-        // Wildcard user rule
         let wildcard_rule = AclRule::new(
             "*".to_string(),
             "public/#".to_string(),
@@ -804,11 +583,9 @@ mod tests {
     async fn test_acl_basic_operations() {
         let acl = AclManager::new();
 
-        // Default deny
         assert!(!acl.check_publish(Some("alice"), "sensors/temp").await);
         assert!(!acl.check_subscribe(Some("alice"), "sensors/+").await);
 
-        // Add rule allowing Alice to read sensors
         acl.add_rule(AclRule::new(
             "alice".to_string(),
             "sensors/+".to_string(),
@@ -819,7 +596,6 @@ mod tests {
         assert!(!acl.check_publish(Some("alice"), "sensors/temp").await);
         assert!(acl.check_subscribe(Some("alice"), "sensors/temp").await);
 
-        // Add rule allowing Bob to write to actuators
         acl.add_rule(AclRule::new(
             "bob".to_string(),
             "actuators/#".to_string(),
@@ -833,7 +609,6 @@ mod tests {
                 .await
         );
 
-        // Verify isolation
         assert!(!acl.check_publish(Some("alice"), "actuators/fan").await);
         assert!(!acl.check_subscribe(Some("bob"), "sensors/temp").await);
     }
@@ -842,7 +617,6 @@ mod tests {
     async fn test_acl_rule_priority() {
         let acl = AclManager::new();
 
-        // Add general rule first
         acl.add_rule(AclRule::new(
             "*".to_string(),
             "data/#".to_string(),
@@ -850,7 +624,6 @@ mod tests {
         ))
         .await;
 
-        // Add specific deny rule
         acl.add_rule(AclRule::new(
             "alice".to_string(),
             "data/secret/#".to_string(),
@@ -858,21 +631,18 @@ mod tests {
         ))
         .await;
 
-        // Alice should be denied access to secret data (specific rule wins)
         assert!(!acl.check_publish(Some("alice"), "data/secret/file1").await);
         assert!(
             !acl.check_subscribe(Some("alice"), "data/secret/file1")
                 .await
         );
 
-        // Alice should have access to other data
         assert!(acl.check_publish(Some("alice"), "data/public/file1").await);
         assert!(
             acl.check_subscribe(Some("alice"), "data/public/file1")
                 .await
         );
 
-        // Bob should have access to all data including secret
         assert!(acl.check_publish(Some("bob"), "data/secret/file1").await);
         assert!(acl.check_subscribe(Some("bob"), "data/secret/file1").await);
     }
@@ -881,12 +651,10 @@ mod tests {
     async fn test_acl_allow_all_manager() {
         let acl = AclManager::allow_all();
 
-        // Should allow everything by default
         assert!(acl.check_publish(Some("alice"), "any/topic").await);
         assert!(acl.check_subscribe(Some("alice"), "any/topic").await);
         assert!(acl.check_publish(None, "anonymous/topic").await);
 
-        // Add specific deny rule
         acl.add_rule(AclRule::new(
             "alice".to_string(),
             "forbidden/#".to_string(),
@@ -894,11 +662,9 @@ mod tests {
         ))
         .await;
 
-        // Should deny Alice access to forbidden topics
         assert!(!acl.check_publish(Some("alice"), "forbidden/secret").await);
         assert!(!acl.check_subscribe(Some("alice"), "forbidden/secret").await);
 
-        // Should still allow Alice access to other topics
         assert!(acl.check_publish(Some("alice"), "allowed/topic").await);
         assert!(acl.check_subscribe(Some("alice"), "allowed/topic").await);
     }
@@ -908,23 +674,20 @@ mod tests {
         use std::io::Write;
         use tempfile::NamedTempFile;
 
-        // Create temporary ACL file
         let mut temp_file = NamedTempFile::new().unwrap();
         writeln!(temp_file, "# ACL file").unwrap();
         writeln!(temp_file, "user alice topic sensors/+ permission read").unwrap();
         writeln!(temp_file, "user bob topic actuators/# permission write").unwrap();
         writeln!(temp_file, "user * topic public/# permission readwrite").unwrap();
         writeln!(temp_file, "user alice topic admin/# permission deny").unwrap();
-        writeln!(temp_file).unwrap(); // Empty line
+        writeln!(temp_file).unwrap();
         writeln!(temp_file, "# Another comment").unwrap();
         writeln!(temp_file, "invalid line format").unwrap();
         temp_file.flush().unwrap();
 
-        // Load from file
         let acl = AclManager::from_file(temp_file.path()).await.unwrap();
         assert_eq!(acl.rule_count().await, 4);
 
-        // Test Alice's permissions
         assert!(!acl.check_publish(Some("alice"), "sensors/temp").await);
         assert!(acl.check_subscribe(Some("alice"), "sensors/temp").await);
         assert!(
@@ -933,12 +696,10 @@ mod tests {
         );
         assert!(!acl.check_publish(Some("alice"), "admin/users").await);
 
-        // Test Bob's permissions
         assert!(acl.check_publish(Some("bob"), "actuators/fan").await);
         assert!(!acl.check_subscribe(Some("bob"), "actuators/fan").await);
         assert!(acl.check_publish(Some("bob"), "public/messages").await);
 
-        // Test unknown user (should get wildcard permissions)
         assert!(acl.check_publish(Some("charlie"), "public/chat").await);
         assert!(!acl.check_publish(Some("charlie"), "sensors/temp").await);
     }
