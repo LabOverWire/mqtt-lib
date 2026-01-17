@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [mqtt5-protocol 0.9.2] - 2026-01-17
+
+### Fixed
+
+- **Embedded target build**: Updated bebytes to 3.0.2 which fixes `no_std` support
+  - Resolves `Vec` not found error when building for `thumbv7em-none-eabihf` and other embedded targets
+  - Removed workaround `Vec` imports that are no longer needed
+
 ## [mqtt5 0.19.0] - 2026-01-15
 
 ### Changed
@@ -21,6 +29,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Parameter type changes**: Some functions now take `&str` instead of `String`
   - `CallbackManager::register` and `register_with_id`: `topic_filter: &str`
   - `CertificateAuthProvider::add_certificate`: `fingerprint: &str, username: &str`
+
+- **Disconnect behavior**: `MqttClient::disconnect()` now returns `Ok(())` when not connected
+  - Previously returned `Err(MqttError::NotConnected)`
+  - Now treats disconnect on disconnected client as a no-op for simpler cleanup code
 
 ## [mqtt5 0.18.3] / [mqtt5-wasm 0.8.3] - 2026-01-14
 
