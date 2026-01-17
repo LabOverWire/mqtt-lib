@@ -36,6 +36,46 @@ Demonstrates Last Will and Testament (LWT) functionality for detecting unexpecte
 
 Federated JWT authentication with Google OAuth. Demonstrates identity-only auth mode with ACL-based authorization.
 
+### Request/Response RPC (request-response/)
+
+Demonstrates MQTT v5.0 request/response pattern using ResponseTopic and CorrelationData for RPC-style communication.
+
+### Retained Messages (retained-messages/)
+
+Shows retained message functionality - late subscribers immediately receive the last retained message on a topic.
+
+### Topic Aliases (topic-aliases/)
+
+Demonstrates bandwidth optimization using topic aliases to reduce packet size for frequently-used topics.
+
+### Session Recovery (session-recovery/)
+
+Shows session persistence across reconnections with cleanStart=false and sessionExpiryInterval.
+
+### $SYS Monitoring (sys-monitoring/)
+
+Live broker metrics dashboard subscribing to $SYS/# topics for statistics.
+
+### Message Expiry (message-expiry/)
+
+Demonstrates message expiry intervals (TTL) - messages automatically expire after specified time.
+
+### Flow Control (flow-control/)
+
+Shows receiveMaximum-based flow control and backpressure handling for QoS 1/2 messages.
+
+### BroadcastChannel (broadcast-channel/)
+
+Cross-tab communication using BroadcastChannel transport for multi-tab MQTT coordination.
+
+### Subscription Identifiers (subscription-ids/)
+
+Demonstrates subscription identifiers for routing messages based on which subscription matched.
+
+### ACL Permissions (acl-permissions/)
+
+Shows ACL rule enforcement with visual feedback for allowed/denied operations.
+
 ### Rapid Ports (rapid-ports/)
 
 Quick testing tool for MessagePort-based broker connections.
@@ -153,6 +193,116 @@ Quick MessagePort connection testing.
 
 ```bash
 cd rapid-ports
+python3 -m http.server 8000
+```
+
+Open http://localhost:8000 in your browser.
+
+#### Request/Response RPC
+
+RPC-style communication with correlation tracking.
+
+```bash
+cd request-response
+python3 -m http.server 8000
+```
+
+Open http://localhost:8000 in your browser.
+
+#### Retained Messages
+
+Late subscriber receives retained state immediately.
+
+```bash
+cd retained-messages
+python3 -m http.server 8000
+```
+
+Open http://localhost:8000 in your browser.
+
+#### Topic Aliases
+
+Bandwidth optimization demonstration.
+
+```bash
+cd topic-aliases
+python3 -m http.server 8000
+```
+
+Open http://localhost:8000 in your browser.
+
+#### Session Recovery
+
+Session persistence across reconnections.
+
+```bash
+cd session-recovery
+python3 -m http.server 8000
+```
+
+Open http://localhost:8000 in your browser.
+
+#### $SYS Monitoring
+
+Live broker metrics dashboard.
+
+```bash
+cd sys-monitoring
+python3 -m http.server 8000
+```
+
+Open http://localhost:8000 in your browser.
+
+#### Message Expiry
+
+Message TTL and expiration tracking.
+
+```bash
+cd message-expiry
+python3 -m http.server 8000
+```
+
+Open http://localhost:8000 in your browser.
+
+#### Flow Control
+
+Backpressure and receiveMaximum demonstration.
+
+```bash
+cd flow-control
+python3 -m http.server 8000
+```
+
+Open http://localhost:8000 in your browser.
+
+#### BroadcastChannel
+
+Cross-tab MQTT communication.
+
+```bash
+cd broadcast-channel
+python3 -m http.server 8000
+```
+
+Open http://localhost:8000 in your browser.
+
+#### Subscription Identifiers
+
+Message routing by subscription ID.
+
+```bash
+cd subscription-ids
+python3 -m http.server 8000
+```
+
+Open http://localhost:8000 in your browser.
+
+#### ACL Permissions
+
+Permission enforcement visualization.
+
+```bash
+cd acl-permissions
 python3 -m http.server 8000
 ```
 
