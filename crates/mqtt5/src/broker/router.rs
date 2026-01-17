@@ -116,7 +116,6 @@ impl MessageRouter {
         topic_filter.contains('+') || topic_filter.contains('#')
     }
 
-    /// Sets the bridge manager for this router
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn set_bridge_manager(&self, bridge_manager: Arc<BridgeManager>) {
         *self.bridge_manager.write().await = Some(Arc::downgrade(&bridge_manager));
@@ -137,7 +136,6 @@ impl MessageRouter {
     /// Returns an error if the storage fails to load retained messages.
     pub async fn initialize(&self) -> Result<()> {
         if let Some(ref storage) = self.storage {
-            // Load all retained messages from storage
             let stored_messages = storage.get_retained_messages("#").await?;
             let mut retained = self.retained_messages.write().await;
 
@@ -150,7 +148,6 @@ impl MessageRouter {
         Ok(())
     }
 
-    /// Registers a client connection, signals old client to disconnect if ID already exists
     pub async fn register_client(
         &self,
         client_id: String,
@@ -159,7 +156,6 @@ impl MessageRouter {
     ) {
         let mut clients = self.clients.write().await;
 
-        // Remove old client if exists and signal disconnect
         if let Some(old_client) = clients.remove(&client_id) {
             info!("Client ID takeover: {}", client_id);
             let _ = old_client.disconnect_tx.send(());
@@ -175,14 +171,12 @@ impl MessageRouter {
         info!("Registered client: {}", client_id);
     }
 
-    /// Disconnects a client but keeps subscriptions (for persistent sessions)
     pub async fn disconnect_client(&self, client_id: &str) {
         let mut clients = self.clients.write().await;
         clients.remove(client_id);
         debug!("Disconnected client (keeping subscriptions): {}", client_id);
     }
 
-    /// Unregisters a client connection and removes all subscriptions
     pub async fn unregister_client(&self, client_id: &str) {
         let mut clients = self.clients.write().await;
         clients.remove(client_id);
@@ -289,7 +283,6 @@ impl MessageRouter {
         Ok(is_new)
     }
 
-    /// Removes a subscription for a client
     pub async fn unsubscribe(&self, client_id: &str, topic_filter: &str) -> bool {
         let (actual_filter, _) = parse_shared_subscription(topic_filter);
 
@@ -360,24 +353,31 @@ impl MessageRouter {
         }
 
         if publish.retain {
-            let mut retained = self.retained_messages.write().await;
-            if publish.payload.is_empty() {
-                retained.remove(&publish.topic_name);
+            let (should_remove, retained_msg) = if publish.payload.is_empty() {
+                self.retained_messages
+                    .write()
+                    .await
+                    .remove(&publish.topic_name);
                 debug!("Deleted retained message for topic: {}", publish.topic_name);
+                (true, None)
+            } else {
+                let retained_msg = RetainedMessage::new(publish.clone());
+                self.retained_messages
+                    .write()
+                    .await
+                    .insert(publish.topic_name.clone(), retained_msg.clone());
+                debug!("Stored retained message for topic: {}", publish.topic_name);
+                (false, Some(retained_msg))
+            };
 
-                if let Some(ref storage) = self.storage {
+            if let Some(ref storage) = self.storage {
+                if should_remove {
                     if let Err(e) = storage.remove_retained_message(&publish.topic_name).await {
                         tracing::error!("Failed to remove retained message from storage: {e}");
                     }
-                }
-            } else {
-                let retained_msg = RetainedMessage::new(publish.clone());
-                retained.insert(publish.topic_name.clone(), retained_msg.clone());
-                debug!("Stored retained message for topic: {}", publish.topic_name);
-
-                if let Some(ref storage) = self.storage {
+                } else if let Some(ref msg) = retained_msg {
                     if let Err(e) = storage
-                        .store_retained_message(&publish.topic_name, retained_msg)
+                        .store_retained_message(&publish.topic_name, msg.clone())
                         .await
                     {
                         tracing::error!("Failed to store retained message to storage: {e}");
@@ -425,16 +425,20 @@ impl MessageRouter {
             }
         }
 
-        for (group_name, group_subs) in share_groups {
-            let online_subs: Vec<&Subscription> = group_subs
+        for (group_name, group_subs) in &share_groups {
+            let online_subs: Vec<&&Subscription> = group_subs
                 .iter()
                 .filter(|sub| clients.contains_key(&sub.client_id))
-                .copied()
                 .collect();
 
             if !online_subs.is_empty() {
-                let counters = self.share_group_counters.read().await;
-                if let Some(counter) = counters.get(&group_name) {
+                let counter = self
+                    .share_group_counters
+                    .read()
+                    .await
+                    .get(group_name)
+                    .cloned();
+                if let Some(counter) = counter {
                     let index = counter.fetch_add(1, Ordering::Relaxed) % online_subs.len();
                     let chosen_sub = online_subs[index];
 
@@ -467,7 +471,7 @@ impl MessageRouter {
             }
         }
 
-        for sub in regular_subs {
+        for sub in &regular_subs {
             self.deliver_to_subscriber(
                 sub,
                 publish,
@@ -477,6 +481,10 @@ impl MessageRouter {
             )
             .await;
         }
+
+        drop(exact);
+        drop(wildcard);
+        drop(clients);
 
         if forward_to_bridges {
             #[cfg(not(target_arch = "wasm32"))]
@@ -582,7 +590,6 @@ impl MessageRouter {
         }
     }
 
-    /// Gets retained messages matching a topic filter
     pub async fn get_retained_messages(&self, topic_filter: &str) -> Vec<PublishPacket> {
         let retained = self.retained_messages.read().await;
         retained
@@ -592,24 +599,20 @@ impl MessageRouter {
             .collect()
     }
 
-    /// Gets the number of connected clients
     pub async fn client_count(&self) -> usize {
         self.clients.read().await.len()
     }
 
-    /// Gets the number of unique topic filters with subscriptions
     pub async fn topic_count(&self) -> usize {
         let exact = self.exact_subscriptions.read().await;
         let wildcard = self.wildcard_subscriptions.read().await;
         exact.len() + wildcard.len()
     }
 
-    /// Gets the number of retained messages
     pub async fn retained_count(&self) -> usize {
         self.retained_messages.read().await.len()
     }
 
-    /// Gets the number of subscriptions for a specific client
     pub async fn subscription_count_for_client(&self, client_id: &str) -> usize {
         let exact = self.exact_subscriptions.read().await;
         let wildcard = self.wildcard_subscriptions.read().await;
@@ -639,7 +642,6 @@ impl MessageRouter {
             .is_some_and(|subs| subs.iter().any(|sub| sub.client_id == client_id))
     }
 
-    /// Checks if a retained message already exists for a topic
     pub async fn has_retained_message(&self, topic: &str) -> bool {
         let retained = self.retained_messages.read().await;
         retained.contains_key(topic)
@@ -947,5 +949,78 @@ mod tests {
         let shared2_received = rx2.try_recv().is_ok();
 
         assert!(shared1_received ^ shared2_received); // XOR - exactly one should be true
+    }
+
+    #[tokio::test]
+    async fn test_route_message_local_only_delivers_to_subscribers() {
+        let router = MessageRouter::new();
+        let (tx1, rx1) = flume::bounded(100);
+        let (tx2, rx2) = flume::bounded(100);
+
+        let (dtx1, _drx1) = tokio::sync::oneshot::channel();
+        let (dtx2, _drx2) = tokio::sync::oneshot::channel();
+        router
+            .register_client("client1".to_string(), tx1, dtx1)
+            .await;
+        router
+            .register_client("client2".to_string(), tx2, dtx2)
+            .await;
+
+        router
+            .subscribe(
+                "client1".to_string(),
+                "test/+".to_string(),
+                QoS::AtLeastOnce,
+                None,
+                false,
+                false,
+                0,
+                ProtocolVersion::V5,
+            )
+            .await
+            .unwrap();
+        router
+            .subscribe(
+                "client2".to_string(),
+                "test/data".to_string(),
+                QoS::ExactlyOnce,
+                None,
+                false,
+                false,
+                0,
+                ProtocolVersion::V5,
+            )
+            .await
+            .unwrap();
+
+        let publish = PublishPacket::new("test/data", &b"local-only"[..], QoS::ExactlyOnce);
+
+        router.route_message_local_only(&publish, None).await;
+
+        let msg1 = rx1.try_recv().unwrap();
+        assert_eq!(msg1.topic_name, "test/data");
+        assert_eq!(&msg1.payload[..], b"local-only");
+        assert_eq!(msg1.qos, QoS::AtLeastOnce);
+
+        let msg2 = rx2.try_recv().unwrap();
+        assert_eq!(msg2.topic_name, "test/data");
+        assert_eq!(&msg2.payload[..], b"local-only");
+        assert_eq!(msg2.qos, QoS::ExactlyOnce);
+    }
+
+    #[tokio::test]
+    async fn test_route_message_local_only_stores_retained() {
+        let router = MessageRouter::new();
+
+        let mut publish = PublishPacket::new("test/status", &b"online"[..], QoS::AtMostOnce);
+        publish.retain = true;
+
+        router.route_message_local_only(&publish, None).await;
+
+        assert_eq!(router.retained_count().await, 1);
+
+        let retained = router.get_retained_messages("test/status").await;
+        assert_eq!(retained.len(), 1);
+        assert_eq!(&retained[0].payload[..], b"online");
     }
 }

@@ -327,6 +327,7 @@ async fn execute_generate_config(args: GenerateConfigArgs) -> Result<()> {
                 "[::]:14567".parse().unwrap(),
             ],
         }),
+        cluster_listener_config: None,
         storage_config: StorageConfig {
             backend: StorageBackend::File,
             base_dir: PathBuf::from("./mqtt_storage"),

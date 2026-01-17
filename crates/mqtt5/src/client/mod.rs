@@ -2,43 +2,34 @@
 //!
 //! This client uses direct async/await patterns throughout.
 
-use crate::callback::{CallbackId, PublishCallback};
+use crate::callback::PublishCallback;
 use crate::error::{MqttError, Result};
 use crate::packet::publish::PublishPacket;
 use crate::packet::subscribe::{SubscribePacket, SubscriptionOptions, TopicFilter};
 use crate::packet::unsubscribe::UnsubscribePacket;
 use crate::protocol::v5::properties::Properties;
 #[cfg(not(target_arch = "wasm32"))]
-use crate::transport::quic::QuicConfig;
-#[cfg(not(target_arch = "wasm32"))]
-use crate::transport::tcp::TcpConfig;
-#[cfg(not(target_arch = "wasm32"))]
 use crate::transport::tls::TlsConfig;
-#[cfg(not(target_arch = "wasm32"))]
-use crate::transport::websocket::{WebSocketConfig, WebSocketTransport};
-#[cfg(not(target_arch = "wasm32"))]
-use crate::transport::{QuicTransport, TcpTransport, TlsTransport, TransportType};
 use crate::types::{
     ConnectOptions, ConnectResult, PublishOptions, PublishResult, SubscribeOptions,
 };
 use crate::QoS;
-#[cfg(not(target_arch = "wasm32"))]
-use crate::Transport;
 use std::future::Future;
-use std::net::ToSocketAddrs;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tokio::time::Duration;
 use tracing::instrument;
 
 mod auth_handler;
 pub mod auth_handlers;
+mod builders;
 mod connection;
 #[cfg(not(target_arch = "wasm32"))]
 mod direct;
 mod error_recovery;
+mod inner;
 pub mod mock;
 mod retry;
+mod state;
 pub mod r#trait;
 
 pub use auth_handler::{AuthHandler, AuthResponse};
@@ -51,11 +42,10 @@ pub use self::error_recovery::{
 pub use self::mock::{MockCall, MockMqttClient};
 pub use self::r#trait::MqttClientTrait;
 
+pub use builders::ConnectionEventCallback;
+
 #[cfg(not(target_arch = "wasm32"))]
 use self::direct::DirectClientInner;
-
-/// Type alias for connection event callback
-pub type ConnectionEventCallback = Arc<dyn Fn(ConnectionEvent) + Send + Sync>;
 
 /// Thread-safe MQTT v5.0 client
 ///
@@ -68,23 +58,18 @@ pub type ConnectionEventCallback = Arc<dyn Fn(ConnectionEvent) + Send + Sync>;
 ///
 /// #[tokio::main]
 /// async fn main() -> Result<(), Box<dyn std::error::Error>> {
-///     // Create a client with a unique ID
 ///     let client = MqttClient::new("my-client-id");
-///     
-///     // Connect to the broker
+///
 ///     client.connect("mqtt://localhost:1883").await?;
-///     
-///     // Subscribe to a topic
+///
 ///     client.subscribe("temperature/room1", |msg| {
 ///         println!("Received: {} on topic {}",
 ///                  String::from_utf8_lossy(&msg.payload),
 ///                  msg.topic);
 ///     }).await?;
-///     
-///     // Publish a message
+///
 ///     client.publish("temperature/room1", b"22.5").await?;
-///     
-///     // Disconnect when done
+///
 ///     client.disconnect().await?;
 ///     Ok(())
 /// }
@@ -98,92 +83,40 @@ pub type ConnectionEventCallback = Arc<dyn Fn(ConnectionEvent) + Send + Sync>;
 ///
 /// #[tokio::main]
 /// async fn main() -> Result<(), Box<dyn std::error::Error>> {
-///     // Create client with custom options
 ///     let options = ConnectOptions::new("my-client")
 ///         .with_clean_start(true)
 ///         .with_keep_alive(Duration::from_secs(30))
 ///         .with_credentials("user", b"pass");
-///     
+///
 ///     let client = MqttClient::with_options(options);
-///     
-///     // Connect with TLS
+///
 ///     client.connect("mqtts://broker.example.com:8883").await?;
-///     
-///     // Publish with QoS 2 and retain flag
+///
 ///     let mut pub_options = PublishOptions::default();
 ///     pub_options.qos = QoS::ExactlyOnce;
 ///     pub_options.retain = true;
-///     
+///
 ///     client.publish_with_options(
 ///         "status/device1",
 ///         b"online",
 ///         pub_options
 ///     ).await?;
-///     
+///
 ///     Ok(())
 /// }
 /// ```
 #[derive(Clone)]
 pub struct MqttClient {
-    inner: Arc<RwLock<DirectClientInner>>,
-    connection_event_callbacks: Arc<RwLock<Vec<ConnectionEventCallback>>>,
-    error_callbacks: Arc<RwLock<Vec<ErrorCallback>>>,
-    error_recovery_config: Arc<RwLock<ErrorRecoveryConfig>>,
-    connection_mutex: Arc<tokio::sync::Mutex<()>>,
-    tls_config: Arc<RwLock<Option<TlsConfig>>>,
-    transport_config: Arc<RwLock<crate::transport::ClientTransportConfig>>,
+    pub(crate) inner: Arc<RwLock<DirectClientInner>>,
+    pub(crate) connection_event_callbacks: Arc<RwLock<Vec<ConnectionEventCallback>>>,
+    pub(crate) error_callbacks: Arc<RwLock<Vec<error_recovery::ErrorCallback>>>,
+    pub(crate) error_recovery_config: Arc<RwLock<error_recovery::ErrorRecoveryConfig>>,
+    pub(crate) connection_mutex: Arc<tokio::sync::Mutex<()>>,
+    pub(crate) tls_config: Arc<RwLock<Option<TlsConfig>>>,
+    pub(crate) transport_config: Arc<RwLock<crate::transport::ClientTransportConfig>>,
 }
 
 impl MqttClient {
-    /// Creates a new MQTT client with default options
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use mqtt5::MqttClient;
-    ///
-    /// let client = MqttClient::new("my-device-001");
-    /// ```
-    pub fn new(client_id: impl Into<String>) -> Self {
-        let client_id_str = client_id.into();
-        tracing::trace!(client_id = %client_id_str, "MQTT CLIENT - new() method called");
-        let options = ConnectOptions::new(client_id_str); // Use default clean_start=true
-        Self::with_options(options)
-    }
-
-    /// Creates a new MQTT client with custom options
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use mqtt5::{MqttClient, ConnectOptions};
-    /// use std::time::Duration;
-    ///
-    /// let options = ConnectOptions::new("client-001")
-    ///     .with_clean_start(true)
-    ///     .with_keep_alive(Duration::from_secs(60))
-    ///     .with_credentials("mqtt_user", b"secret");
-    ///
-    /// let client = MqttClient::with_options(options);
-    /// ```
-    #[must_use]
-    pub fn with_options(options: ConnectOptions) -> Self {
-        tracing::trace!(client_id = %options.client_id, "MQTT CLIENT - with_options() method called");
-        let inner = DirectClientInner::new(options);
-
-        Self {
-            inner: Arc::new(RwLock::new(inner)),
-            connection_event_callbacks: Arc::new(RwLock::new(Vec::new())),
-            error_callbacks: Arc::new(RwLock::new(Vec::new())),
-            error_recovery_config: Arc::new(RwLock::new(ErrorRecoveryConfig::default())),
-            connection_mutex: Arc::new(tokio::sync::Mutex::new(())),
-            tls_config: Arc::new(RwLock::new(None)),
-            transport_config: Arc::new(RwLock::new(
-                crate::transport::ClientTransportConfig::default(),
-            )),
-        }
-    }
-
     /// Checks if the client is connected
     pub async fn is_connected(&self) -> bool {
         self.inner.read().await.is_connected()
@@ -246,14 +179,6 @@ impl MqttClient {
         Ok(())
     }
 
-    /// Triggers a connection event to all registered callbacks
-    async fn trigger_connection_event(&self, event: ConnectionEvent) {
-        let callbacks = self.connection_event_callbacks.read().await.clone();
-        for callback in callbacks {
-            callback(event.clone());
-        }
-    }
-
     /// Sets an error callback
     ///
     /// # Errors
@@ -266,106 +191,6 @@ impl MqttClient {
         let mut callbacks = self.error_callbacks.write().await;
         callbacks.push(Box::new(callback));
         Ok(())
-    }
-
-    /// Set whether to skip TLS certificate verification
-    ///
-    /// # Safety
-    ///
-    /// This disables certificate verification and should only be used for testing
-    /// with self-signed certificates. Never use in production.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,no_run
-    /// # use mqtt5::MqttClient;
-    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// let client = MqttClient::new("my-client");
-    ///
-    /// // Enable insecure mode for testing
-    /// client.set_insecure_tls(true).await;
-    ///
-    /// // Connect will now skip certificate verification
-    /// client.connect("mqtts://test-broker:8883").await?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub async fn set_insecure_tls(&self, insecure: bool) {
-        self.transport_config.write().await.insecure_tls = insecure;
-    }
-
-    pub async fn set_quic_stream_strategy(&self, strategy: crate::transport::StreamStrategy) {
-        self.transport_config.write().await.stream_strategy = strategy;
-    }
-
-    pub async fn set_quic_flow_headers(&self, enable: bool) {
-        self.transport_config.write().await.flow_headers = enable;
-    }
-
-    pub async fn set_quic_flow_expire(&self, duration: crate::time::Duration) {
-        self.transport_config.write().await.flow_expire = duration;
-    }
-
-    pub async fn set_quic_max_streams(&self, max: Option<usize>) {
-        self.transport_config.write().await.max_streams = max;
-    }
-
-    pub async fn set_quic_datagrams(&self, enable: bool) {
-        self.transport_config.write().await.datagrams = enable;
-    }
-
-    pub async fn set_quic_connect_timeout(&self, timeout: crate::time::Duration) {
-        self.transport_config.write().await.connect_timeout = timeout;
-    }
-
-    pub async fn set_tls_config(
-        &self,
-        cert_pem: Option<Vec<u8>>,
-        key_pem: Option<Vec<u8>>,
-        ca_cert_pem: Option<Vec<u8>>,
-    ) {
-        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-
-        tracing::debug!(
-            "set_tls_config called - cert: {}, key: {}, ca: {}",
-            cert_pem.is_some(),
-            key_pem.is_some(),
-            ca_cert_pem.is_some()
-        );
-
-        let mut config_lock = self.tls_config.write().await;
-        let placeholder_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
-
-        if cert_pem.is_some() || key_pem.is_some() || ca_cert_pem.is_some() {
-            let mut config = TlsConfig::new(placeholder_addr, "placeholder");
-
-            if let (Some(cert), Some(key)) = (cert_pem, key_pem) {
-                if let Err(e) = config.load_client_cert_pem_bytes(&cert) {
-                    tracing::error!("Failed to load client certificate: {e}");
-                    return;
-                }
-                if let Err(e) = config.load_client_key_pem_bytes(&key) {
-                    tracing::error!("Failed to load client key: {e}");
-                    return;
-                }
-                tracing::debug!("Loaded client cert and key");
-            }
-
-            if let Some(ca_cert) = ca_cert_pem {
-                if let Err(e) = config.load_ca_cert_pem_bytes(&ca_cert) {
-                    tracing::error!("Failed to load CA certificate: {e}");
-                    return;
-                }
-                config.use_system_roots = false;
-                tracing::debug!(
-                    "Loaded CA cert, use_system_roots=false, has {} certs",
-                    config.root_certs.as_ref().map_or(0, Vec::len)
-                );
-            }
-
-            *config_lock = Some(config);
-            tracing::debug!("TLS config stored");
-        }
     }
 
     /// Connects to the MQTT broker with default options
@@ -399,13 +224,9 @@ impl MqttClient {
         tracing::info!(client_id = %client_id, address = %address, "Initiating MQTT connection");
 
         let result = {
-            // Acquire connection mutex to prevent concurrent connection attempts
             let connection_guard = self.connection_mutex.lock().await;
-
             let options = self.inner.read().await.options.clone();
             let result = self.connect_with_options_internal(address, options).await;
-
-            // Explicitly drop guard to show we're done with the critical section
             drop(connection_guard);
             result
         };
@@ -435,500 +256,13 @@ impl MqttClient {
         address: &str,
         options: ConnectOptions,
     ) -> Result<ConnectResult> {
-        // Acquire connection mutex to prevent concurrent connection attempts
         let connection_guard = self.connection_mutex.lock().await;
         let result = self.connect_with_options_internal(address, options).await;
-
-        // Explicitly drop guard to show we're done with the critical section
         drop(connection_guard);
         result
     }
 
-    /// Internal connection method with custom options (no mutex guard)
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the operation fails
-    #[instrument(skip(self, options), fields(client_id = %options.client_id, clean_start = %options.clean_start), level = "debug")]
-    async fn connect_with_options_internal(
-        &self,
-        address: &str,
-        options: ConnectOptions,
-    ) -> Result<ConnectResult> {
-        // Check if already connected
-        if self.is_connected().await {
-            return Err(MqttError::AlreadyConnected);
-        }
-
-        // Update the inner client with new options
-        {
-            let mut inner = self.inner.write().await;
-            inner
-                .auth_method
-                .clone_from(&options.properties.authentication_method);
-            inner.options = options.clone();
-            // Always store address for potential reconnection
-            inner.last_address = Some(address.to_string());
-        }
-
-        // Try to connect
-        let result = self.connect_internal(address).await;
-
-        // Handle connection result
-        if let Err(ref error) = result {
-            // For initial connection failures, don't trigger disconnect events
-            // Only connections that were previously established should trigger disconnect events
-
-            let error_recovery_config =
-                crate::client::error_recovery::ErrorRecoveryConfig::default();
-            if let Some(_recoverable_error) =
-                crate::client::error_recovery::is_recoverable(error, &error_recovery_config)
-            {
-                // This is a recoverable error and automatic reconnection is enabled
-                if options.reconnect_config.enabled {
-                    tracing::debug!(error = %error, "🔄 SPAWN MONITOR - Initial connection failed with recoverable error, starting background reconnection");
-                    let client = self.clone();
-                    tokio::spawn(async move {
-                        client.monitor_connection().await;
-                    });
-                } else {
-                    tracing::debug!(error = %error, "Initial connection failed with recoverable error, but automatic reconnection is disabled");
-                }
-            } else {
-                tracing::debug!(error = %error, "Initial connection failed with non-recoverable error, not starting background reconnection");
-            }
-        } else if result.is_ok() && options.reconnect_config.enabled {
-            // Start monitoring for future disconnections only after successful connection
-            tracing::debug!("🔄 SPAWN MONITOR - Successful connection, starting monitor task for future disconnections");
-            let client = self.clone();
-            tokio::spawn(async move {
-                client.monitor_connection().await;
-            });
-        }
-
-        result
-    }
-
-    /// Internal connection method that does the actual connection work
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the operation fails
-    /// Try to connect to a specific address
-    #[allow(clippy::too_many_lines)]
-    async fn try_connect_address(
-        &self,
-        addr: std::net::SocketAddr,
-        client_transport_type: ClientTransportType,
-        host: &str,
-    ) -> Result<TransportType> {
-        match client_transport_type {
-            ClientTransportType::Tcp => {
-                let config = TcpConfig::new(addr);
-                let mut tcp_transport = TcpTransport::new(config);
-                tcp_transport
-                    .connect()
-                    .await
-                    .map_err(|e| MqttError::ConnectionError(format!("TCP connect failed: {e}")))?;
-                Ok(TransportType::Tcp(tcp_transport))
-            }
-            ClientTransportType::Tls => {
-                let insecure = self.transport_config.read().await.insecure_tls;
-                let tls_config_lock = self.tls_config.read().await;
-                let config = if let Some(existing_config) = &*tls_config_lock {
-                    tracing::debug!(
-                        "Using stored TLS config - use_system_roots: {}, has_ca: {}, has_cert: {}",
-                        existing_config.use_system_roots,
-                        existing_config.root_certs.is_some(),
-                        existing_config.client_cert.is_some()
-                    );
-                    let mut cfg = existing_config.clone();
-                    cfg.addr = addr;
-                    cfg.hostname = host.to_string();
-                    cfg.verify_server_cert = !insecure;
-                    cfg
-                } else {
-                    tracing::debug!("No stored TLS config, using default");
-                    TlsConfig::new(addr, host).with_verify_server_cert(!insecure)
-                };
-                drop(tls_config_lock);
-
-                let mut tls_transport = TlsTransport::new(config);
-                tls_transport
-                    .connect()
-                    .await
-                    .map_err(|e| MqttError::ConnectionError(format!("TLS connect failed: {e}")))?;
-                Ok(TransportType::Tls(Box::new(tls_transport)))
-            }
-            ClientTransportType::WebSocket(url) => {
-                let config = WebSocketConfig::new(&url).map_err(|e| {
-                    MqttError::ConnectionError(format!("Invalid WebSocket URL: {e}"))
-                })?;
-                let mut ws_transport = WebSocketTransport::new(config);
-                ws_transport.connect().await.map_err(|e| {
-                    MqttError::ConnectionError(format!("WebSocket connect failed: {e}"))
-                })?;
-                Ok(TransportType::WebSocket(Box::new(ws_transport)))
-            }
-            ClientTransportType::WebSocketSecure(url) => {
-                let insecure = self.transport_config.read().await.insecure_tls;
-                let mut config = WebSocketConfig::new(&url).map_err(|e| {
-                    MqttError::ConnectionError(format!("Invalid WebSocket URL: {e}"))
-                })?;
-
-                if insecure {
-                    let tls_config = TlsConfig::new(addr, host).with_verify_server_cert(false);
-                    config = config.with_tls_config(tls_config);
-                }
-
-                let mut ws_transport = WebSocketTransport::new(config);
-                ws_transport.connect().await.map_err(|e| {
-                    MqttError::ConnectionError(format!("WebSocket connect failed: {e}"))
-                })?;
-                Ok(TransportType::WebSocket(Box::new(ws_transport)))
-            }
-            ClientTransportType::Quic => {
-                let qc = self.transport_config.read().await;
-                let server_name = if host.parse::<std::net::IpAddr>().is_ok() {
-                    "localhost"
-                } else {
-                    host
-                };
-                let mut config = QuicConfig::new(addr, server_name)
-                    .with_verify_server_cert(false)
-                    .with_stream_strategy(qc.stream_strategy)
-                    .with_flow_headers(qc.flow_headers)
-                    .with_flow_expire_interval(qc.flow_expire.as_secs())
-                    .with_datagrams(qc.datagrams)
-                    .with_connect_timeout(qc.connect_timeout);
-                if let Some(max) = qc.max_streams {
-                    config = config.with_max_concurrent_streams(max);
-                }
-                drop(qc);
-                let mut quic_transport = QuicTransport::new(config);
-                quic_transport
-                    .connect()
-                    .await
-                    .map_err(|e| MqttError::ConnectionError(format!("QUIC connect failed: {e}")))?;
-                Ok(TransportType::Quic(Box::new(quic_transport)))
-            }
-            ClientTransportType::QuicSecure => {
-                let qc: crate::transport::ClientTransportConfig =
-                    (*self.transport_config.read().await).clone();
-                let tls_config_lock = self.tls_config.read().await;
-                let server_name = if host.parse::<std::net::IpAddr>().is_ok() {
-                    "localhost"
-                } else {
-                    host
-                };
-                let mut config = QuicConfig::new(addr, server_name)
-                    .with_verify_server_cert(!qc.insecure_tls)
-                    .with_stream_strategy(qc.stream_strategy)
-                    .with_flow_headers(qc.flow_headers)
-                    .with_flow_expire_interval(qc.flow_expire.as_secs())
-                    .with_datagrams(qc.datagrams)
-                    .with_connect_timeout(qc.connect_timeout);
-
-                if let Some(max) = qc.max_streams {
-                    config = config.with_max_concurrent_streams(max);
-                }
-
-                if let Some(existing_config) = &*tls_config_lock {
-                    tracing::debug!(
-                        "Using stored TLS config for QUIC - use_system_roots: {}, has_ca: {}, has_cert: {}",
-                        existing_config.use_system_roots,
-                        existing_config.root_certs.is_some(),
-                        existing_config.client_cert.is_some()
-                    );
-
-                    if let (Some(ref cert_chain), Some(ref key)) =
-                        (&existing_config.client_cert, &existing_config.client_key)
-                    {
-                        config = config.with_client_cert(cert_chain.clone(), key.clone_key());
-                    }
-
-                    if let Some(ref certs) = existing_config.root_certs {
-                        config = config.with_root_certs(certs.clone());
-                    }
-                } else {
-                    tracing::debug!("No stored TLS config for QUIC, using default");
-                }
-                drop(tls_config_lock);
-
-                let mut quic_transport = QuicTransport::new(config);
-                quic_transport
-                    .connect()
-                    .await
-                    .map_err(|e| MqttError::ConnectionError(format!("QUIC connect failed: {e}")))?;
-                Ok(TransportType::Quic(Box::new(quic_transport)))
-            }
-        }
-    }
-
-    async fn connect_internal(&self, address: &str) -> Result<ConnectResult> {
-        let client_id = self.inner.read().await.options.client_id.clone();
-        tracing::debug!(
-            address = %address,
-            client_id = %client_id,
-            "🔄 CONNECTION ATTEMPT - Tracking source of connection attempt"
-        );
-
-        let (client_transport_type, host, port) = Self::parse_address(address)?;
-        let addrs = Self::resolve_addresses(host, port)?;
-        let addresses_to_try = Self::select_addresses_for_connection(&addrs, host);
-
-        self.try_connect_to_addresses(addresses_to_try, client_transport_type, host)
-            .await
-    }
-
-    fn resolve_addresses(host: &str, port: u16) -> Result<Vec<std::net::SocketAddr>> {
-        let addr_str = format!("{host}:{port}");
-        tracing::debug!(addr_str = %addr_str, "🌐 DNS RESOLUTION - Starting address resolution");
-
-        let addrs: Vec<_> = addr_str
-            .to_socket_addrs()
-            .map_err(|e| {
-                tracing::error!(addr_str = %addr_str, error = %e, "🌐 DNS RESOLUTION - Failed to resolve address");
-                MqttError::ConnectionError(format!("Failed to resolve address: {e}"))
-            })?
-            .collect();
-
-        tracing::debug!(addr_str = %addr_str, resolved_count = addrs.len(), "🌐 DNS RESOLUTION - Address resolved successfully");
-
-        if addrs.is_empty() {
-            return Err(MqttError::ConnectionError(
-                "No valid address found".to_string(),
-            ));
-        }
-
-        Ok(addrs)
-    }
-
-    fn select_addresses_for_connection<'a>(
-        addrs: &'a [std::net::SocketAddr],
-        host: &str,
-    ) -> &'a [std::net::SocketAddr] {
-        let is_aws_iot = Self::is_aws_iot_endpoint(host);
-
-        if is_aws_iot {
-            tracing::debug!("AWS IoT endpoint detected, limiting to first resolved address");
-            &addrs[0..1]
-        } else {
-            addrs
-        }
-    }
-
-    async fn try_connect_to_addresses(
-        &self,
-        addresses: &[std::net::SocketAddr],
-        transport_type: ClientTransportType,
-        host: &str,
-    ) -> Result<ConnectResult> {
-        let mut last_error = None;
-
-        for addr in addresses {
-            tracing::debug!("Trying to connect to address: {}", addr);
-
-            let transport = match self
-                .try_connect_address(*addr, transport_type.clone(), host)
-                .await
-            {
-                Ok(t) => t,
-                Err(e) => {
-                    tracing::debug!("Failed to connect to {}: {}", addr, e);
-                    last_error = Some(e);
-                    continue;
-                }
-            };
-
-            self.reset_reconnect_counter().await;
-
-            let mut inner = self.inner.write().await;
-            match inner.connect(transport).await {
-                Ok(result) => {
-                    let stored_subs = inner.stored_subscriptions.read().await.clone();
-                    let session_present = result.session_present;
-                    drop(inner);
-
-                    self.trigger_connection_event(ConnectionEvent::Connected { session_present })
-                        .await;
-                    self.recover_quic_flows().await;
-                    self.restore_subscriptions_after_connect(stored_subs, session_present)
-                        .await;
-
-                    return Ok(result);
-                }
-                Err(e) => {
-                    drop(inner);
-                    last_error = Some(e);
-                }
-            }
-        }
-
-        Err(last_error.unwrap_or_else(|| {
-            MqttError::ConnectionError("Failed to connect to any address".to_string())
-        }))
-    }
-
-    async fn reset_reconnect_counter(&self) {
-        let mut inner = self.inner.write().await;
-        inner.reconnect_attempt = 0;
-    }
-
-    async fn recover_quic_flows(&self) {
-        let inner = self.inner.read().await;
-        match inner.recover_flows().await {
-            Ok(0) => {}
-            Ok(n) => tracing::info!(recovered = n, "Recovered QUIC flows after reconnect"),
-            Err(e) => tracing::warn!(error = %e, "Failed to recover QUIC flows"),
-        }
-    }
-
-    async fn restore_subscriptions_after_connect(
-        &self,
-        stored_subs: Vec<(String, SubscriptionOptions, CallbackId)>,
-        session_present: bool,
-    ) {
-        if stored_subs.is_empty() {
-            return;
-        }
-
-        if session_present {
-            tracing::info!("Session resumed, restoring {} callbacks", stored_subs.len());
-            let inner = self.inner.read().await;
-            for (topic, _, callback_id) in stored_subs {
-                if let Err(e) = inner.callback_manager.restore_callback(callback_id).await {
-                    tracing::warn!("Failed to restore callback for {}: {}", topic, e);
-                }
-            }
-        } else {
-            tracing::info!(
-                "Session not resumed, restoring {} subscriptions",
-                stored_subs.len()
-            );
-            for (topic, options, callback_id) in stored_subs {
-                if let Err(e) = self
-                    .resubscribe_internal(&topic, options, callback_id)
-                    .await
-                {
-                    tracing::warn!("Failed to restore subscription to {}: {}", topic, e);
-                }
-            }
-        }
-    }
-
-    /// Internal connection method using custom TLS configuration
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the operation fails
-    async fn connect_internal_with_tls(
-        &self,
-        tls_config: crate::transport::tls::TlsConfig,
-    ) -> Result<ConnectResult> {
-        // Create TLS transport directly from config
-        let mut tls_transport = crate::transport::tls::TlsTransport::new(tls_config);
-        tls_transport
-            .connect()
-            .await
-            .map_err(|e| MqttError::ConnectionError(format!("TLS connect failed: {e}")))?;
-
-        let transport = TransportType::Tls(Box::new(tls_transport));
-
-        // Reset reconnect attempt counter
-        {
-            let mut inner = self.inner.write().await;
-            inner.reconnect_attempt = 0;
-        }
-
-        // Try to connect using direct async method
-        let mut inner = self.inner.write().await;
-        match inner.connect(transport).await {
-            Ok(result) => {
-                // Get stored subscriptions before releasing the lock
-                let stored_subs = inner.stored_subscriptions.read().await.clone();
-                let session_present = result.session_present;
-                drop(inner); // Release lock before potentially resubscribing
-
-                // Trigger connected event
-                self.trigger_connection_event(ConnectionEvent::Connected { session_present })
-                    .await;
-
-                // Recover QUIC flows if applicable
-                self.recover_quic_flows().await;
-
-                // Restore callbacks and subscriptions
-                if !stored_subs.is_empty() {
-                    if session_present {
-                        // Session was resumed - only restore callbacks
-                        tracing::info!(
-                            "Session resumed, restoring {} callbacks",
-                            stored_subs.len()
-                        );
-                        let inner = self.inner.read().await;
-                        for (topic, _, callback_id) in stored_subs {
-                            if let Err(e) =
-                                inner.callback_manager.restore_callback(callback_id).await
-                            {
-                                tracing::warn!("Failed to restore callback for {}: {}", topic, e);
-                            }
-                        }
-                    } else {
-                        // Session was not resumed - need to resubscribe and restore callbacks
-                        tracing::info!(
-                            "Session not resumed, restoring {} subscriptions",
-                            stored_subs.len()
-                        );
-                        for (topic, options, callback_id) in stored_subs {
-                            if let Err(e) = self
-                                .resubscribe_internal(&topic, options, callback_id)
-                                .await
-                            {
-                                tracing::warn!(
-                                    "Failed to restore subscription to {}: {}",
-                                    topic,
-                                    e
-                                );
-                            }
-                        }
-                    }
-                }
-
-                Ok(result)
-            }
-            Err(e) => {
-                drop(inner);
-                Err(e)
-            }
-        }
-    }
-
     /// Connects to the MQTT broker using a custom TLS configuration
-    ///
-    /// This method allows direct configuration of TLS settings including certificates,
-    /// ALPN protocols, and other TLS-specific options.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,no_run
-    /// # use mqtt5::{MqttClient, transport::tls::TlsConfig};
-    /// # use std::net::SocketAddr;
-    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// let client = MqttClient::new("my-client");
-    ///
-    /// let mut tls_config = TlsConfig::new(
-    ///     "broker.example.com:8883".parse()?,
-    ///     "broker.example.com"
-    /// );
-    /// tls_config.load_client_cert_pem("client-cert.pem")?;
-    /// tls_config.load_client_key_pem("client-key.pem")?;
-    /// tls_config.load_ca_cert_pem("ca-cert.pem")?;
-    /// tls_config = tls_config.with_alpn_protocols(&["x-amzn-mqtt-ca"]);
-    ///
-    /// client.connect_with_tls(tls_config).await?;
-    /// # Ok(())
-    /// # }
-    /// ```
     ///
     /// # Errors
     ///
@@ -937,51 +271,18 @@ impl MqttClient {
         &self,
         tls_config: crate::transport::tls::TlsConfig,
     ) -> Result<()> {
-        // Acquire connection mutex to prevent concurrent connection attempts
         let connection_guard = self.connection_mutex.lock().await;
-
         let options = self.inner.read().await.options.clone();
         let result = self
             .connect_with_tls_and_options_internal(tls_config, options)
             .await;
-
-        // Explicitly drop guard to show we're done with the critical section
         drop(connection_guard);
         result.map(|_| ())
     }
 
     /// Connects to the MQTT broker using custom TLS configuration and connect options
     ///
-    /// This method combines custom TLS settings with MQTT connection options.
     /// Returns `session_present` flag from CONNACK
-    ///
-    /// # Examples
-    ///
-    /// ```rust,no_run
-    /// # use mqtt5::{MqttClient, ConnectOptions, transport::tls::TlsConfig};
-    /// # use std::net::SocketAddr;
-    /// # use std::time::Duration;
-    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// let mut options = ConnectOptions::new("aws-iot-client")
-    ///     .with_clean_start(false)
-    ///     .with_keep_alive(Duration::from_secs(30));
-    /// options.properties.maximum_packet_size = Some(131072); // 128KB for AWS IoT
-    ///
-    /// let mut tls_config = TlsConfig::new(
-    ///     "your-endpoint.iot.us-east-1.amazonaws.com:443".parse()?,
-    ///     "your-endpoint.iot.us-east-1.amazonaws.com"
-    /// );
-    /// tls_config.load_client_cert_pem("device-cert.pem")?;
-    /// tls_config.load_client_key_pem("device-key.pem")?;
-    /// tls_config.load_ca_cert_pem("AmazonRootCA1.pem")?;
-    /// tls_config = tls_config.with_alpn_protocols(&["x-amzn-mqtt-ca"]);
-    ///
-    /// let client = MqttClient::with_options(options.clone());
-    /// let result = client.connect_with_tls_and_options(tls_config, options).await?;
-    /// println!("Connected! Session present: {}", result.session_present);
-    /// # Ok(())
-    /// # }
-    /// ```
     ///
     /// # Errors
     ///
@@ -991,70 +292,15 @@ impl MqttClient {
         tls_config: crate::transport::tls::TlsConfig,
         options: ConnectOptions,
     ) -> Result<ConnectResult> {
-        // Acquire connection mutex to prevent concurrent connection attempts
         let connection_guard = self.connection_mutex.lock().await;
         let result = self
             .connect_with_tls_and_options_internal(tls_config, options)
             .await;
-
-        // Explicitly drop guard to show we're done with the critical section
         drop(connection_guard);
         result
     }
 
-    /// Internal TLS connection method (no mutex guard)
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if connection fails or configuration is invalid
-    async fn connect_with_tls_and_options_internal(
-        &self,
-        tls_config: crate::transport::tls::TlsConfig,
-        options: ConnectOptions,
-    ) -> Result<ConnectResult> {
-        // Check if already connected
-        if self.is_connected().await {
-            return Err(MqttError::AlreadyConnected);
-        }
-
-        // Update the inner client with new options
-        {
-            let mut inner = self.inner.write().await;
-            inner.options = options.clone();
-            // Store address for potential reconnection
-            inner.last_address = Some(format!(
-                "{}:{}",
-                tls_config.hostname,
-                tls_config.addr.port()
-            ));
-        }
-
-        // Try to connect with TLS config
-        let result = self.connect_internal_with_tls(tls_config).await;
-
-        // Handle reconnection if enabled and initial connection fails
-        if let Err(ref error) = result {
-            if options.reconnect_config.enabled {
-                // Trigger initial disconnection event
-                self.trigger_connection_event(ConnectionEvent::Disconnected {
-                    reason: DisconnectReason::NetworkError(error.to_string()),
-                })
-                .await;
-
-                // Start reconnection attempts in background
-                // Note: For TLS config reconnection, we'd need to store the TLS config
-                // This is a limitation that could be addressed in future versions
-                tracing::warn!(
-                    "Automatic reconnection with custom TLS config is not yet supported"
-                );
-            }
-        }
-
-        result
-    }
-
     /// Disconnects from the MQTT broker
-    ///
     ///
     /// # Errors
     ///
@@ -1068,13 +314,10 @@ impl MqttClient {
         match inner.disconnect().await {
             Ok(()) => {
                 tracing::info!(client_id = %client_id, "Successfully disconnected from MQTT broker");
-
-                // Trigger disconnected event
                 self.trigger_connection_event(ConnectionEvent::Disconnected {
                     reason: DisconnectReason::ClientInitiated,
                 })
                 .await;
-
                 Ok(())
             }
             Err(e) => {
@@ -1085,28 +328,6 @@ impl MqttClient {
     }
 
     /// Publishes a message to a topic
-    ///
-    /// # Examples
-    ///
-    /// ```rust,no_run
-    /// # use mqtt5::MqttClient;
-    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// let client = MqttClient::new("my-client");
-    /// client.connect("mqtt://localhost:1883").await?;
-    ///
-    /// // Publish a simple string message
-    /// client.publish("sensors/temperature", "23.5°C").await?;
-    ///
-    /// // Publish binary data
-    /// let data = vec![0x01, 0x02, 0x03, 0x04];
-    /// client.publish("sensors/binary", data).await?;
-    ///
-    /// // Publish JSON
-    /// let json = r#"{"temperature": 23.5, "humidity": 45}"#;
-    /// client.publish("sensors/json", json).await?;
-    /// # Ok(())
-    /// # }
-    /// ```
     ///
     /// # Errors
     ///
@@ -1141,7 +362,6 @@ impl MqttClient {
 
     /// Publishes a message with custom options
     ///
-    ///
     /// # Errors
     ///
     /// Returns an error if the operation fails
@@ -1165,7 +385,6 @@ impl MqttClient {
             "Publishing MQTT message"
         );
 
-        // Direct publish - no command channels!
         let inner = self.inner.read().await;
         match inner.publish(topic_str.clone(), payload_vec, options).await {
             Ok(result) => {
@@ -1188,35 +407,6 @@ impl MqttClient {
 
     /// Subscribes to a topic with a callback
     ///
-    ///
-    /// # Examples
-    ///
-    /// ```rust,no_run
-    /// # use mqtt5::MqttClient;
-    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// let client = MqttClient::new("my-client");
-    /// client.connect("mqtt://localhost:1883").await?;
-    ///
-    /// // Subscribe to a specific topic
-    /// client.subscribe("sensors/temperature", |msg| {
-    ///     println!("Temperature: {}", String::from_utf8_lossy(&msg.payload));
-    /// }).await?;
-    ///
-    /// // Subscribe with wildcards
-    /// client.subscribe("sensors/+/status", |msg| {
-    ///     println!("Status update on {}: {}", msg.topic,
-    ///              String::from_utf8_lossy(&msg.payload));
-    /// }).await?;
-    ///
-    /// // Subscribe to all topics under sensors/
-    /// client.subscribe("sensors/#", |msg| {
-    ///     println!("Sensor data: {} = {}", msg.topic,
-    ///              String::from_utf8_lossy(&msg.payload));
-    /// }).await?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    ///
     /// # Errors
     ///
     /// Returns an error if subscription fails, topic filter is invalid, or client is not connected
@@ -1234,7 +424,7 @@ impl MqttClient {
             .await
     }
 
-    /// Subscribes to a topic with custom options and a callback (using Message type)
+    /// Subscribes to a topic with custom options and a callback
     ///
     /// # Errors
     ///
@@ -1259,7 +449,6 @@ impl MqttClient {
             "Subscribing to MQTT topic"
         );
 
-        // Wrap the callback to convert PublishPacket to Message
         let wrapped_callback = move |packet: PublishPacket| {
             let msg = crate::types::Message::from(packet);
             callback(msg);
@@ -1291,11 +480,6 @@ impl MqttClient {
         }
     }
 
-    /// Internal method that accepts `PublishPacket` callbacks
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the operation fails
     async fn subscribe_with_options_raw<F>(
         &self,
         topic_filter: impl Into<String>,
@@ -1307,18 +491,15 @@ impl MqttClient {
     {
         let topic_filter = topic_filter.into();
 
-        // Register callback first and get callback ID
         let inner = self.inner.read().await;
         let callback: PublishCallback = Arc::new(callback);
         let callback_id = inner
             .callback_manager
-            .register_with_id(topic_filter.clone(), callback)
-            .await?;
+            .register_with_id(&topic_filter, callback)?;
 
-        // Create subscribe packet
         let filter = TopicFilter {
             filter: topic_filter.clone(),
-            options: crate::packet::subscribe::SubscriptionOptions {
+            options: SubscriptionOptions {
                 qos: options.qos,
                 no_local: options.no_local,
                 retain_as_published: options.retain_as_published,
@@ -1343,34 +524,29 @@ impl MqttClient {
             protocol_version: inner.options.protocol_version.as_u8(),
         };
 
-        // Add subscription identifier if provided
         if let Some(sub_id) = options.subscription_identifier {
             packet = packet.with_subscription_identifier(sub_id);
         }
 
-        // Direct subscribe with callback ID - no command channels!
         match inner.subscribe_with_callback(packet, callback_id).await {
             Ok(results) => {
                 if let Some(&(packet_id, qos)) = results.first() {
                     Ok((packet_id, qos))
                 } else {
-                    // Unregister callback on failure
-                    inner.callback_manager.unregister(&topic_filter).await?;
+                    inner.callback_manager.unregister(&topic_filter)?;
                     Err(MqttError::ProtocolError(
                         "No results returned for subscription".to_string(),
                     ))
                 }
             }
             Err(e) => {
-                // Unregister callback on failure
-                inner.callback_manager.unregister(&topic_filter).await?;
+                inner.callback_manager.unregister(&topic_filter)?;
                 Err(e)
             }
         }
     }
 
     /// Unsubscribes from a topic
-    ///
     ///
     /// # Errors
     ///
@@ -1386,9 +562,8 @@ impl MqttClient {
             "Unsubscribing from MQTT topic"
         );
 
-        // Unregister callback first
         let inner = self.inner.read().await;
-        inner.callback_manager.unregister(&topic_filter).await?;
+        inner.callback_manager.unregister(&topic_filter)?;
 
         let packet = UnsubscribePacket {
             packet_id: 0,
@@ -1446,9 +621,6 @@ impl MqttClient {
     }
 
     /// Unsubscribe from multiple topics at once
-    ///
-    /// Returns a vector of results, one for each topic. Each result contains the topic
-    /// and whether the unsubscribe operation succeeded for that topic.
     ///
     /// # Errors
     ///
@@ -1534,12 +706,12 @@ impl MqttClient {
     }
 
     /// Get error recovery configuration
-    pub async fn error_recovery_config(&self) -> ErrorRecoveryConfig {
+    pub async fn error_recovery_config(&self) -> error_recovery::ErrorRecoveryConfig {
         self.error_recovery_config.read().await.clone()
     }
 
     /// Set error recovery configuration
-    pub async fn set_error_recovery_config(&self, config: ErrorRecoveryConfig) {
+    pub async fn set_error_recovery_config(&self, config: error_recovery::ErrorRecoveryConfig) {
         *self.error_recovery_config.write().await = config;
     }
 
@@ -1560,49 +732,11 @@ impl MqttClient {
     }
 
     /// Sets an authentication handler for enhanced authentication
-    ///
-    /// The handler will be called during connection if the server requires
-    /// challenge-response authentication, and for re-authentication requests.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,no_run
-    /// use mqtt5::{MqttClient, ConnectOptions, AuthHandler, AuthResponse};
-    /// use std::future::Future;
-    /// use std::pin::Pin;
-    ///
-    /// struct MyAuthHandler;
-    ///
-    /// impl AuthHandler for MyAuthHandler {
-    ///     fn handle_challenge<'a>(
-    ///         &'a self,
-    ///         auth_method: &'a str,
-    ///         challenge_data: Option<&'a [u8]>,
-    ///     ) -> Pin<Box<dyn Future<Output = mqtt5::Result<AuthResponse>> + Send + 'a>> {
-    ///         Box::pin(async move {
-    ///             // Process challenge and return response
-    ///             Ok(AuthResponse::Continue(b"response".to_vec()))
-    ///         })
-    ///     }
-    /// }
-    ///
-    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// let options = ConnectOptions::new("client")
-    ///     .with_authentication_method("SCRAM-SHA-256");
-    /// let client = MqttClient::with_options(options);
-    /// client.set_auth_handler(MyAuthHandler).await;
-    /// # Ok(())
-    /// # }
-    /// ```
     pub async fn set_auth_handler(&self, handler: impl AuthHandler + 'static) {
         self.inner.write().await.set_auth_handler(handler);
     }
 
     /// Initiates re-authentication with the broker
-    ///
-    /// This sends an AUTH packet with `ReAuthenticate` reason code to the broker,
-    /// triggering a new authentication exchange using the same method as the
-    /// initial connection.
     ///
     /// # Errors
     ///
@@ -1613,9 +747,18 @@ impl MqttClient {
     pub async fn reauthenticate(&self) -> Result<()> {
         self.inner.read().await.reauthenticate().await
     }
+
+    /// Simulate abnormal disconnection (for testing will messages)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails
+    pub async fn disconnect_abnormally(&self) -> Result<()> {
+        let mut inner = self.inner.write().await;
+        inner.disconnect_with_packet(false).await
+    }
 }
 
-/// Implementation of `MqttClientTrait` for `MqttClient`
 #[allow(clippy::manual_async_fn)]
 impl MqttClientTrait for MqttClient {
     fn is_connected(&self) -> impl Future<Output = bool> + Send + '_ {
@@ -1760,325 +903,6 @@ impl MqttClientTrait for MqttClient {
     }
 }
 
-impl MqttClient {
-    /// Simulate abnormal disconnection (for testing will messages)
-    /// This method closes the connection without sending a DISCONNECT packet,
-    /// which causes the broker to send the will message.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the operation fails
-    pub async fn disconnect_abnormally(&self) -> Result<()> {
-        let mut inner = self.inner.write().await;
-        inner.disconnect_with_packet(false).await
-    }
-
-    /// Detects if the hostname is an AWS `IoT` endpoint
-    fn is_aws_iot_endpoint(hostname: &str) -> bool {
-        // AWS IoT Core endpoints follow the pattern: *.iot.*.amazonaws.com
-        hostname.contains(".iot.") && hostname.ends_with(".amazonaws.com")
-    }
-
-    /// Parses an address string to determine transport type and components
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the operation fails
-    fn parse_address(address: &str) -> Result<(ClientTransportType, &str, u16)> {
-        if let Some(rest) = address.strip_prefix("mqtt://") {
-            let (host, port) = Self::split_host_port(rest, 1883)?;
-            Ok((ClientTransportType::Tcp, host, port))
-        } else if let Some(rest) = address.strip_prefix("mqtts://") {
-            let (host, port) = Self::split_host_port(rest, 8883)?;
-            Ok((ClientTransportType::Tls, host, port))
-        } else if let Some(rest) = address.strip_prefix("ws://") {
-            let (host, port) = Self::split_host_port(rest, 80)?;
-            Ok((
-                ClientTransportType::WebSocket(address.to_string()),
-                host,
-                port,
-            ))
-        } else if let Some(rest) = address.strip_prefix("wss://") {
-            let (host, port) = Self::split_host_port(rest, 443)?;
-            Ok((
-                ClientTransportType::WebSocketSecure(address.to_string()),
-                host,
-                port,
-            ))
-        } else if let Some(rest) = address.strip_prefix("tcp://") {
-            let (host, port) = Self::split_host_port(rest, 1883)?;
-            Ok((ClientTransportType::Tcp, host, port))
-        } else if let Some(rest) = address.strip_prefix("ssl://") {
-            let (host, port) = Self::split_host_port(rest, 8883)?;
-            Ok((ClientTransportType::Tls, host, port))
-        } else if let Some(rest) = address.strip_prefix("quic://") {
-            let (host, port) = Self::split_host_port(rest, 14567)?;
-            Ok((ClientTransportType::Quic, host, port))
-        } else if let Some(rest) = address.strip_prefix("quics://") {
-            let (host, port) = Self::split_host_port(rest, 14567)?;
-            Ok((ClientTransportType::QuicSecure, host, port))
-        } else {
-            let (host, port) = Self::split_host_port(address, 1883)?;
-            Ok((ClientTransportType::Tcp, host, port))
-        }
-    }
-
-    /// Splits a host:port string
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the operation fails
-    fn split_host_port(address: &str, default_port: u16) -> Result<(&str, u16)> {
-        let address_without_path = address.split('/').next().unwrap_or(address);
-
-        if let Some(colon_pos) = address_without_path.rfind(':') {
-            let host = &address_without_path[..colon_pos];
-            let port_str = &address_without_path[colon_pos + 1..];
-            let port = port_str
-                .parse::<u16>()
-                .map_err(|_| MqttError::ConnectionError(format!("Invalid port: {port_str}")))?;
-            Ok((host, port))
-        } else {
-            Ok((address_without_path, default_port))
-        }
-    }
-
-    /// Monitor connection and handle automatic reconnection
-    async fn monitor_connection(&self) {
-        tracing::info!("🔍 MONITOR TASK - Starting connection monitor task");
-
-        loop {
-            // Wait for disconnection
-            tokio::time::sleep(Duration::from_secs(1)).await;
-
-            let inner = self.inner.read().await;
-            if !inner.is_connected() {
-                tracing::info!(
-                    "🔍 MONITOR TASK - Detected disconnection, triggering reconnection logic"
-                );
-
-                // Get reconnection config
-                let reconnect_config = inner.options.reconnect_config.clone();
-                let last_address = inner.last_address.clone();
-                drop(inner); // Release lock before potentially long-running operation
-
-                if !reconnect_config.enabled {
-                    tracing::info!("🔍 MONITOR TASK - Reconnection disabled, exiting monitor");
-                    break;
-                }
-
-                if let Some(address) = last_address {
-                    tracing::info!(
-                        address = %address,
-                        "🔍 MONITOR TASK - Starting reconnection attempt"
-                    );
-
-                    // Attempt reconnection with exponential backoff
-                    if let Err(e) = self.attempt_reconnection(&address, &reconnect_config).await {
-                        tracing::error!("🔍 MONITOR TASK - Reconnection failed: {e}");
-                        break;
-                    }
-                } else {
-                    tracing::info!("🔍 MONITOR TASK - No last address available for reconnection");
-                    break;
-                }
-            }
-        }
-    }
-
-    /// Attempt reconnection with exponential backoff
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the operation fails
-    async fn attempt_reconnection(&self, address: &str, config: &ReconnectConfig) -> Result<()> {
-        tracing::info!(
-            address = %address,
-            max_attempts = ?config.max_attempts,
-            initial_delay = ?config.initial_delay,
-            "🔄 RECONNECTION - Starting reconnection loop"
-        );
-
-        let mut delay = config.initial_delay;
-
-        loop {
-            // Check if already connected (might have been connected manually)
-            if self.is_connected().await {
-                tracing::info!(
-                    "🔄 RECONNECTION - Already connected, stopping reconnection attempts"
-                );
-                return Ok(());
-            }
-
-            // Increment attempt counter
-            let attempt = {
-                let mut inner = self.inner.write().await;
-                inner.reconnect_attempt += 1;
-                inner.reconnect_attempt
-            };
-
-            tracing::info!(
-                attempt = attempt,
-                max_attempts = ?config.max_attempts,
-                delay = ?delay,
-                "🔄 RECONNECTION - Attempting reconnection #{}", attempt
-            );
-
-            // Check max attempts (None means unlimited)
-            if let Some(max) = config.max_attempts {
-                if attempt > max {
-                    tracing::error!(
-                        attempt = attempt,
-                        max_attempts = max,
-                        "🔄 RECONNECTION - Max attempts exceeded"
-                    );
-                    return Err(MqttError::ConnectionError(
-                        "Max reconnection attempts exceeded".to_string(),
-                    ));
-                }
-            }
-
-            // Trigger reconnecting event
-            self.trigger_connection_event(ConnectionEvent::Reconnecting { attempt })
-                .await;
-
-            // Wait before attempting (release mutex during wait)
-            tokio::time::sleep(delay).await;
-
-            // Acquire connection mutex only for the actual connection attempt
-            let connection_guard = self.connection_mutex.lock().await;
-
-            // Double-check connection status after acquiring mutex
-            if self.is_connected().await {
-                tracing::info!("Connected during wait, stopping reconnection attempts");
-                return Ok(());
-            }
-
-            // Try to reconnect using internal method
-            tracing::info!(
-                attempt = attempt,
-                address = %address,
-                "🔄 RECONNECTION - Making connection attempt #{} to {}", attempt, address
-            );
-            let reconnection_result = self.connect_internal(address).await;
-
-            // Release connection guard before restoration logic
-            drop(connection_guard);
-
-            match reconnection_result {
-                Ok(_) => {
-                    tracing::info!(
-                        "🔄 RECONNECTION - Reconnected successfully after {} attempts",
-                        attempt
-                    );
-
-                    // Restore subscriptions if session was not resumed
-                    let inner = self.inner.read().await;
-                    let stored_subs = inner.stored_subscriptions.read().await.clone();
-                    drop(inner); // Release lock before resubscribing
-
-                    for (topic, options, callback_id) in stored_subs {
-                        if let Err(e) = self
-                            .resubscribe_internal(&topic, options, callback_id)
-                            .await
-                        {
-                            tracing::warn!("Failed to restore subscription to {}: {}", topic, e);
-                        }
-                    }
-
-                    // Send queued messages
-                    self.send_queued_messages().await;
-
-                    return Ok(());
-                }
-                Err(e) => {
-                    tracing::warn!("Reconnection attempt {} failed: {}", attempt, e);
-
-                    // Calculate next delay with exponential backoff
-                    #[allow(clippy::cast_possible_truncation)]
-                    {
-                        delay = std::cmp::min(
-                            Duration::from_secs_f64(delay.as_secs_f64() * config.backoff_factor()),
-                            config.max_delay,
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    /// Send messages that were queued during disconnection
-    async fn send_queued_messages(&self) {
-        let messages = {
-            let inner = self.inner.read().await;
-            let mut queued = inner.queued_messages.lock().await;
-            std::mem::take(&mut *queued)
-        };
-
-        for mut msg in messages {
-            // Set DUP flag for replayed messages
-            msg.dup = true;
-
-            if let Err(e) = self.publish_packet(msg).await {
-                tracing::warn!("Failed to send queued message: {e}");
-            }
-        }
-    }
-
-    /// Internal method to resubscribe with stored options and callback
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the operation fails
-    async fn resubscribe_internal(
-        &self,
-        topic: &str,
-        options: crate::packet::subscribe::SubscriptionOptions,
-        callback_id: crate::callback::CallbackId,
-    ) -> Result<()> {
-        // Restore the callback first
-        let inner = self.inner.read().await;
-        inner.callback_manager.restore_callback(callback_id).await?;
-        drop(inner);
-
-        let inner = self.inner.read().await;
-        let packet = SubscribePacket {
-            packet_id: inner.packet_id_generator.next(),
-            filters: vec![crate::packet::subscribe::TopicFilter {
-                filter: topic.to_string(),
-                options,
-            }],
-            properties: Properties::new(),
-            protocol_version: inner.options.protocol_version.as_u8(),
-        };
-        inner.subscribe_with_callback(packet, callback_id).await?;
-        Ok(())
-    }
-
-    /// Internal method to publish a packet
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the operation fails
-    async fn publish_packet(&self, packet: PublishPacket) -> Result<()> {
-        let mut inner = self.inner.write().await;
-        inner
-            .send_packet(crate::packet::Packet::Publish(packet))
-            .await
-    }
-}
-
-/// Client transport type for parsing addresses
-#[derive(Debug, Clone)]
-enum ClientTransportType {
-    Tcp,
-    Tls,
-    WebSocket(String),
-    WebSocketSecure(String),
-    Quic,
-    QuicSecure,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2092,87 +916,86 @@ mod tests {
 
     #[test]
     fn test_parse_address() {
-        // Test MQTT scheme with explicit port
         let (transport, host, port) = MqttClient::parse_address("mqtt://localhost:1883").unwrap();
-        assert!(matches!(transport, ClientTransportType::Tcp));
+        assert!(matches!(transport, state::ClientTransportType::Tcp));
         assert_eq!(host, "localhost");
         assert_eq!(port, 1883);
 
-        // Test MQTT scheme with default port
         let (transport, host, port) = MqttClient::parse_address("mqtt://localhost").unwrap();
-        assert!(matches!(transport, ClientTransportType::Tcp));
+        assert!(matches!(transport, state::ClientTransportType::Tcp));
         assert_eq!(host, "localhost");
         assert_eq!(port, 1883);
 
-        // Test MQTTS scheme with default port
         let (transport, host, port) =
             MqttClient::parse_address("mqtts://broker.example.com").unwrap();
-        assert!(matches!(transport, ClientTransportType::Tls));
+        assert!(matches!(transport, state::ClientTransportType::Tls));
         assert_eq!(host, "broker.example.com");
         assert_eq!(port, 8883);
 
-        // Test MQTTS scheme with custom port
         let (transport, host, port) =
             MqttClient::parse_address("mqtts://secure.broker:9999").unwrap();
-        assert!(matches!(transport, ClientTransportType::Tls));
+        assert!(matches!(transport, state::ClientTransportType::Tls));
         assert_eq!(host, "secure.broker");
         assert_eq!(port, 9999);
 
-        // Test TCP scheme
         let (transport, host, port) =
             MqttClient::parse_address("tcp://192.168.1.100:1234").unwrap();
-        assert!(matches!(transport, ClientTransportType::Tcp));
+        assert!(matches!(transport, state::ClientTransportType::Tcp));
         assert_eq!(host, "192.168.1.100");
         assert_eq!(port, 1234);
 
-        // Test SSL scheme (alias for TLS)
         let (transport, host, port) =
             MqttClient::parse_address("ssl://secure.broker.com:8883").unwrap();
-        assert!(matches!(transport, ClientTransportType::Tls));
+        assert!(matches!(transport, state::ClientTransportType::Tls));
         assert_eq!(host, "secure.broker.com");
         assert_eq!(port, 8883);
 
-        // Test no scheme with host only (defaults to TCP)
         let (transport, host, port) = MqttClient::parse_address("localhost").unwrap();
-        assert!(matches!(transport, ClientTransportType::Tcp));
+        assert!(matches!(transport, state::ClientTransportType::Tcp));
         assert_eq!(host, "localhost");
         assert_eq!(port, 1883);
 
-        // Test no scheme with host and port
         let (transport, host, port) = MqttClient::parse_address("broker.local:9999").unwrap();
-        assert!(matches!(transport, ClientTransportType::Tcp));
+        assert!(matches!(transport, state::ClientTransportType::Tcp));
         assert_eq!(host, "broker.local");
         assert_eq!(port, 9999);
 
-        // Test WebSocket scheme with default port
         let (transport, host, port) = MqttClient::parse_address("ws://localhost").unwrap();
-        assert!(matches!(transport, ClientTransportType::WebSocket(_)));
+        assert!(matches!(
+            transport,
+            state::ClientTransportType::WebSocket(_)
+        ));
         assert_eq!(host, "localhost");
         assert_eq!(port, 80);
 
-        // Test WebSocket scheme with custom port
         let (transport, host, port) = MqttClient::parse_address("ws://localhost:8080").unwrap();
-        assert!(matches!(transport, ClientTransportType::WebSocket(_)));
+        assert!(matches!(
+            transport,
+            state::ClientTransportType::WebSocket(_)
+        ));
         assert_eq!(host, "localhost");
         assert_eq!(port, 8080);
 
-        // Test WebSocket Secure scheme with default port
         let (transport, host, port) = MqttClient::parse_address("wss://secure.broker").unwrap();
-        assert!(matches!(transport, ClientTransportType::WebSocketSecure(_)));
+        assert!(matches!(
+            transport,
+            state::ClientTransportType::WebSocketSecure(_)
+        ));
         assert_eq!(host, "secure.broker");
         assert_eq!(port, 443);
 
-        // Test WebSocket Secure scheme with custom port
         let (transport, host, port) =
             MqttClient::parse_address("wss://secure.broker:8443").unwrap();
-        assert!(matches!(transport, ClientTransportType::WebSocketSecure(_)));
+        assert!(matches!(
+            transport,
+            state::ClientTransportType::WebSocketSecure(_)
+        ));
         assert_eq!(host, "secure.broker");
         assert_eq!(port, 8443);
 
-        // Test WebSocket with path preservation
         let (transport, host, port) =
             MqttClient::parse_address("ws://broker.emqx.io:8083/mqtt").unwrap();
-        if let ClientTransportType::WebSocket(url) = transport {
+        if let state::ClientTransportType::WebSocket(url) = transport {
             assert_eq!(url, "ws://broker.emqx.io:8083/mqtt");
         } else {
             panic!("Expected WebSocket transport type");
@@ -2180,10 +1003,9 @@ mod tests {
         assert_eq!(host, "broker.emqx.io");
         assert_eq!(port, 8083);
 
-        // Test WebSocket Secure with path preservation
         let (transport, host, port) =
             MqttClient::parse_address("wss://broker.hivemq.com:8884/mqtt").unwrap();
-        if let ClientTransportType::WebSocketSecure(url) = transport {
+        if let state::ClientTransportType::WebSocketSecure(url) = transport {
             assert_eq!(url, "wss://broker.hivemq.com:8884/mqtt");
         } else {
             panic!("Expected WebSocketSecure transport type");
@@ -2191,9 +1013,8 @@ mod tests {
         assert_eq!(host, "broker.hivemq.com");
         assert_eq!(port, 8884);
 
-        // Test IPv6 addresses
         let (transport, host, port) = MqttClient::parse_address("[::1]:1883").unwrap();
-        assert!(matches!(transport, ClientTransportType::Tcp));
+        assert!(matches!(transport, state::ClientTransportType::Tcp));
         assert_eq!(host, "[::1]");
         assert_eq!(port, 1883);
     }

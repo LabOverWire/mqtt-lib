@@ -156,15 +156,13 @@ async fn handle_publish(
     }
 
     // Route to callbacks
-    route_message(publish, callback_manager).await;
+    route_message(&publish, callback_manager);
 
     Ok(())
 }
 
-/// Route message to appropriate callbacks
-async fn route_message(publish: PublishPacket, callback_manager: &Arc<CallbackManager>) {
-    // Dispatch to all matching callbacks
-    let _ = callback_manager.dispatch(&publish).await;
+fn route_message(publish: &PublishPacket, callback_manager: &Arc<CallbackManager>) {
+    let _ = callback_manager.dispatch(publish);
 }
 
 /// Handle PUBACK packet
@@ -439,12 +437,11 @@ mod tests {
         let counter_clone = counter.clone();
         callback_manager
             .register(
-                "test/+".to_string(),
+                "test/+",
                 Arc::new(move |_msg: PublishPacket| {
                     counter_clone.fetch_add(1, Ordering::SeqCst);
                 }),
             )
-            .await
             .unwrap();
 
         let publish = PublishPacket {
@@ -457,9 +454,9 @@ mod tests {
             properties: Properties::default(),
             protocol_version: 5,
         };
-        route_message(publish, &callback_manager).await;
+        route_message(&publish, &callback_manager);
+        tokio::task::yield_now().await;
 
-        // Verify callback was invoked
         assert_eq!(counter.load(Ordering::SeqCst), 1);
     }
 

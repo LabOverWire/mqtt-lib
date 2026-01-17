@@ -1,0 +1,542 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MQTT ACL Permission Demo</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            max-width: 1400px;
+            margin: 40px auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .header {
+            background: white;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+        h1 { color: #333; margin-top: 0; }
+        .highlight {
+            background: #e7f3ff;
+            padding: 15px;
+            border-radius: 4px;
+            border-left: 4px solid #007bff;
+            margin: 15px 0;
+        }
+        .panels {
+            display: grid;
+            grid-template-columns: 300px 1fr;
+            gap: 20px;
+            margin-top: 20px;
+        }
+        .panel {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .panel h2 {
+            margin-top: 0;
+            font-size: 1.2em;
+            padding-bottom: 10px;
+            border-bottom: 3px solid #007bff;
+        }
+        .user-card {
+            padding: 15px;
+            margin: 10px 0;
+            border-radius: 8px;
+            cursor: pointer;
+            border: 2px solid transparent;
+            transition: all 0.2s;
+        }
+        .user-card:hover { border-color: #007bff; }
+        .user-card.selected { border-color: #007bff; background: #e7f3ff; }
+        .user-card .name { font-weight: bold; font-size: 1.1em; }
+        .user-card .role {
+            display: inline-block;
+            padding: 3px 10px;
+            border-radius: 12px;
+            font-size: 0.75em;
+            margin-top: 5px;
+        }
+        .role.admin { background: #dc3545; color: white; }
+        .role.publisher { background: #fd7e14; color: white; }
+        .role.subscriber { background: #28a745; color: white; }
+        .role.guest { background: #6c757d; color: white; }
+        .status {
+            padding: 8px;
+            margin: 10px 0;
+            border-radius: 4px;
+            font-weight: 500;
+            font-size: 0.85em;
+        }
+        .status.connected { background: #d4edda; color: #155724; }
+        .status.disconnected { background: #f8d7da; color: #721c24; }
+        .acl-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 15px 0;
+            font-size: 0.85em;
+        }
+        .acl-table th, .acl-table td {
+            padding: 10px;
+            text-align: left;
+            border-bottom: 1px solid #eee;
+        }
+        .acl-table th { background: #f8f9fa; font-weight: 600; }
+        .permission {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 0.85em;
+        }
+        .permission.read { background: #d4edda; color: #155724; }
+        .permission.write { background: #fff3cd; color: #856404; }
+        .permission.readwrite { background: #cce5ff; color: #004085; }
+        .permission.none { background: #f8d7da; color: #721c24; }
+        .test-panel {
+            margin-top: 20px;
+            padding: 20px;
+            background: #f8f9fa;
+            border-radius: 8px;
+        }
+        .test-row {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            margin: 10px 0;
+        }
+        input[type="text"] {
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+            flex: 1;
+        }
+        button {
+            background: #007bff;
+            color: white;
+            border: none;
+            cursor: pointer;
+            padding: 10px 20px;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        button:hover { background: #0056b3; }
+        button:disabled { background: #6c757d; cursor: not-allowed; }
+        button.subscribe { background: #28a745; }
+        button.subscribe:hover { background: #218838; }
+        button.publish { background: #fd7e14; }
+        button.publish:hover { background: #e96b00; }
+        .result-card {
+            padding: 15px;
+            margin: 10px 0;
+            border-radius: 8px;
+            animation: slideIn 0.3s ease;
+        }
+        @keyframes slideIn {
+            from { opacity: 0; transform: translateX(-10px); }
+            to { opacity: 1; transform: translateX(0); }
+        }
+        .result-card.allowed {
+            background: #d4edda;
+            border-left: 4px solid #28a745;
+        }
+        .result-card.denied {
+            background: #f8d7da;
+            border-left: 4px solid #dc3545;
+        }
+        .result-icon {
+            font-size: 1.5em;
+            margin-right: 10px;
+        }
+        .result-details {
+            font-size: 0.85em;
+            color: #666;
+            margin-top: 5px;
+        }
+        .results-list {
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        .permission-matrix {
+            margin-top: 20px;
+        }
+        .matrix-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.85em;
+        }
+        .matrix-table th, .matrix-table td {
+            padding: 8px;
+            text-align: center;
+            border: 1px solid #ddd;
+        }
+        .matrix-table th { background: #f8f9fa; }
+        .matrix-cell.allowed { background: #d4edda; }
+        .matrix-cell.denied { background: #f8d7da; }
+        #debug {
+            margin-top: 15px;
+            padding: 10px;
+            background: #f8f9fa;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 0.8em;
+            max-height: 150px;
+            overflow-y: auto;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>MQTT ACL Permission Denial Demo</h1>
+        <p>Demonstrates <strong>ACL (Access Control List) Rules</strong> and what happens when permissions are denied.</p>
+        <div class="highlight">
+            <strong>How ACL Works:</strong>
+            <ul style="margin: 10px 0 0 0; padding-left: 20px;">
+                <li>Users are assigned roles with specific permissions</li>
+                <li>Each role defines read/write access to topic patterns</li>
+                <li>Denied operations return MQTT v5.0 reason codes</li>
+            </ul>
+        </div>
+        <div id="debug">
+            <strong>Debug Log:</strong>
+            <div id="debug-messages"></div>
+        </div>
+    </div>
+
+    <div class="panels">
+        <div class="panel">
+            <h2>Users & Roles</h2>
+            <p style="font-size: 0.85em; color: #666;">Select a user to test their permissions</p>
+
+            <div class="user-card selected" data-user="admin" data-pass="admin123">
+                <div class="name">Alice (Admin)</div>
+                <span class="role admin">admin</span>
+                <div style="font-size: 0.8em; color: #666; margin-top: 5px;">Full access to all topics</div>
+            </div>
+
+            <div class="user-card" data-user="publisher" data-pass="pub123">
+                <div class="name">Bob (Publisher)</div>
+                <span class="role publisher">publisher</span>
+                <div style="font-size: 0.8em; color: #666; margin-top: 5px;">Can publish to data/#</div>
+            </div>
+
+            <div class="user-card" data-user="subscriber" data-pass="sub123">
+                <div class="name">Carol (Subscriber)</div>
+                <span class="role subscriber">subscriber</span>
+                <div style="font-size: 0.8em; color: #666; margin-top: 5px;">Can only read data/#</div>
+            </div>
+
+            <div class="user-card" data-user="guest" data-pass="guest123">
+                <div class="name">Dave (Guest)</div>
+                <span class="role guest">guest</span>
+                <div style="font-size: 0.8em; color: #666; margin-top: 5px;">Limited to public/#</div>
+            </div>
+
+            <h3 style="margin-top: 20px;">ACL Rules</h3>
+            <table class="acl-table">
+                <thead>
+                    <tr><th>Role</th><th>Topic Pattern</th><th>Permission</th></tr>
+                </thead>
+                <tbody>
+                    <tr><td>admin</td><td>#</td><td><span class="permission readwrite">read/write</span></td></tr>
+                    <tr><td>publisher</td><td>data/#</td><td><span class="permission write">write</span></td></tr>
+                    <tr><td>subscriber</td><td>data/#</td><td><span class="permission read">read</span></td></tr>
+                    <tr><td>guest</td><td>public/#</td><td><span class="permission read">read</span></td></tr>
+                </tbody>
+            </table>
+        </div>
+
+        <div class="panel">
+            <h2>Permission Testing</h2>
+            <div id="user-status" class="status disconnected">Select a user to connect</div>
+
+            <div class="test-panel">
+                <h3>Test Operations</h3>
+
+                <div class="test-row">
+                    <input type="text" id="sub-topic" placeholder="Topic to subscribe" value="data/sensors">
+                    <button class="subscribe" id="test-subscribe">Subscribe</button>
+                </div>
+
+                <div class="test-row">
+                    <input type="text" id="pub-topic" placeholder="Topic to publish" value="data/sensors">
+                    <button class="publish" id="test-publish">Publish</button>
+                </div>
+
+                <h4 style="margin-top: 20px;">Quick Tests:</h4>
+                <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+                    <button onclick="quickTest('subscribe', 'data/sensors')">Sub data/sensors</button>
+                    <button onclick="quickTest('publish', 'data/sensors')">Pub data/sensors</button>
+                    <button onclick="quickTest('subscribe', 'admin/logs')">Sub admin/logs</button>
+                    <button onclick="quickTest('publish', 'admin/config')">Pub admin/config</button>
+                    <button onclick="quickTest('subscribe', 'public/news')">Sub public/news</button>
+                </div>
+            </div>
+
+            <h3>Results</h3>
+            <div id="results-list" class="results-list">
+                <em style="color: #666;">Test results will appear here...</em>
+            </div>
+
+            <div class="permission-matrix">
+                <h3>Permission Matrix (Current User)</h3>
+                <table class="matrix-table">
+                    <thead>
+                        <tr>
+                            <th>Topic</th>
+                            <th>Subscribe</th>
+                            <th>Publish</th>
+                        </tr>
+                    </thead>
+                    <tbody id="matrix-body">
+                        <tr><td colspan="3" style="text-align: center; color: #666;">Connect a user to see permissions</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <script type="module">
+        import init, { WasmBroker, WasmBrokerConfig, WasmMqttClient, WasmConnectOptions } from './pkg/mqtt5_wasm.js';
+
+        let broker;
+        let currentClient;
+        let currentPort;
+        let currentUser = null;
+
+        const userPermissions = {
+            admin: { subscribe: ['#'], publish: ['#'] },
+            publisher: { subscribe: [], publish: ['data/#'] },
+            subscriber: { subscribe: ['data/#'], publish: [] },
+            guest: { subscribe: ['public/#'], publish: [] }
+        };
+
+        function debugLog(msg) {
+            const debugDiv = document.getElementById('debug');
+            const messagesDiv = document.getElementById('debug-messages');
+            debugDiv.style.display = 'block';
+            const line = document.createElement('div');
+            line.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+            messagesDiv.appendChild(line);
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+            console.log(msg);
+        }
+
+        function checkPermission(user, operation, topic) {
+            const perms = userPermissions[user];
+            if (!perms) return false;
+
+            const patterns = operation === 'subscribe' ? perms.subscribe : perms.publish;
+
+            for (const pattern of patterns) {
+                if (pattern === '#') return true;
+                if (pattern.endsWith('/#')) {
+                    const prefix = pattern.slice(0, -2);
+                    if (topic.startsWith(prefix)) return true;
+                }
+                if (pattern === topic) return true;
+            }
+            return false;
+        }
+
+        function addResult(operation, topic, allowed, details) {
+            const list = document.getElementById('results-list');
+            if (list.querySelector('em')) list.innerHTML = '';
+
+            const card = document.createElement('div');
+            card.className = `result-card ${allowed ? 'allowed' : 'denied'}`;
+            card.innerHTML = `
+                <span class="result-icon">${allowed ? '✓' : '✗'}</span>
+                <strong>${operation.toUpperCase()}</strong> ${topic}
+                <span style="float: right; font-weight: bold; color: ${allowed ? '#28a745' : '#dc3545'}">
+                    ${allowed ? 'ALLOWED' : 'DENIED'}
+                </span>
+                <div class="result-details">${details}</div>
+            `;
+            list.prepend(card);
+        }
+
+        function updateMatrix() {
+            const tbody = document.getElementById('matrix-body');
+            if (!currentUser) {
+                tbody.innerHTML = '<tr><td colspan="3" style="text-align: center; color: #666;">Connect a user to see permissions</td></tr>';
+                return;
+            }
+
+            const testTopics = ['data/sensors', 'data/config', 'admin/logs', 'public/news', 'private/secret'];
+            tbody.innerHTML = '';
+
+            testTopics.forEach(topic => {
+                const canSub = checkPermission(currentUser, 'subscribe', topic);
+                const canPub = checkPermission(currentUser, 'publish', topic);
+
+                const row = document.createElement('tr');
+                row.innerHTML = `
+                    <td style="font-family: monospace;">${topic}</td>
+                    <td class="matrix-cell ${canSub ? 'allowed' : 'denied'}">${canSub ? '✓' : '✗'}</td>
+                    <td class="matrix-cell ${canPub ? 'allowed' : 'denied'}">${canPub ? '✓' : '✗'}</td>
+                `;
+                tbody.appendChild(row);
+            });
+        }
+
+        async function connectUser(username, password) {
+            if (currentPort) {
+                currentPort.close();
+            }
+
+            currentClient = new WasmMqttClient(username);
+            const statusEl = document.getElementById('user-status');
+
+            currentClient.on_connect(() => {
+                statusEl.className = 'status connected';
+                statusEl.textContent = `Connected as ${username}`;
+                currentUser = username;
+                updateMatrix();
+                debugLog(`${username} connected`);
+            });
+
+            currentClient.on_disconnect(() => {
+                statusEl.className = 'status disconnected';
+                statusEl.textContent = 'Disconnected';
+            });
+
+            currentClient.on_error((err) => {
+                debugLog(`Error: ${err}`);
+            });
+
+            currentPort = broker.create_client_port();
+
+            const options = new WasmConnectOptions();
+            options.username = username;
+            options.password = new TextEncoder().encode(password);
+
+            await currentClient.connect_message_port_with_options(currentPort, options);
+        }
+
+        async function testSubscribe(topic) {
+            if (!currentClient || !currentUser) {
+                alert('Please select and connect a user first');
+                return;
+            }
+
+            const allowed = checkPermission(currentUser, 'subscribe', topic);
+
+            try {
+                await currentClient.subscribe_with_callback(topic, (t, payload) => {
+                    debugLog(`Received on ${t}`);
+                });
+
+                addResult('subscribe', topic, allowed,
+                    allowed ? `User "${currentUser}" has read permission for this topic pattern`
+                           : `Subscription succeeded but would be denied by ACL in production`);
+            } catch (err) {
+                addResult('subscribe', topic, false, `Error: ${err.message || err}`);
+            }
+        }
+
+        async function testPublish(topic) {
+            if (!currentClient || !currentUser) {
+                alert('Please select and connect a user first');
+                return;
+            }
+
+            const allowed = checkPermission(currentUser, 'publish', topic);
+
+            try {
+                const encoder = new TextEncoder();
+                const payload = JSON.stringify({ test: true, timestamp: Date.now() });
+                await currentClient.publish(topic, encoder.encode(payload));
+
+                addResult('publish', topic, allowed,
+                    allowed ? `User "${currentUser}" has write permission for this topic pattern`
+                           : `Publish succeeded but would be denied by ACL in production`);
+            } catch (err) {
+                addResult('publish', topic, false, `Error: ${err.message || err}`);
+            }
+        }
+
+        window.quickTest = async function(operation, topic) {
+            if (operation === 'subscribe') {
+                await testSubscribe(topic);
+            } else {
+                await testPublish(topic);
+            }
+        };
+
+        async function main() {
+            try {
+                debugLog('Initializing WASM...');
+                await init();
+
+                const config = new WasmBrokerConfig();
+                config.max_clients = 10;
+                config.allow_anonymous = true;
+
+                broker = WasmBroker.with_config(config);
+
+                await broker.add_user('admin', 'admin123');
+                await broker.add_user('publisher', 'pub123');
+                await broker.add_user('subscriber', 'sub123');
+                await broker.add_user('guest', 'guest123');
+
+                await broker.add_role('admin');
+                await broker.add_role_rule('admin', '#', 'readwrite');
+
+                await broker.add_role('publisher');
+                await broker.add_role_rule('publisher', 'data/#', 'write');
+
+                await broker.add_role('subscriber');
+                await broker.add_role_rule('subscriber', 'data/#', 'read');
+
+                await broker.add_role('guest');
+                await broker.add_role_rule('guest', 'public/#', 'read');
+
+                await broker.assign_role('admin', 'admin');
+                await broker.assign_role('publisher', 'publisher');
+                await broker.assign_role('subscriber', 'subscriber');
+                await broker.assign_role('guest', 'guest');
+
+                debugLog('Broker created with ACL rules');
+
+                document.querySelectorAll('.user-card').forEach(card => {
+                    card.addEventListener('click', async () => {
+                        document.querySelectorAll('.user-card').forEach(c => c.classList.remove('selected'));
+                        card.classList.add('selected');
+
+                        const username = card.dataset.user;
+                        const password = card.dataset.pass;
+                        await connectUser(username, password);
+                    });
+                });
+
+                document.getElementById('test-subscribe').addEventListener('click', () => {
+                    const topic = document.getElementById('sub-topic').value;
+                    testSubscribe(topic);
+                });
+
+                document.getElementById('test-publish').addEventListener('click', () => {
+                    const topic = document.getElementById('pub-topic').value;
+                    testPublish(topic);
+                });
+
+                await connectUser('admin', 'admin123');
+
+                debugLog('Demo ready! Select users and test their permissions.');
+            } catch (error) {
+                debugLog(`ERROR: ${error.message || error}`);
+                console.error('Initialization error:', error);
+            }
+        }
+
+        main();
+    </script>
+</body>
+</html>

@@ -485,6 +485,64 @@ pub async fn run_quic_connection_handler(
     resource_monitor: Arc<ResourceMonitor>,
     shutdown_rx: broadcast::Receiver<()>,
 ) {
+    run_quic_handler_inner(
+        connection,
+        peer_addr,
+        config,
+        router,
+        auth_provider,
+        storage,
+        stats,
+        resource_monitor,
+        shutdown_rx,
+        false,
+        "QUIC",
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn run_quic_cluster_connection_handler(
+    connection: Arc<Connection>,
+    peer_addr: SocketAddr,
+    config: Arc<BrokerConfig>,
+    router: Arc<MessageRouter>,
+    auth_provider: Arc<dyn AuthProvider>,
+    storage: Option<Arc<DynamicStorage>>,
+    stats: Arc<BrokerStats>,
+    resource_monitor: Arc<ResourceMonitor>,
+    shutdown_rx: broadcast::Receiver<()>,
+) {
+    run_quic_handler_inner(
+        connection,
+        peer_addr,
+        config,
+        router,
+        auth_provider,
+        storage,
+        stats,
+        resource_monitor,
+        shutdown_rx,
+        true,
+        "Cluster QUIC",
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_quic_handler_inner(
+    connection: Arc<Connection>,
+    peer_addr: SocketAddr,
+    config: Arc<BrokerConfig>,
+    router: Arc<MessageRouter>,
+    auth_provider: Arc<dyn AuthProvider>,
+    storage: Option<Arc<DynamicStorage>>,
+    stats: Arc<BrokerStats>,
+    resource_monitor: Arc<ResourceMonitor>,
+    shutdown_rx: broadcast::Receiver<()>,
+    skip_bridge_forwarding: bool,
+    label: &'static str,
+) {
     let (packet_tx, packet_rx) = mpsc::channel::<Packet>(100);
     let flow_registry = Arc::new(Mutex::new(FlowRegistry::new(256)));
 
@@ -497,8 +555,8 @@ pub async fn run_quic_connection_handler(
     };
 
     debug!(
-        "QUIC control stream accepted from {}, starting handler",
-        peer_addr
+        "{} control stream accepted from {}, starting handler",
+        label, peer_addr
     );
 
     let stream = QuicStreamWrapper::new(send, recv, peer_addr);
@@ -515,27 +573,31 @@ pub async fn run_quic_connection_handler(
         resource_monitor,
         shutdown_rx,
         Some(packet_rx),
-    );
+    )
+    .with_skip_bridge_forwarding(skip_bridge_forwarding);
 
+    let handler_label = label;
     tokio::spawn(async move {
         if let Err(e) = handler.run().await {
             if e.is_normal_disconnect() {
-                debug!("QUIC client handler finished");
+                debug!("{} client handler finished", handler_label);
             } else {
-                warn!("QUIC client handler error: {e}");
+                warn!("{} client handler error: {e}", handler_label);
             }
         }
     });
 
     let datagram_connection = connection.clone();
     let datagram_packet_tx = packet_tx.clone();
+    let datagram_label = label;
     tokio::spawn(async move {
         loop {
             match datagram_connection.read_datagram().await {
                 Ok(datagram) => {
                     trace!(
                         len = datagram.len(),
-                        "Received QUIC datagram from {}",
+                        "Received {} datagram from {}",
+                        datagram_label,
                         peer_addr
                     );
                     match decode_datagram_packet(&datagram) {
@@ -558,13 +620,20 @@ pub async fn run_quic_connection_handler(
         }
     });
 
+    let stream_label = label;
     tokio::spawn(async move {
         loop {
             if let Ok((_send, recv)) = connection.accept_bi().await {
-                debug!("Additional QUIC data stream accepted from {}", peer_addr);
+                debug!(
+                    "Additional {} data stream accepted from {}",
+                    stream_label, peer_addr
+                );
                 spawn_data_stream_reader(recv, packet_tx.clone(), peer_addr, flow_registry.clone());
             } else {
-                debug!("QUIC connection stream accept loop ended for {}", peer_addr);
+                debug!(
+                    "{} connection stream accept loop ended for {}",
+                    stream_label, peer_addr
+                );
                 break;
             }
         }

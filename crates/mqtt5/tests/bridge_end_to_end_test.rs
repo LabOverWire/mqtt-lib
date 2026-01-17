@@ -204,12 +204,12 @@ async fn test_bridge_error_scenarios() {
         remote_prefix: None,
     });
 
-    let _ = manager.add_bridge(config.clone()).await;
+    let _ = manager.add_bridge(config.clone());
 
     // Adding same bridge again should fail if it exists
-    let bridges = manager.list_bridges().await;
+    let bridges = manager.list_bridges();
     if bridges.contains(&"test".to_string()) {
-        let result = manager.add_bridge(config).await;
+        let result = manager.add_bridge(config);
         assert!(result.is_err());
     }
 

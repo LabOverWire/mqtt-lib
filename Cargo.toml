@@ -22,10 +22,6 @@ panic = "abort"
 strip = true
 opt-level = "z"
 
-[profile.release.package.mqtt5-wasm]
-opt-level = "z"
-strip = "debuginfo"
-
 [profile.dev]
 debug = true
 
@@ -33,3 +29,6 @@ debug = true
 inherits = "release"
 debug = 2
 lto = false
+
+[patch.crates-io]
+mqtt5-protocol = { path = "crates/mqtt5-protocol" }

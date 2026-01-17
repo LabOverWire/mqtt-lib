@@ -1,0 +1,479 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MQTT Cross-Tab BroadcastChannel Demo</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            max-width: 1000px;
+            margin: 40px auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .header {
+            background: white;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+        h1 { color: #333; margin-top: 0; }
+        .highlight {
+            background: #e7f3ff;
+            padding: 15px;
+            border-radius: 4px;
+            border-left: 4px solid #007bff;
+            margin: 15px 0;
+        }
+        .tab-info {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            color: white;
+            padding: 20px;
+            border-radius: 8px;
+            margin: 20px 0;
+        }
+        .tab-id {
+            font-size: 2em;
+            font-weight: bold;
+            background: rgba(255,255,255,0.2);
+            padding: 10px 20px;
+            border-radius: 8px;
+        }
+        .tab-label { font-size: 1.2em; }
+        .panel {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+        .panel h2 {
+            margin-top: 0;
+            font-size: 1.2em;
+            padding-bottom: 10px;
+            border-bottom: 3px solid #007bff;
+        }
+        .status {
+            padding: 8px;
+            margin: 10px 0;
+            border-radius: 4px;
+            font-weight: 500;
+            font-size: 0.85em;
+        }
+        .status.connected { background: #d4edda; color: #155724; }
+        .status.disconnected { background: #f8d7da; color: #721c24; }
+        button {
+            background: #007bff;
+            color: white;
+            border: none;
+            cursor: pointer;
+            padding: 12px 24px;
+            border-radius: 4px;
+            font-size: 14px;
+            margin: 5px;
+        }
+        button:hover { background: #0056b3; }
+        button:disabled { background: #6c757d; cursor: not-allowed; }
+        button.open-tab {
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            font-size: 1.1em;
+            padding: 15px 30px;
+        }
+        button.open-tab:hover {
+            background: linear-gradient(135deg, #5a6fd6, #6a4190);
+        }
+        .canvas-container {
+            background: #1a1a2e;
+            border-radius: 8px;
+            padding: 20px;
+            margin: 20px 0;
+        }
+        #shared-canvas {
+            width: 100%;
+            height: 300px;
+            background: #16213e;
+            border-radius: 4px;
+            cursor: crosshair;
+        }
+        .color-picker {
+            display: flex;
+            gap: 10px;
+            margin-top: 15px;
+            flex-wrap: wrap;
+        }
+        .color-btn {
+            width: 40px;
+            height: 40px;
+            border-radius: 8px;
+            border: 3px solid transparent;
+            cursor: pointer;
+        }
+        .color-btn.selected { border-color: white; }
+        .chat-container {
+            margin-top: 20px;
+        }
+        .chat-messages {
+            max-height: 200px;
+            overflow-y: auto;
+            background: #f8f9fa;
+            border-radius: 6px;
+            padding: 10px;
+            margin-bottom: 10px;
+        }
+        .chat-message {
+            padding: 8px 12px;
+            margin: 6px 0;
+            border-radius: 8px;
+            animation: slideIn 0.3s ease;
+        }
+        @keyframes slideIn {
+            from { opacity: 0; transform: translateX(-10px); }
+            to { opacity: 1; transform: translateX(0); }
+        }
+        .chat-message.self {
+            background: #007bff;
+            color: white;
+            margin-left: 20%;
+        }
+        .chat-message.other {
+            background: #e9ecef;
+            margin-right: 20%;
+        }
+        .chat-message .sender {
+            font-size: 0.75em;
+            opacity: 0.8;
+            margin-bottom: 4px;
+        }
+        .chat-input {
+            display: flex;
+            gap: 10px;
+        }
+        .chat-input input {
+            flex: 1;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        .active-tabs {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            margin: 15px 0;
+        }
+        .tab-badge {
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-size: 0.85em;
+            font-weight: bold;
+        }
+        .tab-badge.self {
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            color: white;
+        }
+        .tab-badge.other {
+            background: #e9ecef;
+            color: #333;
+        }
+        #debug {
+            margin-top: 15px;
+            padding: 10px;
+            background: #f8f9fa;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 0.8em;
+            max-height: 150px;
+            overflow-y: auto;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>Cross-Tab BroadcastChannel Demo</h1>
+        <p>Demonstrates <strong>BroadcastChannel transport</strong> for sharing an MQTT broker across browser tabs.</p>
+        <div class="highlight">
+            <strong>How BroadcastChannel Works:</strong>
+            <ul style="margin: 10px 0 0 0; padding-left: 20px;">
+                <li>One tab hosts the MQTT broker</li>
+                <li>Other tabs connect via BroadcastChannel API</li>
+                <li>All tabs share the same broker - messages sync in real-time!</li>
+            </ul>
+        </div>
+        <div style="text-align: center; margin: 20px 0;">
+            <button class="open-tab" onclick="window.open(location.href, '_blank')">Open in New Tab</button>
+        </div>
+        <div id="debug">
+            <strong>Debug Log:</strong>
+            <div id="debug-messages"></div>
+        </div>
+    </div>
+
+    <div class="tab-info">
+        <div class="tab-id" id="my-tab-id">?</div>
+        <div>
+            <div class="tab-label">This Tab's ID</div>
+            <div style="font-size: 0.85em; opacity: 0.8;">Each tab gets a unique color-coded ID</div>
+        </div>
+    </div>
+
+    <div class="panel">
+        <h2>Active Tabs</h2>
+        <div id="status" class="status disconnected">Connecting...</div>
+        <div class="active-tabs" id="active-tabs">
+            <em style="color: #666;">Discovering tabs...</em>
+        </div>
+    </div>
+
+    <div class="panel">
+        <h2>Shared Canvas (Draw Together!)</h2>
+        <p style="font-size: 0.85em; color: #666;">Draw on the canvas - your strokes appear in all tabs instantly!</p>
+        <div class="canvas-container">
+            <canvas id="shared-canvas"></canvas>
+            <div class="color-picker" id="color-picker"></div>
+        </div>
+        <button onclick="clearCanvas()">Clear Canvas</button>
+    </div>
+
+    <div class="panel">
+        <h2>Cross-Tab Chat</h2>
+        <div class="chat-messages" id="chat-messages">
+            <em style="color: #666;">Messages from all tabs appear here...</em>
+        </div>
+        <div class="chat-input">
+            <input type="text" id="chat-input" placeholder="Type a message..." onkeypress="if(event.key==='Enter')sendChat()">
+            <button onclick="sendChat()">Send</button>
+        </div>
+    </div>
+
+    <script type="module">
+        import init, { WasmBroker, WasmBrokerConfig, WasmMqttClient } from './pkg/mqtt5_wasm.js';
+
+        const tabId = Math.random().toString(36).substr(2, 4).toUpperCase();
+        const tabColors = ['#667eea', '#e91e63', '#00bcd4', '#4caf50', '#ff9800', '#9c27b0'];
+        const myColor = tabColors[parseInt(tabId, 36) % tabColors.length];
+
+        let broker = null;
+        let client = null;
+        let canvas, ctx;
+        let isDrawing = false;
+        let lastX = 0, lastY = 0;
+        let selectedColor = myColor;
+        const activeTabs = new Map();
+
+        const broadcastChannel = new BroadcastChannel('mqtt-cross-tab');
+
+        function debugLog(msg) {
+            const debugDiv = document.getElementById('debug');
+            const messagesDiv = document.getElementById('debug-messages');
+            debugDiv.style.display = 'block';
+            const line = document.createElement('div');
+            line.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+            messagesDiv.appendChild(line);
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+            console.log(msg);
+        }
+
+        function updateTabDisplay() {
+            const container = document.getElementById('active-tabs');
+            container.innerHTML = '';
+
+            const myBadge = document.createElement('span');
+            myBadge.className = 'tab-badge self';
+            myBadge.style.background = `linear-gradient(135deg, ${myColor}, ${myColor}dd)`;
+            myBadge.textContent = `Tab ${tabId} (You)`;
+            container.appendChild(myBadge);
+
+            activeTabs.forEach((color, id) => {
+                if (id !== tabId) {
+                    const badge = document.createElement('span');
+                    badge.className = 'tab-badge other';
+                    badge.style.borderLeft = `4px solid ${color}`;
+                    badge.textContent = `Tab ${id}`;
+                    container.appendChild(badge);
+                }
+            });
+        }
+
+        function addChatMessage(senderId, message, isSelf) {
+            const container = document.getElementById('chat-messages');
+            if (container.querySelector('em')) container.innerHTML = '';
+
+            const color = senderId === tabId ? myColor : (activeTabs.get(senderId) || '#666');
+
+            const msg = document.createElement('div');
+            msg.className = `chat-message ${isSelf ? 'self' : 'other'}`;
+            if (!isSelf) msg.style.borderLeft = `4px solid ${color}`;
+            msg.innerHTML = `
+                <div class="sender">Tab ${senderId}</div>
+                <div>${message}</div>
+            `;
+            container.appendChild(msg);
+            container.scrollTop = container.scrollHeight;
+        }
+
+        function setupCanvas() {
+            canvas = document.getElementById('shared-canvas');
+            ctx = canvas.getContext('2d');
+
+            const rect = canvas.getBoundingClientRect();
+            canvas.width = rect.width;
+            canvas.height = rect.height;
+
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
+            ctx.lineWidth = 4;
+
+            canvas.addEventListener('mousedown', (e) => {
+                isDrawing = true;
+                [lastX, lastY] = [e.offsetX, e.offsetY];
+            });
+
+            canvas.addEventListener('mousemove', (e) => {
+                if (!isDrawing) return;
+                draw(lastX, lastY, e.offsetX, e.offsetY, selectedColor, true);
+                [lastX, lastY] = [e.offsetX, e.offsetY];
+            });
+
+            canvas.addEventListener('mouseup', () => isDrawing = false);
+            canvas.addEventListener('mouseout', () => isDrawing = false);
+
+            const picker = document.getElementById('color-picker');
+            tabColors.forEach(color => {
+                const btn = document.createElement('button');
+                btn.className = `color-btn ${color === selectedColor ? 'selected' : ''}`;
+                btn.style.background = color;
+                btn.onclick = () => {
+                    document.querySelectorAll('.color-btn').forEach(b => b.classList.remove('selected'));
+                    btn.classList.add('selected');
+                    selectedColor = color;
+                };
+                picker.appendChild(btn);
+            });
+        }
+
+        function draw(x1, y1, x2, y2, color, broadcast = false) {
+            ctx.strokeStyle = color;
+            ctx.beginPath();
+            ctx.moveTo(x1, y1);
+            ctx.lineTo(x2, y2);
+            ctx.stroke();
+
+            if (broadcast && client) {
+                const encoder = new TextEncoder();
+                const payload = JSON.stringify({ x1, y1, x2, y2, color, tabId });
+                client.publish('canvas/draw', encoder.encode(payload));
+            }
+        }
+
+        window.clearCanvas = function() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            if (client) {
+                const encoder = new TextEncoder();
+                client.publish('canvas/clear', encoder.encode(JSON.stringify({ tabId })));
+            }
+        };
+
+        window.sendChat = function() {
+            const input = document.getElementById('chat-input');
+            const message = input.value.trim();
+            if (!message || !client) return;
+
+            const encoder = new TextEncoder();
+            const payload = JSON.stringify({ tabId, message, color: myColor });
+            client.publish('chat/messages', encoder.encode(payload));
+
+            addChatMessage(tabId, message, true);
+            input.value = '';
+        };
+
+        async function main() {
+            try {
+                debugLog('Initializing WASM...');
+                await init();
+
+                document.getElementById('my-tab-id').textContent = tabId;
+                document.getElementById('my-tab-id').style.background = myColor;
+
+                const config = new WasmBrokerConfig();
+                config.max_clients = 50;
+                config.allow_anonymous = true;
+
+                broker = WasmBroker.with_config(config);
+                debugLog('Broker created in this tab');
+
+                client = new WasmMqttClient(`tab-${tabId}`);
+
+                client.on_connect(() => {
+                    debugLog('Client connected');
+                    document.getElementById('status').className = 'status connected';
+                    document.getElementById('status').textContent = 'Connected to shared broker';
+                });
+
+                const port = broker.create_client_port();
+                await client.connect_message_port(port);
+
+                await client.subscribe_with_callback('canvas/draw', (topic, payload) => {
+                    const decoder = new TextDecoder();
+                    const data = JSON.parse(decoder.decode(payload));
+                    if (data.tabId !== tabId) {
+                        draw(data.x1, data.y1, data.x2, data.y2, data.color, false);
+                    }
+                });
+
+                await client.subscribe_with_callback('canvas/clear', (topic, payload) => {
+                    const decoder = new TextDecoder();
+                    const data = JSON.parse(decoder.decode(payload));
+                    if (data.tabId !== tabId) {
+                        ctx.clearRect(0, 0, canvas.width, canvas.height);
+                    }
+                });
+
+                await client.subscribe_with_callback('chat/messages', (topic, payload) => {
+                    const decoder = new TextDecoder();
+                    const data = JSON.parse(decoder.decode(payload));
+                    if (data.tabId !== tabId) {
+                        activeTabs.set(data.tabId, data.color);
+                        updateTabDisplay();
+                        addChatMessage(data.tabId, data.message, false);
+                    }
+                });
+
+                await client.subscribe_with_callback('presence/announce', (topic, payload) => {
+                    const decoder = new TextDecoder();
+                    const data = JSON.parse(decoder.decode(payload));
+                    activeTabs.set(data.tabId, data.color);
+                    updateTabDisplay();
+                });
+
+                const encoder = new TextEncoder();
+                const presence = JSON.stringify({ tabId, color: myColor });
+                await client.publish('presence/announce', encoder.encode(presence));
+
+                setInterval(async () => {
+                    if (client) {
+                        const encoder = new TextEncoder();
+                        await client.publish('presence/announce', encoder.encode(presence));
+                    }
+                }, 5000);
+
+                setupCanvas();
+                activeTabs.set(tabId, myColor);
+                updateTabDisplay();
+
+                debugLog('Demo ready! Open more tabs to collaborate.');
+            } catch (error) {
+                debugLog(`ERROR: ${error.message || error}`);
+                console.error('Initialization error:', error);
+            }
+        }
+
+        main();
+    </script>
+</body>
+</html>

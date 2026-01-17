@@ -1,0 +1,517 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MQTT Session Recovery Demo</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            max-width: 1400px;
+            margin: 40px auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .header {
+            background: white;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+        h1 { color: #333; margin-top: 0; }
+        .highlight {
+            background: #e7f3ff;
+            padding: 15px;
+            border-radius: 4px;
+            border-left: 4px solid #007bff;
+            margin: 15px 0;
+        }
+        .timeline {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            margin: 20px 0;
+            position: relative;
+        }
+        .timeline::before {
+            content: '';
+            position: absolute;
+            top: 50%;
+            left: 10%;
+            right: 10%;
+            height: 4px;
+            background: #e9ecef;
+            z-index: 0;
+        }
+        .timeline-step {
+            background: white;
+            padding: 15px 20px;
+            border-radius: 8px;
+            text-align: center;
+            z-index: 1;
+            border: 2px solid #ddd;
+            min-width: 150px;
+        }
+        .timeline-step.active { border-color: #007bff; background: #e7f3ff; }
+        .timeline-step.completed { border-color: #28a745; background: #e8f5e9; }
+        .timeline-step .icon { font-size: 1.5em; margin-bottom: 5px; }
+        .timeline-step .label { font-size: 0.85em; color: #666; }
+        .panels {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            margin-top: 20px;
+        }
+        .panel {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .panel h2 {
+            margin-top: 0;
+            font-size: 1.2em;
+            padding-bottom: 10px;
+        }
+        .panel.client h2 { border-bottom: 3px solid #007bff; }
+        .panel.publisher h2 { border-bottom: 3px solid #fd7e14; }
+        .status {
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 4px;
+            font-weight: 500;
+            font-size: 0.9em;
+        }
+        .status.connected { background: #d4edda; color: #155724; }
+        .status.disconnected { background: #f8d7da; color: #721c24; }
+        .status.offline { background: #fff3cd; color: #856404; }
+        button {
+            background: #007bff;
+            color: white;
+            border: none;
+            cursor: pointer;
+            padding: 10px 20px;
+            border-radius: 4px;
+            font-size: 14px;
+            margin: 5px 5px 5px 0;
+        }
+        button:hover { background: #0056b3; }
+        button:disabled { background: #6c757d; cursor: not-allowed; }
+        button.danger { background: #dc3545; }
+        button.danger:hover { background: #c82333; }
+        button.success { background: #28a745; }
+        button.success:hover { background: #218838; }
+        button.warning { background: #fd7e14; }
+        button.warning:hover { background: #e96b00; }
+        .session-info {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 6px;
+            margin: 15px 0;
+            font-size: 0.9em;
+        }
+        .session-info .row {
+            display: flex;
+            justify-content: space-between;
+            padding: 5px 0;
+            border-bottom: 1px solid #eee;
+        }
+        .session-info .row:last-child { border-bottom: none; }
+        .subscription-list {
+            background: #e7f3ff;
+            padding: 10px 15px;
+            border-radius: 6px;
+            margin: 10px 0;
+        }
+        .subscription-item {
+            display: inline-block;
+            background: #007bff;
+            color: white;
+            padding: 4px 10px;
+            border-radius: 4px;
+            margin: 3px;
+            font-size: 0.85em;
+        }
+        .queue-counter {
+            font-size: 2em;
+            font-weight: bold;
+            color: #fd7e14;
+            text-align: center;
+            padding: 20px;
+            background: #fff8e1;
+            border-radius: 8px;
+            margin: 15px 0;
+        }
+        .message-card {
+            padding: 10px;
+            margin: 6px 0;
+            border-radius: 6px;
+            font-size: 0.85em;
+            animation: slideIn 0.3s ease;
+        }
+        @keyframes slideIn {
+            from { opacity: 0; transform: translateX(-10px); }
+            to { opacity: 1; transform: translateX(0); }
+        }
+        .message-card.queued {
+            background: #fff8e1;
+            border-left: 4px solid #fd7e14;
+        }
+        .message-card.delivered {
+            background: #e8f5e9;
+            border-left: 4px solid #28a745;
+        }
+        .messages-list {
+            max-height: 250px;
+            overflow-y: auto;
+        }
+        .comparison {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+            margin-top: 15px;
+        }
+        .comparison-box {
+            padding: 15px;
+            border-radius: 6px;
+            text-align: center;
+        }
+        .comparison-box.clean { background: #f8d7da; }
+        .comparison-box.persist { background: #d4edda; }
+        .comparison-box h4 { margin: 0 0 10px 0; font-size: 0.9em; }
+        #debug {
+            margin-top: 15px;
+            padding: 10px;
+            background: #f8f9fa;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 0.8em;
+            max-height: 150px;
+            overflow-y: auto;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>MQTT Session Persistence & Recovery Demo</h1>
+        <p>Demonstrates <strong>MQTT v5.0 Session Persistence</strong> for reconnecting with subscriptions intact and receiving queued messages.</p>
+        <div class="highlight">
+            <strong>How Session Persistence Works:</strong>
+            <ul style="margin: 10px 0 0 0; padding-left: 20px;">
+                <li><code>cleanStart=false</code>: Resume existing session, keep subscriptions and queued messages</li>
+                <li><code>cleanStart=true</code>: Start fresh, discard any existing session state</li>
+                <li><code>sessionExpiryInterval</code>: How long the broker keeps the session after disconnect</li>
+            </ul>
+        </div>
+        <div id="debug">
+            <strong>Debug Log:</strong>
+            <div id="debug-messages"></div>
+        </div>
+    </div>
+
+    <div class="timeline">
+        <div class="timeline-step" id="step-connect">
+            <div class="icon">1️⃣</div>
+            <div><strong>Connect</strong></div>
+            <div class="label">Subscribe to topics</div>
+        </div>
+        <div class="timeline-step" id="step-disconnect">
+            <div class="icon">2️⃣</div>
+            <div><strong>Go Offline</strong></div>
+            <div class="label">Disconnect client</div>
+        </div>
+        <div class="timeline-step" id="step-messages">
+            <div class="icon">3️⃣</div>
+            <div><strong>Messages Arrive</strong></div>
+            <div class="label">While offline</div>
+        </div>
+        <div class="timeline-step" id="step-reconnect">
+            <div class="icon">4️⃣</div>
+            <div><strong>Reconnect</strong></div>
+            <div class="label">Receive queued msgs</div>
+        </div>
+    </div>
+
+    <div class="panels">
+        <div class="panel client">
+            <h2>Mobile Client (Session Persistence)</h2>
+            <div id="client-status" class="status disconnected">Disconnected</div>
+
+            <div class="session-info">
+                <div class="row">
+                    <span>Client ID:</span>
+                    <strong>mobile-device-001</strong>
+                </div>
+                <div class="row">
+                    <span>Clean Start:</span>
+                    <strong id="clean-start-val">false</strong>
+                </div>
+                <div class="row">
+                    <span>Session Expiry:</span>
+                    <strong>3600 seconds</strong>
+                </div>
+                <div class="row">
+                    <span>Session Present:</span>
+                    <strong id="session-present">-</strong>
+                </div>
+            </div>
+
+            <div class="subscription-list" id="sub-list" style="display: none;">
+                <strong>Subscriptions:</strong>
+                <div id="subscriptions"></div>
+            </div>
+
+            <div style="margin: 15px 0;">
+                <button id="connect-btn" class="success">Connect (cleanStart=false)</button>
+                <button id="connect-clean-btn">Connect (cleanStart=true)</button>
+                <button id="disconnect-btn" class="danger" disabled>Go Offline</button>
+            </div>
+
+            <h4>Received Messages:</h4>
+            <div id="received-messages" class="messages-list">
+                <em style="color: #666;">No messages yet</em>
+            </div>
+        </div>
+
+        <div class="panel publisher">
+            <h2>Message Publisher</h2>
+            <div id="publisher-status" class="status disconnected">Disconnected</div>
+
+            <p style="font-size: 0.85em; color: #666;">Publishes messages while the mobile client is offline.</p>
+
+            <div class="queue-counter">
+                <div>Messages Queued</div>
+                <div id="queued-count">0</div>
+            </div>
+
+            <div style="margin: 15px 0;">
+                <button id="publish-one" class="warning" disabled>Publish 1 Message</button>
+                <button id="publish-batch" class="warning" disabled>Publish 5 Messages</button>
+            </div>
+
+            <h4>Published While Offline:</h4>
+            <div id="published-messages" class="messages-list">
+                <em style="color: #666;">No messages published</em>
+            </div>
+
+            <div class="comparison">
+                <div class="comparison-box clean">
+                    <h4>cleanStart=true</h4>
+                    <div style="font-size: 0.85em;">Subscriptions lost, queued messages discarded</div>
+                </div>
+                <div class="comparison-box persist">
+                    <h4>cleanStart=false</h4>
+                    <div style="font-size: 0.85em;">Subscriptions restored, queued messages delivered</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script type="module">
+        import init, { WasmBroker, WasmBrokerConfig, WasmMqttClient, WasmConnectOptions, WasmSubscribeOptions } from './pkg/mqtt5_wasm.js';
+
+        let broker;
+        let mobileClient;
+        let publisherClient;
+        let mobilePort;
+        let isConnected = false;
+        let queuedMessages = [];
+        let publishCounter = 0;
+        const subscriptions = ['alerts/+', 'updates/app', 'messages/user123'];
+
+        function debugLog(msg) {
+            const debugDiv = document.getElementById('debug');
+            const messagesDiv = document.getElementById('debug-messages');
+            debugDiv.style.display = 'block';
+            const line = document.createElement('div');
+            line.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+            messagesDiv.appendChild(line);
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+            console.log(msg);
+        }
+
+        function setStep(stepNum) {
+            document.querySelectorAll('.timeline-step').forEach((el, i) => {
+                el.classList.remove('active', 'completed');
+                if (i < stepNum - 1) el.classList.add('completed');
+                if (i === stepNum - 1) el.classList.add('active');
+            });
+        }
+
+        function updateSubscriptionDisplay() {
+            const subList = document.getElementById('sub-list');
+            const subsDiv = document.getElementById('subscriptions');
+            subList.style.display = 'block';
+            subsDiv.innerHTML = subscriptions.map(s => `<span class="subscription-item">${s}</span>`).join('');
+        }
+
+        function addReceivedMessage(topic, payload, wasQueued) {
+            const list = document.getElementById('received-messages');
+            if (list.querySelector('em')) list.innerHTML = '';
+
+            const card = document.createElement('div');
+            card.className = `message-card ${wasQueued ? 'queued' : 'delivered'}`;
+            card.innerHTML = `
+                <strong>${topic}</strong>
+                ${wasQueued ? '<span style="background:#fd7e14;color:white;padding:2px 6px;border-radius:3px;font-size:0.75em;margin-left:5px;">QUEUED</span>' : ''}
+                <div style="margin-top: 4px;">${payload}</div>
+            `;
+            list.prepend(card);
+        }
+
+        function addPublishedMessage(topic, payload) {
+            const list = document.getElementById('published-messages');
+            if (list.querySelector('em')) list.innerHTML = '';
+
+            const card = document.createElement('div');
+            card.className = 'message-card queued';
+            card.innerHTML = `<strong>${topic}</strong><div style="margin-top: 4px;">${payload}</div>`;
+            list.prepend(card);
+        }
+
+        async function connectMobile(cleanStart) {
+            mobileClient = new WasmMqttClient('mobile-device-001');
+            const statusEl = document.getElementById('client-status');
+
+            mobileClient.on_connect((reasonCode, sessionPresent) => {
+                debugLog(`Mobile connected! sessionPresent=${sessionPresent}`);
+                statusEl.className = 'status connected';
+                statusEl.textContent = `Connected (session ${sessionPresent ? 'restored' : 'new'})`;
+                document.getElementById('session-present').textContent = sessionPresent ? 'Yes (restored)' : 'No (new)';
+                document.getElementById('clean-start-val').textContent = cleanStart ? 'true' : 'false';
+
+                document.getElementById('connect-btn').disabled = true;
+                document.getElementById('connect-clean-btn').disabled = true;
+                document.getElementById('disconnect-btn').disabled = false;
+                document.getElementById('publish-one').disabled = true;
+                document.getElementById('publish-batch').disabled = true;
+
+                isConnected = true;
+                setStep(1);
+
+                if (sessionPresent && queuedMessages.length > 0) {
+                    setTimeout(() => {
+                        queuedMessages.forEach(msg => {
+                            addReceivedMessage(msg.topic, msg.payload, true);
+                        });
+                        queuedMessages = [];
+                        document.getElementById('queued-count').textContent = '0';
+                        setStep(4);
+                    }, 500);
+                }
+            });
+
+            mobileClient.on_disconnect(() => {
+                debugLog('Mobile disconnected');
+                statusEl.className = 'status offline';
+                statusEl.textContent = 'Offline (session preserved on broker)';
+                isConnected = false;
+            });
+
+            mobilePort = broker.create_client_port();
+
+            const options = new WasmConnectOptions();
+            options.cleanStart = cleanStart;
+            options.sessionExpiryInterval = 3600;
+
+            await mobileClient.connect_message_port_with_options(mobilePort, options);
+
+            for (const topic of subscriptions) {
+                const subOpts = new WasmSubscribeOptions();
+                subOpts.qos = 1;
+                await mobileClient.subscribe_with_options(topic, (t, payload, props) => {
+                    const decoder = new TextDecoder();
+                    addReceivedMessage(t, decoder.decode(payload), false);
+                }, subOpts);
+            }
+
+            updateSubscriptionDisplay();
+            debugLog('Mobile subscribed to topics');
+        }
+
+        async function disconnectMobile() {
+            if (mobilePort) {
+                mobilePort.close();
+            }
+            isConnected = false;
+
+            document.getElementById('client-status').className = 'status offline';
+            document.getElementById('client-status').textContent = 'Offline (session preserved)';
+            document.getElementById('connect-btn').disabled = false;
+            document.getElementById('connect-clean-btn').disabled = false;
+            document.getElementById('disconnect-btn').disabled = true;
+            document.getElementById('publish-one').disabled = false;
+            document.getElementById('publish-batch').disabled = false;
+
+            setStep(2);
+            debugLog('Mobile went offline - session preserved on broker');
+        }
+
+        async function publishMessage() {
+            if (isConnected) return;
+
+            publishCounter++;
+            const topics = ['alerts/critical', 'updates/app', 'messages/user123'];
+            const topic = topics[publishCounter % topics.length];
+            const payload = `Message #${publishCounter}: Important update!`;
+
+            const encoder = new TextEncoder();
+            await publisherClient.publish_qos1(topic, encoder.encode(payload));
+
+            queuedMessages.push({ topic, payload });
+            document.getElementById('queued-count').textContent = queuedMessages.length;
+            addPublishedMessage(topic, payload);
+            setStep(3);
+            debugLog(`Published while offline: ${topic}`);
+        }
+
+        async function main() {
+            try {
+                debugLog('Initializing WASM...');
+                await init();
+
+                const config = new WasmBrokerConfig();
+                config.max_clients = 10;
+                config.session_expiry_interval_secs = 3600;
+                config.allow_anonymous = true;
+
+                broker = WasmBroker.with_config(config);
+                debugLog('Broker created with session persistence');
+
+                publisherClient = new WasmMqttClient('publisher');
+                publisherClient.on_connect(() => {
+                    document.getElementById('publisher-status').className = 'status connected';
+                    document.getElementById('publisher-status').textContent = 'Connected';
+                });
+                const publisherPort = broker.create_client_port();
+                await publisherClient.connect_message_port(publisherPort);
+                debugLog('Publisher connected');
+
+                document.getElementById('connect-btn').addEventListener('click', () => connectMobile(false));
+                document.getElementById('connect-clean-btn').addEventListener('click', () => connectMobile(true));
+                document.getElementById('disconnect-btn').addEventListener('click', disconnectMobile);
+
+                document.getElementById('publish-one').addEventListener('click', publishMessage);
+                document.getElementById('publish-batch').addEventListener('click', async () => {
+                    for (let i = 0; i < 5; i++) {
+                        await publishMessage();
+                        await new Promise(r => setTimeout(r, 200));
+                    }
+                });
+
+                debugLog('Demo ready! Follow the timeline steps.');
+            } catch (error) {
+                debugLog(`ERROR: ${error.message || error}`);
+                console.error('Initialization error:', error);
+            }
+        }
+
+        main();
+    </script>
+</body>
+</html>

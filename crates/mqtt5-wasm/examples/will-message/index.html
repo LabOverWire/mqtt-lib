@@ -433,6 +433,7 @@
                 const config = new WasmBrokerConfig();
                 config.max_clients = 10;
                 config.maximum_qos = 2;
+                config.allow_anonymous = true;
 
                 debugLog('Creating in-tab broker...');
                 broker = WasmBroker.with_config(config);

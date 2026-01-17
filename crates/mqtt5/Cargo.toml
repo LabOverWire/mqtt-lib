@@ -1,6 +1,6 @@
 [package]
 name = "mqtt5"
-version = "0.18.2"
+version = "0.19.0"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -126,12 +126,13 @@ opentelemetry-otlp = { version = "0.31", features = [
 ], optional = true }
 tracing-opentelemetry = { version = "0.32", optional = true }
 opentelemetry = { version = "0.31", features = ["trace"], optional = true }
-mqtt5-protocol = { version = "0.9", path = "../mqtt5-protocol" }
+mqtt5-protocol = "0.9.2"
 argon2 = "0.5"
 getrandom = "0.3"
 bebytes = { version = "3.0", features = ["bytes"] }
 regex = "1.12.2"
 flume = { version = "0.12.0", features = ["async"] }
+parking_lot = "0.12.5"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 hyper = { version = "1.8.1", features = ["http1", "client"] }

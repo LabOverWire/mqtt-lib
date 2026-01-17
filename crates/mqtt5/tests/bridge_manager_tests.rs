@@ -12,7 +12,7 @@ async fn test_bridge_manager_creation() {
     let manager = BridgeManager::new(router);
 
     // Initially no bridges
-    let bridges = manager.list_bridges().await;
+    let bridges = manager.list_bridges();
     assert_eq!(bridges.len(), 0);
 
     let stats = manager.get_all_stats().await;
@@ -32,10 +32,10 @@ async fn test_bridge_manager_add_remove() {
     );
 
     // Adding will fail due to connection error, but bridge might still be registered
-    let _ = manager.add_bridge(config.clone()).await;
+    let _ = manager.add_bridge(config.clone());
 
     // Check if bridge was added (depends on implementation)
-    let bridges = manager.list_bridges().await;
+    let bridges = manager.list_bridges();
     // Bridge might not be added if connection fails immediately
 
     // Try to remove non-existent bridge
@@ -48,7 +48,7 @@ async fn test_bridge_manager_add_remove() {
         assert!(result.is_ok());
 
         // Verify removed
-        let bridges = manager.list_bridges().await;
+        let bridges = manager.list_bridges();
         assert_eq!(bridges.len(), 0);
     }
 }
@@ -65,12 +65,12 @@ async fn test_bridge_manager_duplicate_bridge() {
     );
 
     // First add might fail or succeed depending on connection
-    let _ = manager.add_bridge(config.clone()).await;
+    let _ = manager.add_bridge(config.clone());
 
     // If bridge was added, second add should fail
-    let bridges = manager.list_bridges().await;
+    let bridges = manager.list_bridges();
     if bridges.contains(&"duplicate-bridge".to_string()) {
-        let result = manager.add_bridge(config).await;
+        let result = manager.add_bridge(config);
         assert!(result.is_err());
     }
 }
@@ -100,11 +100,11 @@ async fn test_bridge_manager_multiple_bridges() {
     ];
 
     for config in configs {
-        let _ = manager.add_bridge(config).await;
+        let _ = manager.add_bridge(config);
     }
 
     // Some bridges might be added even if connections fail
-    let bridges = manager.list_bridges().await;
+    let bridges = manager.list_bridges();
     assert!(bridges.len() <= 3);
 }
 
@@ -119,7 +119,7 @@ async fn test_bridge_manager_stats() {
         QoS::AtMostOnce,
     );
 
-    let _ = manager.add_bridge(config).await;
+    let _ = manager.add_bridge(config);
 
     tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
 
@@ -145,7 +145,7 @@ async fn test_bridge_manager_stop_all() {
             BridgeDirection::Both,
             QoS::AtMostOnce,
         );
-        let _ = manager.add_bridge(config).await;
+        let _ = manager.add_bridge(config);
     }
 
     // Stop all bridges
@@ -153,7 +153,7 @@ async fn test_bridge_manager_stop_all() {
     assert!(result.is_ok());
 
     // All bridges should be removed
-    let bridges = manager.list_bridges().await;
+    let bridges = manager.list_bridges();
     assert_eq!(bridges.len(), 0);
 }
 
@@ -168,7 +168,7 @@ async fn test_bridge_manager_reload() {
         BridgeDirection::Out,
         QoS::AtMostOnce,
     );
-    let _ = manager.add_bridge(config1).await;
+    let _ = manager.add_bridge(config1);
 
     // Reload with new config
     let config2 = BridgeConfig::new("reload-bridge", "broker2:1883").add_topic(
@@ -204,7 +204,7 @@ async fn test_bridge_manager_handle_outgoing() {
         BridgeDirection::Out,
         QoS::AtMostOnce,
     );
-    let _ = manager.add_bridge(config).await;
+    let _ = manager.add_bridge(config);
 
     // Should still handle gracefully (even if bridge not connected)
     let result = manager.handle_outgoing(&packet).await;
@@ -226,7 +226,7 @@ async fn test_bridge_manager_concurrent_operations() {
             let config =
                 BridgeConfig::new(format!("concurrent-bridge-{i}"), format!("broker{i}:1883"))
                     .add_topic("test/#", BridgeDirection::Both, QoS::AtMostOnce);
-            let _ = manager_clone.add_bridge(config).await;
+            let _ = manager_clone.add_bridge(config);
         });
         handles.push(handle);
     }
@@ -237,7 +237,7 @@ async fn test_bridge_manager_concurrent_operations() {
     }
 
     // List bridges
-    let bridges = manager.list_bridges().await;
+    let bridges = manager.list_bridges();
     assert!(bridges.len() <= 5);
 
     // Remove bridges concurrently
@@ -256,7 +256,7 @@ async fn test_bridge_manager_concurrent_operations() {
     }
 
     // Should be empty
-    let bridges = manager.list_bridges().await;
+    let bridges = manager.list_bridges();
     assert_eq!(bridges.len(), 0);
 }
 
@@ -272,7 +272,7 @@ async fn test_bridge_manager_error_handling() {
     ];
 
     for config in invalid_configs {
-        let result = manager.add_bridge(config).await;
+        let result = manager.add_bridge(config);
         assert!(result.is_err());
     }
 

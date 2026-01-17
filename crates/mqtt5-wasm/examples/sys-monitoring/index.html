@@ -1,0 +1,470 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MQTT $SYS Monitoring Dashboard</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            max-width: 1400px;
+            margin: 40px auto;
+            padding: 20px;
+            background: #1a1a2e;
+            color: #eee;
+        }
+        .header {
+            background: #16213e;
+            padding: 30px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+        h1 { color: #00d4ff; margin-top: 0; }
+        .highlight {
+            background: rgba(0, 212, 255, 0.1);
+            padding: 15px;
+            border-radius: 4px;
+            border-left: 4px solid #00d4ff;
+            margin: 15px 0;
+        }
+        .dashboard {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin-top: 20px;
+        }
+        .metric-card {
+            background: #16213e;
+            padding: 20px;
+            border-radius: 8px;
+            text-align: center;
+            border: 1px solid #0f3460;
+        }
+        .metric-card .icon { font-size: 2em; margin-bottom: 10px; }
+        .metric-card .value {
+            font-size: 2.5em;
+            font-weight: bold;
+            color: #00d4ff;
+            font-family: monospace;
+        }
+        .metric-card .label { color: #888; font-size: 0.9em; margin-top: 5px; }
+        .metric-card .unit { font-size: 0.8em; color: #666; }
+        .gauge-container {
+            width: 120px;
+            height: 120px;
+            margin: 0 auto 10px;
+            position: relative;
+        }
+        .gauge-bg {
+            fill: none;
+            stroke: #0f3460;
+            stroke-width: 10;
+        }
+        .gauge-fill {
+            fill: none;
+            stroke: #00d4ff;
+            stroke-width: 10;
+            stroke-linecap: round;
+            transform: rotate(-90deg);
+            transform-origin: center;
+            transition: stroke-dashoffset 0.5s ease;
+        }
+        .gauge-text {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 1.5em;
+            font-weight: bold;
+            color: #00d4ff;
+        }
+        .chart-container {
+            background: #16213e;
+            padding: 20px;
+            border-radius: 8px;
+            margin-top: 20px;
+            border: 1px solid #0f3460;
+        }
+        .chart-container h3 { margin-top: 0; color: #00d4ff; }
+        .chart {
+            height: 150px;
+            display: flex;
+            align-items: flex-end;
+            gap: 2px;
+            padding: 10px 0;
+        }
+        .chart-bar {
+            flex: 1;
+            background: linear-gradient(to top, #00d4ff, #0f3460);
+            min-width: 8px;
+            transition: height 0.3s ease;
+            border-radius: 2px 2px 0 0;
+        }
+        .clients-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 10px;
+        }
+        .clients-table th, .clients-table td {
+            padding: 10px;
+            text-align: left;
+            border-bottom: 1px solid #0f3460;
+        }
+        .clients-table th { color: #00d4ff; }
+        .status-badge {
+            display: inline-block;
+            padding: 3px 8px;
+            border-radius: 4px;
+            font-size: 0.8em;
+        }
+        .status-badge.online { background: #28a745; }
+        .status-badge.offline { background: #dc3545; }
+        .uptime {
+            font-family: monospace;
+            color: #28a745;
+        }
+        button {
+            background: #00d4ff;
+            color: #1a1a2e;
+            border: none;
+            cursor: pointer;
+            padding: 10px 20px;
+            border-radius: 4px;
+            font-size: 14px;
+            font-weight: bold;
+            margin: 5px;
+        }
+        button:hover { background: #00b8e6; }
+        button:disabled { background: #444; color: #888; cursor: not-allowed; }
+        .controls {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            margin-top: 15px;
+        }
+        .live-indicator {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            color: #28a745;
+        }
+        .live-dot {
+            width: 10px;
+            height: 10px;
+            background: #28a745;
+            border-radius: 50%;
+            animation: pulse 1s infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        #debug {
+            margin-top: 15px;
+            padding: 10px;
+            background: #0f3460;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 0.8em;
+            max-height: 150px;
+            overflow-y: auto;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>$SYS Topics Monitoring Dashboard</h1>
+        <p>Demonstrates <strong>MQTT $SYS Topics</strong> for real-time broker statistics and monitoring.</p>
+        <div class="highlight">
+            <strong>About $SYS Topics:</strong>
+            <ul style="margin: 10px 0 0 0; padding-left: 20px;">
+                <li>Standard topics for broker statistics (<code>$SYS/broker/...</code>)</li>
+                <li>Subscribe to <code>$SYS/#</code> to receive all broker metrics</li>
+                <li>Includes: client counts, message rates, uptime, memory usage</li>
+            </ul>
+        </div>
+        <div class="controls">
+            <button id="add-client">Add Test Client</button>
+            <button id="remove-client">Remove Client</button>
+            <button id="send-messages">Send 10 Messages</button>
+            <span class="live-indicator"><span class="live-dot"></span> Live Updates</span>
+        </div>
+        <div id="debug">
+            <strong>Debug Log:</strong>
+            <div id="debug-messages"></div>
+        </div>
+    </div>
+
+    <div class="dashboard">
+        <div class="metric-card">
+            <div class="icon">👥</div>
+            <div class="value" id="clients-connected">0</div>
+            <div class="label">Clients Connected</div>
+        </div>
+        <div class="metric-card">
+            <div class="icon">📨</div>
+            <div class="value" id="messages-received">0</div>
+            <div class="label">Messages Received</div>
+        </div>
+        <div class="metric-card">
+            <div class="icon">📤</div>
+            <div class="value" id="messages-sent">0</div>
+            <div class="label">Messages Sent</div>
+        </div>
+        <div class="metric-card">
+            <div class="icon">📊</div>
+            <div class="value" id="subscriptions">0</div>
+            <div class="label">Active Subscriptions</div>
+        </div>
+        <div class="metric-card">
+            <div class="icon">⏱️</div>
+            <div class="value uptime" id="uptime">00:00:00</div>
+            <div class="label">Broker Uptime</div>
+        </div>
+        <div class="metric-card">
+            <div class="gauge-container">
+                <svg width="120" height="120" viewBox="0 0 120 120">
+                    <circle class="gauge-bg" cx="60" cy="60" r="50"></circle>
+                    <circle class="gauge-fill" id="load-gauge" cx="60" cy="60" r="50"
+                            stroke-dasharray="314" stroke-dashoffset="314"></circle>
+                </svg>
+                <div class="gauge-text" id="load-percent">0%</div>
+            </div>
+            <div class="label">Broker Load</div>
+        </div>
+    </div>
+
+    <div class="chart-container">
+        <h3>Message Rate (last 30 seconds)</h3>
+        <div class="chart" id="msg-chart"></div>
+    </div>
+
+    <div class="chart-container">
+        <h3>Connected Clients</h3>
+        <table class="clients-table">
+            <thead>
+                <tr>
+                    <th>Client ID</th>
+                    <th>Status</th>
+                    <th>Connected At</th>
+                    <th>Subscriptions</th>
+                </tr>
+            </thead>
+            <tbody id="clients-list">
+                <tr><td colspan="4" style="text-align: center; color: #666;">No clients connected</td></tr>
+            </tbody>
+        </table>
+    </div>
+
+    <script type="module">
+        import init, { WasmBroker, WasmBrokerConfig, WasmMqttClient } from './pkg/mqtt5_wasm.js';
+
+        let broker;
+        let monitorClient;
+        let testClients = [];
+        const messageHistory = new Array(30).fill(0);
+        let messagesThisSecond = 0;
+        let startTime = Date.now();
+
+        const stats = {
+            clientsConnected: 1,
+            messagesReceived: 0,
+            messagesSent: 0,
+            subscriptions: 1,
+            load: 0
+        };
+
+        function debugLog(msg) {
+            const debugDiv = document.getElementById('debug');
+            const messagesDiv = document.getElementById('debug-messages');
+            debugDiv.style.display = 'block';
+            const line = document.createElement('div');
+            line.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+            messagesDiv.appendChild(line);
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+            console.log(msg);
+        }
+
+        function updateDisplay() {
+            document.getElementById('clients-connected').textContent = stats.clientsConnected;
+            document.getElementById('messages-received').textContent = stats.messagesReceived;
+            document.getElementById('messages-sent').textContent = stats.messagesSent;
+            document.getElementById('subscriptions').textContent = stats.subscriptions;
+
+            const elapsed = Math.floor((Date.now() - startTime) / 1000);
+            const hours = Math.floor(elapsed / 3600).toString().padStart(2, '0');
+            const minutes = Math.floor((elapsed % 3600) / 60).toString().padStart(2, '0');
+            const seconds = (elapsed % 60).toString().padStart(2, '0');
+            document.getElementById('uptime').textContent = `${hours}:${minutes}:${seconds}`;
+
+            const loadOffset = 314 - (314 * stats.load / 100);
+            document.getElementById('load-gauge').style.strokeDashoffset = loadOffset;
+            document.getElementById('load-percent').textContent = `${Math.round(stats.load)}%`;
+        }
+
+        function updateChart() {
+            messageHistory.push(messagesThisSecond);
+            messageHistory.shift();
+            messagesThisSecond = 0;
+
+            const max = Math.max(...messageHistory, 1);
+            const chart = document.getElementById('msg-chart');
+            chart.innerHTML = '';
+
+            messageHistory.forEach(val => {
+                const bar = document.createElement('div');
+                bar.className = 'chart-bar';
+                bar.style.height = `${(val / max) * 100}%`;
+                chart.appendChild(bar);
+            });
+        }
+
+        function updateClientList() {
+            const tbody = document.getElementById('clients-list');
+
+            if (testClients.length === 0 && stats.clientsConnected <= 1) {
+                tbody.innerHTML = '<tr><td colspan="4" style="text-align: center; color: #666;">Only monitor client connected</td></tr>';
+                return;
+            }
+
+            tbody.innerHTML = '';
+
+            const monitorRow = document.createElement('tr');
+            monitorRow.innerHTML = `
+                <td>monitor-client</td>
+                <td><span class="status-badge online">Online</span></td>
+                <td>${new Date(startTime).toLocaleTimeString()}</td>
+                <td>$SYS/#</td>
+            `;
+            tbody.appendChild(monitorRow);
+
+            testClients.forEach((client, i) => {
+                const row = document.createElement('tr');
+                row.innerHTML = `
+                    <td>${client.id}</td>
+                    <td><span class="status-badge online">Online</span></td>
+                    <td>${client.connectedAt}</td>
+                    <td>test/messages</td>
+                `;
+                tbody.appendChild(row);
+            });
+        }
+
+        async function addTestClient() {
+            const clientId = `test-client-${testClients.length + 1}`;
+            const client = new WasmMqttClient(clientId);
+
+            client.on_connect(() => {
+                stats.clientsConnected++;
+                stats.subscriptions++;
+                stats.load = Math.min(100, stats.clientsConnected * 10);
+                updateDisplay();
+                updateClientList();
+            });
+
+            client.on_disconnect(() => {
+                stats.clientsConnected = Math.max(1, stats.clientsConnected - 1);
+                stats.subscriptions = Math.max(1, stats.subscriptions - 1);
+                stats.load = Math.min(100, stats.clientsConnected * 10);
+                updateDisplay();
+            });
+
+            const port = broker.create_client_port();
+            await client.connect_message_port(port);
+
+            await client.subscribe_with_callback('test/messages', (topic, payload) => {
+                stats.messagesReceived++;
+                messagesThisSecond++;
+                updateDisplay();
+            });
+
+            testClients.push({
+                id: clientId,
+                client,
+                port,
+                connectedAt: new Date().toLocaleTimeString()
+            });
+
+            debugLog(`Added client: ${clientId}`);
+        }
+
+        async function removeTestClient() {
+            if (testClients.length === 0) return;
+
+            const removed = testClients.pop();
+            removed.port.close();
+            stats.clientsConnected = Math.max(1, stats.clientsConnected - 1);
+            stats.subscriptions = Math.max(1, stats.subscriptions - 1);
+            stats.load = Math.min(100, stats.clientsConnected * 10);
+            updateDisplay();
+            updateClientList();
+            debugLog(`Removed client: ${removed.id}`);
+        }
+
+        async function sendMessages() {
+            const encoder = new TextEncoder();
+            for (let i = 0; i < 10; i++) {
+                const payload = JSON.stringify({ value: Math.random() * 100, timestamp: Date.now() });
+                await monitorClient.publish('test/messages', encoder.encode(payload));
+                stats.messagesSent++;
+                messagesThisSecond++;
+                await new Promise(r => setTimeout(r, 50));
+            }
+            updateDisplay();
+            debugLog('Sent 10 test messages');
+        }
+
+        async function main() {
+            try {
+                debugLog('Initializing WASM...');
+                await init();
+
+                const config = new WasmBrokerConfig();
+                config.max_clients = 100;
+                config.allow_anonymous = true;
+
+                broker = WasmBroker.with_config(config);
+                debugLog('Broker created');
+
+                monitorClient = new WasmMqttClient('monitor-client');
+
+                monitorClient.on_connect(() => {
+                    debugLog('Monitor connected');
+                    updateDisplay();
+                    updateClientList();
+                });
+
+                const monitorPort = broker.create_client_port();
+                await monitorClient.connect_message_port(monitorPort);
+
+                await monitorClient.subscribe_with_callback('$SYS/#', (topic, payload) => {
+                    const decoder = new TextDecoder();
+                    const value = decoder.decode(payload);
+                    debugLog(`$SYS: ${topic} = ${value}`);
+                });
+
+                await monitorClient.subscribe_with_callback('test/messages', (topic, payload) => {
+                    stats.messagesReceived++;
+                    messagesThisSecond++;
+                    updateDisplay();
+                });
+
+                document.getElementById('add-client').addEventListener('click', addTestClient);
+                document.getElementById('remove-client').addEventListener('click', removeTestClient);
+                document.getElementById('send-messages').addEventListener('click', sendMessages);
+
+                setInterval(updateDisplay, 1000);
+                setInterval(updateChart, 1000);
+
+                debugLog('Dashboard ready! Add clients and send messages to see stats update.');
+            } catch (error) {
+                debugLog(`ERROR: ${error.message || error}`);
+                console.error('Initialization error:', error);
+            }
+        }
+
+        main();
+    </script>
+</body>
+</html>

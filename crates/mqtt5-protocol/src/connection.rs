@@ -1,4 +1,5 @@
 use crate::error::MqttError;
+use crate::numeric::u128_to_u64_saturating;
 use crate::prelude::*;
 use crate::time::Duration;
 
@@ -100,26 +101,25 @@ impl ReconnectConfig {
     }
 
     pub fn set_backoff_factor(&mut self, factor: f64) {
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        {
-            self.backoff_factor_tenths = (factor * 10.0) as u32;
-        }
+        self.backoff_factor_tenths = if factor < 0.0 {
+            0
+        } else if factor >= f64::from(u32::MAX) / 10.0 {
+            u32::MAX
+        } else {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let result = (factor * 10.0) as u32;
+            result
+        };
     }
 
     #[must_use]
-    #[allow(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        clippy::cast_possible_wrap,
-        clippy::cast_precision_loss
-    )]
     pub fn calculate_delay(&self, attempt: u32) -> Duration {
         if attempt == 0 {
             return self.initial_delay;
         }
 
-        let initial_ms = self.initial_delay.as_millis() as u64;
-        let max_ms = self.max_delay.as_millis() as u64;
+        let initial_ms = u128_to_u64_saturating(self.initial_delay.as_millis());
+        let max_ms = u128_to_u64_saturating(self.max_delay.as_millis());
 
         let factor_tenths = u64::from(self.backoff_factor_tenths);
         let mut delay_tenths = initial_ms.saturating_mul(10);

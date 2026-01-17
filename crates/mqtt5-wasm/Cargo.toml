@@ -1,6 +1,6 @@
 [package]
 name = "mqtt5-wasm"
-version = "0.8.2"
+version = "0.8.3"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -26,8 +26,8 @@ client = [
 broker = ["client", "dep:mqtt5", "dep:tokio"]
 
 [dependencies]
-mqtt5-protocol = { path = "../mqtt5-protocol", version = "0.9" }
-mqtt5 = { path = "../mqtt5", version = "0.18", optional = true, default-features = false, features = [
+mqtt5-protocol = "0.9.2"
+mqtt5 = { path = "../mqtt5", version = "0.19", optional = true, default-features = false, features = [
     "tokio",
 ] }
 
@@ -41,7 +41,6 @@ bytes = "1.10"
 futures = "0.3"
 futures-util = "0.3"
 tracing = "0.1.41"
-tokio = { version = "1.47", optional = true }
 gloo-timers = { version = "0.3.0", features = ["futures"] }
 flume = "0.12.0"
 
@@ -65,11 +64,8 @@ features = [
     "Window",
     "console",
 ]
-[target.wasm32-unknown-unknown.dependencies]
-tokio = { version = "1.47", optional = true, features = [
-    "sync",
-    "macros",
-    "io-util",
-    "time",
-    "rt",
-] }
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+tokio = { version = "1.47", optional = true, features = ["sync"] }
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false

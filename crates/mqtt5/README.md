@@ -8,6 +8,7 @@ MQTT v5.0 and v3.1.1 client and broker for native platforms (Linux, macOS, Windo
 - Multiple transports: TCP, TLS, WebSocket, QUIC
 - QUIC multistream support with flow headers
 - Automatic reconnection with exponential backoff
+- Configurable keepalive with timeout tolerance
 - Mock client for unit testing
 
 ## Usage
@@ -47,6 +48,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 ```
+
+### Keepalive Configuration
+
+```rust
+use mqtt5::{MqttClient, ConnectOptions, KeepaliveConfig};
+use std::time::Duration;
+
+let options = ConnectOptions::new("client-id")
+    .with_keep_alive(Duration::from_secs(30))
+    .with_keepalive_config(KeepaliveConfig::new(75, 200));
+```
+
+The `KeepaliveConfig` controls ping timing and timeout tolerance:
+- `ping_interval_percent`: When to send PINGREQ (default 75% of keep_alive)
+- `timeout_percent`: How long to wait for PINGRESP (default 150%, use 200%+ for high-latency)
 
 ### Broker
 

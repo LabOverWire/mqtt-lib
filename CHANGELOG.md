@@ -5,6 +5,74 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [mqtt5-protocol 0.9.2] - 2026-01-17
+
+### Fixed
+
+- **Embedded target build**: Updated bebytes to 3.0.2 which fixes `no_std` support
+  - Resolves `Vec` not found error when building for `thumbv7em-none-eabihf` and other embedded targets
+  - Removed workaround `Vec` imports that are no longer needed
+
+## [mqtt5 0.19.0] - 2026-01-15
+
+### Changed
+
+- **BREAKING: Sync function signatures**: Removed `async` from functions that don't await internally
+  - `CallbackManager`: `register`, `register_with_id`, `unregister`, `dispatch`, `callback_count`, `clear`, `restore_callback`
+  - `PasswordAuthProvider`: `add_user`, `add_user_with_hash`, `remove_user`, `user_count`, `has_user`, `verify_user_password`
+  - `CertificateAuthProvider`: `add_certificate`, `remove_certificate`, `cert_count`, `has_certificate`
+  - `AuthRateLimiter`: `check_rate_limit`, `record_attempt`, `cleanup_expired`
+  - `BridgeManager`: `add_bridge`, `list_bridges`
+  - `DirectClient`: `queue_publish_message`, `setup_publish_acknowledgment`
+  - Callers must remove `.await` from these function calls
+
+- **Parameter type changes**: Some functions now take `&str` instead of `String`
+  - `CallbackManager::register` and `register_with_id`: `topic_filter: &str`
+  - `CertificateAuthProvider::add_certificate`: `fingerprint: &str, username: &str`
+
+- **Disconnect behavior**: `MqttClient::disconnect()` now returns `Ok(())` when not connected
+  - Previously returned `Err(MqttError::NotConnected)`
+  - Now treats disconnect on disconnected client as a no-op for simpler cleanup code
+
+## [mqtt5 0.18.3] / [mqtt5-wasm 0.8.3] - 2026-01-14
+
+### Added
+
+- **Lifecycle event callbacks for WASM broker**: JavaScript callbacks for broker activity monitoring
+  - `on_client_connect(callback)`: Fires when client connects with `{clientId, cleanStart}`
+  - `on_client_disconnect(callback)`: Fires when client disconnects with `{clientId, reason, unexpected}`
+  - `on_client_publish(callback)`: Fires on publish with `{clientId, topic, qos, retain, payloadSize}`
+  - `on_client_subscribe(callback)`: Fires on subscribe with `{clientId, subscriptions: [{topic, qos}]}`
+  - `on_client_unsubscribe(callback)`: Fires on unsubscribe with `{clientId, topics}`
+  - `on_message_delivered(callback)`: Fires on QoS 1/2 ACK with `{clientId, packetId, qos}`
+  - Callbacks dispatched asynchronously via `spawn_local` to prevent blocking packet handling
+
+- **Configurable keepalive timeout**: `KeepaliveConfig` type for fine-tuning keepalive behavior
+  - `with_keepalive_config()` and `with_keepalive_timeout_percent()` on `ConnectOptions`
+  - Allows longer timeout tolerance for high-latency connections
+  - `with_lock_retry()` for configuring PINGREQ lock acquisition behavior
+
+- **Skip bridge forwarding flag**: `ClientHandler::with_skip_bridge_forwarding(true)` for internal connections
+  - Messages from flagged connections route to local subscribers only
+  - Prevents message loops in distributed broker deployments
+  - Replaces client ID naming conventions for internal traffic identification
+
+- **Cluster listener configuration**: `ClusterListenerConfig` for dedicated inter-node communication ports
+  - `BrokerConfig::with_cluster_listener()` to configure cluster listener addresses
+  - Connections on cluster listeners automatically have bridge forwarding disabled
+  - Supports TCP, TCP+TLS, and QUIC transports via `ClusterTransport` enum
+  - Use `ClusterListenerConfig::quic()` for QUIC-based cluster communication
+
+### Changed
+
+- **Async callback dispatch**: Message callbacks now dispatched via spawned tasks
+  - Prevents reader task from blocking when callbacks are slow
+  - Improves connection stability under high message load
+
+- **Priority keepalive mechanism**: Keepalive uses try_lock with retry for shared state access
+  - Falls back to spawned task if lock contention detected
+  - Ensures keepalive pings are sent even during heavy publish activity
+
 ## [mqttv5-cli 0.18.0] - 2026-01-08
 
 ### Added
