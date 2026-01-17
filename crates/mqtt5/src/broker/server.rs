@@ -28,6 +28,17 @@ use tracing::{debug, error, info, warn};
 #[cfg(feature = "opentelemetry")]
 use crate::telemetry;
 
+#[derive(Clone)]
+struct AcceptLoopState {
+    config: Arc<BrokerConfig>,
+    router: Arc<MessageRouter>,
+    auth_provider: Arc<dyn AuthProvider>,
+    storage: Option<Arc<DynamicStorage>>,
+    stats: Arc<BrokerStats>,
+    resource_monitor: Arc<ResourceMonitor>,
+    shutdown_tx: tokio::sync::broadcast::Sender<()>,
+}
+
 /// MQTT v5.0 Broker
 pub struct MqttBroker {
     config: Arc<BrokerConfig>,
@@ -732,50 +743,50 @@ impl MqttBroker {
 
         let mut shutdown_rx = shutdown_tx.subscribe();
 
+        let accept_state = AcceptLoopState {
+            config: Arc::clone(&self.config),
+            router: Arc::clone(&self.router),
+            auth_provider: Arc::clone(&self.auth_provider),
+            storage: self.storage.clone(),
+            stats: Arc::clone(&self.stats),
+            resource_monitor: Arc::clone(&self.resource_monitor),
+            shutdown_tx: shutdown_tx.clone(),
+        };
+
         // Spawn WebSocket accept tasks (one per listener)
         if let Some(ws_config) = ws_config {
             for ws_listener in ws_listeners {
                 let ws_cfg = ws_config.clone();
-                let config = Arc::clone(&self.config);
-                let router = Arc::clone(&self.router);
-                let auth_provider = Arc::clone(&self.auth_provider);
-                let storage = self.storage.clone();
-                let stats = Arc::clone(&self.stats);
-                let resource_monitor = Arc::clone(&self.resource_monitor);
-                let shutdown_tx_clone = shutdown_tx.clone();
-                let mut shutdown_rx_ws = shutdown_tx.subscribe();
+                let state = accept_state.clone();
+                let mut shutdown_rx_ws = state.shutdown_tx.subscribe();
 
                 tokio::spawn(async move {
                     loop {
                         tokio::select! {
-                            // Accept WebSocket connections
                             accept_result = ws_listener.accept() => {
                                 match accept_result {
                                     Ok((tcp_stream, addr)) => {
                                         debug!("New WebSocket connection from {}", addr);
 
-                                        // Check connection limits
-                                        if !resource_monitor.can_accept_connection(addr.ip()).await {
+                                        if !state.resource_monitor.can_accept_connection(addr.ip()).await {
                                             warn!("WebSocket connection rejected from {}: resource limits exceeded", addr);
                                             continue;
                                         }
 
-                                        // Perform WebSocket handshake
                                         match accept_websocket_connection(tcp_stream, &ws_cfg, addr).await {
                                             Ok(ws_stream) => {
                                                 let transport = BrokerTransport::websocket(ws_stream);
 
-                                                // Spawn handler task for this client
                                                 let handler = ClientHandler::new(
                                                     transport,
                                                     addr,
-                                                    Arc::clone(&config),
-                                                    Arc::clone(&router),
-                                                    Arc::clone(&auth_provider),
-                                                    storage.clone(),
-                                                    Arc::clone(&stats),
-                                                    Arc::clone(&resource_monitor),
-                                                    shutdown_tx_clone.subscribe(),
+                                                    Arc::clone(&state.config),
+                                                    Arc::clone(&state.router),
+                                                    Arc::clone(&state.auth_provider),
+                                                    state.storage.clone(),
+                                                    Arc::clone(&state.stats),
+                                                    Arc::clone(&state.resource_monitor),
+                                                    state.shutdown_tx.subscribe(),
                                                 );
 
                                                 tokio::spawn(async move {
@@ -799,7 +810,6 @@ impl MqttBroker {
                                 }
                             }
 
-                            // Shutdown signal
                             _ = shutdown_rx_ws.recv() => {
                                 debug!("WebSocket accept task shutting down");
                                 break;
@@ -816,14 +826,8 @@ impl MqttBroker {
             for ws_tls_listener in ws_tls_listeners {
                 let ws_cfg = ws_tls_config.clone();
                 let acceptor = Arc::clone(&acceptor);
-                let config = Arc::clone(&self.config);
-                let router = Arc::clone(&self.router);
-                let auth_provider = Arc::clone(&self.auth_provider);
-                let storage = self.storage.clone();
-                let stats = Arc::clone(&self.stats);
-                let resource_monitor = Arc::clone(&self.resource_monitor);
-                let shutdown_tx_clone = shutdown_tx.clone();
-                let mut shutdown_rx_wss = shutdown_tx.subscribe();
+                let state = accept_state.clone();
+                let mut shutdown_rx_wss = state.shutdown_tx.subscribe();
 
                 tokio::spawn(async move {
                     loop {
@@ -833,20 +837,14 @@ impl MqttBroker {
                                     Ok((tcp_stream, addr)) => {
                                         debug!("New WebSocket TLS connection from {}", addr);
 
-                                        if !resource_monitor.can_accept_connection(addr.ip()).await {
+                                        if !state.resource_monitor.can_accept_connection(addr.ip()).await {
                                             warn!("WebSocket TLS connection rejected from {}: resource limits exceeded", addr);
                                             continue;
                                         }
 
                                         let acc_clone = acceptor.clone();
                                         let cfg_clone = ws_cfg.clone();
-                                        let config_clone = Arc::clone(&config);
-                                        let router_clone = Arc::clone(&router);
-                                        let auth_clone = Arc::clone(&auth_provider);
-                                        let storage_clone = storage.clone();
-                                        let stats_clone = Arc::clone(&stats);
-                                        let monitor_clone = Arc::clone(&resource_monitor);
-                                        let shutdown_tx_wstls = shutdown_tx_clone.clone();
+                                        let state_clone = state.clone();
 
                                         tokio::spawn(async move {
                                             match accept_tls_connection(&acc_clone, tcp_stream, addr).await {
@@ -858,13 +856,13 @@ impl MqttBroker {
                                                             let handler = ClientHandler::new(
                                                                 transport,
                                                                 addr,
-                                                                config_clone,
-                                                                router_clone,
-                                                                auth_clone,
-                                                                storage_clone,
-                                                                stats_clone,
-                                                                monitor_clone,
-                                                                shutdown_tx_wstls.subscribe(),
+                                                                state_clone.config,
+                                                                state_clone.router,
+                                                                state_clone.auth_provider,
+                                                                state_clone.storage,
+                                                                state_clone.stats,
+                                                                state_clone.resource_monitor,
+                                                                state_clone.shutdown_tx.subscribe(),
                                                             );
 
                                                             if let Err(e) = handler.run().await {
@@ -907,46 +905,36 @@ impl MqttBroker {
             let acceptor = Arc::new(tls_acceptor);
             for tls_listener in tls_listeners {
                 let acceptor = Arc::clone(&acceptor);
-                let config = Arc::clone(&self.config);
-                let router = Arc::clone(&self.router);
-                let auth_provider = Arc::clone(&self.auth_provider);
-                let storage = self.storage.clone();
-                let stats = Arc::clone(&self.stats);
-                let resource_monitor = Arc::clone(&self.resource_monitor);
-                let shutdown_tx_clone = shutdown_tx.clone();
-                let mut shutdown_rx_tls = shutdown_tx.subscribe();
+                let state = accept_state.clone();
+                let mut shutdown_rx_tls = state.shutdown_tx.subscribe();
 
                 tokio::spawn(async move {
                     loop {
                         tokio::select! {
-                            // Accept TLS connections
                             accept_result = tls_listener.accept() => {
                                 match accept_result {
                                     Ok((tcp_stream, addr)) => {
                                         debug!("New TLS connection from {}", addr);
 
-                                        // Check connection limits
-                                        if !resource_monitor.can_accept_connection(addr.ip()).await {
+                                        if !state.resource_monitor.can_accept_connection(addr.ip()).await {
                                             warn!("TLS connection rejected from {}: resource limits exceeded", addr);
                                             continue;
                                         }
 
-                                        // Perform TLS handshake
                                         match accept_tls_connection(&acceptor, tcp_stream, addr).await {
                                             Ok(tls_stream) => {
                                                 let transport = BrokerTransport::tls(tls_stream);
 
-                                                // Spawn handler task for this client
                                                 let handler = ClientHandler::new(
                                                     transport,
                                                     addr,
-                                                    Arc::clone(&config),
-                                                    Arc::clone(&router),
-                                                    Arc::clone(&auth_provider),
-                                                    storage.clone(),
-                                                    Arc::clone(&stats),
-                                                    Arc::clone(&resource_monitor),
-                                                    shutdown_tx_clone.subscribe(),
+                                                    Arc::clone(&state.config),
+                                                    Arc::clone(&state.router),
+                                                    Arc::clone(&state.auth_provider),
+                                                    state.storage.clone(),
+                                                    Arc::clone(&state.stats),
+                                                    Arc::clone(&state.resource_monitor),
+                                                    state.shutdown_tx.subscribe(),
                                                 );
 
                                                 tokio::spawn(async move {
@@ -970,7 +958,6 @@ impl MqttBroker {
                                 }
                             }
 
-                            // Shutdown signal
                             _ = shutdown_rx_tls.recv() => {
                                 debug!("TLS accept task shutting down");
                                 break;
@@ -986,14 +973,8 @@ impl MqttBroker {
             quic_endpoints.len()
         );
         for quic_endpoint in quic_endpoints {
-            let config = Arc::clone(&self.config);
-            let router = Arc::clone(&self.router);
-            let auth_provider = Arc::clone(&self.auth_provider);
-            let storage = self.storage.clone();
-            let stats = Arc::clone(&self.stats);
-            let resource_monitor = Arc::clone(&self.resource_monitor);
-            let shutdown_tx_clone = shutdown_tx.clone();
-            let mut shutdown_rx_quic = shutdown_tx.subscribe();
+            let state = accept_state.clone();
+            let mut shutdown_rx_quic = state.shutdown_tx.subscribe();
 
             let local_addr = quic_endpoint.local_addr();
             tokio::spawn(async move {
@@ -1005,32 +986,26 @@ impl MqttBroker {
                                 Ok((connection, peer_addr)) => {
                                     debug!("New QUIC connection from {}", peer_addr);
 
-                                    if !resource_monitor.can_accept_connection(peer_addr.ip()).await {
+                                    if !state.resource_monitor.can_accept_connection(peer_addr.ip()).await {
                                         warn!("QUIC connection rejected from {}: resource limits exceeded", peer_addr);
                                         connection.close(0u32.into(), b"resource limit");
                                         continue;
                                     }
 
                                     let conn = Arc::new(connection);
-                                    let config_clone = Arc::clone(&config);
-                                    let router_clone = Arc::clone(&router);
-                                    let auth_clone = Arc::clone(&auth_provider);
-                                    let storage_clone = storage.clone();
-                                    let stats_clone = Arc::clone(&stats);
-                                    let monitor_clone = Arc::clone(&resource_monitor);
-                                    let shutdown_for_handler = shutdown_tx_clone.clone();
+                                    let state_clone = state.clone();
 
                                     tokio::spawn(async move {
                                         run_quic_connection_handler(
                                             conn,
                                             peer_addr,
-                                            config_clone,
-                                            router_clone,
-                                            auth_clone,
-                                            storage_clone,
-                                            stats_clone,
-                                            monitor_clone,
-                                            shutdown_for_handler.subscribe(),
+                                            state_clone.config,
+                                            state_clone.router,
+                                            state_clone.auth_provider,
+                                            state_clone.storage,
+                                            state_clone.stats,
+                                            state_clone.resource_monitor,
+                                            state_clone.shutdown_tx.subscribe(),
                                         )
                                         .await;
                                     });
@@ -1061,14 +1036,8 @@ impl MqttBroker {
 
         let cluster_tls_acceptor = cluster_tls_acceptor.map(Arc::new);
         for cluster_listener in cluster_listeners {
-            let config = Arc::clone(&self.config);
-            let router = Arc::clone(&self.router);
-            let auth_provider = Arc::clone(&self.auth_provider);
-            let storage = self.storage.clone();
-            let stats = Arc::clone(&self.stats);
-            let resource_monitor = Arc::clone(&self.resource_monitor);
-            let shutdown_tx_clone = shutdown_tx.clone();
-            let mut shutdown_rx_cluster = shutdown_tx.subscribe();
+            let state = accept_state.clone();
+            let mut shutdown_rx_cluster = state.shutdown_tx.subscribe();
             let acceptor = cluster_tls_acceptor.clone();
 
             tokio::spawn(async move {
@@ -1079,20 +1048,14 @@ impl MqttBroker {
                                 Ok((tcp_stream, addr)) => {
                                     debug!(addr = %addr, "New Cluster connection");
 
-                                    if !resource_monitor.can_accept_connection(addr.ip()).await {
+                                    if !state.resource_monitor.can_accept_connection(addr.ip()).await {
                                         warn!("Cluster connection rejected from {}: resource limits exceeded", addr);
                                         continue;
                                     }
 
                                     if let Some(ref tls_acceptor) = acceptor {
                                         let acc_clone = Arc::clone(tls_acceptor);
-                                        let config_clone = Arc::clone(&config);
-                                        let router_clone = Arc::clone(&router);
-                                        let auth_clone = Arc::clone(&auth_provider);
-                                        let storage_clone = storage.clone();
-                                        let stats_clone = Arc::clone(&stats);
-                                        let monitor_clone = Arc::clone(&resource_monitor);
-                                        let shutdown_for_handler = shutdown_tx_clone.clone();
+                                        let state_clone = state.clone();
 
                                         tokio::spawn(async move {
                                             match accept_tls_connection(&acc_clone, tcp_stream, addr).await {
@@ -1102,13 +1065,13 @@ impl MqttBroker {
                                                     let handler = ClientHandler::new(
                                                         transport,
                                                         addr,
-                                                        config_clone,
-                                                        router_clone,
-                                                        auth_clone,
-                                                        storage_clone,
-                                                        stats_clone,
-                                                        monitor_clone,
-                                                        shutdown_for_handler.subscribe(),
+                                                        state_clone.config,
+                                                        state_clone.router,
+                                                        state_clone.auth_provider,
+                                                        state_clone.storage,
+                                                        state_clone.stats,
+                                                        state_clone.resource_monitor,
+                                                        state_clone.shutdown_tx.subscribe(),
                                                     )
                                                     .with_skip_bridge_forwarding(true);
 
@@ -1131,13 +1094,13 @@ impl MqttBroker {
                                         let handler = ClientHandler::new(
                                             transport,
                                             addr,
-                                            Arc::clone(&config),
-                                            Arc::clone(&router),
-                                            Arc::clone(&auth_provider),
-                                            storage.clone(),
-                                            Arc::clone(&stats),
-                                            Arc::clone(&resource_monitor),
-                                            shutdown_tx_clone.subscribe(),
+                                            Arc::clone(&state.config),
+                                            Arc::clone(&state.router),
+                                            Arc::clone(&state.auth_provider),
+                                            state.storage.clone(),
+                                            Arc::clone(&state.stats),
+                                            Arc::clone(&state.resource_monitor),
+                                            state.shutdown_tx.subscribe(),
                                         )
                                         .with_skip_bridge_forwarding(true);
 
@@ -1175,14 +1138,8 @@ impl MqttBroker {
         }
 
         for cluster_quic_endpoint in cluster_quic_endpoints {
-            let config = Arc::clone(&self.config);
-            let router = Arc::clone(&self.router);
-            let auth_provider = Arc::clone(&self.auth_provider);
-            let storage = self.storage.clone();
-            let stats = Arc::clone(&self.stats);
-            let resource_monitor = Arc::clone(&self.resource_monitor);
-            let shutdown_tx_clone = shutdown_tx.clone();
-            let mut shutdown_rx_quic_cluster = shutdown_tx.subscribe();
+            let state = accept_state.clone();
+            let mut shutdown_rx_quic_cluster = state.shutdown_tx.subscribe();
 
             let local_addr = cluster_quic_endpoint.local_addr();
             tokio::spawn(async move {
@@ -1194,32 +1151,26 @@ impl MqttBroker {
                                 Ok((connection, peer_addr)) => {
                                     debug!("New Cluster QUIC connection from {}", peer_addr);
 
-                                    if !resource_monitor.can_accept_connection(peer_addr.ip()).await {
+                                    if !state.resource_monitor.can_accept_connection(peer_addr.ip()).await {
                                         warn!("Cluster QUIC connection rejected from {}: resource limits exceeded", peer_addr);
                                         connection.close(0u32.into(), b"resource limit");
                                         continue;
                                     }
 
                                     let conn = Arc::new(connection);
-                                    let config_clone = Arc::clone(&config);
-                                    let router_clone = Arc::clone(&router);
-                                    let auth_clone = Arc::clone(&auth_provider);
-                                    let storage_clone = storage.clone();
-                                    let stats_clone = Arc::clone(&stats);
-                                    let monitor_clone = Arc::clone(&resource_monitor);
-                                    let shutdown_for_handler = shutdown_tx_clone.clone();
+                                    let state_clone = state.clone();
 
                                     tokio::spawn(async move {
                                         run_quic_cluster_connection_handler(
                                             conn,
                                             peer_addr,
-                                            config_clone,
-                                            router_clone,
-                                            auth_clone,
-                                            storage_clone,
-                                            stats_clone,
-                                            monitor_clone,
-                                            shutdown_for_handler.subscribe(),
+                                            state_clone.config,
+                                            state_clone.router,
+                                            state_clone.auth_provider,
+                                            state_clone.storage,
+                                            state_clone.stats,
+                                            state_clone.resource_monitor,
+                                            state_clone.shutdown_tx.subscribe(),
                                         )
                                         .await;
                                     });
@@ -1246,59 +1197,50 @@ impl MqttBroker {
             listeners.len()
         );
         for listener in listeners {
-            let config = Arc::clone(&self.config);
-            let router = Arc::clone(&self.router);
-            let auth_provider = Arc::clone(&self.auth_provider);
-            let storage = self.storage.clone();
-            let stats = Arc::clone(&self.stats);
-            let resource_monitor = Arc::clone(&self.resource_monitor);
-            let shutdown_tx_clone = shutdown_tx.clone();
-            let mut shutdown_rx_tcp = shutdown_tx.subscribe();
+            let state = accept_state.clone();
+            let mut shutdown_rx_tcp = state.shutdown_tx.subscribe();
 
             tokio::spawn(async move {
                 loop {
                     tokio::select! {
                         accept_result = listener.accept() => {
-                    match accept_result {
-                        Ok((stream, addr)) => {
-                            debug!(addr = %addr, "New TCP connection");
+                            match accept_result {
+                                Ok((stream, addr)) => {
+                                    debug!(addr = %addr, "New TCP connection");
 
-                            // Check connection limits
-                            if !resource_monitor.can_accept_connection(addr.ip()).await {
-                                warn!("Connection rejected from {}: resource limits exceeded", addr);
-                                continue;
-                            }
-
-                            let transport = BrokerTransport::tcp(stream);
-
-                            // Spawn handler task for this client
-                            let handler = ClientHandler::new(
-                                transport,
-                                addr,
-                                Arc::clone(&config),
-                                Arc::clone(&router),
-                                Arc::clone(&auth_provider),
-                                storage.clone(),
-                                Arc::clone(&stats),
-                                Arc::clone(&resource_monitor),
-                                shutdown_tx_clone.subscribe(),
-                            );
-
-                            tokio::spawn(async move {
-                                if let Err(e) = handler.run().await {
-                                    if e.is_normal_disconnect() {
-                                        debug!("Client handler finished");
-                                    } else {
-                                        warn!("Client handler error: {e}");
+                                    if !state.resource_monitor.can_accept_connection(addr.ip()).await {
+                                        warn!("Connection rejected from {}: resource limits exceeded", addr);
+                                        continue;
                                     }
+
+                                    let transport = BrokerTransport::tcp(stream);
+
+                                    let handler = ClientHandler::new(
+                                        transport,
+                                        addr,
+                                        Arc::clone(&state.config),
+                                        Arc::clone(&state.router),
+                                        Arc::clone(&state.auth_provider),
+                                        state.storage.clone(),
+                                        Arc::clone(&state.stats),
+                                        Arc::clone(&state.resource_monitor),
+                                        state.shutdown_tx.subscribe(),
+                                    );
+
+                                    tokio::spawn(async move {
+                                        if let Err(e) = handler.run().await {
+                                            if e.is_normal_disconnect() {
+                                                debug!("Client handler finished");
+                                            } else {
+                                                warn!("Client handler error: {e}");
+                                            }
+                                        }
+                                    });
                                 }
-                            });
-                        }
-                        Err(e) => {
-                            error!("TCP accept error: {e}");
-                            // Continue accepting other connections
-                        }
-                    }
+                                Err(e) => {
+                                    error!("TCP accept error: {e}");
+                                }
+                            }
                         }
                         _ = shutdown_rx_tcp.recv() => {
                             debug!("TCP accept task shutting down");

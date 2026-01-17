@@ -950,4 +950,77 @@ mod tests {
 
         assert!(shared1_received ^ shared2_received); // XOR - exactly one should be true
     }
+
+    #[tokio::test]
+    async fn test_route_message_local_only_delivers_to_subscribers() {
+        let router = MessageRouter::new();
+        let (tx1, rx1) = flume::bounded(100);
+        let (tx2, rx2) = flume::bounded(100);
+
+        let (dtx1, _drx1) = tokio::sync::oneshot::channel();
+        let (dtx2, _drx2) = tokio::sync::oneshot::channel();
+        router
+            .register_client("client1".to_string(), tx1, dtx1)
+            .await;
+        router
+            .register_client("client2".to_string(), tx2, dtx2)
+            .await;
+
+        router
+            .subscribe(
+                "client1".to_string(),
+                "test/+".to_string(),
+                QoS::AtLeastOnce,
+                None,
+                false,
+                false,
+                0,
+                ProtocolVersion::V5,
+            )
+            .await
+            .unwrap();
+        router
+            .subscribe(
+                "client2".to_string(),
+                "test/data".to_string(),
+                QoS::ExactlyOnce,
+                None,
+                false,
+                false,
+                0,
+                ProtocolVersion::V5,
+            )
+            .await
+            .unwrap();
+
+        let publish = PublishPacket::new("test/data", &b"local-only"[..], QoS::ExactlyOnce);
+
+        router.route_message_local_only(&publish, None).await;
+
+        let msg1 = rx1.try_recv().unwrap();
+        assert_eq!(msg1.topic_name, "test/data");
+        assert_eq!(&msg1.payload[..], b"local-only");
+        assert_eq!(msg1.qos, QoS::AtLeastOnce);
+
+        let msg2 = rx2.try_recv().unwrap();
+        assert_eq!(msg2.topic_name, "test/data");
+        assert_eq!(&msg2.payload[..], b"local-only");
+        assert_eq!(msg2.qos, QoS::ExactlyOnce);
+    }
+
+    #[tokio::test]
+    async fn test_route_message_local_only_stores_retained() {
+        let router = MessageRouter::new();
+
+        let mut publish = PublishPacket::new("test/status", &b"online"[..], QoS::AtMostOnce);
+        publish.retain = true;
+
+        router.route_message_local_only(&publish, None).await;
+
+        assert_eq!(router.retained_count().await, 1);
+
+        let retained = router.get_retained_messages("test/status").await;
+        assert_eq!(retained.len(), 1);
+        assert_eq!(&retained[0].payload[..], b"online");
+    }
 }

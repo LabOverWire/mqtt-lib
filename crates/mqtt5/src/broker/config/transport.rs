@@ -238,3 +238,130 @@ impl ClusterListenerConfig {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cluster_listener_config_new_creates_tcp_transport() {
+        let addr: SocketAddr = "127.0.0.1:9999".parse().unwrap();
+        let config = ClusterListenerConfig::new(vec![addr]);
+
+        assert_eq!(config.bind_addresses, vec![addr]);
+        assert_eq!(config.transport, ClusterTransport::Tcp);
+        assert!(config.cert_file.is_none());
+        assert!(config.key_file.is_none());
+        assert!(!config.require_client_cert);
+    }
+
+    #[test]
+    fn cluster_listener_config_quic_creates_quic_transport() {
+        let addr: SocketAddr = "127.0.0.1:9999".parse().unwrap();
+        let config = ClusterListenerConfig::quic(
+            vec![addr],
+            PathBuf::from("/path/to/cert.pem"),
+            PathBuf::from("/path/to/key.pem"),
+        );
+
+        assert_eq!(config.transport, ClusterTransport::Quic);
+        assert!(config.uses_tls());
+        assert!(config.is_quic());
+    }
+
+    #[test]
+    fn cluster_listener_config_with_tls_builder() {
+        let addr: SocketAddr = "127.0.0.1:9999".parse().unwrap();
+        let config = ClusterListenerConfig::new(vec![addr])
+            .with_tls(
+                PathBuf::from("/path/to/cert.pem"),
+                PathBuf::from("/path/to/key.pem"),
+            )
+            .with_ca_file(PathBuf::from("/path/to/ca.pem"))
+            .with_require_client_cert(true);
+
+        assert!(config.uses_tls());
+        assert!(!config.is_quic());
+        assert!(config.require_client_cert);
+        assert!(config.ca_file.is_some());
+    }
+
+    #[test]
+    fn cluster_listener_config_validate_empty_addresses() {
+        let config = ClusterListenerConfig::new(vec![]);
+        let result = config.validate();
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("at least one bind address"));
+    }
+
+    #[test]
+    fn cluster_listener_config_validate_quic_without_tls() {
+        let addr: SocketAddr = "127.0.0.1:9999".parse().unwrap();
+        let config = ClusterListenerConfig::new(vec![addr]).with_transport(ClusterTransport::Quic);
+        let result = config.validate();
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("cert_file and key_file"));
+    }
+
+    #[test]
+    fn cluster_listener_config_validate_partial_tls() {
+        let addr: SocketAddr = "127.0.0.1:9999".parse().unwrap();
+        let mut config = ClusterListenerConfig::new(vec![addr]);
+        config.cert_file = Some(PathBuf::from("/path/to/cert.pem"));
+        let result = config.validate();
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("both cert_file and key_file"));
+    }
+
+    #[test]
+    fn cluster_listener_config_validate_valid_tcp() {
+        let addr: SocketAddr = "127.0.0.1:9999".parse().unwrap();
+        let config = ClusterListenerConfig::new(vec![addr]);
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn cluster_listener_config_validate_valid_tls() {
+        let addr: SocketAddr = "127.0.0.1:9999".parse().unwrap();
+        let config = ClusterListenerConfig::new(vec![addr]).with_tls(
+            PathBuf::from("/path/to/cert.pem"),
+            PathBuf::from("/path/to/key.pem"),
+        );
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn cluster_listener_config_validate_valid_quic() {
+        let addr: SocketAddr = "127.0.0.1:9999".parse().unwrap();
+        let config = ClusterListenerConfig::quic(
+            vec![addr],
+            PathBuf::from("/path/to/cert.pem"),
+            PathBuf::from("/path/to/key.pem"),
+        );
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn cluster_listener_config_add_bind_address() {
+        let addr1: SocketAddr = "127.0.0.1:9999".parse().unwrap();
+        let addr2: SocketAddr = "127.0.0.1:9998".parse().unwrap();
+        let config = ClusterListenerConfig::new(vec![addr1]).add_bind_address(addr2);
+
+        assert_eq!(config.bind_addresses.len(), 2);
+        assert!(config.bind_addresses.contains(&addr1));
+        assert!(config.bind_addresses.contains(&addr2));
+    }
+
+    #[test]
+    fn cluster_listener_config_with_bind_address_replaces() {
+        let addr1: SocketAddr = "127.0.0.1:9999".parse().unwrap();
+        let addr2: SocketAddr = "127.0.0.1:9998".parse().unwrap();
+        let config = ClusterListenerConfig::new(vec![addr1]).with_bind_address(addr2);
+
+        assert_eq!(config.bind_addresses.len(), 1);
+        assert_eq!(config.bind_addresses[0], addr2);
+    }
+}
