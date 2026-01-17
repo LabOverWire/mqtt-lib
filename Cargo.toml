@@ -22,10 +22,6 @@ panic = "abort"
 strip = true
 opt-level = "z"
 
-[profile.release.package.mqtt5-wasm]
-opt-level = "z"
-strip = "debuginfo"
-
 [profile.dev]
 debug = true
 
