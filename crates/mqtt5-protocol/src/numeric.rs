@@ -24,15 +24,7 @@ pub fn u128_to_f64_saturating(value: u128) -> f64 {
 
 #[must_use]
 pub fn usize_to_f64_saturating(value: usize) -> f64 {
-    #[allow(clippy::cast_possible_truncation)]
-    let max_safe = F64_MAX_SAFE_INTEGER as usize;
-    if value <= max_safe {
-        #[allow(clippy::cast_precision_loss)]
-        let result = value as f64;
-        result
-    } else {
-        f64::MAX
-    }
+    u64_to_f64_saturating(value as u64)
 }
 
 #[must_use]
