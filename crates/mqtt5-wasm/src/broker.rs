@@ -28,6 +28,7 @@ pub struct WasmEventCallbacks {
 }
 
 #[derive(Hash)]
+#[allow(clippy::struct_excessive_bools)]
 struct ConfigHashFields {
     max_clients: u32,
     session_expiry_interval_secs: u32,
@@ -256,6 +257,7 @@ impl WasmBroker {
     /// # Errors
     /// Returns an error if adding the user fails.
     #[wasm_bindgen]
+    #[allow(clippy::needless_pass_by_value)]
     pub fn add_user(&self, username: String, password: String) -> Result<(), JsValue> {
         self.auth_provider
             .password_provider()
@@ -271,16 +273,19 @@ impl WasmBroker {
     }
 
     #[wasm_bindgen]
+    #[must_use]
     pub fn remove_user(&self, username: &str) -> bool {
         self.auth_provider.password_provider().remove_user(username)
     }
 
     #[wasm_bindgen]
+    #[must_use]
     pub fn has_user(&self, username: &str) -> bool {
         self.auth_provider.password_provider().has_user(username)
     }
 
     #[wasm_bindgen]
+    #[must_use]
     pub fn user_count(&self) -> usize {
         self.auth_provider.password_provider().user_count()
     }
@@ -515,6 +520,8 @@ impl WasmBroker {
         });
     }
 
+    /// # Errors
+    /// Returns an error if the config write lock cannot be acquired.
     #[wasm_bindgen]
     #[allow(clippy::needless_pass_by_value)]
     pub fn update_config(&self, new_config: WasmBrokerConfig) -> Result<(), JsValue> {
@@ -527,25 +534,22 @@ impl WasmBroker {
 
         let broker_config = new_config.to_broker_config();
 
-        match self.config.try_write() {
-            Ok(mut config) => {
-                *config = broker_config;
-            }
-            Err(_) => {
-                web_sys::console::error_1(
-                    &"Config update failed: lock contention (config in use)".into(),
-                );
-                return Err(JsValue::from_str(
-                    "Failed to acquire config write lock: resource busy",
-                ));
-            }
+        if let Ok(mut config) = self.config.try_write() {
+            *config = broker_config;
+        } else {
+            web_sys::console::error_1(
+                &"Config update failed: lock contention (config in use)".into(),
+            );
+            return Err(JsValue::from_str(
+                "Failed to acquire config write lock: resource busy",
+            ));
         }
 
         self.config_hash.set(new_hash);
 
         if let Some(callback) = self.on_config_change.borrow().as_ref() {
-            let old_hash_js = JsValue::from_f64(old_hash as f64);
-            let new_hash_js = JsValue::from_f64(new_hash as f64);
+            let old_hash_js = JsValue::from_f64(u64_to_f64_saturating(old_hash));
+            let new_hash_js = JsValue::from_f64(u64_to_f64_saturating(new_hash));
             if let Err(e) = callback.call2(&JsValue::NULL, &old_hash_js, &new_hash_js) {
                 web_sys::console::error_1(&format!("Config change callback error: {e:?}").into());
             }
@@ -597,39 +601,44 @@ impl WasmBroker {
     }
 
     #[wasm_bindgen]
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation)]
     pub fn get_max_clients(&self) -> u32 {
-        self.config
-            .read()
-            .map(|c| c.max_clients as u32)
-            .unwrap_or_else(|_| {
+        self.config.read().map_or_else(
+            |_| {
                 web_sys::console::warn_1(&"Config read failed, using default max_clients".into());
                 1000
-            })
+            },
+            |c| c.max_clients as u32,
+        )
     }
 
     #[wasm_bindgen]
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation)]
     pub fn get_max_packet_size(&self) -> u32 {
-        self.config
-            .read()
-            .map(|c| c.max_packet_size as u32)
-            .unwrap_or_else(|_| {
+        self.config.read().map_or_else(
+            |_| {
                 web_sys::console::warn_1(
                     &"Config read failed, using default max_packet_size".into(),
                 );
                 268_435_456
-            })
+            },
+            |c| c.max_packet_size as u32,
+        )
     }
 
     #[wasm_bindgen]
+    #[must_use]
     pub fn get_session_expiry_interval_secs(&self) -> u32 {
-        self.config
-            .read()
-            .map(|c| u64_to_u32_saturating(c.session_expiry_interval.as_secs()))
-            .unwrap_or_else(|_| {
+        self.config.read().map_or_else(
+            |_| {
                 web_sys::console::warn_1(
                     &"Config read failed, using default session_expiry_interval".into(),
                 );
                 3600
-            })
+            },
+            |c| u64_to_u32_saturating(c.session_expiry_interval.as_secs()),
+        )
     }
 }

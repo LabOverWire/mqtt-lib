@@ -13,6 +13,7 @@ pub struct MessagePortTransport {
     rx: Option<mpsc::UnboundedReceiver<Vec<u8>>>,
     connected: Arc<AtomicBool>,
     closure: Option<Closure<dyn FnMut(MessageEvent)>>,
+    buffer: Vec<u8>,
 }
 
 pub struct MessagePortReader {
@@ -122,6 +123,7 @@ impl MessagePortTransport {
             rx: None,
             connected: Arc::new(AtomicBool::new(false)),
             closure: None,
+            buffer: Vec::new(),
         }
     }
 
@@ -135,7 +137,7 @@ impl MessagePortTransport {
         let reader = MessagePortReader {
             rx,
             connected: Arc::clone(&self.connected),
-            buffer: Vec::new(),
+            buffer: self.buffer,
             buffer_pos: 0,
         };
 
@@ -176,6 +178,13 @@ impl Transport for MessagePortTransport {
     }
 
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
+        if !self.buffer.is_empty() {
+            let len = self.buffer.len().min(buf.len());
+            buf[..len].copy_from_slice(&self.buffer[..len]);
+            self.buffer.drain(..len);
+            return Ok(len);
+        }
+
         let data = self
             .rx
             .as_mut()
@@ -186,6 +195,11 @@ impl Transport for MessagePortTransport {
 
         let len = data.len().min(buf.len());
         buf[..len].copy_from_slice(&data[..len]);
+
+        if data.len() > len {
+            self.buffer.extend_from_slice(&data[len..]);
+        }
+
         Ok(len)
     }
 
