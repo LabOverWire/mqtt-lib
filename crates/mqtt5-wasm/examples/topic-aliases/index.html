@@ -1,0 +1,496 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MQTT Topic Aliases Bandwidth Demo</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            max-width: 1400px;
+            margin: 40px auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .header {
+            background: white;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+        h1 { color: #333; margin-top: 0; }
+        .highlight {
+            background: #e7f3ff;
+            padding: 15px;
+            border-radius: 4px;
+            border-left: 4px solid #007bff;
+            margin: 15px 0;
+        }
+        .savings-display {
+            background: linear-gradient(135deg, #28a745, #20c997);
+            color: white;
+            padding: 30px;
+            border-radius: 12px;
+            text-align: center;
+            margin: 20px 0;
+        }
+        .savings-value {
+            font-size: 4em;
+            font-weight: bold;
+        }
+        .savings-label { font-size: 1.2em; margin-top: 10px; }
+        .comparison {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            margin-top: 20px;
+        }
+        .comparison-panel {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .comparison-panel h2 {
+            margin-top: 0;
+            font-size: 1.2em;
+            padding-bottom: 10px;
+        }
+        .comparison-panel.no-alias h2 { border-bottom: 3px solid #dc3545; }
+        .comparison-panel.with-alias h2 { border-bottom: 3px solid #28a745; }
+        .meter {
+            background: #e9ecef;
+            border-radius: 8px;
+            height: 40px;
+            margin: 15px 0;
+            overflow: hidden;
+            position: relative;
+        }
+        .meter-fill {
+            height: 100%;
+            border-radius: 8px;
+            transition: width 0.3s ease;
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
+            padding-right: 10px;
+            color: white;
+            font-weight: bold;
+            font-size: 0.85em;
+        }
+        .meter-fill.no-alias { background: linear-gradient(90deg, #dc3545, #ff6b6b); }
+        .meter-fill.with-alias { background: linear-gradient(90deg, #28a745, #20c997); }
+        .stat-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 10px 0;
+            border-bottom: 1px solid #eee;
+        }
+        .stat-row:last-child { border-bottom: none; }
+        .stat-label { color: #666; }
+        .stat-value { font-weight: bold; font-family: monospace; }
+        .alias-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 15px;
+            font-size: 0.85em;
+        }
+        .alias-table th, .alias-table td {
+            padding: 8px 12px;
+            text-align: left;
+            border-bottom: 1px solid #eee;
+        }
+        .alias-table th { background: #f8f9fa; font-weight: 600; }
+        .alias-id {
+            background: #007bff;
+            color: white;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-family: monospace;
+        }
+        .topic-name {
+            font-family: monospace;
+            font-size: 0.85em;
+            color: #666;
+        }
+        button {
+            background: #007bff;
+            color: white;
+            border: none;
+            cursor: pointer;
+            padding: 12px 24px;
+            border-radius: 4px;
+            font-size: 14px;
+            margin: 5px;
+        }
+        button:hover { background: #0056b3; }
+        button:disabled { background: #6c757d; cursor: not-allowed; }
+        button.start { background: #28a745; }
+        button.start:hover { background: #218838; }
+        button.stop { background: #dc3545; }
+        button.stop:hover { background: #c82333; }
+        .controls {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            justify-content: center;
+            margin: 20px 0;
+            flex-wrap: wrap;
+        }
+        .packet-viz {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 4px;
+            max-height: 100px;
+            overflow: hidden;
+            margin-top: 10px;
+        }
+        .packet {
+            height: 8px;
+            border-radius: 2px;
+            animation: packetAnim 0.3s ease;
+        }
+        @keyframes packetAnim {
+            from { transform: scale(0); }
+            to { transform: scale(1); }
+        }
+        .packet.no-alias { background: #dc3545; }
+        .packet.with-alias { background: #28a745; }
+        .status {
+            padding: 8px;
+            margin: 10px 0;
+            border-radius: 4px;
+            font-weight: 500;
+            font-size: 0.85em;
+        }
+        .status.connected { background: #d4edda; color: #155724; }
+        .status.disconnected { background: #f8d7da; color: #721c24; }
+        #debug {
+            margin-top: 15px;
+            padding: 10px;
+            background: #f8f9fa;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 0.8em;
+            max-height: 150px;
+            overflow-y: auto;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>MQTT Topic Aliases - Bandwidth Optimizer</h1>
+        <p>Demonstrates <strong>MQTT v5.0 Topic Aliases</strong> for reducing bandwidth on high-frequency publishing.</p>
+        <div class="highlight">
+            <strong>How Topic Aliases Work:</strong>
+            <ul style="margin: 10px 0 0 0; padding-left: 20px;">
+                <li>First publish: Full topic name + alias assignment (e.g., topic="sensors/device-001/temperature/celsius" alias=1)</li>
+                <li>Subsequent publishes: Only alias number (2 bytes instead of full topic string)</li>
+                <li>Long topic names benefit most from aliasing</li>
+            </ul>
+        </div>
+        <div id="debug">
+            <strong>Debug Log:</strong>
+            <div id="debug-messages"></div>
+        </div>
+    </div>
+
+    <div class="savings-display">
+        <div class="savings-value" id="savings-percent">0%</div>
+        <div class="savings-label">Bandwidth Saved with Topic Aliases</div>
+    </div>
+
+    <div class="controls">
+        <button id="start-btn" class="start">Start Publishing</button>
+        <button id="stop-btn" class="stop" disabled>Stop</button>
+        <button id="reset-btn">Reset Stats</button>
+        <span style="margin-left: 20px;">
+            Messages/sec: <strong id="msg-rate">0</strong>
+        </span>
+    </div>
+
+    <div class="comparison">
+        <div class="comparison-panel no-alias">
+            <h2>Without Topic Aliases</h2>
+            <div id="status-no-alias" class="status disconnected">Disconnected</div>
+            <div class="meter">
+                <div class="meter-fill no-alias" id="meter-no-alias" style="width: 0%">0 B</div>
+            </div>
+            <div class="stat-row">
+                <span class="stat-label">Messages Sent</span>
+                <span class="stat-value" id="count-no-alias">0</span>
+            </div>
+            <div class="stat-row">
+                <span class="stat-label">Total Bytes</span>
+                <span class="stat-value" id="bytes-no-alias">0</span>
+            </div>
+            <div class="stat-row">
+                <span class="stat-label">Avg Bytes/Message</span>
+                <span class="stat-value" id="avg-no-alias">0</span>
+            </div>
+            <h4>Packet Sizes (visualization)</h4>
+            <div class="packet-viz" id="packets-no-alias"></div>
+        </div>
+
+        <div class="comparison-panel with-alias">
+            <h2>With Topic Aliases</h2>
+            <div id="status-with-alias" class="status disconnected">Disconnected</div>
+            <div class="meter">
+                <div class="meter-fill with-alias" id="meter-with-alias" style="width: 0%">0 B</div>
+            </div>
+            <div class="stat-row">
+                <span class="stat-label">Messages Sent</span>
+                <span class="stat-value" id="count-with-alias">0</span>
+            </div>
+            <div class="stat-row">
+                <span class="stat-label">Total Bytes</span>
+                <span class="stat-value" id="bytes-with-alias">0</span>
+            </div>
+            <div class="stat-row">
+                <span class="stat-label">Avg Bytes/Message</span>
+                <span class="stat-value" id="avg-with-alias">0</span>
+            </div>
+            <h4>Packet Sizes (visualization)</h4>
+            <div class="packet-viz" id="packets-with-alias"></div>
+        </div>
+    </div>
+
+    <div style="background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-top: 20px;">
+        <h3 style="margin-top: 0;">Topic Alias Registry</h3>
+        <table class="alias-table">
+            <thead>
+                <tr>
+                    <th>Alias ID</th>
+                    <th>Topic</th>
+                    <th>Topic Length</th>
+                    <th>Savings/Message</th>
+                </tr>
+            </thead>
+            <tbody id="alias-registry">
+            </tbody>
+        </table>
+    </div>
+
+    <script type="module">
+        import init, { WasmBroker, WasmBrokerConfig, WasmMqttClient, WasmPublishOptions } from './pkg/mqtt5_wasm.js';
+
+        let broker;
+        let clientNoAlias;
+        let clientWithAlias;
+        let publishInterval = null;
+
+        const topics = [
+            'sensors/device-001/temperature/celsius',
+            'sensors/device-001/humidity/percentage',
+            'sensors/device-002/pressure/hectopascals',
+            'actuators/device-003/motor/speed/rpm',
+            'telemetry/device-004/gps/coordinates/latitude'
+        ];
+
+        const aliasMap = new Map();
+        let nextAliasId = 1;
+
+        const stats = {
+            noAlias: { count: 0, bytes: 0 },
+            withAlias: { count: 0, bytes: 0 }
+        };
+
+        function debugLog(msg) {
+            const debugDiv = document.getElementById('debug');
+            const messagesDiv = document.getElementById('debug-messages');
+            debugDiv.style.display = 'block';
+            const line = document.createElement('div');
+            line.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+            messagesDiv.appendChild(line);
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+            console.log(msg);
+        }
+
+        function calculatePacketSize(topic, payload, useAlias, isFirstUse) {
+            let size = 2;
+            if (!useAlias || isFirstUse) {
+                size += 2 + topic.length;
+            }
+            if (useAlias) {
+                size += 3;
+            }
+            size += payload.length;
+            return size;
+        }
+
+        function updateStats() {
+            document.getElementById('count-no-alias').textContent = stats.noAlias.count;
+            document.getElementById('bytes-no-alias').textContent = stats.noAlias.bytes.toLocaleString();
+            document.getElementById('avg-no-alias').textContent = stats.noAlias.count > 0
+                ? (stats.noAlias.bytes / stats.noAlias.count).toFixed(1) : '0';
+
+            document.getElementById('count-with-alias').textContent = stats.withAlias.count;
+            document.getElementById('bytes-with-alias').textContent = stats.withAlias.bytes.toLocaleString();
+            document.getElementById('avg-with-alias').textContent = stats.withAlias.count > 0
+                ? (stats.withAlias.bytes / stats.withAlias.count).toFixed(1) : '0';
+
+            const maxBytes = Math.max(stats.noAlias.bytes, stats.withAlias.bytes, 1);
+            document.getElementById('meter-no-alias').style.width = `${(stats.noAlias.bytes / maxBytes) * 100}%`;
+            document.getElementById('meter-no-alias').textContent = `${stats.noAlias.bytes.toLocaleString()} B`;
+            document.getElementById('meter-with-alias').style.width = `${(stats.withAlias.bytes / maxBytes) * 100}%`;
+            document.getElementById('meter-with-alias').textContent = `${stats.withAlias.bytes.toLocaleString()} B`;
+
+            if (stats.noAlias.bytes > 0) {
+                const savings = ((1 - stats.withAlias.bytes / stats.noAlias.bytes) * 100).toFixed(1);
+                document.getElementById('savings-percent').textContent = `${savings}%`;
+            }
+        }
+
+        function addPacketViz(containerId, size, className) {
+            const container = document.getElementById(containerId);
+            const packet = document.createElement('div');
+            packet.className = `packet ${className}`;
+            packet.style.width = `${Math.max(4, size / 2)}px`;
+            container.appendChild(packet);
+
+            while (container.children.length > 100) {
+                container.removeChild(container.firstChild);
+            }
+        }
+
+        function updateAliasRegistry() {
+            const tbody = document.getElementById('alias-registry');
+            tbody.innerHTML = '';
+
+            aliasMap.forEach((aliasId, topic) => {
+                const row = document.createElement('tr');
+                const savings = topic.length - 2;
+                row.innerHTML = `
+                    <td><span class="alias-id">${aliasId}</span></td>
+                    <td><span class="topic-name">${topic}</span></td>
+                    <td>${topic.length} bytes</td>
+                    <td style="color: #28a745; font-weight: bold;">-${savings} bytes</td>
+                `;
+                tbody.appendChild(row);
+            });
+        }
+
+        async function publishMessage() {
+            const topic = topics[Math.floor(Math.random() * topics.length)];
+            const payload = JSON.stringify({
+                value: Math.random() * 100,
+                timestamp: Date.now()
+            });
+            const encoder = new TextEncoder();
+            const payloadBytes = encoder.encode(payload);
+
+            const sizeNoAlias = calculatePacketSize(topic, payloadBytes, false, false);
+            stats.noAlias.count++;
+            stats.noAlias.bytes += sizeNoAlias;
+            addPacketViz('packets-no-alias', sizeNoAlias, 'no-alias');
+
+            await clientNoAlias.publish(topic, payloadBytes);
+
+            const isFirstUse = !aliasMap.has(topic);
+            if (isFirstUse) {
+                aliasMap.set(topic, nextAliasId++);
+                updateAliasRegistry();
+            }
+
+            const sizeWithAlias = calculatePacketSize(topic, payloadBytes, true, isFirstUse);
+            stats.withAlias.count++;
+            stats.withAlias.bytes += sizeWithAlias;
+            addPacketViz('packets-with-alias', sizeWithAlias, 'with-alias');
+
+            const options = new WasmPublishOptions();
+            options.topicAlias = aliasMap.get(topic);
+            await clientWithAlias.publish_with_options(topic, payloadBytes, options);
+
+            updateStats();
+        }
+
+        function resetStats() {
+            stats.noAlias = { count: 0, bytes: 0 };
+            stats.withAlias = { count: 0, bytes: 0 };
+            aliasMap.clear();
+            nextAliasId = 1;
+            document.getElementById('packets-no-alias').innerHTML = '';
+            document.getElementById('packets-with-alias').innerHTML = '';
+            updateStats();
+            updateAliasRegistry();
+            document.getElementById('savings-percent').textContent = '0%';
+        }
+
+        async function main() {
+            try {
+                debugLog('Initializing WASM...');
+                await init();
+
+                const config = new WasmBrokerConfig();
+                config.max_clients = 10;
+                config.topic_alias_maximum = 20;
+                config.allow_anonymous = true;
+
+                broker = WasmBroker.with_config(config);
+                debugLog('Broker created with topic alias support (max: 20)');
+
+                clientNoAlias = new WasmMqttClient('client-no-alias');
+                clientNoAlias.on_connect(() => {
+                    document.getElementById('status-no-alias').className = 'status connected';
+                    document.getElementById('status-no-alias').textContent = 'Connected';
+                });
+                const portNoAlias = broker.create_client_port();
+                await clientNoAlias.connect_message_port(portNoAlias);
+
+                clientWithAlias = new WasmMqttClient('client-with-alias');
+                clientWithAlias.on_connect(() => {
+                    document.getElementById('status-with-alias').className = 'status connected';
+                    document.getElementById('status-with-alias').textContent = 'Connected';
+                });
+                const portWithAlias = broker.create_client_port();
+                await clientWithAlias.connect_message_port(portWithAlias);
+
+                let messageCount = 0;
+                let lastSecond = Date.now();
+
+                document.getElementById('start-btn').addEventListener('click', () => {
+                    if (publishInterval) return;
+
+                    publishInterval = setInterval(async () => {
+                        await publishMessage();
+                        messageCount++;
+
+                        const now = Date.now();
+                        if (now - lastSecond >= 1000) {
+                            document.getElementById('msg-rate').textContent = messageCount;
+                            messageCount = 0;
+                            lastSecond = now;
+                        }
+                    }, 50);
+
+                    document.getElementById('start-btn').disabled = true;
+                    document.getElementById('stop-btn').disabled = false;
+                    debugLog('Started publishing');
+                });
+
+                document.getElementById('stop-btn').addEventListener('click', () => {
+                    if (publishInterval) {
+                        clearInterval(publishInterval);
+                        publishInterval = null;
+                    }
+                    document.getElementById('start-btn').disabled = false;
+                    document.getElementById('stop-btn').disabled = true;
+                    document.getElementById('msg-rate').textContent = '0';
+                    debugLog('Stopped publishing');
+                });
+
+                document.getElementById('reset-btn').addEventListener('click', resetStats);
+
+                debugLog('Demo ready! Click "Start Publishing" to begin.');
+            } catch (error) {
+                debugLog(`ERROR: ${error.message || error}`);
+                console.error('Initialization error:', error);
+            }
+        }
+
+        main();
+    </script>
+</body>
+</html>
