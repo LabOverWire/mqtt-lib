@@ -3,7 +3,7 @@
 //! MQTT strings are prefixed with a 2-byte length field in big-endian format.
 
 use crate::error::{MqttError, Result};
-use crate::prelude::{format, vec, String, ToString, Vec};
+use crate::prelude::{format, vec, String, ToString};
 use bebytes::BeBytes;
 
 /// MQTT string with automatic size handling via `BeBytes` size expressions

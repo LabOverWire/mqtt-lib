@@ -25,7 +25,7 @@ std = [
 ]
 
 [dependencies]
-bebytes = { version = "3.0", default-features = false }
+bebytes = { version = "3.0.2", default-features = false }
 bytes = { version = "1.10", default-features = false, features = [
     "extra-platforms",
 ] }
