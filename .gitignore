@@ -186,3 +186,4 @@ test_certs/mosquitto_passwd.txt
 CAPABILITIES_VERIFICATION_GUIDE.md
 test_passwords.txt
 TEMP_BDD_SCENARIO_GUIDE.md
+.playwright-mcp/

@@ -148,6 +148,10 @@ async fn attempt_reconnect(
         let mut state_mut = state.borrow_mut();
         state_mut.keep_alive = options.keep_alive;
         state_mut.protocol_version = options.protocol_version;
+        #[cfg(feature = "codec")]
+        {
+            state_mut.codec_registry.clone_from(&options.codec_registry);
+        }
     }
 
     let properties = build_properties_from_stored(options);

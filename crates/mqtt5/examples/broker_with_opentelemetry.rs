@@ -21,7 +21,7 @@
 //!    cargo run --example broker_with_opentelemetry --features opentelemetry
 //!    ```
 //!
-//! 3. Open Jaeger UI at http://localhost:16686 to view traces
+//! 3. Open Jaeger UI at <http://localhost:16686> to view traces
 
 use mqtt5::broker::{BrokerConfig, MqttBroker};
 use mqtt5::telemetry::TelemetryConfig;

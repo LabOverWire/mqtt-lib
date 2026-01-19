@@ -1,6 +1,7 @@
 //! Packet type handlers for incoming packets
 
 use crate::callback::CallbackManager;
+use crate::codec::CodecRegistry;
 use crate::error::{MqttError, Result};
 use crate::packet::Packet;
 use crate::protocol::v5::properties::Properties;
@@ -19,10 +20,19 @@ pub(super) async fn handle_incoming_packet_with_writer(
     callback_manager: &Arc<CallbackManager>,
     flow_id: Option<crate::transport::flow::FlowId>,
     keepalive_state: &Arc<Mutex<KeepaliveState>>,
+    codec_registry: Option<&Arc<CodecRegistry>>,
 ) -> Result<()> {
     match packet {
         Packet::Publish(publish) => {
-            handle_publish_with_ack(publish, writer, session, callback_manager, flow_id).await
+            handle_publish_with_ack(
+                publish,
+                writer,
+                session,
+                callback_manager,
+                flow_id,
+                codec_registry,
+            )
+            .await
         }
         Packet::PingResp => {
             keepalive_state.lock().record_pong_received();
@@ -42,12 +52,19 @@ pub(super) async fn handle_incoming_packet_with_writer(
 }
 
 pub(super) async fn handle_publish_with_ack(
-    publish: crate::packet::publish::PublishPacket,
+    mut publish: crate::packet::publish::PublishPacket,
     writer: &Arc<tokio::sync::Mutex<UnifiedWriter>>,
     session: &Arc<tokio::sync::RwLock<SessionState>>,
     callback_manager: &Arc<CallbackManager>,
     flow_id: Option<crate::transport::flow::FlowId>,
+    codec_registry: Option<&Arc<CodecRegistry>>,
 ) -> Result<()> {
+    if let Some(registry) = codec_registry {
+        let content_type = publish.properties.get_content_type();
+        let decoded = registry.decode_if_needed(&publish.payload, content_type.as_deref())?;
+        publish.payload = decoded;
+    }
+
     match publish.qos {
         crate::QoS::AtMostOnce => {}
         crate::QoS::AtLeastOnce => {

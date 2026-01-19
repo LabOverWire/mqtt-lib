@@ -36,6 +36,9 @@ opentelemetry_sdk = ["dep:opentelemetry_sdk"]
 opentelemetry-otlp = ["dep:opentelemetry-otlp"]
 tracing-opentelemetry = ["dep:tracing-opentelemetry"]
 tokio = ["dep:tokio"]
+codec-gzip = ["dep:flate2"]
+codec-deflate = ["dep:flate2"]
+codec-all = ["codec-gzip", "codec-deflate"]
 
 [dev-dependencies]
 tokio-test = "0.4"
@@ -86,11 +89,6 @@ name = "mqtt5"
 path = "src/lib.rs"
 crate-type = ["cdylib", "rlib"]
 
-[[test]]
-name = "cli_bdd"
-path = "tests/cli_bdd.rs"
-harness = false
-
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = ["-O4"]
 
@@ -133,6 +131,7 @@ bebytes = { version = "3.0", features = ["bytes"] }
 regex = "1.12.2"
 flume = { version = "0.12.0", features = ["async"] }
 parking_lot = "0.12.5"
+flate2 = { version = "1.1.8", optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 hyper = { version = "1.8.1", features = ["http1", "client"] }

@@ -626,6 +626,41 @@ let bridge_config = BridgeConfig::new("edge-to-cloud", "cloud-broker:1883")
 // broker.add_bridge(bridge_config).await?;
 ```
 
+#### Bridge Loop Prevention
+
+When using bidirectional bridges (`BridgeDirection::Both`) or complex multi-broker topologies, message loops can occur. The broker automatically detects and prevents loops using SHA-256 message fingerprints:
+
+- **How it works**: Each message's fingerprint (hash of topic + payload + QoS + retain) is cached. If the same fingerprint is seen within the TTL window, the duplicate is dropped.
+- **Default TTL**: 60 seconds
+- **Default cache size**: 10,000 fingerprints
+
+Configure loop prevention per bridge:
+
+```rust
+use std::time::Duration;
+
+let mut config = BridgeConfig::new("my-bridge", "remote:1883")
+    .add_topic("data/#", BridgeDirection::Both, QoS::AtLeastOnce);
+
+// Increase TTL for slow networks or reduce for high-throughput scenarios
+config.loop_prevention_ttl = Duration::from_secs(300);  // 5 minutes
+config.loop_prevention_cache_size = 50000;  // Store more fingerprints
+```
+
+Or via JSON configuration:
+
+```json
+{
+  "name": "my-bridge",
+  "remote_address": "remote-broker:1883",
+  "loop_prevention_ttl": "5m",
+  "loop_prevention_cache_size": 50000,
+  "topics": [...]
+}
+```
+
+**Note**: Legitimate duplicate messages (identical content sent within the TTL window) will also be blocked. Adjust TTL based on your use case.
+
 ### Broker Event Hooks
 
 Monitor and react to broker events with custom handlers:

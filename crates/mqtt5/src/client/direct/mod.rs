@@ -476,6 +476,7 @@ impl DirectClientInner {
     /// # Errors
     ///
     /// Returns an error if the operation fails
+    #[allow(clippy::too_many_lines)]
     pub async fn publish(
         &self,
         topic: String,
@@ -527,16 +528,30 @@ impl DirectClientInner {
             return Err(MqttError::NotConnected);
         }
 
+        let (final_payload, codec_content_type) = if options.skip_codec {
+            (payload.into(), None)
+        } else if let Some(ref registry) = self.options.codec_registry {
+            registry.encode_with_default(&payload)?
+        } else {
+            (payload.into(), None)
+        };
+
+        let mut properties: Properties = options.properties.into();
+        if let Some(ct) = codec_content_type {
+            use crate::protocol::v5::properties::{PropertyId, PropertyValue};
+            let _ = properties.add(PropertyId::ContentType, PropertyValue::Utf8String(ct));
+        }
+
         let packet_id = (options.qos != QoS::AtMostOnce).then(|| self.packet_id_generator.next());
 
         let publish = PublishPacket {
             topic_name: topic,
-            payload: payload.into(),
+            payload: final_payload,
             qos: options.qos,
             retain: options.retain,
             dup: false,
             packet_id,
-            properties: options.properties.into(),
+            properties,
             protocol_version: self.options.protocol_version.as_u8(),
         };
 
@@ -1011,6 +1026,7 @@ impl DirectClientInner {
             auth_handler: self.auth_handler.clone(),
             auth_method: self.auth_method.clone(),
             keepalive_state: keepalive_state.clone(),
+            codec_registry: self.options.codec_registry.clone(),
         };
 
         let ctx_for_packet_reader = ctx.clone();

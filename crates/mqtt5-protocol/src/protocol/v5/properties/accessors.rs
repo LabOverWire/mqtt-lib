@@ -345,4 +345,18 @@ impl Properties {
             .or_default()
             .push(PropertyValue::Utf8String(content_type));
     }
+
+    #[must_use]
+    pub fn get_content_type(&self) -> Option<String> {
+        self.properties
+            .get(&PropertyId::ContentType)
+            .and_then(|values| values.first())
+            .and_then(|value| {
+                if let PropertyValue::Utf8String(s) = value {
+                    Some(s.clone())
+                } else {
+                    None
+                }
+            })
+    }
 }

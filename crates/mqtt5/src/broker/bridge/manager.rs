@@ -13,13 +13,11 @@ use tracing::{debug, error, info};
 
 /// Manages multiple bridge connections
 pub struct BridgeManager {
-    /// Active bridge connections
     bridges: Arc<RwLock<HashMap<String, Arc<BridgeConnection>>>>,
     tasks: Arc<Mutex<HashMap<String, JoinHandle<()>>>>,
-    /// Message router
     router: Arc<MessageRouter>,
-    /// Loop prevention
-    loop_prevention: Arc<LoopPrevention>,
+    loop_prevention: Arc<RwLock<Option<Arc<LoopPrevention>>>>,
+    runtime_handle: Option<tokio::runtime::Handle>,
 }
 
 impl BridgeManager {
@@ -29,8 +27,38 @@ impl BridgeManager {
             bridges: Arc::new(RwLock::new(HashMap::new())),
             tasks: Arc::new(Mutex::new(HashMap::new())),
             router,
-            loop_prevention: Arc::new(LoopPrevention::default()),
+            loop_prevention: Arc::new(RwLock::new(None)),
+            runtime_handle: None,
         }
+    }
+
+    #[allow(clippy::must_use_candidate)]
+    pub fn with_runtime(router: Arc<MessageRouter>, handle: tokio::runtime::Handle) -> Self {
+        Self {
+            bridges: Arc::new(RwLock::new(HashMap::new())),
+            tasks: Arc::new(Mutex::new(HashMap::new())),
+            router,
+            loop_prevention: Arc::new(RwLock::new(None)),
+            runtime_handle: Some(handle),
+        }
+    }
+
+    fn get_or_init_loop_prevention(&self, config: &BridgeConfig) -> Arc<LoopPrevention> {
+        let mut guard = self.loop_prevention.write();
+        if let Some(ref lp) = *guard {
+            return lp.clone();
+        }
+        let lp = Arc::new(LoopPrevention::new(
+            config.loop_prevention_ttl,
+            config.loop_prevention_cache_size,
+        ));
+        *guard = Some(lp.clone());
+        info!(
+            ttl_secs = config.loop_prevention_ttl.as_secs(),
+            cache_size = config.loop_prevention_cache_size,
+            "Loop prevention initialized from bridge config"
+        );
+        lp
     }
 
     /// Adds a new bridge.
@@ -46,16 +74,26 @@ impl BridgeManager {
             )));
         }
 
+        self.get_or_init_loop_prevention(&config);
+
         let bridge = Arc::new(BridgeConnection::new(config, self.router.clone())?);
 
         bridge.start();
 
         let bridge_clone = bridge.clone();
-        let task = tokio::spawn(async move {
-            if let Err(e) = Box::pin(bridge_clone.run()).await {
-                error!("Bridge task error: {e}");
-            }
-        });
+        let task = if let Some(ref handle) = self.runtime_handle {
+            handle.spawn(async move {
+                if let Err(e) = Box::pin(bridge_clone.run()).await {
+                    error!("Bridge task error: {e}");
+                }
+            })
+        } else {
+            tokio::spawn(async move {
+                if let Err(e) = Box::pin(bridge_clone.run()).await {
+                    error!("Bridge task error: {e}");
+                }
+            })
+        };
 
         let task_name = name.clone();
         self.bridges.write().insert(name, bridge);
@@ -105,12 +143,15 @@ impl BridgeManager {
             return Ok(());
         }
 
-        if !self.loop_prevention.check_message(packet).await {
-            debug!(
-                topic = %packet.topic_name,
-                "Message loop detected, not forwarding to bridges"
-            );
-            return Ok(());
+        let loop_prevention = self.loop_prevention.read().clone();
+        if let Some(lp) = loop_prevention {
+            if !lp.check_message(packet).await {
+                debug!(
+                    topic = %packet.topic_name,
+                    "Message loop detected, not forwarding to bridges"
+                );
+                return Ok(());
+            }
         }
 
         let bridge_list: Vec<_> = {

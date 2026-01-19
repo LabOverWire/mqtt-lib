@@ -17,8 +17,9 @@ name = "mqttv5"
 path = "src/main.rs"
 
 [features]
-default = []
+default = ["codec"]
 opentelemetry = ["mqtt5/opentelemetry"]
+codec = ["mqtt5/codec-all"]
 
 [dependencies]
 mqtt5 = { version = "0.19", path = "../mqtt5" }
