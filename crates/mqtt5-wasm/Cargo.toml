@@ -44,7 +44,7 @@ futures-util = "0.3"
 tracing = "0.1.41"
 gloo-timers = { version = "0.3.0", features = ["futures"] }
 flume = "0.12.0"
-miniz_oxide = { path = "/Volumes/SanDisk 4TB/repos/miniz_oxide/miniz_oxide", optional = true }
+miniz_oxide = { version = "0.9", optional = true }
 sha2 = "0.10.9"
 
 [dependencies.web-sys]
