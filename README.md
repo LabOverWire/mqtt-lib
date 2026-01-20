@@ -21,7 +21,7 @@
 
 ```toml
 [dependencies]
-mqtt5 = "0.19"
+mqtt5 = "0.20"
 ```
 
 ### CLI Tool
