@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="referrer" content="strict-origin-when-cross-origin">
+    <title>MQTT Federated JWT Auth - WASM Client</title>
+    <script src="https://accounts.google.com/gsi/client" async></script>
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        h1 { color: #333; }
+        .badge {
+            display: inline-block;
+            background: #ff6b35;
+            color: white;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+            margin-left: 10px;
+            vertical-align: middle;
+        }
+        .card {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            margin: 20px 0;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .status {
+            padding: 10px 15px;
+            border-radius: 4px;
+            margin: 10px 0;
+            font-weight: 500;
+        }
+        .status.disconnected { background: #ffebee; color: #c62828; }
+        .status.connecting { background: #fff3e0; color: #ef6c00; }
+        .status.connected { background: #e8f5e9; color: #2e7d32; }
+        .status.error { background: #ffebee; color: #c62828; }
+        .status.loading { background: #e3f2fd; color: #1565c0; }
+        input, button, textarea {
+            padding: 10px 15px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        input, textarea { width: 100%; margin: 5px 0; }
+        button {
+            background: #ff6b35;
+            color: white;
+            border: none;
+            cursor: pointer;
+            margin: 5px 5px 5px 0;
+        }
+        button:hover { background: #e55a2b; }
+        button:disabled { background: #ccc; cursor: not-allowed; }
+        .token-display {
+            background: #f5f5f5;
+            padding: 10px;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 12px;
+            word-break: break-all;
+            max-height: 100px;
+            overflow-y: auto;
+        }
+        .log {
+            background: #263238;
+            color: #aed581;
+            padding: 15px;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 12px;
+            height: 300px;
+            overflow-y: auto;
+        }
+        .log .error { color: #ef5350; }
+        .log .info { color: #4fc3f7; }
+        .log .success { color: #aed581; }
+        .log .warn { color: #ffb74d; }
+        label { display: block; margin-top: 10px; font-weight: 500; }
+        .row { display: flex; gap: 10px; }
+        .row > * { flex: 1; }
+        .user-info {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .user-info img {
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+        }
+        #g_id_signin { margin: 10px 0; }
+        .hidden { display: none; }
+        pre { margin: 0; white-space: pre-wrap; }
+        .tech-note {
+            background: #fff3e0;
+            border-left: 4px solid #ff6b35;
+            padding: 10px 15px;
+            margin: 10px 0;
+            font-size: 13px;
+        }
+    </style>
+</head>
+<body>
+    <h1>MQTT Federated JWT Auth <span class="badge">WASM Client</span></h1>
+    <p>Test Google OAuth JWT authentication using our Rust WASM MQTT client.</p>
+
+    <div class="tech-note">
+        This example uses <strong>mqtt5-wasm</strong> - our Rust MQTT client compiled to WebAssembly.
+        Same protocol implementation as the native client, running in the browser.
+    </div>
+
+    <div class="card">
+        <h2>1. WASM Module</h2>
+        <div id="wasmStatus" class="status loading">Loading WASM module...</div>
+    </div>
+
+    <div class="card">
+        <h2>2. Configuration</h2>
+        <div id="configStatus" class="status connecting">Loading configuration...</div>
+        <label>Google Client ID</label>
+        <input type="text" id="clientId" placeholder="your-client-id.apps.googleusercontent.com">
+
+        <label>Broker WebSocket URL</label>
+        <input type="text" id="brokerUrl" value="ws://localhost:8080/mqtt" placeholder="ws://localhost:8080/mqtt">
+
+        <small>Config auto-loaded from server. <a href="https://console.cloud.google.com/apis/credentials" target="_blank">Google Cloud Console</a></small>
+    </div>
+
+    <div class="card">
+        <h2>3. Google Sign-In</h2>
+        <div id="g_id_signin"></div>
+        <div id="userInfo" class="user-info hidden"></div>
+        <div id="tokenSection" class="hidden">
+            <label>ID Token (JWT)</label>
+            <div class="token-display" id="tokenDisplay"></div>
+            <button onclick="copyToken()">Copy Token</button>
+            <button onclick="decodeToken()">Decode Token</button>
+        </div>
+    </div>
+
+    <div class="card">
+        <h2>4. MQTT Connection</h2>
+        <div id="mqttStatus" class="status disconnected">Disconnected</div>
+        <div class="row">
+            <button id="connectBtn" onclick="connectMqtt()" disabled>Connect with JWT</button>
+            <button id="disconnectBtn" onclick="disconnectMqtt()" disabled>Disconnect</button>
+        </div>
+    </div>
+
+    <div class="card">
+        <h2>5. Publish / Subscribe</h2>
+        <div class="row">
+            <div>
+                <label>Subscribe Topic</label>
+                <input type="text" id="subTopic" value="test/#" placeholder="test/#">
+                <button id="subBtn" onclick="subscribe()" disabled>Subscribe</button>
+            </div>
+            <div>
+                <label>Publish Topic</label>
+                <input type="text" id="pubTopic" value="test/hello" placeholder="test/hello">
+                <label>Message</label>
+                <input type="text" id="pubMessage" value="Hello from WASM!" placeholder="Message">
+                <button id="pubBtn" onclick="publish()" disabled>Publish</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="card">
+        <h2>Log</h2>
+        <div id="log" class="log"></div>
+        <button onclick="clearLog()">Clear Log</button>
+    </div>
+
+    <script type="module">
+        import init, { WasmMqttClient, WasmConnectOptions, WasmSubscribeOptions } from './pkg/mqtt5_wasm.js';
+
+        let wasmReady = false;
+        let idToken = null;
+        let mqttClient = null;
+        let googleInitialized = false;
+
+        window.log = function(message, type = 'info') {
+            const logEl = document.getElementById('log');
+            const time = new Date().toLocaleTimeString();
+            logEl.innerHTML += `<div class="${type}">[${time}] ${message}</div>`;
+            logEl.scrollTop = logEl.scrollHeight;
+        }
+
+        window.clearLog = function() {
+            document.getElementById('log').innerHTML = '';
+        }
+
+        function setStatus(id, status, text) {
+            const el = document.getElementById(id);
+            el.className = 'status ' + status;
+            el.textContent = text;
+        }
+
+        async function initWasm() {
+            try {
+                await init();
+                wasmReady = true;
+                setStatus('wasmStatus', 'connected', 'WASM module loaded successfully');
+                log('mqtt5-wasm module initialized', 'success');
+            } catch (e) {
+                setStatus('wasmStatus', 'error', 'Failed to load WASM: ' + e.message);
+                log('WASM init error: ' + e.message, 'error');
+            }
+        }
+
+        function initGoogle() {
+            const clientId = document.getElementById('clientId').value.trim();
+            if (!clientId) {
+                log('Please enter a Google Client ID', 'error');
+                return;
+            }
+
+            log('Initializing Google Sign-In...', 'info');
+
+            google.accounts.id.initialize({
+                client_id: clientId,
+                callback: handleCredentialResponse,
+                auto_select: false,
+            });
+
+            google.accounts.id.renderButton(
+                document.getElementById('g_id_signin'),
+                { theme: 'outline', size: 'large', text: 'signin_with' }
+            );
+
+            googleInitialized = true;
+            log('Google Sign-In initialized. Click the button to sign in.', 'success');
+        }
+
+        function handleCredentialResponse(response) {
+            idToken = response.credential;
+            log('Received Google ID token', 'success');
+
+            const payload = JSON.parse(atob(idToken.split('.')[1]));
+
+            document.getElementById('userInfo').innerHTML = `
+                <img src="${payload.picture}" alt="Profile">
+                <div>
+                    <strong>${payload.name}</strong><br>
+                    <small>${payload.email}</small>
+                </div>
+            `;
+            document.getElementById('userInfo').classList.remove('hidden');
+            document.getElementById('tokenSection').classList.remove('hidden');
+            document.getElementById('tokenDisplay').textContent = idToken;
+
+            if (wasmReady) {
+                document.getElementById('connectBtn').disabled = false;
+            }
+
+            log(`Signed in as: ${payload.email}`, 'success');
+            log(`Token subject (sub): ${payload.sub}`, 'info');
+            log(`Token issuer (iss): ${payload.iss}`, 'info');
+            log(`Token expires: ${new Date(payload.exp * 1000).toLocaleString()}`, 'info');
+        }
+
+        window.copyToken = function() {
+            navigator.clipboard.writeText(idToken);
+            log('Token copied to clipboard', 'success');
+        }
+
+        window.decodeToken = function() {
+            if (!idToken) return;
+            const parts = idToken.split('.');
+            const header = JSON.parse(atob(parts[0]));
+            const payload = JSON.parse(atob(parts[1]));
+
+            log('=== JWT Header ===', 'info');
+            log('<pre>' + JSON.stringify(header, null, 2) + '</pre>', 'info');
+            log('=== JWT Payload ===', 'info');
+            log('<pre>' + JSON.stringify(payload, null, 2) + '</pre>', 'info');
+        }
+
+        window.connectMqtt = async function() {
+            console.log('connectMqtt called');
+            log('Connect button clicked', 'info');
+
+            if (!wasmReady) {
+                log('WASM module not ready', 'error');
+                return;
+            }
+
+            if (!idToken) {
+                log('No JWT token available. Please sign in first.', 'error');
+                return;
+            }
+
+            const brokerUrl = document.getElementById('brokerUrl').value.trim();
+            if (!brokerUrl) {
+                log('Please enter broker WebSocket URL', 'error');
+                return;
+            }
+
+            setStatus('mqttStatus', 'connecting', 'Connecting...');
+            log(`Connecting to ${brokerUrl} using WASM client...`, 'info');
+
+            const payload = JSON.parse(atob(idToken.split('.')[1]));
+            const clientId = 'wasm-' + payload.sub.substring(0, 8) + '-' + Date.now();
+
+            try {
+                log('Creating WasmMqttClient...', 'info');
+                mqttClient = new WasmMqttClient(clientId);
+                log('Client created: ' + clientId, 'info');
+
+                mqttClient.on_connect((reasonCode, sessionPresent) => {
+                    console.log('on_connect callback', reasonCode, sessionPresent);
+                    if (reasonCode === 0) {
+                        setStatus('mqttStatus', 'connected', 'Connected');
+                        log('Connected to MQTT broker!', 'success');
+                        log(`Client ID: ${clientId}`, 'info');
+                        log(`Session Present: ${sessionPresent}`, 'info');
+                        document.getElementById('connectBtn').disabled = true;
+                        document.getElementById('disconnectBtn').disabled = false;
+                        document.getElementById('subBtn').disabled = false;
+                        document.getElementById('pubBtn').disabled = false;
+                    } else {
+                        setStatus('mqttStatus', 'error', 'Connection rejected: ' + reasonCode);
+                        log(`Connection rejected with reason code: ${reasonCode}`, 'error');
+                    }
+                });
+
+                mqttClient.on_disconnect(() => {
+                    console.log('on_disconnect callback');
+                    setStatus('mqttStatus', 'disconnected', 'Disconnected');
+                    log('Disconnected from broker', 'warn');
+                    document.getElementById('connectBtn').disabled = false;
+                    document.getElementById('disconnectBtn').disabled = true;
+                    document.getElementById('subBtn').disabled = true;
+                    document.getElementById('pubBtn').disabled = true;
+                });
+
+                mqttClient.on_error((error) => {
+                    console.log('on_error callback', error);
+                    setStatus('mqttStatus', 'error', 'Error: ' + error);
+                    log('MQTT Error: ' + error, 'error');
+                });
+
+                log('Creating WasmConnectOptions...', 'info');
+                const options = new WasmConnectOptions();
+                options.cleanStart = true;
+                options.keepAlive = 60;
+                options.authenticationMethod = 'JWT';
+                const tokenBytes = new TextEncoder().encode(idToken);
+                log(`Token bytes length: ${tokenBytes.length}`, 'info');
+                options.authenticationData = tokenBytes;
+                log('Options configured with JWT auth', 'info');
+
+                log('Calling connect_with_options...', 'info');
+                await mqttClient.connect_with_options(brokerUrl, options);
+                log('connect_with_options returned', 'info');
+
+            } catch (err) {
+                console.error('Connection error:', err);
+                setStatus('mqttStatus', 'error', 'Connection failed');
+                log('Connection error: ' + err, 'error');
+                log('Stack: ' + (err.stack || 'no stack'), 'error');
+            }
+        }
+
+        window.disconnectMqtt = async function() {
+            if (mqttClient) {
+                try {
+                    await mqttClient.disconnect();
+                    log('Disconnected', 'info');
+                } catch (e) {
+                    log('Disconnect error: ' + e, 'error');
+                }
+                mqttClient = null;
+            }
+        }
+
+        window.subscribe = async function() {
+            const topic = document.getElementById('subTopic').value.trim();
+            if (!topic) {
+                log('Please enter a topic to subscribe', 'error');
+                return;
+            }
+            if (!mqttClient || !mqttClient.is_connected()) {
+                log('Not connected', 'error');
+                return;
+            }
+
+            try {
+                const options = new WasmSubscribeOptions();
+                options.qos = 1;
+
+                await mqttClient.subscribe_with_options(topic, (msgTopic, payload, properties) => {
+                    const message = new TextDecoder().decode(payload);
+                    log(`[${msgTopic}] ${message}`, 'success');
+                }, options);
+
+                log(`Subscribed to: ${topic}`, 'success');
+            } catch (e) {
+                log(`Subscribe error: ${e}`, 'error');
+            }
+        }
+
+        window.publish = async function() {
+            const topic = document.getElementById('pubTopic').value.trim();
+            const message = document.getElementById('pubMessage').value;
+
+            if (!topic) {
+                log('Please enter a topic to publish', 'error');
+                return;
+            }
+            if (!mqttClient || !mqttClient.is_connected()) {
+                log('Not connected', 'error');
+                return;
+            }
+
+            try {
+                const payload = new TextEncoder().encode(message);
+                await mqttClient.publish(topic, payload);
+                log(`Published to ${topic}: ${message}`, 'success');
+            } catch (e) {
+                log(`Publish error: ${e}`, 'error');
+            }
+        }
+
+        async function loadConfig() {
+            try {
+                const response = await fetch('/config.json');
+                if (response.ok) {
+                    const config = await response.json();
+                    if (config.clientId) {
+                        document.getElementById('clientId').value = config.clientId;
+                    }
+                    if (config.brokerUrl) {
+                        document.getElementById('brokerUrl').value = config.brokerUrl;
+                    }
+                    setStatus('configStatus', 'connected', 'Configuration loaded');
+                    log('Configuration loaded from server', 'success');
+
+                    if (config.clientId) {
+                        initGoogle();
+                    }
+                } else {
+                    setStatus('configStatus', 'disconnected', 'No config found - enter Client ID manually');
+                    log('No config.json found. Enter Google Client ID manually.', 'warn');
+                }
+            } catch (e) {
+                setStatus('configStatus', 'disconnected', 'No config found - enter Client ID manually');
+                log('Could not load config. Enter Google Client ID manually.', 'warn');
+            }
+        }
+
+        await initWasm();
+        loadConfig();
+    </script>
+</body>
+</html>

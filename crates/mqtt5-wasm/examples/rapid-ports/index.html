@@ -1,0 +1,589 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Rapid Port Creation Test</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            max-width: 1200px;
+            margin: 40px auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .header {
+            background: white;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+        h1 { color: #333; margin-top: 0; }
+        .warning {
+            background: #fff3cd;
+            padding: 15px;
+            border-radius: 4px;
+            border-left: 4px solid #ffc107;
+            margin: 15px 0;
+        }
+        .test-section {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+        button {
+            background: #007bff;
+            color: white;
+            border: none;
+            cursor: pointer;
+            padding: 12px 24px;
+            border-radius: 4px;
+            font-size: 14px;
+            margin: 5px;
+        }
+        button:hover { background: #0056b3; }
+        button.danger { background: #dc3545; }
+        button.danger:hover { background: #c82333; }
+        button.success { background: #28a745; }
+        button.success:hover { background: #218838; }
+        button:disabled { background: #6c757d; cursor: not-allowed; }
+        #log {
+            background: #1e1e1e;
+            color: #d4d4d4;
+            padding: 15px;
+            border-radius: 4px;
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 12px;
+            max-height: 500px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+        .log-error { color: #f44747; }
+        .log-success { color: #6a9955; }
+        .log-warn { color: #dcdcaa; }
+        .log-info { color: #9cdcfe; }
+        .controls {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            margin-bottom: 15px;
+        }
+        input[type="number"] {
+            width: 80px;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        label {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>Rapid Port Creation Test</h1>
+        <p>Tests for "closure invoked recursively or after being dropped" error when creating multiple client ports rapidly.</p>
+
+        <div class="warning">
+            <strong>Purpose:</strong> This example attempts to reproduce the error by creating multiple
+            <code>create_client_port()</code> calls in rapid succession without awaiting between them.
+        </div>
+    </div>
+
+    <div class="test-section">
+        <h2>Test Controls</h2>
+        <div class="controls">
+            <label>
+                Number of clients:
+                <input type="number" id="num-clients" value="10" min="2" max="100">
+            </label>
+        </div>
+        <div class="controls">
+            <button id="test-sequential" class="success">Test 1: Sequential (with await)</button>
+            <button id="test-rapid-no-await" class="danger">Test 2: Rapid (NO await between ports)</button>
+            <button id="test-rapid-connect" class="danger">Test 3: Rapid ports + parallel connect</button>
+            <button id="test-fire-forget" class="danger">Test 4: Fire & forget (no await at all)</button>
+            <button id="test-frontend" class="danger">Test 5: Frontend pattern</button>
+            <button id="test-frontend-opts" class="danger">Test 6: Frontend + options</button>
+            <button id="test-auth" class="danger">Test 7: Auth required</button>
+        </div>
+        <div class="controls">
+            <button id="clear-log">Clear Log</button>
+            <button id="reset-broker">Reset Broker</button>
+        </div>
+    </div>
+
+    <div class="test-section">
+        <h2>Console Output</h2>
+        <div id="log"></div>
+    </div>
+
+    <script type="module">
+        import init, { WasmBroker, WasmBrokerConfig, WasmMqttClient, WasmConnectOptions } from './pkg/mqtt5_wasm.js';
+
+        let broker = null;
+        const logEl = document.getElementById('log');
+
+        function log(msg, type = 'info') {
+            const timestamp = new Date().toISOString().split('T')[1].slice(0, -1);
+            const line = document.createElement('div');
+            line.className = `log-${type}`;
+            line.textContent = `[${timestamp}] ${msg}`;
+            logEl.appendChild(line);
+            logEl.scrollTop = logEl.scrollHeight;
+            console.log(`[${type.toUpperCase()}]`, msg);
+        }
+
+        function logError(msg) { log(msg, 'error'); }
+        function logSuccess(msg) { log(msg, 'success'); }
+        function logWarn(msg) { log(msg, 'warn'); }
+
+        async function createBroker() {
+            if (broker) {
+                log('Broker already exists');
+                return;
+            }
+            const config = new WasmBrokerConfig();
+            config.max_clients = 200;
+            broker = WasmBroker.with_config(config);
+            logSuccess('Broker created');
+        }
+
+        function resetBroker() {
+            broker = null;
+            log('Broker reset - will create new one on next test');
+        }
+
+        // Test 1: Sequential creation with await (should work)
+        async function testSequential() {
+            const numClients = parseInt(document.getElementById('num-clients').value);
+            log(`\n=== TEST 1: Sequential creation (${numClients} clients) ===`);
+
+            await createBroker();
+            const clients = [];
+            const startTime = performance.now();
+
+            try {
+                for (let i = 0; i < numClients; i++) {
+                    const clientId = `seq-client-${i}`;
+                    log(`Creating client ${i + 1}/${numClients}: ${clientId}`);
+
+                    const client = new WasmMqttClient(clientId);
+
+                    client.on_connect(() => {
+                        log(`  ${clientId} connected`, 'success');
+                    });
+
+                    client.on_error((err) => {
+                        logError(`  ${clientId} error: ${err}`);
+                    });
+
+                    const port = broker.create_client_port();
+                    log(`  Port created for ${clientId}`);
+
+                    await client.connect_message_port(port);
+                    log(`  ${clientId} connect_message_port completed`);
+
+                    clients.push(client);
+                }
+
+                const elapsed = (performance.now() - startTime).toFixed(2);
+                logSuccess(`\nTEST 1 PASSED: ${numClients} clients created in ${elapsed}ms`);
+
+            } catch (error) {
+                logError(`\nTEST 1 FAILED: ${error.message || error}`);
+                console.error('Full error:', error);
+            }
+        }
+
+        // Test 2: Create all ports first without await, then connect
+        async function testRapidNoAwait() {
+            const numClients = parseInt(document.getElementById('num-clients').value);
+            log(`\n=== TEST 2: Rapid port creation (${numClients} clients) ===`);
+            log('Creating ALL ports first, then connecting...');
+
+            await createBroker();
+            const ports = [];
+            const clients = [];
+            const startTime = performance.now();
+
+            try {
+                // Phase 1: Create all ports rapidly (synchronous calls)
+                log('\nPhase 1: Creating ports (no await)...');
+                for (let i = 0; i < numClients; i++) {
+                    const port = broker.create_client_port();
+                    ports.push(port);
+                    log(`  Port ${i + 1} created`);
+                }
+                log(`All ${numClients} ports created`);
+
+                // Phase 2: Create clients and connect sequentially
+                log('\nPhase 2: Connecting clients...');
+                for (let i = 0; i < numClients; i++) {
+                    const clientId = `rapid-client-${i}`;
+                    const client = new WasmMqttClient(clientId);
+
+                    client.on_connect(() => {
+                        log(`  ${clientId} connected`, 'success');
+                    });
+
+                    client.on_error((err) => {
+                        logError(`  ${clientId} error: ${err}`);
+                    });
+
+                    await client.connect_message_port(ports[i]);
+                    clients.push(client);
+                }
+
+                const elapsed = (performance.now() - startTime).toFixed(2);
+                logSuccess(`\nTEST 2 PASSED: ${numClients} clients created in ${elapsed}ms`);
+
+            } catch (error) {
+                logError(`\nTEST 2 FAILED: ${error.message || error}`);
+                console.error('Full error:', error);
+            }
+        }
+
+        // Test 3: Create ports and start connecting in parallel (most aggressive)
+        async function testRapidConnect() {
+            const numClients = parseInt(document.getElementById('num-clients').value);
+            log(`\n=== TEST 3: Rapid ports + parallel connect (${numClients} clients) ===`);
+            log('Creating ports and immediately starting connect (parallel)...');
+
+            await createBroker();
+            const connectPromises = [];
+            const startTime = performance.now();
+
+            try {
+                // Create ports and start connecting immediately (don't await yet)
+                for (let i = 0; i < numClients; i++) {
+                    const clientId = `parallel-client-${i}`;
+                    const client = new WasmMqttClient(clientId);
+
+                    client.on_connect(() => {
+                        log(`  ${clientId} connected`, 'success');
+                    });
+
+                    client.on_error((err) => {
+                        logError(`  ${clientId} error: ${err}`);
+                    });
+
+                    const port = broker.create_client_port();
+                    log(`  Port ${i + 1} created, starting connect...`);
+
+                    // Don't await - collect promise
+                    const connectPromise = client.connect_message_port(port);
+                    connectPromises.push(connectPromise);
+                }
+
+                log(`\nAll ${numClients} ports created and connects started`);
+                log('Waiting for all connections to complete...');
+
+                // Now await all
+                await Promise.all(connectPromises);
+
+                const elapsed = (performance.now() - startTime).toFixed(2);
+                logSuccess(`\nTEST 3 PASSED: ${numClients} clients created in ${elapsed}ms`);
+
+            } catch (error) {
+                logError(`\nTEST 3 FAILED: ${error.message || error}`);
+                console.error('Full error:', error);
+            }
+        }
+
+        // Test 5: Exact frontend pattern - create WasmMqttClient first, connect later
+        async function testFrontendPattern() {
+            const numClients = parseInt(document.getElementById('num-clients').value);
+            log(`\n=== TEST 5: Frontend pattern (${numClients} clients) ===`);
+            log('Creating all WasmMqttClient instances first, then ports, then connecting...');
+
+            await createBroker();
+            const startTime = performance.now();
+
+            try {
+                // Phase 1: Create all WasmMqttClient instances (like ClientInstance.initialize())
+                log('\nPhase 1: Creating WasmMqttClient instances...');
+                const clients = [];
+                for (let i = 0; i < numClients; i++) {
+                    const clientId = `frontend-client-${i}`;
+                    const client = new WasmMqttClient(clientId);
+
+                    client.on_connect(() => {
+                        log(`  ${clientId} connected`, 'success');
+                    });
+
+                    client.on_error((err) => {
+                        logError(`  ${clientId} error: ${err}`);
+                    });
+
+                    clients.push({ clientId, client });
+                    log(`  Created WasmMqttClient: ${clientId}`);
+                }
+                log(`All ${numClients} WasmMqttClient instances created`);
+
+                // Phase 2: Create ports and connect (like SimulationEngine.start())
+                log('\nPhase 2: Creating ports and connecting (with yields)...');
+                for (let i = 0; i < numClients; i++) {
+                    const { clientId, client } = clients[i];
+
+                    // Yield like frontend does
+                    await new Promise(resolve => setTimeout(resolve, 0));
+
+                    log(`  Creating port for ${clientId}...`);
+                    const port = broker.create_client_port();
+                    log(`  Port created for ${clientId}`);
+
+                    // Yield again like frontend does
+                    await new Promise(resolve => setTimeout(resolve, 0));
+
+                    log(`  Connecting ${clientId}...`);
+                    await client.connect_message_port(port);
+                    log(`  ${clientId} connected`);
+
+                    // Delay like frontend does
+                    await new Promise(resolve => setTimeout(resolve, 100));
+                }
+
+                const elapsed = (performance.now() - startTime).toFixed(2);
+                logSuccess(`\nTEST 5 PASSED: ${numClients} clients created in ${elapsed}ms`);
+
+            } catch (error) {
+                logError(`\nTEST 5 FAILED: ${error.message || error}`);
+                console.error('Full error:', error);
+            }
+        }
+
+        // Test 6: Frontend pattern with connect options (cleanStart, keepAlive, etc.)
+        async function testFrontendPatternWithOptions() {
+            const numClients = parseInt(document.getElementById('num-clients').value);
+            log(`\n=== TEST 6: Frontend pattern with options (${numClients} clients) ===`);
+
+            await createBroker();
+            const startTime = performance.now();
+
+            try {
+                log('\nPhase 1: Creating WasmMqttClient instances...');
+                const clients = [];
+                for (let i = 0; i < numClients; i++) {
+                    const clientId = `opts-client-${i}`;
+                    const client = new WasmMqttClient(clientId);
+
+                    client.on_connect(() => {
+                        log(`  ${clientId} connected`, 'success');
+                    });
+
+                    client.on_error((err) => {
+                        logError(`  ${clientId} error: ${err}`);
+                    });
+
+                    clients.push({ clientId, client });
+                }
+                log(`All ${numClients} WasmMqttClient instances created`);
+
+                log('\nPhase 2: Creating ports and connecting with options...');
+                for (let i = 0; i < numClients; i++) {
+                    const { clientId, client } = clients[i];
+
+                    await new Promise(resolve => setTimeout(resolve, 0));
+
+                    const port = broker.create_client_port();
+                    log(`  Port created for ${clientId}`);
+
+                    await new Promise(resolve => setTimeout(resolve, 0));
+
+                    // Use connect_with_options like frontend does
+                    const connectOpts = new WasmConnectOptions();
+                    connectOpts.cleanStart = true;
+                    connectOpts.keepAlive = 60;
+
+                    log(`  Connecting ${clientId} with options...`);
+                    await client.connect_message_port_with_options(port, connectOpts);
+                    log(`  ${clientId} connected`);
+
+                    await new Promise(resolve => setTimeout(resolve, 100));
+                }
+
+                const elapsed = (performance.now() - startTime).toFixed(2);
+                logSuccess(`\nTEST 6 PASSED: ${numClients} clients created in ${elapsed}ms`);
+
+            } catch (error) {
+                logError(`\nTEST 6 FAILED: ${error.message || error}`);
+                console.error('Full error:', error);
+            }
+        }
+
+        // Test 7: Frontend pattern with allowAnonymous=false (like the failing diagram)
+        async function testWithAuth() {
+            const numClients = parseInt(document.getElementById('num-clients').value);
+            log(`\n=== TEST 7: Auth required (allowAnonymous=false) (${numClients} clients) ===`);
+
+            // Create a NEW broker with allowAnonymous=false
+            log('Creating broker with allowAnonymous=false...');
+            const config = new WasmBrokerConfig();
+            config.max_clients = 200;
+            const authBroker = WasmBroker.with_config(config);
+            authBroker.set_allow_anonymous(false);
+            logSuccess('Auth broker created');
+
+            const startTime = performance.now();
+
+            try {
+                log('\nPhase 1: Creating WasmMqttClient instances...');
+                const clients = [];
+                for (let i = 0; i < numClients; i++) {
+                    const clientId = `auth-client-${i}`;
+                    const client = new WasmMqttClient(clientId);
+
+                    client.on_connect(() => {
+                        log(`  ${clientId} connected`, 'success');
+                    });
+
+                    client.on_error((err) => {
+                        logError(`  ${clientId} error: ${err}`);
+                    });
+
+                    clients.push({ clientId, client });
+                }
+                log(`All ${numClients} WasmMqttClient instances created`);
+
+                log('\nPhase 2: Creating ports and connecting (NO credentials - should fail auth)...');
+                for (let i = 0; i < numClients; i++) {
+                    const { clientId, client } = clients[i];
+
+                    await new Promise(resolve => setTimeout(resolve, 0));
+
+                    log(`  Creating port for ${clientId}...`);
+                    const port = authBroker.create_client_port();
+                    log(`  Port created for ${clientId}`);
+
+                    await new Promise(resolve => setTimeout(resolve, 0));
+
+                    const connectOpts = new WasmConnectOptions();
+                    connectOpts.cleanStart = true;
+                    connectOpts.keepAlive = 60;
+
+                    log(`  Connecting ${clientId} (no credentials)...`);
+                    try {
+                        await client.connect_message_port_with_options(port, connectOpts);
+                        log(`  ${clientId} connected (unexpected - should have failed auth)`);
+                    } catch (e) {
+                        logWarn(`  ${clientId} connection failed (expected): ${e}`);
+                    }
+
+                    await new Promise(resolve => setTimeout(resolve, 100));
+                }
+
+                const elapsed = (performance.now() - startTime).toFixed(2);
+                log(`\nTEST 7 completed in ${elapsed}ms`);
+
+            } catch (error) {
+                logError(`\nTEST 7 FAILED: ${error.message || error}`);
+                console.error('Full error:', error);
+            }
+        }
+
+        // Test 4: Fire and forget - don't await anything
+        async function testFireForget() {
+            const numClients = parseInt(document.getElementById('num-clients').value);
+            log(`\n=== TEST 4: Fire & forget (${numClients} clients) ===`);
+            log('Creating ports and connecting WITHOUT any await...');
+
+            await createBroker();
+            const startTime = performance.now();
+            let connectedCount = 0;
+            let errorCount = 0;
+
+            try {
+                for (let i = 0; i < numClients; i++) {
+                    const clientId = `fire-client-${i}`;
+                    const client = new WasmMqttClient(clientId);
+
+                    client.on_connect(() => {
+                        connectedCount++;
+                        log(`  ${clientId} connected (${connectedCount}/${numClients})`, 'success');
+                    });
+
+                    client.on_error((err) => {
+                        errorCount++;
+                        logError(`  ${clientId} error: ${err}`);
+                    });
+
+                    const port = broker.create_client_port();
+
+                    // Fire and forget - don't await
+                    client.connect_message_port(port).catch(err => {
+                        logError(`  ${clientId} connect failed: ${err}`);
+                    });
+
+                    log(`  Port ${i + 1} created, connect fired (not awaited)`);
+                }
+
+                const createElapsed = (performance.now() - startTime).toFixed(2);
+                log(`\nAll ${numClients} ports created in ${createElapsed}ms (connects still running)`);
+
+                // Give some time for connections to complete/fail
+                log('Waiting 3 seconds for async operations to settle...');
+                await new Promise(resolve => setTimeout(resolve, 3000));
+
+                const totalElapsed = (performance.now() - startTime).toFixed(2);
+                if (errorCount === 0) {
+                    logSuccess(`\nTEST 4 PASSED: ${connectedCount}/${numClients} connected, ${errorCount} errors (${totalElapsed}ms)`);
+                } else {
+                    logError(`\nTEST 4 HAD ERRORS: ${connectedCount}/${numClients} connected, ${errorCount} errors (${totalElapsed}ms)`);
+                }
+
+            } catch (error) {
+                logError(`\nTEST 4 FAILED: ${error.message || error}`);
+                console.error('Full error:', error);
+            }
+        }
+
+        // Initialize
+        async function main() {
+            try {
+                log('Initializing WASM...');
+                await init();
+                logSuccess('WASM initialized');
+
+                // Wire up buttons
+                document.getElementById('test-sequential').addEventListener('click', testSequential);
+                document.getElementById('test-rapid-no-await').addEventListener('click', testRapidNoAwait);
+                document.getElementById('test-rapid-connect').addEventListener('click', testRapidConnect);
+                document.getElementById('test-fire-forget').addEventListener('click', testFireForget);
+                document.getElementById('test-frontend').addEventListener('click', testFrontendPattern);
+                document.getElementById('test-frontend-opts').addEventListener('click', testFrontendPatternWithOptions);
+                document.getElementById('test-auth').addEventListener('click', testWithAuth);
+                document.getElementById('clear-log').addEventListener('click', () => { logEl.innerHTML = ''; });
+                document.getElementById('reset-broker').addEventListener('click', resetBroker);
+
+                log('\nReady! Click a test button to begin.');
+                logWarn('Tests 2-4 attempt to trigger the "closure invoked recursively" error.');
+
+            } catch (error) {
+                logError(`Initialization failed: ${error.message || error}`);
+                console.error('Init error:', error);
+            }
+        }
+
+        // Capture unhandled errors
+        window.addEventListener('error', (event) => {
+            logError(`UNCAUGHT ERROR: ${event.message}`);
+            console.error('Uncaught:', event.error);
+        });
+
+        window.addEventListener('unhandledrejection', (event) => {
+            logError(`UNHANDLED REJECTION: ${event.reason}`);
+            console.error('Unhandled rejection:', event.reason);
+        });
+
+        main();
+    </script>
+</body>
+</html>

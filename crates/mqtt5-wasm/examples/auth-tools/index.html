@@ -1,0 +1,849 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MQTT Auth Tools - Password & ACL Generator</title>
+    <style>
+        * {
+            box-sizing: border-box;
+        }
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            max-width: 1400px;
+            margin: 40px auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .header {
+            background: white;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+        h1 {
+            color: #333;
+            margin-top: 0;
+        }
+        .tools-container {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(500px, 1fr));
+            gap: 20px;
+        }
+        .tool {
+            background: white;
+            padding: 25px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .tool h2 {
+            margin-top: 0;
+            color: #333;
+            font-size: 1.3em;
+            border-bottom: 3px solid #007bff;
+            padding-bottom: 10px;
+        }
+        .tool.password h2 { border-color: #28a745; }
+        .tool.acl h2 { border-color: #dc3545; }
+        .tool.roles h2 { border-color: #6f42c1; }
+        .form-group {
+            margin: 15px 0;
+        }
+        .form-group label {
+            display: block;
+            font-weight: 500;
+            margin-bottom: 5px;
+            color: #555;
+        }
+        .form-row {
+            display: flex;
+            gap: 10px;
+            margin: 15px 0;
+        }
+        .form-row .form-group {
+            flex: 1;
+            margin: 0;
+        }
+        input, select {
+            width: 100%;
+            padding: 10px 12px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        input:focus, select:focus {
+            outline: none;
+            border-color: #007bff;
+            box-shadow: 0 0 0 2px rgba(0,123,255,0.1);
+        }
+        button {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 4px;
+            font-size: 14px;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        .btn-primary {
+            background: #007bff;
+            color: white;
+        }
+        .btn-primary:hover {
+            background: #0056b3;
+        }
+        .btn-success {
+            background: #28a745;
+            color: white;
+        }
+        .btn-success:hover {
+            background: #218838;
+        }
+        .btn-danger {
+            background: #dc3545;
+            color: white;
+        }
+        .btn-danger:hover {
+            background: #c82333;
+        }
+        .btn-secondary {
+            background: #6c757d;
+            color: white;
+        }
+        .btn-secondary:hover {
+            background: #545b62;
+        }
+        button:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+        .button-group {
+            display: flex;
+            gap: 10px;
+            margin-top: 15px;
+        }
+        .entries-list {
+            margin: 20px 0;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .entry {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px 15px;
+            border-bottom: 1px solid #eee;
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 13px;
+        }
+        .entry:last-child {
+            border-bottom: none;
+        }
+        .entry:hover {
+            background: #f8f9fa;
+        }
+        .entry-content {
+            flex: 1;
+            word-break: break-all;
+            padding-right: 10px;
+        }
+        .entry .btn-remove {
+            padding: 4px 10px;
+            font-size: 12px;
+            background: #dc3545;
+            color: white;
+            border: none;
+            border-radius: 3px;
+            cursor: pointer;
+        }
+        .entry .btn-remove:hover {
+            background: #c82333;
+        }
+        .output-section {
+            margin-top: 20px;
+        }
+        .output-section h3 {
+            margin-bottom: 10px;
+            color: #333;
+        }
+        .output-box {
+            background: #1e1e1e;
+            color: #d4d4d4;
+            padding: 15px;
+            border-radius: 4px;
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 13px;
+            white-space: pre-wrap;
+            word-break: break-all;
+            max-height: 250px;
+            overflow-y: auto;
+        }
+        .empty-state {
+            color: #999;
+            text-align: center;
+            padding: 30px;
+            font-style: italic;
+        }
+        .info-box {
+            background: #e7f3ff;
+            border-left: 4px solid #007bff;
+            padding: 12px 15px;
+            margin: 15px 0;
+            border-radius: 0 4px 4px 0;
+            font-size: 0.9em;
+        }
+        .info-box code {
+            background: rgba(0,0,0,0.1);
+            padding: 2px 6px;
+            border-radius: 3px;
+        }
+        .permission-badge {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 3px;
+            font-size: 11px;
+            font-weight: bold;
+            text-transform: uppercase;
+        }
+        .permission-read { background: #d4edda; color: #155724; }
+        .permission-write { background: #fff3cd; color: #856404; }
+        .permission-readwrite { background: #cce5ff; color: #004085; }
+        .permission-deny { background: #f8d7da; color: #721c24; }
+        .role-badge {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 3px;
+            font-size: 11px;
+            font-weight: bold;
+            background: #e2d4f0;
+            color: #6f42c1;
+        }
+        .section-divider {
+            border-top: 1px dashed #ddd;
+            margin: 20px 0;
+            padding-top: 15px;
+        }
+        .section-divider h4 {
+            margin: 0 0 10px 0;
+            color: #666;
+            font-size: 0.9em;
+            text-transform: uppercase;
+        }
+        .status {
+            padding: 8px 12px;
+            border-radius: 4px;
+            margin: 10px 0;
+            font-size: 0.9em;
+        }
+        .status.success {
+            background: #d4edda;
+            color: #155724;
+        }
+        .status.error {
+            background: #f8d7da;
+            color: #721c24;
+        }
+        .status.info {
+            background: #e7f3ff;
+            color: #004085;
+        }
+        #loading {
+            text-align: center;
+            padding: 40px;
+            color: #666;
+        }
+        .hidden {
+            display: none !important;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>MQTT Auth Tools</h1>
+        <p>Generate password files and ACL rules for your MQTT broker. Uses the same Argon2 hashing as the native broker.</p>
+    </div>
+
+    <div id="loading">
+        <p>Loading WASM module...</p>
+    </div>
+
+    <div id="app" class="hidden">
+        <div class="tools-container">
+            <div class="tool password">
+                <h2>Password Generator</h2>
+                <p>Create hashed credentials for broker authentication.</p>
+
+                <div class="info-box">
+                    Passwords are hashed using <strong>Argon2</strong> (same as <code>mqttv5 passwd</code> CLI command).
+                </div>
+
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="pw-username">Username</label>
+                        <input type="text" id="pw-username" placeholder="e.g., alice">
+                    </div>
+                    <div class="form-group">
+                        <label for="pw-password">Password</label>
+                        <input type="password" id="pw-password" placeholder="Enter password">
+                    </div>
+                </div>
+
+                <div class="button-group">
+                    <button class="btn-success" id="pw-add-btn">Add User</button>
+                    <button class="btn-secondary" id="pw-clear-btn">Clear All</button>
+                </div>
+
+                <div id="pw-status"></div>
+
+                <div class="entries-list" id="pw-entries">
+                    <div class="empty-state">No users added yet</div>
+                </div>
+
+                <div class="output-section">
+                    <h3>Password File Output</h3>
+                    <div class="button-group">
+                        <button class="btn-primary" id="pw-copy-btn">Copy to Clipboard</button>
+                        <button class="btn-secondary" id="pw-download-btn">Download passwd.txt</button>
+                    </div>
+                    <div class="output-box" id="pw-output"># Password file (empty)</div>
+                </div>
+            </div>
+
+            <div class="tool acl">
+                <h2>ACL Rule Builder</h2>
+                <p>Define topic-based access control rules.</p>
+
+                <div class="info-box">
+                    Use <code>*</code> for wildcard username. Topic patterns support <code>+</code> (single level) and <code>#</code> (multi level) wildcards.
+                </div>
+
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="acl-username">Username</label>
+                        <input type="text" id="acl-username" placeholder="e.g., alice or *">
+                    </div>
+                    <div class="form-group">
+                        <label for="acl-topic">Topic Pattern</label>
+                        <input type="text" id="acl-topic" placeholder="e.g., sensors/+">
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label for="acl-permission">Permission</label>
+                    <select id="acl-permission">
+                        <option value="read">Read (Subscribe only)</option>
+                        <option value="write">Write (Publish only)</option>
+                        <option value="readwrite">Read/Write (Full access)</option>
+                        <option value="deny">Deny (Block access)</option>
+                    </select>
+                </div>
+
+                <div class="button-group">
+                    <button class="btn-danger" id="acl-add-btn">Add Rule</button>
+                    <button class="btn-secondary" id="acl-clear-btn">Clear All</button>
+                </div>
+
+                <div id="acl-status"></div>
+
+                <div class="entries-list" id="acl-entries">
+                    <div class="empty-state">No ACL rules added yet</div>
+                </div>
+
+                <div class="output-section">
+                    <h3>ACL File Output</h3>
+                    <div class="button-group">
+                        <button class="btn-primary" id="acl-copy-btn">Copy to Clipboard</button>
+                        <button class="btn-secondary" id="acl-download-btn">Download acl.txt</button>
+                    </div>
+                    <div class="output-box" id="acl-output"># ACL file (empty)</div>
+                </div>
+            </div>
+
+            <div class="tool roles">
+                <h2>Role-Based Access Control</h2>
+                <p>Define roles with topic permissions, then assign users to roles.</p>
+
+                <div class="info-box">
+                    Roles group topic permissions together. Users inherit all permissions from their assigned roles.
+                    Direct user ACL rules take precedence over role-based permissions.
+                </div>
+
+                <div class="section-divider">
+                    <h4>Role Definitions</h4>
+                </div>
+
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="role-name">Role Name</label>
+                        <input type="text" id="role-name" placeholder="e.g., admin, device, monitor">
+                    </div>
+                    <div class="form-group">
+                        <label for="role-topic">Topic Pattern</label>
+                        <input type="text" id="role-topic" placeholder="e.g., devices/+/telemetry">
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label for="role-permission">Permission</label>
+                    <select id="role-permission">
+                        <option value="read">Read (Subscribe only)</option>
+                        <option value="write">Write (Publish only)</option>
+                        <option value="readwrite">Read/Write (Full access)</option>
+                        <option value="deny">Deny (Block access)</option>
+                    </select>
+                </div>
+
+                <div class="button-group">
+                    <button class="btn-primary" id="role-add-btn" style="background: #6f42c1;">Add Role Rule</button>
+                    <button class="btn-secondary" id="role-clear-btn">Clear Roles</button>
+                </div>
+
+                <div id="role-status"></div>
+
+                <div class="entries-list" id="role-entries">
+                    <div class="empty-state">No roles defined yet</div>
+                </div>
+
+                <div class="section-divider">
+                    <h4>User-Role Assignments</h4>
+                </div>
+
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="assign-username">Username</label>
+                        <input type="text" id="assign-username" placeholder="e.g., alice">
+                    </div>
+                    <div class="form-group">
+                        <label for="assign-role">Role</label>
+                        <input type="text" id="assign-role" placeholder="e.g., admin">
+                    </div>
+                </div>
+
+                <div class="button-group">
+                    <button class="btn-primary" id="assign-add-btn" style="background: #6f42c1;">Assign Role</button>
+                    <button class="btn-secondary" id="assign-clear-btn">Clear Assignments</button>
+                </div>
+
+                <div id="assign-status"></div>
+
+                <div class="entries-list" id="assign-entries">
+                    <div class="empty-state">No user-role assignments yet</div>
+                </div>
+
+                <div class="output-section">
+                    <h3>Roles & Assignments Output</h3>
+                    <div class="button-group">
+                        <button class="btn-primary" id="roles-copy-btn">Copy to Clipboard</button>
+                    </div>
+                    <div class="output-box" id="roles-output"># Roles (empty)</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script type="module">
+        import init, { WasmBroker } from './pkg/mqtt5_wasm.js';
+
+        const state = {
+            passwords: [],
+            aclRules: [],
+            roleRules: [],
+            assignments: []
+        };
+
+        function showStatus(elementId, message, type) {
+            const el = document.getElementById(elementId);
+            el.className = `status ${type}`;
+            el.textContent = message;
+            el.classList.remove('hidden');
+            setTimeout(() => el.classList.add('hidden'), 3000);
+        }
+
+        function getPermissionBadge(permission) {
+            return `<span class="permission-badge permission-${permission}">${permission}</span>`;
+        }
+
+        function renderPasswordEntries() {
+            const container = document.getElementById('pw-entries');
+            const output = document.getElementById('pw-output');
+
+            if (state.passwords.length === 0) {
+                container.innerHTML = '<div class="empty-state">No users added yet</div>';
+                output.textContent = '# Password file (empty)';
+                return;
+            }
+
+            container.innerHTML = state.passwords.map((entry, index) => `
+                <div class="entry">
+                    <div class="entry-content">
+                        <strong>${entry.username}</strong>:${entry.hash.substring(0, 50)}...
+                    </div>
+                    <button class="btn-remove" data-index="${index}">Remove</button>
+                </div>
+            `).join('');
+
+            container.querySelectorAll('.btn-remove').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    state.passwords.splice(parseInt(btn.dataset.index), 1);
+                    renderPasswordEntries();
+                });
+            });
+
+            const fileContent = state.passwords
+                .map(e => `${e.username}:${e.hash}`)
+                .join('\n');
+            output.textContent = fileContent;
+        }
+
+        function renderAclEntries() {
+            const container = document.getElementById('acl-entries');
+            const output = document.getElementById('acl-output');
+
+            if (state.aclRules.length === 0) {
+                container.innerHTML = '<div class="empty-state">No ACL rules added yet</div>';
+                output.textContent = '# ACL file (empty)';
+                return;
+            }
+
+            container.innerHTML = state.aclRules.map((rule, index) => `
+                <div class="entry">
+                    <div class="entry-content">
+                        user <strong>${rule.username}</strong> topic <strong>${rule.topic}</strong> ${getPermissionBadge(rule.permission)}
+                    </div>
+                    <button class="btn-remove" data-index="${index}">Remove</button>
+                </div>
+            `).join('');
+
+            container.querySelectorAll('.btn-remove').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    state.aclRules.splice(parseInt(btn.dataset.index), 1);
+                    renderAclEntries();
+                });
+            });
+
+            const fileContent = state.aclRules
+                .map(r => `user ${r.username} topic ${r.topic} permission ${r.permission}`)
+                .join('\n');
+            output.textContent = fileContent;
+        }
+
+        function renderRoleEntries() {
+            const container = document.getElementById('role-entries');
+            const output = document.getElementById('roles-output');
+
+            if (state.roleRules.length === 0) {
+                container.innerHTML = '<div class="empty-state">No roles defined yet</div>';
+            } else {
+                container.innerHTML = state.roleRules.map((rule, index) => `
+                    <div class="entry">
+                        <div class="entry-content">
+                            role <span class="role-badge">${rule.role}</span> topic <strong>${rule.topic}</strong> ${getPermissionBadge(rule.permission)}
+                        </div>
+                        <button class="btn-remove" data-index="${index}">Remove</button>
+                    </div>
+                `).join('');
+
+                container.querySelectorAll('.btn-remove').forEach(btn => {
+                    btn.addEventListener('click', () => {
+                        state.roleRules.splice(parseInt(btn.dataset.index), 1);
+                        renderRoleEntries();
+                    });
+                });
+            }
+
+            updateRolesOutput();
+        }
+
+        function renderAssignEntries() {
+            const container = document.getElementById('assign-entries');
+
+            if (state.assignments.length === 0) {
+                container.innerHTML = '<div class="empty-state">No user-role assignments yet</div>';
+            } else {
+                container.innerHTML = state.assignments.map((assign, index) => `
+                    <div class="entry">
+                        <div class="entry-content">
+                            assign <strong>${assign.username}</strong> → <span class="role-badge">${assign.role}</span>
+                        </div>
+                        <button class="btn-remove" data-index="${index}">Remove</button>
+                    </div>
+                `).join('');
+
+                container.querySelectorAll('.btn-remove').forEach(btn => {
+                    btn.addEventListener('click', () => {
+                        state.assignments.splice(parseInt(btn.dataset.index), 1);
+                        renderAssignEntries();
+                    });
+                });
+            }
+
+            updateRolesOutput();
+        }
+
+        function updateRolesOutput() {
+            const output = document.getElementById('roles-output');
+
+            if (state.roleRules.length === 0 && state.assignments.length === 0) {
+                output.textContent = '# Roles (empty)';
+                return;
+            }
+
+            let content = '';
+            if (state.roleRules.length > 0) {
+                content += '# Role definitions\n';
+                content += state.roleRules
+                    .map(r => `role ${r.role} topic ${r.topic} permission ${r.permission}`)
+                    .join('\n');
+            }
+
+            if (state.assignments.length > 0) {
+                if (content) content += '\n\n';
+                content += '# User-role assignments\n';
+                content += state.assignments
+                    .map(a => `assign ${a.username} ${a.role}`)
+                    .join('\n');
+            }
+
+            output.textContent = content;
+        }
+
+        function downloadFile(filename, content) {
+            const blob = new Blob([content], { type: 'text/plain' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        }
+
+        async function copyToClipboard(text, statusId) {
+            try {
+                await navigator.clipboard.writeText(text);
+                showStatus(statusId, 'Copied to clipboard!', 'success');
+            } catch (err) {
+                showStatus(statusId, 'Failed to copy: ' + err.message, 'error');
+            }
+        }
+
+        async function main() {
+            await init();
+
+            document.getElementById('loading').classList.add('hidden');
+            document.getElementById('app').classList.remove('hidden');
+
+            document.getElementById('pw-add-btn').addEventListener('click', async () => {
+                const username = document.getElementById('pw-username').value.trim();
+                const password = document.getElementById('pw-password').value;
+
+                if (!username) {
+                    showStatus('pw-status', 'Please enter a username', 'error');
+                    return;
+                }
+                if (!password) {
+                    showStatus('pw-status', 'Please enter a password', 'error');
+                    return;
+                }
+                if (username.includes(':')) {
+                    showStatus('pw-status', 'Username cannot contain ":"', 'error');
+                    return;
+                }
+                if (state.passwords.some(e => e.username === username)) {
+                    showStatus('pw-status', 'Username already exists', 'error');
+                    return;
+                }
+
+                try {
+                    const hash = WasmBroker.hash_password(password);
+                    state.passwords.push({ username, hash });
+                    renderPasswordEntries();
+
+                    document.getElementById('pw-username').value = '';
+                    document.getElementById('pw-password').value = '';
+                    showStatus('pw-status', `Added user: ${username}`, 'success');
+                } catch (err) {
+                    showStatus('pw-status', 'Hashing failed: ' + err, 'error');
+                }
+            });
+
+            document.getElementById('pw-clear-btn').addEventListener('click', () => {
+                state.passwords = [];
+                renderPasswordEntries();
+            });
+
+            document.getElementById('pw-copy-btn').addEventListener('click', () => {
+                const content = document.getElementById('pw-output').textContent;
+                copyToClipboard(content, 'pw-status');
+            });
+
+            document.getElementById('pw-download-btn').addEventListener('click', () => {
+                const content = document.getElementById('pw-output').textContent;
+                downloadFile('passwd.txt', content);
+            });
+
+            document.getElementById('acl-add-btn').addEventListener('click', () => {
+                const username = document.getElementById('acl-username').value.trim();
+                const topic = document.getElementById('acl-topic').value.trim();
+                const permission = document.getElementById('acl-permission').value;
+
+                if (!username) {
+                    showStatus('acl-status', 'Please enter a username', 'error');
+                    return;
+                }
+                if (!topic) {
+                    showStatus('acl-status', 'Please enter a topic pattern', 'error');
+                    return;
+                }
+                if (username.includes(' ') || topic.includes(' ')) {
+                    showStatus('acl-status', 'Username and topic cannot contain spaces', 'error');
+                    return;
+                }
+
+                const duplicate = state.aclRules.some(
+                    r => r.username === username && r.topic === topic
+                );
+                if (duplicate) {
+                    showStatus('acl-status', 'Rule already exists for this user/topic', 'error');
+                    return;
+                }
+
+                state.aclRules.push({ username, topic, permission });
+                renderAclEntries();
+
+                document.getElementById('acl-username').value = '';
+                document.getElementById('acl-topic').value = '';
+                showStatus('acl-status', 'Added ACL rule', 'success');
+            });
+
+            document.getElementById('acl-clear-btn').addEventListener('click', () => {
+                state.aclRules = [];
+                renderAclEntries();
+            });
+
+            document.getElementById('acl-copy-btn').addEventListener('click', () => {
+                const content = document.getElementById('acl-output').textContent;
+                copyToClipboard(content, 'acl-status');
+            });
+
+            document.getElementById('acl-download-btn').addEventListener('click', () => {
+                const content = document.getElementById('acl-output').textContent;
+                downloadFile('acl.txt', content);
+            });
+
+            ['pw-username', 'pw-password'].forEach(id => {
+                document.getElementById(id).addEventListener('keypress', (e) => {
+                    if (e.key === 'Enter') document.getElementById('pw-add-btn').click();
+                });
+            });
+
+            ['acl-username', 'acl-topic'].forEach(id => {
+                document.getElementById(id).addEventListener('keypress', (e) => {
+                    if (e.key === 'Enter') document.getElementById('acl-add-btn').click();
+                });
+            });
+
+            document.getElementById('role-add-btn').addEventListener('click', () => {
+                const role = document.getElementById('role-name').value.trim();
+                const topic = document.getElementById('role-topic').value.trim();
+                const permission = document.getElementById('role-permission').value;
+
+                if (!role) {
+                    showStatus('role-status', 'Please enter a role name', 'error');
+                    return;
+                }
+                if (!topic) {
+                    showStatus('role-status', 'Please enter a topic pattern', 'error');
+                    return;
+                }
+                if (role.includes(' ') || topic.includes(' ')) {
+                    showStatus('role-status', 'Role name and topic cannot contain spaces', 'error');
+                    return;
+                }
+
+                const duplicate = state.roleRules.some(
+                    r => r.role === role && r.topic === topic
+                );
+                if (duplicate) {
+                    showStatus('role-status', 'Rule already exists for this role/topic', 'error');
+                    return;
+                }
+
+                state.roleRules.push({ role, topic, permission });
+                renderRoleEntries();
+
+                document.getElementById('role-topic').value = '';
+                showStatus('role-status', `Added rule to role: ${role}`, 'success');
+            });
+
+            document.getElementById('role-clear-btn').addEventListener('click', () => {
+                state.roleRules = [];
+                renderRoleEntries();
+            });
+
+            document.getElementById('assign-add-btn').addEventListener('click', () => {
+                const username = document.getElementById('assign-username').value.trim();
+                const role = document.getElementById('assign-role').value.trim();
+
+                if (!username) {
+                    showStatus('assign-status', 'Please enter a username', 'error');
+                    return;
+                }
+                if (!role) {
+                    showStatus('assign-status', 'Please enter a role name', 'error');
+                    return;
+                }
+                if (username.includes(' ') || role.includes(' ')) {
+                    showStatus('assign-status', 'Username and role cannot contain spaces', 'error');
+                    return;
+                }
+
+                const duplicate = state.assignments.some(
+                    a => a.username === username && a.role === role
+                );
+                if (duplicate) {
+                    showStatus('assign-status', 'Assignment already exists', 'error');
+                    return;
+                }
+
+                state.assignments.push({ username, role });
+                renderAssignEntries();
+
+                document.getElementById('assign-username').value = '';
+                document.getElementById('assign-role').value = '';
+                showStatus('assign-status', `Assigned ${username} to ${role}`, 'success');
+            });
+
+            document.getElementById('assign-clear-btn').addEventListener('click', () => {
+                state.assignments = [];
+                renderAssignEntries();
+            });
+
+            document.getElementById('roles-copy-btn').addEventListener('click', () => {
+                const content = document.getElementById('roles-output').textContent;
+                copyToClipboard(content, 'role-status');
+            });
+
+            ['role-name', 'role-topic'].forEach(id => {
+                document.getElementById(id).addEventListener('keypress', (e) => {
+                    if (e.key === 'Enter') document.getElementById('role-add-btn').click();
+                });
+            });
+
+            ['assign-username', 'assign-role'].forEach(id => {
+                document.getElementById(id).addEventListener('keypress', (e) => {
+                    if (e.key === 'Enter') document.getElementById('assign-add-btn').click();
+                });
+            });
+        }
+
+        main().catch(err => {
+            document.getElementById('loading').innerHTML = `<p style="color: red;">Error: ${err.message || err}</p>`;
+            console.error(err);
+        });
+    </script>
+</body>
+</html>
