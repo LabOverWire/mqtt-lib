@@ -80,6 +80,21 @@ pub fn i32_to_u32_saturating(value: i32) -> u32 {
     }
 }
 
+#[must_use]
+#[allow(clippy::cast_precision_loss)]
+pub fn f64_to_u64_saturating(value: f64) -> u64 {
+    const U64_MAX_AS_F64: f64 = u64::MAX as f64;
+    if value < 0.0 {
+        0
+    } else if value >= U64_MAX_AS_F64 {
+        u64::MAX
+    } else {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let result = value as u64;
+        result
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

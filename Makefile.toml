@@ -127,7 +127,7 @@ dependencies = ["fmt-check", "clippy", "wasm-clippy", "build", "test-fast", "tes
 description = "Run all CI checks locally - MUST pass before pushing"
 
 [tasks.pre-commit]
-dependencies = ["fmt-check", "clippy", "test-fast"]
+dependencies = ["fmt-check", "clippy", "wasm-clippy", "test-fast"]
 description = "Run before committing - checks formatting and runs fast tests"
 
 [tasks.doc]

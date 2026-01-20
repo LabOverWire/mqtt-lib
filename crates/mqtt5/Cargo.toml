@@ -124,7 +124,7 @@ opentelemetry-otlp = { version = "0.31", features = [
 ], optional = true }
 tracing-opentelemetry = { version = "0.32", optional = true }
 opentelemetry = { version = "0.31", features = ["trace"], optional = true }
-mqtt5-protocol = "0.9.2"
+mqtt5-protocol = "0.9.3"
 argon2 = "0.5"
 getrandom = "0.3"
 bebytes = { version = "3.0", features = ["bytes"] }

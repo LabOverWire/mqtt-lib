@@ -449,4 +449,18 @@ impl WasmBridgeManager {
             let _ = bridge.stop().await;
         }
     }
+
+    pub fn clear_loop_prevention_cache(&self) {
+        if let Some(lp) = self.loop_prevention.borrow().as_ref() {
+            lp.clear_cache();
+        }
+    }
+
+    #[must_use]
+    pub fn loop_prevention_cache_size(&self) -> usize {
+        self.loop_prevention
+            .borrow()
+            .as_ref()
+            .map_or(0, |lp| lp.cache_size())
+    }
 }

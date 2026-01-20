@@ -7,7 +7,7 @@
 //! # How It Works
 //!
 //! When a message is forwarded through a bridge, a SHA-256 fingerprint is
-//! calculated from the topic, payload, QoS, and retain flag. If the same
+//! calculated from the topic, payload, `QoS`, and retain flag. If the same
 //! fingerprint is seen again within the TTL window, the message is blocked.
 //!
 //! # WASM Considerations
@@ -16,6 +16,7 @@
 //! is single-threaded. Time is obtained via `web_sys::Performance::now()`
 //! since `std::time::Instant` is not available in WASM.
 
+use mqtt5_protocol::numeric::{f64_to_u64_saturating, u64_to_f64_saturating};
 use sha2::{Digest, Sha256};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -59,14 +60,14 @@ impl WasmLoopPrevention {
     pub fn new(ttl_secs: u64, max_cache_size: usize) -> Self {
         Self {
             seen_messages: RefCell::new(HashMap::new()),
-            ttl_ms: (ttl_secs * 1000) as f64,
+            ttl_ms: u64_to_f64_saturating(ttl_secs.saturating_mul(1000)),
             max_cache_size,
         }
     }
 
     #[must_use]
     pub fn ttl_secs(&self) -> u64 {
-        (self.ttl_ms / 1000.0) as u64
+        f64_to_u64_saturating(self.ttl_ms / 1000.0)
     }
 
     #[must_use]
@@ -127,8 +128,7 @@ impl WasmLoopPrevention {
     fn current_time_ms() -> f64 {
         web_sys::window()
             .and_then(|w| w.performance())
-            .map(|p| p.now())
-            .unwrap_or(0.0)
+            .map_or(0.0, |p| p.now())
     }
 
     /// Clears all cached fingerprints.
