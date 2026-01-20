@@ -7,6 +7,8 @@ use clap::Args;
 use dialoguer::{Input, Select};
 use mqtt5::client::auth_handlers::{JwtAuthHandler, ScramSha256AuthHandler};
 use mqtt5::time::Duration;
+#[cfg(feature = "codec")]
+use mqtt5::{CodecRegistry, DeflateCodec, GzipCodec};
 use mqtt5::{
     ConnectOptions, ConnectionEvent, Message, MqttClient, ProtocolVersion, PublishOptions, QoS,
     WillMessage,
@@ -217,7 +219,7 @@ pub struct PubCommand {
     #[arg(long, conflicts_with = "delay")]
     pub at: Option<String>,
 
-    /// OpenTelemetry OTLP endpoint (e.g., http://localhost:4317)
+    /// OpenTelemetry OTLP endpoint (e.g., `http://localhost:4317`)
     #[cfg(feature = "opentelemetry")]
     #[arg(long)]
     pub otel_endpoint: Option<String>,
@@ -231,6 +233,21 @@ pub struct PubCommand {
     #[cfg(feature = "opentelemetry")]
     #[arg(long, default_value = "1.0")]
     pub otel_sampling: f64,
+
+    /// Compress payload using codec (gzip, deflate)
+    #[cfg(feature = "codec")]
+    #[arg(long, value_parser = ["gzip", "deflate"])]
+    pub codec: Option<String>,
+
+    /// Codec compression level (0-9, default: 6)
+    #[cfg(feature = "codec")]
+    #[arg(long, default_value = "6", requires = "codec")]
+    pub codec_level: u32,
+
+    /// Minimum payload size for compression in bytes (default: 128)
+    #[cfg(feature = "codec")]
+    #[arg(long, default_value = "128", requires = "codec")]
+    pub codec_min_size: usize,
 }
 
 fn parse_qos(s: &str) -> Result<QoS, String> {
@@ -436,6 +453,39 @@ pub async fn execute(mut cmd: PubCommand, verbose: bool, debug: bool) -> Result<
         }
 
         options = options.with_will(will);
+    }
+
+    #[cfg(feature = "codec")]
+    if let Some(ref codec_name) = cmd.codec {
+        let registry = CodecRegistry::new();
+        match codec_name.as_str() {
+            "gzip" => {
+                registry.register(
+                    GzipCodec::new()
+                        .with_level(cmd.codec_level)
+                        .with_min_size(cmd.codec_min_size),
+                );
+                registry.set_default("application/gzip")?;
+                debug!(
+                    "Gzip codec enabled: level={}, min_size={}",
+                    cmd.codec_level, cmd.codec_min_size
+                );
+            }
+            "deflate" => {
+                registry.register(
+                    DeflateCodec::new()
+                        .with_level(cmd.codec_level)
+                        .with_min_size(cmd.codec_min_size),
+                );
+                registry.set_default("application/x-deflate")?;
+                debug!(
+                    "Deflate codec enabled: level={}, min_size={}",
+                    cmd.codec_level, cmd.codec_min_size
+                );
+            }
+            _ => anyhow::bail!("Unknown codec: {codec_name}"),
+        }
+        options = options.with_codec_registry(Arc::new(registry));
     }
 
     // Configure insecure TLS mode if requested

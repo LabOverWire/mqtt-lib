@@ -1,16 +1,19 @@
+use crate::codec::CodecRegistry;
 use crate::session::SessionConfig;
 use mqtt5_protocol::time::Duration;
 use std::ops::{Deref, DerefMut};
+use std::sync::Arc;
 
 pub use mqtt5_protocol::ReasonCode;
 pub use mqtt5_protocol::ReconnectConfig;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct ConnectOptions {
     pub protocol_options: mqtt5_protocol::ConnectOptions,
     pub session_config: SessionConfig,
     pub reconnect_config: ReconnectConfig,
     pub keepalive_config: Option<mqtt5_protocol::KeepaliveConfig>,
+    pub codec_registry: Option<Arc<CodecRegistry>>,
 }
 
 impl ConnectOptions {
@@ -21,6 +24,7 @@ impl ConnectOptions {
             session_config: SessionConfig::default(),
             reconnect_config: ReconnectConfig::default(),
             keepalive_config: None,
+            codec_registry: None,
         }
     }
 
@@ -117,6 +121,27 @@ impl ConnectOptions {
             lock_retry_delay_ms: config.lock_retry_delay_ms,
         });
         self
+    }
+
+    #[must_use]
+    pub fn with_codec_registry(mut self, registry: Arc<CodecRegistry>) -> Self {
+        self.codec_registry = Some(registry);
+        self
+    }
+}
+
+impl std::fmt::Debug for ConnectOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConnectOptions")
+            .field("protocol_options", &self.protocol_options)
+            .field("session_config", &self.session_config)
+            .field("reconnect_config", &self.reconnect_config)
+            .field("keepalive_config", &self.keepalive_config)
+            .field(
+                "codec_registry",
+                &self.codec_registry.as_ref().map(|_| "CodecRegistry"),
+            )
+            .finish()
     }
 }
 

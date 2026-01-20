@@ -3,7 +3,12 @@ use mqtt5_protocol::protocol::v5::properties::{Properties, PropertyId, PropertyV
 use mqtt5_protocol::time::Duration;
 use mqtt5_protocol::types::MessageProperties;
 use mqtt5_protocol::QoS;
+#[cfg(feature = "codec")]
+use std::rc::Rc;
 use wasm_bindgen::prelude::*;
+
+#[cfg(feature = "codec")]
+use crate::codec::WasmCodecRegistry;
 
 #[wasm_bindgen]
 pub struct WasmReconnectOptions {
@@ -142,6 +147,8 @@ pub struct WasmConnectOptions {
     pub(crate) user_properties: Vec<(String, String)>,
     pub(crate) protocol_version: u8,
     pub(crate) backup_urls: Vec<String>,
+    #[cfg(feature = "codec")]
+    pub(crate) codec_registry: Option<Rc<WasmCodecRegistry>>,
 }
 
 #[wasm_bindgen]
@@ -167,6 +174,8 @@ impl WasmConnectOptions {
             user_properties: Vec::new(),
             protocol_version: 5,
             backup_urls: Vec::new(),
+            #[cfg(feature = "codec")]
+            codec_registry: None,
         }
     }
 
@@ -335,6 +344,18 @@ impl WasmConnectOptions {
     #[must_use]
     pub fn getBackupUrls(&self) -> Vec<String> {
         self.backup_urls.clone()
+    }
+
+    #[cfg(feature = "codec")]
+    #[wasm_bindgen(js_name = "setCodecRegistry")]
+    pub fn set_codec_registry(&mut self, registry: WasmCodecRegistry) {
+        self.codec_registry = Some(Rc::new(registry));
+    }
+
+    #[cfg(feature = "codec")]
+    #[wasm_bindgen(js_name = "clearCodecRegistry")]
+    pub fn clear_codec_registry(&mut self) {
+        self.codec_registry = None;
     }
 
     #[allow(clippy::too_many_lines)]

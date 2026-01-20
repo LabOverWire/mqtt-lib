@@ -775,6 +775,7 @@ impl BridgeConnection {
             qos: decision.qos,
             retain: packet.retain,
             properties: msg_props.into(),
+            skip_codec: false,
         };
 
         let client = self.client.clone();

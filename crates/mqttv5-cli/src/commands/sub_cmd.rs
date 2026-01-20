@@ -7,6 +7,8 @@ use clap::Args;
 use dialoguer::{Input, Select};
 use mqtt5::client::auth_handlers::{JwtAuthHandler, ScramSha256AuthHandler};
 use mqtt5::time::Duration;
+#[cfg(feature = "codec")]
+use mqtt5::{CodecRegistry, DeflateCodec, GzipCodec};
 use mqtt5::{ConnectOptions, MqttClient, ProtocolVersion, QoS, WillMessage};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -167,7 +169,7 @@ pub struct SubCommand {
     #[arg(long, default_value = "30", value_parser = parse_duration_secs)]
     pub quic_connect_timeout: u64,
 
-    /// OpenTelemetry OTLP endpoint (e.g., http://localhost:4317)
+    /// OpenTelemetry OTLP endpoint (e.g., `http://localhost:4317`)
     #[cfg(feature = "opentelemetry")]
     #[arg(long)]
     pub otel_endpoint: Option<String>,
@@ -181,6 +183,11 @@ pub struct SubCommand {
     #[cfg(feature = "opentelemetry")]
     #[arg(long, default_value = "1.0")]
     pub otel_sampling: f64,
+
+    /// Enable codec decoding for incoming messages (gzip, deflate, or all)
+    #[cfg(feature = "codec")]
+    #[arg(long, value_parser = ["gzip", "deflate", "all"])]
+    pub codec: Option<String>,
 }
 
 fn parse_qos(s: &str) -> Result<QoS, String> {
@@ -362,6 +369,28 @@ pub async fn execute(mut cmd: SubCommand, verbose: bool, debug: bool) -> Result<
         }
 
         options = options.with_will(will);
+    }
+
+    #[cfg(feature = "codec")]
+    if let Some(ref codec_name) = cmd.codec {
+        let registry = CodecRegistry::new();
+        match codec_name.as_str() {
+            "gzip" => {
+                registry.register(GzipCodec::new());
+                debug!("Gzip codec decoding enabled");
+            }
+            "deflate" => {
+                registry.register(DeflateCodec::new());
+                debug!("Deflate codec decoding enabled");
+            }
+            "all" => {
+                registry.register(GzipCodec::new());
+                registry.register(DeflateCodec::new());
+                debug!("All codec decoding enabled (gzip, deflate)");
+            }
+            _ => anyhow::bail!("Unknown codec: {codec_name}"),
+        }
+        options = options.with_codec_registry(Arc::new(registry));
     }
 
     // Configure insecure TLS mode if requested

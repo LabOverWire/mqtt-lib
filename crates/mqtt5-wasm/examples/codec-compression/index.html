@@ -1,0 +1,571 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MQTT Codec Compression - mqtt5-wasm</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pako/2.1.0/pako.min.js"></script>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            max-width: 1000px;
+            margin: 40px auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .header {
+            background: white;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+        h1 {
+            color: #333;
+            margin-top: 0;
+        }
+        .card {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+        .card h2 {
+            margin-top: 0;
+            color: #333;
+            font-size: 1.2em;
+            border-bottom: 2px solid #007bff;
+            padding-bottom: 10px;
+        }
+        .status {
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 4px;
+            font-weight: 500;
+            font-size: 0.9em;
+        }
+        .status.connected {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        .status.disconnected {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        .control-group {
+            margin: 15px 0;
+        }
+        .control-group label {
+            display: block;
+            font-size: 0.9em;
+            color: #666;
+            margin-bottom: 5px;
+        }
+        input, textarea, select {
+            width: calc(100% - 22px);
+            padding: 10px;
+            border-radius: 4px;
+            border: 1px solid #ddd;
+            font-size: 14px;
+        }
+        textarea {
+            resize: vertical;
+            min-height: 100px;
+            font-family: monospace;
+        }
+        button {
+            background: #007bff;
+            color: white;
+            border: none;
+            cursor: pointer;
+            padding: 10px 20px;
+            border-radius: 4px;
+            font-size: 14px;
+            margin: 5px 5px 5px 0;
+        }
+        button:hover {
+            background: #0056b3;
+        }
+        button:disabled {
+            background: #6c757d;
+            cursor: not-allowed;
+        }
+        button.secondary {
+            background: #6c757d;
+        }
+        button.secondary:hover {
+            background: #545b62;
+        }
+        .highlight {
+            background: #e7f3ff;
+            padding: 15px;
+            border-radius: 4px;
+            border-left: 4px solid #007bff;
+            margin: 15px 0;
+            font-size: 0.9em;
+        }
+        .codec-config {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+        }
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 10px;
+            margin: 15px 0;
+        }
+        .stat-box {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 4px;
+            text-align: center;
+        }
+        .stat-box .value {
+            font-size: 1.5em;
+            font-weight: bold;
+            color: #007bff;
+        }
+        .stat-box .label {
+            font-size: 0.8em;
+            color: #666;
+            margin-top: 5px;
+        }
+        .messages {
+            max-height: 400px;
+            overflow-y: auto;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            padding: 10px;
+            background: #fafafa;
+        }
+        .message {
+            padding: 10px;
+            margin: 8px 0;
+            background: white;
+            border-radius: 4px;
+            border-left: 4px solid #28a745;
+        }
+        .message.sent {
+            border-left-color: #007bff;
+        }
+        .message .header {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 5px;
+            background: transparent;
+            padding: 0;
+            box-shadow: none;
+        }
+        .message .topic {
+            font-weight: bold;
+            color: #333;
+        }
+        .message .compression-info {
+            font-size: 0.8em;
+            color: #28a745;
+        }
+        .message .payload {
+            font-family: monospace;
+            font-size: 0.85em;
+            background: #f8f9fa;
+            padding: 8px;
+            border-radius: 4px;
+            word-break: break-all;
+            white-space: pre-wrap;
+        }
+        .message .time {
+            font-size: 0.75em;
+            color: #999;
+            margin-top: 5px;
+        }
+        #debug {
+            margin-top: 15px;
+            padding: 10px;
+            background: #f8f9fa;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 0.8em;
+            max-height: 150px;
+            overflow-y: auto;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🗜️ MQTT Codec Compression Demo</h1>
+        <p>Demonstrates <strong>automatic payload compression</strong> using gzip/deflate codecs in the WASM client.</p>
+        <div class="highlight">
+            <strong>How it works:</strong> Messages larger than the threshold (default 128 bytes) are automatically
+            compressed before sending and decompressed when received. The <code>content-type</code> MQTT property
+            indicates the compression format.
+        </div>
+    </div>
+
+    <div class="card">
+        <h2>📊 Compression Statistics</h2>
+        <div class="stats">
+            <div class="stat-box">
+                <div class="value" id="stat-messages">0</div>
+                <div class="label">Messages Sent</div>
+            </div>
+            <div class="stat-box">
+                <div class="value" id="stat-original">0 B</div>
+                <div class="label">Original Size</div>
+            </div>
+            <div class="stat-box">
+                <div class="value" id="stat-compressed">0 B</div>
+                <div class="label">Compressed Size</div>
+            </div>
+            <div class="stat-box">
+                <div class="value" id="stat-ratio">0%</div>
+                <div class="label">Compression Ratio</div>
+            </div>
+        </div>
+    </div>
+
+    <div class="card">
+        <h2>⚙️ Codec Configuration</h2>
+        <div class="codec-config">
+            <div class="control-group">
+                <label>Compression Type</label>
+                <select id="codec-type">
+                    <option value="gzip">Gzip (application/gzip)</option>
+                    <option value="deflate">Deflate (application/deflate)</option>
+                    <option value="none">None (no compression)</option>
+                </select>
+            </div>
+            <div class="control-group">
+                <label>Compression Level (1-9)</label>
+                <input type="number" id="codec-level" value="6" min="1" max="9">
+            </div>
+            <div class="control-group">
+                <label>Minimum Size Threshold (bytes)</label>
+                <input type="number" id="codec-threshold" value="128" min="0">
+            </div>
+            <div class="control-group">
+                <label>Broker URL</label>
+                <input type="text" id="broker-url" value="ws://broker.hivemq.com:8000/mqtt">
+            </div>
+        </div>
+        <button id="connect-btn">Connect with Codec</button>
+        <button id="disconnect-btn" class="secondary" disabled>Disconnect</button>
+        <div id="connection-status" class="status disconnected">Disconnected</div>
+    </div>
+
+    <div class="card">
+        <h2>📤 Publish Message</h2>
+        <div class="control-group">
+            <label>Topic</label>
+            <input type="text" id="publish-topic" value="mqtt5-wasm/codec-demo" disabled>
+        </div>
+        <div class="control-group">
+            <label>Payload (larger payloads will be compressed)</label>
+            <textarea id="publish-payload" disabled>This is a test message. To see compression in action, paste a longer text here. The codec will automatically compress payloads larger than the configured threshold. Try pasting a JSON object, log data, or any repetitive text to see good compression ratios!</textarea>
+        </div>
+        <button id="publish-btn" disabled>Publish</button>
+        <button id="generate-large-btn" class="secondary" disabled>Generate Large Payload</button>
+    </div>
+
+    <div class="card">
+        <h2>📥 Received Messages</h2>
+        <div class="control-group">
+            <label>Subscribe Topic</label>
+            <input type="text" id="subscribe-topic" value="mqtt5-wasm/codec-demo" disabled>
+            <button id="subscribe-btn" disabled style="margin-top: 10px;">Subscribe</button>
+        </div>
+        <div id="messages" class="messages">
+            <em>No messages yet. Connect and subscribe to see messages.</em>
+        </div>
+    </div>
+
+    <div id="debug">
+        <strong>Debug Log:</strong>
+        <div id="debug-messages"></div>
+    </div>
+
+    <script type="module">
+        import init, {
+            WasmMqttClient,
+            WasmConnectOptions,
+            WasmPublishOptions,
+            WasmSubscribeOptions,
+            createCodecRegistry,
+            createGzipCodec,
+            createDeflateCodec
+        } from './pkg/mqtt5_wasm.js';
+
+        let client = null;
+        let codecRegistry = null;
+        let stats = { messages: 0, original: 0, compressed: 0 };
+
+        function debugLog(msg) {
+            const messagesDiv = document.getElementById('debug-messages');
+            const line = document.createElement('div');
+            line.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+            messagesDiv.appendChild(line);
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+            console.log(msg);
+        }
+
+        function updateStatus(connected) {
+            const statusEl = document.getElementById('connection-status');
+            statusEl.className = `status ${connected ? 'connected' : 'disconnected'}`;
+            statusEl.textContent = connected ? 'Connected' : 'Disconnected';
+
+            document.getElementById('connect-btn').disabled = connected;
+            document.getElementById('disconnect-btn').disabled = !connected;
+            document.getElementById('publish-topic').disabled = !connected;
+            document.getElementById('publish-payload').disabled = !connected;
+            document.getElementById('publish-btn').disabled = !connected;
+            document.getElementById('generate-large-btn').disabled = !connected;
+            document.getElementById('subscribe-topic').disabled = !connected;
+            document.getElementById('subscribe-btn').disabled = !connected;
+            document.getElementById('codec-type').disabled = connected;
+            document.getElementById('codec-level').disabled = connected;
+            document.getElementById('codec-threshold').disabled = connected;
+            document.getElementById('broker-url').disabled = connected;
+        }
+
+        function formatBytes(bytes) {
+            if (bytes === 0) return '0 B';
+            const k = 1024;
+            const sizes = ['B', 'KB', 'MB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+        }
+
+        function updateStats(originalSize, compressedSize) {
+            stats.messages++;
+            stats.original += originalSize;
+            stats.compressed += compressedSize;
+
+            document.getElementById('stat-messages').textContent = stats.messages;
+            document.getElementById('stat-original').textContent = formatBytes(stats.original);
+            document.getElementById('stat-compressed').textContent = formatBytes(stats.compressed);
+
+            const ratio = stats.original > 0
+                ? Math.round((1 - stats.compressed / stats.original) * 100)
+                : 0;
+            document.getElementById('stat-ratio').textContent = ratio + '%';
+        }
+
+        function addMessage(topic, payload, direction, compressionInfo) {
+            const messagesEl = document.getElementById('messages');
+            if (messagesEl.querySelector('em')) {
+                messagesEl.innerHTML = '';
+            }
+
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message ${direction}`;
+
+            let payloadText;
+            if (payload instanceof Uint8Array) {
+                payloadText = new TextDecoder().decode(payload);
+            } else {
+                payloadText = payload;
+            }
+
+            const truncated = payloadText.length > 500
+                ? payloadText.substring(0, 500) + '... [truncated]'
+                : payloadText;
+
+            messageDiv.innerHTML = `
+                <div class="header">
+                    <span class="topic">${topic}</span>
+                    <span class="compression-info">${compressionInfo}</span>
+                </div>
+                <div class="payload">${truncated}</div>
+                <div class="time">${new Date().toLocaleTimeString()} - ${direction}</div>
+            `;
+
+            messagesEl.insertBefore(messageDiv, messagesEl.firstChild);
+        }
+
+        function generateLargePayload() {
+            const data = {
+                timestamp: new Date().toISOString(),
+                sensor_id: "sensor-" + Math.floor(Math.random() * 1000),
+                readings: []
+            };
+
+            for (let i = 0; i < 50; i++) {
+                data.readings.push({
+                    time: new Date(Date.now() - i * 1000).toISOString(),
+                    temperature: (20 + Math.random() * 10).toFixed(2),
+                    humidity: (40 + Math.random() * 30).toFixed(2),
+                    pressure: (1000 + Math.random() * 50).toFixed(2),
+                    status: "operational",
+                    metadata: {
+                        location: "Building A, Floor " + Math.floor(Math.random() * 10),
+                        device_type: "environmental_sensor_v2",
+                        firmware: "1.2.3"
+                    }
+                });
+            }
+
+            return JSON.stringify(data, null, 2);
+        }
+
+        async function handleConnect() {
+            const brokerUrl = document.getElementById('broker-url').value;
+            const codecType = document.getElementById('codec-type').value;
+            const codecLevel = parseInt(document.getElementById('codec-level').value);
+            const threshold = parseInt(document.getElementById('codec-threshold').value);
+
+            try {
+                debugLog('Creating codec registry...');
+                codecRegistry = createCodecRegistry();
+
+                if (codecType === 'gzip') {
+                    const gzipCodec = createGzipCodec(codecLevel, threshold);
+                    codecRegistry.registerGzip(gzipCodec);
+                    codecRegistry.setDefault('application/gzip');
+                    debugLog(`Gzip codec configured: level=${codecLevel}, threshold=${threshold}`);
+                } else if (codecType === 'deflate') {
+                    const deflateCodec = createDeflateCodec(codecLevel, threshold);
+                    codecRegistry.registerDeflate(deflateCodec);
+                    codecRegistry.setDefault('application/deflate');
+                    debugLog(`Deflate codec configured: level=${codecLevel}, threshold=${threshold}`);
+                } else {
+                    debugLog('No compression enabled');
+                }
+
+                const clientId = `mqtt5-codec-${Date.now()}`;
+                client = new WasmMqttClient(clientId);
+                debugLog(`Client created: ${clientId}`);
+
+                const connectOpts = new WasmConnectOptions();
+                connectOpts.keepAlive = 60;
+                connectOpts.cleanStart = true;
+
+                if (codecType !== 'none') {
+                    connectOpts.setCodecRegistry(codecRegistry);
+                    debugLog('Codec registry attached to connection options');
+                }
+
+                client.on_connect((reasonCode, sessionPresent) => {
+                    debugLog(`Connected! reason=${reasonCode}, session=${sessionPresent}`);
+                    updateStatus(true);
+                });
+
+                client.on_disconnect(() => {
+                    debugLog('Disconnected');
+                    updateStatus(false);
+                });
+
+                client.on_error((error) => {
+                    debugLog(`Error: ${error}`);
+                });
+
+                debugLog(`Connecting to ${brokerUrl}...`);
+                await client.connect_with_options(brokerUrl, connectOpts);
+
+            } catch (error) {
+                debugLog(`Connection failed: ${error}`);
+                console.error(error);
+            }
+        }
+
+        async function handleDisconnect() {
+            if (client) {
+                await client.disconnect();
+                client = null;
+            }
+        }
+
+        async function handleSubscribe() {
+            const topic = document.getElementById('subscribe-topic').value;
+            if (!topic) return;
+
+            try {
+                const subOpts = new WasmSubscribeOptions();
+                subOpts.qos = 1;
+
+                await client.subscribe_with_options(topic, (receivedTopic, payload, properties) => {
+                    const contentType = properties?.contentType || 'none';
+                    const originalSize = payload.length;
+
+                    let compressionInfo = `${formatBytes(originalSize)}`;
+                    if (contentType && contentType !== 'none') {
+                        compressionInfo += ` (decompressed from ${contentType})`;
+                    } else {
+                        compressionInfo += ' (uncompressed)';
+                    }
+
+                    addMessage(receivedTopic, payload, 'received', compressionInfo);
+                    debugLog(`Received on ${receivedTopic}: ${originalSize} bytes, content-type: ${contentType}`);
+                }, subOpts);
+
+                debugLog(`Subscribed to: ${topic}`);
+            } catch (error) {
+                debugLog(`Subscribe failed: ${error}`);
+            }
+        }
+
+        async function handlePublish() {
+            const topic = document.getElementById('publish-topic').value;
+            const payload = document.getElementById('publish-payload').value;
+            if (!topic || !payload) return;
+
+            try {
+                const encoder = new TextEncoder();
+                const payloadBytes = encoder.encode(payload);
+                const originalSize = payloadBytes.length;
+
+                const pubOpts = new WasmPublishOptions();
+                pubOpts.qos = 1;
+
+                await client.publish_with_options(topic, payloadBytes, pubOpts);
+
+                const threshold = parseInt(document.getElementById('codec-threshold').value);
+                const codecType = document.getElementById('codec-type').value;
+                const wasCompressed = codecType !== 'none' && originalSize >= threshold;
+
+                let compressionInfo = `${formatBytes(originalSize)}`;
+                if (wasCompressed) {
+                    const estimatedCompressed = Math.round(originalSize * 0.3);
+                    compressionInfo += ` → ~${formatBytes(estimatedCompressed)} (${codecType})`;
+                    updateStats(originalSize, estimatedCompressed);
+                } else {
+                    compressionInfo += ' (below threshold)';
+                    updateStats(originalSize, originalSize);
+                }
+
+                addMessage(topic, payload, 'sent', compressionInfo);
+                debugLog(`Published to ${topic}: ${originalSize} bytes`);
+
+            } catch (error) {
+                debugLog(`Publish failed: ${error}`);
+            }
+        }
+
+        async function main() {
+            try {
+                debugLog('Initializing WASM module...');
+                await init();
+                debugLog('WASM initialized successfully');
+
+                document.getElementById('connect-btn').addEventListener('click', handleConnect);
+                document.getElementById('disconnect-btn').addEventListener('click', handleDisconnect);
+                document.getElementById('subscribe-btn').addEventListener('click', handleSubscribe);
+                document.getElementById('publish-btn').addEventListener('click', handlePublish);
+                document.getElementById('generate-large-btn').addEventListener('click', () => {
+                    document.getElementById('publish-payload').value = generateLargePayload();
+                });
+
+                debugLog('Application ready. Configure codec and connect to begin.');
+
+            } catch (error) {
+                debugLog(`Initialization failed: ${error}`);
+                console.error(error);
+            }
+        }
+
+        main();
+    </script>
+</body>
+</html>

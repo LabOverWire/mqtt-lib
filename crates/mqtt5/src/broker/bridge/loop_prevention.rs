@@ -44,6 +44,16 @@ impl LoopPrevention {
         }
     }
 
+    #[must_use]
+    pub fn ttl(&self) -> Duration {
+        self.ttl
+    }
+
+    #[must_use]
+    pub fn max_cache_size(&self) -> usize {
+        self.max_cache_size
+    }
+
     /// Checks if a message should be forwarded (returns false if loop detected)
     pub async fn check_message(&self, packet: &PublishPacket) -> bool {
         let fingerprint = Self::calculate_fingerprint(packet);

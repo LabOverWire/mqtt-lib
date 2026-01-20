@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [mqtt5 0.20.0] / [mqtt5-wasm 0.9.0] / [mqttv5-cli 0.19.0] - 2026-01-19
+
+### Added
+
+- **Codec compression system** for payload compression/decompression
+  - `codec-gzip` and `codec-deflate` features for native mqtt5 crate
+  - `codec` feature for mqtt5-wasm with gzip and deflate support
+  - `CodecRegistry` for managing multiple compression algorithms
+  - Automatic compression with configurable minimum payload size threshold
+  - CLI flags: `--codec` (gzip/deflate), `--codec-level` (1-9), `--codec-min-size` (bytes)
+
+- **Bridge loop prevention configuration** via wasm-bindgen setters
+  - `loop_prevention_ttl_secs` setter on `WasmBridgeConfig`
+  - `loop_prevention_cache_size` setter on `WasmBridgeConfig`
+  - SHA-256 fingerprinting for duplicate message detection
+  - Configurable TTL for fingerprint cache entries
+
+- **WASM examples** for new features
+  - `codec-compression/` - Interactive compression demo with gzip/deflate
+  - `loop-prevention/` - Bridge loop prevention visualization
+
+### Fixed
+
+- **WASM stack overflow** with miniz_oxide compression
+  - Uses miniz_oxide 0.9.0 with box fix for `LZOxide.codes` array
+  - Moves 64KB allocation from stack to heap
+  - Compression now works with default 1MB WASM stack
+
+### Changed
+
+- Bridge configuration now uses wasm-bindgen setters for JavaScript property access
+- WASM broker connection stability improvements
+
 ## [mqtt5-protocol 0.9.2] - 2026-01-17
 
 ### Fixed

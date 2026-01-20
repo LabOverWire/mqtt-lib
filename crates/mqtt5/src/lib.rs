@@ -174,6 +174,7 @@ pub mod broker;
 pub mod callback;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod client;
+pub mod codec;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod crypto;
 pub mod session;
@@ -192,6 +193,11 @@ pub use client::{
     AuthHandler, AuthResponse, ConnectionEvent, DisconnectReason, JwtAuthHandler, MockCall,
     MockMqttClient, MqttClient, MqttClientTrait, PlainAuthHandler, ScramSha256AuthHandler,
 };
+#[cfg(feature = "codec-deflate")]
+pub use codec::DeflateCodec;
+#[cfg(feature = "codec-gzip")]
+pub use codec::GzipCodec;
+pub use codec::{CodecRegistry, PayloadCodec};
 pub use mqtt5_protocol::{
     is_valid_client_id, is_valid_topic_filter, is_valid_topic_name, parse_shared_subscription,
     strip_shared_subscription_prefix, topic_matches_filter, validate_client_id,

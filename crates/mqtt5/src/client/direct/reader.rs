@@ -2,6 +2,7 @@
 
 use crate::callback::CallbackManager;
 use crate::client::auth_handler::{AuthHandler, AuthResponse};
+use crate::codec::CodecRegistry;
 use crate::error::{MqttError, Result};
 use crate::packet::auth::AuthPacket;
 use crate::packet::suback::SubAckPacket;
@@ -40,6 +41,7 @@ pub(super) struct PacketReaderContext {
     pub(super) auth_handler: Option<Arc<dyn AuthHandler>>,
     pub(super) auth_method: Option<String>,
     pub(super) keepalive_state: Arc<Mutex<KeepaliveState>>,
+    pub(super) codec_registry: Option<Arc<CodecRegistry>>,
 }
 
 pub(super) async fn packet_reader_task_with_responses(
@@ -114,6 +116,7 @@ pub(super) async fn packet_reader_task_with_responses(
                     &ctx.callback_manager,
                     None,
                     &ctx.keepalive_state,
+                    ctx.codec_registry.as_ref(),
                 )
                 .await
                 {
@@ -320,6 +323,7 @@ async fn quic_stream_reader_task(
                     &ctx.callback_manager,
                     flow_id,
                     &ctx.keepalive_state,
+                    ctx.codec_registry.as_ref(),
                 )
                 .await
                 {

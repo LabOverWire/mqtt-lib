@@ -9,6 +9,8 @@ pub mod broker;
 pub mod client;
 #[cfg(feature = "broker")]
 mod client_handler;
+#[cfg(feature = "codec")]
+pub mod codec;
 pub mod config;
 pub mod decoder;
 pub mod transport;
@@ -19,6 +21,11 @@ pub use bridge::{WasmBridgeConfig, WasmBridgeDirection, WasmTopicMapping};
 #[cfg(feature = "broker")]
 pub use broker::{WasmBroker, WasmBrokerConfig};
 pub use client::WasmMqttClient;
+#[cfg(feature = "codec")]
+pub use codec::{
+    create_codec_registry, create_deflate_codec, create_gzip_codec, WasmCodecRegistry,
+    WasmDeflateCodec, WasmGzipCodec, WasmPayloadCodec,
+};
 pub use config::{
     WasmConnectOptions, WasmPublishOptions, WasmReconnectOptions, WasmSubscribeOptions,
     WasmWillMessage,

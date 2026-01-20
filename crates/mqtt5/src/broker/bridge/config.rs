@@ -147,6 +147,14 @@ pub struct BridgeConfig {
     /// Topic mappings for this bridge
     #[serde(default)]
     pub topics: Vec<TopicMapping>,
+
+    /// Loop prevention TTL - how long to remember message fingerprints
+    #[serde(with = "humantime_serde", default = "default_loop_prevention_ttl")]
+    pub loop_prevention_ttl: Duration,
+
+    /// Loop prevention cache size - maximum number of fingerprints to store
+    #[serde(default = "default_loop_prevention_cache_size")]
+    pub loop_prevention_cache_size: usize,
 }
 
 /// Topic mapping configuration
@@ -263,6 +271,14 @@ fn default_retry_jitter() -> bool {
     true
 }
 
+fn default_loop_prevention_ttl() -> Duration {
+    Duration::from_secs(60)
+}
+
+fn default_loop_prevention_cache_size() -> usize {
+    10000
+}
+
 impl BridgeConfig {
     /// Creates a new bridge configuration
     pub fn new(name: impl Into<String>, remote_address: impl Into<String>) -> Self {
@@ -303,6 +319,8 @@ impl BridgeConfig {
             primary_health_check_interval: Duration::from_secs(30),
             enable_failback: true,
             topics: Vec::new(),
+            loop_prevention_ttl: Duration::from_secs(60),
+            loop_prevention_cache_size: 10000,
         }
     }
 
@@ -451,5 +469,56 @@ mod tests {
 
         let deserialized: BridgeConfig = serde_json::from_str(&json).unwrap();
         assert!(!deserialized.try_private);
+    }
+
+    #[test]
+    fn test_loop_prevention_defaults() {
+        let config = BridgeConfig::new("test-bridge", "remote.broker:1883").add_topic(
+            "test/#",
+            BridgeDirection::Both,
+            QoS::AtMostOnce,
+        );
+
+        assert_eq!(config.loop_prevention_ttl, Duration::from_secs(60));
+        assert_eq!(config.loop_prevention_cache_size, 10000);
+    }
+
+    #[test]
+    fn test_loop_prevention_serialization() {
+        let mut config = BridgeConfig::new("test-bridge", "remote.broker:1883").add_topic(
+            "test/#",
+            BridgeDirection::Both,
+            QoS::AtMostOnce,
+        );
+        config.loop_prevention_ttl = Duration::from_secs(120);
+        config.loop_prevention_cache_size = 5000;
+
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(json.contains("\"loop_prevention_ttl\":\"2m\""));
+        assert!(json.contains("\"loop_prevention_cache_size\":5000"));
+
+        let deserialized: BridgeConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.loop_prevention_ttl, Duration::from_secs(120));
+        assert_eq!(deserialized.loop_prevention_cache_size, 5000);
+    }
+
+    #[test]
+    fn test_loop_prevention_from_json() {
+        let json = r#"{
+            "name": "test-bridge",
+            "client_id": "bridge-test",
+            "remote_address": "broker:1883",
+            "loop_prevention_ttl": "5m",
+            "loop_prevention_cache_size": 20000,
+            "topics": [{
+                "pattern": "test/#",
+                "direction": "both",
+                "qos": "AtMostOnce"
+            }]
+        }"#;
+
+        let config: BridgeConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.loop_prevention_ttl, Duration::from_secs(300));
+        assert_eq!(config.loop_prevention_cache_size, 20000);
     }
 }

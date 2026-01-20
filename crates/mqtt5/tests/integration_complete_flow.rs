@@ -478,6 +478,7 @@ async fn test_publish_options_and_properties() {
         qos: QoS::AtLeastOnce,
         retain: true,
         properties,
+        skip_codec: false,
     };
 
     let _ = client

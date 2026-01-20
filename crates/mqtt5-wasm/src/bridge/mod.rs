@@ -1,4 +1,7 @@
+mod loop_prevention;
+
 use crate::client::{RustMessage, WasmMqttClient};
+use loop_prevention::WasmLoopPrevention;
 use mqtt5::broker::router::MessageRouter;
 use mqtt5::packet::publish::PublishPacket;
 use mqtt5_protocol::{evaluate_forwarding, BridgeDirection, BridgeStats, QoS, TopicMappingCore};
@@ -97,6 +100,8 @@ pub struct WasmBridgeConfig {
     username: Option<String>,
     password: Option<String>,
     topics: Vec<WasmTopicMapping>,
+    loop_prevention_ttl_secs: u64,
+    loop_prevention_cache_size: usize,
 }
 
 #[wasm_bindgen]
@@ -113,6 +118,8 @@ impl WasmBridgeConfig {
             username: None,
             password: None,
             topics: Vec::new(),
+            loop_prevention_ttl_secs: 60,
+            loop_prevention_cache_size: 10000,
         }
     }
 
@@ -139,6 +146,23 @@ impl WasmBridgeConfig {
     #[wasm_bindgen(setter)]
     pub fn set_password(&mut self, password: Option<String>) {
         self.password = password;
+    }
+
+    /// Sets how long message fingerprints are remembered for loop detection.
+    ///
+    /// Messages with the same fingerprint seen within this window are blocked.
+    /// Default: 60 seconds.
+    #[wasm_bindgen(setter)]
+    pub fn set_loop_prevention_ttl_secs(&mut self, secs: u64) {
+        self.loop_prevention_ttl_secs = secs;
+    }
+
+    /// Sets the maximum number of message fingerprints to cache.
+    ///
+    /// When exceeded, expired entries are cleaned up. Default: 10000.
+    #[wasm_bindgen(setter)]
+    pub fn set_loop_prevention_cache_size(&mut self, size: usize) {
+        self.loop_prevention_cache_size = size;
     }
 
     #[wasm_bindgen]
@@ -305,6 +329,7 @@ impl WasmBridgeConnection {
 pub struct WasmBridgeManager {
     bridges: Rc<RefCell<HashMap<String, Rc<WasmBridgeConnection>>>>,
     router: Arc<MessageRouter>,
+    loop_prevention: Rc<RefCell<Option<Rc<WasmLoopPrevention>>>>,
 }
 
 impl WasmBridgeManager {
@@ -313,7 +338,45 @@ impl WasmBridgeManager {
         Self {
             bridges: Rc::new(RefCell::new(HashMap::new())),
             router,
+            loop_prevention: Rc::new(RefCell::new(None)),
         }
+    }
+
+    pub fn set_loop_prevention(&self, ttl_secs: u64, cache_size: usize) {
+        let lp = Rc::new(WasmLoopPrevention::new(ttl_secs, cache_size));
+        *self.loop_prevention.borrow_mut() = Some(lp);
+        tracing::info!(
+            ttl_secs = ttl_secs,
+            cache_size = cache_size,
+            "Loop prevention configured at manager level"
+        );
+    }
+
+    fn get_or_init_loop_prevention(&self, config: &WasmBridgeConfig) -> Rc<WasmLoopPrevention> {
+        let mut guard = self.loop_prevention.borrow_mut();
+        if let Some(ref lp) = *guard {
+            let existing_ttl = lp.ttl_secs();
+            let existing_cache_size = lp.max_cache_size();
+            if config.loop_prevention_ttl_secs != existing_ttl
+                || config.loop_prevention_cache_size != existing_cache_size
+            {
+                tracing::warn!(
+                    bridge = %config.name,
+                    bridge_ttl_secs = config.loop_prevention_ttl_secs,
+                    bridge_cache_size = config.loop_prevention_cache_size,
+                    active_ttl_secs = existing_ttl,
+                    active_cache_size = existing_cache_size,
+                    "Bridge has different loop prevention settings than active config; using active config"
+                );
+            }
+            return lp.clone();
+        }
+        let lp = Rc::new(WasmLoopPrevention::new(
+            config.loop_prevention_ttl_secs,
+            config.loop_prevention_cache_size,
+        ));
+        *guard = Some(lp.clone());
+        lp
     }
 
     /// # Errors
@@ -330,6 +393,8 @@ impl WasmBridgeManager {
                 "Bridge '{name}' already exists"
             )));
         }
+
+        self.get_or_init_loop_prevention(&config);
 
         let connection = WasmBridgeConnection::new(config, self.router.clone())
             .map_err(|e| JsValue::from_str(&e))?;
@@ -354,6 +419,17 @@ impl WasmBridgeManager {
     pub async fn forward_to_bridges(&self, packet: &PublishPacket) {
         if packet.topic_name.starts_with("$SYS/") {
             return;
+        }
+
+        if let Some(lp) = self.loop_prevention.borrow().as_ref() {
+            if !lp.check_message(
+                &packet.topic_name,
+                &packet.payload,
+                u8::from(packet.qos),
+                packet.retain,
+            ) {
+                return;
+            }
         }
 
         let bridges: Vec<_> = self.bridges.borrow().values().cloned().collect();

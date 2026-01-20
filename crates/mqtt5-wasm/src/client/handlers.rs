@@ -11,6 +11,9 @@ use super::packet::encode_packet;
 use super::state::ClientState;
 use super::RustMessage;
 
+#[cfg(feature = "codec")]
+use crate::codec::WasmCodecRegistry;
+
 #[allow(clippy::too_many_lines)]
 pub fn handle_incoming_packet(state: &Rc<RefCell<ClientState>>, packet: Packet) {
     match packet {
@@ -148,13 +151,26 @@ fn deliver_message(
     retain: bool,
     properties: &mqtt5_protocol::types::MessageProperties,
 ) {
+    #[cfg(feature = "codec")]
+    let decoded_payload = {
+        let registry = state.borrow().codec_registry.clone();
+        decode_payload_if_needed(
+            payload,
+            properties.content_type.as_deref(),
+            registry.as_ref(),
+        )
+    };
+
+    #[cfg(not(feature = "codec"))]
+    let decoded_payload = payload.to_vec();
+
     let subscriptions = state.borrow().subscriptions.clone();
     let rust_subscriptions = state.borrow().rust_subscriptions.clone();
 
     for (filter, callback) in &subscriptions {
         if mqtt5_protocol::validation::topic_matches_filter(topic, filter) {
             let topic_js = JsValue::from_str(topic);
-            let payload_array = js_sys::Uint8Array::from(payload);
+            let payload_array = js_sys::Uint8Array::from(decoded_payload.as_slice());
             let props_js: WasmMessageProperties = properties.clone().into();
 
             if let Err(e) = callback.call3(
@@ -172,13 +188,27 @@ fn deliver_message(
         if mqtt5_protocol::validation::topic_matches_filter(topic, filter) {
             let msg = RustMessage {
                 topic: topic.to_string(),
-                payload: payload.to_vec(),
+                payload: decoded_payload.clone(),
                 qos,
                 retain,
                 properties: properties.clone(),
             };
             callback(msg);
         }
+    }
+}
+
+#[cfg(feature = "codec")]
+fn decode_payload_if_needed(
+    payload: &[u8],
+    content_type: Option<&str>,
+    registry: Option<&Rc<WasmCodecRegistry>>,
+) -> Vec<u8> {
+    if let Some(reg) = registry {
+        reg.decode_if_needed(payload, content_type)
+            .unwrap_or_else(|_| payload.to_vec())
+    } else {
+        payload.to_vec()
     }
 }
 

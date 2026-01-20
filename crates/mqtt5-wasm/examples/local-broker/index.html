@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WASM Local Broker - Multi-Client Demo</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            max-width: 1200px;
+            margin: 40px auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .header {
+            background: white;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+        h1 {
+            color: #333;
+            margin-top: 0;
+        }
+        .clients-container {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+            gap: 20px;
+            margin-top: 20px;
+        }
+        .client {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .client h2 {
+            margin-top: 0;
+            color: #333;
+            font-size: 1.2em;
+            border-bottom: 2px solid #007bff;
+            padding-bottom: 10px;
+        }
+        .client.client-1 h2 { border-color: #007bff; }
+        .client.client-2 h2 { border-color: #28a745; }
+        .client.client-3 h2 { border-color: #ffc107; }
+        .status {
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 4px;
+            font-weight: 500;
+            font-size: 0.9em;
+        }
+        .status.connected {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        .status.disconnected {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        .controls {
+            margin: 15px 0;
+        }
+        .control-group {
+            margin: 10px 0;
+        }
+        .control-group label {
+            display: block;
+            font-size: 0.9em;
+            color: #666;
+            margin-bottom: 5px;
+        }
+        input {
+            width: calc(100% - 22px);
+            padding: 8px;
+            border-radius: 4px;
+            border: 1px solid #ddd;
+            font-size: 14px;
+        }
+        button {
+            background: #007bff;
+            color: white;
+            border: none;
+            cursor: pointer;
+            padding: 8px 16px;
+            border-radius: 4px;
+            font-size: 14px;
+            margin: 5px 5px 5px 0;
+        }
+        button:hover {
+            background: #0056b3;
+        }
+        button:disabled {
+            background: #6c757d;
+            cursor: not-allowed;
+        }
+        .client.client-1 button { background: #007bff; }
+        .client.client-2 button { background: #28a745; }
+        .client.client-3 button { background: #ffc107; color: #000; }
+        .client.client-1 button:hover { background: #0056b3; }
+        .client.client-2 button:hover { background: #218838; }
+        .client.client-3 button:hover { background: #e0a800; }
+        .messages {
+            margin-top: 15px;
+            max-height: 250px;
+            overflow-y: auto;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            padding: 10px;
+            background: #fafafa;
+            font-size: 0.85em;
+        }
+        .message {
+            padding: 6px;
+            margin: 4px 0;
+            background: white;
+            border-left: 3px solid #007bff;
+            border-radius: 2px;
+        }
+        .client.client-1 .message { border-left-color: #007bff; }
+        .client.client-2 .message { border-left-color: #28a745; }
+        .client.client-3 .message { border-left-color: #ffc107; }
+        .topic {
+            font-weight: bold;
+            color: #007bff;
+        }
+        .payload {
+            color: #333;
+            margin-top: 2px;
+        }
+        .highlight {
+            background: #fff3cd;
+            padding: 15px;
+            border-radius: 4px;
+            border-left: 4px solid #ffc107;
+            margin: 15px 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🚀 WASM Local Broker - Multi-Client Demo</h1>
+        <p>This demonstrates an <strong>in-tab MQTT broker</strong> running entirely in your browser with WASM, routing messages between <strong>multiple clients</strong>!</p>
+        <div class="highlight">
+            <strong>Try this:</strong> Subscribe all clients to <code>demo/+</code>, then publish from any client to see messages routed through the broker!
+        </div>
+        <div id="rbac-info" style="margin-top: 15px; padding: 15px; background: #e7f3ff; border-radius: 4px; font-size: 0.9em; display: none;">
+            <strong>RBAC Configuration:</strong>
+            <div id="rbac-roles" style="margin-top: 8px;"></div>
+            <div id="rbac-assignments" style="margin-top: 8px;"></div>
+        </div>
+        <div id="debug" style="margin-top: 15px; padding: 10px; background: #f8f9fa; border-radius: 4px; font-family: monospace; font-size: 0.85em; max-height: 200px; overflow-y: auto; display: none;">
+            <strong>Debug Log:</strong>
+            <div id="debug-messages"></div>
+        </div>
+    </div>
+
+    <div class="clients-container">
+        <div class="client client-1">
+            <h2>📱 Client A</h2>
+            <div id="status-1" class="status disconnected">Status: Disconnected</div>
+            <div class="controls">
+                <div class="control-group">
+                    <label>Subscribe to topic:</label>
+                    <input type="text" id="subscribe-topic-1" value="demo/+">
+                    <button id="subscribe-btn-1">Subscribe</button>
+                </div>
+                <div class="control-group">
+                    <label>Publish to topic:</label>
+                    <input type="text" id="publish-topic-1" value="demo/client-a">
+                    <input type="text" id="publish-message-1" value="Hello from Client A!">
+                    <button id="publish-btn-1">Publish</button>
+                </div>
+            </div>
+            <div id="subscriptions-1" style="margin: 10px 0; padding: 8px; background: #e7f3ff; border-radius: 4px; font-size: 0.85em; display: none;">
+                <strong>Subscribed to:</strong> <span id="sub-list-1"></span>
+            </div>
+            <h4>Received Messages:</h4>
+            <div id="messages-1" class="messages">
+                <em>No messages yet</em>
+            </div>
+        </div>
+
+        <div class="client client-2">
+            <h2>📱 Client B</h2>
+            <div id="status-2" class="status disconnected">Status: Disconnected</div>
+            <div class="controls">
+                <div class="control-group">
+                    <label>Subscribe to topic:</label>
+                    <input type="text" id="subscribe-topic-2" value="demo/+">
+                    <button id="subscribe-btn-2">Subscribe</button>
+                </div>
+                <div class="control-group">
+                    <label>Publish to topic:</label>
+                    <input type="text" id="publish-topic-2" value="demo/client-b">
+                    <input type="text" id="publish-message-2" value="Hello from Client B!">
+                    <button id="publish-btn-2">Publish</button>
+                </div>
+            </div>
+            <div id="subscriptions-2" style="margin: 10px 0; padding: 8px; background: #d4edda; border-radius: 4px; font-size: 0.85em; display: none;">
+                <strong>Subscribed to:</strong> <span id="sub-list-2"></span>
+            </div>
+            <h4>Received Messages:</h4>
+            <div id="messages-2" class="messages">
+                <em>No messages yet</em>
+            </div>
+        </div>
+
+        <div class="client client-3">
+            <h2>📱 Client C</h2>
+            <div id="status-3" class="status disconnected">Status: Disconnected</div>
+            <div class="controls">
+                <div class="control-group">
+                    <label>Subscribe to topic:</label>
+                    <input type="text" id="subscribe-topic-3" value="demo/+">
+                    <button id="subscribe-btn-3">Subscribe</button>
+                </div>
+                <div class="control-group">
+                    <label>Publish to topic:</label>
+                    <input type="text" id="publish-topic-3" value="demo/client-c">
+                    <input type="text" id="publish-message-3" value="Hello from Client C!">
+                    <button id="publish-btn-3">Publish</button>
+                </div>
+            </div>
+            <div id="subscriptions-3" style="margin: 10px 0; padding: 8px; background: #fff3cd; border-radius: 4px; font-size: 0.85em; display: none;">
+                <strong>Subscribed to:</strong> <span id="sub-list-3"></span>
+            </div>
+            <h4>Received Messages:</h4>
+            <div id="messages-3" class="messages">
+                <em>No messages yet</em>
+            </div>
+        </div>
+    </div>
+
+    <script type="module">
+        import init, { WasmBroker, WasmBrokerConfig, WasmMqttClient, WasmConnectOptions } from './pkg/mqtt5_wasm.js';
+
+        function debugLog(msg) {
+            const debugDiv = document.getElementById('debug');
+            const messagesDiv = document.getElementById('debug-messages');
+            debugDiv.style.display = 'block';
+            const line = document.createElement('div');
+            line.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+            messagesDiv.appendChild(line);
+            console.log(msg);
+        }
+
+        async function createClient(clientId, clientNum) {
+            const client = new WasmMqttClient(clientId);
+            const statusEl = document.getElementById(`status-${clientNum}`);
+            const messagesEl = document.getElementById(`messages-${clientNum}`);
+            const subscriptions = new Set();
+
+            client.on_connect((reasonCode, sessionPresent) => {
+                console.log(`${clientId} connected!`, reasonCode, sessionPresent);
+                statusEl.className = 'status connected';
+                statusEl.textContent = `Status: Connected`;
+            });
+
+            client.on_disconnect(() => {
+                console.log(`${clientId} disconnected`);
+                statusEl.className = 'status disconnected';
+                statusEl.textContent = 'Status: Disconnected';
+            });
+
+            client.on_error((error) => {
+                console.error(`${clientId} error:`, error);
+            });
+
+            document.getElementById(`subscribe-btn-${clientNum}`).addEventListener('click', async () => {
+                const topic = document.getElementById(`subscribe-topic-${clientNum}`).value;
+                if (!topic) {
+                    alert('Please enter a topic');
+                    return;
+                }
+
+                await client.subscribe_with_callback(topic, (receivedTopic, payload) => {
+                    const decoder = new TextDecoder();
+                    const message = decoder.decode(payload);
+
+                    if (messagesEl.querySelector('em')) {
+                        messagesEl.innerHTML = '';
+                    }
+
+                    const timestamp = new Date().toLocaleTimeString();
+                    const messageEl = document.createElement('div');
+                    messageEl.className = 'message';
+                    messageEl.innerHTML = `
+                        <div class="topic">${receivedTopic}</div>
+                        <div class="payload">${message} <small>(${timestamp})</small></div>
+                    `;
+                    messagesEl.prepend(messageEl);
+                });
+
+                subscriptions.add(topic);
+                const subsDiv = document.getElementById(`subscriptions-${clientNum}`);
+                const subsList = document.getElementById(`sub-list-${clientNum}`);
+                subsDiv.style.display = 'block';
+                subsList.textContent = Array.from(subscriptions).join(', ');
+
+                console.log(`${clientId} subscribed to:`, topic);
+            });
+
+            document.getElementById(`publish-btn-${clientNum}`).addEventListener('click', async () => {
+                const topic = document.getElementById(`publish-topic-${clientNum}`).value;
+                const message = document.getElementById(`publish-message-${clientNum}`).value;
+
+                if (!topic || !message) {
+                    alert('Please enter both topic and message');
+                    return;
+                }
+
+                const encoder = new TextEncoder();
+                await client.publish(topic, encoder.encode(message));
+                console.log(`${clientId} published:`, topic, message);
+            });
+
+            return client;
+        }
+
+        async function main() {
+            try {
+                debugLog('Initializing WASM...');
+                await init();
+                debugLog('WASM initialized');
+
+                debugLog('Creating broker configuration...');
+                const config = new WasmBrokerConfig();
+
+                config.max_clients = 100;
+                config.max_packet_size = 1048576;
+
+                config.session_expiry_interval_secs = 3600;
+                config.server_keep_alive_secs = 60;
+
+                config.maximum_qos = 2;
+                config.retain_available = true;
+                config.topic_alias_maximum = 10;
+
+                config.wildcard_subscription_available = true;
+                config.subscription_identifier_available = true;
+                config.shared_subscription_available = true;
+
+                debugLog('Creating broker with custom config...');
+                const broker = WasmBroker.with_config(config);
+
+                await broker.add_user("alice", "secret123");
+                await broker.add_user("bob", "password456");
+                await broker.add_user("charlie", "guest789");
+
+                const userCount = await broker.user_count();
+                debugLog(`Broker created with ${userCount} users configured`);
+
+                debugLog('Setting up RBAC roles...');
+                await broker.add_role("admin");
+                await broker.add_role_rule("admin", "admin/#", "readwrite");
+                await broker.add_role_rule("admin", "$SYS/#", "read");
+
+                await broker.add_role("publisher");
+                await broker.add_role_rule("publisher", "demo/#", "write");
+
+                await broker.add_role("subscriber");
+                await broker.add_role_rule("subscriber", "demo/#", "read");
+
+                const roleCount = await broker.role_count();
+                debugLog(`Created ${roleCount} roles`);
+
+                await broker.assign_role("alice", "admin");
+                await broker.assign_role("bob", "publisher");
+                await broker.assign_role("bob", "subscriber");
+                await broker.assign_role("charlie", "subscriber");
+
+                const roles = await broker.list_roles();
+                const aliceRoles = await broker.get_user_roles("alice");
+                const bobRoles = await broker.get_user_roles("bob");
+                const charlieRoles = await broker.get_user_roles("charlie");
+
+                const rbacDiv = document.getElementById('rbac-info');
+                rbacDiv.style.display = 'block';
+                document.getElementById('rbac-roles').innerHTML = `<strong>Roles:</strong> ${roles.join(', ')}`;
+                document.getElementById('rbac-assignments').innerHTML = `
+                    <strong>Assignments:</strong>
+                    alice → [${aliceRoles.join(', ')}],
+                    bob → [${bobRoles.join(', ')}],
+                    charlie → [${charlieRoles.join(', ')}]
+                `;
+                debugLog(`RBAC configured: ${roles.length} roles, users assigned`);
+
+                debugLog('Creating clients...');
+                const clientA = await createClient('client-a', 1);
+                const clientB = await createClient('client-b', 2);
+                const clientC = await createClient('client-c', 3);
+                debugLog('Clients created');
+
+                debugLog('Getting ports from broker...');
+                const portA = broker.create_client_port();
+                debugLog('Port A created');
+                const portB = broker.create_client_port();
+                debugLog('Port B created');
+                const portC = broker.create_client_port();
+                debugLog('Port C created');
+
+                function createConnectOptions(username, password) {
+                    const options = new WasmConnectOptions();
+                    options.username = username;
+                    options.password = new TextEncoder().encode(password);
+                    return options;
+                }
+
+                debugLog('Connecting Client A...');
+                const timeoutA = setTimeout(() => debugLog('⚠️ Client A taking longer than expected...'), 2000);
+                await clientA.connect_message_port_with_options(portA, createConnectOptions('alice', 'secret123'));
+                clearTimeout(timeoutA);
+                debugLog('Client A connected!');
+
+                debugLog('Connecting Client B...');
+                await clientB.connect_message_port_with_options(portB, createConnectOptions('bob', 'password456'));
+                debugLog('Client B connected!');
+
+                debugLog('Connecting Client C...');
+                await clientC.connect_message_port_with_options(portC, createConnectOptions('charlie', 'guest789'));
+                debugLog('Client C connected!');
+
+                debugLog('✅ All clients connected! Ready to use.');
+            } catch (error) {
+                debugLog(`❌ ERROR: ${error.message || error}`);
+                console.error('Initialization error:', error);
+                throw error;
+            }
+        }
+
+        main().catch(err => {
+            debugLog(`❌ FATAL ERROR: ${err.message || err}`);
+            console.error('Fatal error:', err);
+        });
+    </script>
+</body>
+</html>

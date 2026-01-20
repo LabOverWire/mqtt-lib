@@ -6,6 +6,9 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
+#[cfg(feature = "codec")]
+use crate::codec::WasmCodecRegistry;
+
 pub struct ClientState {
     pub client_id: String,
     pub writer: Option<Rc<RefCell<WasmWriter>>>,
@@ -36,6 +39,8 @@ pub struct ClientState {
     pub last_options: Option<StoredConnectOptions>,
     pub user_initiated_disconnect: bool,
     pub current_broker_index: usize,
+    #[cfg(feature = "codec")]
+    pub codec_registry: Option<Rc<WasmCodecRegistry>>,
 }
 
 impl ClientState {
@@ -70,6 +75,8 @@ impl ClientState {
             last_options: None,
             user_initiated_disconnect: false,
             current_broker_index: 0,
+            #[cfg(feature = "codec")]
+            codec_registry: None,
         }
     }
 }
@@ -90,6 +97,8 @@ pub struct StoredConnectOptions {
     pub user_properties: Vec<(String, String)>,
     pub protocol_version: u8,
     pub backup_urls: Vec<String>,
+    #[cfg(feature = "codec")]
+    pub codec_registry: Option<Rc<WasmCodecRegistry>>,
 }
 
 impl From<&WasmConnectOptions> for StoredConnectOptions {
@@ -109,6 +118,8 @@ impl From<&WasmConnectOptions> for StoredConnectOptions {
             user_properties: opts.user_properties.clone(),
             protocol_version: opts.protocol_version,
             backup_urls: opts.backup_urls.clone(),
+            #[cfg(feature = "codec")]
+            codec_registry: opts.codec_registry.clone(),
         }
     }
 }

@@ -4,7 +4,7 @@ set -e
 echo "Building WASM package..."
 cd "$(dirname "$0")/.."
 
-wasm-pack build --target web --features client,broker
+wasm-pack build --target web --features client,broker,codec
 
 echo "Copying to example directories..."
 cp -r pkg examples/websocket/
@@ -26,6 +26,8 @@ cp -r pkg examples/flow-control/
 cp -r pkg examples/broadcast-channel/
 cp -r pkg examples/subscription-ids/
 cp -r pkg examples/acl-permissions/
+cp -r pkg examples/codec-compression/
+cp -r pkg examples/loop-prevention/
 
 echo "✨ Build complete!"
 echo ""
@@ -105,6 +107,14 @@ echo "  python3 -m http.server 8000"
 echo ""
 echo "ACL Permissions (Permission Denial Demo):"
 echo "  cd examples/acl-permissions"
+echo "  python3 -m http.server 8000"
+echo ""
+echo "Codec Compression (Gzip/Deflate Demo):"
+echo "  cd examples/codec-compression"
+echo "  python3 -m http.server 8000"
+echo ""
+echo "Loop Prevention (Duplicate Blocking Demo):"
+echo "  cd examples/loop-prevention"
 echo "  python3 -m http.server 8000"
 echo ""
 echo "Then open http://localhost:8000 in your browser"

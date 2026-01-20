@@ -1302,6 +1302,11 @@ impl MqttBroker {
     }
 
     #[must_use]
+    pub fn router(&self) -> Arc<MessageRouter> {
+        Arc::clone(&self.router)
+    }
+
+    #[must_use]
     pub fn local_addr(&self) -> Option<std::net::SocketAddr> {
         self.listeners.first()?.local_addr().ok()
     }

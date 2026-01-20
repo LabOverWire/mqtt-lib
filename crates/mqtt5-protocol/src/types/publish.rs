@@ -22,6 +22,7 @@ pub struct PublishOptions {
     pub qos: QoS,
     pub retain: bool,
     pub properties: PublishProperties,
+    pub skip_codec: bool,
 }
 
 impl Default for PublishOptions {
@@ -30,7 +31,16 @@ impl Default for PublishOptions {
             qos: QoS::AtMostOnce,
             retain: false,
             properties: PublishProperties::default(),
+            skip_codec: false,
         }
+    }
+}
+
+impl PublishOptions {
+    #[must_use]
+    pub fn with_skip_codec(mut self, skip: bool) -> Self {
+        self.skip_codec = skip;
+        self
     }
 }
 

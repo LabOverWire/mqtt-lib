@@ -155,6 +155,10 @@ impl WasmMqttClient {
             state.last_options = Some(StoredConnectOptions::from(config));
             state.user_initiated_disconnect = false;
             state.reconnect_attempt = 0;
+            #[cfg(feature = "codec")]
+            {
+                state.codec_registry.clone_from(&config.codec_registry);
+            }
         }
 
         let (will, will_properties) = if let Some(will_config) = &config.will {
@@ -332,12 +336,42 @@ impl WasmMqttClient {
 
         let (puback_promise, pubcomp_promise) = create_ack_promises(&self.state, qos, packet_id);
 
+        #[cfg(feature = "codec")]
+        let (final_payload, codec_content_type) = {
+            let registry = self.state.borrow().codec_registry.clone();
+            if let Some(ref reg) = registry {
+                match reg.encode_with_default(payload) {
+                    Ok((encoded, ct)) => (encoded, ct),
+                    Err(_) => (payload.to_vec(), None),
+                }
+            } else {
+                (payload.to_vec(), None)
+            }
+        };
+
+        #[cfg(not(feature = "codec"))]
+        let (final_payload, codec_content_type): (Vec<u8>, Option<String>) =
+            (payload.to_vec(), None);
+
         let protocol_version = self.state.borrow().protocol_version;
-        let properties = if protocol_version == 5 {
+        let mut properties = if protocol_version == 5 {
             options.to_properties()
         } else {
             Properties::default()
         };
+
+        if let Some(ct) = codec_content_type {
+            if properties
+                .add(
+                    mqtt5_protocol::protocol::v5::properties::PropertyId::ContentType,
+                    mqtt5_protocol::protocol::v5::properties::PropertyValue::Utf8String(ct),
+                )
+                .is_err()
+            {
+                web_sys::console::warn_1(&"Failed to add codec content type property".into());
+            }
+        }
+
         let publish_packet = PublishPacket {
             dup: false,
             qos,
@@ -345,7 +379,7 @@ impl WasmMqttClient {
             topic_name: topic.to_string(),
             packet_id,
             properties,
-            payload: payload.to_vec().into(),
+            payload: final_payload.into(),
             protocol_version,
         };
 
