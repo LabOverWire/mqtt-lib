@@ -4,7 +4,23 @@ set -e
 echo "Building WASM package..."
 cd "$(dirname "$0")/.."
 
-wasm-pack build --target web --features client,broker,codec
+cargo build --target wasm32-unknown-unknown --release --features client,broker,codec
+
+mkdir -p pkg
+wasm-bindgen --target web --out-dir pkg ../../target/wasm32-unknown-unknown/release/mqtt5_wasm.wasm
+
+VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+cat > pkg/package.json << EOF
+{
+  "name": "mqtt5-wasm",
+  "type": "module",
+  "version": "$VERSION",
+  "description": "MQTT v5.0 WebAssembly client and broker for browser environments",
+  "license": "MIT OR Apache-2.0",
+  "main": "mqtt5_wasm.js",
+  "types": "mqtt5_wasm.d.ts"
+}
+EOF
 
 echo "Copying to example directories..."
 cp -r pkg examples/websocket/

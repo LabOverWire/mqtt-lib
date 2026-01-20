@@ -156,12 +156,45 @@ description = "Check WASM compilation without building"
 [tasks.wasm-build]
 script = '''
 #!/bin/bash
-echo "Building WASM package with wasm-pack..."
+set -e
+echo "Building WASM package..."
 cd crates/mqtt5-wasm
-wasm-pack build --target web --features client,broker
+
+cargo build --target wasm32-unknown-unknown --release --features client,broker,codec
+
+mkdir -p pkg
+wasm-bindgen --target web --out-dir pkg ../../target/wasm32-unknown-unknown/release/mqtt5_wasm.wasm
+
+VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+cat > pkg/package.json << EOF
+{
+  "name": "mqtt5-wasm",
+  "type": "module",
+  "version": "$VERSION",
+  "description": "MQTT v5.0 WebAssembly client and broker for browser environments",
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/LabOverWire/mqtt-lib"
+  },
+  "files": [
+    "mqtt5_wasm_bg.wasm",
+    "mqtt5_wasm.js",
+    "mqtt5_wasm.d.ts"
+  ],
+  "main": "mqtt5_wasm.js",
+  "types": "mqtt5_wasm.d.ts",
+  "keywords": ["mqtt", "wasm", "webassembly", "iot", "pubsub"]
+}
+EOF
+
+cp ../../LICENSE-MIT pkg/ 2>/dev/null || true
+cp ../../LICENSE-APACHE-2.0 pkg/ 2>/dev/null || true
+cp README.md pkg/ 2>/dev/null || true
+
 echo "✨ WASM build complete! Package in crates/mqtt5-wasm/pkg/"
 '''
-description = "Build WASM package using wasm-pack"
+description = "Build WASM package using wasm-bindgen"
 
 [tasks.wasm-examples]
 dependencies = ["wasm-build"]

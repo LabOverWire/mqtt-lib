@@ -27,13 +27,14 @@ npm install mqtt5-wasm
 
 ```toml
 [dependencies]
-mqtt5-wasm = "0.8"
+mqtt5-wasm = "0.9"
 ```
 
-Build with wasm-pack:
+Build with wasm-bindgen:
 
 ```bash
-wasm-pack build --target web --features client,broker
+cargo build --target wasm32-unknown-unknown --release --features client,broker,codec
+wasm-bindgen --target web --out-dir pkg target/wasm32-unknown-unknown/release/mqtt5_wasm.wasm
 ```
 
 ## Usage
