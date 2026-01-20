@@ -46,7 +46,7 @@ Then open http://localhost:8080 in your browser.
 1. **Configure Codec**: Select gzip or deflate, set compression level (1-10), and minimum size threshold
 2. **Connect**: The codec registry is attached to the connection options
 3. **Publish**: Messages larger than the threshold are automatically compressed
-4. **Receive**: Messages with `application/gzip` or `application/deflate` content-type are automatically decompressed
+4. **Receive**: Messages with `application/gzip` or `application/x-deflate` content-type are automatically decompressed
 
 ## API Usage
 

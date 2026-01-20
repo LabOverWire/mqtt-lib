@@ -47,7 +47,7 @@ impl WasmPayloadCodec for WasmDeflateCodec {
     }
 
     fn content_type(&self) -> &'static str {
-        "application/deflate"
+        "application/x-deflate"
     }
 
     fn min_size_threshold(&self) -> usize {
