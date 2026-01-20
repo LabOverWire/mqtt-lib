@@ -342,9 +342,33 @@ impl WasmBridgeManager {
         }
     }
 
+    pub fn set_loop_prevention(&self, ttl_secs: u64, cache_size: usize) {
+        let lp = Rc::new(WasmLoopPrevention::new(ttl_secs, cache_size));
+        *self.loop_prevention.borrow_mut() = Some(lp);
+        tracing::info!(
+            ttl_secs = ttl_secs,
+            cache_size = cache_size,
+            "Loop prevention configured at manager level"
+        );
+    }
+
     fn get_or_init_loop_prevention(&self, config: &WasmBridgeConfig) -> Rc<WasmLoopPrevention> {
         let mut guard = self.loop_prevention.borrow_mut();
         if let Some(ref lp) = *guard {
+            let existing_ttl = lp.ttl_secs();
+            let existing_cache_size = lp.max_cache_size();
+            if config.loop_prevention_ttl_secs != existing_ttl
+                || config.loop_prevention_cache_size != existing_cache_size
+            {
+                tracing::warn!(
+                    bridge = %config.name,
+                    bridge_ttl_secs = config.loop_prevention_ttl_secs,
+                    bridge_cache_size = config.loop_prevention_cache_size,
+                    active_ttl_secs = existing_ttl,
+                    active_cache_size = existing_cache_size,
+                    "Bridge has different loop prevention settings than active config; using active config"
+                );
+            }
             return lp.clone();
         }
         let lp = Rc::new(WasmLoopPrevention::new(

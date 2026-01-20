@@ -43,9 +43,33 @@ impl BridgeManager {
         }
     }
 
+    pub fn set_loop_prevention(&self, ttl: crate::time::Duration, cache_size: usize) {
+        let lp = Arc::new(LoopPrevention::new(ttl, cache_size));
+        *self.loop_prevention.write() = Some(lp);
+        info!(
+            ttl_secs = ttl.as_secs(),
+            cache_size = cache_size,
+            "Loop prevention configured at manager level"
+        );
+    }
+
     fn get_or_init_loop_prevention(&self, config: &BridgeConfig) -> Arc<LoopPrevention> {
         let mut guard = self.loop_prevention.write();
         if let Some(ref lp) = *guard {
+            let existing_ttl = lp.ttl();
+            let existing_cache_size = lp.max_cache_size();
+            if config.loop_prevention_ttl != existing_ttl
+                || config.loop_prevention_cache_size != existing_cache_size
+            {
+                tracing::warn!(
+                    bridge = %config.name,
+                    bridge_ttl_secs = config.loop_prevention_ttl.as_secs(),
+                    bridge_cache_size = config.loop_prevention_cache_size,
+                    active_ttl_secs = existing_ttl.as_secs(),
+                    active_cache_size = existing_cache_size,
+                    "Bridge has different loop prevention settings than active config; using active config"
+                );
+            }
             return lp.clone();
         }
         let lp = Arc::new(LoopPrevention::new(

@@ -64,6 +64,16 @@ impl WasmLoopPrevention {
         }
     }
 
+    #[must_use]
+    pub fn ttl_secs(&self) -> u64 {
+        (self.ttl_ms / 1000.0) as u64
+    }
+
+    #[must_use]
+    pub fn max_cache_size(&self) -> usize {
+        self.max_cache_size
+    }
+
     /// Checks if a message should be forwarded.
     ///
     /// Returns `true` if the message should be forwarded (first occurrence),
