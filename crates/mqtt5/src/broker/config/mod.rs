@@ -1,4 +1,5 @@
 mod auth;
+mod delta;
 mod storage;
 mod tls;
 mod transport;
@@ -7,6 +8,7 @@ pub use auth::{
     AuthConfig, AuthMethod, ClaimPattern, FederatedAuthMode, FederatedJwtConfig, JwtAlgorithm,
     JwtConfig, JwtIssuerConfig, JwtKeySource, JwtRoleMapping, RateLimitConfig, RoleMergeMode,
 };
+pub use delta::DeltaSubscriptionConfig;
 pub use storage::{StorageBackend, StorageConfig};
 pub use tls::TlsConfig;
 pub use transport::{ClusterListenerConfig, ClusterTransport, QuicConfig, WebSocketConfig};
@@ -59,6 +61,8 @@ pub struct BrokerConfig {
     pub quic_config: Option<QuicConfig>,
     pub cluster_listener_config: Option<ClusterListenerConfig>,
     pub storage_config: StorageConfig,
+    #[serde(default)]
+    pub delta_subscription_config: DeltaSubscriptionConfig,
     #[cfg(not(target_arch = "wasm32"))]
     #[serde(default)]
     pub bridges: Vec<BridgeConfig>,
@@ -106,7 +110,8 @@ impl std::fmt::Debug for BrokerConfig {
             .field("websocket_tls_config", &self.websocket_tls_config)
             .field("quic_config", &self.quic_config)
             .field("cluster_listener_config", &self.cluster_listener_config)
-            .field("storage_config", &self.storage_config);
+            .field("storage_config", &self.storage_config)
+            .field("delta_subscription_config", &self.delta_subscription_config);
         #[cfg(not(target_arch = "wasm32"))]
         d.field("bridges", &self.bridges);
         #[cfg(feature = "opentelemetry")]
@@ -145,6 +150,7 @@ impl Default for BrokerConfig {
             quic_config: None,
             cluster_listener_config: None,
             storage_config: StorageConfig::default(),
+            delta_subscription_config: DeltaSubscriptionConfig::default(),
             #[cfg(not(target_arch = "wasm32"))]
             bridges: vec![],
             #[cfg(feature = "opentelemetry")]
@@ -271,6 +277,12 @@ impl BrokerConfig {
     #[must_use]
     pub fn with_storage(mut self, storage: StorageConfig) -> Self {
         self.storage_config = storage;
+        self
+    }
+
+    #[must_use]
+    pub fn with_delta_subscription(mut self, delta: DeltaSubscriptionConfig) -> Self {
+        self.delta_subscription_config = delta;
         self
     }
 

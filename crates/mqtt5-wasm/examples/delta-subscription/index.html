@@ -1,0 +1,495 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WASM Delta Subscription Demo</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            max-width: 1200px;
+            margin: 40px auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .header {
+            background: white;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+        h1 {
+            color: #333;
+            margin-top: 0;
+        }
+        .highlight {
+            background: #e7f3ff;
+            padding: 15px;
+            border-radius: 4px;
+            border-left: 4px solid #007bff;
+            margin: 15px 0;
+        }
+        .delta-info {
+            background: #d4edda;
+            padding: 15px;
+            border-radius: 4px;
+            border-left: 4px solid #28a745;
+            margin: 15px 0;
+        }
+        .container {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            margin-top: 20px;
+        }
+        .card {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .card h2 {
+            margin-top: 0;
+            color: #333;
+            font-size: 1.2em;
+            border-bottom: 2px solid #007bff;
+            padding-bottom: 10px;
+        }
+        .publisher h2 { border-color: #28a745; }
+        .subscriber h2 { border-color: #007bff; }
+        .status {
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 4px;
+            font-weight: 500;
+            font-size: 0.9em;
+        }
+        .status.connected {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        .status.disconnected {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        .controls {
+            margin: 15px 0;
+        }
+        .control-group {
+            margin: 10px 0;
+        }
+        .control-group label {
+            display: block;
+            font-size: 0.9em;
+            color: #666;
+            margin-bottom: 5px;
+        }
+        input, select {
+            width: calc(100% - 22px);
+            padding: 8px;
+            border-radius: 4px;
+            border: 1px solid #ddd;
+            font-size: 14px;
+        }
+        button {
+            background: #007bff;
+            color: white;
+            border: none;
+            cursor: pointer;
+            padding: 10px 20px;
+            border-radius: 4px;
+            font-size: 14px;
+            margin: 5px 5px 5px 0;
+        }
+        button:hover {
+            background: #0056b3;
+        }
+        button:disabled {
+            background: #6c757d;
+            cursor: not-allowed;
+        }
+        button.publish {
+            background: #28a745;
+        }
+        button.publish:hover {
+            background: #218838;
+        }
+        .messages {
+            margin-top: 15px;
+            max-height: 300px;
+            overflow-y: auto;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            padding: 10px;
+            background: #fafafa;
+            font-size: 0.85em;
+        }
+        .message {
+            padding: 8px;
+            margin: 4px 0;
+            background: white;
+            border-left: 3px solid #007bff;
+            border-radius: 2px;
+        }
+        .message.blocked {
+            border-left-color: #dc3545;
+            background: #fff5f5;
+        }
+        .message.delivered {
+            border-left-color: #28a745;
+            background: #f5fff5;
+        }
+        .topic {
+            font-weight: bold;
+            color: #007bff;
+        }
+        .payload {
+            color: #333;
+            margin-top: 2px;
+        }
+        .stats {
+            margin-top: 20px;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 4px;
+        }
+        .stat-item {
+            display: inline-block;
+            margin-right: 20px;
+            padding: 8px 12px;
+            background: white;
+            border-radius: 4px;
+            border: 1px solid #ddd;
+        }
+        .stat-value {
+            font-size: 1.5em;
+            font-weight: bold;
+            color: #007bff;
+        }
+        .stat-label {
+            font-size: 0.8em;
+            color: #666;
+        }
+        #debug {
+            margin-top: 15px;
+            padding: 10px;
+            background: #f8f9fa;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 0.85em;
+            max-height: 200px;
+            overflow-y: auto;
+            display: none;
+        }
+        .preset-buttons {
+            margin: 10px 0;
+        }
+        .preset-buttons button {
+            background: #6c757d;
+            font-size: 12px;
+            padding: 6px 12px;
+        }
+        .preset-buttons button:hover {
+            background: #5a6268;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>Delta Subscription Demo</h1>
+        <p>This demonstrates the <strong>delta subscription</strong> feature where the broker only delivers messages when the payload differs from the last delivered value.</p>
+
+        <div class="delta-info">
+            <strong>How Delta Subscriptions Work:</strong>
+            <ul style="margin: 10px 0 0 0; padding-left: 20px;">
+                <li>The broker tracks the last payload hash per topic per subscriber</li>
+                <li>When a new message arrives, it's only delivered if the payload changed</li>
+                <li>This reduces bandwidth for sensors that frequently publish unchanged values</li>
+                <li>Configured via topic patterns: <code>sensors/#</code></li>
+            </ul>
+        </div>
+
+        <div class="highlight">
+            <strong>Try this:</strong> Click "Publish Same Value" multiple times - notice only the first message is received!<br>
+            Then click "Publish Different Value" to see a new message delivered.
+        </div>
+    </div>
+
+    <div class="stats">
+        <div class="stat-item">
+            <div class="stat-value" id="published-count">0</div>
+            <div class="stat-label">Published</div>
+        </div>
+        <div class="stat-item">
+            <div class="stat-value" id="delivered-count">0</div>
+            <div class="stat-label">Delivered</div>
+        </div>
+        <div class="stat-item">
+            <div class="stat-value" id="blocked-count">0</div>
+            <div class="stat-label">Blocked (Delta)</div>
+        </div>
+    </div>
+
+    <div class="container">
+        <div class="card publisher">
+            <h2>Publisher</h2>
+            <div id="publisher-status" class="status disconnected">Status: Disconnected</div>
+
+            <div class="controls">
+                <div class="control-group">
+                    <label>Topic (delta enabled for sensors/#):</label>
+                    <input type="text" id="publish-topic" value="sensors/temperature">
+                </div>
+                <div class="control-group">
+                    <label>Payload:</label>
+                    <input type="text" id="publish-payload" value="25.5">
+                </div>
+                <div class="preset-buttons">
+                    <button onclick="setPayload('25.5')">25.5</button>
+                    <button onclick="setPayload('26.0')">26.0</button>
+                    <button onclick="setPayload('27.5')">27.5</button>
+                </div>
+                <button id="publish-btn" class="publish">Publish</button>
+                <button id="publish-same-btn" class="publish">Publish Same Value</button>
+                <button id="publish-different-btn" class="publish">Publish Different Value</button>
+            </div>
+
+            <h4>Publish Log:</h4>
+            <div id="publish-log" class="messages">
+                <em>No messages published yet</em>
+            </div>
+        </div>
+
+        <div class="card subscriber">
+            <h2>Subscriber (Delta Mode)</h2>
+            <div id="subscriber-status" class="status disconnected">Status: Disconnected</div>
+
+            <div class="controls">
+                <div class="control-group">
+                    <label>Subscribed to:</label>
+                    <input type="text" id="subscribe-topic" value="sensors/#" readonly style="background: #f8f9fa;">
+                </div>
+            </div>
+
+            <h4>Received Messages:</h4>
+            <div id="received-messages" class="messages">
+                <em>No messages received yet</em>
+            </div>
+        </div>
+    </div>
+
+    <div id="debug">
+        <strong>Debug Log:</strong>
+        <div id="debug-messages"></div>
+    </div>
+
+    <script type="module">
+        import init, { WasmBroker, WasmBrokerConfig, WasmMqttClient, WasmConnectOptions } from './pkg/mqtt5_wasm.js';
+
+        let publishedCount = 0;
+        let deliveredCount = 0;
+        let blockedCount = 0;
+        let lastPublishedPayload = null;
+        let currentPayloadValue = 25.5;
+
+        function debugLog(msg) {
+            const debugDiv = document.getElementById('debug');
+            const messagesDiv = document.getElementById('debug-messages');
+            debugDiv.style.display = 'block';
+            const line = document.createElement('div');
+            line.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+            messagesDiv.appendChild(line);
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+            console.log(msg);
+        }
+
+        function updateStats() {
+            document.getElementById('published-count').textContent = publishedCount;
+            document.getElementById('delivered-count').textContent = deliveredCount;
+            document.getElementById('blocked-count').textContent = blockedCount;
+        }
+
+        function addPublishLog(topic, payload, wasBlocked) {
+            const logEl = document.getElementById('publish-log');
+            if (logEl.querySelector('em')) {
+                logEl.innerHTML = '';
+            }
+
+            const timestamp = new Date().toLocaleTimeString();
+            const messageEl = document.createElement('div');
+            messageEl.className = wasBlocked ? 'message blocked' : 'message delivered';
+            messageEl.innerHTML = `
+                <div class="topic">${topic}</div>
+                <div class="payload">${payload} ${wasBlocked ? '(blocked - duplicate)' : '(delivered)'} <small>(${timestamp})</small></div>
+            `;
+            logEl.prepend(messageEl);
+        }
+
+        function addReceivedMessage(topic, payload) {
+            const messagesEl = document.getElementById('received-messages');
+            if (messagesEl.querySelector('em')) {
+                messagesEl.innerHTML = '';
+            }
+
+            const timestamp = new Date().toLocaleTimeString();
+            const messageEl = document.createElement('div');
+            messageEl.className = 'message delivered';
+            messageEl.innerHTML = `
+                <div class="topic">${topic}</div>
+                <div class="payload">${payload} <small>(${timestamp})</small></div>
+            `;
+            messagesEl.prepend(messageEl);
+        }
+
+        window.setPayload = function(value) {
+            document.getElementById('publish-payload').value = value;
+        };
+
+        async function main() {
+            try {
+                debugLog('Initializing WASM...');
+                await init();
+                debugLog('WASM initialized');
+
+                debugLog('Creating broker configuration with delta subscriptions...');
+                const config = new WasmBrokerConfig();
+
+                config.max_clients = 100;
+                config.max_packet_size = 1048576;
+                config.allow_anonymous = true;
+
+                config.delta_subscription_enabled = true;
+                config.add_delta_subscription_pattern('sensors/#');
+
+                debugLog('Delta subscription enabled for pattern: sensors/#');
+
+                debugLog('Creating broker...');
+                const broker = WasmBroker.with_config(config);
+                debugLog('Broker created');
+
+                debugLog('Creating publisher client...');
+                const publisher = new WasmMqttClient('publisher');
+
+                publisher.on_connect((reasonCode, sessionPresent) => {
+                    debugLog('Publisher connected');
+                    document.getElementById('publisher-status').className = 'status connected';
+                    document.getElementById('publisher-status').textContent = 'Status: Connected';
+                });
+
+                publisher.on_disconnect(() => {
+                    document.getElementById('publisher-status').className = 'status disconnected';
+                    document.getElementById('publisher-status').textContent = 'Status: Disconnected';
+                });
+
+                debugLog('Creating subscriber client...');
+                const subscriber = new WasmMqttClient('subscriber');
+
+                subscriber.on_connect((reasonCode, sessionPresent) => {
+                    debugLog('Subscriber connected');
+                    document.getElementById('subscriber-status').className = 'status connected';
+                    document.getElementById('subscriber-status').textContent = 'Status: Connected (Delta Mode)';
+                });
+
+                subscriber.on_disconnect(() => {
+                    document.getElementById('subscriber-status').className = 'status disconnected';
+                    document.getElementById('subscriber-status').textContent = 'Status: Disconnected';
+                });
+
+                const publisherPort = broker.create_client_port();
+                const subscriberPort = broker.create_client_port();
+
+                debugLog('Connecting publisher...');
+                await publisher.connect_message_port(publisherPort);
+                debugLog('Publisher connected!');
+
+                debugLog('Connecting subscriber...');
+                await subscriber.connect_message_port(subscriberPort);
+                debugLog('Subscriber connected!');
+
+                debugLog('Subscribing to sensors/#...');
+                await subscriber.subscribe_with_callback('sensors/#', (topic, payload) => {
+                    const decoder = new TextDecoder();
+                    const message = decoder.decode(payload);
+
+                    deliveredCount++;
+                    updateStats();
+                    addReceivedMessage(topic, message);
+                    debugLog(`Received: ${topic} = ${message}`);
+                });
+                debugLog('Subscribed!');
+
+                document.getElementById('publish-btn').addEventListener('click', async () => {
+                    const topic = document.getElementById('publish-topic').value;
+                    const payload = document.getElementById('publish-payload').value;
+
+                    if (!topic || !payload) {
+                        alert('Please enter both topic and payload');
+                        return;
+                    }
+
+                    const encoder = new TextEncoder();
+                    await publisher.publish(topic, encoder.encode(payload));
+
+                    publishedCount++;
+                    const wasBlocked = (lastPublishedPayload === payload);
+                    if (wasBlocked) {
+                        blockedCount++;
+                    }
+                    lastPublishedPayload = payload;
+                    updateStats();
+                    addPublishLog(topic, payload, wasBlocked);
+                    debugLog(`Published: ${topic} = ${payload}`);
+                });
+
+                document.getElementById('publish-same-btn').addEventListener('click', async () => {
+                    const topic = document.getElementById('publish-topic').value;
+                    const payload = document.getElementById('publish-payload').value;
+
+                    const encoder = new TextEncoder();
+                    await publisher.publish(topic, encoder.encode(payload));
+
+                    publishedCount++;
+                    const wasBlocked = (lastPublishedPayload === payload);
+                    if (wasBlocked) {
+                        blockedCount++;
+                    }
+                    lastPublishedPayload = payload;
+                    updateStats();
+                    addPublishLog(topic, payload, wasBlocked);
+                    debugLog(`Published (same): ${topic} = ${payload}`);
+                });
+
+                document.getElementById('publish-different-btn').addEventListener('click', async () => {
+                    const topic = document.getElementById('publish-topic').value;
+                    currentPayloadValue += 0.5;
+                    const payload = currentPayloadValue.toFixed(1);
+                    document.getElementById('publish-payload').value = payload;
+
+                    const encoder = new TextEncoder();
+                    await publisher.publish(topic, encoder.encode(payload));
+
+                    publishedCount++;
+                    lastPublishedPayload = payload;
+                    updateStats();
+                    addPublishLog(topic, payload, false);
+                    debugLog(`Published (different): ${topic} = ${payload}`);
+                });
+
+                debugLog('Demo ready!');
+
+            } catch (error) {
+                debugLog(`ERROR: ${error.message || error}`);
+                console.error('Initialization error:', error);
+            }
+        }
+
+        main().catch(err => {
+            debugLog(`FATAL ERROR: ${err.message || err}`);
+            console.error('Fatal error:', err);
+        });
+    </script>
+</body>
+</html>

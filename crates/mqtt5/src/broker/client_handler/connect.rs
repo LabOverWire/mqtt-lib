@@ -326,9 +326,14 @@ impl ClientHandler {
                     stored.retain_as_published,
                     stored.retain_handling,
                     ProtocolVersion::try_from(self.protocol_version).unwrap_or_default(),
+                    stored.delta_mode,
                 )
                 .await?;
         }
+
+        self.router
+            .load_delta_state(&connect.client_id, session.delta_state.clone())
+            .await;
 
         session.will_message.clone_from(&connect.will);
         session.will_delay_interval = connect

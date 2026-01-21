@@ -13,8 +13,8 @@
 //! # WASM Considerations
 //!
 //! This implementation uses `Rc<RefCell>` instead of `Arc<RwLock>` since WASM
-//! is single-threaded. Time is obtained via `web_sys::Performance::now()`
-//! since `std::time::Instant` is not available in WASM.
+//! is single-threaded. Time is obtained via `js_sys::Date::now()` since
+//! `std::time::Instant` is not available in WASM.
 
 use mqtt5_protocol::numeric::{f64_to_u64_saturating, u64_to_f64_saturating};
 use sha2::{Digest, Sha256};
@@ -126,9 +126,7 @@ impl WasmLoopPrevention {
     }
 
     fn current_time_ms() -> f64 {
-        web_sys::window()
-            .and_then(|w| w.performance())
-            .map_or(0.0, |p| p.now())
+        js_sys::Date::now()
     }
 
     /// Clears all cached fingerprints.

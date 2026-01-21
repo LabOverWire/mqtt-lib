@@ -5,6 +5,7 @@ use mqtt5_protocol::packet::subscribe::SubscribePacket;
 use mqtt5_protocol::packet::unsuback::{UnsubAckPacket, UnsubAckReasonCode};
 use mqtt5_protocol::packet::unsubscribe::UnsubscribePacket;
 use mqtt5_protocol::packet::Packet;
+use mqtt5_protocol::topic_matches_filter;
 use mqtt5_protocol::types::ProtocolVersion;
 use mqtt5_protocol::QoS;
 use tracing::{debug, warn};
@@ -49,6 +50,14 @@ impl WasmClientHandler {
 
             let subscription_id = subscribe.properties.get_subscription_identifier();
 
+            let delta_mode = self.config.read().is_ok_and(|c| {
+                c.delta_subscription_config.enabled
+                    && c.delta_subscription_config
+                        .topic_patterns
+                        .iter()
+                        .any(|pattern| topic_matches_filter(&filter.filter, pattern))
+            });
+
             self.router
                 .subscribe(
                     client_id.clone(),
@@ -59,6 +68,7 @@ impl WasmClientHandler {
                     filter.options.retain_as_published,
                     filter.options.retain_handling as u8,
                     ProtocolVersion::try_from(self.protocol_version).unwrap_or_default(),
+                    delta_mode,
                 )
                 .await?;
 
@@ -70,6 +80,7 @@ impl WasmClientHandler {
                     retain_handling: filter.options.retain_handling as u8,
                     subscription_id,
                     protocol_version: self.protocol_version,
+                    delta_mode,
                 };
                 session.add_subscription(filter.filter.clone(), stored);
                 self.storage.store_session(session.clone()).await.ok();

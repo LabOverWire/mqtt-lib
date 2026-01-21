@@ -2,7 +2,7 @@ use crate::bridge::{WasmBridgeConfig, WasmBridgeManager};
 use crate::client_handler::WasmClientHandler;
 use mqtt5::broker::acl::{AclRule, Permission};
 use mqtt5::broker::auth::{ComprehensiveAuthProvider, PasswordAuthProvider};
-use mqtt5::broker::config::BrokerConfig;
+use mqtt5::broker::config::{BrokerConfig, DeltaSubscriptionConfig};
 use mqtt5::broker::resource_monitor::{ResourceLimits, ResourceMonitor};
 use mqtt5::broker::router::MessageRouter;
 use mqtt5::broker::storage::{DynamicStorage, MemoryBackend};
@@ -41,6 +41,8 @@ struct ConfigHashFields {
     shared_subscription_available: bool,
     server_keep_alive_secs: Option<u32>,
     allow_anonymous: bool,
+    delta_subscription_enabled: bool,
+    delta_subscription_patterns: Vec<String>,
 }
 
 #[wasm_bindgen]
@@ -57,6 +59,8 @@ pub struct WasmBrokerConfig {
     shared_subscription_available: bool,
     server_keep_alive_secs: Option<u32>,
     allow_anonymous: bool,
+    delta_subscription_enabled: bool,
+    delta_subscription_patterns: Vec<String>,
 }
 
 #[wasm_bindgen]
@@ -76,6 +80,8 @@ impl WasmBrokerConfig {
             shared_subscription_available: true,
             server_keep_alive_secs: None,
             allow_anonymous: false,
+            delta_subscription_enabled: false,
+            delta_subscription_patterns: Vec::new(),
         }
     }
 
@@ -134,6 +140,21 @@ impl WasmBrokerConfig {
         self.allow_anonymous = value;
     }
 
+    #[wasm_bindgen(setter)]
+    pub fn set_delta_subscription_enabled(&mut self, value: bool) {
+        self.delta_subscription_enabled = value;
+    }
+
+    #[wasm_bindgen]
+    pub fn add_delta_subscription_pattern(&mut self, pattern: String) {
+        self.delta_subscription_patterns.push(pattern);
+    }
+
+    #[wasm_bindgen]
+    pub fn clear_delta_subscription_patterns(&mut self) {
+        self.delta_subscription_patterns.clear();
+    }
+
     fn to_broker_config(&self) -> BrokerConfig {
         BrokerConfig {
             max_clients: self.max_clients as usize,
@@ -150,6 +171,10 @@ impl WasmBrokerConfig {
             server_keep_alive: self
                 .server_keep_alive_secs
                 .map(|s| Duration::from_secs(u64::from(s))),
+            delta_subscription_config: DeltaSubscriptionConfig {
+                enabled: self.delta_subscription_enabled,
+                topic_patterns: self.delta_subscription_patterns.clone(),
+            },
             ..Default::default()
         }
     }
@@ -167,6 +192,8 @@ impl WasmBrokerConfig {
             shared_subscription_available: self.shared_subscription_available,
             server_keep_alive_secs: self.server_keep_alive_secs,
             allow_anonymous: self.allow_anonymous,
+            delta_subscription_enabled: self.delta_subscription_enabled,
+            delta_subscription_patterns: self.delta_subscription_patterns.clone(),
         };
         let mut hasher = DefaultHasher::new();
         fields.hash(&mut hasher);

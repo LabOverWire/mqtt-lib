@@ -5,7 +5,9 @@
 #[cfg(not(target_arch = "wasm32"))]
 use crate::broker::bridge::BridgeManager;
 use crate::broker::events::{BrokerEventHandler, RetainedSetEvent};
-use crate::broker::storage::{DynamicStorage, QueuedMessage, RetainedMessage, StorageBackend};
+use crate::broker::storage::{
+    DeltaState, DynamicStorage, QueuedMessage, RetainedMessage, StorageBackend,
+};
 use crate::packet::publish::PublishPacket;
 use crate::types::ProtocolVersion;
 use crate::validation::{parse_shared_subscription, topic_matches_filter};
@@ -41,6 +43,8 @@ pub struct Subscription {
     pub retain_handling: u8,
     /// Protocol version of the subscriber
     pub protocol_version: ProtocolVersion,
+    /// Delta mode - if true, only deliver messages when payload changes
+    pub delta_mode: bool,
 }
 
 /// Message router for the broker
@@ -52,6 +56,7 @@ pub struct MessageRouter {
     storage: Option<Arc<DynamicStorage>>,
     share_group_counters: Arc<RwLock<HashMap<String, Arc<AtomicUsize>>>>,
     event_handler: Option<Arc<dyn BrokerEventHandler>>,
+    delta_states: Arc<RwLock<HashMap<String, DeltaState>>>,
     #[cfg(not(target_arch = "wasm32"))]
     bridge_manager: Arc<RwLock<Option<Weak<BridgeManager>>>>,
     #[cfg(target_arch = "wasm32")]
@@ -79,6 +84,7 @@ impl MessageRouter {
             storage: None,
             share_group_counters: Arc::new(RwLock::new(HashMap::new())),
             event_handler: None,
+            delta_states: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(not(target_arch = "wasm32"))]
             bridge_manager: Arc::new(RwLock::new(None)),
             #[cfg(target_arch = "wasm32")]
@@ -98,6 +104,7 @@ impl MessageRouter {
             storage: Some(storage),
             share_group_counters: Arc::new(RwLock::new(HashMap::new())),
             event_handler: None,
+            delta_states: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(not(target_arch = "wasm32"))]
             bridge_manager: Arc::new(RwLock::new(None)),
             #[cfg(target_arch = "wasm32")]
@@ -215,6 +222,7 @@ impl MessageRouter {
         retain_as_published: bool,
         retain_handling: u8,
         protocol_version: ProtocolVersion,
+        delta_mode: bool,
     ) -> Result<bool> {
         if retain_handling > 2 {
             return Err(crate::MqttError::ProtocolError(format!(
@@ -234,6 +242,7 @@ impl MessageRouter {
             retain_as_published,
             retain_handling,
             protocol_version,
+            delta_mode,
         };
 
         let is_new = if Self::has_wildcards(actual_filter) {
@@ -561,6 +570,21 @@ impl MessageRouter {
             return;
         }
 
+        if sub.delta_mode {
+            let delta_states = self.delta_states.read().await;
+            if let Some(state) = delta_states.get(&sub.client_id) {
+                if !state.should_deliver(&publish.topic_name, &publish.payload) {
+                    trace!(
+                        "Skipping delta delivery to {} - payload unchanged for topic {}",
+                        sub.client_id,
+                        publish.topic_name
+                    );
+                    return;
+                }
+            }
+            drop(delta_states);
+        }
+
         if let Some(client_info) = clients.get(&sub.client_id) {
             let qos = Self::effective_qos(publish.qos, sub.qos);
             let message = Self::prepare_message(publish, sub, qos);
@@ -576,6 +600,12 @@ impl MessageRouter {
                         Self::queue_message(storage, e.into_inner(), &sub.client_id, qos).await;
                     }
                 }
+            } else if sub.delta_mode {
+                let mut delta_states = self.delta_states.write().await;
+                delta_states
+                    .entry(sub.client_id.clone())
+                    .or_default()
+                    .update_hash(&publish.topic_name, &publish.payload);
             }
         } else if let Some(storage) = storage {
             if sub.qos != QoS::AtMostOnce {
@@ -646,6 +676,21 @@ impl MessageRouter {
         let retained = self.retained_messages.read().await;
         retained.contains_key(topic)
     }
+
+    pub async fn load_delta_state(&self, client_id: &str, state: DeltaState) {
+        self.delta_states
+            .write()
+            .await
+            .insert(client_id.to_string(), state);
+    }
+
+    pub async fn get_delta_state(&self, client_id: &str) -> Option<DeltaState> {
+        self.delta_states.read().await.get(client_id).cloned()
+    }
+
+    pub async fn remove_delta_state(&self, client_id: &str) {
+        self.delta_states.write().await.remove(client_id);
+    }
 }
 
 impl Default for MessageRouter {
@@ -689,6 +734,7 @@ mod tests {
                 false,
                 0,
                 ProtocolVersion::V5,
+                false,
             )
             .await
             .unwrap();
@@ -726,6 +772,7 @@ mod tests {
                 false,
                 0,
                 ProtocolVersion::V5,
+                false,
             )
             .await
             .unwrap();
@@ -739,6 +786,7 @@ mod tests {
                 false,
                 0,
                 ProtocolVersion::V5,
+                false,
             )
             .await
             .unwrap();
@@ -814,6 +862,7 @@ mod tests {
                 false,
                 0,
                 ProtocolVersion::V5,
+                false,
             )
             .await
             .unwrap();
@@ -827,6 +876,7 @@ mod tests {
                 false,
                 0,
                 ProtocolVersion::V5,
+                false,
             )
             .await
             .unwrap();
@@ -840,6 +890,7 @@ mod tests {
                 false,
                 0,
                 ProtocolVersion::V5,
+                false,
             )
             .await
             .unwrap();
@@ -905,6 +956,7 @@ mod tests {
                 false,
                 0,
                 ProtocolVersion::V5,
+                false,
             )
             .await
             .unwrap();
@@ -918,6 +970,7 @@ mod tests {
                 false,
                 0,
                 ProtocolVersion::V5,
+                false,
             )
             .await
             .unwrap();
@@ -932,6 +985,7 @@ mod tests {
                 false,
                 0,
                 ProtocolVersion::V5,
+                false,
             )
             .await
             .unwrap();
@@ -976,6 +1030,7 @@ mod tests {
                 false,
                 0,
                 ProtocolVersion::V5,
+                false,
             )
             .await
             .unwrap();
@@ -989,6 +1044,7 @@ mod tests {
                 false,
                 0,
                 ProtocolVersion::V5,
+                false,
             )
             .await
             .unwrap();
