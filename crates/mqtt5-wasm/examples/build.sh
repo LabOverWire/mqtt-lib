@@ -44,6 +44,7 @@ cp -r pkg examples/subscription-ids/
 cp -r pkg examples/acl-permissions/
 cp -r pkg examples/codec-compression/
 cp -r pkg examples/loop-prevention/
+cp -r pkg examples/delta-subscription/
 
 echo "✨ Build complete!"
 echo ""
