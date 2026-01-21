@@ -118,7 +118,7 @@ impl WasmBridgeConfig {
             username: None,
             password: None,
             topics: Vec::new(),
-            loop_prevention_ttl_secs: 60,
+            loop_prevention_ttl_secs: 0,
             loop_prevention_cache_size: 10000,
         }
     }
@@ -151,7 +151,7 @@ impl WasmBridgeConfig {
     /// Sets how long message fingerprints are remembered for loop detection.
     ///
     /// Messages with the same fingerprint seen within this window are blocked.
-    /// Default: 60 seconds.
+    /// Set to 0 to disable loop prevention (default).
     #[wasm_bindgen(setter)]
     pub fn set_loop_prevention_ttl_secs(&mut self, secs: u64) {
         self.loop_prevention_ttl_secs = secs;
@@ -352,7 +352,11 @@ impl WasmBridgeManager {
         );
     }
 
-    fn get_or_init_loop_prevention(&self, config: &WasmBridgeConfig) -> Rc<WasmLoopPrevention> {
+    fn get_or_init_loop_prevention(&self, config: &WasmBridgeConfig) {
+        if config.loop_prevention_ttl_secs == 0 {
+            return;
+        }
+
         let mut guard = self.loop_prevention.borrow_mut();
         if let Some(ref lp) = *guard {
             let existing_ttl = lp.ttl_secs();
@@ -369,14 +373,13 @@ impl WasmBridgeManager {
                     "Bridge has different loop prevention settings than active config; using active config"
                 );
             }
-            return lp.clone();
+            return;
         }
         let lp = Rc::new(WasmLoopPrevention::new(
             config.loop_prevention_ttl_secs,
             config.loop_prevention_cache_size,
         ));
         *guard = Some(lp.clone());
-        lp
     }
 
     /// # Errors
