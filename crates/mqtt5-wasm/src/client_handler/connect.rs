@@ -183,7 +183,7 @@ impl WasmClientHandler {
                                 stored.retain_handling,
                                 ProtocolVersion::try_from(self.protocol_version)
                                     .unwrap_or_default(),
-                                stored.delta_mode,
+                                stored.change_only,
                             )
                             .await?;
                     }

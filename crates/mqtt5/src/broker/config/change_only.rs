@@ -1,14 +1,14 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct DeltaSubscriptionConfig {
+pub struct ChangeOnlyDeliveryConfig {
     #[serde(default)]
     pub enabled: bool,
     #[serde(default)]
     pub topic_patterns: Vec<String>,
 }
 
-impl DeltaSubscriptionConfig {
+impl ChangeOnlyDeliveryConfig {
     #[must_use]
     pub fn new() -> Self {
         Self::default()

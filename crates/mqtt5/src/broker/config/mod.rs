@@ -1,5 +1,5 @@
 mod auth;
-mod delta;
+mod change_only;
 mod storage;
 mod tls;
 mod transport;
@@ -8,7 +8,7 @@ pub use auth::{
     AuthConfig, AuthMethod, ClaimPattern, FederatedAuthMode, FederatedJwtConfig, JwtAlgorithm,
     JwtConfig, JwtIssuerConfig, JwtKeySource, JwtRoleMapping, RateLimitConfig, RoleMergeMode,
 };
-pub use delta::DeltaSubscriptionConfig;
+pub use change_only::ChangeOnlyDeliveryConfig;
 pub use storage::{StorageBackend, StorageConfig};
 pub use tls::TlsConfig;
 pub use transport::{ClusterListenerConfig, ClusterTransport, QuicConfig, WebSocketConfig};
@@ -62,7 +62,7 @@ pub struct BrokerConfig {
     pub cluster_listener_config: Option<ClusterListenerConfig>,
     pub storage_config: StorageConfig,
     #[serde(default)]
-    pub delta_subscription_config: DeltaSubscriptionConfig,
+    pub change_only_delivery_config: ChangeOnlyDeliveryConfig,
     #[cfg(not(target_arch = "wasm32"))]
     #[serde(default)]
     pub bridges: Vec<BridgeConfig>,
@@ -111,7 +111,10 @@ impl std::fmt::Debug for BrokerConfig {
             .field("quic_config", &self.quic_config)
             .field("cluster_listener_config", &self.cluster_listener_config)
             .field("storage_config", &self.storage_config)
-            .field("delta_subscription_config", &self.delta_subscription_config);
+            .field(
+                "change_only_delivery_config",
+                &self.change_only_delivery_config,
+            );
         #[cfg(not(target_arch = "wasm32"))]
         d.field("bridges", &self.bridges);
         #[cfg(feature = "opentelemetry")]
@@ -150,7 +153,7 @@ impl Default for BrokerConfig {
             quic_config: None,
             cluster_listener_config: None,
             storage_config: StorageConfig::default(),
-            delta_subscription_config: DeltaSubscriptionConfig::default(),
+            change_only_delivery_config: ChangeOnlyDeliveryConfig::default(),
             #[cfg(not(target_arch = "wasm32"))]
             bridges: vec![],
             #[cfg(feature = "opentelemetry")]
@@ -281,8 +284,8 @@ impl BrokerConfig {
     }
 
     #[must_use]
-    pub fn with_delta_subscription(mut self, delta: DeltaSubscriptionConfig) -> Self {
-        self.delta_subscription_config = delta;
+    pub fn with_change_only_delivery(mut self, config: ChangeOnlyDeliveryConfig) -> Self {
+        self.change_only_delivery_config = config;
         self
     }
 

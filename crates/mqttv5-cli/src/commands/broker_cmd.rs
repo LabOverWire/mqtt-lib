@@ -254,7 +254,7 @@ pub async fn execute(cmd: BrokerCommand, verbose: bool, debug: bool) -> Result<(
 
 async fn execute_generate_config(args: GenerateConfigArgs) -> Result<()> {
     use mqtt5::broker::config::{
-        AuthConfig, AuthMethod, DeltaSubscriptionConfig, QuicConfig, RateLimitConfig,
+        AuthConfig, AuthMethod, ChangeOnlyDeliveryConfig, QuicConfig, RateLimitConfig,
         StorageBackend, StorageConfig, TlsConfig, WebSocketConfig,
     };
 
@@ -334,7 +334,7 @@ async fn execute_generate_config(args: GenerateConfigArgs) -> Result<()> {
             cleanup_interval: std::time::Duration::from_secs(3600),
             enable_persistence: true,
         },
-        delta_subscription_config: DeltaSubscriptionConfig::default(),
+        change_only_delivery_config: ChangeOnlyDeliveryConfig::default(),
         bridges: vec![],
         #[cfg(feature = "opentelemetry")]
         opentelemetry_config: None,

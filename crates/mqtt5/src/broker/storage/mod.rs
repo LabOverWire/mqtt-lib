@@ -53,11 +53,11 @@ pub struct RetainedMessage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct DeltaState {
+pub struct ChangeOnlyState {
     pub last_payload_hashes: HashMap<String, u64>,
 }
 
-impl DeltaState {
+impl ChangeOnlyState {
     #[must_use]
     pub fn compute_hash(payload: &[u8]) -> u64 {
         let mut hasher = DefaultHasher::new();
@@ -89,7 +89,7 @@ pub struct StoredSubscription {
     #[serde(default = "default_protocol_version")]
     pub protocol_version: u8,
     #[serde(default)]
-    pub delta_mode: bool,
+    pub change_only: bool,
 }
 
 fn default_protocol_version() -> u8 {
@@ -106,7 +106,7 @@ impl StoredSubscription {
             retain_handling: 0,
             subscription_id: None,
             protocol_version: 5,
-            delta_mode: false,
+            change_only: false,
         }
     }
 }
@@ -136,7 +136,7 @@ pub struct ClientSession {
     #[serde(default = "default_receive_maximum")]
     pub receive_maximum: u16,
     #[serde(default)]
-    pub delta_state: DeltaState,
+    pub change_only_state: ChangeOnlyState,
 }
 
 fn default_receive_maximum() -> u16 {
@@ -607,7 +607,7 @@ impl ClientSession {
             will_message: None,
             will_delay_interval: None,
             receive_maximum: 65535,
-            delta_state: DeltaState::default(),
+            change_only_state: ChangeOnlyState::default(),
         }
     }
 
@@ -633,7 +633,7 @@ impl ClientSession {
             will_message,
             will_delay_interval: will_delay,
             receive_maximum: 65535,
-            delta_state: DeltaState::default(),
+            change_only_state: ChangeOnlyState::default(),
         }
     }
 

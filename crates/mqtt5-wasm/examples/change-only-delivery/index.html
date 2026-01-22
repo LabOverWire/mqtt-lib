@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>WASM Delta Subscription Demo</title>
+    <title>WASM Change-Only Delivery Demo</title>
     <style>
         body {
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
@@ -30,7 +30,7 @@
             border-left: 4px solid #007bff;
             margin: 15px 0;
         }
-        .delta-info {
+        .change-only-info {
             background: #d4edda;
             padding: 15px;
             border-radius: 4px;
@@ -199,11 +199,11 @@
 </head>
 <body>
     <div class="header">
-        <h1>Delta Subscription Demo</h1>
-        <p>This demonstrates the <strong>delta subscription</strong> feature where the broker only delivers messages when the payload differs from the last delivered value.</p>
+        <h1>Change-Only Delivery Demo</h1>
+        <p>This demonstrates the <strong>change-only delivery</strong> feature where the broker only delivers messages when the payload differs from the last delivered value.</p>
 
-        <div class="delta-info">
-            <strong>How Delta Subscriptions Work:</strong>
+        <div class="change-only-info">
+            <strong>How Change-Only Deliverys Work:</strong>
             <ul style="margin: 10px 0 0 0; padding-left: 20px;">
                 <li>The broker tracks the last payload hash per topic per subscriber</li>
                 <li>When a new message arrives, it's only delivered if the payload changed</li>
@@ -229,7 +229,7 @@
         </div>
         <div class="stat-item">
             <div class="stat-value" id="blocked-count">0</div>
-            <div class="stat-label">Blocked (Delta)</div>
+            <div class="stat-label">Blocked (Change-Only)</div>
         </div>
     </div>
 
@@ -240,7 +240,7 @@
 
             <div class="controls">
                 <div class="control-group">
-                    <label>Topic (delta enabled for sensors/#):</label>
+                    <label>Topic (change-only enabled for sensors/#):</label>
                     <input type="text" id="publish-topic" value="sensors/temperature">
                 </div>
                 <div class="control-group">
@@ -264,7 +264,7 @@
         </div>
 
         <div class="card subscriber">
-            <h2>Subscriber (Delta Mode)</h2>
+            <h2>Subscriber (Change-Only Mode)</h2>
             <div id="subscriber-status" class="status disconnected">Status: Disconnected</div>
 
             <div class="controls">
@@ -354,17 +354,17 @@
                 await init();
                 debugLog('WASM initialized');
 
-                debugLog('Creating broker configuration with delta subscriptions...');
+                debugLog('Creating broker configuration with change-only deliverys...');
                 const config = new WasmBrokerConfig();
 
                 config.max_clients = 100;
                 config.max_packet_size = 1048576;
                 config.allow_anonymous = true;
 
-                config.delta_subscription_enabled = true;
-                config.add_delta_subscription_pattern('sensors/#');
+                config.change_only_delivery_enabled = true;
+                config.add_change_only_delivery_pattern('sensors/#');
 
-                debugLog('Delta subscription enabled for pattern: sensors/#');
+                debugLog('Change-only delivery enabled for pattern: sensors/#');
 
                 debugLog('Creating broker...');
                 const broker = WasmBroker.with_config(config);
@@ -390,7 +390,7 @@
                 subscriber.on_connect((reasonCode, sessionPresent) => {
                     debugLog('Subscriber connected');
                     document.getElementById('subscriber-status').className = 'status connected';
-                    document.getElementById('subscriber-status').textContent = 'Status: Connected (Delta Mode)';
+                    document.getElementById('subscriber-status').textContent = 'Status: Connected (Change-Only Mode)';
                 });
 
                 subscriber.on_disconnect(() => {

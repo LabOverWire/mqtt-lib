@@ -1,5 +1,5 @@
 use mqtt5::broker::router::MessageRouter;
-use mqtt5::broker::storage::DeltaState;
+use mqtt5::broker::storage::ChangeOnlyState;
 use mqtt5::packet::publish::PublishPacket;
 use mqtt5::time::Duration;
 use mqtt5::types::ProtocolVersion;
@@ -8,19 +8,19 @@ use std::sync::Arc;
 use tokio::time::timeout;
 
 #[tokio::test]
-async fn test_delta_mode_filters_duplicate_payloads() {
+async fn test_change_only_filters_duplicate_payloads() {
     let router = Arc::new(MessageRouter::new());
 
     let (tx, rx) = flume::bounded(10);
     let (dtx, _drx) = tokio::sync::oneshot::channel();
 
     router
-        .register_client("delta_client".to_string(), tx, dtx)
+        .register_client("change_only_client".to_string(), tx, dtx)
         .await;
 
     router
         .subscribe(
-            "delta_client".to_string(),
+            "change_only_client".to_string(),
             "sensors/temperature".to_string(),
             QoS::AtMostOnce,
             None,
@@ -53,24 +53,24 @@ async fn test_delta_mode_filters_duplicate_payloads() {
     let result2 = timeout(Duration::from_millis(100), rx.recv_async()).await;
     assert!(
         result2.is_err(),
-        "Duplicate payload should not be delivered in delta mode"
+        "Duplicate payload should not be delivered in change-only mode"
     );
 }
 
 #[tokio::test]
-async fn test_delta_mode_allows_different_payloads() {
+async fn test_change_only_allows_different_payloads() {
     let router = Arc::new(MessageRouter::new());
 
     let (tx, rx) = flume::bounded(10);
     let (dtx, _drx) = tokio::sync::oneshot::channel();
 
     router
-        .register_client("delta_client".to_string(), tx, dtx)
+        .register_client("change_only_client".to_string(), tx, dtx)
         .await;
 
     router
         .subscribe(
-            "delta_client".to_string(),
+            "change_only_client".to_string(),
             "sensors/temperature".to_string(),
             QoS::AtMostOnce,
             None,
@@ -109,7 +109,7 @@ async fn test_delta_mode_allows_different_payloads() {
 }
 
 #[tokio::test]
-async fn test_delta_mode_disabled_allows_duplicates() {
+async fn test_change_only_disabled_allows_duplicates() {
     let router = Arc::new(MessageRouter::new());
 
     let (tx, rx) = flume::bounded(10);
@@ -154,24 +154,24 @@ async fn test_delta_mode_disabled_allows_duplicates() {
     let result2 = timeout(Duration::from_millis(100), rx.recv_async()).await;
     assert!(
         result2.is_ok(),
-        "Duplicate payload should be delivered when delta_mode=false"
+        "Duplicate payload should be delivered when change_only=false"
     );
 }
 
 #[tokio::test]
-async fn test_delta_mode_per_topic_tracking() {
+async fn test_change_only_per_topic_tracking() {
     let router = Arc::new(MessageRouter::new());
 
     let (tx, rx) = flume::bounded(10);
     let (dtx, _drx) = tokio::sync::oneshot::channel();
 
     router
-        .register_client("delta_client".to_string(), tx, dtx)
+        .register_client("change_only_client".to_string(), tx, dtx)
         .await;
 
     router
         .subscribe(
-            "delta_client".to_string(),
+            "change_only_client".to_string(),
             "sensors/+".to_string(),
             QoS::AtMostOnce,
             None,
@@ -209,7 +209,7 @@ async fn test_delta_mode_per_topic_tracking() {
 }
 
 #[tokio::test]
-async fn test_delta_state_persistence() {
+async fn test_change_only_state_persistence() {
     let router = Arc::new(MessageRouter::new());
 
     let (tx, rx) = flume::bounded(10);
@@ -239,24 +239,29 @@ async fn test_delta_state_persistence() {
 
     let _ = timeout(Duration::from_millis(100), rx.recv_async()).await;
 
-    let state = router.get_delta_state("persistent_client").await;
-    assert!(state.is_some(), "Delta state should exist after delivery");
+    let state = router.get_change_only_state("persistent_client").await;
+    assert!(
+        state.is_some(),
+        "Change-only state should exist after delivery"
+    );
 
     let state = state.unwrap();
     assert!(
         state.last_payload_hashes.contains_key("test/topic"),
-        "Delta state should track the topic"
+        "Change-only state should track the topic"
     );
 }
 
 #[tokio::test]
-async fn test_delta_state_load_on_reconnect() {
+async fn test_change_only_state_load_on_reconnect() {
     let router = Arc::new(MessageRouter::new());
 
-    let mut state = DeltaState::default();
+    let mut state = ChangeOnlyState::default();
     state.update_hash("test/topic", b"data1");
 
-    router.load_delta_state("reconnect_client", state).await;
+    router
+        .load_change_only_state("reconnect_client", state)
+        .await;
 
     let (tx, rx) = flume::bounded(10);
     let (dtx, _drx) = tokio::sync::oneshot::channel();
@@ -300,10 +305,10 @@ async fn test_delta_state_load_on_reconnect() {
 }
 
 #[tokio::test]
-async fn test_delta_state_hash_computation() {
-    let hash1 = DeltaState::compute_hash(b"hello world");
-    let hash2 = DeltaState::compute_hash(b"hello world");
-    let hash3 = DeltaState::compute_hash(b"hello world!");
+async fn test_change_only_state_hash_computation() {
+    let hash1 = ChangeOnlyState::compute_hash(b"hello world");
+    let hash2 = ChangeOnlyState::compute_hash(b"hello world");
+    let hash3 = ChangeOnlyState::compute_hash(b"hello world!");
 
     assert_eq!(hash1, hash2, "Same payload should produce same hash");
     assert_ne!(
@@ -313,8 +318,8 @@ async fn test_delta_state_hash_computation() {
 }
 
 #[tokio::test]
-async fn test_delta_state_should_deliver() {
-    let mut state = DeltaState::default();
+async fn test_change_only_state_should_deliver() {
+    let mut state = ChangeOnlyState::default();
 
     assert!(
         state.should_deliver("topic", b"data"),
@@ -340,7 +345,7 @@ async fn test_delta_state_should_deliver() {
 }
 
 #[tokio::test]
-async fn test_delta_mode_with_qos_levels() {
+async fn test_change_only_with_qos_levels() {
     let router = Arc::new(MessageRouter::new());
 
     let (tx, rx) = flume::bounded(10);
@@ -385,12 +390,12 @@ async fn test_delta_mode_with_qos_levels() {
     let result2 = timeout(Duration::from_millis(100), rx.recv_async()).await;
     assert!(
         result2.is_err(),
-        "Duplicate QoS1 message should be filtered in delta mode"
+        "Duplicate QoS1 message should be filtered in change-only mode"
     );
 }
 
 #[tokio::test]
-async fn test_delta_mode_multiple_clients_independent() {
+async fn test_change_only_multiple_clients_independent() {
     let router = Arc::new(MessageRouter::new());
 
     let (tx1, rx1) = flume::bounded(10);

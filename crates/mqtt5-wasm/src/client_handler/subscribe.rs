@@ -50,9 +50,9 @@ impl WasmClientHandler {
 
             let subscription_id = subscribe.properties.get_subscription_identifier();
 
-            let delta_mode = self.config.read().is_ok_and(|c| {
-                c.delta_subscription_config.enabled
-                    && c.delta_subscription_config
+            let change_only = self.config.read().is_ok_and(|c| {
+                c.change_only_delivery_config.enabled
+                    && c.change_only_delivery_config
                         .topic_patterns
                         .iter()
                         .any(|pattern| topic_matches_filter(&filter.filter, pattern))
@@ -68,7 +68,7 @@ impl WasmClientHandler {
                     filter.options.retain_as_published,
                     filter.options.retain_handling as u8,
                     ProtocolVersion::try_from(self.protocol_version).unwrap_or_default(),
-                    delta_mode,
+                    change_only,
                 )
                 .await?;
 
@@ -80,7 +80,7 @@ impl WasmClientHandler {
                     retain_handling: filter.options.retain_handling as u8,
                     subscription_id,
                     protocol_version: self.protocol_version,
-                    delta_mode,
+                    change_only,
                 };
                 session.add_subscription(filter.filter.clone(), stored);
                 self.storage.store_session(session.clone()).await.ok();

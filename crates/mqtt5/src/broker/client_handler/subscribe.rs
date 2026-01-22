@@ -59,10 +59,10 @@ impl ClientHandler {
                 filter.options.qos as u8
             };
 
-            let delta_mode = self.config.delta_subscription_config.enabled
+            let change_only = self.config.change_only_delivery_config.enabled
                 && self
                     .config
-                    .delta_subscription_config
+                    .change_only_delivery_config
                     .topic_patterns
                     .iter()
                     .any(|pattern| topic_matches_filter(&filter.filter, pattern));
@@ -78,7 +78,7 @@ impl ClientHandler {
                     filter.options.retain_as_published,
                     filter.options.retain_handling as u8,
                     ProtocolVersion::try_from(self.protocol_version).unwrap_or_default(),
-                    delta_mode,
+                    change_only,
                 )
                 .await?;
 
@@ -90,7 +90,7 @@ impl ClientHandler {
                     retain_handling: filter.options.retain_handling as u8,
                     subscription_id: subscribe.properties.get_subscription_identifier(),
                     protocol_version: self.protocol_version,
-                    delta_mode,
+                    change_only,
                 };
                 session.add_subscription(filter.filter.clone(), stored);
                 if let Some(ref storage) = self.storage {

@@ -6,7 +6,7 @@
 use crate::broker::bridge::BridgeManager;
 use crate::broker::events::{BrokerEventHandler, RetainedSetEvent};
 use crate::broker::storage::{
-    DeltaState, DynamicStorage, QueuedMessage, RetainedMessage, StorageBackend,
+    ChangeOnlyState, DynamicStorage, QueuedMessage, RetainedMessage, StorageBackend,
 };
 use crate::packet::publish::PublishPacket;
 use crate::types::ProtocolVersion;
@@ -43,8 +43,8 @@ pub struct Subscription {
     pub retain_handling: u8,
     /// Protocol version of the subscriber
     pub protocol_version: ProtocolVersion,
-    /// Delta mode - if true, only deliver messages when payload changes
-    pub delta_mode: bool,
+    /// Change-only mode - if true, only deliver messages when payload changes
+    pub change_only: bool,
 }
 
 /// Message router for the broker
@@ -56,7 +56,7 @@ pub struct MessageRouter {
     storage: Option<Arc<DynamicStorage>>,
     share_group_counters: Arc<RwLock<HashMap<String, Arc<AtomicUsize>>>>,
     event_handler: Option<Arc<dyn BrokerEventHandler>>,
-    delta_states: Arc<RwLock<HashMap<String, DeltaState>>>,
+    change_only_states: Arc<RwLock<HashMap<String, ChangeOnlyState>>>,
     #[cfg(not(target_arch = "wasm32"))]
     bridge_manager: Arc<RwLock<Option<Weak<BridgeManager>>>>,
     #[cfg(target_arch = "wasm32")]
@@ -84,7 +84,7 @@ impl MessageRouter {
             storage: None,
             share_group_counters: Arc::new(RwLock::new(HashMap::new())),
             event_handler: None,
-            delta_states: Arc::new(RwLock::new(HashMap::new())),
+            change_only_states: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(not(target_arch = "wasm32"))]
             bridge_manager: Arc::new(RwLock::new(None)),
             #[cfg(target_arch = "wasm32")]
@@ -104,7 +104,7 @@ impl MessageRouter {
             storage: Some(storage),
             share_group_counters: Arc::new(RwLock::new(HashMap::new())),
             event_handler: None,
-            delta_states: Arc::new(RwLock::new(HashMap::new())),
+            change_only_states: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(not(target_arch = "wasm32"))]
             bridge_manager: Arc::new(RwLock::new(None)),
             #[cfg(target_arch = "wasm32")]
@@ -222,7 +222,7 @@ impl MessageRouter {
         retain_as_published: bool,
         retain_handling: u8,
         protocol_version: ProtocolVersion,
-        delta_mode: bool,
+        change_only: bool,
     ) -> Result<bool> {
         if retain_handling > 2 {
             return Err(crate::MqttError::ProtocolError(format!(
@@ -242,7 +242,7 @@ impl MessageRouter {
             retain_as_published,
             retain_handling,
             protocol_version,
-            delta_mode,
+            change_only,
         };
 
         let is_new = if Self::has_wildcards(actual_filter) {
@@ -570,19 +570,19 @@ impl MessageRouter {
             return;
         }
 
-        if sub.delta_mode {
-            let delta_states = self.delta_states.read().await;
-            if let Some(state) = delta_states.get(&sub.client_id) {
+        if sub.change_only {
+            let change_only_states = self.change_only_states.read().await;
+            if let Some(state) = change_only_states.get(&sub.client_id) {
                 if !state.should_deliver(&publish.topic_name, &publish.payload) {
                     trace!(
-                        "Skipping delta delivery to {} - payload unchanged for topic {}",
+                        "Skipping change-only delivery to {} - payload unchanged for topic {}",
                         sub.client_id,
                         publish.topic_name
                     );
                     return;
                 }
             }
-            drop(delta_states);
+            drop(change_only_states);
         }
 
         if let Some(client_info) = clients.get(&sub.client_id) {
@@ -600,9 +600,9 @@ impl MessageRouter {
                         Self::queue_message(storage, e.into_inner(), &sub.client_id, qos).await;
                     }
                 }
-            } else if sub.delta_mode {
-                let mut delta_states = self.delta_states.write().await;
-                delta_states
+            } else if sub.change_only {
+                let mut change_only_states = self.change_only_states.write().await;
+                change_only_states
                     .entry(sub.client_id.clone())
                     .or_default()
                     .update_hash(&publish.topic_name, &publish.payload);
@@ -677,19 +677,19 @@ impl MessageRouter {
         retained.contains_key(topic)
     }
 
-    pub async fn load_delta_state(&self, client_id: &str, state: DeltaState) {
-        self.delta_states
+    pub async fn load_change_only_state(&self, client_id: &str, state: ChangeOnlyState) {
+        self.change_only_states
             .write()
             .await
             .insert(client_id.to_string(), state);
     }
 
-    pub async fn get_delta_state(&self, client_id: &str) -> Option<DeltaState> {
-        self.delta_states.read().await.get(client_id).cloned()
+    pub async fn get_change_only_state(&self, client_id: &str) -> Option<ChangeOnlyState> {
+        self.change_only_states.read().await.get(client_id).cloned()
     }
 
-    pub async fn remove_delta_state(&self, client_id: &str) {
-        self.delta_states.write().await.remove(client_id);
+    pub async fn remove_change_only_state(&self, client_id: &str) {
+        self.change_only_states.write().await.remove(client_id);
     }
 }
 
