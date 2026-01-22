@@ -21,7 +21,7 @@
 
 ```toml
 [dependencies]
-mqtt5 = "0.20"
+mqtt5 = "0.21"
 ```
 
 ### CLI Tool
@@ -185,10 +185,35 @@ mqttv5 pub
 ### Advanced Features
 
 - Broker-to-broker bridging - Connect multiple broker instances
+- Change-only delivery - Only deliver messages when payload differs from last value
 - Resource monitoring - $SYS topics, connection metrics
 - Hot configuration reload - Update settings without restart
 - Storage backends - File-based or in-memory persistence
 - Event hooks - Custom handlers for connect, publish, subscribe, disconnect events
+
+### Change-Only Delivery
+
+Reduces bandwidth for topics that frequently publish unchanged values (common with sensors).
+
+```rust
+use mqtt5::broker::config::{BrokerConfig, ChangeOnlyDeliveryConfig};
+
+let config = BrokerConfig::new()
+    .with_change_only_delivery(ChangeOnlyDeliveryConfig {
+        enabled: true,
+        topic_patterns: vec!["sensors/#".to_string(), "status/+".to_string()],
+    });
+```
+
+**How it works:**
+- Broker tracks last payload hash per topic per subscriber
+- Messages only delivered when payload differs from last delivered value
+- State persists across client reconnections
+- Configured via topic patterns with wildcard support
+
+**Bridge behavior:**
+- Messages from bridges → local subscribers: change-only filtering applies
+- Messages to bridges (outgoing): all messages forwarded (no filtering)
 
 ## Client Capabilities
 
