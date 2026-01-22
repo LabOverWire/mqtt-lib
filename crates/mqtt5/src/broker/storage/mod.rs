@@ -52,6 +52,8 @@ pub struct RetainedMessage {
     pub expires_at: Option<SystemTime>,
 }
 
+const CHANGE_ONLY_MAX_TOPICS: usize = 10_000;
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ChangeOnlyState {
     pub last_payload_hashes: HashMap<String, u64>,
@@ -73,6 +75,13 @@ impl ChangeOnlyState {
 
     pub fn update_hash(&mut self, topic: &str, payload: &[u8]) {
         let hash = Self::compute_hash(payload);
+        if self.last_payload_hashes.len() >= CHANGE_ONLY_MAX_TOPICS
+            && !self.last_payload_hashes.contains_key(topic)
+        {
+            if let Some(key) = self.last_payload_hashes.keys().next().cloned() {
+                self.last_payload_hashes.remove(&key);
+            }
+        }
         self.last_payload_hashes.insert(topic.to_string(), hash);
     }
 }
