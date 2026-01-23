@@ -25,7 +25,9 @@ use crate::packet::publish::PublishPacket;
 use crate::time::{Duration, SystemTime};
 use crate::QoS;
 use serde::{Deserialize, Serialize};
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -50,6 +52,40 @@ pub struct RetainedMessage {
     pub expires_at: Option<SystemTime>,
 }
 
+const CHANGE_ONLY_MAX_TOPICS: usize = 10_000;
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ChangeOnlyState {
+    pub last_payload_hashes: HashMap<String, u64>,
+}
+
+impl ChangeOnlyState {
+    #[must_use]
+    pub fn compute_hash(payload: &[u8]) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        payload.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    #[must_use]
+    pub fn should_deliver(&self, topic: &str, payload: &[u8]) -> bool {
+        let hash = Self::compute_hash(payload);
+        self.last_payload_hashes.get(topic) != Some(&hash)
+    }
+
+    pub fn update_hash(&mut self, topic: &str, payload: &[u8]) {
+        let hash = Self::compute_hash(payload);
+        if self.last_payload_hashes.len() >= CHANGE_ONLY_MAX_TOPICS
+            && !self.last_payload_hashes.contains_key(topic)
+        {
+            if let Some(key) = self.last_payload_hashes.keys().next().cloned() {
+                self.last_payload_hashes.remove(&key);
+            }
+        }
+        self.last_payload_hashes.insert(topic.to_string(), hash);
+    }
+}
+
 /// Stored subscription options for session persistence
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredSubscription {
@@ -61,6 +97,8 @@ pub struct StoredSubscription {
     pub subscription_id: Option<u32>,
     #[serde(default = "default_protocol_version")]
     pub protocol_version: u8,
+    #[serde(default)]
+    pub change_only: bool,
 }
 
 fn default_protocol_version() -> u8 {
@@ -77,6 +115,7 @@ impl StoredSubscription {
             retain_handling: 0,
             subscription_id: None,
             protocol_version: 5,
+            change_only: false,
         }
     }
 }
@@ -105,6 +144,8 @@ pub struct ClientSession {
     /// Client's receive maximum (for broker outbound flow control)
     #[serde(default = "default_receive_maximum")]
     pub receive_maximum: u16,
+    #[serde(default)]
+    pub change_only_state: ChangeOnlyState,
 }
 
 fn default_receive_maximum() -> u16 {
@@ -575,6 +616,7 @@ impl ClientSession {
             will_message: None,
             will_delay_interval: None,
             receive_maximum: 65535,
+            change_only_state: ChangeOnlyState::default(),
         }
     }
 
@@ -600,6 +642,7 @@ impl ClientSession {
             will_message,
             will_delay_interval: will_delay,
             receive_maximum: 65535,
+            change_only_state: ChangeOnlyState::default(),
         }
     }
 

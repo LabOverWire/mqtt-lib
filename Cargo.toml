@@ -32,3 +32,4 @@ lto = false
 
 [patch.crates-io]
 mqtt5-protocol = { path = "crates/mqtt5-protocol" }
+mqtt5 = { path = "crates/mqtt5" }

@@ -98,6 +98,7 @@ async fn test_bridge_message_routing() {
             false,
             0,
             ProtocolVersion::V5,
+            false,
         )
         .await
         .unwrap();

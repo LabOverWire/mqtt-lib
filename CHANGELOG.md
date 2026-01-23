@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [mqtt5 0.21.0] / [mqtt5-wasm 0.10.0] / [mqttv5-cli 0.20.0] - 2026-01-21
+
+### Added
+
+- **Change-only delivery** - Broker-configured duplicate payload suppression
+  - Only delivers messages when payload differs from last delivered value per topic per subscriber
+  - Configured via `ChangeOnlyDeliveryConfig` with topic patterns (e.g., `sensors/#`)
+  - Reduces bandwidth for topics that frequently publish unchanged values
+  - State persists across client reconnections
+  - WASM support: `set_change_only_delivery_enabled`, `add_change_only_delivery_pattern`
+  - New example: `change-only-delivery/`
+
+### Changed
+
+- **WASM bridge loop prevention disabled by default** - TTL changed from 60s to 0 (disabled)
+  - Prevents unexpected behavior for users who don't need loop prevention
+  - Enable explicitly with `set_loop_prevention_ttl_secs(60)` if needed
+
+- Internal dependency management: mqtt5 crate now uses workspace `[patch.crates-io]`
+
 ## [mqtt5 0.20.0] / [mqtt5-wasm 0.9.0] / [mqttv5-cli 0.19.0] - 2026-01-19
 
 ### Added

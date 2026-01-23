@@ -38,6 +38,7 @@ async fn test_shared_subscription_distribution() {
             false,
             0,
             ProtocolVersion::V5,
+            false,
         )
         .await
         .unwrap();
@@ -52,6 +53,7 @@ async fn test_shared_subscription_distribution() {
             false,
             0,
             ProtocolVersion::V5,
+            false,
         )
         .await
         .unwrap();
@@ -66,6 +68,7 @@ async fn test_shared_subscription_distribution() {
             false,
             0,
             ProtocolVersion::V5,
+            false,
         )
         .await
         .unwrap();
@@ -135,6 +138,7 @@ async fn test_mixed_shared_and_regular_subscriptions() {
             false,
             0,
             ProtocolVersion::V5,
+            false,
         )
         .await
         .unwrap();
@@ -149,6 +153,7 @@ async fn test_mixed_shared_and_regular_subscriptions() {
             false,
             0,
             ProtocolVersion::V5,
+            false,
         )
         .await
         .unwrap();
@@ -163,6 +168,7 @@ async fn test_mixed_shared_and_regular_subscriptions() {
             false,
             0,
             ProtocolVersion::V5,
+            false,
         )
         .await
         .unwrap();

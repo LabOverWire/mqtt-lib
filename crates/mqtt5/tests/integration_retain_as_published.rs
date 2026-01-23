@@ -28,6 +28,7 @@ async fn test_retain_as_published_false_clears_retain_flag() {
             false,
             0,
             ProtocolVersion::V5,
+            false,
         )
         .await
         .unwrap();
@@ -68,6 +69,7 @@ async fn test_retain_as_published_true_preserves_retain_flag() {
             true,
             0,
             ProtocolVersion::V5,
+            false,
         )
         .await
         .unwrap();

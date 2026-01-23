@@ -12,6 +12,7 @@ use crate::packet::unsubscribe::UnsubscribePacket;
 use crate::packet::Packet;
 use crate::transport::PacketIo;
 use crate::types::ProtocolVersion;
+use crate::validation::topic_matches_filter;
 use crate::QoS;
 use tracing::debug;
 
@@ -58,6 +59,14 @@ impl ClientHandler {
                 filter.options.qos as u8
             };
 
+            let change_only = self.config.change_only_delivery_config.enabled
+                && self
+                    .config
+                    .change_only_delivery_config
+                    .topic_patterns
+                    .iter()
+                    .any(|pattern| topic_matches_filter(&filter.filter, pattern));
+
             let is_new = self
                 .router
                 .subscribe(
@@ -69,6 +78,7 @@ impl ClientHandler {
                     filter.options.retain_as_published,
                     filter.options.retain_handling as u8,
                     ProtocolVersion::try_from(self.protocol_version).unwrap_or_default(),
+                    change_only,
                 )
                 .await?;
 
@@ -80,6 +90,7 @@ impl ClientHandler {
                     retain_handling: filter.options.retain_handling as u8,
                     subscription_id: subscribe.properties.get_subscription_identifier(),
                     protocol_version: self.protocol_version,
+                    change_only,
                 };
                 session.add_subscription(filter.filter.clone(), stored);
                 if let Some(ref storage) = self.storage {
