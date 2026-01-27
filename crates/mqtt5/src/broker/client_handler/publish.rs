@@ -445,6 +445,14 @@ impl ClientHandler {
         }
 
         let payload_size = publish.payload.len();
+        tracing::debug!(
+            topic = %publish.topic_name,
+            qos = ?publish.qos,
+            retain = publish.retain,
+            payload_len = payload_size,
+            packet_id = ?publish.packet_id,
+            "Sending PUBLISH to client"
+        );
         self.write_buffer.clear();
         encode_packet_to_buffer(&Packet::Publish(publish), &mut self.write_buffer)?;
         self.transport.write(&self.write_buffer).await?;
