@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [mqtt5 0.21.1] / [mqtt5-wasm 0.10.1] / [mqttv5-cli 0.20.1] - 2026-01-26
+
+### Fixed
+
+- **Invalid packet_id initialization** - `PublishPacket::new` no longer sets packet_id to 0 for QoS > 0 (0 is not a valid MQTT packet identifier)
+
+### Added
+
+- Debug tracing for outgoing PUBLISH packets and retained message delivery
+
 ## [mqtt5 0.21.0] / [mqtt5-wasm 0.10.0] / [mqttv5-cli 0.20.0] - 2026-01-21
 
 ### Added
