@@ -106,7 +106,19 @@ impl ClientHandler {
 
             if should_send_retained {
                 let retained = self.router.get_retained_messages(&filter.filter).await;
+                debug!(
+                    topic = %filter.filter,
+                    count = retained.len(),
+                    "Retained messages found for subscription"
+                );
                 for mut msg in retained {
+                    debug!(
+                        topic = %msg.topic_name,
+                        qos = ?msg.qos,
+                        payload_len = msg.payload.len(),
+                        retain = msg.retain,
+                        "Queuing retained message for delivery"
+                    );
                     msg.retain = true;
                     self.publish_tx.send_async(msg).await.map_err(|_| {
                         MqttError::InvalidState("Failed to queue retained message".to_string())

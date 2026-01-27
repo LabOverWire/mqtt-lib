@@ -55,6 +55,7 @@ fn test_shared_subscriptions_in_turmoil() {
                 false,
                 0,
                 ProtocolVersion::V5,
+                false,
             )
             .await
             .unwrap();
@@ -69,6 +70,7 @@ fn test_shared_subscriptions_in_turmoil() {
                 false,
                 0,
                 ProtocolVersion::V5,
+                false,
             )
             .await
             .unwrap();
@@ -83,6 +85,7 @@ fn test_shared_subscriptions_in_turmoil() {
                 false,
                 0,
                 ProtocolVersion::V5,
+                false,
             )
             .await
             .unwrap();

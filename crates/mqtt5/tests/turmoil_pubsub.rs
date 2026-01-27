@@ -42,6 +42,7 @@ fn test_basic_publish_subscribe() {
                 false,
                 0,
                 ProtocolVersion::V5,
+                false,
             )
             .await
             .unwrap();
@@ -106,6 +107,7 @@ fn test_wildcard_subscriptions() {
                 false,
                 0,
                 ProtocolVersion::V5,
+                false,
             )
             .await
             .unwrap();
@@ -121,6 +123,7 @@ fn test_wildcard_subscriptions() {
                 false,
                 0,
                 ProtocolVersion::V5,
+                false,
             )
             .await
             .unwrap();
@@ -220,6 +223,7 @@ fn test_multiple_subscribers_same_topic() {
                     false,
                     0,
                     ProtocolVersion::V5,
+                    false,
                 )
                 .await
                 .unwrap();
@@ -296,6 +300,7 @@ fn test_qos_levels() {
                 false,
                 0,
                 ProtocolVersion::V5,
+                false,
             )
             .await
             .unwrap();
@@ -310,6 +315,7 @@ fn test_qos_levels() {
                 false,
                 0,
                 ProtocolVersion::V5,
+                false,
             )
             .await
             .unwrap();
@@ -378,6 +384,7 @@ fn test_unsubscribe_functionality() {
                 false,
                 0,
                 ProtocolVersion::V5,
+                false,
             )
             .await
             .unwrap();

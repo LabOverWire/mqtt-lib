@@ -33,15 +33,9 @@ impl PublishPacket {
     /// Creates a new PUBLISH packet (v5.0)
     #[must_use]
     pub fn new(topic_name: impl Into<String>, payload: impl Into<Bytes>, qos: QoS) -> Self {
-        let packet_id = if qos == QoS::AtMostOnce {
-            None
-        } else {
-            Some(0)
-        };
-
         Self {
             topic_name: topic_name.into(),
-            packet_id,
+            packet_id: None,
             payload: payload.into(),
             qos,
             retain: false,
@@ -54,15 +48,9 @@ impl PublishPacket {
     /// Creates a new PUBLISH packet for v3.1.1
     #[must_use]
     pub fn new_v311(topic_name: impl Into<String>, payload: impl Into<Bytes>, qos: QoS) -> Self {
-        let packet_id = if qos == QoS::AtMostOnce {
-            None
-        } else {
-            Some(0)
-        };
-
         Self {
             topic_name: topic_name.into(),
-            packet_id,
+            packet_id: None,
             payload: payload.into(),
             qos,
             retain: false,
