@@ -21,7 +21,7 @@
 
 ```toml
 [dependencies]
-mqtt5 = "0.21"
+mqtt5 = "0.22"
 ```
 
 ### CLI Tool
@@ -943,6 +943,19 @@ The broker supports multiple authentication methods and fine-grained authorizati
 | IdentityOnly | External IdP for identity, internal ACL for authorization |
 | ClaimBinding | Admin-defined claim-to-role mappings |
 | TrustedRoles | Trust role claims from IdP (Keycloak, Azure AD) |
+
+### Composite Authentication
+
+`CompositeAuthProvider` chains a primary provider (enhanced auth) with a fallback provider (password auth). When the primary rejects a connection with `BadAuthenticationMethod`, the fallback is tried. This lets internal service clients use plain CONNECT while external clients use SCRAM/JWT/Federated auth.
+
+```rust
+use mqtt5::broker::auth::{CompositeAuthProvider, PasswordAuthProvider};
+
+let primary = broker.auth_provider();
+let fallback = Arc::new(PasswordAuthProvider::new());
+let composite = Arc::new(CompositeAuthProvider::new(primary, fallback));
+let broker = broker.with_auth_provider(composite);
+```
 
 ### Authorization
 
