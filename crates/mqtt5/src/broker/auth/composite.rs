@@ -9,6 +9,10 @@ use crate::protocol::v5::reason_codes::ReasonCode;
 
 use super::{AuthProvider, AuthResult, EnhancedAuthResult};
 
+/// Chains two auth providers: tries primary first, falls back only on `BadAuthenticationMethod`.
+///
+/// Authorization uses OR-semantics: allows if either provider allows.
+/// Enhanced auth delegates to primary only (multi-step protocols cannot fall back mid-stream).
 pub struct CompositeAuthProvider {
     primary: Arc<dyn AuthProvider>,
     fallback: Arc<dyn AuthProvider>,
