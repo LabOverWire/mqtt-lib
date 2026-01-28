@@ -1,8 +1,10 @@
 //! Authentication and authorization for the MQTT broker
 
+mod composite;
 mod providers;
 mod rate_limit;
 
+pub use composite::CompositeAuthProvider;
 pub use providers::{
     AllowAllAuthProvider, CertificateAuthProvider, ComprehensiveAuthProvider, PasswordAuthProvider,
 };

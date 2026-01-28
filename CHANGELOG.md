@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [mqtt5 0.22.0] / [mqtt5-wasm 0.10.2] / [mqttv5-cli 0.20.2] - 2026-01-27
+
+### Added
+
+- **CompositeAuthProvider** - Chains a primary auth provider with a fallback; falls through to fallback on `BadAuthenticationMethod`, enabling mixed enhanced/password auth
+- **`MqttBroker::auth_provider()`** - Getter to extract the broker's built auth provider for wrapping with `CompositeAuthProvider`
+
 ## [mqtt5-protocol 0.9.4] / [mqtt5 0.21.1] / [mqtt5-wasm 0.10.1] / [mqttv5-cli 0.20.1] - 2026-01-26
 
 ### Fixed

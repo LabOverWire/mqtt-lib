@@ -1302,6 +1302,11 @@ impl MqttBroker {
     }
 
     #[must_use]
+    pub fn auth_provider(&self) -> Arc<dyn AuthProvider> {
+        Arc::clone(&self.auth_provider)
+    }
+
+    #[must_use]
     pub fn router(&self) -> Arc<MessageRouter> {
         Arc::clone(&self.router)
     }

@@ -1,6 +1,6 @@
 [package]
 name = "mqttv5-cli"
-version = "0.20.1"
+version = "0.20.2"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -22,7 +22,7 @@ opentelemetry = ["mqtt5/opentelemetry"]
 codec = ["mqtt5/codec-all"]
 
 [dependencies]
-mqtt5 = "0.21"
+mqtt5 = "0.22"
 anyhow = "1.0"
 tracing = "0.1"
 serde = { version = "1.0", features = ["derive"] }
