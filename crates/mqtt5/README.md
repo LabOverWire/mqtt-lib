@@ -93,6 +93,16 @@ let config = BrokerConfig::default()
 
 Authentication methods: Password, SCRAM-SHA-256, JWT, Federated JWT (Google, Keycloak, etc.)
 
+Use `CompositeAuthProvider` to chain enhanced auth with a password fallback for internal service clients:
+
+```rust
+use mqtt5::broker::auth::{CompositeAuthProvider, PasswordAuthProvider};
+
+let primary = broker.auth_provider();
+let fallback = Arc::new(PasswordAuthProvider::new());
+let broker = broker.with_auth_provider(Arc::new(CompositeAuthProvider::new(primary, fallback)));
+```
+
 See [Authentication & Authorization Guide](../../AUTHENTICATION.md) for details.
 
 ## Transport URLs
