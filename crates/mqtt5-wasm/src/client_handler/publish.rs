@@ -19,7 +19,7 @@ impl WasmClientHandler {
     #[allow(clippy::too_many_lines)]
     pub(super) async fn handle_publish(
         &mut self,
-        publish: PublishPacket,
+        mut publish: PublishPacket,
         writer: &mut WasmWriter,
     ) -> Result<()> {
         let client_id = self.client_id.as_ref().unwrap();
@@ -106,6 +106,15 @@ impl WasmClientHandler {
                 }
             }
             return Ok(());
+        }
+
+        publish
+            .properties
+            .remove_user_property_by_key("x-mqtt-sender");
+        if let Some(ref uid) = self.user_id {
+            publish
+                .properties
+                .add_user_property("x-mqtt-sender".into(), uid.clone());
         }
 
         match publish.qos {

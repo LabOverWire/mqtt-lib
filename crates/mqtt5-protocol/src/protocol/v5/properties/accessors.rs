@@ -73,6 +73,21 @@ impl Properties {
             .push(PropertyValue::Utf8StringPair(key, value));
     }
 
+    pub fn remove_user_property_by_key(&mut self, key: &str) {
+        if let Some(values) = self.properties.get_mut(&PropertyId::UserProperty) {
+            values.retain(|v| {
+                if let PropertyValue::Utf8StringPair(k, _) = v {
+                    k != key
+                } else {
+                    true
+                }
+            });
+            if values.is_empty() {
+                self.properties.remove(&PropertyId::UserProperty);
+            }
+        }
+    }
+
     pub fn set_subscription_identifier(&mut self, id: u32) {
         self.properties
             .entry(PropertyId::SubscriptionIdentifier)

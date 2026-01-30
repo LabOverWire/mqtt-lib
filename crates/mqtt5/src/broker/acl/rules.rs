@@ -2,7 +2,16 @@
 
 use crate::error::{MqttError, Result};
 use crate::validation::topic_matches_filter;
+use std::borrow::Cow;
 use std::collections::HashSet;
+
+fn expand_pattern<'a>(pattern: &'a str, username: Option<&str>) -> Option<Cow<'a, str>> {
+    if !pattern.contains("%u") {
+        return Some(Cow::Borrowed(pattern));
+    }
+    let name = username?;
+    Some(Cow::Owned(pattern.replace("%u", name)))
+}
 
 /// Access permissions for topics
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,7 +82,10 @@ impl AclRule {
             return false;
         }
 
-        topic_matches_filter(topic, &self.topic_pattern)
+        let Some(expanded) = expand_pattern(&self.topic_pattern, username) else {
+            return false;
+        };
+        topic_matches_filter(topic, &expanded)
     }
 }
 
@@ -94,8 +106,11 @@ impl RoleRule {
     }
 
     #[must_use]
-    pub fn matches(&self, topic: &str) -> bool {
-        topic_matches_filter(topic, &self.topic_pattern)
+    pub fn matches(&self, username: Option<&str>, topic: &str) -> bool {
+        let Some(expanded) = expand_pattern(&self.topic_pattern, username) else {
+            return false;
+        };
+        topic_matches_filter(topic, &expanded)
     }
 }
 

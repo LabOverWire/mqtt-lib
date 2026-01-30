@@ -413,7 +413,7 @@ impl AclManager {
                 for role_name in &all_assigned_roles {
                     if let Some(role) = roles_map.get(role_name) {
                         for rule in &role.rules {
-                            if rule.matches(topic) {
+                            if rule.matches(username, topic) {
                                 if rule.permission.is_deny() {
                                     debug!(
                                         "Role deny matched: user={}, role={}, topic={}, pattern={}",
@@ -1370,5 +1370,118 @@ mod tests {
 
         assert!(acl.check_publish(Some("alice"), "admin/logs/access").await);
         assert!(!acl.check_publish(Some("alice"), "admin/logs/error").await);
+    }
+
+    #[tokio::test]
+    async fn test_percent_u_direct_rule_expansion() {
+        let acl = AclManager::new();
+
+        acl.add_rule(AclRule::new(
+            "*".to_string(),
+            "$DB/u/%u/#".to_string(),
+            Permission::ReadWrite,
+        ))
+        .await;
+
+        assert!(
+            acl.check_publish(Some("alice@gmail.com"), "$DB/u/alice@gmail.com/nodes")
+                .await
+        );
+        assert!(
+            acl.check_subscribe(Some("alice@gmail.com"), "$DB/u/alice@gmail.com/nodes")
+                .await
+        );
+
+        assert!(
+            !acl.check_publish(Some("alice@gmail.com"), "$DB/u/bob@gmail.com/nodes")
+                .await
+        );
+
+        assert!(acl.check_publish(Some("bob"), "$DB/u/bob/data").await);
+        assert!(
+            !acl.check_publish(Some("bob"), "$DB/u/alice@gmail.com/data")
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn test_percent_u_anonymous_never_matches() {
+        let acl = AclManager::new();
+
+        acl.add_rule(AclRule::new(
+            "*".to_string(),
+            "$DB/u/%u/#".to_string(),
+            Permission::ReadWrite,
+        ))
+        .await;
+
+        assert!(!acl.check_publish(None, "$DB/u/anyone/data").await);
+        assert!(!acl.check_subscribe(None, "$DB/u/anyone/data").await);
+    }
+
+    #[tokio::test]
+    async fn test_percent_u_role_rule_expansion() {
+        let acl = AclManager::new();
+
+        acl.add_role_rule("db-user", "$DB/u/%u/#".to_string(), Permission::ReadWrite)
+            .await
+            .unwrap();
+        acl.assign_role("alice", "db-user").await.unwrap();
+        acl.assign_role("bob", "db-user").await.unwrap();
+
+        assert!(acl.check_publish(Some("alice"), "$DB/u/alice/nodes").await);
+        assert!(
+            acl.check_subscribe(Some("alice"), "$DB/u/alice/nodes")
+                .await
+        );
+
+        assert!(!acl.check_publish(Some("alice"), "$DB/u/bob/nodes").await);
+
+        assert!(acl.check_publish(Some("bob"), "$DB/u/bob/data").await);
+        assert!(!acl.check_publish(Some("bob"), "$DB/u/alice/data").await);
+    }
+
+    #[tokio::test]
+    async fn test_percent_u_combined_with_mqtt_wildcards() {
+        let acl = AclManager::new();
+
+        acl.add_rule(AclRule::new(
+            "*".to_string(),
+            "$DB/u/%u/+/events/#".to_string(),
+            Permission::ReadWrite,
+        ))
+        .await;
+
+        assert!(
+            acl.check_publish(Some("alice"), "$DB/u/alice/nodes/events/created")
+                .await
+        );
+        assert!(
+            acl.check_publish(Some("alice"), "$DB/u/alice/edges/events/updated")
+                .await
+        );
+        assert!(
+            !acl.check_publish(Some("alice"), "$DB/u/bob/nodes/events/created")
+                .await
+        );
+        assert!(
+            !acl.check_publish(Some("alice"), "$DB/u/alice/events/created")
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn test_no_percent_u_unchanged_behavior() {
+        let acl = AclManager::new();
+
+        acl.add_rule(AclRule::new(
+            "*".to_string(),
+            "public/#".to_string(),
+            Permission::ReadWrite,
+        ))
+        .await;
+
+        assert!(acl.check_publish(Some("alice"), "public/data").await);
+        assert!(acl.check_publish(None, "public/data").await);
     }
 }

@@ -82,6 +82,7 @@ pub struct ClientUnsubscribeEvent {
 #[derive(Debug, Clone)]
 pub struct ClientPublishEvent {
     pub client_id: Arc<str>,
+    pub user_id: Option<Arc<str>>,
     pub topic: Arc<str>,
     pub payload: Bytes,
     pub qos: QoS,

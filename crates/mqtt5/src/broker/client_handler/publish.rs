@@ -109,6 +109,15 @@ impl ClientHandler {
             }
         }
 
+        publish
+            .properties
+            .remove_user_property_by_key("x-mqtt-sender");
+        if let Some(ref uid) = self.user_id {
+            publish
+                .properties
+                .add_user_property("x-mqtt-sender".into(), uid.clone());
+        }
+
         if !self
             .resource_monitor
             .can_send_message(&client_id, payload_size)
@@ -342,6 +351,7 @@ impl ClientHandler {
 
             let event = ClientPublishEvent {
                 client_id: client_id.to_string().into(),
+                user_id: self.user_id.as_deref().map(Arc::from),
                 topic: publish.topic_name.clone().into(),
                 payload: publish.payload.clone(),
                 qos: publish.qos,
