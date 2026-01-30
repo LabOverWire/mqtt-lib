@@ -116,6 +116,40 @@ assign bob sensors
 - `readwrite` - Both
 - `deny` - Explicit denial
 
+### Username Substitution (`%u`)
+
+ACL topic patterns support `%u` as a placeholder for the authenticated username. The broker expands `%u` to the current user's identity before matching, enabling a single rule to scope every user to their own topic namespace.
+
+```
+user * topic $DB/u/%u/# permission readwrite
+```
+
+When `alice@gmail.com` publishes to `$DB/u/alice@gmail.com/nodes`, the pattern expands to `$DB/u/alice@gmail.com/#` and matches. Publishing to `$DB/u/bob@gmail.com/nodes` does not match.
+
+`%u` works in both direct user rules and role-based rules:
+
+```
+role db-user topic $DB/u/%u/# permission readwrite
+assign alice db-user
+assign bob db-user
+```
+
+Anonymous clients (no authenticated username) never match patterns containing `%u`.
+
+`%u` can be combined with MQTT wildcards:
+
+```
+user * topic devices/%u/+/telemetry/# permission read
+```
+
+### Sender Identity Injection
+
+The broker stamps an `x-mqtt-sender` MQTT v5 user property on every PUBLISH packet before routing. The value is the authenticated username of the publishing client. Any client-provided `x-mqtt-sender` property is stripped and replaced by the broker to prevent spoofing.
+
+Anonymous clients (no authenticated identity) produce no `x-mqtt-sender` property. Internal/bridge messages also carry no `x-mqtt-sender`.
+
+Subscribers can read `x-mqtt-sender` from received messages to determine who published them, enabling ownership validation and access control at the application layer.
+
 ### CLI Management
 
 ```bash
