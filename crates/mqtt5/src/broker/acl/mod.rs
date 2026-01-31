@@ -222,6 +222,27 @@ impl AclManager {
         self.rules.read().await.len()
     }
 
+    pub async fn list_rules(&self) -> Vec<AclRule> {
+        self.rules.read().await.clone()
+    }
+
+    pub async fn list_user_rules(&self, user: &str) -> Vec<AclRule> {
+        self.rules
+            .read()
+            .await
+            .iter()
+            .filter(|r| r.username == user)
+            .cloned()
+            .collect()
+    }
+
+    pub async fn remove_rule(&self, username: &str, topic_pattern: &str) {
+        self.rules
+            .write()
+            .await
+            .retain(|r| !(r.username == username && r.topic_pattern == topic_pattern));
+    }
+
     pub async fn add_role(&self, name: String) {
         let mut roles = self.roles.write().await;
         roles.entry(name.clone()).or_insert_with(|| Role::new(name));

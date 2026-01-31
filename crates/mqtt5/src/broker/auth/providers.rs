@@ -196,6 +196,11 @@ impl PasswordAuthProvider {
     }
 
     #[must_use]
+    pub fn list_users(&self) -> Vec<String> {
+        self.users.read().keys().cloned().collect()
+    }
+
+    #[must_use]
     pub fn verify_user_password(&self, username: &str, password: &str) -> bool {
         let users = self.users.read();
         users
