@@ -88,6 +88,13 @@ impl Properties {
         }
     }
 
+    pub fn inject_sender(&mut self, user_id: Option<&str>) {
+        self.remove_user_property_by_key("x-mqtt-sender");
+        if let Some(uid) = user_id {
+            self.add_user_property("x-mqtt-sender".into(), uid.into());
+        }
+    }
+
     pub fn set_subscription_identifier(&mut self, id: u32) {
         self.properties
             .entry(PropertyId::SubscriptionIdentifier)

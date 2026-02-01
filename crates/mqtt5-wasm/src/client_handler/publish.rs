@@ -108,14 +108,7 @@ impl WasmClientHandler {
             return Ok(());
         }
 
-        publish
-            .properties
-            .remove_user_property_by_key("x-mqtt-sender");
-        if let Some(ref uid) = self.user_id {
-            publish
-                .properties
-                .add_user_property("x-mqtt-sender".into(), uid.clone());
-        }
+        publish.properties.inject_sender(self.user_id.as_deref());
 
         match publish.qos {
             QoS::AtMostOnce => {

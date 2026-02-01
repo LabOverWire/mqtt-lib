@@ -265,7 +265,10 @@ async fn test_qos1_message_persistence() {
         );
     }
 
-    sub_client2.disconnect().await.ok();
+    match sub_client2.disconnect().await {
+        Ok(()) | Err(mqtt5::MqttError::NotConnected) => {}
+        Err(e) => panic!("unexpected disconnect error: {e}"),
+    }
 }
 
 #[tokio::test]
@@ -350,7 +353,10 @@ async fn test_qos2_message_persistence() {
         assert_eq!(msgs.len(), unique_msgs.len(), "No duplicate QoS 2 messages");
     } // Drop the lock before awaiting
 
-    sub_client2.disconnect().await.ok();
+    match sub_client2.disconnect().await {
+        Ok(()) | Err(mqtt5::MqttError::NotConnected) => {}
+        Err(e) => panic!("unexpected disconnect error: {e}"),
+    }
 }
 
 #[tokio::test]

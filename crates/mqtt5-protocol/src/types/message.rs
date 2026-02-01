@@ -46,6 +46,32 @@ pub struct WillProperties {
     pub user_properties: Vec<(String, String)>,
 }
 
+impl WillProperties {
+    pub fn apply_to_publish_properties(
+        &self,
+        props: &mut crate::protocol::v5::properties::Properties,
+    ) {
+        if let Some(format) = self.payload_format_indicator {
+            props.set_payload_format_indicator(format);
+        }
+        if let Some(expiry) = self.message_expiry_interval {
+            props.set_message_expiry_interval(expiry);
+        }
+        if let Some(ref content_type) = self.content_type {
+            props.set_content_type(content_type.clone());
+        }
+        if let Some(ref response_topic) = self.response_topic {
+            props.set_response_topic(response_topic.clone());
+        }
+        if let Some(ref correlation_data) = self.correlation_data {
+            props.set_correlation_data(correlation_data.clone().into());
+        }
+        for (key, value) in &self.user_properties {
+            props.add_user_property(key.clone(), value.clone());
+        }
+    }
+}
+
 impl From<WillProperties> for crate::protocol::v5::properties::Properties {
     fn from(will_props: WillProperties) -> Self {
         let mut properties = crate::protocol::v5::properties::Properties::default();

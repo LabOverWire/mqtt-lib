@@ -349,6 +349,129 @@ async fn test_will_message_strips_spoofed_sender() {
 }
 
 #[tokio::test]
+async fn test_delayed_will_message_forwards_properties() {
+    let broker = TestBroker::start().await;
+
+    let collector = common::MessageCollector::new();
+    let sub_client = MqttClient::new(test_client_id("delay-prop-sub"));
+    sub_client
+        .connect(broker.address())
+        .await
+        .expect("subscriber connect");
+    sub_client
+        .subscribe("will/delay-props", collector.callback())
+        .await
+        .expect("subscribe");
+
+    let will_props = WillProperties {
+        will_delay_interval: Some(1),
+        payload_format_indicator: Some(true),
+        message_expiry_interval: Some(120),
+        content_type: Some("text/plain".to_string()),
+        response_topic: Some("reply/delayed".to_string()),
+        correlation_data: Some(vec![0xCA, 0xFE]),
+        user_properties: vec![("delayed-key".to_string(), "delayed-val".to_string())],
+    };
+
+    let mut will = WillMessage::new("will/delay-props", b"delayed-gone");
+    will.qos = QoS::AtMostOnce;
+    will.properties = will_props;
+
+    let will_client = MqttClient::new(test_client_id("delay-prop-sender"));
+    let opts = ConnectOptions::new(test_client_id("delay-prop-sender"))
+        .with_clean_start(true)
+        .with_will(will);
+    will_client
+        .connect_with_options(broker.address(), opts)
+        .await
+        .expect("will client connect");
+
+    will_client
+        .disconnect_abnormally()
+        .await
+        .expect("abnormal disconnect");
+
+    assert!(collector.wait_for_messages(1, Duration::from_secs(5)).await);
+
+    let msgs = collector.get_messages().await;
+    let msg = &msgs[0];
+    assert_eq!(msg.payload, b"delayed-gone");
+    assert_eq!(msg.properties.payload_format_indicator, Some(true));
+    assert_eq!(msg.properties.message_expiry_interval, Some(120));
+    assert_eq!(msg.properties.content_type, Some("text/plain".to_string()));
+    assert_eq!(
+        msg.properties.response_topic,
+        Some("reply/delayed".to_string())
+    );
+    assert_eq!(msg.properties.correlation_data, Some(vec![0xCA, 0xFE]));
+    assert!(msg
+        .properties
+        .user_properties
+        .contains(&("delayed-key".to_string(), "delayed-val".to_string())));
+
+    sub_client.disconnect().await.expect("disconnect");
+}
+
+#[tokio::test]
+async fn test_normal_publish_injects_sender() {
+    let broker = TestBroker::start_with_authentication().await;
+
+    let collector = common::MessageCollector::new();
+    let sub_client = MqttClient::new(test_client_id("pub-sender-sub"));
+    let sub_opts = ConnectOptions::new(test_client_id("pub-sender-sub"))
+        .with_clean_start(true)
+        .with_credentials("testuser", b"testpass");
+    sub_client
+        .connect_with_options(broker.address(), sub_opts)
+        .await
+        .expect("subscriber connect");
+    sub_client
+        .subscribe("test/sender-inject", collector.callback())
+        .await
+        .expect("subscribe");
+
+    let pub_client = MqttClient::new(test_client_id("pub-sender-client"));
+    let pub_opts = ConnectOptions::new(test_client_id("pub-sender-client"))
+        .with_clean_start(true)
+        .with_credentials("testuser", b"testpass");
+    pub_client
+        .connect_with_options(broker.address(), pub_opts)
+        .await
+        .expect("publisher connect");
+
+    pub_client
+        .publish_with_options(
+            "test/sender-inject",
+            b"hello",
+            PublishOptions {
+                qos: QoS::AtMostOnce,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("publish");
+
+    assert!(collector.wait_for_messages(1, Duration::from_secs(5)).await);
+
+    let msgs = collector.get_messages().await;
+    let msg = &msgs[0];
+
+    let sender_props: Vec<&str> = msg
+        .properties
+        .user_properties
+        .iter()
+        .filter(|(k, _)| k == "x-mqtt-sender")
+        .map(|(_, v)| v.as_str())
+        .collect();
+
+    assert_eq!(sender_props.len(), 1);
+    assert_eq!(sender_props[0], "testuser");
+
+    pub_client.disconnect().await.expect("disconnect pub");
+    sub_client.disconnect().await.expect("disconnect sub");
+}
+
+#[tokio::test]
 async fn test_topic_aliases() {
     // Start test broker
     let broker = TestBroker::start().await;

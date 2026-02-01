@@ -954,56 +954,7 @@ impl DirectClientInner {
     }
 
     fn build_will_properties(will: Option<&crate::types::WillMessage>) -> Properties {
-        use crate::protocol::v5::properties::{PropertyId, PropertyValue};
-
-        let Some(will) = will else {
-            return Properties::default();
-        };
-
-        let mut props = Properties::default();
-        if let Some(val) = will.properties.will_delay_interval {
-            let _ = props.add(
-                PropertyId::WillDelayInterval,
-                PropertyValue::FourByteInteger(val),
-            );
-        }
-        if let Some(val) = will.properties.payload_format_indicator {
-            let _ = props.add(
-                PropertyId::PayloadFormatIndicator,
-                PropertyValue::Byte(u8::from(val)),
-            );
-        }
-        if let Some(val) = will.properties.message_expiry_interval {
-            let _ = props.add(
-                PropertyId::MessageExpiryInterval,
-                PropertyValue::FourByteInteger(val),
-            );
-        }
-        if let Some(ref val) = will.properties.content_type {
-            let _ = props.add(
-                PropertyId::ContentType,
-                PropertyValue::Utf8String(val.clone()),
-            );
-        }
-        if let Some(ref val) = will.properties.response_topic {
-            let _ = props.add(
-                PropertyId::ResponseTopic,
-                PropertyValue::Utf8String(val.clone()),
-            );
-        }
-        if let Some(ref val) = will.properties.correlation_data {
-            let _ = props.add(
-                PropertyId::CorrelationData,
-                PropertyValue::BinaryData(bytes::Bytes::from(val.clone())),
-            );
-        }
-        for (key, value) in &will.properties.user_properties {
-            let _ = props.add(
-                PropertyId::UserProperty,
-                PropertyValue::Utf8StringPair(key.clone(), value.clone()),
-            );
-        }
-        props
+        will.map_or_else(Properties::default, |w| w.properties.clone().into())
     }
 
     fn start_background_tasks(&mut self, reader: UnifiedReader) -> Result<()> {
