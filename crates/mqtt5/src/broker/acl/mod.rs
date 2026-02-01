@@ -247,8 +247,9 @@ impl AclManager {
             .retain(|r| !(r.username == username && r.topic_pattern == topic_pattern));
     }
 
-    pub async fn add_role(&self, name: String) {
+    pub async fn add_role(&self, name: impl Into<String>) {
         let mut roles = self.roles.write().await;
+        let name = name.into();
         roles.entry(name.clone()).or_insert_with(|| Role::new(name));
     }
 
@@ -283,7 +284,7 @@ impl AclManager {
     pub async fn add_role_rule(
         &self,
         role_name: &str,
-        topic_pattern: String,
+        topic_pattern: impl Into<String>,
         permission: Permission,
     ) -> Result<()> {
         let mut roles = self.roles.write().await;

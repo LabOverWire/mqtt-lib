@@ -35,14 +35,13 @@ impl RetainedMessageStore {
     }
 
     /// Stores or clears a retained message
-    pub async fn store(&self, topic: String, message: Option<RetainedMessage>) {
+    pub async fn store(&self, topic: impl Into<String>, message: Option<RetainedMessage>) {
         let mut messages = self.messages.write().await;
+        let topic = topic.into();
 
         if let Some(msg) = message {
-            // Store the retained message
             messages.insert(topic, msg);
         } else {
-            // Clear the retained message
             messages.remove(&topic);
         }
     }

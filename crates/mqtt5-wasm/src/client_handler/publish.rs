@@ -28,7 +28,7 @@ impl WasmClientHandler {
         let authorized = self
             .auth_provider
             .authorize_publish(client_id, self.user_id.as_deref(), &publish.topic_name)
-            .await?;
+            .await;
 
         if !authorized {
             warn!(

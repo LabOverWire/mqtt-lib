@@ -382,13 +382,13 @@ impl AuthProvider for FederatedJwtAuthProvider {
         _client_id: &str,
         user_id: Option<&'a str>,
         topic: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<bool>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
         Box::pin(async move {
             let Some(ref acl) = self.acl_manager else {
-                return Ok(true);
+                return true;
             };
             let acl_guard = acl.read().await;
-            Ok(acl_guard.check_publish(user_id, topic).await)
+            acl_guard.check_publish(user_id, topic).await
         })
     }
 
@@ -397,13 +397,13 @@ impl AuthProvider for FederatedJwtAuthProvider {
         _client_id: &str,
         user_id: Option<&'a str>,
         topic_filter: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<bool>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
         Box::pin(async move {
             let Some(ref acl) = self.acl_manager else {
-                return Ok(true);
+                return true;
             };
             let acl_guard = acl.read().await;
-            Ok(acl_guard.check_subscribe(user_id, topic_filter).await)
+            acl_guard.check_subscribe(user_id, topic_filter).await
         })
     }
 

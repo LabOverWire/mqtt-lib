@@ -314,16 +314,26 @@ impl ClientHandler {
 
         if let Some(ref storage) = self.storage {
             if let Some(ref session) = self.session {
-                if let Some(mut stored_session) =
-                    storage.get_session(&client_id).await.ok().flatten()
-                {
-                    stored_session.touch();
-                    storage.store_session(stored_session).await.ok();
+                match storage.get_session(&client_id).await {
+                    Ok(Some(mut stored_session)) => {
+                        stored_session.touch();
+                        if let Err(e) = storage.store_session(stored_session).await {
+                            warn!("Failed to store session for {client_id}: {e}");
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        warn!("Failed to get session for {client_id}: {e}");
+                    }
                 }
 
                 if session.expiry_interval == Some(0) {
-                    storage.remove_session(&client_id).await.ok();
-                    storage.remove_queued_messages(&client_id).await.ok();
+                    if let Err(e) = storage.remove_session(&client_id).await {
+                        warn!("Failed to remove session for {client_id}: {e}");
+                    }
+                    if let Err(e) = storage.remove_queued_messages(&client_id).await {
+                        warn!("Failed to remove queued messages for {client_id}: {e}");
+                    }
                     debug!(
                         "Removed session and queued messages for client {}",
                         client_id

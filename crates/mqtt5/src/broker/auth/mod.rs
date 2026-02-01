@@ -41,12 +41,12 @@ impl AuthResult {
     }
 
     #[must_use]
-    pub fn success_with_user(user_id: String) -> Self {
+    pub fn success_with_user(user_id: impl Into<String>) -> Self {
         Self {
             authenticated: true,
             reason_code: ReasonCode::Success,
             reason_string: None,
-            user_id: Some(user_id),
+            user_id: Some(user_id.into()),
         }
     }
 
@@ -61,11 +61,11 @@ impl AuthResult {
     }
 
     #[must_use]
-    pub fn fail_with_reason(reason_code: ReasonCode, reason: String) -> Self {
+    pub fn fail_with_reason(reason_code: ReasonCode, reason: impl Into<String>) -> Self {
         Self {
             authenticated: false,
             reason_code,
-            reason_string: Some(reason),
+            reason_string: Some(reason.into()),
             user_id: None,
         }
     }
@@ -92,11 +92,11 @@ pub struct EnhancedAuthResult {
 
 impl EnhancedAuthResult {
     #[must_use]
-    pub fn success(auth_method: String) -> Self {
+    pub fn success(auth_method: impl Into<String>) -> Self {
         Self {
             status: EnhancedAuthStatus::Success,
             reason_code: ReasonCode::Success,
-            auth_method,
+            auth_method: auth_method.into(),
             auth_data: None,
             reason_string: None,
             user_id: None,
@@ -106,14 +106,14 @@ impl EnhancedAuthResult {
     }
 
     #[must_use]
-    pub fn success_with_user(auth_method: String, user_id: String) -> Self {
+    pub fn success_with_user(auth_method: impl Into<String>, user_id: impl Into<String>) -> Self {
         Self {
             status: EnhancedAuthStatus::Success,
             reason_code: ReasonCode::Success,
-            auth_method,
+            auth_method: auth_method.into(),
             auth_data: None,
             reason_string: None,
-            user_id: Some(user_id),
+            user_id: Some(user_id.into()),
             roles: None,
             role_merge_mode: None,
         }
@@ -121,29 +121,29 @@ impl EnhancedAuthResult {
 
     #[must_use]
     pub fn success_with_user_and_roles(
-        auth_method: String,
-        user_id: String,
+        auth_method: impl Into<String>,
+        user_id: impl Into<String>,
         roles: HashSet<String>,
         merge_mode: RoleMergeMode,
     ) -> Self {
         Self {
             status: EnhancedAuthStatus::Success,
             reason_code: ReasonCode::Success,
-            auth_method,
+            auth_method: auth_method.into(),
             auth_data: None,
             reason_string: None,
-            user_id: Some(user_id),
+            user_id: Some(user_id.into()),
             roles: Some(roles),
             role_merge_mode: Some(merge_mode),
         }
     }
 
     #[must_use]
-    pub fn continue_auth(auth_method: String, auth_data: Option<Vec<u8>>) -> Self {
+    pub fn continue_auth(auth_method: impl Into<String>, auth_data: Option<Vec<u8>>) -> Self {
         Self {
             status: EnhancedAuthStatus::Continue,
             reason_code: ReasonCode::ContinueAuthentication,
-            auth_method,
+            auth_method: auth_method.into(),
             auth_data,
             reason_string: None,
             user_id: None,
@@ -153,11 +153,11 @@ impl EnhancedAuthResult {
     }
 
     #[must_use]
-    pub fn fail(auth_method: String, reason_code: ReasonCode) -> Self {
+    pub fn fail(auth_method: impl Into<String>, reason_code: ReasonCode) -> Self {
         Self {
             status: EnhancedAuthStatus::Failed,
             reason_code,
-            auth_method,
+            auth_method: auth_method.into(),
             auth_data: None,
             reason_string: None,
             user_id: None,
@@ -167,13 +167,17 @@ impl EnhancedAuthResult {
     }
 
     #[must_use]
-    pub fn fail_with_reason(auth_method: String, reason_code: ReasonCode, reason: String) -> Self {
+    pub fn fail_with_reason(
+        auth_method: impl Into<String>,
+        reason_code: ReasonCode,
+        reason: impl Into<String>,
+    ) -> Self {
         Self {
             status: EnhancedAuthStatus::Failed,
             reason_code,
-            auth_method,
+            auth_method: auth_method.into(),
             auth_data: None,
-            reason_string: Some(reason),
+            reason_string: Some(reason.into()),
             user_id: None,
             roles: None,
             role_merge_mode: None,
@@ -194,29 +198,19 @@ pub trait AuthProvider: Send + Sync {
         client_addr: SocketAddr,
     ) -> Pin<Box<dyn Future<Output = Result<AuthResult>> + Send + 'a>>;
 
-    /// Check if a client is authorized to publish to a topic
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if authorization check fails
     fn authorize_publish<'a>(
         &'a self,
         client_id: &str,
         user_id: Option<&'a str>,
         topic: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<bool>> + Send + 'a>>;
+    ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>>;
 
-    /// Check if a client is authorized to subscribe to a topic filter
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if authorization check fails
     fn authorize_subscribe<'a>(
         &'a self,
         client_id: &str,
         user_id: Option<&'a str>,
         topic_filter: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<bool>> + Send + 'a>>;
+    ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>>;
 
     fn supports_enhanced_auth(&self) -> bool {
         false
@@ -276,16 +270,10 @@ mod tests {
         assert!(result.authenticated);
         assert_eq!(result.reason_code, ReasonCode::Success);
 
-        let can_publish = provider
-            .authorize_publish("test", None, "test/topic")
-            .await
-            .unwrap();
+        let can_publish = provider.authorize_publish("test", None, "test/topic").await;
         assert!(can_publish);
 
-        let can_subscribe = provider
-            .authorize_subscribe("test", None, "test/+")
-            .await
-            .unwrap();
+        let can_subscribe = provider.authorize_subscribe("test", None, "test/+").await;
         assert!(can_subscribe);
     }
 
@@ -352,8 +340,8 @@ mod tests {
         let hash = PasswordAuthProvider::hash_password(password).unwrap();
 
         assert_ne!(hash, password);
-        assert!(PasswordAuthProvider::verify_password(password, &hash).unwrap());
-        assert!(!PasswordAuthProvider::verify_password("wrong", &hash).unwrap());
+        assert!(PasswordAuthProvider::verify_password(password, &hash));
+        assert!(!PasswordAuthProvider::verify_password("wrong", &hash));
     }
 
     #[tokio::test]
@@ -485,18 +473,19 @@ mod tests {
         assert!(result.authenticated);
         assert_eq!(result.user_id, Some("alice".to_string()));
 
-        assert!(!auth
-            .authorize_publish("alice-client", Some("alice"), "sensors/temp")
-            .await
-            .unwrap());
-        assert!(auth
-            .authorize_subscribe("alice-client", Some("alice"), "sensors/temp")
-            .await
-            .unwrap());
-        assert!(auth
-            .authorize_publish("alice-client", Some("alice"), "public/announcements")
-            .await
-            .unwrap());
+        assert!(
+            !auth
+                .authorize_publish("alice-client", Some("alice"), "sensors/temp")
+                .await
+        );
+        assert!(
+            auth.authorize_subscribe("alice-client", Some("alice"), "sensors/temp")
+                .await
+        );
+        assert!(
+            auth.authorize_publish("alice-client", Some("alice"), "public/announcements")
+                .await
+        );
 
         connect.username = Some("bob".to_string());
         connect.password = Some("password456".as_bytes().to_vec());
@@ -505,18 +494,19 @@ mod tests {
         assert!(result.authenticated);
         assert_eq!(result.user_id, Some("bob".to_string()));
 
-        assert!(auth
-            .authorize_publish("bob-client", Some("bob"), "actuators/fan")
-            .await
-            .unwrap());
-        assert!(!auth
-            .authorize_subscribe("bob-client", Some("bob"), "actuators/fan")
-            .await
-            .unwrap());
-        assert!(auth
-            .authorize_publish("bob-client", Some("bob"), "public/messages")
-            .await
-            .unwrap());
+        assert!(
+            auth.authorize_publish("bob-client", Some("bob"), "actuators/fan")
+                .await
+        );
+        assert!(
+            !auth
+                .authorize_subscribe("bob-client", Some("bob"), "actuators/fan")
+                .await
+        );
+        assert!(
+            auth.authorize_publish("bob-client", Some("bob"), "public/messages")
+                .await
+        );
 
         connect.username = Some("charlie".to_string());
         connect.password = Some("wrongpass".as_bytes().to_vec());
@@ -551,14 +541,14 @@ mod tests {
         let result = auth.authenticate(&connect, addr).await.unwrap();
         assert!(result.authenticated);
 
-        assert!(auth
-            .authorize_publish("alice-client", Some("alice"), "any/topic")
-            .await
-            .unwrap());
-        assert!(auth
-            .authorize_subscribe("alice-client", Some("alice"), "any/topic")
-            .await
-            .unwrap());
+        assert!(
+            auth.authorize_publish("alice-client", Some("alice"), "any/topic")
+                .await
+        );
+        assert!(
+            auth.authorize_subscribe("alice-client", Some("alice"), "any/topic")
+                .await
+        );
 
         connect.password = Some("wrong".as_bytes().to_vec());
         let result = auth.authenticate(&connect, addr).await.unwrap();
@@ -821,8 +811,8 @@ mod tests {
             _client_id: &str,
             _user_id: Option<&'a str>,
             _topic: &'a str,
-        ) -> Pin<Box<dyn Future<Output = Result<bool>> + Send + 'a>> {
-            Box::pin(async move { Ok(true) })
+        ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+            Box::pin(async move { true })
         }
 
         fn authorize_subscribe<'a>(
@@ -830,8 +820,8 @@ mod tests {
             _client_id: &str,
             _user_id: Option<&'a str>,
             _topic_filter: &'a str,
-        ) -> Pin<Box<dyn Future<Output = Result<bool>> + Send + 'a>> {
-            Box::pin(async move { Ok(true) })
+        ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+            Box::pin(async move { true })
         }
 
         fn supports_enhanced_auth(&self) -> bool {

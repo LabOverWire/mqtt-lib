@@ -28,7 +28,7 @@ impl WasmClientHandler {
             let authorized = self
                 .auth_provider
                 .authorize_subscribe(&client_id, self.user_id.as_deref(), &filter.filter)
-                .await?;
+                .await;
 
             if !authorized {
                 reason_codes.push(SubAckReasonCode::NotAuthorized);

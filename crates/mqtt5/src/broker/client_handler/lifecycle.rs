@@ -64,7 +64,7 @@ impl ClientHandler {
                                     &publish_clone.topic_name,
                                 )
                                 .await;
-                            if !matches!(authorized, Ok(true)) {
+                            if !authorized {
                                 warn!(
                                     "Delayed will for {} denied for topic {}",
                                     client_id_clone, publish_clone.topic_name
@@ -104,7 +104,7 @@ impl ClientHandler {
             .auth_provider
             .authorize_publish(client_id, self.user_id.as_deref(), &publish.topic_name)
             .await;
-        if !matches!(authorized, Ok(true)) {
+        if !authorized {
             warn!(
                 "Will for {} denied for topic {}",
                 client_id, publish.topic_name

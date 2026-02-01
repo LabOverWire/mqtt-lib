@@ -70,10 +70,14 @@ pub struct AclRule {
 
 impl AclRule {
     #[must_use]
-    pub fn new(username: String, topic_pattern: String, permission: Permission) -> Self {
+    pub fn new(
+        username: impl Into<String>,
+        topic_pattern: impl Into<String>,
+        permission: Permission,
+    ) -> Self {
         Self {
-            username,
-            topic_pattern,
+            username: username.into(),
+            topic_pattern: topic_pattern.into(),
             permission,
         }
     }
@@ -105,9 +109,9 @@ pub struct RoleRule {
 
 impl RoleRule {
     #[must_use]
-    pub fn new(topic_pattern: String, permission: Permission) -> Self {
+    pub fn new(topic_pattern: impl Into<String>, permission: Permission) -> Self {
         Self {
-            topic_pattern,
+            topic_pattern: topic_pattern.into(),
             permission,
         }
     }
@@ -130,9 +134,9 @@ pub struct Role {
 
 impl Role {
     #[must_use]
-    pub fn new(name: String) -> Self {
+    pub fn new(name: impl Into<String>) -> Self {
         Self {
-            name,
+            name: name.into(),
             rules: Vec::new(),
         }
     }

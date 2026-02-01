@@ -55,8 +55,8 @@ impl MqttClient {
             tracing::info!("Session resumed, restoring {} callbacks", stored_subs.len());
             let inner = self.inner.read().await;
             for (topic, _, callback_id) in stored_subs {
-                if let Err(e) = inner.callback_manager.restore_callback(callback_id) {
-                    tracing::warn!("Failed to restore callback for {}: {}", topic, e);
+                if !inner.callback_manager.restore_callback(callback_id) {
+                    tracing::warn!("Failed to restore callback for {topic}: not found in registry");
                 }
             }
         } else {
@@ -255,7 +255,7 @@ impl MqttClient {
         callback_id: CallbackId,
     ) -> Result<()> {
         let inner = self.inner.read().await;
-        inner.callback_manager.restore_callback(callback_id)?;
+        let _ = inner.callback_manager.restore_callback(callback_id);
         drop(inner);
 
         let inner = self.inner.read().await;

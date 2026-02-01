@@ -428,7 +428,7 @@ impl WasmBridgeManager {
             if !lp.check_message(
                 &packet.topic_name,
                 &packet.payload,
-                u8::from(packet.qos),
+                packet.qos,
                 packet.retain,
             ) {
                 return;

@@ -14,7 +14,7 @@ use crate::transport::PacketIo;
 use crate::types::ProtocolVersion;
 use crate::validation::topic_matches_filter;
 use crate::QoS;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use super::ClientHandler;
 
@@ -28,7 +28,7 @@ impl ClientHandler {
             let authorized = self
                 .auth_provider
                 .authorize_subscribe(client_id, self.user_id.as_deref(), &filter.filter)
-                .await?;
+                .await;
 
             if !authorized {
                 reason_codes.push(crate::packet::suback::SubAckReasonCode::NotAuthorized);
@@ -94,7 +94,9 @@ impl ClientHandler {
                 };
                 session.add_subscription(filter.filter.clone(), stored);
                 if let Some(ref storage) = self.storage {
-                    storage.store_session(session.clone()).await.ok();
+                    if let Err(e) = storage.store_session(session.clone()).await {
+                        warn!("Failed to store session: {e}");
+                    }
                 }
             }
 
@@ -185,7 +187,9 @@ impl ClientHandler {
                 if let Some(ref mut session) = self.session {
                     session.remove_subscription(topic_filter);
                     if let Some(ref storage) = self.storage {
-                        storage.store_session(session.clone()).await.ok();
+                        if let Err(e) = storage.store_session(session.clone()).await {
+                            warn!("Failed to store session: {e}");
+                        }
                     }
                 }
             }

@@ -31,6 +31,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use tracing::warn;
 
 /// Retained message with metadata
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -315,7 +316,9 @@ impl<B: StorageBackend + 'static> Storage<B> {
             // Check if cached message is expired
             if msg.is_expired() {
                 // Remove from cache and backend
-                self.remove_retained(topic).await.ok();
+                if let Err(e) = self.remove_retained(topic).await {
+                    warn!("Failed to remove expired retained message for {topic}: {e}");
+                }
                 return None;
             }
             return Some(msg);
@@ -452,7 +455,9 @@ impl<B: StorageBackend + 'static> Storage<B> {
             // Check if cached session is expired
             if session.is_expired() {
                 // Remove from cache and backend
-                self.remove_session(client_id).await.ok();
+                if let Err(e) = self.remove_session(client_id).await {
+                    warn!("Failed to remove expired session for {client_id}: {e}");
+                }
                 return None;
             }
             return Some(session);
@@ -604,10 +609,14 @@ impl RetainedMessage {
 impl ClientSession {
     /// Create new client session
     #[must_use]
-    pub fn new(client_id: String, persistent: bool, expiry_interval: Option<u32>) -> Self {
+    pub fn new(
+        client_id: impl Into<String>,
+        persistent: bool,
+        expiry_interval: Option<u32>,
+    ) -> Self {
         let now = SystemTime::now();
         Self {
-            client_id,
+            client_id: client_id.into(),
             persistent,
             expiry_interval,
             subscriptions: HashMap::new(),
@@ -623,7 +632,7 @@ impl ClientSession {
     /// Create new client session with will message
     #[must_use]
     pub fn new_with_will(
-        client_id: String,
+        client_id: impl Into<String>,
         persistent: bool,
         expiry_interval: Option<u32>,
         will_message: Option<crate::types::WillMessage>,
@@ -633,7 +642,7 @@ impl ClientSession {
             .as_ref()
             .and_then(|w| w.properties.will_delay_interval);
         Self {
-            client_id,
+            client_id: client_id.into(),
             persistent,
             expiry_interval,
             subscriptions: HashMap::new(),
@@ -652,8 +661,12 @@ impl ClientSession {
     }
 
     /// Add subscription to session
-    pub fn add_subscription(&mut self, topic_filter: String, subscription: StoredSubscription) {
-        self.subscriptions.insert(topic_filter, subscription);
+    pub fn add_subscription(
+        &mut self,
+        topic_filter: impl Into<String>,
+        subscription: StoredSubscription,
+    ) {
+        self.subscriptions.insert(topic_filter.into(), subscription);
     }
 
     /// Remove subscription from session
