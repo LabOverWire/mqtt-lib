@@ -926,3 +926,167 @@ async fn test_request_problem_information() {
     assert!(!result3.session_present);
     client3.disconnect().await.expect("Failed to disconnect");
 }
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn test_will_message_blocked_by_acl() {
+    use mqtt5::broker::config::{
+        AuthConfig, AuthMethod, BrokerConfig, RateLimitConfig, StorageBackend, StorageConfig,
+    };
+    use std::io::Write;
+    use std::process::Command;
+
+    let temp_dir = std::env::temp_dir();
+    let pid = std::process::id();
+
+    let acl_file = temp_dir.join(format!("test_will_acl_{pid}.txt"));
+    let password_file = temp_dir.join(format!("test_will_passwords_{pid}.txt"));
+
+    let _ = std::fs::remove_file(&acl_file);
+    let _ = std::fs::remove_file(&password_file);
+
+    {
+        let mut f = std::fs::File::create(&acl_file).expect("create acl file");
+        writeln!(f, "user willuser topic will/blocked permission deny").expect("write acl deny");
+        writeln!(f, "user * topic # permission readwrite").expect("write acl allow");
+    }
+
+    let workspace_root = {
+        let mut current = std::env::current_dir().expect("cwd");
+        loop {
+            let cargo_toml = current.join("Cargo.toml");
+            if cargo_toml.exists() {
+                if let Ok(contents) = std::fs::read_to_string(&cargo_toml) {
+                    if contents.contains("[workspace]") {
+                        break current;
+                    }
+                }
+            }
+            assert!(current.pop(), "workspace root not found");
+        }
+    };
+    let cli_binary = if let Ok(path) = std::env::var("CARGO_BIN_EXE_mqttv5") {
+        std::path::PathBuf::from(path)
+    } else {
+        workspace_root.join("target").join("release").join("mqttv5")
+    };
+
+    let status = Command::new(&cli_binary)
+        .args([
+            "passwd",
+            "-c",
+            "-b",
+            "testpass",
+            "willuser",
+            password_file.to_str().unwrap(),
+        ])
+        .status()
+        .expect("create password file");
+    assert!(status.success(), "password file creation failed");
+
+    let status = Command::new(&cli_binary)
+        .args([
+            "passwd",
+            "-b",
+            "testpass",
+            "subuser",
+            password_file.to_str().unwrap(),
+        ])
+        .status()
+        .expect("add second user");
+    assert!(status.success(), "second user creation failed");
+
+    let storage_config = StorageConfig {
+        backend: StorageBackend::Memory,
+        enable_persistence: true,
+        ..Default::default()
+    };
+
+    let auth_config = AuthConfig {
+        allow_anonymous: false,
+        password_file: Some(password_file.clone()),
+        acl_file: Some(acl_file.clone()),
+        auth_method: AuthMethod::Password,
+        auth_data: Some(std::fs::read(&password_file).expect("read password file")),
+        scram_file: None,
+        jwt_config: None,
+        federated_jwt_config: None,
+        rate_limit: RateLimitConfig::default(),
+    };
+
+    let config = BrokerConfig::default()
+        .with_bind_address("127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap())
+        .with_storage(storage_config)
+        .with_auth(auth_config);
+
+    let broker = TestBroker::start_with_config(config).await;
+
+    let collector = common::MessageCollector::new();
+    let sub_client = MqttClient::new(test_client_id("will-acl-sub"));
+    let sub_opts = ConnectOptions::new(test_client_id("will-acl-sub"))
+        .with_clean_start(true)
+        .with_credentials("subuser", b"testpass");
+    sub_client
+        .connect_with_options(broker.address(), sub_opts)
+        .await
+        .expect("subscriber connect");
+    sub_client
+        .subscribe("will/blocked", collector.callback())
+        .await
+        .expect("subscribe");
+
+    let will = WillMessage::new("will/blocked", b"should not arrive");
+    let will_client = MqttClient::new(test_client_id("will-acl-sender"));
+    let opts = ConnectOptions::new(test_client_id("will-acl-sender"))
+        .with_clean_start(true)
+        .with_credentials("willuser", b"testpass")
+        .with_will(will);
+    will_client
+        .connect_with_options(broker.address(), opts)
+        .await
+        .expect("will client connect");
+
+    will_client
+        .disconnect_abnormally()
+        .await
+        .expect("abnormal disconnect");
+
+    let received = collector.wait_for_messages(1, Duration::from_secs(3)).await;
+    assert!(
+        !received,
+        "will message should have been blocked by ACL deny rule"
+    );
+    assert_eq!(collector.count().await, 0);
+
+    let allowed_collector = common::MessageCollector::new();
+    sub_client
+        .subscribe("test/allowed", allowed_collector.callback())
+        .await
+        .expect("subscribe allowed");
+
+    let pub_client = MqttClient::new(test_client_id("will-acl-pub"));
+    let pub_opts = ConnectOptions::new(test_client_id("will-acl-pub"))
+        .with_clean_start(true)
+        .with_credentials("subuser", b"testpass");
+    pub_client
+        .connect_with_options(broker.address(), pub_opts)
+        .await
+        .expect("pub client connect");
+    pub_client
+        .publish("test/allowed", b"hello")
+        .await
+        .expect("publish");
+
+    assert!(
+        allowed_collector
+            .wait_for_messages(1, Duration::from_secs(3))
+            .await,
+        "normal publish to allowed topic should succeed"
+    );
+
+    sub_client.disconnect().await.expect("disconnect sub");
+    pub_client.disconnect().await.expect("disconnect pub");
+
+    let _ = std::fs::remove_file(&acl_file);
+    let _ = std::fs::remove_file(&password_file);
+}

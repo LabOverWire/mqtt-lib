@@ -1,12 +1,10 @@
-//! Client lifecycle management - disconnect and will message handling
-
 use crate::error::{MqttError, Result};
 use crate::packet::disconnect::DisconnectPacket;
 use crate::packet::publish::PublishPacket;
 use crate::time::Duration;
 use crate::transport::PacketIo;
 use std::sync::Arc;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use super::ClientHandler;
 
@@ -47,6 +45,8 @@ impl ClientHandler {
                     if delay > 0 {
                         debug!("Spawning task to publish will after {} seconds", delay);
                         let router = Arc::clone(&self.router);
+                        let auth_provider = Arc::clone(&self.auth_provider);
+                        let user_id = self.user_id.clone();
                         let publish_clone = publish.clone();
                         let client_id_clone = client_id.to_string();
                         let skip_bridges = self.skip_bridge_forwarding;
@@ -56,6 +56,22 @@ impl ClientHandler {
                                 delay, client_id_clone
                             );
                             tokio::time::sleep(Duration::from_secs(u64::from(delay))).await;
+
+                            let authorized = auth_provider
+                                .authorize_publish(
+                                    &client_id_clone,
+                                    user_id.as_deref(),
+                                    &publish_clone.topic_name,
+                                )
+                                .await;
+                            if !matches!(authorized, Ok(true)) {
+                                warn!(
+                                    "Delayed will for {} denied for topic {}",
+                                    client_id_clone, publish_clone.topic_name
+                                );
+                                return;
+                            }
+
                             debug!(
                                 "Task completed: publishing delayed will message for {}",
                                 client_id_clone
@@ -69,14 +85,33 @@ impl ClientHandler {
                         debug!("Spawned delayed will task for {}", client_id);
                     } else {
                         debug!("Publishing will immediately (delay = 0)");
-                        self.route_publish(&publish, None).await;
+                        if self.authorize_will(client_id, &publish).await {
+                            self.route_publish(&publish, None).await;
+                        }
                     }
                 } else {
                     debug!("Publishing will immediately (no delay specified)");
-                    self.route_publish(&publish, None).await;
+                    if self.authorize_will(client_id, &publish).await {
+                        self.route_publish(&publish, None).await;
+                    }
                 }
             }
         }
+    }
+
+    async fn authorize_will(&self, client_id: &str, publish: &PublishPacket) -> bool {
+        let authorized = self
+            .auth_provider
+            .authorize_publish(client_id, self.user_id.as_deref(), &publish.topic_name)
+            .await;
+        if !matches!(authorized, Ok(true)) {
+            warn!(
+                "Will for {} denied for topic {}",
+                client_id, publish.topic_name
+            );
+            return false;
+        }
+        true
     }
 
     pub(super) fn next_packet_id(&mut self) -> u16 {
