@@ -3,7 +3,7 @@
 pub mod cli_helpers;
 
 use mqtt5::time::Duration;
-use mqtt5::{MqttClient, QoS};
+use mqtt5::{MessageProperties, MqttClient, QoS};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -371,6 +371,7 @@ pub struct ReceivedMessage {
     pub payload: Vec<u8>,
     pub qos: QoS,
     pub retain: bool,
+    pub properties: MessageProperties,
 }
 
 #[allow(dead_code)]
@@ -390,6 +391,7 @@ impl MessageCollector {
                 payload: msg.payload.clone(),
                 qos: msg.qos,
                 retain: msg.retain,
+                properties: msg.properties.clone(),
             };
 
             // Use spawn to avoid blocking the callback

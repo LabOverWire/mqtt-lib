@@ -183,6 +183,40 @@ impl WasmClientHandler {
                     PublishPacket::new(will.topic.clone(), will.payload.clone(), will.qos);
                 publish.retain = will.retain;
 
+                if let Some(format) = will.properties.payload_format_indicator {
+                    publish.properties.set_payload_format_indicator(format);
+                }
+                if let Some(expiry) = will.properties.message_expiry_interval {
+                    publish.properties.set_message_expiry_interval(expiry);
+                }
+                if let Some(ref content_type) = will.properties.content_type {
+                    publish.properties.set_content_type(content_type.clone());
+                }
+                if let Some(ref response_topic) = will.properties.response_topic {
+                    publish
+                        .properties
+                        .set_response_topic(response_topic.clone());
+                }
+                if let Some(ref correlation_data) = will.properties.correlation_data {
+                    publish
+                        .properties
+                        .set_correlation_data(correlation_data.clone().into());
+                }
+                for (key, value) in &will.properties.user_properties {
+                    publish
+                        .properties
+                        .add_user_property(key.clone(), value.clone());
+                }
+
+                publish
+                    .properties
+                    .remove_user_property_by_key("x-mqtt-sender");
+                if let Some(ref uid) = self.user_id {
+                    publish
+                        .properties
+                        .add_user_property("x-mqtt-sender".into(), uid.clone());
+                }
+
                 if let Some(delay) = session.will_delay_interval {
                     if delay > 0 {
                         debug!("Spawning task to publish will after {} seconds", delay);

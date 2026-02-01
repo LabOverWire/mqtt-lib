@@ -997,6 +997,12 @@ impl DirectClientInner {
                 PropertyValue::BinaryData(bytes::Bytes::from(val.clone())),
             );
         }
+        for (key, value) in &will.properties.user_properties {
+            let _ = props.add(
+                PropertyId::UserProperty,
+                PropertyValue::Utf8StringPair(key.clone(), value.clone()),
+            );
+        }
         props
     }
 

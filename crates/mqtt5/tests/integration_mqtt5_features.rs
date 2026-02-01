@@ -216,6 +216,139 @@ async fn test_will_message_with_delay() {
 }
 
 #[tokio::test]
+async fn test_will_message_forwards_properties() {
+    let broker = TestBroker::start().await;
+
+    let collector = common::MessageCollector::new();
+    let sub_client = MqttClient::new(test_client_id("will-prop-sub"));
+    sub_client
+        .connect(broker.address())
+        .await
+        .expect("subscriber connect");
+    sub_client
+        .subscribe("will/props", collector.callback())
+        .await
+        .expect("subscribe");
+
+    let will_props = WillProperties {
+        payload_format_indicator: Some(true),
+        message_expiry_interval: Some(300),
+        content_type: Some("application/json".to_string()),
+        response_topic: Some("reply/here".to_string()),
+        correlation_data: Some(vec![0xDE, 0xAD]),
+        user_properties: vec![("custom-key".to_string(), "custom-val".to_string())],
+        ..Default::default()
+    };
+
+    let mut will = WillMessage::new("will/props", b"gone");
+    will.qos = QoS::AtMostOnce;
+    will.properties = will_props;
+
+    let will_client = MqttClient::new(test_client_id("will-prop-sender"));
+    let opts = ConnectOptions::new(test_client_id("will-prop-sender"))
+        .with_clean_start(true)
+        .with_will(will);
+    will_client
+        .connect_with_options(broker.address(), opts)
+        .await
+        .expect("will client connect");
+
+    will_client
+        .disconnect_abnormally()
+        .await
+        .expect("abnormal disconnect");
+
+    assert!(collector.wait_for_messages(1, Duration::from_secs(5)).await);
+
+    let msgs = collector.get_messages().await;
+    let msg = &msgs[0];
+    assert_eq!(msg.payload, b"gone");
+    assert_eq!(msg.properties.payload_format_indicator, Some(true));
+    assert_eq!(msg.properties.message_expiry_interval, Some(300));
+    assert_eq!(
+        msg.properties.content_type,
+        Some("application/json".to_string())
+    );
+    assert_eq!(
+        msg.properties.response_topic,
+        Some("reply/here".to_string())
+    );
+    assert_eq!(msg.properties.correlation_data, Some(vec![0xDE, 0xAD]));
+    assert!(msg
+        .properties
+        .user_properties
+        .contains(&("custom-key".to_string(), "custom-val".to_string())));
+
+    sub_client.disconnect().await.expect("disconnect");
+}
+
+#[tokio::test]
+async fn test_will_message_strips_spoofed_sender() {
+    let broker = TestBroker::start_with_authentication().await;
+
+    let collector = common::MessageCollector::new();
+    let sub_client = MqttClient::new(test_client_id("will-sender-sub"));
+    let sub_opts = ConnectOptions::new(test_client_id("will-sender-sub"))
+        .with_clean_start(true)
+        .with_credentials("testuser", b"testpass");
+    sub_client
+        .connect_with_options(broker.address(), sub_opts)
+        .await
+        .expect("subscriber connect");
+    sub_client
+        .subscribe("will/sender", collector.callback())
+        .await
+        .expect("subscribe");
+
+    let will_props = WillProperties {
+        user_properties: vec![("x-mqtt-sender".to_string(), "evil-impersonator".to_string())],
+        ..Default::default()
+    };
+
+    let mut will = WillMessage::new("will/sender", b"disconnected");
+    will.qos = QoS::AtMostOnce;
+    will.properties = will_props;
+
+    let will_client = MqttClient::new(test_client_id("will-sender-client"));
+    let opts = ConnectOptions::new(test_client_id("will-sender-client"))
+        .with_clean_start(true)
+        .with_credentials("testuser", b"testpass")
+        .with_will(will);
+    will_client
+        .connect_with_options(broker.address(), opts)
+        .await
+        .expect("will client connect");
+
+    will_client
+        .disconnect_abnormally()
+        .await
+        .expect("abnormal disconnect");
+
+    assert!(collector.wait_for_messages(1, Duration::from_secs(5)).await);
+
+    let msgs = collector.get_messages().await;
+    let msg = &msgs[0];
+
+    let sender_props: Vec<&str> = msg
+        .properties
+        .user_properties
+        .iter()
+        .filter(|(k, _)| k == "x-mqtt-sender")
+        .map(|(_, v)| v.as_str())
+        .collect();
+
+    assert_eq!(sender_props.len(), 1);
+    assert_eq!(sender_props[0], "testuser");
+    assert!(!msg
+        .properties
+        .user_properties
+        .iter()
+        .any(|(_, v)| v == "evil-impersonator"));
+
+    sub_client.disconnect().await.expect("disconnect");
+}
+
+#[tokio::test]
 async fn test_topic_aliases() {
     // Start test broker
     let broker = TestBroker::start().await;
