@@ -951,25 +951,7 @@ async fn test_will_message_blocked_by_acl() {
         writeln!(f, "user * topic # permission readwrite").expect("write acl allow");
     }
 
-    let workspace_root = {
-        let mut current = std::env::current_dir().expect("cwd");
-        loop {
-            let cargo_toml = current.join("Cargo.toml");
-            if cargo_toml.exists() {
-                if let Ok(contents) = std::fs::read_to_string(&cargo_toml) {
-                    if contents.contains("[workspace]") {
-                        break current;
-                    }
-                }
-            }
-            assert!(current.pop(), "workspace root not found");
-        }
-    };
-    let cli_binary = if let Ok(path) = std::env::var("CARGO_BIN_EXE_mqttv5") {
-        std::path::PathBuf::from(path)
-    } else {
-        workspace_root.join("target").join("release").join("mqttv5")
-    };
+    let cli_binary = common::get_cli_binary_path();
 
     let status = Command::new(&cli_binary)
         .args([

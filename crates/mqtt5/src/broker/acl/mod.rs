@@ -210,6 +210,8 @@ impl AclManager {
         self.load_acl_file().await
     }
 
+    /// Adds an ACL rule to the in-memory rule set. Does not persist to the ACL file.
+    /// Use [`Self::reload`] to re-read from disk or manage the file externally.
     pub async fn add_rule(&self, rule: AclRule) {
         self.rules.write().await.push(rule);
     }
@@ -236,6 +238,8 @@ impl AclManager {
             .collect()
     }
 
+    /// Removes all ACL rules matching the given username and topic pattern from the
+    /// in-memory rule set. Does not persist to the ACL file.
     pub async fn remove_rule(&self, username: &str, topic_pattern: &str) {
         self.rules
             .write()

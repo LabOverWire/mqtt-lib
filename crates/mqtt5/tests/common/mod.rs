@@ -9,7 +9,8 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use ulid::Ulid;
 
-fn find_workspace_root() -> PathBuf {
+#[allow(dead_code)]
+pub fn find_workspace_root() -> PathBuf {
     let mut current = std::env::current_dir().expect("Failed to get current directory");
 
     loop {
@@ -26,7 +27,8 @@ fn find_workspace_root() -> PathBuf {
     }
 }
 
-fn get_cli_binary_path() -> PathBuf {
+#[allow(dead_code)]
+pub fn get_cli_binary_path() -> PathBuf {
     if let Ok(path) = std::env::var("CARGO_BIN_EXE_mqttv5") {
         return PathBuf::from(path);
     }
