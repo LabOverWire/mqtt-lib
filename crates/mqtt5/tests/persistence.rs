@@ -265,7 +265,7 @@ async fn test_qos1_message_persistence() {
         );
     }
 
-    sub_client2.disconnect().await.unwrap();
+    sub_client2.disconnect().await.ok();
 }
 
 #[tokio::test]
@@ -350,7 +350,7 @@ async fn test_qos2_message_persistence() {
         assert_eq!(msgs.len(), unique_msgs.len(), "No duplicate QoS 2 messages");
     } // Drop the lock before awaiting
 
-    sub_client2.disconnect().await.unwrap();
+    sub_client2.disconnect().await.ok();
 }
 
 #[tokio::test]

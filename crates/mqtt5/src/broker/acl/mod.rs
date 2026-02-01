@@ -1505,4 +1505,86 @@ mod tests {
         assert!(acl.check_publish(Some("alice"), "public/data").await);
         assert!(acl.check_publish(None, "public/data").await);
     }
+
+    #[tokio::test]
+    async fn test_percent_u_wildcard_username_bypass() {
+        let acl = AclManager::new();
+
+        acl.add_rule(AclRule::new(
+            "*".to_string(),
+            "$DB/u/%u/#".to_string(),
+            Permission::ReadWrite,
+        ))
+        .await;
+
+        assert!(
+            acl.check_publish(Some("alice"), "$DB/u/alice/secrets")
+                .await
+        );
+        assert!(!acl.check_publish(Some("alice"), "$DB/u/bob/secrets").await);
+
+        // username "+" expands pattern to "$DB/u/+/#"
+        // + is a single-level MQTT wildcard, so this matches ANY user's namespace
+        assert!(
+            !acl.check_publish(Some("+"), "$DB/u/alice/secrets").await,
+            "BUG: username '+' expanded ACL to $DB/u/+/# which matches alice's namespace"
+        );
+        assert!(
+            !acl.check_publish(Some("+"), "$DB/u/bob/secrets").await,
+            "BUG: username '+' expanded ACL to $DB/u/+/# which matches bob's namespace"
+        );
+
+        // username "#" expands pattern to "$DB/u/#/#"
+        // first # matches all remaining levels
+        assert!(
+            !acl.check_publish(Some("#"), "$DB/u/alice/secrets").await,
+            "BUG: username '#' expanded ACL to $DB/u/#/# which matches everything"
+        );
+        assert!(
+            !acl.check_publish(Some("#"), "$DB/u/deep/nested/path").await,
+            "BUG: username '#' matches arbitrary depth"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_percent_u_slash_username_level_injection() {
+        let acl = AclManager::new();
+
+        acl.add_rule(AclRule::new(
+            "*".to_string(),
+            "home/%u/data".to_string(),
+            Permission::ReadWrite,
+        ))
+        .await;
+
+        assert!(acl.check_publish(Some("alice"), "home/alice/data").await);
+        assert!(!acl.check_publish(Some("alice"), "home/bob/data").await);
+
+        // username "bob/data/../../alice" contains slashes that change topic structure
+        // pattern expands to "home/alice/+/data" — different structure than intended
+        assert!(
+            !acl.check_publish(Some("alice/+"), "home/alice/anything/data")
+                .await,
+            "BUG: username with / and + injects extra wildcard level"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_percent_u_role_wildcard_username_bypass() {
+        let acl = AclManager::new();
+
+        acl.add_role_rule("db-user", "$DB/u/%u/#".to_string(), Permission::ReadWrite)
+            .await
+            .unwrap();
+        acl.assign_role("+", "db-user").await.unwrap();
+
+        assert!(
+            !acl.check_publish(Some("+"), "$DB/u/alice/secrets").await,
+            "BUG: role rule with username '+' expands to $DB/u/+/# matching alice's namespace"
+        );
+        assert!(
+            !acl.check_publish(Some("+"), "$DB/u/bob/secrets").await,
+            "BUG: role rule with username '+' expands to $DB/u/+/# matching bob's namespace"
+        );
+    }
 }

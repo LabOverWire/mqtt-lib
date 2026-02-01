@@ -361,7 +361,7 @@ impl DirectClientInner {
     /// Returns an error if the operation fails
     pub async fn disconnect_with_packet(&mut self, send_disconnect: bool) -> Result<()> {
         if !self.is_connected() {
-            return Ok(());
+            return Err(MqttError::NotConnected);
         }
 
         if send_disconnect {
@@ -1255,7 +1255,7 @@ pub mod tests {
     async fn test_disconnect_not_connected() {
         let mut client = create_test_client();
         let result = client.disconnect().await;
-        assert!(result.is_ok());
+        assert!(matches!(result, Err(MqttError::NotConnected)));
     }
 
     #[tokio::test]

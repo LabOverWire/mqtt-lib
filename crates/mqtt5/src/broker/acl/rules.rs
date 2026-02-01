@@ -5,11 +5,18 @@ use crate::validation::topic_matches_filter;
 use std::borrow::Cow;
 use std::collections::HashSet;
 
+fn username_contains_mqtt_special_chars(name: &str) -> bool {
+    name.contains('+') || name.contains('#') || name.contains('/')
+}
+
 fn expand_pattern<'a>(pattern: &'a str, username: Option<&str>) -> Option<Cow<'a, str>> {
     if !pattern.contains("%u") {
         return Some(Cow::Borrowed(pattern));
     }
     let name = username?;
+    if username_contains_mqtt_special_chars(name) {
+        return None;
+    }
     Some(Cow::Owned(pattern.replace("%u", name)))
 }
 
