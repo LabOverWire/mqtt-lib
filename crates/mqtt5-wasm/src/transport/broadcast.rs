@@ -73,6 +73,13 @@ impl BroadcastChannelWriter {
     }
 }
 
+impl Drop for BroadcastChannelWriter {
+    fn drop(&mut self) {
+        self.channel.set_onmessage(None);
+        self.channel.close();
+    }
+}
+
 impl BroadcastChannelTransport {
     #[allow(clippy::must_use_candidate)]
     pub fn new(channel_name: impl Into<String>) -> Self {
