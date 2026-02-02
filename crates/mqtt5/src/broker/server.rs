@@ -1262,9 +1262,12 @@ impl MqttBroker {
 
         sys_handle.abort();
 
-        for handle in task_handles {
-            let _ = handle.await;
-        }
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            for handle in task_handles {
+                let _ = handle.await;
+            }
+        })
+        .await;
 
         Ok(())
     }

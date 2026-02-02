@@ -134,7 +134,7 @@ assign alice db-user
 assign bob db-user
 ```
 
-Anonymous clients (no authenticated username) never match patterns containing `%u`.
+Anonymous clients (no authenticated username) never match patterns containing `%u`. Usernames containing MQTT special characters (`+`, `#`, `/`) are also excluded from `%u` expansion to prevent wildcard and topic-level injection.
 
 `%u` can be combined with MQTT wildcards:
 
