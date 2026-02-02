@@ -564,4 +564,50 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn test_remove_user_property_by_key() {
+        let mut props = Properties::new();
+        props.add_user_property("x-mqtt-sender".to_string(), "attacker".to_string());
+        props.add_user_property("other-key".to_string(), "value".to_string());
+        props.add_user_property("x-mqtt-sender".to_string(), "double".to_string());
+
+        let all = props.get_all(PropertyId::UserProperty).unwrap();
+        assert_eq!(all.len(), 3);
+
+        props.remove_user_property_by_key("x-mqtt-sender");
+
+        let remaining = props.get_all(PropertyId::UserProperty).unwrap();
+        assert_eq!(remaining.len(), 1);
+        match &remaining[0] {
+            PropertyValue::Utf8StringPair(k, v) => {
+                assert_eq!(k, "other-key");
+                assert_eq!(v, "value");
+            }
+            _ => panic!("unexpected variant"),
+        }
+    }
+
+    #[test]
+    fn test_remove_user_property_by_key_removes_entry_when_empty() {
+        let mut props = Properties::new();
+        props.add_user_property("x-mqtt-sender".to_string(), "only".to_string());
+
+        assert!(props.contains(PropertyId::UserProperty));
+
+        props.remove_user_property_by_key("x-mqtt-sender");
+
+        assert!(!props.contains(PropertyId::UserProperty));
+    }
+
+    #[test]
+    fn test_remove_user_property_by_key_noop_when_absent() {
+        let mut props = Properties::new();
+        props.add_user_property("other".to_string(), "val".to_string());
+
+        props.remove_user_property_by_key("x-mqtt-sender");
+
+        let remaining = props.get_all(PropertyId::UserProperty).unwrap();
+        assert_eq!(remaining.len(), 1);
+    }
 }

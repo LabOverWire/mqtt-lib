@@ -17,6 +17,7 @@
 //! `std::time::Instant` is not available in WASM.
 
 use mqtt5_protocol::numeric::{f64_to_u64_saturating, u64_to_f64_saturating};
+use mqtt5_protocol::QoS;
 use sha2::{Digest, Sha256};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -35,13 +36,14 @@ pub struct MessageFingerprint {
 /// # Example
 ///
 /// ```ignore
+/// use mqtt5_protocol::QoS;
 /// let loop_prevention = WasmLoopPrevention::new(60, 10000);
 ///
 /// // First occurrence - allowed
-/// assert!(loop_prevention.check_message("sensor/temp", b"25.5", 1, false));
+/// assert!(loop_prevention.check_message("sensor/temp", b"25.5", QoS::AtLeastOnce, false));
 ///
 /// // Duplicate within TTL - blocked
-/// assert!(!loop_prevention.check_message("sensor/temp", b"25.5", 1, false));
+/// assert!(!loop_prevention.check_message("sensor/temp", b"25.5", QoS::AtLeastOnce, false));
 /// ```
 pub struct WasmLoopPrevention {
     seen_messages: RefCell<HashMap<MessageFingerprint, (f64, bool)>>,
@@ -79,7 +81,7 @@ impl WasmLoopPrevention {
     ///
     /// Returns `true` if the message should be forwarded (first occurrence),
     /// or `false` if a loop is detected (duplicate within TTL).
-    pub fn check_message(&self, topic: &str, payload: &[u8], qos: u8, retain: bool) -> bool {
+    pub fn check_message(&self, topic: &str, payload: &[u8], qos: QoS, retain: bool) -> bool {
         let fingerprint = Self::calculate_fingerprint(topic, payload, qos, retain);
         let now = Self::current_time_ms();
         let mut cache = self.seen_messages.borrow_mut();
@@ -105,13 +107,13 @@ impl WasmLoopPrevention {
     fn calculate_fingerprint(
         topic: &str,
         payload: &[u8],
-        qos: u8,
+        qos: QoS,
         retain: bool,
     ) -> MessageFingerprint {
         let mut hasher = Sha256::new();
         hasher.update(topic.as_bytes());
         hasher.update(payload);
-        hasher.update([qos]);
+        hasher.update([qos as u8]);
         hasher.update([u8::from(retain)]);
         let result = hasher.finalize();
         let mut hash = [0u8; 32];

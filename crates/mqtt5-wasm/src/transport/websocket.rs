@@ -2,6 +2,8 @@ use futures::channel::{mpsc, oneshot};
 use futures::StreamExt;
 use mqtt5_protocol::error::{MqttError, Result};
 use mqtt5_protocol::Transport;
+use std::cell::Cell;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use wasm_bindgen::prelude::*;
@@ -97,6 +99,16 @@ impl WasmWriter {
     }
 }
 
+impl Drop for WasmWriter {
+    fn drop(&mut self) {
+        self.ws.set_onmessage(None);
+        self.ws.set_onopen(None);
+        self.ws.set_onerror(None);
+        self.ws.set_onclose(None);
+        self.ws.close().ok();
+    }
+}
+
 impl WasmWebSocketTransport {
     #[allow(clippy::must_use_candidate)]
     pub fn new(url: impl Into<String>) -> Self {
@@ -155,16 +167,14 @@ impl Transport for WasmWebSocketTransport {
             }
         });
 
-        let result_tx = Arc::new(std::sync::Mutex::new(Some(result_tx)));
+        let result_tx = Rc::new(Cell::new(Some(result_tx)));
 
         let result_tx_open = result_tx.clone();
         let connected_clone = self.connected.clone();
         let onopen = Closure::new(move |_: JsValue| {
             connected_clone.store(true, Ordering::SeqCst);
-            if let Ok(mut tx_opt) = result_tx_open.lock() {
-                if let Some(tx) = tx_opt.take() {
-                    let _ = tx.send(Ok(()));
-                }
+            if let Some(tx) = result_tx_open.take() {
+                let _ = tx.send(Ok(()));
             }
         });
 
@@ -172,12 +182,10 @@ impl Transport for WasmWebSocketTransport {
         let connected_clone2 = self.connected.clone();
         let onerror = Closure::new(move |_e: ErrorEvent| {
             connected_clone2.store(false, Ordering::SeqCst);
-            if let Ok(mut tx_opt) = result_tx_error.lock() {
-                if let Some(tx) = tx_opt.take() {
-                    let _ = tx.send(Err(MqttError::ConnectionError(
-                        "WebSocket connection failed".into(),
-                    )));
-                }
+            if let Some(tx) = result_tx_error.take() {
+                let _ = tx.send(Err(MqttError::ConnectionError(
+                    "WebSocket connection failed".into(),
+                )));
             }
         });
 

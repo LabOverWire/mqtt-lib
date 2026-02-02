@@ -48,19 +48,16 @@ impl AuthProvider for CompositeAuthProvider {
         client_id: &str,
         user_id: Option<&'a str>,
         topic: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<bool>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
         let client_id = client_id.to_string();
         Box::pin(async move {
-            if self
-                .primary
-                .authorize_publish(&client_id, user_id, topic)
-                .await?
-            {
-                return Ok(true);
-            }
-            self.fallback
+            self.primary
                 .authorize_publish(&client_id, user_id, topic)
                 .await
+                || self
+                    .fallback
+                    .authorize_publish(&client_id, user_id, topic)
+                    .await
         })
     }
 
@@ -69,19 +66,16 @@ impl AuthProvider for CompositeAuthProvider {
         client_id: &str,
         user_id: Option<&'a str>,
         topic_filter: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<bool>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
         let client_id = client_id.to_string();
         Box::pin(async move {
-            if self
-                .primary
-                .authorize_subscribe(&client_id, user_id, topic_filter)
-                .await?
-            {
-                return Ok(true);
-            }
-            self.fallback
+            self.primary
                 .authorize_subscribe(&client_id, user_id, topic_filter)
                 .await
+                || self
+                    .fallback
+                    .authorize_subscribe(&client_id, user_id, topic_filter)
+                    .await
         })
     }
 
@@ -142,8 +136,8 @@ mod tests {
             _client_id: &str,
             _user_id: Option<&'a str>,
             _topic: &'a str,
-        ) -> Pin<Box<dyn Future<Output = Result<bool>> + Send + 'a>> {
-            Box::pin(async { Ok(false) })
+        ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+            Box::pin(async { false })
         }
 
         fn authorize_subscribe<'a>(
@@ -151,8 +145,8 @@ mod tests {
             _client_id: &str,
             _user_id: Option<&'a str>,
             _topic_filter: &'a str,
-        ) -> Pin<Box<dyn Future<Output = Result<bool>> + Send + 'a>> {
-            Box::pin(async { Ok(false) })
+        ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+            Box::pin(async { false })
         }
     }
 
@@ -172,8 +166,8 @@ mod tests {
             _client_id: &str,
             _user_id: Option<&'a str>,
             _topic: &'a str,
-        ) -> Pin<Box<dyn Future<Output = Result<bool>> + Send + 'a>> {
-            Box::pin(async { Ok(false) })
+        ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+            Box::pin(async { false })
         }
 
         fn authorize_subscribe<'a>(
@@ -181,8 +175,8 @@ mod tests {
             _client_id: &str,
             _user_id: Option<&'a str>,
             _topic_filter: &'a str,
-        ) -> Pin<Box<dyn Future<Output = Result<bool>> + Send + 'a>> {
-            Box::pin(async { Ok(false) })
+        ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+            Box::pin(async { false })
         }
     }
 
@@ -235,8 +229,7 @@ mod tests {
 
         let result = composite
             .authorize_publish("client", Some("user"), "topic")
-            .await
-            .unwrap();
+            .await;
         assert!(result);
     }
 
@@ -249,8 +242,7 @@ mod tests {
 
         let result = composite
             .authorize_subscribe("client", Some("user"), "topic/#")
-            .await
-            .unwrap();
+            .await;
         assert!(result);
     }
 

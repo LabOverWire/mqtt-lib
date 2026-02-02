@@ -216,6 +216,262 @@ async fn test_will_message_with_delay() {
 }
 
 #[tokio::test]
+async fn test_will_message_forwards_properties() {
+    let broker = TestBroker::start().await;
+
+    let collector = common::MessageCollector::new();
+    let sub_client = MqttClient::new(test_client_id("will-prop-sub"));
+    sub_client
+        .connect(broker.address())
+        .await
+        .expect("subscriber connect");
+    sub_client
+        .subscribe("will/props", collector.callback())
+        .await
+        .expect("subscribe");
+
+    let will_props = WillProperties {
+        payload_format_indicator: Some(true),
+        message_expiry_interval: Some(300),
+        content_type: Some("application/json".to_string()),
+        response_topic: Some("reply/here".to_string()),
+        correlation_data: Some(vec![0xDE, 0xAD]),
+        user_properties: vec![("custom-key".to_string(), "custom-val".to_string())],
+        ..Default::default()
+    };
+
+    let mut will = WillMessage::new("will/props", b"gone");
+    will.qos = QoS::AtMostOnce;
+    will.properties = will_props;
+
+    let will_client = MqttClient::new(test_client_id("will-prop-sender"));
+    let opts = ConnectOptions::new(test_client_id("will-prop-sender"))
+        .with_clean_start(true)
+        .with_will(will);
+    will_client
+        .connect_with_options(broker.address(), opts)
+        .await
+        .expect("will client connect");
+
+    will_client
+        .disconnect_abnormally()
+        .await
+        .expect("abnormal disconnect");
+
+    assert!(collector.wait_for_messages(1, Duration::from_secs(5)).await);
+
+    let msgs = collector.get_messages().await;
+    let msg = &msgs[0];
+    assert_eq!(msg.payload, b"gone");
+    assert_eq!(msg.properties.payload_format_indicator, Some(true));
+    assert_eq!(msg.properties.message_expiry_interval, Some(300));
+    assert_eq!(
+        msg.properties.content_type,
+        Some("application/json".to_string())
+    );
+    assert_eq!(
+        msg.properties.response_topic,
+        Some("reply/here".to_string())
+    );
+    assert_eq!(msg.properties.correlation_data, Some(vec![0xDE, 0xAD]));
+    assert!(msg
+        .properties
+        .user_properties
+        .contains(&("custom-key".to_string(), "custom-val".to_string())));
+
+    sub_client.disconnect().await.expect("disconnect");
+}
+
+#[tokio::test]
+async fn test_will_message_strips_spoofed_sender() {
+    let broker = TestBroker::start_with_authentication().await;
+
+    let collector = common::MessageCollector::new();
+    let sub_client = MqttClient::new(test_client_id("will-sender-sub"));
+    let sub_opts = ConnectOptions::new(test_client_id("will-sender-sub"))
+        .with_clean_start(true)
+        .with_credentials("testuser", b"testpass");
+    sub_client
+        .connect_with_options(broker.address(), sub_opts)
+        .await
+        .expect("subscriber connect");
+    sub_client
+        .subscribe("will/sender", collector.callback())
+        .await
+        .expect("subscribe");
+
+    let will_props = WillProperties {
+        user_properties: vec![("x-mqtt-sender".to_string(), "evil-impersonator".to_string())],
+        ..Default::default()
+    };
+
+    let mut will = WillMessage::new("will/sender", b"disconnected");
+    will.qos = QoS::AtMostOnce;
+    will.properties = will_props;
+
+    let will_client = MqttClient::new(test_client_id("will-sender-client"));
+    let opts = ConnectOptions::new(test_client_id("will-sender-client"))
+        .with_clean_start(true)
+        .with_credentials("testuser", b"testpass")
+        .with_will(will);
+    will_client
+        .connect_with_options(broker.address(), opts)
+        .await
+        .expect("will client connect");
+
+    will_client
+        .disconnect_abnormally()
+        .await
+        .expect("abnormal disconnect");
+
+    assert!(collector.wait_for_messages(1, Duration::from_secs(5)).await);
+
+    let msgs = collector.get_messages().await;
+    let msg = &msgs[0];
+
+    let sender_props: Vec<&str> = msg
+        .properties
+        .user_properties
+        .iter()
+        .filter(|(k, _)| k == "x-mqtt-sender")
+        .map(|(_, v)| v.as_str())
+        .collect();
+
+    assert_eq!(sender_props.len(), 1);
+    assert_eq!(sender_props[0], "testuser");
+    assert!(!msg
+        .properties
+        .user_properties
+        .iter()
+        .any(|(_, v)| v == "evil-impersonator"));
+
+    sub_client.disconnect().await.expect("disconnect");
+}
+
+#[tokio::test]
+async fn test_delayed_will_message_forwards_properties() {
+    let broker = TestBroker::start().await;
+
+    let collector = common::MessageCollector::new();
+    let sub_client = MqttClient::new(test_client_id("delay-prop-sub"));
+    sub_client
+        .connect(broker.address())
+        .await
+        .expect("subscriber connect");
+    sub_client
+        .subscribe("will/delay-props", collector.callback())
+        .await
+        .expect("subscribe");
+
+    let will_props = WillProperties {
+        will_delay_interval: Some(1),
+        payload_format_indicator: Some(true),
+        message_expiry_interval: Some(120),
+        content_type: Some("text/plain".to_string()),
+        response_topic: Some("reply/delayed".to_string()),
+        correlation_data: Some(vec![0xCA, 0xFE]),
+        user_properties: vec![("delayed-key".to_string(), "delayed-val".to_string())],
+    };
+
+    let mut will = WillMessage::new("will/delay-props", b"delayed-gone");
+    will.qos = QoS::AtMostOnce;
+    will.properties = will_props;
+
+    let will_client = MqttClient::new(test_client_id("delay-prop-sender"));
+    let opts = ConnectOptions::new(test_client_id("delay-prop-sender"))
+        .with_clean_start(true)
+        .with_will(will);
+    will_client
+        .connect_with_options(broker.address(), opts)
+        .await
+        .expect("will client connect");
+
+    will_client
+        .disconnect_abnormally()
+        .await
+        .expect("abnormal disconnect");
+
+    assert!(collector.wait_for_messages(1, Duration::from_secs(5)).await);
+
+    let msgs = collector.get_messages().await;
+    let msg = &msgs[0];
+    assert_eq!(msg.payload, b"delayed-gone");
+    assert_eq!(msg.properties.payload_format_indicator, Some(true));
+    assert_eq!(msg.properties.message_expiry_interval, Some(120));
+    assert_eq!(msg.properties.content_type, Some("text/plain".to_string()));
+    assert_eq!(
+        msg.properties.response_topic,
+        Some("reply/delayed".to_string())
+    );
+    assert_eq!(msg.properties.correlation_data, Some(vec![0xCA, 0xFE]));
+    assert!(msg
+        .properties
+        .user_properties
+        .contains(&("delayed-key".to_string(), "delayed-val".to_string())));
+
+    sub_client.disconnect().await.expect("disconnect");
+}
+
+#[tokio::test]
+async fn test_normal_publish_injects_sender() {
+    let broker = TestBroker::start_with_authentication().await;
+
+    let collector = common::MessageCollector::new();
+    let sub_client = MqttClient::new(test_client_id("pub-sender-sub"));
+    let sub_opts = ConnectOptions::new(test_client_id("pub-sender-sub"))
+        .with_clean_start(true)
+        .with_credentials("testuser", b"testpass");
+    sub_client
+        .connect_with_options(broker.address(), sub_opts)
+        .await
+        .expect("subscriber connect");
+    sub_client
+        .subscribe("test/sender-inject", collector.callback())
+        .await
+        .expect("subscribe");
+
+    let pub_client = MqttClient::new(test_client_id("pub-sender-client"));
+    let pub_opts = ConnectOptions::new(test_client_id("pub-sender-client"))
+        .with_clean_start(true)
+        .with_credentials("testuser", b"testpass");
+    pub_client
+        .connect_with_options(broker.address(), pub_opts)
+        .await
+        .expect("publisher connect");
+
+    pub_client
+        .publish_with_options(
+            "test/sender-inject",
+            b"hello",
+            PublishOptions {
+                qos: QoS::AtMostOnce,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("publish");
+
+    assert!(collector.wait_for_messages(1, Duration::from_secs(5)).await);
+
+    let msgs = collector.get_messages().await;
+    let msg = &msgs[0];
+
+    let sender_props: Vec<&str> = msg
+        .properties
+        .user_properties
+        .iter()
+        .filter(|(k, _)| k == "x-mqtt-sender")
+        .map(|(_, v)| v.as_str())
+        .collect();
+
+    assert_eq!(sender_props.len(), 1);
+    assert_eq!(sender_props[0], "testuser");
+
+    pub_client.disconnect().await.expect("disconnect pub");
+    sub_client.disconnect().await.expect("disconnect sub");
+}
+
+#[tokio::test]
 async fn test_topic_aliases() {
     // Start test broker
     let broker = TestBroker::start().await;
@@ -669,4 +925,150 @@ async fn test_request_problem_information() {
         .expect("Failed to connect with default request_problem_information");
     assert!(!result3.session_present);
     client3.disconnect().await.expect("Failed to disconnect");
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn test_will_message_blocked_by_acl() {
+    use mqtt5::broker::config::{
+        AuthConfig, AuthMethod, BrokerConfig, RateLimitConfig, StorageBackend, StorageConfig,
+    };
+    use std::io::Write;
+    use std::process::Command;
+
+    let temp_dir = std::env::temp_dir();
+    let pid = std::process::id();
+
+    let acl_file = temp_dir.join(format!("test_will_acl_{pid}.txt"));
+    let password_file = temp_dir.join(format!("test_will_passwords_{pid}.txt"));
+
+    let _ = std::fs::remove_file(&acl_file);
+    let _ = std::fs::remove_file(&password_file);
+
+    {
+        let mut f = std::fs::File::create(&acl_file).expect("create acl file");
+        writeln!(f, "user willuser topic will/blocked permission deny").expect("write acl deny");
+        writeln!(f, "user * topic # permission readwrite").expect("write acl allow");
+    }
+
+    let cli_binary = common::get_cli_binary_path();
+
+    let status = Command::new(&cli_binary)
+        .args([
+            "passwd",
+            "-c",
+            "-b",
+            "testpass",
+            "willuser",
+            password_file.to_str().unwrap(),
+        ])
+        .status()
+        .expect("create password file");
+    assert!(status.success(), "password file creation failed");
+
+    let status = Command::new(&cli_binary)
+        .args([
+            "passwd",
+            "-b",
+            "testpass",
+            "subuser",
+            password_file.to_str().unwrap(),
+        ])
+        .status()
+        .expect("add second user");
+    assert!(status.success(), "second user creation failed");
+
+    let storage_config = StorageConfig {
+        backend: StorageBackend::Memory,
+        enable_persistence: true,
+        ..Default::default()
+    };
+
+    let auth_config = AuthConfig {
+        allow_anonymous: false,
+        password_file: Some(password_file.clone()),
+        acl_file: Some(acl_file.clone()),
+        auth_method: AuthMethod::Password,
+        auth_data: Some(std::fs::read(&password_file).expect("read password file")),
+        scram_file: None,
+        jwt_config: None,
+        federated_jwt_config: None,
+        rate_limit: RateLimitConfig::default(),
+    };
+
+    let config = BrokerConfig::default()
+        .with_bind_address("127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap())
+        .with_storage(storage_config)
+        .with_auth(auth_config);
+
+    let broker = TestBroker::start_with_config(config).await;
+
+    let collector = common::MessageCollector::new();
+    let sub_client = MqttClient::new(test_client_id("will-acl-sub"));
+    let sub_opts = ConnectOptions::new(test_client_id("will-acl-sub"))
+        .with_clean_start(true)
+        .with_credentials("subuser", b"testpass");
+    sub_client
+        .connect_with_options(broker.address(), sub_opts)
+        .await
+        .expect("subscriber connect");
+    sub_client
+        .subscribe("will/blocked", collector.callback())
+        .await
+        .expect("subscribe");
+
+    let will = WillMessage::new("will/blocked", b"should not arrive");
+    let will_client = MqttClient::new(test_client_id("will-acl-sender"));
+    let opts = ConnectOptions::new(test_client_id("will-acl-sender"))
+        .with_clean_start(true)
+        .with_credentials("willuser", b"testpass")
+        .with_will(will);
+    will_client
+        .connect_with_options(broker.address(), opts)
+        .await
+        .expect("will client connect");
+
+    will_client
+        .disconnect_abnormally()
+        .await
+        .expect("abnormal disconnect");
+
+    let received = collector.wait_for_messages(1, Duration::from_secs(3)).await;
+    assert!(
+        !received,
+        "will message should have been blocked by ACL deny rule"
+    );
+    assert_eq!(collector.count().await, 0);
+
+    let allowed_collector = common::MessageCollector::new();
+    sub_client
+        .subscribe("test/allowed", allowed_collector.callback())
+        .await
+        .expect("subscribe allowed");
+
+    let pub_client = MqttClient::new(test_client_id("will-acl-pub"));
+    let pub_opts = ConnectOptions::new(test_client_id("will-acl-pub"))
+        .with_clean_start(true)
+        .with_credentials("subuser", b"testpass");
+    pub_client
+        .connect_with_options(broker.address(), pub_opts)
+        .await
+        .expect("pub client connect");
+    pub_client
+        .publish("test/allowed", b"hello")
+        .await
+        .expect("publish");
+
+    assert!(
+        allowed_collector
+            .wait_for_messages(1, Duration::from_secs(3))
+            .await,
+        "normal publish to allowed topic should succeed"
+    );
+
+    sub_client.disconnect().await.expect("disconnect sub");
+    pub_client.disconnect().await.expect("disconnect pub");
+
+    let _ = std::fs::remove_file(&acl_file);
+    let _ = std::fs::remove_file(&password_file);
 }

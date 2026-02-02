@@ -237,8 +237,8 @@ impl AuthProvider for TestChallengeResponseAuthProvider {
         _client_id: &str,
         _user_id: Option<&'a str>,
         _topic: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<bool>> + Send + 'a>> {
-        Box::pin(async move { Ok(true) })
+    ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move { true })
     }
 
     fn authorize_subscribe<'a>(
@@ -246,8 +246,8 @@ impl AuthProvider for TestChallengeResponseAuthProvider {
         _client_id: &str,
         _user_id: Option<&'a str>,
         _topic_filter: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<bool>> + Send + 'a>> {
-        Box::pin(async move { Ok(true) })
+    ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move { true })
     }
 
     fn supports_enhanced_auth(&self) -> bool {

@@ -13,6 +13,13 @@ use tokio::fs;
 use tokio::sync::{broadcast, RwLock};
 use tracing::{debug, error, info, warn};
 
+fn unix_timestamp_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
 /// Configuration change notification
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConfigChangeEvent {
@@ -151,10 +158,7 @@ impl HotReloadManager {
 
                                     // Send change notification
                                     let event = ConfigChangeEvent {
-                                        timestamp: SystemTime::now()
-                                            .duration_since(UNIX_EPOCH)
-                                            .unwrap()
-                                            .as_secs(),
+                                        timestamp: unix_timestamp_secs(),
                                         change_type: ConfigChangeType::FullReload,
                                         config_path: config_path.clone(),
                                         previous_hash: old_hash,
@@ -296,10 +300,7 @@ impl HotReloadManager {
 
             // Send change notification
             let event = ConfigChangeEvent {
-                timestamp: SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs(),
+                timestamp: unix_timestamp_secs(),
                 change_type: ConfigChangeType::FullReload,
                 config_path: self.config_path.clone(),
                 previous_hash: old_hash,
@@ -347,10 +348,7 @@ impl HotReloadManager {
 
         // Send change notification
         let event = ConfigChangeEvent {
-            timestamp: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
+            timestamp: unix_timestamp_secs(),
             change_type,
             config_path: self.config_path.clone(),
             previous_hash: old_hash,

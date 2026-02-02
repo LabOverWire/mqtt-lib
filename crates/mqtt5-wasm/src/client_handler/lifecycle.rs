@@ -174,6 +174,21 @@ impl WasmClientHandler {
         }
     }
 
+    async fn authorize_will(&self, client_id: &str, publish: &PublishPacket) -> bool {
+        let authorized = self
+            .auth_provider
+            .authorize_publish(client_id, self.user_id.as_deref(), &publish.topic_name)
+            .await;
+        if !authorized {
+            warn!(
+                "Will for {} denied for topic {}",
+                client_id, publish.topic_name
+            );
+            return false;
+        }
+        true
+    }
+
     pub(super) async fn publish_will_message(&self, client_id: &str) {
         if let Some(ref session) = self.session {
             if let Some(ref will) = session.will_message {
@@ -183,10 +198,16 @@ impl WasmClientHandler {
                     PublishPacket::new(will.topic.clone(), will.payload.clone(), will.qos);
                 publish.retain = will.retain;
 
+                will.properties
+                    .apply_to_publish_properties(&mut publish.properties);
+                publish.properties.inject_sender(self.user_id.as_deref());
+
                 if let Some(delay) = session.will_delay_interval {
                     if delay > 0 {
                         debug!("Spawning task to publish will after {} seconds", delay);
                         let router = Arc::clone(&self.router);
+                        let auth_provider = Arc::clone(&self.auth_provider);
+                        let user_id = self.user_id.clone();
                         let publish_clone = publish.clone();
                         let client_id_clone = client_id.to_string();
                         spawn_local(async move {
@@ -194,13 +215,29 @@ impl WasmClientHandler {
                                 delay,
                             )))
                             .await;
+
+                            let authorized = auth_provider
+                                .authorize_publish(
+                                    &client_id_clone,
+                                    user_id.as_deref(),
+                                    &publish_clone.topic_name,
+                                )
+                                .await;
+                            if !authorized {
+                                warn!(
+                                    "Delayed will for {} denied for topic {}",
+                                    client_id_clone, publish_clone.topic_name
+                                );
+                                return;
+                            }
+
                             debug!("Publishing delayed will message for {}", client_id_clone);
                             router.route_message(&publish_clone, None).await;
                         });
-                    } else {
+                    } else if self.authorize_will(client_id, &publish).await {
                         self.router.route_message(&publish, None).await;
                     }
-                } else {
+                } else if self.authorize_will(client_id, &publish).await {
                     self.router.route_message(&publish, None).await;
                 }
             }

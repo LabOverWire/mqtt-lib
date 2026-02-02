@@ -192,15 +192,14 @@ impl ResourceMonitor {
     }
 
     /// Register a new connection
-    pub async fn register_connection(&self, client_id: String, ip_addr: IpAddr) {
-        // Increment global connection count
+    pub async fn register_connection(&self, client_id: impl Into<String>, ip_addr: IpAddr) {
+        let client_id = client_id.into();
         let new_count = self.connection_count.fetch_add(1, Ordering::Relaxed) + 1;
         debug!(
             "Connection registered: {} from {} (total: {})",
             client_id, ip_addr, new_count
         );
 
-        // Increment per-IP connection count
         let mut ip_connections = self.ip_connections.write().await;
         *ip_connections.entry(ip_addr).or_insert(0) += 1;
         drop(ip_connections);

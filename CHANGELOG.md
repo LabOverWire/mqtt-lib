@@ -5,6 +5,56 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [mqtt5-protocol 0.9.5] / [mqtt5 0.22.1] / [mqtt5-wasm 0.10.3] / [mqttv5-cli 0.20.3] - 2026-02-01
+
+### Security
+
+- **Will message ACL enforcement** - Will messages now checked against ACL at publish time
+  - Previously, will messages bypassed `authorize_publish()` entirely, allowing any authenticated client to publish to any topic by setting it as their will topic and disconnecting abnormally
+  - All three will paths enforced: immediate (no delay), immediate (delay=0), and delayed (delay>0)
+  - Delayed wills re-check ACL after the delay timer, catching rule changes between connect and disconnect
+  - Applies to both native and WASM brokers
+
+- **`x-mqtt-sender` identity injection** - Broker injects authenticated username as `x-mqtt-sender` user property on all PUBLISH packets
+  - Strips any client-supplied `x-mqtt-sender` properties before injecting the real identity
+  - Applies to both normal publishes and will messages
+  - Prevents sender identity spoofing
+
+- **`%u` ACL substitution hardened against wildcard injection** - Rejects usernames containing `+`, `#`, or `/` characters
+  - Without this, a username like `+` would expand `$DB/u/%u/#` into `$DB/u/+/#`, matching all users' namespaces
+
+### Added
+
+- **`%u` ACL pattern substitution** - ACL topic patterns can use `%u` as a placeholder for the authenticated username
+  - Enables per-user topic namespacing: `user * topic $DB/u/%u/# permission readwrite`
+  - Works in both direct ACL rules and role-based rules
+  - Anonymous clients never match `%u` patterns
+
+- **Will message property forwarding** - Will messages now carry all MQTT v5 properties set at connect time
+  - `payload_format_indicator`, `message_expiry_interval`, `content_type`, `response_topic`, `correlation_data`, and user properties
+  - `WillProperties::apply_to_publish_properties()` helper on mqtt5-protocol
+
+- **ACL management helpers** - Runtime ACL rule management
+  - `AclManager::list_rules()`, `list_user_rules()`, `remove_rule()`
+  - `PasswordAuthProvider::list_users()`
+
+- **`ClientPublishEvent.user_id`** - Publish event now includes the authenticated user identity for event handlers
+
+### Fixed
+
+- **WASM transport Drop impls** - `BroadcastChannelWriter`, `MessagePortWriter`, and `WasmWriter` now properly clean up event handlers and close connections on drop
+  - Prevents closure-after-drop panics in WASM environments
+
+- **WASM WebSocket recursive mutex panic** - Replaced `Arc<Mutex<Option<oneshot::Sender>>>` with `Rc<Cell<Option<oneshot::Sender>>>` in WebSocket connect
+  - The JS `onopen`/`onerror` callbacks run synchronously on the same thread, making `Mutex` prone to recursive locking
+
+### Changed
+
+- **`disconnect()` returns `Err(NotConnected)` when not connected** - Previously returned `Ok(())`
+  - Callers that need the old behavior can match on `Err(MqttError::NotConnected)`
+
+- **`build_will_properties` simplified** - Uses `WillProperties::into()` conversion instead of manual property-by-property construction
+
 ## [mqtt5 0.22.0] / [mqtt5-wasm 0.10.2] / [mqttv5-cli 0.20.2] - 2026-01-27
 
 ### Added

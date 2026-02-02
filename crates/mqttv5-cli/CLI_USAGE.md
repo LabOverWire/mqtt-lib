@@ -539,6 +539,12 @@ Add rule for all users to access public topics:
 mqttv5 acl add "*" "public/#" readwrite --file acl.txt
 ```
 
+User-scoped rule with `%u` substitution (expands to authenticated username):
+
+```bash
+mqttv5 acl add "*" '$DB/u/%u/#' readwrite --file acl.txt
+```
+
 Deny access to admin topics:
 
 ```bash
@@ -939,7 +945,7 @@ user <username> topic <pattern> permission <type>
 
 **Format:**
 - `<username>` - Username or `*` for wildcard (all users)
-- `<pattern>` - Topic pattern with MQTT wildcards (`+` for single level, `#` for multi-level)
+- `<pattern>` - Topic pattern with MQTT wildcards (`+` for single level, `#` for multi-level). Use `%u` to substitute the authenticated username.
 - `<type>` - Permission: `read`, `write`, `readwrite`, or `deny`
 
 **Example ACL file:**
@@ -950,6 +956,7 @@ user bob topic actuators/# permission write
 user admin topic admin/# permission readwrite
 user * topic public/# permission readwrite
 user * topic admin/# permission deny
+user * topic $DB/u/%u/# permission readwrite
 ```
 
 **Rule Priority:**

@@ -41,8 +41,8 @@ impl AuthProvider for AllowAllAuthProvider {
         _client_id: &str,
         _user_id: Option<&'a str>,
         _topic: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<bool>> + Send + 'a>> {
-        Box::pin(async move { Ok(true) })
+    ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move { true })
     }
 
     fn authorize_subscribe<'a>(
@@ -50,8 +50,8 @@ impl AuthProvider for AllowAllAuthProvider {
         _client_id: &str,
         _user_id: Option<&'a str>,
         _topic_filter: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<bool>> + Send + 'a>> {
-        Box::pin(async move { Ok(true) })
+    ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move { true })
     }
 }
 
@@ -170,14 +170,20 @@ impl PasswordAuthProvider {
     /// # Errors
     ///
     /// Returns an error if Argon2 hashing fails
-    pub fn add_user(&self, username: String, password: &str) -> Result<()> {
+    pub fn add_user(&self, username: impl Into<String>, password: &str) -> Result<()> {
         let password_hash = Self::hash_password(password)?;
-        self.users.write().insert(username, password_hash);
+        self.users.write().insert(username.into(), password_hash);
         Ok(())
     }
 
-    pub fn add_user_with_hash(&self, username: String, password_hash: String) {
-        self.users.write().insert(username, password_hash);
+    pub fn add_user_with_hash(
+        &self,
+        username: impl Into<String>,
+        password_hash: impl Into<String>,
+    ) {
+        self.users
+            .write()
+            .insert(username.into(), password_hash.into());
     }
 
     #[must_use]
@@ -196,11 +202,16 @@ impl PasswordAuthProvider {
     }
 
     #[must_use]
+    pub fn list_users(&self) -> Vec<String> {
+        self.users.read().keys().cloned().collect()
+    }
+
+    #[must_use]
     pub fn verify_user_password(&self, username: &str, password: &str) -> bool {
         let users = self.users.read();
         users
             .get(username)
-            .is_some_and(|hash| Self::verify_password(password, hash).unwrap_or(false))
+            .is_some_and(|hash| Self::verify_password(password, hash))
     }
 
     #[must_use]
@@ -208,7 +219,7 @@ impl PasswordAuthProvider {
         let users = self.users.read();
         users
             .get(username)
-            .is_some_and(|hash| Self::verify_password(password, hash).unwrap_or(false))
+            .is_some_and(|hash| Self::verify_password(password, hash))
     }
 
     /// Generates an Argon2 hash for a password
@@ -236,19 +247,16 @@ impl PasswordAuthProvider {
             })
     }
 
-    /// Verifies a password against an Argon2 hash
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if Argon2 verification fails
-    pub fn verify_password(password: &str, hash: &str) -> Result<bool> {
-        let parsed_hash = PasswordHash::new(hash).map_err(|e| {
+    #[must_use]
+    pub fn verify_password(password: &str, hash: &str) -> bool {
+        let Ok(parsed_hash) = PasswordHash::new(hash).map_err(|e| {
             error!("Failed to parse password hash: {e}");
-            MqttError::AuthenticationFailed
-        })?;
-        Ok(Argon2::default()
+        }) else {
+            return false;
+        };
+        Argon2::default()
             .verify_password(password.as_bytes(), &parsed_hash)
-            .is_ok())
+            .is_ok()
     }
 }
 
@@ -285,19 +293,12 @@ impl AuthProvider for PasswordAuthProvider {
             if let Some(password_hash) = users.get(username) {
                 let password_str = String::from_utf8_lossy(password);
 
-                match Self::verify_password(&password_str, password_hash) {
-                    Ok(true) => {
-                        debug!("Authentication successful for user: {username}");
-                        Ok(AuthResult::success_with_user(username.clone()))
-                    }
-                    Ok(false) => {
-                        warn!("Authentication failed for user: {username} (wrong password)");
-                        Ok(AuthResult::fail(ReasonCode::BadUsernameOrPassword))
-                    }
-                    Err(e) => {
-                        error!("Argon2 verification error for user {username}: {e}");
-                        Ok(AuthResult::fail(ReasonCode::ServerUnavailable))
-                    }
+                if Self::verify_password(&password_str, password_hash) {
+                    debug!("Authentication successful for user: {username}");
+                    Ok(AuthResult::success_with_user(username.clone()))
+                } else {
+                    warn!("Authentication failed for user: {username} (wrong password)");
+                    Ok(AuthResult::fail(ReasonCode::BadUsernameOrPassword))
                 }
             } else {
                 warn!("Authentication failed for user: {username} (user not found)");
@@ -311,8 +312,8 @@ impl AuthProvider for PasswordAuthProvider {
         _client_id: &str,
         _user_id: Option<&'a str>,
         _topic: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<bool>> + Send + 'a>> {
-        Box::pin(async move { Ok(true) })
+    ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move { true })
     }
 
     fn authorize_subscribe<'a>(
@@ -320,8 +321,8 @@ impl AuthProvider for PasswordAuthProvider {
         _client_id: &str,
         _user_id: Option<&'a str>,
         _topic_filter: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<bool>> + Send + 'a>> {
-        Box::pin(async move { Ok(true) })
+    ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move { true })
     }
 }
 
@@ -436,7 +437,7 @@ impl AuthProvider for ComprehensiveAuthProvider {
         client_id: &str,
         user_id: Option<&'a str>,
         topic: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<bool>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
         let client_id = client_id.to_string();
         Box::pin(async move {
             debug!(
@@ -445,7 +446,7 @@ impl AuthProvider for ComprehensiveAuthProvider {
             );
             let allowed = self.acl_manager.check_publish(user_id, topic).await;
             debug!("Authorization result: {}", allowed);
-            Ok(allowed)
+            allowed
         })
     }
 
@@ -454,12 +455,11 @@ impl AuthProvider for ComprehensiveAuthProvider {
         _client_id: &str,
         user_id: Option<&'a str>,
         topic_filter: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<bool>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
         Box::pin(async move {
-            Ok(self
-                .acl_manager
+            self.acl_manager
                 .check_subscribe(user_id, topic_filter)
-                .await)
+                .await
         })
     }
 }
@@ -680,8 +680,8 @@ impl AuthProvider for CertificateAuthProvider {
         _client_id: &str,
         _user_id: Option<&'a str>,
         _topic: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<bool>> + Send + 'a>> {
-        Box::pin(async move { Ok(true) })
+    ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move { true })
     }
 
     fn authorize_subscribe<'a>(
@@ -689,7 +689,7 @@ impl AuthProvider for CertificateAuthProvider {
         _client_id: &str,
         _user_id: Option<&'a str>,
         _topic_filter: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<bool>> + Send + 'a>> {
-        Box::pin(async move { Ok(true) })
+    ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move { true })
     }
 }

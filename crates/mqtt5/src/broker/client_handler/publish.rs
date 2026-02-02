@@ -85,7 +85,7 @@ impl ClientHandler {
         let authorized = self
             .auth_provider
             .authorize_publish(&client_id, self.user_id.as_deref(), &publish.topic_name)
-            .await?;
+            .await;
 
         if !authorized {
             warn!(
@@ -108,6 +108,8 @@ impl ClientHandler {
                 return err;
             }
         }
+
+        publish.properties.inject_sender(self.user_id.as_deref());
 
         if !self
             .resource_monitor
@@ -342,6 +344,7 @@ impl ClientHandler {
 
             let event = ClientPublishEvent {
                 client_id: client_id.to_string().into(),
+                user_id: self.user_id.as_deref().map(Arc::from),
                 topic: publish.topic_name.clone().into(),
                 payload: publish.payload.clone(),
                 qos: publish.qos,

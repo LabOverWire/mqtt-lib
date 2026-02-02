@@ -115,6 +115,13 @@ impl MessagePortWriter {
     }
 }
 
+impl Drop for MessagePortWriter {
+    fn drop(&mut self) {
+        self.port.set_onmessage(None);
+        self.port.close();
+    }
+}
+
 impl MessagePortTransport {
     #[allow(clippy::must_use_candidate)]
     pub fn new(port: MessagePort) -> Self {

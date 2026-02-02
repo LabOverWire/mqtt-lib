@@ -533,14 +533,14 @@ impl MqttClient {
                 if let Some(&(packet_id, qos)) = results.first() {
                     Ok((packet_id, qos))
                 } else {
-                    inner.callback_manager.unregister(&topic_filter)?;
+                    let _ = inner.callback_manager.unregister(&topic_filter);
                     Err(MqttError::ProtocolError(
                         "No results returned for subscription".to_string(),
                     ))
                 }
             }
             Err(e) => {
-                inner.callback_manager.unregister(&topic_filter)?;
+                let _ = inner.callback_manager.unregister(&topic_filter);
                 Err(e)
             }
         }
@@ -563,7 +563,7 @@ impl MqttClient {
         );
 
         let inner = self.inner.read().await;
-        inner.callback_manager.unregister(&topic_filter)?;
+        let _ = inner.callback_manager.unregister(&topic_filter);
 
         let packet = UnsubscribePacket {
             packet_id: 0,

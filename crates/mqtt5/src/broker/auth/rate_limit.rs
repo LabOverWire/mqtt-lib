@@ -136,7 +136,7 @@ impl AuthProvider for RateLimitedAuthProvider {
         client_id: &str,
         user_id: Option<&'a str>,
         topic: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<bool>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
         let client_id = client_id.to_string();
         Box::pin(async move {
             self.inner
@@ -150,7 +150,7 @@ impl AuthProvider for RateLimitedAuthProvider {
         client_id: &str,
         user_id: Option<&'a str>,
         topic_filter: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<bool>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
         let client_id = client_id.to_string();
         Box::pin(async move {
             self.inner

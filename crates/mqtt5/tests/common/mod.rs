@@ -3,13 +3,14 @@
 pub mod cli_helpers;
 
 use mqtt5::time::Duration;
-use mqtt5::{MqttClient, QoS};
+use mqtt5::{MessageProperties, MqttClient, QoS};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use ulid::Ulid;
 
-fn find_workspace_root() -> PathBuf {
+#[allow(dead_code)]
+pub fn find_workspace_root() -> PathBuf {
     let mut current = std::env::current_dir().expect("Failed to get current directory");
 
     loop {
@@ -26,7 +27,8 @@ fn find_workspace_root() -> PathBuf {
     }
 }
 
-fn get_cli_binary_path() -> PathBuf {
+#[allow(dead_code)]
+pub fn get_cli_binary_path() -> PathBuf {
     if let Ok(path) = std::env::var("CARGO_BIN_EXE_mqttv5") {
         return PathBuf::from(path);
     }
@@ -371,6 +373,7 @@ pub struct ReceivedMessage {
     pub payload: Vec<u8>,
     pub qos: QoS,
     pub retain: bool,
+    pub properties: MessageProperties,
 }
 
 #[allow(dead_code)]
@@ -390,6 +393,7 @@ impl MessageCollector {
                 payload: msg.payload.clone(),
                 qos: msg.qos,
                 retain: msg.retain,
+                properties: msg.properties.clone(),
             };
 
             // Use spawn to avoid blocking the callback

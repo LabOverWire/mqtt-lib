@@ -636,7 +636,7 @@ impl BridgeConnection {
     async fn probe_broker(address: &str, config: &BridgeConfig) -> bool {
         use tokio::net::TcpStream;
 
-        let addr = match address.to_socket_addrs() {
+        let addr = match tokio::net::lookup_host(address).await {
             Ok(mut addrs) => match addrs.next() {
                 Some(addr) => addr,
                 None => return false,
@@ -705,6 +705,7 @@ impl BridgeConnection {
                     let pub_props: crate::types::PublishProperties = msg.properties.into();
                     packet.properties = pub_props.into();
                     packet.retain = msg.retain;
+                    packet.properties.inject_sender(None);
 
                     tokio::spawn(async move {
                         router.route_message_local_only(&packet, None).await;

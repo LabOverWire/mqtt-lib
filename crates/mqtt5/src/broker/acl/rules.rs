@@ -2,7 +2,23 @@
 
 use crate::error::{MqttError, Result};
 use crate::validation::topic_matches_filter;
+use std::borrow::Cow;
 use std::collections::HashSet;
+
+fn username_contains_mqtt_special_chars(name: &str) -> bool {
+    name.contains('+') || name.contains('#') || name.contains('/')
+}
+
+fn expand_pattern<'a>(pattern: &'a str, username: Option<&str>) -> Option<Cow<'a, str>> {
+    if !pattern.contains("%u") {
+        return Some(Cow::Borrowed(pattern));
+    }
+    let name = username?;
+    if username_contains_mqtt_special_chars(name) {
+        return None;
+    }
+    Some(Cow::Owned(pattern.replace("%u", name)))
+}
 
 /// Access permissions for topics
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,10 +70,14 @@ pub struct AclRule {
 
 impl AclRule {
     #[must_use]
-    pub fn new(username: String, topic_pattern: String, permission: Permission) -> Self {
+    pub fn new(
+        username: impl Into<String>,
+        topic_pattern: impl Into<String>,
+        permission: Permission,
+    ) -> Self {
         Self {
-            username,
-            topic_pattern,
+            username: username.into(),
+            topic_pattern: topic_pattern.into(),
             permission,
         }
     }
@@ -73,7 +93,10 @@ impl AclRule {
             return false;
         }
 
-        topic_matches_filter(topic, &self.topic_pattern)
+        let Some(expanded) = expand_pattern(&self.topic_pattern, username) else {
+            return false;
+        };
+        topic_matches_filter(topic, &expanded)
     }
 }
 
@@ -86,16 +109,19 @@ pub struct RoleRule {
 
 impl RoleRule {
     #[must_use]
-    pub fn new(topic_pattern: String, permission: Permission) -> Self {
+    pub fn new(topic_pattern: impl Into<String>, permission: Permission) -> Self {
         Self {
-            topic_pattern,
+            topic_pattern: topic_pattern.into(),
             permission,
         }
     }
 
     #[must_use]
-    pub fn matches(&self, topic: &str) -> bool {
-        topic_matches_filter(topic, &self.topic_pattern)
+    pub fn matches(&self, username: Option<&str>, topic: &str) -> bool {
+        let Some(expanded) = expand_pattern(&self.topic_pattern, username) else {
+            return false;
+        };
+        topic_matches_filter(topic, &expanded)
     }
 }
 
@@ -108,9 +134,9 @@ pub struct Role {
 
 impl Role {
     #[must_use]
-    pub fn new(name: String) -> Self {
+    pub fn new(name: impl Into<String>) -> Self {
         Self {
-            name,
+            name: name.into(),
             rules: Vec::new(),
         }
     }

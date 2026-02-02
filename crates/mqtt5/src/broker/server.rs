@@ -624,6 +624,7 @@ impl MqttBroker {
     async fn initialize_storage(
         &self,
         shutdown_tx: &tokio::sync::broadcast::Sender<()>,
+        task_handles: &mut Vec<tokio::task::JoinHandle<()>>,
     ) -> Result<()> {
         if let Some(ref storage) = self.storage {
             storage.cleanup_expired().await?;
@@ -632,7 +633,7 @@ impl MqttBroker {
             let cleanup_interval = self.config.storage_config.cleanup_interval;
             let mut shutdown_rx = shutdown_tx.subscribe();
 
-            tokio::spawn(async move {
+            task_handles.push(tokio::spawn(async move {
                 let mut interval = tokio::time::interval(cleanup_interval);
                 loop {
                     tokio::select! {
@@ -647,13 +648,13 @@ impl MqttBroker {
                         }
                     }
                 }
-            });
+            }));
 
             let storage_clone = Arc::clone(storage);
             let mut shutdown_rx = shutdown_tx.subscribe();
             let flush_interval = std::time::Duration::from_secs(5);
 
-            tokio::spawn(async move {
+            task_handles.push(tokio::spawn(async move {
                 let mut interval = tokio::time::interval(flush_interval);
                 interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 loop {
@@ -672,7 +673,7 @@ impl MqttBroker {
                         }
                     }
                 }
-            });
+            }));
         }
         Ok(())
     }
@@ -713,20 +714,21 @@ impl MqttBroker {
             ));
         };
 
-        self.initialize_storage(&shutdown_tx).await?;
+        let mut task_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+
+        self.initialize_storage(&shutdown_tx, &mut task_handles)
+            .await?;
         self.router.initialize().await?;
 
-        // Start $SYS topics provider
         let sys_provider =
             SysTopicsProvider::new(Arc::clone(&self.router), Arc::clone(&self.stats));
-        drop(sys_provider.start());
+        let sys_handle = sys_provider.start();
 
         info!("Router initialized, starting resource monitor cleanup task");
 
-        // Start resource monitor cleanup task
         let resource_monitor_clone = Arc::clone(&self.resource_monitor);
         let mut shutdown_rx_cleanup = shutdown_tx.subscribe();
-        tokio::spawn(async move {
+        task_handles.push(tokio::spawn(async move {
             let mut interval = tokio::time::interval(crate::time::Duration::from_secs(60));
             loop {
                 tokio::select! {
@@ -739,7 +741,7 @@ impl MqttBroker {
                     }
                 }
             }
-        });
+        }));
 
         let mut shutdown_rx = shutdown_tx.subscribe();
 
@@ -760,7 +762,7 @@ impl MqttBroker {
                 let state = accept_state.clone();
                 let mut shutdown_rx_ws = state.shutdown_tx.subscribe();
 
-                tokio::spawn(async move {
+                task_handles.push(tokio::spawn(async move {
                     loop {
                         tokio::select! {
                             accept_result = ws_listener.accept() => {
@@ -816,11 +818,10 @@ impl MqttBroker {
                             }
                         }
                     }
-                });
+                }));
             }
         }
 
-        // Spawn WebSocket TLS accept tasks (one per listener)
         if let (Some(ws_tls_config), Some(ws_tls_acceptor)) = (ws_tls_config, ws_tls_acceptor) {
             let acceptor = Arc::new(ws_tls_acceptor);
             for ws_tls_listener in ws_tls_listeners {
@@ -829,7 +830,7 @@ impl MqttBroker {
                 let state = accept_state.clone();
                 let mut shutdown_rx_wss = state.shutdown_tx.subscribe();
 
-                tokio::spawn(async move {
+                task_handles.push(tokio::spawn(async move {
                     loop {
                         tokio::select! {
                             accept_result = ws_tls_listener.accept() => {
@@ -896,11 +897,10 @@ impl MqttBroker {
                             }
                         }
                     }
-                });
+                }));
             }
         }
 
-        // Spawn TLS accept tasks (one per listener)
         if let Some(tls_acceptor) = tls_acceptor {
             let acceptor = Arc::new(tls_acceptor);
             for tls_listener in tls_listeners {
@@ -908,7 +908,7 @@ impl MqttBroker {
                 let state = accept_state.clone();
                 let mut shutdown_rx_tls = state.shutdown_tx.subscribe();
 
-                tokio::spawn(async move {
+                task_handles.push(tokio::spawn(async move {
                     loop {
                         tokio::select! {
                             accept_result = tls_listener.accept() => {
@@ -964,7 +964,7 @@ impl MqttBroker {
                             }
                         }
                     }
-                });
+                }));
             }
         }
 
@@ -977,7 +977,7 @@ impl MqttBroker {
             let mut shutdown_rx_quic = state.shutdown_tx.subscribe();
 
             let local_addr = quic_endpoint.local_addr();
-            tokio::spawn(async move {
+            task_handles.push(tokio::spawn(async move {
                 debug!("QUIC accept loop starting for {:?}", local_addr);
                 loop {
                     tokio::select! {
@@ -1024,7 +1024,7 @@ impl MqttBroker {
                         }
                     }
                 }
-            });
+            }));
         }
 
         if !cluster_listeners.is_empty() {
@@ -1040,7 +1040,7 @@ impl MqttBroker {
             let mut shutdown_rx_cluster = state.shutdown_tx.subscribe();
             let acceptor = cluster_tls_acceptor.clone();
 
-            tokio::spawn(async move {
+            task_handles.push(tokio::spawn(async move {
                 loop {
                     tokio::select! {
                         accept_result = cluster_listener.accept() => {
@@ -1127,7 +1127,7 @@ impl MqttBroker {
                         }
                     }
                 }
-            });
+            }));
         }
 
         if !cluster_quic_endpoints.is_empty() {
@@ -1142,7 +1142,7 @@ impl MqttBroker {
             let mut shutdown_rx_quic_cluster = state.shutdown_tx.subscribe();
 
             let local_addr = cluster_quic_endpoint.local_addr();
-            tokio::spawn(async move {
+            task_handles.push(tokio::spawn(async move {
                 debug!("Cluster QUIC accept loop starting for {:?}", local_addr);
                 loop {
                     tokio::select! {
@@ -1189,7 +1189,7 @@ impl MqttBroker {
                         }
                     }
                 }
-            });
+            }));
         }
 
         info!(
@@ -1200,7 +1200,7 @@ impl MqttBroker {
             let state = accept_state.clone();
             let mut shutdown_rx_tcp = state.shutdown_tx.subscribe();
 
-            tokio::spawn(async move {
+            task_handles.push(tokio::spawn(async move {
                 loop {
                     tokio::select! {
                         accept_result = listener.accept() => {
@@ -1248,7 +1248,7 @@ impl MqttBroker {
                         }
                     }
                 }
-            });
+            }));
         }
 
         info!("Broker ready - accepting connections");
@@ -1259,6 +1259,15 @@ impl MqttBroker {
 
         shutdown_rx.recv().await.ok();
         info!("Broker shutting down");
+
+        sys_handle.abort();
+
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            for handle in task_handles {
+                let _ = handle.await;
+            }
+        })
+        .await;
 
         Ok(())
     }

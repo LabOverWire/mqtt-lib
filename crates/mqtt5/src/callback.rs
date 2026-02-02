@@ -44,15 +44,9 @@ impl CallbackManager {
         }
     }
 
-    /// Registers a callback for a topic filter and returns a callback ID
-    ///
     /// # Errors
     ///
-    /// Returns an error if a callback with the same ID is already registered
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the operation fails
+    /// Currently infallible but returns Result for API stability.
     pub fn register_with_id(
         &self,
         topic_filter: &str,
@@ -73,14 +67,11 @@ impl CallbackManager {
         Ok(id)
     }
 
-    /// Registers a callback for a topic filter (legacy method)
-    ///
     /// # Errors
     ///
-    /// Returns an error if the operation fails
-    pub fn register(&self, topic_filter: &str, callback: PublishCallback) -> Result<()> {
-        self.register_with_id(topic_filter, callback)?;
-        Ok(())
+    /// Returns an error if the topic filter is invalid.
+    pub fn register(&self, topic_filter: &str, callback: PublishCallback) -> Result<CallbackId> {
+        self.register_with_id(topic_filter, callback)
     }
 
     fn register_internal(&self, topic_filter: &str, entry: CallbackEntry) {
@@ -99,21 +90,12 @@ impl CallbackManager {
         self.callback_registry.lock().get(&id).cloned()
     }
 
-    /// Re-registers a callback using its stored ID
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the callback cannot be registered
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the operation fails
-    pub fn restore_callback(&self, id: CallbackId) -> Result<bool> {
+    #[must_use]
+    pub fn restore_callback(&self, id: CallbackId) -> bool {
         if let Some(entry) = self.get_callback(id) {
             let topic_filter = &entry.topic_filter;
             let actual_filter = strip_shared_subscription_prefix(topic_filter).to_string();
 
-            // Check if already registered
             let already_registered = if actual_filter.contains('+') || actual_filter.contains('#') {
                 let wildcards = self.wildcard_callbacks.lock();
                 wildcards.iter().any(|e| e.id == id)
@@ -128,27 +110,16 @@ impl CallbackManager {
                 let topic_filter = entry.topic_filter.clone();
                 self.register_internal(&topic_filter, entry);
             }
-            Ok(true)
+            true
         } else {
-            Ok(false)
+            false
         }
     }
 
-    /// Unregisters all callbacks for a topic filter
-    ///
-    /// Returns `Ok(true)` if any callbacks were removed, `Ok(false)` if no callbacks existed.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the topic filter is invalid
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the operation fails
-    pub fn unregister(&self, topic_filter: &str) -> Result<bool> {
+    #[must_use]
+    pub fn unregister(&self, topic_filter: &str) -> bool {
         let actual_filter = strip_shared_subscription_prefix(topic_filter);
 
-        // Remove from registry and track if anything was removed
         let mut registry = self.callback_registry.lock();
         let registry_count_before = registry.len();
         registry.retain(|_, entry| entry.topic_filter != topic_filter);
@@ -165,18 +136,12 @@ impl CallbackManager {
             exact.remove(actual_filter).is_some()
         };
 
-        Ok(removed_from_registry || removed_from_callbacks)
+        removed_from_registry || removed_from_callbacks
     }
 
-    /// Dispatches a message to all matching callbacks
-    ///
     /// # Errors
     ///
-    /// Currently always returns Ok, but may return errors in future versions
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the operation fails
+    /// Currently infallible but returns Result for API stability.
     pub fn dispatch(&self, message: &PublishPacket) -> Result<()> {
         let mut callbacks_to_call = Vec::new();
 
@@ -403,7 +368,7 @@ mod tests {
         tokio::task::yield_now().await;
         assert_eq!(counter.load(Ordering::Relaxed), 1);
 
-        manager.unregister("test/topic").unwrap();
+        let _ = manager.unregister("test/topic");
         manager.dispatch(&message).unwrap();
         tokio::task::yield_now().await;
         assert_eq!(counter.load(Ordering::Relaxed), 1);

@@ -238,9 +238,11 @@ Enhanced authentication mechanisms:
 
 Rule-based access control:
 - Wildcard topic matching in rules
+- `%u` substitution expands to authenticated username in topic patterns
 - Publish/subscribe permission separation
 - Role-based access control (RBAC)
 - CLI management: `mqttv5 acl add/remove/list/check`
+- Sender identity injection: broker stamps `x-mqtt-sender` user property on PUBLISH packets
 
 ### Bridge Manager
 
@@ -266,7 +268,7 @@ Custom event handlers via `BrokerEventHandler` trait:
 | `on_client_connect` | `ClientConnectEvent` | Client CONNECT packet accepted |
 | `on_client_subscribe` | `ClientSubscribeEvent` | Client SUBSCRIBE processed |
 | `on_client_unsubscribe` | `ClientUnsubscribeEvent` | Client UNSUBSCRIBE processed |
-| `on_client_publish` | `ClientPublishEvent` | Client PUBLISH received (includes `response_topic`, `correlation_data` for request/response) |
+| `on_client_publish` | `ClientPublishEvent` | Client PUBLISH received (includes `user_id`, `response_topic`, `correlation_data`) |
 | `on_client_disconnect` | `ClientDisconnectEvent` | Client disconnects (clean or unexpected) |
 | `on_retained_set` | `RetainedSetEvent` | Retained message stored or cleared |
 | `on_message_delivered` | `MessageDeliveredEvent` | QoS 1/2 message delivered to subscriber |

@@ -19,7 +19,7 @@ impl WasmClientHandler {
     #[allow(clippy::too_many_lines)]
     pub(super) async fn handle_publish(
         &mut self,
-        publish: PublishPacket,
+        mut publish: PublishPacket,
         writer: &mut WasmWriter,
     ) -> Result<()> {
         let client_id = self.client_id.as_ref().unwrap();
@@ -28,7 +28,7 @@ impl WasmClientHandler {
         let authorized = self
             .auth_provider
             .authorize_publish(client_id, self.user_id.as_deref(), &publish.topic_name)
-            .await?;
+            .await;
 
         if !authorized {
             warn!(
@@ -107,6 +107,8 @@ impl WasmClientHandler {
             }
             return Ok(());
         }
+
+        publish.properties.inject_sender(self.user_id.as_deref());
 
         match publish.qos {
             QoS::AtMostOnce => {
