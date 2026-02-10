@@ -334,19 +334,18 @@ impl ClientHandler {
         mut session: ClientSession,
         storage: &Arc<DynamicStorage>,
     ) -> Result<()> {
-        if let Some(ref session_user) = session.user_id {
-            if self.user_id.as_deref() != Some(session_user.as_str()) {
-                warn!(
-                    client_id = %connect.client_id,
-                    session_user = %session_user,
-                    "Session user mismatch, rejecting connection"
-                );
-                let connack = ConnAckPacket::new(false, ReasonCode::NotAuthorized);
-                self.transport
-                    .write_packet(Packet::ConnAck(connack))
-                    .await?;
-                return Err(MqttError::AuthenticationFailed);
-            }
+        if session.user_id.as_deref() != self.user_id.as_deref() {
+            warn!(
+                client_id = %connect.client_id,
+                session_user = ?session.user_id,
+                current_user = ?self.user_id,
+                "Session user mismatch, rejecting connection"
+            );
+            let connack = ConnAckPacket::new(false, ReasonCode::NotAuthorized);
+            self.transport
+                .write_packet(Packet::ConnAck(connack))
+                .await?;
+            return Err(MqttError::AuthenticationFailed);
         }
 
         let mut unauthorized_filters = Vec::new();

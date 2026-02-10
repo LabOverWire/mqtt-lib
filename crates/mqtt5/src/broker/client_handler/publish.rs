@@ -564,11 +564,7 @@ impl ClientHandler {
                 }
             };
 
-            let mut max_pid: u16 = 0;
             for msg in inflights {
-                if msg.packet_id > max_pid {
-                    max_pid = msg.packet_id;
-                }
                 match msg.direction {
                     InflightDirection::Outbound => match msg.phase {
                         InflightPhase::AwaitingPubrec => {
@@ -598,9 +594,7 @@ impl ClientHandler {
                     }
                 }
             }
-            if max_pid >= self.next_packet_id {
-                self.next_packet_id = if max_pid == u16::MAX { 1 } else { max_pid + 1 };
-            }
+            self.advance_packet_id_past_inflight();
         }
         Ok(())
     }

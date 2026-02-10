@@ -784,7 +784,7 @@ impl QueuedMessage {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum InflightDirection {
     Inbound,
     Outbound,
@@ -809,8 +809,10 @@ pub struct InflightMessage {
     pub retain: bool,
     pub stored_at_secs: u64,
     pub message_expiry_interval: Option<u32>,
+    #[serde(default)]
+    pub expires_at_secs: Option<u64>,
     #[serde(skip)]
-    pub expires_at: Option<SystemTime>,
+    expires_at_cache: Option<SystemTime>,
     #[serde(default)]
     pub user_properties: Vec<(String, String)>,
     pub content_type: Option<String>,
@@ -835,7 +837,9 @@ impl InflightMessage {
             .unwrap_or_default()
             .as_secs();
         let message_expiry_interval = packet.properties.get_message_expiry_interval();
-        let expires_at =
+        let expires_at_secs =
+            message_expiry_interval.map(|interval| stored_at_secs + u64::from(interval));
+        let expires_at_cache =
             message_expiry_interval.map(|interval| now + Duration::from_secs(u64::from(interval)));
 
         let user_properties = packet
@@ -901,7 +905,8 @@ impl InflightMessage {
             retain: packet.retain,
             stored_at_secs,
             message_expiry_interval,
-            expires_at,
+            expires_at_secs,
+            expires_at_cache,
             user_properties,
             content_type,
             response_topic,
@@ -945,16 +950,16 @@ impl InflightMessage {
         packet
     }
 
-    pub fn recompute_expiry(&mut self) {
-        if let Some(interval) = self.message_expiry_interval {
-            let stored_at = SystemTime::UNIX_EPOCH + Duration::from_secs(self.stored_at_secs);
-            self.expires_at = Some(stored_at + Duration::from_secs(u64::from(interval)));
-        }
+    fn resolved_expires_at(&self) -> Option<SystemTime> {
+        self.expires_at_cache.or_else(|| {
+            self.expires_at_secs
+                .map(|secs| SystemTime::UNIX_EPOCH + Duration::from_secs(secs))
+        })
     }
 
     #[must_use]
     pub fn remaining_expiry_interval(&self) -> Option<u32> {
-        self.expires_at.and_then(|expiry| {
+        self.resolved_expires_at().and_then(|expiry| {
             expiry
                 .duration_since(SystemTime::now())
                 .ok()
@@ -964,7 +969,7 @@ impl InflightMessage {
 
     #[must_use]
     pub fn is_expired(&self) -> bool {
-        self.expires_at
+        self.resolved_expires_at()
             .is_some_and(|expiry| SystemTime::now() > expiry)
     }
 }

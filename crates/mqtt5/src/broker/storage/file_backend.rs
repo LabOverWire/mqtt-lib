@@ -338,10 +338,9 @@ impl FileBackend {
                     if is_dir {
                         let files = self.list_files(&client_dir, "json").await?;
                         for file_path in files {
-                            if let Some(mut msg) =
+                            if let Some(msg) =
                                 self.read_file::<InflightMessage>(file_path.clone()).await?
                             {
-                                msg.recompute_expiry();
                                 if msg.is_expired() {
                                     if let Err(e) = fs::remove_file(&file_path).await {
                                         warn!("failed to remove expired inflight: {e}");
@@ -562,8 +561,7 @@ impl StorageBackend for FileBackend {
         let mut messages = Vec::new();
 
         for file_path in files {
-            if let Some(mut msg) = self.read_file::<InflightMessage>(file_path.clone()).await? {
-                msg.recompute_expiry();
+            if let Some(msg) = self.read_file::<InflightMessage>(file_path.clone()).await? {
                 if !msg.is_expired() {
                     messages.push(msg);
                 } else if let Err(e) = fs::remove_file(&file_path).await {

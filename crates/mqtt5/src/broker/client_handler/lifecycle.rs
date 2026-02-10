@@ -123,4 +123,21 @@ impl ClientHandler {
         };
         id
     }
+
+    pub(super) fn advance_packet_id_past_inflight(&mut self) {
+        let mut candidate = self.next_packet_id;
+        for _ in 0..u16::MAX {
+            if !self.outbound_inflight.contains_key(&candidate)
+                && !self.inflight_publishes.contains_key(&candidate)
+            {
+                self.next_packet_id = candidate;
+                return;
+            }
+            candidate = if candidate == u16::MAX {
+                1
+            } else {
+                candidate + 1
+            };
+        }
+    }
 }

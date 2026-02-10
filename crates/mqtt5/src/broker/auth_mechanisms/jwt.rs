@@ -152,12 +152,9 @@ impl JwtAuthProvider {
             self.verifiers
                 .iter()
                 .find(|v| v.kid() == Some(kid.as_str()))
-                .ok_or_else(|| JwtError::UnsupportedAlgorithm(header.alg.clone()))?
+                .ok_or(JwtError::InvalidClaim("unknown kid"))?
         } else {
-            self.verifiers
-                .iter()
-                .find(|v| v.algorithm() == header.alg)
-                .ok_or(JwtError::UnsupportedAlgorithm(header.alg))?
+            return Err(JwtError::MissingClaim("kid"));
         };
 
         if !Self::verify_signature(verifier, message_bytes, &signature_bytes) {
@@ -335,7 +332,6 @@ fn base64url_decode(input: &str) -> std::result::Result<Vec<u8>, JwtError> {
 enum JwtError {
     InvalidFormat(&'static str),
     InvalidSignature,
-    UnsupportedAlgorithm(String),
     Expired,
     NotYetValid,
     InvalidClaim(&'static str),
@@ -347,7 +343,6 @@ impl std::fmt::Display for JwtError {
         match self {
             Self::InvalidFormat(msg) => write!(f, "invalid JWT format: {msg}"),
             Self::InvalidSignature => write!(f, "invalid signature"),
-            Self::UnsupportedAlgorithm(alg) => write!(f, "unsupported algorithm: {alg}"),
             Self::Expired => write!(f, "token expired"),
             Self::NotYetValid => write!(f, "token not yet valid"),
             Self::InvalidClaim(msg) => write!(f, "invalid claim: {msg}"),

@@ -472,6 +472,24 @@ impl WasmClientHandler {
         Ok(())
     }
 
+    pub(super) fn advance_packet_id_past_inflight(&self) {
+        let outbound = self.outbound_inflight.borrow();
+        let mut candidate = self.next_packet_id.get();
+        for _ in 0..u16::MAX {
+            if !outbound.contains_key(&candidate)
+                && !self.inflight_publishes.contains_key(&candidate)
+            {
+                self.next_packet_id.set(candidate);
+                return;
+            }
+            candidate = if candidate == u16::MAX {
+                1
+            } else {
+                candidate + 1
+            };
+        }
+    }
+
     pub(super) fn fire_client_connect(&self, client_id: &str, clean_start: bool) {
         let callback = self.event_callbacks.on_client_connect.borrow().clone();
         let client_id = client_id.to_string();

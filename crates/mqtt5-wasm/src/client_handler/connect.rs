@@ -215,17 +215,16 @@ impl WasmClientHandler {
     ) -> Result<bool> {
         let client_id = &connect.client_id;
 
-        if let Some(ref session_user) = session.user_id {
-            if self.user_id.as_deref() != Some(session_user.as_str()) {
-                warn!(
-                    client_id = %client_id,
-                    session_user = %session_user,
-                    "Session user mismatch, rejecting connection"
-                );
-                let connack = ConnAckPacket::new(false, ReasonCode::NotAuthorized);
-                self.write_packet(&Packet::ConnAck(connack), writer)?;
-                return Err(MqttError::AuthenticationFailed);
-            }
+        if session.user_id.as_deref() != self.user_id.as_deref() {
+            warn!(
+                client_id = %client_id,
+                session_user = ?session.user_id,
+                current_user = ?self.user_id,
+                "Session user mismatch, rejecting connection"
+            );
+            let connack = ConnAckPacket::new(false, ReasonCode::NotAuthorized);
+            self.write_packet(&Packet::ConnAck(connack), writer)?;
+            return Err(MqttError::AuthenticationFailed);
         }
 
         let mut unauthorized_filters = Vec::new();
@@ -261,11 +260,7 @@ impl WasmClientHandler {
             .get_inflight_messages(client_id)
             .await
             .unwrap_or_default();
-        let mut max_pid: u16 = 0;
         for msg in inflights {
-            if msg.packet_id > max_pid {
-                max_pid = msg.packet_id;
-            }
             match msg.direction {
                 InflightDirection::Inbound => {
                     self.inflight_publishes
@@ -278,10 +273,7 @@ impl WasmClientHandler {
                 }
             }
         }
-        if max_pid > 0 {
-            let next = if max_pid == u16::MAX { 1 } else { max_pid + 1 };
-            self.next_packet_id.set(next);
-        }
+        self.advance_packet_id_past_inflight();
 
         session.will_message.clone_from(&connect.will);
         session.will_delay_interval = connect

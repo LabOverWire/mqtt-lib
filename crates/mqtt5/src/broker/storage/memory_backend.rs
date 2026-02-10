@@ -13,13 +13,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::debug;
 
-/// In-memory storage backend
+type InflightMap = HashMap<String, HashMap<(u16, InflightDirection), InflightMessage>>;
+
 #[derive(Debug)]
 pub struct MemoryBackend {
     retained: Arc<Mutex<HashMap<String, RetainedMessage>>>,
     sessions: Arc<Mutex<HashMap<String, ClientSession>>>,
     queues: Arc<Mutex<HashMap<String, Vec<QueuedMessage>>>>,
-    inflight: Arc<Mutex<HashMap<String, Vec<InflightMessage>>>>,
+    inflight: Arc<Mutex<InflightMap>>,
 }
 
 impl MemoryBackend {
@@ -152,14 +153,8 @@ impl StorageBackend for MemoryBackend {
     async fn store_inflight_message(&self, message: InflightMessage) -> Result<()> {
         let mut inflight = self.inflight.lock();
         let entries = inflight.entry(message.client_id.clone()).or_default();
-        if let Some(pos) = entries
-            .iter()
-            .position(|e| e.packet_id == message.packet_id && e.direction == message.direction)
-        {
-            entries[pos] = message;
-        } else {
-            entries.push(message);
-        }
+        let key = (message.packet_id, message.direction);
+        entries.insert(key, message);
         Ok(())
     }
 
@@ -169,7 +164,7 @@ impl StorageBackend for MemoryBackend {
             .get(client_id)
             .map(|entries| {
                 entries
-                    .iter()
+                    .values()
                     .filter(|e| !e.is_expired())
                     .cloned()
                     .collect()
@@ -185,7 +180,7 @@ impl StorageBackend for MemoryBackend {
     ) -> Result<()> {
         let mut inflight = self.inflight.lock();
         if let Some(entries) = inflight.get_mut(client_id) {
-            entries.retain(|e| !(e.packet_id == packet_id && e.direction == direction));
+            entries.remove(&(packet_id, direction));
             if entries.is_empty() {
                 inflight.remove(client_id);
             }
@@ -240,7 +235,7 @@ impl StorageBackend for MemoryBackend {
             let mut inflight = self.inflight.lock();
             for entries in inflight.values_mut() {
                 let original_len = entries.len();
-                entries.retain(|entry| !entry.is_expired());
+                entries.retain(|_, entry| !entry.is_expired());
                 removed_count += original_len - entries.len();
             }
             inflight.retain(|_, entries| !entries.is_empty());
