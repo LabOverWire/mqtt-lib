@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **JWT algorithm confusion prevention** - Verifier selection now uses `kid` (key ID) header matching instead of trusting the `alg` header from untrusted tokens. Single-verifier configurations ignore the header algorithm entirely
 - **Session-to-user binding** - Sessions now store the authenticated `user_id`. On reconnect with `clean_start=false`, the broker rejects the connection if the reconnecting user doesn't match the session owner
 - **ACL re-check on session restore** - When restoring subscriptions from a previous session, each topic filter is re-authorized against current ACL rules. Subscriptions that no longer pass authorization are pruned
+- **Certificate auth transport guard** - `cert:` prefixed client IDs are now rejected at the transport layer unless the connection has a verified TLS client certificate. Prevents spoofing certificate identity over plain TCP, WebSocket, or QUIC connections
 - **Certificate auth fingerprint validation** - `CertificateAuthProvider` now validates TLS peer certificate fingerprints against registered fingerprints instead of trusting `cert:` prefix in client IDs. Fingerprints must be exactly 64 hex characters
 - **SCRAM state collision fix** - SCRAM authentication now rejects concurrent authentication attempts for the same `client_id`, preventing auth state from being clobbered
 - **QUIC bridge TLS verification** - QUIC bridges now default to certificate verification enabled (`secure: true`), matching QUIC's mandatory TLS requirement
@@ -29,6 +30,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Regex compilation caching** - JWT claim pattern regexes are now compiled once at deserialization time instead of on every authentication attempt. Invalid regex patterns fail at config load
 - **innerHTML XSS prevention** - All 19 WASM example HTML files replaced `innerHTML +=` with safe DOM manipulation (`createElement` + `textContent` + `appendChild`)
 - **WASM enhanced auth user_id propagation** - Fixed missing `user_id` capture in WASM broker's enhanced auth success path
+- **Packet ID collision prevention** - After restoring inflight messages on reconnect, the broker now scans both `outbound_inflight` and `inflight_publishes` maps to advance the packet ID counter past any occupied IDs, preventing collisions in both native and WASM brokers
+- **Session user binding hardened** - Anonymous-to-authenticated and authenticated-to-anonymous session mismatches are now correctly rejected (previously only authenticated-to-different-authenticated was caught)
+
+### Fixed
+
+- **InflightMessage expiry survives serialization** - Replaced `#[serde(skip)]` `expires_at` with serializable `expires_at_secs` (epoch seconds) plus an in-memory cache, so expiry is preserved across file backend round-trips
+
+### Changed
+
+- **MemoryBackend inflight storage** - Inflight messages now stored in `HashMap<(u16, InflightDirection), InflightMessage>` per client instead of `Vec<InflightMessage>`, giving O(1) insert/remove/lookup instead of O(n) linear scan
 
 ## [mqtt5 0.22.3] / [mqtt5-wasm 0.10.5] - 2026-02-10
 

@@ -316,7 +316,8 @@ When restoring subscriptions from a previous session, each topic filter is re-au
 
 - `CertificateAuthProvider` validates TLS peer certificate fingerprints (64-char hex SHA-256)
 - Client IDs starting with `cert:` are matched against registered fingerprints from the actual TLS connection
-- Prevents spoofing via fake `cert:` prefixed client IDs without a valid certificate
+- The broker rejects `cert:` prefixed client IDs at the transport layer before authentication unless the connection has a verified TLS client certificate (`client_cert_info`). This prevents spoofing over plain TCP, WebSocket, or QUIC
+- Fingerprints are case-insensitive and must be exactly 64 hex characters
 
 ### ACL
 
