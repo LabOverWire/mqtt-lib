@@ -1,5 +1,5 @@
 use mqtt5::broker::auth::{EnhancedAuthResult, EnhancedAuthStatus};
-use mqtt5::broker::storage::{ClientSession, InflightDirection, StorageBackend};
+use mqtt5::broker::storage::{ClientSession, StorageBackend};
 use mqtt5_protocol::error::{MqttError, Result};
 use mqtt5_protocol::packet::auth::AuthPacket;
 use mqtt5_protocol::packet::connack::ConnAckPacket;
@@ -154,6 +154,7 @@ impl WasmClientHandler {
             self.deliver_queued_messages(&connect.client_id, writer)
                 .await?;
             self.resend_inflight_messages(writer).await?;
+            self.advance_packet_id_past_inflight();
         }
         Ok(())
     }
@@ -255,26 +256,6 @@ impl WasmClientHandler {
             session.subscriptions.remove(filter);
         }
 
-        let inflights = self
-            .storage
-            .get_inflight_messages(client_id)
-            .await
-            .unwrap_or_default();
-        for msg in inflights {
-            match msg.direction {
-                InflightDirection::Inbound => {
-                    self.inflight_publishes
-                        .insert(msg.packet_id, msg.to_publish_packet());
-                }
-                InflightDirection::Outbound => {
-                    self.outbound_inflight
-                        .borrow_mut()
-                        .insert(msg.packet_id, msg.to_publish_packet());
-                }
-            }
-        }
-        self.advance_packet_id_past_inflight();
-
         session.will_message.clone_from(&connect.will);
         session.will_delay_interval = connect
             .will
@@ -358,6 +339,7 @@ impl WasmClientHandler {
                         self.deliver_queued_messages(&pending.connect.client_id, writer)
                             .await?;
                         self.resend_inflight_messages(writer).await?;
+                        self.advance_packet_id_past_inflight();
                     }
                 }
 

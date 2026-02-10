@@ -210,8 +210,7 @@ impl FederatedJwtAuthProvider {
             let keys = self.jwks_cache.get_keys_for_issuer(&issuer).await;
             let mut found = false;
             for key in keys {
-                if key.algorithm == header.alg
-                    && Self::verify_with_jwk_key(&key, &header.alg, message_bytes, &signature_bytes)
+                if Self::verify_with_jwk_key(&key, &key.algorithm, message_bytes, &signature_bytes)
                 {
                     found = true;
                     break;

@@ -128,7 +128,7 @@ pub fn is_path_safe_client_id(client_id: &str) -> bool {
         return false;
     }
 
-    if client_id == ".." || client_id.starts_with("../") {
+    if client_id == "." || client_id == ".." || client_id.starts_with("../") {
         return false;
     }
 
@@ -509,6 +509,7 @@ mod tests {
 
     #[test]
     fn test_path_safe_client_ids_rejects_traversal() {
+        assert!(!is_path_safe_client_id("."));
         assert!(!is_path_safe_client_id(".."));
         assert!(!is_path_safe_client_id("../etc"));
         assert!(!is_path_safe_client_id("foo/../../etc"));

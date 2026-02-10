@@ -150,7 +150,8 @@ where
 
             if let Some(ref origins) = allowed_origins {
                 let origin = req.headers().get("Origin").and_then(|v| v.to_str().ok());
-                let allowed = origin.is_some_and(|o| origins.iter().any(|a| a == o));
+                let allowed =
+                    origin.is_some_and(|o| origins.iter().any(|a| a.eq_ignore_ascii_case(o)));
                 if !allowed {
                     debug!("WebSocket origin rejected: {:?}", origin);
                     let reject = http::Response::builder()
