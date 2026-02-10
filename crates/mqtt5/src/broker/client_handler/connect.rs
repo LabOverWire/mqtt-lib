@@ -78,6 +78,19 @@ impl ClientHandler {
             assigned_client_id = Some(generated_id.clone());
         }
 
+        if !crate::is_path_safe_client_id(&connect.client_id) {
+            warn!(
+                client_id = %connect.client_id,
+                addr = %self.client_addr,
+                "Rejecting connection: invalid client identifier"
+            );
+            let connack = ConnAckPacket::new(false, ReasonCode::ClientIdentifierNotValid);
+            self.transport
+                .write_packet(Packet::ConnAck(connack))
+                .await?;
+            return Err(MqttError::InvalidClientId(connect.client_id));
+        }
+
         let auth_method_prop = connect.properties.get_authentication_method();
         let auth_data_prop = connect.properties.get_authentication_data();
 

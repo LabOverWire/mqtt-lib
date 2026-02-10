@@ -38,10 +38,10 @@ pub use types::{
     WillMessage, WillProperties,
 };
 pub use validation::{
-    is_valid_client_id, is_valid_topic_filter, is_valid_topic_name, parse_shared_subscription,
-    strip_shared_subscription_prefix, topic_matches_filter, validate_client_id,
-    validate_topic_filter, validate_topic_name, RestrictiveValidator, StandardValidator,
-    TopicValidator,
+    is_path_safe_client_id, is_valid_client_id, is_valid_topic_filter, is_valid_topic_name,
+    parse_shared_subscription, strip_shared_subscription_prefix, topic_matches_filter,
+    validate_client_id, validate_topic_filter, validate_topic_name, RestrictiveValidator,
+    StandardValidator, TopicValidator,
 };
 
 pub use session::{

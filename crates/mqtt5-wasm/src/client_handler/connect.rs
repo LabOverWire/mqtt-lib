@@ -60,6 +60,12 @@ impl WasmClientHandler {
             assigned_client_id = Some(generated_id);
         }
 
+        if !mqtt5_protocol::is_path_safe_client_id(&connect.client_id) {
+            let connack = ConnAckPacket::new(false, ReasonCode::ClientIdentifierNotValid);
+            self.write_packet(&Packet::ConnAck(connack), writer)?;
+            return Err(MqttError::InvalidClientId(connect.client_id));
+        }
+
         let dummy_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
 
         if self.protocol_version == 5 {

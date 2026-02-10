@@ -109,6 +109,36 @@ pub fn is_valid_client_id(client_id: &str) -> bool {
     client_id.chars().all(|c| c.is_ascii_alphanumeric())
 }
 
+/// Checks whether a client ID is safe for use in filesystem paths.
+///
+/// Rejects path traversal sequences (`..`), path separators (`/`, `\`),
+/// null bytes, and control characters while allowing common client ID
+/// characters like hyphens, underscores, and dots (when not part of `..`).
+#[must_use]
+pub fn is_path_safe_client_id(client_id: &str) -> bool {
+    if client_id.is_empty() {
+        return true;
+    }
+
+    if client_id.len() > crate::constants::limits::MAX_CLIENT_ID_LENGTH {
+        return false;
+    }
+
+    if client_id.contains('/') || client_id.contains('\\') || client_id.contains('\0') {
+        return false;
+    }
+
+    if client_id == ".."
+        || client_id.starts_with("../")
+        || client_id.ends_with("/..")
+        || client_id.contains("/../")
+    {
+        return false;
+    }
+
+    client_id.chars().all(|c| !c.is_ascii_control())
+}
+
 /// Validates a topic name and returns an error if invalid
 ///
 /// # Errors
@@ -469,6 +499,32 @@ mod tests {
 
         let too_long = "a".repeat(crate::constants::limits::MAX_CLIENT_ID_LENGTH + 1);
         assert!(!is_valid_client_id(&too_long));
+    }
+
+    #[test]
+    fn test_path_safe_client_ids_valid() {
+        assert!(is_path_safe_client_id(""));
+        assert!(is_path_safe_client_id("client123"));
+        assert!(is_path_safe_client_id("my-device-001"));
+        assert!(is_path_safe_client_id("sensor_node.5"));
+        assert!(is_path_safe_client_id("client@home"));
+        assert!(is_path_safe_client_id("device 1"));
+    }
+
+    #[test]
+    fn test_path_safe_client_ids_rejects_traversal() {
+        assert!(!is_path_safe_client_id(".."));
+        assert!(!is_path_safe_client_id("../etc"));
+        assert!(!is_path_safe_client_id("foo/../../etc"));
+        assert!(!is_path_safe_client_id("a/../b"));
+        assert!(!is_path_safe_client_id("foo/bar"));
+        assert!(!is_path_safe_client_id("foo\\bar"));
+        assert!(!is_path_safe_client_id("/etc/passwd"));
+        assert!(!is_path_safe_client_id("client\0id"));
+        assert!(!is_path_safe_client_id("client\x01id"));
+
+        let too_long = "a".repeat(crate::constants::limits::MAX_CLIENT_ID_LENGTH + 1);
+        assert!(!is_path_safe_client_id(&too_long));
     }
 
     #[test]
