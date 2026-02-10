@@ -674,16 +674,18 @@ The broker accepts a JSON configuration file with `--config` flag.
   "bind_addresses": ["string"],
   "path": "string",
   "subprotocol": "string",
-  "use_tls": boolean
+  "use_tls": boolean,
+  "allowed_origins": ["string"] | null
 }
 ```
 
-| Field            | Type       | Description                  | Default   |
-| ---------------- | ---------- | ---------------------------- | --------- |
-| `bind_addresses` | `string[]` | WebSocket listener addresses | Required  |
-| `path`           | `string`   | WebSocket endpoint path      | `"/mqtt"` |
-| `subprotocol`    | `string`   | WebSocket subprotocol        | `"mqtt"`  |
-| `use_tls`        | `boolean`  | Use TLS for WebSocket        | `false`   |
+| Field              | Type             | Description                                        | Default   |
+| ------------------ | ---------------- | -------------------------------------------------- | --------- |
+| `bind_addresses`   | `string[]`       | WebSocket listener addresses                       | Required  |
+| `path`             | `string`         | WebSocket endpoint path (non-matching paths return 404) | `"/mqtt"` |
+| `subprotocol`      | `string`         | WebSocket subprotocol                              | `"mqtt"`  |
+| `use_tls`          | `boolean`        | Use TLS for WebSocket                              | `false`   |
+| `allowed_origins`  | `string[]\|null` | Allowed Origin headers for CSWSH prevention (null = all origins allowed) | `null` |
 
 ### StorageConfig
 
@@ -963,6 +965,12 @@ user * topic $DB/u/%u/# permission readwrite
 - More specific rules override general rules
 - User-specific rules take precedence over wildcard rules
 - Deny rules have highest priority
+
+**Security:**
+- `%u` substitution rejects usernames containing `+`, `#`, or `/` to prevent wildcard injection
+- Anonymous clients never match `%u` patterns
+- Sessions are bound to authenticated user identity — reconnecting with a different user is rejected
+- On session restore, subscriptions are re-checked against current ACL rules
 
 Use `mqttv5 acl` command to manage ACL files.
 

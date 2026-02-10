@@ -968,10 +968,40 @@ See [Authentication & Authorization Guide](AUTHENTICATION.md) for configuration 
 
 ## Security
 
+### Transport Security
+
 - TLS 1.2+ with certificate validation
-- QUIC with built-in TLS 1.3
-- Mutual TLS (client certificates)
-- Rate limiting and resource monitoring
+- QUIC with built-in TLS 1.3 (certificate verification enforced by default)
+- Mutual TLS (client certificates) with fingerprint validation
+- WebSocket Origin validation (`allowed_origins`) for CSWSH prevention
+- WebSocket path enforcement (rejects non-configured paths with HTTP 404)
+
+### Authentication Security
+
+- JWT tokens require `exp` and `sub` claims (reject tokens without expiration or subject)
+- JWT algorithm confusion prevention via `kid`-based verifier selection
+- SCRAM-SHA-256 with per-connection state isolation (prevents concurrent auth collisions)
+- SCRAM client passwords zeroized on drop
+- Password fields excluded from log output
+- Authentication rate limiting (5 attempts/60s, 5-minute lockout)
+- Certificate auth validates TLS peer fingerprints (64-char hex) instead of trusting client ID prefix
+
+### Session & Authorization Security
+
+- Sessions bound to authenticated user identity (rejects reconnection from different user)
+- ACL re-checked on session restore (prunes subscriptions that no longer pass authorization)
+- Topic name validation on publish (after topic alias resolution)
+- Bridge config Debug output redacts passwords
+
+### Storage Security
+
+- File storage uses percent-encoding for topic-to-filename mapping (bijective, no collisions)
+- Atomic writes with fsync before rename for crash-safe durability
+- `NoVerification` TLS bypass restricted to `pub(crate)` scope
+
+### Example Security
+
+- All WASM example HTML files use safe DOM manipulation (no innerHTML with user data)
 
 ## License
 

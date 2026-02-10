@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [mqtt5 0.22.4] / [mqtt5-wasm 0.10.6] - 2026-02-10
+
+### Security
+
+- **JWT exp claim enforcement** - Tokens without `exp` (expiration) claim are now rejected instead of being treated as never-expiring. Applies to both `JwtAuthProvider` and `FederatedJwtAuthProvider`
+- **JWT sub claim enforcement** - Tokens without `sub` (subject) claim are now rejected instead of defaulting to empty string identity
+- **JWT algorithm confusion prevention** - Verifier selection now uses `kid` (key ID) header matching instead of trusting the `alg` header from untrusted tokens. Single-verifier configurations ignore the header algorithm entirely
+- **Session-to-user binding** - Sessions now store the authenticated `user_id`. On reconnect with `clean_start=false`, the broker rejects the connection if the reconnecting user doesn't match the session owner
+- **ACL re-check on session restore** - When restoring subscriptions from a previous session, each topic filter is re-authorized against current ACL rules. Subscriptions that no longer pass authorization are pruned
+- **Certificate auth fingerprint validation** - `CertificateAuthProvider` now validates TLS peer certificate fingerprints against registered fingerprints instead of trusting `cert:` prefix in client IDs. Fingerprints must be exactly 64 hex characters
+- **SCRAM state key collision fix** - SCRAM authentication state is now keyed by `client_id:socket_addr` instead of `client_id` alone, preventing concurrent connections from clobbering each other's auth state
+- **QUIC bridge TLS verification** - QUIC bridges now default to certificate verification enabled (`secure: true`), matching QUIC's mandatory TLS requirement
+- **WebSocket path enforcement** - Requests to non-configured WebSocket paths now return HTTP 404 instead of silently accepting the connection
+- **WebSocket Origin validation** - New `allowed_origins` configuration on `WebSocketServerConfig` for Cross-Site WebSocket Hijacking (CSWSH) prevention. When set, connections without a matching `Origin` header are rejected with HTTP 403
+- **Bridge config password redaction** - `BridgeConfig` Debug output now prints `[REDACTED]` instead of the plaintext password
+- **Password field redaction in logs** - Auth provider tracing instrumentation now skips password fields to prevent credential leakage in logs
+- **NoVerification struct restricted** - `NoVerification` (TLS certificate bypass) changed from `pub` to `pub(crate)` to prevent accidental misuse by downstream crates
+- **Topic name validation on publish** - Broker now validates topic names on incoming PUBLISH packets after topic alias resolution, rejecting invalid topics before routing
+- **Topic filename bijective encoding** - File storage backend replaced `_slash_` topic-to-filename encoding with percent-encoding (`/` → `%2F`, `%` → `%25`), preventing collisions between topics like `a/b` and `a_slash_b`
+- **fsync for file storage durability** - Atomic file writes now call `sync_data()` before rename, ensuring data reaches disk before the old file is replaced
+- **SCRAM password zeroization** - Client-side SCRAM password storage now uses `Zeroizing<String>` which automatically zeros memory on drop
+- **Regex compilation caching** - JWT claim pattern regexes are now compiled once at deserialization time instead of on every authentication attempt. Invalid regex patterns fail at config load
+- **innerHTML XSS prevention** - All 19 WASM example HTML files replaced `innerHTML +=` with safe DOM manipulation (`createElement` + `textContent` + `appendChild`)
+- **WASM enhanced auth user_id propagation** - Fixed missing `user_id` capture in WASM broker's enhanced auth success path
+
 ## [mqtt5 0.22.3] / [mqtt5-wasm 0.10.5] - 2026-02-10
 
 ### Added
