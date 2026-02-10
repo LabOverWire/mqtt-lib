@@ -20,6 +20,7 @@ use mqtt5_protocol::packet::publish::PublishPacket;
 use mqtt5_protocol::packet::MqttPacket;
 use mqtt5_protocol::packet::Packet;
 use mqtt5_protocol::KeepaliveConfig;
+use mqtt5_protocol::QoS;
 use mqtt5_protocol::Transport;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -57,6 +58,8 @@ pub struct WasmClientHandler {
     publish_rx: flume::Receiver<PublishPacket>,
     publish_tx: flume::Sender<PublishPacket>,
     pub(super) inflight_publishes: HashMap<u16, PublishPacket>,
+    pub(super) outbound_inflight: Rc<RefCell<HashMap<u16, PublishPacket>>>,
+    pub(super) next_packet_id: Rc<Cell<u16>>,
     pub(super) normal_disconnect: bool,
     pub(super) keep_alive: mqtt5::time::Duration,
     pub(super) auth_method: Option<String>,
@@ -173,6 +176,8 @@ impl WasmClientHandler {
             publish_rx,
             publish_tx,
             inflight_publishes: HashMap::new(),
+            outbound_inflight: Rc::new(RefCell::new(HashMap::new())),
+            next_packet_id: Rc::new(Cell::new(1)),
             normal_disconnect: false,
             keep_alive: mqtt5::time::Duration::from_secs(60),
             auth_method: None,
@@ -296,23 +301,50 @@ impl WasmClientHandler {
         let publish_rx = std::mem::replace(&mut self.publish_rx, flume::bounded(1).1);
         let writer_shared = Rc::new(RefCell::new(writer));
         let writer_for_forward = Rc::clone(&writer_shared);
+        let outbound_inflight_fwd = Rc::clone(&self.outbound_inflight);
+        let next_pid_fwd = Rc::clone(&self.next_packet_id);
+        let storage_fwd = Arc::clone(&self.storage);
+        let client_id_fwd = self.client_id.clone().unwrap_or_default();
 
         spawn_local(async move {
+            use mqtt5::broker::storage::{
+                InflightDirection, InflightMessage, InflightPhase, StorageBackend,
+            };
+
             loop {
                 if !*running_forward.borrow() {
                     break;
                 }
 
                 match publish_rx.recv_async().await {
-                    Ok(publish) => {
+                    Ok(mut publish) => {
+                        if publish.qos != QoS::AtMostOnce {
+                            let pid = next_pid_fwd.get();
+                            next_pid_fwd.set(if pid == u16::MAX { 1 } else { pid + 1 });
+                            publish.packet_id = Some(pid);
+
+                            if publish.qos == QoS::ExactlyOnce {
+                                outbound_inflight_fwd
+                                    .borrow_mut()
+                                    .insert(pid, publish.clone());
+                                let inflight = InflightMessage::from_publish(
+                                    &publish,
+                                    client_id_fwd.clone(),
+                                    InflightDirection::Outbound,
+                                    InflightPhase::AwaitingPubrec,
+                                );
+                                let _ = storage_fwd.store_inflight_message(inflight).await;
+                            }
+                        }
+
                         if let Ok(mut writer_guard) = writer_for_forward.try_borrow_mut() {
                             let result = Self::write_publish_packet(&publish, &mut writer_guard);
                             if let Err(e) = result {
-                                error!("Handler #{} error forwarding publish: {}", handler_id, e);
+                                error!("Handler #{handler_id} error forwarding publish: {e}");
                                 break;
                             }
                         } else {
-                            error!("Handler #{} writer busy, cannot forward", handler_id);
+                            error!("Handler #{handler_id} writer busy, cannot forward");
                         }
                     }
                     Err(_) => break,
@@ -391,10 +423,10 @@ impl WasmClientHandler {
                 self.handle_puback(puback);
                 Ok(())
             }
-            Packet::PubRec(pubrec) => self.handle_pubrec(&pubrec, writer),
+            Packet::PubRec(pubrec) => self.handle_pubrec(&pubrec, writer).await,
             Packet::PubRel(pubrel) => self.handle_pubrel(pubrel, writer).await,
             Packet::PubComp(ref pubcomp) => {
-                self.handle_pubcomp(pubcomp);
+                self.handle_pubcomp(pubcomp).await;
                 Ok(())
             }
             Packet::PingReq => self.handle_pingreq(writer),

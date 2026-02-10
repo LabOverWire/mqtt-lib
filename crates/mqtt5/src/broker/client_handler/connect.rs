@@ -258,6 +258,7 @@ impl ClientHandler {
 
         if session_present {
             self.deliver_queued_messages(&connect.client_id).await?;
+            self.resend_inflight_messages().await?;
         }
 
         Ok(())
@@ -306,6 +307,9 @@ impl ClientHandler {
             session.will_delay_interval
         );
         storage.store_session(session.clone()).await?;
+        storage
+            .remove_all_inflight_messages(&connect.client_id)
+            .await?;
         self.session = Some(session);
         Ok(())
     }

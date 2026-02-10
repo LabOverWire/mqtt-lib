@@ -25,7 +25,7 @@ use crate::transport::packet_io::read_packet_reusing_buffer;
 use crate::transport::PacketIo;
 use bytes::{Bytes, BytesMut};
 use mqtt5_protocol::KeepaliveConfig;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -73,7 +73,7 @@ pub struct ClientHandler {
     pub(super) topic_aliases: HashMap<u16, String>,
     pub(super) external_packet_rx: Option<mpsc::Receiver<Packet>>,
     pub(super) client_receive_maximum: u16,
-    pub(super) outbound_inflight: HashSet<u16>,
+    pub(super) outbound_inflight: HashMap<u16, PublishPacket>,
     pub(super) protocol_version: u8,
     pub(super) write_buffer: BytesMut,
     pub(super) read_buffer: BytesMut,
@@ -150,7 +150,7 @@ impl ClientHandler {
             topic_aliases: HashMap::new(),
             external_packet_rx,
             client_receive_maximum: 65535,
-            outbound_inflight: HashSet::new(),
+            outbound_inflight: HashMap::new(),
             protocol_version: 5,
             write_buffer: BytesMut::with_capacity(4096),
             read_buffer: BytesMut::with_capacity(4096),
@@ -334,8 +334,11 @@ impl ClientHandler {
                     if let Err(e) = storage.remove_queued_messages(&client_id).await {
                         warn!("Failed to remove queued messages for {client_id}: {e}");
                     }
+                    if let Err(e) = storage.remove_all_inflight_messages(&client_id).await {
+                        warn!("Failed to remove inflight messages for {client_id}: {e}");
+                    }
                     debug!(
-                        "Removed session and queued messages for client {}",
+                        "Removed session, queued, and inflight messages for client {}",
                         client_id
                     );
                 }

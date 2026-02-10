@@ -604,3 +604,172 @@ async fn test_inflight_message_persistence() {
     pub_client2.disconnect().await.unwrap();
     sub_client.disconnect().await.unwrap();
 }
+
+#[tokio::test]
+async fn test_qos2_outbound_inflight_resend_on_reconnect() {
+    let broker = TestBroker::start().await;
+
+    let pub_client = MqttClient::new("qos2-inflight-pub");
+    let sub_client_id = "qos2-inflight-sub";
+
+    let sub_client =
+        MqttClient::with_options(ConnectOptions::new(sub_client_id).with_clean_start(false));
+    sub_client.connect(broker.address()).await.unwrap();
+
+    sub_client
+        .subscribe_with_options(
+            "test/qos2/inflight",
+            mqtt5::SubscribeOptions {
+                qos: QoS::ExactlyOnce,
+                ..Default::default()
+            },
+            |_| {},
+        )
+        .await
+        .unwrap();
+
+    sub_client.disconnect().await.unwrap();
+
+    pub_client.connect(broker.address()).await.unwrap();
+    for i in 0..3 {
+        pub_client
+            .publish_qos2("test/qos2/inflight", format!("inflight msg {i}"))
+            .await
+            .unwrap();
+    }
+    pub_client.disconnect().await.unwrap();
+
+    let messages = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let messages_clone = messages.clone();
+
+    let sub_client2 =
+        MqttClient::with_options(ConnectOptions::new(sub_client_id).with_clean_start(false));
+
+    let session = sub_client2
+        .connect_with_options(
+            broker.address(),
+            ConnectOptions::new(sub_client_id).with_clean_start(false),
+        )
+        .await
+        .unwrap();
+
+    sub_client2
+        .subscribe_with_options(
+            "test/qos2/inflight",
+            mqtt5::SubscribeOptions {
+                qos: QoS::ExactlyOnce,
+                ..Default::default()
+            },
+            move |msg| {
+                messages_clone
+                    .lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&msg.payload).to_string());
+            },
+        )
+        .await
+        .unwrap();
+
+    sleep(Duration::from_secs(2)).await;
+
+    {
+        let msgs = messages.lock().unwrap();
+        if session.session_present {
+            assert!(
+                !msgs.is_empty(),
+                "should receive QoS2 messages after reconnect with session_present"
+            );
+            let mut unique = msgs.clone();
+            unique.sort();
+            unique.dedup();
+            assert_eq!(
+                msgs.len(),
+                unique.len(),
+                "QoS2 should not produce duplicates"
+            );
+        }
+    }
+
+    match sub_client2.disconnect().await {
+        Ok(()) | Err(mqtt5::MqttError::NotConnected) => {}
+        Err(e) => panic!("unexpected disconnect error: {e}"),
+    }
+}
+
+#[tokio::test]
+async fn test_clean_start_clears_inflight_state() {
+    let broker = TestBroker::start().await;
+
+    let pub_client = MqttClient::new("clean-inflight-pub");
+    let sub_client_id = "clean-inflight-sub";
+
+    let sub_client =
+        MqttClient::with_options(ConnectOptions::new(sub_client_id).with_clean_start(false));
+    sub_client.connect(broker.address()).await.unwrap();
+
+    sub_client
+        .subscribe_with_options(
+            "test/clean/inflight",
+            mqtt5::SubscribeOptions {
+                qos: QoS::ExactlyOnce,
+                ..Default::default()
+            },
+            |_| {},
+        )
+        .await
+        .unwrap();
+
+    sub_client.disconnect().await.unwrap();
+
+    pub_client.connect(broker.address()).await.unwrap();
+    for i in 0..3 {
+        pub_client
+            .publish_qos2("test/clean/inflight", format!("clean msg {i}"))
+            .await
+            .unwrap();
+    }
+    pub_client.disconnect().await.unwrap();
+
+    let received = Arc::new(AtomicU32::new(0));
+    let received_clone = received.clone();
+
+    let sub_client2 =
+        MqttClient::with_options(ConnectOptions::new(sub_client_id).with_clean_start(true));
+
+    let session = sub_client2
+        .connect_with_options(
+            broker.address(),
+            ConnectOptions::new(sub_client_id).with_clean_start(true),
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        !session.session_present,
+        "clean_start=true should not have session_present"
+    );
+
+    sub_client2
+        .subscribe_with_options(
+            "test/clean/inflight",
+            mqtt5::SubscribeOptions {
+                qos: QoS::ExactlyOnce,
+                ..Default::default()
+            },
+            move |_| {
+                received_clone.fetch_add(1, Ordering::Relaxed);
+            },
+        )
+        .await
+        .unwrap();
+
+    sleep(Duration::from_millis(500)).await;
+
+    assert_eq!(
+        received.load(Ordering::Relaxed),
+        0,
+        "clean_start=true should not deliver old queued or inflight messages"
+    );
+
+    sub_client2.disconnect().await.unwrap();
+}

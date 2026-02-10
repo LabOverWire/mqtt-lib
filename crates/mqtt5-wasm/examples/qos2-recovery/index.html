@@ -1,0 +1,549 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MQTT QoS 2 Mid-Flight Recovery Demo</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            max-width: 1400px;
+            margin: 40px auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .header {
+            background: white;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+        h1 { color: #333; margin-top: 0; }
+        .highlight {
+            background: #e7f3ff;
+            padding: 15px;
+            border-radius: 4px;
+            border-left: 4px solid #007bff;
+            margin: 15px 0;
+        }
+        .timeline {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            margin: 20px 0;
+            position: relative;
+        }
+        .timeline::before {
+            content: '';
+            position: absolute;
+            top: 50%;
+            left: 8%;
+            right: 8%;
+            height: 4px;
+            background: #e9ecef;
+            z-index: 0;
+        }
+        .timeline-step {
+            background: white;
+            padding: 12px 16px;
+            border-radius: 8px;
+            text-align: center;
+            z-index: 1;
+            border: 2px solid #ddd;
+            min-width: 120px;
+        }
+        .timeline-step.active { border-color: #007bff; background: #e7f3ff; }
+        .timeline-step.completed { border-color: #28a745; background: #e8f5e9; }
+        .timeline-step .icon { font-size: 1.4em; margin-bottom: 4px; }
+        .timeline-step .label { font-size: 0.8em; color: #666; }
+        .panels {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            margin-top: 20px;
+        }
+        .panel {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .panel h2 {
+            margin-top: 0;
+            font-size: 1.2em;
+            padding-bottom: 10px;
+        }
+        .panel.subscriber h2 { border-bottom: 3px solid #007bff; }
+        .panel.publisher h2 { border-bottom: 3px solid #fd7e14; }
+        .status {
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 4px;
+            font-weight: 500;
+            font-size: 0.9em;
+        }
+        .status.connected { background: #d4edda; color: #155724; }
+        .status.disconnected { background: #f8d7da; color: #721c24; }
+        .status.offline { background: #fff3cd; color: #856404; }
+        button {
+            background: #007bff;
+            color: white;
+            border: none;
+            cursor: pointer;
+            padding: 10px 20px;
+            border-radius: 4px;
+            font-size: 14px;
+            margin: 5px 5px 5px 0;
+        }
+        button:hover { background: #0056b3; }
+        button:disabled { background: #6c757d; cursor: not-allowed; }
+        button.danger { background: #dc3545; }
+        button.danger:hover { background: #c82333; }
+        button.success { background: #28a745; }
+        button.success:hover { background: #218838; }
+        button.warning { background: #fd7e14; }
+        button.warning:hover { background: #e96b00; }
+        .session-info {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 6px;
+            margin: 15px 0;
+            font-size: 0.9em;
+        }
+        .session-info .row {
+            display: flex;
+            justify-content: space-between;
+            padding: 5px 0;
+            border-bottom: 1px solid #eee;
+        }
+        .session-info .row:last-child { border-bottom: none; }
+        .flow-indicator {
+            background: #f8f9fa;
+            padding: 12px;
+            border-radius: 6px;
+            margin: 10px 0;
+            font-size: 0.85em;
+            font-family: monospace;
+        }
+        .flow-indicator .step {
+            padding: 3px 0;
+            color: #666;
+        }
+        .flow-indicator .step.active { color: #007bff; font-weight: bold; }
+        .flow-indicator .step.done { color: #28a745; }
+        .flow-indicator .step.stuck { color: #dc3545; font-weight: bold; }
+        .message-card {
+            padding: 10px;
+            margin: 6px 0;
+            border-radius: 6px;
+            font-size: 0.85em;
+            animation: slideIn 0.3s ease;
+        }
+        @keyframes slideIn {
+            from { opacity: 0; transform: translateX(-10px); }
+            to { opacity: 1; transform: translateX(0); }
+        }
+        .message-card.normal {
+            background: #e8f5e9;
+            border-left: 4px solid #28a745;
+        }
+        .message-card.recovered {
+            background: #fff3cd;
+            border-left: 4px solid #fd7e14;
+        }
+        .message-card.interrupted {
+            background: #f8d7da;
+            border-left: 4px solid #dc3545;
+        }
+        .badge {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 3px;
+            font-size: 0.75em;
+            font-weight: bold;
+            margin-left: 5px;
+            vertical-align: middle;
+        }
+        .badge.recovered { background: #fd7e14; color: white; }
+        .badge.dup { background: #6f42c1; color: white; }
+        .badge.normal { background: #28a745; color: white; }
+        .messages-list {
+            max-height: 250px;
+            overflow-y: auto;
+        }
+        #debug {
+            margin-top: 15px;
+            padding: 10px;
+            background: #1e1e1e;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 0.8em;
+            max-height: 200px;
+            overflow-y: auto;
+            color: #d4d4d4;
+        }
+        #debug .log-line { padding: 1px 0; }
+        #debug .log-line.info { color: #4fc1ff; }
+        #debug .log-line.warn { color: #cca700; }
+        #debug .log-line.error { color: #f14c4c; }
+        #debug .log-line.success { color: #89d185; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>MQTT QoS 2 Mid-Flight Recovery Demo</h1>
+        <p>Demonstrates <strong>QoS 2 exactly-once delivery</strong> surviving a connection interruption mid-handshake. The broker persists in-flight state and resumes the QoS 2 flow on reconnect.</p>
+        <div class="highlight">
+            <strong>QoS 2 Flow:</strong> PUBLISH &rarr; PUBREC &rarr; PUBREL &rarr; PUBCOMP.
+            When the subscriber disconnects after receiving PUBLISH but before PUBREC completes,
+            the broker retains the in-flight message and resends it (with DUP=1) on reconnect.
+        </div>
+    </div>
+
+    <div class="timeline">
+        <div class="timeline-step" id="step-setup">
+            <div class="icon">1</div>
+            <div><strong>Setup</strong></div>
+            <div class="label">Connect & subscribe</div>
+        </div>
+        <div class="timeline-step" id="step-normal">
+            <div class="icon">2</div>
+            <div><strong>Normal QoS2</strong></div>
+            <div class="label">Baseline delivery</div>
+        </div>
+        <div class="timeline-step" id="step-interrupt">
+            <div class="icon">3</div>
+            <div><strong>Interrupt</strong></div>
+            <div class="label">Disconnect mid-flow</div>
+        </div>
+        <div class="timeline-step" id="step-offline">
+            <div class="icon">4</div>
+            <div><strong>Offline</strong></div>
+            <div class="label">Session preserved</div>
+        </div>
+        <div class="timeline-step" id="step-recover">
+            <div class="icon">5</div>
+            <div><strong>Recover</strong></div>
+            <div class="label">Message resent</div>
+        </div>
+    </div>
+
+    <div class="panels">
+        <div class="panel subscriber">
+            <h2>Subscriber (mobile-device-001)</h2>
+            <div id="sub-status" class="status disconnected">Disconnected</div>
+
+            <div class="session-info">
+                <div class="row">
+                    <span>Client ID:</span>
+                    <strong>mobile-device-001</strong>
+                </div>
+                <div class="row">
+                    <span>Clean Start:</span>
+                    <strong>false</strong>
+                </div>
+                <div class="row">
+                    <span>Session Expiry:</span>
+                    <strong>3600s</strong>
+                </div>
+                <div class="row">
+                    <span>Session Present:</span>
+                    <strong id="session-present">-</strong>
+                </div>
+            </div>
+
+            <div style="margin: 15px 0;">
+                <button id="btn-run" class="success">Run Full Demo</button>
+                <button id="btn-reset" class="danger" disabled>Reset</button>
+            </div>
+
+            <h4>Received Messages:</h4>
+            <div id="received-messages" class="messages-list">
+                <em style="color: #666;">Waiting for demo to start...</em>
+            </div>
+        </div>
+
+        <div class="panel publisher">
+            <h2>Publisher & QoS 2 Flow</h2>
+            <div id="pub-status" class="status disconnected">Disconnected</div>
+
+            <div id="qos2-flow" class="flow-indicator" style="display: none;">
+                <div class="step" id="flow-publish">PUBLISH &rarr; subscriber</div>
+                <div class="step" id="flow-pubrec">PUBREC &larr; subscriber</div>
+                <div class="step" id="flow-pubrel">PUBREL &rarr; subscriber</div>
+                <div class="step" id="flow-pubcomp">PUBCOMP &larr; subscriber</div>
+            </div>
+
+            <h4>Published Messages:</h4>
+            <div id="published-messages" class="messages-list">
+                <em style="color: #666;">No messages published</em>
+            </div>
+
+            <div style="margin-top: 15px; padding: 15px; background: #f8f9fa; border-radius: 6px;">
+                <strong style="font-size: 0.9em;">What happens:</strong>
+                <ol style="margin: 8px 0 0 0; padding-left: 20px; font-size: 0.85em; color: #555;">
+                    <li>Normal QoS 2 completes the full handshake</li>
+                    <li>Interrupted QoS 2: subscriber disconnects after receiving PUBLISH</li>
+                    <li>Broker keeps the message in-flight (AwaitingPubrec)</li>
+                    <li>On reconnect, broker resends PUBLISH with DUP=1</li>
+                </ol>
+            </div>
+        </div>
+    </div>
+
+    <div id="debug">
+        <div id="debug-messages"></div>
+    </div>
+
+    <script type="module">
+        import init, { WasmBroker, WasmBrokerConfig, WasmMqttClient, WasmConnectOptions, WasmSubscribeOptions } from './pkg/mqtt5_wasm.js';
+
+        let broker;
+        let publisherClient;
+        let subscriberClient;
+        let subscriberPort;
+        let messageCounter = 0;
+        let interruptOnNext = false;
+        let expectingRecovery = false;
+
+        function log(msg, level = 'info') {
+            const div = document.getElementById('debug-messages');
+            const line = document.createElement('div');
+            line.className = `log-line ${level}`;
+            line.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+            div.appendChild(line);
+            div.scrollTop = div.scrollHeight;
+            console.log(msg);
+        }
+
+        function setStep(num) {
+            document.querySelectorAll('.timeline-step').forEach((el, i) => {
+                el.classList.remove('active', 'completed');
+                if (i < num - 1) el.classList.add('completed');
+                if (i === num - 1) el.classList.add('active');
+            });
+        }
+
+        function setFlowStep(stepId, state) {
+            const el = document.getElementById(stepId);
+            el.classList.remove('active', 'done', 'stuck');
+            if (state) el.classList.add(state);
+        }
+
+        function resetFlow() {
+            ['flow-publish', 'flow-pubrec', 'flow-pubrel', 'flow-pubcomp'].forEach(id => {
+                setFlowStep(id, null);
+            });
+        }
+
+        function addReceivedMessage(topic, payload, type) {
+            const list = document.getElementById('received-messages');
+            if (list.querySelector('em')) list.innerHTML = '';
+            const card = document.createElement('div');
+            card.className = `message-card ${type}`;
+            let badge = '';
+            if (type === 'recovered') badge = '<span class="badge recovered">RECOVERED</span><span class="badge dup">DUP=1</span>';
+            else if (type === 'normal') badge = '<span class="badge normal">QoS 2</span>';
+            card.innerHTML = `<strong>${topic}</strong>${badge}<div style="margin-top:4px;">${payload}</div>`;
+            list.prepend(card);
+        }
+
+        function addPublishedMessage(topic, payload, note) {
+            const list = document.getElementById('published-messages');
+            if (list.querySelector('em')) list.innerHTML = '';
+            const card = document.createElement('div');
+            card.className = `message-card ${note === 'interrupted' ? 'interrupted' : 'normal'}`;
+            card.innerHTML = `<strong>${topic}</strong>${note ? ` <span style="font-size:0.8em;color:#666;">(${note})</span>` : ''}<div style="margin-top:4px;">${payload}</div>`;
+            list.prepend(card);
+        }
+
+        function sleep(ms) {
+            return new Promise(r => setTimeout(r, ms));
+        }
+
+        async function connectSubscriber(onMessage) {
+            subscriberClient = new WasmMqttClient('mobile-device-001');
+            const statusEl = document.getElementById('sub-status');
+
+            return new Promise((resolve) => {
+                subscriberClient.on_connect((reasonCode, sessionPresent) => {
+                    log(`Subscriber connected, sessionPresent=${sessionPresent}`, 'success');
+                    statusEl.className = 'status connected';
+                    statusEl.textContent = `Connected (session ${sessionPresent ? 'restored' : 'new'})`;
+                    document.getElementById('session-present').textContent = sessionPresent ? 'Yes (restored)' : 'No (new)';
+                    resolve(sessionPresent);
+                });
+
+                subscriberClient.on_disconnect(() => {
+                    log('Subscriber disconnected', 'warn');
+                });
+
+                subscriberPort = broker.create_client_port();
+
+                const opts = new WasmConnectOptions();
+                opts.cleanStart = false;
+                opts.sessionExpiryInterval = 3600;
+
+                subscriberClient.connect_message_port_with_options(subscriberPort, opts).then(() => {
+                    const subOpts = new WasmSubscribeOptions();
+                    subOpts.qos = 2;
+                    subscriberClient.subscribe_with_options('demo/qos2', onMessage, subOpts);
+                    log('Subscriber subscribed to demo/qos2 at QoS 2');
+                });
+            });
+        }
+
+        async function runDemo() {
+            document.getElementById('btn-run').disabled = true;
+
+            log('--- Demo starting ---', 'info');
+            await init();
+            log('WASM initialized');
+
+            const config = new WasmBrokerConfig();
+            config.max_clients = 10;
+            config.session_expiry_interval_secs = 3600;
+            config.allow_anonymous = true;
+            broker = WasmBroker.with_config(config);
+            log('Broker created with session persistence');
+
+            publisherClient = new WasmMqttClient('publisher');
+            publisherClient.on_connect(() => {
+                document.getElementById('pub-status').className = 'status connected';
+                document.getElementById('pub-status').textContent = 'Connected';
+            });
+            const pubPort = broker.create_client_port();
+            await publisherClient.connect_message_port(pubPort);
+            log('Publisher connected', 'success');
+
+            setStep(1);
+            log('Step 1: Connecting subscriber with cleanStart=false');
+
+            await connectSubscriber((topic, payload) => {
+                const text = new TextDecoder().decode(payload);
+
+                if (interruptOnNext) {
+                    interruptOnNext = false;
+                    log(`Subscriber received PUBLISH mid-flight: "${text}" - interrupting now!`, 'warn');
+                    addReceivedMessage(topic, text + ' [connection lost before PUBREC]', 'interrupted');
+
+                    setFlowStep('flow-publish', 'done');
+                    setFlowStep('flow-pubrec', 'stuck');
+
+                    subscriberPort.close();
+                    subscriberPort = null;
+
+                    const statusEl = document.getElementById('sub-status');
+                    statusEl.className = 'status offline';
+                    statusEl.textContent = 'Offline (session preserved)';
+
+                    setStep(4);
+                    log('Subscriber went offline - in-flight message stuck at AwaitingPubrec', 'warn');
+
+                    setTimeout(() => reconnectAndRecover(), 2500);
+                    return;
+                }
+
+                if (expectingRecovery) {
+                    log(`Subscriber received RECOVERED message: "${text}"`, 'success');
+                    addReceivedMessage(topic, text, 'recovered');
+
+                    setFlowStep('flow-publish', 'done');
+                    setFlowStep('flow-pubrec', 'done');
+                    setFlowStep('flow-pubrel', 'done');
+                    setFlowStep('flow-pubcomp', 'done');
+
+                    setStep(5);
+                    log('--- QoS 2 message recovered after reconnect! ---', 'success');
+
+                    document.getElementById('btn-reset').disabled = false;
+                    return;
+                }
+
+                log(`Subscriber received QoS 2 message: "${text}"`, 'success');
+                addReceivedMessage(topic, text, 'normal');
+
+                resetFlow();
+                setFlowStep('flow-publish', 'done');
+                setFlowStep('flow-pubrec', 'done');
+                setFlowStep('flow-pubrel', 'done');
+                setFlowStep('flow-pubcomp', 'done');
+            });
+
+            await sleep(500);
+
+            setStep(2);
+            document.getElementById('qos2-flow').style.display = 'block';
+            log('Step 2: Publishing normal QoS 2 message (baseline)');
+
+            resetFlow();
+            setFlowStep('flow-publish', 'active');
+
+            messageCounter++;
+            const normalPayload = `Normal delivery #${messageCounter}`;
+            const enc = new TextEncoder();
+            await publisherClient.publish_qos2('demo/qos2', enc.encode(normalPayload));
+            addPublishedMessage('demo/qos2', normalPayload, 'normal');
+            log(`Published QoS 2: "${normalPayload}"`);
+
+            await sleep(1500);
+
+            setStep(3);
+            log('Step 3: Publishing QoS 2 message that will be interrupted');
+
+            resetFlow();
+            setFlowStep('flow-publish', 'active');
+            interruptOnNext = true;
+
+            messageCounter++;
+            const interruptPayload = `Critical update #${messageCounter}`;
+            await publisherClient.publish_qos2('demo/qos2', enc.encode(interruptPayload));
+            addPublishedMessage('demo/qos2', interruptPayload, 'interrupted');
+            log(`Published QoS 2: "${interruptPayload}" (will interrupt on receipt)`);
+        }
+
+        async function reconnectAndRecover() {
+            log('Step 5: Reconnecting subscriber with cleanStart=false to recover');
+            expectingRecovery = true;
+
+            resetFlow();
+            setFlowStep('flow-publish', 'active');
+
+            const sessionPresent = await connectSubscriber((topic, payload) => {
+                const text = new TextDecoder().decode(payload);
+
+                if (expectingRecovery) {
+                    expectingRecovery = false;
+                    log(`RECOVERED: "${text}" delivered via QoS 2 resend (DUP=1)`, 'success');
+                    addReceivedMessage(topic, text, 'recovered');
+
+                    setFlowStep('flow-publish', 'done');
+                    setFlowStep('flow-pubrec', 'done');
+                    setFlowStep('flow-pubrel', 'done');
+                    setFlowStep('flow-pubcomp', 'done');
+
+                    setStep(5);
+                    log('--- Demo complete! QoS 2 exactly-once delivery survived reconnection ---', 'success');
+                    document.getElementById('btn-reset').disabled = false;
+                    return;
+                }
+
+                addReceivedMessage(topic, text, 'normal');
+            });
+
+            if (sessionPresent) {
+                log('Session restored from broker - subscriptions intact');
+            }
+        }
+
+        document.getElementById('btn-run').addEventListener('click', runDemo);
+        document.getElementById('btn-reset').addEventListener('click', () => {
+            window.location.reload();
+        });
+    </script>
+</body>
+</html>
