@@ -82,6 +82,7 @@ impl ClientHandler {
         match result.status {
             EnhancedAuthStatus::Success => {
                 self.auth_state = AuthState::Completed;
+                self.user_id = result.user_id;
 
                 if let Some(pending) = self.pending_connect.take() {
                     let session_present = self.handle_session(&pending.connect).await?;
@@ -167,6 +168,7 @@ impl ClientHandler {
 
         match result.status {
             EnhancedAuthStatus::Success => {
+                self.user_id = result.user_id;
                 let success_auth = AuthPacket::success(result.auth_method)?;
                 self.transport
                     .write_packet(Packet::Auth(success_auth))

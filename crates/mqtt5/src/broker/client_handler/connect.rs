@@ -95,6 +95,7 @@ impl ClientHandler {
                 match result.status {
                     EnhancedAuthStatus::Success => {
                         self.auth_state = AuthState::Completed;
+                        self.user_id = result.user_id;
                     }
                     EnhancedAuthStatus::Continue => {
                         self.auth_state = AuthState::InProgress;
