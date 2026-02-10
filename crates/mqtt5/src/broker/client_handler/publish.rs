@@ -153,7 +153,9 @@ impl ClientHandler {
                         InflightDirection::Inbound,
                         InflightPhase::AwaitingPubrel,
                     );
-                    let _ = storage.store_inflight_message(inflight).await;
+                    if let Err(e) = storage.store_inflight_message(inflight).await {
+                        debug!("failed to persist inbound inflight {packet_id}: {e}");
+                    }
                 }
                 let mut pubrec = PubRecPacket::new(packet_id);
                 pubrec.reason_code = ReasonCode::Success;
@@ -373,13 +375,19 @@ impl ClientHandler {
     pub(super) async fn handle_puback(&mut self, puback: &PubAckPacket) {
         if self.outbound_inflight.remove(&puback.packet_id).is_some() {
             if let Some(ref storage) = self.storage {
-                let _ = storage
+                if let Err(e) = storage
                     .remove_inflight_message(
                         self.client_id.as_ref().unwrap(),
                         puback.packet_id,
                         InflightDirection::Outbound,
                     )
-                    .await;
+                    .await
+                {
+                    debug!(
+                        "failed to remove outbound inflight {}: {e}",
+                        puback.packet_id
+                    );
+                }
             }
             tracing::trace!(
                 packet_id = puback.packet_id,
@@ -409,7 +417,12 @@ impl ClientHandler {
                     InflightDirection::Outbound,
                     InflightPhase::AwaitingPubcomp,
                 );
-                let _ = storage.store_inflight_message(inflight).await;
+                if let Err(e) = storage.store_inflight_message(inflight).await {
+                    debug!(
+                        "failed to update inflight phase for {}: {e}",
+                        pubrec.packet_id
+                    );
+                }
             }
         }
         let mut pub_rel = PubRelPacket::new(pubrec.packet_id);
@@ -422,13 +435,19 @@ impl ClientHandler {
             let client_id = self.client_id.as_ref().unwrap();
 
             if let Some(ref storage) = self.storage {
-                let _ = storage
+                if let Err(e) = storage
                     .remove_inflight_message(
                         client_id,
                         pubrel.packet_id,
                         InflightDirection::Inbound,
                     )
-                    .await;
+                    .await
+                {
+                    debug!(
+                        "failed to remove inbound inflight {}: {e}",
+                        pubrel.packet_id
+                    );
+                }
             }
 
             #[cfg(feature = "opentelemetry")]
@@ -445,13 +464,19 @@ impl ClientHandler {
     pub(super) async fn handle_pubcomp(&mut self, pubcomp: &PubCompPacket) {
         if self.outbound_inflight.remove(&pubcomp.packet_id).is_some() {
             if let Some(ref storage) = self.storage {
-                let _ = storage
+                if let Err(e) = storage
                     .remove_inflight_message(
                         self.client_id.as_ref().unwrap(),
                         pubcomp.packet_id,
                         InflightDirection::Outbound,
                     )
-                    .await;
+                    .await
+                {
+                    debug!(
+                        "failed to remove outbound inflight {}: {e}",
+                        pubcomp.packet_id
+                    );
+                }
             }
             tracing::trace!(
                 packet_id = pubcomp.packet_id,
@@ -504,7 +529,9 @@ impl ClientHandler {
                             InflightDirection::Outbound,
                             InflightPhase::AwaitingPubrec,
                         );
-                        let _ = storage.store_inflight_message(inflight).await;
+                        if let Err(e) = storage.store_inflight_message(inflight).await {
+                            debug!("failed to persist outbound inflight {packet_id}: {e}");
+                        }
                     }
                 }
             }
@@ -537,7 +564,11 @@ impl ClientHandler {
                 }
             };
 
+            let mut max_pid: u16 = 0;
             for msg in inflights {
+                if msg.packet_id > max_pid {
+                    max_pid = msg.packet_id;
+                }
                 match msg.direction {
                     InflightDirection::Outbound => match msg.phase {
                         InflightPhase::AwaitingPubrec => {
@@ -566,6 +597,9 @@ impl ClientHandler {
                         self.inflight_publishes.insert(msg.packet_id, publish);
                     }
                 }
+            }
+            if max_pid >= self.next_packet_id {
+                self.next_packet_id = if max_pid == u16::MAX { 1 } else { max_pid + 1 };
             }
         }
         Ok(())

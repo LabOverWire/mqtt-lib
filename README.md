@@ -980,7 +980,7 @@ See [Authentication & Authorization Guide](AUTHENTICATION.md) for configuration 
 
 - JWT tokens require `exp` and `sub` claims (reject tokens without expiration or subject)
 - JWT algorithm confusion prevention via `kid`-based verifier selection
-- SCRAM-SHA-256 with per-connection state isolation (prevents concurrent auth collisions)
+- SCRAM-SHA-256 rejects concurrent authentication for the same client ID
 - SCRAM client passwords zeroized on drop
 - Password fields excluded from log output
 - Authentication rate limiting (5 attempts/60s, 5-minute lockout)

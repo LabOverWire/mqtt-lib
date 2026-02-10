@@ -149,7 +149,9 @@ impl WasmClientHandler {
                     InflightDirection::Inbound,
                     InflightPhase::AwaitingPubrel,
                 );
-                let _ = self.storage.store_inflight_message(inflight).await;
+                if let Err(e) = self.storage.store_inflight_message(inflight).await {
+                    debug!("failed to persist inbound inflight {packet_id}: {e}");
+                }
                 self.inflight_publishes.insert(packet_id, publish);
                 let pubrec = PubRecPacket::new(packet_id);
                 self.write_packet(&Packet::PubRec(pubrec), writer)?;
@@ -188,7 +190,12 @@ impl WasmClientHandler {
                 })
         });
         if let Some(inflight) = inflight {
-            let _ = self.storage.store_inflight_message(inflight).await;
+            if let Err(e) = self.storage.store_inflight_message(inflight).await {
+                debug!(
+                    "failed to update inflight phase for {}: {e}",
+                    pubrec.packet_id
+                );
+            }
         }
         let pubrel = PubRelPacket::new(pubrec.packet_id);
         self.write_packet(&Packet::PubRel(pubrel), writer)?;

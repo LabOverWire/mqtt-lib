@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Session-to-user binding** - Sessions now store the authenticated `user_id`. On reconnect with `clean_start=false`, the broker rejects the connection if the reconnecting user doesn't match the session owner
 - **ACL re-check on session restore** - When restoring subscriptions from a previous session, each topic filter is re-authorized against current ACL rules. Subscriptions that no longer pass authorization are pruned
 - **Certificate auth fingerprint validation** - `CertificateAuthProvider` now validates TLS peer certificate fingerprints against registered fingerprints instead of trusting `cert:` prefix in client IDs. Fingerprints must be exactly 64 hex characters
-- **SCRAM state key collision fix** - SCRAM authentication state is now keyed by `client_id:socket_addr` instead of `client_id` alone, preventing concurrent connections from clobbering each other's auth state
+- **SCRAM state collision fix** - SCRAM authentication now rejects concurrent authentication attempts for the same `client_id`, preventing auth state from being clobbered
 - **QUIC bridge TLS verification** - QUIC bridges now default to certificate verification enabled (`secure: true`), matching QUIC's mandatory TLS requirement
 - **WebSocket path enforcement** - Requests to non-configured WebSocket paths now return HTTP 404 instead of silently accepting the connection
 - **WebSocket Origin validation** - New `allowed_origins` configuration on `WebSocketServerConfig` for Cross-Site WebSocket Hijacking (CSWSH) prevention. When set, connections without a matching `Origin` header are rejected with HTTP 403

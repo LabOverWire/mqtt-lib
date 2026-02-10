@@ -230,7 +230,7 @@ Pluggable providers via `AuthProvider` trait:
 - `ComprehensiveAuthProvider` - Combines multiple methods
 
 Enhanced authentication mechanisms:
-- SCRAM-SHA-256 with channel binding and per-connection state isolation
+- SCRAM-SHA-256 with channel binding (rejects concurrent auth for same client ID)
 - JWT with algorithm confusion prevention and claim enforcement
 - PLAIN over TLS
 

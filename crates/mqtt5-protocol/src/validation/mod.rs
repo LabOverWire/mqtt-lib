@@ -128,11 +128,7 @@ pub fn is_path_safe_client_id(client_id: &str) -> bool {
         return false;
     }
 
-    if client_id == ".."
-        || client_id.starts_with("../")
-        || client_id.ends_with("/..")
-        || client_id.contains("/../")
-    {
+    if client_id == ".." || client_id.starts_with("../") {
         return false;
     }
 

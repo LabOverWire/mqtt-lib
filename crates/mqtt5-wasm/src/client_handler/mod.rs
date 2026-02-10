@@ -333,7 +333,11 @@ impl WasmClientHandler {
                                     InflightDirection::Outbound,
                                     InflightPhase::AwaitingPubrec,
                                 );
-                                let _ = storage_fwd.store_inflight_message(inflight).await;
+                                if let Err(e) = storage_fwd.store_inflight_message(inflight).await {
+                                    tracing::debug!(
+                                        "failed to persist outbound inflight {pid}: {e}"
+                                    );
+                                }
                             }
                         }
 

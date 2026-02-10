@@ -309,7 +309,7 @@ When restoring subscriptions from a previous session, each topic filter is re-au
 
 ### SCRAM
 
-- Authentication state keyed by `client_id:socket_addr` to prevent concurrent connection collisions
+- Authentication state keyed by `client_id`; concurrent authentication for the same client ID is rejected
 - Channel binding supported for additional transport-layer verification
 
 ### Certificate Authentication

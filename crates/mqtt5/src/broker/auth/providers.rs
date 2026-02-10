@@ -659,9 +659,9 @@ impl AuthProvider for CertificateAuthProvider {
 
                 let certs = self.allowed_certs.read();
                 if let Some(username) = certs.get(&fingerprint.to_lowercase()) {
-                    warn!(
-                        "CertificateAuthProvider trusts client_id prefix only; \
-                         ensure this listener uses mTLS to prevent spoofing"
+                    debug!(
+                        "CertificateAuthProvider trusts client_id prefix; \
+                         listener must use mTLS to prevent spoofing"
                     );
                     return Ok(AuthResult::success_with_user(username.clone()));
                 }
