@@ -91,6 +91,20 @@ impl ClientHandler {
             return Err(MqttError::InvalidClientId(connect.client_id));
         }
 
+        if connect.client_id.starts_with("cert:") && self.transport.client_cert_info().is_none() {
+            warn!(
+                client_id = %connect.client_id,
+                transport = self.transport.transport_type(),
+                addr = %self.client_addr,
+                "Rejecting cert: client ID on connection without verified client certificate"
+            );
+            let connack = ConnAckPacket::new(false, ReasonCode::NotAuthorized);
+            self.transport
+                .write_packet(Packet::ConnAck(connack))
+                .await?;
+            return Err(MqttError::AuthenticationFailed);
+        }
+
         let auth_method_prop = connect.properties.get_authentication_method();
         let auth_data_prop = connect.properties.get_authentication_data();
 
