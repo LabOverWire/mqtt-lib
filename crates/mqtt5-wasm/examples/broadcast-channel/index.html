@@ -309,10 +309,13 @@
             const msg = document.createElement('div');
             msg.className = `chat-message ${isSelf ? 'self' : 'other'}`;
             if (!isSelf) msg.style.borderLeft = `4px solid ${color}`;
-            msg.innerHTML = `
-                <div class="sender">Tab ${senderId}</div>
-                <div>${message}</div>
-            `;
+            const senderDiv = document.createElement('div');
+            senderDiv.className = 'sender';
+            senderDiv.textContent = `Tab ${senderId}`;
+            const messageDiv = document.createElement('div');
+            messageDiv.textContent = message;
+            msg.appendChild(senderDiv);
+            msg.appendChild(messageDiv);
             container.appendChild(msg);
             container.scrollTop = container.scrollHeight;
         }

@@ -362,12 +362,25 @@
             aliasMap.forEach((aliasId, topic) => {
                 const row = document.createElement('tr');
                 const savings = topic.length - 2;
-                row.innerHTML = `
-                    <td><span class="alias-id">${aliasId}</span></td>
-                    <td><span class="topic-name">${topic}</span></td>
-                    <td>${topic.length} bytes</td>
-                    <td style="color: #28a745; font-weight: bold;">-${savings} bytes</td>
-                `;
+                const aliasTd = document.createElement('td');
+                const aliasSpan = document.createElement('span');
+                aliasSpan.className = 'alias-id';
+                aliasSpan.textContent = aliasId;
+                aliasTd.appendChild(aliasSpan);
+                const topicTd = document.createElement('td');
+                const topicSpan = document.createElement('span');
+                topicSpan.className = 'topic-name';
+                topicSpan.textContent = topic;
+                topicTd.appendChild(topicSpan);
+                const sizeTd = document.createElement('td');
+                sizeTd.textContent = `${topic.length} bytes`;
+                const savingsTd = document.createElement('td');
+                savingsTd.style.cssText = 'color: #28a745; font-weight: bold;';
+                savingsTd.textContent = `-${savings} bytes`;
+                row.appendChild(aliasTd);
+                row.appendChild(topicTd);
+                row.appendChild(sizeTd);
+                row.appendChild(savingsTd);
                 tbody.appendChild(row);
             });
         }

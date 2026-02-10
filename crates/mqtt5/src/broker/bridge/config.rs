@@ -7,7 +7,7 @@ pub use mqtt5_protocol::BridgeDirection;
 use serde::{Deserialize, Serialize};
 
 /// Bridge connection configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct BridgeConfig {
     /// Unique name for this bridge
@@ -155,6 +155,22 @@ pub struct BridgeConfig {
     /// Loop prevention cache size - maximum number of fingerprints to store
     #[serde(default = "default_loop_prevention_cache_size")]
     pub loop_prevention_cache_size: usize,
+}
+
+impl std::fmt::Debug for BridgeConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BridgeConfig")
+            .field("name", &self.name)
+            .field("remote_address", &self.remote_address)
+            .field("client_id", &self.client_id)
+            .field("username", &self.username)
+            .field("password", &self.password.as_ref().map(|_| "[REDACTED]"))
+            .field("protocol", &self.protocol)
+            .field("use_tls", &self.use_tls)
+            .field("insecure", &self.insecure)
+            .field("topics", &self.topics)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Topic mapping configuration

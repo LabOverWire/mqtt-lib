@@ -315,6 +315,7 @@ impl ClientHandler {
             will_message,
         );
         session.receive_maximum = self.client_receive_maximum;
+        session.user_id.clone_from(&self.user_id);
         debug!(
             "Created new session with will_delay_interval: {:?}",
             session.will_delay_interval
@@ -333,7 +334,36 @@ impl ClientHandler {
         mut session: ClientSession,
         storage: &Arc<DynamicStorage>,
     ) -> Result<()> {
+        if let Some(ref session_user) = session.user_id {
+            if self.user_id.as_deref() != Some(session_user.as_str()) {
+                warn!(
+                    client_id = %connect.client_id,
+                    session_user = %session_user,
+                    "Session user mismatch, rejecting connection"
+                );
+                let connack = ConnAckPacket::new(false, ReasonCode::NotAuthorized);
+                self.transport
+                    .write_packet(Packet::ConnAck(connack))
+                    .await?;
+                return Err(MqttError::AuthenticationFailed);
+            }
+        }
+
+        let mut unauthorized_filters = Vec::new();
         for (topic_filter, stored) in &session.subscriptions {
+            let authorized = self
+                .auth_provider
+                .authorize_subscribe(&connect.client_id, self.user_id.as_deref(), topic_filter)
+                .await;
+            if !authorized {
+                warn!(
+                    client_id = %connect.client_id,
+                    topic_filter = %topic_filter,
+                    "Dropping subscription on session restore: no longer authorized"
+                );
+                unauthorized_filters.push(topic_filter.clone());
+                continue;
+            }
             self.router
                 .subscribe(
                     connect.client_id.clone(),
@@ -348,6 +378,9 @@ impl ClientHandler {
                 )
                 .await?;
         }
+        for filter in &unauthorized_filters {
+            session.subscriptions.remove(filter);
+        }
 
         self.router
             .load_change_only_state(&connect.client_id, session.change_only_state.clone())
@@ -360,6 +393,7 @@ impl ClientHandler {
             .and_then(|w| w.properties.will_delay_interval);
 
         session.receive_maximum = self.client_receive_maximum;
+        session.user_id.clone_from(&self.user_id);
 
         session.touch();
         storage.store_session(session.clone()).await?;

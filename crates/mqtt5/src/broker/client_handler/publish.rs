@@ -81,6 +81,8 @@ impl ClientHandler {
             ));
         }
 
+        crate::validate_topic_name(&publish.topic_name)?;
+
         let payload_size = publish.payload.len();
         self.stats.publish_received(payload_size);
 

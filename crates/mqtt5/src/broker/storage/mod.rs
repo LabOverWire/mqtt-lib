@@ -147,6 +147,8 @@ pub struct ClientSession {
     pub receive_maximum: u16,
     #[serde(default)]
     pub change_only_state: ChangeOnlyState,
+    #[serde(default)]
+    pub user_id: Option<String>,
 }
 
 fn default_receive_maximum() -> u16 {
@@ -656,6 +658,7 @@ impl ClientSession {
             will_delay_interval: None,
             receive_maximum: 65535,
             change_only_state: ChangeOnlyState::default(),
+            user_id: None,
         }
     }
 
@@ -682,6 +685,7 @@ impl ClientSession {
             will_delay_interval: will_delay,
             receive_maximum: 65535,
             change_only_state: ChangeOnlyState::default(),
+            user_id: None,
         }
     }
 

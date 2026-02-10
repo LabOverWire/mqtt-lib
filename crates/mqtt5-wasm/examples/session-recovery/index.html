@@ -347,7 +347,13 @@
             const subList = document.getElementById('sub-list');
             const subsDiv = document.getElementById('subscriptions');
             subList.style.display = 'block';
-            subsDiv.innerHTML = subscriptions.map(s => `<span class="subscription-item">${s}</span>`).join('');
+            subsDiv.innerHTML = '';
+            subscriptions.forEach(s => {
+                const span = document.createElement('span');
+                span.className = 'subscription-item';
+                span.textContent = s;
+                subsDiv.appendChild(span);
+            });
         }
 
         function addReceivedMessage(topic, payload, wasQueued) {
@@ -356,11 +362,19 @@
 
             const card = document.createElement('div');
             card.className = `message-card ${wasQueued ? 'queued' : 'delivered'}`;
-            card.innerHTML = `
-                <strong>${topic}</strong>
-                ${wasQueued ? '<span style="background:#fd7e14;color:white;padding:2px 6px;border-radius:3px;font-size:0.75em;margin-left:5px;">QUEUED</span>' : ''}
-                <div style="margin-top: 4px;">${payload}</div>
-            `;
+            const topicStrong = document.createElement('strong');
+            topicStrong.textContent = topic;
+            card.appendChild(topicStrong);
+            if (wasQueued) {
+                const queuedBadge = document.createElement('span');
+                queuedBadge.style.cssText = 'background:#fd7e14;color:white;padding:2px 6px;border-radius:3px;font-size:0.75em;margin-left:5px;';
+                queuedBadge.textContent = 'QUEUED';
+                card.appendChild(queuedBadge);
+            }
+            const payloadDiv = document.createElement('div');
+            payloadDiv.style.marginTop = '4px';
+            payloadDiv.textContent = payload;
+            card.appendChild(payloadDiv);
             list.prepend(card);
         }
 
@@ -370,7 +384,13 @@
 
             const card = document.createElement('div');
             card.className = 'message-card queued';
-            card.innerHTML = `<strong>${topic}</strong><div style="margin-top: 4px;">${payload}</div>`;
+            const topicStrong = document.createElement('strong');
+            topicStrong.textContent = topic;
+            card.appendChild(topicStrong);
+            const payloadDiv = document.createElement('div');
+            payloadDiv.style.marginTop = '4px';
+            payloadDiv.textContent = payload;
+            card.appendChild(payloadDiv);
             list.prepend(card);
         }
 

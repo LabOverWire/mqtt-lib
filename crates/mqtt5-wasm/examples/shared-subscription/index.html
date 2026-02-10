@@ -364,10 +364,14 @@
 
             const messageEl = document.createElement('div');
             messageEl.className = 'message';
-            messageEl.innerHTML = `
-                <div class="topic">${topic}</div>
-                <div class="payload">${payload}</div>
-            `;
+            const topicDiv = document.createElement('div');
+            topicDiv.className = 'topic';
+            topicDiv.textContent = topic;
+            const payloadDiv = document.createElement('div');
+            payloadDiv.className = 'payload';
+            payloadDiv.textContent = payload;
+            messageEl.appendChild(topicDiv);
+            messageEl.appendChild(payloadDiv);
             messagesEl.prepend(messageEl);
 
             while (messagesEl.children.length > 20) {

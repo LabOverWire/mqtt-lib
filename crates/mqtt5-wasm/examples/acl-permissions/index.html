@@ -352,14 +352,22 @@
 
             const card = document.createElement('div');
             card.className = `result-card ${allowed ? 'allowed' : 'denied'}`;
-            card.innerHTML = `
-                <span class="result-icon">${allowed ? '✓' : '✗'}</span>
-                <strong>${operation.toUpperCase()}</strong> ${topic}
-                <span style="float: right; font-weight: bold; color: ${allowed ? '#28a745' : '#dc3545'}">
-                    ${allowed ? 'ALLOWED' : 'DENIED'}
-                </span>
-                <div class="result-details">${details}</div>
-            `;
+            const iconSpan = document.createElement('span');
+            iconSpan.className = 'result-icon';
+            iconSpan.textContent = allowed ? '✓' : '✗';
+            const opStrong = document.createElement('strong');
+            opStrong.textContent = operation.toUpperCase();
+            const statusSpan = document.createElement('span');
+            statusSpan.style.cssText = `float: right; font-weight: bold; color: ${allowed ? '#28a745' : '#dc3545'}`;
+            statusSpan.textContent = allowed ? 'ALLOWED' : 'DENIED';
+            const detailsDiv = document.createElement('div');
+            detailsDiv.className = 'result-details';
+            detailsDiv.textContent = details;
+            card.appendChild(iconSpan);
+            card.appendChild(opStrong);
+            card.appendChild(document.createTextNode(` ${topic}`));
+            card.appendChild(statusSpan);
+            card.appendChild(detailsDiv);
             list.prepend(card);
         }
 
@@ -378,11 +386,18 @@
                 const canPub = checkPermission(currentUser, 'publish', topic);
 
                 const row = document.createElement('tr');
-                row.innerHTML = `
-                    <td style="font-family: monospace;">${topic}</td>
-                    <td class="matrix-cell ${canSub ? 'allowed' : 'denied'}">${canSub ? '✓' : '✗'}</td>
-                    <td class="matrix-cell ${canPub ? 'allowed' : 'denied'}">${canPub ? '✓' : '✗'}</td>
-                `;
+                const topicTd = document.createElement('td');
+                topicTd.style.fontFamily = 'monospace';
+                topicTd.textContent = topic;
+                const subTd = document.createElement('td');
+                subTd.className = `matrix-cell ${canSub ? 'allowed' : 'denied'}`;
+                subTd.textContent = canSub ? '✓' : '✗';
+                const pubTd = document.createElement('td');
+                pubTd.className = `matrix-cell ${canPub ? 'allowed' : 'denied'}`;
+                pubTd.textContent = canPub ? '✓' : '✗';
+                row.appendChild(topicTd);
+                row.appendChild(subTd);
+                row.appendChild(pubTd);
                 tbody.appendChild(row);
             });
         }

@@ -5,6 +5,7 @@ use sha2::{Digest, Sha256};
 use std::num::NonZeroU32;
 use std::sync::Mutex;
 use tracing::debug;
+use zeroize::Zeroizing;
 
 enum ScramClientState {
     Initial,
@@ -19,7 +20,7 @@ enum ScramClientState {
 
 pub struct ScramSha256AuthHandler {
     username: String,
-    password: String,
+    password: Zeroizing<String>,
     state: Mutex<ScramClientState>,
 }
 
@@ -28,7 +29,7 @@ impl ScramSha256AuthHandler {
     pub fn new(username: impl Into<String>, password: impl Into<String>) -> Self {
         Self {
             username: username.into(),
-            password: password.into(),
+            password: Zeroizing::new(password.into()),
             state: Mutex::new(ScramClientState::Initial),
         }
     }

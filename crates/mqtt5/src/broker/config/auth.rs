@@ -329,14 +329,83 @@ impl JwtRoleMapping {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub enum ClaimPattern {
     Equals(String),
     Contains(String),
     EndsWith(String),
     StartsWith(String),
-    Regex(String),
+    Regex(CompiledRegex),
     Any,
+}
+
+#[derive(Clone)]
+pub struct CompiledRegex {
+    pub source: String,
+    pub compiled: regex::Regex,
+}
+
+impl std::fmt::Debug for CompiledRegex {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("CompiledRegex").field(&self.source).finish()
+    }
+}
+
+impl Serialize for ClaimPattern {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        #[derive(Serialize)]
+        enum Raw {
+            Equals(String),
+            Contains(String),
+            EndsWith(String),
+            StartsWith(String),
+            Regex(String),
+            Any,
+        }
+        let raw = match self {
+            Self::Equals(s) => Raw::Equals(s.clone()),
+            Self::Contains(s) => Raw::Contains(s.clone()),
+            Self::EndsWith(s) => Raw::EndsWith(s.clone()),
+            Self::StartsWith(s) => Raw::StartsWith(s.clone()),
+            Self::Regex(r) => Raw::Regex(r.source.clone()),
+            Self::Any => Raw::Any,
+        };
+        raw.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ClaimPattern {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        enum Raw {
+            Equals(String),
+            Contains(String),
+            EndsWith(String),
+            StartsWith(String),
+            Regex(String),
+            Any,
+        }
+        let raw = Raw::deserialize(deserializer)?;
+        Ok(match raw {
+            Raw::Equals(s) => Self::Equals(s),
+            Raw::Contains(s) => Self::Contains(s),
+            Raw::EndsWith(s) => Self::EndsWith(s),
+            Raw::StartsWith(s) => Self::StartsWith(s),
+            Raw::Regex(pattern) => {
+                let compiled = regex::Regex::new(&pattern).map_err(serde::de::Error::custom)?;
+                Self::Regex(CompiledRegex {
+                    source: pattern,
+                    compiled,
+                })
+            }
+            Raw::Any => Self::Any,
+        })
+    }
 }
 
 impl ClaimPattern {
@@ -347,9 +416,7 @@ impl ClaimPattern {
             Self::Contains(s) => value.contains(s),
             Self::EndsWith(s) => value.ends_with(s),
             Self::StartsWith(s) => value.starts_with(s),
-            Self::Regex(pattern) => regex::Regex::new(pattern)
-                .map(|re| re.is_match(value))
-                .unwrap_or(false),
+            Self::Regex(r) => r.compiled.is_match(value),
             Self::Any => true,
         }
     }

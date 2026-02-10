@@ -475,14 +475,24 @@
                 return;
             }
 
-            container.innerHTML = state.passwords.map((entry, index) => `
-                <div class="entry">
-                    <div class="entry-content">
-                        <strong>${entry.username}</strong>:${entry.hash.substring(0, 50)}...
-                    </div>
-                    <button class="btn-remove" data-index="${index}">Remove</button>
-                </div>
-            `).join('');
+            container.innerHTML = '';
+            state.passwords.forEach((entry, index) => {
+                const entryDiv = document.createElement('div');
+                entryDiv.className = 'entry';
+                const contentDiv = document.createElement('div');
+                contentDiv.className = 'entry-content';
+                const nameStrong = document.createElement('strong');
+                nameStrong.textContent = entry.username;
+                contentDiv.appendChild(nameStrong);
+                contentDiv.appendChild(document.createTextNode(`:${entry.hash.substring(0, 50)}...`));
+                const removeBtn = document.createElement('button');
+                removeBtn.className = 'btn-remove';
+                removeBtn.dataset.index = index;
+                removeBtn.textContent = 'Remove';
+                entryDiv.appendChild(contentDiv);
+                entryDiv.appendChild(removeBtn);
+                container.appendChild(entryDiv);
+            });
 
             container.querySelectorAll('.btn-remove').forEach(btn => {
                 btn.addEventListener('click', () => {
@@ -507,14 +517,33 @@
                 return;
             }
 
-            container.innerHTML = state.aclRules.map((rule, index) => `
-                <div class="entry">
-                    <div class="entry-content">
-                        user <strong>${rule.username}</strong> topic <strong>${rule.topic}</strong> ${getPermissionBadge(rule.permission)}
-                    </div>
-                    <button class="btn-remove" data-index="${index}">Remove</button>
-                </div>
-            `).join('');
+            container.innerHTML = '';
+            state.aclRules.forEach((rule, index) => {
+                const entryDiv = document.createElement('div');
+                entryDiv.className = 'entry';
+                const contentDiv = document.createElement('div');
+                contentDiv.className = 'entry-content';
+                contentDiv.appendChild(document.createTextNode('user '));
+                const userStrong = document.createElement('strong');
+                userStrong.textContent = rule.username;
+                contentDiv.appendChild(userStrong);
+                contentDiv.appendChild(document.createTextNode(' topic '));
+                const topicStrong = document.createElement('strong');
+                topicStrong.textContent = rule.topic;
+                contentDiv.appendChild(topicStrong);
+                contentDiv.appendChild(document.createTextNode(' '));
+                const badge = document.createElement('span');
+                badge.className = `permission-badge permission-${rule.permission}`;
+                badge.textContent = rule.permission;
+                contentDiv.appendChild(badge);
+                const removeBtn = document.createElement('button');
+                removeBtn.className = 'btn-remove';
+                removeBtn.dataset.index = index;
+                removeBtn.textContent = 'Remove';
+                entryDiv.appendChild(contentDiv);
+                entryDiv.appendChild(removeBtn);
+                container.appendChild(entryDiv);
+            });
 
             container.querySelectorAll('.btn-remove').forEach(btn => {
                 btn.addEventListener('click', () => {
@@ -536,14 +565,34 @@
             if (state.roleRules.length === 0) {
                 container.innerHTML = '<div class="empty-state">No roles defined yet</div>';
             } else {
-                container.innerHTML = state.roleRules.map((rule, index) => `
-                    <div class="entry">
-                        <div class="entry-content">
-                            role <span class="role-badge">${rule.role}</span> topic <strong>${rule.topic}</strong> ${getPermissionBadge(rule.permission)}
-                        </div>
-                        <button class="btn-remove" data-index="${index}">Remove</button>
-                    </div>
-                `).join('');
+                container.innerHTML = '';
+                state.roleRules.forEach((rule, index) => {
+                    const entryDiv = document.createElement('div');
+                    entryDiv.className = 'entry';
+                    const contentDiv = document.createElement('div');
+                    contentDiv.className = 'entry-content';
+                    contentDiv.appendChild(document.createTextNode('role '));
+                    const roleBadge = document.createElement('span');
+                    roleBadge.className = 'role-badge';
+                    roleBadge.textContent = rule.role;
+                    contentDiv.appendChild(roleBadge);
+                    contentDiv.appendChild(document.createTextNode(' topic '));
+                    const topicStrong = document.createElement('strong');
+                    topicStrong.textContent = rule.topic;
+                    contentDiv.appendChild(topicStrong);
+                    contentDiv.appendChild(document.createTextNode(' '));
+                    const permBadge = document.createElement('span');
+                    permBadge.className = `permission-badge permission-${rule.permission}`;
+                    permBadge.textContent = rule.permission;
+                    contentDiv.appendChild(permBadge);
+                    const removeBtn = document.createElement('button');
+                    removeBtn.className = 'btn-remove';
+                    removeBtn.dataset.index = index;
+                    removeBtn.textContent = 'Remove';
+                    entryDiv.appendChild(contentDiv);
+                    entryDiv.appendChild(removeBtn);
+                    container.appendChild(entryDiv);
+                });
 
                 container.querySelectorAll('.btn-remove').forEach(btn => {
                     btn.addEventListener('click', () => {
@@ -562,14 +611,29 @@
             if (state.assignments.length === 0) {
                 container.innerHTML = '<div class="empty-state">No user-role assignments yet</div>';
             } else {
-                container.innerHTML = state.assignments.map((assign, index) => `
-                    <div class="entry">
-                        <div class="entry-content">
-                            assign <strong>${assign.username}</strong> → <span class="role-badge">${assign.role}</span>
-                        </div>
-                        <button class="btn-remove" data-index="${index}">Remove</button>
-                    </div>
-                `).join('');
+                container.innerHTML = '';
+                state.assignments.forEach((assign, index) => {
+                    const entryDiv = document.createElement('div');
+                    entryDiv.className = 'entry';
+                    const contentDiv = document.createElement('div');
+                    contentDiv.className = 'entry-content';
+                    contentDiv.appendChild(document.createTextNode('assign '));
+                    const nameStrong = document.createElement('strong');
+                    nameStrong.textContent = assign.username;
+                    contentDiv.appendChild(nameStrong);
+                    contentDiv.appendChild(document.createTextNode(' → '));
+                    const roleBadge = document.createElement('span');
+                    roleBadge.className = 'role-badge';
+                    roleBadge.textContent = assign.role;
+                    contentDiv.appendChild(roleBadge);
+                    const removeBtn = document.createElement('button');
+                    removeBtn.className = 'btn-remove';
+                    removeBtn.dataset.index = index;
+                    removeBtn.textContent = 'Remove';
+                    entryDiv.appendChild(contentDiv);
+                    entryDiv.appendChild(removeBtn);
+                    container.appendChild(entryDiv);
+                });
 
                 container.querySelectorAll('.btn-remove').forEach(btn => {
                     btn.addEventListener('click', () => {
@@ -841,7 +905,12 @@
         }
 
         main().catch(err => {
-            document.getElementById('loading').innerHTML = `<p style="color: red;">Error: ${err.message || err}</p>`;
+            const loadingEl = document.getElementById('loading');
+            loadingEl.innerHTML = '';
+            const errP = document.createElement('p');
+            errP.style.color = 'red';
+            errP.textContent = `Error: ${err.message || err}`;
+            loadingEl.appendChild(errP);
             console.error(err);
         });
     </script>

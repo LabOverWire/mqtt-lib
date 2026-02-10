@@ -194,22 +194,47 @@ impl FileBackend {
         Ok(())
     }
 
-    /// Convert topic to safe filename
     fn topic_to_filename(topic: &str) -> String {
-        topic
-            .replace('/', "_slash_")
-            .replace('+', "_plus_")
-            .replace('#', "_hash_")
-            .replace('$', "_dollar_")
+        let mut result = String::with_capacity(topic.len());
+        for ch in topic.chars() {
+            match ch {
+                '%' => result.push_str("%25"),
+                '/' => result.push_str("%2F"),
+                '+' => result.push_str("%2B"),
+                '#' => result.push_str("%23"),
+                '$' => result.push_str("%24"),
+                '\\' => result.push_str("%5C"),
+                ':' => result.push_str("%3A"),
+                '*' => result.push_str("%2A"),
+                '?' => result.push_str("%3F"),
+                '"' => result.push_str("%22"),
+                '<' => result.push_str("%3C"),
+                '>' => result.push_str("%3E"),
+                '|' => result.push_str("%7C"),
+                '\0' => result.push_str("%00"),
+                _ => result.push(ch),
+            }
+        }
+        result
     }
 
-    /// Convert filename back to topic
     fn filename_to_topic(filename: &str) -> String {
-        filename
-            .replace("_slash_", "/")
-            .replace("_plus_", "+")
-            .replace("_hash_", "#")
-            .replace("_dollar_", "$")
+        let mut result = String::with_capacity(filename.len());
+        let mut chars = filename.chars();
+        while let Some(ch) = chars.next() {
+            if ch == '%' {
+                let hex: String = chars.by_ref().take(2).collect();
+                if let Ok(byte) = u8::from_str_radix(&hex, 16) {
+                    result.push(char::from(byte));
+                } else {
+                    result.push('%');
+                    result.push_str(&hex);
+                }
+            } else {
+                result.push(ch);
+            }
+        }
+        result
     }
 
     /// Write data to file atomically
@@ -239,9 +264,12 @@ impl FileBackend {
             .await
             .map_err(|e| MqttError::Io(format!("Failed to flush temp file: {e}")))?;
 
+        file.sync_data()
+            .await
+            .map_err(|e| MqttError::Io(format!("Failed to sync temp file: {e}")))?;
+
         drop(file);
 
-        // Atomically move temp file to final location
         fs::rename(&temp_path, &path)
             .await
             .map_err(|e| MqttError::Io(format!("Failed to rename temp file: {e}")))?;

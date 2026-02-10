@@ -254,10 +254,14 @@
             const timestamp = new Date().toLocaleTimeString();
             const messageEl = document.createElement('div');
             messageEl.className = isWillMessage ? 'message will-message' : 'message';
-            messageEl.innerHTML = `
-                <div class="topic">${topic} ${isWillMessage ? '⚠️ WILL MESSAGE' : ''}</div>
-                <div class="payload">${payload} <small>(${timestamp})</small></div>
-            `;
+            const topicDiv = document.createElement('div');
+            topicDiv.className = 'topic';
+            topicDiv.textContent = `${topic} ${isWillMessage ? 'WILL MESSAGE' : ''}`;
+            const payloadDiv = document.createElement('div');
+            payloadDiv.className = 'payload';
+            payloadDiv.textContent = `${payload} (${timestamp})`;
+            messageEl.appendChild(topicDiv);
+            messageEl.appendChild(payloadDiv);
             messagesEl.prepend(messageEl);
         }
 

@@ -290,12 +290,20 @@
             const card = document.createElement('div');
             card.className = 'message-card active';
             card.id = `pub-${id}`;
-            card.innerHTML = `
-                <span class="countdown">${ttl}s</span>
-                <strong>Notification #${id}</strong>
-                <div>${content}</div>
-                <div class="ttl-bar" style="width: 100%"></div>
-            `;
+            const countdown = document.createElement('span');
+            countdown.className = 'countdown';
+            countdown.textContent = `${ttl}s`;
+            const title = document.createElement('strong');
+            title.textContent = `Notification #${id}`;
+            const contentDiv = document.createElement('div');
+            contentDiv.textContent = content;
+            const ttlBar = document.createElement('div');
+            ttlBar.className = 'ttl-bar';
+            ttlBar.style.width = '100%';
+            card.appendChild(countdown);
+            card.appendChild(title);
+            card.appendChild(contentDiv);
+            card.appendChild(ttlBar);
             list.prepend(card);
 
             activeMessages.set(id, { ttl, maxTtl: ttl, content, startTime: Date.now() });
@@ -308,11 +316,16 @@
 
             const card = document.createElement('div');
             card.className = 'message-card active';
-            card.innerHTML = `
-                <span class="countdown">${remainingTtl}s remaining</span>
-                <strong>Notification #${id}</strong>
-                <div>${content}</div>
-            `;
+            const countdown = document.createElement('span');
+            countdown.className = 'countdown';
+            countdown.textContent = `${remainingTtl}s remaining`;
+            const title = document.createElement('strong');
+            title.textContent = `Notification #${id}`;
+            const contentDiv = document.createElement('div');
+            contentDiv.textContent = content;
+            card.appendChild(countdown);
+            card.appendChild(title);
+            card.appendChild(contentDiv);
             list.prepend(card);
 
             stats.delivered++;
@@ -325,7 +338,10 @@
 
             const item = document.createElement('div');
             item.className = 'graveyard-item';
-            item.innerHTML = `<strong>#${id}</strong> - ${content} (expired before delivery)`;
+            const label = document.createElement('strong');
+            label.textContent = `#${id}`;
+            item.appendChild(label);
+            item.appendChild(document.createTextNode(` - ${content} (expired before delivery)`));
             list.prepend(item);
 
             stats.expired++;

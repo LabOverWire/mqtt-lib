@@ -170,18 +170,25 @@ impl WasmClientHandler {
                 .await
                 .ok();
 
-            let session = ClientSession::new_with_will(
+            let mut session = ClientSession::new_with_will(
                 client_id.clone(),
                 session_expiry != Some(0),
                 session_expiry,
                 connect.will.clone(),
             );
+            session.user_id.clone_from(&self.user_id);
             self.storage.store_session(session.clone()).await.ok();
             self.session = Some(session);
             Ok(false)
         } else {
             match self.storage.get_session(client_id).await {
                 Ok(Some(mut session)) => {
+                    if let Some(ref session_user) = session.user_id {
+                        if self.user_id.as_deref() != Some(session_user.as_str()) {
+                            return Err(MqttError::AuthenticationFailed);
+                        }
+                    }
+
                     for (topic_filter, stored) in &session.subscriptions {
                         self.router
                             .subscribe(
@@ -223,17 +230,19 @@ impl WasmClientHandler {
                         .will
                         .as_ref()
                         .and_then(|w| w.properties.will_delay_interval);
+                    session.user_id.clone_from(&self.user_id);
                     self.storage.store_session(session.clone()).await.ok();
                     self.session = Some(session);
                     Ok(true)
                 }
                 Ok(None) => {
-                    let session = ClientSession::new_with_will(
+                    let mut session = ClientSession::new_with_will(
                         client_id.clone(),
                         session_expiry != Some(0),
                         session_expiry,
                         connect.will.clone(),
                     );
+                    session.user_id.clone_from(&self.user_id);
                     self.storage.store_session(session.clone()).await.ok();
                     self.session = Some(session);
                     Ok(false)
@@ -251,6 +260,7 @@ impl WasmClientHandler {
         match result.status {
             EnhancedAuthStatus::Success => {
                 self.auth_state = AuthState::Completed;
+                self.user_id.clone_from(&result.user_id);
 
                 if let Some(pending) = self.pending_connect.take() {
                     self.client_id = Some(pending.connect.client_id.clone());

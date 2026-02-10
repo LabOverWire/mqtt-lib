@@ -345,10 +345,28 @@
             if (list.querySelector('em')) list.innerHTML = '';
             const card = document.createElement('div');
             card.className = `message-card ${type}`;
-            let badge = '';
-            if (type === 'recovered') badge = '<span class="badge recovered">RECOVERED</span><span class="badge dup">DUP=1</span>';
-            else if (type === 'normal') badge = '<span class="badge normal">QoS 2</span>';
-            card.innerHTML = `<strong>${topic}</strong>${badge}<div style="margin-top:4px;">${payload}</div>`;
+            const topicStrong = document.createElement('strong');
+            topicStrong.textContent = topic;
+            card.appendChild(topicStrong);
+            if (type === 'recovered') {
+                const recoveredBadge = document.createElement('span');
+                recoveredBadge.className = 'badge recovered';
+                recoveredBadge.textContent = 'RECOVERED';
+                card.appendChild(recoveredBadge);
+                const dupBadge = document.createElement('span');
+                dupBadge.className = 'badge dup';
+                dupBadge.textContent = 'DUP=1';
+                card.appendChild(dupBadge);
+            } else if (type === 'normal') {
+                const normalBadge = document.createElement('span');
+                normalBadge.className = 'badge normal';
+                normalBadge.textContent = 'QoS 2';
+                card.appendChild(normalBadge);
+            }
+            const payloadDiv = document.createElement('div');
+            payloadDiv.style.marginTop = '4px';
+            payloadDiv.textContent = payload;
+            card.appendChild(payloadDiv);
             list.prepend(card);
         }
 
@@ -357,7 +375,19 @@
             if (list.querySelector('em')) list.innerHTML = '';
             const card = document.createElement('div');
             card.className = `message-card ${note === 'interrupted' ? 'interrupted' : 'normal'}`;
-            card.innerHTML = `<strong>${topic}</strong>${note ? ` <span style="font-size:0.8em;color:#666;">(${note})</span>` : ''}<div style="margin-top:4px;">${payload}</div>`;
+            const topicStrong = document.createElement('strong');
+            topicStrong.textContent = topic;
+            card.appendChild(topicStrong);
+            if (note) {
+                const noteSpan = document.createElement('span');
+                noteSpan.style.cssText = 'font-size:0.8em;color:#666;';
+                noteSpan.textContent = ` (${note})`;
+                card.appendChild(noteSpan);
+            }
+            const payloadDiv = document.createElement('div');
+            payloadDiv.style.marginTop = '4px';
+            payloadDiv.textContent = payload;
+            card.appendChild(payloadDiv);
             list.prepend(card);
         }
 

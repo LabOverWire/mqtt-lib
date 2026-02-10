@@ -191,7 +191,10 @@
         window.log = function(message, type = 'info') {
             const logEl = document.getElementById('log');
             const time = new Date().toLocaleTimeString();
-            logEl.innerHTML += `<div class="${type}">[${time}] ${message}</div>`;
+            const entry = document.createElement('div');
+            entry.className = type;
+            entry.textContent = `[${time}] ${message}`;
+            logEl.appendChild(entry);
             logEl.scrollTop = logEl.scrollHeight;
         }
 
@@ -247,13 +250,21 @@
 
             const payload = JSON.parse(atob(idToken.split('.')[1]));
 
-            document.getElementById('userInfo').innerHTML = `
-                <img src="${payload.picture}" alt="Profile">
-                <div>
-                    <strong>${payload.name}</strong><br>
-                    <small>${payload.email}</small>
-                </div>
-            `;
+            const userInfoEl = document.getElementById('userInfo');
+            userInfoEl.innerHTML = '';
+            const img = document.createElement('img');
+            img.src = payload.picture;
+            img.alt = 'Profile';
+            const infoDiv = document.createElement('div');
+            const nameStrong = document.createElement('strong');
+            nameStrong.textContent = payload.name;
+            const emailSmall = document.createElement('small');
+            emailSmall.textContent = payload.email;
+            infoDiv.appendChild(nameStrong);
+            infoDiv.appendChild(document.createElement('br'));
+            infoDiv.appendChild(emailSmall);
+            userInfoEl.appendChild(img);
+            userInfoEl.appendChild(infoDiv);
             document.getElementById('userInfo').classList.remove('hidden');
             document.getElementById('tokenSection').classList.remove('hidden');
             document.getElementById('tokenDisplay').textContent = idToken;

@@ -24,6 +24,8 @@ pub struct WebSocketServerConfig {
     pub max_frame_size: Option<usize>,
     /// Maximum message size
     pub max_message_size: Option<usize>,
+    /// Allowed Origin headers (None = allow all, Some = whitelist)
+    pub allowed_origins: Option<Vec<String>>,
 }
 
 impl Default for WebSocketServerConfig {
@@ -31,8 +33,9 @@ impl Default for WebSocketServerConfig {
         Self {
             path: "/mqtt".to_string(),
             subprotocol: "mqtt".to_string(),
-            max_frame_size: Some(16 * 1024 * 1024),   // 16MB
-            max_message_size: Some(64 * 1024 * 1024), // 64MB
+            max_frame_size: Some(16 * 1024 * 1024),
+            max_message_size: Some(64 * 1024 * 1024),
+            allowed_origins: None,
         }
     }
 }
@@ -54,6 +57,12 @@ impl WebSocketServerConfig {
     #[must_use]
     pub fn with_subprotocol(mut self, subprotocol: impl Into<String>) -> Self {
         self.subprotocol = subprotocol.into();
+        self
+    }
+
+    #[must_use]
+    pub fn with_allowed_origins(mut self, origins: Vec<String>) -> Self {
+        self.allowed_origins = Some(origins);
         self
     }
 
@@ -125,14 +134,31 @@ where
     // Create callback to handle WebSocket handshake
     let subprotocol = config.subprotocol.clone();
     let path = config.path.clone();
+    let allowed_origins = config.allowed_origins.clone();
 
     let callback =
         |req: &tokio_tungstenite::tungstenite::handshake::server::Request,
          response: tokio_tungstenite::tungstenite::handshake::server::Response| {
-            // Check the path
             if req.uri().path() != path {
                 debug!("WebSocket path mismatch: {} != {}", req.uri().path(), path);
-                // We can't reject here, but we'll close the connection after handshake
+                let reject = http::Response::builder()
+                    .status(http::StatusCode::NOT_FOUND)
+                    .body(None)
+                    .expect("building 404 response");
+                return Err(reject);
+            }
+
+            if let Some(ref origins) = allowed_origins {
+                let origin = req.headers().get("Origin").and_then(|v| v.to_str().ok());
+                let allowed = origin.is_some_and(|o| origins.iter().any(|a| a == o));
+                if !allowed {
+                    debug!("WebSocket origin rejected: {:?}", origin);
+                    let reject = http::Response::builder()
+                        .status(http::StatusCode::FORBIDDEN)
+                        .body(None)
+                        .expect("building 403 response");
+                    return Err(reject);
+                }
             }
 
             // Check for the MQTT subprotocol
