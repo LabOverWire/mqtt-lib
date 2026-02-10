@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [mqtt5 0.22.3] / [mqtt5-wasm 0.10.5] - 2026-02-10
+
+### Added
+
+- **QoS 2 inflight persistence** - Broker persists in-flight QoS 2 messages across client reconnections
+  - `InflightMessage` struct stores decomposed publish data with direction (Inbound/Outbound) and phase (AwaitingPubrec/AwaitingPubrel/AwaitingPubcomp)
+  - `StorageBackend` trait extended with `store_inflight_message`, `get_inflight_messages`, `remove_inflight_message`, `remove_all_inflight_messages`
+  - `MemoryBackend` and `FileBackend` implementations for inflight storage
+  - On reconnect with `clean_start=false`, broker resends outbound PUBLISH (DUP=1) or PUBREL and restores inbound inflight state
+  - `clean_start=true` clears all inflight messages
+  - Message expiry tracking for inflight messages with automatic cleanup
+  - Applies to both native and WASM brokers
+
+- **WASM outbound inflight tracking** - WASM broker now tracks outbound QoS 2 messages
+  - Assigns packet IDs and persists outbound inflight state in the forward loop
+  - `handle_pubrec`/`handle_pubcomp` update and remove inflight storage
+  - `resend_inflight_messages` on session restore
+
+- **QoS 2 recovery demo** (`examples/qos2-recovery/`) - Interactive browser demo showing QoS 2 mid-flight recovery after connection interruption
+
+## [mqtt5 0.22.2] / [mqtt5-wasm 0.10.4] - 2026-02-10
+
+### Fixed
+
+- **Missing `user_id` in enhanced auth success paths** - JWT-authenticated clients now correctly propagate identity downstream
+  - Enhanced auth (JWT) success paths never captured `result.user_id` into `self.user_id`, so `inject_sender()` inserted `None` for JWT clients
+  - Fixes immediate enhanced auth success, multi-step Continue→Success, and re-authentication success
+  - Password auth was unaffected (already captured `user_id` correctly)
+
 ## [mqtt5-protocol 0.9.5] / [mqtt5 0.22.1] / [mqtt5-wasm 0.10.3] / [mqttv5-cli 0.20.3] - 2026-02-01
 
 ### Security
