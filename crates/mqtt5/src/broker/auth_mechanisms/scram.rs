@@ -424,6 +424,17 @@ impl<S: ScramCredentialStore> ScramSha256AuthProvider<S> {
                     "Too many concurrent authentications".to_string(),
                 );
             }
+            if states.contains_key(client_id) {
+                warn!(
+                    client_id = %client_id,
+                    "SCRAM authentication rejected: concurrent authentication in progress"
+                );
+                return EnhancedAuthResult::fail_with_reason(
+                    method.to_string(),
+                    ReasonCode::NotAuthorized,
+                    "Authentication already in progress for this client".to_string(),
+                );
+            }
             states.insert(client_id.to_string(), state);
         }
 

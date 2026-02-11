@@ -199,12 +199,12 @@ pub use codec::DeflateCodec;
 pub use codec::GzipCodec;
 pub use codec::{CodecRegistry, PayloadCodec};
 pub use mqtt5_protocol::{
-    is_valid_client_id, is_valid_topic_filter, is_valid_topic_name, parse_shared_subscription,
-    strip_shared_subscription_prefix, topic_matches_filter, validate_client_id,
-    validate_topic_filter, validate_topic_name, ConnectProperties, ConnectResult, FixedHeader,
-    Message, MessageProperties, MqttError, Packet, PacketType, Properties, PropertyId,
-    PropertyValue, PropertyValueType, ProtocolVersion, PublishOptions, PublishProperties,
-    PublishResult, QoS, RestrictiveValidator, Result, RetainHandling, StandardValidator,
-    SubscribeOptions, TopicValidator, Transport, WillMessage, WillProperties,
+    is_path_safe_client_id, is_valid_client_id, is_valid_topic_filter, is_valid_topic_name,
+    parse_shared_subscription, strip_shared_subscription_prefix, topic_matches_filter,
+    validate_client_id, validate_topic_filter, validate_topic_name, ConnectProperties,
+    ConnectResult, FixedHeader, Message, MessageProperties, MqttError, Packet, PacketType,
+    Properties, PropertyId, PropertyValue, PropertyValueType, ProtocolVersion, PublishOptions,
+    PublishProperties, PublishResult, QoS, RestrictiveValidator, Result, RetainHandling,
+    StandardValidator, SubscribeOptions, TopicValidator, Transport, WillMessage, WillProperties,
 };
 pub use types::{ConnectOptions, ConnectionStats};

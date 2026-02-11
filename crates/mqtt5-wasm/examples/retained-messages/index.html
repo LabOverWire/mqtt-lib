@@ -273,12 +273,23 @@
 
             const card = document.createElement('div');
             card.className = `message-card ${isRetained ? 'retained' : 'live'}`;
-            card.innerHTML = `
-                <strong>${topic}</strong>
-                ${isRetained ? '<span class="retained-badge">RETAINED</span>' : ''}
-                <div style="margin-top: 4px;">${payload}</div>
-                <div style="font-size: 0.75em; color: #666; margin-top: 4px;">${new Date().toLocaleTimeString()}</div>
-            `;
+            const topicStrong = document.createElement('strong');
+            topicStrong.textContent = topic;
+            card.appendChild(topicStrong);
+            if (isRetained) {
+                const badge = document.createElement('span');
+                badge.className = 'retained-badge';
+                badge.textContent = 'RETAINED';
+                card.appendChild(badge);
+            }
+            const payloadDiv = document.createElement('div');
+            payloadDiv.style.marginTop = '4px';
+            payloadDiv.textContent = payload;
+            card.appendChild(payloadDiv);
+            const timeDiv = document.createElement('div');
+            timeDiv.style.cssText = 'font-size: 0.75em; color: #666; margin-top: 4px;';
+            timeDiv.textContent = new Date().toLocaleTimeString();
+            card.appendChild(timeDiv);
             list.prepend(card);
         }
 

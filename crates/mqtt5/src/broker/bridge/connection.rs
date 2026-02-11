@@ -464,8 +464,9 @@ impl BridgeConnection {
                 }
             }
             BridgeProtocol::Tls => Box::pin(self.connect_tls(options)).await,
-            BridgeProtocol::Quic => Box::pin(self.connect_quic(options, false)).await,
-            BridgeProtocol::QuicSecure => Box::pin(self.connect_quic(options, true)).await,
+            BridgeProtocol::Quic | BridgeProtocol::QuicSecure => {
+                Box::pin(self.connect_quic(options, true)).await
+            }
         }
     }
 

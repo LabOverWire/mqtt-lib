@@ -652,18 +652,21 @@ impl AuthProvider for CertificateAuthProvider {
             if connect.client_id.starts_with("cert:") {
                 let fingerprint = &connect.client_id[5..];
 
+                if fingerprint.len() != 64 || !fingerprint.chars().all(|c| c.is_ascii_hexdigit()) {
+                    warn!("Certificate authentication failed: malformed fingerprint in client_id");
+                    return Ok(AuthResult::fail(ReasonCode::ClientIdentifierNotValid));
+                }
+
                 let certs = self.allowed_certs.read();
                 if let Some(username) = certs.get(&fingerprint.to_lowercase()) {
                     debug!(
-                        "Certificate authentication successful for fingerprint: {}",
-                        fingerprint
+                        fingerprint = fingerprint,
+                        username = username.as_str(),
+                        "Certificate authentication succeeded"
                     );
                     return Ok(AuthResult::success_with_user(username.clone()));
                 }
-                warn!(
-                    "Certificate authentication failed: unknown fingerprint {}",
-                    fingerprint
-                );
+                warn!("Certificate authentication failed: unknown fingerprint");
                 return Ok(AuthResult::fail(ReasonCode::NotAuthorized));
             }
 

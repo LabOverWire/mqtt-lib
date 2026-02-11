@@ -331,22 +331,40 @@
             tbody.innerHTML = '';
 
             const monitorRow = document.createElement('tr');
-            monitorRow.innerHTML = `
-                <td>monitor-client</td>
-                <td><span class="status-badge online">Online</span></td>
-                <td>${new Date(startTime).toLocaleTimeString()}</td>
-                <td>$SYS/#</td>
-            `;
+            const td1 = document.createElement('td');
+            td1.textContent = 'monitor-client';
+            const td2 = document.createElement('td');
+            const statusBadge = document.createElement('span');
+            statusBadge.className = 'status-badge online';
+            statusBadge.textContent = 'Online';
+            td2.appendChild(statusBadge);
+            const td3 = document.createElement('td');
+            td3.textContent = new Date(startTime).toLocaleTimeString();
+            const td4 = document.createElement('td');
+            td4.textContent = '$SYS/#';
+            monitorRow.appendChild(td1);
+            monitorRow.appendChild(td2);
+            monitorRow.appendChild(td3);
+            monitorRow.appendChild(td4);
             tbody.appendChild(monitorRow);
 
             testClients.forEach((client, i) => {
                 const row = document.createElement('tr');
-                row.innerHTML = `
-                    <td>${client.id}</td>
-                    <td><span class="status-badge online">Online</span></td>
-                    <td>${client.connectedAt}</td>
-                    <td>test/messages</td>
-                `;
+                const ctd1 = document.createElement('td');
+                ctd1.textContent = client.id;
+                const ctd2 = document.createElement('td');
+                const cBadge = document.createElement('span');
+                cBadge.className = 'status-badge online';
+                cBadge.textContent = 'Online';
+                ctd2.appendChild(cBadge);
+                const ctd3 = document.createElement('td');
+                ctd3.textContent = client.connectedAt;
+                const ctd4 = document.createElement('td');
+                ctd4.textContent = 'test/messages';
+                row.appendChild(ctd1);
+                row.appendChild(ctd2);
+                row.appendChild(ctd3);
+                row.appendChild(ctd4);
                 tbody.appendChild(row);
             });
         }

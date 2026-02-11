@@ -269,11 +269,19 @@
             const card = document.createElement('div');
             card.className = 'request-card pending';
             card.id = `req-${correlationId}`;
-            card.innerHTML = `
-                <strong>${command}</strong>
-                <div><span class="correlation-id">${correlationId}</span></div>
-                <div style="margin-top: 4px; color: #856404;">Waiting for response...</div>
-            `;
+            const cmdStrong = document.createElement('strong');
+            cmdStrong.textContent = command;
+            const corrDiv = document.createElement('div');
+            const corrSpan = document.createElement('span');
+            corrSpan.className = 'correlation-id';
+            corrSpan.textContent = correlationId;
+            corrDiv.appendChild(corrSpan);
+            const waitDiv = document.createElement('div');
+            waitDiv.style.cssText = 'margin-top: 4px; color: #856404;';
+            waitDiv.textContent = 'Waiting for response...';
+            card.appendChild(cmdStrong);
+            card.appendChild(corrDiv);
+            card.appendChild(waitDiv);
             list.prepend(card);
         }
 
@@ -281,7 +289,12 @@
             const card = document.getElementById(`req-${correlationId}`);
             if (card) {
                 card.className = 'request-card completed';
-                card.querySelector('div:last-child').innerHTML = `<span class="latency">Response in ${latency}ms</span>`;
+                const lastDiv = card.querySelector('div:last-child');
+                lastDiv.innerHTML = '';
+                const latencySpan = document.createElement('span');
+                latencySpan.className = 'latency';
+                latencySpan.textContent = `Response in ${latency}ms`;
+                lastDiv.appendChild(latencySpan);
             }
         }
 
@@ -291,10 +304,16 @@
 
             const card = document.createElement('div');
             card.className = 'response-card';
-            card.innerHTML = `
-                <strong>${command}</strong> → ${result}
-                <div><span class="correlation-id">${correlationId}</span></div>
-            `;
+            const respStrong = document.createElement('strong');
+            respStrong.textContent = command;
+            card.appendChild(respStrong);
+            card.appendChild(document.createTextNode(` → ${result}`));
+            const respCorrDiv = document.createElement('div');
+            const respCorrSpan = document.createElement('span');
+            respCorrSpan.className = 'correlation-id';
+            respCorrSpan.textContent = correlationId;
+            respCorrDiv.appendChild(respCorrSpan);
+            card.appendChild(respCorrDiv);
             list.prepend(card);
         }
 
@@ -312,10 +331,15 @@
             const item = document.createElement('div');
             item.className = `tracker-item ${status}`;
             item.id = `track-${correlationId}`;
-            item.innerHTML = `
-                <span class="correlation-id" style="font-size: 0.7em;">${correlationId.substring(0, 12)}...</span>
-                <span class="arrow">${status === 'completed' ? '→' : '...'}</span>
-            `;
+            const trackCorrSpan = document.createElement('span');
+            trackCorrSpan.className = 'correlation-id';
+            trackCorrSpan.style.fontSize = '0.7em';
+            trackCorrSpan.textContent = `${correlationId.substring(0, 12)}...`;
+            const arrowSpan = document.createElement('span');
+            arrowSpan.className = 'arrow';
+            arrowSpan.textContent = status === 'completed' ? '→' : '...';
+            item.appendChild(trackCorrSpan);
+            item.appendChild(arrowSpan);
             list.prepend(item);
         }
 

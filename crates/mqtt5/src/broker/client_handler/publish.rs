@@ -1,7 +1,9 @@
 //! Publish handling and `QoS` flow control
 
 use crate::broker::events::{ClientPublishEvent, MessageDeliveredEvent};
-use crate::broker::storage::{QueuedMessage, StorageBackend};
+use crate::broker::storage::{
+    InflightDirection, InflightMessage, InflightPhase, QueuedMessage, StorageBackend,
+};
 use crate::error::{MqttError, Result};
 use crate::packet::puback::PubAckPacket;
 use crate::packet::pubcomp::PubCompPacket;
@@ -79,6 +81,8 @@ impl ClientHandler {
             ));
         }
 
+        crate::validate_topic_name(&publish.topic_name)?;
+
         let payload_size = publish.payload.len();
         self.stats.publish_received(payload_size);
 
@@ -142,6 +146,17 @@ impl ClientHandler {
             QoS::ExactlyOnce => {
                 let packet_id = publish.packet_id.unwrap();
                 self.inflight_publishes.insert(packet_id, publish);
+                if let Some(ref storage) = self.storage {
+                    let inflight = InflightMessage::from_publish(
+                        self.inflight_publishes.get(&packet_id).unwrap(),
+                        client_id.clone(),
+                        InflightDirection::Inbound,
+                        InflightPhase::AwaitingPubrel,
+                    );
+                    if let Err(e) = storage.store_inflight_message(inflight).await {
+                        debug!("failed to persist inbound inflight {packet_id}: {e}");
+                    }
+                }
                 let mut pubrec = PubRecPacket::new(packet_id);
                 pubrec.reason_code = ReasonCode::Success;
                 self.transport.write_packet(Packet::PubRec(pubrec)).await?;
@@ -358,7 +373,22 @@ impl ClientHandler {
     }
 
     pub(super) async fn handle_puback(&mut self, puback: &PubAckPacket) {
-        if self.outbound_inflight.remove(&puback.packet_id) {
+        if self.outbound_inflight.remove(&puback.packet_id).is_some() {
+            if let Some(ref storage) = self.storage {
+                if let Err(e) = storage
+                    .remove_inflight_message(
+                        self.client_id.as_ref().unwrap(),
+                        puback.packet_id,
+                        InflightDirection::Outbound,
+                    )
+                    .await
+                {
+                    debug!(
+                        "failed to remove outbound inflight {}: {e}",
+                        puback.packet_id
+                    );
+                }
+            }
             tracing::trace!(
                 packet_id = puback.packet_id,
                 inflight = self.outbound_inflight.len(),
@@ -379,6 +409,22 @@ impl ClientHandler {
     }
 
     pub(super) async fn handle_pubrec(&mut self, pubrec: PubRecPacket) -> Result<()> {
+        if let Some(ref storage) = self.storage {
+            if let Some(publish) = self.outbound_inflight.get(&pubrec.packet_id) {
+                let inflight = InflightMessage::from_publish(
+                    publish,
+                    self.client_id.as_ref().unwrap().clone(),
+                    InflightDirection::Outbound,
+                    InflightPhase::AwaitingPubcomp,
+                );
+                if let Err(e) = storage.store_inflight_message(inflight).await {
+                    debug!(
+                        "failed to update inflight phase for {}: {e}",
+                        pubrec.packet_id
+                    );
+                }
+            }
+        }
         let mut pub_rel = PubRelPacket::new(pubrec.packet_id);
         pub_rel.reason_code = ReasonCode::Success;
         self.transport.write_packet(Packet::PubRel(pub_rel)).await
@@ -387,6 +433,22 @@ impl ClientHandler {
     pub(super) async fn handle_pubrel(&mut self, pubrel: PubRelPacket) -> Result<()> {
         if let Some(publish) = self.inflight_publishes.remove(&pubrel.packet_id) {
             let client_id = self.client_id.as_ref().unwrap();
+
+            if let Some(ref storage) = self.storage {
+                if let Err(e) = storage
+                    .remove_inflight_message(
+                        client_id,
+                        pubrel.packet_id,
+                        InflightDirection::Inbound,
+                    )
+                    .await
+                {
+                    debug!(
+                        "failed to remove inbound inflight {}: {e}",
+                        pubrel.packet_id
+                    );
+                }
+            }
 
             #[cfg(feature = "opentelemetry")]
             self.route_with_trace_context(&publish, client_id).await?;
@@ -400,7 +462,22 @@ impl ClientHandler {
     }
 
     pub(super) async fn handle_pubcomp(&mut self, pubcomp: &PubCompPacket) {
-        if self.outbound_inflight.remove(&pubcomp.packet_id) {
+        if self.outbound_inflight.remove(&pubcomp.packet_id).is_some() {
+            if let Some(ref storage) = self.storage {
+                if let Err(e) = storage
+                    .remove_inflight_message(
+                        self.client_id.as_ref().unwrap(),
+                        pubcomp.packet_id,
+                        InflightDirection::Outbound,
+                    )
+                    .await
+                {
+                    debug!(
+                        "failed to remove outbound inflight {}: {e}",
+                        pubcomp.packet_id
+                    );
+                }
+            }
             tracing::trace!(
                 packet_id = pubcomp.packet_id,
                 inflight = self.outbound_inflight.len(),
@@ -443,7 +520,20 @@ impl ClientHandler {
             }
 
             if let Some(packet_id) = publish.packet_id {
-                self.outbound_inflight.insert(packet_id);
+                self.outbound_inflight.insert(packet_id, publish.clone());
+                if publish.qos == QoS::ExactlyOnce {
+                    if let Some(ref storage) = self.storage {
+                        let inflight = InflightMessage::from_publish(
+                            &publish,
+                            self.client_id.as_ref().unwrap().clone(),
+                            InflightDirection::Outbound,
+                            InflightPhase::AwaitingPubrec,
+                        );
+                        if let Err(e) = storage.store_inflight_message(inflight).await {
+                            debug!("failed to persist outbound inflight {packet_id}: {e}");
+                        }
+                    }
+                }
             }
         }
 
@@ -460,6 +550,52 @@ impl ClientHandler {
         encode_packet_to_buffer(&Packet::Publish(publish), &mut self.write_buffer)?;
         self.transport.write(&self.write_buffer).await?;
         self.stats.publish_sent(payload_size);
+        Ok(())
+    }
+
+    pub(super) async fn resend_inflight_messages(&mut self) -> Result<()> {
+        if let Some(ref storage) = self.storage {
+            let client_id = self.client_id.as_ref().unwrap();
+            let inflights = match storage.get_inflight_messages(client_id).await {
+                Ok(msgs) => msgs,
+                Err(e) => {
+                    warn!("failed to load inflight messages for {client_id}: {e}");
+                    return Ok(());
+                }
+            };
+
+            for msg in inflights {
+                match msg.direction {
+                    InflightDirection::Outbound => match msg.phase {
+                        InflightPhase::AwaitingPubrec => {
+                            let mut publish = msg.to_publish_packet();
+                            publish.dup = true;
+                            self.outbound_inflight
+                                .insert(msg.packet_id, publish.clone());
+                            self.write_buffer.clear();
+                            encode_packet_to_buffer(
+                                &Packet::Publish(publish),
+                                &mut self.write_buffer,
+                            )?;
+                            self.transport.write(&self.write_buffer).await?;
+                        }
+                        InflightPhase::AwaitingPubcomp => {
+                            let publish = msg.to_publish_packet();
+                            self.outbound_inflight.insert(msg.packet_id, publish);
+                            let mut pubrel = PubRelPacket::new(msg.packet_id);
+                            pubrel.reason_code = ReasonCode::Success;
+                            self.transport.write_packet(Packet::PubRel(pubrel)).await?;
+                        }
+                        InflightPhase::AwaitingPubrel => {}
+                    },
+                    InflightDirection::Inbound => {
+                        let publish = msg.to_publish_packet();
+                        self.inflight_publishes.insert(msg.packet_id, publish);
+                    }
+                }
+            }
+            self.advance_packet_id_past_inflight();
+        }
         Ok(())
     }
 }

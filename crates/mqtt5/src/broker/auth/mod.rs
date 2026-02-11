@@ -571,7 +571,7 @@ mod tests {
         assert_eq!(result.user_id, Some("alice".to_string()));
 
         let unknown_fingerprint =
-            "c3d4e5f6789012345678901234567890abcdef123456789012345678901234567b";
+            "c3d4e5f6789012345678901234567890abcdef12345678901234567890123456";
         let connect = ConnectPacket::new(mqtt5_protocol::ConnectOptions::new(format!(
             "cert:{unknown_fingerprint}"
         )));

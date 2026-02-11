@@ -28,6 +28,10 @@ Browser-based tools for generating password and ACL files for native broker auth
 
 Demonstrates QoS 2 (exactly once) message delivery with full acknowledgment flow.
 
+### QoS 2 Recovery (qos2-recovery/)
+
+Demonstrates QoS 2 mid-flight recovery after client disconnection. Subscriber disconnects during a QoS 2 exchange, then reconnects with cleanStart=false to receive the in-flight message from persistent session state.
+
 ### Will Message (will-message/)
 
 Demonstrates Last Will and Testament (LWT) functionality for detecting unexpected client disconnections.
@@ -160,6 +164,17 @@ Test QoS 2 exactly-once message delivery.
 
 ```bash
 cd qos2
+python3 -m http.server 8000
+```
+
+Open http://localhost:8000 in your browser.
+
+#### QoS 2 Recovery
+
+QoS 2 mid-flight recovery after disconnection.
+
+```bash
+cd qos2-recovery
 python3 -m http.server 8000
 ```
 

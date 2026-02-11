@@ -9,7 +9,7 @@ use mqtt5_protocol::protocol::v5::reason_codes::ReasonCode;
 use mqtt5_protocol::types::ProtocolVersion;
 use mqtt5_protocol::{u64_to_u32_saturating, usize_to_u32_saturating};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use tracing::{debug, error};
+use tracing::{debug, error, warn};
 
 use crate::decoder::read_packet;
 use crate::transport::{WasmReader, WasmWriter};
@@ -60,6 +60,12 @@ impl WasmClientHandler {
             assigned_client_id = Some(generated_id);
         }
 
+        if !mqtt5_protocol::is_path_safe_client_id(&connect.client_id) {
+            let connack = ConnAckPacket::new(false, ReasonCode::ClientIdentifierNotValid);
+            self.write_packet(&Packet::ConnAck(connack), writer)?;
+            return Err(MqttError::InvalidClientId(connect.client_id));
+        }
+
         let dummy_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
 
         if self.protocol_version == 5 {
@@ -100,7 +106,7 @@ impl WasmClientHandler {
         self.keep_alive = mqtt5::time::Duration::from_secs(u64::from(connect.keep_alive));
         self.auth_state = AuthState::Completed;
 
-        let session_present = self.handle_session(&connect).await?;
+        let session_present = self.handle_session(&connect, writer).await?;
 
         let mut connack = ConnAckPacket::new(session_present, ReasonCode::Success);
         connack.protocol_version = self.protocol_version;
@@ -147,63 +153,52 @@ impl WasmClientHandler {
         if session_present {
             self.deliver_queued_messages(&connect.client_id, writer)
                 .await?;
+            self.resend_inflight_messages(writer).await?;
+            self.advance_packet_id_past_inflight();
         }
         Ok(())
     }
 
-    pub(super) async fn handle_session(&mut self, connect: &ConnectPacket) -> Result<bool> {
+    pub(super) async fn handle_session(
+        &mut self,
+        connect: &ConnectPacket,
+        writer: &mut WasmWriter,
+    ) -> Result<bool> {
         let client_id = &connect.client_id;
         let session_expiry = connect.properties.get_session_expiry_interval();
 
         if connect.clean_start {
             self.storage.remove_session(client_id).await.ok();
             self.storage.remove_queued_messages(client_id).await.ok();
+            self.storage
+                .remove_all_inflight_messages(client_id)
+                .await
+                .ok();
 
-            let session = ClientSession::new_with_will(
+            let mut session = ClientSession::new_with_will(
                 client_id.clone(),
                 session_expiry != Some(0),
                 session_expiry,
                 connect.will.clone(),
             );
+            session.user_id.clone_from(&self.user_id);
             self.storage.store_session(session.clone()).await.ok();
             self.session = Some(session);
             Ok(false)
         } else {
             match self.storage.get_session(client_id).await {
-                Ok(Some(mut session)) => {
-                    for (topic_filter, stored) in &session.subscriptions {
-                        self.router
-                            .subscribe(
-                                client_id.clone(),
-                                topic_filter.clone(),
-                                stored.qos,
-                                stored.subscription_id,
-                                stored.no_local,
-                                stored.retain_as_published,
-                                stored.retain_handling,
-                                ProtocolVersion::try_from(self.protocol_version)
-                                    .unwrap_or_default(),
-                                stored.change_only,
-                            )
-                            .await?;
-                    }
-
-                    session.will_message.clone_from(&connect.will);
-                    session.will_delay_interval = connect
-                        .will
-                        .as_ref()
-                        .and_then(|w| w.properties.will_delay_interval);
-                    self.storage.store_session(session.clone()).await.ok();
-                    self.session = Some(session);
-                    Ok(true)
+                Ok(Some(session)) => {
+                    self.restore_existing_session(connect, session, writer)
+                        .await
                 }
                 Ok(None) => {
-                    let session = ClientSession::new_with_will(
+                    let mut session = ClientSession::new_with_will(
                         client_id.clone(),
                         session_expiry != Some(0),
                         session_expiry,
                         connect.will.clone(),
                     );
+                    session.user_id.clone_from(&self.user_id);
                     self.storage.store_session(session.clone()).await.ok();
                     self.session = Some(session);
                     Ok(false)
@@ -211,6 +206,65 @@ impl WasmClientHandler {
                 Err(e) => Err(e),
             }
         }
+    }
+
+    async fn restore_existing_session(
+        &mut self,
+        connect: &ConnectPacket,
+        mut session: ClientSession,
+        writer: &mut WasmWriter,
+    ) -> Result<bool> {
+        let client_id = &connect.client_id;
+
+        if session.user_id.as_deref() != self.user_id.as_deref() {
+            warn!(
+                client_id = %client_id,
+                session_user = ?session.user_id,
+                current_user = ?self.user_id,
+                "Session user mismatch, rejecting connection"
+            );
+            let connack = ConnAckPacket::new(false, ReasonCode::NotAuthorized);
+            self.write_packet(&Packet::ConnAck(connack), writer)?;
+            return Err(MqttError::AuthenticationFailed);
+        }
+
+        let mut unauthorized_filters = Vec::new();
+        for (topic_filter, stored) in &session.subscriptions {
+            let authorized = self
+                .auth_provider
+                .authorize_subscribe(client_id, self.user_id.as_deref(), topic_filter)
+                .await;
+            if !authorized {
+                unauthorized_filters.push(topic_filter.clone());
+                continue;
+            }
+            self.router
+                .subscribe(
+                    client_id.clone(),
+                    topic_filter.clone(),
+                    stored.qos,
+                    stored.subscription_id,
+                    stored.no_local,
+                    stored.retain_as_published,
+                    stored.retain_handling,
+                    ProtocolVersion::try_from(self.protocol_version).unwrap_or_default(),
+                    stored.change_only,
+                )
+                .await?;
+        }
+        for filter in &unauthorized_filters {
+            session.subscriptions.remove(filter);
+        }
+
+        session.will_message.clone_from(&connect.will);
+        session.will_delay_interval = connect
+            .will
+            .as_ref()
+            .and_then(|w| w.properties.will_delay_interval);
+        session.user_id.clone_from(&self.user_id);
+        self.storage.store_session(session.clone()).await.ok();
+        self.session = Some(session);
+        Ok(true)
     }
 
     pub(super) async fn process_enhanced_auth_result(
@@ -221,13 +275,14 @@ impl WasmClientHandler {
         match result.status {
             EnhancedAuthStatus::Success => {
                 self.auth_state = AuthState::Completed;
+                self.user_id.clone_from(&result.user_id);
 
                 if let Some(pending) = self.pending_connect.take() {
                     self.client_id = Some(pending.connect.client_id.clone());
                     self.keep_alive =
                         mqtt5::time::Duration::from_secs(u64::from(pending.connect.keep_alive));
 
-                    let session_present = self.handle_session(&pending.connect).await?;
+                    let session_present = self.handle_session(&pending.connect, writer).await?;
 
                     let mut connack = ConnAckPacket::new(session_present, ReasonCode::Success);
                     connack.protocol_version = self.protocol_version;
@@ -283,6 +338,8 @@ impl WasmClientHandler {
                     if session_present {
                         self.deliver_queued_messages(&pending.connect.client_id, writer)
                             .await?;
+                        self.resend_inflight_messages(writer).await?;
+                        self.advance_packet_id_past_inflight();
                     }
                 }
 

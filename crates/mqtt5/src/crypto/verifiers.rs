@@ -3,7 +3,7 @@ use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, SignatureScheme};
 
 #[derive(Debug)]
-pub struct NoVerification;
+pub(crate) struct NoVerification;
 
 impl ServerCertVerifier for NoVerification {
     fn verify_server_cert(

@@ -45,6 +45,7 @@ cp -r pkg examples/acl-permissions/
 cp -r pkg examples/codec-compression/
 cp -r pkg examples/loop-prevention/
 cp -r pkg examples/change-only-delivery/
+cp -r pkg examples/qos2-recovery/
 
 echo "✨ Build complete!"
 echo ""
@@ -132,6 +133,10 @@ echo "  python3 -m http.server 8000"
 echo ""
 echo "Loop Prevention (Duplicate Blocking Demo):"
 echo "  cd examples/loop-prevention"
+echo "  python3 -m http.server 8000"
+echo ""
+echo "QoS 2 Recovery (Mid-Flight Recovery):"
+echo "  cd examples/qos2-recovery"
 echo "  python3 -m http.server 8000"
 echo ""
 echo "Then open http://localhost:8000 in your browser"

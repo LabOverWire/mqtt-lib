@@ -5,6 +5,71 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [mqtt5 0.22.4] / [mqtt5-wasm 0.10.6] - 2026-02-10
+
+### Security
+
+- **JWT exp claim enforcement** - Tokens without `exp` (expiration) claim are now rejected instead of being treated as never-expiring. Applies to both `JwtAuthProvider` and `FederatedJwtAuthProvider`
+- **JWT sub claim enforcement** - Tokens without `sub` (subject) claim are now rejected instead of defaulting to empty string identity
+- **JWT algorithm confusion prevention** - Verifier selection now uses `kid` (key ID) header matching instead of trusting the `alg` header from untrusted tokens. Single-verifier configurations ignore the header algorithm entirely
+- **Session-to-user binding** - Sessions now store the authenticated `user_id`. On reconnect with `clean_start=false`, the broker rejects the connection if the reconnecting user doesn't match the session owner
+- **ACL re-check on session restore** - When restoring subscriptions from a previous session, each topic filter is re-authorized against current ACL rules. Subscriptions that no longer pass authorization are pruned
+- **Certificate auth transport guard** - `cert:` prefixed client IDs are now rejected at the transport layer unless the connection has a verified TLS client certificate. Prevents spoofing certificate identity over plain TCP, WebSocket, or QUIC connections
+- **Certificate auth fingerprint validation** - `CertificateAuthProvider` now validates TLS peer certificate fingerprints against registered fingerprints instead of trusting `cert:` prefix in client IDs. Fingerprints must be exactly 64 hex characters
+- **SCRAM state collision fix** - SCRAM authentication now rejects concurrent authentication attempts for the same `client_id`, preventing auth state from being clobbered
+- **QUIC bridge TLS verification** - QUIC bridges now default to certificate verification enabled (`secure: true`), matching QUIC's mandatory TLS requirement
+- **WebSocket path enforcement** - Requests to non-configured WebSocket paths now return HTTP 404 instead of silently accepting the connection
+- **WebSocket Origin validation** - New `allowed_origins` configuration on `WebSocketServerConfig` for Cross-Site WebSocket Hijacking (CSWSH) prevention. When set, connections without a matching `Origin` header are rejected with HTTP 403
+- **Bridge config password redaction** - `BridgeConfig` Debug output now prints `[REDACTED]` instead of the plaintext password
+- **Password field redaction in logs** - Auth provider tracing instrumentation now skips password fields to prevent credential leakage in logs
+- **NoVerification struct restricted** - `NoVerification` (TLS certificate bypass) changed from `pub` to `pub(crate)` to prevent accidental misuse by downstream crates
+- **Topic name validation on publish** - Broker now validates topic names on incoming PUBLISH packets after topic alias resolution, rejecting invalid topics before routing
+- **Topic filename bijective encoding** - File storage backend replaced `_slash_` topic-to-filename encoding with percent-encoding (`/` → `%2F`, `%` → `%25`), preventing collisions between topics like `a/b` and `a_slash_b`
+- **fsync for file storage durability** - Atomic file writes now call `sync_data()` before rename, ensuring data reaches disk before the old file is replaced
+- **SCRAM password zeroization** - Client-side SCRAM password storage now uses `Zeroizing<String>` which automatically zeros memory on drop
+- **Regex compilation caching** - JWT claim pattern regexes are now compiled once at deserialization time instead of on every authentication attempt. Invalid regex patterns fail at config load
+- **innerHTML XSS prevention** - All 19 WASM example HTML files replaced `innerHTML +=` with safe DOM manipulation (`createElement` + `textContent` + `appendChild`)
+- **WASM enhanced auth user_id propagation** - Fixed missing `user_id` capture in WASM broker's enhanced auth success path
+- **Packet ID collision prevention** - After restoring inflight messages on reconnect, the broker now scans both `outbound_inflight` and `inflight_publishes` maps to advance the packet ID counter past any occupied IDs, preventing collisions in both native and WASM brokers
+- **Session user binding hardened** - Anonymous-to-authenticated and authenticated-to-anonymous session mismatches are now correctly rejected (previously only authenticated-to-different-authenticated was caught)
+
+### Fixed
+
+- **InflightMessage expiry survives serialization** - Replaced `#[serde(skip)]` `expires_at` with serializable `expires_at_secs` (epoch seconds) plus an in-memory cache, so expiry is preserved across file backend round-trips
+
+### Changed
+
+- **MemoryBackend inflight storage** - Inflight messages now stored in `HashMap<(u16, InflightDirection), InflightMessage>` per client instead of `Vec<InflightMessage>`, giving O(1) insert/remove/lookup instead of O(n) linear scan
+
+## [mqtt5 0.22.3] / [mqtt5-wasm 0.10.5] - 2026-02-10
+
+### Added
+
+- **QoS 2 inflight persistence** - Broker persists in-flight QoS 2 messages across client reconnections
+  - `InflightMessage` struct stores decomposed publish data with direction (Inbound/Outbound) and phase (AwaitingPubrec/AwaitingPubrel/AwaitingPubcomp)
+  - `StorageBackend` trait extended with `store_inflight_message`, `get_inflight_messages`, `remove_inflight_message`, `remove_all_inflight_messages`
+  - `MemoryBackend` and `FileBackend` implementations for inflight storage
+  - On reconnect with `clean_start=false`, broker resends outbound PUBLISH (DUP=1) or PUBREL and restores inbound inflight state
+  - `clean_start=true` clears all inflight messages
+  - Message expiry tracking for inflight messages with automatic cleanup
+  - Applies to both native and WASM brokers
+
+- **WASM outbound inflight tracking** - WASM broker now tracks outbound QoS 2 messages
+  - Assigns packet IDs and persists outbound inflight state in the forward loop
+  - `handle_pubrec`/`handle_pubcomp` update and remove inflight storage
+  - `resend_inflight_messages` on session restore
+
+- **QoS 2 recovery demo** (`examples/qos2-recovery/`) - Interactive browser demo showing QoS 2 mid-flight recovery after connection interruption
+
+## [mqtt5 0.22.2] / [mqtt5-wasm 0.10.4] - 2026-02-10
+
+### Fixed
+
+- **Missing `user_id` in enhanced auth success paths** - JWT-authenticated clients now correctly propagate identity downstream
+  - Enhanced auth (JWT) success paths never captured `result.user_id` into `self.user_id`, so `inject_sender()` inserted `None` for JWT clients
+  - Fixes immediate enhanced auth success, multi-step Continue→Success, and re-authentication success
+  - Password auth was unaffected (already captured `user_id` correctly)
+
 ## [mqtt5-protocol 0.9.5] / [mqtt5 0.22.1] / [mqtt5-wasm 0.10.3] / [mqttv5-cli 0.20.3] - 2026-02-01
 
 ### Security

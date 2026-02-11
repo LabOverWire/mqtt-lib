@@ -278,15 +278,59 @@ mqttv5 broker \
 }
 ```
 
+## Session Security
+
+### Session-to-User Binding
+
+Sessions store the authenticated `user_id`. When a client reconnects with `clean_start=false`, the broker verifies the reconnecting user matches the session owner. Mismatched users are rejected with `NotAuthorized`, preventing session hijacking where an attacker reconnects using a known client ID.
+
+### ACL Re-Check on Session Restore
+
+When restoring subscriptions from a previous session, each topic filter is re-authorized against current ACL rules. Subscriptions that no longer pass authorization are silently pruned from the restored session. This ensures ACL rule changes take effect even for persistent sessions.
+
 ## Security Notes
 
+### Credentials
+
 - Passwords hashed with Argon2id
-- SCRAM never transmits passwords
-- JWKS endpoints must use HTTPS
+- SCRAM never transmits passwords; client-side passwords zeroized on drop
+- Password fields excluded from tracing/log output
 - Password/ACL files should have mode 0600
-- Deny rules evaluated before allow rules
+- Bridge config Debug output redacts password fields
 - Enable TLS to protect credentials in transit
+
+### JWT
+
+- Tokens **must** include `exp` (expiration) and `sub` (subject) claims; tokens without either are rejected
+- Verifier selection uses `kid` (key ID) header matching, not the `alg` header, preventing algorithm confusion attacks
+- Single-verifier configurations ignore the token's `alg` header entirely
+- JWKS endpoints must use HTTPS
+- Claim pattern regexes compiled once at config load (invalid patterns fail early)
+
+### SCRAM
+
+- Authentication state keyed by `client_id`; concurrent authentication for the same client ID is rejected
+- Channel binding supported for additional transport-layer verification
+
+### Certificate Authentication
+
+- `CertificateAuthProvider` validates TLS peer certificate fingerprints (64-char hex SHA-256)
+- Client IDs starting with `cert:` are matched against registered fingerprints from the actual TLS connection
+- The broker rejects `cert:` prefixed client IDs at the transport layer before authentication unless the connection has a verified TLS client certificate (`client_cert_info`). This prevents spoofing over plain TCP, WebSocket, or QUIC
+- Fingerprints are case-insensitive and must be exactly 64 hex characters
+
+### ACL
+
+- Deny rules evaluated before allow rules
+- `%u` substitution rejects usernames containing `+`, `#`, or `/` to prevent wildcard injection
+- Topic names validated on publish after topic alias resolution
+
+### Transport
+
 - Rate limiting enabled by default (5 attempts per 60s, 5-minute lockout)
+- QUIC bridges default to certificate verification enabled
+- WebSocket `allowed_origins` configuration prevents Cross-Site WebSocket Hijacking
+- WebSocket path enforcement rejects connections to non-configured paths
 
 ## Rate Limiting
 

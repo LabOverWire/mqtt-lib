@@ -1,5 +1,5 @@
 use super::jwks::{JwkKey, JwksCache, JwksEndpointConfig};
-use super::jwt::{JwtClaims, JwtHeader, JwtVerifier};
+use super::jwt::{JwtClaims, JwtHeader, JwtVerifier, JwtVerifierKey};
 use crate::broker::acl::{AclManager, FederatedRoleEntry};
 use crate::broker::auth::{AuthProvider, AuthResult, EnhancedAuthResult};
 use crate::broker::config::{
@@ -210,8 +210,7 @@ impl FederatedJwtAuthProvider {
             let keys = self.jwks_cache.get_keys_for_issuer(&issuer).await;
             let mut found = false;
             for key in keys {
-                if key.algorithm == header.alg
-                    && Self::verify_with_jwk_key(&key, &header.alg, message_bytes, &signature_bytes)
+                if Self::verify_with_jwk_key(&key, &key.algorithm, message_bytes, &signature_bytes)
                 {
                     found = true;
                     break;
@@ -234,10 +233,9 @@ impl FederatedJwtAuthProvider {
             .clock_skew_secs
             .max(self.clock_skew_secs);
 
-        if let Some(exp) = claims.exp {
-            if now > exp + clock_skew {
-                return Err(JwtError::Expired);
-            }
+        let exp = claims.exp.ok_or(JwtError::MissingClaim("exp"))?;
+        if now > exp + clock_skew {
+            return Err(JwtError::Expired);
         }
 
         if let Some(nbf) = claims.nbf {
@@ -280,19 +278,19 @@ impl FederatedJwtAuthProvider {
         if verifier.algorithm() != alg {
             return false;
         }
-        match verifier {
-            JwtVerifier::Hs256(secret) => {
+        match &verifier.key {
+            JwtVerifierKey::Hs256(secret) => {
                 let key = hmac::Key::new(hmac::HMAC_SHA256, secret);
                 hmac::verify(&key, message, sig).is_ok()
             }
-            JwtVerifier::Rs256(public_key) => {
+            JwtVerifierKey::Rs256(public_key) => {
                 let key = signature::UnparsedPublicKey::new(
                     &signature::RSA_PKCS1_2048_8192_SHA256,
                     public_key,
                 );
                 key.verify(message, sig).is_ok()
             }
-            JwtVerifier::Es256(public_key) => {
+            JwtVerifierKey::Es256(public_key) => {
                 let key = signature::UnparsedPublicKey::new(
                     &signature::ECDSA_P256_SHA256_FIXED,
                     public_key,
@@ -524,9 +522,9 @@ fn load_static_verifier(
     })?;
 
     Ok(match algorithm {
-        crate::broker::config::JwtAlgorithm::HS256 => JwtVerifier::Hs256(key_data),
-        crate::broker::config::JwtAlgorithm::RS256 => JwtVerifier::Rs256(key_data),
-        crate::broker::config::JwtAlgorithm::ES256 => JwtVerifier::Es256(key_data),
+        crate::broker::config::JwtAlgorithm::HS256 => JwtVerifier::hs256(key_data),
+        crate::broker::config::JwtAlgorithm::RS256 => JwtVerifier::rs256(key_data),
+        crate::broker::config::JwtAlgorithm::ES256 => JwtVerifier::es256(key_data),
     })
 }
 
@@ -534,7 +532,7 @@ fn load_fallback_verifier(path: &PathBuf) -> Result<JwtVerifier> {
     let key_data = std::fs::read(path).map_err(|e| {
         crate::error::MqttError::Configuration(format!("Failed to read fallback key file: {e}"))
     })?;
-    Ok(JwtVerifier::Rs256(key_data))
+    Ok(JwtVerifier::rs256(key_data))
 }
 
 fn base64url_decode(input: &str) -> std::result::Result<Vec<u8>, JwtError> {
@@ -560,6 +558,7 @@ enum JwtError {
     Expired,
     NotYetValid,
     InvalidClaim(&'static str),
+    MissingClaim(&'static str),
 }
 
 impl std::fmt::Display for JwtError {
@@ -572,6 +571,7 @@ impl std::fmt::Display for JwtError {
             Self::Expired => write!(f, "token expired"),
             Self::NotYetValid => write!(f, "token not yet valid"),
             Self::InvalidClaim(msg) => write!(f, "invalid claim: {msg}"),
+            Self::MissingClaim(claim) => write!(f, "missing required claim: {claim}"),
         }
     }
 }

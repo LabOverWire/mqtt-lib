@@ -2,7 +2,10 @@
 //!
 //! Provides volatile storage for development and testing scenarios.
 
-use super::{ClientSession, QueuedMessage, RetainedMessage, StorageBackend};
+use super::{
+    ClientSession, InflightDirection, InflightMessage, QueuedMessage, RetainedMessage,
+    StorageBackend,
+};
 use crate::error::Result;
 use crate::validation::topic_matches_filter;
 use parking_lot::Mutex;
@@ -10,15 +13,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::debug;
 
-/// In-memory storage backend
+type InflightMap = HashMap<String, HashMap<(u16, InflightDirection), InflightMessage>>;
+
 #[derive(Debug)]
 pub struct MemoryBackend {
-    /// Retained messages by topic
     retained: Arc<Mutex<HashMap<String, RetainedMessage>>>,
-    /// Client sessions by client ID
     sessions: Arc<Mutex<HashMap<String, ClientSession>>>,
-    /// Queued messages by client ID
     queues: Arc<Mutex<HashMap<String, Vec<QueuedMessage>>>>,
+    inflight: Arc<Mutex<InflightMap>>,
 }
 
 impl MemoryBackend {
@@ -29,6 +31,7 @@ impl MemoryBackend {
             retained: Arc::new(Mutex::new(HashMap::new())),
             sessions: Arc::new(Mutex::new(HashMap::new())),
             queues: Arc::new(Mutex::new(HashMap::new())),
+            inflight: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -147,6 +150,50 @@ impl StorageBackend for MemoryBackend {
         Ok(())
     }
 
+    async fn store_inflight_message(&self, message: InflightMessage) -> Result<()> {
+        let mut inflight = self.inflight.lock();
+        let entries = inflight.entry(message.client_id.clone()).or_default();
+        let key = (message.packet_id, message.direction);
+        entries.insert(key, message);
+        Ok(())
+    }
+
+    async fn get_inflight_messages(&self, client_id: &str) -> Result<Vec<InflightMessage>> {
+        let inflight = self.inflight.lock();
+        Ok(inflight
+            .get(client_id)
+            .map(|entries| {
+                entries
+                    .values()
+                    .filter(|e| !e.is_expired())
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
+    async fn remove_inflight_message(
+        &self,
+        client_id: &str,
+        packet_id: u16,
+        direction: InflightDirection,
+    ) -> Result<()> {
+        let mut inflight = self.inflight.lock();
+        if let Some(entries) = inflight.get_mut(client_id) {
+            entries.remove(&(packet_id, direction));
+            if entries.is_empty() {
+                inflight.remove(client_id);
+            }
+        }
+        Ok(())
+    }
+
+    async fn remove_all_inflight_messages(&self, client_id: &str) -> Result<()> {
+        let mut inflight = self.inflight.lock();
+        inflight.remove(client_id);
+        Ok(())
+    }
+
     async fn cleanup_expired(&self) -> Result<()> {
         let mut removed_count = 0;
 
@@ -182,6 +229,16 @@ impl StorageBackend for MemoryBackend {
                 removed_count += original_len - queue.len();
             }
             queues.retain(|_, queue| !queue.is_empty());
+        }
+
+        {
+            let mut inflight = self.inflight.lock();
+            for entries in inflight.values_mut() {
+                let original_len = entries.len();
+                entries.retain(|_, entry| !entry.is_expired());
+                removed_count += original_len - entries.len();
+            }
+            inflight.retain(|_, entries| !entries.is_empty());
         }
 
         if removed_count > 0 {

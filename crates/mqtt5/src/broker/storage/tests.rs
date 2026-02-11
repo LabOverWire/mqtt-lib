@@ -2,7 +2,10 @@
 
 #[cfg(test)]
 use super::super::*;
-use crate::broker::storage::{ClientSession, QueuedMessage, RetainedMessage, StoredSubscription};
+use crate::broker::storage::{
+    ClientSession, InflightDirection, InflightMessage, InflightPhase, QueuedMessage,
+    RetainedMessage, StoredSubscription,
+};
 use crate::packet::publish::PublishPacket;
 use crate::protocol::v5::properties::{PropertyId, PropertyValue};
 use crate::time::Duration;
@@ -315,4 +318,294 @@ async fn test_dynamic_storage_backends() {
         .unwrap();
     let retrieved = dynamic.get_retained_message("dynamic/test").await.unwrap();
     assert!(retrieved.is_some());
+}
+
+fn create_test_inflight(
+    client_id: &str,
+    packet_id: u16,
+    direction: InflightDirection,
+    phase: InflightPhase,
+) -> InflightMessage {
+    let mut packet = PublishPacket::new("test/inflight", &b"inflight data"[..], QoS::ExactlyOnce);
+    packet.packet_id = Some(packet_id);
+    InflightMessage::from_publish(&packet, client_id.to_string(), direction, phase)
+}
+
+#[tokio::test]
+async fn test_memory_inflight_store_and_retrieve() {
+    let backend = MemoryBackend::new();
+
+    let msg = create_test_inflight(
+        "client1",
+        1,
+        InflightDirection::Outbound,
+        InflightPhase::AwaitingPubrec,
+    );
+    backend.store_inflight_message(msg).await.unwrap();
+
+    let msgs = backend.get_inflight_messages("client1").await.unwrap();
+    assert_eq!(msgs.len(), 1);
+    assert_eq!(msgs[0].packet_id, 1);
+    assert_eq!(msgs[0].direction, InflightDirection::Outbound);
+    assert_eq!(msgs[0].phase, InflightPhase::AwaitingPubrec);
+    assert_eq!(msgs[0].topic, "test/inflight");
+    assert_eq!(msgs[0].payload, b"inflight data");
+}
+
+#[tokio::test]
+async fn test_memory_inflight_upsert() {
+    let backend = MemoryBackend::new();
+
+    let initial = create_test_inflight(
+        "client1",
+        1,
+        InflightDirection::Outbound,
+        InflightPhase::AwaitingPubrec,
+    );
+    backend.store_inflight_message(initial).await.unwrap();
+
+    let updated = create_test_inflight(
+        "client1",
+        1,
+        InflightDirection::Outbound,
+        InflightPhase::AwaitingPubcomp,
+    );
+    backend.store_inflight_message(updated).await.unwrap();
+
+    let stored = backend.get_inflight_messages("client1").await.unwrap();
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].phase, InflightPhase::AwaitingPubcomp);
+}
+
+#[tokio::test]
+async fn test_memory_inflight_remove_single() {
+    let backend = MemoryBackend::new();
+
+    let outbound = create_test_inflight(
+        "client1",
+        1,
+        InflightDirection::Outbound,
+        InflightPhase::AwaitingPubrec,
+    );
+    let inbound = create_test_inflight(
+        "client1",
+        2,
+        InflightDirection::Inbound,
+        InflightPhase::AwaitingPubrel,
+    );
+    backend.store_inflight_message(outbound).await.unwrap();
+    backend.store_inflight_message(inbound).await.unwrap();
+
+    backend
+        .remove_inflight_message("client1", 1, InflightDirection::Outbound)
+        .await
+        .unwrap();
+
+    let remaining = backend.get_inflight_messages("client1").await.unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].packet_id, 2);
+    assert_eq!(remaining[0].direction, InflightDirection::Inbound);
+}
+
+#[tokio::test]
+async fn test_memory_inflight_remove_all() {
+    let backend = MemoryBackend::new();
+
+    for i in 1..=5 {
+        let msg = create_test_inflight(
+            "client1",
+            i,
+            InflightDirection::Outbound,
+            InflightPhase::AwaitingPubrec,
+        );
+        backend.store_inflight_message(msg).await.unwrap();
+    }
+
+    assert_eq!(
+        backend
+            .get_inflight_messages("client1")
+            .await
+            .unwrap()
+            .len(),
+        5
+    );
+
+    backend
+        .remove_all_inflight_messages("client1")
+        .await
+        .unwrap();
+
+    assert!(backend
+        .get_inflight_messages("client1")
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn test_memory_inflight_direction_isolation() {
+    let backend = MemoryBackend::new();
+
+    let inbound = create_test_inflight(
+        "client1",
+        1,
+        InflightDirection::Inbound,
+        InflightPhase::AwaitingPubrel,
+    );
+    let outbound = create_test_inflight(
+        "client1",
+        1,
+        InflightDirection::Outbound,
+        InflightPhase::AwaitingPubrec,
+    );
+    backend.store_inflight_message(inbound).await.unwrap();
+    backend.store_inflight_message(outbound).await.unwrap();
+
+    let msgs = backend.get_inflight_messages("client1").await.unwrap();
+    assert_eq!(msgs.len(), 2);
+
+    backend
+        .remove_inflight_message("client1", 1, InflightDirection::Inbound)
+        .await
+        .unwrap();
+
+    let msgs = backend.get_inflight_messages("client1").await.unwrap();
+    assert_eq!(msgs.len(), 1);
+    assert_eq!(msgs[0].direction, InflightDirection::Outbound);
+}
+
+#[tokio::test]
+async fn test_inflight_to_publish_roundtrip() {
+    let mut original = PublishPacket::new("test/roundtrip", &b"payload"[..], QoS::ExactlyOnce);
+    original.retain = true;
+    original.packet_id = Some(42);
+
+    let inflight = InflightMessage::from_publish(
+        &original,
+        "client1".to_string(),
+        InflightDirection::Outbound,
+        InflightPhase::AwaitingPubrec,
+    );
+
+    let reconstructed = inflight.to_publish_packet();
+    assert_eq!(reconstructed.topic_name, "test/roundtrip");
+    assert_eq!(&reconstructed.payload[..], b"payload");
+    assert_eq!(reconstructed.qos, QoS::ExactlyOnce);
+    assert!(reconstructed.retain);
+    assert_eq!(reconstructed.packet_id, Some(42));
+}
+
+#[tokio::test]
+async fn test_file_backend_inflight_persistence() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend_path = dir.path().to_path_buf();
+
+    {
+        let backend = FileBackend::new(&backend_path).await.unwrap();
+        let msg = create_test_inflight(
+            "client1",
+            1,
+            InflightDirection::Outbound,
+            InflightPhase::AwaitingPubrec,
+        );
+        backend.store_inflight_message(msg).await.unwrap();
+
+        let msg2 = create_test_inflight(
+            "client1",
+            2,
+            InflightDirection::Inbound,
+            InflightPhase::AwaitingPubrel,
+        );
+        backend.store_inflight_message(msg2).await.unwrap();
+    }
+
+    {
+        let backend = FileBackend::new(&backend_path).await.unwrap();
+        let msgs = backend.get_inflight_messages("client1").await.unwrap();
+        assert_eq!(msgs.len(), 2);
+
+        let outbound = msgs
+            .iter()
+            .find(|m| m.direction == InflightDirection::Outbound);
+        assert!(outbound.is_some());
+        assert_eq!(outbound.unwrap().packet_id, 1);
+        assert_eq!(outbound.unwrap().phase, InflightPhase::AwaitingPubrec);
+
+        let inbound = msgs
+            .iter()
+            .find(|m| m.direction == InflightDirection::Inbound);
+        assert!(inbound.is_some());
+        assert_eq!(inbound.unwrap().packet_id, 2);
+    }
+}
+
+#[tokio::test]
+async fn test_file_backend_inflight_remove() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = FileBackend::new(dir.path()).await.unwrap();
+
+    let msg = create_test_inflight(
+        "client1",
+        1,
+        InflightDirection::Outbound,
+        InflightPhase::AwaitingPubrec,
+    );
+    backend.store_inflight_message(msg).await.unwrap();
+
+    backend
+        .remove_inflight_message("client1", 1, InflightDirection::Outbound)
+        .await
+        .unwrap();
+
+    let msgs = backend.get_inflight_messages("client1").await.unwrap();
+    assert!(msgs.is_empty());
+}
+
+#[tokio::test]
+async fn test_file_backend_inflight_remove_all() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = FileBackend::new(dir.path()).await.unwrap();
+
+    for i in 1..=3 {
+        let msg = create_test_inflight(
+            "client1",
+            i,
+            InflightDirection::Outbound,
+            InflightPhase::AwaitingPubrec,
+        );
+        backend.store_inflight_message(msg).await.unwrap();
+    }
+
+    backend
+        .remove_all_inflight_messages("client1")
+        .await
+        .unwrap();
+
+    let msgs = backend.get_inflight_messages("client1").await.unwrap();
+    assert!(msgs.is_empty());
+}
+
+#[tokio::test]
+async fn test_dynamic_storage_inflight() {
+    let memory = MemoryBackend::new();
+    let dynamic = DynamicStorage::Memory(memory);
+
+    let msg = create_test_inflight(
+        "client1",
+        1,
+        InflightDirection::Outbound,
+        InflightPhase::AwaitingPubrec,
+    );
+    dynamic.store_inflight_message(msg).await.unwrap();
+
+    let msgs = dynamic.get_inflight_messages("client1").await.unwrap();
+    assert_eq!(msgs.len(), 1);
+
+    dynamic
+        .remove_inflight_message("client1", 1, InflightDirection::Outbound)
+        .await
+        .unwrap();
+
+    let msgs = dynamic.get_inflight_messages("client1").await.unwrap();
+    assert!(msgs.is_empty());
 }

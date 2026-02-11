@@ -194,7 +194,7 @@ The client validates acknowledgment reason codes:
 2. **Server Listeners**: One per transport
    - TCP: Direct `accept()` loop
    - TLS: rustls wrapper with certificate validation
-   - WebSocket: HTTP upgrade with tokio-tungstenite
+   - WebSocket: HTTP upgrade with tokio-tungstenite, path enforcement, Origin validation
    - QUIC: quinn endpoint with multistream
 
 3. **ClientHandler**: Per-client connection
@@ -208,8 +208,8 @@ The client validates acknowledgment reason codes:
    - Shared subscription support (`$share/group/topic`)
 
 5. **Storage Backend**: Persistence layer
-   - Sessions, retained messages, queued messages
-   - File-based or in-memory implementations
+   - Sessions, retained messages, queued messages, inflight messages
+   - File-based (percent-encoded filenames, atomic writes with fsync) or in-memory implementations
 
 ### Broker Data Flow
 
@@ -223,23 +223,29 @@ Routing:     Publisher -> Router.route_message() -> subscribers -> write_packet(
 
 Pluggable providers via `AuthProvider` trait:
 - `AllowAllAuthProvider` - No authentication (development)
-- `PasswordAuthProvider` - File-based with argon2 hashing
-- `CertificateAuthProvider` - Client certificate validation
-- `JwtAuthProvider` - JWT token validation with JWKS support
-- `FederatedJwtAuthProvider` - Multi-issuer JWT support
+- `PasswordAuthProvider` - File-based with argon2 hashing (password fields excluded from logs)
+- `CertificateAuthProvider` - TLS peer certificate fingerprint validation (64-char hex SHA-256)
+- `JwtAuthProvider` - JWT token validation with `kid`-based verifier selection, mandatory `exp`/`sub` claims
+- `FederatedJwtAuthProvider` - Multi-issuer JWT with JWKS auto-refresh and compiled regex claim patterns
 - `ComprehensiveAuthProvider` - Combines multiple methods
 
 Enhanced authentication mechanisms:
-- SCRAM-SHA-256 with channel binding
-- JWT with custom claims extraction
+- SCRAM-SHA-256 with channel binding (rejects concurrent auth for same client ID)
+- JWT with algorithm confusion prevention and claim enforcement
 - PLAIN over TLS
+
+Session security:
+- Sessions bound to authenticated `user_id` (rejects reconnection from different user)
+- ACL re-checked on session restore (prunes unauthorized subscriptions)
+- `NoVerification` TLS bypass restricted to `pub(crate)` scope
 
 ### ACL System
 
 Rule-based access control:
 - Wildcard topic matching in rules
-- `%u` substitution expands to authenticated username in topic patterns
+- `%u` substitution expands to authenticated username in topic patterns (rejects usernames with `+`, `#`, `/`)
 - Publish/subscribe permission separation
+- Topic name validation on publish (after topic alias resolution)
 - Role-based access control (RBAC)
 - CLI management: `mqttv5 acl add/remove/list/check`
 - Sender identity injection: broker stamps `x-mqtt-sender` user property on PUBLISH packets

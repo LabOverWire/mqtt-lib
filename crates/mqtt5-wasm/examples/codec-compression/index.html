@@ -373,14 +373,25 @@
                 ? payloadText.substring(0, 500) + '... [truncated]'
                 : payloadText;
 
-            messageDiv.innerHTML = `
-                <div class="header">
-                    <span class="topic">${topic}</span>
-                    <span class="compression-info">${compressionInfo}</span>
-                </div>
-                <div class="payload">${truncated}</div>
-                <div class="time">${new Date().toLocaleTimeString()} - ${direction}</div>
-            `;
+            const headerDiv = document.createElement('div');
+            headerDiv.className = 'header';
+            const topicSpan = document.createElement('span');
+            topicSpan.className = 'topic';
+            topicSpan.textContent = topic;
+            const compSpan = document.createElement('span');
+            compSpan.className = 'compression-info';
+            compSpan.textContent = compressionInfo;
+            headerDiv.appendChild(topicSpan);
+            headerDiv.appendChild(compSpan);
+            const payloadDiv = document.createElement('div');
+            payloadDiv.className = 'payload';
+            payloadDiv.textContent = truncated;
+            const timeDiv = document.createElement('div');
+            timeDiv.className = 'time';
+            timeDiv.textContent = `${new Date().toLocaleTimeString()} - ${direction}`;
+            messageDiv.appendChild(headerDiv);
+            messageDiv.appendChild(payloadDiv);
+            messageDiv.appendChild(timeDiv);
 
             messagesEl.insertBefore(messageDiv, messagesEl.firstChild);
         }

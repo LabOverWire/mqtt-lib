@@ -78,6 +78,33 @@ impl ClientHandler {
             assigned_client_id = Some(generated_id.clone());
         }
 
+        if !crate::is_path_safe_client_id(&connect.client_id) {
+            warn!(
+                client_id = %connect.client_id,
+                addr = %self.client_addr,
+                "Rejecting connection: invalid client identifier"
+            );
+            let connack = ConnAckPacket::new(false, ReasonCode::ClientIdentifierNotValid);
+            self.transport
+                .write_packet(Packet::ConnAck(connack))
+                .await?;
+            return Err(MqttError::InvalidClientId(connect.client_id));
+        }
+
+        if connect.client_id.starts_with("cert:") && self.transport.client_cert_info().is_none() {
+            warn!(
+                client_id = %connect.client_id,
+                transport = self.transport.transport_type(),
+                addr = %self.client_addr,
+                "Rejecting cert: client ID on connection without verified client certificate"
+            );
+            let connack = ConnAckPacket::new(false, ReasonCode::NotAuthorized);
+            self.transport
+                .write_packet(Packet::ConnAck(connack))
+                .await?;
+            return Err(MqttError::AuthenticationFailed);
+        }
+
         let auth_method_prop = connect.properties.get_authentication_method();
         let auth_data_prop = connect.properties.get_authentication_data();
 
@@ -258,6 +285,7 @@ impl ClientHandler {
 
         if session_present {
             self.deliver_queued_messages(&connect.client_id).await?;
+            self.resend_inflight_messages().await?;
         }
 
         Ok(())
@@ -301,11 +329,15 @@ impl ClientHandler {
             will_message,
         );
         session.receive_maximum = self.client_receive_maximum;
+        session.user_id.clone_from(&self.user_id);
         debug!(
             "Created new session with will_delay_interval: {:?}",
             session.will_delay_interval
         );
         storage.store_session(session.clone()).await?;
+        storage
+            .remove_all_inflight_messages(&connect.client_id)
+            .await?;
         self.session = Some(session);
         Ok(())
     }
@@ -316,7 +348,35 @@ impl ClientHandler {
         mut session: ClientSession,
         storage: &Arc<DynamicStorage>,
     ) -> Result<()> {
+        if session.user_id.as_deref() != self.user_id.as_deref() {
+            warn!(
+                client_id = %connect.client_id,
+                session_user = ?session.user_id,
+                current_user = ?self.user_id,
+                "Session user mismatch, rejecting connection"
+            );
+            let connack = ConnAckPacket::new(false, ReasonCode::NotAuthorized);
+            self.transport
+                .write_packet(Packet::ConnAck(connack))
+                .await?;
+            return Err(MqttError::AuthenticationFailed);
+        }
+
+        let mut unauthorized_filters = Vec::new();
         for (topic_filter, stored) in &session.subscriptions {
+            let authorized = self
+                .auth_provider
+                .authorize_subscribe(&connect.client_id, self.user_id.as_deref(), topic_filter)
+                .await;
+            if !authorized {
+                warn!(
+                    client_id = %connect.client_id,
+                    topic_filter = %topic_filter,
+                    "Dropping subscription on session restore: no longer authorized"
+                );
+                unauthorized_filters.push(topic_filter.clone());
+                continue;
+            }
             self.router
                 .subscribe(
                     connect.client_id.clone(),
@@ -331,6 +391,9 @@ impl ClientHandler {
                 )
                 .await?;
         }
+        for filter in &unauthorized_filters {
+            session.subscriptions.remove(filter);
+        }
 
         self.router
             .load_change_only_state(&connect.client_id, session.change_only_state.clone())
@@ -343,6 +406,7 @@ impl ClientHandler {
             .and_then(|w| w.properties.will_delay_interval);
 
         session.receive_maximum = self.client_receive_maximum;
+        session.user_id.clone_from(&self.user_id);
 
         session.touch();
         storage.store_session(session.clone()).await?;

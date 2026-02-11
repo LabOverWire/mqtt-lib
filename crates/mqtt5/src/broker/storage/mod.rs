@@ -147,6 +147,8 @@ pub struct ClientSession {
     pub receive_maximum: u16,
     #[serde(default)]
     pub change_only_state: ChangeOnlyState,
+    #[serde(default)]
+    pub user_id: Option<String>,
 }
 
 fn default_receive_maximum() -> u16 {
@@ -237,6 +239,36 @@ pub trait StorageBackend: Send + Sync {
         &self,
         client_id: &str,
     ) -> impl std::future::Future<Output = Result<()>> + Send;
+
+    fn store_inflight_message(
+        &self,
+        _message: InflightMessage,
+    ) -> impl std::future::Future<Output = Result<()>> + Send {
+        async { Ok(()) }
+    }
+
+    fn get_inflight_messages(
+        &self,
+        _client_id: &str,
+    ) -> impl std::future::Future<Output = Result<Vec<InflightMessage>>> + Send {
+        async { Ok(Vec::new()) }
+    }
+
+    fn remove_inflight_message(
+        &self,
+        _client_id: &str,
+        _packet_id: u16,
+        _direction: InflightDirection,
+    ) -> impl std::future::Future<Output = Result<()>> + Send {
+        async { Ok(()) }
+    }
+
+    fn remove_all_inflight_messages(
+        &self,
+        _client_id: &str,
+    ) -> impl std::future::Future<Output = Result<()>> + Send {
+        async { Ok(()) }
+    }
 
     /// Clean up expired messages and sessions
     fn cleanup_expired(&self) -> impl std::future::Future<Output = Result<()>> + Send;
@@ -626,6 +658,7 @@ impl ClientSession {
             will_delay_interval: None,
             receive_maximum: 65535,
             change_only_state: ChangeOnlyState::default(),
+            user_id: None,
         }
     }
 
@@ -652,6 +685,7 @@ impl ClientSession {
             will_delay_interval: will_delay,
             receive_maximum: 65535,
             change_only_state: ChangeOnlyState::default(),
+            user_id: None,
         }
     }
 
@@ -750,6 +784,196 @@ impl QueuedMessage {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum InflightDirection {
+    Inbound,
+    Outbound,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum InflightPhase {
+    AwaitingPubrec,
+    AwaitingPubrel,
+    AwaitingPubcomp,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InflightMessage {
+    pub client_id: String,
+    pub packet_id: u16,
+    pub direction: InflightDirection,
+    pub phase: InflightPhase,
+    pub topic: String,
+    pub payload: Vec<u8>,
+    pub qos: QoS,
+    pub retain: bool,
+    pub stored_at_secs: u64,
+    pub message_expiry_interval: Option<u32>,
+    #[serde(default)]
+    pub expires_at_secs: Option<u64>,
+    #[serde(skip)]
+    expires_at_cache: Option<SystemTime>,
+    #[serde(default)]
+    pub user_properties: Vec<(String, String)>,
+    pub content_type: Option<String>,
+    pub response_topic: Option<String>,
+    pub correlation_data: Option<Vec<u8>>,
+    pub payload_format_indicator: Option<bool>,
+}
+
+impl InflightMessage {
+    #[must_use]
+    pub fn from_publish(
+        packet: &PublishPacket,
+        client_id: String,
+        direction: InflightDirection,
+        phase: InflightPhase,
+    ) -> Self {
+        use crate::protocol::v5::properties::{PropertyId, PropertyValue};
+
+        let now = SystemTime::now();
+        let stored_at_secs = now
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let message_expiry_interval = packet.properties.get_message_expiry_interval();
+        let expires_at_secs =
+            message_expiry_interval.map(|interval| stored_at_secs + u64::from(interval));
+        let expires_at_cache =
+            message_expiry_interval.map(|interval| now + Duration::from_secs(u64::from(interval)));
+
+        let user_properties = packet
+            .properties
+            .get_all(PropertyId::UserProperty)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(|v| {
+                        if let PropertyValue::Utf8StringPair(k, val) = v {
+                            Some((k.clone(), val.clone()))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let content_type = packet.properties.get_content_type();
+
+        let response_topic = packet
+            .properties
+            .get(PropertyId::ResponseTopic)
+            .and_then(|v| {
+                if let PropertyValue::Utf8String(s) = v {
+                    Some(s.clone())
+                } else {
+                    None
+                }
+            });
+
+        let correlation_data = packet
+            .properties
+            .get(PropertyId::CorrelationData)
+            .and_then(|v| {
+                if let PropertyValue::BinaryData(b) = v {
+                    Some(b.to_vec())
+                } else {
+                    None
+                }
+            });
+
+        let payload_format_indicator = packet
+            .properties
+            .get(PropertyId::PayloadFormatIndicator)
+            .and_then(|v| {
+                if let PropertyValue::Byte(b) = v {
+                    Some(*b != 0)
+                } else {
+                    None
+                }
+            });
+
+        Self {
+            client_id,
+            packet_id: packet.packet_id.unwrap_or(0),
+            direction,
+            phase,
+            topic: packet.topic_name.clone(),
+            payload: packet.payload.to_vec(),
+            qos: packet.qos,
+            retain: packet.retain,
+            stored_at_secs,
+            message_expiry_interval,
+            expires_at_secs,
+            expires_at_cache,
+            user_properties,
+            content_type,
+            response_topic,
+            correlation_data,
+            payload_format_indicator,
+        }
+    }
+
+    #[must_use]
+    pub fn to_publish_packet(&self) -> PublishPacket {
+        let mut packet = PublishPacket::new(&self.topic, self.payload.clone(), self.qos)
+            .with_retain(self.retain);
+        packet.packet_id = Some(self.packet_id);
+
+        if let Some(remaining) = self.remaining_expiry_interval() {
+            packet.properties.set_message_expiry_interval(remaining);
+        }
+
+        for (key, value) in &self.user_properties {
+            packet
+                .properties
+                .add_user_property(key.clone(), value.clone());
+        }
+
+        if let Some(ref ct) = self.content_type {
+            packet.properties.set_content_type(ct.clone());
+        }
+
+        if let Some(ref rt) = self.response_topic {
+            packet.properties.set_response_topic(rt.clone());
+        }
+
+        if let Some(ref cd) = self.correlation_data {
+            packet.properties.set_correlation_data(cd.clone().into());
+        }
+
+        if let Some(pfi) = self.payload_format_indicator {
+            packet.properties.set_payload_format_indicator(pfi);
+        }
+
+        packet
+    }
+
+    fn resolved_expires_at(&self) -> Option<SystemTime> {
+        self.expires_at_cache.or_else(|| {
+            self.expires_at_secs
+                .map(|secs| SystemTime::UNIX_EPOCH + Duration::from_secs(secs))
+        })
+    }
+
+    #[must_use]
+    pub fn remaining_expiry_interval(&self) -> Option<u32> {
+        self.resolved_expires_at().and_then(|expiry| {
+            expiry
+                .duration_since(SystemTime::now())
+                .ok()
+                .map(|d| u32::try_from(d.as_secs()).unwrap_or(u32::MAX))
+        })
+    }
+
+    #[must_use]
+    pub fn is_expired(&self) -> bool {
+        self.resolved_expires_at()
+            .is_some_and(|expiry| SystemTime::now() > expiry)
+    }
+}
+
 /// Dynamic storage backend that can hold different implementations
 pub enum DynamicStorage {
     #[cfg(not(target_arch = "wasm32"))]
@@ -841,6 +1065,51 @@ impl StorageBackend for DynamicStorage {
             #[cfg(not(target_arch = "wasm32"))]
             Self::File(backend) => backend.remove_queued_messages(client_id).await,
             Self::Memory(backend) => backend.remove_queued_messages(client_id).await,
+        }
+    }
+
+    async fn store_inflight_message(&self, message: InflightMessage) -> Result<()> {
+        match self {
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::File(backend) => backend.store_inflight_message(message).await,
+            Self::Memory(backend) => backend.store_inflight_message(message).await,
+        }
+    }
+
+    async fn get_inflight_messages(&self, client_id: &str) -> Result<Vec<InflightMessage>> {
+        match self {
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::File(backend) => backend.get_inflight_messages(client_id).await,
+            Self::Memory(backend) => backend.get_inflight_messages(client_id).await,
+        }
+    }
+
+    async fn remove_inflight_message(
+        &self,
+        client_id: &str,
+        packet_id: u16,
+        direction: InflightDirection,
+    ) -> Result<()> {
+        match self {
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::File(backend) => {
+                backend
+                    .remove_inflight_message(client_id, packet_id, direction)
+                    .await
+            }
+            Self::Memory(backend) => {
+                backend
+                    .remove_inflight_message(client_id, packet_id, direction)
+                    .await
+            }
+        }
+    }
+
+    async fn remove_all_inflight_messages(&self, client_id: &str) -> Result<()> {
+        match self {
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::File(backend) => backend.remove_all_inflight_messages(client_id).await,
+            Self::Memory(backend) => backend.remove_all_inflight_messages(client_id).await,
         }
     }
 

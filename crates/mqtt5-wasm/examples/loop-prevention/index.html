@@ -443,10 +443,14 @@
             const timestamp = new Date().toLocaleTimeString();
             const messageEl = document.createElement('div');
             messageEl.className = 'message';
-            messageEl.innerHTML = `
-                <div class="topic">${topic}</div>
-                <div class="payload">${payload} <small>(${timestamp})</small></div>
-            `;
+            const topicDiv = document.createElement('div');
+            topicDiv.className = 'topic';
+            topicDiv.textContent = topic;
+            const payloadDiv = document.createElement('div');
+            payloadDiv.className = 'payload';
+            payloadDiv.textContent = `${payload} (${timestamp})`;
+            messageEl.appendChild(topicDiv);
+            messageEl.appendChild(payloadDiv);
             messagesEl.prepend(messageEl);
         }
 

@@ -289,10 +289,14 @@
                     const timestamp = new Date().toLocaleTimeString();
                     const messageEl = document.createElement('div');
                     messageEl.className = 'message';
-                    messageEl.innerHTML = `
-                        <div class="topic">${receivedTopic}</div>
-                        <div class="payload">${message} <small>(${timestamp})</small></div>
-                    `;
+                    const topicDiv = document.createElement('div');
+                    topicDiv.className = 'topic';
+                    topicDiv.textContent = receivedTopic;
+                    const payloadDiv = document.createElement('div');
+                    payloadDiv.className = 'payload';
+                    payloadDiv.textContent = `${message} (${timestamp})`;
+                    messageEl.appendChild(topicDiv);
+                    messageEl.appendChild(payloadDiv);
                     messagesEl.prepend(messageEl);
                 });
 
@@ -381,13 +385,18 @@
 
                 const rbacDiv = document.getElementById('rbac-info');
                 rbacDiv.style.display = 'block';
-                document.getElementById('rbac-roles').innerHTML = `<strong>Roles:</strong> ${roles.join(', ')}`;
-                document.getElementById('rbac-assignments').innerHTML = `
-                    <strong>Assignments:</strong>
-                    alice → [${aliceRoles.join(', ')}],
-                    bob → [${bobRoles.join(', ')}],
-                    charlie → [${charlieRoles.join(', ')}]
-                `;
+                const rbacRolesEl = document.getElementById('rbac-roles');
+                rbacRolesEl.innerHTML = '';
+                const rolesLabel = document.createElement('strong');
+                rolesLabel.textContent = 'Roles:';
+                rbacRolesEl.appendChild(rolesLabel);
+                rbacRolesEl.appendChild(document.createTextNode(` ${roles.join(', ')}`));
+                const rbacAssignEl = document.getElementById('rbac-assignments');
+                rbacAssignEl.innerHTML = '';
+                const assignLabel = document.createElement('strong');
+                assignLabel.textContent = 'Assignments:';
+                rbacAssignEl.appendChild(assignLabel);
+                rbacAssignEl.appendChild(document.createTextNode(` alice → [${aliceRoles.join(', ')}], bob → [${bobRoles.join(', ')}], charlie → [${charlieRoles.join(', ')}]`));
                 debugLog(`RBAC configured: ${roles.length} roles, users assigned`);
 
                 debugLog('Creating clients...');

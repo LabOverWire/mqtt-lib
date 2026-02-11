@@ -11,7 +11,13 @@ use std::pin::Pin;
 use tracing::{debug, warn};
 
 #[derive(Clone)]
-pub enum JwtVerifier {
+pub struct JwtVerifier {
+    pub key: JwtVerifierKey,
+    pub kid: Option<String>,
+}
+
+#[derive(Clone)]
+pub enum JwtVerifierKey {
     Hs256(Vec<u8>),
     Rs256(Vec<u8>),
     Es256(Vec<u8>),
@@ -20,10 +26,39 @@ pub enum JwtVerifier {
 impl JwtVerifier {
     #[must_use]
     pub fn algorithm(&self) -> &'static str {
-        match self {
-            Self::Hs256(_) => "HS256",
-            Self::Rs256(_) => "RS256",
-            Self::Es256(_) => "ES256",
+        match &self.key {
+            JwtVerifierKey::Hs256(_) => "HS256",
+            JwtVerifierKey::Rs256(_) => "RS256",
+            JwtVerifierKey::Es256(_) => "ES256",
+        }
+    }
+
+    #[must_use]
+    pub fn kid(&self) -> Option<&str> {
+        self.kid.as_deref()
+    }
+
+    #[must_use]
+    pub fn hs256(key: Vec<u8>) -> Self {
+        Self {
+            key: JwtVerifierKey::Hs256(key),
+            kid: None,
+        }
+    }
+
+    #[must_use]
+    pub fn rs256(key: Vec<u8>) -> Self {
+        Self {
+            key: JwtVerifierKey::Rs256(key),
+            kid: None,
+        }
+    }
+
+    #[must_use]
+    pub fn es256(key: Vec<u8>) -> Self {
+        Self {
+            key: JwtVerifierKey::Es256(key),
+            kid: None,
         }
     }
 }
@@ -41,7 +76,7 @@ impl JwtAuthProvider {
     #[must_use]
     pub fn with_hs256_secret(secret: impl AsRef<[u8]>) -> Self {
         Self {
-            verifiers: vec![JwtVerifier::Hs256(secret.as_ref().to_vec())],
+            verifiers: vec![JwtVerifier::hs256(secret.as_ref().to_vec())],
             required_issuer: None,
             required_audience: None,
             clock_skew_secs: DEFAULT_CLOCK_SKEW_SECS,
@@ -51,7 +86,7 @@ impl JwtAuthProvider {
     #[must_use]
     pub fn with_rs256_public_key(der: impl AsRef<[u8]>) -> Self {
         Self {
-            verifiers: vec![JwtVerifier::Rs256(der.as_ref().to_vec())],
+            verifiers: vec![JwtVerifier::rs256(der.as_ref().to_vec())],
             required_issuer: None,
             required_audience: None,
             clock_skew_secs: DEFAULT_CLOCK_SKEW_SECS,
@@ -61,7 +96,7 @@ impl JwtAuthProvider {
     #[must_use]
     pub fn with_es256_public_key(der: impl AsRef<[u8]>) -> Self {
         Self {
-            verifiers: vec![JwtVerifier::Es256(der.as_ref().to_vec())],
+            verifiers: vec![JwtVerifier::es256(der.as_ref().to_vec())],
             required_issuer: None,
             required_audience: None,
             clock_skew_secs: DEFAULT_CLOCK_SKEW_SECS,
@@ -111,10 +146,15 @@ impl JwtAuthProvider {
         let message = format!("{}.{}", parts[0], parts[1]);
         let message_bytes = message.as_bytes();
 
-        let matching_verifier = self.verifiers.iter().find(|v| v.algorithm() == header.alg);
-
-        let Some(verifier) = matching_verifier else {
-            return Err(JwtError::UnsupportedAlgorithm(header.alg));
+        let verifier = if self.verifiers.len() == 1 {
+            &self.verifiers[0]
+        } else if let Some(ref kid) = header.kid {
+            self.verifiers
+                .iter()
+                .find(|v| v.kid() == Some(kid.as_str()))
+                .ok_or(JwtError::InvalidClaim("unknown kid"))?
+        } else {
+            return Err(JwtError::MissingClaim("kid"));
         };
 
         if !Self::verify_signature(verifier, message_bytes, &signature_bytes) {
@@ -129,10 +169,9 @@ impl JwtAuthProvider {
             .map(|d| d.as_secs())
             .unwrap_or(0);
 
-        if let Some(exp) = claims.exp {
-            if now > exp + self.clock_skew_secs {
-                return Err(JwtError::Expired);
-            }
+        let exp = claims.exp.ok_or(JwtError::MissingClaim("exp"))?;
+        if now > exp + self.clock_skew_secs {
+            return Err(JwtError::Expired);
         }
 
         if let Some(nbf) = claims.nbf {
@@ -159,19 +198,19 @@ impl JwtAuthProvider {
     }
 
     fn verify_signature(verifier: &JwtVerifier, message: &[u8], sig: &[u8]) -> bool {
-        match verifier {
-            JwtVerifier::Hs256(secret) => {
+        match &verifier.key {
+            JwtVerifierKey::Hs256(secret) => {
                 let key = hmac::Key::new(hmac::HMAC_SHA256, secret);
                 hmac::verify(&key, message, sig).is_ok()
             }
-            JwtVerifier::Rs256(public_key) => {
+            JwtVerifierKey::Rs256(public_key) => {
                 let key = signature::UnparsedPublicKey::new(
                     &signature::RSA_PKCS1_2048_8192_SHA256,
                     public_key,
                 );
                 key.verify(message, sig).is_ok()
             }
-            JwtVerifier::Es256(public_key) => {
+            JwtVerifierKey::Es256(public_key) => {
                 let key = signature::UnparsedPublicKey::new(
                     &signature::ECDSA_P256_SHA256_FIXED,
                     public_key,
@@ -241,7 +280,14 @@ impl AuthProvider for JwtAuthProvider {
 
             match self.verify_jwt(token) {
                 Ok(claims) => {
-                    let user_id = claims.sub.unwrap_or_default();
+                    let Some(user_id) = claims.sub else {
+                        warn!("JWT authentication failed: missing sub claim");
+                        return Ok(EnhancedAuthResult::fail_with_reason(
+                            method,
+                            ReasonCode::NotAuthorized,
+                            "missing sub claim".to_string(),
+                        ));
+                    };
                     debug!(user_id = %user_id, "JWT authentication successful");
                     Ok(EnhancedAuthResult::success_with_user(method, user_id))
                 }
@@ -286,10 +332,10 @@ fn base64url_decode(input: &str) -> std::result::Result<Vec<u8>, JwtError> {
 enum JwtError {
     InvalidFormat(&'static str),
     InvalidSignature,
-    UnsupportedAlgorithm(String),
     Expired,
     NotYetValid,
     InvalidClaim(&'static str),
+    MissingClaim(&'static str),
 }
 
 impl std::fmt::Display for JwtError {
@@ -297,10 +343,10 @@ impl std::fmt::Display for JwtError {
         match self {
             Self::InvalidFormat(msg) => write!(f, "invalid JWT format: {msg}"),
             Self::InvalidSignature => write!(f, "invalid signature"),
-            Self::UnsupportedAlgorithm(alg) => write!(f, "unsupported algorithm: {alg}"),
             Self::Expired => write!(f, "token expired"),
             Self::NotYetValid => write!(f, "token not yet valid"),
             Self::InvalidClaim(msg) => write!(f, "invalid claim: {msg}"),
+            Self::MissingClaim(claim) => write!(f, "missing required claim: {claim}"),
         }
     }
 }

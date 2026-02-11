@@ -332,27 +332,38 @@
             const card = document.createElement('div');
             card.className = 'message-card';
 
-            let badgesHtml = '';
+            const topicDiv = document.createElement('div');
+            topicDiv.className = 'message-topic';
+            topicDiv.textContent = `#${messageCounter}: ${topic}`;
+            const payloadDiv = document.createElement('div');
+            payloadDiv.className = 'message-payload';
+            payloadDiv.textContent = payload;
+            const matchedDiv = document.createElement('div');
+            matchedDiv.className = 'matched-subs';
+            const matchedLabel = document.createElement('strong');
+            matchedLabel.style.marginRight = '10px';
+            matchedLabel.textContent = 'Matched:';
+            matchedDiv.appendChild(matchedLabel);
             if (subscriptionIds && subscriptionIds.length > 0) {
                 subscriptionIds.forEach(id => {
                     const subClass = id === 1001 ? 'sub-1' : id === 1002 ? 'sub-2' : 'sub-3';
-                    badgesHtml += `<span class="matched-badge ${subClass}">ID: ${id}</span>`;
+                    const badge = document.createElement('span');
+                    badge.className = `matched-badge ${subClass}`;
+                    badge.textContent = `ID: ${id}`;
+                    matchedDiv.appendChild(badge);
                     if (counts[id] !== undefined) {
                         counts[id]++;
                     }
                 });
             } else {
-                badgesHtml = '<span style="color: #999;">No matching subscriptions</span>';
+                const noMatch = document.createElement('span');
+                noMatch.style.color = '#999';
+                noMatch.textContent = 'No matching subscriptions';
+                matchedDiv.appendChild(noMatch);
             }
-
-            card.innerHTML = `
-                <div class="message-topic">#${messageCounter}: ${topic}</div>
-                <div class="message-payload">${payload}</div>
-                <div class="matched-subs">
-                    <strong style="margin-right: 10px;">Matched:</strong>
-                    ${badgesHtml}
-                </div>
-            `;
+            card.appendChild(topicDiv);
+            card.appendChild(payloadDiv);
+            card.appendChild(matchedDiv);
 
             list.prepend(card);
             updateCounts();

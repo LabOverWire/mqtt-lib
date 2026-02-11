@@ -2,7 +2,10 @@
 //!
 //! Provides durable storage using organized file structure with atomic operations.
 
-use super::{ClientSession, QueuedMessage, RetainedMessage, StorageBackend};
+use super::{
+    ClientSession, InflightDirection, InflightMessage, QueuedMessage, RetainedMessage,
+    StorageBackend,
+};
 use crate::error::{MqttError, Result};
 use crate::validation::topic_matches_filter;
 use serde_json;
@@ -32,6 +35,7 @@ pub struct FileBackend {
     retained_dir: PathBuf,
     sessions_dir: PathBuf,
     queues_dir: PathBuf,
+    inflight_dir: PathBuf,
     sessions_cache: Arc<RwLock<HashMap<String, ClientSession>>>,
     dirty_sessions: Arc<RwLock<HashSet<String>>>,
     shutdown: Arc<AtomicBool>,
@@ -48,22 +52,15 @@ impl FileBackend {
         let retained_dir = base_dir.join("retained");
         let sessions_dir = base_dir.join("sessions");
         let queues_dir = base_dir.join("queues");
+        let inflight_dir = base_dir.join("inflight");
 
-        // Check storage version before creating directories
         Self::check_storage_version(&base_dir).await?;
 
-        // Create directories
-        fs::create_dir_all(&retained_dir)
-            .await
-            .map_err(|e| MqttError::Configuration(format!("Failed to create retained dir: {e}")))?;
-
-        fs::create_dir_all(&sessions_dir)
-            .await
-            .map_err(|e| MqttError::Configuration(format!("Failed to create sessions dir: {e}")))?;
-
-        fs::create_dir_all(&queues_dir)
-            .await
-            .map_err(|e| MqttError::Configuration(format!("Failed to create queues dir: {e}")))?;
+        for dir in [&retained_dir, &sessions_dir, &queues_dir, &inflight_dir] {
+            fs::create_dir_all(dir).await.map_err(|e| {
+                MqttError::Configuration(format!("Failed to create dir {}: {e}", dir.display()))
+            })?;
+        }
 
         info!(
             "Initialized file storage backend at: {}",
@@ -75,6 +72,7 @@ impl FileBackend {
             retained_dir,
             sessions_dir,
             queues_dir,
+            inflight_dir,
             sessions_cache: Arc::new(RwLock::new(HashMap::new())),
             dirty_sessions: Arc::new(RwLock::new(HashSet::new())),
             shutdown: Arc::new(AtomicBool::new(false)),
@@ -196,22 +194,47 @@ impl FileBackend {
         Ok(())
     }
 
-    /// Convert topic to safe filename
     fn topic_to_filename(topic: &str) -> String {
-        topic
-            .replace('/', "_slash_")
-            .replace('+', "_plus_")
-            .replace('#', "_hash_")
-            .replace('$', "_dollar_")
+        let mut result = String::with_capacity(topic.len());
+        for ch in topic.chars() {
+            match ch {
+                '%' => result.push_str("%25"),
+                '/' => result.push_str("%2F"),
+                '+' => result.push_str("%2B"),
+                '#' => result.push_str("%23"),
+                '$' => result.push_str("%24"),
+                '\\' => result.push_str("%5C"),
+                ':' => result.push_str("%3A"),
+                '*' => result.push_str("%2A"),
+                '?' => result.push_str("%3F"),
+                '"' => result.push_str("%22"),
+                '<' => result.push_str("%3C"),
+                '>' => result.push_str("%3E"),
+                '|' => result.push_str("%7C"),
+                '\0' => result.push_str("%00"),
+                _ => result.push(ch),
+            }
+        }
+        result
     }
 
-    /// Convert filename back to topic
     fn filename_to_topic(filename: &str) -> String {
-        filename
-            .replace("_slash_", "/")
-            .replace("_plus_", "+")
-            .replace("_hash_", "#")
-            .replace("_dollar_", "$")
+        let mut result = String::with_capacity(filename.len());
+        let mut chars = filename.chars();
+        while let Some(ch) = chars.next() {
+            if ch == '%' {
+                let hex: String = chars.by_ref().take(2).collect();
+                if let Ok(byte) = u8::from_str_radix(&hex, 16) {
+                    result.push(char::from(byte));
+                } else {
+                    result.push('%');
+                    result.push_str(&hex);
+                }
+            } else {
+                result.push(ch);
+            }
+        }
+        result
     }
 
     /// Write data to file atomically
@@ -241,9 +264,12 @@ impl FileBackend {
             .await
             .map_err(|e| MqttError::Io(format!("Failed to flush temp file: {e}")))?;
 
+        file.sync_data()
+            .await
+            .map_err(|e| MqttError::Io(format!("Failed to sync temp file: {e}")))?;
+
         drop(file);
 
-        // Atomically move temp file to final location
         fs::rename(&temp_path, &path)
             .await
             .map_err(|e| MqttError::Io(format!("Failed to rename temp file: {e}")))?;
@@ -297,6 +323,44 @@ impl FileBackend {
         }
 
         Ok(files)
+    }
+
+    async fn cleanup_expired_inflight(&self) -> Result<usize> {
+        let mut removed = 0;
+        if self.inflight_dir.exists() {
+            if let Ok(mut inflight_entries) = fs::read_dir(&self.inflight_dir).await {
+                while let Ok(Some(entry)) = inflight_entries.next_entry().await {
+                    let client_dir = entry.path();
+                    let is_dir = fs::metadata(&client_dir)
+                        .await
+                        .map(|m| m.is_dir())
+                        .unwrap_or(false);
+                    if is_dir {
+                        let files = self.list_files(&client_dir, "json").await?;
+                        for file_path in files {
+                            if let Some(msg) =
+                                self.read_file::<InflightMessage>(file_path.clone()).await?
+                            {
+                                if msg.is_expired() {
+                                    if let Err(e) = fs::remove_file(&file_path).await {
+                                        warn!("failed to remove expired inflight: {e}");
+                                    } else {
+                                        removed += 1;
+                                    }
+                                }
+                            }
+                        }
+
+                        if let Ok(mut dir) = fs::read_dir(&client_dir).await {
+                            if dir.next_entry().await.ok().flatten().is_none() {
+                                let _ = fs::remove_dir(&client_dir).await;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(removed)
     }
 }
 
@@ -475,6 +539,81 @@ impl StorageBackend for FileBackend {
         Ok(())
     }
 
+    async fn store_inflight_message(&self, message: InflightMessage) -> Result<()> {
+        let client_dir = self.inflight_dir.join(&message.client_id);
+        let direction_tag = match message.direction {
+            InflightDirection::Inbound => "inbound",
+            InflightDirection::Outbound => "outbound",
+        };
+        let filename = format!("{direction_tag}_{}.json", message.packet_id);
+        let path = client_dir.join(filename);
+
+        self.write_file_atomic(path, &message).await
+    }
+
+    async fn get_inflight_messages(&self, client_id: &str) -> Result<Vec<InflightMessage>> {
+        let client_dir = self.inflight_dir.join(client_id);
+        if !client_dir.exists() {
+            return Ok(Vec::new());
+        }
+
+        let files = self.list_files(&client_dir, "json").await?;
+        let mut messages = Vec::new();
+
+        for file_path in files {
+            if let Some(msg) = self.read_file::<InflightMessage>(file_path.clone()).await? {
+                if !msg.is_expired() {
+                    messages.push(msg);
+                } else if let Err(e) = fs::remove_file(&file_path).await {
+                    warn!("failed to remove expired inflight file: {e}");
+                }
+            }
+        }
+
+        Ok(messages)
+    }
+
+    async fn remove_inflight_message(
+        &self,
+        client_id: &str,
+        packet_id: u16,
+        direction: InflightDirection,
+    ) -> Result<()> {
+        let client_dir = self.inflight_dir.join(client_id);
+        let direction_tag = match direction {
+            InflightDirection::Inbound => "inbound",
+            InflightDirection::Outbound => "outbound",
+        };
+        let filename = format!("{direction_tag}_{packet_id}.json");
+        let path = client_dir.join(filename);
+
+        if path.exists() {
+            fs::remove_file(&path)
+                .await
+                .map_err(|e| MqttError::Io(format!("failed to remove inflight file: {e}")))?;
+        }
+
+        if client_dir.exists() {
+            if let Ok(mut dir) = fs::read_dir(&client_dir).await {
+                if dir.next_entry().await.ok().flatten().is_none() {
+                    let _ = fs::remove_dir(&client_dir).await;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn remove_all_inflight_messages(&self, client_id: &str) -> Result<()> {
+        let client_dir = self.inflight_dir.join(client_id);
+        if client_dir.exists() {
+            fs::remove_dir_all(&client_dir)
+                .await
+                .map_err(|e| MqttError::Io(format!("failed to remove inflight dir: {e}")))?;
+        }
+        Ok(())
+    }
+
     async fn cleanup_expired(&self) -> Result<()> {
         let mut removed_count = 0;
 
@@ -547,6 +686,8 @@ impl StorageBackend for FileBackend {
                 }
             }
         }
+
+        removed_count += self.cleanup_expired_inflight().await?;
 
         if removed_count > 0 {
             info!("Cleaned up {} expired storage entries", removed_count);
