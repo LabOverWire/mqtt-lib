@@ -335,6 +335,7 @@ async fn execute_generate_config(args: GenerateConfigArgs) -> Result<()> {
             enable_persistence: true,
         },
         change_only_delivery_config: ChangeOnlyDeliveryConfig::default(),
+        echo_suppression_config: mqtt5::broker::config::EchoSuppressionConfig::default(),
         bridges: vec![],
         #[cfg(feature = "opentelemetry")]
         opentelemetry_config: None,

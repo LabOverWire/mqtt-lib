@@ -114,6 +114,7 @@ impl ClientHandler {
         }
 
         publish.properties.inject_sender(self.user_id.as_deref());
+        publish.properties.inject_client_id(Some(&client_id));
 
         if !self
             .resource_monitor

@@ -610,4 +610,75 @@ mod tests {
         let remaining = props.get_all(PropertyId::UserProperty).unwrap();
         assert_eq!(remaining.len(), 1);
     }
+
+    #[test]
+    fn test_inject_client_id_adds_property() {
+        let mut props = Properties::new();
+        props.inject_client_id(Some("my-client"));
+
+        let val = props.get_user_property_value("x-mqtt-client-id");
+        assert_eq!(val, Some("my-client"));
+    }
+
+    #[test]
+    fn test_inject_client_id_strips_spoofed() {
+        let mut props = Properties::new();
+        props.add_user_property("x-mqtt-client-id".to_string(), "spoofed".to_string());
+        props.add_user_property("x-mqtt-client-id".to_string(), "double".to_string());
+        props.add_user_property("other".to_string(), "keep".to_string());
+
+        props.inject_client_id(Some("real-client"));
+
+        let all = props.get_all(PropertyId::UserProperty).unwrap();
+        let client_id_props: Vec<&str> = all
+            .iter()
+            .filter_map(|v| {
+                if let PropertyValue::Utf8StringPair(k, val) = v {
+                    if k == "x-mqtt-client-id" {
+                        return Some(val.as_str());
+                    }
+                }
+                None
+            })
+            .collect();
+
+        assert_eq!(client_id_props, vec!["real-client"]);
+        assert_eq!(props.get_user_property_value("other"), Some("keep"));
+    }
+
+    #[test]
+    fn test_inject_client_id_none_removes_all() {
+        let mut props = Properties::new();
+        props.add_user_property("x-mqtt-client-id".to_string(), "old".to_string());
+        props.add_user_property("other".to_string(), "keep".to_string());
+
+        props.inject_client_id(None);
+
+        assert!(props.get_user_property_value("x-mqtt-client-id").is_none());
+        assert_eq!(props.get_user_property_value("other"), Some("keep"));
+    }
+
+    #[test]
+    fn test_get_user_property_value_found() {
+        let mut props = Properties::new();
+        props.add_user_property("key1".to_string(), "val1".to_string());
+        props.add_user_property("key2".to_string(), "val2".to_string());
+
+        assert_eq!(props.get_user_property_value("key1"), Some("val1"));
+        assert_eq!(props.get_user_property_value("key2"), Some("val2"));
+    }
+
+    #[test]
+    fn test_get_user_property_value_not_found() {
+        let mut props = Properties::new();
+        props.add_user_property("key1".to_string(), "val1".to_string());
+
+        assert!(props.get_user_property_value("missing").is_none());
+    }
+
+    #[test]
+    fn test_get_user_property_value_empty() {
+        let props = Properties::new();
+        assert!(props.get_user_property_value("anything").is_none());
+    }
 }

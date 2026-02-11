@@ -707,6 +707,7 @@ impl BridgeConnection {
                     packet.properties = pub_props.into();
                     packet.retain = msg.retain;
                     packet.properties.inject_sender(None);
+                    packet.properties.inject_client_id(None);
 
                     tokio::spawn(async move {
                         router.route_message_local_only(&packet, None).await;

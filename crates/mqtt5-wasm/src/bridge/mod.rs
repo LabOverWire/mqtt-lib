@@ -260,6 +260,7 @@ impl WasmBridgeConnection {
                                 packet.properties = pub_props.into();
                                 packet.retain = msg.retain;
                                 packet.properties.inject_sender(None);
+                                packet.properties.inject_client_id(None);
 
                                 wasm_bindgen_futures::spawn_local(async move {
                                     router.route_message_local_only(&packet, None).await;

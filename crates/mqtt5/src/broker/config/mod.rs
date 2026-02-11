@@ -1,5 +1,6 @@
 mod auth;
 mod change_only;
+mod echo_suppression;
 mod storage;
 mod tls;
 mod transport;
@@ -9,6 +10,7 @@ pub use auth::{
     JwtConfig, JwtIssuerConfig, JwtKeySource, JwtRoleMapping, RateLimitConfig, RoleMergeMode,
 };
 pub use change_only::ChangeOnlyDeliveryConfig;
+pub use echo_suppression::EchoSuppressionConfig;
 pub use storage::{StorageBackend, StorageConfig};
 pub use tls::TlsConfig;
 pub use transport::{ClusterListenerConfig, ClusterTransport, QuicConfig, WebSocketConfig};
@@ -63,6 +65,8 @@ pub struct BrokerConfig {
     pub storage_config: StorageConfig,
     #[serde(default)]
     pub change_only_delivery_config: ChangeOnlyDeliveryConfig,
+    #[serde(default)]
+    pub echo_suppression_config: EchoSuppressionConfig,
     #[cfg(not(target_arch = "wasm32"))]
     #[serde(default)]
     pub bridges: Vec<BridgeConfig>,
@@ -114,7 +118,8 @@ impl std::fmt::Debug for BrokerConfig {
             .field(
                 "change_only_delivery_config",
                 &self.change_only_delivery_config,
-            );
+            )
+            .field("echo_suppression_config", &self.echo_suppression_config);
         #[cfg(not(target_arch = "wasm32"))]
         d.field("bridges", &self.bridges);
         #[cfg(feature = "opentelemetry")]
@@ -154,6 +159,7 @@ impl Default for BrokerConfig {
             cluster_listener_config: None,
             storage_config: StorageConfig::default(),
             change_only_delivery_config: ChangeOnlyDeliveryConfig::default(),
+            echo_suppression_config: EchoSuppressionConfig::default(),
             #[cfg(not(target_arch = "wasm32"))]
             bridges: vec![],
             #[cfg(feature = "opentelemetry")]
@@ -286,6 +292,12 @@ impl BrokerConfig {
     #[must_use]
     pub fn with_change_only_delivery(mut self, config: ChangeOnlyDeliveryConfig) -> Self {
         self.change_only_delivery_config = config;
+        self
+    }
+
+    #[must_use]
+    pub fn with_echo_suppression(mut self, config: EchoSuppressionConfig) -> Self {
+        self.echo_suppression_config = config;
         self
     }
 

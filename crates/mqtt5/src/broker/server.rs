@@ -297,19 +297,7 @@ impl MqttBroker {
             None
         };
 
-        let router = {
-            let base = if let Some(ref storage) = storage {
-                MessageRouter::with_storage(Arc::clone(storage))
-            } else {
-                MessageRouter::new()
-            };
-            let router = if let Some(ref handler) = config.event_handler {
-                base.with_event_handler(Arc::clone(handler))
-            } else {
-                base
-            };
-            Arc::new(router)
-        };
+        let router = Self::build_router(&config, storage.as_ref());
 
         let auth_provider = create_auth_provider(&config.auth_config).await?;
         let stats = Arc::new(BrokerStats::new());
@@ -615,6 +603,29 @@ impl MqttBroker {
         } else {
             Ok((Vec::new(), None, Vec::new()))
         }
+    }
+
+    fn build_router(
+        config: &BrokerConfig,
+        storage: Option<&Arc<DynamicStorage>>,
+    ) -> Arc<MessageRouter> {
+        let base = if let Some(storage) = storage {
+            MessageRouter::with_storage(Arc::clone(storage))
+        } else {
+            MessageRouter::new()
+        };
+        let with_handler = if let Some(ref handler) = config.event_handler {
+            base.with_event_handler(Arc::clone(handler))
+        } else {
+            base
+        };
+        let router = if config.echo_suppression_config.enabled {
+            with_handler
+                .with_echo_suppression_key(config.echo_suppression_config.property_key.clone())
+        } else {
+            with_handler
+        };
+        Arc::new(router)
     }
 
     fn default_resource_limits(max_clients: usize) -> ResourceLimits {

@@ -39,6 +39,7 @@ impl ClientHandler {
                 will.properties
                     .apply_to_publish_properties(&mut publish.properties);
                 publish.properties.inject_sender(self.user_id.as_deref());
+                publish.properties.inject_client_id(Some(client_id));
 
                 if let Some(delay) = session.will_delay_interval {
                     debug!("Using will delay from session: {} seconds", delay);
