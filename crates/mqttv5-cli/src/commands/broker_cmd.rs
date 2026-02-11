@@ -374,29 +374,33 @@ async fn execute_run(mut cmd: RunArgs, verbose: bool, debug: bool) -> Result<()>
 
     info!("Starting MQTT v5.0 broker...");
 
-    let config = if let Some(config_path) = &cmd.config {
+    let (config, config_path) = if let Some(config_path) = &cmd.config {
         debug!("Loading configuration from: {:?}", config_path);
-        load_config_from_file(config_path)
+        let cfg = load_config_from_file(config_path)
             .await
-            .with_context(|| format!("Failed to load config from {}", config_path.display()))?
+            .with_context(|| format!("Failed to load config from {}", config_path.display()))?;
+        (cfg, Some(config_path.clone()))
     } else {
-        // Smart prompting for configuration
-        create_interactive_config(&mut cmd).await?
+        (create_interactive_config(&mut cmd).await?, None)
     };
 
-    // Validate configuration
     config
         .validate()
         .context("Configuration validation failed")?;
 
-    // Create and start broker
     info!(
         "Creating broker with bind addresses: {:?}",
         config.bind_addresses
     );
-    let mut broker = MqttBroker::with_config(config.clone())
-        .await
-        .context("Failed to create MQTT broker")?;
+    let mut broker = if let Some(ref path) = config_path {
+        MqttBroker::with_config_file(config.clone(), path.clone())
+            .await
+            .context("Failed to create MQTT broker with hot-reload")?
+    } else {
+        MqttBroker::with_config(config.clone())
+            .await
+            .context("Failed to create MQTT broker")?
+    };
 
     println!("🚀 MQTT v5.0 broker starting...");
     println!(
@@ -451,9 +455,30 @@ async fn execute_run(mut cmd: RunArgs, verbose: bool, debug: bool) -> Result<()>
             otel_config.otlp_endpoint, otel_config.service_name
         );
     }
+    if config_path.is_some() {
+        println!("  🔄 Hot-reload: enabled (edit config file or send SIGHUP to reload)");
+    }
     println!("  📝 Press Ctrl+C to stop");
 
-    // Set up signal handling
+    let reload_sender = broker.manual_reload_sender();
+
+    #[cfg(unix)]
+    let mut sighup_task = None;
+    #[cfg(unix)]
+    if let Some(sender) = reload_sender {
+        let mut sighup_stream = signal::unix::signal(signal::unix::SignalKind::hangup())
+            .context("Failed to register SIGHUP handler")?;
+        sighup_task = Some(tokio::spawn(async move {
+            loop {
+                sighup_stream.recv().await;
+                info!("Received SIGHUP, triggering config reload");
+                if sender.send(()).await.is_err() {
+                    break;
+                }
+            }
+        }));
+    }
+
     let shutdown_signal = async {
         match signal::ctrl_c().await {
             Ok(()) => {
@@ -465,7 +490,6 @@ async fn execute_run(mut cmd: RunArgs, verbose: bool, debug: bool) -> Result<()>
         }
     };
 
-    // Run broker with graceful shutdown
     tokio::select! {
         result = broker.run() => {
             match result {
@@ -480,6 +504,11 @@ async fn execute_run(mut cmd: RunArgs, verbose: bool, debug: bool) -> Result<()>
         () = shutdown_signal => {
             info!("Shutdown signal received, stopping broker...");
         }
+    }
+
+    #[cfg(unix)]
+    if let Some(handle) = sighup_task {
+        handle.abort();
     }
 
     println!("✓ MQTT broker stopped");

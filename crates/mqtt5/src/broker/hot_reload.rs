@@ -317,6 +317,11 @@ impl HotReloadManager {
     }
 
     #[must_use]
+    pub fn current_config_handle(&self) -> Arc<RwLock<BrokerConfig>> {
+        Arc::clone(&self.current_config)
+    }
+
+    #[must_use]
     pub fn subscribe_to_changes(&self) -> broadcast::Receiver<ConfigChangeEvent> {
         self.change_sender.subscribe()
     }

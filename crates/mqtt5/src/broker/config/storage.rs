@@ -2,7 +2,7 @@ use crate::time::Duration;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StorageConfig {
     pub backend: StorageBackend,
     pub base_dir: PathBuf,

@@ -7,6 +7,7 @@ use crate::broker::binding::{bind_tcp_addresses, format_binding_error};
 use crate::broker::bridge::BridgeManager;
 use crate::broker::client_handler::ClientHandler;
 use crate::broker::config::{BrokerConfig, StorageBackend as StorageBackendType};
+use crate::broker::hot_reload::HotReloadManager;
 use crate::broker::quic_acceptor::{
     accept_quic_connection, run_quic_cluster_connection_handler, run_quic_connection_handler,
     QuicAcceptorConfig,
@@ -20,8 +21,10 @@ use crate::broker::transport::BrokerTransport;
 use crate::broker::websocket_server::{accept_websocket_connection, WebSocketServerConfig};
 use crate::error::{MqttError, Result};
 use quinn::Endpoint;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::net::TcpListener;
+use tokio::sync::{mpsc, watch};
 use tokio_rustls::TlsAcceptor;
 use tracing::{debug, error, info, warn};
 
@@ -30,13 +33,23 @@ use crate::telemetry;
 
 #[derive(Clone)]
 struct AcceptLoopState {
-    config: Arc<BrokerConfig>,
+    config_rx: watch::Receiver<Arc<BrokerConfig>>,
     router: Arc<MessageRouter>,
-    auth_provider: Arc<dyn AuthProvider>,
+    auth_rx: watch::Receiver<Arc<dyn AuthProvider>>,
     storage: Option<Arc<DynamicStorage>>,
     stats: Arc<BrokerStats>,
     resource_monitor: Arc<ResourceMonitor>,
     shutdown_tx: tokio::sync::broadcast::Sender<()>,
+}
+
+impl AcceptLoopState {
+    fn snapshot_config(&self) -> Arc<BrokerConfig> {
+        Arc::clone(&self.config_rx.borrow())
+    }
+
+    fn snapshot_auth(&self) -> Arc<dyn AuthProvider> {
+        Arc::clone(&self.auth_rx.borrow())
+    }
 }
 
 /// MQTT v5.0 Broker
@@ -61,8 +74,15 @@ pub struct MqttBroker {
     cluster_tls_acceptor: Option<TlsAcceptor>,
     cluster_quic_endpoints: Vec<Endpoint>,
     shutdown_tx: Option<tokio::sync::broadcast::Sender<()>>,
-    ready_tx: Option<tokio::sync::watch::Sender<bool>>,
-    ready_rx: tokio::sync::watch::Receiver<bool>,
+    ready_tx: Option<watch::Sender<bool>>,
+    ready_rx: watch::Receiver<bool>,
+    config_watch_tx: watch::Sender<Arc<BrokerConfig>>,
+    config_watch_rx: watch::Receiver<Arc<BrokerConfig>>,
+    auth_watch_tx: watch::Sender<Arc<dyn AuthProvider>>,
+    auth_watch_rx: watch::Receiver<Arc<dyn AuthProvider>>,
+    hot_reload_manager: Option<HotReloadManager>,
+    reload_tx: Option<mpsc::Sender<()>>,
+    reload_rx: Option<mpsc::Receiver<()>>,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -297,7 +317,7 @@ impl MqttBroker {
             config.max_clients,
         )));
         let (shutdown_tx, _) = tokio::sync::broadcast::channel(1);
-        let (ready_tx, ready_rx) = tokio::sync::watch::channel(false);
+        let (ready_tx, ready_rx) = watch::channel(false);
 
         #[cfg(feature = "opentelemetry")]
         if let Some(ref otel_config) = config.opentelemetry_config {
@@ -322,8 +342,12 @@ impl MqttBroker {
             Some(manager)
         };
 
+        let config = Arc::new(config);
+        let (config_watch_tx, config_watch_rx) = watch::channel(Arc::clone(&config));
+        let (auth_watch_tx, auth_watch_rx) = watch::channel(Arc::clone(&auth_provider));
+
         Ok(Self {
-            config: Arc::new(config),
+            config,
             router,
             auth_provider,
             storage,
@@ -345,6 +369,13 @@ impl MqttBroker {
             shutdown_tx: Some(shutdown_tx),
             ready_tx: Some(ready_tx),
             ready_rx,
+            config_watch_tx,
+            config_watch_rx,
+            auth_watch_tx,
+            auth_watch_rx,
+            hot_reload_manager: None,
+            reload_tx: None,
+            reload_rx: None,
         })
     }
 
@@ -614,9 +645,30 @@ impl MqttBroker {
         }
     }
 
-    /// Sets a custom authentication provider
+    /// Creates a broker with hot-reload support from a config file path
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the config is invalid, binding fails, or the hot-reload manager
+    /// cannot be created.
+    pub async fn with_config_file(config: BrokerConfig, path: PathBuf) -> Result<Self> {
+        let manager = HotReloadManager::new(config.clone(), path)?;
+        let (reload_tx, reload_rx) = mpsc::channel(1);
+        let mut broker = Self::with_config(config).await?;
+        broker.hot_reload_manager = Some(manager);
+        broker.reload_tx = Some(reload_tx);
+        broker.reload_rx = Some(reload_rx);
+        Ok(broker)
+    }
+
+    #[must_use]
+    pub fn manual_reload_sender(&self) -> Option<mpsc::Sender<()>> {
+        self.reload_tx.clone()
+    }
+
     #[must_use]
     pub fn with_auth_provider(mut self, provider: Arc<dyn AuthProvider>) -> Self {
+        let _ = self.auth_watch_tx.send(Arc::clone(&provider));
         self.auth_provider = provider;
         self
     }
@@ -746,9 +798,9 @@ impl MqttBroker {
         let mut shutdown_rx = shutdown_tx.subscribe();
 
         let accept_state = AcceptLoopState {
-            config: Arc::clone(&self.config),
+            config_rx: self.config_watch_rx.clone(),
             router: Arc::clone(&self.router),
-            auth_provider: Arc::clone(&self.auth_provider),
+            auth_rx: self.auth_watch_rx.clone(),
             storage: self.storage.clone(),
             stats: Arc::clone(&self.stats),
             resource_monitor: Arc::clone(&self.resource_monitor),
@@ -782,9 +834,9 @@ impl MqttBroker {
                                                 let handler = ClientHandler::new(
                                                     transport,
                                                     addr,
-                                                    Arc::clone(&state.config),
+                                                    state.snapshot_config(),
                                                     Arc::clone(&state.router),
-                                                    Arc::clone(&state.auth_provider),
+                                                    state.snapshot_auth(),
                                                     state.storage.clone(),
                                                     Arc::clone(&state.stats),
                                                     Arc::clone(&state.resource_monitor),
@@ -848,6 +900,8 @@ impl MqttBroker {
                                         let state_clone = state.clone();
 
                                         tokio::spawn(async move {
+                                            let cfg = state_clone.snapshot_config();
+                                            let auth = state_clone.snapshot_auth();
                                             match accept_tls_connection(&acc_clone, tcp_stream, addr).await {
                                                 Ok(tls_stream) => {
                                                     match accept_websocket_connection(tls_stream, &cfg_clone, addr).await {
@@ -857,9 +911,9 @@ impl MqttBroker {
                                                             let handler = ClientHandler::new(
                                                                 transport,
                                                                 addr,
-                                                                state_clone.config,
+                                                                cfg,
                                                                 state_clone.router,
-                                                                state_clone.auth_provider,
+                                                                auth,
                                                                 state_clone.storage,
                                                                 state_clone.stats,
                                                                 state_clone.resource_monitor,
@@ -928,9 +982,9 @@ impl MqttBroker {
                                                 let handler = ClientHandler::new(
                                                     transport,
                                                     addr,
-                                                    Arc::clone(&state.config),
+                                                    state.snapshot_config(),
                                                     Arc::clone(&state.router),
-                                                    Arc::clone(&state.auth_provider),
+                                                    state.snapshot_auth(),
                                                     state.storage.clone(),
                                                     Arc::clone(&state.stats),
                                                     Arc::clone(&state.resource_monitor),
@@ -995,13 +1049,15 @@ impl MqttBroker {
                                     let conn = Arc::new(connection);
                                     let state_clone = state.clone();
 
+                                    let cfg = state_clone.snapshot_config();
+                                    let auth = state_clone.snapshot_auth();
                                     tokio::spawn(async move {
                                         run_quic_connection_handler(
                                             conn,
                                             peer_addr,
-                                            state_clone.config,
+                                            cfg,
                                             state_clone.router,
-                                            state_clone.auth_provider,
+                                            auth,
                                             state_clone.storage,
                                             state_clone.stats,
                                             state_clone.resource_monitor,
@@ -1058,6 +1114,8 @@ impl MqttBroker {
                                         let state_clone = state.clone();
 
                                         tokio::spawn(async move {
+                                            let cfg = state_clone.snapshot_config();
+                                            let auth = state_clone.snapshot_auth();
                                             match accept_tls_connection(&acc_clone, tcp_stream, addr).await {
                                                 Ok(tls_stream) => {
                                                     let transport = BrokerTransport::tls(tls_stream);
@@ -1065,9 +1123,9 @@ impl MqttBroker {
                                                     let handler = ClientHandler::new(
                                                         transport,
                                                         addr,
-                                                        state_clone.config,
+                                                        cfg,
                                                         state_clone.router,
-                                                        state_clone.auth_provider,
+                                                        auth,
                                                         state_clone.storage,
                                                         state_clone.stats,
                                                         state_clone.resource_monitor,
@@ -1094,9 +1152,9 @@ impl MqttBroker {
                                         let handler = ClientHandler::new(
                                             transport,
                                             addr,
-                                            Arc::clone(&state.config),
+                                            state.snapshot_config(),
                                             Arc::clone(&state.router),
-                                            Arc::clone(&state.auth_provider),
+                                            state.snapshot_auth(),
                                             state.storage.clone(),
                                             Arc::clone(&state.stats),
                                             Arc::clone(&state.resource_monitor),
@@ -1160,13 +1218,15 @@ impl MqttBroker {
                                     let conn = Arc::new(connection);
                                     let state_clone = state.clone();
 
+                                    let cfg = state_clone.snapshot_config();
+                                    let auth = state_clone.snapshot_auth();
                                     tokio::spawn(async move {
                                         run_quic_cluster_connection_handler(
                                             conn,
                                             peer_addr,
-                                            state_clone.config,
+                                            cfg,
                                             state_clone.router,
-                                            state_clone.auth_provider,
+                                            auth,
                                             state_clone.storage,
                                             state_clone.stats,
                                             state_clone.resource_monitor,
@@ -1218,9 +1278,9 @@ impl MqttBroker {
                                     let handler = ClientHandler::new(
                                         transport,
                                         addr,
-                                        Arc::clone(&state.config),
+                                        state.snapshot_config(),
                                         Arc::clone(&state.router),
-                                        Arc::clone(&state.auth_provider),
+                                        state.snapshot_auth(),
                                         state.storage.clone(),
                                         Arc::clone(&state.stats),
                                         Arc::clone(&state.resource_monitor),
@@ -1249,6 +1309,83 @@ impl MqttBroker {
                     }
                 }
             }));
+        }
+
+        if let Some(mut manager) = self.hot_reload_manager.take() {
+            if let Err(e) = manager.start().await {
+                error!("Failed to start hot-reload watcher: {e}");
+            } else {
+                let mut change_rx = manager.subscribe_to_changes();
+                let config_handle = manager.current_config_handle();
+                let config_watch_tx = self.config_watch_tx.clone();
+                let auth_watch_tx = self.auth_watch_tx.clone();
+                let resource_monitor = Arc::clone(&self.resource_monitor);
+                let old_config = Arc::clone(&self.config);
+                let mut shutdown_rx_reload = shutdown_tx.subscribe();
+                let mut reload_rx = self.reload_rx.take();
+
+                task_handles.push(tokio::spawn(async move {
+                    loop {
+                        let reload_trigger = async {
+                            if let Some(ref mut rx) = reload_rx {
+                                rx.recv().await;
+                            } else {
+                                std::future::pending::<()>().await;
+                            }
+                        };
+
+                        tokio::select! {
+                            change_result = change_rx.recv() => {
+                                match change_result {
+                                    Ok(_event) => {}
+                                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                                        debug!("Config change channel closed");
+                                        break;
+                                    }
+                                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                                        warn!("Config change listener lagged, skipped {n} events");
+                                        continue;
+                                    }
+                                }
+                            }
+                            () = reload_trigger => {
+                                info!("Manual config reload triggered");
+                                let cfg = config_handle.read().await;
+                                if let Err(e) = cfg.validate() {
+                                    error!("Reloaded config is invalid, ignoring: {e}");
+                                    continue;
+                                }
+                                drop(cfg);
+                            }
+                            _ = shutdown_rx_reload.recv() => {
+                                debug!("Config change listener shutting down");
+                                break;
+                            }
+                        }
+
+                        let new_config = config_handle.read().await.clone();
+
+                        Self::warn_non_reloadable_changes(&old_config, &new_config);
+
+                        resource_monitor
+                            .update_limits(Self::default_resource_limits(new_config.max_clients));
+
+                        match create_auth_provider(&new_config.auth_config).await {
+                            Ok(new_auth) => {
+                                let _ = auth_watch_tx.send(new_auth);
+                                info!("Auth provider recreated from reloaded config");
+                            }
+                            Err(e) => {
+                                error!("Failed to recreate auth provider, keeping old: {e}");
+                            }
+                        }
+
+                        let new_config = Arc::new(new_config);
+                        let _ = config_watch_tx.send(Arc::clone(&new_config));
+                        info!("Config watch updated for new connections");
+                    }
+                }));
+            }
         }
 
         info!("Broker ready - accepting connections");
@@ -1330,8 +1467,32 @@ impl MqttBroker {
     /// Call this before spawning `run()` to get a receiver. The broker sends `true`
     /// when it starts accepting connections. Use `changed().await` to wait.
     #[must_use]
-    pub fn ready_receiver(&self) -> tokio::sync::watch::Receiver<bool> {
+    pub fn ready_receiver(&self) -> watch::Receiver<bool> {
         self.ready_rx.clone()
+    }
+
+    fn warn_non_reloadable_changes(old: &BrokerConfig, new: &BrokerConfig) {
+        if old.bind_addresses != new.bind_addresses {
+            warn!("bind_addresses changed but requires restart to take effect");
+        }
+        if old.tls_config != new.tls_config {
+            warn!("tls_config changed but requires restart to take effect");
+        }
+        if old.websocket_config != new.websocket_config {
+            warn!("websocket_config changed but requires restart to take effect");
+        }
+        if old.websocket_tls_config != new.websocket_tls_config {
+            warn!("websocket_tls_config changed but requires restart to take effect");
+        }
+        if old.quic_config != new.quic_config {
+            warn!("quic_config changed but requires restart to take effect");
+        }
+        if old.cluster_listener_config != new.cluster_listener_config {
+            warn!("cluster_listener_config changed but requires restart to take effect");
+        }
+        if old.storage_config != new.storage_config {
+            warn!("storage_config changed but requires restart to take effect");
+        }
     }
 }
 
