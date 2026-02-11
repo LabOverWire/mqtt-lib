@@ -1317,10 +1317,11 @@ impl MqttBroker {
             } else {
                 let mut change_rx = manager.subscribe_to_changes();
                 let config_handle = manager.current_config_handle();
+                let config_path = manager.config_path().to_path_buf();
                 let config_watch_tx = self.config_watch_tx.clone();
                 let auth_watch_tx = self.auth_watch_tx.clone();
                 let resource_monitor = Arc::clone(&self.resource_monitor);
-                let old_config = Arc::clone(&self.config);
+                let mut old_config = Arc::clone(&self.config);
                 let mut shutdown_rx_reload = shutdown_tx.subscribe();
                 let mut reload_rx = self.reload_rx.take();
 
@@ -1350,12 +1351,19 @@ impl MqttBroker {
                             }
                             () = reload_trigger => {
                                 info!("Manual config reload triggered");
-                                let cfg = config_handle.read().await;
-                                if let Err(e) = cfg.validate() {
-                                    error!("Reloaded config is invalid, ignoring: {e}");
-                                    continue;
+                                match HotReloadManager::reload_config_file(&config_path).await {
+                                    Ok(new_cfg) => {
+                                        if let Err(e) = new_cfg.validate() {
+                                            error!("Reloaded config is invalid, ignoring: {e}");
+                                            continue;
+                                        }
+                                        *config_handle.write().await = new_cfg;
+                                    }
+                                    Err(e) => {
+                                        error!("Failed to read config file: {e}");
+                                        continue;
+                                    }
                                 }
-                                drop(cfg);
                             }
                             _ = shutdown_rx_reload.recv() => {
                                 debug!("Config change listener shutting down");
@@ -1374,15 +1382,16 @@ impl MqttBroker {
                             Ok(new_auth) => {
                                 let _ = auth_watch_tx.send(new_auth);
                                 info!("Auth provider recreated from reloaded config");
+
+                                let new_config = Arc::new(new_config);
+                                let _ = config_watch_tx.send(Arc::clone(&new_config));
+                                old_config = new_config;
+                                info!("Config watch updated for new connections");
                             }
                             Err(e) => {
                                 error!("Failed to recreate auth provider, keeping old: {e}");
                             }
                         }
-
-                        let new_config = Arc::new(new_config);
-                        let _ = config_watch_tx.send(Arc::clone(&new_config));
-                        info!("Config watch updated for new connections");
                     }
                 }));
             }

@@ -217,8 +217,11 @@ impl HotReloadManager {
         Ok(false)
     }
 
-    /// Reloads configuration from file
-    async fn reload_config_file(config_path: &Path) -> Result<BrokerConfig> {
+    /// Reloads configuration from file.
+    ///
+    /// # Errors
+    /// Returns an error if the file cannot be read or contains invalid JSON/TOML.
+    pub async fn reload_config_file(config_path: &Path) -> Result<BrokerConfig> {
         let config_content = fs::read_to_string(config_path)
             .await
             .map_err(|e| MqttError::Io(format!("Failed to read config file: {e}")))?;
@@ -291,6 +294,11 @@ impl HotReloadManager {
             info!("Configuration manually reloaded successfully");
             Ok(true)
         }
+    }
+
+    #[must_use]
+    pub fn config_path(&self) -> &Path {
+        &self.config_path
     }
 
     #[must_use]
