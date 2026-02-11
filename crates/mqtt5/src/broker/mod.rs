@@ -65,6 +65,8 @@ pub use events::{
     ClientSubscribeEvent, ClientUnsubscribeEvent, MessageDeliveredEvent, RetainedSetEvent,
     SubAckReasonCode, SubscriptionInfo,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub use hot_reload::HotReloadManager;
 pub use resource_monitor::{ResourceLimits, ResourceMonitor, ResourceStats};
 #[cfg(not(target_arch = "wasm32"))]
 pub use server::MqttBroker;

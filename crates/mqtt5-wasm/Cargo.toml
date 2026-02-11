@@ -27,7 +27,7 @@ broker = ["client", "dep:mqtt5", "dep:tokio"]
 codec = ["client", "dep:miniz_oxide"]
 
 [dependencies]
-mqtt5-protocol = "0.9.5"
+mqtt5-protocol = "0.9.6"
 mqtt5 = { version = "0.22", optional = true, default-features = false, features = [
     "tokio",
 ] }

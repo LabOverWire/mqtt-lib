@@ -217,8 +217,11 @@ impl HotReloadManager {
         Ok(false)
     }
 
-    /// Reloads configuration from file
-    async fn reload_config_file(config_path: &Path) -> Result<BrokerConfig> {
+    /// Reloads configuration from file.
+    ///
+    /// # Errors
+    /// Returns an error if the file cannot be read or contains invalid JSON/TOML.
+    pub async fn reload_config_file(config_path: &Path) -> Result<BrokerConfig> {
         let config_content = fs::read_to_string(config_path)
             .await
             .map_err(|e| MqttError::Io(format!("Failed to read config file: {e}")))?;
@@ -235,36 +238,13 @@ impl HotReloadManager {
         Ok(config)
     }
 
-    /// Calculates a hash of the configuration for change detection
     fn calculate_config_hash(config: &BrokerConfig) -> u64 {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
 
         let mut hasher = DefaultHasher::new();
-
-        // Hash key configuration fields
-        for addr in &config.bind_addresses {
-            addr.hash(&mut hasher);
-        }
-        config.max_clients.hash(&mut hasher);
-        config.max_packet_size.hash(&mut hasher);
-        config.session_expiry_interval.as_secs().hash(&mut hasher);
-
-        if let Some(ref tls_config) = config.tls_config {
-            tls_config.cert_file.hash(&mut hasher);
-            tls_config.key_file.hash(&mut hasher);
-        }
-
-        if let Some(ref ws_config) = config.websocket_config {
-            for addr in &ws_config.bind_addresses {
-                addr.hash(&mut hasher);
-            }
-            ws_config.path.hash(&mut hasher);
-        }
-
-        // Hash max_clients as resource limit
-        config.max_clients.hash(&mut hasher);
-
+        let json = serde_json::to_string(config).unwrap_or_default();
+        json.hash(&mut hasher);
         hasher.finish()
     }
 
@@ -314,6 +294,16 @@ impl HotReloadManager {
             info!("Configuration manually reloaded successfully");
             Ok(true)
         }
+    }
+
+    #[must_use]
+    pub fn config_path(&self) -> &Path {
+        &self.config_path
+    }
+
+    #[must_use]
+    pub fn current_config_handle(&self) -> Arc<RwLock<BrokerConfig>> {
+        Arc::clone(&self.current_config)
     }
 
     #[must_use]

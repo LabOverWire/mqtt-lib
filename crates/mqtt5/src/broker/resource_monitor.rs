@@ -12,6 +12,8 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
+type SyncRwLock<T> = std::sync::RwLock<T>;
+
 /// Resource limits configuration
 #[derive(Debug, Clone)]
 pub struct ResourceLimits {
@@ -112,8 +114,7 @@ impl ConnectionRateTracker {
 
 /// Resource monitor for MQTT broker
 pub struct ResourceMonitor {
-    /// Resource limits configuration
-    limits: ResourceLimits,
+    limits: SyncRwLock<ResourceLimits>,
 
     /// Current connection count
     connection_count: AtomicUsize,
@@ -135,12 +136,11 @@ pub struct ResourceMonitor {
 }
 
 impl ResourceMonitor {
-    /// Create a new resource monitor
     pub fn new(limits: ResourceLimits) -> Self {
         info!("Initializing resource monitor with limits: {:?}", limits);
 
         Self {
-            limits,
+            limits: SyncRwLock::new(limits),
             connection_count: AtomicUsize::new(0),
             ip_connections: Arc::new(RwLock::new(HashMap::new())),
             client_resources: Arc::new(RwLock::new(HashMap::new())),
@@ -150,40 +150,49 @@ impl ResourceMonitor {
         }
     }
 
-    /// Check if a new connection can be accepted
+    /// # Panics
+    /// Panics if the resource limits lock is poisoned.
+    pub fn update_limits(&self, new_limits: ResourceLimits) {
+        info!("Updating resource limits: {:?}", new_limits);
+        *self.limits.write().expect("resource limits lock poisoned") = new_limits;
+    }
+
+    /// # Panics
+    /// Panics if the resource limits lock is poisoned.
     pub async fn can_accept_connection(&self, ip_addr: IpAddr) -> bool {
-        // Check global connection limit
+        let (max_connections, max_connections_per_ip, rate_limit_window, max_connection_rate) = {
+            let limits = self.limits.read().expect("resource limits lock poisoned");
+            (
+                limits.max_connections,
+                limits.max_connections_per_ip,
+                limits.rate_limit_window,
+                limits.max_connection_rate,
+            )
+        };
+
         let current_connections = self.connection_count.load(Ordering::Relaxed);
-        if current_connections >= self.limits.max_connections {
+        if current_connections >= max_connections {
             warn!(
-                "Connection rejected: global limit reached ({}/{})",
-                current_connections, self.limits.max_connections
+                "Connection rejected: global limit reached ({current_connections}/{max_connections})"
             );
             return false;
         }
 
-        // Check per-IP connection limit
         let ip_connections = self.ip_connections.read().await;
         let ip_count = ip_connections.get(&ip_addr).copied().unwrap_or(0);
-        if ip_count >= self.limits.max_connections_per_ip {
+        if ip_count >= max_connections_per_ip {
             warn!(
-                "Connection rejected: per-IP limit reached for {} ({}/{})",
-                ip_addr, ip_count, self.limits.max_connections_per_ip
+                "Connection rejected: per-IP limit reached for {ip_addr} ({ip_count}/{max_connections_per_ip})"
             );
             return false;
         }
         drop(ip_connections);
 
-        // Check connection rate limit
         let mut rate_tracker = self.connection_rate.write().await;
-        if !rate_tracker.add_connection(
-            self.limits.rate_limit_window,
-            self.limits.max_connection_rate,
-        ) {
+        if !rate_tracker.add_connection(rate_limit_window, max_connection_rate) {
             warn!(
-                "Connection rejected: rate limit exceeded ({} conn/{}s)",
-                self.limits.max_connection_rate,
-                self.limits.rate_limit_window.as_secs()
+                "Connection rejected: rate limit exceeded ({max_connection_rate} conn/{}s)",
+                rate_limit_window.as_secs()
             );
             return false;
         }
@@ -235,9 +244,19 @@ impl ResourceMonitor {
         client_resources.remove(client_id);
     }
 
-    /// Check if client can send a message (rate limiting)
+    /// # Panics
+    /// Panics if the resource limits lock is poisoned.
     pub async fn can_send_message(&self, client_id: &str, message_size: usize) -> bool {
-        if self.limits.max_message_rate_per_client >= 1_000_000 {
+        let (max_message_rate, rate_limit_window, max_bandwidth) = {
+            let limits = self.limits.read().expect("resource limits lock poisoned");
+            (
+                limits.max_message_rate_per_client,
+                limits.rate_limit_window,
+                limits.max_bandwidth_per_client,
+            )
+        };
+
+        if max_message_rate >= 1_000_000 {
             self.total_messages.fetch_add(1, Ordering::Relaxed);
             self.total_bytes
                 .fetch_add(message_size as u64, Ordering::Relaxed);
@@ -250,28 +269,24 @@ impl ResourceMonitor {
             return true;
         };
 
-        if resources.is_window_expired(self.limits.rate_limit_window) {
+        if resources.is_window_expired(rate_limit_window) {
             resources.reset_window();
         }
 
         let current_messages = resources.message_count.load(Ordering::Relaxed);
-        if current_messages >= u64::from(self.limits.max_message_rate_per_client) {
+        if current_messages >= u64::from(max_message_rate) {
             warn!(
-                "Message rejected for {}: rate limit exceeded ({} msg/{}s)",
-                client_id,
-                current_messages,
-                self.limits.rate_limit_window.as_secs()
+                "Message rejected for {client_id}: rate limit exceeded ({current_messages} msg/{}s)",
+                rate_limit_window.as_secs()
             );
             return false;
         }
 
         let current_bytes = resources.bytes_transferred.load(Ordering::Relaxed);
-        if current_bytes + message_size as u64 > self.limits.max_bandwidth_per_client {
+        if current_bytes + message_size as u64 > max_bandwidth {
             warn!(
-                "Message rejected for {}: bandwidth limit exceeded ({} bytes/{}s)",
-                client_id,
-                current_bytes,
-                self.limits.rate_limit_window.as_secs()
+                "Message rejected for {client_id}: bandwidth limit exceeded ({current_bytes} bytes/{}s)",
+                rate_limit_window.as_secs()
             );
             return false;
         }
@@ -288,17 +303,23 @@ impl ResourceMonitor {
         true
     }
 
-    /// Get current resource usage statistics
+    /// # Panics
+    /// Panics if the resource limits lock is poisoned.
     pub async fn get_stats(&self) -> ResourceStats {
         let ip_connections = self.ip_connections.read().await;
         let client_resources = self.client_resources.read().await;
 
         let unique_ips = ip_connections.len();
         let active_clients = client_resources.len();
+        let max_connections = self
+            .limits
+            .read()
+            .expect("resource limits lock poisoned")
+            .max_connections;
 
         ResourceStats {
             current_connections: self.connection_count.load(Ordering::Relaxed),
-            max_connections: self.limits.max_connections,
+            max_connections,
             unique_ips,
             active_clients,
             total_messages: self.total_messages.load(Ordering::Relaxed),
@@ -306,32 +327,39 @@ impl ResourceMonitor {
         }
     }
 
-    /// Get memory usage estimate (simplified)
     pub fn get_memory_usage(&self) -> u64 {
-        // Rough estimate based on connection count and data structures
         let connection_count = self.connection_count.load(Ordering::Relaxed) as u64;
-
-        // Estimate memory per connection (very rough)
-        let memory_per_connection = 4096; // 4KB per connection estimate
-
+        let memory_per_connection = 4096_u64;
         connection_count * memory_per_connection
     }
 
-    /// Check if memory limit is exceeded
+    /// # Panics
+    /// Panics if the resource limits lock is poisoned.
     pub fn is_memory_limit_exceeded(&self) -> bool {
-        if self.limits.max_memory_bytes == 0 {
-            return false; // Unlimited
+        let max_memory_bytes = self
+            .limits
+            .read()
+            .expect("resource limits lock poisoned")
+            .max_memory_bytes;
+        if max_memory_bytes == 0 {
+            return false;
         }
-
-        self.get_memory_usage() > self.limits.max_memory_bytes
+        self.get_memory_usage() > max_memory_bytes
     }
 
-    /// Cleanup expired rate limit windows (call periodically)
+    /// # Panics
+    /// Panics if the resource limits lock is poisoned.
     pub async fn cleanup_expired_windows(&self) {
+        let rate_limit_window = self
+            .limits
+            .read()
+            .expect("resource limits lock poisoned")
+            .rate_limit_window;
+
         let mut client_resources = self.client_resources.write().await;
 
         for resources in client_resources.values_mut() {
-            if resources.is_window_expired(self.limits.rate_limit_window) {
+            if resources.is_window_expired(rate_limit_window) {
                 resources.reset_window();
             }
         }

@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct QuicConfig {
     pub cert_file: PathBuf,
     pub key_file: PathBuf,
@@ -61,7 +61,7 @@ impl QuicConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WebSocketConfig {
     pub bind_addresses: Vec<SocketAddr>,
     pub path: String,
@@ -127,7 +127,7 @@ pub enum ClusterTransport {
     Quic,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ClusterListenerConfig {
     pub bind_addresses: Vec<SocketAddr>,
     pub transport: ClusterTransport,
