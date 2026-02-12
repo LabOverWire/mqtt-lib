@@ -19,8 +19,8 @@ pub fn spawn_packet_reader(state: Rc<RefCell<ClientState>>, mut reader: WasmRead
                     if state.borrow().connection_generation != generation {
                         break None;
                     }
-                    if matches!(&packet, Packet::Disconnect(_)) {
-                        break Some("Server sent DISCONNECT".to_string());
+                    if let Packet::Disconnect(ref disc) = packet {
+                        break Some(format!("Server sent DISCONNECT: {:?}", disc.reason_code));
                     }
                     handle_incoming_packet(&state, packet);
                 }

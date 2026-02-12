@@ -146,7 +146,6 @@ mqttv5 pub
 - Built-in authentication: Username/password, file-based, argon2
 - Resource monitoring: Connection limits, rate limiting, memory tracking
 - Distributed tracing: OpenTelemetry integration with trace context propagation
-- Self-contained: No external dependencies
 
 ### Client
 
@@ -478,7 +477,6 @@ MQTT v5.0 broker in browser:
 - Retained messages: in-memory storage
 - Subscriptions: wildcard matching (`+`, `#`)
 - Session management: memory-only (lost on page reload)
-- No external dependencies
 
 ### WASM Limitations
 

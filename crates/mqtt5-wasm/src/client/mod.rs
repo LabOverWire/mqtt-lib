@@ -209,7 +209,8 @@ impl WasmMqttClient {
                     {
                         let mut state_mut = self.state.borrow_mut();
                         state_mut.connected = true;
-                        state_mut.connection_generation += 1;
+                        state_mut.connection_generation =
+                            state_mut.connection_generation.wrapping_add(1);
                     }
 
                     spawn_packet_reader(Rc::clone(&self.state), reader);
@@ -617,7 +618,7 @@ impl WasmMqttClient {
                 Ok(mut state) => {
                     state.connected = false;
                     state.user_initiated_disconnect = true;
-                    state.connection_generation += 1;
+                    state.connection_generation = state.connection_generation.wrapping_add(1);
                     break state.writer.take();
                 }
                 Err(_) => {

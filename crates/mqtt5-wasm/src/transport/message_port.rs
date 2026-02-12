@@ -27,7 +27,7 @@ pub struct MessagePortReader {
 pub struct MessagePortWriter {
     port: MessagePort,
     connected: Arc<AtomicBool>,
-    msg_tx: mpsc::UnboundedSender<Vec<u8>>,
+    msg_tx: Option<mpsc::UnboundedSender<Vec<u8>>>,
     _closure: Option<Closure<dyn FnMut(MessageEvent)>>,
 }
 
@@ -88,7 +88,7 @@ impl MessagePortWriter {
     pub fn new(
         port: MessagePort,
         connected: Arc<AtomicBool>,
-        msg_tx: mpsc::UnboundedSender<Vec<u8>>,
+        msg_tx: Option<mpsc::UnboundedSender<Vec<u8>>>,
     ) -> Self {
         Self {
             port,
@@ -111,7 +111,9 @@ impl MessagePortWriter {
     /// # Errors
     /// Returns an error if closing the port fails.
     pub fn close(&mut self) -> Result<()> {
-        self.msg_tx.close_channel();
+        if let Some(tx) = &self.msg_tx {
+            tx.close_channel();
+        }
         self.port.close();
         self.connected.store(false, Ordering::SeqCst);
         Ok(())
@@ -125,7 +127,9 @@ impl MessagePortWriter {
 
 impl Drop for MessagePortWriter {
     fn drop(&mut self) {
-        self.msg_tx.close_channel();
+        if let Some(tx) = &self.msg_tx {
+            tx.close_channel();
+        }
         self.connected.store(false, Ordering::SeqCst);
         self.port.set_onmessage(None);
         self.port.close();
@@ -163,7 +167,7 @@ impl MessagePortTransport {
         let writer = MessagePortWriter {
             port,
             connected: self.connected,
-            msg_tx,
+            msg_tx: Some(msg_tx),
             _closure: Some(closure),
         };
 

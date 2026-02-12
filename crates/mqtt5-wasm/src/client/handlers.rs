@@ -14,7 +14,6 @@ use super::RustMessage;
 #[cfg(feature = "codec")]
 use crate::codec::WasmCodecRegistry;
 
-#[allow(clippy::too_many_lines)]
 pub fn handle_incoming_packet(state: &Rc<RefCell<ClientState>>, packet: Packet) {
     match packet {
         Packet::ConnAck(connack) => {
@@ -28,46 +27,7 @@ pub fn handle_incoming_packet(state: &Rc<RefCell<ClientState>>, packet: Packet) 
                 }
             }
         }
-        Packet::Publish(publish) => {
-            let topic = publish.topic_name.clone();
-            let payload = publish.payload.clone();
-            let qos = publish.qos;
-            let retain = publish.retain;
-            let properties: mqtt5_protocol::types::MessageProperties =
-                publish.properties.clone().into();
-
-            if qos == mqtt5_protocol::QoS::ExactlyOnce {
-                if let Some(packet_id) = publish.packet_id {
-                    let is_duplicate = state.borrow().received_qos2.contains_key(&packet_id);
-                    let actions =
-                        mqtt5_protocol::qos2::handle_incoming_publish_qos2(packet_id, is_duplicate);
-
-                    for action in actions {
-                        match action {
-                            mqtt5_protocol::qos2::QoS2Action::DeliverMessage { packet_id: _ } => {
-                                deliver_message(state, &topic, &payload, qos, retain, &properties);
-                            }
-                            mqtt5_protocol::qos2::QoS2Action::SendPubRec {
-                                packet_id,
-                                reason_code,
-                            } => {
-                                send_pubrec(state, packet_id, reason_code);
-                            }
-                            mqtt5_protocol::qos2::QoS2Action::TrackIncomingPubRec { packet_id } => {
-                                let now = js_sys::Date::now();
-                                state.borrow_mut().pending_pubrecs.insert(packet_id, now);
-                                state.borrow_mut().received_qos2.insert(packet_id, now);
-                            }
-                            _ => {}
-                        }
-                    }
-                } else {
-                    web_sys::console::error_1(&"QoS 2 PUBLISH missing packet_id".into());
-                }
-            } else {
-                deliver_message(state, &topic, &payload, qos, retain, &properties);
-            }
-        }
+        Packet::Publish(ref publish) => handle_publish(state, publish),
         Packet::SubAck(suback) => {
             let callback = state.borrow_mut().pending_subacks.remove(&suback.packet_id);
             if let Some(callback) = callback {
@@ -140,6 +100,49 @@ pub fn handle_incoming_packet(state: &Rc<RefCell<ClientState>>, packet: Packet) 
         _ => {
             web_sys::console::warn_1(&format!("Unhandled packet type: {packet:?}").into());
         }
+    }
+}
+
+fn handle_publish(
+    state: &Rc<RefCell<ClientState>>,
+    publish: &mqtt5_protocol::packet::publish::PublishPacket,
+) {
+    let topic = publish.topic_name.clone();
+    let payload = publish.payload.clone();
+    let qos = publish.qos;
+    let retain = publish.retain;
+    let properties: mqtt5_protocol::types::MessageProperties = publish.properties.clone().into();
+
+    if qos == mqtt5_protocol::QoS::ExactlyOnce {
+        if let Some(packet_id) = publish.packet_id {
+            let is_duplicate = state.borrow().received_qos2.contains_key(&packet_id);
+            let actions =
+                mqtt5_protocol::qos2::handle_incoming_publish_qos2(packet_id, is_duplicate);
+
+            for action in actions {
+                match action {
+                    mqtt5_protocol::qos2::QoS2Action::DeliverMessage { packet_id: _ } => {
+                        deliver_message(state, &topic, &payload, qos, retain, &properties);
+                    }
+                    mqtt5_protocol::qos2::QoS2Action::SendPubRec {
+                        packet_id,
+                        reason_code,
+                    } => {
+                        send_pubrec(state, packet_id, reason_code);
+                    }
+                    mqtt5_protocol::qos2::QoS2Action::TrackIncomingPubRec { packet_id } => {
+                        let now = js_sys::Date::now();
+                        state.borrow_mut().pending_pubrecs.insert(packet_id, now);
+                        state.borrow_mut().received_qos2.insert(packet_id, now);
+                    }
+                    _ => {}
+                }
+            }
+        } else {
+            web_sys::console::error_1(&"QoS 2 PUBLISH missing packet_id".into());
+        }
+    } else {
+        deliver_message(state, &topic, &payload, qos, retain, &properties);
     }
 }
 

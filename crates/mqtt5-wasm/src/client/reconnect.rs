@@ -201,7 +201,7 @@ async fn attempt_reconnect(
             {
                 let mut state_mut = state.borrow_mut();
                 state_mut.connected = true;
-                state_mut.connection_generation += 1;
+                state_mut.connection_generation = state_mut.connection_generation.wrapping_add(1);
                 state_mut.writer = Some(Rc::clone(&writer_rc));
             }
 
