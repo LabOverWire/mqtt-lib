@@ -1332,6 +1332,7 @@ impl MqttBroker {
                 let config_watch_tx = self.config_watch_tx.clone();
                 let auth_watch_tx = self.auth_watch_tx.clone();
                 let resource_monitor = Arc::clone(&self.resource_monitor);
+                let router = Arc::clone(&self.router);
                 let mut old_config = Arc::clone(&self.config);
                 let mut shutdown_rx_reload = shutdown_tx.subscribe();
                 let mut reload_rx = self.reload_rx.take();
@@ -1393,6 +1394,13 @@ impl MqttBroker {
                             Ok(new_auth) => {
                                 let _ = auth_watch_tx.send(new_auth);
                                 info!("Auth provider recreated from reloaded config");
+
+                                let echo_key = if new_config.echo_suppression_config.enabled {
+                                    Some(new_config.echo_suppression_config.property_key.clone())
+                                } else {
+                                    None
+                                };
+                                router.update_echo_suppression_key(echo_key).await;
 
                                 let new_config = Arc::new(new_config);
                                 let _ = config_watch_tx.send(Arc::clone(&new_config));

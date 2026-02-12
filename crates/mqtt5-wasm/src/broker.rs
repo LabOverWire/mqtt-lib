@@ -597,6 +597,12 @@ impl WasmBroker {
 
         let broker_config = new_config.to_broker_config();
 
+        let echo_key = if broker_config.echo_suppression_config.enabled {
+            Some(broker_config.echo_suppression_config.property_key.clone())
+        } else {
+            None
+        };
+
         if let Ok(mut config) = self.config.try_write() {
             *config = broker_config;
         } else {
@@ -606,6 +612,12 @@ impl WasmBroker {
             return Err(JsValue::from_str(
                 "Failed to acquire config write lock: resource busy",
             ));
+        }
+
+        if !self.router.try_update_echo_suppression_key(echo_key) {
+            web_sys::console::warn_1(
+                &"Echo suppression key update skipped: router lock contention".into(),
+            );
         }
 
         self.config_hash.set(new_hash);

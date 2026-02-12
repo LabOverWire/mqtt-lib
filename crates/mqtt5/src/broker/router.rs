@@ -61,7 +61,7 @@ pub struct MessageRouter {
     bridge_manager: Arc<RwLock<Option<Weak<BridgeManager>>>>,
     #[cfg(target_arch = "wasm32")]
     wasm_bridge_callback: Arc<RwLock<Option<WasmBridgeCallback>>>,
-    echo_suppression_key: Option<String>,
+    echo_suppression_key: Arc<RwLock<Option<String>>>,
 }
 
 /// Information about a connected client
@@ -91,7 +91,7 @@ impl MessageRouter {
             #[cfg(target_arch = "wasm32")]
             #[allow(clippy::arc_with_non_send_sync)]
             wasm_bridge_callback: Arc::new(RwLock::new(None)),
-            echo_suppression_key: None,
+            echo_suppression_key: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -112,7 +112,7 @@ impl MessageRouter {
             #[cfg(target_arch = "wasm32")]
             #[allow(clippy::arc_with_non_send_sync)]
             wasm_bridge_callback: Arc::new(RwLock::new(None)),
-            echo_suppression_key: None,
+            echo_suppression_key: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -124,8 +124,23 @@ impl MessageRouter {
 
     #[must_use]
     pub fn with_echo_suppression_key(mut self, key: String) -> Self {
-        self.echo_suppression_key = Some(key);
+        self.echo_suppression_key = Arc::new(RwLock::new(Some(key)));
         self
+    }
+
+    pub async fn update_echo_suppression_key(&self, key: Option<String>) {
+        *self.echo_suppression_key.write().await = key;
+    }
+
+    #[must_use]
+    pub fn try_update_echo_suppression_key(&self, key: Option<String>) -> bool {
+        match self.echo_suppression_key.try_write() {
+            Ok(mut guard) => {
+                *guard = key;
+                true
+            }
+            Err(_) => false,
+        }
     }
 
     fn has_wildcards(topic_filter: &str) -> bool {
@@ -579,11 +594,14 @@ impl MessageRouter {
             return;
         }
 
-        if let Some(ref key) = self.echo_suppression_key {
-            if let Some(origin) = publish.properties.get_user_property_value(key) {
-                if origin == sub.client_id {
-                    trace!("Skipping echo delivery to {}", sub.client_id);
-                    return;
+        {
+            let suppression_key = self.echo_suppression_key.read().await;
+            if let Some(ref key) = *suppression_key {
+                if let Some(origin) = publish.properties.get_user_property_value(key) {
+                    if origin == sub.client_id {
+                        trace!("Skipping echo delivery to {}", sub.client_id);
+                        return;
+                    }
                 }
             }
         }
