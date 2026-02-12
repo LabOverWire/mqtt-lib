@@ -234,9 +234,10 @@ impl WasmClientHandler {
         use std::sync::{atomic::AtomicBool, Arc};
 
         let connected = Arc::new(AtomicBool::new(true));
+        let (msg_tx, _) = futures::channel::mpsc::unbounded();
 
         let reader = MessagePortReader::new(msg_rx, Arc::clone(&connected));
-        let writer = MessagePortWriter::new(port, connected);
+        let writer = MessagePortWriter::new(port, connected, msg_tx);
 
         let mut reader = WasmReader::MessagePort(reader);
         let mut writer = WasmWriter::MessagePort(writer);

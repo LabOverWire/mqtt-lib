@@ -35,20 +35,15 @@ use qos::{await_ack_promises, create_ack_promises, spawn_qos2_cleanup_task};
 use reader::spawn_packet_reader;
 use state::{ClientState, StoredConnectOptions};
 
-/// Sleeps for the specified number of milliseconds.
-///
-/// # Panics
-///
-/// Panics if the browser window is not available.
+#[wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(js_name = "setTimeout")]
+    fn set_timeout(handler: &js_sys::Function, timeout: i32) -> i32;
+}
+
 pub async fn sleep_ms(millis: u32) {
     let promise = js_sys::Promise::new(&mut |resolve, _reject| {
-        let window = web_sys::window().expect("no global window");
-        window
-            .set_timeout_with_callback_and_timeout_and_arguments_0(
-                &resolve,
-                i32::try_from(millis).unwrap_or(i32::MAX),
-            )
-            .expect("setTimeout failed");
+        set_timeout(&resolve, i32::try_from(millis).unwrap_or(i32::MAX));
     });
     JsFuture::from(promise).await.ok();
 }
@@ -140,6 +135,16 @@ impl WasmMqttClient {
         mut transport: WasmTransportType,
         config: &WasmConnectOptions,
     ) -> Result<(), JsValue> {
+        {
+            let state_ref = self.state.borrow();
+            if state_ref.connected {
+                return Err(JsValue::from_str("Already connected"));
+            }
+            if state_ref.reconnecting {
+                return Err(JsValue::from_str("Reconnection in progress"));
+            }
+        }
+
         transport
             .connect()
             .await
@@ -229,7 +234,11 @@ impl WasmMqttClient {
                         )));
                     }
 
-                    self.state.borrow_mut().connected = true;
+                    {
+                        let mut state_mut = self.state.borrow_mut();
+                        state_mut.connected = true;
+                        state_mut.connection_generation += 1;
+                    }
 
                     spawn_packet_reader(Rc::clone(&self.state), reader);
                     spawn_keepalive_task(Rc::clone(&self.state));
@@ -631,18 +640,35 @@ impl WasmMqttClient {
         encode_packet(&packet, &mut buf)
             .map_err(|e| JsValue::from_str(&format!("DISCONNECT packet encoding failed: {e}")))?;
 
-        let writer_rc = loop {
+        let (writer_rc, pubacks, pubcomps, subacks) = loop {
             match self.state.try_borrow_mut() {
                 Ok(mut state) => {
                     state.connected = false;
                     state.user_initiated_disconnect = true;
-                    break state.writer.take();
+                    let writer = state.writer.take();
+                    let pubacks: Vec<_> = state.pending_pubacks.drain().collect();
+                    let pubcomps: Vec<_> = state.pending_pubcomps.drain().collect();
+                    let subacks: Vec<_> = state.pending_subacks.drain().collect();
+                    break (writer, pubacks, pubcomps, subacks);
                 }
                 Err(_) => {
                     sleep_ms(10).await;
                 }
             }
         };
+
+        let error_val = JsValue::from_f64(f64::from(0x80_u8));
+        for (_, callback) in pubacks {
+            let _ = callback.call1(&JsValue::NULL, &error_val);
+        }
+        for (_, (callback, _)) in pubcomps {
+            let _ = callback.call1(&JsValue::NULL, &error_val);
+        }
+        for (_, resolve) in subacks {
+            let arr = js_sys::Array::new();
+            arr.push(&JsValue::from_f64(f64::from(0x80_u8)));
+            let _ = resolve.call1(&JsValue::NULL, &arr.into());
+        }
 
         if let Some(writer_rc) = writer_rc {
             let mut writer = writer_rc.borrow_mut();

@@ -12,6 +12,7 @@ pub struct BroadcastChannelTransport {
     channel_name: String,
     channel: Option<BroadcastChannel>,
     rx: Option<mpsc::UnboundedReceiver<Vec<u8>>>,
+    tx: Option<mpsc::UnboundedSender<Vec<u8>>>,
     connected: Arc<AtomicBool>,
     closure: Option<Closure<dyn FnMut(MessageEvent)>>,
 }
@@ -24,6 +25,7 @@ pub struct BroadcastChannelReader {
 pub struct BroadcastChannelWriter {
     channel: BroadcastChannel,
     connected: Arc<AtomicBool>,
+    msg_tx: mpsc::UnboundedSender<Vec<u8>>,
     _closure: Closure<dyn FnMut(MessageEvent)>,
 }
 
@@ -62,6 +64,7 @@ impl BroadcastChannelWriter {
     /// # Errors
     /// This method does not currently return errors but uses Result for API consistency.
     pub fn close(&mut self) -> Result<()> {
+        self.msg_tx.close_channel();
         self.channel.close();
         self.connected.store(false, Ordering::SeqCst);
         Ok(())
@@ -75,6 +78,8 @@ impl BroadcastChannelWriter {
 
 impl Drop for BroadcastChannelWriter {
     fn drop(&mut self) {
+        self.msg_tx.close_channel();
+        self.connected.store(false, Ordering::SeqCst);
         self.channel.set_onmessage(None);
         self.channel.close();
     }
@@ -87,6 +92,7 @@ impl BroadcastChannelTransport {
             channel_name: channel_name.into(),
             channel: None,
             rx: None,
+            tx: None,
             connected: Arc::new(AtomicBool::new(false)),
             closure: None,
         }
@@ -98,6 +104,7 @@ impl BroadcastChannelTransport {
         let channel = self.channel.ok_or(MqttError::NotConnected)?;
         let rx = self.rx.ok_or(MqttError::NotConnected)?;
         let closure = self.closure.ok_or(MqttError::NotConnected)?;
+        let msg_tx = self.tx.ok_or(MqttError::NotConnected)?;
 
         let reader = BroadcastChannelReader {
             rx,
@@ -107,6 +114,7 @@ impl BroadcastChannelTransport {
         let writer = BroadcastChannelWriter {
             channel,
             connected: self.connected,
+            msg_tx,
             _closure: closure,
         };
 
@@ -135,6 +143,7 @@ impl Transport for BroadcastChannelTransport {
 
         self.channel = Some(channel);
         self.rx = Some(msg_rx);
+        self.tx = Some(msg_tx);
         self.closure = Some(onmessage);
         self.connected.store(true, Ordering::SeqCst);
 

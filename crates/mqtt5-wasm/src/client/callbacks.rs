@@ -2,7 +2,49 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use wasm_bindgen::prelude::*;
 
+use super::reconnect::spawn_reconnection_task;
 use super::state::ClientState;
+
+pub fn handle_connection_lost(state: &Rc<RefCell<ClientState>>, reason: &str) {
+    let (should_reconnect, pubacks, pubcomps, subacks) = {
+        let mut state_ref = state.borrow_mut();
+        if !state_ref.connected {
+            return;
+        }
+        state_ref.connected = false;
+
+        let pubacks: Vec<_> = state_ref.pending_pubacks.drain().collect();
+        let pubcomps: Vec<_> = state_ref.pending_pubcomps.drain().collect();
+        let subacks: Vec<_> = state_ref.pending_subacks.drain().collect();
+
+        let should = state_ref.reconnect_config.enabled
+            && !state_ref.user_initiated_disconnect
+            && !state_ref.reconnecting
+            && state_ref.last_url.is_some();
+        (should, pubacks, pubcomps, subacks)
+    };
+
+    let error_val = JsValue::from_f64(f64::from(0x80_u8));
+    for (_, callback) in pubacks {
+        let _ = callback.call1(&JsValue::NULL, &error_val);
+    }
+    for (_, (callback, _)) in pubcomps {
+        let _ = callback.call1(&JsValue::NULL, &error_val);
+    }
+    for (_, resolve) in subacks {
+        let arr = js_sys::Array::new();
+        arr.push(&JsValue::from_f64(f64::from(0x80_u8)));
+        let _ = resolve.call1(&JsValue::NULL, &arr.into());
+    }
+
+    web_sys::console::error_1(&reason.into());
+    trigger_error_callback(state, reason);
+    trigger_disconnect_callback(state);
+
+    if should_reconnect {
+        spawn_reconnection_task(Rc::clone(state));
+    }
+}
 
 pub fn trigger_disconnect_callback(state: &Rc<RefCell<ClientState>>) {
     let callback = state.borrow().on_disconnect.clone();
