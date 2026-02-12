@@ -95,6 +95,28 @@ impl Properties {
         }
     }
 
+    pub fn inject_client_id(&mut self, client_id: Option<&str>) {
+        self.remove_user_property_by_key("x-mqtt-client-id");
+        if let Some(cid) = client_id {
+            self.add_user_property("x-mqtt-client-id".into(), cid.into());
+        }
+    }
+
+    #[must_use]
+    pub fn get_user_property_value(&self, key: &str) -> Option<&str> {
+        self.properties
+            .get(&PropertyId::UserProperty)?
+            .iter()
+            .find_map(|v| {
+                if let PropertyValue::Utf8StringPair(k, val) = v {
+                    if k == key {
+                        return Some(val.as_str());
+                    }
+                }
+                None
+            })
+    }
+
     pub fn set_subscription_identifier(&mut self, id: u32) {
         self.properties
             .entry(PropertyId::SubscriptionIdentifier)

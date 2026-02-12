@@ -110,6 +110,9 @@ impl WasmClientHandler {
         }
 
         publish.properties.inject_sender(self.user_id.as_deref());
+        publish
+            .properties
+            .inject_client_id(Some(client_id.as_str()));
 
         match publish.qos {
             QoS::AtMostOnce => {

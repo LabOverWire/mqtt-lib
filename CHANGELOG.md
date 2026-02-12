@@ -5,7 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [mqtt5 0.22.4] / [mqtt5-wasm 0.10.6] - 2026-02-10
+## [mqtt5-protocol 0.9.7] / [mqtt5 0.22.5] / [mqtt5-wasm 0.10.6] / [mqttv5-cli 0.20.4] - 2026-02-12
+
+### Added
+
+- **`x-mqtt-client-id` injection** - Broker injects publisher's MQTT client_id as `x-mqtt-client-id` user property on every PUBLISH (strips client-supplied values first to prevent spoofing). Applies to normal publishes, will messages, and bridge paths in both native and WASM brokers
+- **Echo suppression** - Configurable delivery suppression when a user property value matches the subscriber's client_id
+  - `EchoSuppressionConfig` with `enabled` and `property_key` (default `x-origin-client-id`)
+  - Defaults to `x-origin-client-id` (not `x-mqtt-client-id`) because intermediaries like MQDB republish with their own client_id — only the application-layer origin property tracks the real causation chain
+  - Hot-reloadable via SIGHUP (native) and `update_config()` (WASM)
+  - `BrokerConfig::with_echo_suppression()` and `WasmBrokerConfig` setters
+- **`Properties::get_user_property_value()`** - Single-value user property lookup by key
+
+### Changed
+
+- Router construction extracted to `MqttBroker::build_router()` for reuse between init and reload paths
+
+### Fixed
+
+- **CLI TLS broker tests** use `--storage-backend memory` instead of default file backend, preventing failures from stale/corrupt storage left by prior runs
+
+## [mqtt5 0.22.4] / [mqtt5-wasm 0.10.5] - 2026-02-10
 
 ### Security
 

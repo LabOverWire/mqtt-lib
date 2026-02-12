@@ -43,6 +43,8 @@ struct ConfigHashFields {
     allow_anonymous: bool,
     change_only_delivery_enabled: bool,
     change_only_delivery_patterns: Vec<String>,
+    echo_suppression_enabled: bool,
+    echo_suppression_property_key: Option<String>,
 }
 
 #[wasm_bindgen]
@@ -61,6 +63,8 @@ pub struct WasmBrokerConfig {
     allow_anonymous: bool,
     change_only_delivery_enabled: bool,
     change_only_delivery_patterns: Vec<String>,
+    echo_suppression_enabled: bool,
+    echo_suppression_property_key: Option<String>,
 }
 
 #[wasm_bindgen]
@@ -82,6 +86,8 @@ impl WasmBrokerConfig {
             allow_anonymous: false,
             change_only_delivery_enabled: false,
             change_only_delivery_patterns: Vec::new(),
+            echo_suppression_enabled: false,
+            echo_suppression_property_key: None,
         }
     }
 
@@ -155,6 +161,16 @@ impl WasmBrokerConfig {
         self.change_only_delivery_patterns.clear();
     }
 
+    #[wasm_bindgen(setter)]
+    pub fn set_echo_suppression_enabled(&mut self, value: bool) {
+        self.echo_suppression_enabled = value;
+    }
+
+    #[wasm_bindgen(setter)]
+    pub fn set_echo_suppression_property_key(&mut self, value: Option<String>) {
+        self.echo_suppression_property_key = value;
+    }
+
     fn to_broker_config(&self) -> BrokerConfig {
         BrokerConfig {
             max_clients: self.max_clients as usize,
@@ -175,6 +191,13 @@ impl WasmBrokerConfig {
                 enabled: self.change_only_delivery_enabled,
                 topic_patterns: self.change_only_delivery_patterns.clone(),
             },
+            echo_suppression_config: mqtt5::broker::config::EchoSuppressionConfig {
+                enabled: self.echo_suppression_enabled,
+                property_key: self
+                    .echo_suppression_property_key
+                    .clone()
+                    .unwrap_or_else(|| "x-origin-client-id".to_string()),
+            },
             ..Default::default()
         }
     }
@@ -194,6 +217,8 @@ impl WasmBrokerConfig {
             allow_anonymous: self.allow_anonymous,
             change_only_delivery_enabled: self.change_only_delivery_enabled,
             change_only_delivery_patterns: self.change_only_delivery_patterns.clone(),
+            echo_suppression_enabled: self.echo_suppression_enabled,
+            echo_suppression_property_key: self.echo_suppression_property_key.clone(),
         };
         let mut hasher = DefaultHasher::new();
         fields.hash(&mut hasher);
@@ -242,7 +267,18 @@ impl WasmBroker {
         let config = Arc::new(RwLock::new(wasm_config.to_broker_config()));
 
         let storage = Arc::new(DynamicStorage::Memory(MemoryBackend::new()));
-        let router = Arc::new(MessageRouter::with_storage(Arc::clone(&storage)));
+        let broker_config = config
+            .read()
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let base_router = MessageRouter::with_storage(Arc::clone(&storage));
+        let router = if broker_config.echo_suppression_config.enabled {
+            Arc::new(base_router.with_echo_suppression_key(
+                broker_config.echo_suppression_config.property_key.clone(),
+            ))
+        } else {
+            Arc::new(base_router)
+        };
+        drop(broker_config);
 
         let password_provider = PasswordAuthProvider::new().with_anonymous(allow_anonymous);
         let acl_manager = mqtt5::broker::acl::AclManager::allow_all();
@@ -561,6 +597,12 @@ impl WasmBroker {
 
         let broker_config = new_config.to_broker_config();
 
+        let echo_key = if broker_config.echo_suppression_config.enabled {
+            Some(broker_config.echo_suppression_config.property_key.clone())
+        } else {
+            None
+        };
+
         if let Ok(mut config) = self.config.try_write() {
             *config = broker_config;
         } else {
@@ -570,6 +612,12 @@ impl WasmBroker {
             return Err(JsValue::from_str(
                 "Failed to acquire config write lock: resource busy",
             ));
+        }
+
+        if !self.router.try_update_echo_suppression_key(echo_key) {
+            web_sys::console::warn_1(
+                &"Echo suppression key update skipped: router lock contention".into(),
+            );
         }
 
         self.config_hash.set(new_hash);

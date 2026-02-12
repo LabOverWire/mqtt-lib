@@ -3,6 +3,7 @@
 mod common;
 
 use common::TestBroker;
+use mqtt5::broker::config::EchoSuppressionConfig;
 use mqtt5::time::Duration;
 use mqtt5::{
     ConnectOptions, ConnectionEvent, Message, MqttClient, PublishOptions, QoS, SubscribeOptions,
@@ -1071,4 +1072,194 @@ async fn test_will_message_blocked_by_acl() {
 
     let _ = std::fs::remove_file(&acl_file);
     let _ = std::fs::remove_file(&password_file);
+}
+
+#[tokio::test]
+async fn test_publish_injects_client_id() {
+    let broker = TestBroker::start().await;
+
+    let collector = common::MessageCollector::new();
+    let sub_client = MqttClient::new(test_client_id("cid-inject-sub"));
+    sub_client
+        .connect(broker.address())
+        .await
+        .expect("subscriber connect");
+    sub_client
+        .subscribe("test/client-id-inject", collector.callback())
+        .await
+        .expect("subscribe");
+
+    let pub_client_id = test_client_id("cid-inject-pub");
+    let pub_client = MqttClient::new(pub_client_id.clone());
+    let pub_opts = ConnectOptions::new(pub_client_id.clone()).with_clean_start(true);
+    pub_client
+        .connect_with_options(broker.address(), pub_opts)
+        .await
+        .expect("publisher connect");
+
+    pub_client
+        .publish("test/client-id-inject", b"hello")
+        .await
+        .expect("publish");
+
+    assert!(collector.wait_for_messages(1, Duration::from_secs(5)).await);
+
+    let msgs = collector.get_messages().await;
+    let msg = &msgs[0];
+
+    let client_id_props: Vec<&str> = msg
+        .properties
+        .user_properties
+        .iter()
+        .filter(|(k, _)| k == "x-mqtt-client-id")
+        .map(|(_, v)| v.as_str())
+        .collect();
+
+    assert_eq!(client_id_props.len(), 1);
+    assert_eq!(client_id_props[0], pub_client_id);
+
+    pub_client.disconnect().await.expect("disconnect pub");
+    sub_client.disconnect().await.expect("disconnect sub");
+}
+
+#[tokio::test]
+async fn test_publish_strips_spoofed_client_id() {
+    let broker = TestBroker::start().await;
+
+    let collector = common::MessageCollector::new();
+    let sub_client = MqttClient::new(test_client_id("cid-spoof-sub"));
+    sub_client
+        .connect(broker.address())
+        .await
+        .expect("subscriber connect");
+    sub_client
+        .subscribe("test/client-id-spoof", collector.callback())
+        .await
+        .expect("subscribe");
+
+    let pub_client_id = test_client_id("cid-spoof-pub");
+    let pub_client = MqttClient::new(pub_client_id.clone());
+    let pub_opts = ConnectOptions::new(pub_client_id.clone()).with_clean_start(true);
+    pub_client
+        .connect_with_options(broker.address(), pub_opts)
+        .await
+        .expect("publisher connect");
+
+    let mut opts = PublishOptions {
+        qos: QoS::AtMostOnce,
+        ..Default::default()
+    };
+    opts.properties
+        .user_properties
+        .push(("x-mqtt-client-id".to_string(), "evil-spoof".to_string()));
+
+    pub_client
+        .publish_with_options("test/client-id-spoof", b"hello", opts)
+        .await
+        .expect("publish");
+
+    assert!(collector.wait_for_messages(1, Duration::from_secs(5)).await);
+
+    let msgs = collector.get_messages().await;
+    let msg = &msgs[0];
+
+    let client_id_props: Vec<&str> = msg
+        .properties
+        .user_properties
+        .iter()
+        .filter(|(k, _)| k == "x-mqtt-client-id")
+        .map(|(_, v)| v.as_str())
+        .collect();
+
+    assert_eq!(client_id_props.len(), 1);
+    assert_eq!(client_id_props[0], pub_client_id);
+    assert!(!msg
+        .properties
+        .user_properties
+        .iter()
+        .any(|(_, v)| v == "evil-spoof"));
+
+    pub_client.disconnect().await.expect("disconnect pub");
+    sub_client.disconnect().await.expect("disconnect sub");
+}
+
+#[tokio::test]
+async fn test_echo_suppression() {
+    use mqtt5::broker::config::{BrokerConfig, StorageBackend, StorageConfig};
+
+    let storage_config = StorageConfig {
+        backend: StorageBackend::Memory,
+        enable_persistence: true,
+        ..Default::default()
+    };
+
+    let config = BrokerConfig::default()
+        .with_bind_address("127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap())
+        .with_storage(storage_config)
+        .with_echo_suppression(
+            EchoSuppressionConfig::new()
+                .with_enabled(true)
+                .with_property_key("x-origin-client-id"),
+        );
+
+    let broker = TestBroker::start_with_config(config).await;
+
+    let sub1_id = test_client_id("echo-sub1");
+    let sub2_id = test_client_id("echo-sub2");
+
+    let collector1 = common::MessageCollector::new();
+    let collector2 = common::MessageCollector::new();
+
+    let sub1 = MqttClient::new(sub1_id.clone());
+    sub1.connect_with_options(
+        broker.address(),
+        ConnectOptions::new(sub1_id.clone()).with_clean_start(true),
+    )
+    .await
+    .expect("sub1 connect");
+    sub1.subscribe("test/echo-sup", collector1.callback())
+        .await
+        .expect("sub1 subscribe");
+
+    let sub2 = MqttClient::new(sub2_id.clone());
+    sub2.connect_with_options(
+        broker.address(),
+        ConnectOptions::new(sub2_id.clone()).with_clean_start(true),
+    )
+    .await
+    .expect("sub2 connect");
+    sub2.subscribe("test/echo-sup", collector2.callback())
+        .await
+        .expect("sub2 subscribe");
+
+    let pub_client = MqttClient::new(test_client_id("echo-pub"));
+    pub_client
+        .connect(broker.address())
+        .await
+        .expect("pub connect");
+
+    let mut opts = PublishOptions {
+        qos: QoS::AtMostOnce,
+        ..Default::default()
+    };
+    opts.properties
+        .user_properties
+        .push(("x-origin-client-id".to_string(), sub1_id.clone()));
+
+    pub_client
+        .publish_with_options("test/echo-sup", b"echo-test", opts)
+        .await
+        .expect("publish");
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    assert_eq!(collector1.count().await, 0);
+    assert_eq!(collector2.count().await, 1);
+
+    let msgs = collector2.get_messages().await;
+    assert_eq!(&msgs[0].payload[..], b"echo-test");
+
+    pub_client.disconnect().await.expect("disconnect pub");
+    sub1.disconnect().await.expect("disconnect sub1");
+    sub2.disconnect().await.expect("disconnect sub2");
 }

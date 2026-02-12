@@ -18,7 +18,6 @@ async fn test_cli_broker_tls_starts() {
         "../../target/release/mqttv5"
     };
 
-    // Start broker with TLS
     let mut broker = Command::new(binary_path)
         .args([
             "broker",
@@ -28,6 +27,8 @@ async fn test_cli_broker_tls_starts() {
             "../../test_certs/server.key",
             "--allow-anonymous",
             "--non-interactive",
+            "--storage-backend",
+            "memory",
         ])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -84,7 +85,6 @@ async fn test_cli_broker_tls_listens() {
         "target/release/mqttv5"
     };
 
-    // Start broker with TLS in background
     let mut broker = Command::new(binary_path)
         .args([
             "broker",
@@ -93,10 +93,12 @@ async fn test_cli_broker_tls_listens() {
             "--tls-key",
             "../../test_certs/server.key",
             "--tls-host",
-            "127.0.0.1:28883", // Use different port to avoid conflicts
+            "127.0.0.1:28883",
             "--allow-anonymous",
             "--verbose",
             "--non-interactive",
+            "--storage-backend",
+            "memory",
         ])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())

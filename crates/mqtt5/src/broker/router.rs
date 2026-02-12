@@ -61,6 +61,7 @@ pub struct MessageRouter {
     bridge_manager: Arc<RwLock<Option<Weak<BridgeManager>>>>,
     #[cfg(target_arch = "wasm32")]
     wasm_bridge_callback: Arc<RwLock<Option<WasmBridgeCallback>>>,
+    echo_suppression_key: Arc<RwLock<Option<String>>>,
 }
 
 /// Information about a connected client
@@ -90,6 +91,7 @@ impl MessageRouter {
             #[cfg(target_arch = "wasm32")]
             #[allow(clippy::arc_with_non_send_sync)]
             wasm_bridge_callback: Arc::new(RwLock::new(None)),
+            echo_suppression_key: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -110,6 +112,7 @@ impl MessageRouter {
             #[cfg(target_arch = "wasm32")]
             #[allow(clippy::arc_with_non_send_sync)]
             wasm_bridge_callback: Arc::new(RwLock::new(None)),
+            echo_suppression_key: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -117,6 +120,27 @@ impl MessageRouter {
     pub fn with_event_handler(mut self, handler: Arc<dyn BrokerEventHandler>) -> Self {
         self.event_handler = Some(handler);
         self
+    }
+
+    #[must_use]
+    pub fn with_echo_suppression_key(mut self, key: String) -> Self {
+        self.echo_suppression_key = Arc::new(RwLock::new(Some(key)));
+        self
+    }
+
+    pub async fn update_echo_suppression_key(&self, key: Option<String>) {
+        *self.echo_suppression_key.write().await = key;
+    }
+
+    #[must_use]
+    pub fn try_update_echo_suppression_key(&self, key: Option<String>) -> bool {
+        match self.echo_suppression_key.try_write() {
+            Ok(mut guard) => {
+                *guard = key;
+                true
+            }
+            Err(_) => false,
+        }
     }
 
     fn has_wildcards(topic_filter: &str) -> bool {
@@ -568,6 +592,18 @@ impl MessageRouter {
                 sub.client_id
             );
             return;
+        }
+
+        {
+            let suppression_key = self.echo_suppression_key.read().await;
+            if let Some(ref key) = *suppression_key {
+                if let Some(origin) = publish.properties.get_user_property_value(key) {
+                    if origin == sub.client_id {
+                        trace!("Skipping echo delivery to {}", sub.client_id);
+                        return;
+                    }
+                }
+            }
         }
 
         if sub.change_only {
@@ -1062,6 +1098,118 @@ mod tests {
         assert_eq!(msg2.topic_name, "test/data");
         assert_eq!(&msg2.payload[..], b"local-only");
         assert_eq!(msg2.qos, QoS::ExactlyOnce);
+    }
+
+    #[tokio::test]
+    async fn test_echo_suppression_skips_matching_client() {
+        let router = MessageRouter::new().with_echo_suppression_key("x-origin".to_string());
+        let (tx1, rx1) = flume::bounded(100);
+        let (tx2, rx2) = flume::bounded(100);
+
+        let (dtx1, _drx1) = tokio::sync::oneshot::channel();
+        let (dtx2, _drx2) = tokio::sync::oneshot::channel();
+        router
+            .register_client("client1".to_string(), tx1, dtx1)
+            .await;
+        router
+            .register_client("client2".to_string(), tx2, dtx2)
+            .await;
+
+        router
+            .subscribe(
+                "client1".to_string(),
+                "test/echo".to_string(),
+                QoS::AtMostOnce,
+                None,
+                false,
+                false,
+                0,
+                ProtocolVersion::V5,
+                false,
+            )
+            .await
+            .unwrap();
+        router
+            .subscribe(
+                "client2".to_string(),
+                "test/echo".to_string(),
+                QoS::AtMostOnce,
+                None,
+                false,
+                false,
+                0,
+                ProtocolVersion::V5,
+                false,
+            )
+            .await
+            .unwrap();
+
+        let mut publish = PublishPacket::new("test/echo", &b"hello"[..], QoS::AtMostOnce);
+        publish
+            .properties
+            .add_user_property("x-origin".to_string(), "client1".to_string());
+
+        router.route_message(&publish, None).await;
+
+        assert!(rx1.try_recv().is_err());
+
+        let msg2 = rx2.try_recv().unwrap();
+        assert_eq!(msg2.topic_name, "test/echo");
+    }
+
+    #[tokio::test]
+    async fn test_echo_suppression_disabled_delivers_all() {
+        let router = MessageRouter::new();
+        let (tx1, rx1) = flume::bounded(100);
+        let (tx2, rx2) = flume::bounded(100);
+
+        let (dtx1, _drx1) = tokio::sync::oneshot::channel();
+        let (dtx2, _drx2) = tokio::sync::oneshot::channel();
+        router
+            .register_client("client1".to_string(), tx1, dtx1)
+            .await;
+        router
+            .register_client("client2".to_string(), tx2, dtx2)
+            .await;
+
+        router
+            .subscribe(
+                "client1".to_string(),
+                "test/echo".to_string(),
+                QoS::AtMostOnce,
+                None,
+                false,
+                false,
+                0,
+                ProtocolVersion::V5,
+                false,
+            )
+            .await
+            .unwrap();
+        router
+            .subscribe(
+                "client2".to_string(),
+                "test/echo".to_string(),
+                QoS::AtMostOnce,
+                None,
+                false,
+                false,
+                0,
+                ProtocolVersion::V5,
+                false,
+            )
+            .await
+            .unwrap();
+
+        let mut publish = PublishPacket::new("test/echo", &b"hello"[..], QoS::AtMostOnce);
+        publish
+            .properties
+            .add_user_property("x-origin".to_string(), "client1".to_string());
+
+        router.route_message(&publish, None).await;
+
+        assert!(rx1.try_recv().is_ok());
+        assert!(rx2.try_recv().is_ok());
     }
 
     #[tokio::test]
