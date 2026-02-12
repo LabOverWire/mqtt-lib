@@ -28,7 +28,7 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::MessagePort;
 
-use callbacks::trigger_disconnect_callback;
+use callbacks::{drain_pending_callbacks, trigger_disconnect_callback};
 use keepalive::spawn_keepalive_task;
 use packet::encode_packet;
 use qos::{await_ack_promises, create_ack_promises, spawn_qos2_cleanup_task};
@@ -129,7 +129,6 @@ impl WasmMqttClient {
             .await
     }
 
-    #[allow(clippy::too_many_lines)]
     async fn connect_with_transport_and_config(
         &self,
         mut transport: WasmTransportType,
@@ -151,12 +150,11 @@ impl WasmMqttClient {
             .map_err(|e| JsValue::from_str(&format!("Transport connection failed: {e}")))?;
 
         let client_id = self.state.borrow().client_id.clone();
-        let protocol_version = config.protocol_version;
 
         {
             let mut state = self.state.borrow_mut();
             state.keep_alive = config.keep_alive;
-            state.protocol_version = protocol_version;
+            state.protocol_version = config.protocol_version;
             state.last_options = Some(StoredConnectOptions::from(config));
             state.user_initiated_disconnect = false;
             state.reconnect_attempt = 0;
@@ -166,33 +164,7 @@ impl WasmMqttClient {
             }
         }
 
-        let (will, will_properties) = if let Some(will_config) = &config.will {
-            let will_msg = will_config.to_will_message();
-            let will_props = will_msg.properties.clone().into();
-            (Some(will_msg), will_props)
-        } else {
-            (None, Properties::default())
-        };
-
-        let (properties, will_properties) = if protocol_version == 5 {
-            (config.to_properties(), will_properties)
-        } else {
-            (Properties::default(), Properties::default())
-        };
-
-        let connect_packet = ConnectPacket {
-            protocol_version,
-            clean_start: config.clean_start,
-            keep_alive: config.keep_alive,
-            client_id,
-            username: config.username.clone(),
-            password: config.password.clone(),
-            will,
-            properties,
-            will_properties,
-        };
-
-        let packet = Packet::Connect(Box::new(connect_packet));
+        let packet = Packet::Connect(Box::new(build_connect_packet(client_id, config)));
         let mut buf = BytesMut::new();
         encode_packet(&packet, &mut buf)
             .map_err(|e| JsValue::from_str(&format!("Packet encoding failed: {e}")))?;
@@ -640,35 +612,19 @@ impl WasmMqttClient {
         encode_packet(&packet, &mut buf)
             .map_err(|e| JsValue::from_str(&format!("DISCONNECT packet encoding failed: {e}")))?;
 
-        let (writer_rc, pubacks, pubcomps, subacks) = loop {
+        let writer_rc = loop {
             match self.state.try_borrow_mut() {
                 Ok(mut state) => {
                     state.connected = false;
                     state.user_initiated_disconnect = true;
-                    let writer = state.writer.take();
-                    let pubacks: Vec<_> = state.pending_pubacks.drain().collect();
-                    let pubcomps: Vec<_> = state.pending_pubcomps.drain().collect();
-                    let subacks: Vec<_> = state.pending_subacks.drain().collect();
-                    break (writer, pubacks, pubcomps, subacks);
+                    state.connection_generation += 1;
+                    break state.writer.take();
                 }
                 Err(_) => {
                     sleep_ms(10).await;
                 }
             }
         };
-
-        let error_val = JsValue::from_f64(f64::from(0x80_u8));
-        for (_, callback) in pubacks {
-            let _ = callback.call1(&JsValue::NULL, &error_val);
-        }
-        for (_, (callback, _)) in pubcomps {
-            let _ = callback.call1(&JsValue::NULL, &error_val);
-        }
-        for (_, resolve) in subacks {
-            let arr = js_sys::Array::new();
-            arr.push(&JsValue::from_f64(f64::from(0x80_u8)));
-            let _ = resolve.call1(&JsValue::NULL, &arr.into());
-        }
 
         if let Some(writer_rc) = writer_rc {
             let mut writer = writer_rc.borrow_mut();
@@ -680,6 +636,7 @@ impl WasmMqttClient {
                 .map_err(|e| JsValue::from_str(&format!("Close failed: {e}")))?;
         }
 
+        drain_pending_callbacks(&mut self.state.borrow_mut());
         trigger_disconnect_callback(&self.state);
         Ok(())
     }
@@ -782,6 +739,34 @@ impl WasmMqttClient {
             .write(&buf)
             .map_err(|e| JsValue::from_str(&format!("Write failed: {e}")));
         result
+    }
+}
+
+fn build_connect_packet(client_id: String, config: &WasmConnectOptions) -> ConnectPacket {
+    let (will, will_properties) = if let Some(will_config) = &config.will {
+        let will_msg = will_config.to_will_message();
+        let will_props = will_msg.properties.clone().into();
+        (Some(will_msg), will_props)
+    } else {
+        (None, Properties::default())
+    };
+
+    let (properties, will_properties) = if config.protocol_version == 5 {
+        (config.to_properties(), will_properties)
+    } else {
+        (Properties::default(), Properties::default())
+    };
+
+    ConnectPacket {
+        protocol_version: config.protocol_version,
+        clean_start: config.clean_start,
+        keep_alive: config.keep_alive,
+        client_id,
+        username: config.username.clone(),
+        password: config.password.clone(),
+        will,
+        properties,
+        will_properties,
     }
 }
 

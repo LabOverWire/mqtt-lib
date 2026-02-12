@@ -5,24 +5,10 @@ use wasm_bindgen::prelude::*;
 use super::reconnect::spawn_reconnection_task;
 use super::state::ClientState;
 
-pub fn handle_connection_lost(state: &Rc<RefCell<ClientState>>, reason: &str) {
-    let (should_reconnect, pubacks, pubcomps, subacks) = {
-        let mut state_ref = state.borrow_mut();
-        if !state_ref.connected {
-            return;
-        }
-        state_ref.connected = false;
-
-        let pubacks: Vec<_> = state_ref.pending_pubacks.drain().collect();
-        let pubcomps: Vec<_> = state_ref.pending_pubcomps.drain().collect();
-        let subacks: Vec<_> = state_ref.pending_subacks.drain().collect();
-
-        let should = state_ref.reconnect_config.enabled
-            && !state_ref.user_initiated_disconnect
-            && !state_ref.reconnecting
-            && state_ref.last_url.is_some();
-        (should, pubacks, pubcomps, subacks)
-    };
+pub fn drain_pending_callbacks(state: &mut ClientState) {
+    let pubacks: Vec<_> = state.pending_pubacks.drain().collect();
+    let pubcomps: Vec<_> = state.pending_pubcomps.drain().collect();
+    let subacks: Vec<_> = state.pending_subacks.drain().collect();
 
     let error_val = JsValue::from_f64(f64::from(0x80_u8));
     for (_, callback) in pubacks {
@@ -36,6 +22,23 @@ pub fn handle_connection_lost(state: &Rc<RefCell<ClientState>>, reason: &str) {
         arr.push(&JsValue::from_f64(f64::from(0x80_u8)));
         let _ = resolve.call1(&JsValue::NULL, &arr.into());
     }
+}
+
+pub fn handle_connection_lost(state: &Rc<RefCell<ClientState>>, reason: &str) {
+    let should_reconnect = {
+        let mut state_ref = state.borrow_mut();
+        if !state_ref.connected {
+            return;
+        }
+        state_ref.connected = false;
+
+        drain_pending_callbacks(&mut state_ref);
+
+        state_ref.reconnect_config.enabled
+            && !state_ref.user_initiated_disconnect
+            && !state_ref.reconnecting
+            && state_ref.last_url.is_some()
+    };
 
     web_sys::console::error_1(&reason.into());
     trigger_error_callback(state, reason);
