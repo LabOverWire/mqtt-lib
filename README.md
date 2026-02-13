@@ -4,6 +4,7 @@
 [![Documentation](https://docs.rs/mqtt5/badge.svg)](https://docs.rs/mqtt5)
 [![Rust CI](https://github.com/LabOverWire/mqtt-lib/actions/workflows/rust.yml/badge.svg)](https://github.com/LabOverWire/mqtt-lib/actions)
 [![License](https://img.shields.io/crates/l/mqtt5.svg)](https://github.com/LabOverWire/mqtt-lib#license)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/LabOverWire/mqtt-lib)
 
 **MQTT v5.0 and v3.1.1 platform featuring client library and broker implementation**
 
