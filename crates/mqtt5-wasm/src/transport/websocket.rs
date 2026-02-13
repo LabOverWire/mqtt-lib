@@ -14,6 +14,7 @@ pub struct WasmWebSocketTransport {
     url: String,
     ws: Option<WebSocket>,
     rx: Option<mpsc::UnboundedReceiver<Vec<u8>>>,
+    tx: Option<mpsc::UnboundedSender<Vec<u8>>>,
     connected: Arc<AtomicBool>,
     closures: Option<ClosureBundle>,
     buffer: Vec<u8>,
@@ -35,6 +36,7 @@ pub struct WasmReader {
 pub struct WasmWriter {
     ws: WebSocket,
     connected: Arc<AtomicBool>,
+    msg_tx: mpsc::UnboundedSender<Vec<u8>>,
     _closures: ClosureBundle,
 }
 
@@ -84,6 +86,7 @@ impl WasmWriter {
     /// # Errors
     /// This method does not currently return errors but uses Result for API consistency.
     pub fn close(&mut self) -> Result<()> {
+        self.msg_tx.close_channel();
         self.ws.set_onmessage(None);
         self.ws.set_onopen(None);
         self.ws.set_onerror(None);
@@ -101,6 +104,8 @@ impl WasmWriter {
 
 impl Drop for WasmWriter {
     fn drop(&mut self) {
+        self.msg_tx.close_channel();
+        self.connected.store(false, Ordering::SeqCst);
         self.ws.set_onmessage(None);
         self.ws.set_onopen(None);
         self.ws.set_onerror(None);
@@ -116,6 +121,7 @@ impl WasmWebSocketTransport {
             url: url.into(),
             ws: None,
             rx: None,
+            tx: None,
             connected: Arc::new(AtomicBool::new(false)),
             closures: None,
             buffer: Vec::new(),
@@ -128,6 +134,7 @@ impl WasmWebSocketTransport {
         let ws = self.ws.ok_or(MqttError::NotConnected)?;
         let rx = self.rx.ok_or(MqttError::NotConnected)?;
         let closures = self.closures.ok_or(MqttError::NotConnected)?;
+        let msg_tx = self.tx.ok_or(MqttError::NotConnected)?;
 
         let reader = WasmReader {
             rx,
@@ -138,6 +145,7 @@ impl WasmWebSocketTransport {
         let writer = WasmWriter {
             ws,
             connected: self.connected,
+            msg_tx,
             _closures: closures,
         };
 
@@ -156,12 +164,12 @@ impl Transport for WasmWebSocketTransport {
         let (msg_tx, msg_rx) = mpsc::unbounded();
         let (result_tx, result_rx) = oneshot::channel();
 
-        let msg_tx_clone = msg_tx.clone();
+        let msg_tx_message = msg_tx.clone();
         let onmessage = Closure::new(move |e: MessageEvent| {
             if let Ok(abuf) = e.data().dyn_into::<js_sys::ArrayBuffer>() {
                 let array = js_sys::Uint8Array::new(&abuf);
                 let vec = array.to_vec();
-                let _ = msg_tx_clone.unbounded_send(vec);
+                let _ = msg_tx_message.unbounded_send(vec);
             } else {
                 web_sys::console::warn_1(&"WebSocket received non-ArrayBuffer message".into());
             }
@@ -180,8 +188,10 @@ impl Transport for WasmWebSocketTransport {
 
         let result_tx_error = result_tx;
         let connected_clone2 = self.connected.clone();
+        let msg_tx_error = msg_tx.clone();
         let onerror = Closure::new(move |_e: ErrorEvent| {
             connected_clone2.store(false, Ordering::SeqCst);
+            msg_tx_error.close_channel();
             if let Some(tx) = result_tx_error.take() {
                 let _ = tx.send(Err(MqttError::ConnectionError(
                     "WebSocket connection failed".into(),
@@ -190,8 +200,10 @@ impl Transport for WasmWebSocketTransport {
         });
 
         let connected_clone3 = self.connected.clone();
+        let msg_tx_close = msg_tx.clone();
         let onclose = Closure::new(move |_e: CloseEvent| {
             connected_clone3.store(false, Ordering::SeqCst);
+            msg_tx_close.close_channel();
         });
 
         ws.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
@@ -201,6 +213,7 @@ impl Transport for WasmWebSocketTransport {
 
         self.ws = Some(ws.clone());
         self.rx = Some(msg_rx);
+        self.tx = Some(msg_tx);
         self.closures = Some(ClosureBundle {
             _onmessage: onmessage,
             _onopen: onopen,
@@ -220,6 +233,7 @@ impl Transport for WasmWebSocketTransport {
             ws.close().ok();
             self.ws = None;
             self.rx = None;
+            self.tx = None;
             self.closures = None;
         }
 

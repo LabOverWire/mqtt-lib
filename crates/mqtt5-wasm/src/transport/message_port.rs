@@ -11,6 +11,7 @@ use web_sys::{MessageEvent, MessagePort};
 pub struct MessagePortTransport {
     port: MessagePort,
     rx: Option<mpsc::UnboundedReceiver<Vec<u8>>>,
+    tx: Option<mpsc::UnboundedSender<Vec<u8>>>,
     connected: Arc<AtomicBool>,
     closure: Option<Closure<dyn FnMut(MessageEvent)>>,
     buffer: Vec<u8>,
@@ -26,6 +27,7 @@ pub struct MessagePortReader {
 pub struct MessagePortWriter {
     port: MessagePort,
     connected: Arc<AtomicBool>,
+    msg_tx: Option<mpsc::UnboundedSender<Vec<u8>>>,
     _closure: Option<Closure<dyn FnMut(MessageEvent)>>,
 }
 
@@ -83,10 +85,15 @@ impl MessagePortReader {
 
 impl MessagePortWriter {
     #[allow(clippy::must_use_candidate)]
-    pub fn new(port: MessagePort, connected: Arc<AtomicBool>) -> Self {
+    pub fn new(
+        port: MessagePort,
+        connected: Arc<AtomicBool>,
+        msg_tx: Option<mpsc::UnboundedSender<Vec<u8>>>,
+    ) -> Self {
         Self {
             port,
             connected,
+            msg_tx,
             _closure: None,
         }
     }
@@ -104,6 +111,9 @@ impl MessagePortWriter {
     /// # Errors
     /// Returns an error if closing the port fails.
     pub fn close(&mut self) -> Result<()> {
+        if let Some(tx) = &self.msg_tx {
+            tx.close_channel();
+        }
         self.port.close();
         self.connected.store(false, Ordering::SeqCst);
         Ok(())
@@ -117,6 +127,10 @@ impl MessagePortWriter {
 
 impl Drop for MessagePortWriter {
     fn drop(&mut self) {
+        if let Some(tx) = &self.msg_tx {
+            tx.close_channel();
+        }
+        self.connected.store(false, Ordering::SeqCst);
         self.port.set_onmessage(None);
         self.port.close();
     }
@@ -128,6 +142,7 @@ impl MessagePortTransport {
         Self {
             port,
             rx: None,
+            tx: None,
             connected: Arc::new(AtomicBool::new(false)),
             closure: None,
             buffer: Vec::new(),
@@ -140,6 +155,7 @@ impl MessagePortTransport {
         let port = self.port;
         let rx = self.rx.ok_or(MqttError::NotConnected)?;
         let closure = self.closure.ok_or(MqttError::NotConnected)?;
+        let msg_tx = self.tx.ok_or(MqttError::NotConnected)?;
 
         let reader = MessagePortReader {
             rx,
@@ -151,6 +167,7 @@ impl MessagePortTransport {
         let writer = MessagePortWriter {
             port,
             connected: self.connected,
+            msg_tx: Some(msg_tx),
             _closure: Some(closure),
         };
 
@@ -178,6 +195,7 @@ impl Transport for MessagePortTransport {
         self.port.start();
 
         self.rx = Some(msg_rx);
+        self.tx = Some(msg_tx);
         self.closure = Some(onmessage);
         self.connected.store(true, Ordering::SeqCst);
 

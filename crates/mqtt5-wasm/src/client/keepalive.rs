@@ -7,14 +7,14 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use wasm_bindgen_futures::spawn_local;
 
-use super::callbacks::{trigger_disconnect_callback, trigger_error_callback};
+use super::callbacks::handle_connection_lost;
 use super::packet::encode_packet;
-use super::reconnect::spawn_reconnection_task;
 use super::sleep_ms;
 use super::state::ClientState;
 
 pub fn spawn_keepalive_task(state: Rc<RefCell<ClientState>>) {
     let keepalive_config = KeepaliveConfig::conservative();
+    let generation = state.borrow().connection_generation;
 
     spawn_local(async move {
         loop {
@@ -35,6 +35,10 @@ pub fn spawn_keepalive_task(state: Rc<RefCell<ClientState>>) {
             let sleep_duration = u128_to_u32_saturating(ping_interval.as_millis());
             sleep_ms(sleep_duration).await;
 
+            if state.borrow().connection_generation != generation {
+                break;
+            }
+
             let timeout_duration = keepalive_config.timeout_duration(keepalive_duration);
             let timeout_ms = crate::utils::u128_to_f64_saturating(timeout_duration.as_millis());
 
@@ -49,12 +53,7 @@ pub fn spawn_keepalive_task(state: Rc<RefCell<ClientState>>) {
                     let pong_received = state_ref
                         .last_pong_received
                         .is_some_and(|pong| pong > last_ping);
-                    if !pong_received && (now - last_ping) > timeout_ms {
-                        web_sys::console::error_1(&"Keepalive timeout".into());
-                        true
-                    } else {
-                        false
-                    }
+                    !pong_received && (now - last_ping) > timeout_ms
                 } else {
                     false
                 }
@@ -64,21 +63,7 @@ pub fn spawn_keepalive_task(state: Rc<RefCell<ClientState>>) {
             };
 
             if should_disconnect {
-                let should_reconnect = {
-                    let mut state_ref = state.borrow_mut();
-                    state_ref.connected = false;
-                    state_ref.reconnect_config.enabled
-                        && !state_ref.user_initiated_disconnect
-                        && !state_ref.reconnecting
-                        && state_ref.last_url.is_some()
-                };
-
-                trigger_error_callback(&state, "Keepalive timeout");
-                trigger_disconnect_callback(&state);
-
-                if should_reconnect {
-                    spawn_reconnection_task(Rc::clone(&state));
-                }
+                handle_connection_lost(&state, "Keepalive timeout");
                 break;
             }
 
@@ -101,22 +86,7 @@ pub fn spawn_keepalive_task(state: Rc<RefCell<ClientState>>) {
                     Ok(()) => {}
                     Err(e) => {
                         let error_msg = format!("Ping send error: {e}");
-                        web_sys::console::error_1(&error_msg.clone().into());
-                        let should_reconnect = {
-                            let mut state_ref = state.borrow_mut();
-                            state_ref.connected = false;
-                            state_ref.reconnect_config.enabled
-                                && !state_ref.user_initiated_disconnect
-                                && !state_ref.reconnecting
-                                && state_ref.last_url.is_some()
-                        };
-
-                        trigger_error_callback(&state, &error_msg);
-                        trigger_disconnect_callback(&state);
-
-                        if should_reconnect {
-                            spawn_reconnection_task(Rc::clone(&state));
-                        }
+                        handle_connection_lost(&state, &error_msg);
                         break;
                     }
                 },

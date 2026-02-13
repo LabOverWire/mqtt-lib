@@ -236,7 +236,7 @@ impl WasmClientHandler {
         let connected = Arc::new(AtomicBool::new(true));
 
         let reader = MessagePortReader::new(msg_rx, Arc::clone(&connected));
-        let writer = MessagePortWriter::new(port, connected);
+        let writer = MessagePortWriter::new(port, connected, None);
 
         let mut reader = WasmReader::MessagePort(reader);
         let mut writer = WasmWriter::MessagePort(writer);

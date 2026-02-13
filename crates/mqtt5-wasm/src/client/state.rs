@@ -38,6 +38,7 @@ pub struct ClientState {
     pub last_url: Option<String>,
     pub last_options: Option<StoredConnectOptions>,
     pub user_initiated_disconnect: bool,
+    pub connection_generation: u32,
     pub current_broker_index: usize,
     #[cfg(feature = "codec")]
     pub codec_registry: Option<Rc<WasmCodecRegistry>>,
@@ -74,6 +75,7 @@ impl ClientState {
             last_url: None,
             last_options: None,
             user_initiated_disconnect: false,
+            connection_generation: 0,
             current_broker_index: 0,
             #[cfg(feature = "codec")]
             codec_registry: None,

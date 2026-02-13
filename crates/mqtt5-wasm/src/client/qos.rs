@@ -70,12 +70,18 @@ pub async fn await_ack_promises(
 }
 
 pub fn spawn_qos2_cleanup_task(state: Rc<RefCell<ClientState>>) {
+    let generation = state.borrow().connection_generation;
     wasm_bindgen_futures::spawn_local(async move {
         loop {
             sleep_ms(5000).await;
 
             let connected = match state.try_borrow() {
-                Ok(state_ref) => state_ref.connected,
+                Ok(state_ref) => {
+                    if state_ref.connection_generation != generation {
+                        break;
+                    }
+                    state_ref.connected
+                }
                 Err(_) => continue,
             };
 
