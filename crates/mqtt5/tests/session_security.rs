@@ -10,16 +10,16 @@ use mqtt5::{ConnectOptions, MqttClient};
 use std::io::Write;
 use std::net::SocketAddr;
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn setup_two_user_broker_config() -> (BrokerConfig, std::path::PathBuf, std::path::PathBuf) {
     let temp_dir = std::env::temp_dir();
     let pid = std::process::id();
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    let password_file = temp_dir.join(format!("test_session_sec_pw_{pid}_{ts}.txt"));
-    let acl_file = temp_dir.join(format!("test_session_sec_acl_{pid}_{ts}.txt"));
+    let seq = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let password_file = temp_dir.join(format!("test_session_sec_pw_{pid}_{seq}.txt"));
+    let acl_file = temp_dir.join(format!("test_session_sec_acl_{pid}_{seq}.txt"));
 
     let _ = std::fs::remove_file(&password_file);
     let _ = std::fs::remove_file(&acl_file);
@@ -160,12 +160,9 @@ async fn test_session_user_binding_allows_same_user() {
 async fn test_acl_recheck_prunes_unauthorized_subscriptions() {
     let temp_dir = std::env::temp_dir();
     let pid = std::process::id();
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    let password_file = temp_dir.join(format!("test_acl_recheck_pw_{pid}_{ts}.txt"));
-    let acl_file = temp_dir.join(format!("test_acl_recheck_acl_{pid}_{ts}.txt"));
+    let seq = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let password_file = temp_dir.join(format!("test_acl_recheck_pw_{pid}_{seq}.txt"));
+    let acl_file = temp_dir.join(format!("test_acl_recheck_acl_{pid}_{seq}.txt"));
 
     let _ = std::fs::remove_file(&password_file);
     let _ = std::fs::remove_file(&acl_file);
