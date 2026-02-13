@@ -18,6 +18,7 @@ echo "📦 BUILD COMMANDS"
 echo "  cargo make build              Build the project with all features"
 echo "  cargo make build-release      Build optimized release version"
 echo "  cargo make build-cli          Build the mqttv5 CLI tool"
+echo "  cargo make install            Install mqttv5 CLI to ~/.cargo/bin"
 echo "  cargo make check              Run cargo check"
 echo "  cargo make clean              Clean build artifacts"
 echo ""
@@ -107,6 +108,11 @@ description = "Run CLI functionality tests"
 command = "cargo"
 args = ["build", "--release", "-p", "mqttv5-cli"]
 description = "Build the mqttv5 CLI tool"
+
+[tasks.install]
+command = "cargo"
+args = ["install", "--path", "crates/mqttv5-cli"]
+description = "Install the mqttv5 CLI tool to ~/.cargo/bin"
 
 [tasks.build]
 command = "cargo"

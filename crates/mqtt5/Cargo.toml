@@ -1,6 +1,6 @@
 [package]
 name = "mqtt5"
-version = "0.22.5"
+version = "0.22.6"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true

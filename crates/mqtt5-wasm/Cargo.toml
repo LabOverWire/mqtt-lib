@@ -1,6 +1,6 @@
 [package]
 name = "mqtt5-wasm"
-version = "0.10.7"
+version = "0.10.8"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -65,6 +65,8 @@ features = [
     "ServiceWorkerGlobalScope",
     "WebSocket",
     "Window",
+    "Navigator",
+    "AddEventListenerOptions",
     "console",
     "Performance",
 ]

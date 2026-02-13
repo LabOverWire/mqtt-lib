@@ -94,11 +94,17 @@ jobs:
       - name: Build CLI
         run: cargo build --release --package mqttv5-cli --target ${{ matrix.target }}
 
+      - name: Rename binary
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp ./target/${{ matrix.target }}/release/${{ matrix.artifact_name }} dist/${{ matrix.asset_name }}
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset_name }}
-          path: ./target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
+          path: dist/${{ matrix.asset_name }}
 
   # Create GitHub release
   create-release:
@@ -124,10 +130,16 @@ jobs:
         with:
           path: artifacts
 
+      - name: Prepare release assets
+        run: |
+          mkdir -p release
+          find artifacts -type f -exec cp {} release/ \;
+          ls -la release/
+
       - name: Create Release
         uses: ncipollo/release-action@v1
         with:
           bodyFile: release_notes.md
-          artifacts: "artifacts/**/*"
+          artifacts: "release/*"
           token: ${{ secrets.GITHUB_TOKEN }}
           allowUpdates: true

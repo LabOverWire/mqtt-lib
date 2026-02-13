@@ -46,6 +46,7 @@ cp -r pkg examples/codec-compression/
 cp -r pkg examples/loop-prevention/
 cp -r pkg examples/change-only-delivery/
 cp -r pkg examples/qos2-recovery/
+cp -r pkg examples/connectivity-detection/
 
 echo "✨ Build complete!"
 echo ""
@@ -137,6 +138,10 @@ echo "  python3 -m http.server 8000"
 echo ""
 echo "QoS 2 Recovery (Mid-Flight Recovery):"
 echo "  cd examples/qos2-recovery"
+echo "  python3 -m http.server 8000"
+echo ""
+echo "Connectivity Detection (Online/Offline):"
+echo "  cd examples/connectivity-detection"
 echo "  python3 -m http.server 8000"
 echo ""
 echo "Then open http://localhost:8000 in your browser"

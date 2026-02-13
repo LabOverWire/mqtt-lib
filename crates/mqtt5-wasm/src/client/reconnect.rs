@@ -12,6 +12,7 @@ use crate::decoder::read_packet;
 use crate::transport::WasmTransportType;
 
 use super::callbacks::{trigger_reconnect_failed_callback, trigger_reconnecting_callback};
+use super::connectivity::{is_browser_online, wait_for_online};
 use super::keepalive::spawn_keepalive_task;
 use super::packet::encode_packet;
 use super::qos::spawn_qos2_cleanup_task;
@@ -60,6 +61,17 @@ pub fn spawn_reconnection_task(state: Rc<RefCell<ClientState>>) {
                 return;
             };
 
+            if !is_browser_online() {
+                trigger_reconnecting_callback(&state, attempt + 1, 0);
+                wait_for_online().await;
+                if state.borrow().user_initiated_disconnect {
+                    state.borrow_mut().reconnecting = false;
+                    return;
+                }
+                state.borrow_mut().reconnect_attempt = 0;
+                continue;
+            }
+
             trigger_reconnecting_callback(&state, attempt + 1, delay);
 
             sleep_ms(delay).await;
@@ -69,63 +81,61 @@ pub fn spawn_reconnection_task(state: Rc<RefCell<ClientState>>) {
                 return;
             }
 
-            let mut all_urls = vec![primary_url.clone()];
-            all_urls.extend(options.backup_urls.clone());
-
-            let mut connected = false;
-            for (idx, url) in all_urls.iter().enumerate() {
-                match attempt_reconnect(&state, url, &options).await {
-                    Ok(()) => {
-                        {
-                            let mut state_ref = state.borrow_mut();
-                            state_ref.reconnecting = false;
-                            state_ref.reconnect_attempt = 0;
-                            state_ref.current_broker_index = idx;
-                        }
-                        if idx == 0 {
-                            web_sys::console::log_1(
-                                &format!(
-                                    "Reconnected to primary after {0} attempt(s)",
-                                    attempt + 1
-                                )
-                                .into(),
-                            );
-                        } else {
-                            web_sys::console::log_1(
-                                &format!(
-                                    "Reconnected to backup {idx} after {0} attempt(s)",
-                                    attempt + 1
-                                )
-                                .into(),
-                            );
-                        }
-                        connected = true;
-                        break;
-                    }
-                    Err(e) => {
-                        if idx == 0 {
-                            web_sys::console::warn_1(
-                                &format!("Primary connection failed: {e}").into(),
-                            );
-                        } else {
-                            web_sys::console::warn_1(
-                                &format!("Backup {idx} connection failed: {e}").into(),
-                            );
-                        }
-                    }
-                }
-            }
-
-            if connected {
+            if try_all_brokers(&state, &primary_url, &options, attempt).await {
                 return;
             }
-
-            web_sys::console::warn_1(
-                &format!("All brokers failed on attempt {0}", attempt + 1).into(),
-            );
             state.borrow_mut().reconnect_attempt = attempt + 1;
         }
     });
+}
+
+async fn try_all_brokers(
+    state: &Rc<RefCell<ClientState>>,
+    primary_url: &str,
+    options: &StoredConnectOptions,
+    attempt: u32,
+) -> bool {
+    let mut all_urls = vec![primary_url.to_string()];
+    all_urls.extend(options.backup_urls.clone());
+
+    for (idx, url) in all_urls.iter().enumerate() {
+        match attempt_reconnect(state, url, options).await {
+            Ok(()) => {
+                {
+                    let mut state_ref = state.borrow_mut();
+                    state_ref.reconnecting = false;
+                    state_ref.reconnect_attempt = 0;
+                    state_ref.current_broker_index = idx;
+                }
+                if idx == 0 {
+                    web_sys::console::log_1(
+                        &format!("Reconnected to primary after {0} attempt(s)", attempt + 1).into(),
+                    );
+                } else {
+                    web_sys::console::log_1(
+                        &format!(
+                            "Reconnected to backup {idx} after {0} attempt(s)",
+                            attempt + 1
+                        )
+                        .into(),
+                    );
+                }
+                return true;
+            }
+            Err(e) => {
+                if idx == 0 {
+                    web_sys::console::warn_1(&format!("Primary connection failed: {e}").into());
+                } else {
+                    web_sys::console::warn_1(
+                        &format!("Backup {idx} connection failed: {e}").into(),
+                    );
+                }
+            }
+        }
+    }
+
+    web_sys::console::warn_1(&format!("All brokers failed on attempt {0}", attempt + 1).into());
+    false
 }
 
 async fn attempt_reconnect(

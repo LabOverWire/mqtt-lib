@@ -83,6 +83,18 @@ pub fn trigger_reconnecting_callback(
     }
 }
 
+pub fn trigger_connectivity_change_callback(state: &Rc<RefCell<ClientState>>, online: bool) {
+    let callback = state.borrow().on_connectivity_change.clone();
+    if let Some(callback) = callback {
+        let online_js = JsValue::from_bool(online);
+        if let Err(e) = callback.call1(&JsValue::NULL, &online_js) {
+            web_sys::console::error_1(
+                &format!("onConnectivityChange callback error: {e:?}").into(),
+            );
+        }
+    }
+}
+
 pub fn trigger_reconnect_failed_callback(state: &Rc<RefCell<ClientState>>, error_msg: &str) {
     let callback = state.borrow().on_reconnect_failed.clone();
     if let Some(callback) = callback {

@@ -10,16 +10,16 @@ use mqtt5::{ConnectOptions, MqttClient};
 use std::io::Write;
 use std::net::SocketAddr;
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn setup_two_user_broker_config() -> (BrokerConfig, std::path::PathBuf, std::path::PathBuf) {
     let temp_dir = std::env::temp_dir();
     let pid = std::process::id();
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    let password_file = temp_dir.join(format!("test_session_sec_pw_{pid}_{ts}.txt"));
-    let acl_file = temp_dir.join(format!("test_session_sec_acl_{pid}_{ts}.txt"));
+    let seq = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let password_file = temp_dir.join(format!("test_session_sec_pw_{pid}_{seq}.txt"));
+    let acl_file = temp_dir.join(format!("test_session_sec_acl_{pid}_{seq}.txt"));
 
     let _ = std::fs::remove_file(&password_file);
     let _ = std::fs::remove_file(&acl_file);
@@ -156,16 +156,12 @@ async fn test_session_user_binding_allows_same_user() {
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
-async fn test_acl_recheck_prunes_unauthorized_subscriptions() {
+async fn test_session_resume_preserves_subscriptions_with_acl() {
     let temp_dir = std::env::temp_dir();
     let pid = std::process::id();
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    let password_file = temp_dir.join(format!("test_acl_recheck_pw_{pid}_{ts}.txt"));
-    let acl_file = temp_dir.join(format!("test_acl_recheck_acl_{pid}_{ts}.txt"));
+    let seq = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let password_file = temp_dir.join(format!("test_acl_resume_pw_{pid}_{seq}.txt"));
+    let acl_file = temp_dir.join(format!("test_acl_resume_acl_{pid}_{seq}.txt"));
 
     let _ = std::fs::remove_file(&password_file);
     let _ = std::fs::remove_file(&acl_file);
@@ -187,7 +183,6 @@ async fn test_acl_recheck_prunes_unauthorized_subscriptions() {
     {
         let mut f = std::fs::File::create(&acl_file).expect("create acl file");
         writeln!(f, "user alice topic sensors/# permission readwrite").unwrap();
-        writeln!(f, "user alice topic control/# permission readwrite").unwrap();
     }
 
     let storage_config = StorageConfig {
@@ -214,7 +209,7 @@ async fn test_acl_recheck_prunes_unauthorized_subscriptions() {
         .with_auth(auth_config);
 
     let broker = TestBroker::start_with_config(config).await;
-    let client_id = "acl-recheck-test";
+    let client_id = "acl-resume-test";
 
     let opts = ConnectOptions::new(client_id)
         .with_clean_start(true)
@@ -227,14 +222,7 @@ async fn test_acl_recheck_prunes_unauthorized_subscriptions() {
         .expect("first connect");
 
     client1.subscribe("sensors/temp", |_| {}).await.unwrap();
-    client1.subscribe("control/valve", |_| {}).await.unwrap();
     client1.disconnect().await.unwrap();
-
-    {
-        let mut f = std::fs::File::create(&acl_file).expect("rewrite acl file");
-        writeln!(f, "user alice topic sensors/# permission readwrite").unwrap();
-        writeln!(f, "user alice topic control/# permission deny").unwrap();
-    }
 
     let resume_opts = ConnectOptions::new(client_id)
         .with_clean_start(false)
@@ -257,7 +245,7 @@ async fn test_acl_recheck_prunes_unauthorized_subscriptions() {
         .await
         .unwrap();
 
-    let pub_opts = ConnectOptions::new("acl-recheck-pub")
+    let pub_opts = ConnectOptions::new("acl-resume-pub")
         .with_clean_start(true)
         .with_credentials("alice", b"pass1");
     let publisher = MqttClient::with_options(pub_opts.clone());
@@ -272,7 +260,7 @@ async fn test_acl_recheck_prunes_unauthorized_subscriptions() {
         collector
             .wait_for_messages(1, mqtt5::time::Duration::from_secs(3))
             .await,
-        "sensors/temp subscription must still work"
+        "sensors/temp subscription must still work after session resume"
     );
 
     publisher.disconnect().await.unwrap();

@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MQTT Browser Connectivity Detection Demo</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            max-width: 900px;
+            margin: 40px auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .header {
+            background: white;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+        h1 { color: #333; margin-top: 0; }
+        .highlight {
+            background: #e7f3ff;
+            padding: 15px;
+            border-radius: 4px;
+            border-left: 4px solid #007bff;
+            margin: 15px 0;
+        }
+        .panel {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+        .panel h2 {
+            margin-top: 0;
+            font-size: 1.2em;
+            padding-bottom: 10px;
+            border-bottom: 3px solid #007bff;
+        }
+        .status-row {
+            display: flex;
+            gap: 15px;
+            margin: 15px 0;
+        }
+        .status-badge {
+            padding: 12px 20px;
+            border-radius: 8px;
+            font-weight: 600;
+            font-size: 0.95em;
+            flex: 1;
+            text-align: center;
+        }
+        .status-badge.online { background: #d4edda; color: #155724; }
+        .status-badge.offline { background: #f8d7da; color: #721c24; }
+        .status-badge.connected { background: #d4edda; color: #155724; }
+        .status-badge.disconnected { background: #fff3cd; color: #856404; }
+        .status-badge.reconnecting { background: #cce5ff; color: #004085; }
+        button {
+            background: #007bff;
+            color: white;
+            border: none;
+            cursor: pointer;
+            padding: 10px 20px;
+            border-radius: 4px;
+            font-size: 14px;
+            margin: 5px 5px 5px 0;
+        }
+        button:hover { background: #0056b3; }
+        button:disabled { background: #6c757d; cursor: not-allowed; }
+        button.danger { background: #dc3545; }
+        button.danger:hover { background: #c82333; }
+        button.success { background: #28a745; }
+        button.success:hover { background: #218838; }
+        .event-log {
+            max-height: 400px;
+            overflow-y: auto;
+            border: 2px solid #e9ecef;
+            border-radius: 6px;
+            padding: 10px;
+            background: #f8f9fa;
+            font-family: monospace;
+            font-size: 0.85em;
+        }
+        .event-entry {
+            padding: 6px 10px;
+            margin: 4px 0;
+            border-radius: 4px;
+            animation: slideIn 0.3s ease;
+        }
+        @keyframes slideIn {
+            from { opacity: 0; transform: translateX(-10px); }
+            to { opacity: 1; transform: translateX(0); }
+        }
+        .event-entry.connectivity { background: #e7f3ff; border-left: 4px solid #007bff; }
+        .event-entry.reconnect { background: #fff8e1; border-left: 4px solid #fd7e14; }
+        .event-entry.mqtt { background: #e8f5e9; border-left: 4px solid #28a745; }
+        .event-entry.error { background: #f8d7da; border-left: 4px solid #dc3545; }
+        .event-entry.info { background: #f0f0f0; border-left: 4px solid #6c757d; }
+        .instructions {
+            background: #fff8e1;
+            padding: 15px;
+            border-radius: 4px;
+            border-left: 4px solid #fd7e14;
+            margin: 15px 0;
+            font-size: 0.9em;
+        }
+        .counter-row {
+            display: flex;
+            gap: 15px;
+            margin: 15px 0;
+        }
+        .counter {
+            flex: 1;
+            text-align: center;
+            padding: 15px;
+            border-radius: 8px;
+            background: #f8f9fa;
+        }
+        .counter .value {
+            font-size: 2em;
+            font-weight: bold;
+        }
+        .counter .label {
+            font-size: 0.8em;
+            color: #666;
+            margin-top: 4px;
+        }
+        .counter.online-events .value { color: #28a745; }
+        .counter.offline-events .value { color: #dc3545; }
+        .counter.reconnect-events .value { color: #fd7e14; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>Browser Connectivity Detection Demo</h1>
+        <p>Demonstrates how the WASM MQTT client detects browser online/offline state and pauses reconnection when the network is unavailable.</p>
+        <div class="highlight">
+            <strong>How it works:</strong>
+            <ul style="margin: 10px 0 0 0; padding-left: 20px;">
+                <li><code>on_connectivity_change(callback)</code> fires when the browser goes online or offline</li>
+                <li><code>is_browser_online()</code> returns the current network state synchronously</li>
+                <li>Reconnection pauses while offline and resumes immediately when the network returns</li>
+                <li>Backoff resets after a network outage (the failure was connectivity, not server rejection)</li>
+            </ul>
+        </div>
+    </div>
+
+    <div class="panel">
+        <h2>Status</h2>
+        <div class="status-row">
+            <div id="network-status" class="status-badge online">Network: Online</div>
+            <div id="mqtt-status" class="status-badge disconnected">MQTT: Disconnected</div>
+        </div>
+        <div class="counter-row">
+            <div class="counter online-events">
+                <div id="online-count" class="value">0</div>
+                <div class="label">Online Events</div>
+            </div>
+            <div class="counter offline-events">
+                <div id="offline-count" class="value">0</div>
+                <div class="label">Offline Events</div>
+            </div>
+            <div class="counter reconnect-events">
+                <div id="reconnect-count" class="value">0</div>
+                <div class="label">Reconnect Attempts</div>
+            </div>
+        </div>
+        <div style="margin: 15px 0;">
+            <button id="connect-btn" class="success">Connect to Broker</button>
+            <button id="disconnect-btn" class="danger" disabled>Disconnect</button>
+            <button id="check-online-btn">Check is_browser_online()</button>
+        </div>
+        <div class="instructions">
+            <strong>To test connectivity detection:</strong>
+            <ol style="margin: 8px 0 0 0; padding-left: 20px;">
+                <li>Click "Connect to Broker" to start the MQTT connection</li>
+                <li>Toggle your OS Wi-Fi off, use airplane mode, or use the DevTools Network "Offline" throttle</li>
+                <li>Watch the event log: reconnection pauses while offline</li>
+                <li>Restore connectivity: reconnection resumes immediately from attempt 0</li>
+            </ol>
+        </div>
+    </div>
+
+    <div class="panel">
+        <h2>Event Log</h2>
+        <button id="clear-log" style="float: right; margin-top: -8px;">Clear</button>
+        <div id="event-log" class="event-log">
+            <div class="event-entry info">Waiting for initialization...</div>
+        </div>
+    </div>
+
+    <script type="module">
+        import init, { WasmBroker, WasmBrokerConfig, WasmMqttClient, WasmConnectOptions, WasmReconnectOptions, WasmSubscribeOptions } from './pkg/mqtt5_wasm.js';
+
+        let broker;
+        let client;
+        let isConnected = false;
+        let onlineCount = 0;
+        let offlineCount = 0;
+        let reconnectCount = 0;
+
+        function logEvent(message, type = 'info') {
+            const log = document.getElementById('event-log');
+            const entry = document.createElement('div');
+            entry.className = `event-entry ${type}`;
+            const time = new Date().toLocaleTimeString('en-US', { hour12: false, fractionalSecondDigits: 3 });
+            entry.textContent = `[${time}] ${message}`;
+            log.prepend(entry);
+            console.log(`[${type}] ${message}`);
+        }
+
+        function updateNetworkBadge(online) {
+            const badge = document.getElementById('network-status');
+            badge.className = `status-badge ${online ? 'online' : 'offline'}`;
+            badge.textContent = `Network: ${online ? 'Online' : 'Offline'}`;
+        }
+
+        function updateMqttBadge(state) {
+            const badge = document.getElementById('mqtt-status');
+            badge.className = `status-badge ${state}`;
+            const labels = {
+                connected: 'MQTT: Connected',
+                disconnected: 'MQTT: Disconnected',
+                reconnecting: 'MQTT: Reconnecting...',
+            };
+            badge.textContent = labels[state] || `MQTT: ${state}`;
+        }
+
+        function updateCounter(id, value) {
+            document.getElementById(id).textContent = value;
+        }
+
+        async function connectClient() {
+            if (isConnected) return;
+
+            client = new WasmMqttClient('connectivity-demo-client');
+
+            client.on_connectivity_change((online) => {
+                if (online) {
+                    onlineCount++;
+                    updateCounter('online-count', onlineCount);
+                    logEvent('Browser went ONLINE - reconnection will resume immediately', 'connectivity');
+                } else {
+                    offlineCount++;
+                    updateCounter('offline-count', offlineCount);
+                    logEvent('Browser went OFFLINE - reconnection paused (no wasted retries)', 'connectivity');
+                }
+                updateNetworkBadge(online);
+            });
+
+            client.on_connect((reasonCode, sessionPresent) => {
+                isConnected = true;
+                updateMqttBadge('connected');
+                document.getElementById('connect-btn').disabled = true;
+                document.getElementById('disconnect-btn').disabled = false;
+                logEvent(`Connected (reason=${reasonCode}, sessionPresent=${sessionPresent})`, 'mqtt');
+            });
+
+            client.on_disconnect(() => {
+                isConnected = false;
+                updateMqttBadge('disconnected');
+                logEvent('Disconnected from broker', 'mqtt');
+            });
+
+            client.on_reconnecting((attempt, delay) => {
+                reconnectCount++;
+                updateCounter('reconnect-count', reconnectCount);
+                updateMqttBadge('reconnecting');
+                if (delay === 0) {
+                    logEvent(`Reconnect attempt #${attempt} - waiting for network (delay=0)`, 'reconnect');
+                } else {
+                    logEvent(`Reconnect attempt #${attempt} - retrying in ${delay}ms`, 'reconnect');
+                }
+            });
+
+            client.on_reconnect_failed((error) => {
+                updateMqttBadge('disconnected');
+                logEvent(`Reconnection failed: ${error}`, 'error');
+            });
+
+            client.on_error((error) => {
+                logEvent(`Error: ${error}`, 'error');
+            });
+
+            const reconnectOpts = new WasmReconnectOptions();
+            reconnectOpts.enabled = true;
+            reconnectOpts.initial_delay_ms = 1000;
+            reconnectOpts.max_delay_ms = 10000;
+            reconnectOpts.max_retries = 50;
+            client.set_reconnect_options(reconnectOpts);
+
+            const connectOpts = new WasmConnectOptions();
+            connectOpts.cleanStart = true;
+            connectOpts.keepAlive = 30;
+
+            const port = broker.create_client_port();
+
+            try {
+                logEvent('Connecting to in-browser broker...', 'info');
+                await client.connect_message_port_with_options(port, connectOpts);
+            } catch (error) {
+                logEvent(`Connection failed: ${error}`, 'error');
+            }
+        }
+
+        async function disconnectClient() {
+            if (!client || !isConnected) return;
+            try {
+                await client.disconnect();
+                document.getElementById('connect-btn').disabled = false;
+                document.getElementById('disconnect-btn').disabled = true;
+            } catch (error) {
+                logEvent(`Disconnect failed: ${error}`, 'error');
+            }
+        }
+
+        function checkOnline() {
+            if (!client) {
+                logEvent('No client created yet - connect first', 'info');
+                return;
+            }
+            const online = client.is_browser_online();
+            logEvent(`is_browser_online() => ${online}`, 'connectivity');
+        }
+
+        async function main() {
+            try {
+                await init();
+                logEvent('WASM module initialized', 'info');
+
+                const config = new WasmBrokerConfig();
+                config.max_clients = 10;
+                config.allow_anonymous = true;
+                broker = WasmBroker.with_config(config);
+                logEvent('In-browser MQTT broker started', 'info');
+
+                updateNetworkBadge(navigator.onLine);
+                logEvent(`Initial network state: ${navigator.onLine ? 'online' : 'offline'}`, 'connectivity');
+
+                document.getElementById('connect-btn').addEventListener('click', connectClient);
+                document.getElementById('disconnect-btn').addEventListener('click', disconnectClient);
+                document.getElementById('check-online-btn').addEventListener('click', checkOnline);
+                document.getElementById('clear-log').addEventListener('click', () => {
+                    document.getElementById('event-log').innerHTML = '';
+                });
+
+                logEvent('Demo ready - click "Connect to Broker" to start', 'info');
+            } catch (error) {
+                logEvent(`Initialization error: ${error.message || error}`, 'error');
+                console.error(error);
+            }
+        }
+
+        main();
+    </script>
+</body>
+</html>

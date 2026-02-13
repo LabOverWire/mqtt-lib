@@ -1,4 +1,5 @@
 mod callbacks;
+mod connectivity;
 mod handlers;
 mod keepalive;
 mod packet;
@@ -70,9 +71,15 @@ impl WasmMqttClient {
     pub fn new(client_id: String) -> Self {
         console_error_panic_hook::set_once();
 
-        Self {
-            state: Rc::new(RefCell::new(ClientState::new(client_id))),
+        let state = Rc::new(RefCell::new(ClientState::new(client_id)));
+        let (online_fn, offline_fn) = connectivity::register_connectivity_listeners(&state);
+        {
+            let mut s = state.borrow_mut();
+            s.online_listener_fn = Some(online_fn);
+            s.offline_listener_fn = Some(offline_fn);
         }
+
+        Self { state }
     }
 
     /// # Errors
@@ -669,6 +676,24 @@ impl WasmMqttClient {
 
     pub fn on_reconnect_failed(&self, callback: js_sys::Function) {
         self.state.borrow_mut().on_reconnect_failed = Some(callback);
+    }
+
+    pub fn on_connectivity_change(&self, callback: js_sys::Function) {
+        self.state.borrow_mut().on_connectivity_change = Some(callback);
+    }
+
+    #[must_use]
+    pub fn is_browser_online(&self) -> bool {
+        connectivity::is_browser_online()
+    }
+
+    pub fn destroy(&self) {
+        let state = self.state.borrow();
+        if let (Some(online_fn), Some(offline_fn)) =
+            (&state.online_listener_fn, &state.offline_listener_fn)
+        {
+            connectivity::remove_connectivity_listeners(online_fn, offline_fn);
+        }
     }
 
     pub fn set_reconnect_options(&self, options: &WasmReconnectOptions) {
