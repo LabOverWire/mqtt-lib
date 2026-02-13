@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [mqtt5 0.22.6] / [mqtt5-wasm 0.10.8] - 2026-02-13
+
+### Added
+
+- **Browser connectivity detection** - WASM client detects browser online/offline state during reconnection
+  - `on_connectivity_change(callback)` fires when the browser goes online or offline
+  - `is_browser_online()` returns current network state synchronously
+  - Reconnection pauses while offline (no wasted retries) and resumes immediately when network returns
+  - Backoff resets after a network outage since the failure was connectivity, not server rejection
+- **Connectivity detection example** - New `connectivity-detection` example demonstrating online/offline handling
+
+### Fixed
+
+- **Flaky session security tests** - Replaced millisecond-precision timestamps with atomic counter for temp file naming, preventing filename collisions when concurrent tests execute within the same millisecond
+- **Release workflow artifacts** - Fixed GitHub Actions release workflow to correctly flatten artifact directories before uploading to the release
+
 ## [mqtt5-protocol 0.9.7] / [mqtt5 0.22.5] / [mqtt5-wasm 0.10.6] / [mqttv5-cli 0.20.4] - 2026-02-12
 
 ### Added

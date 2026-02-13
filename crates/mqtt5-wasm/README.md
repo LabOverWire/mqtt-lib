@@ -10,7 +10,8 @@ MQTT v5.0 and v3.1.1 WebAssembly client and broker for browser environments.
 - **Broker bridging** - Connect multiple in-browser brokers via MessagePort
 - **Full QoS support** - QoS 0, 1, and 2 with proper acknowledgment
 - **Shared subscriptions** - Load balancing across multiple subscribers
-- **Event callbacks** - Connection, disconnect, and error event handlers
+- **Event callbacks** - Connection, disconnect, error, and connectivity event handlers
+- **Browser connectivity detection** - Automatic online/offline detection with smart reconnection
 - **Broker lifecycle events** - Monitor client connections, publishes, and subscriptions
 - **Automatic keepalive** - Connection health monitoring with timeout detection
 - **Will messages** - Last Will and Testament (LWT) support
@@ -76,6 +77,20 @@ client.on_error((error) => {
 });
 
 await client.connect("wss://broker.example.com:8084/mqtt");
+```
+
+### Connectivity Detection
+
+```javascript
+const client = new WasmMqttClient("browser-client");
+
+client.on_connectivity_change((online) => {
+  console.log(online ? "Network available" : "Network lost");
+});
+
+if (!client.is_browser_online()) {
+  console.log("Currently offline");
+}
 ```
 
 ### In-Browser Broker
