@@ -72,7 +72,12 @@ impl WasmMqttClient {
         console_error_panic_hook::set_once();
 
         let state = Rc::new(RefCell::new(ClientState::new(client_id)));
-        connectivity::register_connectivity_listeners(&state);
+        let (online_fn, offline_fn) = connectivity::register_connectivity_listeners(&state);
+        {
+            let mut s = state.borrow_mut();
+            s.online_listener_fn = Some(online_fn);
+            s.offline_listener_fn = Some(offline_fn);
+        }
 
         Self { state }
     }
@@ -680,6 +685,15 @@ impl WasmMqttClient {
     #[must_use]
     pub fn is_browser_online(&self) -> bool {
         connectivity::is_browser_online()
+    }
+
+    pub fn destroy(&self) {
+        let state = self.state.borrow();
+        if let (Some(online_fn), Some(offline_fn)) =
+            (&state.online_listener_fn, &state.offline_listener_fn)
+        {
+            connectivity::remove_connectivity_listeners(online_fn, offline_fn);
+        }
     }
 
     pub fn set_reconnect_options(&self, options: &WasmReconnectOptions) {

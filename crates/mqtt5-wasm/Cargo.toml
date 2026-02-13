@@ -66,6 +66,7 @@ features = [
     "WebSocket",
     "Window",
     "Navigator",
+    "AddEventListenerOptions",
     "console",
     "Performance",
 ]
