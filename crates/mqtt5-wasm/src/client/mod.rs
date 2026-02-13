@@ -1,4 +1,5 @@
 mod callbacks;
+mod connectivity;
 mod handlers;
 mod keepalive;
 mod packet;
@@ -70,9 +71,10 @@ impl WasmMqttClient {
     pub fn new(client_id: String) -> Self {
         console_error_panic_hook::set_once();
 
-        Self {
-            state: Rc::new(RefCell::new(ClientState::new(client_id))),
-        }
+        let state = Rc::new(RefCell::new(ClientState::new(client_id)));
+        connectivity::register_connectivity_listeners(&state);
+
+        Self { state }
     }
 
     /// # Errors
@@ -669,6 +671,15 @@ impl WasmMqttClient {
 
     pub fn on_reconnect_failed(&self, callback: js_sys::Function) {
         self.state.borrow_mut().on_reconnect_failed = Some(callback);
+    }
+
+    pub fn on_connectivity_change(&self, callback: js_sys::Function) {
+        self.state.borrow_mut().on_connectivity_change = Some(callback);
+    }
+
+    #[must_use]
+    pub fn is_browser_online(&self) -> bool {
+        connectivity::is_browser_online()
     }
 
     pub fn set_reconnect_options(&self, options: &WasmReconnectOptions) {

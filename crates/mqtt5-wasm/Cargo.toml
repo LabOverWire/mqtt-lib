@@ -65,6 +65,7 @@ features = [
     "ServiceWorkerGlobalScope",
     "WebSocket",
     "Window",
+    "Navigator",
     "console",
     "Performance",
 ]
