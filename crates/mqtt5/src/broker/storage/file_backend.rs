@@ -237,42 +237,47 @@ impl FileBackend {
         result
     }
 
-    /// Write data to file atomically
     async fn write_file_atomic<T: serde::Serialize>(&self, path: PathBuf, data: &T) -> Result<()> {
-        // Ensure parent directory exists
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .await
-                .map_err(|e| MqttError::Io(format!("Failed to create parent directory: {e}")))?;
-        }
-
-        let temp_path = path.with_extension("tmp");
-
-        // Write to temporary file first
         let serialized = serde_json::to_vec_pretty(data)
             .map_err(|e| MqttError::Configuration(format!("Failed to serialize data: {e}")))?;
 
-        let mut file = File::create(&temp_path)
-            .await
-            .map_err(|e| MqttError::Io(format!("Failed to create temp file: {e}")))?;
+        for attempt in 0..2u8 {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).await.map_err(|e| {
+                    MqttError::Io(format!("Failed to create parent directory: {e}"))
+                })?;
+            }
 
-        file.write_all(&serialized)
-            .await
-            .map_err(|e| MqttError::Io(format!("Failed to write temp file: {e}")))?;
+            let temp_path = path.with_extension("tmp");
 
-        file.flush()
-            .await
-            .map_err(|e| MqttError::Io(format!("Failed to flush temp file: {e}")))?;
+            let mut file = File::create(&temp_path)
+                .await
+                .map_err(|e| MqttError::Io(format!("Failed to create temp file: {e}")))?;
 
-        file.sync_data()
-            .await
-            .map_err(|e| MqttError::Io(format!("Failed to sync temp file: {e}")))?;
+            file.write_all(&serialized)
+                .await
+                .map_err(|e| MqttError::Io(format!("Failed to write temp file: {e}")))?;
 
-        drop(file);
+            file.flush()
+                .await
+                .map_err(|e| MqttError::Io(format!("Failed to flush temp file: {e}")))?;
 
-        fs::rename(&temp_path, &path)
-            .await
-            .map_err(|e| MqttError::Io(format!("Failed to rename temp file: {e}")))?;
+            file.sync_data()
+                .await
+                .map_err(|e| MqttError::Io(format!("Failed to sync temp file: {e}")))?;
+
+            drop(file);
+
+            match fs::rename(&temp_path, &path).await {
+                Ok(()) => return Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound && attempt == 0 => {
+                    debug!("Atomic write race detected, retrying: {e}");
+                }
+                Err(e) => {
+                    return Err(MqttError::Io(format!("Failed to rename temp file: {e}")));
+                }
+            }
+        }
 
         Ok(())
     }
