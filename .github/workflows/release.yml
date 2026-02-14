@@ -68,27 +68,46 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Check if npm publish is needed
+        id: npm-check
+        run: |
+          LOCAL_VERSION=$(grep '^version' crates/mqtt5-wasm/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          NPM_VERSION=$(npm view mqtt5-wasm version 2>/dev/null || echo "0.0.0")
+          echo "local=$LOCAL_VERSION" >> "$GITHUB_OUTPUT"
+          echo "npm=$NPM_VERSION" >> "$GITHUB_OUTPUT"
+          if [ "$LOCAL_VERSION" = "$NPM_VERSION" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "mqtt5-wasm $LOCAL_VERSION already published to npm, skipping"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "Publishing mqtt5-wasm $LOCAL_VERSION (npm has $NPM_VERSION)"
+          fi
+
       - name: Install Rust
+        if: steps.npm-check.outputs.skip == 'false'
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
 
       - name: Install wasm-bindgen-cli
+        if: steps.npm-check.outputs.skip == 'false'
         run: cargo install wasm-bindgen-cli
 
       - name: Setup Node.js
+        if: steps.npm-check.outputs.skip == 'false'
         uses: actions/setup-node@v4
         with:
           node-version: '20'
           registry-url: 'https://registry.npmjs.org'
 
       - name: Build and publish WASM package
+        if: steps.npm-check.outputs.skip == 'false'
         run: |
           cd crates/mqtt5-wasm
           cargo build --target wasm32-unknown-unknown --release --features client,broker,codec
           mkdir -p pkg
           wasm-bindgen --target web --out-dir pkg ../../target/wasm32-unknown-unknown/release/mqtt5_wasm.wasm
-          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          VERSION=${{ steps.npm-check.outputs.local }}
           cat > pkg/package.json << PKGJSON
           {
             "name": "mqtt5-wasm",
