@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [mqtt5 0.22.7] - 2026-02-14
+
+### Fixed
+
+- **File backend atomic write race** - Fixed race condition where concurrent `remove_dir_all` could delete the temp file between write and rename, causing ENOENT errors when queuing messages for offline clients
+
 ## [mqtt5 0.22.6] / [mqtt5-wasm 0.10.8] - 2026-02-13
 
 ### Added
