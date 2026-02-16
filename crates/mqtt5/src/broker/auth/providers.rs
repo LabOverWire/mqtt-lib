@@ -6,7 +6,6 @@ use crate::packet::connect::ConnectPacket;
 use crate::protocol::v5::reason_codes::ReasonCode;
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, Salt, SaltString};
 use argon2::Argon2;
-use base64::prelude::*;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::future::Future;
@@ -605,29 +604,6 @@ impl CertificateAuthProvider {
         let mut hasher = Sha256::new();
         hasher.update(cert_der);
         hex::encode(hasher.finalize())
-    }
-
-    /// Extracts the Common Name (CN) from a certificate subject
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the certificate cannot be parsed
-    pub fn extract_common_name(cert_der: &[u8]) -> Result<Option<String>> {
-        let _cert_pem = format!(
-            "-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----",
-            BASE64_STANDARD.encode(cert_der)
-        );
-
-        if let Ok(decoded) = std::str::from_utf8(cert_der) {
-            if let Some(cn_start) = decoded.find("CN=") {
-                let cn_part = &decoded[cn_start + 3..];
-                if let Some(cn_end) = cn_part.find(',').or_else(|| cn_part.find('\0')) {
-                    return Ok(Some(cn_part[..cn_end].trim().to_string()));
-                }
-            }
-        }
-
-        Ok(None)
     }
 }
 

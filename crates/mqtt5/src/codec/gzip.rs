@@ -1,4 +1,5 @@
-use std::io::{Read, Write};
+use std::io::Read;
+use std::io::Write;
 
 use bytes::Bytes;
 use flate2::read::GzDecoder;
@@ -8,9 +9,12 @@ use flate2::Compression;
 use super::PayloadCodec;
 use crate::error::{MqttError, Result};
 
+const DEFAULT_MAX_DECOMPRESSED_SIZE: usize = 10 * 1024 * 1024;
+
 pub struct GzipCodec {
     level: Compression,
     min_size: usize,
+    max_decompressed_size: usize,
 }
 
 impl Default for GzipCodec {
@@ -25,6 +29,7 @@ impl GzipCodec {
         Self {
             level: Compression::default(),
             min_size: 128,
+            max_decompressed_size: DEFAULT_MAX_DECOMPRESSED_SIZE,
         }
     }
 
@@ -37,6 +42,12 @@ impl GzipCodec {
     #[must_use]
     pub fn with_min_size(mut self, size: usize) -> Self {
         self.min_size = size;
+        self
+    }
+
+    #[must_use]
+    pub fn with_max_decompressed_size(mut self, size: usize) -> Self {
+        self.max_decompressed_size = size;
         self
     }
 }
@@ -62,11 +73,19 @@ impl PayloadCodec for GzipCodec {
     }
 
     fn decode(&self, payload: &[u8]) -> Result<Bytes> {
-        let mut decoder = GzDecoder::new(payload);
+        let limit = self.max_decompressed_size;
+        let mut decoder =
+            GzDecoder::new(payload).take(u64::try_from(limit + 1).unwrap_or(u64::MAX));
         let mut decompressed = Vec::new();
         decoder
             .read_to_end(&mut decompressed)
             .map_err(|e| MqttError::ProtocolError(format!("gzip decode failed: {e}")))?;
+        if decompressed.len() > limit {
+            return Err(MqttError::ProtocolError(format!(
+                "gzip decompressed size {} exceeds limit {limit}",
+                decompressed.len()
+            )));
+        }
         Ok(Bytes::from(decompressed))
     }
 

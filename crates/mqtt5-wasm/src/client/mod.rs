@@ -96,6 +96,14 @@ impl WasmMqttClient {
         url: &str,
         config: &WasmConnectOptions,
     ) -> Result<(), JsValue> {
+        let lower = url.to_ascii_lowercase();
+        if !lower.starts_with("ws://") && !lower.starts_with("wss://") {
+            return Err(JsValue::from_str("URL must start with ws:// or wss://"));
+        }
+        if lower.starts_with("ws://") && (config.username.is_some() || config.password.is_some()) {
+            web_sys::console::warn_1(&"Credentials sent over unencrypted ws:// connection".into());
+        }
+
         self.state.borrow_mut().last_url = Some(url.to_string());
         let transport = WasmTransportType::WebSocket(
             crate::transport::websocket::WasmWebSocketTransport::new(url),

@@ -32,10 +32,13 @@ fn gzip_compress_native(input: &[u8], level: u8) -> Result<Vec<u8>, String> {
     Ok(output)
 }
 
+const DEFAULT_MAX_DECOMPRESSED_SIZE: usize = 10 * 1024 * 1024;
+
 #[wasm_bindgen]
 pub struct WasmGzipCodec {
     level: u8,
     min_size: usize,
+    max_decompressed_size: usize,
 }
 
 #[wasm_bindgen]
@@ -46,6 +49,7 @@ impl WasmGzipCodec {
         Self {
             level: 6,
             min_size: 128,
+            max_decompressed_size: DEFAULT_MAX_DECOMPRESSED_SIZE,
         }
     }
 
@@ -60,6 +64,13 @@ impl WasmGzipCodec {
     #[must_use]
     pub fn with_min_size(mut self, size: usize) -> Self {
         self.min_size = size;
+        self
+    }
+
+    #[wasm_bindgen(js_name = "withMaxDecompressedSize")]
+    #[must_use]
+    pub fn with_max_decompressed_size(mut self, size: usize) -> Self {
+        self.max_decompressed_size = size;
         self
     }
 }
@@ -138,6 +149,15 @@ impl WasmPayloadCodec for WasmGzipCodec {
         }
 
         let deflate_data = &payload[offset..payload.len() - 8];
-        decompress_to_vec(deflate_data).map_err(|e| format!("Gzip decompression failed: {e}"))
+        let result = decompress_to_vec(deflate_data)
+            .map_err(|e| format!("Gzip decompression failed: {e}"))?;
+        if result.len() > self.max_decompressed_size {
+            return Err(format!(
+                "Gzip decompressed size {} exceeds limit {}",
+                result.len(),
+                self.max_decompressed_size
+            ));
+        }
+        Ok(result)
     }
 }

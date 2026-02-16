@@ -12,7 +12,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
-type SyncRwLock<T> = std::sync::RwLock<T>;
+type SyncRwLock<T> = parking_lot::RwLock<T>;
 
 /// Resource limits configuration
 #[derive(Debug, Clone)]
@@ -150,18 +150,14 @@ impl ResourceMonitor {
         }
     }
 
-    /// # Panics
-    /// Panics if the resource limits lock is poisoned.
     pub fn update_limits(&self, new_limits: ResourceLimits) {
         info!("Updating resource limits: {:?}", new_limits);
-        *self.limits.write().expect("resource limits lock poisoned") = new_limits;
+        *self.limits.write() = new_limits;
     }
 
-    /// # Panics
-    /// Panics if the resource limits lock is poisoned.
     pub async fn can_accept_connection(&self, ip_addr: IpAddr) -> bool {
         let (max_connections, max_connections_per_ip, rate_limit_window, max_connection_rate) = {
-            let limits = self.limits.read().expect("resource limits lock poisoned");
+            let limits = self.limits.read();
             (
                 limits.max_connections,
                 limits.max_connections_per_ip,
@@ -244,11 +240,9 @@ impl ResourceMonitor {
         client_resources.remove(client_id);
     }
 
-    /// # Panics
-    /// Panics if the resource limits lock is poisoned.
     pub async fn can_send_message(&self, client_id: &str, message_size: usize) -> bool {
         let (max_message_rate, rate_limit_window, max_bandwidth) = {
-            let limits = self.limits.read().expect("resource limits lock poisoned");
+            let limits = self.limits.read();
             (
                 limits.max_message_rate_per_client,
                 limits.rate_limit_window,
@@ -303,19 +297,13 @@ impl ResourceMonitor {
         true
     }
 
-    /// # Panics
-    /// Panics if the resource limits lock is poisoned.
     pub async fn get_stats(&self) -> ResourceStats {
         let ip_connections = self.ip_connections.read().await;
         let client_resources = self.client_resources.read().await;
 
         let unique_ips = ip_connections.len();
         let active_clients = client_resources.len();
-        let max_connections = self
-            .limits
-            .read()
-            .expect("resource limits lock poisoned")
-            .max_connections;
+        let max_connections = self.limits.read().max_connections;
 
         ResourceStats {
             current_connections: self.connection_count.load(Ordering::Relaxed),
@@ -333,28 +321,16 @@ impl ResourceMonitor {
         connection_count * memory_per_connection
     }
 
-    /// # Panics
-    /// Panics if the resource limits lock is poisoned.
     pub fn is_memory_limit_exceeded(&self) -> bool {
-        let max_memory_bytes = self
-            .limits
-            .read()
-            .expect("resource limits lock poisoned")
-            .max_memory_bytes;
+        let max_memory_bytes = self.limits.read().max_memory_bytes;
         if max_memory_bytes == 0 {
             return false;
         }
         self.get_memory_usage() > max_memory_bytes
     }
 
-    /// # Panics
-    /// Panics if the resource limits lock is poisoned.
     pub async fn cleanup_expired_windows(&self) {
-        let rate_limit_window = self
-            .limits
-            .read()
-            .expect("resource limits lock poisoned")
-            .rate_limit_window;
+        let rate_limit_window = self.limits.read().rate_limit_window;
 
         let mut client_resources = self.client_resources.write().await;
 

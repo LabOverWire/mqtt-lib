@@ -1,5 +1,6 @@
 use crate::transport::WasmReader;
 use bytes::Buf;
+use mqtt5_protocol::constants::limits::MAX_PACKET_SIZE;
 use mqtt5_protocol::error::{MqttError, Result};
 use mqtt5_protocol::packet::{FixedHeader, Packet};
 
@@ -17,6 +18,14 @@ pub async fn read_packet(reader: &mut WasmReader) -> Result<Packet> {
     let fixed_header = FixedHeader::decode(&mut cursor)?;
 
     let remaining_length = fixed_header.remaining_length as usize;
+    let max_size = MAX_PACKET_SIZE as usize;
+    if remaining_length > max_size {
+        return Err(MqttError::PacketTooLarge {
+            size: remaining_length,
+            max: max_size,
+        });
+    }
+
     let mut body_buf = vec![0u8; remaining_length];
 
     if remaining_length > 0 {

@@ -4,7 +4,7 @@ mod composite;
 mod providers;
 mod rate_limit;
 
-pub use composite::CompositeAuthProvider;
+pub use composite::{AuthorizationMode, CompositeAuthProvider};
 pub use providers::{
     AllowAllAuthProvider, CertificateAuthProvider, ComprehensiveAuthProvider, PasswordAuthProvider,
 };
@@ -719,18 +719,6 @@ mod tests {
             .has_certificate("1234567890123456789012345678901234567890123456789012345678901234"));
         assert!(provider
             .has_certificate("abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd"));
-    }
-
-    #[test]
-    fn test_certificate_common_name_extraction() {
-        let empty_cert = b"";
-        let result = CertificateAuthProvider::extract_common_name(empty_cert);
-        assert!(result.is_ok());
-        assert!(result.unwrap().is_none());
-
-        let fake_cert_with_cn = b"Some certificate data CN=test.example.com,O=Test Org more data";
-        let result = CertificateAuthProvider::extract_common_name(fake_cert_with_cn);
-        assert!(result.is_ok());
     }
 
     #[tokio::test]
