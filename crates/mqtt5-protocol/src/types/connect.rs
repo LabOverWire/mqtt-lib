@@ -21,7 +21,14 @@ impl core::fmt::Debug for ConnectOptions {
             .field("keep_alive", &self.keep_alive)
             .field("clean_start", &self.clean_start)
             .field("username", &self.username)
-            .field("password", &self.password.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "password",
+                &if self.password.is_some() {
+                    Some("[REDACTED]")
+                } else {
+                    None::<&str>
+                },
+            )
             .field("will", &self.will)
             .field("properties", &self.properties)
             .field("protocol_version", &self.protocol_version)

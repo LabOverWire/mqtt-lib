@@ -33,7 +33,14 @@ impl core::fmt::Debug for ConnectPacket {
             .field("keep_alive", &self.keep_alive)
             .field("client_id", &self.client_id)
             .field("username", &self.username)
-            .field("password", &self.password.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "password",
+                &if self.password.is_some() {
+                    Some("[REDACTED]")
+                } else {
+                    None::<&str>
+                },
+            )
             .field("will", &self.will)
             .field("properties", &self.properties)
             .field("will_properties", &self.will_properties)
