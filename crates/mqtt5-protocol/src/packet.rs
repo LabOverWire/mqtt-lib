@@ -413,13 +413,6 @@ impl Packet {
         buf: &mut B,
         protocol_version: u8,
     ) -> Result<Self> {
-        if !fixed_header.validate_flags() {
-            return Err(MqttError::MalformedPacket(format!(
-                "Invalid fixed header flags 0x{:02X} for {:?}",
-                fixed_header.flags, packet_type
-            )));
-        }
-
         match packet_type {
             PacketType::Publish => {
                 let packet = publish::PublishPacket::decode_body_with_version(
