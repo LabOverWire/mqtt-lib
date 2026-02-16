@@ -80,7 +80,7 @@ mod bebytes_tests {
 
 use crate::encoding::{decode_variable_int, encode_variable_int};
 use crate::error::{MqttError, Result};
-use crate::prelude::{Box, ToString, Vec};
+use crate::prelude::{format, Box, ToString, Vec};
 use bebytes::BeBytes;
 use bytes::{Buf, BufMut};
 
