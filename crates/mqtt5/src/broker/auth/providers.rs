@@ -136,10 +136,7 @@ impl PasswordAuthProvider {
 
             let parts: Vec<&str> = line.splitn(2, ':').collect();
             if parts.len() != 2 {
-                warn!(
-                    "Invalid format in password file at line {}: {}",
-                    line_num, line
-                );
+                warn!("Invalid format in password file at line {line_num}");
                 continue;
             }
 
@@ -533,10 +530,7 @@ impl CertificateAuthProvider {
 
             let parts: Vec<&str> = line.splitn(2, ':').collect();
             if parts.len() != 2 {
-                warn!(
-                    "Invalid format in certificate file at line {}: {}",
-                    line_num, line
-                );
+                warn!("Invalid format in certificate file at line {line_num}");
                 continue;
             }
 

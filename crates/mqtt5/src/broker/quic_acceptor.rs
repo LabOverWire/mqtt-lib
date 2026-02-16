@@ -690,7 +690,7 @@ fn spawn_data_stream_reader(
                         let mut registry = flow_registry.lock().await;
                         registry.touch(id);
                     }
-                    debug!(flow_id = ?flow_id, "Read packet from QUIC data stream: {:?}", packet);
+                    debug!(flow_id = ?flow_id, packet_type = %packet.packet_type_name(), "Read packet from QUIC data stream");
                     if packet_tx.send(packet).await.is_err() {
                         debug!("Packet channel closed, stopping data stream reader");
                         break;

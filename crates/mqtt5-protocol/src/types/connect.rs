@@ -2,7 +2,7 @@ use super::{ProtocolVersion, WillMessage};
 use crate::prelude::{String, Vec};
 use crate::time::Duration;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ConnectOptions {
     pub client_id: String,
     pub keep_alive: Duration,
@@ -12,6 +12,21 @@ pub struct ConnectOptions {
     pub will: Option<WillMessage>,
     pub properties: ConnectProperties,
     pub protocol_version: ProtocolVersion,
+}
+
+impl core::fmt::Debug for ConnectOptions {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ConnectOptions")
+            .field("client_id", &self.client_id)
+            .field("keep_alive", &self.keep_alive)
+            .field("clean_start", &self.clean_start)
+            .field("username", &self.username)
+            .field("password", &self.password.as_ref().map(|_| "[REDACTED]"))
+            .field("will", &self.will)
+            .field("properties", &self.properties)
+            .field("protocol_version", &self.protocol_version)
+            .finish()
+    }
 }
 
 impl Default for ConnectOptions {
