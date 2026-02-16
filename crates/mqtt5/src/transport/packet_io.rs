@@ -71,6 +71,14 @@ pub trait PacketIo: Transport {
                 fixed_header.remaining_length
             );
 
+            let max_size = crate::constants::limits::MAX_PACKET_SIZE as usize;
+            if fixed_header.remaining_length as usize > max_size {
+                return Err(MqttError::PacketTooLarge {
+                    size: fixed_header.remaining_length as usize,
+                    max: max_size,
+                });
+            }
+
             if fixed_header.remaining_length > 10000 {
                 tracing::debug!(
                     packet_type = ?fixed_header.packet_type,
@@ -207,6 +215,14 @@ impl PacketReader for OwnedReadHalf {
         let mut header_buf = header_buf.freeze();
         let fixed_header = FixedHeader::decode(&mut header_buf)?;
 
+        let max_size = crate::constants::limits::MAX_PACKET_SIZE as usize;
+        if fixed_header.remaining_length as usize > max_size {
+            return Err(MqttError::PacketTooLarge {
+                size: fixed_header.remaining_length as usize,
+                max: max_size,
+            });
+        }
+
         let mut payload_buf = BytesMut::with_capacity(fixed_header.remaining_length as usize);
         payload_buf.resize(fixed_header.remaining_length as usize, 0);
         let mut bytes_read = 0;
@@ -290,6 +306,7 @@ pub async fn read_packet_reusing_buffer<T: Transport>(
     transport: &mut T,
     protocol_version: u8,
     payload_buffer: &mut BytesMut,
+    max_packet_size: usize,
 ) -> Result<Packet> {
     let mut header_bytes = [0u8; 5];
     let mut header_len = 0usize;
@@ -325,6 +342,13 @@ pub async fn read_packet_reusing_buffer<T: Transport>(
     let fixed_header = FixedHeader::decode(&mut header_slice)?;
 
     let remaining = fixed_header.remaining_length as usize;
+    if remaining > max_packet_size {
+        return Err(MqttError::PacketTooLarge {
+            size: remaining,
+            max: max_packet_size,
+        });
+    }
+
     payload_buffer.clear();
     payload_buffer.reserve(remaining);
     payload_buffer.resize(remaining, 0);
@@ -388,6 +412,14 @@ impl PacketReader for TlsReadHalf {
 
         let mut header_buf = header_buf.freeze();
         let fixed_header = FixedHeader::decode(&mut header_buf)?;
+
+        let max_size = crate::constants::limits::MAX_PACKET_SIZE as usize;
+        if fixed_header.remaining_length as usize > max_size {
+            return Err(MqttError::PacketTooLarge {
+                size: fixed_header.remaining_length as usize,
+                max: max_size,
+            });
+        }
 
         let mut payload_buf = BytesMut::with_capacity(fixed_header.remaining_length as usize);
         payload_buf.resize(fixed_header.remaining_length as usize, 0);

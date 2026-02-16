@@ -30,7 +30,7 @@ impl WasmReconnectOptions {
             initial_delay_ms: 1000,
             max_delay_ms: 60000,
             backoff_factor: 2.0,
-            max_attempts: None,
+            max_attempts: Some(20),
         }
     }
 

@@ -371,9 +371,15 @@ impl ClientHandler {
         result
     }
 
+    fn max_packet_size(&self) -> usize {
+        self.config.max_packet_size
+    }
+
     async fn wait_for_connect(&mut self) -> Result<()> {
+        let max_size = self.max_packet_size();
         let packet =
-            read_packet_reusing_buffer(&mut self.transport, 5, &mut self.read_buffer).await?;
+            read_packet_reusing_buffer(&mut self.transport, 5, &mut self.read_buffer, max_size)
+                .await?;
 
         match packet {
             Packet::Connect(connect) => self.handle_connect(*connect).await,
@@ -387,9 +393,15 @@ impl ClientHandler {
         &mut self,
         disconnect_rx: &mut tokio::sync::oneshot::Receiver<()>,
     ) -> Result<bool> {
+        let max_size = self.max_packet_size();
+        let zombie_timeout = Duration::from_secs(300);
         loop {
             tokio::select! {
-                packet_result = read_packet_reusing_buffer(&mut self.transport, self.protocol_version, &mut self.read_buffer) => {
+                read_result = timeout(zombie_timeout, read_packet_reusing_buffer(&mut self.transport, self.protocol_version, &mut self.read_buffer, max_size)) => {
+                    let packet_result = read_result.map_err(|_| {
+                        warn!("Zombie connection timeout (no keepalive, no data for {}s)", zombie_timeout.as_secs());
+                        MqttError::Timeout
+                    })?;
                     match packet_result {
                         Ok(packet) => {
                             self.handle_packet(packet).await?;
@@ -442,10 +454,16 @@ impl ClientHandler {
         disconnect_rx: &mut tokio::sync::oneshot::Receiver<()>,
     ) -> Result<bool> {
         let mut last_packet_time = tokio::time::Instant::now();
+        let max_size = self.max_packet_size();
+        let read_timeout = self.keep_alive.mul_f32(1.5);
 
         loop {
             tokio::select! {
-                packet_result = read_packet_reusing_buffer(&mut self.transport, self.protocol_version, &mut self.read_buffer) => {
+                read_result = timeout(read_timeout, read_packet_reusing_buffer(&mut self.transport, self.protocol_version, &mut self.read_buffer, max_size)) => {
+                    let packet_result = read_result.map_err(|_| {
+                        warn!("Read timeout (no data for {:?})", read_timeout);
+                        MqttError::Timeout
+                    })?;
                     match packet_result {
                         Ok(packet) => {
                             last_packet_time = tokio::time::Instant::now();

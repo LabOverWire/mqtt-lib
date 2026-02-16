@@ -120,21 +120,25 @@ impl TlsConfig {
         self
     }
 
-    /// Sets ALPN protocols
-    ///
-    /// # Panics
-    ///
-    /// Panics if any protocol string is empty or longer than 255 bytes (ALPN limitation)
+    /// Sets ALPN protocols, filtering out any that are empty or longer than 255 bytes
     #[must_use]
     pub fn with_alpn_protocols(mut self, protocols: &[&str]) -> Self {
-        for protocol in protocols {
-            assert!(!protocol.is_empty(), "ALPN protocol cannot be empty");
-            assert!(
-                (protocol.len() <= 255),
-                "ALPN protocol cannot exceed 255 bytes"
-            );
-        }
-        self.alpn_protocols = Some(protocols.iter().map(|p| p.as_bytes().to_vec()).collect());
+        let valid: Vec<Vec<u8>> = protocols
+            .iter()
+            .filter(|p| {
+                if p.is_empty() {
+                    tracing::warn!("Skipping empty ALPN protocol");
+                    return false;
+                }
+                if p.len() > 255 {
+                    tracing::warn!("Skipping ALPN protocol exceeding 255 bytes: {:?}", p);
+                    return false;
+                }
+                true
+            })
+            .map(|p| p.as_bytes().to_vec())
+            .collect();
+        self.alpn_protocols = if valid.is_empty() { None } else { Some(valid) };
         self
     }
 

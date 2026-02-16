@@ -9,19 +9,34 @@ use crate::protocol::v5::reason_codes::ReasonCode;
 
 use super::{AuthProvider, AuthResult, EnhancedAuthResult};
 
-/// Chains two auth providers: tries primary first, falls back only on `BadAuthenticationMethod`.
-///
-/// Authorization uses OR-semantics: allows if either provider allows.
-/// Enhanced auth delegates to primary only (multi-step protocols cannot fall back mid-stream).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AuthorizationMode {
+    #[default]
+    PrimaryOnly,
+    Or,
+    And,
+}
+
 pub struct CompositeAuthProvider {
     primary: Arc<dyn AuthProvider>,
     fallback: Arc<dyn AuthProvider>,
+    authorization_mode: AuthorizationMode,
 }
 
 impl CompositeAuthProvider {
     #[must_use]
     pub fn new(primary: Arc<dyn AuthProvider>, fallback: Arc<dyn AuthProvider>) -> Self {
-        Self { primary, fallback }
+        Self {
+            primary,
+            fallback,
+            authorization_mode: AuthorizationMode::default(),
+        }
+    }
+
+    #[must_use]
+    pub fn with_authorization_mode(mut self, mode: AuthorizationMode) -> Self {
+        self.authorization_mode = mode;
+        self
     }
 }
 
@@ -50,14 +65,29 @@ impl AuthProvider for CompositeAuthProvider {
         topic: &'a str,
     ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
         let client_id = client_id.to_string();
+        let mode = self.authorization_mode;
         Box::pin(async move {
-            self.primary
+            let primary = self
+                .primary
                 .authorize_publish(&client_id, user_id, topic)
-                .await
-                || self
-                    .fallback
-                    .authorize_publish(&client_id, user_id, topic)
-                    .await
+                .await;
+            match mode {
+                AuthorizationMode::PrimaryOnly => primary,
+                AuthorizationMode::Or => {
+                    primary
+                        || self
+                            .fallback
+                            .authorize_publish(&client_id, user_id, topic)
+                            .await
+                }
+                AuthorizationMode::And => {
+                    primary
+                        && self
+                            .fallback
+                            .authorize_publish(&client_id, user_id, topic)
+                            .await
+                }
+            }
         })
     }
 
@@ -68,14 +98,29 @@ impl AuthProvider for CompositeAuthProvider {
         topic_filter: &'a str,
     ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
         let client_id = client_id.to_string();
+        let mode = self.authorization_mode;
         Box::pin(async move {
-            self.primary
+            let primary = self
+                .primary
                 .authorize_subscribe(&client_id, user_id, topic_filter)
-                .await
-                || self
-                    .fallback
-                    .authorize_subscribe(&client_id, user_id, topic_filter)
-                    .await
+                .await;
+            match mode {
+                AuthorizationMode::PrimaryOnly => primary,
+                AuthorizationMode::Or => {
+                    primary
+                        || self
+                            .fallback
+                            .authorize_subscribe(&client_id, user_id, topic_filter)
+                            .await
+                }
+                AuthorizationMode::And => {
+                    primary
+                        && self
+                            .fallback
+                            .authorize_subscribe(&client_id, user_id, topic_filter)
+                            .await
+                }
+            }
         })
     }
 
@@ -221,11 +266,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn authorize_publish_falls_through() {
+    async fn authorize_publish_or_mode_falls_through() {
         let composite = CompositeAuthProvider::new(
             Arc::new(RejectWithBadAuthMethod),
             Arc::new(AllowAllAuthProvider),
-        );
+        )
+        .with_authorization_mode(AuthorizationMode::Or);
 
         let result = composite
             .authorize_publish("client", Some("user"), "topic")
@@ -234,7 +280,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn authorize_subscribe_falls_through() {
+    async fn authorize_subscribe_or_mode_falls_through() {
+        let composite = CompositeAuthProvider::new(
+            Arc::new(RejectWithBadAuthMethod),
+            Arc::new(AllowAllAuthProvider),
+        )
+        .with_authorization_mode(AuthorizationMode::Or);
+
+        let result = composite
+            .authorize_subscribe("client", Some("user"), "topic/#")
+            .await;
+        assert!(result);
+    }
+
+    #[tokio::test]
+    async fn authorize_publish_primary_only_ignores_fallback() {
+        let composite = CompositeAuthProvider::new(
+            Arc::new(RejectWithBadAuthMethod),
+            Arc::new(AllowAllAuthProvider),
+        );
+
+        let result = composite
+            .authorize_publish("client", Some("user"), "topic")
+            .await;
+        assert!(!result);
+    }
+
+    #[tokio::test]
+    async fn authorize_subscribe_primary_only_ignores_fallback() {
         let composite = CompositeAuthProvider::new(
             Arc::new(RejectWithBadAuthMethod),
             Arc::new(AllowAllAuthProvider),
@@ -243,7 +316,57 @@ mod tests {
         let result = composite
             .authorize_subscribe("client", Some("user"), "topic/#")
             .await;
-        assert!(result);
+        assert!(!result);
+    }
+
+    #[tokio::test]
+    async fn authorize_publish_and_mode_requires_both() {
+        let both_allow = CompositeAuthProvider::new(
+            Arc::new(AllowAllAuthProvider),
+            Arc::new(AllowAllAuthProvider),
+        )
+        .with_authorization_mode(AuthorizationMode::And);
+        assert!(
+            both_allow
+                .authorize_publish("client", Some("user"), "topic")
+                .await
+        );
+
+        let primary_rejects = CompositeAuthProvider::new(
+            Arc::new(RejectWithBadAuthMethod),
+            Arc::new(AllowAllAuthProvider),
+        )
+        .with_authorization_mode(AuthorizationMode::And);
+        assert!(
+            !primary_rejects
+                .authorize_publish("client", Some("user"), "topic")
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn authorize_subscribe_and_mode_requires_both() {
+        let both_allow = CompositeAuthProvider::new(
+            Arc::new(AllowAllAuthProvider),
+            Arc::new(AllowAllAuthProvider),
+        )
+        .with_authorization_mode(AuthorizationMode::And);
+        assert!(
+            both_allow
+                .authorize_subscribe("client", Some("user"), "topic/#")
+                .await
+        );
+
+        let fallback_rejects = CompositeAuthProvider::new(
+            Arc::new(AllowAllAuthProvider),
+            Arc::new(RejectWithNotAuthorized),
+        )
+        .with_authorization_mode(AuthorizationMode::And);
+        assert!(
+            !fallback_rejects
+                .authorize_subscribe("client", Some("user"), "topic/#")
+                .await
+        );
     }
 
     #[tokio::test]
@@ -262,5 +385,14 @@ mod tests {
             Arc::new(AllowAllAuthProvider),
         );
         assert!(!composite.supports_enhanced_auth());
+    }
+
+    #[test]
+    fn default_authorization_mode_is_primary_only() {
+        let composite = CompositeAuthProvider::new(
+            Arc::new(AllowAllAuthProvider),
+            Arc::new(AllowAllAuthProvider),
+        );
+        assert_eq!(composite.authorization_mode, AuthorizationMode::PrimaryOnly);
     }
 }
