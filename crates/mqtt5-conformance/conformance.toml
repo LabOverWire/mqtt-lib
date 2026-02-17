@@ -1006,3 +1006,43 @@ test_names = ["pingresp_sent_on_pingreq", "multiple_pingreqs_all_responded"]
 title = "PINGRESP – PING Response"
 total_statements = 0
 note = "No normative MUST statements in Section 3.13; PINGRESP is purely a response to PINGREQ."
+
+# ===========================================================================
+# Section 3.14 — DISCONNECT
+# ===========================================================================
+
+[sections."3.14"]
+title = "DISCONNECT – Disconnect Notification"
+total_statements = 4
+
+[[sections."3.14".statements]]
+id = "MQTT-3.14.2-1"
+level = "Must"
+applies_to = "Both"
+text = "The DISCONNECT Reason Code MUST be one of the values listed in the specification."
+status = "Tested"
+test_names = ["disconnect_valid_reason_codes_accepted", "disconnect_invalid_reason_code_rejected"]
+
+[[sections."3.14".statements]]
+id = "MQTT-3.14.4-1"
+level = "Must"
+applies_to = "Both"
+text = "After sending a DISCONNECT packet the sender MUST NOT send any more MQTT Control Packets on that Network Connection."
+status = "Tested"
+test_names = ["no_packets_after_client_disconnect"]
+
+[[sections."3.14".statements]]
+id = "MQTT-3.14.4-2"
+level = "Must"
+applies_to = "Both"
+text = "After sending a DISCONNECT packet the sender MUST close the Network Connection."
+status = "Tested"
+test_names = ["no_packets_after_client_disconnect"]
+
+[[sections."3.14".statements]]
+id = "MQTT-3.14.4-3"
+level = "Must"
+applies_to = "Server"
+text = "On receipt of DISCONNECT with a Reason Code of 0x00 (Normal disconnection) the Server MUST discard any Will Message associated with the current Connection without publishing it."
+status = "Tested"
+test_names = ["disconnect_normal_suppresses_will"]

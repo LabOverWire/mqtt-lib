@@ -15,13 +15,30 @@
 - [x] Section 3.11 — UNSUBACK (7 tests, 2 normative statements)
 - [x] Section 3.12 — PINGREQ (5 tests, 1 normative statement)
 - [x] Section 3.13 — PINGRESP (0 normative statements, covered by 3.12 tests)
-- [ ] Section 3.14 — DISCONNECT (reason codes, session expiry override, will suppression)
+- [x] Section 3.14 — DISCONNECT (8 tests, 4 normative statements)
 
 **Rule**: after every step, every detail learned, every fix applied — add an entry here. New entries go on top, beneath this plan list.
 
 ---
 
 ## Diary Entries
+
+### 2026-02-17 — Section 3.14 DISCONNECT complete
+
+8 passing tests across 4 groups in `section3_disconnect.rs`:
+
+- **Group 1 — Will Suppression/Publication** (3 tests): normal disconnect (0x00) suppresses will `[MQTT-3.14.4-3]`, disconnect with 0x04 (`DisconnectWithWillMessage`) publishes will, TCP drop publishes will after keep-alive timeout
+- **Group 2 — Reason Code Handling** (2 tests): valid reason codes (0x00, 0x04, 0x80) accepted `[MQTT-3.14.2-1]`, invalid reason code (0x03) rejected
+- **Group 3 — Server-Initiated Disconnect** (2 tests): second CONNECT triggers server DISCONNECT, server DISCONNECT uses valid reason code
+- **Group 4 — Post-Disconnect Behavior** (1 test): no PINGRESP after client DISCONNECT `[MQTT-3.14.4-1]`/`[MQTT-3.14.4-2]`
+
+One broker conformance gap discovered and fixed:
+1. `handle_disconnect` in both native and WASM brokers unconditionally set `normal_disconnect = true` and cleared the will message for ALL DISCONNECT reason codes — including 0x04 (`DisconnectWithWillMessage`). Fixed to only suppress will when reason code is NOT 0x04.
+
+Added `RawMqttClient` methods: `expect_disconnect_packet`.
+Added `RawPacketBuilder` methods: `disconnect_normal`, `disconnect_with_reason`, `connect_with_will_and_keepalive`.
+
+4 normative statements tracked in `conformance.toml` Section 3.14: all Tested. Session Expiry override rules deferred (complex, not critical path).
 
 ### 2026-02-17 — Sections 3.12–3.13 PINGREQ/PINGRESP complete
 

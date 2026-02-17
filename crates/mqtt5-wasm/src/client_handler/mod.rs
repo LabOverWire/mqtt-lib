@@ -434,7 +434,7 @@ impl WasmClientHandler {
                 Ok(())
             }
             Packet::PingReq => self.handle_pingreq(writer),
-            Packet::Disconnect(disconnect) => self.handle_disconnect(disconnect),
+            Packet::Disconnect(ref disconnect) => self.handle_disconnect(disconnect),
             Packet::Auth(auth) => self.handle_auth(auth, writer).await,
             _ => {
                 warn!("Unexpected packet type");

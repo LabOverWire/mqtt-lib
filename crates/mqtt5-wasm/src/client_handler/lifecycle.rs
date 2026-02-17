@@ -18,13 +18,15 @@ impl WasmClientHandler {
         self.write_packet(&Packet::PingResp, writer)
     }
 
-    pub(super) fn handle_disconnect(&mut self, _disconnect: DisconnectPacket) -> Result<()> {
+    pub(super) fn handle_disconnect(&mut self, disconnect: &DisconnectPacket) -> Result<()> {
         debug!("Client disconnected normally");
-        self.normal_disconnect = true;
 
-        if let Some(ref mut session) = self.session {
-            session.will_message = None;
-            session.will_delay_interval = None;
+        if disconnect.reason_code != ReasonCode::DisconnectWithWillMessage {
+            self.normal_disconnect = true;
+            if let Some(ref mut session) = self.session {
+                session.will_message = None;
+                session.will_delay_interval = None;
+            }
         }
 
         Err(MqttError::ClientClosed)

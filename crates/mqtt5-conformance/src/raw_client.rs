@@ -416,6 +416,43 @@ impl RawMqttClient {
         )
     }
 
+    /// Reads and parses a DISCONNECT packet from the server, returning the
+    /// reason code byte.
+    ///
+    /// Returns `None` if the response is not a DISCONNECT, the timeout elapses,
+    /// or the connection is closed without sending DISCONNECT.
+    pub async fn expect_disconnect_packet(&mut self, timeout_dur: Duration) -> Option<u8> {
+        let data = self.read_packet_bytes(timeout_dur).await?;
+        if data.is_empty() || data[0] != 0xE0 {
+            return None;
+        }
+        let mut idx = 1;
+        let mut remaining_len: u32 = 0;
+        let mut shift = 0;
+        loop {
+            if idx >= data.len() {
+                return None;
+            }
+            let byte = data[idx];
+            idx += 1;
+            remaining_len |= u32::from(byte & 0x7F) << shift;
+            if byte & 0x80 == 0 {
+                break;
+            }
+            shift += 7;
+            if shift > 21 {
+                return None;
+            }
+        }
+        if remaining_len == 0 {
+            return Some(0x00);
+        }
+        if data.len() < idx + remaining_len as usize {
+            return None;
+        }
+        Some(data[idx])
+    }
+
     /// Waits for the broker to close the connection or send a DISCONNECT packet.
     ///
     /// Returns `true` if the broker either closed the TCP connection (read
@@ -970,6 +1007,46 @@ impl RawPacketBuilder {
         put_mqtt_string(&mut body, "test-pw-client");
         put_mqtt_string(&mut body, "secret");
 
+        wrap_fixed_header(0x10, &body)
+    }
+
+    /// Builds a normal DISCONNECT packet with no reason code (implies 0x00).
+    ///
+    /// Fixed header `0xE0`, remaining length `0x00`.
+    #[must_use]
+    pub fn disconnect_normal() -> Vec<u8> {
+        vec![0xE0, 0x00]
+    }
+
+    /// Builds a DISCONNECT packet with an explicit reason code byte.
+    ///
+    /// Fixed header `0xE0`, remaining length 2, reason byte, no properties.
+    #[must_use]
+    pub fn disconnect_with_reason(reason_code: u8) -> Vec<u8> {
+        let mut body = BytesMut::new();
+        body.put_u8(reason_code);
+        body.put_u8(0);
+        wrap_fixed_header(0xE0, &body)
+    }
+
+    /// Builds a CONNECT packet with Will Flag=1 (`QoS` 0) and a configurable keepalive.
+    ///
+    /// Will topic is `"will/{client_id}"`, will payload is `"offline"`.
+    /// Connect flags: Will Flag (bit 2) + `clean_start` (bit 1) = `0x06`.
+    #[must_use]
+    pub fn connect_with_will_and_keepalive(client_id: &str, keepalive_secs: u16) -> Vec<u8> {
+        let mut body = BytesMut::new();
+        body.put_u16(4);
+        body.put_slice(b"MQTT");
+        body.put_u8(5);
+        body.put_u8(0x06);
+        body.put_u16(keepalive_secs);
+        body.put_u8(0);
+        put_mqtt_string(&mut body, client_id);
+        body.put_u8(0);
+        let will_topic = format!("will/{client_id}");
+        put_mqtt_string(&mut body, &will_topic);
+        put_mqtt_string(&mut body, "offline");
         wrap_fixed_header(0x10, &body)
     }
 }

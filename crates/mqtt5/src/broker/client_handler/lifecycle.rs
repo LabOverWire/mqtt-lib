@@ -1,6 +1,7 @@
 use crate::error::{MqttError, Result};
 use crate::packet::disconnect::DisconnectPacket;
 use crate::packet::publish::PublishPacket;
+use crate::protocol::v5::reason_codes::ReasonCode;
 use crate::time::Duration;
 use crate::transport::PacketIo;
 use std::sync::Arc;
@@ -10,9 +11,13 @@ use super::ClientHandler;
 
 impl ClientHandler {
     pub(super) fn handle_disconnect(&mut self, disconnect: &DisconnectPacket) -> Result<()> {
-        self.normal_disconnect = true;
         self.disconnect_reason = Some(disconnect.reason_code);
 
+        if disconnect.reason_code == ReasonCode::DisconnectWithWillMessage {
+            return Err(MqttError::ClientClosed);
+        }
+
+        self.normal_disconnect = true;
         if let Some(ref mut session) = self.session {
             session.will_message = None;
             session.will_delay_interval = None;
