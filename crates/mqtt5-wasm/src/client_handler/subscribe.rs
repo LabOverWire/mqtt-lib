@@ -140,14 +140,20 @@ impl WasmClientHandler {
         let mut reason_codes = Vec::new();
 
         for filter in &unsubscribe.filters {
-            self.router.unsubscribe(client_id, filter).await;
+            let removed = self.router.unsubscribe(client_id, filter).await;
 
-            if let Some(ref mut session) = self.session {
-                session.remove_subscription(filter);
-                self.storage.store_session(session.clone()).await.ok();
+            if removed {
+                if let Some(ref mut session) = self.session {
+                    session.remove_subscription(filter);
+                    self.storage.store_session(session.clone()).await.ok();
+                }
             }
 
-            reason_codes.push(UnsubAckReasonCode::Success);
+            reason_codes.push(if removed {
+                UnsubAckReasonCode::Success
+            } else {
+                UnsubAckReasonCode::NoSubscriptionExisted
+            });
         }
 
         let mut unsuback = UnsubAckPacket::new(unsubscribe.packet_id);

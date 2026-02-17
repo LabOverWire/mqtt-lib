@@ -276,6 +276,67 @@ impl RawMqttClient {
         Some((packet_id, reason_codes))
     }
 
+    /// Reads and parses an UNSUBACK packet, returning `(packet_id, reason_codes)`.
+    ///
+    /// UNSUBACK fixed header byte is `0xB0`. Same structure as SUBACK:
+    /// remaining length, packet ID (2 bytes), properties length (variable int,
+    /// skipped), then all remaining bytes are reason codes.
+    /// Returns `None` if the response is not a valid UNSUBACK or the timeout elapses.
+    pub async fn expect_unsuback(&mut self, timeout_dur: Duration) -> Option<(u16, Vec<u8>)> {
+        let data = self.read_packet_bytes(timeout_dur).await?;
+        if data.len() < 4 || data[0] != 0xB0 {
+            return None;
+        }
+        let mut idx = 1;
+        let mut remaining_len: u32 = 0;
+        let mut shift = 0;
+        loop {
+            if idx >= data.len() {
+                return None;
+            }
+            let byte = data[idx];
+            idx += 1;
+            remaining_len |= u32::from(byte & 0x7F) << shift;
+            if byte & 0x80 == 0 {
+                break;
+            }
+            shift += 7;
+            if shift > 21 {
+                return None;
+            }
+        }
+        let payload_start = idx;
+        if data.len() < payload_start + remaining_len as usize || remaining_len < 3 {
+            return None;
+        }
+        let packet_id = u16::from_be_bytes([data[idx], data[idx + 1]]);
+        idx += 2;
+        let mut props_len: u32 = 0;
+        let mut props_shift = 0;
+        loop {
+            if idx >= data.len() {
+                return None;
+            }
+            let byte = data[idx];
+            idx += 1;
+            props_len |= u32::from(byte & 0x7F) << props_shift;
+            if byte & 0x80 == 0 {
+                break;
+            }
+            props_shift += 7;
+            if props_shift > 21 {
+                return None;
+            }
+        }
+        idx += props_len as usize;
+        let end = payload_start + remaining_len as usize;
+        if idx > end {
+            return None;
+        }
+        let reason_codes = data[idx..end].to_vec();
+        Some((packet_id, reason_codes))
+    }
+
     /// Reads and parses a PUBLISH packet from the server, returning
     /// `(qos, topic, payload)`.
     ///
@@ -751,6 +812,57 @@ impl RawPacketBuilder {
         put_mqtt_string(&mut body, &filter);
         body.put_u8(options_byte);
         wrap_fixed_header(0x82, &body)
+    }
+
+    /// Builds an UNSUBSCRIBE packet for a single topic filter.
+    ///
+    /// Fixed header byte `0xA2` (UNSUBSCRIBE, reserved bits = 0010).
+    #[must_use]
+    pub fn unsubscribe(topic: &str, packet_id: u16) -> Vec<u8> {
+        let mut body = BytesMut::new();
+        body.put_u16(packet_id);
+        body.put_u8(0);
+        put_mqtt_string(&mut body, topic);
+        wrap_fixed_header(0xA2, &body)
+    }
+
+    /// Builds an UNSUBSCRIBE packet with multiple topic filters.
+    ///
+    /// Fixed header byte `0xA2`.
+    #[must_use]
+    pub fn unsubscribe_multiple(filters: &[&str], packet_id: u16) -> Vec<u8> {
+        let mut body = BytesMut::new();
+        body.put_u16(packet_id);
+        body.put_u8(0);
+        for filter in filters {
+            put_mqtt_string(&mut body, filter);
+        }
+        wrap_fixed_header(0xA2, &body)
+    }
+
+    /// Builds an UNSUBSCRIBE packet with invalid fixed header flags.
+    ///
+    /// Fixed header byte `0xA0` (flags = `0x00` instead of required `0x02`).
+    /// Violates `[MQTT-3.10.1-1]`.
+    #[must_use]
+    pub fn unsubscribe_invalid_flags(topic: &str, packet_id: u16) -> Vec<u8> {
+        let mut body = BytesMut::new();
+        body.put_u16(packet_id);
+        body.put_u8(0);
+        put_mqtt_string(&mut body, topic);
+        wrap_fixed_header(0xA0, &body)
+    }
+
+    /// Builds an UNSUBSCRIBE packet with no topic filters (empty payload
+    /// after packet ID and properties).
+    ///
+    /// Violates `[MQTT-3.10.3-2]`.
+    #[must_use]
+    pub fn unsubscribe_empty_payload(packet_id: u16) -> Vec<u8> {
+        let mut body = BytesMut::new();
+        body.put_u16(packet_id);
+        body.put_u8(0);
+        wrap_fixed_header(0xA2, &body)
     }
 
     /// Builds a `QoS` 2 PUBLISH with the given topic, payload, and packet ID.

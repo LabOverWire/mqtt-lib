@@ -11,8 +11,8 @@
 - [x] Section 3.7 — PUBCOMP (2 tests, 2 normative statements)
 - [x] Section 3.8 — SUBSCRIBE (4 tests, 4 normative statements)
 - [x] Section 3.9 — SUBACK (8 tests, 4 normative statements)
-- [ ] Section 3.10 — UNSUBSCRIBE (acknowledgement, topic filter matching)
-- [ ] Section 3.11 — UNSUBACK (reason codes)
+- [x] Section 3.10 — UNSUBSCRIBE (2 tests, 3 normative statements)
+- [x] Section 3.11 — UNSUBACK (7 tests, 2 normative statements)
 - [ ] Section 3.12 — PINGREQ/PINGRESP (keep-alive enforcement)
 - [ ] Section 3.14 — DISCONNECT (reason codes, session expiry override, will suppression)
 
@@ -21,6 +21,22 @@
 ---
 
 ## Diary Entries
+
+### 2026-02-17 — Sections 3.10–3.11 UNSUBSCRIBE/UNSUBACK complete
+
+9 passing tests across 3 groups in `section3_unsubscribe.rs`:
+
+- **Group 1 — UNSUBSCRIBE Structure** (2 tests): invalid flags rejected `[MQTT-3.10.1-1]`, empty payload rejected `[MQTT-3.10.3-2]`
+- **Group 2 — UNSUBACK Response** (4 tests): packet ID matches `[MQTT-3.11.2-1]`, one reason code per filter `[MQTT-3.11.3-1]`, Success for existing subscription, NoSubscriptionExisted (0x11) for non-existent
+- **Group 3 — Subscription Removal Verification** (3 tests): unsubscribe stops delivery `[MQTT-3.10.4-1]`, partial multi-filter unsubscribe with mixed reason codes, idempotent unsubscribe (first=Success, second=NoSubscriptionExisted)
+
+One broker conformance gap discovered and fixed:
+1. WASM broker `handle_unsubscribe` always returned `UnsubAckReasonCode::Success` regardless of whether a subscription existed — fixed to capture `router.unsubscribe()` return value and use `NoSubscriptionExisted` (0x11) when `removed == false`, matching the native broker pattern. Also made session update conditional on `removed == true`.
+
+Added `RawMqttClient` methods: `expect_unsuback`.
+Added `RawPacketBuilder` methods: `unsubscribe`, `unsubscribe_multiple`, `unsubscribe_invalid_flags`, `unsubscribe_empty_payload`.
+
+5 normative statements tracked in `conformance.toml` Sections 3.10–3.11: all Tested.
 
 ### 2026-02-17 — Sections 3.8–3.9 SUBSCRIBE/SUBACK complete
 

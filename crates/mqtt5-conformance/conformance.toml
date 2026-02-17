@@ -925,3 +925,59 @@ applies_to = "Server"
 text = "The Server uses a SUBACK Reason Code of Granted QoS 0 (0x00), Granted QoS 1 (0x01), or Granted QoS 2 (0x02) to confirm each subscription."
 status = "Tested"
 test_names = ["suback_grants_requested_qos", "suback_downgrades_to_max_qos"]
+
+# ===========================================================================
+# Section 3.10 — UNSUBSCRIBE
+# ===========================================================================
+
+[sections."3.10"]
+title = "UNSUBSCRIBE – Unsubscribe Request"
+total_statements = 3
+
+[[sections."3.10".statements]]
+id = "MQTT-3.10.1-1"
+level = "Must"
+applies_to = "Both"
+text = "Bits 3,2,1,0 of the Fixed Header of the UNSUBSCRIBE packet are reserved and MUST be set to 0,0,1,0 respectively. The Server MUST treat any other value as malformed and close the Network Connection."
+status = "Tested"
+test_names = ["unsubscribe_invalid_flags_rejected"]
+
+[[sections."3.10".statements]]
+id = "MQTT-3.10.3-2"
+level = "Must"
+applies_to = "Both"
+text = "The Payload of an UNSUBSCRIBE packet MUST contain at least one Topic Filter."
+status = "Tested"
+test_names = ["unsubscribe_empty_payload_rejected"]
+
+[[sections."3.10".statements]]
+id = "MQTT-3.10.4-1"
+level = "Must"
+applies_to = "Server"
+text = "When the Server receives an UNSUBSCRIBE packet it MUST stop adding any new messages which match the Topic Filters, for delivery to the Client."
+status = "Tested"
+test_names = ["unsubscribe_stops_delivery", "unsubscribe_partial_multi"]
+
+# ===========================================================================
+# Section 3.11 — UNSUBACK
+# ===========================================================================
+
+[sections."3.11"]
+title = "UNSUBACK – Unsubscribe Acknowledgement"
+total_statements = 2
+
+[[sections."3.11".statements]]
+id = "MQTT-3.11.2-1"
+level = "Must"
+applies_to = "Server"
+text = "The UNSUBACK packet MUST have the same Packet Identifier as the UNSUBSCRIBE packet that is being acknowledged."
+status = "Tested"
+test_names = ["unsuback_packet_id_matches"]
+
+[[sections."3.11".statements]]
+id = "MQTT-3.11.3-1"
+level = "Must"
+applies_to = "Server"
+text = "The UNSUBACK Packet MUST contain a Reason Code for each Topic Filter that was in the corresponding UNSUBSCRIBE packet."
+status = "Tested"
+test_names = ["unsuback_reason_codes_per_filter", "unsuback_success_for_existing", "unsuback_no_subscription_existed", "unsubscribe_partial_multi", "unsubscribe_idempotent"]
