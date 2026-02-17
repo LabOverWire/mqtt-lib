@@ -1,10 +1,12 @@
 use mqtt5::broker::storage::{StorageBackend, StoredSubscription};
-use mqtt5_protocol::error::Result;
+use mqtt5_protocol::error::{MqttError, Result};
+use mqtt5_protocol::packet::disconnect::DisconnectPacket;
 use mqtt5_protocol::packet::suback::{SubAckPacket, SubAckReasonCode};
 use mqtt5_protocol::packet::subscribe::SubscribePacket;
 use mqtt5_protocol::packet::unsuback::{UnsubAckPacket, UnsubAckReasonCode};
 use mqtt5_protocol::packet::unsubscribe::UnsubscribePacket;
 use mqtt5_protocol::packet::Packet;
+use mqtt5_protocol::protocol::v5::reason_codes::ReasonCode;
 use mqtt5_protocol::topic_matches_filter;
 use mqtt5_protocol::types::ProtocolVersion;
 use mqtt5_protocol::QoS;
@@ -25,6 +27,21 @@ impl WasmClientHandler {
         let mut successful_subscriptions = Vec::new();
 
         for filter in &subscribe.filters {
+            if filter.options.no_local && filter.filter.starts_with("$share/") {
+                warn!(
+                    "Client {client_id} set NoLocal on shared subscription {}",
+                    filter.filter
+                );
+                let disconnect = DisconnectPacket {
+                    reason_code: ReasonCode::ProtocolError,
+                    properties: mqtt5_protocol::protocol::v5::properties::Properties::default(),
+                };
+                self.write_packet(&Packet::Disconnect(disconnect), writer)?;
+                return Err(MqttError::ProtocolError(
+                    "NoLocal on shared subscription".to_string(),
+                ));
+            }
+
             let authorized = self
                 .auth_provider
                 .authorize_subscribe(&client_id, self.user_id.as_deref(), &filter.filter)

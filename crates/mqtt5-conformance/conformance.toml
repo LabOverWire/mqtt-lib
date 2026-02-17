@@ -845,3 +845,83 @@ applies_to = "Both"
 text = "The recipient of the PUBCOMP completes the QoS 2 protocol exchange. After sending a PUBCOMP, any delivery of the Application Message to subscribers can proceed."
 status = "Tested"
 test_names = ["pubcomp_message_delivered_after_exchange", "pubrec_no_delivery_before_pubrel"]
+
+# ===========================================================================
+# Section 3.8 — SUBSCRIBE
+# ===========================================================================
+
+[sections."3.8"]
+title = "SUBSCRIBE – Subscribe Request"
+total_statements = 4
+
+[[sections."3.8".statements]]
+id = "MQTT-3.8.1-1"
+level = "Must"
+applies_to = "Both"
+text = "Bits 3,2,1,0 of the Fixed Header of the SUBSCRIBE packet are reserved and MUST be set to 0,0,1,0 respectively. The Server MUST treat any other value as malformed and close the Network Connection."
+status = "Tested"
+test_names = ["subscribe_invalid_flags_rejected"]
+
+[[sections."3.8".statements]]
+id = "MQTT-3.8.3-3"
+level = "Must"
+applies_to = "Both"
+text = "The Payload of a SUBSCRIBE packet MUST contain at least one Topic Filter/Subscription Options pair."
+status = "Tested"
+test_names = ["subscribe_empty_payload_rejected"]
+
+[[sections."3.8".statements]]
+id = "MQTT-3.8.3-4"
+level = "Must"
+applies_to = "Server"
+text = "It is a Protocol Error to set the No Local bit to 1 on a Shared Subscription."
+status = "Tested"
+test_names = ["subscribe_no_local_shared_rejected"]
+
+[[sections."3.8".statements]]
+id = "MQTT-3.8.4-1"
+level = "Must"
+applies_to = "Server"
+text = "When the Server receives a SUBSCRIBE packet from a Client, the Server MUST respond with a SUBACK packet."
+status = "Tested"
+test_names = ["suback_packet_id_matches", "suback_grants_requested_qos"]
+
+# ===========================================================================
+# Section 3.9 — SUBACK
+# ===========================================================================
+
+[sections."3.9"]
+title = "SUBACK – Subscribe Acknowledgement"
+total_statements = 4
+
+[[sections."3.9".statements]]
+id = "MQTT-3.9.2-1"
+level = "Must"
+applies_to = "Server"
+text = "The SUBACK packet MUST have the same Packet Identifier as the SUBSCRIBE packet that is being acknowledged."
+status = "Tested"
+test_names = ["suback_packet_id_matches"]
+
+[[sections."3.9".statements]]
+id = "MQTT-3.9.3-1"
+level = "Must"
+applies_to = "Server"
+text = "The SUBACK Packet MUST contain a Reason Code for each Topic Filter/Subscription Option pair that was in the corresponding SUBSCRIBE packet."
+status = "Tested"
+test_names = ["suback_reason_codes_per_filter", "suback_reason_codes_ordering"]
+
+[[sections."3.9".statements]]
+id = "MQTT-3.9.3-2"
+level = "Must"
+applies_to = "Server"
+text = "Each Reason Code corresponds to a Topic Filter in the SUBSCRIBE packet being acknowledged. The SUBACK Reason Codes MUST be listed in the same order as the Topic Filters in the SUBSCRIBE packet."
+status = "Tested"
+test_names = ["suback_reason_codes_ordering"]
+
+[[sections."3.9".statements]]
+id = "MQTT-3.9.3-3"
+level = "Must"
+applies_to = "Server"
+text = "The Server uses a SUBACK Reason Code of Granted QoS 0 (0x00), Granted QoS 1 (0x01), or Granted QoS 2 (0x02) to confirm each subscription."
+status = "Tested"
+test_names = ["suback_grants_requested_qos", "suback_downgrades_to_max_qos"]

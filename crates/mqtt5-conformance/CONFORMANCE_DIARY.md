@@ -9,8 +9,8 @@
 - [x] Section 3.5 — PUBREC (2 tests, 2 normative statements)
 - [x] Section 3.6 — PUBREL (2 tests, 3 normative statements)
 - [x] Section 3.7 — PUBCOMP (2 tests, 2 normative statements)
-- [ ] Section 3.8 — SUBSCRIBE (options, wildcards, shared subscriptions)
-- [ ] Section 3.9 — SUBACK (reason codes, subscription confirmation)
+- [x] Section 3.8 — SUBSCRIBE (4 tests, 4 normative statements)
+- [x] Section 3.9 — SUBACK (8 tests, 4 normative statements)
 - [ ] Section 3.10 — UNSUBSCRIBE (acknowledgement, topic filter matching)
 - [ ] Section 3.11 — UNSUBACK (reason codes)
 - [ ] Section 3.12 — PINGREQ/PINGRESP (keep-alive enforcement)
@@ -21,6 +21,24 @@
 ---
 
 ## Diary Entries
+
+### 2026-02-17 — Sections 3.8–3.9 SUBSCRIBE/SUBACK complete
+
+12 passing tests across 5 groups in `section3_subscribe.rs`:
+
+- **Group 1 — SUBSCRIBE Structure** (3 tests): invalid flags rejected `[MQTT-3.8.1-1]`, empty payload rejected `[MQTT-3.8.3-3]`, NoLocal on shared subscription rejected `[MQTT-3.8.3-4]`
+- **Group 2 — SUBACK Response** (3 tests): packet ID matches `[MQTT-3.9.2-1]`, one reason code per filter `[MQTT-3.9.3-1]`, reason codes in order with mixed auth `[MQTT-3.9.3-2]`
+- **Group 3 — QoS Granting** (3 tests): grants exact requested QoS `[MQTT-3.9.3-3]`, downgrades to max QoS, message delivery at granted QoS
+- **Group 4 — Authorization & Quota** (2 tests): NotAuthorized (0x87) via ACL denial, QuotaExceeded (0x97) via max_subscriptions_per_client
+- **Group 5 — Subscription Replacement** (1 test): second subscribe to same topic replaces first, only one message copy delivered
+
+One broker conformance gap discovered and fixed:
+1. NoLocal=1 on shared subscriptions (`$share/group/topic`) was not rejected — added validation in `subscribe.rs` for both native and WASM brokers, sending DISCONNECT with ProtocolError (0x82) `[MQTT-3.8.3-4]`
+
+Added `RawMqttClient` methods: `expect_suback`, `expect_publish`.
+Added `RawPacketBuilder` methods: `subscribe_with_packet_id`, `subscribe_multiple`, `subscribe_invalid_flags`, `subscribe_empty_payload`, `subscribe_shared_no_local`.
+
+8 normative statements tracked in `conformance.toml` Sections 3.8–3.9: all Tested.
 
 ### 2026-02-17 — Sections 3.4–3.7 QoS Ack packets complete
 

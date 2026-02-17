@@ -5,11 +5,13 @@ use crate::broker::events::{
 };
 use crate::broker::storage::{StorageBackend, StoredSubscription};
 use crate::error::{MqttError, Result};
+use crate::packet::disconnect::DisconnectPacket;
 use crate::packet::suback::SubAckPacket;
 use crate::packet::subscribe::SubscribePacket;
 use crate::packet::unsuback::UnsubAckPacket;
 use crate::packet::unsubscribe::UnsubscribePacket;
 use crate::packet::Packet;
+use crate::protocol::v5::reason_codes::ReasonCode;
 use crate::transport::PacketIo;
 use crate::types::ProtocolVersion;
 use crate::validation::topic_matches_filter;
@@ -25,6 +27,22 @@ impl ClientHandler {
         let mut reason_codes: Vec<crate::packet::suback::SubAckReasonCode> = Vec::new();
 
         for filter in &subscribe.filters {
+            if filter.options.no_local && filter.filter.starts_with("$share/") {
+                warn!(
+                    "Client {client_id} set NoLocal on shared subscription {}",
+                    filter.filter
+                );
+                if self.protocol_version == 5 {
+                    let disconnect = DisconnectPacket::new(ReasonCode::ProtocolError);
+                    self.transport
+                        .write_packet(Packet::Disconnect(disconnect))
+                        .await?;
+                }
+                return Err(MqttError::ProtocolError(
+                    "NoLocal on shared subscription".to_string(),
+                ));
+            }
+
             let authorized = self
                 .auth_provider
                 .authorize_subscribe(client_id, self.user_id.as_deref(), &filter.filter)

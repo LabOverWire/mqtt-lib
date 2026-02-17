@@ -215,6 +215,135 @@ impl RawMqttClient {
         Some(u16::from_be_bytes([data[idx], data[idx + 1]]))
     }
 
+    /// Reads and parses a SUBACK packet, returning `(packet_id, reason_codes)`.
+    ///
+    /// SUBACK fixed header byte is `0x90`. Parses: remaining length, packet ID
+    /// (2 bytes), properties length (variable int, skipped), then collects all
+    /// remaining bytes as reason codes.
+    /// Returns `None` if the response is not a valid SUBACK or the timeout elapses.
+    pub async fn expect_suback(&mut self, timeout_dur: Duration) -> Option<(u16, Vec<u8>)> {
+        let data = self.read_packet_bytes(timeout_dur).await?;
+        if data.len() < 4 || data[0] != 0x90 {
+            return None;
+        }
+        let mut idx = 1;
+        let mut remaining_len: u32 = 0;
+        let mut shift = 0;
+        loop {
+            if idx >= data.len() {
+                return None;
+            }
+            let byte = data[idx];
+            idx += 1;
+            remaining_len |= u32::from(byte & 0x7F) << shift;
+            if byte & 0x80 == 0 {
+                break;
+            }
+            shift += 7;
+            if shift > 21 {
+                return None;
+            }
+        }
+        let payload_start = idx;
+        if data.len() < payload_start + remaining_len as usize || remaining_len < 3 {
+            return None;
+        }
+        let packet_id = u16::from_be_bytes([data[idx], data[idx + 1]]);
+        idx += 2;
+        let mut props_len: u32 = 0;
+        let mut props_shift = 0;
+        loop {
+            if idx >= data.len() {
+                return None;
+            }
+            let byte = data[idx];
+            idx += 1;
+            props_len |= u32::from(byte & 0x7F) << props_shift;
+            if byte & 0x80 == 0 {
+                break;
+            }
+            props_shift += 7;
+            if props_shift > 21 {
+                return None;
+            }
+        }
+        idx += props_len as usize;
+        let end = payload_start + remaining_len as usize;
+        if idx > end {
+            return None;
+        }
+        let reason_codes = data[idx..end].to_vec();
+        Some((packet_id, reason_codes))
+    }
+
+    /// Reads and parses a PUBLISH packet from the server, returning
+    /// `(qos, topic, payload)`.
+    ///
+    /// Returns `None` if the packet is not a PUBLISH or the timeout elapses.
+    pub async fn expect_publish(&mut self, timeout_dur: Duration) -> Option<(u8, String, Vec<u8>)> {
+        let data = self.read_packet_bytes(timeout_dur).await?;
+        if data.is_empty() || (data[0] & 0xF0) != 0x30 {
+            return None;
+        }
+        let qos = (data[0] >> 1) & 0x03;
+        let mut idx = 1;
+        let mut remaining_len: u32 = 0;
+        let mut shift = 0;
+        loop {
+            if idx >= data.len() {
+                return None;
+            }
+            let byte = data[idx];
+            idx += 1;
+            remaining_len |= u32::from(byte & 0x7F) << shift;
+            if byte & 0x80 == 0 {
+                break;
+            }
+            shift += 7;
+            if shift > 21 {
+                return None;
+            }
+        }
+        let payload_start = idx;
+        if data.len() < payload_start + remaining_len as usize {
+            return None;
+        }
+        if idx + 2 > data.len() {
+            return None;
+        }
+        let topic_len = u16::from_be_bytes([data[idx], data[idx + 1]]) as usize;
+        idx += 2;
+        if idx + topic_len > data.len() {
+            return None;
+        }
+        let topic = String::from_utf8_lossy(&data[idx..idx + topic_len]).to_string();
+        idx += topic_len;
+        if qos > 0 {
+            idx += 2;
+        }
+        let mut props_len: u32 = 0;
+        let mut props_shift = 0;
+        loop {
+            if idx >= data.len() {
+                return None;
+            }
+            let byte = data[idx];
+            idx += 1;
+            props_len |= u32::from(byte & 0x7F) << props_shift;
+            if byte & 0x80 == 0 {
+                break;
+            }
+            props_shift += 7;
+            if props_shift > 21 {
+                return None;
+            }
+        }
+        idx += props_len as usize;
+        let end = payload_start + remaining_len as usize;
+        let payload = data[idx..end].to_vec();
+        Some((qos, topic, payload))
+    }
+
     /// Waits for the broker to close the connection or send a DISCONNECT packet.
     ///
     /// Returns `true` if the broker either closed the TCP connection (read
@@ -549,6 +678,78 @@ impl RawPacketBuilder {
         body.put_u8(0);
         put_mqtt_string(&mut body, topic);
         body.put_u8(qos & 0x03);
+        wrap_fixed_header(0x82, &body)
+    }
+
+    /// Builds a SUBSCRIBE packet with a configurable packet ID.
+    ///
+    /// Fixed header byte `0x82` (SUBSCRIBE, reserved bits = 0010).
+    #[must_use]
+    pub fn subscribe_with_packet_id(topic: &str, qos: u8, packet_id: u16) -> Vec<u8> {
+        let mut body = BytesMut::new();
+        body.put_u16(packet_id);
+        body.put_u8(0);
+        put_mqtt_string(&mut body, topic);
+        body.put_u8(qos & 0x03);
+        wrap_fixed_header(0x82, &body)
+    }
+
+    /// Builds a SUBSCRIBE packet with multiple topic filters.
+    ///
+    /// Each entry in `filters` is `(topic_filter, qos_byte)`.
+    /// Fixed header byte `0x82`.
+    #[must_use]
+    pub fn subscribe_multiple(filters: &[(&str, u8)], packet_id: u16) -> Vec<u8> {
+        let mut body = BytesMut::new();
+        body.put_u16(packet_id);
+        body.put_u8(0);
+        for (topic, qos) in filters {
+            put_mqtt_string(&mut body, topic);
+            body.put_u8(*qos & 0x03);
+        }
+        wrap_fixed_header(0x82, &body)
+    }
+
+    /// Builds a SUBSCRIBE packet with invalid fixed header flags.
+    ///
+    /// Fixed header byte `0x80` (flags = `0x00` instead of required `0x02`).
+    /// Violates `[MQTT-3.8.1-1]`.
+    #[must_use]
+    pub fn subscribe_invalid_flags(topic: &str, qos: u8) -> Vec<u8> {
+        let mut body = BytesMut::new();
+        body.put_u16(1);
+        body.put_u8(0);
+        put_mqtt_string(&mut body, topic);
+        body.put_u8(qos & 0x03);
+        wrap_fixed_header(0x80, &body)
+    }
+
+    /// Builds a SUBSCRIBE packet with no topic filters (empty payload after
+    /// packet ID and properties).
+    ///
+    /// Violates `[MQTT-3.8.3-3]`.
+    #[must_use]
+    pub fn subscribe_empty_payload(packet_id: u16) -> Vec<u8> {
+        let mut body = BytesMut::new();
+        body.put_u16(packet_id);
+        body.put_u8(0);
+        wrap_fixed_header(0x82, &body)
+    }
+
+    /// Builds a SUBSCRIBE for a shared subscription with `NoLocal=1`.
+    ///
+    /// The options byte encodes: `QoS` in bits 0-1, `NoLocal` in bit 2.
+    /// Topic filter is `$share/{group}/{topic}`.
+    /// Violates `[MQTT-3.8.3-4]`.
+    #[must_use]
+    pub fn subscribe_shared_no_local(group: &str, topic: &str, qos: u8, packet_id: u16) -> Vec<u8> {
+        let filter = format!("$share/{group}/{topic}");
+        let options_byte = (qos & 0x03) | 0x04;
+        let mut body = BytesMut::new();
+        body.put_u16(packet_id);
+        body.put_u8(0);
+        put_mqtt_string(&mut body, &filter);
+        body.put_u8(options_byte);
         wrap_fixed_header(0x82, &body)
     }
 
