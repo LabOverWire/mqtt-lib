@@ -439,7 +439,7 @@ impl ClientHandler {
     }
 
     pub(super) async fn handle_pubrel(&mut self, pubrel: PubRelPacket) -> Result<()> {
-        if let Some(publish) = self.inflight_publishes.remove(&pubrel.packet_id) {
+        let reason_code = if let Some(publish) = self.inflight_publishes.remove(&pubrel.packet_id) {
             let client_id = self.client_id.as_ref().unwrap();
 
             if let Some(ref storage) = self.storage {
@@ -462,10 +462,13 @@ impl ClientHandler {
             self.route_with_trace_context(&publish, client_id).await?;
             #[cfg(not(feature = "opentelemetry"))]
             self.route_publish(&publish, Some(client_id)).await;
-        }
 
-        let mut pubcomp = PubCompPacket::new(pubrel.packet_id);
-        pubcomp.reason_code = ReasonCode::Success;
+            ReasonCode::Success
+        } else {
+            ReasonCode::PacketIdentifierNotFound
+        };
+
+        let pubcomp = PubCompPacket::new_with_reason(pubrel.packet_id, reason_code);
         self.transport.write_packet(Packet::PubComp(pubcomp)).await
     }
 

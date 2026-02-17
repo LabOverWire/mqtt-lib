@@ -210,16 +210,19 @@ impl WasmClientHandler {
         pubrel: PubRelPacket,
         writer: &mut WasmWriter,
     ) -> Result<()> {
-        if let Some(publish) = self.inflight_publishes.remove(&pubrel.packet_id) {
+        let reason_code = if let Some(publish) = self.inflight_publishes.remove(&pubrel.packet_id) {
             let client_id = self.client_id.as_ref().unwrap();
             let _ = self
                 .storage
                 .remove_inflight_message(client_id, pubrel.packet_id, InflightDirection::Inbound)
                 .await;
             self.router.route_message(&publish, Some(client_id)).await;
-        }
+            ReasonCode::Success
+        } else {
+            ReasonCode::PacketIdentifierNotFound
+        };
 
-        let pubcomp = PubCompPacket::new(pubrel.packet_id);
+        let pubcomp = PubCompPacket::new_with_reason(pubrel.packet_id, reason_code);
         self.write_packet(&Packet::PubComp(pubcomp), writer)?;
         Ok(())
     }

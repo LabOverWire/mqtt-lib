@@ -128,6 +128,61 @@ impl RawMqttClient {
         if data.len() < 4 || data[0] != 0x40 {
             return None;
         }
+        parse_ack_packet(&data)
+    }
+
+    /// Reads and parses a PUBREC packet, returning `(packet_id, reason_code)`.
+    ///
+    /// Returns `None` if the response is not a valid PUBREC or the timeout
+    /// elapses. PUBREC fixed header byte is `0x50`.
+    pub async fn expect_pubrec(&mut self, timeout_dur: Duration) -> Option<(u16, u8)> {
+        let data = self.read_packet_bytes(timeout_dur).await?;
+        if data.len() < 4 || data[0] != 0x50 {
+            return None;
+        }
+        parse_ack_packet(&data)
+    }
+
+    /// Reads and parses a PUBREL packet, returning `(first_byte, packet_id, reason_code)`.
+    ///
+    /// Returns the raw first byte so callers can verify flags (valid PUBREL
+    /// has first byte `0x62`, i.e. flags = `0x02`). Returns `None` if the
+    /// timeout elapses or the packet is too short.
+    pub async fn expect_pubrel_raw(&mut self, timeout_dur: Duration) -> Option<(u8, u16, u8)> {
+        let data = self.read_packet_bytes(timeout_dur).await?;
+        if data.len() < 4 || (data[0] & 0xF0) != 0x60 {
+            return None;
+        }
+        let (packet_id, reason_code) = parse_ack_packet(&data)?;
+        Some((data[0], packet_id, reason_code))
+    }
+
+    /// Reads and parses a PUBCOMP packet, returning `(packet_id, reason_code)`.
+    ///
+    /// Returns `None` if the response is not a valid PUBCOMP or the timeout
+    /// elapses. PUBCOMP fixed header byte is `0x70`.
+    pub async fn expect_pubcomp(&mut self, timeout_dur: Duration) -> Option<(u16, u8)> {
+        let data = self.read_packet_bytes(timeout_dur).await?;
+        if data.len() < 4 || data[0] != 0x70 {
+            return None;
+        }
+        parse_ack_packet(&data)
+    }
+
+    /// Reads a `QoS` 2 PUBLISH packet from the server and returns its packet ID.
+    ///
+    /// Verifies the packet is a PUBLISH with `QoS`=2 (bits 2-1 of first byte == `0b10`).
+    /// Skips past the topic string to extract the packet identifier.
+    /// Returns `None` if the packet is not a `QoS` 2 PUBLISH or the timeout elapses.
+    pub async fn expect_publish_qos2(&mut self, timeout_dur: Duration) -> Option<u16> {
+        let data = self.read_packet_bytes(timeout_dur).await?;
+        if data.is_empty() || (data[0] & 0xF0) != 0x30 {
+            return None;
+        }
+        let qos = (data[0] >> 1) & 0x03;
+        if qos != 2 {
+            return None;
+        }
         let mut idx = 1;
         let mut remaining_len: u32 = 0;
         let mut shift = 0;
@@ -146,16 +201,18 @@ impl RawMqttClient {
                 return None;
             }
         }
-        if data.len() < idx + remaining_len as usize || remaining_len < 2 {
+        if data.len() < idx + remaining_len as usize {
             return None;
         }
-        let packet_id = u16::from_be_bytes([data[idx], data[idx + 1]]);
-        let reason_code = if remaining_len >= 3 {
-            data[idx + 2]
-        } else {
-            0x00
-        };
-        Some((packet_id, reason_code))
+        if idx + 2 > data.len() {
+            return None;
+        }
+        let topic_len = u16::from_be_bytes([data[idx], data[idx + 1]]) as usize;
+        idx += 2 + topic_len;
+        if idx + 2 > data.len() {
+            return None;
+        }
+        Some(u16::from_be_bytes([data[idx], data[idx + 1]]))
     }
 
     /// Waits for the broker to close the connection or send a DISCONNECT packet.
@@ -495,6 +552,60 @@ impl RawPacketBuilder {
         wrap_fixed_header(0x82, &body)
     }
 
+    /// Builds a `QoS` 2 PUBLISH with the given topic, payload, and packet ID.
+    ///
+    /// Fixed header byte `0x34` (PUBLISH, DUP=0, QoS=2, RETAIN=0).
+    #[must_use]
+    pub fn publish_qos2(topic: &str, payload: &[u8], packet_id: u16) -> Vec<u8> {
+        let mut body = BytesMut::new();
+        put_mqtt_string(&mut body, topic);
+        body.put_u16(packet_id);
+        body.put_u8(0);
+        body.put_slice(payload);
+        wrap_fixed_header(0x34, &body)
+    }
+
+    /// Builds a PUBREC packet with the given packet ID and implicit Success reason.
+    ///
+    /// Fixed header byte `0x50`.
+    #[must_use]
+    pub fn pubrec(packet_id: u16) -> Vec<u8> {
+        let mut body = BytesMut::new();
+        body.put_u16(packet_id);
+        wrap_fixed_header(0x50, &body)
+    }
+
+    /// Builds a PUBREL packet with the correct fixed header flags (`0x02`).
+    ///
+    /// Fixed header byte `0x62` (PUBREL with reserved flags = 0010).
+    #[must_use]
+    pub fn pubrel(packet_id: u16) -> Vec<u8> {
+        let mut body = BytesMut::new();
+        body.put_u16(packet_id);
+        wrap_fixed_header(0x62, &body)
+    }
+
+    /// Builds a malformed PUBREL packet with flags = `0x00` instead of `0x02`.
+    ///
+    /// Fixed header byte `0x60` (invalid — flags MUST be `0x02`).
+    /// Violates `[MQTT-3.6.1-1]`.
+    #[must_use]
+    pub fn pubrel_invalid_flags(packet_id: u16) -> Vec<u8> {
+        let mut body = BytesMut::new();
+        body.put_u16(packet_id);
+        wrap_fixed_header(0x60, &body)
+    }
+
+    /// Builds a PUBCOMP packet with the given packet ID and implicit Success reason.
+    ///
+    /// Fixed header byte `0x70`.
+    #[must_use]
+    pub fn pubcomp(packet_id: u16) -> Vec<u8> {
+        let mut body = BytesMut::new();
+        body.put_u16(packet_id);
+        wrap_fixed_header(0x70, &body)
+    }
+
     /// Builds a CONNECT packet with Password Flag set but Username Flag clear.
     ///
     /// Connect flags `0x42` = Password (bit 6) + `clean_start` (bit 1).
@@ -528,6 +639,37 @@ fn build_connect_with_will(client_id: &str, connect_flags: u8) -> Vec<u8> {
     put_mqtt_string(&mut body, "will/topic");
     put_mqtt_string(&mut body, "will-payload");
     wrap_fixed_header(0x10, &body)
+}
+
+fn parse_ack_packet(data: &[u8]) -> Option<(u16, u8)> {
+    let mut idx = 1;
+    let mut remaining_len: u32 = 0;
+    let mut shift = 0;
+    loop {
+        if idx >= data.len() {
+            return None;
+        }
+        let byte = data[idx];
+        idx += 1;
+        remaining_len |= u32::from(byte & 0x7F) << shift;
+        if byte & 0x80 == 0 {
+            break;
+        }
+        shift += 7;
+        if shift > 21 {
+            return None;
+        }
+    }
+    if data.len() < idx + remaining_len as usize || remaining_len < 2 {
+        return None;
+    }
+    let packet_id = u16::from_be_bytes([data[idx], data[idx + 1]]);
+    let reason_code = if remaining_len >= 3 {
+        data[idx + 2]
+    } else {
+        0x00
+    };
+    Some((packet_id, reason_code))
 }
 
 fn put_mqtt_string(buf: &mut BytesMut, s: &str) {

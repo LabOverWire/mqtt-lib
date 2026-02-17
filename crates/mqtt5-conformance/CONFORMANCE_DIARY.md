@@ -5,10 +5,10 @@
 - [x] Section 3.1 — CONNECT (21 tests, 23 normative statements)
 - [x] Section 3.2 — CONNACK (11 tests, 22 normative statements)
 - [x] Section 3.3 — PUBLISH (22 tests, 43 normative statements)
-- [ ] Section 3.4 — PUBACK (reason codes, QoS 1 acknowledgement)
-- [ ] Section 3.5 — PUBREC (QoS 2 first phase)
-- [ ] Section 3.6 — PUBREL (QoS 2 second phase)
-- [ ] Section 3.7 — PUBCOMP (QoS 2 completion)
+- [x] Section 3.4 — PUBACK (2 tests, 2 normative statements)
+- [x] Section 3.5 — PUBREC (2 tests, 2 normative statements)
+- [x] Section 3.6 — PUBREL (2 tests, 3 normative statements)
+- [x] Section 3.7 — PUBCOMP (2 tests, 2 normative statements)
 - [ ] Section 3.8 — SUBSCRIBE (options, wildcards, shared subscriptions)
 - [ ] Section 3.9 — SUBACK (reason codes, subscription confirmation)
 - [ ] Section 3.10 — UNSUBSCRIBE (acknowledgement, topic filter matching)
@@ -21,6 +21,25 @@
 ---
 
 ## Diary Entries
+
+### 2026-02-17 — Sections 3.4–3.7 QoS Ack packets complete
+
+9 passing tests across 5 groups in `section3_qos_ack.rs`:
+
+- **Group 1 — PUBACK (Section 3.4)** (2 tests): correct packet ID + reason code, message delivery on QoS 1
+- **Group 2 — PUBREC (Section 3.5)** (2 tests): correct packet ID + reason code, no delivery before PUBREL
+- **Group 3 — PUBREL (Section 3.6)** (2 tests): invalid flags rejected `[MQTT-3.6.1-1]`, unknown packet ID returns `PacketIdentifierNotFound`
+- **Group 4 — PUBCOMP (Section 3.7)** (2 tests): correct packet ID + reason after full QoS 2 flow, message delivered after exchange
+- **Group 5 — Outbound Server PUBREL** (1 test): server PUBREL has correct flags `0x02` and matching packet ID
+
+One broker conformance gap discovered and fixed:
+1. `handle_pubrel` sent PUBCOMP with `ReasonCode::Success` even when packet_id was not found in inflight — fixed to use `PacketIdentifierNotFound` (0x92) in both native and WASM brokers.
+
+Added `RawMqttClient` methods: `expect_pubrec`, `expect_pubrel_raw`, `expect_pubcomp`, `expect_publish_qos2`.
+Added `RawPacketBuilder` methods: `publish_qos2`, `pubrec`, `pubrel`, `pubrel_invalid_flags`, `pubcomp`.
+Refactored `expect_puback` to use shared `parse_ack_packet` helper.
+
+9 normative statements tracked in `conformance.toml` Sections 3.4–3.7: all Tested.
 
 ### 2026-02-17 — Section 3.2 CONNACK complete
 

@@ -741,3 +741,107 @@ applies_to = "Server"
 text = "If the Client specified a Maximum QoS in the CONNECT packet, the Server MUST NOT send PUBLISH packets at a QoS exceeding the Client's specified Maximum QoS."
 status = "Untested"
 test_names = []
+
+# ===========================================================================
+# Section 3.4 — PUBACK
+# ===========================================================================
+
+[sections."3.4"]
+title = "PUBACK – QoS 1 Publish Acknowledgement"
+total_statements = 2
+
+[[sections."3.4".statements]]
+id = "MQTT-3.4.0-1"
+level = "Must"
+applies_to = "Server"
+text = "The Server MUST send a PUBACK packet in response to a QoS 1 PUBLISH packet, containing the Packet Identifier from the PUBLISH."
+status = "Tested"
+test_names = ["puback_correct_packet_id_and_reason", "puback_message_delivered_on_qos1"]
+
+[[sections."3.4".statements]]
+id = "MQTT-3.4.2-1"
+level = "Must"
+applies_to = "Both"
+text = "The PUBACK Reason Code MUST be one of the values listed in the spec table (Success, NoMatchingSubscribers, UnspecifiedError, etc.)."
+status = "Tested"
+test_names = ["puback_correct_packet_id_and_reason"]
+
+# ===========================================================================
+# Section 3.5 — PUBREC
+# ===========================================================================
+
+[sections."3.5"]
+title = "PUBREC – QoS 2 Publish Received (Part 1)"
+total_statements = 2
+
+[[sections."3.5".statements]]
+id = "MQTT-3.5.0-1"
+level = "Must"
+applies_to = "Server"
+text = "The Server MUST send a PUBREC packet in response to a QoS 2 PUBLISH packet, containing the Packet Identifier from the PUBLISH."
+status = "Tested"
+test_names = ["pubrec_correct_packet_id_and_reason"]
+
+[[sections."3.5".statements]]
+id = "MQTT-3.5.2-1"
+level = "Must"
+applies_to = "Both"
+text = "The PUBREC Reason Code MUST be one of the values listed in the spec table."
+status = "Tested"
+test_names = ["pubrec_correct_packet_id_and_reason"]
+
+# ===========================================================================
+# Section 3.6 — PUBREL
+# ===========================================================================
+
+[sections."3.6"]
+title = "PUBREL – QoS 2 Publish Release (Part 2)"
+total_statements = 3
+
+[[sections."3.6".statements]]
+id = "MQTT-3.6.1-1"
+level = "Must"
+applies_to = "Both"
+text = "Bits 3,2,1,0 of the Fixed Header of the PUBREL packet are reserved and MUST be set to 0,0,1,0 respectively. The Server MUST treat any other value as malformed and close the Network Connection."
+status = "Tested"
+test_names = ["pubrel_invalid_flags_rejected", "server_pubrel_correct_flags"]
+
+[[sections."3.6".statements]]
+id = "MQTT-3.6.2-1"
+level = "Must"
+applies_to = "Both"
+text = "The PUBREL Reason Code MUST be one of Success (0x00) or Packet Identifier Not Found (0x92)."
+status = "Tested"
+test_names = ["pubrel_unknown_packet_id", "server_pubrel_correct_flags"]
+
+[[sections."3.6".statements]]
+id = "MQTT-3.6.4-1"
+level = "Must"
+applies_to = "Both"
+text = "The Server MUST respond to a PUBREL packet by sending a PUBCOMP packet containing the same Packet Identifier."
+status = "Tested"
+test_names = ["pubcomp_correct_packet_id_and_reason"]
+
+# ===========================================================================
+# Section 3.7 — PUBCOMP
+# ===========================================================================
+
+[sections."3.7"]
+title = "PUBCOMP – QoS 2 Publish Complete (Part 3)"
+total_statements = 2
+
+[[sections."3.7".statements]]
+id = "MQTT-3.7.2-1"
+level = "Must"
+applies_to = "Both"
+text = "The PUBCOMP Reason Code MUST be one of Success (0x00) or Packet Identifier Not Found (0x92)."
+status = "Tested"
+test_names = ["pubcomp_correct_packet_id_and_reason", "pubrel_unknown_packet_id"]
+
+[[sections."3.7".statements]]
+id = "MQTT-3.7.4-1"
+level = "Must"
+applies_to = "Both"
+text = "The recipient of the PUBCOMP completes the QoS 2 protocol exchange. After sending a PUBCOMP, any delivery of the Application Message to subscribers can proceed."
+status = "Tested"
+test_names = ["pubcomp_message_delivered_after_exchange", "pubrec_no_delivery_before_pubrel"]
