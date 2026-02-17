@@ -13,7 +13,8 @@
 - [x] Section 3.9 — SUBACK (8 tests, 4 normative statements)
 - [x] Section 3.10 — UNSUBSCRIBE (2 tests, 3 normative statements)
 - [x] Section 3.11 — UNSUBACK (7 tests, 2 normative statements)
-- [ ] Section 3.12 — PINGREQ/PINGRESP (keep-alive enforcement)
+- [x] Section 3.12 — PINGREQ (5 tests, 1 normative statement)
+- [x] Section 3.13 — PINGRESP (0 normative statements, covered by 3.12 tests)
 - [ ] Section 3.14 — DISCONNECT (reason codes, session expiry override, will suppression)
 
 **Rule**: after every step, every detail learned, every fix applied — add an entry here. New entries go on top, beneath this plan list.
@@ -21,6 +22,21 @@
 ---
 
 ## Diary Entries
+
+### 2026-02-17 — Sections 3.12–3.13 PINGREQ/PINGRESP complete
+
+5 passing tests across 2 groups in `section3_ping.rs`:
+
+- **Group 1 — PINGREQ/PINGRESP Exchange** (2 tests): single PINGREQ gets PINGRESP `[MQTT-3.12.4-1]`, 3 sequential PINGREQs all get PINGRESPs
+- **Group 2 — Keep-Alive Timeout Enforcement** (3 tests): keep-alive=2s timeout closes connection within 1.5x `[MQTT-3.1.2-11]`, keep-alive=0 disables timeout (connection survives 5s silence), PINGREQ resets keep-alive timer (5s of pings at 1s intervals keeps 2s keep-alive alive)
+
+No broker conformance gaps discovered — PINGREQ handler and keep-alive enforcement both work correctly.
+
+Added `RawMqttClient` methods: `expect_pingresp`.
+Added `RawPacketBuilder` methods: `pingreq`, `connect_with_keepalive`.
+
+Updated `MQTT-3.1.2-11` from Untested to Tested.
+1 normative statement tracked in `conformance.toml` Section 3.12: Tested. Section 3.13 has no normative MUST statements.
 
 ### 2026-02-17 — Sections 3.10–3.11 UNSUBSCRIBE/UNSUBACK complete
 

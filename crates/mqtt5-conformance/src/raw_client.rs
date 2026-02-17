@@ -405,6 +405,17 @@ impl RawMqttClient {
         Some((qos, topic, payload))
     }
 
+    /// Reads and checks whether the next packet is a PINGRESP (`0xD0 0x00`).
+    ///
+    /// Returns `true` if PINGRESP is received within the timeout, `false`
+    /// otherwise (timeout, connection closed, or different packet type).
+    pub async fn expect_pingresp(&mut self, timeout_dur: Duration) -> bool {
+        matches!(
+            self.read_packet_bytes(timeout_dur).await,
+            Some(data) if data.len() >= 2 && data[0] == 0xD0 && data[1] == 0x00
+        )
+    }
+
     /// Waits for the broker to close the connection or send a DISCONNECT packet.
     ///
     /// Returns `true` if the broker either closed the TCP connection (read
@@ -917,6 +928,30 @@ impl RawPacketBuilder {
         let mut body = BytesMut::new();
         body.put_u16(packet_id);
         wrap_fixed_header(0x70, &body)
+    }
+
+    /// Builds a PINGREQ packet (`0xC0 0x00`).
+    #[must_use]
+    pub fn pingreq() -> Vec<u8> {
+        vec![0xC0, 0x00]
+    }
+
+    /// Builds a CONNECT packet with a configurable keep-alive value.
+    ///
+    /// Same as [`valid_connect`](Self::valid_connect) but uses `keepalive_secs`
+    /// instead of the default 60s.
+    #[must_use]
+    pub fn connect_with_keepalive(client_id: &str, keepalive_secs: u16) -> Vec<u8> {
+        let mut body = BytesMut::new();
+        body.put_u16(4);
+        body.put_slice(b"MQTT");
+        body.put_u8(5);
+        body.put_u8(0x02);
+        body.put_u16(keepalive_secs);
+        body.put_u8(0);
+        put_mqtt_string(&mut body, client_id);
+
+        wrap_fixed_header(0x10, &body)
     }
 
     /// Builds a CONNECT packet with Password Flag set but Username Flag clear.
