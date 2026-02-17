@@ -207,6 +207,35 @@ impl ClientHandler {
             self.user_id = auth_result.user_id;
         }
 
+        if let Some(ref will) = connect.will {
+            if (will.qos as u8) > self.config.maximum_qos {
+                info!(
+                    client_id = %connect.client_id,
+                    will_qos = will.qos as u8,
+                    maximum_qos = self.config.maximum_qos,
+                    "Rejecting connection: Will QoS exceeds server maximum"
+                );
+                let connack = ConnAckPacket::new(false, ReasonCode::QoSNotSupported);
+                self.transport
+                    .write_packet(Packet::ConnAck(connack))
+                    .await?;
+                return Err(MqttError::ProtocolError(
+                    "Will QoS exceeds server maximum".into(),
+                ));
+            }
+            if will.retain && !self.config.retain_available {
+                info!(
+                    client_id = %connect.client_id,
+                    "Rejecting connection: Will Retain not supported"
+                );
+                let connack = ConnAckPacket::new(false, ReasonCode::RetainNotSupported);
+                self.transport
+                    .write_packet(Packet::ConnAck(connack))
+                    .await?;
+                return Err(MqttError::ProtocolError("Retain not supported".into()));
+            }
+        }
+
         self.client_id = Some(connect.client_id.clone());
         self.keep_alive = Duration::from_secs(u64::from(connect.keep_alive));
 

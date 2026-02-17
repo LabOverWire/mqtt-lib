@@ -185,6 +185,212 @@ text = "If the CONNECT packet has a fixed header flags field that is not 0x00, t
 status = "Tested"
 test_names = ["connect_invalid_fixed_header_flags"]
 
+[sections."3.2"]
+title = "CONNACK - Connect Acknowledgement"
+
+[[sections."3.2".statements]]
+id = "MQTT-3.2.0-1"
+level = "Must"
+applies_to = "Server"
+text = "The Server MUST send a CONNACK with a 0x00 (Success) Reason Code before sending any other packets."
+status = "CrossRef"
+test_names = ["connect_success_connack"]
+note = "Tested via MQTT-3.1.4-6 in section3_connect.rs"
+
+[[sections."3.2".statements]]
+id = "MQTT-3.2.0-2"
+level = "Must"
+applies_to = "Server"
+text = "The Server MUST NOT send more than one CONNACK in a Network Connection."
+status = "Tested"
+test_names = ["connack_only_one_per_connection"]
+
+[[sections."3.2".statements]]
+id = "MQTT-3.2.2-1"
+level = "Must"
+applies_to = "Both"
+text = "Byte 1 is the Connect Acknowledge Flags. Bits 7-1 are reserved and MUST be set to 0."
+status = "Tested"
+test_names = ["connack_reserved_flags_zero"]
+
+[[sections."3.2".statements]]
+id = "MQTT-3.2.2-2"
+level = "Must"
+applies_to = "Server"
+text = "If the Server accepts a connection with CleanStart set to 1, the Server MUST set Session Present to 0 in the CONNACK packet."
+status = "CrossRef"
+test_names = ["connect_clean_start_session_present_zero"]
+note = "Tested via MQTT-3.1.4-3 in section3_connect.rs"
+
+[[sections."3.2".statements]]
+id = "MQTT-3.2.2-3"
+level = "Must"
+applies_to = "Server"
+text = "If the Server accepts a connection with CleanStart set to 0 and the Server has Session State for the ClientID, it MUST set Session Present to 1 in the CONNACK packet."
+status = "CrossRef"
+test_names = ["connect_clean_start_false_session_present_one"]
+note = "Tested via MQTT-3.1.4-4 in section3_connect.rs"
+
+[[sections."3.2".statements]]
+id = "MQTT-3.2.2-4"
+level = "Must"
+applies_to = "Client"
+text = "If the value of Session Present received by the Client from the Server is not as expected, the Client SHOULD close the Network Connection."
+status = "NotApplicable"
+test_names = []
+note = "Client-side behavior"
+
+[[sections."3.2".statements]]
+id = "MQTT-3.2.2-5"
+level = "Must"
+applies_to = "Client"
+text = "If the Client does not have Session State and receives Session Present set to 1 it MUST close the Network Connection."
+status = "NotApplicable"
+test_names = []
+note = "Client-side behavior"
+
+[[sections."3.2".statements]]
+id = "MQTT-3.2.2-6"
+level = "Must"
+applies_to = "Server"
+text = "If a Server sends a CONNACK packet containing a non-zero Reason Code it MUST set Session Present to 0."
+status = "Tested"
+test_names = ["connack_session_present_zero_on_error"]
+
+[[sections."3.2".statements]]
+id = "MQTT-3.2.2-7"
+level = "Must"
+applies_to = "Server"
+text = "If a Server sends a CONNACK packet containing a Reason Code of 128 or greater it MUST then close the Network Connection."
+status = "Tested"
+test_names = ["connack_error_code_closes_connection"]
+
+[[sections."3.2".statements]]
+id = "MQTT-3.2.2-8"
+level = "Must"
+applies_to = "Server"
+text = "The Server sending the CONNACK packet MUST use one of the Connect Reason Code values."
+status = "Tested"
+test_names = ["connack_uses_valid_reason_code"]
+
+[[sections."3.2".statements]]
+id = "MQTT-3.2.2-9"
+level = "Must"
+applies_to = "Server"
+text = "If a Server does not support QoS 1 or QoS 2 PUBLISH packets it MUST still accept SUBSCRIBE packets containing a Requested QoS of 0, 1 or 2."
+status = "Tested"
+test_names = ["connack_maximum_qos_advertised", "connack_accepts_subscribe_any_qos_with_limited_max"]
+
+[[sections."3.2".statements]]
+id = "MQTT-3.2.2-10"
+level = "Must"
+applies_to = "Server"
+text = "If it receives a SUBSCRIBE packet with a higher QoS than the Maximum QoS it has advertised, it downgrades the subscription to the advertised maximum."
+status = "Tested"
+test_names = ["connack_accepts_subscribe_any_qos_with_limited_max"]
+
+[[sections."3.2".statements]]
+id = "MQTT-3.2.2-11"
+level = "Must"
+applies_to = "Client"
+text = "If a Client receives a Maximum QoS from a Server, it MUST NOT send PUBLISH packets at a QoS level exceeding the Maximum QoS level specified."
+status = "NotApplicable"
+test_names = []
+note = "Client-side behavior"
+
+[[sections."3.2".statements]]
+id = "MQTT-3.2.2-12"
+level = "Must"
+applies_to = "Server"
+text = "If the Server receives a CONNECT packet containing a Will QoS that exceeds its capabilities, it MUST reject the connection. It SHOULD use a CONNACK packet with Reason Code 0x9B (QoS not supported)."
+status = "Tested"
+test_names = ["connack_will_qos_exceeds_maximum_rejected"]
+
+[[sections."3.2".statements]]
+id = "MQTT-3.2.2-13"
+level = "Must"
+applies_to = "Server"
+text = "If the Server receives a CONNECT packet containing a Will Message with Will Retain set to 1, and it does not support retained messages, the Server MUST reject the connection request. It SHOULD send CONNACK with Reason Code 0x9A (Retain not supported)."
+status = "Tested"
+test_names = ["connack_will_retain_rejected_when_unsupported"]
+
+[[sections."3.2".statements]]
+id = "MQTT-3.2.2-14"
+level = "Must"
+applies_to = "Client"
+text = "A Client receiving Retain Available set to 0 from the Server MUST NOT send a PUBLISH packet with the RETAIN flag set to 1."
+status = "NotApplicable"
+test_names = []
+note = "Client-side behavior"
+
+[[sections."3.2".statements]]
+id = "MQTT-3.2.2-15"
+level = "Must"
+applies_to = "Client"
+text = "If a Client receives a Maximum Packet Size from the Server, the Client MUST NOT send packets exceeding this size."
+status = "NotApplicable"
+test_names = []
+note = "Client-side behavior"
+
+[[sections."3.2".statements]]
+id = "MQTT-3.2.2-16"
+level = "Must"
+applies_to = "Server"
+text = "The Server MUST NOT send packets exceeding Maximum Packet Size to the Client. If an Assigned Client Identifier is included, the CONNACK is the first packet sent."
+status = "Tested"
+test_names = ["connack_assigned_client_id_unique"]
+
+[[sections."3.2".statements]]
+id = "MQTT-3.2.2-17"
+level = "Must"
+applies_to = "Client"
+text = "The Client MUST NOT send a Topic Alias in a PUBLISH packet to the Server greater than this value."
+status = "NotApplicable"
+test_names = []
+note = "Client-side behavior"
+
+[[sections."3.2".statements]]
+id = "MQTT-3.2.2-18"
+level = "Must"
+applies_to = "Client"
+text = "A value of 0 (Topic Alias Maximum) indicates that the Server does not accept any Topic Aliases on this connection."
+status = "NotApplicable"
+test_names = []
+note = "Client-side behavior"
+
+[[sections."3.2".statements]]
+id = "MQTT-3.2.2-19"
+level = "Must"
+applies_to = "Server"
+text = "The Server MUST NOT send this property (Reason String) if it would increase the size of the CONNACK packet beyond the Maximum Packet Size specified by the Client."
+status = "Untested"
+test_names = []
+
+[[sections."3.2".statements]]
+id = "MQTT-3.2.2-20"
+level = "Must"
+applies_to = "Server"
+text = "The Server MUST NOT send this property (User Property) if it would increase the size of the CONNACK packet beyond the Maximum Packet Size specified by the Client."
+status = "Untested"
+test_names = []
+
+[[sections."3.2".statements]]
+id = "MQTT-3.2.2-21"
+level = "Must"
+applies_to = "Client"
+text = "If the Client receives a Wildcard Subscription Available value of 0, the Client MUST NOT use wildcard characters in Topic Filters."
+status = "NotApplicable"
+test_names = []
+note = "Client-side behavior"
+
+[[sections."3.2".statements]]
+id = "MQTT-3.2.2-22"
+level = "Must"
+applies_to = "Server"
+text = "If the Server receives a CONNECT packet containing a non-zero Keep Alive and it does not support Keep Alive, the Server sets the Server Keep Alive to the value it supports."
+status = "Untested"
+test_names = []
+
 [sections."3.3"]
 title = "PUBLISH - Publish Message"
 

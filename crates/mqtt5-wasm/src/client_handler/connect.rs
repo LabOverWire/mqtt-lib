@@ -101,6 +101,23 @@ impl WasmClientHandler {
             return Err(MqttError::AuthenticationFailed);
         }
 
+        if let Some(ref will) = connect.will {
+            if let Ok(config) = self.config.read() {
+                if (will.qos as u8) > config.maximum_qos {
+                    let connack = ConnAckPacket::new(false, ReasonCode::QoSNotSupported);
+                    self.write_packet(&Packet::ConnAck(connack), writer)?;
+                    return Err(MqttError::ProtocolError(
+                        "Will QoS exceeds server maximum".to_string(),
+                    ));
+                }
+                if will.retain && !config.retain_available {
+                    let connack = ConnAckPacket::new(false, ReasonCode::RetainNotSupported);
+                    self.write_packet(&Packet::ConnAck(connack), writer)?;
+                    return Err(MqttError::ProtocolError("Retain not supported".to_string()));
+                }
+            }
+        }
+
         self.client_id = Some(connect.client_id.clone());
         self.user_id = auth_result.user_id;
         self.keep_alive = mqtt5::time::Duration::from_secs(u64::from(connect.keep_alive));
@@ -127,7 +144,9 @@ impl WasmClientHandler {
                 if config.maximum_qos < 2 {
                     connack.properties.set_maximum_qos(config.maximum_qos);
                 }
-                connack.properties.set_retain_available(true);
+                connack
+                    .properties
+                    .set_retain_available(config.retain_available);
                 connack
                     .properties
                     .set_maximum_packet_size(usize_to_u32_saturating(config.max_packet_size));
@@ -308,7 +327,9 @@ impl WasmClientHandler {
                         if config.maximum_qos < 2 {
                             connack.properties.set_maximum_qos(config.maximum_qos);
                         }
-                        connack.properties.set_retain_available(true);
+                        connack
+                            .properties
+                            .set_retain_available(config.retain_available);
                         connack
                             .properties
                             .set_maximum_packet_size(usize_to_u32_saturating(

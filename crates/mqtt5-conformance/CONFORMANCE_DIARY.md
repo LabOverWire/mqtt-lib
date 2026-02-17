@@ -3,7 +3,7 @@
 ## Planned Work
 
 - [x] Section 3.1 — CONNECT (21 tests, 23 normative statements)
-- [ ] Section 3.2 — CONNACK (session present, reason codes, properties)
+- [x] Section 3.2 — CONNACK (11 tests, 22 normative statements)
 - [x] Section 3.3 — PUBLISH (22 tests, 43 normative statements)
 - [ ] Section 3.4 — PUBACK (reason codes, QoS 1 acknowledgement)
 - [ ] Section 3.5 — PUBREC (QoS 2 first phase)
@@ -21,6 +21,27 @@
 ---
 
 ## Diary Entries
+
+### 2026-02-17 — Section 3.2 CONNACK complete
+
+11 passing tests across 5 groups:
+
+- **Group 1 — CONNACK Structure** (2 raw-client tests): reserved flags zero, only one CONNACK per connection
+- **Group 2 — Session Present + Error Handling** (3 raw-client tests): session present zero on error, error code closes connection, valid reason codes
+- **Group 3 — CONNACK Properties** (3 tests): server capabilities present, MaximumQoS advertised when limited, assigned client ID uniqueness
+- **Group 4 — Will Rejection** (2 raw-client + custom config tests): Will QoS exceeds maximum rejected with 0x9B, Will Retain rejected with 0x9A
+- **Group 5 — Subscribe with Limited QoS** (1 high-level client test): subscribe accepted and downgraded when MaximumQoS < requested
+
+Two broker conformance gaps discovered and fixed:
+1. Will QoS exceeding `maximum_qos` was not rejected at CONNECT time — added validation in `connect.rs` for both native and WASM brokers `[MQTT-3.2.2-12]`
+2. Will Retain=1 when `retain_available=false` was not rejected at CONNECT time — added validation in `connect.rs` for both native and WASM brokers `[MQTT-3.2.2-13]`
+
+Additional fix: WASM broker was hardcoding `retain_available=true` in CONNACK instead of using the config value.
+
+Added `RawMqttClient` method: `expect_connack_packet` (returns fully decoded `ConnAckPacket`).
+Added `RawPacketBuilder` methods: `connect_with_will_qos`, `connect_with_will_retain`, `subscribe`.
+
+22 normative statements tracked in `conformance.toml` Section 3.2: 8 Tested, 3 CrossRef, 7 NotApplicable (client-side), 3 Untested (max packet size constraints, keep alive passthrough).
 
 ### 2026-02-16 — Section 3.3 PUBLISH complete
 

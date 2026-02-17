@@ -9,6 +9,9 @@
 #![allow(clippy::cast_possible_truncation, clippy::missing_errors_doc)]
 
 use bytes::{BufMut, BytesMut};
+use mqtt5_protocol::packet::connack::ConnAckPacket;
+use mqtt5_protocol::packet::MqttPacket;
+use mqtt5_protocol::FixedHeader;
 use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -85,6 +88,20 @@ impl RawMqttClient {
         let flags = data[idx];
         let reason_code = data[idx + 1];
         Some((flags, reason_code))
+    }
+
+    /// Reads and parses a fully decoded [`ConnAckPacket`] from the broker.
+    ///
+    /// Returns `None` if the response is not a valid CONNACK or the timeout
+    /// elapses. All properties are accessible on the returned packet.
+    pub async fn expect_connack_packet(&mut self, timeout_dur: Duration) -> Option<ConnAckPacket> {
+        let data = self.read_packet_bytes(timeout_dur).await?;
+        if data.len() < 4 || data[0] != 0x20 {
+            return None;
+        }
+        let mut buf = &data[..];
+        let fixed_header = FixedHeader::decode(&mut buf).ok()?;
+        ConnAckPacket::decode_body(&mut buf, &fixed_header).ok()
     }
 
     /// Sends a CONNECT, reads CONNACK, and returns `(flags, reason_code)`.
@@ -442,6 +459,42 @@ impl RawPacketBuilder {
         wrap_fixed_header(0x30, &body)
     }
 
+    /// Builds a CONNECT packet with Will Flag=1 and the specified Will `QoS`.
+    ///
+    /// Connect flags: Will Flag (bit 2) + `clean_start` (bit 1) + Will `QoS`
+    /// shifted into bits 4-3. Includes Will Properties (empty), Will Topic,
+    /// and Will Payload in the payload.
+    #[must_use]
+    pub fn connect_with_will_qos(client_id: &str, will_qos: u8) -> Vec<u8> {
+        let flags = 0x06 | ((will_qos & 0x03) << 3);
+        build_connect_with_will(client_id, flags)
+    }
+
+    /// Builds a CONNECT packet with Will Flag=1 and Will Retain=1.
+    ///
+    /// Connect flags: Will Retain (bit 5) + Will Flag (bit 2) +
+    /// `clean_start` (bit 1). Includes Will Properties (empty), Will Topic,
+    /// and Will Payload in the payload.
+    #[must_use]
+    pub fn connect_with_will_retain(client_id: &str) -> Vec<u8> {
+        let flags = 0x26;
+        build_connect_with_will(client_id, flags)
+    }
+
+    /// Builds a SUBSCRIBE packet for the given topic filter and `QoS`.
+    ///
+    /// Fixed header byte `0x82` (SUBSCRIBE, reserved bits = 0010).
+    /// Uses packet ID 1.
+    #[must_use]
+    pub fn subscribe(topic: &str, qos: u8) -> Vec<u8> {
+        let mut body = BytesMut::new();
+        body.put_u16(1);
+        body.put_u8(0);
+        put_mqtt_string(&mut body, topic);
+        body.put_u8(qos & 0x03);
+        wrap_fixed_header(0x82, &body)
+    }
+
     /// Builds a CONNECT packet with Password Flag set but Username Flag clear.
     ///
     /// Connect flags `0x42` = Password (bit 6) + `clean_start` (bit 1).
@@ -460,6 +513,21 @@ impl RawPacketBuilder {
 
         wrap_fixed_header(0x10, &body)
     }
+}
+
+fn build_connect_with_will(client_id: &str, connect_flags: u8) -> Vec<u8> {
+    let mut body = BytesMut::new();
+    body.put_u16(4);
+    body.put_slice(b"MQTT");
+    body.put_u8(5);
+    body.put_u8(connect_flags);
+    body.put_u16(60);
+    body.put_u8(0);
+    put_mqtt_string(&mut body, client_id);
+    body.put_u8(0);
+    put_mqtt_string(&mut body, "will/topic");
+    put_mqtt_string(&mut body, "will-payload");
+    wrap_fixed_header(0x10, &body)
 }
 
 fn put_mqtt_string(buf: &mut BytesMut, s: &str) {
