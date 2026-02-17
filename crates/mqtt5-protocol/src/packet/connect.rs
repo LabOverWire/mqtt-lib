@@ -12,27 +12,40 @@ const PROTOCOL_NAME: &str = "MQTT";
 const PROTOCOL_VERSION_V5: u8 = 5;
 const PROTOCOL_VERSION_V311: u8 = 4;
 
-/// MQTT CONNECT packet
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ConnectPacket {
-    /// Protocol version (4 for v3.1.1, 5 for v5.0)
     pub protocol_version: u8,
-    /// Clean start flag (Clean Session in v3.1.1)
     pub clean_start: bool,
-    /// Keep alive interval in seconds
     pub keep_alive: u16,
-    /// Client identifier
     pub client_id: String,
-    /// Username (optional)
     pub username: Option<String>,
-    /// Password (optional)
     pub password: Option<Vec<u8>>,
-    /// Will message (optional)
     pub will: Option<WillMessage>,
-    /// CONNECT properties (v5.0 only)
     pub properties: Properties,
-    /// Will properties (v5.0 only)
     pub will_properties: Properties,
+}
+
+impl core::fmt::Debug for ConnectPacket {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ConnectPacket")
+            .field("protocol_version", &self.protocol_version)
+            .field("clean_start", &self.clean_start)
+            .field("keep_alive", &self.keep_alive)
+            .field("client_id", &self.client_id)
+            .field("username", &self.username)
+            .field(
+                "password",
+                &if self.password.is_some() {
+                    Some("[REDACTED]")
+                } else {
+                    None::<&str>
+                },
+            )
+            .field("will", &self.will)
+            .field("properties", &self.properties)
+            .field("will_properties", &self.will_properties)
+            .finish()
+    }
 }
 
 impl ConnectPacket {
@@ -361,11 +374,27 @@ impl ConnectPacket {
             password_flag: decomposed_flags.contains(&ConnectFlags::PasswordFlag),
         };
 
+        let will_flag = decomposed_flags.contains(&ConnectFlags::WillFlag);
+        let will_qos = ConnectFlags::extract_will_qos(flags);
+        let will_retain = decomposed_flags.contains(&ConnectFlags::WillRetain);
+
+        if !will_flag && will_qos != 0 {
+            return Err(MqttError::MalformedPacket(
+                "Will QoS must be 0 when Will Flag is 0".to_string(),
+            ));
+        }
+
+        if !will_flag && will_retain {
+            return Err(MqttError::MalformedPacket(
+                "Will Retain must be 0 when Will Flag is 0".to_string(),
+            ));
+        }
+
         let decoded_flags = DecodedConnectFlags {
             clean_start: decomposed_flags.contains(&ConnectFlags::CleanStart),
-            will_flag: decomposed_flags.contains(&ConnectFlags::WillFlag),
-            will_qos: ConnectFlags::extract_will_qos(flags),
-            will_retain: decomposed_flags.contains(&ConnectFlags::WillRetain),
+            will_flag,
+            will_qos,
+            will_retain,
             credentials,
         };
 

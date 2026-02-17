@@ -78,7 +78,7 @@ pub enum EnhancedAuthStatus {
     Failed,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct EnhancedAuthResult {
     pub status: EnhancedAuthStatus,
     pub reason_code: ReasonCode,
@@ -88,6 +88,27 @@ pub struct EnhancedAuthResult {
     pub user_id: Option<String>,
     pub roles: Option<HashSet<String>>,
     pub role_merge_mode: Option<RoleMergeMode>,
+}
+
+impl std::fmt::Debug for EnhancedAuthResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EnhancedAuthResult")
+            .field("status", &self.status)
+            .field("reason_code", &self.reason_code)
+            .field("auth_method", &self.auth_method)
+            .field(
+                "auth_data",
+                &self
+                    .auth_data
+                    .as_ref()
+                    .map(|d| format!("<{} bytes>", d.len())),
+            )
+            .field("reason_string", &self.reason_string)
+            .field("user_id", &self.user_id)
+            .field("roles", &self.roles)
+            .field("role_merge_mode", &self.role_merge_mode)
+            .finish()
+    }
 }
 
 impl EnhancedAuthResult {

@@ -80,7 +80,7 @@ mod bebytes_tests {
 
 use crate::encoding::{decode_variable_int, encode_variable_int};
 use crate::error::{MqttError, Result};
-use crate::prelude::{Box, ToString, Vec};
+use crate::prelude::{format, Box, ToString, Vec};
 use bebytes::BeBytes;
 use bytes::{Buf, BufMut};
 
@@ -308,8 +308,27 @@ pub enum Packet {
 }
 
 impl Packet {
-    /// Decode a packet body based on the packet type
-    ///
+    #[must_use]
+    pub fn packet_type_name(&self) -> &'static str {
+        match self {
+            Self::Connect(_) => "CONNECT",
+            Self::ConnAck(_) => "CONNACK",
+            Self::Publish(_) => "PUBLISH",
+            Self::PubAck(_) => "PUBACK",
+            Self::PubRec(_) => "PUBREC",
+            Self::PubRel(_) => "PUBREL",
+            Self::PubComp(_) => "PUBCOMP",
+            Self::Subscribe(_) => "SUBSCRIBE",
+            Self::SubAck(_) => "SUBACK",
+            Self::Unsubscribe(_) => "UNSUBSCRIBE",
+            Self::UnsubAck(_) => "UNSUBACK",
+            Self::PingReq => "PINGREQ",
+            Self::PingResp => "PINGRESP",
+            Self::Disconnect(_) => "DISCONNECT",
+            Self::Auth(_) => "AUTH",
+        }
+    }
+
     /// # Errors
     ///
     /// Returns an error if decoding fails
@@ -318,6 +337,13 @@ impl Packet {
         fixed_header: &FixedHeader,
         buf: &mut B,
     ) -> Result<Self> {
+        if !fixed_header.validate_flags() {
+            return Err(MqttError::MalformedPacket(format!(
+                "Invalid fixed header flags 0x{:02X} for {:?}",
+                fixed_header.flags, packet_type
+            )));
+        }
+
         match packet_type {
             PacketType::Connect => {
                 let packet = connect::ConnectPacket::decode_body(buf, fixed_header)?;

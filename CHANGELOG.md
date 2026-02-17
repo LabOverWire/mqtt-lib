@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [mqtt5-protocol 0.9.8] / [mqtt5 0.22.8] / [mqtt5-wasm 0.10.9] / [mqttv5-cli 0.20.5] - 2026-02-16
+
+### Security
+
+- **Max packet size enforcement** - Enforce max packet size before buffer allocation in all packet read paths (native + WASM), preventing OOM from malicious remaining-length fields
+- **CompositeAuthProvider authorization modes** - `AuthorizationMode` enum (`PrimaryOnly`/`Or`/`And`) with safe `PrimaryOnly` default — fallback provider no longer silently grants access
+- **Read timeouts** - Added read timeouts to `handle_packets` (keepalive × 1.5) and `handle_packets_no_keepalive` (300s zombie guard) to prevent idle connection resource exhaustion
+- **Decompression bomb limits** - `max_decompressed_size` (default 10MB) on all 4 codec structs (native gzip/deflate, WASM gzip/deflate) to block decompression bombs
+- **Per-username rate limiting** - Auth rate limiter now tracks both IP and username, blocking credential stuffing attacks that rotate source IPs
+- **ConnectPacket password redaction** - `ConnectPacket` and `ConnectOptions` (mqtt5-protocol) now use custom `Debug` impls that print `[REDACTED]` instead of raw password bytes, preventing credential leakage via `{:?}` formatting
+- **EnhancedAuthResult auth_data redaction** - `EnhancedAuthResult` now uses a custom `Debug` impl that prints `<N bytes>` instead of raw authentication exchange data (SCRAM challenges, JWT tokens)
+- **QUIC packet debug log sanitized** - QUIC data stream reader now logs only the packet type name at `debug!` level instead of the full packet contents, preventing payload and credential exposure in debug logs
+- **Password file parse error log sanitized** - Malformed password/certificate file lines are no longer included in warning log messages, preventing accidental exposure of hashes or secrets on format errors
+
+### Added
+
+- **`Packet::packet_type_name()`** - Returns the MQTT packet type as a static string (e.g., `"CONNECT"`, `"PUBLISH"`) for safe logging without exposing packet contents
+
+### Changed
+
+- **WASM reconnect defaults** - `max_attempts` defaults to 20 (was unlimited); WebSocket URL scheme validated; warning logged for credentials over `ws://`
+- **Resource monitor locks** - Switched to `parking_lot::RwLock` (no lock poisoning)
+- **ALPN protocol validation** - Invalid ALPN protocols are filtered with a warning instead of panicking
+
 ## [mqtt5 0.22.7] - 2026-02-14
 
 ### Fixed
