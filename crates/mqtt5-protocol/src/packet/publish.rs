@@ -278,6 +278,12 @@ impl PublishPacket {
             }
         };
 
+        if dup && qos == QoS::AtMostOnce {
+            return Err(MqttError::MalformedPacket(
+                "DUP flag must be 0 when QoS is 0 [MQTT-3.3.1-2]".to_string(),
+            ));
+        }
+
         let topic_name = decode_string(buf)?;
 
         let packet_id = if qos == QoS::AtMostOnce {

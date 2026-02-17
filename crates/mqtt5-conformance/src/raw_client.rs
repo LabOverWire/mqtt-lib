@@ -1,0 +1,491 @@
+//! Raw TCP client for sending hand-crafted MQTT packets.
+//!
+//! The normal [`MqttClient`](mqtt5::MqttClient) API enforces well-formed packets,
+//! making it impossible to test how the broker handles malformed input.
+//! [`RawMqttClient`] operates at the TCP byte level, and [`RawPacketBuilder`]
+//! constructs both valid and deliberately invalid MQTT v5.0 packets for
+//! conformance edge-case testing.
+
+#![allow(clippy::cast_possible_truncation, clippy::missing_errors_doc)]
+
+use bytes::{BufMut, BytesMut};
+use std::net::SocketAddr;
+use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
+
+/// A raw TCP client for sending arbitrary bytes to an MQTT broker.
+///
+/// Unlike [`MqttClient`](mqtt5::MqttClient), this client performs no packet
+/// validation or encoding — it writes raw bytes directly to the TCP stream.
+/// Use this for testing broker behavior with malformed, truncated, or
+/// protocol-violating packets.
+pub struct RawMqttClient {
+    stream: TcpStream,
+}
+
+impl RawMqttClient {
+    /// Opens a raw TCP connection to the broker.
+    pub async fn connect_tcp(addr: SocketAddr) -> std::io::Result<Self> {
+        let stream = TcpStream::connect(addr).await?;
+        Ok(Self { stream })
+    }
+
+    /// Sends raw bytes over the TCP connection.
+    pub async fn send_raw(&mut self, data: &[u8]) -> std::io::Result<()> {
+        self.stream.write_all(data).await
+    }
+
+    /// Reads raw response bytes from the broker within the given timeout.
+    ///
+    /// Returns `None` if the timeout elapses, the connection closes, or a
+    /// read error occurs.
+    pub async fn read_packet_bytes(&mut self, timeout_dur: Duration) -> Option<Vec<u8>> {
+        let mut buf = vec![0u8; 8192];
+        match tokio::time::timeout(timeout_dur, self.stream.read(&mut buf)).await {
+            Ok(Ok(n)) if n > 0 => {
+                buf.truncate(n);
+                Some(buf)
+            }
+            _ => None,
+        }
+    }
+
+    /// Reads and parses a CONNACK packet, returning `(flags, reason_code)`.
+    ///
+    /// Returns `None` if the response is not a valid CONNACK or the timeout
+    /// elapses.
+    pub async fn expect_connack(&mut self, timeout_dur: Duration) -> Option<(u8, u8)> {
+        let data = self.read_packet_bytes(timeout_dur).await?;
+        if data.len() < 4 || data[0] != 0x20 {
+            return None;
+        }
+        let remaining_start = 1;
+        let mut idx = remaining_start;
+        let mut remaining_len: u32 = 0;
+        let mut shift = 0;
+        loop {
+            if idx >= data.len() {
+                return None;
+            }
+            let byte = data[idx];
+            idx += 1;
+            remaining_len |= u32::from(byte & 0x7F) << shift;
+            if byte & 0x80 == 0 {
+                break;
+            }
+            shift += 7;
+            if shift > 21 {
+                return None;
+            }
+        }
+        if data.len() < idx + remaining_len as usize || remaining_len < 2 {
+            return None;
+        }
+        let flags = data[idx];
+        let reason_code = data[idx + 1];
+        Some((flags, reason_code))
+    }
+
+    /// Sends a CONNECT, reads CONNACK, and returns `(flags, reason_code)`.
+    ///
+    /// Convenience wrapper combining [`send_raw`] with [`expect_connack`].
+    /// Returns `None` if CONNACK is not received within the timeout.
+    pub async fn connect_and_establish(
+        &mut self,
+        client_id: &str,
+        timeout_dur: Duration,
+    ) -> Option<(u8, u8)> {
+        self.send_raw(&RawPacketBuilder::valid_connect(client_id))
+            .await
+            .ok()?;
+        self.expect_connack(timeout_dur).await
+    }
+
+    /// Reads and parses a PUBACK packet, returning `(packet_id, reason_code)`.
+    ///
+    /// Returns `None` if the response is not a valid PUBACK or the timeout
+    /// elapses. PUBACK fixed header byte is `0x40`.
+    pub async fn expect_puback(&mut self, timeout_dur: Duration) -> Option<(u16, u8)> {
+        let data = self.read_packet_bytes(timeout_dur).await?;
+        if data.len() < 4 || data[0] != 0x40 {
+            return None;
+        }
+        let mut idx = 1;
+        let mut remaining_len: u32 = 0;
+        let mut shift = 0;
+        loop {
+            if idx >= data.len() {
+                return None;
+            }
+            let byte = data[idx];
+            idx += 1;
+            remaining_len |= u32::from(byte & 0x7F) << shift;
+            if byte & 0x80 == 0 {
+                break;
+            }
+            shift += 7;
+            if shift > 21 {
+                return None;
+            }
+        }
+        if data.len() < idx + remaining_len as usize || remaining_len < 2 {
+            return None;
+        }
+        let packet_id = u16::from_be_bytes([data[idx], data[idx + 1]]);
+        let reason_code = if remaining_len >= 3 {
+            data[idx + 2]
+        } else {
+            0x00
+        };
+        Some((packet_id, reason_code))
+    }
+
+    /// Waits for the broker to close the connection or send a DISCONNECT packet.
+    ///
+    /// Returns `true` if the broker either closed the TCP connection (read
+    /// returns 0 bytes), sent a DISCONNECT packet (first byte `0xE0`), or
+    /// the connection errored. Returns `false` if the timeout elapses with
+    /// the connection still open.
+    pub async fn expect_disconnect(&mut self, timeout_dur: Duration) -> bool {
+        let mut buf = [0u8; 4096];
+        match tokio::time::timeout(timeout_dur, self.stream.read(&mut buf)).await {
+            Ok(Ok(0) | Err(_)) => true,
+            Ok(Ok(n)) => {
+                if buf[..n].first() == Some(&0xE0) {
+                    return true;
+                }
+                let mut second_buf = [0u8; 1];
+                match tokio::time::timeout(timeout_dur, self.stream.read(&mut second_buf)).await {
+                    Ok(Ok(0) | Err(_)) => true,
+                    Ok(Ok(_)) | Err(_) => false,
+                }
+            }
+            Err(_) => false,
+        }
+    }
+}
+
+/// Builds hand-crafted MQTT v5.0 packet byte sequences.
+///
+/// Each method returns a `Vec<u8>` containing a complete MQTT packet
+/// (fixed header + body). Methods that produce invalid packets document
+/// which spec rule they are designed to violate.
+pub struct RawPacketBuilder;
+
+impl RawPacketBuilder {
+    /// Builds a well-formed MQTT v5.0 CONNECT packet with `clean_start=true`,
+    /// keepalive=60s, and no properties.
+    #[must_use]
+    pub fn valid_connect(client_id: &str) -> Vec<u8> {
+        let mut body = BytesMut::new();
+        body.put_u16(4);
+        body.put_slice(b"MQTT");
+        body.put_u8(5);
+        body.put_u8(0x02);
+        body.put_u16(60);
+        body.put_u8(0);
+        put_mqtt_string(&mut body, client_id);
+
+        wrap_fixed_header(0x10, &body)
+    }
+
+    /// Builds a CONNECT packet with an arbitrary protocol version byte.
+    ///
+    /// Used to test `[MQTT-3.1.2-2]`: server MUST respond with CONNACK 0x84
+    /// for unsupported protocol versions.
+    #[must_use]
+    pub fn connect_with_protocol_version(version: u8) -> Vec<u8> {
+        let mut body = BytesMut::new();
+        body.put_u16(4);
+        body.put_slice(b"MQTT");
+        body.put_u8(version);
+        body.put_u8(0x02);
+        body.put_u16(60);
+        body.put_u8(0);
+        put_mqtt_string(&mut body, "test-version-client");
+
+        wrap_fixed_header(0x10, &body)
+    }
+
+    /// Builds a CONNECT packet with protocol name "XXXX" instead of "MQTT".
+    ///
+    /// Used to test `[MQTT-3.1.2-1]`: server MUST close the connection if
+    /// the protocol name is not "MQTT".
+    #[must_use]
+    pub fn connect_with_invalid_protocol_name() -> Vec<u8> {
+        let mut body = BytesMut::new();
+        body.put_u16(4);
+        body.put_slice(b"XXXX");
+        body.put_u8(5);
+        body.put_u8(0x02);
+        body.put_u16(60);
+        body.put_u8(0);
+        put_mqtt_string(&mut body, "test-proto-client");
+
+        wrap_fixed_header(0x10, &body)
+    }
+
+    /// Builds a CONNECT packet with the reserved flag (bit 0) set to 1.
+    ///
+    /// Connect flags byte `0x03` = `clean_start` (bit 1) + reserved (bit 0).
+    /// Used to test `[MQTT-3.1.2-3]`: reserved flag MUST be 0.
+    #[must_use]
+    pub fn connect_with_reserved_flag_set() -> Vec<u8> {
+        let mut body = BytesMut::new();
+        body.put_u16(4);
+        body.put_slice(b"MQTT");
+        body.put_u8(5);
+        body.put_u8(0x03);
+        body.put_u16(60);
+        body.put_u8(0);
+        put_mqtt_string(&mut body, "test-reserved-client");
+
+        wrap_fixed_header(0x10, &body)
+    }
+
+    /// Builds a CONNECT packet with Will Flag set but no Will Topic or
+    /// Will Payload in the payload.
+    ///
+    /// Connect flags `0x06` = Will Flag (bit 2) + `clean_start` (bit 1).
+    /// Used to test `[MQTT-3.1.2-6]`: Will Topic and Will Payload MUST be
+    /// present when Will Flag is 1.
+    #[must_use]
+    pub fn connect_with_will_flag_no_payload() -> Vec<u8> {
+        let mut body = BytesMut::new();
+        body.put_u16(4);
+        body.put_slice(b"MQTT");
+        body.put_u8(5);
+        body.put_u8(0x06);
+        body.put_u16(60);
+        body.put_u8(0);
+        put_mqtt_string(&mut body, "test-will-client");
+
+        wrap_fixed_header(0x10, &body)
+    }
+
+    /// Builds a `QoS` 0 PUBLISH packet (no prior CONNECT).
+    ///
+    /// Used to test `[MQTT-3.1.0-1]`: the first packet from the client
+    /// MUST be a CONNECT.
+    #[must_use]
+    pub fn publish_without_connect() -> Vec<u8> {
+        let mut body = BytesMut::new();
+        put_mqtt_string(&mut body, "test/topic");
+        body.put_u8(0);
+        body.put_slice(b"hello");
+
+        wrap_fixed_header(0x30, &body)
+    }
+
+    /// Builds a truncated CONNECT packet: fixed header claims 50 bytes
+    /// remaining but only 3 bytes of body follow.
+    ///
+    /// Used to test `[MQTT-3.1.4-1]`: server MUST close the connection
+    /// on malformed packets.
+    #[must_use]
+    pub fn connect_malformed_truncated() -> Vec<u8> {
+        vec![0x10, 50, 0x00, 0x04, 0x4D]
+    }
+
+    /// Builds a CONNECT packet with a duplicated Session Expiry Interval
+    /// property (property ID `0x11` appears twice).
+    ///
+    /// Used to test `[MQTT-3.1.4-2]`: duplicate non-repeatable properties
+    /// are a protocol error.
+    #[must_use]
+    pub fn connect_with_duplicate_property() -> Vec<u8> {
+        let mut body = BytesMut::new();
+        body.put_u16(4);
+        body.put_slice(b"MQTT");
+        body.put_u8(5);
+        body.put_u8(0x02);
+        body.put_u16(60);
+
+        let mut props = BytesMut::new();
+        props.put_u8(0x11);
+        props.put_u32(300);
+        props.put_u8(0x11);
+        props.put_u32(600);
+
+        encode_variable_int(&mut body, props.len() as u32);
+        body.put(props);
+        put_mqtt_string(&mut body, "test-dup-prop-client");
+
+        wrap_fixed_header(0x10, &body)
+    }
+
+    /// Builds a CONNECT packet with fixed header flags byte `0x11` instead
+    /// of the required `0x10`.
+    ///
+    /// The lower 4 bits of a CONNECT fixed header MUST be `0x00`.
+    /// Used to test `[MQTT-3.1.2-12]`.
+    #[must_use]
+    pub fn connect_with_invalid_fixed_header_flags() -> Vec<u8> {
+        let mut body = BytesMut::new();
+        body.put_u16(4);
+        body.put_slice(b"MQTT");
+        body.put_u8(5);
+        body.put_u8(0x02);
+        body.put_u16(60);
+        body.put_u8(0);
+        put_mqtt_string(&mut body, "test-flags-client");
+
+        wrap_fixed_header(0x11, &body)
+    }
+
+    /// Builds a `QoS` 0 PUBLISH with the given topic and payload.
+    ///
+    /// Fixed header byte `0x30` (PUBLISH, DUP=0, QoS=0, RETAIN=0).
+    #[must_use]
+    pub fn publish_qos0(topic: &str, payload: &[u8]) -> Vec<u8> {
+        let mut body = BytesMut::new();
+        put_mqtt_string(&mut body, topic);
+        body.put_u8(0);
+        body.put_slice(payload);
+        wrap_fixed_header(0x30, &body)
+    }
+
+    /// Builds a `QoS` 1 PUBLISH with the given topic, payload, and packet ID.
+    ///
+    /// Fixed header byte `0x32` (PUBLISH, DUP=0, QoS=1, RETAIN=0).
+    #[must_use]
+    pub fn publish_qos1(topic: &str, payload: &[u8], packet_id: u16) -> Vec<u8> {
+        let mut body = BytesMut::new();
+        put_mqtt_string(&mut body, topic);
+        body.put_u16(packet_id);
+        body.put_u8(0);
+        body.put_slice(payload);
+        wrap_fixed_header(0x32, &body)
+    }
+
+    /// Builds a malformed PUBLISH with both `QoS` bits set (QoS=3).
+    ///
+    /// Fixed header byte `0x36` (PUBLISH, DUP=0, QoS=3, RETAIN=0).
+    /// Violates `[MQTT-3.3.1-4]`: `QoS` MUST NOT be 3.
+    #[must_use]
+    pub fn publish_qos3_malformed(topic: &str, payload: &[u8]) -> Vec<u8> {
+        let mut body = BytesMut::new();
+        put_mqtt_string(&mut body, topic);
+        body.put_u8(0);
+        body.put_slice(payload);
+        wrap_fixed_header(0x36, &body)
+    }
+
+    /// Builds a PUBLISH with DUP=1 and `QoS`=0.
+    ///
+    /// Fixed header byte `0x38` (PUBLISH, DUP=1, QoS=0, RETAIN=0).
+    /// Violates `[MQTT-3.3.1-2]`: DUP MUST be 0 when `QoS` is 0.
+    #[must_use]
+    pub fn publish_dup_qos0(topic: &str, payload: &[u8]) -> Vec<u8> {
+        let mut body = BytesMut::new();
+        put_mqtt_string(&mut body, topic);
+        body.put_u8(0);
+        body.put_slice(payload);
+        wrap_fixed_header(0x38, &body)
+    }
+
+    /// Builds a PUBLISH with a wildcard character (`#`) in the topic name.
+    ///
+    /// Violates `[MQTT-3.3.2-2]`: topic name MUST NOT contain wildcards.
+    #[must_use]
+    pub fn publish_with_wildcard_topic() -> Vec<u8> {
+        let mut body = BytesMut::new();
+        put_mqtt_string(&mut body, "test/#");
+        body.put_u8(0);
+        body.put_slice(b"payload");
+        wrap_fixed_header(0x30, &body)
+    }
+
+    /// Builds a PUBLISH with an empty (zero-length) topic and no Topic Alias.
+    ///
+    /// Violates `[MQTT-3.3.2-1]`: topic name MUST be present if no Topic Alias.
+    #[must_use]
+    pub fn publish_with_empty_topic() -> Vec<u8> {
+        let mut body = BytesMut::new();
+        put_mqtt_string(&mut body, "");
+        body.put_u8(0);
+        body.put_slice(b"payload");
+        wrap_fixed_header(0x30, &body)
+    }
+
+    /// Builds a PUBLISH with Topic Alias property set to 0.
+    ///
+    /// Violates `[MQTT-3.3.2-8]`: Topic Alias MUST NOT be 0.
+    #[must_use]
+    pub fn publish_with_topic_alias_zero(topic: &str, payload: &[u8]) -> Vec<u8> {
+        let mut body = BytesMut::new();
+        put_mqtt_string(&mut body, topic);
+        let mut props = BytesMut::new();
+        props.put_u8(0x23);
+        props.put_u16(0);
+        encode_variable_int(&mut body, props.len() as u32);
+        body.put(props);
+        body.put_slice(payload);
+        wrap_fixed_header(0x30, &body)
+    }
+
+    /// Builds a PUBLISH with a Subscription Identifier property.
+    ///
+    /// Violates `[MQTT-3.3.4-6]`: Subscription Identifier MUST NOT be
+    /// included in a PUBLISH from client to server.
+    #[must_use]
+    pub fn publish_with_subscription_id(topic: &str, payload: &[u8], sub_id: u32) -> Vec<u8> {
+        let mut body = BytesMut::new();
+        put_mqtt_string(&mut body, topic);
+        let mut props = BytesMut::new();
+        props.put_u8(0x0B);
+        encode_variable_int(&mut props, sub_id);
+        encode_variable_int(&mut body, props.len() as u32);
+        body.put(props);
+        body.put_slice(payload);
+        wrap_fixed_header(0x30, &body)
+    }
+
+    /// Builds a CONNECT packet with Password Flag set but Username Flag clear.
+    ///
+    /// Connect flags `0x42` = Password (bit 6) + `clean_start` (bit 1).
+    /// MQTT v5.0 allows password without username, so this is a valid packet.
+    #[must_use]
+    pub fn connect_with_password_no_username() -> Vec<u8> {
+        let mut body = BytesMut::new();
+        body.put_u16(4);
+        body.put_slice(b"MQTT");
+        body.put_u8(5);
+        body.put_u8(0x42);
+        body.put_u16(60);
+        body.put_u8(0);
+        put_mqtt_string(&mut body, "test-pw-client");
+        put_mqtt_string(&mut body, "secret");
+
+        wrap_fixed_header(0x10, &body)
+    }
+}
+
+fn put_mqtt_string(buf: &mut BytesMut, s: &str) {
+    let bytes = s.as_bytes();
+    buf.put_u16(bytes.len() as u16);
+    buf.put_slice(bytes);
+}
+
+fn encode_variable_int(buf: &mut BytesMut, mut value: u32) {
+    loop {
+        let mut byte = (value & 0x7F) as u8;
+        value >>= 7;
+        if value > 0 {
+            byte |= 0x80;
+        }
+        buf.put_u8(byte);
+        if value == 0 {
+            break;
+        }
+    }
+}
+
+fn wrap_fixed_header(first_byte: u8, body: &[u8]) -> Vec<u8> {
+    let mut packet = BytesMut::new();
+    packet.put_u8(first_byte);
+    encode_variable_int(&mut packet, body.len() as u32);
+    packet.put_slice(body);
+    packet.to_vec()
+}

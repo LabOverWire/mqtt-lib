@@ -1,0 +1,537 @@
+[sections."3.1"]
+title = "CONNECT - Connection Request"
+
+[[sections."3.1".statements]]
+id = "MQTT-3.1.0-1"
+level = "Must"
+applies_to = "Server"
+text = "After a Network Connection is established by a Client to a Server, the first packet sent from the Client to the Server MUST be a CONNECT packet."
+status = "Tested"
+test_names = ["connect_first_packet_must_be_connect"]
+
+[[sections."3.1".statements]]
+id = "MQTT-3.1.0-2"
+level = "Must"
+applies_to = "Server"
+text = "The Server MUST process a second CONNECT packet sent from a Client as a Protocol Error and close the Network Connection."
+status = "Tested"
+test_names = ["connect_second_connect_is_protocol_error"]
+
+[[sections."3.1".statements]]
+id = "MQTT-3.1.2-1"
+level = "Must"
+applies_to = "Both"
+text = "The protocol name MUST be the UTF-8 String 'MQTT'. A Server which does not receive this MUST close the Network Connection."
+status = "Tested"
+test_names = ["connect_protocol_name_must_be_mqtt"]
+
+[[sections."3.1".statements]]
+id = "MQTT-3.1.2-2"
+level = "Must"
+applies_to = "Server"
+text = "The Server MUST respond to a CONNECT packet with a CONNACK with 0x84 (Unsupported Protocol Version) if the Protocol Version is not supported."
+status = "Tested"
+test_names = ["connect_unsupported_protocol_version"]
+
+[[sections."3.1".statements]]
+id = "MQTT-3.1.2-3"
+level = "Must"
+applies_to = "Both"
+text = "The Server MUST validate that the reserved flag in the CONNECT packet is set to 0. If it is not 0, treat it as a Malformed Packet."
+status = "Tested"
+test_names = ["connect_reserved_flag_must_be_zero"]
+
+[[sections."3.1".statements]]
+id = "MQTT-3.1.2-4"
+level = "Must"
+applies_to = "Server"
+text = "If CleanStart is set to 1, the Client and Server MUST discard any existing Session and start a new Session."
+status = "Tested"
+test_names = ["connect_clean_start_new_session"]
+
+[[sections."3.1".statements]]
+id = "MQTT-3.1.2-5"
+level = "Must"
+applies_to = "Server"
+text = "If CleanStart is set to 0 and there is a Session associated with the Client Identifier, the Server MUST resume communications based on state from the existing Session."
+status = "Tested"
+test_names = ["connect_clean_start_false_resumes_session"]
+
+[[sections."3.1".statements]]
+id = "MQTT-3.1.2-6"
+level = "Must"
+applies_to = "Both"
+text = "If the Will Flag is set to 1, the Will QoS and Will Retain fields in the Connect Flags will be used by the Server, and the Will Properties, Will Topic and Will Payload fields MUST be present in the Payload."
+status = "Tested"
+test_names = ["connect_will_flag_with_will_topic_payload"]
+
+[[sections."3.1".statements]]
+id = "MQTT-3.1.2-7"
+level = "Must"
+applies_to = "Server"
+text = "If the Will Flag is set to 0, then the Will QoS MUST be set to 0."
+status = "Tested"
+test_names = ["connect_will_qos_zero_without_will_flag"]
+
+[[sections."3.1".statements]]
+id = "MQTT-3.1.2-8"
+level = "Must"
+applies_to = "Server"
+text = "If the Will Flag is set to 0, then Will Retain MUST be set to 0."
+status = "Tested"
+test_names = ["connect_will_retain_zero_without_will_flag"]
+
+[[sections."3.1".statements]]
+id = "MQTT-3.1.2-9"
+level = "Must"
+applies_to = "Server"
+text = "If the Will Flag is set to 1, the value of Will QoS can be 0, 1, or 2. A value of 3 is a Malformed Packet."
+status = "Tested"
+test_names = ["connect_will_qos_3_is_malformed"]
+
+[[sections."3.1".statements]]
+id = "MQTT-3.1.2-10"
+level = "Must"
+applies_to = "Both"
+text = "The Server MUST NOT send a Will Message if Will Flag is 0."
+status = "Tested"
+test_names = ["connect_will_not_published_on_normal_disconnect"]
+
+[[sections."3.1".statements]]
+id = "MQTT-3.1.2-11"
+level = "Must"
+applies_to = "Server"
+text = "If the Keep Alive value is non-zero and the Server does not receive an MQTT Control Packet from the Client within one and a half times the Keep Alive time period, it MUST close the Network Connection."
+status = "Untested"
+test_names = []
+
+[[sections."3.1".statements]]
+id = "MQTT-3.1.3-3"
+level = "Must"
+applies_to = "Server"
+text = "The Server MUST allow ClientID's which are between 1 and 23 UTF-8 encoded bytes in length, and that contain only the characters 0-9, a-z, A-Z."
+status = "Tested"
+test_names = ["connect_valid_client_id_accepted"]
+
+[[sections."3.1".statements]]
+id = "MQTT-3.1.3-4"
+level = "Must"
+applies_to = "Server"
+text = "A Server MAY allow a Client to supply a ClientID that has a length of zero bytes, however if it does so the Server MUST treat this as a special case and assign a unique ClientID to that Client."
+status = "Tested"
+test_names = ["connect_empty_client_id_server_assigns"]
+
+[[sections."3.1".statements]]
+id = "MQTT-3.1.3-5"
+level = "Must"
+applies_to = "Server"
+text = "If the Server rejects the ClientID it MAY respond to the CONNECT packet with a CONNACK using Reason Code 0x85 (Client Identifier not valid)."
+status = "Untested"
+test_names = []
+
+[[sections."3.1".statements]]
+id = "MQTT-3.1.4-1"
+level = "Must"
+applies_to = "Server"
+text = "The Server MUST validate that the CONNECT packet matches the format described in the specification and close the Network Connection if it does not."
+status = "Tested"
+test_names = ["connect_malformed_packet_closes_connection"]
+
+[[sections."3.1".statements]]
+id = "MQTT-3.1.4-2"
+level = "Must"
+applies_to = "Server"
+text = "The Server MAY check the CONNECT Packet contents are consistent and if any check fails SHOULD send the CONNACK packet with a non-zero return code."
+status = "Tested"
+test_names = ["connect_duplicate_property_rejected"]
+
+[[sections."3.1".statements]]
+id = "MQTT-3.1.4-3"
+level = "Must"
+applies_to = "Server"
+text = "If the Server accepts a connection with CleanStart set to 1, the Server MUST set Session Present to 0 in the CONNACK packet."
+status = "Tested"
+test_names = ["connect_clean_start_session_present_zero"]
+
+[[sections."3.1".statements]]
+id = "MQTT-3.1.4-4"
+level = "Must"
+applies_to = "Server"
+text = "If the Server accepts a connection with CleanStart set to 0 and the Server has Session State for the ClientID, it MUST set Session Present to 1 in the CONNACK packet."
+status = "Tested"
+test_names = ["connect_clean_start_false_session_present_one"]
+
+[[sections."3.1".statements]]
+id = "MQTT-3.1.4-5"
+level = "Must"
+applies_to = "Server"
+text = "If the Will Flag is set to 1, the Server MUST store the Will Message and publish the Will Message after the Network Connection is subsequently closed unless the Will Message has been deleted on receipt of a DISCONNECT packet with Reason Code 0x00."
+status = "Tested"
+test_names = ["connect_will_published_on_abnormal_disconnect", "connect_will_not_published_on_normal_disconnect"]
+
+[[sections."3.1".statements]]
+id = "MQTT-3.1.4-6"
+level = "Must"
+applies_to = "Server"
+text = "The Server MUST respond to a CONNECT packet with a CONNACK packet. The CONNACK is the first packet sent from the Server to the Client."
+status = "Tested"
+test_names = ["connect_success_connack"]
+
+[[sections."3.1".statements]]
+id = "MQTT-3.1.2-12"
+level = "Must"
+applies_to = "Server"
+text = "If the CONNECT packet has a fixed header flags field that is not 0x00, the Server MUST treat it as a Malformed Packet."
+status = "Tested"
+test_names = ["connect_invalid_fixed_header_flags"]
+
+[sections."3.3"]
+title = "PUBLISH - Publish Message"
+
+[[sections."3.3".statements]]
+id = "MQTT-3.3.1-1"
+level = "Must"
+applies_to = "Both"
+text = "The DUP flag MUST be set to 1 by the Client or Server when it attempts to re-deliver a PUBLISH packet."
+status = "NotApplicable"
+test_names = []
+note = "Client-side re-delivery behavior"
+
+[[sections."3.3".statements]]
+id = "MQTT-3.3.1-2"
+level = "Must"
+applies_to = "Both"
+text = "The DUP flag MUST be set to 0 for all QoS 0 messages."
+status = "Tested"
+test_names = ["publish_dup_must_be_zero_for_qos0"]
+
+[[sections."3.3".statements]]
+id = "MQTT-3.3.1-3"
+level = "Must"
+applies_to = "Both"
+text = "The value of the DUP flag from an incoming PUBLISH packet is not propagated when the PUBLISH packet is sent to subscribers by the Server."
+status = "Untested"
+test_names = []
+
+[[sections."3.3".statements]]
+id = "MQTT-3.3.1-4"
+level = "Must"
+applies_to = "Both"
+text = "A PUBLISH packet MUST NOT have both QoS bits set to 1. If a Server or Client receives a PUBLISH packet which has both QoS bits set to 1 it is a Malformed Packet."
+status = "Tested"
+test_names = ["publish_qos3_is_malformed"]
+
+[[sections."3.3".statements]]
+id = "MQTT-3.3.1-5"
+level = "Must"
+applies_to = "Server"
+text = "If the RETAIN flag is set to 1 in a PUBLISH packet sent by a Client to a Server, the Server MUST replace any existing retained message for this topic and store the Application Message."
+status = "Tested"
+test_names = ["publish_retain_stores_message"]
+
+[[sections."3.3".statements]]
+id = "MQTT-3.3.1-6"
+level = "Must"
+applies_to = "Server"
+text = "If the Payload contains zero bytes it is processed normally by the Server but any retained message with the same topic name MUST be removed and any future subscribers for the topic will not receive a retained message."
+status = "Tested"
+test_names = ["publish_retain_empty_payload_clears"]
+
+[[sections."3.3".statements]]
+id = "MQTT-3.3.1-7"
+level = "Must"
+applies_to = "Server"
+text = "A retained message with a Payload containing zero bytes MUST NOT be stored as a retained message on the Server."
+status = "Tested"
+test_names = ["publish_retain_empty_payload_clears"]
+
+[[sections."3.3".statements]]
+id = "MQTT-3.3.1-8"
+level = "Must"
+applies_to = "Server"
+text = "If the RETAIN flag is 0 in a PUBLISH packet sent by a Client to a Server, the Server MUST NOT store the message as a retained message and MUST NOT remove or replace any existing retained message."
+status = "Tested"
+test_names = ["publish_no_retain_does_not_store"]
+
+[[sections."3.3".statements]]
+id = "MQTT-3.3.1-9"
+level = "Must"
+applies_to = "Server"
+text = "If Retain Handling is set to 0 the Server MUST send the retained messages matching the Topic Filter of the subscription to the Client."
+status = "Tested"
+test_names = ["publish_retain_handling_zero_sends_retained"]
+
+[[sections."3.3".statements]]
+id = "MQTT-3.3.1-10"
+level = "Must"
+applies_to = "Server"
+text = "If Retain Handling is set to 1, if the subscription did not already exist, the Server MUST send all retained messages matching the Topic Filter to the Client, and if the subscription already existed it MUST NOT send retained messages."
+status = "Tested"
+test_names = ["publish_retain_handling_one_only_new_subs"]
+
+[[sections."3.3".statements]]
+id = "MQTT-3.3.1-11"
+level = "Must"
+applies_to = "Server"
+text = "If Retain Handling is set to 2, the Server MUST NOT send the retained messages."
+status = "Tested"
+test_names = ["publish_retain_handling_two_no_retained"]
+
+[[sections."3.3".statements]]
+id = "MQTT-3.3.1-12"
+level = "Must"
+applies_to = "Server"
+text = "If the value of Retain As Published subscription option is set to 0, the Server MUST set the RETAIN flag to 0 when forwarding an Application Message regardless of how the RETAIN flag was set in the received PUBLISH packet."
+status = "Tested"
+test_names = ["publish_retain_as_published_zero_clears_flag"]
+
+[[sections."3.3".statements]]
+id = "MQTT-3.3.1-13"
+level = "Must"
+applies_to = "Server"
+text = "If the value of Retain As Published subscription option is set to 1, the Server MUST set the RETAIN flag equal to the RETAIN flag in the received PUBLISH packet."
+status = "Tested"
+test_names = ["publish_retain_as_published_one_preserves_flag"]
+
+[[sections."3.3".statements]]
+id = "MQTT-3.3.2-1"
+level = "Must"
+applies_to = "Both"
+text = "The Topic Name MUST be present as the first field in the PUBLISH packet Variable Header. It MUST be a UTF-8 Encoded String."
+status = "Tested"
+test_names = ["publish_topic_must_not_be_empty_without_alias"]
+
+[[sections."3.3".statements]]
+id = "MQTT-3.3.2-2"
+level = "Must"
+applies_to = "Both"
+text = "The Topic Name in the PUBLISH packet MUST NOT contain wildcard characters."
+status = "Tested"
+test_names = ["publish_topic_must_not_contain_wildcards"]
+
+[[sections."3.3".statements]]
+id = "MQTT-3.3.2-3"
+level = "Must"
+applies_to = "Server"
+text = "The Topic Name sent to subscribing Clients MUST match the Subscription's Topic Filter."
+status = "Tested"
+test_names = ["publish_topic_matches_subscription_filter"]
+
+[[sections."3.3".statements]]
+id = "MQTT-3.3.2-4"
+level = "Must"
+applies_to = "Server"
+text = "The Server MUST send the Payload Format Indicator unaltered to all subscribers receiving the Application Message."
+status = "Tested"
+test_names = ["publish_payload_format_indicator_forwarded"]
+
+[[sections."3.3".statements]]
+id = "MQTT-3.3.2-5"
+level = "Must"
+applies_to = "Server"
+text = "If the Message Expiry Interval has passed and the Server has not managed to start onward delivery to a matching subscriber, then it MUST delete the copy of the message for that subscriber."
+status = "Untested"
+test_names = []
+
+[[sections."3.3".statements]]
+id = "MQTT-3.3.2-6"
+level = "Must"
+applies_to = "Server"
+text = "The PUBLISH packet sent to a Client by the Server MUST contain a Message Expiry Interval set to the received value minus the time that the Application Message has been waiting in the Server."
+status = "Untested"
+test_names = []
+
+[[sections."3.3".statements]]
+id = "MQTT-3.3.2-7"
+level = "Must"
+applies_to = "Both"
+text = "A Topic Alias of 0 is not permitted. A Client MUST NOT send a PUBLISH packet containing a Topic Alias with the value 0."
+status = "Tested"
+test_names = ["publish_topic_alias_zero_rejected"]
+
+[[sections."3.3".statements]]
+id = "MQTT-3.3.2-8"
+level = "Must"
+applies_to = "Server"
+text = "A Server MUST NOT send a PUBLISH packet with a Topic Alias greater than the Topic Alias Maximum value sent by the Client in the CONNECT packet."
+status = "NotApplicable"
+test_names = []
+note = "Server-to-client alias usage"
+
+[[sections."3.3".statements]]
+id = "MQTT-3.3.2-9"
+level = "Must"
+applies_to = "Client"
+text = "A Client MUST NOT send a PUBLISH packet with a Topic Alias greater than the Topic Alias Maximum value returned by the Server in the CONNACK packet."
+status = "NotApplicable"
+test_names = []
+note = "Client-side constraint"
+
+[[sections."3.3".statements]]
+id = "MQTT-3.3.2-10"
+level = "Must"
+applies_to = "Both"
+text = "A Topic Alias mapping is scoped to the Network Connection. A new Network Connection starts with no Topic Alias mappings."
+status = "Untested"
+test_names = []
+
+[[sections."3.3".statements]]
+id = "MQTT-3.3.2-11"
+level = "Must"
+applies_to = "Both"
+text = "A Topic Alias mapping exists only within the Network Connection and lasts for the lifetime of that Network Connection."
+status = "Untested"
+test_names = []
+
+[[sections."3.3".statements]]
+id = "MQTT-3.3.2-12"
+level = "Must"
+applies_to = "Both"
+text = "A sender can modify the Topic Alias mapping by sending another PUBLISH in the same Network Connection with the same Topic Alias value and a different non-zero length Topic Name."
+status = "Untested"
+test_names = []
+
+[[sections."3.3".statements]]
+id = "MQTT-3.3.2-13"
+level = "Must"
+applies_to = "Both"
+text = "The Response Topic MUST be a UTF-8 Encoded String."
+status = "Untested"
+test_names = []
+
+[[sections."3.3".statements]]
+id = "MQTT-3.3.2-14"
+level = "Must"
+applies_to = "Both"
+text = "The Response Topic MUST NOT contain wildcard characters."
+status = "Untested"
+test_names = []
+
+[[sections."3.3".statements]]
+id = "MQTT-3.3.2-15"
+level = "Must"
+applies_to = "Server"
+text = "The Server MUST send the Response Topic unaltered to all subscribers receiving the Application Message."
+status = "Tested"
+test_names = ["publish_response_topic_and_correlation_data_forwarded"]
+
+[[sections."3.3".statements]]
+id = "MQTT-3.3.2-16"
+level = "Must"
+applies_to = "Server"
+text = "The Server MUST send the Correlation Data unaltered to all subscribers receiving the Application Message."
+status = "Tested"
+test_names = ["publish_response_topic_and_correlation_data_forwarded"]
+
+[[sections."3.3".statements]]
+id = "MQTT-3.3.2-17"
+level = "Must"
+applies_to = "Server"
+text = "The Server MUST send all User Properties unaltered in a PUBLISH packet when forwarding the Application Message to a Client."
+status = "Tested"
+test_names = ["publish_user_properties_forwarded_and_ordered"]
+
+[[sections."3.3".statements]]
+id = "MQTT-3.3.2-18"
+level = "Must"
+applies_to = "Server"
+text = "The Server MUST maintain the order of User Properties when forwarding the Application Message."
+status = "Tested"
+test_names = ["publish_user_properties_forwarded_and_ordered"]
+
+[[sections."3.3".statements]]
+id = "MQTT-3.3.2-19"
+level = "Must"
+applies_to = "Both"
+text = "The Content Type MUST be a UTF-8 Encoded String."
+status = "Untested"
+test_names = []
+
+[[sections."3.3".statements]]
+id = "MQTT-3.3.2-20"
+level = "Must"
+applies_to = "Server"
+text = "The Server MUST send the Content Type unaltered to all subscribers receiving the Application Message."
+status = "Tested"
+test_names = ["publish_content_type_forwarded"]
+
+[[sections."3.3".statements]]
+id = "MQTT-3.3.4-1"
+level = "Must"
+applies_to = "Server"
+text = "The receiver of a PUBLISH Packet MUST respond with the packet as determined by the QoS in the PUBLISH Packet."
+status = "Tested"
+test_names = ["publish_qos0_delivery", "publish_qos1_puback_response", "publish_qos2_full_flow"]
+
+[[sections."3.3".statements]]
+id = "MQTT-3.3.4-2"
+level = "Must"
+applies_to = "Server"
+text = "When Clients make subscriptions with Topic Filters that include wildcards, it is possible for a Client's subscriptions to overlap so that a published message could match multiple filters. In this case the Server MUST deliver the message to the Client respecting the maximum QoS of all the matching subscriptions."
+status = "Untested"
+test_names = []
+
+[[sections."3.3".statements]]
+id = "MQTT-3.3.4-3"
+level = "Must"
+applies_to = "Server"
+text = "If the Client specified a Subscription Identifier for any of the overlapping subscriptions the Server MUST send those Subscription Identifiers in the message which is published as the result of the subscriptions."
+status = "Untested"
+test_names = []
+
+[[sections."3.3".statements]]
+id = "MQTT-3.3.4-4"
+level = "Must"
+applies_to = "Server"
+text = "If the Server sends a single copy of the message it MUST include in the PUBLISH packet the Subscription Identifiers for all matching subscriptions which have a Subscription Identifiers."
+status = "Untested"
+test_names = []
+
+[[sections."3.3".statements]]
+id = "MQTT-3.3.4-5"
+level = "Must"
+applies_to = "Server"
+text = "If the Server sends multiple PUBLISH packets it MUST send, in each of them, the Subscription Identifier of the matching subscription."
+status = "Untested"
+test_names = []
+
+[[sections."3.3".statements]]
+id = "MQTT-3.3.4-6"
+level = "Must"
+applies_to = "Both"
+text = "A PUBLISH packet sent from a Client to a Server MUST NOT contain a Subscription Identifier."
+status = "Tested"
+test_names = ["publish_subscription_id_from_client_rejected"]
+
+[[sections."3.3".statements]]
+id = "MQTT-3.3.4-7"
+level = "Must"
+applies_to = "Server"
+text = "The Server MUST NOT send more than Receive Maximum QoS 1 and QoS 2 PUBLISH packets for which it has not received PUBACK, PUBCOMP, or PUBREC with a Reason Code of 128 or greater from the Client."
+status = "Untested"
+test_names = []
+
+[[sections."3.3".statements]]
+id = "MQTT-3.3.4-8"
+level = "Must"
+applies_to = "Server"
+text = "If it receives more than Receive Maximum QoS 1 and QoS 2 PUBLISH packets where it has not sent a PUBACK or PUBCOMP in response, the Server uses a DISCONNECT packet with Reason Code 0x93 (Receive Maximum exceeded)."
+status = "Untested"
+test_names = []
+
+[[sections."3.3".statements]]
+id = "MQTT-3.3.4-9"
+level = "Must"
+applies_to = "Both"
+text = "The Client MUST NOT delay the sending of any packets other than PUBLISH packets due to having sent Receive Maximum PUBLISH packets without receiving acknowledgements for them."
+status = "NotApplicable"
+test_names = []
+note = "Client-side flow control behavior"
+
+[[sections."3.3".statements]]
+id = "MQTT-3.3.4-10"
+level = "Must"
+applies_to = "Server"
+text = "If the Client specified a Maximum QoS in the CONNECT packet, the Server MUST NOT send PUBLISH packets at a QoS exceeding the Client's specified Maximum QoS."
+status = "Untested"
+test_names = []

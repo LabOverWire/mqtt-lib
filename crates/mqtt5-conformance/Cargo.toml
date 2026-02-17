@@ -1,0 +1,25 @@
+[package]
+name = "mqtt5-conformance"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+description = "MQTT v5.0 OASIS specification conformance test suite"
+
+[lib]
+name = "mqtt5_conformance"
+path = "src/lib.rs"
+
+[dependencies]
+mqtt5 = { path = "../mqtt5" }
+mqtt5-protocol = { path = "../mqtt5-protocol" }
+tokio = { version = "1.47", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.9"
+bytes = "1.10"
+ulid = "1.2.1"

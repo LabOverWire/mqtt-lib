@@ -81,6 +81,13 @@ impl ClientHandler {
             ));
         }
 
+        if publish.properties.get_subscription_identifier().is_some() {
+            return Err(MqttError::ProtocolError(
+                "PUBLISH from client must not contain Subscription Identifier [MQTT-3.3.4-6]"
+                    .to_string(),
+            ));
+        }
+
         crate::validate_topic_name(&publish.topic_name)?;
 
         let payload_size = publish.payload.len();
