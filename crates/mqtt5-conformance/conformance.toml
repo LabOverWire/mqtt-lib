@@ -1046,3 +1046,51 @@ applies_to = "Server"
 text = "On receipt of DISCONNECT with a Reason Code of 0x00 (Normal disconnection) the Server MUST discard any Will Message associated with the current Connection without publishing it."
 status = "Tested"
 test_names = ["disconnect_normal_suppresses_will"]
+
+# ===========================================================================
+# Section 4.7 — Topic Names and Topic Filters
+# ===========================================================================
+
+[sections."4.7"]
+title = "Topic Names and Topic Filters"
+total_statements = 5
+
+[[sections."4.7".statements]]
+id = "MQTT-4.7.1-1"
+level = "Must"
+applies_to = "Both"
+text = "The multi-level wildcard character (#) MUST be specified either on its own or following a topic level separator. In either case it MUST be the last character specified in the Topic Filter."
+status = "Tested"
+test_names = ["multi_level_wildcard_must_be_last", "multi_level_wildcard_must_be_full_level"]
+
+[[sections."4.7".statements]]
+id = "MQTT-4.7.1-2"
+level = "Must"
+applies_to = "Both"
+text = "The single-level wildcard (+) can be used at any level in the Topic Filter, including first and last levels. Where it is used, it MUST occupy an entire level of the filter."
+status = "Tested"
+test_names = ["single_level_wildcard_must_be_full_level"]
+
+[[sections."4.7".statements]]
+id = "MQTT-4.7.2-1"
+level = "Must"
+applies_to = "Server"
+text = "The Server MUST NOT match Topic Filters starting with a wildcard character (# or +) with Topic Names beginning with a $ character."
+status = "Tested"
+test_names = ["dollar_topics_not_matched_by_root_wildcards"]
+
+[[sections."4.7".statements]]
+id = "MQTT-4.7.3-1"
+level = "Must"
+applies_to = "Both"
+text = "All Topic Names and Topic Filters MUST be at least one character long."
+status = "Tested"
+test_names = ["topic_filter_must_not_be_empty"]
+
+[[sections."4.7".statements]]
+id = "MQTT-4.7.3-2"
+level = "Must"
+applies_to = "Both"
+text = "Topic Names and Topic Filters MUST NOT include the null character (Unicode U+0000)."
+status = "Tested"
+test_names = ["null_char_in_topic_name_rejected"]

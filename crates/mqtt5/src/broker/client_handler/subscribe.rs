@@ -14,7 +14,9 @@ use crate::packet::Packet;
 use crate::protocol::v5::reason_codes::ReasonCode;
 use crate::transport::PacketIo;
 use crate::types::ProtocolVersion;
-use crate::validation::topic_matches_filter;
+use crate::validation::{
+    strip_shared_subscription_prefix, topic_matches_filter, validate_topic_filter,
+};
 use crate::QoS;
 use tracing::{debug, warn};
 
@@ -41,6 +43,16 @@ impl ClientHandler {
                 return Err(MqttError::ProtocolError(
                     "NoLocal on shared subscription".to_string(),
                 ));
+            }
+
+            let underlying = strip_shared_subscription_prefix(&filter.filter);
+            if validate_topic_filter(underlying).is_err() {
+                warn!(
+                    "Client {client_id} sent invalid topic filter: {}",
+                    filter.filter
+                );
+                reason_codes.push(crate::packet::suback::SubAckReasonCode::TopicFilterInvalid);
+                continue;
             }
 
             let authorized = self

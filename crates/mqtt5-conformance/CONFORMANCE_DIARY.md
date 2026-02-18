@@ -16,12 +16,27 @@
 - [x] Section 3.12 — PINGREQ (5 tests, 1 normative statement)
 - [x] Section 3.13 — PINGRESP (0 normative statements, covered by 3.12 tests)
 - [x] Section 3.14 — DISCONNECT (8 tests, 4 normative statements)
+- [x] Section 4.7 — Topic Names and Topic Filters (10 tests, 5 normative statements)
 
 **Rule**: after every step, every detail learned, every fix applied — add an entry here. New entries go on top, beneath this plan list.
 
 ---
 
 ## Diary Entries
+
+### 2026-02-17 — Section 4.7 Topic Names and Topic Filters complete
+
+10 passing tests across 4 groups in `section4_topic.rs`:
+
+- **Group 1 — Topic Filter Wildcard Rules** (4 tests): `#` not last in filter returns 0x8F `[MQTT-4.7.1-1]`, `tennis#` (not full level) returns 0x8F `[MQTT-4.7.1-1]`, `sport+` and `sport/+tennis` both return 0x8F `[MQTT-4.7.1-2]`, valid wildcards (`sport/+`, `sport/#`, `+/tennis/#`, `#`, `+`) all granted QoS 0
+- **Group 2 — Dollar-Prefix Topic Matching** (2 tests): `#` does not match `$SYS/test` and `+/info` does not match `$SYS/info` `[MQTT-4.7.2-1]`, explicit `$SYS/#` subscription matches `$SYS/test`
+- **Group 3 — Topic Name/Filter Minimum Rules** (2 tests): empty string filter returns 0x8F `[MQTT-4.7.3-1]`, null char in topic name causes disconnect `[MQTT-4.7.3-2]`
+- **Group 4 — Topic Matching Correctness** (2 tests): `sport/+/player` matches one level only, `sport/#` matches `sport`, `sport/tennis`, and `sport/tennis/player`
+
+One broker conformance gap discovered and fixed:
+1. `handle_subscribe` in both native and WASM brokers never validated topic filters — malformed filters like `sport/tennis#` or `sport+` were silently accepted. Added `validate_topic_filter()` call (with `strip_shared_subscription_prefix()` for shared subscriptions) returning `TopicFilterInvalid` (0x8F) per-filter in the SUBACK.
+
+5 normative statements tracked in `conformance.toml` Section 4.7: all Tested.
 
 ### 2026-02-17 — Section 3.14 DISCONNECT complete
 
