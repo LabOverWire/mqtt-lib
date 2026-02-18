@@ -353,6 +353,48 @@ async fn connack_assigned_client_id_unique() {
     );
 }
 
+/// `[MQTT-3.2.2-22]` If the Server receives a CONNECT packet containing a
+/// non-zero Keep Alive and it does not support that value, the Server sets
+/// Server Keep Alive to the value it supports.
+///
+/// Configures the broker with `server_keep_alive=30s`. A raw client connects
+/// with keepalive=60s. The CONNACK must contain `ServerKeepAlive` property
+/// equal to 30.
+#[tokio::test]
+async fn server_keep_alive_override() {
+    let mut config = memory_config();
+    config.server_keep_alive = Some(Duration::from_secs(30));
+    let broker = ConformanceBroker::start_with_config(config).await;
+
+    let mut raw = RawMqttClient::connect_tcp(broker.socket_addr())
+        .await
+        .unwrap();
+    let client_id = unique_client_id("ska");
+    raw.send_raw(&RawPacketBuilder::valid_connect(&client_id))
+        .await
+        .unwrap();
+
+    let connack = raw
+        .expect_connack_packet(TIMEOUT)
+        .await
+        .expect("Must receive CONNACK");
+
+    assert_eq!(connack.reason_code, ReasonCode::Success);
+    let ska = connack.properties.get(PropertyId::ServerKeepAlive);
+    assert!(
+        ska.is_some(),
+        "[MQTT-3.2.2-22] CONNACK must include ServerKeepAlive when broker overrides keep alive"
+    );
+    if let Some(mqtt5_protocol::PropertyValue::TwoByteInteger(val)) = ska {
+        assert_eq!(
+            *val, 30,
+            "[MQTT-3.2.2-22] ServerKeepAlive must be 30 (broker-configured value)"
+        );
+    } else {
+        panic!("ServerKeepAlive property has wrong type");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Group 4: Will Rejection (raw client + custom config)
 // ---------------------------------------------------------------------------

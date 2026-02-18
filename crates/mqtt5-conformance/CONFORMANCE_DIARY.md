@@ -19,12 +19,27 @@
 - [x] Section 4.7 — Topic Names and Topic Filters (10 tests, 5 normative statements)
 - [x] Section 4.8 — Subscriptions / Shared Subscriptions (8 tests, 2 normative statements)
 - [x] Section 3.3 Advanced — Overlapping Subs, Message Expiry, Response Topic (7 tests, 10 normative statements)
+- [x] Final 6 untested statements — 3 tests, 2 NotApplicable, 1 NotImplemented
 
 **Rule**: after every step, every detail learned, every fix applied — add an entry here. New entries go on top, beneath this plan list.
 
 ---
 
 ## Diary Entries
+
+### 2026-02-18 — Final 6 untested conformance statements resolved
+
+3 new tests across 3 files, plus 3 reclassifications:
+
+- **`client_id_rejected_with_0x85`** in `section3_connect.rs`: raw CONNECT with `bad/id` client ID rejected with 0x85 `[MQTT-3.1.3-5]`
+- **`server_keep_alive_override`** in `section3_connack.rs`: broker with `server_keep_alive=30s` returns `ServerKeepAlive=30` in CONNACK `[MQTT-3.2.2-22]`
+- **`receive_maximum_limits_outbound_publishes`** in new `section3_publish_flow.rs`: raw subscriber with `receive_maximum=2` receives exactly 2 QoS 1 publishes when 4 are sent without PUBACKs `[MQTT-3.3.4-7]`
+
+Added `RawPacketBuilder::connect_with_receive_maximum()` to build CONNECT with Receive Maximum property.
+
+Key implementation detail: `read_packet_bytes()` can return multiple MQTT packets in a single TCP read, so the receive maximum test accumulates all bytes and counts PUBLISH packet headers by walking the MQTT frame structure.
+
+6 conformance.toml updates: 3 Untested→Tested (`MQTT-3.1.3-5`, `MQTT-3.2.2-22`, `MQTT-3.3.4-7`), 2 Untested→NotApplicable (`MQTT-3.2.2-19`, `MQTT-3.2.2-20` — broker never reads client Maximum Packet Size), 1 Untested→NotImplemented (`MQTT-3.3.4-8` — broker does not enforce inbound receive maximum).
 
 ### 2026-02-18 — Section 3.3 Overlapping Subscriptions, Message Expiry & Response Topic complete
 

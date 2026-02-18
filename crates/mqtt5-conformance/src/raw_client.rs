@@ -1169,6 +1169,31 @@ impl RawPacketBuilder {
         wrap_fixed_header(0x3A, &body)
     }
 
+    /// Builds a CONNECT packet with a Receive Maximum property.
+    ///
+    /// Same as [`valid_connect`](Self::valid_connect) but includes the Receive
+    /// Maximum property (ID `0x21`, `u16`) so the broker limits its outbound
+    /// inflight window for this client.
+    #[must_use]
+    pub fn connect_with_receive_maximum(client_id: &str, receive_maximum: u16) -> Vec<u8> {
+        let mut body = BytesMut::new();
+        body.put_u16(4);
+        body.put_slice(b"MQTT");
+        body.put_u8(5);
+        body.put_u8(0x02);
+        body.put_u16(60);
+
+        let mut props = BytesMut::new();
+        props.put_u8(0x21);
+        props.put_u16(receive_maximum);
+        encode_variable_int(&mut body, props.len() as u32);
+        body.put(props);
+
+        put_mqtt_string(&mut body, client_id);
+
+        wrap_fixed_header(0x10, &body)
+    }
+
     /// Builds a normal DISCONNECT packet with no reason code (implies 0x00).
     ///
     /// Fixed header `0xE0`, remaining length `0x00`.

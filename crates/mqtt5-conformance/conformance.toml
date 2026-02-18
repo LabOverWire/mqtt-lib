@@ -126,8 +126,8 @@ id = "MQTT-3.1.3-5"
 level = "Must"
 applies_to = "Server"
 text = "If the Server rejects the ClientID it MAY respond to the CONNECT packet with a CONNACK using Reason Code 0x85 (Client Identifier not valid)."
-status = "Untested"
-test_names = []
+status = "Tested"
+test_names = ["client_id_rejected_with_0x85"]
 
 [[sections."3.1".statements]]
 id = "MQTT-3.1.4-1"
@@ -363,16 +363,18 @@ id = "MQTT-3.2.2-19"
 level = "Must"
 applies_to = "Server"
 text = "The Server MUST NOT send this property (Reason String) if it would increase the size of the CONNACK packet beyond the Maximum Packet Size specified by the Client."
-status = "Untested"
+status = "NotApplicable"
 test_names = []
+note = "Broker never reads client Maximum Packet Size from CONNECT; CONNACK is always minimal"
 
 [[sections."3.2".statements]]
 id = "MQTT-3.2.2-20"
 level = "Must"
 applies_to = "Server"
 text = "The Server MUST NOT send this property (User Property) if it would increase the size of the CONNACK packet beyond the Maximum Packet Size specified by the Client."
-status = "Untested"
+status = "NotApplicable"
 test_names = []
+note = "Broker never reads client Maximum Packet Size from CONNECT; CONNACK is always minimal"
 
 [[sections."3.2".statements]]
 id = "MQTT-3.2.2-21"
@@ -388,8 +390,8 @@ id = "MQTT-3.2.2-22"
 level = "Must"
 applies_to = "Server"
 text = "If the Server receives a CONNECT packet containing a non-zero Keep Alive and it does not support Keep Alive, the Server sets the Server Keep Alive to the value it supports."
-status = "Untested"
-test_names = []
+status = "Tested"
+test_names = ["server_keep_alive_override"]
 
 [sections."3.3"]
 title = "PUBLISH - Publish Message"
@@ -716,16 +718,17 @@ id = "MQTT-3.3.4-7"
 level = "Must"
 applies_to = "Server"
 text = "The Server MUST NOT send more than Receive Maximum QoS 1 and QoS 2 PUBLISH packets for which it has not received PUBACK, PUBCOMP, or PUBREC with a Reason Code of 128 or greater from the Client."
-status = "Untested"
-test_names = []
+status = "Tested"
+test_names = ["receive_maximum_limits_outbound_publishes"]
 
 [[sections."3.3".statements]]
 id = "MQTT-3.3.4-8"
 level = "Must"
 applies_to = "Server"
 text = "If it receives more than Receive Maximum QoS 1 and QoS 2 PUBLISH packets where it has not sent a PUBACK or PUBCOMP in response, the Server uses a DISCONNECT packet with Reason Code 0x93 (Receive Maximum exceeded)."
-status = "Untested"
+status = "NotImplemented"
 test_names = []
+note = "Broker does not enforce inbound receive maximum; no 0x93 DISCONNECT"
 
 [[sections."3.3".statements]]
 id = "MQTT-3.3.4-9"

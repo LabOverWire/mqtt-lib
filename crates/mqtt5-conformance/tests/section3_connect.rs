@@ -384,6 +384,32 @@ async fn connect_empty_client_id_server_assigns() {
     );
 }
 
+/// `[MQTT-3.1.3-5]` If the Server rejects the `ClientID` it MAY respond to the
+/// CONNECT packet with a CONNACK using Reason Code 0x85
+/// (`ClientIdentifierNotValid`).
+///
+/// Sends a CONNECT with a client ID containing `/` which the broker rejects
+/// via `is_path_safe_client_id` validation.
+#[tokio::test]
+async fn client_id_rejected_with_0x85() {
+    let broker = ConformanceBroker::start().await;
+    let mut raw = RawMqttClient::connect_tcp(broker.socket_addr())
+        .await
+        .unwrap();
+
+    raw.send_raw(&RawPacketBuilder::valid_connect("bad/id"))
+        .await
+        .unwrap();
+
+    let connack = raw.expect_connack(Duration::from_secs(2)).await;
+    assert!(connack.is_some(), "[MQTT-3.1.3-5] Server must send CONNACK");
+    let (_, reason) = connack.unwrap();
+    assert_eq!(
+        reason, 0x85,
+        "[MQTT-3.1.3-5] Server must reject invalid client ID with 0x85 (ClientIdentifierNotValid)"
+    );
+}
+
 /// `[MQTT-3.1.4-1]` The Server MUST validate that the CONNECT packet matches
 /// the format described in the specification and close the Network Connection
 /// if it does not.
