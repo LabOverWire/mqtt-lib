@@ -1094,3 +1094,27 @@ applies_to = "Both"
 text = "Topic Names and Topic Filters MUST NOT include the null character (Unicode U+0000)."
 status = "Tested"
 test_names = ["null_char_in_topic_name_rejected"]
+
+# ===========================================================================
+# Section 4.8 — Subscriptions (Shared Subscriptions)
+# ===========================================================================
+
+[sections."4.8"]
+title = "Subscriptions"
+total_statements = 2
+
+[[sections."4.8".statements]]
+id = "MQTT-4.8.2-1"
+level = "Must"
+applies_to = "Both"
+text = "The Shared Subscription Topic Filter MUST match the format $share/{ShareName}/{filter}. The ShareName is a character string that does not include /, + or #. The filter is the remainder of the string."
+status = "Tested"
+test_names = ["shared_sub_valid_format_accepted", "shared_sub_incomplete_format_rejected"]
+
+[[sections."4.8".statements]]
+id = "MQTT-4.8.2-2"
+level = "Must"
+applies_to = "Both"
+text = "The ShareName MUST NOT contain the characters /, + or #."
+status = "Tested"
+test_names = ["shared_sub_share_name_with_wildcard_rejected"]

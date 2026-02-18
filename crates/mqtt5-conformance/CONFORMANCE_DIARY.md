@@ -17,12 +17,30 @@
 - [x] Section 3.13 — PINGRESP (0 normative statements, covered by 3.12 tests)
 - [x] Section 3.14 — DISCONNECT (8 tests, 4 normative statements)
 - [x] Section 4.7 — Topic Names and Topic Filters (10 tests, 5 normative statements)
+- [x] Section 4.8 — Subscriptions / Shared Subscriptions (8 tests, 2 normative statements)
 
 **Rule**: after every step, every detail learned, every fix applied — add an entry here. New entries go on top, beneath this plan list.
 
 ---
 
 ## Diary Entries
+
+### 2026-02-17 — Section 4.8 Shared Subscriptions complete
+
+8 passing tests across 4 groups in `section4_shared_sub.rs`:
+
+- **Group 1 — Shared Subscription Format Validation** (3 tests): valid `$share/mygroup/sensor/+` accepted `[MQTT-4.8.2-1]`, ShareName with `+` or `#` returns 0x8F `[MQTT-4.8.2-2]`, incomplete `$share/grouponly` (no second `/`) returns 0x8F `[MQTT-4.8.2-1]`
+- **Group 2 — Message Distribution** (2 tests): two shared subscribers get ~3 messages each from 6 published (round-robin), mixed shared+regular both receive all messages when shared group has single member
+- **Group 3 — Retained Messages** (1 test): shared subscription does not receive retained messages on subscribe, regular subscription does
+- **Group 4 — Unsubscribe and Multiple Groups** (2 tests): unsubscribe from shared stops delivery, two independent groups (`groupA`, `groupB`) each receive a copy of published messages
+
+Two broker conformance gaps discovered and fixed:
+1. `handle_subscribe` in both native and WASM brokers never validated ShareName characters — `$share/gr+oup/topic` and `$share/gr#oup/topic` were silently accepted. Added `parse_shared_subscription()` and check for `+` or `#` in group name, returning `TopicFilterInvalid` (0x8F) `[MQTT-4.8.2-2]`.
+2. Incomplete shared subscription format `$share/grouponly` (no second `/` after ShareName) was silently accepted as a regular subscription. Added check: if filter starts with `$share/` but `parse_shared_subscription()` returns no group, reject with `TopicFilterInvalid` (0x8F) `[MQTT-4.8.2-1]`.
+
+Removed now-unused `strip_shared_subscription_prefix` import from both broker subscribe handlers (replaced by direct `parse_shared_subscription` call).
+
+2 normative statements tracked in `conformance.toml` Section 4.8: all Tested.
 
 ### 2026-02-17 — Section 4.7 Topic Names and Topic Filters complete
 

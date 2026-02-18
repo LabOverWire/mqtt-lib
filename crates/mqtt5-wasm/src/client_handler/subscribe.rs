@@ -9,7 +9,7 @@ use mqtt5_protocol::packet::Packet;
 use mqtt5_protocol::protocol::v5::reason_codes::ReasonCode;
 use mqtt5_protocol::topic_matches_filter;
 use mqtt5_protocol::types::ProtocolVersion;
-use mqtt5_protocol::validation::{strip_shared_subscription_prefix, validate_topic_filter};
+use mqtt5_protocol::validation::{parse_shared_subscription, validate_topic_filter};
 use mqtt5_protocol::QoS;
 use tracing::{debug, warn};
 
@@ -43,7 +43,7 @@ impl WasmClientHandler {
                 ));
             }
 
-            let underlying = strip_shared_subscription_prefix(&filter.filter);
+            let (underlying, share_group) = parse_shared_subscription(&filter.filter);
             if validate_topic_filter(underlying).is_err() {
                 warn!(
                     "Client {client_id} sent invalid topic filter: {}",
@@ -51,6 +51,28 @@ impl WasmClientHandler {
                 );
                 reason_codes.push(SubAckReasonCode::TopicFilterInvalid);
                 continue;
+            }
+
+            if filter.filter.starts_with("$share/") {
+                match share_group {
+                    None => {
+                        warn!(
+                            "Client {client_id} sent malformed shared subscription: {}",
+                            filter.filter
+                        );
+                        reason_codes.push(SubAckReasonCode::TopicFilterInvalid);
+                        continue;
+                    }
+                    Some(group) if group.contains('+') || group.contains('#') => {
+                        warn!(
+                            "Client {client_id} sent shared subscription with invalid ShareName: {}",
+                            filter.filter
+                        );
+                        reason_codes.push(SubAckReasonCode::TopicFilterInvalid);
+                        continue;
+                    }
+                    _ => {}
+                }
             }
 
             let authorized = self

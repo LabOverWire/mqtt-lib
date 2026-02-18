@@ -14,9 +14,7 @@ use crate::packet::Packet;
 use crate::protocol::v5::reason_codes::ReasonCode;
 use crate::transport::PacketIo;
 use crate::types::ProtocolVersion;
-use crate::validation::{
-    strip_shared_subscription_prefix, topic_matches_filter, validate_topic_filter,
-};
+use crate::validation::{parse_shared_subscription, topic_matches_filter, validate_topic_filter};
 use crate::QoS;
 use tracing::{debug, warn};
 
@@ -45,7 +43,7 @@ impl ClientHandler {
                 ));
             }
 
-            let underlying = strip_shared_subscription_prefix(&filter.filter);
+            let (underlying, share_group) = parse_shared_subscription(&filter.filter);
             if validate_topic_filter(underlying).is_err() {
                 warn!(
                     "Client {client_id} sent invalid topic filter: {}",
@@ -53,6 +51,30 @@ impl ClientHandler {
                 );
                 reason_codes.push(crate::packet::suback::SubAckReasonCode::TopicFilterInvalid);
                 continue;
+            }
+
+            if filter.filter.starts_with("$share/") {
+                match share_group {
+                    None => {
+                        warn!(
+                            "Client {client_id} sent malformed shared subscription: {}",
+                            filter.filter
+                        );
+                        reason_codes
+                            .push(crate::packet::suback::SubAckReasonCode::TopicFilterInvalid);
+                        continue;
+                    }
+                    Some(group) if group.contains('+') || group.contains('#') => {
+                        warn!(
+                            "Client {client_id} sent shared subscription with invalid ShareName: {}",
+                            filter.filter
+                        );
+                        reason_codes
+                            .push(crate::packet::suback::SubAckReasonCode::TopicFilterInvalid);
+                        continue;
+                    }
+                    _ => {}
+                }
             }
 
             let authorized = self
