@@ -18,12 +18,28 @@
 - [x] Section 3.14 — DISCONNECT (8 tests, 4 normative statements)
 - [x] Section 4.7 — Topic Names and Topic Filters (10 tests, 5 normative statements)
 - [x] Section 4.8 — Subscriptions / Shared Subscriptions (8 tests, 2 normative statements)
+- [x] Section 3.3 Advanced — Overlapping Subs, Message Expiry, Response Topic (7 tests, 10 normative statements)
 
 **Rule**: after every step, every detail learned, every fix applied — add an entry here. New entries go on top, beneath this plan list.
 
 ---
 
 ## Diary Entries
+
+### 2026-02-18 — Section 3.3 Overlapping Subscriptions, Message Expiry & Response Topic complete
+
+7 passing tests across 3 groups in `section3_publish_advanced.rs`:
+
+- **Group 1 — Overlapping Subscriptions** (3 tests): two wildcard filters deliver 2 copies with max QoS respected `[MQTT-3.3.4-2]`, each copy carries its matching subscription identifier `[MQTT-3.3.4-3]`/`[MQTT-3.3.4-5]`, no_local prevents echo on wildcard overlap
+- **Group 2 — Message Expiry** (2 tests): expired retained message not delivered to new subscriber `[MQTT-3.3.2-5]`, retained message expiry interval decremented by server wait time `[MQTT-3.3.2-6]`
+- **Group 3 — Response Topic** (2 tests): wildcard in Response Topic causes disconnect `[MQTT-3.3.2-14]`, valid UTF-8 Response Topic forwarded to subscriber `[MQTT-3.3.2-13]`
+
+One broker conformance gap discovered and fixed:
+1. `handle_publish()` in `publish.rs` never validated the Response Topic property for wildcards — added `validate_topic_name()` call on the Response Topic after the main topic validation `[MQTT-3.3.2-14]`.
+
+Added `RawPacketBuilder` methods: `publish_qos0_with_response_topic`, `subscribe_with_sub_id`.
+
+10 normative statements updated in `conformance.toml`: 7 from Untested to Tested (`MQTT-3.3.2-5`, `MQTT-3.3.2-6`, `MQTT-3.3.2-13`, `MQTT-3.3.2-14`, `MQTT-3.3.4-2`, `MQTT-3.3.4-3`, `MQTT-3.3.4-5`), 2 to NotApplicable (`MQTT-3.3.4-4`, `MQTT-3.3.4-10`), 1 to CrossRef (`MQTT-3.3.2-19`).
 
 ### 2026-02-17 — Section 3.3 Topic Alias Lifecycle & DUP Flag tests complete
 

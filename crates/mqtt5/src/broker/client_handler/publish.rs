@@ -90,6 +90,12 @@ impl ClientHandler {
 
         crate::validate_topic_name(&publish.topic_name)?;
 
+        if let Some(PropertyValue::Utf8String(response_topic)) =
+            publish.properties.get(PropertyId::ResponseTopic)
+        {
+            crate::validate_topic_name(response_topic)?;
+        }
+
         let payload_size = publish.payload.len();
         self.stats.publish_received(payload_size);
 

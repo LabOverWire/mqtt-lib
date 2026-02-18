@@ -536,16 +536,16 @@ id = "MQTT-3.3.2-5"
 level = "Must"
 applies_to = "Server"
 text = "If the Message Expiry Interval has passed and the Server has not managed to start onward delivery to a matching subscriber, then it MUST delete the copy of the message for that subscriber."
-status = "Untested"
-test_names = []
+status = "Tested"
+test_names = ["message_expiry_drops_expired_retained"]
 
 [[sections."3.3".statements]]
 id = "MQTT-3.3.2-6"
 level = "Must"
 applies_to = "Server"
 text = "The PUBLISH packet sent to a Client by the Server MUST contain a Message Expiry Interval set to the received value minus the time that the Application Message has been waiting in the Server."
-status = "Untested"
-test_names = []
+status = "Tested"
+test_names = ["message_expiry_interval_decremented"]
 
 [[sections."3.3".statements]]
 id = "MQTT-3.3.2-7"
@@ -602,16 +602,16 @@ id = "MQTT-3.3.2-13"
 level = "Must"
 applies_to = "Both"
 text = "The Response Topic MUST be a UTF-8 Encoded String."
-status = "Untested"
-test_names = []
+status = "Tested"
+test_names = ["response_topic_valid_utf8_forwarded"]
 
 [[sections."3.3".statements]]
 id = "MQTT-3.3.2-14"
 level = "Must"
 applies_to = "Both"
 text = "The Response Topic MUST NOT contain wildcard characters."
-status = "Untested"
-test_names = []
+status = "Tested"
+test_names = ["response_topic_wildcard_rejected"]
 
 [[sections."3.3".statements]]
 id = "MQTT-3.3.2-15"
@@ -650,8 +650,9 @@ id = "MQTT-3.3.2-19"
 level = "Must"
 applies_to = "Both"
 text = "The Content Type MUST be a UTF-8 Encoded String."
-status = "Untested"
-test_names = []
+status = "CrossRef"
+test_names = ["publish_content_type_forwarded"]
+note = "UTF-8 enforced by decode_string at protocol layer"
 
 [[sections."3.3".statements]]
 id = "MQTT-3.3.2-20"
@@ -674,32 +675,33 @@ id = "MQTT-3.3.4-2"
 level = "Must"
 applies_to = "Server"
 text = "When Clients make subscriptions with Topic Filters that include wildcards, it is possible for a Client's subscriptions to overlap so that a published message could match multiple filters. In this case the Server MUST deliver the message to the Client respecting the maximum QoS of all the matching subscriptions."
-status = "Untested"
-test_names = []
+status = "Tested"
+test_names = ["overlapping_subs_max_qos_delivered"]
 
 [[sections."3.3".statements]]
 id = "MQTT-3.3.4-3"
 level = "Must"
 applies_to = "Server"
 text = "If the Client specified a Subscription Identifier for any of the overlapping subscriptions the Server MUST send those Subscription Identifiers in the message which is published as the result of the subscriptions."
-status = "Untested"
-test_names = []
+status = "Tested"
+test_names = ["overlapping_subs_subscription_ids_per_copy"]
 
 [[sections."3.3".statements]]
 id = "MQTT-3.3.4-4"
 level = "Must"
 applies_to = "Server"
 text = "If the Server sends a single copy of the message it MUST include in the PUBLISH packet the Subscription Identifiers for all matching subscriptions which have a Subscription Identifiers."
-status = "Untested"
+status = "NotApplicable"
 test_names = []
+note = "Broker sends multiple PUBLISH packets for overlapping subscriptions (3.3.4-5 applies instead)"
 
 [[sections."3.3".statements]]
 id = "MQTT-3.3.4-5"
 level = "Must"
 applies_to = "Server"
 text = "If the Server sends multiple PUBLISH packets it MUST send, in each of them, the Subscription Identifier of the matching subscription."
-status = "Untested"
-test_names = []
+status = "Tested"
+test_names = ["overlapping_subs_subscription_ids_per_copy"]
 
 [[sections."3.3".statements]]
 id = "MQTT-3.3.4-6"
@@ -739,8 +741,9 @@ id = "MQTT-3.3.4-10"
 level = "Must"
 applies_to = "Server"
 text = "If the Client specified a Maximum QoS in the CONNECT packet, the Server MUST NOT send PUBLISH packets at a QoS exceeding the Client's specified Maximum QoS."
-status = "Untested"
+status = "NotApplicable"
 test_names = []
+note = "Maximum QoS is a CONNACK property (server to client), not a CONNECT property"
 
 # ===========================================================================
 # Section 3.4 — PUBACK

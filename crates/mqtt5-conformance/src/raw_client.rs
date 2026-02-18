@@ -892,6 +892,24 @@ impl RawPacketBuilder {
         wrap_fixed_header(0x82, &body)
     }
 
+    /// Builds a SUBSCRIBE packet with a Subscription Identifier property.
+    ///
+    /// Property ID `0x0B` encodes the subscription identifier as a variable-length
+    /// integer. Used for overlapping subscription tests `[MQTT-3.3.4-3]`/`[MQTT-3.3.4-5]`.
+    #[must_use]
+    pub fn subscribe_with_sub_id(topic: &str, qos: u8, packet_id: u16, sub_id: u32) -> Vec<u8> {
+        let mut body = BytesMut::new();
+        body.put_u16(packet_id);
+        let mut props = BytesMut::new();
+        props.put_u8(0x0B);
+        encode_variable_int(&mut props, sub_id);
+        encode_variable_int(&mut body, props.len() as u32);
+        body.put(props);
+        put_mqtt_string(&mut body, topic);
+        body.put_u8(qos & 0x03);
+        wrap_fixed_header(0x82, &body)
+    }
+
     /// Builds a SUBSCRIBE packet with invalid fixed header flags.
     ///
     /// Fixed header byte `0x80` (flags = `0x00` instead of required `0x02`).
@@ -1111,6 +1129,27 @@ impl RawPacketBuilder {
         let mut props = BytesMut::new();
         props.put_u8(0x23);
         props.put_u16(alias);
+        encode_variable_int(&mut body, props.len() as u32);
+        body.put(props);
+        body.put_slice(payload);
+        wrap_fixed_header(0x30, &body)
+    }
+
+    /// Builds a `QoS` 0 PUBLISH with a Response Topic property.
+    ///
+    /// Property ID `0x08` (Response Topic) is encoded as a UTF-8 string.
+    /// Use with wildcard characters in `response_topic` to test `[MQTT-3.3.2-14]`.
+    #[must_use]
+    pub fn publish_qos0_with_response_topic(
+        topic: &str,
+        payload: &[u8],
+        response_topic: &str,
+    ) -> Vec<u8> {
+        let mut body = BytesMut::new();
+        put_mqtt_string(&mut body, topic);
+        let mut props = BytesMut::new();
+        props.put_u8(0x08);
+        put_mqtt_string(&mut props, response_topic);
         encode_variable_int(&mut body, props.len() as u32);
         body.put(props);
         body.put_slice(payload);
