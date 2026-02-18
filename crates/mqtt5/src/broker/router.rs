@@ -554,6 +554,7 @@ impl MessageRouter {
     fn prepare_message(publish: &PublishPacket, sub: &Subscription, qos: QoS) -> PublishPacket {
         let mut message = publish.clone();
         message.qos = qos;
+        message.dup = false;
         message.protocol_version = sub.protocol_version.as_u8();
         if !sub.retain_as_published {
             message.retain = false;

@@ -416,8 +416,8 @@ id = "MQTT-3.3.1-3"
 level = "Must"
 applies_to = "Both"
 text = "The value of the DUP flag from an incoming PUBLISH packet is not propagated when the PUBLISH packet is sent to subscribers by the Server."
-status = "Untested"
-test_names = []
+status = "Tested"
+test_names = ["dup_flag_not_propagated_to_subscribers"]
 
 [[sections."3.3".statements]]
 id = "MQTT-3.3.1-4"
@@ -578,24 +578,24 @@ id = "MQTT-3.3.2-10"
 level = "Must"
 applies_to = "Both"
 text = "A Topic Alias mapping is scoped to the Network Connection. A new Network Connection starts with no Topic Alias mappings."
-status = "Untested"
-test_names = []
+status = "Tested"
+test_names = ["topic_alias_not_shared_across_connections", "topic_alias_cleared_on_reconnect"]
 
 [[sections."3.3".statements]]
 id = "MQTT-3.3.2-11"
 level = "Must"
 applies_to = "Both"
 text = "A Topic Alias mapping exists only within the Network Connection and lasts for the lifetime of that Network Connection."
-status = "Untested"
-test_names = []
+status = "Tested"
+test_names = ["topic_alias_not_shared_across_connections", "topic_alias_cleared_on_reconnect"]
 
 [[sections."3.3".statements]]
 id = "MQTT-3.3.2-12"
 level = "Must"
 applies_to = "Both"
 text = "A sender can modify the Topic Alias mapping by sending another PUBLISH in the same Network Connection with the same Topic Alias value and a different non-zero length Topic Name."
-status = "Untested"
-test_names = []
+status = "Tested"
+test_names = ["topic_alias_register_and_reuse", "topic_alias_update_mapping"]
 
 [[sections."3.3".statements]]
 id = "MQTT-3.3.2-13"

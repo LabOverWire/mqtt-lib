@@ -405,6 +405,79 @@ impl RawMqttClient {
         Some((qos, topic, payload))
     }
 
+    /// Reads and parses a PUBLISH packet, returning `(first_byte, qos, topic, payload)`.
+    ///
+    /// Same as [`expect_publish`] but also returns the raw first byte so callers
+    /// can inspect DUP (bit 3) and RETAIN (bit 0) flags.
+    /// Returns `None` if the packet is not a PUBLISH or the timeout elapses.
+    pub async fn expect_publish_raw_header(
+        &mut self,
+        timeout_dur: Duration,
+    ) -> Option<(u8, u8, String, Vec<u8>)> {
+        let data = self.read_packet_bytes(timeout_dur).await?;
+        if data.is_empty() || (data[0] & 0xF0) != 0x30 {
+            return None;
+        }
+        let first_byte = data[0];
+        let qos = (first_byte >> 1) & 0x03;
+        let mut idx = 1;
+        let mut remaining_len: u32 = 0;
+        let mut shift = 0;
+        loop {
+            if idx >= data.len() {
+                return None;
+            }
+            let byte = data[idx];
+            idx += 1;
+            remaining_len |= u32::from(byte & 0x7F) << shift;
+            if byte & 0x80 == 0 {
+                break;
+            }
+            shift += 7;
+            if shift > 21 {
+                return None;
+            }
+        }
+        let payload_start = idx;
+        if data.len() < payload_start + remaining_len as usize {
+            return None;
+        }
+        if idx + 2 > data.len() {
+            return None;
+        }
+        let topic_len = u16::from_be_bytes([data[idx], data[idx + 1]]) as usize;
+        idx += 2;
+        if idx + topic_len > data.len() {
+            return None;
+        }
+        let topic = String::from_utf8_lossy(&data[idx..idx + topic_len]).to_string();
+        idx += topic_len;
+        if qos > 0 {
+            idx += 2;
+        }
+        let mut props_len: u32 = 0;
+        let mut props_shift = 0;
+        loop {
+            if idx >= data.len() {
+                return None;
+            }
+            let byte = data[idx];
+            idx += 1;
+            props_len |= u32::from(byte & 0x7F) << props_shift;
+            if byte & 0x80 == 0 {
+                break;
+            }
+            props_shift += 7;
+            if props_shift > 21 {
+                return None;
+            }
+        }
+        idx += props_len as usize;
+        let end = payload_start + remaining_len as usize;
+        let payload = data[idx..end].to_vec();
+        Some((first_byte, qos, topic, payload))
+    }
+
     /// Reads and checks whether the next packet is a PINGRESP (`0xD0 0x00`).
     ///
     /// Returns `true` if PINGRESP is received within the timeout, `false`
@@ -1008,6 +1081,53 @@ impl RawPacketBuilder {
         put_mqtt_string(&mut body, "secret");
 
         wrap_fixed_header(0x10, &body)
+    }
+
+    /// Builds a `QoS` 0 PUBLISH with a Topic Alias property that registers the alias.
+    ///
+    /// The topic field is non-empty and the Topic Alias property (`0x23`) maps
+    /// `alias` to `topic`. Fixed header byte `0x30`.
+    #[must_use]
+    pub fn publish_qos0_with_topic_alias(topic: &str, payload: &[u8], alias: u16) -> Vec<u8> {
+        let mut body = BytesMut::new();
+        put_mqtt_string(&mut body, topic);
+        let mut props = BytesMut::new();
+        props.put_u8(0x23);
+        props.put_u16(alias);
+        encode_variable_int(&mut body, props.len() as u32);
+        body.put(props);
+        body.put_slice(payload);
+        wrap_fixed_header(0x30, &body)
+    }
+
+    /// Builds a `QoS` 0 PUBLISH that reuses a previously registered Topic Alias.
+    ///
+    /// The topic field is empty (zero-length string) and the Topic Alias property
+    /// (`0x23`) references `alias`. Fixed header byte `0x30`.
+    #[must_use]
+    pub fn publish_qos0_alias_only(payload: &[u8], alias: u16) -> Vec<u8> {
+        let mut body = BytesMut::new();
+        put_mqtt_string(&mut body, "");
+        let mut props = BytesMut::new();
+        props.put_u8(0x23);
+        props.put_u16(alias);
+        encode_variable_int(&mut body, props.len() as u32);
+        body.put(props);
+        body.put_slice(payload);
+        wrap_fixed_header(0x30, &body)
+    }
+
+    /// Builds a `QoS` 1 PUBLISH with DUP=1 flag set.
+    ///
+    /// Fixed header byte `0x3A` (PUBLISH, DUP=1, QoS=1, RETAIN=0).
+    #[must_use]
+    pub fn publish_qos1_with_dup(topic: &str, payload: &[u8], packet_id: u16) -> Vec<u8> {
+        let mut body = BytesMut::new();
+        put_mqtt_string(&mut body, topic);
+        body.put_u16(packet_id);
+        body.put_u8(0);
+        body.put_slice(payload);
+        wrap_fixed_header(0x3A, &body)
     }
 
     /// Builds a normal DISCONNECT packet with no reason code (implies 0x00).

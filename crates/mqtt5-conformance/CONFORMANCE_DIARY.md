@@ -25,6 +25,21 @@
 
 ## Diary Entries
 
+### 2026-02-17 — Section 3.3 Topic Alias Lifecycle & DUP Flag tests complete
+
+6 passing tests across 2 groups in `section3_publish_alias.rs`:
+
+- **Group 1 — Topic Alias Lifecycle** (5 tests): register alias and reuse via empty-topic PUBLISH `[MQTT-3.3.2-12]`, remap alias to different topic `[MQTT-3.3.2-12]`, alias not shared across connections `[MQTT-3.3.2-10]`/`[MQTT-3.3.2-11]`, alias cleared on reconnect `[MQTT-3.3.2-10]`/`[MQTT-3.3.2-11]`, alias stripped before delivery (subscriber receives full topic name)
+- **Group 2 — DUP Flag** (1 test): DUP=1 on incoming QoS 1 PUBLISH is not propagated to subscriber `[MQTT-3.3.1-3]`
+
+One broker conformance gap discovered and fixed:
+1. `prepare_message()` in `router.rs` cloned the incoming PUBLISH but never cleared the `dup` flag — DUP=1 from the publisher would propagate to subscribers. Added `message.dup = false;` after the clone `[MQTT-3.3.1-3]`.
+
+Added `RawMqttClient` methods: `expect_publish_raw_header`.
+Added `RawPacketBuilder` methods: `publish_qos0_with_topic_alias`, `publish_qos0_alias_only`, `publish_qos1_with_dup`.
+
+4 normative statements updated in `conformance.toml` from Untested to Tested: `MQTT-3.3.1-3`, `MQTT-3.3.2-10`, `MQTT-3.3.2-11`, `MQTT-3.3.2-12`.
+
 ### 2026-02-17 — Section 4.8 Shared Subscriptions complete
 
 8 passing tests across 4 groups in `section4_shared_sub.rs`:
