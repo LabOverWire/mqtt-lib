@@ -27,6 +27,17 @@
 
 ## Diary Entries
 
+### 2026-02-18 — MQTT-3.3.4-8 inbound receive maximum enforcement
+
+Implemented server-side receive maximum enforcement:
+- Added `server_receive_maximum: Option<u16>` to `BrokerConfig` with builder method
+- `ClientHandler` stores resolved value (default 65535)
+- CONNACK advertises receive maximum when configured
+- `handle_publish` checks `inflight_publishes.len() >= server_receive_maximum` before processing QoS 1/2
+- Sends DISCONNECT 0x93 (`ReceiveMaximumExceeded`) when exceeded
+- Key insight: QoS 1 PUBACK is sent synchronously so QoS 1 inflight is transient; QoS 2 accumulates in `inflight_publishes` until PUBREL/PUBCOMP
+- Conformance test sends 3 QoS 2 PUBLISHes with receive_maximum=2, asserts DISCONNECT 0x93 on 3rd
+
 ### 2026-02-18 — Final 6 untested conformance statements resolved
 
 3 new tests across 3 files, plus 3 reclassifications:

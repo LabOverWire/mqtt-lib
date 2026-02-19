@@ -726,9 +726,8 @@ id = "MQTT-3.3.4-8"
 level = "Must"
 applies_to = "Server"
 text = "If it receives more than Receive Maximum QoS 1 and QoS 2 PUBLISH packets where it has not sent a PUBACK or PUBCOMP in response, the Server uses a DISCONNECT packet with Reason Code 0x93 (Receive Maximum exceeded)."
-status = "NotImplemented"
-test_names = []
-note = "Broker does not enforce inbound receive maximum; no 0x93 DISCONNECT"
+status = "Tested"
+test_names = ["inbound_receive_maximum_exceeded_disconnects_with_0x93"]
 
 [[sections."3.3".statements]]
 id = "MQTT-3.3.4-9"

@@ -73,6 +73,7 @@ pub struct ClientHandler {
     pub(super) topic_aliases: HashMap<u16, String>,
     pub(super) external_packet_rx: Option<mpsc::Receiver<Packet>>,
     pub(super) client_receive_maximum: u16,
+    pub(super) server_receive_maximum: u16,
     pub(super) outbound_inflight: HashMap<u16, PublishPacket>,
     pub(super) protocol_version: u8,
     pub(super) write_buffer: BytesMut,
@@ -121,6 +122,7 @@ impl ClientHandler {
         external_packet_rx: Option<mpsc::Receiver<Packet>>,
     ) -> Self {
         let (publish_tx, publish_rx) = flume::bounded(config.client_channel_capacity);
+        let server_receive_maximum = config.server_receive_maximum.unwrap_or(65535);
 
         Self {
             transport,
@@ -150,6 +152,7 @@ impl ClientHandler {
             topic_aliases: HashMap::new(),
             external_packet_rx,
             client_receive_maximum: 65535,
+            server_receive_maximum,
             outbound_inflight: HashMap::new(),
             protocol_version: 5,
             write_buffer: BytesMut::with_capacity(4096),

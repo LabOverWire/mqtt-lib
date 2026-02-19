@@ -277,6 +277,7 @@ async fn execute_generate_config(args: GenerateConfigArgs) -> Result<()> {
         max_retained_message_size: 0,
         client_channel_capacity: 10000,
         server_keep_alive: None,
+        server_receive_maximum: None,
         response_information: None,
         auth_config: AuthConfig {
             allow_anonymous: true,

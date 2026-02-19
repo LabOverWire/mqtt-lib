@@ -285,6 +285,10 @@ impl ClientHandler {
                 connack.properties.set_maximum_qos(self.config.maximum_qos);
             }
 
+            if let Some(recv_max) = self.config.server_receive_maximum {
+                connack.properties.set_receive_maximum(recv_max);
+            }
+
             if let Some(keep_alive) = self.config.server_keep_alive {
                 connack
                     .properties

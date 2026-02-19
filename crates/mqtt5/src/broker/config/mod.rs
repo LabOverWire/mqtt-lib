@@ -55,6 +55,8 @@ pub struct BrokerConfig {
     pub client_channel_capacity: usize,
     #[cfg_attr(not(target_arch = "wasm32"), serde(with = "humantime_serde"))]
     pub server_keep_alive: Option<Duration>,
+    #[serde(default)]
+    pub server_receive_maximum: Option<u16>,
     pub response_information: Option<String>,
     pub auth_config: AuthConfig,
     pub tls_config: Option<TlsConfig>,
@@ -107,6 +109,7 @@ impl std::fmt::Debug for BrokerConfig {
             .field("max_retained_message_size", &self.max_retained_message_size)
             .field("client_channel_capacity", &self.client_channel_capacity)
             .field("server_keep_alive", &self.server_keep_alive)
+            .field("server_receive_maximum", &self.server_receive_maximum)
             .field("response_information", &self.response_information)
             .field("auth_config", &self.auth_config)
             .field("tls_config", &self.tls_config)
@@ -150,6 +153,7 @@ impl Default for BrokerConfig {
             max_retained_message_size: 0,
             client_channel_capacity: default_client_channel_capacity(),
             server_keep_alive: None,
+            server_receive_maximum: None,
             response_information: None,
             auth_config: AuthConfig::default(),
             tls_config: None,
@@ -298,6 +302,12 @@ impl BrokerConfig {
     #[must_use]
     pub fn with_echo_suppression(mut self, config: EchoSuppressionConfig) -> Self {
         self.echo_suppression_config = config;
+        self
+    }
+
+    #[must_use]
+    pub fn with_server_receive_maximum(mut self, val: u16) -> Self {
+        self.server_receive_maximum = Some(val);
         self
     }
 

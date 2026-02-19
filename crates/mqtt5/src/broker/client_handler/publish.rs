@@ -5,6 +5,7 @@ use crate::broker::storage::{
     InflightDirection, InflightMessage, InflightPhase, QueuedMessage, StorageBackend,
 };
 use crate::error::{MqttError, Result};
+use crate::packet::disconnect::DisconnectPacket;
 use crate::packet::puback::PubAckPacket;
 use crate::packet::pubcomp::PubCompPacket;
 use crate::packet::publish::PublishPacket;
@@ -55,6 +56,24 @@ impl ClientHandler {
     #[allow(clippy::too_many_lines)]
     pub(super) async fn handle_publish(&mut self, mut publish: PublishPacket) -> Result<()> {
         let client_id = self.client_id.clone().unwrap();
+
+        if publish.qos != QoS::AtMostOnce
+            && self.inflight_publishes.len() >= usize::from(self.server_receive_maximum)
+        {
+            warn!(
+                client_id = %client_id,
+                inflight = self.inflight_publishes.len(),
+                server_receive_maximum = self.server_receive_maximum,
+                "Receive maximum exceeded"
+            );
+            let disconnect = DisconnectPacket::new(ReasonCode::ReceiveMaximumExceeded);
+            self.transport
+                .write_packet(Packet::Disconnect(disconnect))
+                .await?;
+            return Err(MqttError::ProtocolError(
+                "Client exceeded server receive maximum".to_string(),
+            ));
+        }
 
         if let Some(alias) = publish.properties.get_topic_alias() {
             if alias == 0 || alias > self.config.topic_alias_maximum {
