@@ -1,10 +1,8 @@
-mod common;
-
-use common::{
-    connected_client, unique_client_id, ConformanceBroker, MessageCollector, RawMqttClient,
-    RawPacketBuilder,
-};
 use mqtt5::{PublishOptions, QoS, SubscribeOptions};
+use mqtt5_conformance::harness::{
+    connected_client, unique_client_id, ConformanceBroker, MessageCollector,
+};
+use mqtt5_conformance::raw_client::{RawMqttClient, RawPacketBuilder};
 use std::collections::HashSet;
 use std::time::Duration;
 

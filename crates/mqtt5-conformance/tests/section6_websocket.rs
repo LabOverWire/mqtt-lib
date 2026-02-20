@@ -1,7 +1,6 @@
-mod common;
-
-use common::{ConformanceBroker, RawPacketBuilder};
 use futures_util::{SinkExt, StreamExt};
+use mqtt5_conformance::harness::ConformanceBroker;
+use mqtt5_conformance::raw_client::RawPacketBuilder;
 use std::time::Duration;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;

@@ -4,13 +4,11 @@
 //! Session Expiry, Will Delay Interval, Will User Properties, Request Response
 //! Information, and reserved fixed header flags on server packets.
 
-mod common;
-
-use common::{
-    connected_client, unique_client_id, ConformanceBroker, MessageCollector, RawMqttClient,
-    RawPacketBuilder,
-};
 use mqtt5::{ConnectOptions, MqttClient};
+use mqtt5_conformance::harness::{
+    connected_client, unique_client_id, ConformanceBroker, MessageCollector,
+};
+use mqtt5_conformance::raw_client::{RawMqttClient, RawPacketBuilder};
 use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_secs(3);

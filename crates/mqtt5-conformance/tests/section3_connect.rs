@@ -5,13 +5,11 @@
 //! valid-path scenarios, or [`RawMqttClient`] for sending malformed packets
 //! that the normal API would reject.
 
-mod common;
-
-use common::{
-    connected_client, unique_client_id, ConformanceBroker, MessageCollector, RawMqttClient,
-    RawPacketBuilder,
-};
 use mqtt5::{ConnectOptions, MqttClient, WillMessage};
+use mqtt5_conformance::harness::{
+    connected_client, unique_client_id, ConformanceBroker, MessageCollector,
+};
+use mqtt5_conformance::raw_client::{RawMqttClient, RawPacketBuilder};
 use std::time::Duration;
 
 /// `[MQTT-3.1.0-1]` After a Network Connection is established by a Client to

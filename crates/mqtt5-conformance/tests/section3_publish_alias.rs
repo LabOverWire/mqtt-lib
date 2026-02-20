@@ -1,6 +1,5 @@
-mod common;
-
-use common::{unique_client_id, ConformanceBroker, RawMqttClient, RawPacketBuilder};
+use mqtt5_conformance::harness::{unique_client_id, ConformanceBroker};
+use mqtt5_conformance::raw_client::{RawMqttClient, RawPacketBuilder};
 use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_secs(3);

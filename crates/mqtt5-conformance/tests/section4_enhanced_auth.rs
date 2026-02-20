@@ -1,10 +1,9 @@
-mod common;
-
-use common::{unique_client_id, ConformanceBroker, RawMqttClient, RawPacketBuilder};
 use mqtt5::broker::auth::{AuthProvider, AuthResult, EnhancedAuthResult};
 use mqtt5::error::Result;
 use mqtt5::packet::connect::ConnectPacket;
 use mqtt5::protocol::v5::reason_codes::ReasonCode;
+use mqtt5_conformance::harness::{unique_client_id, ConformanceBroker};
+use mqtt5_conformance::raw_client::{RawMqttClient, RawPacketBuilder};
 use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;

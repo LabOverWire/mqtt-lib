@@ -1,7 +1,6 @@
-mod common;
-
-use common::{unique_client_id, ConformanceBroker, RawMqttClient, RawPacketBuilder};
 use mqtt5::broker::config::{BrokerConfig, StorageBackend, StorageConfig};
+use mqtt5_conformance::harness::{unique_client_id, ConformanceBroker};
+use mqtt5_conformance::raw_client::{RawMqttClient, RawPacketBuilder};
 use std::net::SocketAddr;
 use std::time::Duration;
 
