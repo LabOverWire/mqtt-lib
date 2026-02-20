@@ -106,7 +106,7 @@ impl RawMqttClient {
 
     /// Sends a CONNECT, reads CONNACK, and returns `(flags, reason_code)`.
     ///
-    /// Convenience wrapper combining [`send_raw`] with [`expect_connack`].
+    /// Convenience wrapper combining [`Self::send_raw`] with [`Self::expect_connack`].
     /// Returns `None` if CONNACK is not received within the timeout.
     pub async fn connect_and_establish(
         &mut self,
@@ -407,7 +407,7 @@ impl RawMqttClient {
 
     /// Reads and parses a PUBLISH packet, returning `(first_byte, qos, topic, payload)`.
     ///
-    /// Same as [`expect_publish`] but also returns the raw first byte so callers
+    /// Same as [`Self::expect_publish`] but also returns the raw first byte so callers
     /// can inspect DUP (bit 3) and RETAIN (bit 0) flags.
     /// Returns `None` if the packet is not a PUBLISH or the timeout elapses.
     pub async fn expect_publish_raw_header(
@@ -617,7 +617,7 @@ impl RawMqttClient {
 
     /// Reads raw bytes within timeout and returns `Option<Vec<u8>>`.
     ///
-    /// Alias of [`read_packet_bytes`] for readability in tests that accept
+    /// Alias of [`Self::read_packet_bytes`] for readability in tests that accept
     /// any packet type without inspecting the contents.
     pub async fn expect_any_packet(&mut self, timeout_dur: Duration) -> Option<Vec<u8>> {
         self.read_packet_bytes(timeout_dur).await
