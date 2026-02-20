@@ -32,7 +32,6 @@ impl WasmClientHandler {
         Err(MqttError::ClientClosed)
     }
 
-    #[allow(clippy::too_many_lines)]
     pub(super) async fn handle_auth(
         &mut self,
         auth: AuthPacket,

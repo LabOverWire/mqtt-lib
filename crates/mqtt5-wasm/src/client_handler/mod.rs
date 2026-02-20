@@ -269,18 +269,11 @@ impl WasmClientHandler {
         result
     }
 
-    #[allow(clippy::await_holding_refcell_ref, clippy::too_many_lines)]
-    async fn packet_loop(
-        &mut self,
-        reader: &mut WasmReader,
-        writer: WasmWriter,
+    fn spawn_disconnect_watcher(
+        running: &Rc<RefCell<bool>>,
         disconnect_rx: tokio::sync::oneshot::Receiver<()>,
-    ) -> Result<()> {
-        use crate::decoder::read_packet;
-
-        let running = Rc::new(RefCell::new(true));
-        let running_clone = Rc::clone(&running);
-
+    ) {
+        let running_clone = Rc::clone(running);
         spawn_local(async move {
             match disconnect_rx.await {
                 Ok(()) => {
@@ -292,19 +285,21 @@ impl WasmClientHandler {
                 }
             }
         });
+    }
 
-        let last_packet_time = Rc::new(Cell::new(mqtt5::time::Instant::now()));
-        let keep_alive = self.keep_alive;
-        let handler_id = self.handler_id;
-
-        let running_forward = Rc::clone(&running);
+    fn spawn_publish_forwarder(
+        &mut self,
+        running: &Rc<RefCell<bool>>,
+        writer_shared: &Rc<RefCell<WasmWriter>>,
+    ) {
+        let running_forward = Rc::clone(running);
         let publish_rx = std::mem::replace(&mut self.publish_rx, flume::bounded(1).1);
-        let writer_shared = Rc::new(RefCell::new(writer));
-        let writer_for_forward = Rc::clone(&writer_shared);
+        let writer_for_forward = Rc::clone(writer_shared);
         let outbound_inflight_fwd = Rc::clone(&self.outbound_inflight);
         let next_pid_fwd = Rc::clone(&self.next_packet_id);
         let storage_fwd = Arc::clone(&self.storage);
         let client_id_fwd = self.client_id.clone().unwrap_or_default();
+        let handler_id = self.handler_id;
 
         spawn_local(async move {
             use mqtt5::broker::storage::{
@@ -355,30 +350,63 @@ impl WasmClientHandler {
                 }
             }
         });
+    }
+
+    fn spawn_keepalive_timer(
+        running: &Rc<RefCell<bool>>,
+        last_packet_time: &Rc<Cell<mqtt5::time::Instant>>,
+        keep_alive: mqtt5::time::Duration,
+        handler_id: u32,
+        timeout_tx: tokio::sync::mpsc::Sender<()>,
+    ) {
+        let running_timeout = Rc::clone(running);
+        let last_packet_time_timeout = Rc::clone(last_packet_time);
+        let timeout_duration = KeepaliveConfig::default().timeout_duration(keep_alive);
+        spawn_local(async move {
+            loop {
+                gloo_timers::future::sleep(std::time::Duration::from_secs(1)).await;
+
+                if !*running_timeout.borrow() {
+                    break;
+                }
+
+                let elapsed = last_packet_time_timeout.get().elapsed();
+                if elapsed > timeout_duration {
+                    warn!("Handler #{handler_id} keep-alive timeout detected");
+                    *running_timeout.borrow_mut() = false;
+                    let _ = timeout_tx.send(()).await;
+                    break;
+                }
+            }
+        });
+    }
+
+    #[allow(clippy::await_holding_refcell_ref)]
+    async fn packet_loop(
+        &mut self,
+        reader: &mut WasmReader,
+        writer: WasmWriter,
+        disconnect_rx: tokio::sync::oneshot::Receiver<()>,
+    ) -> Result<()> {
+        use crate::decoder::read_packet;
+
+        let running = Rc::new(RefCell::new(true));
+        Self::spawn_disconnect_watcher(&running, disconnect_rx);
+
+        let last_packet_time = Rc::new(Cell::new(mqtt5::time::Instant::now()));
+        let writer_shared = Rc::new(RefCell::new(writer));
+
+        self.spawn_publish_forwarder(&running, &writer_shared);
 
         let (timeout_tx, mut timeout_rx) = tokio::sync::mpsc::channel::<()>(1);
-
-        if !keep_alive.is_zero() {
-            let running_timeout = Rc::clone(&running);
-            let last_packet_time_timeout = Rc::clone(&last_packet_time);
-            let timeout_duration = KeepaliveConfig::default().timeout_duration(keep_alive);
-            spawn_local(async move {
-                loop {
-                    gloo_timers::future::sleep(std::time::Duration::from_secs(1)).await;
-
-                    if !*running_timeout.borrow() {
-                        break;
-                    }
-
-                    let elapsed = last_packet_time_timeout.get().elapsed();
-                    if elapsed > timeout_duration {
-                        warn!("Handler #{} keep-alive timeout detected", handler_id);
-                        *running_timeout.borrow_mut() = false;
-                        let _ = timeout_tx.send(()).await;
-                        break;
-                    }
-                }
-            });
+        if !self.keep_alive.is_zero() {
+            Self::spawn_keepalive_timer(
+                &running,
+                &last_packet_time,
+                self.keep_alive,
+                self.handler_id,
+                timeout_tx,
+            );
         }
 
         loop {

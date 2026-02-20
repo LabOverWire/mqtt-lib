@@ -1,5 +1,3 @@
-//! Extended authentication handling
-
 use crate::broker::auth::EnhancedAuthStatus;
 use crate::error::{MqttError, Result};
 use crate::packet::auth::AuthPacket;
@@ -12,7 +10,6 @@ use crate::transport::PacketIo;
 use super::{AuthState, ClientHandler};
 
 impl ClientHandler {
-    #[allow(clippy::too_many_lines)]
     pub(super) async fn handle_auth(&mut self, auth: AuthPacket) -> Result<()> {
         let client_id = match &self.client_id {
             Some(id) => id.clone(),

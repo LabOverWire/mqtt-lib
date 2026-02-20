@@ -34,7 +34,6 @@ impl WasmClientHandler {
         }
     }
 
-    #[allow(clippy::too_many_lines)]
     pub(super) async fn handle_connect(
         &mut self,
         mut connect: ConnectPacket,
@@ -134,35 +133,7 @@ impl WasmClientHandler {
                     .properties
                     .set_assigned_client_identifier(assigned_id.clone());
             }
-
-            if let Ok(config) = self.config.read() {
-                connack
-                    .properties
-                    .set_session_expiry_interval(u64_to_u32_saturating(
-                        config.session_expiry_interval.as_secs(),
-                    ));
-                if config.maximum_qos < 2 {
-                    connack.properties.set_maximum_qos(config.maximum_qos);
-                }
-                connack
-                    .properties
-                    .set_retain_available(config.retain_available);
-                connack
-                    .properties
-                    .set_maximum_packet_size(usize_to_u32_saturating(config.max_packet_size));
-                connack
-                    .properties
-                    .set_topic_alias_maximum(config.topic_alias_maximum);
-                connack
-                    .properties
-                    .set_wildcard_subscription_available(config.wildcard_subscription_available);
-                connack.properties.set_subscription_identifier_available(
-                    config.subscription_identifier_available,
-                );
-                connack
-                    .properties
-                    .set_shared_subscription_available(config.shared_subscription_available);
-            }
+            self.set_server_capability_properties(&mut connack);
         }
 
         self.write_packet(&Packet::ConnAck(connack), writer)?;
@@ -318,36 +289,7 @@ impl WasmClientHandler {
                         connack.properties.set_authentication_data(data.into());
                     }
 
-                    if let Ok(config) = self.config.read() {
-                        connack
-                            .properties
-                            .set_session_expiry_interval(u64_to_u32_saturating(
-                                config.session_expiry_interval.as_secs(),
-                            ));
-                        if config.maximum_qos < 2 {
-                            connack.properties.set_maximum_qos(config.maximum_qos);
-                        }
-                        connack
-                            .properties
-                            .set_retain_available(config.retain_available);
-                        connack
-                            .properties
-                            .set_maximum_packet_size(usize_to_u32_saturating(
-                                config.max_packet_size,
-                            ));
-                        connack
-                            .properties
-                            .set_topic_alias_maximum(config.topic_alias_maximum);
-                        connack.properties.set_wildcard_subscription_available(
-                            config.wildcard_subscription_available,
-                        );
-                        connack.properties.set_subscription_identifier_available(
-                            config.subscription_identifier_available,
-                        );
-                        connack.properties.set_shared_subscription_available(
-                            config.shared_subscription_available,
-                        );
-                    }
+                    self.set_server_capability_properties(&mut connack);
 
                     self.write_packet(&Packet::ConnAck(connack), writer)?;
 
@@ -386,6 +328,37 @@ impl WasmClientHandler {
                 self.write_packet(&Packet::ConnAck(connack), writer)?;
                 Err(MqttError::AuthenticationFailed)
             }
+        }
+    }
+
+    fn set_server_capability_properties(&self, connack: &mut ConnAckPacket) {
+        if let Ok(config) = self.config.read() {
+            connack
+                .properties
+                .set_session_expiry_interval(u64_to_u32_saturating(
+                    config.session_expiry_interval.as_secs(),
+                ));
+            if config.maximum_qos < 2 {
+                connack.properties.set_maximum_qos(config.maximum_qos);
+            }
+            connack
+                .properties
+                .set_retain_available(config.retain_available);
+            connack
+                .properties
+                .set_maximum_packet_size(usize_to_u32_saturating(config.max_packet_size));
+            connack
+                .properties
+                .set_topic_alias_maximum(config.topic_alias_maximum);
+            connack
+                .properties
+                .set_wildcard_subscription_available(config.wildcard_subscription_available);
+            connack
+                .properties
+                .set_subscription_identifier_available(config.subscription_identifier_available);
+            connack
+                .properties
+                .set_shared_subscription_available(config.shared_subscription_available);
         }
     }
 }

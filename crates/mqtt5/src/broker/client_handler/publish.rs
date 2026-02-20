@@ -1,5 +1,3 @@
-//! Publish handling and `QoS` flow control
-
 use crate::broker::events::{ClientPublishEvent, MessageDeliveredEvent};
 use crate::broker::storage::{
     InflightDirection, InflightMessage, InflightPhase, QueuedMessage, StorageBackend,
@@ -53,67 +51,12 @@ impl ClientHandler {
         Ok(())
     }
 
-    #[allow(clippy::too_many_lines)]
     pub(super) async fn handle_publish(&mut self, mut publish: PublishPacket) -> Result<()> {
         let client_id = self.client_id.clone().unwrap();
 
-        if publish.qos != QoS::AtMostOnce
-            && self.inflight_publishes.len() >= usize::from(self.server_receive_maximum)
-        {
-            warn!(
-                client_id = %client_id,
-                inflight = self.inflight_publishes.len(),
-                server_receive_maximum = self.server_receive_maximum,
-                "Receive maximum exceeded"
-            );
-            let disconnect = DisconnectPacket::new(ReasonCode::ReceiveMaximumExceeded);
-            self.transport
-                .write_packet(Packet::Disconnect(disconnect))
-                .await?;
-            return Err(MqttError::ProtocolError(
-                "Client exceeded server receive maximum".to_string(),
-            ));
-        }
-
-        if let Some(alias) = publish.properties.get_topic_alias() {
-            if alias == 0 || alias > self.config.topic_alias_maximum {
-                return Err(MqttError::ProtocolError(format!(
-                    "Invalid topic alias: {} (maximum: {})",
-                    alias, self.config.topic_alias_maximum
-                )));
-            }
-
-            if publish.topic_name.is_empty() {
-                if let Some(topic) = self.topic_aliases.get(&alias) {
-                    publish.topic_name.clone_from(topic);
-                } else {
-                    return Err(MqttError::ProtocolError(format!(
-                        "Topic alias {alias} not found"
-                    )));
-                }
-            } else {
-                self.topic_aliases.insert(alias, publish.topic_name.clone());
-            }
-        } else if publish.topic_name.is_empty() {
-            return Err(MqttError::ProtocolError(
-                "Empty topic name without topic alias".to_string(),
-            ));
-        }
-
-        if publish.properties.get_subscription_identifier().is_some() {
-            return Err(MqttError::ProtocolError(
-                "PUBLISH from client must not contain Subscription Identifier [MQTT-3.3.4-6]"
-                    .to_string(),
-            ));
-        }
-
-        crate::validate_topic_name(&publish.topic_name)?;
-
-        if let Some(PropertyValue::Utf8String(response_topic)) =
-            publish.properties.get(PropertyId::ResponseTopic)
-        {
-            crate::validate_topic_name(response_topic)?;
-        }
+        self.check_receive_maximum(&client_id, &publish).await?;
+        self.resolve_topic_alias(&mut publish)?;
+        Self::validate_publish_properties(&publish)?;
 
         let payload_size = publish.payload.len();
         self.stats.publish_received(payload_size);
@@ -158,19 +101,97 @@ impl ClientHandler {
         }
 
         self.fire_publish_event(&publish, &client_id).await;
+        self.route_publish_by_qos(publish, &client_id).await
+    }
 
+    async fn check_receive_maximum(
+        &mut self,
+        client_id: &str,
+        publish: &PublishPacket,
+    ) -> Result<()> {
+        if publish.qos != QoS::AtMostOnce
+            && self.inflight_publishes.len() >= usize::from(self.server_receive_maximum)
+        {
+            warn!(
+                client_id = %client_id,
+                inflight = self.inflight_publishes.len(),
+                server_receive_maximum = self.server_receive_maximum,
+                "Receive maximum exceeded"
+            );
+            let disconnect = DisconnectPacket::new(ReasonCode::ReceiveMaximumExceeded);
+            self.transport
+                .write_packet(Packet::Disconnect(disconnect))
+                .await?;
+            return Err(MqttError::ProtocolError(
+                "Client exceeded server receive maximum".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn resolve_topic_alias(&mut self, publish: &mut PublishPacket) -> Result<()> {
+        if let Some(alias) = publish.properties.get_topic_alias() {
+            if alias == 0 || alias > self.config.topic_alias_maximum {
+                return Err(MqttError::ProtocolError(format!(
+                    "Invalid topic alias: {} (maximum: {})",
+                    alias, self.config.topic_alias_maximum
+                )));
+            }
+
+            if publish.topic_name.is_empty() {
+                if let Some(topic) = self.topic_aliases.get(&alias) {
+                    publish.topic_name.clone_from(topic);
+                } else {
+                    return Err(MqttError::ProtocolError(format!(
+                        "Topic alias {alias} not found"
+                    )));
+                }
+            } else {
+                self.topic_aliases.insert(alias, publish.topic_name.clone());
+            }
+        } else if publish.topic_name.is_empty() {
+            return Err(MqttError::ProtocolError(
+                "Empty topic name without topic alias".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_publish_properties(publish: &PublishPacket) -> Result<()> {
+        if publish.properties.get_subscription_identifier().is_some() {
+            return Err(MqttError::ProtocolError(
+                "PUBLISH from client must not contain Subscription Identifier [MQTT-3.3.4-6]"
+                    .to_string(),
+            ));
+        }
+
+        crate::validate_topic_name(&publish.topic_name)?;
+
+        if let Some(PropertyValue::Utf8String(response_topic)) =
+            publish.properties.get(PropertyId::ResponseTopic)
+        {
+            crate::validate_topic_name(response_topic)?;
+        }
+        Ok(())
+    }
+
+    async fn route_publish_by_qos(
+        &mut self,
+        publish: PublishPacket,
+        client_id: &str,
+    ) -> Result<()> {
         match publish.qos {
             QoS::AtMostOnce => {
                 #[cfg(feature = "opentelemetry")]
-                self.route_with_trace_context(&publish, &client_id).await?;
+                self.route_with_trace_context(&publish, client_id).await?;
                 #[cfg(not(feature = "opentelemetry"))]
-                self.route_publish(&publish, Some(&client_id)).await;
+                self.route_publish(&publish, Some(client_id)).await;
             }
             QoS::AtLeastOnce => {
                 #[cfg(feature = "opentelemetry")]
-                self.route_with_trace_context(&publish, &client_id).await?;
+                self.route_with_trace_context(&publish, client_id).await?;
                 #[cfg(not(feature = "opentelemetry"))]
-                self.route_publish(&publish, Some(&client_id)).await;
+                self.route_publish(&publish, Some(client_id)).await;
 
                 let mut puback = PubAckPacket::new(publish.packet_id.unwrap());
                 puback.reason_code = ReasonCode::Success;
@@ -182,7 +203,7 @@ impl ClientHandler {
                 if let Some(ref storage) = self.storage {
                     let inflight = InflightMessage::from_publish(
                         self.inflight_publishes.get(&packet_id).unwrap(),
-                        client_id.clone(),
+                        client_id.to_string(),
                         InflightDirection::Inbound,
                         InflightPhase::AwaitingPubrel,
                     );
@@ -195,7 +216,6 @@ impl ClientHandler {
                 self.transport.write_packet(Packet::PubRec(pubrec)).await?;
             }
         }
-
         Ok(())
     }
 

@@ -149,82 +149,82 @@ pub async fn execute(cmd: BenchCommand, verbose: bool, debug: bool) -> Result<()
     }
 }
 
-async fn run_throughput(cmd: BenchCommand) -> Result<()> {
-    let broker_url = cmd
-        .url
+fn broker_url(cmd: &BenchCommand) -> String {
+    cmd.url
         .clone()
-        .unwrap_or_else(|| format!("mqtt://{}:{}", cmd.host, cmd.port));
+        .unwrap_or_else(|| format!("mqtt://{}:{}", cmd.host, cmd.port))
+}
 
-    let base_client_id = cmd
-        .client_id
+fn base_client_id(cmd: &BenchCommand, prefix: &str) -> String {
+    cmd.client_id
         .clone()
-        .unwrap_or_else(|| format!("mqttv5-bench-{}", rand::rng().random::<u32>()));
+        .unwrap_or_else(|| format!("mqttv5-{prefix}-{}", rand::rng().random::<u32>()))
+}
 
-    eprintln!(
-        "connecting {} publisher(s) and {} subscriber(s) to {}...",
-        cmd.publishers, cmd.subscribers, broker_url
-    );
+async fn connect_client(client_id: String, url: &str) -> Result<MqttClient> {
+    let client = MqttClient::new(&client_id);
+    let options = ConnectOptions::new(client_id)
+        .with_clean_start(true)
+        .with_keep_alive(Duration::from_secs(30));
+    client
+        .connect_with_options(url, options)
+        .await
+        .context("failed to connect")?;
+    Ok(client)
+}
 
-    let mut pub_clients = Vec::with_capacity(cmd.publishers);
-    for i in 0..cmd.publishers {
-        let pub_client_id = format!("{base_client_id}-pub-{i}");
-        let pub_client = MqttClient::new(&pub_client_id);
-        let pub_options = ConnectOptions::new(pub_client_id)
-            .with_clean_start(true)
-            .with_keep_alive(Duration::from_secs(30));
+fn as_f64_lossy(value: u64) -> f64 {
+    #[allow(clippy::cast_precision_loss)]
+    let result = value as f64;
+    result
+}
 
-        pub_client
-            .connect_with_options(&broker_url, pub_options)
-            .await
-            .context("failed to connect publisher")?;
-        pub_clients.push(pub_client);
+fn usize_as_f64_lossy(value: usize) -> f64 {
+    #[allow(clippy::cast_precision_loss)]
+    let result = value as f64;
+    result
+}
+
+fn nanos_as_u64() -> u64 {
+    #[allow(clippy::cast_possible_truncation)]
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as u64;
+    nanos
+}
+
+fn micros_as_u64(duration: std::time::Duration) -> u64 {
+    #[allow(clippy::cast_possible_truncation)]
+    let micros = duration.as_micros() as u64;
+    micros
+}
+
+fn percentile_stats(sorted: &[u64]) -> (f64, u64, u64, u64) {
+    if sorted.is_empty() {
+        return (0.0, 0, 0, 0);
     }
+    let avg = as_f64_lossy(sorted.iter().sum::<u64>()) / usize_as_f64_lossy(sorted.len());
+    let p50 = sorted[sorted.len() * 50 / 100];
+    let p95 = sorted[sorted.len() * 95 / 100];
+    let p99 = sorted[sorted.len() * 99 / 100];
+    (avg, p50, p95, p99)
+}
 
-    let received = Arc::new(AtomicU64::new(0));
-    let topic = cmd.topic.clone();
-    let filter = cmd.filter.clone().unwrap_or_else(|| topic.clone());
-
-    let mut sub_clients = Vec::with_capacity(cmd.subscribers);
-    for i in 0..cmd.subscribers {
-        let sub_client_id = format!("{base_client_id}-sub-{i}");
-        let sub_client = MqttClient::new(&sub_client_id);
-        let sub_options = ConnectOptions::new(sub_client_id)
-            .with_clean_start(true)
-            .with_keep_alive(Duration::from_secs(30));
-
-        sub_client
-            .connect_with_options(&broker_url, sub_options)
-            .await
-            .context("failed to connect subscriber")?;
-
-        let received_clone = Arc::clone(&received);
-        sub_client
-            .subscribe(&filter, move |_| {
-                received_clone.fetch_add(1, Ordering::Relaxed);
-            })
-            .await
-            .context("failed to subscribe")?;
-
-        sub_clients.push(sub_client);
-    }
-
-    eprintln!("subscribed {} client(s) to {}", cmd.subscribers, filter);
-
-    let payload: Arc<[u8]> = vec![0u8; cmd.payload_size].into();
-    let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
-    let published = Arc::new(AtomicU64::new(0));
-
-    eprintln!("warming up for {}s...", cmd.warmup);
-    let warmup_duration = Duration::from_secs(cmd.warmup);
-    let measure_duration = Duration::from_secs(cmd.duration);
-
-    let mut handles = Vec::with_capacity(cmd.publishers);
+fn spawn_publishers(
+    pub_clients: Vec<MqttClient>,
+    topic: &str,
+    payload: &Arc<[u8]>,
+    qos: QoS,
+    running: &Arc<std::sync::atomic::AtomicBool>,
+    published: &Arc<AtomicU64>,
+) -> Vec<tokio::task::JoinHandle<()>> {
+    let mut handles = Vec::with_capacity(pub_clients.len());
     for pub_client in pub_clients {
-        let topic = topic.clone();
-        let payload = Arc::clone(&payload);
-        let running = Arc::clone(&running);
-        let published = Arc::clone(&published);
-        let qos = cmd.qos;
+        let topic = topic.to_string();
+        let payload = Arc::clone(payload);
+        let running = Arc::clone(running);
+        let published = Arc::clone(published);
 
         handles.push(tokio::spawn(async move {
             while running.load(Ordering::Relaxed) {
@@ -238,43 +238,69 @@ async fn run_throughput(cmd: BenchCommand) -> Result<()> {
             pub_client.disconnect().await.ok();
         }));
     }
+    handles
+}
 
-    tokio::time::sleep(warmup_duration).await;
+async fn run_throughput(cmd: BenchCommand) -> Result<()> {
+    let url = broker_url(&cmd);
+    let base_id = base_client_id(&cmd, "bench");
 
+    eprintln!(
+        "connecting {} publisher(s) and {} subscriber(s) to {url}...",
+        cmd.publishers, cmd.subscribers
+    );
+
+    let mut pub_clients = Vec::with_capacity(cmd.publishers);
+    for i in 0..cmd.publishers {
+        pub_clients.push(connect_client(format!("{base_id}-pub-{i}"), &url).await?);
+    }
+
+    let received = Arc::new(AtomicU64::new(0));
+    let topic = cmd.topic.clone();
+    let filter = cmd.filter.clone().unwrap_or_else(|| topic.clone());
+
+    let mut sub_clients = Vec::with_capacity(cmd.subscribers);
+    for i in 0..cmd.subscribers {
+        let sub_client = connect_client(format!("{base_id}-sub-{i}"), &url).await?;
+        let received_clone = Arc::clone(&received);
+        sub_client
+            .subscribe(&filter, move |_| {
+                received_clone.fetch_add(1, Ordering::Relaxed);
+            })
+            .await
+            .context("failed to subscribe")?;
+        sub_clients.push(sub_client);
+    }
+
+    eprintln!("subscribed {} client(s) to {filter}", cmd.subscribers);
+
+    let payload: Arc<[u8]> = vec![0u8; cmd.payload_size].into();
+    let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let published = Arc::new(AtomicU64::new(0));
+
+    eprintln!("warming up for {}s...", cmd.warmup);
+    let handles = spawn_publishers(pub_clients, &topic, &payload, cmd.qos, &running, &published);
+
+    tokio::time::sleep(Duration::from_secs(cmd.warmup)).await;
     received.store(0, Ordering::SeqCst);
     published.store(0, Ordering::SeqCst);
-    let mut samples: Vec<u64> = Vec::new();
-    let mut last_received = 0u64;
 
     eprintln!("measuring for {}s...", cmd.duration);
     let measure_start = Instant::now();
-    let measure_end = measure_start + measure_duration;
-    let mut next_sample = measure_start + Duration::from_secs(1);
-
-    while Instant::now() < measure_end {
-        tokio::time::sleep(Duration::from_millis(10)).await;
-
-        if Instant::now() >= next_sample {
-            let current = received.load(Ordering::Relaxed);
-            let delta = current - last_received;
-            samples.push(delta);
-            eprintln!("  {delta} msg/s");
-            last_received = current;
-            next_sample += Duration::from_secs(1);
-        }
-    }
+    let samples =
+        sample_counter_per_second(measure_start, Duration::from_secs(cmd.duration), &received)
+            .await;
 
     running.store(false, Ordering::SeqCst);
     for handle in handles {
         handle.await.ok();
     }
-
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let total_published = published.load(Ordering::Relaxed);
     let total_received = received.load(Ordering::Relaxed);
     let elapsed = measure_start.elapsed().as_secs_f64();
-    let throughput_avg = total_received as f64 / elapsed;
+    let throughput_avg = as_f64_lossy(total_received) / elapsed;
 
     let output = BenchOutput {
         mode: "throughput".to_string(),
@@ -305,6 +331,30 @@ async fn run_throughput(cmd: BenchCommand) -> Result<()> {
     Ok(())
 }
 
+async fn sample_counter_per_second(
+    start: Instant,
+    duration: Duration,
+    counter: &AtomicU64,
+) -> Vec<u64> {
+    let end = start + duration;
+    let mut next_sample = start + Duration::from_secs(1);
+    let mut last_count = 0u64;
+    let mut samples = Vec::new();
+
+    while Instant::now() < end {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        if Instant::now() >= next_sample {
+            let current = counter.load(Ordering::Relaxed);
+            let delta = current - last_count;
+            samples.push(delta);
+            eprintln!("  {delta} msg/s");
+            last_count = current;
+            next_sample += Duration::from_secs(1);
+        }
+    }
+    samples
+}
+
 async fn publish_message(client: &MqttClient, topic: &str, payload: &[u8], qos: QoS) -> Result<()> {
     match qos {
         QoS::AtMostOnce => client.publish(topic, payload.to_vec()).await?,
@@ -316,39 +366,14 @@ async fn publish_message(client: &MqttClient, topic: &str, payload: &[u8], qos: 
 
 async fn run_latency(cmd: BenchCommand) -> Result<()> {
     use std::sync::Mutex;
-    use std::time::SystemTime;
 
-    let broker_url = cmd
-        .url
-        .clone()
-        .unwrap_or_else(|| format!("mqtt://{}:{}", cmd.host, cmd.port));
+    let url = broker_url(&cmd);
+    let base_id = base_client_id(&cmd, "lat");
 
-    let base_client_id = cmd
-        .client_id
-        .clone()
-        .unwrap_or_else(|| format!("mqttv5-lat-{}", rand::rng().random::<u32>()));
+    eprintln!("connecting to {url} for latency test...");
 
-    eprintln!("connecting to {broker_url} for latency test...");
-
-    let pub_client = MqttClient::new(format!("{base_client_id}-pub"));
-    let pub_options = ConnectOptions::new(format!("{base_client_id}-pub"))
-        .with_clean_start(true)
-        .with_keep_alive(Duration::from_secs(30));
-
-    pub_client
-        .connect_with_options(&broker_url, pub_options)
-        .await
-        .context("failed to connect publisher")?;
-
-    let sub_client = MqttClient::new(format!("{base_client_id}-sub"));
-    let sub_options = ConnectOptions::new(format!("{base_client_id}-sub"))
-        .with_clean_start(true)
-        .with_keep_alive(Duration::from_secs(30));
-
-    sub_client
-        .connect_with_options(&broker_url, sub_options)
-        .await
-        .context("failed to connect subscriber")?;
+    let pub_client = connect_client(format!("{base_id}-pub"), &url).await?;
+    let sub_client = connect_client(format!("{base_id}-sub"), &url).await?;
 
     let latencies = Arc::new(Mutex::new(Vec::with_capacity(10000)));
     let latencies_clone = Arc::clone(&latencies);
@@ -360,10 +385,7 @@ async fn run_latency(cmd: BenchCommand) -> Result<()> {
             let payload = &msg.payload;
             if payload.len() >= 8 {
                 let sent_nanos = u64::from_be_bytes(payload[0..8].try_into().unwrap());
-                let now_nanos = SystemTime::now()
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos() as u64;
+                let now_nanos = nanos_as_u64();
                 let latency_us = (now_nanos.saturating_sub(sent_nanos)) / 1000;
                 latencies_clone.lock().unwrap().push(latency_us);
             }
@@ -371,39 +393,27 @@ async fn run_latency(cmd: BenchCommand) -> Result<()> {
         .await
         .context("failed to subscribe")?;
 
-    eprintln!("warming up for {}s...", cmd.warmup);
-
     let message_rate = 1000;
     let interval_us = 1_000_000 / message_rate;
     let mut payload = vec![0u8; cmd.payload_size.max(8)];
 
-    for _ in 0..(cmd.warmup * message_rate) {
-        let now_nanos = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos() as u64;
-        payload[0..8].copy_from_slice(&now_nanos.to_be_bytes());
-        publish_message(&pub_client, &topic, &payload, cmd.qos).await?;
-        tokio::time::sleep(Duration::from_micros(interval_us)).await;
-    }
+    eprintln!("warming up for {}s...", cmd.warmup);
+    send_timed_messages(
+        &pub_client,
+        &topic,
+        &mut payload,
+        cmd.qos,
+        cmd.warmup * message_rate,
+        interval_us,
+    )
+    .await?;
+    latencies.lock().unwrap().clear();
 
-    {
-        latencies.lock().unwrap().clear();
-    }
-
-    eprintln!(
-        "measuring for {}s at {} msg/s...",
-        cmd.duration, message_rate
-    );
+    eprintln!("measuring for {}s at {message_rate} msg/s...", cmd.duration);
     let measure_start = Instant::now();
     let measure_duration = Duration::from_secs(cmd.duration);
-
     while measure_start.elapsed() < measure_duration {
-        let now_nanos = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos() as u64;
-        payload[0..8].copy_from_slice(&now_nanos.to_be_bytes());
+        payload[0..8].copy_from_slice(&nanos_as_u64().to_be_bytes());
         publish_message(&pub_client, &topic, &payload, cmd.qos).await?;
         tokio::time::sleep(Duration::from_micros(interval_us)).await;
     }
@@ -413,17 +423,12 @@ async fn run_latency(cmd: BenchCommand) -> Result<()> {
     let mut samples = latencies.lock().unwrap().clone();
     samples.sort_unstable();
 
-    let (min_us, max_us, avg_us, p50_us, p95_us, p99_us) = if samples.is_empty() {
-        (0, 0, 0.0, 0, 0, 0)
+    let (min_us, max_us) = if samples.is_empty() {
+        (0, 0)
     } else {
-        let min = samples[0];
-        let max = samples[samples.len() - 1];
-        let avg = samples.iter().sum::<u64>() as f64 / samples.len() as f64;
-        let p50 = samples[samples.len() * 50 / 100];
-        let p95 = samples[samples.len() * 95 / 100];
-        let p99 = samples[samples.len() * 99 / 100];
-        (min, max, avg, p50, p95, p99)
+        (samples[0], samples[samples.len() - 1])
     };
+    let (avg_us, p50_us, p95_us, p99_us) = percentile_stats(&samples);
 
     eprintln!(
         "  p50: {p50_us}us, p95: {p95_us}us, p99: {p99_us}us, min: {min_us}us, max: {max_us}us"
@@ -464,37 +469,34 @@ async fn run_latency(cmd: BenchCommand) -> Result<()> {
     Ok(())
 }
 
+async fn send_timed_messages(
+    client: &MqttClient,
+    topic: &str,
+    payload: &mut [u8],
+    qos: QoS,
+    count: u64,
+    interval_us: u64,
+) -> Result<()> {
+    for _ in 0..count {
+        payload[0..8].copy_from_slice(&nanos_as_u64().to_be_bytes());
+        publish_message(client, topic, payload, qos).await?;
+        tokio::time::sleep(Duration::from_micros(interval_us)).await;
+    }
+    Ok(())
+}
+
 async fn run_connections(cmd: BenchCommand) -> Result<()> {
-    use std::net::ToSocketAddrs;
     use std::sync::Mutex;
 
-    let original_url = cmd
-        .url
-        .clone()
-        .unwrap_or_else(|| format!("mqtt://{}:{}", cmd.host, cmd.port));
-
-    let broker_url = if let Some(rest) = original_url.strip_prefix("mqtt://") {
-        let addr_str = rest.split('/').next().unwrap_or(rest);
-        let resolved: std::net::SocketAddr = addr_str
-            .to_socket_addrs()
-            .context("failed to resolve broker address")?
-            .next()
-            .context("no addresses resolved")?;
-        format!("mqtt://{resolved}")
-    } else {
-        original_url.clone()
-    };
-
-    let base_client_id = cmd
-        .client_id
-        .clone()
-        .unwrap_or_else(|| format!("mqttv5-conn-{}", rand::rng().random::<u32>()));
+    let original_url = broker_url(&cmd);
+    let resolved_url = resolve_broker_url(&original_url)?;
+    let base_id = base_client_id(&cmd, "conn");
 
     eprintln!(
-        "benchmarking connection rate to {} with {} concurrent workers for {}s...",
-        original_url, cmd.concurrency, cmd.duration
+        "benchmarking connection rate to {original_url} with {} concurrent workers for {}s...",
+        cmd.concurrency, cmd.duration
     );
-    eprintln!("  (resolved to {broker_url})");
+    eprintln!("  (resolved to {resolved_url})");
 
     let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let successful = Arc::new(AtomicU64::new(0));
@@ -502,60 +504,21 @@ async fn run_connections(cmd: BenchCommand) -> Result<()> {
     let connect_times = Arc::new(Mutex::new(Vec::with_capacity(10000)));
     let counter = Arc::new(AtomicU64::new(0));
 
-    let measure_duration = Duration::from_secs(cmd.duration);
     let measure_start = Instant::now();
+    let measure_duration = Duration::from_secs(cmd.duration);
 
-    let mut handles = Vec::with_capacity(cmd.concurrency);
-    for _ in 0..cmd.concurrency {
-        let broker_url = broker_url.clone();
-        let base_client_id = base_client_id.clone();
-        let running = Arc::clone(&running);
-        let successful = Arc::clone(&successful);
-        let failed = Arc::clone(&failed);
-        let connect_times = Arc::clone(&connect_times);
-        let counter = Arc::clone(&counter);
+    let handles = spawn_connection_workers(
+        cmd.concurrency,
+        &resolved_url,
+        &base_id,
+        &running,
+        &successful,
+        &failed,
+        &connect_times,
+        &counter,
+    );
 
-        handles.push(tokio::spawn(async move {
-            while running.load(Ordering::Relaxed) {
-                let id = counter.fetch_add(1, Ordering::Relaxed);
-                let client_id = format!("{base_client_id}-{id}");
-                let client = MqttClient::new(&client_id);
-                let options = ConnectOptions::new(client_id)
-                    .with_clean_start(true)
-                    .with_keep_alive(Duration::from_secs(30));
-
-                let start = Instant::now();
-                match client.connect_with_options(&broker_url, options).await {
-                    Ok(_) => {
-                        let elapsed_us = start.elapsed().as_micros() as u64;
-                        successful.fetch_add(1, Ordering::Relaxed);
-                        connect_times.lock().unwrap().push(elapsed_us);
-                        client.disconnect().await.ok();
-                    }
-                    Err(_) => {
-                        failed.fetch_add(1, Ordering::Relaxed);
-                    }
-                }
-            }
-        }));
-    }
-
-    let mut samples: Vec<u64> = Vec::new();
-    let mut last_count = 0u64;
-    let mut next_sample = measure_start + Duration::from_secs(1);
-
-    while Instant::now() < measure_start + measure_duration {
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
-        if Instant::now() >= next_sample {
-            let current = successful.load(Ordering::Relaxed);
-            let delta = current - last_count;
-            samples.push(delta);
-            eprintln!("  {delta} conn/s");
-            last_count = current;
-            next_sample += Duration::from_secs(1);
-        }
-    }
+    let samples = sample_counter_per_second(measure_start, measure_duration, &successful).await;
 
     running.store(false, Ordering::SeqCst);
     for handle in handles {
@@ -565,20 +528,12 @@ async fn run_connections(cmd: BenchCommand) -> Result<()> {
     let total_successful = successful.load(Ordering::Relaxed);
     let total_failed = failed.load(Ordering::Relaxed);
     let elapsed = measure_start.elapsed().as_secs_f64();
-    let connections_per_sec = total_successful as f64 / elapsed;
+    let connections_per_sec = as_f64_lossy(total_successful) / elapsed;
 
     let mut times = connect_times.lock().unwrap().clone();
     times.sort_unstable();
 
-    let (avg_connect_us, p50_connect_us, p95_connect_us, p99_connect_us) = if times.is_empty() {
-        (0.0, 0, 0, 0)
-    } else {
-        let avg = times.iter().sum::<u64>() as f64 / times.len() as f64;
-        let p50 = times[times.len() * 50 / 100];
-        let p95 = times[times.len() * 95 / 100];
-        let p99 = times[times.len() * 99 / 100];
-        (avg, p50, p95, p99)
-    };
+    let (avg_connect_us, p50_connect_us, p95_connect_us, p99_connect_us) = percentile_stats(&times);
 
     eprintln!("\n  total: {total_successful} successful, {total_failed} failed");
     eprintln!("  avg: {avg_connect_us:.0}us, p50: {p50_connect_us}us, p95: {p95_connect_us}us, p99: {p99_connect_us}us");
@@ -611,4 +566,68 @@ async fn run_connections(cmd: BenchCommand) -> Result<()> {
 
     println!("{}", serde_json::to_string_pretty(&output)?);
     Ok(())
+}
+
+fn resolve_broker_url(original_url: &str) -> Result<String> {
+    use std::net::ToSocketAddrs;
+
+    if let Some(rest) = original_url.strip_prefix("mqtt://") {
+        let addr_str = rest.split('/').next().unwrap_or(rest);
+        let resolved: std::net::SocketAddr = addr_str
+            .to_socket_addrs()
+            .context("failed to resolve broker address")?
+            .next()
+            .context("no addresses resolved")?;
+        Ok(format!("mqtt://{resolved}"))
+    } else {
+        Ok(original_url.to_string())
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_connection_workers(
+    concurrency: usize,
+    broker_url: &str,
+    base_client_id: &str,
+    running: &Arc<std::sync::atomic::AtomicBool>,
+    successful: &Arc<AtomicU64>,
+    failed: &Arc<AtomicU64>,
+    connect_times: &Arc<std::sync::Mutex<Vec<u64>>>,
+    counter: &Arc<AtomicU64>,
+) -> Vec<tokio::task::JoinHandle<()>> {
+    let mut handles = Vec::with_capacity(concurrency);
+    for _ in 0..concurrency {
+        let broker_url = broker_url.to_string();
+        let base_client_id = base_client_id.to_string();
+        let running = Arc::clone(running);
+        let successful = Arc::clone(successful);
+        let failed = Arc::clone(failed);
+        let connect_times = Arc::clone(connect_times);
+        let counter = Arc::clone(counter);
+
+        handles.push(tokio::spawn(async move {
+            while running.load(Ordering::Relaxed) {
+                let id = counter.fetch_add(1, Ordering::Relaxed);
+                let client_id = format!("{base_client_id}-{id}");
+                let client = MqttClient::new(&client_id);
+                let options = ConnectOptions::new(client_id)
+                    .with_clean_start(true)
+                    .with_keep_alive(Duration::from_secs(30));
+
+                let start = Instant::now();
+                match client.connect_with_options(&broker_url, options).await {
+                    Ok(_) => {
+                        let elapsed_us = micros_as_u64(start.elapsed());
+                        successful.fetch_add(1, Ordering::Relaxed);
+                        connect_times.lock().unwrap().push(elapsed_us);
+                        client.disconnect().await.ok();
+                    }
+                    Err(_) => {
+                        failed.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            }
+        }));
+    }
+    handles
 }

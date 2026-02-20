@@ -1,5 +1,3 @@
-//! Connection handling and session management
-
 use crate::broker::auth::EnhancedAuthStatus;
 use crate::broker::storage::{ClientSession, DynamicStorage, StorageBackend};
 use crate::error::{MqttError, Result};
@@ -45,7 +43,6 @@ impl ClientHandler {
         }
     }
 
-    #[allow(clippy::too_many_lines)]
     pub(super) async fn handle_connect(&mut self, mut connect: ConnectPacket) -> Result<()> {
         debug!(
             client_id = %connect.client_id,
@@ -68,16 +65,76 @@ impl ClientHandler {
             .get_request_response_information()
             .unwrap_or(false);
 
-        let mut assigned_client_id = None;
+        let assigned_client_id = Self::assign_client_id_if_empty(&mut connect);
+        self.validate_client_id(&connect).await?;
+
+        if let Some(deferred) = self
+            .handle_authentication(&mut connect, assigned_client_id.clone())
+            .await?
+        {
+            return deferred;
+        }
+
+        self.validate_will_capabilities(&connect).await?;
+
+        self.client_id = Some(connect.client_id.clone());
+        self.keep_alive = Duration::from_secs(u64::from(connect.keep_alive));
+
+        self.client_receive_maximum = connect.properties.get_receive_maximum().unwrap_or(65535);
+        self.client_max_packet_size = connect.properties.get_maximum_packet_size();
+        debug!(
+            client_id = %connect.client_id,
+            receive_maximum = self.client_receive_maximum,
+            max_packet_size = ?self.client_max_packet_size,
+            "Client connection limits"
+        );
+
+        let session_present = self.handle_session(&connect).await?;
+
+        let mut connack = if self.protocol_version == 4 {
+            ConnAckPacket::new_v311(session_present, ReasonCode::Success)
+        } else {
+            ConnAckPacket::new(session_present, ReasonCode::Success)
+        };
+
+        if self.protocol_version == 5 {
+            self.build_connack_properties(&mut connack, assigned_client_id.as_ref());
+        }
+
+        debug!(
+            client_id = %connect.client_id,
+            session_present = session_present,
+            assigned_client_id = ?assigned_client_id,
+            "Sending CONNACK"
+        );
+        tracing::trace!("CONNACK properties: {:?}", connack.properties);
+        self.transport
+            .write_packet(Packet::ConnAck(connack))
+            .await?;
+        tracing::debug!("CONNACK sent successfully");
+
+        if session_present {
+            self.deliver_queued_messages(&connect.client_id).await?;
+            self.resend_inflight_messages().await?;
+        }
+
+        Ok(())
+    }
+
+    fn assign_client_id_if_empty(connect: &mut ConnectPacket) -> Option<String> {
         if connect.client_id.is_empty() {
             use std::sync::atomic::{AtomicU32, Ordering};
             static COUNTER: AtomicU32 = AtomicU32::new(0);
             let generated_id = format!("auto-{}", COUNTER.fetch_add(1, Ordering::SeqCst));
             debug!("Generated client ID '{}' for empty client ID", generated_id);
             connect.client_id.clone_from(&generated_id);
-            assigned_client_id = Some(generated_id.clone());
+            Some(generated_id.clone())
+        } else {
+            None
         }
+    }
 
+    async fn validate_client_id(&mut self, connect: &ConnectPacket) -> Result<()> {
         if !crate::is_path_safe_client_id(&connect.client_id) {
             warn!(
                 client_id = %connect.client_id,
@@ -88,7 +145,7 @@ impl ClientHandler {
             self.transport
                 .write_packet(Packet::ConnAck(connack))
                 .await?;
-            return Err(MqttError::InvalidClientId(connect.client_id));
+            return Err(MqttError::InvalidClientId(connect.client_id.clone()));
         }
 
         if connect.client_id.starts_with("cert:") && self.transport.client_cert_info().is_none() {
@@ -105,6 +162,14 @@ impl ClientHandler {
             return Err(MqttError::AuthenticationFailed);
         }
 
+        Ok(())
+    }
+
+    async fn handle_authentication(
+        &mut self,
+        connect: &mut ConnectPacket,
+        assigned_client_id: Option<String>,
+    ) -> Result<Option<Result<()>>> {
         let auth_method_prop = connect.properties.get_authentication_method();
         let auth_data_prop = connect.properties.get_authentication_data();
 
@@ -137,18 +202,14 @@ impl ClientHandler {
                             .await?;
 
                         self.pending_connect = Some(PendingConnect {
-                            connect,
+                            connect: connect.clone(),
                             assigned_client_id,
                         });
 
-                        return Ok(());
+                        return Ok(Some(Ok(())));
                     }
                     EnhancedAuthStatus::Failed => {
-                        let mut connack = if self.protocol_version == 4 {
-                            ConnAckPacket::new_v311(false, result.reason_code)
-                        } else {
-                            ConnAckPacket::new(false, result.reason_code)
-                        };
+                        let mut connack = self.new_connack(false, result.reason_code);
                         if self.protocol_version == 5 && self.request_problem_information {
                             if let Some(reason) = result.reason_string {
                                 connack.properties.set_reason_string(reason);
@@ -157,15 +218,11 @@ impl ClientHandler {
                         self.transport
                             .write_packet(Packet::ConnAck(connack))
                             .await?;
-                        return Err(MqttError::AuthenticationFailed);
+                        return Ok(Some(Err(MqttError::AuthenticationFailed)));
                     }
                 }
             } else {
-                let mut connack = if self.protocol_version == 4 {
-                    ConnAckPacket::new_v311(false, ReasonCode::BadAuthenticationMethod)
-                } else {
-                    ConnAckPacket::new(false, ReasonCode::BadAuthenticationMethod)
-                };
+                let mut connack = self.new_connack(false, ReasonCode::BadAuthenticationMethod);
                 if self.protocol_version == 5 && self.request_problem_information {
                     connack.properties.set_reason_string(
                         "Server does not support enhanced authentication".to_string(),
@@ -174,12 +231,12 @@ impl ClientHandler {
                 self.transport
                     .write_packet(Packet::ConnAck(connack))
                     .await?;
-                return Err(MqttError::AuthenticationFailed);
+                return Ok(Some(Err(MqttError::AuthenticationFailed)));
             }
         } else {
             let auth_result = self
                 .auth_provider
-                .authenticate(&connect, self.client_addr)
+                .authenticate(connect, self.client_addr)
                 .await?;
 
             if !auth_result.authenticated {
@@ -188,11 +245,7 @@ impl ClientHandler {
                     reason = ?auth_result.reason_code,
                     "Authentication failed"
                 );
-                let mut connack = if self.protocol_version == 4 {
-                    ConnAckPacket::new_v311(false, auth_result.reason_code)
-                } else {
-                    ConnAckPacket::new(false, auth_result.reason_code)
-                };
+                let mut connack = self.new_connack(false, auth_result.reason_code);
                 if self.protocol_version == 5 && self.request_problem_information {
                     connack
                         .properties
@@ -201,12 +254,24 @@ impl ClientHandler {
                 self.transport
                     .write_packet(Packet::ConnAck(connack))
                     .await?;
-                return Err(MqttError::AuthenticationFailed);
+                return Ok(Some(Err(MqttError::AuthenticationFailed)));
             }
 
             self.user_id = auth_result.user_id;
         }
 
+        Ok(None)
+    }
+
+    fn new_connack(&self, session_present: bool, reason_code: ReasonCode) -> ConnAckPacket {
+        if self.protocol_version == 4 {
+            ConnAckPacket::new_v311(session_present, reason_code)
+        } else {
+            ConnAckPacket::new(session_present, reason_code)
+        }
+    }
+
+    async fn validate_will_capabilities(&mut self, connect: &ConnectPacket) -> Result<()> {
         if let Some(ref will) = connect.will {
             if (will.qos as u8) > self.config.maximum_qos {
                 info!(
@@ -235,95 +300,61 @@ impl ClientHandler {
                 return Err(MqttError::ProtocolError("Retain not supported".into()));
             }
         }
-
-        self.client_id = Some(connect.client_id.clone());
-        self.keep_alive = Duration::from_secs(u64::from(connect.keep_alive));
-
-        self.client_receive_maximum = connect.properties.get_receive_maximum().unwrap_or(65535);
-        self.client_max_packet_size = connect.properties.get_maximum_packet_size();
-        debug!(
-            client_id = %connect.client_id,
-            receive_maximum = self.client_receive_maximum,
-            max_packet_size = ?self.client_max_packet_size,
-            "Client connection limits"
-        );
-
-        let session_present = self.handle_session(&connect).await?;
-
-        let mut connack = if self.protocol_version == 4 {
-            ConnAckPacket::new_v311(session_present, ReasonCode::Success)
-        } else {
-            ConnAckPacket::new(session_present, ReasonCode::Success)
-        };
-
-        if self.protocol_version == 5 {
-            if let Some(ref assigned_id) = assigned_client_id {
-                debug!("Setting assigned client ID in CONNACK: {}", assigned_id);
-                connack
-                    .properties
-                    .set_assigned_client_identifier(assigned_id.clone());
-            }
-
-            connack
-                .properties
-                .set_topic_alias_maximum(self.config.topic_alias_maximum);
-            connack
-                .properties
-                .set_retain_available(self.config.retain_available);
-            connack.properties.set_maximum_packet_size(
-                u32::try_from(self.config.max_packet_size).unwrap_or(u32::MAX),
-            );
-            connack
-                .properties
-                .set_wildcard_subscription_available(self.config.wildcard_subscription_available);
-            connack.properties.set_subscription_identifier_available(
-                self.config.subscription_identifier_available,
-            );
-            connack
-                .properties
-                .set_shared_subscription_available(self.config.shared_subscription_available);
-
-            if self.config.maximum_qos < 2 {
-                connack.properties.set_maximum_qos(self.config.maximum_qos);
-            }
-
-            if let Some(recv_max) = self.config.server_receive_maximum {
-                connack.properties.set_receive_maximum(recv_max);
-            }
-
-            if let Some(keep_alive) = self.config.server_keep_alive {
-                connack
-                    .properties
-                    .set_server_keep_alive(u16::try_from(keep_alive.as_secs()).unwrap_or(u16::MAX));
-            }
-
-            if self.request_response_information {
-                if let Some(ref response_info) = self.config.response_information {
-                    connack
-                        .properties
-                        .set_response_information(response_info.clone());
-                }
-            }
-        }
-
-        debug!(
-            client_id = %connect.client_id,
-            session_present = session_present,
-            assigned_client_id = ?assigned_client_id,
-            "Sending CONNACK"
-        );
-        tracing::trace!("CONNACK properties: {:?}", connack.properties);
-        self.transport
-            .write_packet(Packet::ConnAck(connack))
-            .await?;
-        tracing::debug!("CONNACK sent successfully");
-
-        if session_present {
-            self.deliver_queued_messages(&connect.client_id).await?;
-            self.resend_inflight_messages().await?;
-        }
-
         Ok(())
+    }
+
+    fn build_connack_properties(
+        &self,
+        connack: &mut ConnAckPacket,
+        assigned_client_id: Option<&String>,
+    ) {
+        if let Some(assigned_id) = assigned_client_id {
+            debug!("Setting assigned client ID in CONNACK: {}", assigned_id);
+            connack
+                .properties
+                .set_assigned_client_identifier(assigned_id.clone());
+        }
+
+        connack
+            .properties
+            .set_topic_alias_maximum(self.config.topic_alias_maximum);
+        connack
+            .properties
+            .set_retain_available(self.config.retain_available);
+        connack.properties.set_maximum_packet_size(
+            u32::try_from(self.config.max_packet_size).unwrap_or(u32::MAX),
+        );
+        connack
+            .properties
+            .set_wildcard_subscription_available(self.config.wildcard_subscription_available);
+        connack
+            .properties
+            .set_subscription_identifier_available(self.config.subscription_identifier_available);
+        connack
+            .properties
+            .set_shared_subscription_available(self.config.shared_subscription_available);
+
+        if self.config.maximum_qos < 2 {
+            connack.properties.set_maximum_qos(self.config.maximum_qos);
+        }
+
+        if let Some(recv_max) = self.config.server_receive_maximum {
+            connack.properties.set_receive_maximum(recv_max);
+        }
+
+        if let Some(keep_alive) = self.config.server_keep_alive {
+            connack
+                .properties
+                .set_server_keep_alive(u16::try_from(keep_alive.as_secs()).unwrap_or(u16::MAX));
+        }
+
+        if self.request_response_information {
+            if let Some(ref response_info) = self.config.response_information {
+                connack
+                    .properties
+                    .set_response_information(response_info.clone());
+            }
+        }
     }
 
     pub(super) async fn handle_session(&mut self, connect: &ConnectPacket) -> Result<bool> {

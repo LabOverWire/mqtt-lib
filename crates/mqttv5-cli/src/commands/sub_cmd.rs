@@ -1,6 +1,5 @@
 #![allow(clippy::large_futures)]
 #![allow(clippy::struct_excessive_bools)]
-#![allow(clippy::too_many_lines)]
 
 use anyhow::{Context, Result};
 use clap::Args;
@@ -229,18 +228,7 @@ fn parse_stream_strategy(s: &str) -> Result<mqtt5::transport::StreamStrategy, St
     }
 }
 
-pub async fn execute(mut cmd: SubCommand, verbose: bool, debug: bool) -> Result<()> {
-    #[cfg(feature = "opentelemetry")]
-    let has_otel = cmd.otel_endpoint.is_some();
-
-    #[cfg(not(feature = "opentelemetry"))]
-    let has_otel = false;
-
-    if !has_otel {
-        crate::init_basic_tracing(verbose, debug);
-    }
-
-    // Smart prompting for missing required arguments
+fn prompt_topic_and_qos(cmd: &mut SubCommand) -> Result<(String, QoS)> {
     if cmd.topic.is_none() && !cmd.non_interactive {
         let topic = Input::<String>::new()
             .with_prompt("MQTT topic to subscribe to (e.g., sensors/+, home/#)")
@@ -249,14 +237,12 @@ pub async fn execute(mut cmd: SubCommand, verbose: bool, debug: bool) -> Result<
         cmd.topic = Some(topic);
     }
 
-    let topic = cmd.topic.ok_or_else(|| {
+    let topic = cmd.topic.take().ok_or_else(|| {
         anyhow::anyhow!("Topic is required. Use --topic or run without --non-interactive")
     })?;
 
-    // Validate topic
     validate_topic_filter(&topic)?;
 
-    // Smart QoS prompting
     let qos = if cmd.qos.is_none() && !cmd.non_interactive {
         let qos_options = vec!["0 (At most once)", "1 (At least once)", "2 (Exactly once)"];
         let selection = Select::new()
@@ -275,33 +261,11 @@ pub async fn execute(mut cmd: SubCommand, verbose: bool, debug: bool) -> Result<
         cmd.qos.unwrap_or(QoS::AtMostOnce)
     };
 
-    // Build broker URL
-    let broker_url = cmd
-        .url
-        .unwrap_or_else(|| format!("mqtt://{}:{}", cmd.host, cmd.port));
-    debug!("Connecting to broker: {}", broker_url);
+    Ok((topic, qos))
+}
 
-    // Create client
-    let client_id = cmd
-        .client_id
-        .unwrap_or_else(|| format!("mqttv5-sub-{}", rand::rng().random::<u32>()));
-    let client = MqttClient::new(&client_id);
-
-    #[cfg(feature = "opentelemetry")]
-    if let Some(endpoint) = &cmd.otel_endpoint {
-        use mqtt5::telemetry::TelemetryConfig;
-        let telemetry_config = TelemetryConfig::new(&cmd.otel_service_name)
-            .with_endpoint(endpoint)
-            .with_sampling_ratio(cmd.otel_sampling);
-        mqtt5::telemetry::init_tracing_subscriber(&telemetry_config)?;
-        info!(
-            "OpenTelemetry enabled: endpoint={}, service={}, sampling={}",
-            endpoint, cmd.otel_service_name, cmd.otel_sampling
-        );
-    }
-
-    // Build connection options
-    let mut options = ConnectOptions::new(client_id.clone())
+fn build_connect_options(cmd: &SubCommand, client_id: &str) -> ConnectOptions {
+    let mut options = ConnectOptions::new(client_id.to_owned())
         .with_clean_start(!cmd.no_clean_start)
         .with_keep_alive(Duration::from_secs(cmd.keep_alive));
 
@@ -317,7 +281,14 @@ pub async fn execute(mut cmd: SubCommand, verbose: bool, debug: bool) -> Result<
         options = options.with_session_expiry_interval(duration_secs_to_u32(expiry));
     }
 
-    // Add authentication based on method
+    options
+}
+
+async fn configure_auth(
+    client: &MqttClient,
+    options: &mut ConnectOptions,
+    cmd: &SubCommand,
+) -> Result<()> {
     match cmd.auth_method.as_deref() {
         Some("scram") => {
             let username = cmd.username.clone().ok_or_else(|| {
@@ -326,7 +297,8 @@ pub async fn execute(mut cmd: SubCommand, verbose: bool, debug: bool) -> Result<
             let password = cmd.password.clone().ok_or_else(|| {
                 anyhow::anyhow!("--password is required for SCRAM authentication")
             })?;
-            options = options
+            *options = options
+                .clone()
                 .with_credentials(username.clone(), Vec::new())
                 .with_authentication_method("SCRAM-SHA-256");
 
@@ -339,7 +311,7 @@ pub async fn execute(mut cmd: SubCommand, verbose: bool, debug: bool) -> Result<
                 .jwt_token
                 .clone()
                 .ok_or_else(|| anyhow::anyhow!("--jwt-token is required for JWT authentication"))?;
-            options = options.with_authentication_method("JWT");
+            *options = options.clone().with_authentication_method("JWT");
 
             let handler = JwtAuthHandler::new(token);
             client.set_auth_handler(handler).await;
@@ -347,15 +319,19 @@ pub async fn execute(mut cmd: SubCommand, verbose: bool, debug: bool) -> Result<
         }
         Some("password") | None => {
             if let (Some(username), Some(password)) = (cmd.username.clone(), cmd.password.clone()) {
-                options = options.with_credentials(username, password.into_bytes());
+                *options = options
+                    .clone()
+                    .with_credentials(username, password.into_bytes());
             } else if let Some(username) = cmd.username.clone() {
-                options = options.with_credentials(username, Vec::new());
+                *options = options.clone().with_credentials(username, Vec::new());
             }
         }
         Some(other) => anyhow::bail!("Unknown auth method: {other}"),
     }
+    Ok(())
+}
 
-    // Add will message if specified
+fn configure_will(options: &mut ConnectOptions, cmd: &SubCommand) {
     if let Some(topic) = cmd.will_topic.clone() {
         let payload = cmd.will_message.clone().unwrap_or_default();
         let mut will = WillMessage::new(topic, payload.into_bytes()).with_retain(cmd.will_retain);
@@ -368,38 +344,11 @@ pub async fn execute(mut cmd: SubCommand, verbose: bool, debug: bool) -> Result<
             will.properties.will_delay_interval = Some(duration_secs_to_u32(delay));
         }
 
-        options = options.with_will(will);
+        *options = options.clone().with_will(will);
     }
+}
 
-    #[cfg(feature = "codec")]
-    if let Some(ref codec_name) = cmd.codec {
-        let registry = CodecRegistry::new();
-        match codec_name.as_str() {
-            "gzip" => {
-                registry.register(GzipCodec::new());
-                debug!("Gzip codec decoding enabled");
-            }
-            "deflate" => {
-                registry.register(DeflateCodec::new());
-                debug!("Deflate codec decoding enabled");
-            }
-            "all" => {
-                registry.register(GzipCodec::new());
-                registry.register(DeflateCodec::new());
-                debug!("All codec decoding enabled (gzip, deflate)");
-            }
-            _ => anyhow::bail!("Unknown codec: {codec_name}"),
-        }
-        options = options.with_codec_registry(Arc::new(registry));
-    }
-
-    // Configure insecure TLS mode if requested
-    if cmd.insecure {
-        client.set_insecure_tls(true).await;
-        info!("Insecure TLS mode enabled (certificate verification disabled)");
-    }
-
-    // Configure QUIC transport options
+async fn configure_quic_transport(client: &MqttClient, cmd: &SubCommand) {
     if let Some(strategy) = cmd.quic_stream_strategy {
         client.set_quic_stream_strategy(strategy).await;
         debug!("QUIC stream strategy: {:?}", strategy);
@@ -422,59 +371,86 @@ pub async fn execute(mut cmd: SubCommand, verbose: bool, debug: bool) -> Result<
     client
         .set_quic_connect_timeout(Duration::from_secs(cmd.quic_connect_timeout))
         .await;
+}
 
-    // Configure TLS if using secure connection
-    if broker_url.starts_with("ssl://")
+async fn configure_tls_certs(
+    client: &MqttClient,
+    broker_url: &str,
+    cmd: &SubCommand,
+) -> Result<()> {
+    let is_secure = broker_url.starts_with("ssl://")
         || broker_url.starts_with("mqtts://")
-        || broker_url.starts_with("quics://")
-    {
-        // Configure with certificates if provided
-        if cmd.cert.is_some() || cmd.key.is_some() || cmd.ca_cert.is_some() {
-            let cert_pem = if let Some(cert_path) = &cmd.cert {
-                Some(std::fs::read(cert_path).with_context(|| {
-                    format!("Failed to read certificate file: {}", cert_path.display())
-                })?)
-            } else {
-                None
-            };
-            let key_pem =
-                if let Some(key_path) = &cmd.key {
-                    Some(std::fs::read(key_path).with_context(|| {
-                        format!("Failed to read key file: {}", key_path.display())
-                    })?)
-                } else {
-                    None
-                };
-            let ca_pem = if let Some(ca_path) = &cmd.ca_cert {
-                Some(std::fs::read(ca_path).with_context(|| {
-                    format!("Failed to read CA certificate file: {}", ca_path.display())
-                })?)
-            } else {
-                None
-            };
+        || broker_url.starts_with("quics://");
 
-            client.set_tls_config(cert_pem, key_pem, ca_pem).await;
+    if !is_secure || (cmd.cert.is_none() && cmd.key.is_none() && cmd.ca_cert.is_none()) {
+        return Ok(());
+    }
+
+    let cert_pem =
+        if let Some(cert_path) = &cmd.cert {
+            Some(std::fs::read(cert_path).with_context(|| {
+                format!("Failed to read certificate file: {}", cert_path.display())
+            })?)
+        } else {
+            None
+        };
+    let key_pem = if let Some(key_path) = &cmd.key {
+        Some(
+            std::fs::read(key_path)
+                .with_context(|| format!("Failed to read key file: {}", key_path.display()))?,
+        )
+    } else {
+        None
+    };
+    let ca_pem = if let Some(ca_path) = &cmd.ca_cert {
+        Some(std::fs::read(ca_path).with_context(|| {
+            format!("Failed to read CA certificate file: {}", ca_path.display())
+        })?)
+    } else {
+        None
+    };
+
+    client.set_tls_config(cert_pem, key_pem, ca_pem).await;
+    Ok(())
+}
+
+#[cfg(feature = "codec")]
+fn configure_codec(options: &mut ConnectOptions, cmd: &SubCommand) -> Result<()> {
+    if let Some(ref codec_name) = cmd.codec {
+        let registry = CodecRegistry::new();
+        match codec_name.as_str() {
+            "gzip" => {
+                registry.register(GzipCodec::new());
+                debug!("Gzip codec decoding enabled");
+            }
+            "deflate" => {
+                registry.register(DeflateCodec::new());
+                debug!("Deflate codec decoding enabled");
+            }
+            "all" => {
+                registry.register(GzipCodec::new());
+                registry.register(DeflateCodec::new());
+                debug!("All codec decoding enabled (gzip, deflate)");
+            }
+            _ => anyhow::bail!("Unknown codec: {codec_name}"),
         }
+        *options = options.clone().with_codec_registry(Arc::new(registry));
     }
+    Ok(())
+}
 
-    // Connect
-    info!("Connecting to {}...", broker_url);
-    let result = client
-        .connect_with_options(&broker_url, options)
-        .await
-        .context("Failed to connect to MQTT broker")?;
-
-    if result.session_present {
-        info!("Resumed existing session");
-    }
-
+async fn subscribe_and_print(
+    client: &MqttClient,
+    topic: &str,
+    cmd: &SubCommand,
+    qos: QoS,
+) -> Result<Arc<Notify>> {
     let target_count = cmd.count;
     let verbose = cmd.verbose;
 
     info!("Subscribing to '{}' (QoS {})...", topic, qos as u8);
 
-    let message_count = Arc::new(AtomicU32::new(0));
-    let message_count_clone = message_count.clone();
+    let message_count_clone = Arc::new(AtomicU32::new(0));
     let done_notify = Arc::new(Notify::new());
     let done_notify_clone = done_notify.clone();
 
@@ -495,7 +471,7 @@ pub async fn execute(mut cmd: SubCommand, verbose: bool, debug: bool) -> Result<
     };
 
     let (packet_id, granted_qos) = client
-        .subscribe_with_options(&topic, subscribe_options.clone(), move |message| {
+        .subscribe_with_options(topic, subscribe_options.clone(), move |message| {
             let count = message_count_clone.fetch_add(1, Ordering::Relaxed) + 1;
 
             if verbose {
@@ -522,8 +498,15 @@ pub async fn execute(mut cmd: SubCommand, verbose: bool, debug: bool) -> Result<
 
     println!("✓ Subscribed to '{topic}' (granted QoS {granted_qos:?}) - waiting for messages (Ctrl+C to exit)");
 
-    // Wait for either Ctrl+C or target count reached
-    if cmd.auto_reconnect {
+    Ok(done_notify)
+}
+
+async fn wait_for_completion(
+    client: &MqttClient,
+    done_notify: &Notify,
+    auto_reconnect: bool,
+) -> Result<()> {
+    if auto_reconnect {
         tokio::select! {
             () = done_notify.notified() => {}
             () = async { let _ = signal::ctrl_c().await; } => {
@@ -550,11 +533,76 @@ pub async fn execute(mut cmd: SubCommand, verbose: bool, debug: bool) -> Result<
             }
         }
     }
-
-    // Disconnect
     client.disconnect().await?;
-
     Ok(())
+}
+
+pub async fn execute(mut cmd: SubCommand, verbose: bool, debug: bool) -> Result<()> {
+    #[cfg(feature = "opentelemetry")]
+    let has_otel = cmd.otel_endpoint.is_some();
+
+    #[cfg(not(feature = "opentelemetry"))]
+    let has_otel = false;
+
+    if !has_otel {
+        crate::init_basic_tracing(verbose, debug);
+    }
+
+    let (topic, qos) = prompt_topic_and_qos(&mut cmd)?;
+
+    let broker_url = cmd
+        .url
+        .take()
+        .unwrap_or_else(|| format!("mqtt://{}:{}", cmd.host, cmd.port));
+    debug!("Connecting to broker: {}", broker_url);
+
+    let client_id = cmd
+        .client_id
+        .take()
+        .unwrap_or_else(|| format!("mqttv5-sub-{}", rand::rng().random::<u32>()));
+    let client = MqttClient::new(&client_id);
+
+    #[cfg(feature = "opentelemetry")]
+    if let Some(endpoint) = &cmd.otel_endpoint {
+        use mqtt5::telemetry::TelemetryConfig;
+        let telemetry_config = TelemetryConfig::new(&cmd.otel_service_name)
+            .with_endpoint(endpoint)
+            .with_sampling_ratio(cmd.otel_sampling);
+        mqtt5::telemetry::init_tracing_subscriber(&telemetry_config)?;
+        info!(
+            "OpenTelemetry enabled: endpoint={}, service={}, sampling={}",
+            endpoint, cmd.otel_service_name, cmd.otel_sampling
+        );
+    }
+
+    let mut options = build_connect_options(&cmd, &client_id);
+    configure_auth(&client, &mut options, &cmd).await?;
+    configure_will(&mut options, &cmd);
+
+    #[cfg(feature = "codec")]
+    configure_codec(&mut options, &cmd)?;
+
+    if cmd.insecure {
+        client.set_insecure_tls(true).await;
+        info!("Insecure TLS mode enabled (certificate verification disabled)");
+    }
+
+    configure_quic_transport(&client, &cmd).await;
+    configure_tls_certs(&client, &broker_url, &cmd).await?;
+
+    info!("Connecting to {}...", broker_url);
+    let result = client
+        .connect_with_options(&broker_url, options)
+        .await
+        .context("Failed to connect to MQTT broker")?;
+
+    if result.session_present {
+        info!("Resumed existing session");
+    }
+
+    let done_notify = subscribe_and_print(&client, &topic, &cmd, qos).await?;
+
+    wait_for_completion(&client, &done_notify, cmd.auto_reconnect).await
 }
 
 fn validate_topic_filter(topic: &str) -> Result<()> {
@@ -562,7 +610,6 @@ fn validate_topic_filter(topic: &str) -> Result<()> {
         anyhow::bail!("Topic cannot be empty");
     }
 
-    // Check for invalid patterns
     if topic.contains("//") {
         anyhow::bail!(
             "Invalid topic filter '{}' - cannot have empty segments\nDid you mean '{}'?",
@@ -571,17 +618,11 @@ fn validate_topic_filter(topic: &str) -> Result<()> {
         );
     }
 
-    // Validate wildcard usage
     let segments: Vec<&str> = topic.split('/').collect();
     for (i, segment) in segments.iter().enumerate() {
-        if segment == &"#" {
-            // # must be last segment and alone
-            if i != segments.len() - 1 {
-                anyhow::bail!(
-                    "Invalid topic filter '{topic}' - '#' wildcard must be the last segment"
-                );
-            }
-        } else if segment.contains('#') {
+        if segment == &"#" && i != segments.len() - 1 {
+            anyhow::bail!("Invalid topic filter '{topic}' - '#' wildcard must be the last segment");
+        } else if segment.contains('#') && segment != &"#" {
             anyhow::bail!(
                 "Invalid topic filter '{topic}' - '#' wildcard must be alone in its segment"
             );

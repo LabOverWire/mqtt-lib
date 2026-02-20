@@ -476,7 +476,6 @@ impl DirectClientInner {
     /// # Errors
     ///
     /// Returns an error if the operation fails
-    #[allow(clippy::too_many_lines)]
     pub async fn publish(
         &self,
         topic: String,
@@ -487,35 +486,7 @@ impl DirectClientInner {
             return Ok(self.queue_publish_message(topic, payload, &options));
         }
 
-        let effective_qos = if let Some(max_qos) = *self.server_max_qos.lock() {
-            let qos_value = match options.qos {
-                QoS::AtMostOnce => 0,
-                QoS::AtLeastOnce => 1,
-                QoS::ExactlyOnce => 2,
-            };
-            if qos_value > max_qos {
-                tracing::warn!(
-                    "Requested QoS {} exceeds server maximum {}, using QoS {}",
-                    qos_value,
-                    max_qos,
-                    max_qos
-                );
-                match max_qos {
-                    0 => QoS::AtMostOnce,
-                    1 => QoS::AtLeastOnce,
-                    _ => QoS::ExactlyOnce,
-                }
-            } else {
-                options.qos
-            }
-        } else {
-            options.qos
-        };
-
-        let options = PublishOptions {
-            qos: effective_qos,
-            ..options
-        };
+        let options = self.resolve_effective_qos(options);
 
         #[cfg(feature = "opentelemetry")]
         let options = {
@@ -528,19 +499,7 @@ impl DirectClientInner {
             return Err(MqttError::NotConnected);
         }
 
-        let (final_payload, codec_content_type) = if options.skip_codec {
-            (payload.into(), None)
-        } else if let Some(ref registry) = self.options.codec_registry {
-            registry.encode_with_default(&payload)?
-        } else {
-            (payload.into(), None)
-        };
-
-        let mut properties: Properties = options.properties.into();
-        if let Some(ct) = codec_content_type {
-            use crate::protocol::v5::properties::{PropertyId, PropertyValue};
-            let _ = properties.add(PropertyId::ContentType, PropertyValue::Utf8String(ct));
-        }
+        let (final_payload, properties) = self.encode_payload(payload, &options)?;
 
         let packet_id = (options.qos != QoS::AtMostOnce).then(|| self.packet_id_generator.next());
 
@@ -595,6 +554,59 @@ impl DirectClientInner {
             None => PublishResult::QoS0,
             Some(id) => PublishResult::QoS1Or2 { packet_id: id },
         })
+    }
+
+    fn resolve_effective_qos(&self, options: PublishOptions) -> PublishOptions {
+        let effective_qos = if let Some(max_qos) = *self.server_max_qos.lock() {
+            let qos_value = match options.qos {
+                QoS::AtMostOnce => 0,
+                QoS::AtLeastOnce => 1,
+                QoS::ExactlyOnce => 2,
+            };
+            if qos_value > max_qos {
+                tracing::warn!(
+                    "Requested QoS {} exceeds server maximum {}, using QoS {}",
+                    qos_value,
+                    max_qos,
+                    max_qos
+                );
+                match max_qos {
+                    0 => QoS::AtMostOnce,
+                    1 => QoS::AtLeastOnce,
+                    _ => QoS::ExactlyOnce,
+                }
+            } else {
+                options.qos
+            }
+        } else {
+            options.qos
+        };
+
+        PublishOptions {
+            qos: effective_qos,
+            ..options
+        }
+    }
+
+    fn encode_payload(
+        &self,
+        payload: Vec<u8>,
+        options: &PublishOptions,
+    ) -> Result<(bytes::Bytes, Properties)> {
+        let (final_payload, codec_content_type) = if options.skip_codec {
+            (payload.into(), None)
+        } else if let Some(ref registry) = self.options.codec_registry {
+            registry.encode_with_default(&payload)?
+        } else {
+            (payload.into(), None)
+        };
+
+        let mut properties: Properties = options.properties.clone().into();
+        if let Some(ct) = codec_content_type {
+            use crate::protocol::v5::properties::{PropertyId, PropertyValue};
+            let _ = properties.add(PropertyId::ContentType, PropertyValue::Utf8String(ct));
+        }
+        Ok((final_payload, properties))
     }
 
     async fn send_publish_packet(&self, publish: PublishPacket, qos: QoS) -> Result<()> {
