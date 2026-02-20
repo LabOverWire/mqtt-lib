@@ -43,6 +43,11 @@ impl RawMqttClient {
     ///
     /// Returns `None` if the timeout elapses, the connection closes, or a
     /// read error occurs.
+    ///
+    /// **Limitation:** performs a single `read()` with an 8 KiB buffer. TCP may
+    /// deliver a partial packet or coalesce multiple packets into one read.
+    /// This is acceptable for conformance testing on loopback but may cause
+    /// flaky failures if the TCP stack fragments or coalesces data.
     pub async fn read_packet_bytes(&mut self, timeout_dur: Duration) -> Option<Vec<u8>> {
         let mut buf = vec![0u8; 8192];
         match tokio::time::timeout(timeout_dur, self.stream.read(&mut buf)).await {
@@ -607,6 +612,7 @@ impl RawMqttClient {
         Some(data[idx])
     }
 
+    /// Reads raw bytes and returns them if the first byte is `0xE0` (DISCONNECT).
     pub async fn expect_disconnect_raw(&mut self, timeout_dur: Duration) -> Option<Vec<u8>> {
         let data = self.read_packet_bytes(timeout_dur).await?;
         if data.is_empty() || data[0] != 0xE0 {
@@ -623,6 +629,7 @@ impl RawMqttClient {
         self.read_packet_bytes(timeout_dur).await
     }
 
+    /// Reads an AUTH packet and returns `(reason_code, auth_method)`.
     pub async fn expect_auth_packet(
         &mut self,
         timeout_dur: Duration,
@@ -1703,10 +1710,10 @@ impl RawPacketBuilder {
         wrap_fixed_header(0xF0, &body)
     }
 
-    /// Builds an AUTH packet with non-zero reserved flags.
+    /// Builds a CONNECT packet with invalid UTF-8 bytes in the will topic.
     ///
-    /// Fixed header byte `0xF1` instead of the required `0xF0`.
-    /// Body: reason code `0x00`, no properties.
+    /// Connect flags `0x06` (will flag + clean start), will topic is `[0xFF, 0xFE]`.
+    /// Violates `[MQTT-3.1.3-9]`.
     #[must_use]
     pub fn connect_with_invalid_utf8_will_topic(client_id: &str) -> Vec<u8> {
         let mut body = BytesMut::new();
@@ -1725,6 +1732,7 @@ impl RawPacketBuilder {
         wrap_fixed_header(0x10, &body)
     }
 
+    /// Builds a CONNECT with invalid UTF-8 bytes in the username field.
     #[must_use]
     pub fn connect_with_invalid_utf8_username(client_id: &str) -> Vec<u8> {
         let mut body = BytesMut::new();
@@ -1741,6 +1749,7 @@ impl RawPacketBuilder {
         wrap_fixed_header(0x10, &body)
     }
 
+    /// Builds a `QoS` 2 PUBLISH with a Message Expiry Interval property.
     #[must_use]
     pub fn publish_qos2_with_message_expiry(
         topic: &str,
@@ -1760,6 +1769,7 @@ impl RawPacketBuilder {
         wrap_fixed_header(0x34, &body)
     }
 
+    /// Builds an AUTH packet with non-zero reserved flags (`0xF1` instead of `0xF0`).
     #[must_use]
     pub fn auth_with_invalid_flags() -> Vec<u8> {
         let mut body = BytesMut::new();
@@ -1885,6 +1895,7 @@ impl RawPacketBuilder {
         wrap_fixed_header(0x30, &body)
     }
 
+    /// Builds a CONNECT with an Authentication Method property.
     #[must_use]
     pub fn connect_with_auth_method(client_id: &str, auth_method: &str) -> Vec<u8> {
         let mut body = BytesMut::new();
@@ -1905,6 +1916,7 @@ impl RawPacketBuilder {
         wrap_fixed_header(0x10, &body)
     }
 
+    /// Builds a CONNECT with Authentication Method and Authentication Data properties.
     #[must_use]
     pub fn connect_with_auth_method_and_data(
         client_id: &str,
@@ -1932,6 +1944,7 @@ impl RawPacketBuilder {
         wrap_fixed_header(0x10, &body)
     }
 
+    /// Builds an AUTH packet with the given reason code and Authentication Method.
     #[must_use]
     pub fn auth_with_method(reason_code: u8, auth_method: &str) -> Vec<u8> {
         let mut body = BytesMut::new();
@@ -1946,6 +1959,7 @@ impl RawPacketBuilder {
         wrap_fixed_header(0xF0, &body)
     }
 
+    /// Builds an AUTH packet with reason code, Authentication Method, and Authentication Data.
     #[must_use]
     pub fn auth_with_method_and_data(
         reason_code: u8,
@@ -2014,13 +2028,13 @@ fn parse_ack_packet(data: &[u8]) -> Option<(u16, u8)> {
     Some((packet_id, reason_code))
 }
 
-fn put_mqtt_string(buf: &mut BytesMut, s: &str) {
+pub fn put_mqtt_string(buf: &mut BytesMut, s: &str) {
     let bytes = s.as_bytes();
     buf.put_u16(bytes.len() as u16);
     buf.put_slice(bytes);
 }
 
-fn encode_variable_int(buf: &mut BytesMut, mut value: u32) {
+pub fn encode_variable_int(buf: &mut BytesMut, mut value: u32) {
     loop {
         let mut byte = (value & 0x7F) as u8;
         value >>= 7;
@@ -2034,7 +2048,8 @@ fn encode_variable_int(buf: &mut BytesMut, mut value: u32) {
     }
 }
 
-fn wrap_fixed_header(first_byte: u8, body: &[u8]) -> Vec<u8> {
+#[must_use]
+pub fn wrap_fixed_header(first_byte: u8, body: &[u8]) -> Vec<u8> {
     let mut packet = BytesMut::new();
     packet.put_u8(first_byte);
     encode_variable_int(&mut packet, body.len() as u32);

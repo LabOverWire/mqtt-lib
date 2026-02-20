@@ -198,7 +198,7 @@ async fn overlapping_subs_no_local_prevents_echo() {
 
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(
-        self_collector.count().await,
+        self_collector.count(),
         0,
         "no_local subscriber must not receive its own publish on wildcard subscription"
     );
@@ -241,7 +241,7 @@ async fn message_expiry_drops_expired_retained() {
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     assert_eq!(
-        collector.count().await,
+        collector.count(),
         0,
         "[MQTT-3.3.2-5] expired retained message must not be delivered to new subscriber"
     );
@@ -285,7 +285,7 @@ async fn message_expiry_interval_decremented() {
         "retained message should be delivered"
     );
 
-    let msgs = collector.get_messages().await;
+    let msgs = collector.get_messages();
     let expiry = msgs[0]
         .properties
         .message_expiry_interval
@@ -355,7 +355,7 @@ async fn response_topic_valid_utf8_forwarded() {
         "subscriber should receive message with response topic"
     );
 
-    let msgs = collector.get_messages().await;
+    let msgs = collector.get_messages();
     assert_eq!(
         msgs[0].properties.response_topic.as_deref(),
         Some("reply/topic"),

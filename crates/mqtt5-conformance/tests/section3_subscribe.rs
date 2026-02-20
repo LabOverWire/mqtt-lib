@@ -298,7 +298,7 @@ async fn suback_message_delivery_at_granted_qos() {
         collector.wait_for_messages(1, TIMEOUT).await,
         "subscriber should receive message at granted QoS"
     );
-    let msgs = collector.get_messages().await;
+    let msgs = collector.get_messages();
     assert_eq!(msgs[0].payload, b"delivered");
 }
 
@@ -535,10 +535,10 @@ async fn retain_handling_zero_sends_on_resubscribe() {
         collector.wait_for_messages(1, TIMEOUT).await,
         "first subscribe with RetainHandling=0 must deliver retained message"
     );
-    let msgs = collector.get_messages().await;
+    let msgs = collector.get_messages();
     assert_eq!(msgs[0].payload, b"retained-payload");
 
-    collector.clear().await;
+    collector.clear();
 
     subscriber
         .subscribe_with_options("test/rh0/topic", sub_opts, collector.callback())
@@ -549,7 +549,7 @@ async fn retain_handling_zero_sends_on_resubscribe() {
         collector.wait_for_messages(1, TIMEOUT).await,
         "[MQTT-3.8.4-4] re-subscribe with RetainHandling=0 must deliver retained message again"
     );
-    let msgs2 = collector.get_messages().await;
+    let msgs2 = collector.get_messages();
     assert_eq!(msgs2[0].payload, b"retained-payload");
 }
 

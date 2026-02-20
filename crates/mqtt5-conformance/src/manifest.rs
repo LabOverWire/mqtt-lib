@@ -19,6 +19,9 @@ pub struct ConformanceManifest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Section {
     pub title: String,
+    pub total_statements: Option<usize>,
+    pub note: Option<String>,
+    #[serde(default)]
     pub statements: Vec<NormativeStatement>,
 }
 
@@ -32,6 +35,7 @@ pub struct NormativeStatement {
     pub text: String,
     pub status: TestStatus,
     pub test_names: Vec<String>,
+    pub note: Option<String>,
 }
 
 /// RFC 2119 requirement level of a normative statement.
@@ -59,6 +63,8 @@ pub enum TestStatus {
     Untested,
     NotApplicable,
     Partial,
+    CrossRef,
+    Skipped,
 }
 
 impl ConformanceManifest {

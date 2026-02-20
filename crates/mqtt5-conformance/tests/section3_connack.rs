@@ -1,7 +1,9 @@
 use mqtt5::broker::config::{BrokerConfig, StorageBackend, StorageConfig};
 use mqtt5::{ConnectOptions, MqttClient, QoS, SubscribeOptions};
 use mqtt5_conformance::harness::{unique_client_id, ConformanceBroker};
-use mqtt5_conformance::raw_client::{RawMqttClient, RawPacketBuilder};
+use mqtt5_conformance::raw_client::{
+    put_mqtt_string, wrap_fixed_header, RawMqttClient, RawPacketBuilder,
+};
 use mqtt5_protocol::protocol::v5::properties::PropertyId;
 use mqtt5_protocol::protocol::v5::reason_codes::ReasonCode;
 use std::net::SocketAddr;
@@ -531,35 +533,4 @@ fn build_connect_empty_client_id() -> Vec<u8> {
     put_mqtt_string(&mut body, "");
 
     wrap_fixed_header(0x10, &body)
-}
-
-fn put_mqtt_string(buf: &mut bytes::BytesMut, s: &str) {
-    use bytes::BufMut;
-    let bytes = s.as_bytes();
-    buf.put_u16(bytes.len() as u16);
-    buf.put_slice(bytes);
-}
-
-fn encode_variable_int(buf: &mut bytes::BytesMut, mut value: u32) {
-    use bytes::BufMut;
-    loop {
-        let mut byte = (value & 0x7F) as u8;
-        value >>= 7;
-        if value > 0 {
-            byte |= 0x80;
-        }
-        buf.put_u8(byte);
-        if value == 0 {
-            break;
-        }
-    }
-}
-
-fn wrap_fixed_header(first_byte: u8, body: &[u8]) -> Vec<u8> {
-    use bytes::{BufMut, BytesMut};
-    let mut packet = BytesMut::new();
-    packet.put_u8(first_byte);
-    encode_variable_int(&mut packet, body.len() as u32);
-    packet.put_slice(body);
-    packet.to_vec()
 }

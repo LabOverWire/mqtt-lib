@@ -9,7 +9,9 @@ use mqtt5::{ConnectOptions, MqttClient, WillMessage};
 use mqtt5_conformance::harness::{
     connected_client, unique_client_id, ConformanceBroker, MessageCollector,
 };
-use mqtt5_conformance::raw_client::{RawMqttClient, RawPacketBuilder};
+use mqtt5_conformance::raw_client::{
+    encode_variable_int, put_mqtt_string, wrap_fixed_header, RawMqttClient, RawPacketBuilder,
+};
 use std::time::Duration;
 
 /// `[MQTT-3.1.0-1]` After a Network Connection is established by a Client to
@@ -566,7 +568,7 @@ async fn connect_will_published_on_abnormal_disconnect() {
         collector.wait_for_messages(1, Duration::from_secs(3)).await,
         "[MQTT-3.1.4-5] Will message must be published on abnormal disconnect"
     );
-    let msgs = collector.get_messages().await;
+    let msgs = collector.get_messages();
     assert_eq!(msgs[0].topic, will_topic);
     assert_eq!(msgs[0].payload, b"offline");
 
@@ -604,7 +606,7 @@ async fn connect_will_not_published_on_normal_disconnect() {
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     assert_eq!(
-        collector.count().await,
+        collector.count(),
         0,
         "[MQTT-3.1.4-5] Will message must NOT be published on normal disconnect"
     );
@@ -690,43 +692,12 @@ fn build_connect_resume(client_id: &str, session_expiry: u32) -> Vec<u8> {
     let mut props = BytesMut::new();
     props.put_u8(0x11);
     props.put_u32(session_expiry);
-    encode_variable_int(&mut body, props.len() as u32);
+    encode_variable_int(&mut body, u32::try_from(props.len()).unwrap());
     body.put(props);
 
     put_mqtt_string(&mut body, client_id);
 
     wrap_fixed_header(0x10, &body)
-}
-
-fn put_mqtt_string(buf: &mut bytes::BytesMut, s: &str) {
-    use bytes::BufMut;
-    let bytes = s.as_bytes();
-    buf.put_u16(bytes.len() as u16);
-    buf.put_slice(bytes);
-}
-
-fn encode_variable_int(buf: &mut bytes::BytesMut, mut value: u32) {
-    use bytes::BufMut;
-    loop {
-        let mut byte = (value & 0x7F) as u8;
-        value >>= 7;
-        if value > 0 {
-            byte |= 0x80;
-        }
-        buf.put_u8(byte);
-        if value == 0 {
-            break;
-        }
-    }
-}
-
-fn wrap_fixed_header(first_byte: u8, body: &[u8]) -> Vec<u8> {
-    use bytes::{BufMut, BytesMut};
-    let mut packet = BytesMut::new();
-    packet.put_u8(first_byte);
-    encode_variable_int(&mut packet, body.len() as u32);
-    packet.put_slice(body);
-    packet.to_vec()
 }
 
 fn build_connect_empty_client_id() -> Vec<u8> {

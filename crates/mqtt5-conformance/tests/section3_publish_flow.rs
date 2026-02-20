@@ -59,7 +59,11 @@ async fn receive_maximum_limits_outbound_publishes() {
 
     for i in 1..=4u16 {
         pub_raw
-            .send_raw(&RawPacketBuilder::publish_qos1(&topic, &[i as u8], i))
+            .send_raw(&RawPacketBuilder::publish_qos1(
+                &topic,
+                &[u8::try_from(i).unwrap()],
+                i,
+            ))
             .await
             .unwrap();
     }

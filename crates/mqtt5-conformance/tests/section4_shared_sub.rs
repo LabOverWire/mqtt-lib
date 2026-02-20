@@ -132,8 +132,8 @@ async fn shared_sub_round_robin_delivery() {
 
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    let count1 = collector1.count().await;
-    let count2 = collector2.count().await;
+    let count1 = collector1.count();
+    let count2 = collector2.count();
     assert_eq!(
         count1 + count2,
         6,
@@ -179,12 +179,12 @@ async fn shared_sub_mixed_with_regular() {
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     assert_eq!(
-        collector_regular.count().await,
+        collector_regular.count(),
         4,
         "regular subscriber must receive all 4 messages"
     );
     assert_eq!(
-        collector_shared.count().await,
+        collector_shared.count(),
         4,
         "sole shared group member must receive all 4 messages"
     );
@@ -223,7 +223,7 @@ async fn shared_sub_no_retained_on_subscribe() {
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     assert_eq!(
-        collector_shared.count().await,
+        collector_shared.count(),
         0,
         "shared subscription must not receive retained messages on subscribe"
     );
@@ -236,7 +236,7 @@ async fn shared_sub_no_retained_on_subscribe() {
         .unwrap();
 
     collector_regular.wait_for_messages(1, TIMEOUT).await;
-    let msgs = collector_regular.get_messages().await;
+    let msgs = collector_regular.get_messages();
     assert_eq!(
         msgs.len(),
         1,
@@ -267,7 +267,7 @@ async fn shared_sub_unsubscribe_stops_delivery() {
 
     collector.wait_for_messages(1, TIMEOUT).await;
     assert_eq!(
-        collector.count().await,
+        collector.count(),
         1,
         "must receive message before unsubscribe"
     );
@@ -284,7 +284,7 @@ async fn shared_sub_unsubscribe_stops_delivery() {
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     assert_eq!(
-        collector.count().await,
+        collector.count(),
         1,
         "must not receive messages after unsubscribe from shared subscription"
     );
@@ -317,12 +317,12 @@ async fn shared_sub_multiple_groups_independent() {
     collector_b.wait_for_messages(1, TIMEOUT).await;
 
     assert_eq!(
-        collector_a.count().await,
+        collector_a.count(),
         1,
         "groupA must receive the message independently"
     );
     assert_eq!(
-        collector_b.count().await,
+        collector_b.count(),
         1,
         "groupB must receive the message independently"
     );
@@ -430,7 +430,7 @@ async fn shared_sub_puback_error_discards() {
 
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    let w1_count = collector1.count().await;
+    let w1_count = collector1.count();
 
     let w2_received = worker2
         .expect_publish_with_id(Duration::from_millis(500))

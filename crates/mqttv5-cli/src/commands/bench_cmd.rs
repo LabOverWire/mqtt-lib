@@ -507,16 +507,16 @@ async fn run_connections(cmd: BenchCommand) -> Result<()> {
     let measure_start = Instant::now();
     let measure_duration = Duration::from_secs(cmd.duration);
 
-    let handles = spawn_connection_workers(
-        cmd.concurrency,
-        &resolved_url,
-        &base_id,
-        &running,
-        &successful,
-        &failed,
-        &connect_times,
-        &counter,
-    );
+    let state = ConnectionBenchState {
+        broker_url: resolved_url,
+        base_client_id: base_id,
+        running: Arc::clone(&running),
+        successful: Arc::clone(&successful),
+        failed: Arc::clone(&failed),
+        connect_times: Arc::clone(&connect_times),
+        counter: Arc::clone(&counter),
+    };
+    let handles = spawn_connection_workers(cmd.concurrency, &state);
 
     let samples = sample_counter_per_second(measure_start, measure_duration, &successful).await;
 
@@ -584,26 +584,29 @@ fn resolve_broker_url(original_url: &str) -> Result<String> {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+struct ConnectionBenchState {
+    broker_url: String,
+    base_client_id: String,
+    running: Arc<std::sync::atomic::AtomicBool>,
+    successful: Arc<AtomicU64>,
+    failed: Arc<AtomicU64>,
+    connect_times: Arc<std::sync::Mutex<Vec<u64>>>,
+    counter: Arc<AtomicU64>,
+}
+
 fn spawn_connection_workers(
     concurrency: usize,
-    broker_url: &str,
-    base_client_id: &str,
-    running: &Arc<std::sync::atomic::AtomicBool>,
-    successful: &Arc<AtomicU64>,
-    failed: &Arc<AtomicU64>,
-    connect_times: &Arc<std::sync::Mutex<Vec<u64>>>,
-    counter: &Arc<AtomicU64>,
+    state: &ConnectionBenchState,
 ) -> Vec<tokio::task::JoinHandle<()>> {
     let mut handles = Vec::with_capacity(concurrency);
     for _ in 0..concurrency {
-        let broker_url = broker_url.to_string();
-        let base_client_id = base_client_id.to_string();
-        let running = Arc::clone(running);
-        let successful = Arc::clone(successful);
-        let failed = Arc::clone(failed);
-        let connect_times = Arc::clone(connect_times);
-        let counter = Arc::clone(counter);
+        let broker_url = state.broker_url.clone();
+        let base_client_id = state.base_client_id.clone();
+        let running = Arc::clone(&state.running);
+        let successful = Arc::clone(&state.successful);
+        let failed = Arc::clone(&state.failed);
+        let connect_times = Arc::clone(&state.connect_times);
+        let counter = Arc::clone(&state.counter);
 
         handles.push(tokio::spawn(async move {
             while running.load(Ordering::Relaxed) {

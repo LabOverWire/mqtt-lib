@@ -15,6 +15,12 @@ use tracing::{debug, info, warn};
 
 use super::{AuthState, ClientHandler, PendingConnect};
 
+enum AuthOutcome {
+    Authenticated,
+    ConnectDeferred,
+    Failed(MqttError),
+}
+
 impl ClientHandler {
     pub(super) async fn validate_protocol_version(&mut self, protocol_version: u8) -> Result<()> {
         match protocol_version {
@@ -68,11 +74,13 @@ impl ClientHandler {
         let assigned_client_id = Self::assign_client_id_if_empty(&mut connect);
         self.validate_client_id(&connect).await?;
 
-        if let Some(deferred) = self
+        match self
             .handle_authentication(&mut connect, assigned_client_id.clone())
             .await?
         {
-            return deferred;
+            AuthOutcome::Authenticated => {}
+            AuthOutcome::ConnectDeferred => return Ok(()),
+            AuthOutcome::Failed(err) => return Err(err),
         }
 
         self.validate_will_capabilities(&connect).await?;
@@ -128,7 +136,7 @@ impl ClientHandler {
             let generated_id = format!("auto-{}", COUNTER.fetch_add(1, Ordering::SeqCst));
             debug!("Generated client ID '{}' for empty client ID", generated_id);
             connect.client_id.clone_from(&generated_id);
-            Some(generated_id.clone())
+            Some(generated_id)
         } else {
             None
         }
@@ -169,7 +177,7 @@ impl ClientHandler {
         &mut self,
         connect: &mut ConnectPacket,
         assigned_client_id: Option<String>,
-    ) -> Result<Option<Result<()>>> {
+    ) -> Result<AuthOutcome> {
         let auth_method_prop = connect.properties.get_authentication_method();
         let auth_data_prop = connect.properties.get_authentication_data();
 
@@ -206,7 +214,7 @@ impl ClientHandler {
                             assigned_client_id,
                         });
 
-                        return Ok(Some(Ok(())));
+                        return Ok(AuthOutcome::ConnectDeferred);
                     }
                     EnhancedAuthStatus::Failed => {
                         let mut connack = self.new_connack(false, result.reason_code);
@@ -218,7 +226,7 @@ impl ClientHandler {
                         self.transport
                             .write_packet(Packet::ConnAck(connack))
                             .await?;
-                        return Ok(Some(Err(MqttError::AuthenticationFailed)));
+                        return Ok(AuthOutcome::Failed(MqttError::AuthenticationFailed));
                     }
                 }
             } else {
@@ -231,7 +239,7 @@ impl ClientHandler {
                 self.transport
                     .write_packet(Packet::ConnAck(connack))
                     .await?;
-                return Ok(Some(Err(MqttError::AuthenticationFailed)));
+                return Ok(AuthOutcome::Failed(MqttError::AuthenticationFailed));
             }
         } else {
             let auth_result = self
@@ -254,13 +262,13 @@ impl ClientHandler {
                 self.transport
                     .write_packet(Packet::ConnAck(connack))
                     .await?;
-                return Ok(Some(Err(MqttError::AuthenticationFailed)));
+                return Ok(AuthOutcome::Failed(MqttError::AuthenticationFailed));
             }
 
             self.user_id = auth_result.user_id;
         }
 
-        Ok(None)
+        Ok(AuthOutcome::Authenticated)
     }
 
     fn new_connack(&self, session_present: bool, reason_code: ReasonCode) -> ConnAckPacket {

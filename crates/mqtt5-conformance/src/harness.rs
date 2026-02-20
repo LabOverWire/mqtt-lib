@@ -13,7 +13,7 @@ use mqtt5::types::Message;
 use mqtt5::{ConnectOptions, MessageProperties, MqttClient, QoS};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use std::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio::time::Duration;
 use ulid::Ulid;
@@ -257,14 +257,14 @@ pub struct ReceivedMessage {
 /// a closure suitable for passing to `MqttClient::subscribe`.
 #[derive(Clone)]
 pub struct MessageCollector {
-    messages: Arc<RwLock<Vec<ReceivedMessage>>>,
+    messages: Arc<Mutex<Vec<ReceivedMessage>>>,
 }
 
 impl MessageCollector {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            messages: Arc::new(RwLock::new(Vec::new())),
+            messages: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -279,10 +279,7 @@ impl MessageCollector {
                 retain: msg.retain,
                 properties: msg.properties.clone(),
             };
-            let messages = messages.clone();
-            tokio::spawn(async move {
-                messages.write().await.push(received);
-            });
+            messages.lock().unwrap().push(received);
         }
     }
 
@@ -290,7 +287,7 @@ impl MessageCollector {
     pub async fn wait_for_messages(&self, count: usize, timeout: Duration) -> bool {
         let start = tokio::time::Instant::now();
         while start.elapsed() < timeout {
-            if self.messages.read().await.len() >= count {
+            if self.messages.lock().unwrap().len() >= count {
                 return true;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -299,18 +296,20 @@ impl MessageCollector {
     }
 
     /// Returns a snapshot of all received messages.
-    pub async fn get_messages(&self) -> Vec<ReceivedMessage> {
-        self.messages.read().await.clone()
+    #[must_use]
+    pub fn get_messages(&self) -> Vec<ReceivedMessage> {
+        self.messages.lock().unwrap().clone()
     }
 
     /// Returns the number of messages received so far.
-    pub async fn count(&self) -> usize {
-        self.messages.read().await.len()
+    #[must_use]
+    pub fn count(&self) -> usize {
+        self.messages.lock().unwrap().len()
     }
 
     /// Clears all collected messages.
-    pub async fn clear(&self) {
-        self.messages.write().await.clear();
+    pub fn clear(&self) {
+        self.messages.lock().unwrap().clear();
     }
 }
 

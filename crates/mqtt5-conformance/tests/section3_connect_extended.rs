@@ -8,7 +8,9 @@ use mqtt5::{ConnectOptions, MqttClient};
 use mqtt5_conformance::harness::{
     connected_client, unique_client_id, ConformanceBroker, MessageCollector,
 };
-use mqtt5_conformance::raw_client::{RawMqttClient, RawPacketBuilder};
+use mqtt5_conformance::raw_client::{
+    put_mqtt_string, wrap_fixed_header, RawMqttClient, RawPacketBuilder,
+};
 use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_secs(3);
@@ -52,7 +54,7 @@ async fn will_retain_zero_publishes_non_retained() {
         collector.wait_for_messages(1, Duration::from_secs(5)).await,
         "[MQTT-3.1.2-14] Will message must be published on connection drop"
     );
-    let msgs = collector.get_messages().await;
+    let msgs = collector.get_messages();
     assert!(
         !msgs[0].retain,
         "[MQTT-3.1.2-14] Will message with Will Retain=0 must be published as non-retained"
@@ -99,7 +101,7 @@ async fn will_retain_one_publishes_retained() {
         collector.wait_for_messages(1, Duration::from_secs(5)).await,
         "[MQTT-3.1.2-15] New subscriber must receive retained will message"
     );
-    let msgs = collector.get_messages().await;
+    let msgs = collector.get_messages();
     assert!(
         msgs[0].retain,
         "[MQTT-3.1.2-15] Will message with Will Retain=1 must be delivered as retained"
@@ -278,7 +280,7 @@ async fn server_discards_oversized_publish() {
     tokio::time::sleep(Duration::from_secs(1)).await;
 
     assert_eq!(
-        collector.count().await,
+        collector.count(),
         0,
         "[MQTT-3.1.2-24] Server must not send packet exceeding client Maximum Packet Size"
     );
@@ -292,7 +294,7 @@ async fn server_discards_oversized_publish() {
         collector.wait_for_messages(1, Duration::from_secs(3)).await,
         "[MQTT-3.1.2-25] Server must still deliver packets within Maximum Packet Size"
     );
-    let msgs = collector.get_messages().await;
+    let msgs = collector.get_messages();
     assert_eq!(msgs[0].payload, b"ok");
 
     publisher.disconnect().await.expect("disconnect failed");
@@ -410,7 +412,7 @@ async fn will_delay_reconnect_suppresses_will() {
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     assert_eq!(
-        collector.count().await,
+        collector.count(),
         0,
         "[MQTT-3.1.3-9] Will message must not be sent when client reconnects before will delay expires"
     );
@@ -462,7 +464,7 @@ async fn will_user_property_order_preserved() {
         collector.wait_for_messages(1, Duration::from_secs(5)).await,
         "[MQTT-3.1.3-10] Will message must be published on connection drop"
     );
-    let msgs = collector.get_messages().await;
+    let msgs = collector.get_messages();
     let received_props: Vec<(&str, &str)> = msgs[0]
         .properties
         .user_properties
@@ -508,7 +510,7 @@ async fn session_not_discarded_while_connected() {
         collector.wait_for_messages(1, Duration::from_secs(3)).await,
         "[MQTT-4.1.0-1] Session state (subscriptions) must persist while connected"
     );
-    let msgs = collector.get_messages().await;
+    let msgs = collector.get_messages();
     assert_eq!(msgs[0].payload, b"alive");
 
     client.disconnect().await.expect("disconnect failed");
@@ -639,39 +641,8 @@ fn build_connect_with_username_and_password(
     put_mqtt_string(&mut body, client_id);
     put_mqtt_string(&mut body, username);
     let pw_bytes = password.as_bytes();
-    body.put_u16(pw_bytes.len() as u16);
+    body.put_u16(u16::try_from(pw_bytes.len()).unwrap());
     body.put_slice(pw_bytes);
 
     wrap_fixed_header(0x10, &body)
-}
-
-fn put_mqtt_string(buf: &mut bytes::BytesMut, s: &str) {
-    use bytes::BufMut;
-    let bytes = s.as_bytes();
-    buf.put_u16(bytes.len() as u16);
-    buf.put_slice(bytes);
-}
-
-fn encode_variable_int(buf: &mut bytes::BytesMut, mut value: u32) {
-    use bytes::BufMut;
-    loop {
-        let mut byte = (value & 0x7F) as u8;
-        value >>= 7;
-        if value > 0 {
-            byte |= 0x80;
-        }
-        buf.put_u8(byte);
-        if value == 0 {
-            break;
-        }
-    }
-}
-
-fn wrap_fixed_header(first_byte: u8, body: &[u8]) -> Vec<u8> {
-    use bytes::{BufMut, BytesMut};
-    let mut packet = BytesMut::new();
-    packet.put_u8(first_byte);
-    encode_variable_int(&mut packet, body.len() as u32);
-    packet.put_slice(body);
-    packet.to_vec()
 }

@@ -198,7 +198,7 @@ async fn publish_retain_stores_message() {
         collector.wait_for_messages(1, TIMEOUT).await,
         "[MQTT-3.3.1-5] New subscriber must receive retained message"
     );
-    let msgs = collector.get_messages().await;
+    let msgs = collector.get_messages();
     assert_eq!(msgs[0].payload, b"retained-payload");
     subscriber.disconnect().await.expect("disconnect failed");
 }
@@ -240,7 +240,7 @@ async fn publish_retain_empty_payload_clears() {
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     assert_eq!(
-        collector.count().await,
+        collector.count(),
         0,
         "[MQTT-3.3.1-6/7] Retained message must be cleared by empty payload publish"
     );
@@ -288,7 +288,7 @@ async fn publish_no_retain_does_not_store() {
         collector.wait_for_messages(1, TIMEOUT).await,
         "[MQTT-3.3.1-8] Original retained message must still be delivered"
     );
-    let msgs = collector.get_messages().await;
+    let msgs = collector.get_messages();
     assert_eq!(
         msgs[0].payload, b"original-retained",
         "[MQTT-3.3.1-8] Non-retained publish must not replace retained message"
@@ -376,7 +376,7 @@ async fn publish_retain_handling_one_only_new_subs() {
         collector.wait_for_messages(1, TIMEOUT).await,
         "[MQTT-3.3.1-10] First subscription must receive retained message"
     );
-    collector.clear().await;
+    collector.clear();
 
     subscriber
         .subscribe_with_options(&topic, sub_opts, collector.callback())
@@ -385,7 +385,7 @@ async fn publish_retain_handling_one_only_new_subs() {
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     assert_eq!(
-        collector.count().await,
+        collector.count(),
         0,
         "[MQTT-3.3.1-10] Re-subscription must NOT receive retained message"
     );
@@ -427,7 +427,7 @@ async fn publish_retain_handling_two_no_retained() {
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     assert_eq!(
-        collector.count().await,
+        collector.count(),
         0,
         "[MQTT-3.3.1-11] RetainHandling=2 must NOT deliver retained messages"
     );
@@ -476,7 +476,7 @@ async fn publish_retain_as_published_zero_clears_flag() {
         collector.wait_for_messages(1, TIMEOUT).await,
         "Subscriber must receive message"
     );
-    let msgs = collector.get_messages().await;
+    let msgs = collector.get_messages();
     assert!(
         !msgs[0].retain,
         "[MQTT-3.3.1-12] retain_as_published=0 must clear RETAIN flag on delivery"
@@ -522,7 +522,7 @@ async fn publish_retain_as_published_one_preserves_flag() {
         collector.wait_for_messages(1, TIMEOUT).await,
         "Subscriber must receive message"
     );
-    let msgs = collector.get_messages().await;
+    let msgs = collector.get_messages();
     assert!(
         msgs[0].retain,
         "[MQTT-3.3.1-13] retain_as_published=1 must preserve RETAIN flag on delivery"
@@ -561,7 +561,7 @@ async fn publish_qos0_delivery() {
         collector.wait_for_messages(1, TIMEOUT).await,
         "[MQTT-3.3.4-1] QoS 0 message must be delivered to subscriber"
     );
-    let msgs = collector.get_messages().await;
+    let msgs = collector.get_messages();
     assert_eq!(msgs[0].payload, b"qos0-msg");
     publisher.disconnect().await.expect("disconnect failed");
     subscriber.disconnect().await.expect("disconnect failed");
@@ -603,7 +603,7 @@ async fn publish_qos1_puback_response() {
         collector.wait_for_messages(1, TIMEOUT).await,
         "[MQTT-3.3.4-1] QoS 1 message must be delivered to subscriber"
     );
-    let msgs = collector.get_messages().await;
+    let msgs = collector.get_messages();
     assert_eq!(msgs[0].payload, b"qos1-msg");
     publisher.disconnect().await.expect("disconnect failed");
     subscriber.disconnect().await.expect("disconnect failed");
@@ -645,7 +645,7 @@ async fn publish_qos2_full_flow() {
         collector.wait_for_messages(1, Duration::from_secs(5)).await,
         "[MQTT-3.3.4-1] QoS 2 message must be delivered to subscriber"
     );
-    let msgs = collector.get_messages().await;
+    let msgs = collector.get_messages();
     assert_eq!(msgs[0].payload, b"qos2-msg");
     assert_eq!(msgs.len(), 1, "QoS 2 must deliver exactly once");
     publisher.disconnect().await.expect("disconnect failed");
@@ -691,7 +691,7 @@ async fn publish_payload_format_indicator_forwarded() {
         collector.wait_for_messages(1, TIMEOUT).await,
         "Subscriber must receive message"
     );
-    let msgs = collector.get_messages().await;
+    let msgs = collector.get_messages();
     assert_eq!(
         msgs[0].properties.payload_format_indicator,
         Some(true),
@@ -736,7 +736,7 @@ async fn publish_content_type_forwarded() {
         collector.wait_for_messages(1, TIMEOUT).await,
         "Subscriber must receive message"
     );
-    let msgs = collector.get_messages().await;
+    let msgs = collector.get_messages();
     assert_eq!(
         msgs[0].properties.content_type.as_deref(),
         Some("application/json"),
@@ -782,7 +782,7 @@ async fn publish_response_topic_and_correlation_data_forwarded() {
         collector.wait_for_messages(1, TIMEOUT).await,
         "Subscriber must receive message"
     );
-    let msgs = collector.get_messages().await;
+    let msgs = collector.get_messages();
     assert_eq!(
         msgs[0].properties.response_topic.as_deref(),
         Some("reply/topic"),
@@ -839,7 +839,7 @@ async fn publish_user_properties_forwarded_and_ordered() {
         collector.wait_for_messages(1, TIMEOUT).await,
         "Subscriber must receive message"
     );
-    let msgs = collector.get_messages().await;
+    let msgs = collector.get_messages();
     let received: Vec<(String, String)> = msgs[0]
         .properties
         .user_properties
@@ -889,7 +889,7 @@ async fn publish_topic_matches_subscription_filter() {
         collector.wait_for_messages(1, TIMEOUT).await,
         "[MQTT-3.3.2-3] Wildcard subscription must match published topic"
     );
-    let msgs = collector.get_messages().await;
+    let msgs = collector.get_messages();
     assert_eq!(
         msgs[0].topic, publish_topic,
         "[MQTT-3.3.2-3] Delivered topic name must be the published topic, not the filter"

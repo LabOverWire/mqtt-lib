@@ -55,6 +55,8 @@ impl ConformanceReport {
                     TestStatus::Untested => "[    ]",
                     TestStatus::NotApplicable => "[ NA ]",
                     TestStatus::Partial => "[PART]",
+                    TestStatus::CrossRef => "[XREF]",
+                    TestStatus::Skipped => "[SKIP]",
                 };
                 let text = truncate(&stmt.text, 70);
                 let _ = writeln!(out, "  {marker} {} ({:?}): {text}", stmt.id, stmt.level);
@@ -72,10 +74,10 @@ impl ConformanceReport {
 }
 
 fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
+    if s.chars().count() <= max {
         s.to_owned()
     } else {
-        let mut result = s[..max].to_owned();
+        let mut result: String = s.chars().take(max).collect();
         result.push_str("...");
         result
     }

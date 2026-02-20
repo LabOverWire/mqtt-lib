@@ -39,7 +39,11 @@ async fn flow_control_quota_enforced() {
 
     for i in 1..=5u16 {
         pub_raw
-            .send_raw(&RawPacketBuilder::publish_qos1(&topic, &[i as u8], i))
+            .send_raw(&RawPacketBuilder::publish_qos1(
+                &topic,
+                &[u8::try_from(i).unwrap()],
+                i,
+            ))
             .await
             .unwrap();
     }

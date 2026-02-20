@@ -82,7 +82,11 @@ async fn qos1_server_outbound_unique_nonzero_id_and_dup_zero() {
     let mut seen_ids = HashSet::new();
     for i in 1..=3u16 {
         pub_raw
-            .send_raw(&RawPacketBuilder::publish_qos1(&topic, &[i as u8], i))
+            .send_raw(&RawPacketBuilder::publish_qos1(
+                &topic,
+                &[u8::try_from(i).unwrap()],
+                i,
+            ))
             .await
             .unwrap();
         let _ = pub_raw.expect_puback(TIMEOUT).await;
@@ -563,7 +567,7 @@ async fn qos2_duplicate_publish_no_double_delivery() {
     let _ = pub_raw.expect_pubcomp(TIMEOUT).await;
 
     tokio::time::sleep(Duration::from_millis(500)).await;
-    let msgs = collector.get_messages().await;
+    let msgs = collector.get_messages();
     assert_eq!(
         msgs.len(),
         1,
@@ -639,7 +643,7 @@ async fn qos2_after_pubcomp_same_id_is_new_message() {
         collector.wait_for_messages(2, TIMEOUT).await,
         "[MQTT-4.3.3-12] Both messages must be delivered"
     );
-    let msgs = collector.get_messages().await;
+    let msgs = collector.get_messages();
     assert_eq!(msgs[0].payload, b"first");
     assert_eq!(msgs[1].payload, b"second");
 }

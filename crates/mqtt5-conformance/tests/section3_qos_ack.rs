@@ -69,7 +69,7 @@ async fn puback_message_delivered_on_qos1() {
         collector.wait_for_messages(1, TIMEOUT).await,
         "subscriber should receive QoS 1 message"
     );
-    let msgs = collector.get_messages().await;
+    let msgs = collector.get_messages();
     assert_eq!(msgs[0].payload, b"qos1-payload");
 }
 
@@ -150,7 +150,7 @@ async fn pubrec_no_delivery_before_pubrel() {
 
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(
-        collector.count().await,
+        collector.count(),
         0,
         "message must NOT be delivered before PUBREL"
     );
@@ -300,7 +300,7 @@ async fn pubcomp_message_delivered_after_exchange() {
         collector.wait_for_messages(1, TIMEOUT).await,
         "subscriber should receive message after full QoS 2 exchange"
     );
-    let msgs = collector.get_messages().await;
+    let msgs = collector.get_messages();
     assert_eq!(msgs[0].payload, b"qos2-payload");
 }
 

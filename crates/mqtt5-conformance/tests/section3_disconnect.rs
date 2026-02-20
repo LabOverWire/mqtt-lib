@@ -42,7 +42,7 @@ async fn disconnect_normal_suppresses_will() {
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     assert_eq!(
-        collector.count().await,
+        collector.count(),
         0,
         "[MQTT-3.14.4-3] will must NOT be published on normal disconnect (0x00)"
     );
@@ -84,7 +84,7 @@ async fn disconnect_with_will_message_publishes_will() {
         collector.wait_for_messages(1, Duration::from_secs(3)).await,
         "will must be published when DISCONNECT reason is 0x04 (DisconnectWithWillMessage)"
     );
-    let msgs = collector.get_messages().await;
+    let msgs = collector.get_messages();
     assert_eq!(msgs[0].topic, will_topic);
     assert_eq!(msgs[0].payload, b"offline");
 
@@ -123,7 +123,7 @@ async fn tcp_drop_publishes_will() {
         collector.wait_for_messages(1, Duration::from_secs(6)).await,
         "will must be published after TCP drop (keep-alive timeout triggers abnormal disconnect)"
     );
-    let msgs = collector.get_messages().await;
+    let msgs = collector.get_messages();
     assert_eq!(msgs[0].topic, will_topic);
     assert_eq!(msgs[0].payload, b"offline");
 

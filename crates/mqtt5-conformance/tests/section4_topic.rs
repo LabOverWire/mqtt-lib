@@ -163,12 +163,12 @@ async fn dollar_topics_not_matched_by_root_wildcards() {
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     assert_eq!(
-        collector_hash.count().await,
+        collector_hash.count(),
         0,
         "[MQTT-4.7.2-1] # must not match $SYS/test"
     );
     assert_eq!(
-        collector_plus.count().await,
+        collector_plus.count(),
         0,
         "[MQTT-4.7.2-1] +/info must not match $SYS/info"
     );
@@ -194,7 +194,7 @@ async fn dollar_topics_matched_by_explicit_prefix() {
 
     tokio::time::sleep(Duration::from_millis(300)).await;
 
-    let msgs = collector.get_messages().await;
+    let msgs = collector.get_messages();
     let found = msgs
         .iter()
         .find(|m| m.topic == "$SYS/test")
@@ -290,7 +290,7 @@ async fn single_level_wildcard_matches_one_level() {
 
     tokio::time::sleep(Duration::from_millis(300)).await;
 
-    let msgs = collector.get_messages().await;
+    let msgs = collector.get_messages();
     assert_eq!(
         msgs.len(),
         1,
@@ -325,7 +325,7 @@ async fn multi_level_wildcard_matches_all_descendants() {
         "sport/# must match sport, sport/tennis, and sport/tennis/player"
     );
 
-    let msgs = collector.get_messages().await;
+    let msgs = collector.get_messages();
     let topics: Vec<&str> = msgs.iter().map(|m| m.topic.as_str()).collect();
     assert!(topics.contains(&"sport"));
     assert!(topics.contains(&"sport/tennis"));
@@ -375,17 +375,17 @@ async fn server_delivers_to_matching_subscribers() {
         collector_exact.wait_for_messages(1, TIMEOUT).await,
         "[MQTT-4.5.0-1] exact-match subscriber must receive the message"
     );
-    let msgs = collector_exact.get_messages().await;
+    let msgs = collector_exact.get_messages();
     assert_eq!(msgs[0].payload, b"match-payload");
 
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(
-        collector_wild.count().await,
+        collector_wild.count(),
         0,
         "wildcard subscriber for deliver/tag/+ must not match deliver/tag"
     );
     assert_eq!(
-        collector_non.count().await,
+        collector_non.count(),
         0,
         "non-matching subscriber must not receive the message"
     );
@@ -421,7 +421,7 @@ async fn message_ordering_preserved_same_qos() {
         "subscriber should receive all 5 messages"
     );
 
-    let msgs = collector.get_messages().await;
+    let msgs = collector.get_messages();
     for (i, msg) in msgs.iter().enumerate() {
         let expected = format!("msg-{i}");
         assert_eq!(
@@ -477,7 +477,7 @@ async fn topic_matching_no_unicode_normalization() {
 
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(
-        collector_dec.count().await,
+        collector_dec.count(),
         0,
         "[MQTT-4.7.3-4] decomposed subscriber must NOT receive message on precomposed topic \
          (no Unicode normalization)"
@@ -491,7 +491,7 @@ async fn topic_matching_no_unicode_normalization() {
     );
 
     tokio::time::sleep(Duration::from_millis(300)).await;
-    let pre_msgs = collector_pre.get_messages().await;
+    let pre_msgs = collector_pre.get_messages();
     assert_eq!(
         pre_msgs.len(),
         1,

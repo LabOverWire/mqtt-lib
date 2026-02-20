@@ -843,7 +843,7 @@ fn configure_tls(config: &mut BrokerConfig, cmd: &RunArgs) -> Result<()> {
             info!("TLS enabled");
         }
 
-        *config = config.clone().with_tls(tls_config);
+        config.tls_config = Some(tls_config);
     } else if cmd.tls_cert.is_some() || cmd.tls_key.is_some() {
         anyhow::bail!("Both --tls-cert and --tls-key must be provided together");
     } else if cmd.tls_ca_cert.is_some() || cmd.tls_require_client_cert {
@@ -869,7 +869,7 @@ fn configure_websocket(config: &mut BrokerConfig, cmd: &RunArgs) -> Result<()> {
         let ws_config = WebSocketConfig::default()
             .with_bind_addresses(ws_addrs?)
             .with_path(cmd.ws_path.clone());
-        *config = config.clone().with_websocket(ws_config);
+        config.websocket_config = Some(ws_config);
         info!("WebSocket enabled");
     }
 
@@ -895,7 +895,7 @@ fn configure_websocket(config: &mut BrokerConfig, cmd: &RunArgs) -> Result<()> {
                 .with_bind_addresses(ws_tls_addrs?)
                 .with_path(cmd.ws_path.clone())
                 .with_tls(true);
-            *config = config.clone().with_websocket_tls(ws_tls_config);
+            config.websocket_tls_config = Some(ws_tls_config);
             info!("WebSocket TLS enabled");
         } else {
             anyhow::bail!(
@@ -943,7 +943,7 @@ fn configure_quic(config: &mut BrokerConfig, cmd: &RunArgs) -> Result<()> {
                 .with_require_client_cert(cmd.tls_require_client_cert);
         }
 
-        *config = config.clone().with_quic(quic_config);
+        config.quic_config = Some(quic_config);
         info!("QUIC enabled on {:?}", cmd.quic_host);
     } else {
         anyhow::bail!("Both --tls-cert and --tls-key must be provided when using --quic-host");
