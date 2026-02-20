@@ -1,5 +1,3 @@
-#![allow(clippy::cast_possible_truncation)]
-
 mod common;
 
 use common::{
@@ -357,5 +355,84 @@ async fn unsubscribe_idempotent() {
         rc2[0], 0x11,
         "second unsubscribe should be NoSubscriptionExisted (0x11), got 0x{:02X}",
         rc2[0]
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Group 4: UNSUBACK Reason Code Validation — Section 3.11.3
+// ---------------------------------------------------------------------------
+
+/// `[MQTT-3.11.3-2]` UNSUBACK reason codes must be spec-defined values.
+/// Success (0x00) and `NoSubscriptionExisted` (0x11) are the two valid
+/// outcomes for a well-formed UNSUBSCRIBE. Verify both are in range.
+#[tokio::test]
+async fn unsuback_reason_codes_are_valid_spec_values() {
+    let broker = ConformanceBroker::start().await;
+    let mut raw = RawMqttClient::connect_tcp(broker.socket_addr())
+        .await
+        .unwrap();
+    let client_id = unique_client_id("unsuback-valid");
+    raw.connect_and_establish(&client_id, TIMEOUT).await;
+
+    raw.send_raw(&RawPacketBuilder::subscribe_with_packet_id(
+        "test/valid-rc",
+        0,
+        1,
+    ))
+    .await
+    .unwrap();
+    raw.expect_suback(TIMEOUT).await.expect("SUBACK");
+
+    let filters = ["test/valid-rc", "test/never-existed-rc"];
+    raw.send_raw(&RawPacketBuilder::unsubscribe_multiple(&filters, 2))
+        .await
+        .unwrap();
+
+    let (_, reason_codes) = raw
+        .expect_unsuback(TIMEOUT)
+        .await
+        .expect("expected UNSUBACK from broker");
+
+    assert_eq!(reason_codes.len(), 2);
+
+    let valid_unsuback_codes: &[u8] = &[0x00, 0x11, 0x80, 0x83, 0x87];
+    for (i, rc) in reason_codes.iter().enumerate() {
+        assert!(
+            valid_unsuback_codes.contains(rc),
+            "[MQTT-3.11.3-2] UNSUBACK reason code {i} is 0x{rc:02X}, not a valid spec value"
+        );
+    }
+    assert_eq!(
+        reason_codes[0], 0x00,
+        "first filter (subscribed) should be Success (0x00)"
+    );
+    assert_eq!(
+        reason_codes[1], 0x11,
+        "second filter (never existed) should be NoSubscriptionExisted (0x11)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Group 5: Invalid UTF-8 — Section 3.10.3
+// ---------------------------------------------------------------------------
+
+/// `[MQTT-3.10.3-1]` Topic filter in UNSUBSCRIBE must be valid UTF-8.
+/// Sending invalid UTF-8 bytes must cause disconnect.
+#[tokio::test]
+async fn unsubscribe_invalid_utf8_rejected() {
+    let broker = ConformanceBroker::start().await;
+    let mut raw = RawMqttClient::connect_tcp(broker.socket_addr())
+        .await
+        .unwrap();
+    let client_id = unique_client_id("unsub-bad-utf8");
+    raw.connect_and_establish(&client_id, TIMEOUT).await;
+
+    raw.send_raw(&RawPacketBuilder::unsubscribe_invalid_utf8(1))
+        .await
+        .unwrap();
+
+    assert!(
+        raw.expect_disconnect(TIMEOUT).await,
+        "[MQTT-3.10.3-1] server must disconnect on UNSUBSCRIBE with invalid UTF-8 topic filter"
     );
 }

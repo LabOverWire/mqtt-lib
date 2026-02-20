@@ -438,6 +438,8 @@ impl ClientHandler {
                     handler.on_message_delivered(event).await;
                 }
             }
+
+            self.drain_queued_messages().await;
         }
     }
 
@@ -530,6 +532,49 @@ impl ClientHandler {
                     handler.on_message_delivered(event).await;
                 }
             }
+
+            self.drain_queued_messages().await;
+        }
+    }
+
+    async fn drain_queued_messages(&mut self) {
+        let Some(ref storage) = self.storage else {
+            return;
+        };
+        let Some(client_id) = self.client_id.clone() else {
+            return;
+        };
+
+        let available_slots =
+            usize::from(self.client_receive_maximum).saturating_sub(self.outbound_inflight.len());
+        if available_slots == 0 {
+            return;
+        }
+
+        let queued = match storage.get_queued_messages(&client_id).await {
+            Ok(msgs) => msgs,
+            Err(e) => {
+                debug!("failed to load queued messages for {client_id}: {e}");
+                return;
+            }
+        };
+
+        if queued.is_empty() {
+            return;
+        }
+
+        if let Err(e) = storage.remove_queued_messages(&client_id).await {
+            debug!("failed to remove queued messages for {client_id}: {e}");
+            return;
+        }
+
+        let send_count = available_slots.min(queued.len());
+        for msg in queued.into_iter().take(send_count) {
+            let publish = msg.to_publish_packet();
+            if let Err(e) = self.send_publish(publish).await {
+                debug!("failed to send queued message to {client_id}: {e}");
+                break;
+            }
         }
     }
 
@@ -584,6 +629,16 @@ impl ClientHandler {
         );
         self.write_buffer.clear();
         encode_packet_to_buffer(&Packet::Publish(publish), &mut self.write_buffer)?;
+        if let Some(max) = self.client_max_packet_size {
+            if self.write_buffer.len() > max as usize {
+                debug!(
+                    packet_size = self.write_buffer.len(),
+                    max_packet_size = max,
+                    "Discarding PUBLISH exceeding client Maximum Packet Size"
+                );
+                return Ok(());
+            }
+        }
         self.transport.write(&self.write_buffer).await?;
         self.stats.publish_sent(payload_size);
         Ok(())

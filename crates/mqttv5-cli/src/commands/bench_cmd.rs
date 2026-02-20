@@ -1,7 +1,3 @@
-#![allow(clippy::cast_possible_truncation)]
-#![allow(clippy::cast_precision_loss)]
-#![allow(clippy::too_many_lines)]
-
 use anyhow::{Context, Result};
 use clap::{Args, ValueEnum};
 use mqtt5::time::Duration;

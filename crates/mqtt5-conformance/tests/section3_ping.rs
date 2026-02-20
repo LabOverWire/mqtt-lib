@@ -1,5 +1,3 @@
-#![allow(clippy::cast_possible_truncation)]
-
 mod common;
 
 use common::{unique_client_id, ConformanceBroker, RawMqttClient, RawPacketBuilder};

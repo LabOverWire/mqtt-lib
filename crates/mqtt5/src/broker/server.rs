@@ -1490,6 +1490,11 @@ impl MqttBroker {
         self.listeners.first()?.local_addr().ok()
     }
 
+    #[must_use]
+    pub fn ws_local_addr(&self) -> Option<std::net::SocketAddr> {
+        self.ws_listeners.first()?.local_addr().ok()
+    }
+
     /// Returns a receiver that signals when the broker is ready to accept connections
     ///
     /// Call this before spawning `run()` to get a receiver. The broker sends `true`

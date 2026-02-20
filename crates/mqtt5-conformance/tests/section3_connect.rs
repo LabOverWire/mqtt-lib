@@ -5,8 +5,6 @@
 //! valid-path scenarios, or [`RawMqttClient`] for sending malformed packets
 //! that the normal API would reject.
 
-#![allow(clippy::cast_possible_truncation)]
-
 mod common;
 
 use common::{

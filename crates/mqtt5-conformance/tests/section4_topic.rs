@@ -1,5 +1,3 @@
-#![allow(clippy::cast_possible_truncation)]
-
 mod common;
 
 use common::{
@@ -334,4 +332,171 @@ async fn multi_level_wildcard_matches_all_descendants() {
     assert!(topics.contains(&"sport"));
     assert!(topics.contains(&"sport/tennis"));
     assert!(topics.contains(&"sport/tennis/player"));
+}
+
+// ---------------------------------------------------------------------------
+// Group 5: Message Delivery & Ordering — Sections 4.5 & 4.6
+// ---------------------------------------------------------------------------
+
+/// `[MQTT-4.5.0-1]` The server MUST deliver published messages to clients
+/// that have matching subscriptions.
+#[tokio::test]
+async fn server_delivers_to_matching_subscribers() {
+    let broker = ConformanceBroker::start().await;
+    let tag = unique_client_id("deliver");
+    let topic = format!("deliver/{tag}");
+
+    let collector_exact = MessageCollector::new();
+    let sub_exact = connected_client("sub-exact", &broker).await;
+    sub_exact
+        .subscribe(&topic, collector_exact.callback())
+        .await
+        .unwrap();
+
+    let filter_wild = format!("deliver/{tag}/+");
+    let collector_wild = MessageCollector::new();
+    let sub_wild = connected_client("sub-wild", &broker).await;
+    sub_wild
+        .subscribe(&filter_wild, collector_wild.callback())
+        .await
+        .unwrap();
+
+    let collector_non = MessageCollector::new();
+    let sub_non = connected_client("sub-non", &broker).await;
+    sub_non
+        .subscribe("other/topic", collector_non.callback())
+        .await
+        .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let publisher = connected_client("pub-deliver", &broker).await;
+    publisher.publish(&topic, b"match-payload").await.unwrap();
+
+    assert!(
+        collector_exact.wait_for_messages(1, TIMEOUT).await,
+        "[MQTT-4.5.0-1] exact-match subscriber must receive the message"
+    );
+    let msgs = collector_exact.get_messages().await;
+    assert_eq!(msgs[0].payload, b"match-payload");
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        collector_wild.count().await,
+        0,
+        "wildcard subscriber for deliver/tag/+ must not match deliver/tag"
+    );
+    assert_eq!(
+        collector_non.count().await,
+        0,
+        "non-matching subscriber must not receive the message"
+    );
+}
+
+/// `[MQTT-4.6.0-5]` Message ordering MUST be preserved per topic for the
+/// same `QoS` level. Send multiple `QoS` 0 messages on the same topic and
+/// verify they arrive in order.
+#[tokio::test]
+async fn message_ordering_preserved_same_qos() {
+    let broker = ConformanceBroker::start().await;
+    let tag = unique_client_id("order");
+    let topic = format!("order/{tag}");
+
+    let collector = MessageCollector::new();
+    let subscriber = connected_client("sub-order", &broker).await;
+    subscriber
+        .subscribe(&topic, collector.callback())
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let publisher = connected_client("pub-order", &broker).await;
+    for i in 0u32..5 {
+        publisher
+            .publish(&topic, format!("msg-{i}").into_bytes())
+            .await
+            .unwrap();
+    }
+
+    assert!(
+        collector.wait_for_messages(5, TIMEOUT).await,
+        "subscriber should receive all 5 messages"
+    );
+
+    let msgs = collector.get_messages().await;
+    for (i, msg) in msgs.iter().enumerate() {
+        let expected = format!("msg-{i}");
+        assert_eq!(
+            msg.payload,
+            expected.as_bytes(),
+            "[MQTT-4.6.0-5] message {i} must be in order, expected {expected}, got {}",
+            String::from_utf8_lossy(&msg.payload)
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Group 6: Unicode Normalization — Section 4.7.3
+// ---------------------------------------------------------------------------
+
+/// `[MQTT-4.7.3-4]` Topic matching MUST NOT apply Unicode normalization.
+/// U+00C5 (A-ring precomposed) and U+0041 U+030A (A + combining ring)
+/// are visually identical but must be treated as different topics.
+#[tokio::test]
+async fn topic_matching_no_unicode_normalization() {
+    let broker = ConformanceBroker::start().await;
+    let tag = unique_client_id("unicode");
+
+    let precomposed = format!("uni/{tag}/\u{00C5}");
+    let decomposed = format!("uni/{tag}/A\u{030A}");
+
+    let collector_pre = MessageCollector::new();
+    let sub_pre = connected_client("sub-pre", &broker).await;
+    sub_pre
+        .subscribe(&precomposed, collector_pre.callback())
+        .await
+        .unwrap();
+
+    let collector_dec = MessageCollector::new();
+    let sub_dec = connected_client("sub-dec", &broker).await;
+    sub_dec
+        .subscribe(&decomposed, collector_dec.callback())
+        .await
+        .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let publisher = connected_client("pub-unicode", &broker).await;
+    publisher
+        .publish(&precomposed, b"precomposed")
+        .await
+        .unwrap();
+
+    assert!(
+        collector_pre.wait_for_messages(1, TIMEOUT).await,
+        "precomposed subscriber must receive message on precomposed topic"
+    );
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        collector_dec.count().await,
+        0,
+        "[MQTT-4.7.3-4] decomposed subscriber must NOT receive message on precomposed topic \
+         (no Unicode normalization)"
+    );
+
+    publisher.publish(&decomposed, b"decomposed").await.unwrap();
+
+    assert!(
+        collector_dec.wait_for_messages(1, TIMEOUT).await,
+        "decomposed subscriber must receive message on decomposed topic"
+    );
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let pre_msgs = collector_pre.get_messages().await;
+    assert_eq!(
+        pre_msgs.len(),
+        1,
+        "[MQTT-4.7.3-4] precomposed subscriber must NOT receive message on decomposed topic"
+    );
 }

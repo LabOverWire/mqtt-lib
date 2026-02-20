@@ -6,7 +6,8 @@
 
 #![allow(clippy::missing_panics_doc)]
 
-use mqtt5::broker::config::{BrokerConfig, StorageBackend, StorageConfig};
+use mqtt5::broker::auth::AuthProvider;
+use mqtt5::broker::config::{BrokerConfig, StorageBackend, StorageConfig, WebSocketConfig};
 use mqtt5::broker::server::MqttBroker;
 use mqtt5::types::Message;
 use mqtt5::{ConnectOptions, MessageProperties, MqttClient, QoS};
@@ -24,6 +25,7 @@ use ulid::Ulid;
 pub struct ConformanceBroker {
     address: String,
     port: u16,
+    ws_port: Option<u16>,
     config: BrokerConfig,
     handle: Option<JoinHandle<()>>,
 }
@@ -44,6 +46,25 @@ impl ConformanceBroker {
         Self::start_with_config(config).await
     }
 
+    /// Starts a broker with WebSocket enabled on a random port.
+    pub async fn start_with_websocket() -> Self {
+        let storage_config = StorageConfig {
+            backend: StorageBackend::Memory,
+            enable_persistence: true,
+            ..Default::default()
+        };
+
+        let ws_config =
+            WebSocketConfig::new().with_bind_address("127.0.0.1:0".parse::<SocketAddr>().unwrap());
+
+        let config = BrokerConfig::default()
+            .with_bind_address("127.0.0.1:0".parse::<SocketAddr>().unwrap())
+            .with_websocket(ws_config)
+            .with_storage(storage_config);
+
+        Self::start_with_config(config).await
+    }
+
     /// Starts a broker with the given configuration.
     pub async fn start_with_config(config: BrokerConfig) -> Self {
         let mut broker = MqttBroker::with_config(config.clone())
@@ -53,6 +74,7 @@ impl ConformanceBroker {
         let addr = broker.local_addr().expect("no local addr");
         let port = addr.port();
         let address = format!("mqtt://{addr}");
+        let ws_port = broker.ws_local_addr().map(|a| a.port());
 
         let handle = tokio::spawn(async move {
             let _ = broker.run().await;
@@ -63,6 +85,45 @@ impl ConformanceBroker {
         Self {
             address,
             port,
+            ws_port,
+            config,
+            handle: Some(handle),
+        }
+    }
+
+    /// Starts a broker with a custom auth provider.
+    pub async fn start_with_auth_provider(provider: Arc<dyn AuthProvider>) -> Self {
+        let storage_config = StorageConfig {
+            backend: StorageBackend::Memory,
+            enable_persistence: true,
+            ..Default::default()
+        };
+
+        let config = BrokerConfig::default()
+            .with_bind_address("127.0.0.1:0".parse::<SocketAddr>().unwrap())
+            .with_storage(storage_config);
+
+        let mut broker = MqttBroker::with_config(config.clone())
+            .await
+            .expect("broker creation failed");
+
+        broker = broker.with_auth_provider(provider);
+
+        let addr = broker.local_addr().expect("no local addr");
+        let port = addr.port();
+        let address = format!("mqtt://{addr}");
+        let ws_port = broker.ws_local_addr().map(|a| a.port());
+
+        let handle = tokio::spawn(async move {
+            let _ = broker.run().await;
+        });
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        Self {
+            address,
+            port,
+            ws_port,
             config,
             handle: Some(handle),
         }
@@ -80,10 +141,25 @@ impl ConformanceBroker {
         self.port
     }
 
+    /// Returns the WebSocket port the broker is listening on, if enabled.
+    #[must_use]
+    pub fn ws_port(&self) -> Option<u16> {
+        self.ws_port
+    }
+
     /// Returns the broker's socket address for raw TCP connections.
     #[must_use]
     pub fn socket_addr(&self) -> SocketAddr {
         SocketAddr::from(([127, 0, 0, 1], self.port))
+    }
+
+    /// Returns the broker's WebSocket socket address.
+    ///
+    /// # Panics
+    /// Panics if WebSocket is not enabled on this broker.
+    #[must_use]
+    pub fn ws_socket_addr(&self) -> SocketAddr {
+        SocketAddr::from(([127, 0, 0, 1], self.ws_port.expect("WebSocket not enabled")))
     }
 
     /// Stops the broker by aborting its task.
@@ -112,6 +188,7 @@ impl ConformanceBroker {
         let addr = broker.local_addr().expect("no local addr");
         self.port = addr.port();
         self.address = format!("mqtt://{addr}");
+        self.ws_port = broker.ws_local_addr().map(|a| a.port());
 
         let handle = tokio::spawn(async move {
             let _ = broker.run().await;

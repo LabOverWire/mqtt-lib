@@ -1,5 +1,3 @@
-#![allow(clippy::cast_possible_truncation)]
-
 mod common;
 
 use common::{
@@ -447,5 +445,201 @@ async fn subscribe_replaces_existing() {
     assert!(
         duplicate.is_none(),
         "subscriber should receive only one copy (replacement, not duplicate subscription)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Group 6: Subscribe Options Validation — Section 3.8.3
+// ---------------------------------------------------------------------------
+
+/// `[MQTT-3.8.3-5]` Reserved bits in the subscribe options byte MUST be zero.
+/// Setting bits 6-7 to non-zero is a protocol error that must cause disconnect.
+#[tokio::test]
+async fn subscribe_reserved_option_bits_rejected() {
+    let broker = ConformanceBroker::start().await;
+    let mut raw = RawMqttClient::connect_tcp(broker.socket_addr())
+        .await
+        .unwrap();
+    let client_id = unique_client_id("sub-reserved-bits");
+    raw.connect_and_establish(&client_id, TIMEOUT).await;
+
+    raw.send_raw(&RawPacketBuilder::subscribe_with_options(
+        "test/reserved-bits",
+        0xC0,
+        1,
+    ))
+    .await
+    .unwrap();
+
+    assert!(
+        raw.expect_disconnect(TIMEOUT).await,
+        "[MQTT-3.8.3-5] server must disconnect on SUBSCRIBE with reserved option bits set"
+    );
+}
+
+/// `[MQTT-3.8.3-1]` Topic filter in SUBSCRIBE must be valid UTF-8.
+/// Sending invalid UTF-8 bytes must cause disconnect.
+#[tokio::test]
+async fn subscribe_invalid_utf8_rejected() {
+    let broker = ConformanceBroker::start().await;
+    let mut raw = RawMqttClient::connect_tcp(broker.socket_addr())
+        .await
+        .unwrap();
+    let client_id = unique_client_id("sub-bad-utf8");
+    raw.connect_and_establish(&client_id, TIMEOUT).await;
+
+    raw.send_raw(&RawPacketBuilder::subscribe_invalid_utf8(1))
+        .await
+        .unwrap();
+
+    assert!(
+        raw.expect_disconnect(TIMEOUT).await,
+        "[MQTT-3.8.3-1] server must disconnect on SUBSCRIBE with invalid UTF-8 topic filter"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Group 7: Retain Handling — Section 3.8.4
+// ---------------------------------------------------------------------------
+
+/// `[MQTT-3.8.4-4]` When Retain Handling is 0 (`SendAtSubscribe`), retained
+/// messages are sent on every subscribe, including re-subscribes.
+#[tokio::test]
+async fn retain_handling_zero_sends_on_resubscribe() {
+    let config = memory_config();
+    let broker = ConformanceBroker::start_with_config(config).await;
+
+    let publisher = connected_client("rh0-pub", &broker).await;
+    let pub_opts = mqtt5::PublishOptions {
+        qos: QoS::AtMostOnce,
+        retain: true,
+        ..Default::default()
+    };
+    publisher
+        .publish_with_options("test/rh0/topic", b"retained-payload", pub_opts)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let subscriber = connected_client("rh0-sub", &broker).await;
+    let collector = MessageCollector::new();
+    let sub_opts = SubscribeOptions {
+        qos: QoS::AtMostOnce,
+        retain_handling: mqtt5::RetainHandling::SendAtSubscribe,
+        ..Default::default()
+    };
+    subscriber
+        .subscribe_with_options("test/rh0/topic", sub_opts.clone(), collector.callback())
+        .await
+        .unwrap();
+
+    assert!(
+        collector.wait_for_messages(1, TIMEOUT).await,
+        "first subscribe with RetainHandling=0 must deliver retained message"
+    );
+    let msgs = collector.get_messages().await;
+    assert_eq!(msgs[0].payload, b"retained-payload");
+
+    collector.clear().await;
+
+    subscriber
+        .subscribe_with_options("test/rh0/topic", sub_opts, collector.callback())
+        .await
+        .unwrap();
+
+    assert!(
+        collector.wait_for_messages(1, TIMEOUT).await,
+        "[MQTT-3.8.4-4] re-subscribe with RetainHandling=0 must deliver retained message again"
+    );
+    let msgs2 = collector.get_messages().await;
+    assert_eq!(msgs2[0].payload, b"retained-payload");
+}
+
+// ---------------------------------------------------------------------------
+// Group 8: Delivered QoS — Section 3.8.4
+// ---------------------------------------------------------------------------
+
+/// `[MQTT-3.8.4-8]` The delivered `QoS` is the minimum of the published `QoS`
+/// and the subscription's granted `QoS`. Subscribe at `QoS` 0, publish at `QoS` 1
+/// → delivered at `QoS` 0.
+#[tokio::test]
+async fn delivered_qos_is_minimum_sub0_pub1() {
+    let broker = ConformanceBroker::start().await;
+    let tag = unique_client_id("minqos01");
+    let topic = format!("minqos/{tag}");
+
+    let mut raw_sub = RawMqttClient::connect_tcp(broker.socket_addr())
+        .await
+        .unwrap();
+    let sub_id = unique_client_id("sub-mq01");
+    raw_sub.connect_and_establish(&sub_id, TIMEOUT).await;
+
+    raw_sub
+        .send_raw(&RawPacketBuilder::subscribe_with_packet_id(&topic, 0, 1))
+        .await
+        .unwrap();
+    let (_, rc) = raw_sub.expect_suback(TIMEOUT).await.expect("SUBACK");
+    assert_eq!(rc[0], 0x00, "granted QoS should be 0");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let mut raw_publisher = RawMqttClient::connect_tcp(broker.socket_addr())
+        .await
+        .unwrap();
+    let pub_id = unique_client_id("pub-mq01");
+    raw_publisher.connect_and_establish(&pub_id, TIMEOUT).await;
+
+    raw_publisher
+        .send_raw(&RawPacketBuilder::publish_qos1(&topic, b"hello", 1))
+        .await
+        .unwrap();
+
+    let msg = raw_sub.expect_publish(TIMEOUT).await;
+    assert!(msg.is_some(), "subscriber should receive the message");
+    let (qos, _, payload) = msg.unwrap();
+    assert_eq!(payload, b"hello");
+    assert_eq!(
+        qos, 0,
+        "[MQTT-3.8.4-8] delivered QoS must be min(pub=1, sub=0) = 0"
+    );
+}
+
+/// `[MQTT-3.8.4-8]` Subscribe at `QoS` 1, publish at `QoS` 2 → delivered at `QoS` 1.
+#[tokio::test]
+async fn delivered_qos_is_minimum_sub1_pub2() {
+    let broker = ConformanceBroker::start().await;
+    let tag = unique_client_id("minqos12");
+    let topic = format!("minqos/{tag}");
+
+    let mut raw_sub = RawMqttClient::connect_tcp(broker.socket_addr())
+        .await
+        .unwrap();
+    let sub_id = unique_client_id("sub-mq12");
+    raw_sub.connect_and_establish(&sub_id, TIMEOUT).await;
+
+    raw_sub
+        .send_raw(&RawPacketBuilder::subscribe_with_packet_id(&topic, 1, 1))
+        .await
+        .unwrap();
+    let (_, rc) = raw_sub.expect_suback(TIMEOUT).await.expect("SUBACK");
+    assert_eq!(rc[0], 0x01, "granted QoS should be 1");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let publisher = connected_client("pub-mq12", &broker).await;
+    let pub_opts = mqtt5::PublishOptions {
+        qos: QoS::ExactlyOnce,
+        ..Default::default()
+    };
+    publisher
+        .publish_with_options(&topic, b"world", pub_opts)
+        .await
+        .unwrap();
+
+    let msg = raw_sub.expect_publish(TIMEOUT).await;
+    assert!(msg.is_some(), "subscriber should receive the message");
+    let (qos, _, payload) = msg.unwrap();
+    assert_eq!(payload, b"world");
+    assert_eq!(
+        qos, 1,
+        "[MQTT-3.8.4-8] delivered QoS must be min(pub=2, sub=1) = 1"
     );
 }

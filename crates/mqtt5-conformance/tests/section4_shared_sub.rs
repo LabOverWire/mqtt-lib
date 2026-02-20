@@ -1,12 +1,10 @@
-#![allow(clippy::cast_possible_truncation)]
-
 mod common;
 
 use common::{
     connected_client, unique_client_id, ConformanceBroker, MessageCollector, RawMqttClient,
     RawPacketBuilder,
 };
-use mqtt5::PublishOptions;
+use mqtt5::{PublishOptions, QoS, SubscribeOptions};
 use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_secs(3);
@@ -330,4 +328,133 @@ async fn shared_sub_multiple_groups_independent() {
         1,
         "groupB must receive the message independently"
     );
+}
+
+#[tokio::test]
+async fn shared_sub_respects_granted_qos() {
+    let broker = ConformanceBroker::start().await;
+    let topic = format!("shared-qos/{}", unique_client_id("t"));
+    let shared_filter = format!("$share/qgrp/{topic}");
+
+    let mut sub = RawMqttClient::connect_tcp(broker.socket_addr())
+        .await
+        .unwrap();
+    let sub_id = unique_client_id("sub-sqos");
+    sub.connect_and_establish(&sub_id, TIMEOUT).await;
+
+    sub.send_raw(&RawPacketBuilder::subscribe_with_packet_id(
+        &shared_filter,
+        0,
+        1,
+    ))
+    .await
+    .unwrap();
+    let (_, reason_codes) = sub
+        .expect_suback(TIMEOUT)
+        .await
+        .expect("must receive SUBACK");
+    assert_eq!(
+        reason_codes[0], 0x00,
+        "shared subscription must be granted at QoS 0"
+    );
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let mut pub_raw = RawMqttClient::connect_tcp(broker.socket_addr())
+        .await
+        .unwrap();
+    let pub_id = unique_client_id("pub-sqos");
+    pub_raw.connect_and_establish(&pub_id, TIMEOUT).await;
+
+    pub_raw
+        .send_raw(&RawPacketBuilder::publish_qos1(&topic, b"qos1-data", 1))
+        .await
+        .unwrap();
+    let _ = pub_raw.expect_puback(TIMEOUT).await;
+
+    let (qos, recv_topic, payload) = sub
+        .expect_publish(TIMEOUT)
+        .await
+        .expect("[MQTT-4.8.2-3] subscriber must receive message");
+
+    assert_eq!(recv_topic, topic);
+    assert_eq!(payload, b"qos1-data");
+    assert_eq!(
+        qos, 0,
+        "[MQTT-4.8.2-3] message published at QoS 1 must be downgraded to granted QoS 0"
+    );
+}
+
+#[tokio::test]
+async fn shared_sub_puback_error_discards() {
+    let broker = ConformanceBroker::start().await;
+    let topic = format!("shared-err/{}", unique_client_id("t"));
+    let shared_filter = format!("$share/errgrp/{topic}");
+
+    let sub_opts = SubscribeOptions {
+        qos: QoS::AtLeastOnce,
+        ..Default::default()
+    };
+
+    let worker1 = connected_client("shared-err-w1", &broker).await;
+    let collector1 = MessageCollector::new();
+    worker1
+        .subscribe_with_options(&shared_filter, sub_opts.clone(), collector1.callback())
+        .await
+        .unwrap();
+
+    let mut worker2 = RawMqttClient::connect_tcp(broker.socket_addr())
+        .await
+        .unwrap();
+    let w2_id = unique_client_id("shared-err-w2");
+    worker2.connect_and_establish(&w2_id, TIMEOUT).await;
+    worker2
+        .send_raw(&RawPacketBuilder::subscribe_with_packet_id(
+            &shared_filter,
+            1,
+            1,
+        ))
+        .await
+        .unwrap();
+    let _ = worker2.expect_suback(TIMEOUT).await;
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let publisher = connected_client("shared-err-pub", &broker).await;
+    let pub_opts = PublishOptions {
+        qos: QoS::AtLeastOnce,
+        ..Default::default()
+    };
+    publisher
+        .publish_with_options(&topic, b"reject-me", pub_opts)
+        .await
+        .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let w1_count = collector1.count().await;
+
+    let w2_received = worker2
+        .expect_publish_with_id(Duration::from_millis(500))
+        .await;
+
+    if let Some((_, packet_id, _, _, _)) = w2_received {
+        worker2
+            .send_raw(&RawPacketBuilder::puback_with_reason(packet_id, 0x80))
+            .await
+            .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let redistributed = worker2.read_packet_bytes(Duration::from_secs(1)).await;
+        assert!(
+            redistributed.is_none(),
+            "[MQTT-4.8.2-6] message rejected with PUBACK error must not be redistributed"
+        );
+    } else {
+        assert_eq!(
+            w1_count, 1,
+            "one of the two shared subscribers must receive the message"
+        );
+    }
 }

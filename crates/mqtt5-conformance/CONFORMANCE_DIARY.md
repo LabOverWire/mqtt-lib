@@ -17,15 +17,146 @@
 - [x] Section 3.13 — PINGRESP (0 normative statements, covered by 3.12 tests)
 - [x] Section 3.14 — DISCONNECT (8 tests, 4 normative statements)
 - [x] Section 4.7 — Topic Names and Topic Filters (10 tests, 5 normative statements)
-- [x] Section 4.8 — Subscriptions / Shared Subscriptions (8 tests, 2 normative statements)
+- [x] Section 4.8 — Subscriptions / Shared Subscriptions (10 tests, 4 normative statements)
 - [x] Section 3.3 Advanced — Overlapping Subs, Message Expiry, Response Topic (7 tests, 10 normative statements)
 - [x] Final 6 untested statements — 3 tests, 2 NotApplicable, 1 NotImplemented
+- [x] Section 4.12 — Enhanced Authentication (7 tests, 8 normative statements)
+- [x] Section 1.5 — Data Representation (5 tests, 4 normative statements)
+- [x] Section 4.13 — Error Handling (2 tests, 2 normative statements)
+- [x] Section 6 — WebSocket Transport (3 tests, 3 normative statements)
+- [x] Section 4.9 — Flow Control (3 tests, 3 normative statements)
+- [x] Section 3.15 — AUTH reserved flags (1 test, 1 normative statement)
+- [x] Triage — 44 statements reclassified (16 CrossRef, 28 NotApplicable)
+- [x] Phase 0 — Broker MaxPacketSize enforcement implementation
+- [x] Phase 1 — Extended CONNECT/Session/Will (14 tests, 19 normative statements)
+- [x] Phase 3 — QoS Protocol State Machine (12 tests, 15 normative statements)
+- [x] Final 7 remaining untested — 7 tests, 0 remaining Untested
 
 **Rule**: after every step, every detail learned, every fix applied — add an entry here. New entries go on top, beneath this plan list.
 
 ---
 
 ## Diary Entries
+
+### 2026-02-19 — Final 7 untested conformance statements resolved (zero remaining)
+
+Added `section3_final_conformance.rs` with 7 tests covering the last 7 Untested normative statements. All 247 statements now accounted for: 174 Tested, 27 CrossRef, 44 NotApplicable, 2 Skipped.
+
+Infrastructure additions to `raw_client.rs`:
+- `RawPacketBuilder::connect_with_invalid_utf8_will_topic()` — CONNECT with Will Flag=1 and `[0xFF, 0xFE]` in Will Topic
+- `RawPacketBuilder::connect_with_invalid_utf8_username()` — CONNECT with Username Flag and `[0xFF, 0xFE]` in Username
+- `RawPacketBuilder::publish_qos2_with_message_expiry()` — QoS 2 PUBLISH with Message Expiry Interval property (0x02)
+- `RawMqttClient::expect_disconnect_raw()` — returns raw DISCONNECT bytes for property inspection
+
+Statements tested:
+- MQTT-3.1.2-29: Request Problem Information=0 suppresses Reason String and User Properties on SUBACK
+- MQTT-3.1.3-11: Will Topic with invalid UTF-8 causes connection close
+- MQTT-3.1.3-12: Username with invalid UTF-8 causes connection close
+- MQTT-3.14.0-1: Server does not send DISCONNECT before CONNACK (verified with invalid protocol version)
+- MQTT-3.14.2-2: Server DISCONNECT contains no Session Expiry Interval property (verified via raw byte scan)
+- MQTT-4.3.3-7: Broker sends PUBREL even after message expiry elapsed once PUBLISH was sent to subscriber
+- MQTT-4.3.3-13: Broker sends PUBCOMP even after message expiry elapsed, continuing QoS 2 sequence
+
+Final test suite: 205 tests across 21 test files, all passing. Clippy clean across entire workspace.
+
+### 2026-02-19 — Phase 5: Shared Subscriptions + Flow Control conformance tests
+
+Added 2 tests to `section4_shared_sub.rs` and created `section4_flow_control.rs` with 3 tests, covering 8 normative statements total.
+
+Shared Subscription tests added:
+- `shared_sub_respects_granted_qos` [MQTT-4.8.2-3]: subscribe at QoS 0, publish at QoS 1, verify delivered at QoS 0
+- `shared_sub_puback_error_discards` [MQTT-4.8.2-6]: two shared subscribers, one sends PUBACK with 0x80, verify no redistribution to other subscriber
+
+Flow Control tests created:
+- `flow_control_quota_enforced` [MQTT-4.9.0-1, MQTT-4.9.0-2]: connect with receive_maximum=2, publish 5 QoS 1 messages, verify only 2 arrive before PUBACKs, then verify more arrive after PUBACKing
+- `flow_control_other_packets_at_zero_quota` [MQTT-4.9.0-3]: connect with receive_maximum=1, fill quota, verify PINGREQ and SUBSCRIBE still work at zero quota
+- `auth_invalid_flags_malformed` [MQTT-3.15.1-1]: send AUTH packet with non-zero reserved flags (0xF1), verify disconnect
+
+Two helper functions added to `section4_flow_control.rs`:
+- `read_all_available()`: accumulates raw bytes from TCP reads until timeout
+- `extract_publish_ids()`: walks MQTT frame structure in raw bytes, counts PUBLISH packets and extracts packet IDs
+
+One broker conformance gap discovered and fixed:
+1. `handle_puback` and `handle_pubcomp` in `publish.rs` removed entries from `outbound_inflight` but never drained queued messages from storage. When a client's receive_maximum was hit, `send_publish` correctly queued messages to storage, but nothing pulled them back out (except `deliver_queued_messages` during session reconnect). Added `drain_queued_messages()` method to `ClientHandler` called from both `handle_puback` and `handle_pubcomp`.
+
+Statements skipped:
+- MQTT-4.8.2-4 (implementation-specific delivery strategy) — too complex, marked Skipped
+- MQTT-4.8.2-5 (implementation-specific delivery on disconnect) — too complex, marked Skipped
+
+8 conformance.toml updates: MQTT-4.8.2-3 Tested, MQTT-4.8.2-4 Skipped, MQTT-4.8.2-5 Skipped, MQTT-4.8.2-6 Tested, MQTT-4.9.0-1 Tested, MQTT-4.9.0-2 Tested, MQTT-4.9.0-3 Tested, MQTT-3.15.1-1 Tested.
+
+### 2026-02-19 — Phase 7: WebSocket Transport conformance tests
+
+Added `section6_websocket.rs` with 3 tests covering Section 6 WebSocket transport:
+
+- `websocket_text_frame_closes` — [MQTT-6.0.0-1]: verifies server closes connection on text frame
+- `websocket_packet_across_frames` — [MQTT-6.0.0-2]: verifies server reassembles MQTT packets split across WebSocket frames
+- `websocket_subprotocol_is_mqtt` — [MQTT-6.0.0-4]: verifies server returns "mqtt" subprotocol in handshake
+
+Infrastructure changes:
+- Added `ws_local_addr()` to `MqttBroker` for retrieving WebSocket listener address
+- Added `start_with_websocket()`, `ws_port()`, `ws_socket_addr()` to `ConformanceBroker`
+- Fixed [MQTT-6.0.0-1] compliance: `WebSocketStreamWrapper::poll_read` now returns an error on text frames instead of silently ignoring them
+- Added `tokio-tungstenite`, `futures-util`, `http` dev-dependencies to conformance crate
+- Fixed pre-existing compilation error: added missing `extract_auth_method_property` function (was already added by linter)
+
+### 2026-02-19 — Phase 4: Data Representation + Error Handling conformance tests
+
+Added `section1_data_repr.rs` with 5 tests covering Section 1.5 data representation rules, and `section4_error_handling.rs` with 2 tests covering Section 4.13 error handling.
+
+Infrastructure additions to `raw_client.rs`:
+- `RawPacketBuilder::connect_with_surrogate_utf8()` — CONNECT with UTF-16 surrogate codepoint (U+D800) in client_id
+- `RawPacketBuilder::connect_with_non_minimal_varint()` — CONNECT with 5-byte variable byte integer (exceeds 4-byte max)
+- `RawPacketBuilder::publish_with_invalid_utf8_user_property()` — PUBLISH with invalid UTF-8 bytes in user property key
+- `RawPacketBuilder::publish_with_oversized_topic()` — PUBLISH with 65535-byte topic (max UTF-8 string length)
+- `RawPacketBuilder::subscribe_raw_topic()` — SUBSCRIBE with raw bytes as topic filter (for BOM testing)
+- `RawPacketBuilder::publish_qos0_raw_topic()` — QoS 0 PUBLISH with raw bytes as topic name
+
+Statements tested:
+- MQTT-1.5.4-1: UTF-16 surrogate codepoints in UTF-8 strings must be rejected
+- MQTT-1.5.4-3: BOM (U+FEFF) is valid in UTF-8 strings and must not be stripped
+- MQTT-1.5.5-1: variable byte integers exceeding 4 bytes must be rejected
+- MQTT-1.5.7-1: invalid UTF-8 in user property key/value must be rejected
+- MQTT-4.7.3-3: max-length topic (65535 bytes) must be handled without crash
+- MQTT-4.13.1-1: malformed packets (invalid packet type 0) must close connection
+- MQTT-4.13.2-1: protocol errors (second CONNECT) must trigger DISCONNECT with reason >= 0x80
+
+Incidental fix: borrow conflict in `drain_queued_messages()` in `publish.rs` — changed `ref client_id` pattern to `.clone()` to avoid simultaneous immutable/mutable borrow of `self`.
+
+### 2026-02-19 — Phase 6: Enhanced Authentication conformance tests
+
+Added `section4_enhanced_auth.rs` with 7 tests covering 8 normative statements from Section 4.12.
+
+Infrastructure additions:
+- `ConformanceBroker::start_with_auth_provider()` in harness.rs — starts broker with custom `AuthProvider`
+- `RawPacketBuilder::connect_with_auth_method()` — CONNECT with Authentication Method property (0x15)
+- `RawPacketBuilder::connect_with_auth_method_and_data()` — CONNECT with Method + Data properties
+- `RawPacketBuilder::auth_with_method()` — AUTH packet with reason code and method property
+- `RawPacketBuilder::auth_with_method_and_data()` — AUTH packet with reason code, method, and data
+- `RawMqttClient::expect_auth_packet()` — parse AUTH response extracting reason code and method
+- `extract_auth_method_property()` — helper to pull Authentication Method from raw property bytes
+
+Test auth provider: `ChallengeResponseAuth` implements `AuthProvider` with `supports_enhanced_auth() -> true`. First call (no auth_data) returns Continue with challenge bytes. Second call checks response against expected value. Supports re-authentication via same logic.
+
+Statements tested:
+- MQTT-4.12.0-1: unsupported auth method → CONNACK 0x8C (AllowAllAuth broker)
+- MQTT-4.12.0-2: server sends AUTH with reason 0x18 during challenge-response
+- MQTT-4.12.0-3: client AUTH continue must use reason 0x18 (covered by same test as -2)
+- MQTT-4.12.0-4: auth failure → connection closed (wrong response data)
+- MQTT-4.12.0-5: auth method consistent across all AUTH packets in flow
+- MQTT-4.12.0-6: plain CONNECT (no auth method) → no AUTH packet from server
+- MQTT-4.12.0-7: unsolicited AUTH after plain CONNECT → disconnect
+- MQTT-4.12.1-2: re-auth failure → DISCONNECT and close
+
+### 2026-02-19 — Expand conformance.toml with 123 missing MQTT- IDs
+
+Cross-referenced `conformance.toml` (124 IDs) against rfc-extract's `mqtt-v5.0-compliance.toml` (229 IDs). Added 123 previously untracked normative statements, bringing total to 247 unique IDs.
+
+New sections created (14): 1.5 Data Representation (4), 2.1 Structure of an MQTT Control Packet (1), 2.2 Variable Header (6), 3.15 AUTH (4), 4.1 Session State (2), 4.2 Network Connections (1), 4.3 Quality of Service Levels (18), 4.4 Message Delivery Retry (2), 4.5 Message Receipt (2), 4.6 Message Ordering (1), 4.9 Flow Control (3), 4.12 Enhanced Authentication (9), 4.13 Handling Errors (2), 6.0 WebSocket Transport (4).
+
+Existing sections expanded: 3.1 (+27), 3.4 (+2), 3.5 (+2), 3.6 (+2), 3.7 (+2), 3.8 (+9), 3.9 (+1), 3.10 (+6), 3.11 (+2), 3.14 (+4), 4.7 (+3), 4.8 (+4).
+
+9 duplicate IDs in the extractor (same ID at two normative levels) resolved by picking the primary obligation (Must over May, MustNot over May). All 123 entries added as `status = "Untested"` with empty `test_names`. Updated `total_statements` for all affected sections. Added `title` and `total_statements` to sections 3.1, 3.2, 3.3 which previously lacked them.
 
 ### 2026-02-18 — MQTT-3.3.4-8 inbound receive maximum enforcement
 

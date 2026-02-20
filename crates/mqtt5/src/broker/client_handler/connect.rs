@@ -240,10 +240,12 @@ impl ClientHandler {
         self.keep_alive = Duration::from_secs(u64::from(connect.keep_alive));
 
         self.client_receive_maximum = connect.properties.get_receive_maximum().unwrap_or(65535);
+        self.client_max_packet_size = connect.properties.get_maximum_packet_size();
         debug!(
             client_id = %connect.client_id,
             receive_maximum = self.client_receive_maximum,
-            "Client receive maximum"
+            max_packet_size = ?self.client_max_packet_size,
+            "Client connection limits"
         );
 
         let session_present = self.handle_session(&connect).await?;
