@@ -583,11 +583,6 @@ impl ClientHandler {
             return;
         }
 
-        if let Err(e) = storage.remove_queued_messages(&client_id).await {
-            debug!("failed to remove queued messages for {client_id}: {e}");
-            return;
-        }
-
         let send_count = available_slots.min(queued.len());
         let mut sent = 0;
         for msg in queued.iter().take(send_count) {
@@ -599,10 +594,20 @@ impl ClientHandler {
             sent += 1;
         }
 
-        for msg in queued.into_iter().skip(sent) {
-            if let Err(e) = storage.queue_message(msg).await {
-                debug!("failed to re-queue unsent message for {client_id}: {e}");
-                break;
+        if sent == queued.len() {
+            if let Err(e) = storage.remove_queued_messages(&client_id).await {
+                debug!("failed to remove queued messages for {client_id}: {e}");
+            }
+        } else {
+            if let Err(e) = storage.remove_queued_messages(&client_id).await {
+                debug!("failed to remove queued messages for {client_id}: {e}");
+                return;
+            }
+            for msg in queued.into_iter().skip(sent) {
+                if let Err(e) = storage.queue_message(msg).await {
+                    debug!("failed to re-queue unsent message for {client_id}: {e}");
+                    break;
+                }
             }
         }
     }

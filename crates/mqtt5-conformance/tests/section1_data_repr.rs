@@ -49,10 +49,7 @@ async fn bom_preserved_in_topic() {
         .await
         .unwrap();
     let sub_id = unique_client_id("bom-sub");
-    subscriber
-        .connect_and_establish(&sub_id, TIMEOUT)
-        .await
-        .expect("subscriber CONNACK");
+    subscriber.connect_and_establish(&sub_id, TIMEOUT).await;
 
     subscriber
         .send_raw(&RawPacketBuilder::subscribe_raw_topic(
@@ -76,10 +73,7 @@ async fn bom_preserved_in_topic() {
         .await
         .unwrap();
     let pub_id = unique_client_id("bom-pub");
-    publisher
-        .connect_and_establish(&pub_id, TIMEOUT)
-        .await
-        .expect("publisher CONNACK");
+    publisher.connect_and_establish(&pub_id, TIMEOUT).await;
 
     publisher
         .send_raw(&RawPacketBuilder::publish_qos0_raw_topic(
@@ -138,9 +132,7 @@ async fn invalid_utf8_user_property_rejected() {
         .await
         .unwrap();
     let client_id = unique_client_id("utf8prop");
-    raw.connect_and_establish(&client_id, TIMEOUT)
-        .await
-        .expect("CONNACK");
+    raw.connect_and_establish(&client_id, TIMEOUT).await;
 
     let topic = format!("utf8prop/{client_id}");
     raw.send_raw(&RawPacketBuilder::publish_with_invalid_utf8_user_property(
@@ -168,9 +160,7 @@ async fn max_length_topic_handled() {
         .await
         .unwrap();
     let client_id = unique_client_id("bigtopic");
-    raw.connect_and_establish(&client_id, TIMEOUT)
-        .await
-        .expect("CONNACK");
+    raw.connect_and_establish(&client_id, TIMEOUT).await;
 
     raw.send_raw(&RawPacketBuilder::publish_with_oversized_topic())
         .await

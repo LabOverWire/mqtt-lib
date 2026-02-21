@@ -652,7 +652,7 @@ fn build_jwt_config(cmd: &RunArgs) -> Result<Option<mqtt5::broker::config::JwtCo
 }
 
 async fn build_federated_jwt_config(
-    cmd: &mut RunArgs,
+    cmd: &RunArgs,
 ) -> Result<Option<mqtt5::broker::config::FederatedJwtConfig>> {
     use mqtt5::broker::config::{
         ClaimPattern, FederatedAuthMode, FederatedJwtConfig, JwtIssuerConfig, JwtKeySource,

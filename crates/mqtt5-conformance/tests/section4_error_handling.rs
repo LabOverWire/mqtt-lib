@@ -17,9 +17,7 @@ async fn malformed_packet_closes_connection() {
         .await
         .unwrap();
     let client_id = unique_client_id("malformed");
-    raw.connect_and_establish(&client_id, TIMEOUT)
-        .await
-        .expect("CONNACK");
+    raw.connect_and_establish(&client_id, TIMEOUT).await;
 
     let garbage_packet: &[u8] = &[0x00, 0x00];
     raw.send_raw(garbage_packet).await.unwrap();
@@ -43,9 +41,7 @@ async fn protocol_error_disconnect_closes_connection() {
         .await
         .unwrap();
     let client_id = unique_client_id("proto-err");
-    raw.connect_and_establish(&client_id, TIMEOUT)
-        .await
-        .expect("CONNACK");
+    raw.connect_and_establish(&client_id, TIMEOUT).await;
 
     raw.send_raw(&RawPacketBuilder::valid_connect("second-connect"))
         .await

@@ -288,7 +288,7 @@ fn prompt_topic_and_qos(cmd: &mut PubCommand) -> Result<(String, QoS)> {
         cmd.topic = Some(topic);
     }
 
-    let topic = cmd.topic.clone().ok_or_else(|| {
+    let topic = cmd.topic.take().ok_or_else(|| {
         anyhow::anyhow!("Topic is required. Use --topic or run without --non-interactive")
     })?;
 

@@ -184,10 +184,8 @@ async fn unsolicited_auth_rejected() {
         .unwrap();
 
     let client_id = unique_client_id("unsol-auth");
-    let connack = raw
-        .connect_and_establish(&client_id, Duration::from_secs(3))
+    raw.connect_and_establish(&client_id, Duration::from_secs(3))
         .await;
-    assert!(connack.is_some(), "CONNECT must succeed");
 
     let auth = RawPacketBuilder::auth_with_method(0x19, "SOME-METHOD");
     raw.send_raw(&auth).await.unwrap();

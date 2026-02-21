@@ -288,7 +288,7 @@ impl ClientHandler {
                     maximum_qos = self.config.maximum_qos,
                     "Rejecting connection: Will QoS exceeds server maximum"
                 );
-                let connack = ConnAckPacket::new(false, ReasonCode::QoSNotSupported);
+                let connack = self.new_connack(false, ReasonCode::QoSNotSupported);
                 self.transport
                     .write_packet(Packet::ConnAck(connack))
                     .await?;
@@ -301,7 +301,7 @@ impl ClientHandler {
                     client_id = %connect.client_id,
                     "Rejecting connection: Will Retain not supported"
                 );
-                let connack = ConnAckPacket::new(false, ReasonCode::RetainNotSupported);
+                let connack = self.new_connack(false, ReasonCode::RetainNotSupported);
                 self.transport
                     .write_packet(Packet::ConnAck(connack))
                     .await?;

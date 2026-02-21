@@ -334,14 +334,16 @@ impl WasmClientHandler {
         if let Some(ref will) = connect.will {
             if let Ok(config) = self.config.read() {
                 if (will.qos as u8) > config.maximum_qos {
-                    let connack = ConnAckPacket::new(false, ReasonCode::QoSNotSupported);
+                    let mut connack = ConnAckPacket::new(false, ReasonCode::QoSNotSupported);
+                    connack.protocol_version = self.protocol_version;
                     self.write_packet(&Packet::ConnAck(connack), writer)?;
                     return Err(MqttError::ProtocolError(
                         "Will QoS exceeds server maximum".to_string(),
                     ));
                 }
                 if will.retain && !config.retain_available {
-                    let connack = ConnAckPacket::new(false, ReasonCode::RetainNotSupported);
+                    let mut connack = ConnAckPacket::new(false, ReasonCode::RetainNotSupported);
+                    connack.protocol_version = self.protocol_version;
                     self.write_packet(&Packet::ConnAck(connack), writer)?;
                     return Err(MqttError::ProtocolError("Retain not supported".to_string()));
                 }

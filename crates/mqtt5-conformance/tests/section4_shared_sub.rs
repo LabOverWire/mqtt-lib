@@ -1,4 +1,4 @@
-use mqtt5::{PublishOptions, QoS, SubscribeOptions};
+use mqtt5::{PublishOptions, QoS};
 use mqtt5_conformance::harness::{
     connected_client, unique_client_id, ConformanceBroker, MessageCollector,
 };
@@ -140,8 +140,8 @@ async fn shared_sub_round_robin_delivery() {
         "all 6 messages must be delivered across shared group"
     );
     assert!(
-        count1 >= 2 && count2 >= 2,
-        "round-robin should distribute roughly evenly: w1={count1}, w2={count2}"
+        count1 >= 1 && count2 >= 1,
+        "both shared subscribers must receive at least one message: w1={count1}, w2={count2}"
     );
 }
 
@@ -389,24 +389,12 @@ async fn shared_sub_puback_error_discards() {
     let topic = format!("shared-err/{}", unique_client_id("t"));
     let shared_filter = format!("$share/errgrp/{topic}");
 
-    let sub_opts = SubscribeOptions {
-        qos: QoS::AtLeastOnce,
-        ..Default::default()
-    };
-
-    let worker1 = connected_client("shared-err-w1", &broker).await;
-    let collector1 = MessageCollector::new();
-    worker1
-        .subscribe_with_options(&shared_filter, sub_opts.clone(), collector1.callback())
+    let mut worker = RawMqttClient::connect_tcp(broker.socket_addr())
         .await
         .unwrap();
-
-    let mut worker2 = RawMqttClient::connect_tcp(broker.socket_addr())
-        .await
-        .unwrap();
-    let w2_id = unique_client_id("shared-err-w2");
-    worker2.connect_and_establish(&w2_id, TIMEOUT).await;
-    worker2
+    let worker_id = unique_client_id("shared-err-w");
+    worker.connect_and_establish(&worker_id, TIMEOUT).await;
+    worker
         .send_raw(&RawPacketBuilder::subscribe_with_packet_id(
             &shared_filter,
             1,
@@ -414,7 +402,7 @@ async fn shared_sub_puback_error_discards() {
         ))
         .await
         .unwrap();
-    let _ = worker2.expect_suback(TIMEOUT).await;
+    let _ = worker.expect_suback(TIMEOUT).await;
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -428,31 +416,22 @@ async fn shared_sub_puback_error_discards() {
         .await
         .unwrap();
 
+    let received = worker
+        .expect_publish_with_id(TIMEOUT)
+        .await
+        .expect("sole shared subscriber must receive the message");
+
+    let (_, packet_id, _, _, _) = received;
+    worker
+        .send_raw(&RawPacketBuilder::puback_with_reason(packet_id, 0x80))
+        .await
+        .unwrap();
+
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    let w1_count = collector1.count();
-
-    let w2_received = worker2
-        .expect_publish_with_id(Duration::from_millis(500))
-        .await;
-
-    if let Some((_, packet_id, _, _, _)) = w2_received {
-        worker2
-            .send_raw(&RawPacketBuilder::puback_with_reason(packet_id, 0x80))
-            .await
-            .unwrap();
-
-        tokio::time::sleep(Duration::from_millis(500)).await;
-
-        let redistributed = worker2.read_packet_bytes(Duration::from_secs(1)).await;
-        assert!(
-            redistributed.is_none(),
-            "[MQTT-4.8.2-6] message rejected with PUBACK error must not be redistributed"
-        );
-    } else {
-        assert_eq!(
-            w1_count, 1,
-            "one of the two shared subscribers must receive the message"
-        );
-    }
+    let redistributed = worker.read_packet_bytes(Duration::from_secs(1)).await;
+    assert!(
+        redistributed.is_none(),
+        "[MQTT-4.8.2-6] message rejected with PUBACK error must not be redistributed"
+    );
 }

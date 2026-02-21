@@ -112,16 +112,21 @@ impl RawMqttClient {
     /// Sends a CONNECT, reads CONNACK, and returns `(flags, reason_code)`.
     ///
     /// Convenience wrapper combining [`Self::send_raw`] with [`Self::expect_connack`].
-    /// Returns `None` if CONNACK is not received within the timeout.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the CONNECT cannot be sent or CONNACK is not received.
     pub async fn connect_and_establish(
         &mut self,
         client_id: &str,
         timeout_dur: Duration,
-    ) -> Option<(u8, u8)> {
+    ) -> (u8, u8) {
         self.send_raw(&RawPacketBuilder::valid_connect(client_id))
             .await
-            .ok()?;
-        self.expect_connack(timeout_dur).await
+            .expect("failed to send CONNECT");
+        self.expect_connack(timeout_dur)
+            .await
+            .expect("CONNACK not received")
     }
 
     /// Reads and parses a PUBACK packet, returning `(packet_id, reason_code)`.
