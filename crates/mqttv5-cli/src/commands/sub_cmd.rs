@@ -297,8 +297,7 @@ async fn configure_auth(
             let password = cmd.password.clone().ok_or_else(|| {
                 anyhow::anyhow!("--password is required for SCRAM authentication")
             })?;
-            *options = options
-                .clone()
+            *options = std::mem::take(options)
                 .with_credentials(username.clone(), Vec::new())
                 .with_authentication_method("SCRAM-SHA-256");
 
@@ -311,7 +310,7 @@ async fn configure_auth(
                 .jwt_token
                 .clone()
                 .ok_or_else(|| anyhow::anyhow!("--jwt-token is required for JWT authentication"))?;
-            *options = options.clone().with_authentication_method("JWT");
+            *options = std::mem::take(options).with_authentication_method("JWT");
 
             let handler = JwtAuthHandler::new(token);
             client.set_auth_handler(handler).await;
@@ -319,11 +318,10 @@ async fn configure_auth(
         }
         Some("password") | None => {
             if let (Some(username), Some(password)) = (cmd.username.clone(), cmd.password.clone()) {
-                *options = options
-                    .clone()
-                    .with_credentials(username, password.into_bytes());
+                *options =
+                    std::mem::take(options).with_credentials(username, password.into_bytes());
             } else if let Some(username) = cmd.username.clone() {
-                *options = options.clone().with_credentials(username, Vec::new());
+                *options = std::mem::take(options).with_credentials(username, Vec::new());
             }
         }
         Some(other) => anyhow::bail!("Unknown auth method: {other}"),
@@ -344,7 +342,7 @@ fn configure_will(options: &mut ConnectOptions, cmd: &SubCommand) {
             will.properties.will_delay_interval = Some(duration_secs_to_u32(delay));
         }
 
-        *options = options.clone().with_will(will);
+        *options = std::mem::take(options).with_will(will);
     }
 }
 
@@ -434,7 +432,7 @@ fn configure_codec(options: &mut ConnectOptions, cmd: &SubCommand) -> Result<()>
             }
             _ => anyhow::bail!("Unknown codec: {codec_name}"),
         }
-        *options = options.clone().with_codec_registry(Arc::new(registry));
+        *options = std::mem::take(options).with_codec_registry(Arc::new(registry));
     }
     Ok(())
 }

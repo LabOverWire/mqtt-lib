@@ -558,7 +558,7 @@ impl ClientHandler {
     }
 
     async fn drain_queued_messages(&mut self) {
-        let Some(ref storage) = self.storage else {
+        let Some(storage) = self.storage.clone() else {
             return;
         };
         let Some(client_id) = self.client_id.clone() else {
@@ -589,10 +589,19 @@ impl ClientHandler {
         }
 
         let send_count = available_slots.min(queued.len());
-        for msg in queued.into_iter().take(send_count) {
+        let mut sent = 0;
+        for msg in queued.iter().take(send_count) {
             let publish = msg.to_publish_packet();
             if let Err(e) = self.send_publish(publish).await {
                 debug!("failed to send queued message to {client_id}: {e}");
+                break;
+            }
+            sent += 1;
+        }
+
+        for msg in queued.into_iter().skip(sent) {
+            if let Err(e) = storage.queue_message(msg).await {
+                debug!("failed to re-queue unsent message for {client_id}: {e}");
                 break;
             }
         }

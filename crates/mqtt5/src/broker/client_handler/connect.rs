@@ -11,12 +11,12 @@ use crate::transport::PacketIo;
 use crate::types::ProtocolVersion;
 use crate::QoS;
 use std::sync::Arc;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 
 use super::{AuthState, ClientHandler, PendingConnect};
 
 enum AuthOutcome {
-    Authenticated,
+    Authenticated(Box<ConnectPacket>),
     ConnectDeferred,
     Failed(MqttError),
 }
@@ -74,14 +74,14 @@ impl ClientHandler {
         let assigned_client_id = Self::assign_client_id_if_empty(&mut connect);
         self.validate_client_id(&connect).await?;
 
-        match self
-            .handle_authentication(&mut connect, assigned_client_id.clone())
+        let connect = match self
+            .handle_authentication(connect, assigned_client_id.clone())
             .await?
         {
-            AuthOutcome::Authenticated => {}
+            AuthOutcome::Authenticated(connect) => *connect,
             AuthOutcome::ConnectDeferred => return Ok(()),
             AuthOutcome::Failed(err) => return Err(err),
-        }
+        };
 
         self.validate_will_capabilities(&connect).await?;
 
@@ -115,11 +115,11 @@ impl ClientHandler {
             assigned_client_id = ?assigned_client_id,
             "Sending CONNACK"
         );
-        tracing::trace!("CONNACK properties: {:?}", connack.properties);
+        trace!("CONNACK properties: {:?}", connack.properties);
         self.transport
             .write_packet(Packet::ConnAck(connack))
             .await?;
-        tracing::debug!("CONNACK sent successfully");
+        debug!("CONNACK sent successfully");
 
         if session_present {
             self.deliver_queued_messages(&connect.client_id).await?;
@@ -175,7 +175,7 @@ impl ClientHandler {
 
     async fn handle_authentication(
         &mut self,
-        connect: &mut ConnectPacket,
+        connect: ConnectPacket,
         assigned_client_id: Option<String>,
     ) -> Result<AuthOutcome> {
         let auth_method_prop = connect.properties.get_authentication_method();
@@ -210,7 +210,7 @@ impl ClientHandler {
                             .await?;
 
                         self.pending_connect = Some(PendingConnect {
-                            connect: connect.clone(),
+                            connect,
                             assigned_client_id,
                         });
 
@@ -244,7 +244,7 @@ impl ClientHandler {
         } else {
             let auth_result = self
                 .auth_provider
-                .authenticate(connect, self.client_addr)
+                .authenticate(&connect, self.client_addr)
                 .await?;
 
             if !auth_result.authenticated {
@@ -268,7 +268,7 @@ impl ClientHandler {
             self.user_id = auth_result.user_id;
         }
 
-        Ok(AuthOutcome::Authenticated)
+        Ok(AuthOutcome::Authenticated(Box::new(connect)))
     }
 
     fn new_connack(&self, session_present: bool, reason_code: ReasonCode) -> ConnAckPacket {
