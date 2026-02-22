@@ -348,6 +348,20 @@ impl Properties {
             .push(PropertyValue::FourByteInteger(size));
     }
 
+    #[must_use]
+    pub fn get_maximum_packet_size(&self) -> Option<u32> {
+        self.properties
+            .get(&PropertyId::MaximumPacketSize)
+            .and_then(|values| values.first())
+            .and_then(|value| {
+                if let PropertyValue::FourByteInteger(v) = value {
+                    Some(*v)
+                } else {
+                    None
+                }
+            })
+    }
+
     pub fn set_wildcard_subscription_available(&mut self, available: bool) {
         self.properties
             .entry(PropertyId::WildcardSubscriptionAvailable)

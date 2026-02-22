@@ -33,13 +33,12 @@ cargo install mqttv5-cli
 
 ## Crate Organization
 
-The platform is organized into three crates:
+The platform is organized into four crates:
 
 - **mqtt5-protocol** - Platform-agnostic MQTT v5.0 core (packets, types, Transport trait). Supports `no_std` for embedded targets.
 - **mqtt5** - Native client and broker for Linux, macOS, Windows
 - **mqtt5-wasm** - WebAssembly client and broker for browsers
-
-Shared protocol implementation from `mqtt5-protocol`.
+- **mqtt5-conformance** - OASIS specification conformance test suite (247 normative statements)
 
 ## Quick Start
 
@@ -237,7 +236,7 @@ let config = BrokerConfig::new()
 ### Testing & Development
 
 - Mockable Client Interface - `MqttClientTrait` for unit testing
-- Property-based testing - 29 tests with Proptest
+- Property-based testing with Proptest
 - CLI Integration Testing - End-to-end tests
 - Flow control - Broker receive maximum limits
 
@@ -912,6 +911,9 @@ cargo make test-fast
 
 # Run all tests including integration tests
 cargo make test
+
+# Run MQTT v5.0 conformance tests
+cargo test -p mqtt5-conformance
 ```
 
 ## Architecture
@@ -1020,4 +1022,5 @@ We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guid
 - [Architecture Overview](ARCHITECTURE.md) - System design and principles
 - [Authentication & Authorization](AUTHENTICATION.md) - Auth methods, ACL, RBAC, federated JWT
 - [CLI Usage Guide](crates/mqttv5-cli/CLI_USAGE.md) - Complete CLI reference and examples
+- [Conformance Test Suite](crates/mqtt5-conformance/README.md) - MQTT v5.0 OASIS specification conformance
 - [API Documentation](https://docs.rs/mqtt5) - API reference

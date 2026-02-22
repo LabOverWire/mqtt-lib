@@ -34,7 +34,6 @@ impl WasmClientHandler {
         }
     }
 
-    #[allow(clippy::too_many_lines)]
     pub(super) async fn handle_connect(
         &mut self,
         mut connect: ConnectPacket,
@@ -70,18 +69,28 @@ impl WasmClientHandler {
 
         if self.protocol_version == 5 {
             if let Some(auth_method) = connect.properties.get_authentication_method() {
+                let auth_method = auth_method.clone();
                 if self.auth_provider.supports_enhanced_auth() {
                     self.auth_method = Some(auth_method.clone());
                     self.auth_state = AuthState::InProgress;
+
+                    let auth_data_owned = connect
+                        .properties
+                        .get_authentication_data()
+                        .map(<[u8]>::to_vec);
+                    let client_id_for_auth = connect.client_id.clone();
                     self.pending_connect = Some(PendingConnect {
-                        connect: connect.clone(),
-                        assigned_client_id: assigned_client_id.clone(),
+                        connect,
+                        assigned_client_id,
                     });
 
-                    let auth_data = connect.properties.get_authentication_data();
                     let result = self
                         .auth_provider
-                        .authenticate_enhanced(auth_method, auth_data, &connect.client_id)
+                        .authenticate_enhanced(
+                            &auth_method,
+                            auth_data_owned.as_deref(),
+                            &client_id_for_auth,
+                        )
                         .await?;
 
                     return self.process_enhanced_auth_result(result, writer).await;
@@ -101,6 +110,8 @@ impl WasmClientHandler {
             return Err(MqttError::AuthenticationFailed);
         }
 
+        self.validate_will_capabilities(&connect, writer)?;
+
         self.client_id = Some(connect.client_id.clone());
         self.user_id = auth_result.user_id;
         self.keep_alive = mqtt5::time::Duration::from_secs(u64::from(connect.keep_alive));
@@ -117,33 +128,7 @@ impl WasmClientHandler {
                     .properties
                     .set_assigned_client_identifier(assigned_id.clone());
             }
-
-            if let Ok(config) = self.config.read() {
-                connack
-                    .properties
-                    .set_session_expiry_interval(u64_to_u32_saturating(
-                        config.session_expiry_interval.as_secs(),
-                    ));
-                if config.maximum_qos < 2 {
-                    connack.properties.set_maximum_qos(config.maximum_qos);
-                }
-                connack.properties.set_retain_available(true);
-                connack
-                    .properties
-                    .set_maximum_packet_size(usize_to_u32_saturating(config.max_packet_size));
-                connack
-                    .properties
-                    .set_topic_alias_maximum(config.topic_alias_maximum);
-                connack
-                    .properties
-                    .set_wildcard_subscription_available(config.wildcard_subscription_available);
-                connack.properties.set_subscription_identifier_available(
-                    config.subscription_identifier_available,
-                );
-                connack
-                    .properties
-                    .set_shared_subscription_available(config.shared_subscription_available);
-            }
+            self.set_server_capability_properties(&mut connack);
         }
 
         self.write_packet(&Packet::ConnAck(connack), writer)?;
@@ -299,34 +284,7 @@ impl WasmClientHandler {
                         connack.properties.set_authentication_data(data.into());
                     }
 
-                    if let Ok(config) = self.config.read() {
-                        connack
-                            .properties
-                            .set_session_expiry_interval(u64_to_u32_saturating(
-                                config.session_expiry_interval.as_secs(),
-                            ));
-                        if config.maximum_qos < 2 {
-                            connack.properties.set_maximum_qos(config.maximum_qos);
-                        }
-                        connack.properties.set_retain_available(true);
-                        connack
-                            .properties
-                            .set_maximum_packet_size(usize_to_u32_saturating(
-                                config.max_packet_size,
-                            ));
-                        connack
-                            .properties
-                            .set_topic_alias_maximum(config.topic_alias_maximum);
-                        connack.properties.set_wildcard_subscription_available(
-                            config.wildcard_subscription_available,
-                        );
-                        connack.properties.set_subscription_identifier_available(
-                            config.subscription_identifier_available,
-                        );
-                        connack.properties.set_shared_subscription_available(
-                            config.shared_subscription_available,
-                        );
-                    }
+                    self.set_server_capability_properties(&mut connack);
 
                     self.write_packet(&Packet::ConnAck(connack), writer)?;
 
@@ -365,6 +323,63 @@ impl WasmClientHandler {
                 self.write_packet(&Packet::ConnAck(connack), writer)?;
                 Err(MqttError::AuthenticationFailed)
             }
+        }
+    }
+
+    fn validate_will_capabilities(
+        &self,
+        connect: &ConnectPacket,
+        writer: &mut WasmWriter,
+    ) -> Result<()> {
+        if let Some(ref will) = connect.will {
+            if let Ok(config) = self.config.read() {
+                if (will.qos as u8) > config.maximum_qos {
+                    let mut connack = ConnAckPacket::new(false, ReasonCode::QoSNotSupported);
+                    connack.protocol_version = self.protocol_version;
+                    self.write_packet(&Packet::ConnAck(connack), writer)?;
+                    return Err(MqttError::ProtocolError(
+                        "Will QoS exceeds server maximum".to_string(),
+                    ));
+                }
+                if will.retain && !config.retain_available {
+                    let mut connack = ConnAckPacket::new(false, ReasonCode::RetainNotSupported);
+                    connack.protocol_version = self.protocol_version;
+                    self.write_packet(&Packet::ConnAck(connack), writer)?;
+                    return Err(MqttError::ProtocolError("Retain not supported".to_string()));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn set_server_capability_properties(&self, connack: &mut ConnAckPacket) {
+        if let Ok(config) = self.config.read() {
+            connack
+                .properties
+                .set_session_expiry_interval(u64_to_u32_saturating(
+                    config.session_expiry_interval.as_secs(),
+                ));
+            if config.maximum_qos < 2 {
+                connack.properties.set_maximum_qos(config.maximum_qos);
+            }
+            connack
+                .properties
+                .set_retain_available(config.retain_available);
+            connack
+                .properties
+                .set_maximum_packet_size(usize_to_u32_saturating(config.max_packet_size));
+            connack
+                .properties
+                .set_topic_alias_maximum(config.topic_alias_maximum);
+            connack
+                .properties
+                .set_wildcard_subscription_available(config.wildcard_subscription_available);
+            connack
+                .properties
+                .set_subscription_identifier_available(config.subscription_identifier_available);
+            connack
+                .properties
+                .set_shared_subscription_available(config.shared_subscription_available);
         }
     }
 }

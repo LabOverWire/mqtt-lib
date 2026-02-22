@@ -1,10 +1,9 @@
-//! Publish handling and `QoS` flow control
-
 use crate::broker::events::{ClientPublishEvent, MessageDeliveredEvent};
 use crate::broker::storage::{
     InflightDirection, InflightMessage, InflightPhase, QueuedMessage, StorageBackend,
 };
 use crate::error::{MqttError, Result};
+use crate::packet::disconnect::DisconnectPacket;
 use crate::packet::puback::PubAckPacket;
 use crate::packet::pubcomp::PubCompPacket;
 use crate::packet::publish::PublishPacket;
@@ -52,36 +51,12 @@ impl ClientHandler {
         Ok(())
     }
 
-    #[allow(clippy::too_many_lines)]
     pub(super) async fn handle_publish(&mut self, mut publish: PublishPacket) -> Result<()> {
         let client_id = self.client_id.clone().unwrap();
 
-        if let Some(alias) = publish.properties.get_topic_alias() {
-            if alias == 0 || alias > self.config.topic_alias_maximum {
-                return Err(MqttError::ProtocolError(format!(
-                    "Invalid topic alias: {} (maximum: {})",
-                    alias, self.config.topic_alias_maximum
-                )));
-            }
-
-            if publish.topic_name.is_empty() {
-                if let Some(topic) = self.topic_aliases.get(&alias) {
-                    publish.topic_name.clone_from(topic);
-                } else {
-                    return Err(MqttError::ProtocolError(format!(
-                        "Topic alias {alias} not found"
-                    )));
-                }
-            } else {
-                self.topic_aliases.insert(alias, publish.topic_name.clone());
-            }
-        } else if publish.topic_name.is_empty() {
-            return Err(MqttError::ProtocolError(
-                "Empty topic name without topic alias".to_string(),
-            ));
-        }
-
-        crate::validate_topic_name(&publish.topic_name)?;
+        self.check_receive_maximum(&client_id, &publish).await?;
+        self.resolve_topic_alias(&mut publish)?;
+        Self::validate_publish_properties(&publish)?;
 
         let payload_size = publish.payload.len();
         self.stats.publish_received(payload_size);
@@ -126,19 +101,97 @@ impl ClientHandler {
         }
 
         self.fire_publish_event(&publish, &client_id).await;
+        self.route_publish_by_qos(publish, &client_id).await
+    }
 
+    async fn check_receive_maximum(
+        &mut self,
+        client_id: &str,
+        publish: &PublishPacket,
+    ) -> Result<()> {
+        if publish.qos != QoS::AtMostOnce
+            && self.inflight_publishes.len() >= usize::from(self.server_receive_maximum)
+        {
+            warn!(
+                client_id = %client_id,
+                inflight = self.inflight_publishes.len(),
+                server_receive_maximum = self.server_receive_maximum,
+                "Receive maximum exceeded"
+            );
+            let disconnect = DisconnectPacket::new(ReasonCode::ReceiveMaximumExceeded);
+            self.transport
+                .write_packet(Packet::Disconnect(disconnect))
+                .await?;
+            return Err(MqttError::ProtocolError(
+                "Client exceeded server receive maximum".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn resolve_topic_alias(&mut self, publish: &mut PublishPacket) -> Result<()> {
+        if let Some(alias) = publish.properties.get_topic_alias() {
+            if alias == 0 || alias > self.config.topic_alias_maximum {
+                return Err(MqttError::ProtocolError(format!(
+                    "Invalid topic alias: {} (maximum: {})",
+                    alias, self.config.topic_alias_maximum
+                )));
+            }
+
+            if publish.topic_name.is_empty() {
+                if let Some(topic) = self.topic_aliases.get(&alias) {
+                    publish.topic_name.clone_from(topic);
+                } else {
+                    return Err(MqttError::ProtocolError(format!(
+                        "Topic alias {alias} not found"
+                    )));
+                }
+            } else {
+                self.topic_aliases.insert(alias, publish.topic_name.clone());
+            }
+        } else if publish.topic_name.is_empty() {
+            return Err(MqttError::ProtocolError(
+                "Empty topic name without topic alias".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_publish_properties(publish: &PublishPacket) -> Result<()> {
+        if publish.properties.get_subscription_identifier().is_some() {
+            return Err(MqttError::ProtocolError(
+                "PUBLISH from client must not contain Subscription Identifier [MQTT-3.3.4-6]"
+                    .to_string(),
+            ));
+        }
+
+        crate::validate_topic_name(&publish.topic_name)?;
+
+        if let Some(PropertyValue::Utf8String(response_topic)) =
+            publish.properties.get(PropertyId::ResponseTopic)
+        {
+            crate::validate_topic_name(response_topic)?;
+        }
+        Ok(())
+    }
+
+    async fn route_publish_by_qos(
+        &mut self,
+        publish: PublishPacket,
+        client_id: &str,
+    ) -> Result<()> {
         match publish.qos {
             QoS::AtMostOnce => {
                 #[cfg(feature = "opentelemetry")]
-                self.route_with_trace_context(&publish, &client_id).await?;
+                self.route_with_trace_context(&publish, client_id).await?;
                 #[cfg(not(feature = "opentelemetry"))]
-                self.route_publish(&publish, Some(&client_id)).await;
+                self.route_publish(&publish, Some(client_id)).await;
             }
             QoS::AtLeastOnce => {
                 #[cfg(feature = "opentelemetry")]
-                self.route_with_trace_context(&publish, &client_id).await?;
+                self.route_with_trace_context(&publish, client_id).await?;
                 #[cfg(not(feature = "opentelemetry"))]
-                self.route_publish(&publish, Some(&client_id)).await;
+                self.route_publish(&publish, Some(client_id)).await;
 
                 let mut puback = PubAckPacket::new(publish.packet_id.unwrap());
                 puback.reason_code = ReasonCode::Success;
@@ -150,7 +203,7 @@ impl ClientHandler {
                 if let Some(ref storage) = self.storage {
                     let inflight = InflightMessage::from_publish(
                         self.inflight_publishes.get(&packet_id).unwrap(),
-                        client_id.clone(),
+                        client_id.to_string(),
                         InflightDirection::Inbound,
                         InflightPhase::AwaitingPubrel,
                     );
@@ -163,7 +216,6 @@ impl ClientHandler {
                 self.transport.write_packet(Packet::PubRec(pubrec)).await?;
             }
         }
-
         Ok(())
     }
 
@@ -406,6 +458,8 @@ impl ClientHandler {
                     handler.on_message_delivered(event).await;
                 }
             }
+
+            self.drain_queued_messages().await;
         }
     }
 
@@ -432,7 +486,7 @@ impl ClientHandler {
     }
 
     pub(super) async fn handle_pubrel(&mut self, pubrel: PubRelPacket) -> Result<()> {
-        if let Some(publish) = self.inflight_publishes.remove(&pubrel.packet_id) {
+        let reason_code = if let Some(publish) = self.inflight_publishes.remove(&pubrel.packet_id) {
             let client_id = self.client_id.as_ref().unwrap();
 
             if let Some(ref storage) = self.storage {
@@ -455,10 +509,13 @@ impl ClientHandler {
             self.route_with_trace_context(&publish, client_id).await?;
             #[cfg(not(feature = "opentelemetry"))]
             self.route_publish(&publish, Some(client_id)).await;
-        }
 
-        let mut pubcomp = PubCompPacket::new(pubrel.packet_id);
-        pubcomp.reason_code = ReasonCode::Success;
+            ReasonCode::Success
+        } else {
+            ReasonCode::PacketIdentifierNotFound
+        };
+
+        let pubcomp = PubCompPacket::new_with_reason(pubrel.packet_id, reason_code);
         self.transport.write_packet(Packet::PubComp(pubcomp)).await
     }
 
@@ -493,6 +550,63 @@ impl ClientHandler {
                         qos: QoS::ExactlyOnce,
                     };
                     handler.on_message_delivered(event).await;
+                }
+            }
+
+            self.drain_queued_messages().await;
+        }
+    }
+
+    async fn drain_queued_messages(&mut self) {
+        let Some(storage) = self.storage.clone() else {
+            return;
+        };
+        let Some(client_id) = self.client_id.clone() else {
+            return;
+        };
+
+        let available_slots =
+            usize::from(self.client_receive_maximum).saturating_sub(self.outbound_inflight.len());
+        if available_slots == 0 {
+            return;
+        }
+
+        let queued = match storage.get_queued_messages(&client_id).await {
+            Ok(msgs) => msgs,
+            Err(e) => {
+                debug!("failed to load queued messages for {client_id}: {e}");
+                return;
+            }
+        };
+
+        if queued.is_empty() {
+            return;
+        }
+
+        let send_count = available_slots.min(queued.len());
+        let mut sent = 0;
+        for msg in queued.iter().take(send_count) {
+            let publish = msg.to_publish_packet();
+            if let Err(e) = self.send_publish(publish).await {
+                debug!("failed to send queued message to {client_id}: {e}");
+                break;
+            }
+            sent += 1;
+        }
+
+        if sent == queued.len() {
+            if let Err(e) = storage.remove_queued_messages(&client_id).await {
+                debug!("failed to remove queued messages for {client_id}: {e}");
+            }
+        } else {
+            if let Err(e) = storage.remove_queued_messages(&client_id).await {
+                debug!("failed to remove queued messages for {client_id}: {e}");
+                return;
+            }
+            for msg in queued.into_iter().skip(sent) {
+                if let Err(e) = storage.queue_message(msg).await {
+                    debug!("failed to re-queue unsent message for {client_id}: {e}");
+                    break;
                 }
             }
         }
@@ -549,6 +663,16 @@ impl ClientHandler {
         );
         self.write_buffer.clear();
         encode_packet_to_buffer(&Packet::Publish(publish), &mut self.write_buffer)?;
+        if let Some(max) = self.client_max_packet_size {
+            if self.write_buffer.len() > max as usize {
+                debug!(
+                    packet_size = self.write_buffer.len(),
+                    max_packet_size = max,
+                    "Discarding PUBLISH exceeding client Maximum Packet Size"
+                );
+                return Ok(());
+            }
+        }
         self.transport.write(&self.write_buffer).await?;
         self.stats.publish_sent(payload_size);
         Ok(())

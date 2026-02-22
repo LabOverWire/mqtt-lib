@@ -1,6 +1,5 @@
 #![allow(clippy::doc_markdown)]
 #![allow(clippy::struct_excessive_bools)]
-#![allow(clippy::too_many_lines)]
 
 use anyhow::{Context, Result};
 use clap::{ArgAction, Args, Subcommand};
@@ -252,13 +251,13 @@ pub async fn execute(cmd: BrokerCommand, verbose: bool, debug: bool) -> Result<(
     execute_run(cmd.run_args, verbose, debug).await
 }
 
-async fn execute_generate_config(args: GenerateConfigArgs) -> Result<()> {
+fn build_example_config() -> BrokerConfig {
     use mqtt5::broker::config::{
         AuthConfig, AuthMethod, ChangeOnlyDeliveryConfig, QuicConfig, RateLimitConfig,
         StorageBackend, StorageConfig, TlsConfig, WebSocketConfig,
     };
 
-    let config = BrokerConfig {
+    BrokerConfig {
         bind_addresses: vec![
             "0.0.0.0:1883".parse().unwrap(),
             "[::]:1883".parse().unwrap(),
@@ -277,6 +276,7 @@ async fn execute_generate_config(args: GenerateConfigArgs) -> Result<()> {
         max_retained_message_size: 0,
         client_channel_capacity: 10000,
         server_keep_alive: None,
+        server_receive_maximum: None,
         response_information: None,
         auth_config: AuthConfig {
             allow_anonymous: true,
@@ -340,7 +340,11 @@ async fn execute_generate_config(args: GenerateConfigArgs) -> Result<()> {
         #[cfg(feature = "opentelemetry")]
         opentelemetry_config: None,
         event_handler: None,
-    };
+    }
+}
+
+async fn execute_generate_config(args: GenerateConfigArgs) -> Result<()> {
+    let config = build_example_config();
 
     let output = match args.format.to_lowercase().as_str() {
         "json" => {
@@ -362,47 +366,7 @@ async fn execute_generate_config(args: GenerateConfigArgs) -> Result<()> {
     Ok(())
 }
 
-async fn execute_run(mut cmd: RunArgs, verbose: bool, debug: bool) -> Result<()> {
-    #[cfg(feature = "opentelemetry")]
-    let has_otel = cmd.otel_endpoint.is_some();
-
-    #[cfg(not(feature = "opentelemetry"))]
-    let has_otel = false;
-
-    if !has_otel {
-        crate::init_basic_tracing(verbose, debug);
-    }
-
-    info!("Starting MQTT v5.0 broker...");
-
-    let (config, config_path) = if let Some(config_path) = &cmd.config {
-        debug!("Loading configuration from: {:?}", config_path);
-        let cfg = load_config_from_file(config_path)
-            .await
-            .with_context(|| format!("Failed to load config from {}", config_path.display()))?;
-        (cfg, Some(config_path.clone()))
-    } else {
-        (create_interactive_config(&mut cmd).await?, None)
-    };
-
-    config
-        .validate()
-        .context("Configuration validation failed")?;
-
-    info!(
-        "Creating broker with bind addresses: {:?}",
-        config.bind_addresses
-    );
-    let mut broker = if let Some(ref path) = config_path {
-        MqttBroker::with_config_file(config.clone(), path.clone())
-            .await
-            .context("Failed to create MQTT broker with hot-reload")?
-    } else {
-        MqttBroker::with_config(config.clone())
-            .await
-            .context("Failed to create MQTT broker")?
-    };
-
+fn print_startup_info(config: &BrokerConfig, max_clients: usize, config_path: Option<&PathBuf>) {
     println!("🚀 MQTT v5.0 broker starting...");
     println!(
         "  📡 TCP: {}",
@@ -448,7 +412,7 @@ async fn execute_run(mut cmd: RunArgs, verbose: bool, debug: bool) -> Result<()>
             ws_tls_cfg.path
         );
     }
-    println!("  👥 Max clients: {}", cmd.max_clients);
+    println!("  👥 Max clients: {max_clients}");
     #[cfg(feature = "opentelemetry")]
     if let Some(ref otel_config) = config.opentelemetry_config {
         println!(
@@ -460,6 +424,50 @@ async fn execute_run(mut cmd: RunArgs, verbose: bool, debug: bool) -> Result<()>
         println!("  🔄 Hot-reload: enabled (edit config file or send SIGHUP to reload)");
     }
     println!("  📝 Press Ctrl+C to stop");
+}
+
+async fn execute_run(mut cmd: RunArgs, verbose: bool, debug: bool) -> Result<()> {
+    #[cfg(feature = "opentelemetry")]
+    let has_otel = cmd.otel_endpoint.is_some();
+
+    #[cfg(not(feature = "opentelemetry"))]
+    let has_otel = false;
+
+    if !has_otel {
+        crate::init_basic_tracing(verbose, debug);
+    }
+
+    info!("Starting MQTT v5.0 broker...");
+
+    let (config, config_path) = if let Some(config_path) = &cmd.config {
+        debug!("Loading configuration from: {:?}", config_path);
+        let cfg = load_config_from_file(config_path)
+            .await
+            .with_context(|| format!("Failed to load config from {}", config_path.display()))?;
+        (cfg, Some(config_path.clone()))
+    } else {
+        (create_interactive_config(&mut cmd).await?, None)
+    };
+
+    config
+        .validate()
+        .context("Configuration validation failed")?;
+
+    info!(
+        "Creating broker with bind addresses: {:?}",
+        config.bind_addresses
+    );
+    let mut broker = if let Some(ref path) = config_path {
+        MqttBroker::with_config_file(config.clone(), path.clone())
+            .await
+            .context("Failed to create MQTT broker with hot-reload")?
+    } else {
+        MqttBroker::with_config(config.clone())
+            .await
+            .context("Failed to create MQTT broker")?
+    };
+
+    print_startup_info(&config, cmd.max_clients, config_path.as_ref());
 
     let reload_sender = broker.manual_reload_sender();
 
@@ -563,50 +571,10 @@ fn resolve_auth_settings(cmd: &RunArgs) -> Result<bool> {
     Ok(allow_anon)
 }
 
-async fn create_interactive_config(cmd: &mut RunArgs) -> Result<BrokerConfig> {
-    use mqtt5::broker::config::{
-        AuthConfig, AuthMethod, ClaimPattern, FederatedAuthMode, FederatedJwtConfig, JwtAlgorithm,
-        JwtConfig, JwtIssuerConfig, JwtKeySource, JwtRoleMapping, QuicConfig, RateLimitConfig,
-        RoleMergeMode, StorageConfig, TlsConfig, WebSocketConfig,
-    };
+fn resolve_auth_method(cmd: &RunArgs) -> Result<mqtt5::broker::config::AuthMethod> {
+    use mqtt5::broker::config::AuthMethod;
 
-    let mut config = BrokerConfig::new();
-
-    // Parse bind addresses
-    let bind_addrs: Result<Vec<std::net::SocketAddr>> = if cmd.host.is_empty() {
-        Ok(vec![
-            "0.0.0.0:1883".parse().unwrap(),
-            "[::]:1883".parse().unwrap(),
-        ])
-    } else {
-        cmd.host
-            .iter()
-            .map(|h| {
-                h.parse()
-                    .with_context(|| format!("Invalid bind address: {h}"))
-            })
-            .collect()
-    };
-    config = config.with_bind_addresses(bind_addrs?);
-
-    // Set basic broker parameters
-    config = config.with_max_clients(cmd.max_clients);
-    config.session_expiry_interval = std::time::Duration::from_secs(cmd.session_expiry);
-    config.maximum_qos = cmd.max_qos;
-    config.retain_available = !cmd.no_retain;
-    config.wildcard_subscription_available = !cmd.no_wildcards;
-
-    if let Some(keep_alive) = cmd.keep_alive {
-        config.server_keep_alive = Some(std::time::Duration::from_secs(keep_alive));
-    }
-
-    if let Some(ref response_info) = cmd.response_information {
-        config.response_information = Some(response_info.clone());
-    }
-
-    let allow_anonymous = resolve_auth_settings(cmd)?;
-
-    let auth_method = match cmd.auth_method.as_deref() {
+    match cmd.auth_method.as_deref() {
         Some("scram") => {
             let Some(scram_file) = &cmd.scram_file else {
                 anyhow::bail!("--scram-file is required when using --auth-method scram");
@@ -614,7 +582,7 @@ async fn create_interactive_config(cmd: &mut RunArgs) -> Result<BrokerConfig> {
             if !scram_file.exists() {
                 anyhow::bail!("SCRAM credentials file not found: {}", scram_file.display());
             }
-            AuthMethod::ScramSha256
+            Ok(AuthMethod::ScramSha256)
         }
         Some("jwt") => {
             let Some(jwt_key_file) = &cmd.jwt_key_file else {
@@ -626,7 +594,7 @@ async fn create_interactive_config(cmd: &mut RunArgs) -> Result<BrokerConfig> {
             if cmd.jwt_algorithm.is_none() {
                 anyhow::bail!("--jwt-algorithm is required when using --auth-method jwt");
             }
-            AuthMethod::Jwt
+            Ok(AuthMethod::Jwt)
         }
         Some("jwt-federated") => {
             if cmd.jwt_jwks_uri.is_none() && cmd.jwt_config_file.is_none() {
@@ -650,158 +618,142 @@ async fn create_interactive_config(cmd: &mut RunArgs) -> Result<BrokerConfig> {
                     anyhow::bail!("JWT config file not found: {}", config_file.display());
                 }
             }
-            AuthMethod::JwtFederated
+            Ok(AuthMethod::JwtFederated)
         }
         Some("password") | None => {
             if cmd.auth_password_file.is_some() {
-                AuthMethod::Password
+                Ok(AuthMethod::Password)
             } else {
-                AuthMethod::None
+                Ok(AuthMethod::None)
             }
         }
         Some(other) => anyhow::bail!("Unknown auth method: {other}"),
+    }
+}
+
+fn build_jwt_config(cmd: &RunArgs) -> Result<Option<mqtt5::broker::config::JwtConfig>> {
+    use mqtt5::broker::config::{JwtAlgorithm, JwtConfig};
+
+    let algorithm = match cmd.jwt_algorithm.as_deref() {
+        Some("hs256") => JwtAlgorithm::HS256,
+        Some("rs256") => JwtAlgorithm::RS256,
+        Some("es256") => JwtAlgorithm::ES256,
+        _ => anyhow::bail!("Invalid JWT algorithm"),
+    };
+    let mut jwt_cfg = JwtConfig::new(algorithm, cmd.jwt_key_file.clone().unwrap());
+    jwt_cfg.clock_skew_secs = cmd.jwt_clock_skew;
+    if let Some(ref issuer) = cmd.jwt_issuer {
+        jwt_cfg.issuer = Some(issuer.clone());
+    }
+    if let Some(ref audience) = cmd.jwt_audience {
+        jwt_cfg.audience = Some(audience.clone());
+    }
+    Ok(Some(jwt_cfg))
+}
+
+async fn build_federated_jwt_config(
+    cmd: &RunArgs,
+) -> Result<Option<mqtt5::broker::config::FederatedJwtConfig>> {
+    use mqtt5::broker::config::{
+        ClaimPattern, FederatedAuthMode, FederatedJwtConfig, JwtIssuerConfig, JwtKeySource,
+        JwtRoleMapping, RoleMergeMode,
     };
 
-    if let Some(password_file) = &cmd.auth_password_file {
-        if !password_file.exists() {
-            anyhow::bail!(
-                "Authentication password file not found: {}",
-                password_file.display()
-            );
+    if let Some(config_file) = &cmd.jwt_config_file {
+        let content = tokio::fs::read_to_string(config_file)
+            .await
+            .with_context(|| {
+                format!("Failed to read JWT config file: {}", config_file.display())
+            })?;
+        let config: FederatedJwtConfig = serde_json::from_str(&content)
+            .with_context(|| "Failed to parse JWT config file as JSON")?;
+        return Ok(Some(config));
+    }
+
+    let auth_mode = match cmd.jwt_auth_mode.as_deref() {
+        Some("claim-binding") => FederatedAuthMode::ClaimBinding,
+        Some("trusted-roles") => FederatedAuthMode::TrustedRoles,
+        None => match cmd.jwt_role_merge_mode.as_str() {
+            "replace" => FederatedAuthMode::TrustedRoles,
+            _ => FederatedAuthMode::ClaimBinding,
+        },
+        Some("identity-only" | _) => FederatedAuthMode::IdentityOnly,
+    };
+
+    let merge_mode = match cmd.jwt_role_merge_mode.as_str() {
+        "replace" => RoleMergeMode::Replace,
+        _ => RoleMergeMode::Merge,
+    };
+
+    let default_roles: Vec<String> = cmd
+        .jwt_default_roles
+        .as_ref()
+        .map(|s| s.split(',').map(|r| r.trim().to_string()).collect())
+        .unwrap_or_default();
+
+    let mut role_mappings = Vec::new();
+    if let Some(claim_path) = &cmd.jwt_role_claim {
+        for mapping in &cmd.jwt_role_map {
+            if let Some((value, role)) = mapping.split_once(':') {
+                role_mappings.push(JwtRoleMapping::new(
+                    claim_path.clone(),
+                    ClaimPattern::Equals(value.to_string()),
+                    vec![role.to_string()],
+                ));
+            }
         }
     }
 
-    if let Some(acl_file) = &cmd.acl_file {
-        if !acl_file.exists() {
-            anyhow::bail!("ACL file not found: {}", acl_file.display());
-        }
+    let mut issuer_config = JwtIssuerConfig::new(
+        "cli-issuer",
+        cmd.jwt_issuer.clone().unwrap(),
+        JwtKeySource::Jwks {
+            uri: cmd.jwt_jwks_uri.clone().unwrap(),
+            fallback_key_file: cmd.jwt_fallback_key.clone().unwrap(),
+            refresh_interval_secs: cmd.jwt_jwks_refresh,
+            cache_ttl_secs: cmd.jwt_jwks_refresh * 24,
+        },
+    )
+    .with_auth_mode(auth_mode)
+    .with_default_roles(default_roles);
+
+    #[allow(deprecated)]
+    {
+        issuer_config.role_merge_mode = merge_mode;
     }
 
-    let jwt_config = if auth_method == AuthMethod::Jwt {
-        let algorithm = match cmd.jwt_algorithm.as_deref() {
-            Some("hs256") => JwtAlgorithm::HS256,
-            Some("rs256") => JwtAlgorithm::RS256,
-            Some("es256") => JwtAlgorithm::ES256,
-            _ => anyhow::bail!("Invalid JWT algorithm"),
-        };
-        let mut jwt_cfg = JwtConfig::new(algorithm, cmd.jwt_key_file.clone().unwrap());
-        jwt_cfg.clock_skew_secs = cmd.jwt_clock_skew;
-        if let Some(ref issuer) = cmd.jwt_issuer {
-            jwt_cfg.issuer = Some(issuer.clone());
-        }
-        if let Some(ref audience) = cmd.jwt_audience {
-            jwt_cfg.audience = Some(audience.clone());
-        }
-        Some(jwt_cfg)
-    } else {
-        None
-    };
+    if let Some(ref audience) = cmd.jwt_audience {
+        issuer_config = issuer_config.with_audience(audience.clone());
+    }
 
-    let federated_jwt_config = if auth_method == AuthMethod::JwtFederated {
-        if let Some(config_file) = &cmd.jwt_config_file {
-            let content = tokio::fs::read_to_string(config_file)
-                .await
-                .with_context(|| {
-                    format!("Failed to read JWT config file: {}", config_file.display())
-                })?;
-            let config: FederatedJwtConfig = serde_json::from_str(&content)
-                .with_context(|| "Failed to parse JWT config file as JSON")?;
-            Some(config)
-        } else {
-            let auth_mode = match cmd.jwt_auth_mode.as_deref() {
-                Some("claim-binding") => FederatedAuthMode::ClaimBinding,
-                Some("trusted-roles") => FederatedAuthMode::TrustedRoles,
-                None => match cmd.jwt_role_merge_mode.as_str() {
-                    "replace" => FederatedAuthMode::TrustedRoles,
-                    _ => FederatedAuthMode::ClaimBinding,
-                },
-                Some("identity-only" | _) => FederatedAuthMode::IdentityOnly,
-            };
+    if !cmd.jwt_trusted_role_claim.is_empty() {
+        issuer_config
+            .trusted_role_claims
+            .clone_from(&cmd.jwt_trusted_role_claim);
+    }
 
-            #[allow(deprecated)]
-            let merge_mode = match cmd.jwt_role_merge_mode.as_str() {
-                "replace" => RoleMergeMode::Replace,
-                _ => RoleMergeMode::Merge,
-            };
+    if let Some(session_scoped) = cmd.jwt_session_scoped_roles {
+        issuer_config.session_scoped_roles = session_scoped;
+    }
 
-            let default_roles: Vec<String> = cmd
-                .jwt_default_roles
-                .as_ref()
-                .map(|s| s.split(',').map(|r| r.trim().to_string()).collect())
-                .unwrap_or_default();
+    if let Some(ref prefix) = cmd.jwt_issuer_prefix {
+        issuer_config.issuer_prefix = Some(prefix.clone());
+    }
 
-            let mut role_mappings = Vec::new();
-            if let Some(claim_path) = &cmd.jwt_role_claim {
-                for mapping in &cmd.jwt_role_map {
-                    if let Some((value, role)) = mapping.split_once(':') {
-                        role_mappings.push(JwtRoleMapping::new(
-                            claim_path.clone(),
-                            ClaimPattern::Equals(value.to_string()),
-                            vec![role.to_string()],
-                        ));
-                    }
-                }
-            }
+    issuer_config.role_mappings = role_mappings;
 
-            let mut issuer_config = JwtIssuerConfig::new(
-                "cli-issuer",
-                cmd.jwt_issuer.clone().unwrap(),
-                JwtKeySource::Jwks {
-                    uri: cmd.jwt_jwks_uri.clone().unwrap(),
-                    fallback_key_file: cmd.jwt_fallback_key.clone().unwrap(),
-                    refresh_interval_secs: cmd.jwt_jwks_refresh,
-                    cache_ttl_secs: cmd.jwt_jwks_refresh * 24,
-                },
-            )
-            .with_auth_mode(auth_mode)
-            .with_default_roles(default_roles);
+    Ok(Some(FederatedJwtConfig {
+        issuers: vec![issuer_config],
+        clock_skew_secs: cmd.jwt_clock_skew,
+    }))
+}
 
-            #[allow(deprecated)]
-            {
-                issuer_config.role_merge_mode = merge_mode;
-            }
-
-            if let Some(ref audience) = cmd.jwt_audience {
-                issuer_config = issuer_config.with_audience(audience.clone());
-            }
-
-            if !cmd.jwt_trusted_role_claim.is_empty() {
-                issuer_config
-                    .trusted_role_claims
-                    .clone_from(&cmd.jwt_trusted_role_claim);
-            }
-
-            if let Some(session_scoped) = cmd.jwt_session_scoped_roles {
-                issuer_config.session_scoped_roles = session_scoped;
-            }
-
-            if let Some(ref prefix) = cmd.jwt_issuer_prefix {
-                issuer_config.issuer_prefix = Some(prefix.clone());
-            }
-
-            issuer_config.role_mappings = role_mappings;
-
-            Some(FederatedJwtConfig {
-                issuers: vec![issuer_config],
-                clock_skew_secs: cmd.jwt_clock_skew,
-            })
-        }
-    } else {
-        None
-    };
-
-    let auth_config = AuthConfig {
-        allow_anonymous,
-        password_file: cmd.auth_password_file.clone(),
-        acl_file: cmd.acl_file.clone(),
-        auth_method,
-        auth_data: None,
-        scram_file: cmd.scram_file.clone(),
-        jwt_config,
-        federated_jwt_config,
-        rate_limit: RateLimitConfig::default(),
-    };
-    config = config.with_auth(auth_config);
+fn log_auth_summary(
+    auth_method: mqtt5::broker::config::AuthMethod,
+    allow_anonymous: bool,
+    cmd: &RunArgs,
+) {
+    use mqtt5::broker::config::AuthMethod;
 
     match auth_method {
         AuthMethod::None if allow_anonymous => {
@@ -846,10 +798,12 @@ async fn create_interactive_config(cmd: &mut RunArgs) -> Result<BrokerConfig> {
     if let Some(acl_file) = &cmd.acl_file {
         info!("ACL authorization enabled (file: {:?})", acl_file);
     }
+}
 
-    // Configure TLS
+fn configure_tls(config: &mut BrokerConfig, cmd: &RunArgs) -> Result<()> {
+    use mqtt5::broker::config::TlsConfig;
+
     if let (Some(cert), Some(key)) = (&cmd.tls_cert, &cmd.tls_key) {
-        // Check if certificate files exist
         if !cert.exists() {
             anyhow::bail!("TLS certificate file not found: {}", cert.display());
         }
@@ -889,14 +843,19 @@ async fn create_interactive_config(cmd: &mut RunArgs) -> Result<BrokerConfig> {
             info!("TLS enabled");
         }
 
-        config = config.with_tls(tls_config);
+        config.tls_config = Some(tls_config);
     } else if cmd.tls_cert.is_some() || cmd.tls_key.is_some() {
         anyhow::bail!("Both --tls-cert and --tls-key must be provided together");
     } else if cmd.tls_ca_cert.is_some() || cmd.tls_require_client_cert {
         anyhow::bail!("--tls-cert and --tls-key must be provided to use --tls-ca-cert or --tls-require-client-cert");
     }
 
-    // Configure WebSocket
+    Ok(())
+}
+
+fn configure_websocket(config: &mut BrokerConfig, cmd: &RunArgs) -> Result<()> {
+    use mqtt5::broker::config::WebSocketConfig;
+
     if !cmd.ws_host.is_empty() {
         let ws_addrs: Result<Vec<std::net::SocketAddr>> = cmd
             .ws_host
@@ -910,11 +869,10 @@ async fn create_interactive_config(cmd: &mut RunArgs) -> Result<BrokerConfig> {
         let ws_config = WebSocketConfig::default()
             .with_bind_addresses(ws_addrs?)
             .with_path(cmd.ws_path.clone());
-        config = config.with_websocket(ws_config);
+        config.websocket_config = Some(ws_config);
         info!("WebSocket enabled");
     }
 
-    // Configure WebSocket TLS
     if !cmd.ws_tls_host.is_empty() {
         if let (Some(cert), Some(key)) = (&cmd.tls_cert, &cmd.tls_key) {
             if !cert.exists() {
@@ -937,7 +895,7 @@ async fn create_interactive_config(cmd: &mut RunArgs) -> Result<BrokerConfig> {
                 .with_bind_addresses(ws_tls_addrs?)
                 .with_path(cmd.ws_path.clone())
                 .with_tls(true);
-            config = config.with_websocket_tls(ws_tls_config);
+            config.websocket_tls_config = Some(ws_tls_config);
             info!("WebSocket TLS enabled");
         } else {
             anyhow::bail!(
@@ -946,50 +904,143 @@ async fn create_interactive_config(cmd: &mut RunArgs) -> Result<BrokerConfig> {
         }
     }
 
-    // Configure QUIC
-    if !cmd.quic_host.is_empty() {
-        if let (Some(cert), Some(key)) = (&cmd.tls_cert, &cmd.tls_key) {
-            if !cert.exists() {
-                anyhow::bail!("TLS certificate file not found: {}", cert.display());
+    Ok(())
+}
+
+fn configure_quic(config: &mut BrokerConfig, cmd: &RunArgs) -> Result<()> {
+    use mqtt5::broker::config::QuicConfig;
+
+    if cmd.quic_host.is_empty() {
+        return Ok(());
+    }
+
+    if let (Some(cert), Some(key)) = (&cmd.tls_cert, &cmd.tls_key) {
+        if !cert.exists() {
+            anyhow::bail!("TLS certificate file not found: {}", cert.display());
+        }
+        if !key.exists() {
+            anyhow::bail!("TLS key file not found: {}", key.display());
+        }
+
+        let quic_addrs: Result<Vec<std::net::SocketAddr>> = cmd
+            .quic_host
+            .iter()
+            .map(|h| {
+                h.parse()
+                    .with_context(|| format!("Invalid QUIC bind address: {h}"))
+            })
+            .collect();
+
+        let mut quic_config =
+            QuicConfig::new(cert.clone(), key.clone()).with_bind_addresses(quic_addrs?);
+
+        if let Some(ca_cert) = &cmd.tls_ca_cert {
+            if !ca_cert.exists() {
+                anyhow::bail!("TLS CA certificate file not found: {}", ca_cert.display());
             }
-            if !key.exists() {
-                anyhow::bail!("TLS key file not found: {}", key.display());
-            }
+            quic_config = quic_config
+                .with_ca_file(ca_cert.clone())
+                .with_require_client_cert(cmd.tls_require_client_cert);
+        }
 
-            let quic_addrs: Result<Vec<std::net::SocketAddr>> = cmd
-                .quic_host
-                .iter()
-                .map(|h| {
-                    h.parse()
-                        .with_context(|| format!("Invalid QUIC bind address: {h}"))
-                })
-                .collect();
+        config.quic_config = Some(quic_config);
+        info!("QUIC enabled on {:?}", cmd.quic_host);
+    } else {
+        anyhow::bail!("Both --tls-cert and --tls-key must be provided when using --quic-host");
+    }
 
-            let mut quic_config =
-                QuicConfig::new(cert.clone(), key.clone()).with_bind_addresses(quic_addrs?);
+    Ok(())
+}
 
-            if let Some(ca_cert) = &cmd.tls_ca_cert {
-                if !ca_cert.exists() {
-                    anyhow::bail!("TLS CA certificate file not found: {}", ca_cert.display());
-                }
-                quic_config = quic_config
-                    .with_ca_file(ca_cert.clone())
-                    .with_require_client_cert(cmd.tls_require_client_cert);
-            }
+async fn create_interactive_config(cmd: &mut RunArgs) -> Result<BrokerConfig> {
+    use mqtt5::broker::config::{AuthConfig, AuthMethod, RateLimitConfig, StorageConfig};
 
-            config = config.with_quic(quic_config);
-            info!("QUIC enabled on {:?}", cmd.quic_host);
-        } else {
-            anyhow::bail!("Both --tls-cert and --tls-key must be provided when using --quic-host");
+    let mut config = BrokerConfig::new();
+
+    let bind_addrs: Result<Vec<std::net::SocketAddr>> = if cmd.host.is_empty() {
+        Ok(vec![
+            "0.0.0.0:1883".parse().unwrap(),
+            "[::]:1883".parse().unwrap(),
+        ])
+    } else {
+        cmd.host
+            .iter()
+            .map(|h| {
+                h.parse()
+                    .with_context(|| format!("Invalid bind address: {h}"))
+            })
+            .collect()
+    };
+    config = config.with_bind_addresses(bind_addrs?);
+
+    config = config.with_max_clients(cmd.max_clients);
+    config.session_expiry_interval = std::time::Duration::from_secs(cmd.session_expiry);
+    config.maximum_qos = cmd.max_qos;
+    config.retain_available = !cmd.no_retain;
+    config.wildcard_subscription_available = !cmd.no_wildcards;
+
+    if let Some(keep_alive) = cmd.keep_alive {
+        config.server_keep_alive = Some(std::time::Duration::from_secs(keep_alive));
+    }
+
+    if let Some(ref response_info) = cmd.response_information {
+        config.response_information = Some(response_info.clone());
+    }
+
+    let allow_anonymous = resolve_auth_settings(cmd)?;
+    let auth_method = resolve_auth_method(cmd)?;
+
+    if let Some(password_file) = &cmd.auth_password_file {
+        if !password_file.exists() {
+            anyhow::bail!(
+                "Authentication password file not found: {}",
+                password_file.display()
+            );
         }
     }
 
-    // Configure storage
+    if let Some(acl_file) = &cmd.acl_file {
+        if !acl_file.exists() {
+            anyhow::bail!("ACL file not found: {}", acl_file.display());
+        }
+    }
+
+    let jwt_config = if auth_method == AuthMethod::Jwt {
+        build_jwt_config(cmd)?
+    } else {
+        None
+    };
+
+    let federated_jwt_config = if auth_method == AuthMethod::JwtFederated {
+        build_federated_jwt_config(cmd).await?
+    } else {
+        None
+    };
+
+    let auth_config = AuthConfig {
+        allow_anonymous,
+        password_file: cmd.auth_password_file.clone(),
+        acl_file: cmd.acl_file.clone(),
+        auth_method,
+        auth_data: None,
+        scram_file: cmd.scram_file.clone(),
+        jwt_config,
+        federated_jwt_config,
+        rate_limit: RateLimitConfig::default(),
+    };
+    config = config.with_auth(auth_config);
+
+    log_auth_summary(auth_method, allow_anonymous, cmd);
+
+    configure_tls(&mut config, cmd)?;
+    configure_websocket(&mut config, cmd)?;
+    configure_quic(&mut config, cmd)?;
+
     let storage_config = StorageConfig {
         enable_persistence: !cmd.no_persistence,
         base_dir: cmd.storage_dir.clone(),
         backend: cmd.storage_backend,
-        cleanup_interval: std::time::Duration::from_secs(300), // 5 minutes
+        cleanup_interval: std::time::Duration::from_secs(300),
     };
     config.storage_config = storage_config;
 

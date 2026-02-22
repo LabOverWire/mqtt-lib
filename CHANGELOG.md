@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [mqtt5-protocol 0.9.9] / [mqtt5 0.22.9] / [mqtt5-wasm 0.10.10] / [mqttv5-cli 0.20.6] / [mqtt5-conformance 0.1.0] - 2026-02-20
+
+### Added
+
+- **mqtt5-conformance crate** - MQTT v5.0 OASIS specification conformance test suite
+  - 197 tests across 22 test files covering sections 1, 3, 4, and 6
+  - Tracks all 247 normative `[MQTT-x.x.x-y]` statements in a structured TOML manifest
+  - Raw TCP packet builder (`RawMqttClient`, `RawPacketBuilder`) for malformed input testing
+  - In-process `ConformanceBroker` harness with memory-backed storage on random loopback port
+  - Machine-readable (JSON) and human-readable coverage report generation
+- **Inbound receive maximum enforcement** - Broker sends DISCONNECT 0x93 when client exceeds receive maximum [MQTT-3.3.4-8]
+- **`Properties::get_maximum_packet_size()`** - Property accessor for Maximum Packet Size
+
+### Fixed
+
+- **DUP flag propagation** - Router no longer propagates publisher's DUP flag to subscribers; resets to false before forwarding [MQTT-3.3.1-1]
+- **PUBCOMP reason codes** - PUBCOMP now returns `PacketIdentifierNotFound` when PUBREL arrives for non-existent packet ID instead of always sending Success [MQTT-3.7.2-1]
+- **Will message suppression** - DISCONNECT with reason code 0x04 (`DisconnectWithWillMessage`) now correctly preserves the will message [MQTT-3.14.4-3]
+- **Queued message drain data loss** - Messages are no longer removed from storage before successful transmission; unsent messages are re-queued
+- **WASM UNSUBACK reason codes** - WASM broker now returns `NoSubscriptionExisted` when unsubscribing from non-existent subscription [MQTT-3.11.3-1]
+- **CONNACK v3.1.1 construction** - Fixed CONNACK packet builder to use protocol-version-aware encoding for v3.1.1 clients
+- **DUP+QoS0 rejection** - Reject PUBLISH with DUP=1 and QoS=0 as malformed [MQTT-3.3.1-2]
+- **Will QoS validation** - Reject CONNECT when Will QoS exceeds server maximum via CONNACK 0x9A [MQTT-3.2.2-11]
+- **Will Retain validation** - Reject CONNECT with Will Retain=1 when retain not supported via CONNACK 0x9B [MQTT-3.2.2-10]
+- **Subscription Identifier on PUBLISH** - Reject client-sent PUBLISH containing Subscription Identifier property [MQTT-3.3.4-6]
+- **Response topic validation** - Validate Response Topic contains no wildcard characters [MQTT-3.3.2-11]
+- **ShareName validation** - Reject shared subscriptions with malformed or wildcard-containing ShareName [MQTT-3.8.3-4]
+- **NoLocal on shared subscriptions** - Send DISCONNECT 0x82 when NoLocal=1 on shared subscription [MQTT-3.8.3-4]
+- **Topic filter syntax validation** - Validate topic filter syntax for both regular and shared subscriptions [MQTT-3.8.3-1]
+
 ## [mqtt5-protocol 0.9.8] / [mqtt5 0.22.8] / [mqtt5-wasm 0.10.9] / [mqttv5-cli 0.20.5] - 2026-02-16
 
 ### Security

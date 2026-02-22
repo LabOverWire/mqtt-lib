@@ -1,5 +1,3 @@
-//! Client connection handler for the MQTT broker
-
 mod auth;
 mod connect;
 mod lifecycle;
@@ -73,6 +71,8 @@ pub struct ClientHandler {
     pub(super) topic_aliases: HashMap<u16, String>,
     pub(super) external_packet_rx: Option<mpsc::Receiver<Packet>>,
     pub(super) client_receive_maximum: u16,
+    pub(super) server_receive_maximum: u16,
+    pub(super) client_max_packet_size: Option<u32>,
     pub(super) outbound_inflight: HashMap<u16, PublishPacket>,
     pub(super) protocol_version: u8,
     pub(super) write_buffer: BytesMut,
@@ -121,6 +121,7 @@ impl ClientHandler {
         external_packet_rx: Option<mpsc::Receiver<Packet>>,
     ) -> Self {
         let (publish_tx, publish_rx) = flume::bounded(config.client_channel_capacity);
+        let server_receive_maximum = config.server_receive_maximum.unwrap_or(65535);
 
         Self {
             transport,
@@ -150,6 +151,8 @@ impl ClientHandler {
             topic_aliases: HashMap::new(),
             external_packet_rx,
             client_receive_maximum: 65535,
+            server_receive_maximum,
+            client_max_packet_size: None,
             outbound_inflight: HashMap::new(),
             protocol_version: 5,
             write_buffer: BytesMut::with_capacity(4096),
@@ -183,8 +186,59 @@ impl ClientHandler {
     /// # Panics
     ///
     /// Panics if `client_id` is None after successful connection
-    #[allow(clippy::too_many_lines)]
     pub async fn run(mut self) -> Result<()> {
+        let client_id = self.perform_connect_handshake().await?;
+
+        let (disconnect_tx, mut disconnect_rx) = tokio::sync::oneshot::channel();
+
+        self.router
+            .register_client(client_id.clone(), self.publish_tx.clone(), disconnect_tx)
+            .await;
+
+        self.fire_connect_event(&client_id).await;
+
+        let (result, session_taken_over) = if self.keep_alive.is_zero() {
+            match self.handle_packets_no_keepalive(&mut disconnect_rx).await {
+                Ok(taken_over) => (Ok(()), taken_over),
+                Err(e) => (Err(e), false),
+            }
+        } else {
+            let mut keep_alive_interval = interval(self.keep_alive);
+            keep_alive_interval.reset();
+            match self
+                .handle_packets(&mut keep_alive_interval, &mut disconnect_rx)
+                .await
+            {
+                Ok(taken_over) => (Ok(()), taken_over),
+                Err(e) => (Err(e), false),
+            }
+        };
+
+        self.handle_client_unregister(&client_id, session_taken_over)
+            .await;
+
+        self.resource_monitor
+            .unregister_connection(&client_id, self.client_addr.ip())
+            .await;
+
+        self.cleanup_session_storage(&client_id).await;
+
+        if let Some(ref user_id) = self.user_id {
+            self.auth_provider.cleanup_session(user_id).await;
+        }
+
+        if !self.normal_disconnect {
+            self.publish_will_message(&client_id).await;
+        }
+
+        self.fire_disconnect_event(&client_id).await;
+
+        info!("Client {} disconnected", client_id);
+
+        result
+    }
+
+    async fn perform_connect_handshake(&mut self) -> Result<String> {
         tracing::debug!(
             "Client handler started for {} ({})",
             self.client_addr,
@@ -213,6 +267,7 @@ impl ClientHandler {
                     .await;
 
                 self.stats.client_connected();
+                Ok(client_id)
             }
             Ok(Err(e)) => {
                 if e.to_string().contains("Connection closed") {
@@ -222,24 +277,19 @@ impl ClientHandler {
                     warn!("Connect error: {e}");
                     tracing::debug!("Connect error details: {:?}", e);
                 }
-                return Err(e);
+                Err(e)
             }
             Err(_) => {
                 warn!("Connect timeout from {}", self.client_addr);
-                return Err(MqttError::Timeout);
+                Err(MqttError::Timeout)
             }
         }
+    }
 
-        let (disconnect_tx, mut disconnect_rx) = tokio::sync::oneshot::channel();
-
-        let client_id = self.client_id.as_ref().unwrap().clone();
-        self.router
-            .register_client(client_id.clone(), self.publish_tx.clone(), disconnect_tx)
-            .await;
-
+    async fn fire_connect_event(&self, client_id: &str) {
         if let Some(ref handler) = self.config.event_handler {
             let event = ClientConnectEvent {
-                client_id: client_id.clone().into(),
+                client_id: client_id.to_string().into(),
                 clean_start: self
                     .pending_connect
                     .as_ref()
@@ -269,24 +319,9 @@ impl ClientHandler {
             };
             handler.on_client_connect(event).await;
         }
+    }
 
-        let (result, session_taken_over) = if self.keep_alive.is_zero() {
-            match self.handle_packets_no_keepalive(&mut disconnect_rx).await {
-                Ok(taken_over) => (Ok(()), taken_over),
-                Err(e) => (Err(e), false),
-            }
-        } else {
-            let mut keep_alive_interval = interval(self.keep_alive);
-            keep_alive_interval.reset();
-            match self
-                .handle_packets(&mut keep_alive_interval, &mut disconnect_rx)
-                .await
-            {
-                Ok(taken_over) => (Ok(()), taken_over),
-                Err(e) => (Err(e), false),
-            }
-        };
-
+    async fn handle_client_unregister(&self, client_id: &str, session_taken_over: bool) {
         let preserve_session = if let Some(ref session) = self.session {
             session.expiry_interval != Some(0)
         } else {
@@ -302,19 +337,17 @@ impl ClientHandler {
             info!("Unregistering client {} (not taken over)", client_id);
 
             if preserve_session {
-                self.router.disconnect_client(&client_id).await;
+                self.router.disconnect_client(client_id).await;
             } else {
-                self.router.unregister_client(&client_id).await;
+                self.router.unregister_client(client_id).await;
             }
         }
+    }
 
-        self.resource_monitor
-            .unregister_connection(&client_id, self.client_addr.ip())
-            .await;
-
+    async fn cleanup_session_storage(&self, client_id: &str) {
         if let Some(ref storage) = self.storage {
             if let Some(ref session) = self.session {
-                match storage.get_session(&client_id).await {
+                match storage.get_session(client_id).await {
                     Ok(Some(mut stored_session)) => {
                         stored_session.touch();
                         if let Err(e) = storage.store_session(stored_session).await {
@@ -328,13 +361,13 @@ impl ClientHandler {
                 }
 
                 if session.expiry_interval == Some(0) {
-                    if let Err(e) = storage.remove_session(&client_id).await {
+                    if let Err(e) = storage.remove_session(client_id).await {
                         warn!("Failed to remove session for {client_id}: {e}");
                     }
-                    if let Err(e) = storage.remove_queued_messages(&client_id).await {
+                    if let Err(e) = storage.remove_queued_messages(client_id).await {
                         warn!("Failed to remove queued messages for {client_id}: {e}");
                     }
-                    if let Err(e) = storage.remove_all_inflight_messages(&client_id).await {
+                    if let Err(e) = storage.remove_all_inflight_messages(client_id).await {
                         warn!("Failed to remove inflight messages for {client_id}: {e}");
                     }
                     debug!(
@@ -344,18 +377,12 @@ impl ClientHandler {
                 }
             }
         }
+    }
 
-        if let Some(ref user_id) = self.user_id {
-            self.auth_provider.cleanup_session(user_id).await;
-        }
-
-        if !self.normal_disconnect {
-            self.publish_will_message(&client_id).await;
-        }
-
+    async fn fire_disconnect_event(&self, client_id: &str) {
         if let Some(ref handler) = self.config.event_handler {
             let event = ClientDisconnectEvent {
-                client_id: client_id.clone().into(),
+                client_id: client_id.to_string().into(),
                 reason: self.disconnect_reason.unwrap_or(if self.normal_disconnect {
                     ReasonCode::Success
                 } else {
@@ -365,10 +392,6 @@ impl ClientHandler {
             };
             handler.on_client_disconnect(event).await;
         }
-
-        info!("Client {} disconnected", client_id);
-
-        result
     }
 
     fn max_packet_size(&self) -> usize {

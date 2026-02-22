@@ -101,6 +101,7 @@ proptest! {
         dup in any::<bool>(),
     ) {
         let packet_id = if matches!(qos, QoS::AtMostOnce) { None } else { Some(42u16) };
+        let dup = if matches!(qos, QoS::AtMostOnce) { false } else { dup };
 
         let publish = PublishPacket {
             topic_name: topic,

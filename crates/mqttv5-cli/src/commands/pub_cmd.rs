@@ -1,6 +1,5 @@
 #![allow(clippy::large_futures)]
 #![allow(clippy::struct_excessive_bools)]
-#![allow(clippy::too_many_lines)]
 
 use anyhow::{Context, Result};
 use clap::Args;
@@ -280,18 +279,7 @@ fn parse_stream_strategy(s: &str) -> Result<mqtt5::transport::StreamStrategy, St
     }
 }
 
-pub async fn execute(mut cmd: PubCommand, verbose: bool, debug: bool) -> Result<()> {
-    #[cfg(feature = "opentelemetry")]
-    let has_otel = cmd.otel_endpoint.is_some();
-
-    #[cfg(not(feature = "opentelemetry"))]
-    let has_otel = false;
-
-    if !has_otel {
-        crate::init_basic_tracing(verbose, debug);
-    }
-
-    // Smart prompting for missing required arguments
+fn prompt_topic_and_qos(cmd: &mut PubCommand) -> Result<(String, QoS)> {
     if cmd.topic.is_none() && !cmd.non_interactive {
         let topic = Input::<String>::new()
             .with_prompt("MQTT topic (e.g., sensors/temperature, home/status)")
@@ -300,11 +288,10 @@ pub async fn execute(mut cmd: PubCommand, verbose: bool, debug: bool) -> Result<
         cmd.topic = Some(topic);
     }
 
-    let topic = cmd.topic.clone().ok_or_else(|| {
+    let topic = cmd.topic.take().ok_or_else(|| {
         anyhow::anyhow!("Topic is required. Use --topic or run without --non-interactive")
     })?;
 
-    // Validate topic
     if topic.is_empty() {
         anyhow::bail!("Topic cannot be empty");
     }
@@ -327,12 +314,6 @@ pub async fn execute(mut cmd: PubCommand, verbose: bool, debug: bool) -> Result<
         anyhow::bail!("--response-topic is required when using --wait-response");
     }
 
-    // Get message content with smart prompting
-    let message = get_message_content(&mut cmd)
-        .await
-        .context("Failed to get message content")?;
-
-    // Smart QoS prompting
     let qos = if cmd.qos.is_none() && !cmd.non_interactive {
         let qos_options = vec![
             "0 (At most once - fire and forget)",
@@ -359,15 +340,433 @@ pub async fn execute(mut cmd: PubCommand, verbose: bool, debug: bool) -> Result<
         warn!("Using --wait-response with QoS 0 may be unreliable; consider using -q 1 or -q 2");
     }
 
-    // Build broker URL
+    Ok((topic, qos))
+}
+
+fn build_connect_options(cmd: &PubCommand, client_id: &str) -> ConnectOptions {
+    let mut options = ConnectOptions::new(client_id.to_owned())
+        .with_clean_start(!cmd.no_clean_start)
+        .with_keep_alive(Duration::from_secs(cmd.keep_alive));
+
+    if cmd.auto_reconnect {
+        options = options.with_automatic_reconnect(true);
+    }
+
+    if let Some(version) = cmd.protocol_version {
+        options = options.with_protocol_version(version);
+    }
+
+    if let Some(expiry) = cmd.session_expiry {
+        options = options.with_session_expiry_interval(duration_secs_to_u32(expiry));
+    }
+
+    options
+}
+
+async fn configure_auth(
+    client: &MqttClient,
+    options: &mut ConnectOptions,
+    cmd: &PubCommand,
+) -> Result<()> {
+    match cmd.auth_method.as_deref() {
+        Some("scram") => {
+            let username = cmd.username.clone().ok_or_else(|| {
+                anyhow::anyhow!("--username is required for SCRAM authentication")
+            })?;
+            let password = cmd.password.clone().ok_or_else(|| {
+                anyhow::anyhow!("--password is required for SCRAM authentication")
+            })?;
+            *options = std::mem::take(options)
+                .with_credentials(username.clone(), Vec::new())
+                .with_authentication_method("SCRAM-SHA-256");
+
+            let handler = ScramSha256AuthHandler::new(username, password);
+            client.set_auth_handler(handler).await;
+            debug!("SCRAM-SHA-256 authentication configured");
+        }
+        Some("jwt") => {
+            let token = cmd
+                .jwt_token
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("--jwt-token is required for JWT authentication"))?;
+            *options = std::mem::take(options).with_authentication_method("JWT");
+
+            let handler = JwtAuthHandler::new(token);
+            client.set_auth_handler(handler).await;
+            debug!("JWT authentication configured");
+        }
+        Some("password") | None => {
+            if let (Some(username), Some(password)) = (cmd.username.clone(), cmd.password.clone()) {
+                *options =
+                    std::mem::take(options).with_credentials(username, password.into_bytes());
+            } else if let Some(username) = cmd.username.clone() {
+                *options = std::mem::take(options).with_credentials(username, Vec::new());
+            }
+        }
+        Some(other) => anyhow::bail!("Unknown auth method: {other}"),
+    }
+    Ok(())
+}
+
+fn configure_will(options: &mut ConnectOptions, cmd: &PubCommand) {
+    if let Some(topic) = cmd.will_topic.clone() {
+        let payload = cmd.will_message.clone().unwrap_or_default();
+        let mut will = WillMessage::new(topic, payload.into_bytes()).with_retain(cmd.will_retain);
+
+        if let Some(qos) = cmd.will_qos {
+            will = will.with_qos(qos);
+        }
+
+        if let Some(delay) = cmd.will_delay {
+            will.properties.will_delay_interval = Some(duration_secs_to_u32(delay));
+        }
+
+        *options = std::mem::take(options).with_will(will);
+    }
+}
+
+async fn configure_quic_transport(client: &MqttClient, cmd: &PubCommand) {
+    if let Some(strategy) = cmd.quic_stream_strategy {
+        client.set_quic_stream_strategy(strategy).await;
+        debug!("QUIC stream strategy: {:?}", strategy);
+    }
+    if cmd.quic_flow_headers {
+        client.set_quic_flow_headers(true).await;
+        debug!("QUIC flow headers enabled");
+    }
+    client
+        .set_quic_flow_expire(std::time::Duration::from_secs(cmd.quic_flow_expire))
+        .await;
+    if let Some(max) = cmd.quic_max_streams {
+        client.set_quic_max_streams(Some(max)).await;
+        debug!("QUIC max streams: {max}");
+    }
+    if cmd.quic_datagrams {
+        client.set_quic_datagrams(true).await;
+        debug!("QUIC datagrams enabled");
+    }
+    client
+        .set_quic_connect_timeout(Duration::from_secs(cmd.quic_connect_timeout))
+        .await;
+}
+
+async fn configure_tls_certs(
+    client: &MqttClient,
+    broker_url: &str,
+    cmd: &PubCommand,
+) -> Result<()> {
+    let is_secure = broker_url.starts_with("ssl://")
+        || broker_url.starts_with("mqtts://")
+        || broker_url.starts_with("quics://");
+    let has_certs = cmd.cert.is_some() || cmd.key.is_some() || cmd.ca_cert.is_some();
+
+    if is_secure && has_certs {
+        let cert_pem = if let Some(cert_path) = &cmd.cert {
+            Some(std::fs::read(cert_path).with_context(|| {
+                format!("Failed to read certificate file: {}", cert_path.display())
+            })?)
+        } else {
+            None
+        };
+        let key_pem = if let Some(key_path) = &cmd.key {
+            Some(
+                std::fs::read(key_path)
+                    .with_context(|| format!("Failed to read key file: {}", key_path.display()))?,
+            )
+        } else {
+            None
+        };
+        let ca_pem = if let Some(ca_path) = &cmd.ca_cert {
+            Some(std::fs::read(ca_path).with_context(|| {
+                format!("Failed to read CA certificate file: {}", ca_path.display())
+            })?)
+        } else {
+            None
+        };
+
+        client.set_tls_config(cert_pem, key_pem, ca_pem).await;
+    }
+    Ok(())
+}
+
+async fn setup_response_subscription(
+    client: &MqttClient,
+    cmd: &PubCommand,
+    correlation_data: Option<Vec<u8>>,
+) -> Result<(Arc<AtomicU32>, Arc<Notify>)> {
+    let received_count = Arc::new(AtomicU32::new(0));
+    let done_notify = Arc::new(Notify::new());
+
+    if cmd.wait_response {
+        let response_topic = cmd.response_topic.as_ref().unwrap().clone();
+        let expected_correlation = correlation_data;
+        let target_count = cmd.response_count;
+        let output_format = cmd.output_format.clone();
+        let received_clone = received_count.clone();
+        let done_clone = done_notify.clone();
+
+        client
+            .subscribe(&response_topic, move |msg: Message| {
+                if let Some(ref expected) = expected_correlation {
+                    match &msg.properties.correlation_data {
+                        Some(received) if received == expected => {}
+                        _ => return,
+                    }
+                }
+
+                format_response_message(&output_format, &msg);
+
+                let count = received_clone.fetch_add(1, Ordering::Relaxed) + 1;
+                if target_count > 0 && count >= target_count {
+                    done_clone.notify_one();
+                }
+            })
+            .await?;
+
+        debug!(
+            "SUBACK received for '{}', subscription ready before publish",
+            response_topic
+        );
+    }
+
+    Ok((received_count, done_notify))
+}
+
+fn format_response_message(output_format: &str, msg: &Message) {
+    match output_format {
+        "json" => {
+            if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&msg.payload) {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json).unwrap_or_default()
+                );
+            } else {
+                println!("{}", String::from_utf8_lossy(&msg.payload));
+            }
+        }
+        "verbose" => {
+            println!("Topic: {}", msg.topic);
+            if let Some(corr) = &msg.properties.correlation_data {
+                println!("Correlation: {}", hex::encode(corr));
+            }
+            println!("Payload: {}", String::from_utf8_lossy(&msg.payload));
+            println!("---");
+        }
+        _ => {
+            println!("{}", String::from_utf8_lossy(&msg.payload));
+        }
+    }
+}
+
+async fn publish_loop(
+    client: &MqttClient,
+    topic: &str,
+    message: &str,
+    cmd: &PubCommand,
+    qos: QoS,
+    correlation_data: Option<&Vec<u8>>,
+) -> Result<()> {
+    let has_properties = cmd.retain
+        || cmd.message_expiry_interval.is_some()
+        || cmd.topic_alias.is_some()
+        || cmd.response_topic.is_some()
+        || correlation_data.is_some();
+
+    let repeat_count = cmd.repeat.unwrap_or(1);
+    let interval_millis = cmd.interval.unwrap_or(1000);
+    let infinite_repeat = cmd.repeat == Some(0);
+    let mut iteration = 0u64;
+
+    loop {
+        iteration += 1;
+
+        if has_properties {
+            publish_with_properties(client, topic, message, cmd, qos, correlation_data).await?;
+        } else {
+            publish_simple(client, topic, message, qos).await?;
+        }
+
+        print_publish_result(cmd, iteration, topic, qos);
+
+        if !infinite_repeat && iteration >= repeat_count {
+            break;
+        }
+
+        tokio::select! {
+            () = tokio::time::sleep(std::time::Duration::from_millis(interval_millis)) => {}
+            _ = signal::ctrl_c() => {
+                println!("\n✓ Interrupted after {iteration} publishes");
+                client.disconnect().await?;
+                return Ok(());
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn publish_with_properties(
+    client: &MqttClient,
+    topic: &str,
+    message: &str,
+    cmd: &PubCommand,
+    qos: QoS,
+    correlation_data: Option<&Vec<u8>>,
+) -> Result<()> {
+    let mut options = PublishOptions {
+        qos,
+        retain: cmd.retain,
+        ..Default::default()
+    };
+    options.properties.message_expiry_interval = cmd.message_expiry_interval;
+    options.properties.topic_alias = cmd.topic_alias;
+    options
+        .properties
+        .response_topic
+        .clone_from(&cmd.response_topic);
+    options.properties.correlation_data = correlation_data.cloned();
+    client
+        .publish_with_options(topic, message.as_bytes(), options)
+        .await?;
+    Ok(())
+}
+
+async fn publish_simple(client: &MqttClient, topic: &str, message: &str, qos: QoS) -> Result<()> {
+    match qos {
+        QoS::AtMostOnce => {
+            client.publish(topic, message.as_bytes()).await?;
+        }
+        QoS::AtLeastOnce => {
+            client.publish_qos1(topic, message.as_bytes()).await?;
+        }
+        QoS::ExactlyOnce => {
+            client.publish_qos2(topic, message.as_bytes()).await?;
+        }
+    }
+    Ok(())
+}
+
+fn print_publish_result(cmd: &PubCommand, iteration: u64, topic: &str, qos: QoS) {
+    if cmd.repeat.is_some() {
+        println!(
+            "✓ Published message {} to '{}' (QoS {})",
+            iteration, topic, qos as u8
+        );
+    } else {
+        println!("✓ Published message to '{}' (QoS {})", topic, qos as u8);
+    }
+    if cmd.retain {
+        println!("  Message retained on broker");
+    }
+}
+
+async fn wait_for_response(
+    cmd: &PubCommand,
+    done_notify: Arc<Notify>,
+    received_count: Arc<AtomicU32>,
+    client: &MqttClient,
+) -> Result<()> {
+    if !cmd.wait_response {
+        return Ok(());
+    }
+
+    let timeout_secs = cmd.timeout;
+    let target_count = cmd.response_count;
+
+    println!(
+        "Waiting for response on '{}'...",
+        cmd.response_topic.as_ref().unwrap()
+    );
+
+    tokio::select! {
+        () = done_notify.notified() => {
+        }
+        () = tokio::time::sleep(std::time::Duration::from_secs(timeout_secs)) => {
+            let count = received_count.load(Ordering::Relaxed);
+            if count == 0 {
+                client.disconnect().await?;
+                anyhow::bail!("Timeout: no response received within {timeout_secs}s");
+            } else if target_count > 0 && count < target_count {
+                eprintln!(
+                    "Warning: timeout after receiving {count} of {target_count} expected responses"
+                );
+            }
+        }
+        _ = signal::ctrl_c() => {
+            println!("\n✓ Interrupted");
+        }
+    }
+
+    Ok(())
+}
+
+async fn keep_alive_loop(client: &MqttClient, auto_reconnect: bool) -> Result<()> {
+    info!("Keeping connection alive (--keep-alive-after-publish)");
+
+    if auto_reconnect {
+        client
+            .on_connection_event(move |event| match event {
+                ConnectionEvent::Connecting => {
+                    info!("Connecting to broker...");
+                }
+                ConnectionEvent::Connected { session_present } => {
+                    if session_present {
+                        info!("✓ Reconnected (session present)");
+                    } else {
+                        info!("✓ Reconnected (new session)");
+                    }
+                }
+                ConnectionEvent::Disconnected { .. } => {
+                    warn!("⚠ Disconnected from broker, attempting reconnection...");
+                }
+                ConnectionEvent::Reconnecting { attempt } => {
+                    info!("Reconnecting (attempt {})...", attempt);
+                }
+                ConnectionEvent::ReconnectFailed { error } => {
+                    warn!("⚠ Reconnection failed: {error}");
+                }
+            })
+            .await?;
+    }
+
+    match signal::ctrl_c().await {
+        Ok(()) => {
+            println!("\n✓ Received Ctrl+C, disconnecting...");
+        }
+        Err(err) => {
+            anyhow::bail!("Unable to listen for shutdown signal: {err}");
+        }
+    }
+
+    Ok(())
+}
+
+pub async fn execute(mut cmd: PubCommand, verbose: bool, debug: bool) -> Result<()> {
+    #[cfg(feature = "opentelemetry")]
+    let has_otel = cmd.otel_endpoint.is_some();
+
+    #[cfg(not(feature = "opentelemetry"))]
+    let has_otel = false;
+
+    if !has_otel {
+        crate::init_basic_tracing(verbose, debug);
+    }
+
+    let (topic, qos) = prompt_topic_and_qos(&mut cmd)?;
+
+    let message = get_message_content(&mut cmd)
+        .await
+        .context("Failed to get message content")?;
+
     let broker_url = cmd
         .url
+        .take()
         .unwrap_or_else(|| format!("mqtt://{}:{}", cmd.host, cmd.port));
     debug!("Connecting to broker: {}", broker_url);
 
-    // Create client
     let client_id = cmd
         .client_id
+        .take()
         .unwrap_or_else(|| format!("mqttv5-pub-{}", rand::rng().random::<u32>()));
     let client = MqttClient::new(&client_id);
 
@@ -384,78 +783,94 @@ pub async fn execute(mut cmd: PubCommand, verbose: bool, debug: bool) -> Result<
         );
     }
 
-    // Build connection options
-    let mut options = ConnectOptions::new(client_id.clone())
-        .with_clean_start(!cmd.no_clean_start)
-        .with_keep_alive(Duration::from_secs(cmd.keep_alive));
-
-    if cmd.auto_reconnect {
-        options = options.with_automatic_reconnect(true);
-    }
-
-    if let Some(version) = cmd.protocol_version {
-        options = options.with_protocol_version(version);
-    }
-
-    if let Some(expiry) = cmd.session_expiry {
-        options = options.with_session_expiry_interval(duration_secs_to_u32(expiry));
-    }
-
-    // Add authentication based on method
-    match cmd.auth_method.as_deref() {
-        Some("scram") => {
-            let username = cmd.username.clone().ok_or_else(|| {
-                anyhow::anyhow!("--username is required for SCRAM authentication")
-            })?;
-            let password = cmd.password.clone().ok_or_else(|| {
-                anyhow::anyhow!("--password is required for SCRAM authentication")
-            })?;
-            options = options
-                .with_credentials(username.clone(), Vec::new())
-                .with_authentication_method("SCRAM-SHA-256");
-
-            let handler = ScramSha256AuthHandler::new(username, password);
-            client.set_auth_handler(handler).await;
-            debug!("SCRAM-SHA-256 authentication configured");
-        }
-        Some("jwt") => {
-            let token = cmd
-                .jwt_token
-                .clone()
-                .ok_or_else(|| anyhow::anyhow!("--jwt-token is required for JWT authentication"))?;
-            options = options.with_authentication_method("JWT");
-
-            let handler = JwtAuthHandler::new(token);
-            client.set_auth_handler(handler).await;
-            debug!("JWT authentication configured");
-        }
-        Some("password") | None => {
-            if let (Some(username), Some(password)) = (cmd.username.clone(), cmd.password.clone()) {
-                options = options.with_credentials(username, password.into_bytes());
-            } else if let Some(username) = cmd.username.clone() {
-                options = options.with_credentials(username, Vec::new());
-            }
-        }
-        Some(other) => anyhow::bail!("Unknown auth method: {other}"),
-    }
-
-    // Add will message if specified
-    if let Some(topic) = cmd.will_topic.clone() {
-        let payload = cmd.will_message.clone().unwrap_or_default();
-        let mut will = WillMessage::new(topic, payload.into_bytes()).with_retain(cmd.will_retain);
-
-        if let Some(qos) = cmd.will_qos {
-            will = will.with_qos(qos);
-        }
-
-        if let Some(delay) = cmd.will_delay {
-            will.properties.will_delay_interval = Some(duration_secs_to_u32(delay));
-        }
-
-        options = options.with_will(will);
-    }
+    let mut options = build_connect_options(&cmd, &client_id);
+    configure_auth(&client, &mut options, &cmd).await?;
+    configure_will(&mut options, &cmd);
 
     #[cfg(feature = "codec")]
+    configure_codec(&mut options, &cmd)?;
+
+    if cmd.insecure {
+        client.set_insecure_tls(true).await;
+        info!("Insecure TLS mode enabled (certificate verification disabled)");
+    }
+
+    configure_quic_transport(&client, &cmd).await;
+    configure_tls_certs(&client, &broker_url, &cmd).await?;
+
+    info!("Connecting to {}...", broker_url);
+    let result = client
+        .connect_with_options(&broker_url, options)
+        .await
+        .context("Failed to connect to MQTT broker")?;
+
+    if result.session_present {
+        println!("✓ Resumed existing session");
+    }
+
+    info!("Publishing to topic '{}'...", topic);
+
+    if cmd.topic_alias == Some(0) {
+        anyhow::bail!("Topic alias must be between 1 and 65535, got: 0");
+    }
+
+    let correlation_data: Option<Vec<u8>> = if cmd.wait_response && cmd.correlation_data.is_none() {
+        Some(format!("rr-{}", rand::rng().random::<u64>()).into_bytes())
+    } else if let Some(ref hex_data) = cmd.correlation_data {
+        Some(hex::decode(hex_data).context("Invalid hex in --correlation-data")?)
+    } else {
+        None
+    };
+
+    let (received_count, done_notify) =
+        setup_response_subscription(&client, &cmd, correlation_data.clone()).await?;
+
+    await_scheduled_delay(&cmd).await?;
+
+    publish_loop(
+        &client,
+        &topic,
+        &message,
+        &cmd,
+        qos,
+        correlation_data.as_ref(),
+    )
+    .await?;
+
+    wait_for_response(&cmd, done_notify, received_count, &client).await?;
+
+    if cmd.keep_alive_after_publish {
+        keep_alive_loop(&client, cmd.auto_reconnect).await?;
+    }
+
+    client.disconnect().await?;
+
+    Ok(())
+}
+
+async fn await_scheduled_delay(cmd: &PubCommand) -> Result<()> {
+    if let Some(delay_secs) = cmd.delay {
+        info!(
+            "Waiting {} before publishing...",
+            humantime::format_duration(std::time::Duration::from_secs(delay_secs))
+        );
+        tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
+    } else if let Some(ref at_time) = cmd.at {
+        let wait_duration = calculate_wait_until(at_time)?;
+        if wait_duration.as_secs() > 0 {
+            info!(
+                "Scheduled for {}, waiting {}...",
+                at_time,
+                humantime::format_duration(wait_duration)
+            );
+            tokio::time::sleep(wait_duration).await;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "codec")]
+fn configure_codec(options: &mut ConnectOptions, cmd: &PubCommand) -> Result<()> {
     if let Some(ref codec_name) = cmd.codec {
         let registry = CodecRegistry::new();
         match codec_name.as_str() {
@@ -485,325 +900,12 @@ pub async fn execute(mut cmd: PubCommand, verbose: bool, debug: bool) -> Result<
             }
             _ => anyhow::bail!("Unknown codec: {codec_name}"),
         }
-        options = options.with_codec_registry(Arc::new(registry));
+        *options = std::mem::take(options).with_codec_registry(Arc::new(registry));
     }
-
-    // Configure insecure TLS mode if requested
-    if cmd.insecure {
-        client.set_insecure_tls(true).await;
-        info!("Insecure TLS mode enabled (certificate verification disabled)");
-    }
-
-    // Configure QUIC transport options
-    if let Some(strategy) = cmd.quic_stream_strategy {
-        client.set_quic_stream_strategy(strategy).await;
-        debug!("QUIC stream strategy: {:?}", strategy);
-    }
-    if cmd.quic_flow_headers {
-        client.set_quic_flow_headers(true).await;
-        debug!("QUIC flow headers enabled");
-    }
-    client
-        .set_quic_flow_expire(std::time::Duration::from_secs(cmd.quic_flow_expire))
-        .await;
-    if let Some(max) = cmd.quic_max_streams {
-        client.set_quic_max_streams(Some(max)).await;
-        debug!("QUIC max streams: {max}");
-    }
-    if cmd.quic_datagrams {
-        client.set_quic_datagrams(true).await;
-        debug!("QUIC datagrams enabled");
-    }
-    client
-        .set_quic_connect_timeout(Duration::from_secs(cmd.quic_connect_timeout))
-        .await;
-
-    // Configure TLS if using secure connection
-    if broker_url.starts_with("ssl://")
-        || broker_url.starts_with("mqtts://")
-        || broker_url.starts_with("quics://")
-    {
-        // Configure with certificates if provided
-        if cmd.cert.is_some() || cmd.key.is_some() || cmd.ca_cert.is_some() {
-            let cert_pem = if let Some(cert_path) = &cmd.cert {
-                Some(std::fs::read(cert_path).with_context(|| {
-                    format!("Failed to read certificate file: {}", cert_path.display())
-                })?)
-            } else {
-                None
-            };
-            let key_pem =
-                if let Some(key_path) = &cmd.key {
-                    Some(std::fs::read(key_path).with_context(|| {
-                        format!("Failed to read key file: {}", key_path.display())
-                    })?)
-                } else {
-                    None
-                };
-            let ca_pem = if let Some(ca_path) = &cmd.ca_cert {
-                Some(std::fs::read(ca_path).with_context(|| {
-                    format!("Failed to read CA certificate file: {}", ca_path.display())
-                })?)
-            } else {
-                None
-            };
-
-            client.set_tls_config(cert_pem, key_pem, ca_pem).await;
-        }
-    }
-
-    // Connect
-    info!("Connecting to {}...", broker_url);
-    let result = client
-        .connect_with_options(&broker_url, options)
-        .await
-        .context("Failed to connect to MQTT broker")?;
-
-    if result.session_present {
-        println!("✓ Resumed existing session");
-    }
-
-    // Publish message
-    info!("Publishing to topic '{}'...", topic);
-
-    if cmd.topic_alias == Some(0) {
-        anyhow::bail!("Topic alias must be between 1 and 65535, got: 0");
-    }
-
-    let correlation_data: Option<Vec<u8>> = if cmd.wait_response && cmd.correlation_data.is_none() {
-        Some(format!("rr-{}", rand::rng().random::<u64>()).into_bytes())
-    } else if let Some(ref hex_data) = cmd.correlation_data {
-        Some(hex::decode(hex_data).context("Invalid hex in --correlation-data")?)
-    } else {
-        None
-    };
-
-    let received_count = Arc::new(AtomicU32::new(0));
-    let done_notify = Arc::new(Notify::new());
-
-    if cmd.wait_response {
-        let response_topic = cmd.response_topic.as_ref().unwrap().clone();
-        let expected_correlation = correlation_data.clone();
-        let target_count = cmd.response_count;
-        let output_format = cmd.output_format.clone();
-        let received_clone = received_count.clone();
-        let done_clone = done_notify.clone();
-
-        client
-            .subscribe(&response_topic, move |msg: Message| {
-                if let Some(ref expected) = expected_correlation {
-                    match &msg.properties.correlation_data {
-                        Some(received) if received == expected => {}
-                        _ => return,
-                    }
-                }
-
-                match output_format.as_str() {
-                    "json" => {
-                        if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&msg.payload)
-                        {
-                            println!(
-                                "{}",
-                                serde_json::to_string_pretty(&json).unwrap_or_default()
-                            );
-                        } else {
-                            println!("{}", String::from_utf8_lossy(&msg.payload));
-                        }
-                    }
-                    "verbose" => {
-                        println!("Topic: {}", msg.topic);
-                        if let Some(corr) = &msg.properties.correlation_data {
-                            println!("Correlation: {}", hex::encode(corr));
-                        }
-                        println!("Payload: {}", String::from_utf8_lossy(&msg.payload));
-                        println!("---");
-                    }
-                    _ => {
-                        println!("{}", String::from_utf8_lossy(&msg.payload));
-                    }
-                }
-
-                let count = received_clone.fetch_add(1, Ordering::Relaxed) + 1;
-                if target_count > 0 && count >= target_count {
-                    done_clone.notify_one();
-                }
-            })
-            .await?;
-
-        debug!(
-            "SUBACK received for '{}', subscription ready before publish",
-            response_topic
-        );
-    }
-
-    if let Some(delay_secs) = cmd.delay {
-        info!(
-            "Waiting {} before publishing...",
-            humantime::format_duration(std::time::Duration::from_secs(delay_secs))
-        );
-        tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
-    } else if let Some(ref at_time) = cmd.at {
-        let wait_duration = calculate_wait_until(at_time)?;
-        if wait_duration.as_secs() > 0 {
-            info!(
-                "Scheduled for {}, waiting {}...",
-                at_time,
-                humantime::format_duration(wait_duration)
-            );
-            tokio::time::sleep(wait_duration).await;
-        }
-    }
-
-    let has_properties = cmd.retain
-        || cmd.message_expiry_interval.is_some()
-        || cmd.topic_alias.is_some()
-        || cmd.response_topic.is_some()
-        || correlation_data.is_some();
-
-    let repeat_count = cmd.repeat.unwrap_or(1);
-    let interval_millis = cmd.interval.unwrap_or(1000);
-    let infinite_repeat = cmd.repeat == Some(0);
-    let mut iteration = 0u64;
-
-    loop {
-        iteration += 1;
-
-        if has_properties {
-            let mut options = PublishOptions {
-                qos,
-                retain: cmd.retain,
-                ..Default::default()
-            };
-            options.properties.message_expiry_interval = cmd.message_expiry_interval;
-            options.properties.topic_alias = cmd.topic_alias;
-            options
-                .properties
-                .response_topic
-                .clone_from(&cmd.response_topic);
-            options
-                .properties
-                .correlation_data
-                .clone_from(&correlation_data);
-            client
-                .publish_with_options(&topic, message.as_bytes(), options)
-                .await?;
-        } else {
-            match qos {
-                QoS::AtMostOnce => {
-                    client.publish(&topic, message.as_bytes()).await?;
-                }
-                QoS::AtLeastOnce => {
-                    client.publish_qos1(&topic, message.as_bytes()).await?;
-                }
-                QoS::ExactlyOnce => {
-                    client.publish_qos2(&topic, message.as_bytes()).await?;
-                }
-            }
-        }
-
-        if cmd.repeat.is_some() {
-            println!(
-                "✓ Published message {} to '{}' (QoS {})",
-                iteration, topic, qos as u8
-            );
-        } else {
-            println!("✓ Published message to '{}' (QoS {})", topic, qos as u8);
-        }
-        if cmd.retain {
-            println!("  Message retained on broker");
-        }
-
-        if !infinite_repeat && iteration >= repeat_count {
-            break;
-        }
-
-        tokio::select! {
-            () = tokio::time::sleep(std::time::Duration::from_millis(interval_millis)) => {}
-            _ = signal::ctrl_c() => {
-                println!("\n✓ Interrupted after {iteration} publishes");
-                client.disconnect().await?;
-                return Ok(());
-            }
-        }
-    }
-
-    if cmd.wait_response {
-        let timeout_secs = cmd.timeout;
-        let target_count = cmd.response_count;
-
-        println!(
-            "Waiting for response on '{}'...",
-            cmd.response_topic.as_ref().unwrap()
-        );
-
-        tokio::select! {
-            () = done_notify.notified() => {
-            }
-            () = tokio::time::sleep(std::time::Duration::from_secs(timeout_secs)) => {
-                let count = received_count.load(Ordering::Relaxed);
-                if count == 0 {
-                    client.disconnect().await?;
-                    anyhow::bail!("Timeout: no response received within {timeout_secs}s");
-                } else if target_count > 0 && count < target_count {
-                    eprintln!(
-                        "Warning: timeout after receiving {count} of {target_count} expected responses"
-                    );
-                }
-            }
-            _ = signal::ctrl_c() => {
-                println!("\n✓ Interrupted");
-            }
-        }
-    }
-
-    // Keep connection alive if requested (for testing will messages)
-    if cmd.keep_alive_after_publish {
-        info!("Keeping connection alive (--keep-alive-after-publish)");
-
-        if cmd.auto_reconnect {
-            client
-                .on_connection_event(move |event| match event {
-                    ConnectionEvent::Connecting => {
-                        info!("Connecting to broker...");
-                    }
-                    ConnectionEvent::Connected { session_present } => {
-                        if session_present {
-                            info!("✓ Reconnected (session present)");
-                        } else {
-                            info!("✓ Reconnected (new session)");
-                        }
-                    }
-                    ConnectionEvent::Disconnected { .. } => {
-                        warn!("⚠ Disconnected from broker, attempting reconnection...");
-                    }
-                    ConnectionEvent::Reconnecting { attempt } => {
-                        info!("Reconnecting (attempt {})...", attempt);
-                    }
-                    ConnectionEvent::ReconnectFailed { error } => {
-                        warn!("⚠ Reconnection failed: {error}");
-                    }
-                })
-                .await?;
-        }
-
-        match signal::ctrl_c().await {
-            Ok(()) => {
-                println!("\n✓ Received Ctrl+C, disconnecting...");
-            }
-            Err(err) => {
-                anyhow::bail!("Unable to listen for shutdown signal: {err}");
-            }
-        }
-    }
-
-    // Disconnect
-    client.disconnect().await?;
-
     Ok(())
 }
 
 async fn get_message_content(cmd: &mut PubCommand) -> Result<String> {
-    // Priority: stdin > file > message > prompt
     if cmd.stdin {
         debug!("Reading message from stdin");
         let mut buffer = String::new();
@@ -825,7 +927,6 @@ async fn get_message_content(cmd: &mut PubCommand) -> Result<String> {
         return Ok(message.clone());
     }
 
-    // Smart prompting for message
     if !cmd.non_interactive {
         let message = Input::<String>::new()
             .with_prompt("Message content")

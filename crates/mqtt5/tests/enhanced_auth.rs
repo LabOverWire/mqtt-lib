@@ -1,4 +1,5 @@
 use mqtt5::broker::auth::{AuthProvider, AuthResult, EnhancedAuthResult};
+use mqtt5::broker::config::{StorageBackend, StorageConfig};
 use mqtt5::broker::{BrokerConfig, MqttBroker};
 use mqtt5::client::{AuthHandler, AuthResponse};
 use mqtt5::error::{MqttError, Result};
@@ -13,6 +14,17 @@ use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
+
+fn test_broker_config() -> BrokerConfig {
+    let storage_config = StorageConfig {
+        backend: StorageBackend::Memory,
+        enable_persistence: true,
+        ..Default::default()
+    };
+    BrokerConfig::default()
+        .with_bind_address("127.0.0.1:0".parse::<SocketAddr>().unwrap())
+        .with_storage(storage_config)
+}
 
 #[tokio::test]
 async fn test_auth_packet_creation() {
@@ -315,16 +327,8 @@ impl AuthHandler for TestClientAuthHandler {
     }
 }
 
-async fn find_available_port() -> u16 {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    listener.local_addr().unwrap().port()
-}
-
 #[tokio::test]
 async fn test_client_enhanced_auth_success() {
-    let port = find_available_port().await;
-    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
-
     let challenge = b"server-challenge-xyz".to_vec();
     let response = b"client-response-abc".to_vec();
 
@@ -333,17 +337,12 @@ async fn test_client_enhanced_auth_success() {
         expected_response: response.clone(),
     });
 
-    let config = BrokerConfig {
-        bind_addresses: vec![addr],
-        max_clients: 10,
-        session_expiry_interval: Duration::from_secs(60),
-        ..Default::default()
-    };
-
-    let mut broker = MqttBroker::with_config(config)
+    let mut broker = MqttBroker::with_config(test_broker_config())
         .await
         .unwrap()
         .with_auth_provider(auth_provider);
+
+    let addr = broker.local_addr().expect("failed to get broker address");
 
     let broker_handle = tokio::spawn(async move { broker.run().await });
 
@@ -360,7 +359,7 @@ async fn test_client_enhanced_auth_success() {
         })
         .await;
 
-    let result = client.connect(&format!("mqtt://127.0.0.1:{port}")).await;
+    let result = client.connect(&format!("mqtt://{addr}")).await;
     assert!(
         result.is_ok(),
         "Client should connect with enhanced auth: {result:?}"
@@ -374,9 +373,6 @@ async fn test_client_enhanced_auth_success() {
 
 #[tokio::test]
 async fn test_client_enhanced_auth_failure() {
-    let port = find_available_port().await;
-    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
-
     let challenge = b"server-challenge-xyz".to_vec();
     let correct_response = b"client-response-abc".to_vec();
     let wrong_response = b"wrong-response".to_vec();
@@ -386,17 +382,12 @@ async fn test_client_enhanced_auth_failure() {
         expected_response: correct_response,
     });
 
-    let config = BrokerConfig {
-        bind_addresses: vec![addr],
-        max_clients: 10,
-        session_expiry_interval: Duration::from_secs(60),
-        ..Default::default()
-    };
-
-    let mut broker = MqttBroker::with_config(config)
+    let mut broker = MqttBroker::with_config(test_broker_config())
         .await
         .unwrap()
         .with_auth_provider(auth_provider);
+
+    let addr = broker.local_addr().expect("failed to get broker address");
 
     let broker_handle = tokio::spawn(async move { broker.run().await });
 
@@ -413,7 +404,7 @@ async fn test_client_enhanced_auth_failure() {
         })
         .await;
 
-    let result = client.connect(&format!("mqtt://127.0.0.1:{port}")).await;
+    let result = client.connect(&format!("mqtt://{addr}")).await;
     assert!(
         result.is_err(),
         "Client should fail with wrong response, but got: {result:?}"
@@ -424,25 +415,17 @@ async fn test_client_enhanced_auth_failure() {
 
 #[tokio::test]
 async fn test_client_enhanced_auth_no_handler() {
-    let port = find_available_port().await;
-    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
-
     let auth_provider = Arc::new(TestChallengeResponseAuthProvider {
         challenge: b"challenge".to_vec(),
         expected_response: b"response".to_vec(),
     });
 
-    let config = BrokerConfig {
-        bind_addresses: vec![addr],
-        max_clients: 10,
-        session_expiry_interval: Duration::from_secs(60),
-        ..Default::default()
-    };
-
-    let mut broker = MqttBroker::with_config(config)
+    let mut broker = MqttBroker::with_config(test_broker_config())
         .await
         .unwrap()
         .with_auth_provider(auth_provider);
+
+    let addr = broker.local_addr().expect("failed to get broker address");
 
     let broker_handle = tokio::spawn(async move { broker.run().await });
 
@@ -453,7 +436,7 @@ async fn test_client_enhanced_auth_no_handler() {
 
     let client = MqttClient::with_options(options);
 
-    let result = client.connect(&format!("mqtt://127.0.0.1:{port}")).await;
+    let result = client.connect(&format!("mqtt://{addr}")).await;
     assert!(result.is_err(), "Client should fail without auth handler");
 
     if let Err(MqttError::AuthenticationFailed) = result {

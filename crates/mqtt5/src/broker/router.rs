@@ -1,7 +1,3 @@
-//! Message routing for the MQTT broker
-//!
-//! Routes messages between clients based on subscriptions
-
 #[cfg(not(target_arch = "wasm32"))]
 use crate::broker::bridge::BridgeManager;
 use crate::broker::events::{BrokerEventHandler, RetainedSetEvent};
@@ -369,7 +365,6 @@ impl MessageRouter {
             .await;
     }
 
-    #[allow(clippy::too_many_lines)]
     async fn route_message_internal(
         &self,
         publish: &PublishPacket,
@@ -386,57 +381,95 @@ impl MessageRouter {
         }
 
         if publish.retain {
-            let (should_remove, retained_msg) = if publish.payload.is_empty() {
-                self.retained_messages
-                    .write()
-                    .await
-                    .remove(&publish.topic_name);
-                debug!("Deleted retained message for topic: {}", publish.topic_name);
-                (true, None)
-            } else {
-                let retained_msg = RetainedMessage::new(publish.clone());
-                self.retained_messages
-                    .write()
-                    .await
-                    .insert(publish.topic_name.clone(), retained_msg.clone());
-                debug!("Stored retained message for topic: {}", publish.topic_name);
-                (false, Some(retained_msg))
-            };
-
-            if let Some(ref storage) = self.storage {
-                if should_remove {
-                    if let Err(e) = storage.remove_retained_message(&publish.topic_name).await {
-                        tracing::error!("Failed to remove retained message from storage: {e}");
-                    }
-                } else if let Some(ref msg) = retained_msg {
-                    if let Err(e) = storage
-                        .store_retained_message(&publish.topic_name, msg.clone())
-                        .await
-                    {
-                        tracing::error!("Failed to store retained message to storage: {e}");
-                    }
-                }
-            }
-
-            if let Some(ref handler) = self.event_handler {
-                let event = RetainedSetEvent {
-                    topic: Arc::from(publish.topic_name.as_str()),
-                    payload: publish.payload.clone(),
-                    qos: publish.qos,
-                    cleared: publish.payload.is_empty(),
-                };
-                handler.on_retained_set(event).await;
-            }
+            self.handle_retain_storage(publish).await;
         }
 
         let exact = self.exact_subscriptions.read().await;
         let wildcard = self.wildcard_subscriptions.read().await;
         let clients = self.clients.read().await;
 
-        let mut share_groups: HashMap<String, Vec<&Subscription>> = HashMap::new();
-        let mut regular_subs: Vec<&Subscription> = Vec::new();
+        let (share_groups, regular_subs) =
+            Self::collect_matching_subscriptions(&exact, &wildcard, &publish.topic_name);
 
-        if let Some(subs) = exact.get(&publish.topic_name) {
+        self.deliver_share_groups(&share_groups, publish, &clients, publishing_client_id)
+            .await;
+
+        for sub in &regular_subs {
+            self.deliver_to_subscriber(
+                sub,
+                publish,
+                &clients,
+                self.storage.as_ref(),
+                publishing_client_id,
+            )
+            .await;
+        }
+
+        drop(exact);
+        drop(wildcard);
+        drop(clients);
+
+        if forward_to_bridges {
+            self.forward_to_bridges(publish).await;
+        }
+    }
+
+    async fn handle_retain_storage(&self, publish: &PublishPacket) {
+        let (should_remove, retained_msg) = if publish.payload.is_empty() {
+            self.retained_messages
+                .write()
+                .await
+                .remove(&publish.topic_name);
+            debug!("Deleted retained message for topic: {}", publish.topic_name);
+            (true, None)
+        } else {
+            let retained_msg = RetainedMessage::new(publish.clone());
+            self.retained_messages
+                .write()
+                .await
+                .insert(publish.topic_name.clone(), retained_msg.clone());
+            debug!("Stored retained message for topic: {}", publish.topic_name);
+            (false, Some(retained_msg))
+        };
+
+        if let Some(ref storage) = self.storage {
+            if should_remove {
+                if let Err(e) = storage.remove_retained_message(&publish.topic_name).await {
+                    error!("Failed to remove retained message from storage: {e}");
+                }
+            } else if let Some(ref msg) = retained_msg {
+                if let Err(e) = storage
+                    .store_retained_message(&publish.topic_name, msg.clone())
+                    .await
+                {
+                    error!("Failed to store retained message to storage: {e}");
+                }
+            }
+        }
+
+        if let Some(ref handler) = self.event_handler {
+            let event = RetainedSetEvent {
+                topic: Arc::from(publish.topic_name.as_str()),
+                payload: publish.payload.clone(),
+                qos: publish.qos,
+                cleared: publish.payload.is_empty(),
+            };
+            handler.on_retained_set(event).await;
+        }
+    }
+
+    fn collect_matching_subscriptions<'a>(
+        exact: &'a HashMap<String, Vec<Subscription>>,
+        wildcard: &'a HashMap<String, Vec<Subscription>>,
+        topic_name: &str,
+    ) -> (
+        HashMap<String, Vec<&'a Subscription>>,
+        Vec<&'a Subscription>,
+    ) {
+        let mut share_groups: HashMap<String, Vec<&'a Subscription>> = HashMap::new();
+        let mut regular_subs: Vec<&'a Subscription> = Vec::new();
+
+        if let Some(subs) = exact.get(topic_name) {
             for sub in subs {
                 if let Some(ref group) = sub.share_group {
                     share_groups.entry(group.clone()).or_default().push(sub);
@@ -446,8 +479,8 @@ impl MessageRouter {
             }
         }
 
-        for (topic_filter, subs) in wildcard.iter() {
-            if topic_matches_filter(&publish.topic_name, topic_filter) {
+        for (topic_filter, subs) in wildcard {
+            if topic_matches_filter(topic_name, topic_filter) {
                 for sub in subs {
                     if let Some(ref group) = sub.share_group {
                         share_groups.entry(group.clone()).or_default().push(sub);
@@ -458,7 +491,17 @@ impl MessageRouter {
             }
         }
 
-        for (group_name, group_subs) in &share_groups {
+        (share_groups, regular_subs)
+    }
+
+    async fn deliver_share_groups(
+        &self,
+        share_groups: &HashMap<String, Vec<&Subscription>>,
+        publish: &PublishPacket,
+        clients: &HashMap<String, ClientInfo>,
+        publishing_client_id: Option<&str>,
+    ) {
+        for (group_name, group_subs) in share_groups {
             let online_subs: Vec<&&Subscription> = group_subs
                 .iter()
                 .filter(|sub| clients.contains_key(&sub.client_id))
@@ -478,7 +521,7 @@ impl MessageRouter {
                     self.deliver_to_subscriber(
                         chosen_sub,
                         publish,
-                        &clients,
+                        clients,
                         self.storage.as_ref(),
                         publishing_client_id,
                     )
@@ -503,41 +546,26 @@ impl MessageRouter {
                 }
             }
         }
+    }
 
-        for sub in &regular_subs {
-            self.deliver_to_subscriber(
-                sub,
-                publish,
-                &clients,
-                self.storage.as_ref(),
-                publishing_client_id,
-            )
-            .await;
-        }
-
-        drop(exact);
-        drop(wildcard);
-        drop(clients);
-
-        if forward_to_bridges {
-            #[cfg(not(target_arch = "wasm32"))]
-            {
-                let bridge_manager_weak = self.bridge_manager.read().await.clone();
-                if let Some(weak) = bridge_manager_weak {
-                    if let Some(bridge_manager) = weak.upgrade() {
-                        if let Err(e) = bridge_manager.handle_outgoing(publish).await {
-                            error!("Failed to forward message to bridges: {e}");
-                        }
+    async fn forward_to_bridges(&self, publish: &PublishPacket) {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let bridge_manager_weak = self.bridge_manager.read().await.clone();
+            if let Some(weak) = bridge_manager_weak {
+                if let Some(bridge_manager) = weak.upgrade() {
+                    if let Err(e) = bridge_manager.handle_outgoing(publish).await {
+                        error!("Failed to forward message to bridges: {e}");
                     }
                 }
             }
+        }
 
-            #[cfg(target_arch = "wasm32")]
-            {
-                let callback = self.wasm_bridge_callback.read().await;
-                if let Some(ref cb) = *callback {
-                    cb(publish);
-                }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let callback = self.wasm_bridge_callback.read().await;
+            if let Some(ref cb) = *callback {
+                cb(publish);
             }
         }
     }
@@ -554,6 +582,7 @@ impl MessageRouter {
     fn prepare_message(publish: &PublishPacket, sub: &Subscription, qos: QoS) -> PublishPacket {
         let mut message = publish.clone();
         message.qos = qos;
+        message.dup = false;
         message.protocol_version = sub.protocol_version.as_u8();
         if !sub.retain_as_published {
             message.retain = false;

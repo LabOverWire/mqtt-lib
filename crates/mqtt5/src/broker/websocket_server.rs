@@ -250,8 +250,14 @@ where
                 std::io::ErrorKind::UnexpectedEof,
                 "WebSocket closed",
             ))),
-            Poll::Ready(Some(Ok(_))) => {
-                // Ignore other message types (text, ping, pong)
+            Poll::Ready(Some(Ok(Message::Text(_)))) => {
+                error!("[MQTT-6.0.0-1] received text frame on MQTT WebSocket, closing");
+                Poll::Ready(Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "MQTT control packets must use binary frames",
+                )))
+            }
+            Poll::Ready(Some(Ok(Message::Ping(_) | Message::Pong(_) | Message::Frame(_)))) => {
                 cx.waker().wake_by_ref();
                 Poll::Pending
             }

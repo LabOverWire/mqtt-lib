@@ -6,3 +6,4 @@
 # everyone who runs the test benefits from these saved cases.
 cc a8abd27130200b1816bc173bce377d630a6faf2778c5cf6e5a46da113521817e # shrinks to base = "__-a_aAaaaA_a0A", repeat_count = 17
 cc ed0c752eca25de1154f9a5031b8b5380662e557a2c5e222d6057a09885139c2b # shrinks to topic = ""
+cc adb191ae16dbae506c54911b6e859ab1927755473e563f21cf765e9601458942 # shrinks to topic = "-Y_Q-_-2_4y_-u-VJ__G1lV-oRpewM-F_aBm3X_IaP79"

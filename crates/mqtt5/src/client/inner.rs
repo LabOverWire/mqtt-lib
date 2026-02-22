@@ -1,5 +1,3 @@
-//! Internal client implementation details
-
 use crate::error::{MqttError, Result};
 use crate::types::{ConnectOptions, ConnectResult};
 use crate::Transport;
@@ -127,7 +125,6 @@ impl MqttClient {
         }
     }
 
-    #[allow(clippy::too_many_lines)]
     pub(crate) async fn try_connect_address(
         &self,
         addr: std::net::SocketAddr,
@@ -135,146 +132,169 @@ impl MqttClient {
         host: &str,
     ) -> Result<TransportType> {
         match client_transport_type {
-            ClientTransportType::Tcp => {
-                let config = TcpConfig::new(addr);
-                let mut tcp_transport = TcpTransport::new(config);
-                tcp_transport
-                    .connect()
-                    .await
-                    .map_err(|e| MqttError::ConnectionError(format!("TCP connect failed: {e}")))?;
-                Ok(TransportType::Tcp(tcp_transport))
-            }
-            ClientTransportType::Tls => {
-                let insecure = self.transport_config.read().await.insecure_tls;
-                let tls_config_lock = self.tls_config.read().await;
-                let config = if let Some(existing_config) = &*tls_config_lock {
-                    tracing::debug!(
-                        "Using stored TLS config - use_system_roots: {}, has_ca: {}, has_cert: {}",
-                        existing_config.use_system_roots,
-                        existing_config.root_certs.is_some(),
-                        existing_config.client_cert.is_some()
-                    );
-                    let mut cfg = existing_config.clone();
-                    cfg.addr = addr;
-                    cfg.hostname = host.to_string();
-                    cfg.verify_server_cert = !insecure;
-                    cfg
-                } else {
-                    tracing::debug!("No stored TLS config, using default");
-                    TlsConfig::new(addr, host).with_verify_server_cert(!insecure)
-                };
-                drop(tls_config_lock);
-
-                let mut tls_transport = TlsTransport::new(config);
-                tls_transport
-                    .connect()
-                    .await
-                    .map_err(|e| MqttError::ConnectionError(format!("TLS connect failed: {e}")))?;
-                Ok(TransportType::Tls(Box::new(tls_transport)))
-            }
-            ClientTransportType::WebSocket(url) => {
-                let config = WebSocketConfig::new(&url).map_err(|e| {
-                    MqttError::ConnectionError(format!("Invalid WebSocket URL: {e}"))
-                })?;
-                let mut ws_transport = WebSocketTransport::new(config);
-                ws_transport.connect().await.map_err(|e| {
-                    MqttError::ConnectionError(format!("WebSocket connect failed: {e}"))
-                })?;
-                Ok(TransportType::WebSocket(Box::new(ws_transport)))
-            }
+            ClientTransportType::Tcp => Self::connect_tcp(addr).await,
+            ClientTransportType::Tls => self.connect_tls(addr, host).await,
+            ClientTransportType::WebSocket(url) => Self::connect_websocket(&url).await,
             ClientTransportType::WebSocketSecure(url) => {
-                let insecure = self.transport_config.read().await.insecure_tls;
-                let mut config = WebSocketConfig::new(&url).map_err(|e| {
-                    MqttError::ConnectionError(format!("Invalid WebSocket URL: {e}"))
-                })?;
-
-                if insecure {
-                    let tls_config = TlsConfig::new(addr, host).with_verify_server_cert(false);
-                    config = config.with_tls_config(tls_config);
-                }
-
-                let mut ws_transport = WebSocketTransport::new(config);
-                ws_transport.connect().await.map_err(|e| {
-                    MqttError::ConnectionError(format!("WebSocket connect failed: {e}"))
-                })?;
-                Ok(TransportType::WebSocket(Box::new(ws_transport)))
+                self.connect_websocket_secure(addr, host, &url).await
             }
-            ClientTransportType::Quic => {
-                let qc = self.transport_config.read().await;
-                let server_name = if host.parse::<std::net::IpAddr>().is_ok() {
-                    "localhost"
-                } else {
-                    host
-                };
-                let mut config = QuicConfig::new(addr, server_name)
-                    .with_verify_server_cert(false)
-                    .with_stream_strategy(qc.stream_strategy)
-                    .with_flow_headers(qc.flow_headers)
-                    .with_flow_expire_interval(qc.flow_expire.as_secs())
-                    .with_datagrams(qc.datagrams)
-                    .with_connect_timeout(qc.connect_timeout);
-                if let Some(max) = qc.max_streams {
-                    config = config.with_max_concurrent_streams(max);
-                }
-                drop(qc);
-                let mut quic_transport = QuicTransport::new(config);
-                quic_transport
-                    .connect()
-                    .await
-                    .map_err(|e| MqttError::ConnectionError(format!("QUIC connect failed: {e}")))?;
-                Ok(TransportType::Quic(Box::new(quic_transport)))
-            }
-            ClientTransportType::QuicSecure => {
-                let qc: crate::transport::ClientTransportConfig =
-                    (*self.transport_config.read().await).clone();
-                let tls_config_lock = self.tls_config.read().await;
-                let server_name = if host.parse::<std::net::IpAddr>().is_ok() {
-                    "localhost"
-                } else {
-                    host
-                };
-                let mut config = QuicConfig::new(addr, server_name)
-                    .with_verify_server_cert(!qc.insecure_tls)
-                    .with_stream_strategy(qc.stream_strategy)
-                    .with_flow_headers(qc.flow_headers)
-                    .with_flow_expire_interval(qc.flow_expire.as_secs())
-                    .with_datagrams(qc.datagrams)
-                    .with_connect_timeout(qc.connect_timeout);
-
-                if let Some(max) = qc.max_streams {
-                    config = config.with_max_concurrent_streams(max);
-                }
-
-                if let Some(existing_config) = &*tls_config_lock {
-                    tracing::debug!(
-                        "Using stored TLS config for QUIC - use_system_roots: {}, has_ca: {}, has_cert: {}",
-                        existing_config.use_system_roots,
-                        existing_config.root_certs.is_some(),
-                        existing_config.client_cert.is_some()
-                    );
-
-                    if let (Some(ref cert_chain), Some(ref key)) =
-                        (&existing_config.client_cert, &existing_config.client_key)
-                    {
-                        config = config.with_client_cert(cert_chain.clone(), key.clone_key());
-                    }
-
-                    if let Some(ref certs) = existing_config.root_certs {
-                        config = config.with_root_certs(certs.clone());
-                    }
-                } else {
-                    tracing::debug!("No stored TLS config for QUIC, using default");
-                }
-                drop(tls_config_lock);
-
-                let mut quic_transport = QuicTransport::new(config);
-                quic_transport
-                    .connect()
-                    .await
-                    .map_err(|e| MqttError::ConnectionError(format!("QUIC connect failed: {e}")))?;
-                Ok(TransportType::Quic(Box::new(quic_transport)))
-            }
+            ClientTransportType::Quic => self.connect_quic(addr, host).await,
+            ClientTransportType::QuicSecure => self.connect_quic_secure(addr, host).await,
         }
+    }
+
+    async fn connect_tcp(addr: std::net::SocketAddr) -> Result<TransportType> {
+        let config = TcpConfig::new(addr);
+        let mut tcp_transport = TcpTransport::new(config);
+        tcp_transport
+            .connect()
+            .await
+            .map_err(|e| MqttError::ConnectionError(format!("TCP connect failed: {e}")))?;
+        Ok(TransportType::Tcp(tcp_transport))
+    }
+
+    async fn connect_tls(&self, addr: std::net::SocketAddr, host: &str) -> Result<TransportType> {
+        let insecure = self.transport_config.read().await.insecure_tls;
+        let tls_config_lock = self.tls_config.read().await;
+        let config = if let Some(existing_config) = &*tls_config_lock {
+            tracing::debug!(
+                "Using stored TLS config - use_system_roots: {}, has_ca: {}, has_cert: {}",
+                existing_config.use_system_roots,
+                existing_config.root_certs.is_some(),
+                existing_config.client_cert.is_some()
+            );
+            let mut cfg = existing_config.clone();
+            cfg.addr = addr;
+            cfg.hostname = host.to_string();
+            cfg.verify_server_cert = !insecure;
+            cfg
+        } else {
+            tracing::debug!("No stored TLS config, using default");
+            TlsConfig::new(addr, host).with_verify_server_cert(!insecure)
+        };
+        drop(tls_config_lock);
+
+        let mut tls_transport = TlsTransport::new(config);
+        tls_transport
+            .connect()
+            .await
+            .map_err(|e| MqttError::ConnectionError(format!("TLS connect failed: {e}")))?;
+        Ok(TransportType::Tls(Box::new(tls_transport)))
+    }
+
+    async fn connect_websocket(url: &str) -> Result<TransportType> {
+        let config = WebSocketConfig::new(url)
+            .map_err(|e| MqttError::ConnectionError(format!("Invalid WebSocket URL: {e}")))?;
+        let mut ws_transport = WebSocketTransport::new(config);
+        ws_transport
+            .connect()
+            .await
+            .map_err(|e| MqttError::ConnectionError(format!("WebSocket connect failed: {e}")))?;
+        Ok(TransportType::WebSocket(Box::new(ws_transport)))
+    }
+
+    async fn connect_websocket_secure(
+        &self,
+        addr: std::net::SocketAddr,
+        host: &str,
+        url: &str,
+    ) -> Result<TransportType> {
+        let insecure = self.transport_config.read().await.insecure_tls;
+        let mut config = WebSocketConfig::new(url)
+            .map_err(|e| MqttError::ConnectionError(format!("Invalid WebSocket URL: {e}")))?;
+
+        if insecure {
+            let tls_config = TlsConfig::new(addr, host).with_verify_server_cert(false);
+            config = config.with_tls_config(tls_config);
+        }
+
+        let mut ws_transport = WebSocketTransport::new(config);
+        ws_transport
+            .connect()
+            .await
+            .map_err(|e| MqttError::ConnectionError(format!("WebSocket connect failed: {e}")))?;
+        Ok(TransportType::WebSocket(Box::new(ws_transport)))
+    }
+
+    async fn connect_quic(&self, addr: std::net::SocketAddr, host: &str) -> Result<TransportType> {
+        let qc = self.transport_config.read().await;
+        let server_name = if host.parse::<std::net::IpAddr>().is_ok() {
+            "localhost"
+        } else {
+            host
+        };
+        let mut config = QuicConfig::new(addr, server_name)
+            .with_verify_server_cert(false)
+            .with_stream_strategy(qc.stream_strategy)
+            .with_flow_headers(qc.flow_headers)
+            .with_flow_expire_interval(qc.flow_expire.as_secs())
+            .with_datagrams(qc.datagrams)
+            .with_connect_timeout(qc.connect_timeout);
+        if let Some(max) = qc.max_streams {
+            config = config.with_max_concurrent_streams(max);
+        }
+        drop(qc);
+        let mut quic_transport = QuicTransport::new(config);
+        quic_transport
+            .connect()
+            .await
+            .map_err(|e| MqttError::ConnectionError(format!("QUIC connect failed: {e}")))?;
+        Ok(TransportType::Quic(Box::new(quic_transport)))
+    }
+
+    async fn connect_quic_secure(
+        &self,
+        addr: std::net::SocketAddr,
+        host: &str,
+    ) -> Result<TransportType> {
+        let qc: crate::transport::ClientTransportConfig =
+            (*self.transport_config.read().await).clone();
+        let tls_config_lock = self.tls_config.read().await;
+        let server_name = if host.parse::<std::net::IpAddr>().is_ok() {
+            "localhost"
+        } else {
+            host
+        };
+        let mut config = QuicConfig::new(addr, server_name)
+            .with_verify_server_cert(!qc.insecure_tls)
+            .with_stream_strategy(qc.stream_strategy)
+            .with_flow_headers(qc.flow_headers)
+            .with_flow_expire_interval(qc.flow_expire.as_secs())
+            .with_datagrams(qc.datagrams)
+            .with_connect_timeout(qc.connect_timeout);
+
+        if let Some(max) = qc.max_streams {
+            config = config.with_max_concurrent_streams(max);
+        }
+
+        if let Some(existing_config) = &*tls_config_lock {
+            tracing::debug!(
+                "Using stored TLS config for QUIC - use_system_roots: {}, has_ca: {}, has_cert: {}",
+                existing_config.use_system_roots,
+                existing_config.root_certs.is_some(),
+                existing_config.client_cert.is_some()
+            );
+
+            if let (Some(ref cert_chain), Some(ref key)) =
+                (&existing_config.client_cert, &existing_config.client_key)
+            {
+                config = config.with_client_cert(cert_chain.clone(), key.clone_key());
+            }
+
+            if let Some(ref certs) = existing_config.root_certs {
+                config = config.with_root_certs(certs.clone());
+            }
+        } else {
+            tracing::debug!("No stored TLS config for QUIC, using default");
+        }
+        drop(tls_config_lock);
+
+        let mut quic_transport = QuicTransport::new(config);
+        quic_transport
+            .connect()
+            .await
+            .map_err(|e| MqttError::ConnectionError(format!("QUIC connect failed: {e}")))?;
+        Ok(TransportType::Quic(Box::new(quic_transport)))
     }
 
     pub(crate) async fn try_connect_to_addresses(

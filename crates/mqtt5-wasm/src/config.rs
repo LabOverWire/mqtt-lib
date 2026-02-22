@@ -10,6 +10,12 @@ use wasm_bindgen::prelude::*;
 #[cfg(feature = "codec")]
 use crate::codec::WasmCodecRegistry;
 
+fn add_property_or_warn(properties: &mut Properties, id: PropertyId, value: PropertyValue) {
+    if properties.add(id, value).is_err() {
+        web_sys::console::warn_1(&format!("Failed to add {id:?} property").into());
+    }
+}
+
 #[wasm_bindgen]
 pub struct WasmReconnectOptions {
     pub(crate) enabled: bool,
@@ -358,120 +364,79 @@ impl WasmConnectOptions {
         self.codec_registry = None;
     }
 
-    #[allow(clippy::too_many_lines)]
     pub(crate) fn to_properties(&self) -> Properties {
         let mut properties = Properties::default();
 
         if let Some(interval) = self.session_expiry_interval {
-            if properties
-                .add(
-                    PropertyId::SessionExpiryInterval,
-                    PropertyValue::FourByteInteger(interval),
-                )
-                .is_err()
-            {
-                web_sys::console::warn_1(&"Failed to add session expiry interval property".into());
-            }
+            add_property_or_warn(
+                &mut properties,
+                PropertyId::SessionExpiryInterval,
+                PropertyValue::FourByteInteger(interval),
+            );
         }
 
         if let Some(max) = self.receive_maximum {
-            if properties
-                .add(
-                    PropertyId::ReceiveMaximum,
-                    PropertyValue::TwoByteInteger(max),
-                )
-                .is_err()
-            {
-                web_sys::console::warn_1(&"Failed to add receive maximum property".into());
-            }
+            add_property_or_warn(
+                &mut properties,
+                PropertyId::ReceiveMaximum,
+                PropertyValue::TwoByteInteger(max),
+            );
         }
 
         if let Some(size) = self.maximum_packet_size {
-            if properties
-                .add(
-                    PropertyId::MaximumPacketSize,
-                    PropertyValue::FourByteInteger(size),
-                )
-                .is_err()
-            {
-                web_sys::console::warn_1(&"Failed to add maximum packet size property".into());
-            }
+            add_property_or_warn(
+                &mut properties,
+                PropertyId::MaximumPacketSize,
+                PropertyValue::FourByteInteger(size),
+            );
         }
 
         if let Some(max) = self.topic_alias_maximum {
-            if properties
-                .add(
-                    PropertyId::TopicAliasMaximum,
-                    PropertyValue::TwoByteInteger(max),
-                )
-                .is_err()
-            {
-                web_sys::console::warn_1(&"Failed to add topic alias maximum property".into());
-            }
+            add_property_or_warn(
+                &mut properties,
+                PropertyId::TopicAliasMaximum,
+                PropertyValue::TwoByteInteger(max),
+            );
         }
 
         if let Some(val) = self.request_response_information {
-            if properties
-                .add(
-                    PropertyId::RequestResponseInformation,
-                    PropertyValue::Byte(u8::from(val)),
-                )
-                .is_err()
-            {
-                web_sys::console::warn_1(
-                    &"Failed to add request response information property".into(),
-                );
-            }
+            add_property_or_warn(
+                &mut properties,
+                PropertyId::RequestResponseInformation,
+                PropertyValue::Byte(u8::from(val)),
+            );
         }
 
         if let Some(val) = self.request_problem_information {
-            if properties
-                .add(
-                    PropertyId::RequestProblemInformation,
-                    PropertyValue::Byte(u8::from(val)),
-                )
-                .is_err()
-            {
-                web_sys::console::warn_1(
-                    &"Failed to add request problem information property".into(),
-                );
-            }
+            add_property_or_warn(
+                &mut properties,
+                PropertyId::RequestProblemInformation,
+                PropertyValue::Byte(u8::from(val)),
+            );
         }
 
         if let Some(method) = &self.authentication_method {
-            if properties
-                .add(
-                    PropertyId::AuthenticationMethod,
-                    PropertyValue::Utf8String(method.clone()),
-                )
-                .is_err()
-            {
-                web_sys::console::warn_1(&"Failed to add authentication method property".into());
-            }
+            add_property_or_warn(
+                &mut properties,
+                PropertyId::AuthenticationMethod,
+                PropertyValue::Utf8String(method.clone()),
+            );
         }
 
         if let Some(data) = &self.authentication_data {
-            if properties
-                .add(
-                    PropertyId::AuthenticationData,
-                    PropertyValue::BinaryData(data.clone().into()),
-                )
-                .is_err()
-            {
-                web_sys::console::warn_1(&"Failed to add authentication data property".into());
-            }
+            add_property_or_warn(
+                &mut properties,
+                PropertyId::AuthenticationData,
+                PropertyValue::BinaryData(data.clone().into()),
+            );
         }
 
         for (key, value) in &self.user_properties {
-            if properties
-                .add(
-                    PropertyId::UserProperty,
-                    PropertyValue::Utf8StringPair(key.clone(), value.clone()),
-                )
-                .is_err()
-            {
-                web_sys::console::warn_1(&"Failed to add user property".into());
-            }
+            add_property_or_warn(
+                &mut properties,
+                PropertyId::UserProperty,
+                PropertyValue::Utf8StringPair(key.clone(), value.clone()),
+            );
         }
 
         properties
