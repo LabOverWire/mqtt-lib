@@ -10,11 +10,13 @@ source "${ROOT_DIR}/setup/config.env"
 : "${SSH_KEY_PATH:=$HOME/.ssh/id_ed25519}"
 : "${RUNS_PER_DATAPOINT:=5}"
 
+SSH_USER="${SSH_USER:-bench}"
+
 RESULTS_DIR="${ROOT_DIR}/results"
 mkdir -p "$RESULTS_DIR"
 
-ssh_broker() { ssh -i "$SSH_KEY_PATH" -o StrictHostKeyChecking=no "root@${BROKER_IP}" "$@"; }
-ssh_client() { ssh -i "$SSH_KEY_PATH" -o StrictHostKeyChecking=no "root@${CLIENT_IP}" "$@"; }
+ssh_broker() { ssh -i "$SSH_KEY_PATH" -o StrictHostKeyChecking=no "${SSH_USER}@${BROKER_IP}" "$@"; }
+ssh_client() { ssh -i "$SSH_KEY_PATH" -o StrictHostKeyChecking=no "${SSH_USER}@${CLIENT_IP}" "$@"; }
 
 BROKER_PID=""
 
@@ -38,11 +40,11 @@ stop_broker() {
 apply_netem() {
     local delay_ms="$1"
     local loss_pct="${2:-0}"
-    ssh_client "bash /opt/mqtt-lib/experiments/netem/apply.sh ${delay_ms} ${loss_pct}"
+    ssh_client "sudo bash /opt/mqtt-lib/experiments/netem/apply.sh ${delay_ms} ${loss_pct}"
 }
 
 clear_netem() {
-    ssh_client "bash /opt/mqtt-lib/experiments/netem/clear.sh"
+    ssh_client "sudo bash /opt/mqtt-lib/experiments/netem/clear.sh"
 }
 
 MONITOR_PID=""
@@ -58,7 +60,7 @@ start_monitor() {
 stop_monitor() {
     local output_file="$1"
     ssh_broker "kill ${MONITOR_PID}" 2>/dev/null || true
-    scp -i "$SSH_KEY_PATH" "root@${BROKER_IP}:/tmp/monitor.csv" "$output_file"
+    scp -i "$SSH_KEY_PATH" "${SSH_USER}@${BROKER_IP}:/tmp/monitor.csv" "$output_file"
     MONITOR_PID=""
 }
 

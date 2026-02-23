@@ -1,31 +1,41 @@
 # MQoQ Benchmarking Infrastructure
 
 Experiment infrastructure for measuring MQTT-over-QUIC performance characteristics
-against TCP/TLS baselines using DigitalOcean droplets.
+against TCP/TLS baselines using GCP Compute Engine instances managed by Terraform.
+
+## Prerequisites
+
+- [Terraform](https://developer.hashicorp.com/terraform/install) >= 1.5
+- GCP project with Compute Engine API enabled
+- `gcloud` CLI authenticated (`gcloud auth application-default login`)
 
 ## Quick Start
 
 ```bash
 # 1. Configure
 cp setup/config.env.example setup/config.env
-# Edit config.env with your DO SSH key ID and repo URL
+# Edit config.env with your GCP project ID and repo URL
 
-# 2. Provision droplets
+# 2. Set up Terraform variables
+cp terraform/terraform.tfvars.example terraform/terraform.tfvars
+# Edit terraform.tfvars with your GCP project ID
+
+# 3. Provision instances
 bash setup/provision.sh
 
-# 3. Install dependencies and build
+# 4. Install dependencies and build
 bash setup/install.sh
 
-# 4. Generate TLS/QUIC certificates
+# 5. Generate TLS/QUIC certificates
 bash setup/generate_bench_certs.sh $BROKER_IP
 
-# 5. Run all experiments
+# 6. Run all experiments
 bash run/run_all.sh
 
-# 6. Aggregate results
+# 7. Aggregate results
 python3 analysis/aggregate.py
 
-# 7. Tear down
+# 8. Tear down
 bash setup/provision.sh teardown
 ```
 
@@ -42,9 +52,11 @@ bash setup/provision.sh teardown
 
 ## Network Impairment
 
-Uses `tc netem` on the client droplet to simulate WAN conditions:
+Uses `tc netem` on the client instance to simulate WAN conditions:
 - `netem/apply.sh <delay_ms> <loss_pct>` - Apply delay and loss
 - `netem/clear.sh` - Remove all impairments
+
+The interface is auto-detected via the default route.
 
 ## Output Format
 
@@ -59,7 +71,8 @@ The `analysis/aggregate.py` script computes mean, stdev, and 95% CI across repea
 
 ```
 experiments/
-├── setup/           # Provisioning and installation
+├── terraform/       # GCP instance provisioning
+├── setup/           # Config and installation
 ├── netem/           # Network impairment (tc netem)
 ├── run/             # Experiment scripts
 ├── monitor/         # Resource monitoring

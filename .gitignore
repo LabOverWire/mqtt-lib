@@ -189,6 +189,13 @@ test_passwords.txt
 TEMP_BDD_SCENARIO_GUIDE.md
 .playwright-mcp/
 
+# Terraform
+experiments/terraform/.terraform/
+experiments/terraform/.terraform.lock.hcl
+experiments/terraform/terraform.tfstate*
+experiments/terraform/*.tfvars
+!experiments/terraform/*.tfvars.example
+
 # Experiment results (raw benchmark data)
 experiments/results/*.json
 experiments/results/**/*.json

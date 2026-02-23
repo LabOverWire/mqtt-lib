@@ -8,14 +8,18 @@ DAYS=365
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/config.env"
 
+: "${SSH_KEY_PATH:=$HOME/.ssh/id_ed25519}"
+SSH_USER="${SSH_USER:-bench}"
+
 generate_certs() {
-    ssh "root@${BROKER_IP}" bash -s -- "$BROKER_IP" "$CERT_DIR" "$DAYS" <<'REMOTE'
+    ssh -i "$SSH_KEY_PATH" "${SSH_USER}@${BROKER_IP}" bash -s -- "$BROKER_IP" "$CERT_DIR" "$DAYS" <<'REMOTE'
         set -euo pipefail
         BROKER_IP="$1"
         CERT_DIR="$2"
         DAYS="$3"
 
-        mkdir -p "$CERT_DIR"
+        sudo mkdir -p "$CERT_DIR"
+        sudo chown "$(whoami):$(whoami)" "$CERT_DIR"
         cd "$CERT_DIR"
 
         openssl ecparam -name prime256v1 -genkey -noout -out ca.key
@@ -41,8 +45,8 @@ EOF
 REMOTE
 
     echo "copying CA cert to client..."
-    ssh "root@${BROKER_IP}" "cat ${CERT_DIR}/ca.pem" | \
-        ssh "root@${CLIENT_IP}" "mkdir -p ${CERT_DIR} && cat > ${CERT_DIR}/ca.pem"
+    ssh -i "$SSH_KEY_PATH" "${SSH_USER}@${BROKER_IP}" "cat ${CERT_DIR}/ca.pem" | \
+        ssh -i "$SSH_KEY_PATH" "${SSH_USER}@${CLIENT_IP}" "sudo mkdir -p ${CERT_DIR} && sudo tee ${CERT_DIR}/ca.pem > /dev/null"
 
     echo "done"
 }

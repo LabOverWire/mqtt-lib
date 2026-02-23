@@ -6,16 +6,19 @@ source "${SCRIPT_DIR}/config.env"
 
 : "${REPO_URL:?Set REPO_URL in config.env}"
 : "${REPO_BRANCH:=main}"
+: "${SSH_KEY_PATH:=$HOME/.ssh/id_ed25519}"
+
+SSH_USER="${SSH_USER:-bench}"
 
 install_on_host() {
     local host="$1"
     echo "installing on ${host}..."
 
-    ssh -o StrictHostKeyChecking=no "root@${host}" bash -s <<'REMOTE'
+    ssh -i "$SSH_KEY_PATH" -o StrictHostKeyChecking=accept-new "${SSH_USER}@${host}" bash -s <<'REMOTE'
         set -euo pipefail
         export DEBIAN_FRONTEND=noninteractive
-        apt-get update -qq
-        apt-get install -y -qq build-essential pkg-config libssl-dev iproute2 openssl git
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq build-essential pkg-config libssl-dev iproute2 openssl git
         if ! command -v rustup &>/dev/null; then
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
         fi
@@ -23,7 +26,7 @@ install_on_host() {
         rustup update stable
 REMOTE
 
-    ssh "root@${host}" bash -s -- "$REPO_URL" "$REPO_BRANCH" <<'REMOTE'
+    ssh -i "$SSH_KEY_PATH" "${SSH_USER}@${host}" bash -s -- "$REPO_URL" "$REPO_BRANCH" <<'REMOTE'
         set -euo pipefail
         source "$HOME/.cargo/env"
         REPO_URL="$1"
@@ -34,11 +37,12 @@ REMOTE
             git checkout "$REPO_BRANCH"
             git pull
         else
-            git clone --branch "$REPO_BRANCH" "$REPO_URL" /opt/mqtt-lib
+            sudo git clone --branch "$REPO_BRANCH" "$REPO_URL" /opt/mqtt-lib
+            sudo chown -R "$(whoami):$(whoami)" /opt/mqtt-lib
             cd /opt/mqtt-lib
         fi
         cargo build --release -p mqttv5-cli
-        ln -sf /opt/mqtt-lib/target/release/mqttv5 /usr/local/bin/mqttv5
+        sudo ln -sf /opt/mqtt-lib/target/release/mqttv5 /usr/local/bin/mqttv5
         echo "mqttv5 installed: $(mqttv5 --version)"
 REMOTE
 

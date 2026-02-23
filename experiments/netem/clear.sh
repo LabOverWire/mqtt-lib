@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-tc qdisc del dev eth0 root 2>/dev/null || true
-echo "netem: cleared"
+DEV=$(ip route show default | awk '{print $5}' | head -1)
+tc qdisc del dev "$DEV" root 2>/dev/null || true
+echo "netem: cleared dev=${DEV}"
