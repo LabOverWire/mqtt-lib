@@ -16,7 +16,7 @@ use tokio::signal;
 use tokio::sync::Notify;
 use tracing::{debug, info};
 
-use super::parsers::{duration_secs_to_u32, parse_duration_secs};
+use super::parsers::{duration_secs_to_u32, parse_duration_secs, parse_stream_strategy};
 
 #[derive(Args)]
 pub struct SubCommand {
@@ -212,19 +212,6 @@ fn parse_retain_handling(s: &str) -> Result<mqtt5::RetainHandling, String> {
         "1" => Ok(mqtt5::RetainHandling::SendIfNew),
         "2" => Ok(mqtt5::RetainHandling::DontSend),
         _ => Err(format!("retain_handling must be 0, 1, or 2, got: {s}")),
-    }
-}
-
-fn parse_stream_strategy(s: &str) -> Result<mqtt5::transport::StreamStrategy, String> {
-    use mqtt5::transport::StreamStrategy;
-    match s.to_lowercase().as_str() {
-        "control-only" | "control" => Ok(StreamStrategy::ControlOnly),
-        "per-publish" | "publish" => Ok(StreamStrategy::DataPerPublish),
-        "per-topic" | "topic" => Ok(StreamStrategy::DataPerTopic),
-        "per-subscription" | "subscription" => Ok(StreamStrategy::DataPerSubscription),
-        _ => Err(format!(
-            "Invalid stream strategy: {s}. Valid: control-only, per-publish, per-topic, per-subscription"
-        )),
     }
 }
 

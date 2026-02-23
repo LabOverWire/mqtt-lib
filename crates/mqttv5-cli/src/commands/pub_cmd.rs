@@ -22,6 +22,7 @@ use tracing::{debug, info, warn};
 
 use super::parsers::{
     calculate_wait_until, duration_secs_to_u32, parse_duration_millis, parse_duration_secs,
+    parse_stream_strategy,
 };
 
 #[derive(Args)]
@@ -263,19 +264,6 @@ fn parse_protocol_version(s: &str) -> Result<ProtocolVersion, String> {
         "3.1.1" | "311" | "4" => Ok(ProtocolVersion::V311),
         "5" | "5.0" => Ok(ProtocolVersion::V5),
         _ => Err(format!("Invalid protocol version: {s}. Use '3.1.1' or '5'")),
-    }
-}
-
-fn parse_stream_strategy(s: &str) -> Result<mqtt5::transport::StreamStrategy, String> {
-    use mqtt5::transport::StreamStrategy;
-    match s.to_lowercase().as_str() {
-        "control-only" | "control" => Ok(StreamStrategy::ControlOnly),
-        "per-publish" | "publish" => Ok(StreamStrategy::DataPerPublish),
-        "per-topic" | "topic" => Ok(StreamStrategy::DataPerTopic),
-        "per-subscription" | "subscription" => Ok(StreamStrategy::DataPerSubscription),
-        _ => Err(format!(
-            "Invalid stream strategy: {s}. Valid: control-only, per-publish, per-topic, per-subscription"
-        )),
     }
 }
 

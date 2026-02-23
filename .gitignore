@@ -188,3 +188,15 @@ CAPABILITIES_VERIFICATION_GUIDE.md
 test_passwords.txt
 TEMP_BDD_SCENARIO_GUIDE.md
 .playwright-mcp/
+
+# Experiment results (raw benchmark data)
+experiments/results/*.json
+experiments/results/**/*.json
+experiments/results/*.csv
+experiments/results/**/*.csv
+
+# Allow experiment scripts and config
+!experiments/**/*.sh
+!experiments/**/*.py
+!experiments/setup/config.env.example
+!experiments/README.md

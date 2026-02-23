@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
+
+EXPERIMENT="04_stream_strategies"
+STRATEGIES=("control-only" "per-publish" "per-topic" "per-subscription")
+TOPIC_COUNTS=(1 4 8 16)
+DELAY=25
+LOSS=2
+
+start_broker "--quic-host 0.0.0.0:14567 --quic-cert /opt/mqtt-certs/server.pem --quic-key /opt/mqtt-certs/server.key"
+apply_netem "$DELAY" "$LOSS"
+
+for strategy in "${STRATEGIES[@]}"; do
+    for ntopics in "${TOPIC_COUNTS[@]}"; do
+        label="${strategy}_${ntopics}topics_throughput"
+        echo "[${EXPERIMENT}] ${label}"
+        run_repeated "$EXPERIMENT" "$label" \
+            "--url quic://${BROKER_IP}:14567 --insecure --quic-stream-strategy ${strategy} --mode throughput --duration 30 --warmup 5 --publishers ${ntopics} --subscribers ${ntopics}"
+
+        label="${strategy}_${ntopics}topics_latency"
+        echo "[${EXPERIMENT}] ${label}"
+        run_repeated "$EXPERIMENT" "$label" \
+            "--url quic://${BROKER_IP}:14567 --insecure --quic-stream-strategy ${strategy} --mode latency --duration 30 --warmup 5"
+    done
+done
+
+clear_netem
+stop_broker
+echo "experiment ${EXPERIMENT} complete"

@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+source "${ROOT_DIR}/setup/config.env"
+
+: "${BROKER_IP:?Set BROKER_IP in config.env}"
+: "${CLIENT_IP:?Set CLIENT_IP in config.env}"
+: "${SSH_KEY_PATH:=$HOME/.ssh/id_ed25519}"
+: "${RUNS_PER_DATAPOINT:=5}"
+
+RESULTS_DIR="${ROOT_DIR}/results"
+mkdir -p "$RESULTS_DIR"
+
+ssh_broker() { ssh -i "$SSH_KEY_PATH" -o StrictHostKeyChecking=no "root@${BROKER_IP}" "$@"; }
+ssh_client() { ssh -i "$SSH_KEY_PATH" -o StrictHostKeyChecking=no "root@${CLIENT_IP}" "$@"; }
+
+BROKER_PID=""
+
+start_broker() {
+    local extra_flags="${1:-}"
+    echo "starting broker on ${BROKER_IP}..."
+    ssh_broker "nohup mqttv5 broker --allow-anonymous --host 0.0.0.0 --storage-backend memory \
+        ${extra_flags} > /tmp/broker.log 2>&1 & echo \$!"
+    BROKER_PID=$(ssh_broker "pgrep -f 'mqttv5 broker' | tail -1")
+    sleep 2
+    echo "broker pid: ${BROKER_PID}"
+}
+
+stop_broker() {
+    echo "stopping broker..."
+    ssh_broker "pkill -f 'mqttv5 broker'" 2>/dev/null || true
+    BROKER_PID=""
+    sleep 1
+}
+
+apply_netem() {
+    local delay_ms="$1"
+    local loss_pct="${2:-0}"
+    ssh_client "bash /opt/mqtt-lib/experiments/netem/apply.sh ${delay_ms} ${loss_pct}"
+}
+
+clear_netem() {
+    ssh_client "bash /opt/mqtt-lib/experiments/netem/clear.sh"
+}
+
+MONITOR_PID=""
+
+start_monitor() {
+    local output_file="$1"
+    ssh_broker "nohup bash /opt/mqtt-lib/experiments/monitor/resource_monitor.sh ${BROKER_PID} \
+        > /tmp/monitor.csv 2>&1 & echo \$!"
+    MONITOR_PID=$(ssh_broker "pgrep -f 'resource_monitor' | tail -1")
+    echo "monitor pid: ${MONITOR_PID}"
+}
+
+stop_monitor() {
+    local output_file="$1"
+    ssh_broker "kill ${MONITOR_PID}" 2>/dev/null || true
+    scp -i "$SSH_KEY_PATH" "root@${BROKER_IP}:/tmp/monitor.csv" "$output_file"
+    MONITOR_PID=""
+}
+
+run_bench() {
+    local experiment="$1"
+    local label="$2"
+    shift 2
+    local bench_args="$*"
+    local output_dir="${RESULTS_DIR}/${experiment}"
+    mkdir -p "$output_dir"
+    local output_file="${output_dir}/${label}.json"
+
+    echo "  running: mqttv5 bench ${bench_args}"
+    ssh_client "mqttv5 bench ${bench_args}" > "$output_file" 2>/dev/null
+    echo "  saved: ${output_file}"
+}
+
+run_repeated() {
+    local experiment="$1"
+    local label="$2"
+    shift 2
+    local bench_args="$*"
+
+    for run in $(seq 1 "$RUNS_PER_DATAPOINT"); do
+        run_bench "$experiment" "${label}_run${run}" "$bench_args"
+    done
+}

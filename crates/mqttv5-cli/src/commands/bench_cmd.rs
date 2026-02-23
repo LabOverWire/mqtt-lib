@@ -1,12 +1,17 @@
+#![allow(clippy::struct_excessive_bools)]
+
 use anyhow::{Context, Result};
 use clap::{Args, ValueEnum};
 use mqtt5::time::Duration;
 use mqtt5::{ConnectOptions, MqttClient, QoS};
 use rand::Rng;
 use serde::Serialize;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::time::Instant;
+
+use super::parsers::{parse_duration_secs, parse_stream_strategy};
 
 #[derive(Debug, Clone, Copy, ValueEnum, Default)]
 pub enum BenchMode {
@@ -14,6 +19,7 @@ pub enum BenchMode {
     Throughput,
     Latency,
     Connections,
+    HolBlocking,
 }
 
 #[derive(Args)]
@@ -66,6 +72,39 @@ pub struct BenchCommand {
 
     #[arg(long, default_value = "10")]
     pub concurrency: usize,
+
+    #[arg(long)]
+    pub insecure: bool,
+
+    #[arg(long)]
+    pub ca_cert: Option<PathBuf>,
+
+    #[arg(long)]
+    pub cert: Option<PathBuf>,
+
+    #[arg(long)]
+    pub key: Option<PathBuf>,
+
+    #[arg(long, value_parser = parse_stream_strategy)]
+    pub quic_stream_strategy: Option<mqtt5::transport::StreamStrategy>,
+
+    #[arg(long)]
+    pub quic_flow_headers: bool,
+
+    #[arg(long, default_value = "300", value_parser = parse_duration_secs)]
+    pub quic_flow_expire: u64,
+
+    #[arg(long)]
+    pub quic_max_streams: Option<usize>,
+
+    #[arg(long)]
+    pub quic_datagrams: bool,
+
+    #[arg(long, default_value = "30", value_parser = parse_duration_secs)]
+    pub quic_connect_timeout: u64,
+
+    #[arg(long, default_value = "4")]
+    pub topics: usize,
 }
 
 fn parse_qos(s: &str) -> Result<QoS, String> {
@@ -87,6 +126,11 @@ struct BenchConfig {
     filter: String,
     publishers: usize,
     subscribers: usize,
+    transport: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    quic_stream_strategy: Option<String>,
+    quic_datagrams: bool,
+    quic_flow_headers: bool,
 }
 
 #[derive(Serialize)]
@@ -125,11 +169,27 @@ struct ConnectionResults {
 }
 
 #[derive(Serialize)]
+struct TopicLatencyResult {
+    topic: String,
+    messages: u64,
+    p50_us: u64,
+    p95_us: u64,
+    p99_us: u64,
+}
+
+#[derive(Serialize)]
+struct HolBlockingResults {
+    topics: Vec<TopicLatencyResult>,
+    correlation: f64,
+}
+
+#[derive(Serialize)]
 #[serde(untagged)]
 enum BenchResults {
     Throughput(ThroughputResults),
     Latency(LatencyResults),
     Connections(ConnectionResults),
+    HolBlocking(HolBlockingResults),
 }
 
 #[derive(Serialize)]
@@ -146,6 +206,7 @@ pub async fn execute(cmd: BenchCommand, verbose: bool, debug: bool) -> Result<()
         BenchMode::Throughput => run_throughput(cmd).await,
         BenchMode::Latency => run_latency(cmd).await,
         BenchMode::Connections => run_connections(cmd).await,
+        BenchMode::HolBlocking => run_hol_blocking(cmd).await,
     }
 }
 
@@ -155,14 +216,99 @@ fn broker_url(cmd: &BenchCommand) -> String {
         .unwrap_or_else(|| format!("mqtt://{}:{}", cmd.host, cmd.port))
 }
 
+fn transport_from_url(url: &str) -> String {
+    url.split("://").next().unwrap_or("tcp").to_string()
+}
+
+fn strategy_display(s: mqtt5::transport::StreamStrategy) -> String {
+    match s {
+        mqtt5::transport::StreamStrategy::ControlOnly => "control-only".to_string(),
+        mqtt5::transport::StreamStrategy::DataPerPublish => "per-publish".to_string(),
+        mqtt5::transport::StreamStrategy::DataPerTopic => "per-topic".to_string(),
+        mqtt5::transport::StreamStrategy::DataPerSubscription => "per-subscription".to_string(),
+    }
+}
+
+fn bench_config(cmd: &BenchCommand, url: &str) -> BenchConfig {
+    let filter = cmd.filter.clone().unwrap_or_else(|| cmd.topic.clone());
+    BenchConfig {
+        duration_secs: cmd.duration,
+        warmup_secs: cmd.warmup,
+        payload_size: cmd.payload_size,
+        qos: cmd.qos as u8,
+        topic: cmd.topic.clone(),
+        filter,
+        publishers: cmd.publishers,
+        subscribers: cmd.subscribers,
+        transport: transport_from_url(url),
+        quic_stream_strategy: cmd.quic_stream_strategy.map(strategy_display),
+        quic_datagrams: cmd.quic_datagrams,
+        quic_flow_headers: cmd.quic_flow_headers,
+    }
+}
+
 fn base_client_id(cmd: &BenchCommand, prefix: &str) -> String {
     cmd.client_id
         .clone()
         .unwrap_or_else(|| format!("mqttv5-{prefix}-{}", rand::rng().random::<u32>()))
 }
 
-async fn connect_client(client_id: String, url: &str) -> Result<MqttClient> {
+async fn configure_transport(client: &MqttClient, cmd: &BenchCommand, url: &str) -> Result<()> {
+    if cmd.insecure {
+        client.set_insecure_tls(true).await;
+    }
+    if let Some(strategy) = cmd.quic_stream_strategy {
+        client.set_quic_stream_strategy(strategy).await;
+    }
+    if cmd.quic_flow_headers {
+        client.set_quic_flow_headers(true).await;
+    }
+    client
+        .set_quic_flow_expire(std::time::Duration::from_secs(cmd.quic_flow_expire))
+        .await;
+    if let Some(max) = cmd.quic_max_streams {
+        client.set_quic_max_streams(Some(max)).await;
+    }
+    if cmd.quic_datagrams {
+        client.set_quic_datagrams(true).await;
+    }
+    client
+        .set_quic_connect_timeout(Duration::from_secs(cmd.quic_connect_timeout))
+        .await;
+
+    let is_secure =
+        url.starts_with("ssl://") || url.starts_with("mqtts://") || url.starts_with("quics://");
+    let has_certs = cmd.cert.is_some() || cmd.key.is_some() || cmd.ca_cert.is_some();
+    if is_secure && has_certs {
+        let cert_pem = if let Some(p) = &cmd.cert {
+            Some(
+                std::fs::read(p)
+                    .with_context(|| format!("failed to read cert: {}", p.display()))?,
+            )
+        } else {
+            None
+        };
+        let key_pem = if let Some(p) = &cmd.key {
+            Some(std::fs::read(p).with_context(|| format!("failed to read key: {}", p.display()))?)
+        } else {
+            None
+        };
+        let ca_pem = if let Some(p) = &cmd.ca_cert {
+            Some(
+                std::fs::read(p)
+                    .with_context(|| format!("failed to read CA cert: {}", p.display()))?,
+            )
+        } else {
+            None
+        };
+        client.set_tls_config(cert_pem, key_pem, ca_pem).await;
+    }
+    Ok(())
+}
+
+async fn connect_client(client_id: String, url: &str, cmd: &BenchCommand) -> Result<MqttClient> {
     let client = MqttClient::new(&client_id);
+    configure_transport(&client, cmd, url).await?;
     let options = ConnectOptions::new(client_id)
         .with_clean_start(true)
         .with_keep_alive(Duration::from_secs(30));
@@ -252,7 +398,7 @@ async fn run_throughput(cmd: BenchCommand) -> Result<()> {
 
     let mut pub_clients = Vec::with_capacity(cmd.publishers);
     for i in 0..cmd.publishers {
-        pub_clients.push(connect_client(format!("{base_id}-pub-{i}"), &url).await?);
+        pub_clients.push(connect_client(format!("{base_id}-pub-{i}"), &url, &cmd).await?);
     }
 
     let received = Arc::new(AtomicU64::new(0));
@@ -261,7 +407,7 @@ async fn run_throughput(cmd: BenchCommand) -> Result<()> {
 
     let mut sub_clients = Vec::with_capacity(cmd.subscribers);
     for i in 0..cmd.subscribers {
-        let sub_client = connect_client(format!("{base_id}-sub-{i}"), &url).await?;
+        let sub_client = connect_client(format!("{base_id}-sub-{i}"), &url, &cmd).await?;
         let received_clone = Arc::clone(&received);
         sub_client
             .subscribe(&filter, move |_| {
@@ -304,16 +450,7 @@ async fn run_throughput(cmd: BenchCommand) -> Result<()> {
 
     let output = BenchOutput {
         mode: "throughput".to_string(),
-        config: BenchConfig {
-            duration_secs: cmd.duration,
-            warmup_secs: cmd.warmup,
-            payload_size: cmd.payload_size,
-            qos: cmd.qos as u8,
-            topic: cmd.topic,
-            filter,
-            publishers: cmd.publishers,
-            subscribers: cmd.subscribers,
-        },
+        config: bench_config(&cmd, &url),
         results: BenchResults::Throughput(ThroughputResults {
             published: total_published,
             received: total_received,
@@ -372,8 +509,8 @@ async fn run_latency(cmd: BenchCommand) -> Result<()> {
 
     eprintln!("connecting to {url} for latency test...");
 
-    let pub_client = connect_client(format!("{base_id}-pub"), &url).await?;
-    let sub_client = connect_client(format!("{base_id}-sub"), &url).await?;
+    let pub_client = connect_client(format!("{base_id}-pub"), &url, &cmd).await?;
+    let sub_client = connect_client(format!("{base_id}-sub"), &url, &cmd).await?;
 
     let latencies = Arc::new(Mutex::new(Vec::with_capacity(10000)));
     let latencies_clone = Arc::clone(&latencies);
@@ -436,16 +573,7 @@ async fn run_latency(cmd: BenchCommand) -> Result<()> {
 
     let output = BenchOutput {
         mode: "latency".to_string(),
-        config: BenchConfig {
-            duration_secs: cmd.duration,
-            warmup_secs: cmd.warmup,
-            payload_size: cmd.payload_size,
-            qos: cmd.qos as u8,
-            topic: cmd.topic,
-            filter,
-            publishers: 1,
-            subscribers: 1,
-        },
+        config: bench_config(&cmd, &url),
         results: BenchResults::Latency(LatencyResults {
             messages: samples.len() as u64,
             min_us,
@@ -454,11 +582,7 @@ async fn run_latency(cmd: BenchCommand) -> Result<()> {
             p50_us,
             p95_us,
             p99_us,
-            samples: samples
-                .iter()
-                .step_by(samples.len().max(1) / 100)
-                .copied()
-                .collect(),
+            samples: downsample(&samples, 100),
         }),
     };
 
@@ -467,6 +591,17 @@ async fn run_latency(cmd: BenchCommand) -> Result<()> {
     pub_client.disconnect().await.ok();
     sub_client.disconnect().await.ok();
     Ok(())
+}
+
+fn downsample(sorted: &[u64], target: usize) -> Vec<u64> {
+    if sorted.len() <= target {
+        return sorted.to_vec();
+    }
+    sorted
+        .iter()
+        .step_by(sorted.len() / target)
+        .copied()
+        .collect()
 }
 
 async fn send_timed_messages(
@@ -510,6 +645,13 @@ async fn run_connections(cmd: BenchCommand) -> Result<()> {
     let state = ConnectionBenchState {
         broker_url: resolved_url,
         base_client_id: base_id,
+        insecure: cmd.insecure,
+        quic_stream_strategy: cmd.quic_stream_strategy,
+        quic_flow_headers: cmd.quic_flow_headers,
+        quic_flow_expire: cmd.quic_flow_expire,
+        quic_max_streams: cmd.quic_max_streams,
+        quic_datagrams: cmd.quic_datagrams,
+        quic_connect_timeout: cmd.quic_connect_timeout,
         running: Arc::clone(&running),
         successful: Arc::clone(&successful),
         failed: Arc::clone(&failed),
@@ -540,15 +682,16 @@ async fn run_connections(cmd: BenchCommand) -> Result<()> {
 
     let output = BenchOutput {
         mode: "connections".to_string(),
-        config: BenchConfig {
-            duration_secs: cmd.duration,
-            warmup_secs: 0,
-            payload_size: 0,
-            qos: 0,
-            topic: String::new(),
-            filter: String::new(),
-            publishers: 0,
-            subscribers: 0,
+        config: {
+            let mut cfg = bench_config(&cmd, &original_url);
+            cfg.warmup_secs = 0;
+            cfg.payload_size = 0;
+            cfg.qos = 0;
+            cfg.topic = String::new();
+            cfg.filter = String::new();
+            cfg.publishers = 0;
+            cfg.subscribers = 0;
+            cfg
         },
         results: BenchResults::Connections(ConnectionResults {
             total_connections: total_successful + total_failed,
@@ -587,6 +730,13 @@ fn resolve_broker_url(original_url: &str) -> Result<String> {
 struct ConnectionBenchState {
     broker_url: String,
     base_client_id: String,
+    insecure: bool,
+    quic_stream_strategy: Option<mqtt5::transport::StreamStrategy>,
+    quic_flow_headers: bool,
+    quic_flow_expire: u64,
+    quic_max_streams: Option<usize>,
+    quic_datagrams: bool,
+    quic_connect_timeout: u64,
     running: Arc<std::sync::atomic::AtomicBool>,
     successful: Arc<AtomicU64>,
     failed: Arc<AtomicU64>,
@@ -602,6 +752,13 @@ fn spawn_connection_workers(
     for _ in 0..concurrency {
         let broker_url = state.broker_url.clone();
         let base_client_id = state.base_client_id.clone();
+        let insecure = state.insecure;
+        let quic_stream_strategy = state.quic_stream_strategy;
+        let quic_flow_headers = state.quic_flow_headers;
+        let quic_flow_expire = state.quic_flow_expire;
+        let quic_max_streams = state.quic_max_streams;
+        let quic_datagrams = state.quic_datagrams;
+        let quic_connect_timeout = state.quic_connect_timeout;
         let running = Arc::clone(&state.running);
         let successful = Arc::clone(&state.successful);
         let failed = Arc::clone(&state.failed);
@@ -613,6 +770,29 @@ fn spawn_connection_workers(
                 let id = counter.fetch_add(1, Ordering::Relaxed);
                 let client_id = format!("{base_client_id}-{id}");
                 let client = MqttClient::new(&client_id);
+
+                if insecure {
+                    client.set_insecure_tls(true).await;
+                }
+                if let Some(strategy) = quic_stream_strategy {
+                    client.set_quic_stream_strategy(strategy).await;
+                }
+                if quic_flow_headers {
+                    client.set_quic_flow_headers(true).await;
+                }
+                client
+                    .set_quic_flow_expire(std::time::Duration::from_secs(quic_flow_expire))
+                    .await;
+                if let Some(max) = quic_max_streams {
+                    client.set_quic_max_streams(Some(max)).await;
+                }
+                if quic_datagrams {
+                    client.set_quic_datagrams(true).await;
+                }
+                client
+                    .set_quic_connect_timeout(Duration::from_secs(quic_connect_timeout))
+                    .await;
+
                 let options = ConnectOptions::new(client_id)
                     .with_clean_start(true)
                     .with_keep_alive(Duration::from_secs(30));
@@ -633,4 +813,199 @@ fn spawn_connection_workers(
         }));
     }
     handles
+}
+
+async fn run_hol_blocking(cmd: BenchCommand) -> Result<()> {
+    use std::sync::Mutex;
+
+    let url = broker_url(&cmd);
+    let base_id = base_client_id(&cmd, "hol");
+    let num_topics = cmd.topics;
+
+    eprintln!("connecting to {url} for HOL blocking test with {num_topics} topics...");
+
+    let pub_client = connect_client(format!("{base_id}-pub"), &url, &cmd).await?;
+    let sub_client = connect_client(format!("{base_id}-sub"), &url, &cmd).await?;
+
+    let topic_latencies: Vec<Arc<Mutex<Vec<u64>>>> = (0..num_topics)
+        .map(|_| Arc::new(Mutex::new(Vec::with_capacity(10000))))
+        .collect();
+
+    for (i, latency_vec) in topic_latencies.iter().enumerate() {
+        let topic_filter = format!("bench/hol/{i}");
+        let latency_clone = Arc::clone(latency_vec);
+        sub_client
+            .subscribe(&topic_filter, move |msg| {
+                let payload = &msg.payload;
+                if payload.len() >= 8 {
+                    let sent_nanos = u64::from_be_bytes(payload[0..8].try_into().unwrap());
+                    let now_nanos = nanos_as_u64();
+                    let latency_us = (now_nanos.saturating_sub(sent_nanos)) / 1000;
+                    latency_clone.lock().unwrap().push(latency_us);
+                }
+            })
+            .await
+            .context("failed to subscribe")?;
+    }
+
+    eprintln!("subscribed to {num_topics} topics");
+
+    let total_rate: u64 = 1000;
+    let interval_us = 1_000_000 * (num_topics as u64) / total_rate;
+
+    eprintln!("warming up for {}s...", cmd.warmup);
+    let warmup_msgs = cmd.warmup * total_rate;
+    let mut payload = vec![0u8; cmd.payload_size.max(8)];
+    send_round_robin(
+        &pub_client,
+        num_topics,
+        &mut payload,
+        cmd.qos,
+        warmup_msgs,
+        interval_us,
+    )
+    .await?;
+
+    for lv in &topic_latencies {
+        lv.lock().unwrap().clear();
+    }
+
+    let per_topic_rate = total_rate / (num_topics as u64);
+    eprintln!(
+        "measuring for {}s at {total_rate} msg/s total ({per_topic_rate} msg/s per topic)...",
+        cmd.duration,
+    );
+    let measure_start = Instant::now();
+    let measure_duration = Duration::from_secs(cmd.duration);
+    let mut round_robin_idx: usize = 0;
+    while measure_start.elapsed() < measure_duration {
+        let topic_idx = round_robin_idx % num_topics;
+        let topic = format!("bench/hol/{topic_idx}");
+        payload[0..8].copy_from_slice(&nanos_as_u64().to_be_bytes());
+        publish_message(&pub_client, &topic, &payload, cmd.qos).await?;
+        tokio::time::sleep(Duration::from_micros(interval_us)).await;
+        round_robin_idx += 1;
+    }
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let (topic_results, correlation) = gather_hol_results(&topic_latencies);
+
+    let output = BenchOutput {
+        mode: "hol-blocking".to_string(),
+        config: bench_config(&cmd, &url),
+        results: BenchResults::HolBlocking(HolBlockingResults {
+            topics: topic_results,
+            correlation,
+        }),
+    };
+
+    println!("{}", serde_json::to_string_pretty(&output)?);
+
+    pub_client.disconnect().await.ok();
+    sub_client.disconnect().await.ok();
+    Ok(())
+}
+
+async fn send_round_robin(
+    client: &MqttClient,
+    num_topics: usize,
+    payload: &mut [u8],
+    qos: QoS,
+    count: u64,
+    interval_us: u64,
+) -> Result<()> {
+    let mut topic_idx: usize = 0;
+    for _ in 0..count {
+        let topic = format!("bench/hol/{topic_idx}");
+        payload[0..8].copy_from_slice(&nanos_as_u64().to_be_bytes());
+        publish_message(client, &topic, payload, qos).await?;
+        tokio::time::sleep(Duration::from_micros(interval_us)).await;
+        topic_idx = (topic_idx + 1) % num_topics;
+    }
+    Ok(())
+}
+
+fn gather_hol_results(
+    topic_latencies: &[Arc<std::sync::Mutex<Vec<u64>>>],
+) -> (Vec<TopicLatencyResult>, f64) {
+    let mut topic_results = Vec::with_capacity(topic_latencies.len());
+    let mut all_sorted_vecs = Vec::with_capacity(topic_latencies.len());
+
+    for (i, lv) in topic_latencies.iter().enumerate() {
+        let mut samples = lv.lock().unwrap().clone();
+        samples.sort_unstable();
+        let (_, p50, p95, p99) = percentile_stats(&samples);
+        eprintln!(
+            "  topic bench/hol/{i}: {} msgs, p50={p50}us, p95={p95}us, p99={p99}us",
+            samples.len()
+        );
+        topic_results.push(TopicLatencyResult {
+            topic: format!("bench/hol/{i}"),
+            messages: samples.len() as u64,
+            p50_us: p50,
+            p95_us: p95,
+            p99_us: p99,
+        });
+        all_sorted_vecs.push(samples);
+    }
+
+    let correlation = pearson_correlation(&all_sorted_vecs);
+    eprintln!("  cross-topic correlation: {correlation:.4}");
+    (topic_results, correlation)
+}
+
+fn pearson_correlation(topic_latencies: &[Vec<u64>]) -> f64 {
+    if topic_latencies.len() < 2 {
+        return 0.0;
+    }
+
+    let min_len = topic_latencies.iter().map(Vec::len).min().unwrap_or(0);
+    if min_len < 2 {
+        return 0.0;
+    }
+
+    let mut total_r = 0.0;
+    let mut pair_count: u64 = 0;
+
+    for i in 0..topic_latencies.len() {
+        for j in (i + 1)..topic_latencies.len() {
+            let r = pearson_pair(
+                &topic_latencies[i][..min_len],
+                &topic_latencies[j][..min_len],
+            );
+            if r.is_finite() {
+                total_r += r;
+                pair_count += 1;
+            }
+        }
+    }
+
+    if pair_count == 0 {
+        return 0.0;
+    }
+    total_r / as_f64_lossy(pair_count)
+}
+
+fn pearson_pair(xs: &[u64], ys: &[u64]) -> f64 {
+    let n = usize_as_f64_lossy(xs.len());
+    let sum_first: f64 = xs.iter().map(|&v| as_f64_lossy(v)).sum();
+    let sum_second: f64 = ys.iter().map(|&v| as_f64_lossy(v)).sum();
+    let sum_product: f64 = xs
+        .iter()
+        .zip(ys.iter())
+        .map(|(&x, &y)| as_f64_lossy(x) * as_f64_lossy(y))
+        .sum();
+    let sum_first_sq: f64 = xs.iter().map(|&v| as_f64_lossy(v).powi(2)).sum();
+    let sum_second_sq: f64 = ys.iter().map(|&v| as_f64_lossy(v).powi(2)).sum();
+
+    let numerator = n.mul_add(sum_product, -(sum_first * sum_second));
+    let denominator = (n.mul_add(sum_first_sq, -sum_first.powi(2))
+        * n.mul_add(sum_second_sq, -sum_second.powi(2)))
+    .sqrt();
+
+    if denominator == 0.0 {
+        return 0.0;
+    }
+    numerator / denominator
 }
