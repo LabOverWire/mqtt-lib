@@ -1004,6 +1004,27 @@ See [Authentication & Authorization Guide](AUTHENTICATION.md) for configuration 
 
 - All WASM example HTML files use safe DOM manipulation (no innerHTML with user data)
 
+## AI Assistance Disclosure
+
+### Tools and Models Used
+
+This project was developed with assistance from **Claude** (Anthropic) via **Claude Code** (CLI agent). Versions used include Claude Opus 4, Claude Sonnet 4, and Claude Sonnet 3.5. AI assistance was applied across the codebase, documentation, and test suites.
+
+### Nature and Scope of Assistance
+
+AI tools were used for:
+
+- **Code generation** — implementing features, modules, and data structures
+- **Refactoring** — restructuring existing code for clarity, performance, and correctness
+- **Test scaffolding** — writing unit tests, integration tests, property-based tests, and conformance tests
+- **Bug fixing** — diagnosing and resolving defects
+- **Documentation drafting** — README content, architecture docs, and inline documentation
+- **Code review** — identifying security issues, lint violations, and correctness problems
+
+### Human Review and Oversight
+
+All AI-generated and AI-assisted outputs were reviewed, edited, and validated by human authors. Core architectural decisions, design trade-offs, and feature direction were made by the human maintainers. The human authors take full responsibility for the final state of all code, documentation, and tests in this repository.
+
 ## License
 
 This project is licensed under either of
