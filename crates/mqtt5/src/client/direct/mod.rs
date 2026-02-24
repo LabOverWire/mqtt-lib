@@ -392,10 +392,8 @@ impl DirectClientInner {
         if let Some(conn) = self.quic_connection.take() {
             conn.close(0u32.into(), b"disconnect");
         }
-        if let Some(endpoint) = self.quic_endpoint.take() {
-            let _ =
-                tokio::time::timeout(std::time::Duration::from_millis(10), endpoint.wait_idle())
-                    .await;
+        if self.quic_endpoint.take().is_some() {
+            tokio::task::yield_now().await;
         }
         self.stream_strategy = None;
         self.quic_datagrams_enabled = false;
