@@ -23,7 +23,7 @@ BROKER_PID=""
 start_broker() {
     local extra_flags="${1:-}"
     echo "starting broker on ${BROKER_IP}..."
-    ssh_broker "nohup mqttv5 broker --allow-anonymous --host 0.0.0.0:1883 --storage-backend memory \
+    ssh_broker "ulimit -n 65536; nohup mqttv5 broker --allow-anonymous --host 0.0.0.0:1883 --storage-backend memory \
         ${extra_flags} > /tmp/broker.log 2>&1 & echo \$!"
     BROKER_PID=$(ssh_broker "pgrep -f 'mqttv5 broker' | tail -1")
     sleep 2
@@ -74,7 +74,7 @@ run_bench() {
     local output_file="${output_dir}/${label}.json"
 
     echo "  running: mqttv5 bench ${bench_args}"
-    ssh_client "mqttv5 bench ${bench_args}" > "$output_file" 2>/dev/null
+    ssh_client "ulimit -n 65536; mqttv5 bench ${bench_args}" > "$output_file" 2>/dev/null
     echo "  saved: ${output_file}"
 }
 
