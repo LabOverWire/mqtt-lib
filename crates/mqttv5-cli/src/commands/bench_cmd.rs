@@ -620,6 +620,41 @@ async fn send_timed_messages(
     Ok(())
 }
 
+fn load_tls_certs(cmd: &BenchCommand) -> Result<TlsCerts> {
+    let cert_pem = cmd
+        .cert
+        .as_ref()
+        .map(std::fs::read)
+        .transpose()
+        .context("failed to read cert")?
+        .map(Arc::new);
+    let key_pem = cmd
+        .key
+        .as_ref()
+        .map(std::fs::read)
+        .transpose()
+        .context("failed to read key")?
+        .map(Arc::new);
+    let ca_pem = cmd
+        .ca_cert
+        .as_ref()
+        .map(std::fs::read)
+        .transpose()
+        .context("failed to read CA cert")?
+        .map(Arc::new);
+    Ok(TlsCerts {
+        cert: cert_pem,
+        key: key_pem,
+        ca: ca_pem,
+    })
+}
+
+struct TlsCerts {
+    cert: Option<Arc<Vec<u8>>>,
+    key: Option<Arc<Vec<u8>>>,
+    ca: Option<Arc<Vec<u8>>>,
+}
+
 async fn run_connections(cmd: BenchCommand) -> Result<()> {
     use std::sync::Mutex;
 
@@ -642,6 +677,7 @@ async fn run_connections(cmd: BenchCommand) -> Result<()> {
     let measure_start = Instant::now();
     let measure_duration = Duration::from_secs(cmd.duration);
 
+    let tls = load_tls_certs(&cmd)?;
     let state = ConnectionBenchState {
         broker_url: resolved_url,
         base_client_id: base_id,
@@ -652,6 +688,9 @@ async fn run_connections(cmd: BenchCommand) -> Result<()> {
         quic_max_streams: cmd.quic_max_streams,
         quic_datagrams: cmd.quic_datagrams,
         quic_connect_timeout: cmd.quic_connect_timeout,
+        cert_pem: tls.cert,
+        key_pem: tls.key,
+        ca_pem: tls.ca,
         running: Arc::clone(&running),
         successful: Arc::clone(&successful),
         failed: Arc::clone(&failed),
@@ -737,6 +776,9 @@ struct ConnectionBenchState {
     quic_max_streams: Option<usize>,
     quic_datagrams: bool,
     quic_connect_timeout: u64,
+    cert_pem: Option<Arc<Vec<u8>>>,
+    key_pem: Option<Arc<Vec<u8>>>,
+    ca_pem: Option<Arc<Vec<u8>>>,
     running: Arc<std::sync::atomic::AtomicBool>,
     successful: Arc<AtomicU64>,
     failed: Arc<AtomicU64>,
@@ -748,6 +790,11 @@ fn spawn_connection_workers(
     concurrency: usize,
     state: &ConnectionBenchState,
 ) -> Vec<tokio::task::JoinHandle<()>> {
+    let is_secure = state.broker_url.starts_with("ssl://")
+        || state.broker_url.starts_with("mqtts://")
+        || state.broker_url.starts_with("quics://");
+    let has_certs = state.cert_pem.is_some() || state.key_pem.is_some() || state.ca_pem.is_some();
+
     let mut handles = Vec::with_capacity(concurrency);
     for _ in 0..concurrency {
         let broker_url = state.broker_url.clone();
@@ -759,6 +806,10 @@ fn spawn_connection_workers(
         let quic_max_streams = state.quic_max_streams;
         let quic_datagrams = state.quic_datagrams;
         let quic_connect_timeout = state.quic_connect_timeout;
+        let cert_pem = state.cert_pem.clone();
+        let key_pem = state.key_pem.clone();
+        let ca_pem = state.ca_pem.clone();
+        let configure_tls = is_secure && has_certs;
         let running = Arc::clone(&state.running);
         let successful = Arc::clone(&state.successful);
         let failed = Arc::clone(&state.failed);
@@ -773,6 +824,15 @@ fn spawn_connection_workers(
 
                 if insecure {
                     client.set_insecure_tls(true).await;
+                }
+                if configure_tls {
+                    client
+                        .set_tls_config(
+                            cert_pem.as_deref().cloned(),
+                            key_pem.as_deref().cloned(),
+                            ca_pem.as_deref().cloned(),
+                        )
+                        .await;
                 }
                 if let Some(strategy) = quic_stream_strategy {
                     client.set_quic_stream_strategy(strategy).await;
