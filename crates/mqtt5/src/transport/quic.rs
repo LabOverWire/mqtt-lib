@@ -287,12 +287,20 @@ impl QuicTransport {
     /// Returns an error if the transport is not connected.
     pub fn into_split(
         mut self,
-    ) -> Result<(SendStream, RecvStream, Connection, StreamStrategy, bool)> {
+    ) -> Result<(
+        SendStream,
+        RecvStream,
+        Connection,
+        Endpoint,
+        StreamStrategy,
+        bool,
+    )> {
         let (send, recv) = self.control_stream.take().ok_or(MqttError::NotConnected)?;
         let conn = self.connection.take().ok_or(MqttError::NotConnected)?;
+        let endpoint = self.endpoint.take().ok_or(MqttError::NotConnected)?;
         let strategy = self.config.stream_strategy;
         let datagrams_enabled = self.config.enable_datagrams;
-        Ok((send, recv, conn, strategy, datagrams_enabled))
+        Ok((send, recv, conn, endpoint, strategy, datagrams_enabled))
     }
 
     #[must_use]

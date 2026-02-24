@@ -35,7 +35,7 @@ use crate::transport::flow::{FlowFlags, FlowId};
 use crate::transport::{PacketIo, PacketWriter, QuicStreamManager, StreamStrategy, TransportType};
 use crate::types::{ConnectOptions, ConnectResult, PublishOptions, PublishResult};
 use crate::QoS;
-use quinn::Connection;
+use quinn::{Connection, Endpoint};
 
 #[cfg(feature = "opentelemetry")]
 use crate::telemetry::propagation;
@@ -48,6 +48,7 @@ use reader::{packet_reader_task_with_responses, quic_stream_acceptor_task, Packe
 pub struct DirectClientInner {
     pub writer: Option<Arc<tokio::sync::Mutex<UnifiedWriter>>>,
     pub quic_connection: Option<Arc<Connection>>,
+    pub quic_endpoint: Option<Endpoint>,
     pub stream_strategy: Option<StreamStrategy>,
     pub quic_datagrams_enabled: bool,
     pub quic_stream_manager: Option<Arc<QuicStreamManager>>,
@@ -89,6 +90,7 @@ impl DirectClientInner {
         Self {
             writer: None,
             quic_connection: None,
+            quic_endpoint: None,
             stream_strategy: None,
             quic_datagrams_enabled: false,
             quic_stream_manager: None,
@@ -280,9 +282,10 @@ impl DirectClientInner {
                 )
             }
             TransportType::Quic(quic) => {
-                let (w, r, conn, strategy, datagrams) = (*quic).into_split()?;
+                let (w, r, conn, endpoint, strategy, datagrams) = (*quic).into_split()?;
                 let conn_arc = Arc::new(conn);
                 self.quic_connection = Some(conn_arc.clone());
+                self.quic_endpoint = Some(endpoint);
                 self.stream_strategy = Some(strategy);
                 self.quic_datagrams_enabled = datagrams;
                 self.quic_stream_manager =
@@ -388,6 +391,9 @@ impl DirectClientInner {
         self.writer = None;
         if let Some(conn) = self.quic_connection.take() {
             conn.close(0u32.into(), b"disconnect");
+        }
+        if let Some(endpoint) = self.quic_endpoint.take() {
+            endpoint.wait_idle().await;
         }
         self.stream_strategy = None;
         self.quic_datagrams_enabled = false;
