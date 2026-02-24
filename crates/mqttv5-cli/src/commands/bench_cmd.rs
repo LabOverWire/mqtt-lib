@@ -803,7 +803,9 @@ fn spawn_connection_workers(
                         let elapsed_us = micros_as_u64(start.elapsed());
                         successful.fetch_add(1, Ordering::Relaxed);
                         connect_times.lock().unwrap().push(elapsed_us);
-                        client.disconnect().await.ok();
+                        tokio::spawn(async move {
+                            client.disconnect().await.ok();
+                        });
                     }
                     Err(_) => {
                         failed.fetch_add(1, Ordering::Relaxed);
