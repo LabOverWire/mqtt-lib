@@ -394,8 +394,7 @@ impl DirectClientInner {
         }
         if let Some(endpoint) = self.quic_endpoint.take() {
             tokio::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                drop(endpoint);
+                endpoint.wait_idle().await;
             });
         }
         self.stream_strategy = None;
