@@ -386,7 +386,9 @@ impl DirectClientInner {
 
         self.set_connected(false);
         self.writer = None;
-        self.quic_connection = None;
+        if let Some(conn) = self.quic_connection.take() {
+            conn.close(0u32.into(), b"disconnect");
+        }
         self.stream_strategy = None;
         self.quic_datagrams_enabled = false;
 
