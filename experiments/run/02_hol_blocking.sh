@@ -16,7 +16,7 @@ TRANSPORT_FLAGS[tcp]=""
 TRANSPORT_FLAGS[quic-control]="--quic-stream-strategy control-only --insecure"
 TRANSPORT_FLAGS[quic-pertopic]="--quic-stream-strategy per-topic --insecure"
 
-start_broker "--quic-host 0.0.0.0:14567 --quic-cert /opt/mqtt-certs/server.pem --quic-key /opt/mqtt-certs/server.key"
+start_broker "--tls-cert /opt/mqtt-certs/server.pem --tls-key /opt/mqtt-certs/server.key --quic-host 0.0.0.0:14567"
 
 for tname in tcp quic-control quic-pertopic; do
     url="${TRANSPORT_URLS[$tname]}"

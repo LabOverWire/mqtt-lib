@@ -7,7 +7,7 @@ STRATEGIES=("control-only" "per-publish" "per-topic" "per-subscription")
 CONCURRENCIES=(10 50 100)
 RUNS_PER_DATAPOINT=3
 
-start_broker "--quic-host 0.0.0.0:14567 --quic-cert /opt/mqtt-certs/server.pem --quic-key /opt/mqtt-certs/server.key"
+start_broker "--tls-cert /opt/mqtt-certs/server.pem --tls-key /opt/mqtt-certs/server.key --quic-host 0.0.0.0:14567"
 
 for conc in "${CONCURRENCIES[@]}"; do
     label="tcp_${conc}conn"

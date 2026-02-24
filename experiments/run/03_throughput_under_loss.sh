@@ -8,7 +8,7 @@ DELAY=10
 QOS_LEVELS=(0 1)
 STRATEGIES=("control-only" "per-publish" "per-topic" "per-subscription")
 
-start_broker "--quic-host 0.0.0.0:14567 --quic-cert /opt/mqtt-certs/server.pem --quic-key /opt/mqtt-certs/server.key"
+start_broker "--tls-cert /opt/mqtt-certs/server.pem --tls-key /opt/mqtt-certs/server.key --quic-host 0.0.0.0:14567"
 
 for qos in "${QOS_LEVELS[@]}"; do
     for loss in "${LOSSES[@]}"; do

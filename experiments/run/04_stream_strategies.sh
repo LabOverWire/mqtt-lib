@@ -8,7 +8,7 @@ TOPIC_COUNTS=(1 4 8 16)
 DELAY=25
 LOSS=2
 
-start_broker "--quic-host 0.0.0.0:14567 --quic-cert /opt/mqtt-certs/server.pem --quic-key /opt/mqtt-certs/server.key"
+start_broker "--tls-cert /opt/mqtt-certs/server.pem --tls-key /opt/mqtt-certs/server.key --quic-host 0.0.0.0:14567"
 apply_netem "$DELAY" "$LOSS"
 
 for strategy in "${STRATEGIES[@]}"; do

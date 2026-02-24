@@ -14,7 +14,7 @@ for tidx in "${!TRANSPORTS[@]}"; do
     if [ "$tname" = "tls" ]; then
         start_broker "--tls-cert /opt/mqtt-certs/server.pem --tls-key /opt/mqtt-certs/server.key"
     elif [ "$tname" = "quic" ]; then
-        start_broker "--quic-host 0.0.0.0:14567 --quic-cert /opt/mqtt-certs/server.pem --quic-key /opt/mqtt-certs/server.key"
+        start_broker "--tls-cert /opt/mqtt-certs/server.pem --tls-key /opt/mqtt-certs/server.key --quic-host 0.0.0.0:14567"
     else
         start_broker ""
     fi
