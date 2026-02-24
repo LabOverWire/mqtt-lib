@@ -80,6 +80,7 @@ pub fn init_basic_tracing(verbose: bool, debug: bool) {
     if std::env::var("RUST_LOG").is_ok() {
         let _ = tracing_subscriber::fmt()
             .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+            .with_writer(std::io::stderr)
             .with_target(false)
             .without_time()
             .try_init();
@@ -94,6 +95,7 @@ pub fn init_basic_tracing(verbose: bool, debug: bool) {
 
         let _ = tracing_subscriber::fmt()
             .with_max_level(log_level)
+            .with_writer(std::io::stderr)
             .with_target(false)
             .without_time()
             .try_init();
