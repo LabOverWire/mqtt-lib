@@ -394,7 +394,7 @@ impl DirectClientInner {
         }
         if let Some(endpoint) = self.quic_endpoint.take() {
             let _ =
-                tokio::time::timeout(std::time::Duration::from_millis(100), endpoint.wait_idle())
+                tokio::time::timeout(std::time::Duration::from_millis(10), endpoint.wait_idle())
                     .await;
         }
         self.stream_strategy = None;
