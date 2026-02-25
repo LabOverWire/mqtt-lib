@@ -705,6 +705,7 @@ async fn run_connections(cmd: BenchCommand) -> Result<()> {
     for handle in handles {
         handle.await.ok();
     }
+    tokio::time::sleep(Duration::from_millis(500)).await;
 
     let total_successful = successful.load(Ordering::Relaxed);
     let total_failed = failed.load(Ordering::Relaxed);

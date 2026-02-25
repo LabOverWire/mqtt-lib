@@ -23,7 +23,7 @@ BROKER_PID=""
 start_broker() {
     local extra_flags="${1:-}"
     echo "starting broker on ${BROKER_IP}..."
-    ssh_broker "ulimit -n 65536; nohup mqttv5 broker --allow-anonymous --host 0.0.0.0:1883 --storage-backend memory \
+    ssh_broker "ulimit -n 65536; nohup mqttv5 broker --allow-anonymous --host 0.0.0.0:1883 --storage-backend memory --max-clients 50000 \
         ${extra_flags} > /tmp/broker.log 2>&1 & echo \$!"
     BROKER_PID=$(ssh_broker "pgrep -f 'mqttv5 broker' | tail -1")
     sleep 2
