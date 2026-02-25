@@ -207,3 +207,4 @@ experiments/results/**/*.csv
 !experiments/**/*.py
 !experiments/setup/config.env.example
 !experiments/README.md
+public/
