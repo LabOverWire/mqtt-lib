@@ -7,8 +7,7 @@ use crate::broker::client_handler::ClientHandler;
 use crate::broker::config::{BrokerConfig, StorageBackend as StorageBackendType};
 use crate::broker::hot_reload::HotReloadManager;
 use crate::broker::quic_acceptor::{
-    accept_quic_connection, run_quic_cluster_connection_handler, run_quic_connection_handler,
-    QuicAcceptorConfig,
+    run_quic_cluster_connection_handler, run_quic_connection_handler, QuicAcceptorConfig,
 };
 use crate::broker::resource_monitor::{ResourceLimits, ResourceMonitor};
 use crate::broker::router::MessageRouter;
@@ -1035,43 +1034,45 @@ impl MqttBroker {
                 debug!("QUIC accept loop starting for {:?}", local_addr);
                 loop {
                     tokio::select! {
-                        accept_result = accept_quic_connection(&quic_endpoint) => {
-                            match accept_result {
-                                Ok((connection, peer_addr)) => {
-                                    debug!("New QUIC connection from {}", peer_addr);
-
-                                    if !state.resource_monitor.can_accept_connection(peer_addr.ip()).await {
-                                        warn!("QUIC connection rejected from {}: resource limits exceeded", peer_addr);
-                                        connection.close(0u32.into(), b"resource limit");
-                                        continue;
+                        incoming = quic_endpoint.accept() => {
+                            let Some(incoming) = incoming else {
+                                debug!("QUIC endpoint closed");
+                                break;
+                            };
+                            let peer_addr = incoming.remote_address();
+                            let state = state.clone();
+                            tokio::spawn(async move {
+                                let connection = match incoming.await {
+                                    Ok(conn) => conn,
+                                    Err(e) => {
+                                        debug!("QUIC handshake failed from {peer_addr}: {e}");
+                                        return;
                                     }
+                                };
+                                debug!("QUIC connection established with {peer_addr} (RTT: {:?})", connection.rtt());
 
-                                    let conn = Arc::new(connection);
-                                    let state_clone = state.clone();
+                                if !state.resource_monitor.can_accept_connection(peer_addr.ip()).await {
+                                    warn!("QUIC connection rejected from {peer_addr}: resource limits exceeded");
+                                    connection.close(0u32.into(), b"resource limit");
+                                    return;
+                                }
 
-                                    let cfg = state_clone.snapshot_config();
-                                    let auth = state_clone.snapshot_auth();
-                                    tokio::spawn(async move {
-                                        run_quic_connection_handler(
-                                            conn,
-                                            peer_addr,
-                                            cfg,
-                                            state_clone.router,
-                                            auth,
-                                            state_clone.storage,
-                                            state_clone.stats,
-                                            state_clone.resource_monitor,
-                                            state_clone.shutdown_tx.subscribe(),
-                                        )
-                                        .await;
-                                    });
-                                }
-                                Err(e) => {
-                                    if !e.to_string().contains("endpoint closed") {
-                                        error!("QUIC accept error: {e}");
-                                    }
-                                }
-                            }
+                                let conn = Arc::new(connection);
+                                let cfg = state.snapshot_config();
+                                let auth = state.snapshot_auth();
+                                run_quic_connection_handler(
+                                    conn,
+                                    peer_addr,
+                                    cfg,
+                                    state.router,
+                                    auth,
+                                    state.storage,
+                                    state.stats,
+                                    state.resource_monitor,
+                                    state.shutdown_tx.subscribe(),
+                                )
+                                .await;
+                            });
                         }
 
                         _ = shutdown_rx_quic.recv() => {
@@ -1217,43 +1218,45 @@ impl MqttBroker {
                 debug!("Cluster QUIC accept loop starting for {:?}", local_addr);
                 loop {
                     tokio::select! {
-                        accept_result = accept_quic_connection(&cluster_quic_endpoint) => {
-                            match accept_result {
-                                Ok((connection, peer_addr)) => {
-                                    debug!("New Cluster QUIC connection from {}", peer_addr);
-
-                                    if !state.resource_monitor.can_accept_connection(peer_addr.ip()).await {
-                                        warn!("Cluster QUIC connection rejected from {}: resource limits exceeded", peer_addr);
-                                        connection.close(0u32.into(), b"resource limit");
-                                        continue;
+                        incoming = cluster_quic_endpoint.accept() => {
+                            let Some(incoming) = incoming else {
+                                debug!("Cluster QUIC endpoint closed");
+                                break;
+                            };
+                            let peer_addr = incoming.remote_address();
+                            let state = state.clone();
+                            tokio::spawn(async move {
+                                let connection = match incoming.await {
+                                    Ok(conn) => conn,
+                                    Err(e) => {
+                                        debug!("Cluster QUIC handshake failed from {peer_addr}: {e}");
+                                        return;
                                     }
+                                };
+                                debug!("Cluster QUIC connection established with {peer_addr} (RTT: {:?})", connection.rtt());
 
-                                    let conn = Arc::new(connection);
-                                    let state_clone = state.clone();
+                                if !state.resource_monitor.can_accept_connection(peer_addr.ip()).await {
+                                    warn!("Cluster QUIC connection rejected from {peer_addr}: resource limits exceeded");
+                                    connection.close(0u32.into(), b"resource limit");
+                                    return;
+                                }
 
-                                    let cfg = state_clone.snapshot_config();
-                                    let auth = state_clone.snapshot_auth();
-                                    tokio::spawn(async move {
-                                        run_quic_cluster_connection_handler(
-                                            conn,
-                                            peer_addr,
-                                            cfg,
-                                            state_clone.router,
-                                            auth,
-                                            state_clone.storage,
-                                            state_clone.stats,
-                                            state_clone.resource_monitor,
-                                            state_clone.shutdown_tx.subscribe(),
-                                        )
-                                        .await;
-                                    });
-                                }
-                                Err(e) => {
-                                    if !e.to_string().contains("endpoint closed") {
-                                        error!("Cluster QUIC accept error: {e}");
-                                    }
-                                }
-                            }
+                                let conn = Arc::new(connection);
+                                let cfg = state.snapshot_config();
+                                let auth = state.snapshot_auth();
+                                run_quic_cluster_connection_handler(
+                                    conn,
+                                    peer_addr,
+                                    cfg,
+                                    state.router,
+                                    auth,
+                                    state.storage,
+                                    state.stats,
+                                    state.resource_monitor,
+                                    state.shutdown_tx.subscribe(),
+                                )
+                                .await;
+                            });
                         }
 
                         _ = shutdown_rx_quic_cluster.recv() => {
