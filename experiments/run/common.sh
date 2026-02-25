@@ -23,9 +23,8 @@ BROKER_PID=""
 start_broker() {
     local extra_flags="${1:-}"
     echo "starting broker on ${BROKER_IP}..."
-    ssh_broker "ulimit -n 65536; nohup mqttv5 broker --allow-anonymous --host 0.0.0.0:1883 --storage-backend memory --max-clients 50000 \
-        ${extra_flags} > /tmp/broker.log 2>&1 & echo \$!"
-    BROKER_PID=$(ssh_broker "pgrep -f 'mqttv5 broker' | tail -1")
+    BROKER_PID=$(ssh_broker "ulimit -n 65536; nohup mqttv5 broker --allow-anonymous --host 0.0.0.0:1883 --storage-backend memory --max-clients 50000 \
+        ${extra_flags} > /tmp/broker.log 2>&1 & echo \$!")
     sleep 2
     echo "broker pid: ${BROKER_PID}"
 }
@@ -51,9 +50,8 @@ MONITOR_PID=""
 
 start_monitor() {
     local output_file="$1"
-    ssh_broker "nohup bash /opt/mqtt-lib/experiments/monitor/resource_monitor.sh ${BROKER_PID} \
-        > /tmp/monitor.csv 2>&1 & echo \$!"
-    MONITOR_PID=$(ssh_broker "pgrep -f 'resource_monitor' | tail -1")
+    MONITOR_PID=$(ssh_broker "nohup bash /opt/mqtt-lib/experiments/monitor/resource_monitor.sh ${BROKER_PID} \
+        > /tmp/monitor.csv 2>&1 & echo \$!")
     echo "monitor pid: ${MONITOR_PID}"
 }
 
@@ -67,9 +65,8 @@ stop_monitor() {
 CLIENT_MONITOR_PID=""
 
 start_client_monitor() {
-    ssh_client "nohup bash /opt/mqtt-lib/experiments/monitor/client_monitor.sh \
-        > /tmp/client_monitor.csv 2>&1 & echo \$!"
-    CLIENT_MONITOR_PID=$(ssh_client "pgrep -f 'client_monitor' | tail -1")
+    CLIENT_MONITOR_PID=$(ssh_client "nohup bash /opt/mqtt-lib/experiments/monitor/client_monitor.sh \
+        > /tmp/client_monitor.csv 2>&1 & echo \$!")
     echo "client monitor pid: ${CLIENT_MONITOR_PID}"
 }
 
