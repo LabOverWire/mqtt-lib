@@ -376,15 +376,15 @@ fn percentile_stats(sorted: &[u64]) -> (f64, u64, u64, u64) {
 
 fn spawn_publishers(
     pub_clients: Vec<MqttClient>,
-    topic: &str,
+    topic_base: &str,
     payload: &Arc<[u8]>,
     qos: QoS,
     running: &Arc<std::sync::atomic::AtomicBool>,
     published: &Arc<AtomicU64>,
 ) -> Vec<tokio::task::JoinHandle<()>> {
     let mut handles = Vec::with_capacity(pub_clients.len());
-    for pub_client in pub_clients {
-        let topic = topic.to_string();
+    for (i, pub_client) in pub_clients.into_iter().enumerate() {
+        let topic = format!("{topic_base}/{i}");
         let payload = Arc::clone(payload);
         let running = Arc::clone(running);
         let published = Arc::clone(published);
@@ -420,7 +420,7 @@ async fn run_throughput(cmd: BenchCommand) -> Result<()> {
 
     let received = Arc::new(AtomicU64::new(0));
     let topic = cmd.topic.clone();
-    let filter = cmd.filter.clone().unwrap_or_else(|| topic.clone());
+    let filter = cmd.filter.clone().unwrap_or_else(|| format!("{topic}/#"));
 
     let mut sub_clients = Vec::with_capacity(cmd.subscribers);
     for i in 0..cmd.subscribers {
@@ -893,29 +893,16 @@ fn spawn_connection_workers(
     handles
 }
 
-async fn run_hol_blocking(cmd: BenchCommand) -> Result<()> {
-    use std::sync::Mutex;
-
-    let url = broker_url(&cmd);
-    let base_id = base_client_id(&cmd, "hol");
-    let num_topics = cmd.topics;
-    let payload_size = cmd.payload_size.max(8);
-
-    eprintln!("connecting to {url} for HOL blocking test with {num_topics} topics...");
-
-    let pub_client = connect_client(format!("{base_id}-pub"), &url, &cmd).await?;
-    let sub_client = connect_client(format!("{base_id}-sub"), &url, &cmd).await?;
-
-    let topic_samples: Vec<Arc<Mutex<Vec<TimestampedSample>>>> = (0..num_topics)
-        .map(|_| Arc::new(Mutex::new(Vec::with_capacity(100_000))))
-        .collect();
-
-    let measure_start_nanos = Arc::new(AtomicU64::new(0));
-
+async fn subscribe_hol_topics(
+    sub_client: &MqttClient,
+    num_topics: usize,
+    topic_samples: &[Arc<std::sync::Mutex<Vec<TimestampedSample>>>],
+    measure_start_nanos: &Arc<AtomicU64>,
+) -> Result<()> {
     for (i, samples_vec) in topic_samples.iter().enumerate() {
         let topic_filter = format!("bench/hol/{i}");
         let samples_clone = Arc::clone(samples_vec);
-        let start_nanos = Arc::clone(&measure_start_nanos);
+        let start_nanos = Arc::clone(measure_start_nanos);
         sub_client
             .subscribe(&topic_filter, move |msg| {
                 let payload = &msg.payload;
@@ -938,8 +925,35 @@ async fn run_hol_blocking(cmd: BenchCommand) -> Result<()> {
             .await
             .context("failed to subscribe")?;
     }
-
     eprintln!("subscribed to {num_topics} topics");
+    Ok(())
+}
+
+async fn run_hol_blocking(cmd: BenchCommand) -> Result<()> {
+    use std::sync::Mutex;
+
+    let url = broker_url(&cmd);
+    let base_id = base_client_id(&cmd, "hol");
+    let num_topics = cmd.topics;
+    let payload_size = cmd.payload_size.max(8);
+
+    eprintln!("connecting to {url} for HOL blocking test with {num_topics} topics...");
+
+    let pub_client = connect_client(format!("{base_id}-pub"), &url, &cmd).await?;
+    let sub_client = connect_client(format!("{base_id}-sub"), &url, &cmd).await?;
+
+    let topic_samples: Vec<Arc<Mutex<Vec<TimestampedSample>>>> = (0..num_topics)
+        .map(|_| Arc::new(Mutex::new(Vec::with_capacity(100_000))))
+        .collect();
+
+    let measure_start_nanos = Arc::new(AtomicU64::new(0));
+    subscribe_hol_topics(
+        &sub_client,
+        num_topics,
+        &topic_samples,
+        &measure_start_nanos,
+    )
+    .await?;
 
     let per_topic_interval_us = if cmd.rate > 0 {
         #[allow(clippy::cast_possible_truncation)]
