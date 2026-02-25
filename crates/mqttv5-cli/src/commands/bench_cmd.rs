@@ -105,6 +105,9 @@ pub struct BenchCommand {
 
     #[arg(long, default_value = "4")]
     pub topics: usize,
+
+    #[arg(long, default_value = "0")]
+    pub rate: u64,
 }
 
 fn parse_qos(s: &str) -> Result<QoS, String> {
@@ -131,6 +134,7 @@ struct BenchConfig {
     quic_stream_strategy: Option<String>,
     quic_datagrams: bool,
     quic_flow_headers: bool,
+    rate: u64,
 }
 
 #[derive(Serialize)]
@@ -168,10 +172,17 @@ struct ConnectionResults {
     samples: Vec<u64>,
 }
 
+#[derive(Clone)]
+struct TimestampedSample {
+    received_at_us: u64,
+    latency_us: u64,
+}
+
 #[derive(Serialize)]
 struct TopicLatencyResult {
     topic: String,
     messages: u64,
+    rate: f64,
     p50_us: u64,
     p95_us: u64,
     p99_us: u64,
@@ -180,7 +191,12 @@ struct TopicLatencyResult {
 #[derive(Serialize)]
 struct HolBlockingResults {
     topics: Vec<TopicLatencyResult>,
-    correlation: f64,
+    windowed_correlation: f64,
+    raw_correlation: f64,
+    window_size_ms: u64,
+    window_count: usize,
+    total_messages: u64,
+    measured_rate: f64,
 }
 
 #[derive(Serialize)]
@@ -244,6 +260,7 @@ fn bench_config(cmd: &BenchCommand, url: &str) -> BenchConfig {
         quic_stream_strategy: cmd.quic_stream_strategy.map(strategy_display),
         quic_datagrams: cmd.quic_datagrams,
         quic_flow_headers: cmd.quic_flow_headers,
+        rate: cmd.rate,
     }
 }
 
@@ -882,19 +899,23 @@ async fn run_hol_blocking(cmd: BenchCommand) -> Result<()> {
     let url = broker_url(&cmd);
     let base_id = base_client_id(&cmd, "hol");
     let num_topics = cmd.topics;
+    let payload_size = cmd.payload_size.max(8);
 
     eprintln!("connecting to {url} for HOL blocking test with {num_topics} topics...");
 
     let pub_client = connect_client(format!("{base_id}-pub"), &url, &cmd).await?;
     let sub_client = connect_client(format!("{base_id}-sub"), &url, &cmd).await?;
 
-    let topic_latencies: Vec<Arc<Mutex<Vec<u64>>>> = (0..num_topics)
-        .map(|_| Arc::new(Mutex::new(Vec::with_capacity(10000))))
+    let topic_samples: Vec<Arc<Mutex<Vec<TimestampedSample>>>> = (0..num_topics)
+        .map(|_| Arc::new(Mutex::new(Vec::with_capacity(100_000))))
         .collect();
 
-    for (i, latency_vec) in topic_latencies.iter().enumerate() {
+    let measure_start_nanos = Arc::new(AtomicU64::new(0));
+
+    for (i, samples_vec) in topic_samples.iter().enumerate() {
         let topic_filter = format!("bench/hol/{i}");
-        let latency_clone = Arc::clone(latency_vec);
+        let samples_clone = Arc::clone(samples_vec);
+        let start_nanos = Arc::clone(&measure_start_nanos);
         sub_client
             .subscribe(&topic_filter, move |msg| {
                 let payload = &msg.payload;
@@ -902,7 +923,16 @@ async fn run_hol_blocking(cmd: BenchCommand) -> Result<()> {
                     let sent_nanos = u64::from_be_bytes(payload[0..8].try_into().unwrap());
                     let now_nanos = nanos_as_u64();
                     let latency_us = (now_nanos.saturating_sub(sent_nanos)) / 1000;
-                    latency_clone.lock().unwrap().push(latency_us);
+                    let base = start_nanos.load(Ordering::Relaxed);
+                    let received_at_us = if base > 0 {
+                        (now_nanos.saturating_sub(base)) / 1000
+                    } else {
+                        0
+                    };
+                    samples_clone.lock().unwrap().push(TimestampedSample {
+                        received_at_us,
+                        latency_us,
+                    });
                 }
             })
             .await
@@ -911,54 +941,85 @@ async fn run_hol_blocking(cmd: BenchCommand) -> Result<()> {
 
     eprintln!("subscribed to {num_topics} topics");
 
-    let total_rate: u64 = 1000;
-    let interval_us = 1_000_000 * (num_topics as u64) / total_rate;
+    let per_topic_interval_us = if cmd.rate > 0 {
+        #[allow(clippy::cast_possible_truncation)]
+        let interval = 1_000_000u64 * (num_topics as u64) / cmd.rate;
+        Some(interval)
+    } else {
+        None
+    };
 
-    eprintln!("warming up for {}s...", cmd.warmup);
-    let warmup_msgs = cmd.warmup * total_rate;
-    let mut payload = vec![0u8; cmd.payload_size.max(8)];
-    send_round_robin(
+    let rate_label = if cmd.rate > 0 {
+        format!("{} msg/s", cmd.rate)
+    } else {
+        "unlimited".to_string()
+    };
+
+    let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let published = Arc::new(AtomicU64::new(0));
+
+    eprintln!("warming up for {}s at {rate_label}...", cmd.warmup);
+    let warmup_handles = spawn_hol_publishers(
         &pub_client,
         num_topics,
-        &mut payload,
-        cmd.qos,
-        warmup_msgs,
-        interval_us,
-    )
-    .await?;
-
-    for lv in &topic_latencies {
-        lv.lock().unwrap().clear();
-    }
-
-    let per_topic_rate = total_rate / (num_topics as u64);
-    eprintln!(
-        "measuring for {}s at {total_rate} msg/s total ({per_topic_rate} msg/s per topic)...",
-        cmd.duration,
+        payload_size,
+        per_topic_interval_us,
+        &running,
+        &published,
     );
-    let measure_start = Instant::now();
-    let measure_duration = Duration::from_secs(cmd.duration);
-    let mut round_robin_idx: usize = 0;
-    while measure_start.elapsed() < measure_duration {
-        let topic_idx = round_robin_idx % num_topics;
-        let topic = format!("bench/hol/{topic_idx}");
-        payload[0..8].copy_from_slice(&nanos_as_u64().to_be_bytes());
-        publish_message(&pub_client, &topic, &payload, cmd.qos).await?;
-        tokio::time::sleep(Duration::from_micros(interval_us)).await;
-        round_robin_idx += 1;
+    tokio::time::sleep(Duration::from_secs(cmd.warmup)).await;
+    running.store(false, Ordering::SeqCst);
+    for handle in warmup_handles {
+        handle.await.ok();
     }
+
+    for sv in &topic_samples {
+        sv.lock().unwrap().clear();
+    }
+    published.store(0, Ordering::SeqCst);
+
+    eprintln!("measuring for {}s at {rate_label}...", cmd.duration);
+    running.store(true, Ordering::SeqCst);
+    measure_start_nanos.store(nanos_as_u64(), Ordering::SeqCst);
+    let measure_wall = Instant::now();
+
+    let measure_handles = spawn_hol_publishers(
+        &pub_client,
+        num_topics,
+        payload_size,
+        per_topic_interval_us,
+        &running,
+        &published,
+    );
+    tokio::time::sleep(Duration::from_secs(cmd.duration)).await;
+    running.store(false, Ordering::SeqCst);
+    for handle in measure_handles {
+        handle.await.ok();
+    }
+
+    let elapsed = measure_wall.elapsed().as_secs_f64();
+    let total_published = published.load(Ordering::Relaxed);
 
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    let (topic_results, correlation) = gather_hol_results(&topic_latencies);
+    let results = gather_hol_results(&topic_samples, elapsed);
+
+    eprintln!(
+        "  published: {total_published}, received: {}, rate: {:.0} msg/s",
+        results.total_messages, results.measured_rate
+    );
+    eprintln!(
+        "  raw_correlation: {:.4}, windowed_correlation: {:.4} ({} windows of {}ms)",
+        results.raw_correlation,
+        results.windowed_correlation,
+        results.window_count,
+        results.window_size_ms
+    );
 
     let output = BenchOutput {
         mode: "hol-blocking".to_string(),
         config: bench_config(&cmd, &url),
-        results: BenchResults::HolBlocking(HolBlockingResults {
-            topics: topic_results,
-            correlation,
-        }),
+        results: BenchResults::HolBlocking(results),
     };
 
     println!("{}", serde_json::to_string_pretty(&output)?);
@@ -968,52 +1029,88 @@ async fn run_hol_blocking(cmd: BenchCommand) -> Result<()> {
     Ok(())
 }
 
-async fn send_round_robin(
-    client: &MqttClient,
+fn spawn_hol_publishers(
+    pub_client: &MqttClient,
     num_topics: usize,
-    payload: &mut [u8],
-    qos: QoS,
-    count: u64,
-    interval_us: u64,
-) -> Result<()> {
-    let mut topic_idx: usize = 0;
-    for _ in 0..count {
-        let topic = format!("bench/hol/{topic_idx}");
-        payload[0..8].copy_from_slice(&nanos_as_u64().to_be_bytes());
-        publish_message(client, &topic, payload, qos).await?;
-        tokio::time::sleep(Duration::from_micros(interval_us)).await;
-        topic_idx = (topic_idx + 1) % num_topics;
+    payload_size: usize,
+    per_topic_interval_us: Option<u64>,
+    running: &Arc<std::sync::atomic::AtomicBool>,
+    published: &Arc<AtomicU64>,
+) -> Vec<tokio::task::JoinHandle<()>> {
+    let mut handles = Vec::with_capacity(num_topics);
+    for topic_idx in 0..num_topics {
+        let client = pub_client.clone();
+        let running = Arc::clone(running);
+        let published = Arc::clone(published);
+
+        handles.push(tokio::spawn(async move {
+            let mut payload = vec![0u8; payload_size];
+            let topic = format!("bench/hol/{topic_idx}");
+            while running.load(Ordering::Relaxed) {
+                payload[0..8].copy_from_slice(&nanos_as_u64().to_be_bytes());
+                if client.publish(&topic, payload.clone()).await.is_ok() {
+                    published.fetch_add(1, Ordering::Relaxed);
+                }
+                if let Some(interval) = per_topic_interval_us {
+                    tokio::time::sleep(Duration::from_micros(interval)).await;
+                }
+            }
+        }));
     }
-    Ok(())
+    handles
 }
 
 fn gather_hol_results(
-    topic_latencies: &[Arc<std::sync::Mutex<Vec<u64>>>],
-) -> (Vec<TopicLatencyResult>, f64) {
-    let mut topic_results = Vec::with_capacity(topic_latencies.len());
-    let mut all_sorted_vecs = Vec::with_capacity(topic_latencies.len());
+    topic_samples: &[Arc<std::sync::Mutex<Vec<TimestampedSample>>>],
+    elapsed_secs: f64,
+) -> HolBlockingResults {
+    let mut topic_results = Vec::with_capacity(topic_samples.len());
+    let mut raw_latency_vecs: Vec<Vec<u64>> = Vec::with_capacity(topic_samples.len());
+    let mut all_samples: Vec<Vec<TimestampedSample>> = Vec::with_capacity(topic_samples.len());
+    let mut total_messages: u64 = 0;
 
-    for (i, lv) in topic_latencies.iter().enumerate() {
-        let mut samples = lv.lock().unwrap().clone();
-        samples.sort_unstable();
-        let (_, p50, p95, p99) = percentile_stats(&samples);
+    for (i, sv) in topic_samples.iter().enumerate() {
+        let samples = sv.lock().unwrap().clone();
+        let mut sorted_latencies: Vec<u64> = samples.iter().map(|s| s.latency_us).collect();
+        let raw_latencies: Vec<u64> = sorted_latencies.clone();
+        sorted_latencies.sort_unstable();
+
+        let (_, p50, p95, p99) = percentile_stats(&sorted_latencies);
+        #[allow(clippy::cast_precision_loss)]
+        let msg_count = samples.len() as u64;
+        let topic_rate = as_f64_lossy(msg_count) / elapsed_secs;
+
         eprintln!(
-            "  topic bench/hol/{i}: {} msgs, p50={p50}us, p95={p95}us, p99={p99}us",
-            samples.len()
+            "  topic bench/hol/{i}: {msg_count} msgs, {topic_rate:.0} msg/s, p50={p50}us, p95={p95}us, p99={p99}us",
         );
         topic_results.push(TopicLatencyResult {
             topic: format!("bench/hol/{i}"),
-            messages: samples.len() as u64,
+            messages: msg_count,
+            rate: topic_rate,
             p50_us: p50,
             p95_us: p95,
             p99_us: p99,
         });
-        all_sorted_vecs.push(samples);
+
+        total_messages += msg_count;
+        raw_latency_vecs.push(raw_latencies);
+        all_samples.push(samples);
     }
 
-    let correlation = pearson_correlation(&all_sorted_vecs);
-    eprintln!("  cross-topic correlation: {correlation:.4}");
-    (topic_results, correlation)
+    let raw_correlation = pearson_correlation(&raw_latency_vecs);
+    let window_size_ms = 500;
+    let (windowed_corr, window_count) = windowed_correlation(&all_samples, window_size_ms);
+    let measured_rate = as_f64_lossy(total_messages) / elapsed_secs;
+
+    HolBlockingResults {
+        topics: topic_results,
+        windowed_correlation: windowed_corr,
+        raw_correlation,
+        window_size_ms,
+        window_count,
+        total_messages,
+        measured_rate,
+    }
 }
 
 fn pearson_correlation(topic_latencies: &[Vec<u64>]) -> f64 {
@@ -1049,16 +1146,18 @@ fn pearson_correlation(topic_latencies: &[Vec<u64>]) -> f64 {
 }
 
 fn pearson_pair(xs: &[u64], ys: &[u64]) -> f64 {
+    let xf: Vec<f64> = xs.iter().map(|&v| as_f64_lossy(v)).collect();
+    let yf: Vec<f64> = ys.iter().map(|&v| as_f64_lossy(v)).collect();
+    pearson_pair_f64(&xf, &yf)
+}
+
+fn pearson_pair_f64(xs: &[f64], ys: &[f64]) -> f64 {
     let n = usize_as_f64_lossy(xs.len());
-    let sum_first: f64 = xs.iter().map(|&v| as_f64_lossy(v)).sum();
-    let sum_second: f64 = ys.iter().map(|&v| as_f64_lossy(v)).sum();
-    let sum_product: f64 = xs
-        .iter()
-        .zip(ys.iter())
-        .map(|(&x, &y)| as_f64_lossy(x) * as_f64_lossy(y))
-        .sum();
-    let sum_first_sq: f64 = xs.iter().map(|&v| as_f64_lossy(v).powi(2)).sum();
-    let sum_second_sq: f64 = ys.iter().map(|&v| as_f64_lossy(v).powi(2)).sum();
+    let sum_first: f64 = xs.iter().sum();
+    let sum_second: f64 = ys.iter().sum();
+    let sum_product: f64 = xs.iter().zip(ys.iter()).map(|(x, y)| x * y).sum();
+    let sum_first_sq: f64 = xs.iter().map(|v| v.powi(2)).sum();
+    let sum_second_sq: f64 = ys.iter().map(|v| v.powi(2)).sum();
 
     let numerator = n.mul_add(sum_product, -(sum_first * sum_second));
     let denominator = (n.mul_add(sum_first_sq, -sum_first.powi(2))
@@ -1069,4 +1168,77 @@ fn pearson_pair(xs: &[u64], ys: &[u64]) -> f64 {
         return 0.0;
     }
     numerator / denominator
+}
+
+fn windowed_correlation(topic_samples: &[Vec<TimestampedSample>], window_ms: u64) -> (f64, usize) {
+    if topic_samples.len() < 2 {
+        return (0.0, 0);
+    }
+
+    let max_time_us = topic_samples
+        .iter()
+        .flat_map(|s| s.iter().map(|ts| ts.received_at_us))
+        .max()
+        .unwrap_or(0);
+
+    let bucket_us = window_ms * 1000;
+    if bucket_us == 0 || max_time_us == 0 {
+        return (0.0, 0);
+    }
+
+    #[allow(clippy::cast_possible_truncation)]
+    let num_windows = max_time_us.div_ceil(bucket_us) as usize;
+
+    let mut per_topic_means: Vec<Vec<f64>> =
+        vec![Vec::with_capacity(num_windows); topic_samples.len()];
+
+    let mut valid_windows = 0usize;
+    for w in 0..num_windows {
+        let window_start = w as u64 * bucket_us;
+        let window_end = window_start + bucket_us;
+
+        let mut all_have_data = true;
+        let mut window_means = Vec::with_capacity(topic_samples.len());
+        for samples in topic_samples {
+            let (sum, count) = samples
+                .iter()
+                .filter(|s| s.received_at_us >= window_start && s.received_at_us < window_end)
+                .fold((0.0f64, 0u64), |(s, c), ts| {
+                    (s + as_f64_lossy(ts.latency_us), c + 1)
+                });
+            if count == 0 {
+                all_have_data = false;
+                break;
+            }
+            window_means.push(sum / as_f64_lossy(count));
+        }
+
+        if all_have_data {
+            for (i, mean) in window_means.into_iter().enumerate() {
+                per_topic_means[i].push(mean);
+            }
+            valid_windows += 1;
+        }
+    }
+
+    if valid_windows < 2 {
+        return (0.0, valid_windows);
+    }
+
+    let mut total_r = 0.0;
+    let mut pair_count = 0u64;
+    for i in 0..per_topic_means.len() {
+        for j in (i + 1)..per_topic_means.len() {
+            let r = pearson_pair_f64(&per_topic_means[i], &per_topic_means[j]);
+            if r.is_finite() {
+                total_r += r;
+                pair_count += 1;
+            }
+        }
+    }
+
+    if pair_count == 0 {
+        return (0.0, valid_windows);
+    }
+    (total_r / as_f64_lossy(pair_count), valid_windows)
 }
