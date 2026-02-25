@@ -110,9 +110,12 @@ run_monitored() {
     local output_dir="${RESULTS_DIR}/${experiment}"
     mkdir -p "$output_dir"
 
-    start_monitor "${output_dir}/${label}_broker_resources.csv"
-    start_client_monitor
-    run_repeated "$experiment" "$label" "$bench_args"
-    stop_client_monitor "${output_dir}/${label}_client_resources.csv"
-    stop_monitor "${output_dir}/${label}_broker_resources.csv"
+    for run in $(seq 1 "$RUNS_PER_DATAPOINT"); do
+        local run_label="${label}_run${run}"
+        start_monitor "${output_dir}/${run_label}_broker_resources.csv"
+        start_client_monitor
+        run_bench "$experiment" "$run_label" "$bench_args"
+        stop_client_monitor "${output_dir}/${run_label}_client_resources.csv"
+        stop_monitor "${output_dir}/${run_label}_broker_resources.csv"
+    done
 }
