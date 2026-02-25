@@ -24,7 +24,7 @@ for conc in "${CONCURRENCIES[@]}"; do
         monitor_file="${RESULTS_DIR}/${EXPERIMENT}/${label}_resources.csv"
         start_monitor "$monitor_file"
         run_repeated "$EXPERIMENT" "$label" \
-            "--url quic://${BROKER_IP}:14567 --insecure --quic-stream-strategy ${strategy} --mode throughput --duration 60 --publishers ${conc} --subscribers ${conc}"
+            "--url quic://${BROKER_IP}:14567 --ca-cert /opt/mqtt-certs/ca.pem --quic-stream-strategy ${strategy} --mode throughput --duration 60 --publishers ${conc} --subscribers ${conc}"
         stop_monitor "$monitor_file"
     done
 done

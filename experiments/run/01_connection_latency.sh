@@ -7,24 +7,41 @@ TRANSPORTS=("mqtt://${BROKER_IP}:1883" "mqtts://${BROKER_IP}:8883" "quic://${BRO
 TRANSPORT_NAMES=("tcp" "tls" "quic")
 DELAYS=(0 25 50 100 200)
 
+broker_flags_for() {
+    local tname="$1"
+    if [ "$tname" = "tls" ]; then
+        echo "--tls-cert /opt/mqtt-certs/server.pem --tls-key /opt/mqtt-certs/server.key"
+    elif [ "$tname" = "quic" ]; then
+        echo "--tls-cert /opt/mqtt-certs/server.pem --tls-key /opt/mqtt-certs/server.key --quic-host 0.0.0.0:14567"
+    else
+        echo ""
+    fi
+}
+
 for tidx in "${!TRANSPORTS[@]}"; do
     url="${TRANSPORTS[$tidx]}"
     tname="${TRANSPORT_NAMES[$tidx]}"
+    flags=$(broker_flags_for "$tname")
 
-    if [ "$tname" = "tls" ]; then
-        start_broker "--tls-cert /opt/mqtt-certs/server.pem --tls-key /opt/mqtt-certs/server.key"
-    elif [ "$tname" = "quic" ]; then
-        start_broker "--tls-cert /opt/mqtt-certs/server.pem --tls-key /opt/mqtt-certs/server.key --quic-host 0.0.0.0:14567"
-    else
-        start_broker ""
-    fi
+    start_broker "$flags"
 
     for delay in "${DELAYS[@]}"; do
         apply_netem "$delay" 0
         label="${tname}_delay${delay}ms"
         echo "[${EXPERIMENT}] ${label}"
-        run_repeated "$EXPERIMENT" "$label" \
-            "--url ${url} --insecure --mode connections --concurrency 1 --duration 30"
+
+        if [ "$tname" = "quic" ]; then
+            for run in $(seq 1 "$RUNS_PER_DATAPOINT"); do
+                stop_broker
+                start_broker "$flags"
+                run_bench "$EXPERIMENT" "${label}_run${run}" \
+                    "--url ${url} --ca-cert /opt/mqtt-certs/ca.pem --mode connections --concurrency 1 --duration 30"
+            done
+        else
+            run_repeated "$EXPERIMENT" "$label" \
+                "--url ${url} --ca-cert /opt/mqtt-certs/ca.pem --mode connections --concurrency 1 --duration 30"
+        fi
+
         clear_netem
     done
 

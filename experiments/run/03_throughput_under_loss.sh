@@ -23,7 +23,7 @@ for qos in "${QOS_LEVELS[@]}"; do
             label="quic-${strategy}_qos${qos}_loss${loss}pct"
             echo "[${EXPERIMENT}] ${label}"
             run_repeated "$EXPERIMENT" "$label" \
-                "--url quic://${BROKER_IP}:14567 --insecure --quic-stream-strategy ${strategy} --mode throughput --duration 30 --warmup 5 --payload-size 256 --qos ${qos}"
+                "--url quic://${BROKER_IP}:14567 --ca-cert /opt/mqtt-certs/ca.pem --quic-stream-strategy ${strategy} --mode throughput --duration 30 --warmup 5 --payload-size 256 --qos ${qos}"
         done
 
         clear_netem

@@ -13,8 +13,8 @@ TRANSPORT_URLS[quic-pertopic]="quic://${BROKER_IP}:14567"
 
 declare -A TRANSPORT_FLAGS
 TRANSPORT_FLAGS[tcp]=""
-TRANSPORT_FLAGS[quic-control]="--quic-stream-strategy control-only --insecure"
-TRANSPORT_FLAGS[quic-pertopic]="--quic-stream-strategy per-topic --insecure"
+TRANSPORT_FLAGS[quic-control]="--quic-stream-strategy control-only --ca-cert /opt/mqtt-certs/ca.pem"
+TRANSPORT_FLAGS[quic-pertopic]="--quic-stream-strategy per-topic --ca-cert /opt/mqtt-certs/ca.pem"
 
 start_broker "--tls-cert /opt/mqtt-certs/server.pem --tls-key /opt/mqtt-certs/server.key --quic-host 0.0.0.0:14567"
 

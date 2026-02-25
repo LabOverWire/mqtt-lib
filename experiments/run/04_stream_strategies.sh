@@ -16,12 +16,12 @@ for strategy in "${STRATEGIES[@]}"; do
         label="${strategy}_${ntopics}topics_throughput"
         echo "[${EXPERIMENT}] ${label}"
         run_repeated "$EXPERIMENT" "$label" \
-            "--url quic://${BROKER_IP}:14567 --insecure --quic-stream-strategy ${strategy} --mode throughput --duration 30 --warmup 5 --publishers ${ntopics} --subscribers ${ntopics}"
+            "--url quic://${BROKER_IP}:14567 --ca-cert /opt/mqtt-certs/ca.pem --quic-stream-strategy ${strategy} --mode throughput --duration 30 --warmup 5 --publishers ${ntopics} --subscribers ${ntopics}"
 
         label="${strategy}_${ntopics}topics_latency"
         echo "[${EXPERIMENT}] ${label}"
         run_repeated "$EXPERIMENT" "$label" \
-            "--url quic://${BROKER_IP}:14567 --insecure --quic-stream-strategy ${strategy} --mode latency --duration 30 --warmup 5"
+            "--url quic://${BROKER_IP}:14567 --ca-cert /opt/mqtt-certs/ca.pem --quic-stream-strategy ${strategy} --mode latency --duration 30 --warmup 5"
     done
 done
 
