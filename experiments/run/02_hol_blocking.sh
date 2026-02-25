@@ -26,7 +26,7 @@ for tname in tcp quic-control quic-pertopic; do
         apply_netem "$DELAY" "$loss"
         label="${tname}_loss${loss}pct"
         echo "[${EXPERIMENT}] ${label}"
-        run_repeated "$EXPERIMENT" "$label" \
+        run_monitored "$EXPERIMENT" "$label" \
             "--url ${url} ${flags} --mode hol-blocking --topics 64 --duration 30 --warmup 5 --payload-size 512"
         clear_netem
     done

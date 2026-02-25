@@ -13,12 +13,12 @@ for loss in "${LOSSES[@]}"; do
 
     label="quic-stream_loss${loss}pct"
     echo "[${EXPERIMENT}] ${label}"
-    run_repeated "$EXPERIMENT" "$label" \
+    run_monitored "$EXPERIMENT" "$label" \
         "--url quic://${BROKER_IP}:14567 --ca-cert /opt/mqtt-certs/ca.pem --mode latency --qos 0 --duration 30"
 
     label="quic-datagram_loss${loss}pct"
     echo "[${EXPERIMENT}] ${label}"
-    run_repeated "$EXPERIMENT" "$label" \
+    run_monitored "$EXPERIMENT" "$label" \
         "--url quic://${BROKER_IP}:14567 --ca-cert /opt/mqtt-certs/ca.pem --quic-datagrams --mode latency --qos 0 --duration 30"
 
     clear_netem

@@ -64,6 +64,22 @@ stop_monitor() {
     MONITOR_PID=""
 }
 
+CLIENT_MONITOR_PID=""
+
+start_client_monitor() {
+    ssh_client "nohup bash /opt/mqtt-lib/experiments/monitor/client_monitor.sh \
+        > /tmp/client_monitor.csv 2>&1 & echo \$!"
+    CLIENT_MONITOR_PID=$(ssh_client "pgrep -f 'client_monitor' | tail -1")
+    echo "client monitor pid: ${CLIENT_MONITOR_PID}"
+}
+
+stop_client_monitor() {
+    local output_file="$1"
+    ssh_client "kill ${CLIENT_MONITOR_PID}" 2>/dev/null || true
+    scp -i "$SSH_KEY_PATH" "${SSH_USER}@${CLIENT_IP}:/tmp/client_monitor.csv" "$output_file"
+    CLIENT_MONITOR_PID=""
+}
+
 run_bench() {
     local experiment="$1"
     local label="$2"
@@ -87,4 +103,19 @@ run_repeated() {
     for run in $(seq 1 "$RUNS_PER_DATAPOINT"); do
         run_bench "$experiment" "${label}_run${run}" "$bench_args"
     done
+}
+
+run_monitored() {
+    local experiment="$1"
+    local label="$2"
+    shift 2
+    local bench_args="$*"
+    local output_dir="${RESULTS_DIR}/${experiment}"
+    mkdir -p "$output_dir"
+
+    start_monitor "${output_dir}/${label}_broker_resources.csv"
+    start_client_monitor
+    run_repeated "$experiment" "$label" "$bench_args"
+    stop_client_monitor "${output_dir}/${label}_client_resources.csv"
+    stop_monitor "${output_dir}/${label}_broker_resources.csv"
 }
