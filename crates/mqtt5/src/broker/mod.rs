@@ -40,6 +40,8 @@ pub mod resource_monitor;
 pub mod router;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod server;
+#[cfg(not(target_arch = "wasm32"))]
+mod server_stream_manager;
 pub mod storage;
 pub mod sys_topics;
 #[cfg(not(target_arch = "wasm32"))]

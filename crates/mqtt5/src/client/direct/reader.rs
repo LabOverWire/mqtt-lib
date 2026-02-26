@@ -13,8 +13,8 @@ use crate::session::SessionState;
 use crate::transport::flow::{
     FlowFlags, FlowHeader, FlowId, FLOW_TYPE_CLIENT_DATA, FLOW_TYPE_CONTROL, FLOW_TYPE_SERVER_DATA,
 };
-use crate::transport::{PacketReader, PacketWriter};
-use bytes::Bytes;
+use crate::transport::PacketWriter;
+use bytes::{Buf, Bytes, BytesMut};
 use parking_lot::Mutex;
 use quinn::Connection;
 use std::collections::HashMap;
@@ -222,25 +222,47 @@ fn is_flow_header_byte(b: u8) -> bool {
     )
 }
 
-async fn try_read_server_flow_header(
-    recv: &mut quinn::RecvStream,
-) -> Result<Option<(FlowId, FlowFlags, Option<StdDuration>)>> {
+struct ServerFlowResult {
+    flow_id: Option<FlowId>,
+    flags: Option<FlowFlags>,
+    expire: Option<StdDuration>,
+    leftover: BytesMut,
+}
+
+async fn try_read_server_flow_header(recv: &mut quinn::RecvStream) -> Result<ServerFlowResult> {
     let chunk = recv
         .read_chunk(1, true)
         .await
         .map_err(|e| MqttError::ConnectionError(format!("Failed to peek stream: {e}")))?;
 
     let Some(chunk) = chunk else {
-        return Ok(None);
+        return Ok(ServerFlowResult {
+            flow_id: None,
+            flags: None,
+            expire: None,
+            leftover: BytesMut::new(),
+        });
     };
 
     if chunk.bytes.is_empty() {
-        return Ok(None);
+        return Ok(ServerFlowResult {
+            flow_id: None,
+            flags: None,
+            expire: None,
+            leftover: BytesMut::new(),
+        });
     }
 
     let first_byte = chunk.bytes[0];
     if !is_flow_header_byte(first_byte) {
-        return Ok(None);
+        let mut leftover = BytesMut::with_capacity(chunk.bytes.len());
+        leftover.extend_from_slice(&chunk.bytes);
+        return Ok(ServerFlowResult {
+            flow_id: None,
+            flags: None,
+            expire: None,
+            leftover,
+        });
     }
 
     let mut header_buf = Vec::with_capacity(32);
@@ -263,10 +285,20 @@ async fn try_read_server_flow_header(
     let mut bytes = Bytes::from(header_buf);
     let flow_header = FlowHeader::decode(&mut bytes)?;
 
+    let mut leftover = BytesMut::with_capacity(bytes.remaining());
+    if bytes.has_remaining() {
+        leftover.extend_from_slice(&bytes);
+    }
+
     match flow_header {
         FlowHeader::Control(h) => {
             tracing::trace!(flow_id = ?h.flow_id, "Parsed control flow header from server");
-            Ok(Some((h.flow_id, h.flags, None)))
+            Ok(ServerFlowResult {
+                flow_id: Some(h.flow_id),
+                flags: Some(h.flags),
+                expire: None,
+                leftover,
+            })
         }
         FlowHeader::ClientData(h) | FlowHeader::ServerData(h) => {
             let expire = if h.expire_interval > 0 {
@@ -275,13 +307,109 @@ async fn try_read_server_flow_header(
                 None
             };
             tracing::debug!(flow_id = ?h.flow_id, is_server = h.is_server_flow(), expire = ?expire, "Parsed data flow header from server");
-            Ok(Some((h.flow_id, h.flags, expire)))
+            Ok(ServerFlowResult {
+                flow_id: Some(h.flow_id),
+                flags: Some(h.flags),
+                expire,
+                leftover,
+            })
         }
         FlowHeader::UserDefined(_) => {
             tracing::trace!("Ignoring user-defined flow header");
-            Ok(None)
+            Ok(ServerFlowResult {
+                flow_id: None,
+                flags: None,
+                expire: None,
+                leftover,
+            })
         }
     }
+}
+
+async fn read_packet_with_buffer(
+    recv: &mut quinn::RecvStream,
+    buffer: &mut BytesMut,
+    protocol_version: u8,
+) -> Result<Packet> {
+    use crate::packet::FixedHeader;
+
+    while buffer.len() < 2 {
+        let mut tmp = [0u8; 64];
+        let n = recv
+            .read(&mut tmp)
+            .await
+            .map_err(|e| MqttError::ConnectionError(format!("QUIC read error: {e}")))?
+            .ok_or(MqttError::ClientClosed)?;
+        if n == 0 {
+            return Err(MqttError::ClientClosed);
+        }
+        buffer.extend_from_slice(&tmp[..n]);
+    }
+
+    let mut remaining_length = 0u32;
+    let mut multiplier = 1u32;
+    let mut remaining_length_bytes = 1usize;
+
+    for i in 1..5 {
+        if i >= buffer.len() {
+            let mut tmp = [0u8; 64];
+            let n = recv
+                .read(&mut tmp)
+                .await
+                .map_err(|e| MqttError::ConnectionError(format!("QUIC read error: {e}")))?
+                .ok_or(MqttError::ClientClosed)?;
+            if n == 0 {
+                return Err(MqttError::ClientClosed);
+            }
+            buffer.extend_from_slice(&tmp[..n]);
+        }
+
+        let byte = buffer[i];
+        remaining_length += u32::from(byte & 0x7F) * multiplier;
+        multiplier *= 128;
+        remaining_length_bytes = i;
+
+        if (byte & 0x80) == 0 {
+            break;
+        }
+
+        if i == 4 {
+            return Err(MqttError::MalformedPacket(
+                "Invalid remaining length encoding".to_string(),
+            ));
+        }
+    }
+
+    let header_len = 1 + remaining_length_bytes;
+    let total_len = header_len + remaining_length as usize;
+
+    while buffer.len() < total_len {
+        let needed = total_len - buffer.len();
+        let chunk_size = needed.min(4096);
+        let old_len = buffer.len();
+        buffer.resize(old_len + chunk_size, 0);
+        let n = recv
+            .read(&mut buffer[old_len..old_len + chunk_size])
+            .await
+            .map_err(|e| MqttError::ConnectionError(format!("QUIC read error: {e}")))?
+            .ok_or(MqttError::ClientClosed)?;
+        if n == 0 {
+            return Err(MqttError::ClientClosed);
+        }
+        buffer.truncate(old_len + n);
+    }
+
+    let packet_bytes = buffer.split_to(total_len);
+    let mut header_buf = packet_bytes.clone().freeze();
+    let fixed_header = FixedHeader::decode(&mut header_buf)?;
+
+    let mut payload_buf = BytesMut::from(&packet_bytes[header_len..]);
+    Packet::decode_from_body_with_version(
+        fixed_header.packet_type,
+        &fixed_header,
+        &mut payload_buf,
+        protocol_version,
+    )
 }
 
 async fn quic_stream_reader_task(
@@ -289,31 +417,33 @@ async fn quic_stream_reader_task(
     send: quinn::SendStream,
     ctx: PacketReaderContext,
 ) {
-    let flow_id = match try_read_server_flow_header(&mut recv).await {
-        Ok(Some((id, flags, expire))) => {
-            tracing::debug!(
-                flow_id = ?id,
-                is_server_initiated = id.is_server_initiated(),
-                ?flags,
-                ?expire,
-                "Server-initiated stream with flow header"
-            );
-            Some(id)
-        }
-        Ok(None) => {
-            tracing::trace!("No flow header on server-initiated stream");
-            None
+    let (flow_id, mut buffer) = match try_read_server_flow_header(&mut recv).await {
+        Ok(result) => {
+            let flow_id = if let (Some(id), Some(flags)) = (result.flow_id, result.flags) {
+                tracing::debug!(
+                    flow_id = ?id,
+                    is_server_initiated = id.is_server_initiated(),
+                    ?flags,
+                    expire = ?result.expire,
+                    "Server-initiated stream with flow header"
+                );
+                Some(id)
+            } else {
+                tracing::trace!("No flow header on server-initiated stream");
+                None
+            };
+            (flow_id, result.leftover)
         }
         Err(e) => {
             tracing::warn!("Error parsing server flow header: {e}");
-            None
+            (None, BytesMut::new())
         }
     };
 
     let stream_writer = Arc::new(tokio::sync::Mutex::new(UnifiedWriter::Quic(send)));
 
     loop {
-        match recv.read_packet(ctx.protocol_version).await {
+        match read_packet_with_buffer(&mut recv, &mut buffer, ctx.protocol_version).await {
             Ok(packet) => {
                 tracing::trace!(flow_id = ?flow_id, "Received packet on server-initiated QUIC stream: {:?}", packet);
                 if let Err(e) = handle_incoming_packet_with_writer(

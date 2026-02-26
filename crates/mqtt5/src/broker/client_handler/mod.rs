@@ -30,6 +30,9 @@ use tokio::sync::mpsc;
 use tokio::time::{interval, timeout};
 use tracing::{debug, info, warn};
 
+#[cfg(not(target_arch = "wasm32"))]
+use crate::broker::server_stream_manager::ServerStreamManager;
+
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum AuthState {
     NotStarted,
@@ -78,6 +81,10 @@ pub struct ClientHandler {
     pub(super) write_buffer: BytesMut,
     pub(super) read_buffer: BytesMut,
     pub(super) skip_bridge_forwarding: bool,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) quic_connection: Option<Arc<quinn::Connection>>,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) server_stream_manager: Option<ServerStreamManager>,
 }
 
 impl ClientHandler {
@@ -158,12 +165,23 @@ impl ClientHandler {
             write_buffer: BytesMut::with_capacity(4096),
             read_buffer: BytesMut::with_capacity(4096),
             skip_bridge_forwarding: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            quic_connection: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            server_stream_manager: None,
         }
     }
 
     #[must_use]
     pub fn with_skip_bridge_forwarding(mut self, skip: bool) -> Self {
         self.skip_bridge_forwarding = skip;
+        self
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn with_quic_connection(mut self, conn: Arc<quinn::Connection>) -> Self {
+        self.quic_connection = Some(conn);
         self
     }
 

@@ -653,8 +653,9 @@ impl ClientHandler {
         }
 
         let payload_size = publish.payload.len();
+        let topic_name = publish.topic_name.clone();
         tracing::debug!(
-            topic = %publish.topic_name,
+            topic = %topic_name,
             qos = ?publish.qos,
             retain = publish.retain,
             payload_len = payload_size,
@@ -673,9 +674,33 @@ impl ClientHandler {
                 return Ok(());
             }
         }
-        self.transport.write(&self.write_buffer).await?;
+        self.write_publish_bytes(&topic_name).await?;
         self.stats.publish_sent(payload_size);
         Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn write_publish_bytes(&mut self, topic: &str) -> Result<()> {
+        use crate::broker::server_stream_manager::ServerStreamManager;
+
+        if self.quic_connection.is_some() {
+            if self.server_stream_manager.is_none() {
+                let conn = self.quic_connection.clone().unwrap();
+                self.server_stream_manager = Some(ServerStreamManager::new(conn));
+            }
+            self.server_stream_manager
+                .as_mut()
+                .unwrap()
+                .write_publish(topic, &self.write_buffer)
+                .await
+        } else {
+            self.transport.write(&self.write_buffer).await
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    async fn write_publish_bytes(&mut self, _topic: &str) -> Result<()> {
+        self.transport.write(&self.write_buffer).await
     }
 
     pub(super) async fn resend_inflight_messages(&mut self) -> Result<()> {

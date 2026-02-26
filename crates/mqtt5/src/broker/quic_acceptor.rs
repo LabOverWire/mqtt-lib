@@ -574,6 +574,7 @@ async fn run_quic_handler_inner(
         shutdown_rx,
         Some(packet_rx),
     )
+    .with_quic_connection(connection.clone())
     .with_skip_bridge_forwarding(skip_bridge_forwarding);
 
     let handler_label = label;
