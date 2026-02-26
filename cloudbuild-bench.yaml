@@ -1,0 +1,31 @@
+steps:
+  - name: 'bash'
+    args:
+      - '-c'
+      - |
+        cat > /workspace/Dockerfile.bench <<'DOCKERFILE'
+        FROM rust:alpine AS builder
+        RUN apk add --no-cache musl-dev
+        WORKDIR /build
+        COPY . .
+        RUN cargo build --release -p mqttv5-cli \
+            && strip target/release/mqttv5
+
+        FROM scratch
+        COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+        COPY --from=builder /build/target/release/mqttv5 /mqttv5
+        ENTRYPOINT ["/mqttv5"]
+        DOCKERFILE
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-f'
+      - 'Dockerfile.bench'
+      - '-t'
+      - 'us-west1-docker.pkg.dev/$PROJECT_ID/mqoq-bench/mqttv5:bench'
+      - '.'
+images:
+  - 'us-west1-docker.pkg.dev/$PROJECT_ID/mqoq-bench/mqttv5:bench'
+timeout: 1800s
+options:
+  machineType: 'E2_HIGHCPU_8'
