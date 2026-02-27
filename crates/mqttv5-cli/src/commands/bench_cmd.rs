@@ -108,12 +108,6 @@ pub struct BenchCommand {
 
     #[arg(long, default_value = "0")]
     pub rate: u64,
-
-    #[arg(long, conflicts_with = "rate")]
-    pub load_factor: Option<f64>,
-
-    #[arg(long, default_value = "10")]
-    pub calibration_duration: u64,
 }
 
 fn parse_qos(s: &str) -> Result<QoS, String> {
@@ -123,15 +117,6 @@ fn parse_qos(s: &str) -> Result<QoS, String> {
         "2" => Ok(QoS::ExactlyOnce),
         _ => Err(format!("QoS must be 0, 1, or 2, got: {s}")),
     }
-}
-
-#[derive(Serialize)]
-struct CalibrationMetadata {
-    calibrated_capacity: f64,
-    target_rate: f64,
-    load_factor: f64,
-    calibration_secs: u64,
-    steady_state_samples: Vec<u64>,
 }
 
 #[derive(Serialize)]
@@ -150,8 +135,6 @@ struct BenchConfig {
     quic_datagrams: bool,
     quic_flow_headers: bool,
     rate: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    calibration: Option<CalibrationMetadata>,
 }
 
 #[derive(Serialize)]
@@ -235,11 +218,6 @@ struct BenchOutput {
 pub async fn execute(cmd: BenchCommand, verbose: bool, debug: bool) -> Result<()> {
     crate::init_basic_tracing(verbose, debug);
 
-    if cmd.load_factor.is_some() && !matches!(cmd.mode, BenchMode::HolBlocking | BenchMode::Latency)
-    {
-        anyhow::bail!("--load-factor is only supported with --mode hol-blocking or --mode latency");
-    }
-
     match cmd.mode {
         BenchMode::Throughput => run_throughput(cmd).await,
         BenchMode::Latency => run_latency(cmd).await,
@@ -267,16 +245,8 @@ fn strategy_display(s: mqtt5::transport::StreamStrategy) -> String {
     }
 }
 
-fn bench_config(
-    cmd: &BenchCommand,
-    url: &str,
-    calibration: Option<CalibrationMetadata>,
-) -> BenchConfig {
+fn bench_config(cmd: &BenchCommand, url: &str) -> BenchConfig {
     let filter = cmd.filter.clone().unwrap_or_else(|| cmd.topic.clone());
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let rate = calibration
-        .as_ref()
-        .map_or(cmd.rate, |c| c.target_rate as u64);
     BenchConfig {
         duration_secs: cmd.duration,
         warmup_secs: cmd.warmup,
@@ -290,8 +260,7 @@ fn bench_config(
         quic_stream_strategy: cmd.quic_stream_strategy.map(strategy_display),
         quic_datagrams: cmd.quic_datagrams,
         quic_flow_headers: cmd.quic_flow_headers,
-        rate,
-        calibration,
+        rate: cmd.rate,
     }
 }
 
@@ -498,7 +467,7 @@ async fn run_throughput(cmd: BenchCommand) -> Result<()> {
 
     let output = BenchOutput {
         mode: "throughput".to_string(),
-        config: bench_config(&cmd, &url, None),
+        config: bench_config(&cmd, &url),
         results: BenchResults::Throughput(ThroughputResults {
             published: total_published,
             received: total_received,
@@ -578,21 +547,11 @@ async fn run_latency(cmd: BenchCommand) -> Result<()> {
         .await
         .context("failed to subscribe")?;
 
-    let payload_size = cmd.payload_size.max(8);
-    let (rate_interval_us, calibration_meta) =
-        determine_publish_rate(&cmd, &url, &base_id, 1, payload_size).await?;
-    let interval_us = rate_interval_us.unwrap_or(1000);
-    let message_rate = 1_000_000 / interval_us;
+    let message_rate = 1000;
+    let interval_us = 1_000_000 / message_rate;
+    let mut payload = vec![0u8; cmd.payload_size.max(8)];
 
-    let rate_label = if let Some(ref meta) = calibration_meta {
-        format!("{:.0} msg/s (calibrated)", meta.target_rate)
-    } else {
-        format!("{message_rate} msg/s")
-    };
-
-    let mut payload = vec![0u8; payload_size];
-
-    eprintln!("warming up for {}s at {rate_label}...", cmd.warmup);
+    eprintln!("warming up for {}s...", cmd.warmup);
     send_timed_messages(
         &pub_client,
         &topic,
@@ -604,7 +563,7 @@ async fn run_latency(cmd: BenchCommand) -> Result<()> {
     .await?;
     latencies.lock().unwrap().clear();
 
-    eprintln!("measuring for {}s at {rate_label}...", cmd.duration);
+    eprintln!("measuring for {}s at {message_rate} msg/s...", cmd.duration);
     let measure_start = Instant::now();
     let measure_duration = Duration::from_secs(cmd.duration);
     while measure_start.elapsed() < measure_duration {
@@ -631,7 +590,7 @@ async fn run_latency(cmd: BenchCommand) -> Result<()> {
 
     let output = BenchOutput {
         mode: "latency".to_string(),
-        config: bench_config(&cmd, &url, calibration_meta),
+        config: bench_config(&cmd, &url),
         results: BenchResults::Latency(LatencyResults {
             messages: samples.len() as u64,
             min_us,
@@ -781,7 +740,7 @@ async fn run_connections(cmd: BenchCommand) -> Result<()> {
     let output = BenchOutput {
         mode: "connections".to_string(),
         config: {
-            let mut cfg = bench_config(&cmd, &original_url, None);
+            let mut cfg = bench_config(&cmd, &original_url);
             cfg.warmup_secs = 0;
             cfg.payload_size = 0;
             cfg.qos = 0;
@@ -934,88 +893,6 @@ fn spawn_connection_workers(
     handles
 }
 
-async fn calibrate_capacity(
-    url: &str,
-    cmd: &BenchCommand,
-    base_id: &str,
-    num_topics: usize,
-    payload_size: usize,
-    duration_secs: u64,
-) -> Result<(f64, Vec<u64>)> {
-    use std::sync::Mutex;
-
-    let publisher = connect_client(format!("{base_id}-cal-pub"), url, cmd).await?;
-    let subscriber = connect_client(format!("{base_id}-cal-sub"), url, cmd).await?;
-
-    let received = Arc::new(AtomicU64::new(0));
-    for i in 0..num_topics {
-        let counter = Arc::clone(&received);
-        let topic_filter = format!("bench/hol/{i}");
-        subscriber
-            .subscribe(&topic_filter, move |_msg| {
-                counter.fetch_add(1, Ordering::Relaxed);
-            })
-            .await
-            .context("calibration subscribe failed")?;
-    }
-
-    let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
-    let sent_count = Arc::new(AtomicU64::new(0));
-    let handles = spawn_hol_publishers(
-        &publisher,
-        num_topics,
-        payload_size,
-        None,
-        &running,
-        &sent_count,
-    );
-
-    let warmup_secs = duration_secs / 2;
-    let sample_secs = duration_secs - warmup_secs;
-    eprintln!("  calibration warmup {warmup_secs}s, then sampling {sample_secs}s...");
-    tokio::time::sleep(Duration::from_secs(warmup_secs)).await;
-
-    received.store(0, Ordering::SeqCst);
-    #[allow(clippy::cast_possible_truncation)]
-    let per_second_samples = Arc::new(Mutex::new(Vec::with_capacity(sample_secs as usize)));
-    let samples_clone = Arc::clone(&per_second_samples);
-    let received_sampler = Arc::clone(&received);
-    let sampler_handle = tokio::spawn(async move {
-        for _ in 0..sample_secs {
-            let before = received_sampler.load(Ordering::Relaxed);
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            let after = received_sampler.load(Ordering::Relaxed);
-            samples_clone.lock().unwrap().push(after - before);
-        }
-    });
-
-    sampler_handle.await?;
-    running.store(false, Ordering::Relaxed);
-    for h in handles {
-        h.await.ok();
-    }
-
-    publisher.disconnect().await.ok();
-    subscriber.disconnect().await.ok();
-
-    let steady = per_second_samples.lock().unwrap().clone();
-
-    anyhow::ensure!(
-        !steady.is_empty(),
-        "calibration produced no steady-state samples"
-    );
-
-    #[allow(clippy::cast_precision_loss)]
-    let capacity = *steady.iter().min().unwrap() as f64;
-
-    anyhow::ensure!(
-        capacity >= 100.0,
-        "calibration failed: capacity {capacity:.0} msg/s is below minimum threshold"
-    );
-
-    Ok((capacity, steady))
-}
-
 async fn subscribe_hol_topics(
     sub_client: &MqttClient,
     num_topics: usize,
@@ -1052,56 +929,6 @@ async fn subscribe_hol_topics(
     Ok(())
 }
 
-async fn determine_publish_rate(
-    cmd: &BenchCommand,
-    url: &str,
-    base_id: &str,
-    num_topics: usize,
-    payload_size: usize,
-) -> Result<(Option<u64>, Option<CalibrationMetadata>)> {
-    if let Some(lf) = cmd.load_factor {
-        anyhow::ensure!(lf > 0.0, "--load-factor must be positive");
-        anyhow::ensure!(lf <= 2.0, "--load-factor must be <= 2.0");
-        if lf > 1.0 {
-            eprintln!("warning: load_factor {lf} exceeds 1.0 -- transport will be overloaded");
-        }
-
-        eprintln!("calibrating capacity for {}s...", cmd.calibration_duration);
-        let (capacity, cal_samples) = calibrate_capacity(
-            url,
-            cmd,
-            base_id,
-            num_topics,
-            payload_size,
-            cmd.calibration_duration,
-        )
-        .await?;
-
-        let target_rate = capacity * lf;
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let interval = 1_000_000u64 * (num_topics as u64) / (target_rate as u64);
-
-        eprintln!(
-            "  capacity: {capacity:.0} msg/s, target: {target_rate:.0} msg/s (load_factor={lf})"
-        );
-
-        let meta = CalibrationMetadata {
-            calibrated_capacity: capacity,
-            target_rate,
-            load_factor: lf,
-            calibration_secs: cmd.calibration_duration,
-            steady_state_samples: cal_samples,
-        };
-        Ok((Some(interval), Some(meta)))
-    } else if cmd.rate > 0 {
-        #[allow(clippy::cast_possible_truncation)]
-        let interval = 1_000_000u64 * (num_topics as u64) / cmd.rate;
-        Ok((Some(interval), None))
-    } else {
-        Ok((None, None))
-    }
-}
-
 async fn run_hol_blocking(cmd: BenchCommand) -> Result<()> {
     use std::sync::Mutex;
 
@@ -1128,12 +955,15 @@ async fn run_hol_blocking(cmd: BenchCommand) -> Result<()> {
     )
     .await?;
 
-    let (per_topic_interval_us, calibration_meta) =
-        determine_publish_rate(&cmd, &url, &base_id, num_topics, payload_size).await?;
+    let per_topic_interval_us = if cmd.rate > 0 {
+        #[allow(clippy::cast_possible_truncation)]
+        let interval = 1_000_000u64 * (num_topics as u64) / cmd.rate;
+        Some(interval)
+    } else {
+        None
+    };
 
-    let rate_label = if let Some(ref meta) = calibration_meta {
-        format!("{:.0} msg/s (calibrated)", meta.target_rate)
-    } else if cmd.rate > 0 {
+    let rate_label = if cmd.rate > 0 {
         format!("{} msg/s", cmd.rate)
     } else {
         "unlimited".to_string()
@@ -1202,7 +1032,7 @@ async fn run_hol_blocking(cmd: BenchCommand) -> Result<()> {
 
     let output = BenchOutput {
         mode: "hol-blocking".to_string(),
-        config: bench_config(&cmd, &url, calibration_meta),
+        config: bench_config(&cmd, &url),
         results: BenchResults::HolBlocking(results),
     };
 
