@@ -1006,29 +1006,12 @@ async fn calibrate_capacity(
     );
 
     #[allow(clippy::cast_precision_loss)]
-    let capacity = steady.iter().sum::<u64>() as f64 / steady.len() as f64;
+    let capacity = *steady.iter().min().unwrap() as f64;
 
     anyhow::ensure!(
         capacity >= 100.0,
         "calibration failed: capacity {capacity:.0} msg/s is below minimum threshold"
     );
-
-    #[allow(clippy::cast_precision_loss)]
-    let cv = if capacity > 0.0 {
-        let mean = capacity;
-        let count = steady.len() as f64;
-        let variance = steady
-            .iter()
-            .map(|&s| (s as f64 - mean).powi(2))
-            .sum::<f64>()
-            / count;
-        variance.sqrt() / mean
-    } else {
-        0.0
-    };
-    if cv > 0.3 {
-        eprintln!("warning: calibration variance is high (CV={cv:.2}) -- capacity estimate may be unreliable");
-    }
 
     Ok((capacity, steady))
 }
