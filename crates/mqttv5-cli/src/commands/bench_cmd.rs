@@ -970,12 +970,18 @@ async fn calibrate_capacity(
         &sent_count,
     );
 
+    let warmup_secs = duration_secs / 2;
+    let sample_secs = duration_secs - warmup_secs;
+    eprintln!("  calibration warmup {warmup_secs}s, then sampling {sample_secs}s...");
+    tokio::time::sleep(Duration::from_secs(warmup_secs)).await;
+
+    received.store(0, Ordering::SeqCst);
     #[allow(clippy::cast_possible_truncation)]
-    let per_second_samples = Arc::new(Mutex::new(Vec::with_capacity(duration_secs as usize)));
+    let per_second_samples = Arc::new(Mutex::new(Vec::with_capacity(sample_secs as usize)));
     let samples_clone = Arc::clone(&per_second_samples);
     let received_sampler = Arc::clone(&received);
     let sampler_handle = tokio::spawn(async move {
-        for _ in 0..duration_secs {
+        for _ in 0..sample_secs {
             let before = received_sampler.load(Ordering::Relaxed);
             tokio::time::sleep(Duration::from_secs(1)).await;
             let after = received_sampler.load(Ordering::Relaxed);
@@ -992,9 +998,7 @@ async fn calibrate_capacity(
     publisher.disconnect().await.ok();
     subscriber.disconnect().await.ok();
 
-    let samples = per_second_samples.lock().unwrap().clone();
-    let ramp_up = 3usize.min(samples.len().saturating_sub(1));
-    let steady: &[u64] = &samples[ramp_up..];
+    let steady = per_second_samples.lock().unwrap().clone();
 
     anyhow::ensure!(
         !steady.is_empty(),
@@ -1026,7 +1030,7 @@ async fn calibrate_capacity(
         eprintln!("warning: calibration variance is high (CV={cv:.2}) -- capacity estimate may be unreliable");
     }
 
-    Ok((capacity, samples))
+    Ok((capacity, steady))
 }
 
 async fn subscribe_hol_topics(
