@@ -112,7 +112,7 @@ pub struct BenchCommand {
     #[arg(long, conflicts_with = "rate")]
     pub load_factor: Option<f64>,
 
-    #[arg(long, default_value = "5")]
+    #[arg(long, default_value = "10")]
     pub calibration_duration: u64,
 }
 
@@ -993,7 +993,7 @@ async fn calibrate_capacity(
     subscriber.disconnect().await.ok();
 
     let samples = per_second_samples.lock().unwrap().clone();
-    let ramp_up = 2usize.min(samples.len().saturating_sub(1));
+    let ramp_up = 3usize.min(samples.len().saturating_sub(1));
     let steady: &[u64] = &samples[ramp_up..];
 
     anyhow::ensure!(
