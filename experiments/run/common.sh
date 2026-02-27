@@ -99,6 +99,7 @@ run_repeated() {
 
     for run in $(seq 1 "$RUNS_PER_DATAPOINT"); do
         run_bench "$experiment" "${label}_run${run}" "$bench_args"
+        sleep 5
     done
 }
 
@@ -117,5 +118,6 @@ run_monitored() {
         run_bench "$experiment" "$run_label" "$bench_args"
         stop_client_monitor "${output_dir}/${run_label}_client_resources.csv"
         stop_monitor "${output_dir}/${run_label}_broker_resources.csv"
+        sleep 5
     done
 }
