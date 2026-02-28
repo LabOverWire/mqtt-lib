@@ -16,8 +16,9 @@ SSH_USER="${SSH_USER:-bench}"
 RESULTS_DIR="${ROOT_DIR}/results"
 mkdir -p "$RESULTS_DIR"
 
-ssh_broker() { ssh -i "$SSH_KEY_PATH" -o StrictHostKeyChecking=no "${SSH_USER}@${BROKER_SSH_IP}" "$@"; }
-ssh_client() { ssh -i "$SSH_KEY_PATH" -o StrictHostKeyChecking=no "${SSH_USER}@${CLIENT_IP}" "$@"; }
+SSH_OPTS="-o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=10"
+ssh_broker() { ssh -i "$SSH_KEY_PATH" $SSH_OPTS "${SSH_USER}@${BROKER_SSH_IP}" "$@"; }
+ssh_client() { ssh -i "$SSH_KEY_PATH" $SSH_OPTS "${SSH_USER}@${CLIENT_IP}" "$@"; }
 
 BROKER_PID=""
 

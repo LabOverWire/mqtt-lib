@@ -1,11 +1,16 @@
 #![allow(clippy::struct_excessive_bools)]
 
 use anyhow::{Context, Result};
+use bebytes::BeBytes;
 use clap::{Args, ValueEnum};
+use flate2::read::GzDecoder;
+use flate2::write::GzEncoder;
+use flate2::Compression;
 use mqtt5::time::Duration;
 use mqtt5::{ConnectOptions, MqttClient, QoS};
 use rand::Rng;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use std::io::{Read as _, Write as _};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -20,6 +25,15 @@ pub enum BenchMode {
     Latency,
     Connections,
     HolBlocking,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum, Default)]
+pub enum PayloadFormat {
+    #[default]
+    Raw,
+    Json,
+    Bebytes,
+    CompressedJson,
 }
 
 #[derive(Args)]
@@ -108,6 +122,9 @@ pub struct BenchCommand {
 
     #[arg(long, default_value = "0")]
     pub rate: u64,
+
+    #[arg(long, value_enum, default_value = "raw")]
+    pub payload_format: PayloadFormat,
 }
 
 fn parse_qos(s: &str) -> Result<QoS, String> {
@@ -116,6 +133,122 @@ fn parse_qos(s: &str) -> Result<QoS, String> {
         "1" => Ok(QoS::AtLeastOnce),
         "2" => Ok(QoS::ExactlyOnce),
         _ => Err(format!("QoS must be 0, 1, or 2, got: {s}")),
+    }
+}
+
+fn format_name(fmt: PayloadFormat) -> String {
+    match fmt {
+        PayloadFormat::Raw => "raw",
+        PayloadFormat::Json => "json",
+        PayloadFormat::Bebytes => "bebytes",
+        PayloadFormat::CompressedJson => "compressed-json",
+    }
+    .to_string()
+}
+
+#[derive(Serialize, Deserialize)]
+struct JsonPayload {
+    ts: u64,
+    seq: u32,
+    dev: u32,
+    readings: Vec<f64>,
+}
+
+#[derive(BeBytes)]
+struct BebytesHeader {
+    timestamp_ns: u64,
+    sequence: u32,
+    device_id: u32,
+}
+
+const BEBYTES_HEADER_SIZE: usize = 16;
+
+fn readings_count(payload_size: usize) -> usize {
+    payload_size.saturating_sub(BEBYTES_HEADER_SIZE) / 8
+}
+
+fn encode_payload(format: PayloadFormat, payload_size: usize, sequence: u32) -> Vec<u8> {
+    let ts = nanos_as_u64();
+    match format {
+        PayloadFormat::Raw => {
+            let size = payload_size.max(8);
+            let mut buf = vec![0u8; size];
+            buf[0..8].copy_from_slice(&ts.to_be_bytes());
+            buf
+        }
+        PayloadFormat::Json => {
+            let count = readings_count(payload_size);
+            let readings = vec![0.0f64; count];
+            let payload = JsonPayload {
+                ts,
+                seq: sequence,
+                dev: 1,
+                readings,
+            };
+            serde_json::to_vec(&payload).unwrap_or_default()
+        }
+        PayloadFormat::Bebytes => {
+            let header = BebytesHeader {
+                timestamp_ns: ts,
+                sequence,
+                device_id: 1,
+            };
+            let mut buf = header.to_be_bytes();
+            let count = readings_count(payload_size);
+            for _ in 0..count {
+                buf.extend_from_slice(&0.0f64.to_be_bytes());
+            }
+            buf
+        }
+        PayloadFormat::CompressedJson => {
+            let count = readings_count(payload_size);
+            let readings = vec![0.0f64; count];
+            let payload = JsonPayload {
+                ts,
+                seq: sequence,
+                dev: 1,
+                readings,
+            };
+            let json_bytes = serde_json::to_vec(&payload).unwrap_or_default();
+            let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+            encoder.write_all(&json_bytes).ok();
+            encoder.finish().unwrap_or_default()
+        }
+    }
+}
+
+fn decode_timestamp(format: PayloadFormat, payload: &[u8]) -> u64 {
+    match format {
+        PayloadFormat::Raw => {
+            if payload.len() >= 8 {
+                u64::from_be_bytes(payload[0..8].try_into().unwrap())
+            } else {
+                0
+            }
+        }
+        PayloadFormat::Json => serde_json::from_slice::<JsonPayload>(payload)
+            .map(|p| p.ts)
+            .unwrap_or(0),
+        PayloadFormat::Bebytes => {
+            if payload.len() >= BEBYTES_HEADER_SIZE {
+                BebytesHeader::try_from_be_bytes(payload)
+                    .map(|(h, _)| h.timestamp_ns)
+                    .unwrap_or(0)
+            } else {
+                0
+            }
+        }
+        PayloadFormat::CompressedJson => {
+            let mut decoder = GzDecoder::new(payload);
+            let mut json_bytes = Vec::new();
+            if decoder.read_to_end(&mut json_bytes).is_ok() {
+                serde_json::from_slice::<JsonPayload>(&json_bytes)
+                    .map(|p| p.ts)
+                    .unwrap_or(0)
+            } else {
+                0
+            }
+        }
     }
 }
 
@@ -135,6 +268,8 @@ struct BenchConfig {
     quic_datagrams: bool,
     quic_flow_headers: bool,
     rate: u64,
+    payload_format: String,
+    actual_payload_bytes: usize,
 }
 
 #[derive(Serialize)]
@@ -247,6 +382,7 @@ fn strategy_display(s: mqtt5::transport::StreamStrategy) -> String {
 
 fn bench_config(cmd: &BenchCommand, url: &str) -> BenchConfig {
     let filter = cmd.filter.clone().unwrap_or_else(|| cmd.topic.clone());
+    let sample = encode_payload(cmd.payload_format, cmd.payload_size, 0);
     BenchConfig {
         duration_secs: cmd.duration,
         warmup_secs: cmd.warmup,
@@ -261,6 +397,8 @@ fn bench_config(cmd: &BenchCommand, url: &str) -> BenchConfig {
         quic_datagrams: cmd.quic_datagrams,
         quic_flow_headers: cmd.quic_flow_headers,
         rate: cmd.rate,
+        payload_format: format_name(cmd.payload_format),
+        actual_payload_bytes: sample.len(),
     }
 }
 
@@ -377,7 +515,8 @@ fn percentile_stats(sorted: &[u64]) -> (f64, u64, u64, u64) {
 fn spawn_publishers(
     pub_clients: Vec<MqttClient>,
     topic_base: &str,
-    payload: &Arc<[u8]>,
+    format: PayloadFormat,
+    payload_size: usize,
     qos: QoS,
     running: &Arc<std::sync::atomic::AtomicBool>,
     published: &Arc<AtomicU64>,
@@ -385,18 +524,20 @@ fn spawn_publishers(
     let mut handles = Vec::with_capacity(pub_clients.len());
     for (i, pub_client) in pub_clients.into_iter().enumerate() {
         let topic = format!("{topic_base}/{i}");
-        let payload = Arc::clone(payload);
         let running = Arc::clone(running);
         let published = Arc::clone(published);
 
         handles.push(tokio::spawn(async move {
+            let mut seq = 0u32;
             while running.load(Ordering::Relaxed) {
+                let payload = encode_payload(format, payload_size, seq);
                 if publish_message(&pub_client, &topic, &payload, qos)
                     .await
                     .is_ok()
                 {
                     published.fetch_add(1, Ordering::Relaxed);
                 }
+                seq = seq.wrapping_add(1);
             }
             pub_client.disconnect().await.ok();
         }));
@@ -422,12 +563,14 @@ async fn run_throughput(cmd: BenchCommand) -> Result<()> {
     let topic = cmd.topic.clone();
     let filter = cmd.filter.clone().unwrap_or_else(|| format!("{topic}/#"));
 
+    let format = cmd.payload_format;
     let mut sub_clients = Vec::with_capacity(cmd.subscribers);
     for i in 0..cmd.subscribers {
         let sub_client = connect_client(format!("{base_id}-sub-{i}"), &url, &cmd).await?;
         let received_clone = Arc::clone(&received);
         sub_client
-            .subscribe(&filter, move |_| {
+            .subscribe(&filter, move |msg| {
+                std::hint::black_box(decode_timestamp(format, &msg.payload));
                 received_clone.fetch_add(1, Ordering::Relaxed);
             })
             .await
@@ -437,12 +580,19 @@ async fn run_throughput(cmd: BenchCommand) -> Result<()> {
 
     eprintln!("subscribed {} client(s) to {filter}", cmd.subscribers);
 
-    let payload: Arc<[u8]> = vec![0u8; cmd.payload_size].into();
     let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let published = Arc::new(AtomicU64::new(0));
 
     eprintln!("warming up for {}s...", cmd.warmup);
-    let handles = spawn_publishers(pub_clients, &topic, &payload, cmd.qos, &running, &published);
+    let handles = spawn_publishers(
+        pub_clients,
+        &topic,
+        format,
+        cmd.payload_size,
+        cmd.qos,
+        &running,
+        &published,
+    );
 
     tokio::time::sleep(Duration::from_secs(cmd.warmup)).await;
     received.store(0, Ordering::SeqCst);
@@ -533,12 +683,12 @@ async fn run_latency(cmd: BenchCommand) -> Result<()> {
     let latencies_clone = Arc::clone(&latencies);
     let topic = cmd.topic.clone();
     let filter = cmd.filter.clone().unwrap_or_else(|| topic.clone());
+    let format = cmd.payload_format;
 
     sub_client
         .subscribe(&filter, move |msg| {
-            let payload = &msg.payload;
-            if payload.len() >= 8 {
-                let sent_nanos = u64::from_be_bytes(payload[0..8].try_into().unwrap());
+            let sent_nanos = decode_timestamp(format, &msg.payload);
+            if sent_nanos > 0 {
                 let now_nanos = nanos_as_u64();
                 let latency_us = (now_nanos.saturating_sub(sent_nanos)) / 1000;
                 latencies_clone.lock().unwrap().push(latency_us);
@@ -549,13 +699,13 @@ async fn run_latency(cmd: BenchCommand) -> Result<()> {
 
     let message_rate = 1000;
     let interval_us = 1_000_000 / message_rate;
-    let mut payload = vec![0u8; cmd.payload_size.max(8)];
 
     eprintln!("warming up for {}s...", cmd.warmup);
-    send_timed_messages(
+    send_timed_messages_formatted(
         &pub_client,
         &topic,
-        &mut payload,
+        format,
+        cmd.payload_size,
         cmd.qos,
         cmd.warmup * message_rate,
         interval_us,
@@ -566,9 +716,11 @@ async fn run_latency(cmd: BenchCommand) -> Result<()> {
     eprintln!("measuring for {}s at {message_rate} msg/s...", cmd.duration);
     let measure_start = Instant::now();
     let measure_duration = Duration::from_secs(cmd.duration);
+    let mut seq = 0u32;
     while measure_start.elapsed() < measure_duration {
-        payload[0..8].copy_from_slice(&nanos_as_u64().to_be_bytes());
+        let payload = encode_payload(format, cmd.payload_size, seq);
         publish_message(&pub_client, &topic, &payload, cmd.qos).await?;
+        seq = seq.wrapping_add(1);
         tokio::time::sleep(Duration::from_micros(interval_us)).await;
     }
 
@@ -621,17 +773,19 @@ fn downsample(sorted: &[u64], target: usize) -> Vec<u64> {
         .collect()
 }
 
-async fn send_timed_messages(
+async fn send_timed_messages_formatted(
     client: &MqttClient,
     topic: &str,
-    payload: &mut [u8],
+    format: PayloadFormat,
+    payload_size: usize,
     qos: QoS,
     count: u64,
     interval_us: u64,
 ) -> Result<()> {
-    for _ in 0..count {
-        payload[0..8].copy_from_slice(&nanos_as_u64().to_be_bytes());
-        publish_message(client, topic, payload, qos).await?;
+    for seq in 0..count {
+        #[allow(clippy::cast_possible_truncation)]
+        let payload = encode_payload(format, payload_size, seq as u32);
+        publish_message(client, topic, &payload, qos).await?;
         tokio::time::sleep(Duration::from_micros(interval_us)).await;
     }
     Ok(())
@@ -896,6 +1050,7 @@ fn spawn_connection_workers(
 async fn subscribe_hol_topics(
     sub_client: &MqttClient,
     num_topics: usize,
+    format: PayloadFormat,
     topic_samples: &[Arc<std::sync::Mutex<Vec<TimestampedSample>>>],
     measure_start_nanos: &Arc<AtomicU64>,
 ) -> Result<()> {
@@ -905,9 +1060,8 @@ async fn subscribe_hol_topics(
         let start_nanos = Arc::clone(measure_start_nanos);
         sub_client
             .subscribe(&topic_filter, move |msg| {
-                let payload = &msg.payload;
-                if payload.len() >= 8 {
-                    let sent_nanos = u64::from_be_bytes(payload[0..8].try_into().unwrap());
+                let sent_nanos = decode_timestamp(format, &msg.payload);
+                if sent_nanos > 0 {
                     let now_nanos = nanos_as_u64();
                     let latency_us = (now_nanos.saturating_sub(sent_nanos)) / 1000;
                     let base = start_nanos.load(Ordering::Relaxed);
@@ -946,10 +1100,12 @@ async fn run_hol_blocking(cmd: BenchCommand) -> Result<()> {
         .map(|_| Arc::new(Mutex::new(Vec::with_capacity(100_000))))
         .collect();
 
+    let format = cmd.payload_format;
     let measure_start_nanos = Arc::new(AtomicU64::new(0));
     subscribe_hol_topics(
         &sub_client,
         num_topics,
+        format,
         &topic_samples,
         &measure_start_nanos,
     )
@@ -976,6 +1132,7 @@ async fn run_hol_blocking(cmd: BenchCommand) -> Result<()> {
     let warmup_handles = spawn_hol_publishers(
         &pub_client,
         num_topics,
+        format,
         payload_size,
         per_topic_interval_us,
         &running,
@@ -1000,6 +1157,7 @@ async fn run_hol_blocking(cmd: BenchCommand) -> Result<()> {
     let measure_handles = spawn_hol_publishers(
         &pub_client,
         num_topics,
+        format,
         payload_size,
         per_topic_interval_us,
         &running,
@@ -1046,6 +1204,7 @@ async fn run_hol_blocking(cmd: BenchCommand) -> Result<()> {
 fn spawn_hol_publishers(
     pub_client: &MqttClient,
     num_topics: usize,
+    format: PayloadFormat,
     payload_size: usize,
     per_topic_interval_us: Option<u64>,
     running: &Arc<std::sync::atomic::AtomicBool>,
@@ -1058,13 +1217,14 @@ fn spawn_hol_publishers(
         let published = Arc::clone(published);
 
         handles.push(tokio::spawn(async move {
-            let mut payload = vec![0u8; payload_size];
             let topic = format!("bench/hol/{topic_idx}");
+            let mut seq = 0u32;
             while running.load(Ordering::Relaxed) {
-                payload[0..8].copy_from_slice(&nanos_as_u64().to_be_bytes());
-                if client.publish(&topic, payload.clone()).await.is_ok() {
+                let payload = encode_payload(format, payload_size, seq);
+                if client.publish(&topic, payload).await.is_ok() {
                     published.fetch_add(1, Ordering::Relaxed);
                 }
+                seq = seq.wrapping_add(1);
                 if let Some(interval) = per_topic_interval_us {
                     tokio::time::sleep(Duration::from_micros(interval)).await;
                 }
