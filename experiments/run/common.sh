@@ -6,6 +6,7 @@ ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 source "${ROOT_DIR}/setup/config.env"
 
 : "${BROKER_IP:?Set BROKER_IP in config.env}"
+: "${BROKER_SSH_IP:=${BROKER_IP}}"
 : "${CLIENT_IP:?Set CLIENT_IP in config.env}"
 : "${SSH_KEY_PATH:=$HOME/.ssh/id_ed25519}"
 : "${RUNS_PER_DATAPOINT:=5}"
@@ -15,7 +16,7 @@ SSH_USER="${SSH_USER:-bench}"
 RESULTS_DIR="${ROOT_DIR}/results"
 mkdir -p "$RESULTS_DIR"
 
-ssh_broker() { ssh -i "$SSH_KEY_PATH" -o StrictHostKeyChecking=no "${SSH_USER}@${BROKER_IP}" "$@"; }
+ssh_broker() { ssh -i "$SSH_KEY_PATH" -o StrictHostKeyChecking=no "${SSH_USER}@${BROKER_SSH_IP}" "$@"; }
 ssh_client() { ssh -i "$SSH_KEY_PATH" -o StrictHostKeyChecking=no "${SSH_USER}@${CLIENT_IP}" "$@"; }
 
 BROKER_PID=""
@@ -58,7 +59,7 @@ start_monitor() {
 stop_monitor() {
     local output_file="$1"
     ssh_broker "kill ${MONITOR_PID}" 2>/dev/null || true
-    scp -i "$SSH_KEY_PATH" "${SSH_USER}@${BROKER_IP}:/tmp/monitor.csv" "$output_file"
+    scp -i "$SSH_KEY_PATH" "${SSH_USER}@${BROKER_SSH_IP}:/tmp/monitor.csv" "$output_file"
     MONITOR_PID=""
 }
 
