@@ -31,7 +31,7 @@ for tname in tcp quic-control quic-pertopic quic-persub quic-perpub; do
         label="${tname}_loss${loss}pct"
         echo "[${EXPERIMENT}] ${label}"
         run_monitored "$EXPERIMENT" "$label" \
-            "--url ${url} ${flags} --mode hol-blocking --topics 8 --duration 30 --warmup 5 --payload-size 512"
+            "--url ${url} ${flags} --mode hol-blocking --topics 8 --duration 30 --warmup 5 --payload-size 512 --rate 500"
         clear_netem
     done
 done
