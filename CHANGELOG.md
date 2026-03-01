@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [mqtt5 0.22.10] / [mqtt5-wasm 0.10.11] / [mqttv5-cli 0.20.7] - 2026-02-28
+
+### Added
+
+- **Server-side per-topic QUIC stream delivery** - Broker routes publishes to topic-specific QUIC streams via `ServerStreamManager`, enabling independent multiplexing per topic
+- **Bench tool `--payload-format` flag** - Compare serialization overhead with raw, json, bebytes, and compressed-json payload formats
+- **Bench tool HOL-blocking mode improvements** - Rate-limited publishing (`--rate`) for clean inter-topic correlation measurement
+- **SSH keepalive in experiment scripts** - Prevents SSH timeout on long-running remote bench sessions
+
+### Changed
+
+- **QUIC client endpoint lifecycle** - `into_split()` returns the endpoint; disconnect uses `wait_idle` with timeout instead of fixed sleep, adapting to actual RTT
+- **Experiment infrastructure** - Bench connections use stable internal VPC IP; SSH/SCP use external IP separately
+
 ## [mqtt5-protocol 0.9.9] / [mqtt5 0.22.9] / [mqtt5-wasm 0.10.10] / [mqttv5-cli 0.20.6] / [mqtt5-conformance 0.1.0] - 2026-02-20
 
 ### Added
