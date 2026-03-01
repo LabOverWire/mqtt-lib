@@ -289,10 +289,10 @@
 
     <script type="module">
         import init, {
-            WasmMqttClient,
-            WasmConnectOptions,
-            WasmPublishOptions,
-            WasmSubscribeOptions,
+            MqttClient,
+            ConnectOptions,
+            PublishOptions,
+            SubscribeOptions,
             createCodecRegistry,
             createGzipCodec,
             createDeflateCodec
@@ -446,10 +446,10 @@
                 }
 
                 const clientId = `mqtt5-codec-${Date.now()}`;
-                client = new WasmMqttClient(clientId);
+                client = new MqttClient(clientId);
                 debugLog(`Client created: ${clientId}`);
 
-                const connectOpts = new WasmConnectOptions();
+                const connectOpts = new ConnectOptions();
                 connectOpts.keepAlive = 60;
                 connectOpts.cleanStart = true;
 
@@ -458,22 +458,22 @@
                     debugLog('Codec registry attached to connection options');
                 }
 
-                client.on_connect((reasonCode, sessionPresent) => {
+                client.onConnect((reasonCode, sessionPresent) => {
                     debugLog(`Connected! reason=${reasonCode}, session=${sessionPresent}`);
                     updateStatus(true);
                 });
 
-                client.on_disconnect(() => {
+                client.onDisconnect(() => {
                     debugLog('Disconnected');
                     updateStatus(false);
                 });
 
-                client.on_error((error) => {
+                client.onError((error) => {
                     debugLog(`Error: ${error}`);
                 });
 
                 debugLog(`Connecting to ${brokerUrl}...`);
-                await client.connect_with_options(brokerUrl, connectOpts);
+                await client.connectWithOptions(brokerUrl, connectOpts);
 
             } catch (error) {
                 debugLog(`Connection failed: ${error}`);
@@ -493,10 +493,10 @@
             if (!topic) return;
 
             try {
-                const subOpts = new WasmSubscribeOptions();
+                const subOpts = new SubscribeOptions();
                 subOpts.qos = 1;
 
-                await client.subscribe_with_options(topic, (receivedTopic, payload, properties) => {
+                await client.subscribeWithOptions(topic, (receivedTopic, payload, properties) => {
                     const contentType = properties?.contentType || 'none';
                     const originalSize = payload.length;
 
@@ -527,10 +527,10 @@
                 const payloadBytes = encoder.encode(payload);
                 const originalSize = payloadBytes.length;
 
-                const pubOpts = new WasmPublishOptions();
+                const pubOpts = new PublishOptions();
                 pubOpts.qos = 1;
 
-                await client.publish_with_options(topic, payloadBytes, pubOpts);
+                await client.publishWithOptions(topic, payloadBytes, pubOpts);
 
                 const threshold = parseInt(document.getElementById('codec-threshold').value);
                 const codecType = document.getElementById('codec-type').value;

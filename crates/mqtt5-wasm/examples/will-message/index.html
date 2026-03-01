@@ -206,7 +206,7 @@
     </div>
 
     <script type="module">
-        import init, { WasmBroker, WasmBrokerConfig, WasmMqttClient, WasmConnectOptions, WasmWillMessage } from './pkg/mqtt5_wasm.js';
+        import init, { Broker, BrokerConfig, MqttClient, ConnectOptions, WillMessage } from './pkg/mqtt5_wasm.js';
 
         let broker;
         let observerClient;
@@ -266,31 +266,31 @@
         }
 
         async function setupObserver() {
-            observerClient = new WasmMqttClient('observer-client');
+            observerClient = new MqttClient('observer-client');
             const statusEl = document.getElementById('status-observer');
 
-            observerClient.on_connect(() => {
+            observerClient.onConnect(() => {
                 debugLog('Observer connected');
                 statusEl.className = 'status connected';
                 statusEl.textContent = 'Status: Connected';
                 document.getElementById('subscribe-btn').disabled = false;
             });
 
-            observerClient.on_disconnect(() => {
+            observerClient.onDisconnect(() => {
                 debugLog('Observer disconnected');
                 statusEl.className = 'status disconnected';
                 statusEl.textContent = 'Status: Disconnected';
             });
 
-            observerClient.on_error((error) => {
+            observerClient.onError((error) => {
                 debugLog(`Observer error: ${error}`);
             });
 
-            const port = broker.create_client_port();
-            await observerClient.connect_message_port(port);
+            const port = broker.createClientPort();
+            await observerClient.connectMessagePort(port);
 
             document.getElementById('subscribe-btn').addEventListener('click', async () => {
-                await observerClient.subscribe_with_callback('status/+', (topic, payload) => {
+                await observerClient.subscribeWithCallback('status/+', (topic, payload) => {
                     const decoder = new TextDecoder();
                     const message = decoder.decode(payload);
                     const isWill = message.includes('unexpected_disconnect');
@@ -304,10 +304,10 @@
         }
 
         async function setupDevice() {
-            deviceClient = new WasmMqttClient('device-1');
+            deviceClient = new MqttClient('device-1');
             const statusEl = document.getElementById('status-device');
 
-            deviceClient.on_connect(() => {
+            deviceClient.onConnect(() => {
                 debugLog('Device connected');
                 statusEl.className = 'status connected';
                 statusEl.textContent = 'Status: Connected';
@@ -316,7 +316,7 @@
                 document.getElementById('reconnect-btn').style.display = 'none';
             });
 
-            deviceClient.on_disconnect(() => {
+            deviceClient.onDisconnect(() => {
                 debugLog('Device disconnected');
                 statusEl.className = 'status disconnected';
                 statusEl.textContent = 'Status: Disconnected';
@@ -325,13 +325,13 @@
                 document.getElementById('reconnect-btn').style.display = 'inline-block';
             });
 
-            deviceClient.on_error((error) => {
+            deviceClient.onError((error) => {
                 debugLog(`Device error: ${error}`);
             });
 
-            devicePort = broker.create_client_port();
+            devicePort = broker.createClientPort();
 
-            const connectOpts = new WasmConnectOptions();
+            const connectOpts = new ConnectOptions();
             connectOpts.keepAlive = 5;
             const encoder = new TextEncoder();
 
@@ -341,12 +341,12 @@
                 timestamp: new Date().toISOString()
             });
 
-            const will = new WasmWillMessage('status/device-1', encoder.encode(willPayload));
+            const will = new WillMessage('status/device-1', encoder.encode(willPayload));
             will.qos = 1;
             will.retain = false;
-            connectOpts.set_will(will);
+            connectOpts.setWill(will);
 
-            await deviceClient.connect_message_port_with_options(devicePort, connectOpts);
+            await deviceClient.connectMessagePortWithOptions(devicePort, connectOpts);
 
             document.getElementById('publish-btn').addEventListener('click', async () => {
                 const payload = JSON.stringify({
@@ -365,11 +365,11 @@
 
             document.getElementById('reconnect-btn').addEventListener('click', async () => {
                 debugLog('Reconnecting device...');
-                deviceClient = new WasmMqttClient('device-1');
+                deviceClient = new MqttClient('device-1');
                 setupDeviceCallbacks();
-                devicePort = broker.create_client_port();
+                devicePort = broker.createClientPort();
 
-                const connectOpts = new WasmConnectOptions();
+                const connectOpts = new ConnectOptions();
                 connectOpts.keepAlive = 5;
                 const encoder = new TextEncoder();
                 const willPayload = JSON.stringify({
@@ -377,19 +377,19 @@
                     reason: 'unexpected_disconnect',
                     timestamp: new Date().toISOString()
                 });
-                const will = new WasmWillMessage('status/device-1', encoder.encode(willPayload));
+                const will = new WillMessage('status/device-1', encoder.encode(willPayload));
                 will.qos = 1;
                 will.retain = false;
-                connectOpts.set_will(will);
+                connectOpts.setWill(will);
 
-                await deviceClient.connect_message_port_with_options(devicePort, connectOpts);
+                await deviceClient.connectMessagePortWithOptions(devicePort, connectOpts);
             });
         }
 
         function setupDeviceCallbacks() {
             const statusEl = document.getElementById('status-device');
 
-            deviceClient.on_connect(() => {
+            deviceClient.onConnect(() => {
                 debugLog('Device reconnected');
                 statusEl.className = 'status connected';
                 statusEl.textContent = 'Status: Connected';
@@ -398,7 +398,7 @@
                 document.getElementById('reconnect-btn').style.display = 'none';
             });
 
-            deviceClient.on_disconnect(() => {
+            deviceClient.onDisconnect(() => {
                 debugLog('Device disconnected');
                 statusEl.className = 'status disconnected';
                 statusEl.textContent = 'Status: Disconnected';
@@ -407,7 +407,7 @@
                 document.getElementById('reconnect-btn').style.display = 'inline-block';
             });
 
-            deviceClient.on_error((error) => {
+            deviceClient.onError((error) => {
                 debugLog(`Device error: ${error}`);
             });
 
@@ -434,13 +434,13 @@
                 await init();
                 debugLog('WASM initialized');
 
-                const config = new WasmBrokerConfig();
+                const config = new BrokerConfig();
                 config.max_clients = 10;
                 config.maximum_qos = 2;
                 config.allow_anonymous = true;
 
                 debugLog('Creating in-tab broker...');
-                broker = WasmBroker.with_config(config);
+                broker = Broker.withConfig(config);
                 debugLog('Broker created');
 
                 await setupObserver();

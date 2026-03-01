@@ -178,11 +178,11 @@ The example demonstrates all available configuration options:
 ### Connection with Options
 
 ```javascript
-import { WasmMqttClient, WasmConnectOptions, WasmWillMessage } from './pkg/mqtt5_wasm.js';
+import { MqttClient, ConnectOptions, WillMessage } from './pkg/mqtt5_wasm.js';
 
-const client = new WasmMqttClient("my-client-id");
+const client = new MqttClient("my-client-id");
 
-const connectOpts = new WasmConnectOptions();
+const connectOpts = new ConnectOptions();
 connectOpts.keepAlive = 60;
 connectOpts.cleanStart = true;
 connectOpts.sessionExpiryInterval = 3600;
@@ -192,22 +192,22 @@ connectOpts.maximumPacketSize = 131072;
 connectOpts.addUserProperty("client-type", "browser");
 connectOpts.addUserProperty("client-version", "0.10.0");
 
-const will = new WasmWillMessage("status/offline", encoder.encode("offline"));
+const will = new WillMessage("status/offline", encoder.encode("offline"));
 will.qos = 1;
 will.retain = true;
 will.willDelayInterval = 5;
 will.messageExpiryInterval = 300;
-connectOpts.set_will(will);
+connectOpts.setWill(will);
 
-await client.connect_with_options("ws://broker:8000/mqtt", connectOpts);
+await client.connectWithOptions("ws://broker:8000/mqtt", connectOpts);
 ```
 
 ### Publish with Options
 
 ```javascript
-import { WasmPublishOptions } from './pkg/mqtt5_wasm.js';
+import { PublishOptions } from './pkg/mqtt5_wasm.js';
 
-const pubOpts = new WasmPublishOptions();
+const pubOpts = new PublishOptions();
 pubOpts.qos = 1;
 pubOpts.retain = false;
 pubOpts.messageExpiryInterval = 300;
@@ -216,22 +216,22 @@ pubOpts.contentType = "text/plain";
 pubOpts.addUserProperty("sender", "websocket-example");
 
 const encoder = new TextEncoder();
-await client.publish_with_options("topic", encoder.encode("message"), pubOpts);
+await client.publishWithOptions("topic", encoder.encode("message"), pubOpts);
 ```
 
 ### Subscribe with Options
 
 ```javascript
-import { WasmSubscribeOptions } from './pkg/mqtt5_wasm.js';
+import { SubscribeOptions } from './pkg/mqtt5_wasm.js';
 
-const subOpts = new WasmSubscribeOptions();
+const subOpts = new SubscribeOptions();
 subOpts.qos = 1;
 subOpts.noLocal = false;
 subOpts.retainAsPublished = true;
 subOpts.retainHandling = 0;
 subOpts.subscriptionIdentifier = 42;
 
-await client.subscribe_with_options("topic/filter", (topic, payload) => {
+await client.subscribeWithOptions("topic/filter", (topic, payload) => {
     console.log('Message:', topic, payload);
 }, subOpts);
 ```

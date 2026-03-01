@@ -181,7 +181,7 @@
     </div>
 
     <script type="module">
-        import init, { WasmMqttClient, WasmConnectOptions, WasmSubscribeOptions } from './pkg/mqtt5_wasm.js';
+        import init, { MqttClient, ConnectOptions, SubscribeOptions } from './pkg/mqtt5_wasm.js';
 
         let wasmReady = false;
         let idToken = null;
@@ -323,11 +323,11 @@
             const clientId = 'wasm-' + payload.sub.substring(0, 8) + '-' + Date.now();
 
             try {
-                log('Creating WasmMqttClient...', 'info');
-                mqttClient = new WasmMqttClient(clientId);
+                log('Creating MqttClient...', 'info');
+                mqttClient = new MqttClient(clientId);
                 log('Client created: ' + clientId, 'info');
 
-                mqttClient.on_connect((reasonCode, sessionPresent) => {
+                mqttClient.onConnect((reasonCode, sessionPresent) => {
                     console.log('on_connect callback', reasonCode, sessionPresent);
                     if (reasonCode === 0) {
                         setStatus('mqttStatus', 'connected', 'Connected');
@@ -344,7 +344,7 @@
                     }
                 });
 
-                mqttClient.on_disconnect(() => {
+                mqttClient.onDisconnect(() => {
                     console.log('on_disconnect callback');
                     setStatus('mqttStatus', 'disconnected', 'Disconnected');
                     log('Disconnected from broker', 'warn');
@@ -354,14 +354,14 @@
                     document.getElementById('pubBtn').disabled = true;
                 });
 
-                mqttClient.on_error((error) => {
+                mqttClient.onError((error) => {
                     console.log('on_error callback', error);
                     setStatus('mqttStatus', 'error', 'Error: ' + error);
                     log('MQTT Error: ' + error, 'error');
                 });
 
-                log('Creating WasmConnectOptions...', 'info');
-                const options = new WasmConnectOptions();
+                log('Creating ConnectOptions...', 'info');
+                const options = new ConnectOptions();
                 options.cleanStart = true;
                 options.keepAlive = 60;
                 options.authenticationMethod = 'JWT';
@@ -371,7 +371,7 @@
                 log('Options configured with JWT auth', 'info');
 
                 log('Calling connect_with_options...', 'info');
-                await mqttClient.connect_with_options(brokerUrl, options);
+                await mqttClient.connectWithOptions(brokerUrl, options);
                 log('connect_with_options returned', 'info');
 
             } catch (err) {
@@ -400,16 +400,16 @@
                 log('Please enter a topic to subscribe', 'error');
                 return;
             }
-            if (!mqttClient || !mqttClient.is_connected()) {
+            if (!mqttClient || !mqttClient.isConnected()) {
                 log('Not connected', 'error');
                 return;
             }
 
             try {
-                const options = new WasmSubscribeOptions();
+                const options = new SubscribeOptions();
                 options.qos = 1;
 
-                await mqttClient.subscribe_with_options(topic, (msgTopic, payload, properties) => {
+                await mqttClient.subscribeWithOptions(topic, (msgTopic, payload, properties) => {
                     const message = new TextDecoder().decode(payload);
                     log(`[${msgTopic}] ${message}`, 'success');
                 }, options);
@@ -428,7 +428,7 @@
                 log('Please enter a topic to publish', 'error');
                 return;
             }
-            if (!mqttClient || !mqttClient.is_connected()) {
+            if (!mqttClient || !mqttClient.isConnected()) {
                 log('Not connected', 'error');
                 return;
             }

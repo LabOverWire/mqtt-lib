@@ -372,13 +372,13 @@
 
     <script type="module">
         import init, {
-            WasmBroker,
-            WasmBrokerConfig,
-            WasmMqttClient,
-            WasmBridgeConfig,
-            WasmBridgeDirection,
-            WasmTopicMapping,
-            WasmSubscribeOptions
+            Broker,
+            BrokerConfig,
+            MqttClient,
+            BridgeConfig,
+            BridgeDirection,
+            TopicMapping,
+            SubscribeOptions
         } from './pkg/mqtt5_wasm.js';
 
         let brokerA = null;
@@ -474,49 +474,49 @@
                 clientB = null;
             }
 
-            const config = new WasmBrokerConfig();
+            const config = new BrokerConfig();
             config.max_clients = 100;
             config.wildcard_subscription_available = true;
             config.allow_anonymous = true;
 
             debugLog('Creating Broker A...');
-            brokerA = WasmBroker.with_config(config);
+            brokerA = Broker.withConfig(config);
             updateStatus('broker-a-status', 'Broker: Ready', true);
 
-            const configB = new WasmBrokerConfig();
+            const configB = new BrokerConfig();
             configB.allow_anonymous = true;
             debugLog('Creating Broker B...');
-            brokerB = WasmBroker.with_config(configB);
+            brokerB = Broker.withConfig(configB);
             updateStatus('broker-b-status', 'Broker: Ready', true);
 
             debugLog(`Setting up bridge with TTL=${ttlSecs}s, cache=${cacheSize}...`);
-            const bridgeConfig = new WasmBridgeConfig('a-to-b');
+            const bridgeConfig = new BridgeConfig('a-to-b');
             bridgeConfig.loop_prevention_ttl_secs = BigInt(ttlSecs);
             bridgeConfig.loop_prevention_cache_size = cacheSize;
 
-            const topicMapping = new WasmTopicMapping('test/#', WasmBridgeDirection.Both);
+            const topicMapping = new TopicMapping('test/#', BridgeDirection.Both);
             topicMapping.qos = 1;
-            bridgeConfig.add_topic(topicMapping);
+            bridgeConfig.addTopic(topicMapping);
 
-            const bridgePort = brokerB.create_client_port();
-            await brokerA.add_bridge(bridgeConfig, bridgePort);
+            const bridgePort = brokerB.createClientPort();
+            await brokerA.addBridge(bridgeConfig, bridgePort);
             debugLog('Bridge established with loop prevention enabled');
 
             debugLog('Connecting Client A...');
-            clientA = new WasmMqttClient('client-a');
-            clientA.on_connect(() => debugLog('Client A connected'));
-            const portA = brokerA.create_client_port();
-            await clientA.connect_message_port(portA);
+            clientA = new MqttClient('client-a');
+            clientA.onConnect(() => debugLog('Client A connected'));
+            const portA = brokerA.createClientPort();
+            await clientA.connectMessagePort(portA);
 
             debugLog('Connecting Client B...');
-            clientB = new WasmMqttClient('client-b');
-            clientB.on_connect(() => debugLog('Client B connected'));
-            const portB = brokerB.create_client_port();
-            await clientB.connect_message_port(portB);
+            clientB = new MqttClient('client-b');
+            clientB.onConnect(() => debugLog('Client B connected'));
+            const portB = brokerB.createClientPort();
+            await clientB.connectMessagePort(portB);
 
-            const options = new WasmSubscribeOptions();
+            const options = new SubscribeOptions();
             options.noLocal = true;
-            await clientB.subscribe_with_options('test/#', (topic, payload) => {
+            await clientB.subscribeWithOptions('test/#', (topic, payload) => {
                 const decoder = new TextDecoder();
                 const message = decoder.decode(payload);
                 stats.received++;

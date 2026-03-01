@@ -126,7 +126,7 @@
     </div>
 
     <script type="module">
-        import init, { WasmBroker, WasmBrokerConfig, WasmMqttClient, WasmConnectOptions } from './pkg/mqtt5_wasm.js';
+        import init, { Broker, BrokerConfig, MqttClient, ConnectOptions } from './pkg/mqtt5_wasm.js';
 
         let broker = null;
         const logEl = document.getElementById('log');
@@ -150,9 +150,9 @@
                 log('Broker already exists');
                 return;
             }
-            const config = new WasmBrokerConfig();
+            const config = new BrokerConfig();
             config.max_clients = 200;
-            broker = WasmBroker.with_config(config);
+            broker = Broker.withConfig(config);
             logSuccess('Broker created');
         }
 
@@ -175,20 +175,20 @@
                     const clientId = `seq-client-${i}`;
                     log(`Creating client ${i + 1}/${numClients}: ${clientId}`);
 
-                    const client = new WasmMqttClient(clientId);
+                    const client = new MqttClient(clientId);
 
-                    client.on_connect(() => {
+                    client.onConnect(() => {
                         log(`  ${clientId} connected`, 'success');
                     });
 
-                    client.on_error((err) => {
+                    client.onError((err) => {
                         logError(`  ${clientId} error: ${err}`);
                     });
 
-                    const port = broker.create_client_port();
+                    const port = broker.createClientPort();
                     log(`  Port created for ${clientId}`);
 
-                    await client.connect_message_port(port);
+                    await client.connectMessagePort(port);
                     log(`  ${clientId} connect_message_port completed`);
 
                     clients.push(client);
@@ -218,7 +218,7 @@
                 // Phase 1: Create all ports rapidly (synchronous calls)
                 log('\nPhase 1: Creating ports (no await)...');
                 for (let i = 0; i < numClients; i++) {
-                    const port = broker.create_client_port();
+                    const port = broker.createClientPort();
                     ports.push(port);
                     log(`  Port ${i + 1} created`);
                 }
@@ -228,17 +228,17 @@
                 log('\nPhase 2: Connecting clients...');
                 for (let i = 0; i < numClients; i++) {
                     const clientId = `rapid-client-${i}`;
-                    const client = new WasmMqttClient(clientId);
+                    const client = new MqttClient(clientId);
 
-                    client.on_connect(() => {
+                    client.onConnect(() => {
                         log(`  ${clientId} connected`, 'success');
                     });
 
-                    client.on_error((err) => {
+                    client.onError((err) => {
                         logError(`  ${clientId} error: ${err}`);
                     });
 
-                    await client.connect_message_port(ports[i]);
+                    await client.connectMessagePort(ports[i]);
                     clients.push(client);
                 }
 
@@ -265,21 +265,21 @@
                 // Create ports and start connecting immediately (don't await yet)
                 for (let i = 0; i < numClients; i++) {
                     const clientId = `parallel-client-${i}`;
-                    const client = new WasmMqttClient(clientId);
+                    const client = new MqttClient(clientId);
 
-                    client.on_connect(() => {
+                    client.onConnect(() => {
                         log(`  ${clientId} connected`, 'success');
                     });
 
-                    client.on_error((err) => {
+                    client.onError((err) => {
                         logError(`  ${clientId} error: ${err}`);
                     });
 
-                    const port = broker.create_client_port();
+                    const port = broker.createClientPort();
                     log(`  Port ${i + 1} created, starting connect...`);
 
                     // Don't await - collect promise
-                    const connectPromise = client.connect_message_port(port);
+                    const connectPromise = client.connectMessagePort(port);
                     connectPromises.push(connectPromise);
                 }
 
@@ -298,35 +298,35 @@
             }
         }
 
-        // Test 5: Exact frontend pattern - create WasmMqttClient first, connect later
+        // Test 5: Exact frontend pattern - create MqttClient first, connect later
         async function testFrontendPattern() {
             const numClients = parseInt(document.getElementById('num-clients').value);
             log(`\n=== TEST 5: Frontend pattern (${numClients} clients) ===`);
-            log('Creating all WasmMqttClient instances first, then ports, then connecting...');
+            log('Creating all MqttClient instances first, then ports, then connecting...');
 
             await createBroker();
             const startTime = performance.now();
 
             try {
-                // Phase 1: Create all WasmMqttClient instances (like ClientInstance.initialize())
-                log('\nPhase 1: Creating WasmMqttClient instances...');
+                // Phase 1: Create all MqttClient instances (like ClientInstance.initialize())
+                log('\nPhase 1: Creating MqttClient instances...');
                 const clients = [];
                 for (let i = 0; i < numClients; i++) {
                     const clientId = `frontend-client-${i}`;
-                    const client = new WasmMqttClient(clientId);
+                    const client = new MqttClient(clientId);
 
-                    client.on_connect(() => {
+                    client.onConnect(() => {
                         log(`  ${clientId} connected`, 'success');
                     });
 
-                    client.on_error((err) => {
+                    client.onError((err) => {
                         logError(`  ${clientId} error: ${err}`);
                     });
 
                     clients.push({ clientId, client });
-                    log(`  Created WasmMqttClient: ${clientId}`);
+                    log(`  Created MqttClient: ${clientId}`);
                 }
-                log(`All ${numClients} WasmMqttClient instances created`);
+                log(`All ${numClients} MqttClient instances created`);
 
                 // Phase 2: Create ports and connect (like SimulationEngine.start())
                 log('\nPhase 2: Creating ports and connecting (with yields)...');
@@ -337,14 +337,14 @@
                     await new Promise(resolve => setTimeout(resolve, 0));
 
                     log(`  Creating port for ${clientId}...`);
-                    const port = broker.create_client_port();
+                    const port = broker.createClientPort();
                     log(`  Port created for ${clientId}`);
 
                     // Yield again like frontend does
                     await new Promise(resolve => setTimeout(resolve, 0));
 
                     log(`  Connecting ${clientId}...`);
-                    await client.connect_message_port(port);
+                    await client.connectMessagePort(port);
                     log(`  ${clientId} connected`);
 
                     // Delay like frontend does
@@ -369,23 +369,23 @@
             const startTime = performance.now();
 
             try {
-                log('\nPhase 1: Creating WasmMqttClient instances...');
+                log('\nPhase 1: Creating MqttClient instances...');
                 const clients = [];
                 for (let i = 0; i < numClients; i++) {
                     const clientId = `opts-client-${i}`;
-                    const client = new WasmMqttClient(clientId);
+                    const client = new MqttClient(clientId);
 
-                    client.on_connect(() => {
+                    client.onConnect(() => {
                         log(`  ${clientId} connected`, 'success');
                     });
 
-                    client.on_error((err) => {
+                    client.onError((err) => {
                         logError(`  ${clientId} error: ${err}`);
                     });
 
                     clients.push({ clientId, client });
                 }
-                log(`All ${numClients} WasmMqttClient instances created`);
+                log(`All ${numClients} MqttClient instances created`);
 
                 log('\nPhase 2: Creating ports and connecting with options...');
                 for (let i = 0; i < numClients; i++) {
@@ -393,18 +393,18 @@
 
                     await new Promise(resolve => setTimeout(resolve, 0));
 
-                    const port = broker.create_client_port();
+                    const port = broker.createClientPort();
                     log(`  Port created for ${clientId}`);
 
                     await new Promise(resolve => setTimeout(resolve, 0));
 
                     // Use connect_with_options like frontend does
-                    const connectOpts = new WasmConnectOptions();
+                    const connectOpts = new ConnectOptions();
                     connectOpts.cleanStart = true;
                     connectOpts.keepAlive = 60;
 
                     log(`  Connecting ${clientId} with options...`);
-                    await client.connect_message_port_with_options(port, connectOpts);
+                    await client.connectMessagePortWithOptions(port, connectOpts);
                     log(`  ${clientId} connected`);
 
                     await new Promise(resolve => setTimeout(resolve, 100));
@@ -426,32 +426,32 @@
 
             // Create a NEW broker with allowAnonymous=false
             log('Creating broker with allowAnonymous=false...');
-            const config = new WasmBrokerConfig();
+            const config = new BrokerConfig();
             config.max_clients = 200;
-            const authBroker = WasmBroker.with_config(config);
-            authBroker.set_allow_anonymous(false);
+            const authBroker = Broker.withConfig(config);
+            authBroker.allowAnonymous = false;
             logSuccess('Auth broker created');
 
             const startTime = performance.now();
 
             try {
-                log('\nPhase 1: Creating WasmMqttClient instances...');
+                log('\nPhase 1: Creating MqttClient instances...');
                 const clients = [];
                 for (let i = 0; i < numClients; i++) {
                     const clientId = `auth-client-${i}`;
-                    const client = new WasmMqttClient(clientId);
+                    const client = new MqttClient(clientId);
 
-                    client.on_connect(() => {
+                    client.onConnect(() => {
                         log(`  ${clientId} connected`, 'success');
                     });
 
-                    client.on_error((err) => {
+                    client.onError((err) => {
                         logError(`  ${clientId} error: ${err}`);
                     });
 
                     clients.push({ clientId, client });
                 }
-                log(`All ${numClients} WasmMqttClient instances created`);
+                log(`All ${numClients} MqttClient instances created`);
 
                 log('\nPhase 2: Creating ports and connecting (NO credentials - should fail auth)...');
                 for (let i = 0; i < numClients; i++) {
@@ -460,18 +460,18 @@
                     await new Promise(resolve => setTimeout(resolve, 0));
 
                     log(`  Creating port for ${clientId}...`);
-                    const port = authBroker.create_client_port();
+                    const port = authBroker.createClientPort();
                     log(`  Port created for ${clientId}`);
 
                     await new Promise(resolve => setTimeout(resolve, 0));
 
-                    const connectOpts = new WasmConnectOptions();
+                    const connectOpts = new ConnectOptions();
                     connectOpts.cleanStart = true;
                     connectOpts.keepAlive = 60;
 
                     log(`  Connecting ${clientId} (no credentials)...`);
                     try {
-                        await client.connect_message_port_with_options(port, connectOpts);
+                        await client.connectMessagePortWithOptions(port, connectOpts);
                         log(`  ${clientId} connected (unexpected - should have failed auth)`);
                     } catch (e) {
                         logWarn(`  ${clientId} connection failed (expected): ${e}`);
@@ -503,22 +503,22 @@
             try {
                 for (let i = 0; i < numClients; i++) {
                     const clientId = `fire-client-${i}`;
-                    const client = new WasmMqttClient(clientId);
+                    const client = new MqttClient(clientId);
 
-                    client.on_connect(() => {
+                    client.onConnect(() => {
                         connectedCount++;
                         log(`  ${clientId} connected (${connectedCount}/${numClients})`, 'success');
                     });
 
-                    client.on_error((err) => {
+                    client.onError((err) => {
                         errorCount++;
                         logError(`  ${clientId} error: ${err}`);
                     });
 
-                    const port = broker.create_client_port();
+                    const port = broker.createClientPort();
 
                     // Fire and forget - don't await
-                    client.connect_message_port(port).catch(err => {
+                    client.connectMessagePort(port).catch(err => {
                         logError(`  ${clientId} connect failed: ${err}`);
                     });
 

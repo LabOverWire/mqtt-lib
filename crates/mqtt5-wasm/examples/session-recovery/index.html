@@ -313,7 +313,7 @@
     </div>
 
     <script type="module">
-        import init, { WasmBroker, WasmBrokerConfig, WasmMqttClient, WasmConnectOptions, WasmSubscribeOptions } from './pkg/mqtt5_wasm.js';
+        import init, { Broker, BrokerConfig, MqttClient, ConnectOptions, SubscribeOptions } from './pkg/mqtt5_wasm.js';
 
         let broker;
         let mobileClient;
@@ -395,10 +395,10 @@
         }
 
         async function connectMobile(cleanStart) {
-            mobileClient = new WasmMqttClient('mobile-device-001');
+            mobileClient = new MqttClient('mobile-device-001');
             const statusEl = document.getElementById('client-status');
 
-            mobileClient.on_connect((reasonCode, sessionPresent) => {
+            mobileClient.onConnect((reasonCode, sessionPresent) => {
                 debugLog(`Mobile connected! sessionPresent=${sessionPresent}`);
                 statusEl.className = 'status connected';
                 statusEl.textContent = `Connected (session ${sessionPresent ? 'restored' : 'new'})`;
@@ -426,25 +426,25 @@
                 }
             });
 
-            mobileClient.on_disconnect(() => {
+            mobileClient.onDisconnect(() => {
                 debugLog('Mobile disconnected');
                 statusEl.className = 'status offline';
                 statusEl.textContent = 'Offline (session preserved on broker)';
                 isConnected = false;
             });
 
-            mobilePort = broker.create_client_port();
+            mobilePort = broker.createClientPort();
 
-            const options = new WasmConnectOptions();
+            const options = new ConnectOptions();
             options.cleanStart = cleanStart;
             options.sessionExpiryInterval = 3600;
 
-            await mobileClient.connect_message_port_with_options(mobilePort, options);
+            await mobileClient.connectMessagePortWithOptions(mobilePort, options);
 
             for (const topic of subscriptions) {
-                const subOpts = new WasmSubscribeOptions();
+                const subOpts = new SubscribeOptions();
                 subOpts.qos = 1;
-                await mobileClient.subscribe_with_options(topic, (t, payload, props) => {
+                await mobileClient.subscribeWithOptions(topic, (t, payload, props) => {
                     const decoder = new TextDecoder();
                     addReceivedMessage(t, decoder.decode(payload), false);
                 }, subOpts);
@@ -481,7 +481,7 @@
             const payload = `Message #${publishCounter}: Important update!`;
 
             const encoder = new TextEncoder();
-            await publisherClient.publish_qos1(topic, encoder.encode(payload));
+            await publisherClient.publishQos1(topic, encoder.encode(payload));
 
             queuedMessages.push({ topic, payload });
             document.getElementById('queued-count').textContent = queuedMessages.length;
@@ -495,21 +495,21 @@
                 debugLog('Initializing WASM...');
                 await init();
 
-                const config = new WasmBrokerConfig();
+                const config = new BrokerConfig();
                 config.max_clients = 10;
                 config.session_expiry_interval_secs = 3600;
                 config.allow_anonymous = true;
 
-                broker = WasmBroker.with_config(config);
+                broker = Broker.withConfig(config);
                 debugLog('Broker created with session persistence');
 
-                publisherClient = new WasmMqttClient('publisher');
-                publisherClient.on_connect(() => {
+                publisherClient = new MqttClient('publisher');
+                publisherClient.onConnect(() => {
                     document.getElementById('publisher-status').className = 'status connected';
                     document.getElementById('publisher-status').textContent = 'Connected';
                 });
-                const publisherPort = broker.create_client_port();
-                await publisherClient.connect_message_port(publisherPort);
+                const publisherPort = broker.createClientPort();
+                await publisherClient.connectMessagePort(publisherPort);
                 debugLog('Publisher connected');
 
                 document.getElementById('connect-btn').addEventListener('click', () => connectMobile(false));

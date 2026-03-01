@@ -44,10 +44,10 @@ Change-only delivery is a broker-configured feature that reduces bandwidth for t
 Change-only delivery is configured on the broker:
 
 ```javascript
-const config = new WasmBrokerConfig();
+const config = new BrokerConfig();
 config.change_only_delivery_enabled = true;
-config.add_change_only_delivery_pattern('sensors/#');
-config.add_change_only_delivery_pattern('telemetry/+/status');
+config.addChangeOnlyDeliveryPattern('sensors/#');
+config.addChangeOnlyDeliveryPattern('telemetry/+/status');
 ```
 
 Any subscription that matches a change-only pattern will automatically use change-only mode.

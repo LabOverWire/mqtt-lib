@@ -193,7 +193,7 @@
     </div>
 
     <script type="module">
-        import init, { WasmBroker, WasmBrokerConfig, WasmMqttClient, WasmConnectOptions, WasmReconnectOptions, WasmSubscribeOptions } from './pkg/mqtt5_wasm.js';
+        import init, { Broker, BrokerConfig, MqttClient, ConnectOptions, ReconnectOptions, SubscribeOptions } from './pkg/mqtt5_wasm.js';
 
         let broker;
         let client;
@@ -236,9 +236,9 @@
         async function connectClient() {
             if (isConnected) return;
 
-            client = new WasmMqttClient('connectivity-demo-client');
+            client = new MqttClient('connectivity-demo-client');
 
-            client.on_connectivity_change((online) => {
+            client.onConnectivityChange((online) => {
                 if (online) {
                     onlineCount++;
                     updateCounter('online-count', onlineCount);
@@ -251,7 +251,7 @@
                 updateNetworkBadge(online);
             });
 
-            client.on_connect((reasonCode, sessionPresent) => {
+            client.onConnect((reasonCode, sessionPresent) => {
                 isConnected = true;
                 updateMqttBadge('connected');
                 document.getElementById('connect-btn').disabled = true;
@@ -259,13 +259,13 @@
                 logEvent(`Connected (reason=${reasonCode}, sessionPresent=${sessionPresent})`, 'mqtt');
             });
 
-            client.on_disconnect(() => {
+            client.onDisconnect(() => {
                 isConnected = false;
                 updateMqttBadge('disconnected');
                 logEvent('Disconnected from broker', 'mqtt');
             });
 
-            client.on_reconnecting((attempt, delay) => {
+            client.onReconnecting((attempt, delay) => {
                 reconnectCount++;
                 updateCounter('reconnect-count', reconnectCount);
                 updateMqttBadge('reconnecting');
@@ -276,31 +276,31 @@
                 }
             });
 
-            client.on_reconnect_failed((error) => {
+            client.onReconnectFailed((error) => {
                 updateMqttBadge('disconnected');
                 logEvent(`Reconnection failed: ${error}`, 'error');
             });
 
-            client.on_error((error) => {
+            client.onError((error) => {
                 logEvent(`Error: ${error}`, 'error');
             });
 
-            const reconnectOpts = new WasmReconnectOptions();
+            const reconnectOpts = new ReconnectOptions();
             reconnectOpts.enabled = true;
             reconnectOpts.initial_delay_ms = 1000;
             reconnectOpts.max_delay_ms = 10000;
             reconnectOpts.max_retries = 50;
-            client.set_reconnect_options(reconnectOpts);
+            client.setReconnectOptions(reconnectOpts);
 
-            const connectOpts = new WasmConnectOptions();
+            const connectOpts = new ConnectOptions();
             connectOpts.cleanStart = true;
             connectOpts.keepAlive = 30;
 
-            const port = broker.create_client_port();
+            const port = broker.createClientPort();
 
             try {
                 logEvent('Connecting to in-browser broker...', 'info');
-                await client.connect_message_port_with_options(port, connectOpts);
+                await client.connectMessagePortWithOptions(port, connectOpts);
             } catch (error) {
                 logEvent(`Connection failed: ${error}`, 'error');
             }
@@ -322,7 +322,7 @@
                 logEvent('No client created yet - connect first', 'info');
                 return;
             }
-            const online = client.is_browser_online();
+            const online = client.isBrowserOnline();
             logEvent(`is_browser_online() => ${online}`, 'connectivity');
         }
 
@@ -331,10 +331,10 @@
                 await init();
                 logEvent('WASM module initialized', 'info');
 
-                const config = new WasmBrokerConfig();
+                const config = new BrokerConfig();
                 config.max_clients = 10;
                 config.allow_anonymous = true;
-                broker = WasmBroker.with_config(config);
+                broker = Broker.withConfig(config);
                 logEvent('In-browser MQTT broker started', 'info');
 
                 updateNetworkBadge(navigator.onLine);

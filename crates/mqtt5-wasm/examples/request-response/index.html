@@ -228,7 +228,7 @@
     </div>
 
     <script type="module">
-        import init, { WasmBroker, WasmBrokerConfig, WasmMqttClient, WasmPublishOptions } from './pkg/mqtt5_wasm.js';
+        import init, { Broker, BrokerConfig, MqttClient, PublishOptions } from './pkg/mqtt5_wasm.js';
 
         let broker;
         let clientMqtt;
@@ -358,11 +358,11 @@
             const payload = JSON.stringify({ command, params: {} });
             const encoder = new TextEncoder();
 
-            const options = new WasmPublishOptions();
+            const options = new PublishOptions();
             options.responseTopic = responseTopic;
             options.correlationData = encoder.encode(correlationId);
 
-            await clientMqtt.publish_with_options('rpc/requests', encoder.encode(payload), options);
+            await clientMqtt.publishWithOptions('rpc/requests', encoder.encode(payload), options);
             debugLog(`Sent request: ${command} (${correlationId})`);
         }
 
@@ -398,10 +398,10 @@
             const responsePayload = JSON.stringify({ result, correlationId });
             const encoder = new TextEncoder();
 
-            const options = new WasmPublishOptions();
+            const options = new PublishOptions();
             options.correlationData = encoder.encode(correlationId);
 
-            await workerMqtt.publish_with_options(responseTopic, encoder.encode(responsePayload), options);
+            await workerMqtt.publishWithOptions(responseTopic, encoder.encode(responsePayload), options);
             debugLog(`Worker sent response: ${result} (${correlationId})`);
         }
 
@@ -429,52 +429,52 @@
                 debugLog('Initializing WASM...');
                 await init();
 
-                const config = new WasmBrokerConfig();
+                const config = new BrokerConfig();
                 config.max_clients = 10;
                 config.allow_anonymous = true;
 
-                broker = WasmBroker.with_config(config);
+                broker = Broker.withConfig(config);
                 debugLog('Broker created');
 
-                clientMqtt = new WasmMqttClient('client-1');
+                clientMqtt = new MqttClient('client-1');
                 const clientStatus = document.getElementById('status-client');
 
-                clientMqtt.on_connect(() => {
+                clientMqtt.onConnect(() => {
                     clientStatus.className = 'status connected';
                     clientStatus.textContent = 'Connected';
                     document.querySelectorAll('.command-btn').forEach(btn => btn.disabled = false);
                 });
 
-                clientMqtt.on_disconnect(() => {
+                clientMqtt.onDisconnect(() => {
                     clientStatus.className = 'status disconnected';
                     clientStatus.textContent = 'Disconnected';
                 });
 
-                const clientPort = broker.create_client_port();
-                await clientMqtt.connect_message_port(clientPort);
+                const clientPort = broker.createClientPort();
+                await clientMqtt.connectMessagePort(clientPort);
 
-                await clientMqtt.subscribe_with_callback('rpc/responses/client-1', (topic, payload, props) => {
+                await clientMqtt.subscribeWithCallback('rpc/responses/client-1', (topic, payload, props) => {
                     handleResponse(topic, payload, props.correlationData);
                 });
                 debugLog('Client subscribed to response topic');
 
-                workerMqtt = new WasmMqttClient('worker-1');
+                workerMqtt = new MqttClient('worker-1');
                 const workerStatus = document.getElementById('status-worker');
 
-                workerMqtt.on_connect(() => {
+                workerMqtt.onConnect(() => {
                     workerStatus.className = 'status connected';
                     workerStatus.textContent = 'Connected';
                 });
 
-                workerMqtt.on_disconnect(() => {
+                workerMqtt.onDisconnect(() => {
                     workerStatus.className = 'status disconnected';
                     workerStatus.textContent = 'Disconnected';
                 });
 
-                const workerPort = broker.create_client_port();
-                await workerMqtt.connect_message_port(workerPort);
+                const workerPort = broker.createClientPort();
+                await workerMqtt.connectMessagePort(workerPort);
 
-                await workerMqtt.subscribe_with_callback('rpc/requests', (topic, payload, props) => {
+                await workerMqtt.subscribeWithCallback('rpc/requests', (topic, payload, props) => {
                     if (props.responseTopic && props.correlationData) {
                         handleRequest(topic, payload, props.responseTopic, props.correlationData);
                     }

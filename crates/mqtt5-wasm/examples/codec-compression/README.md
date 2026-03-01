@@ -57,8 +57,8 @@ Then open http://localhost:8080 in your browser.
 
 ```javascript
 import {
-    WasmMqttClient,
-    WasmConnectOptions,
+    MqttClient,
+    ConnectOptions,
     createCodecRegistry,
     createGzipCodec
 } from './pkg/mqtt5_wasm.js';
@@ -70,15 +70,14 @@ registry.registerGzip(gzipCodec);
 registry.setDefault('application/gzip');
 
 // Attach to connection options
-const options = new WasmConnectOptions();
+const options = new ConnectOptions();
 options.setCodecRegistry(registry);
 
 // Connect - compression happens automatically
-const client = new WasmMqttClient('my-client');
-await client.connect_with_options('ws://broker:8080/mqtt', options);
+const client = new MqttClient('my-client');
+await client.connectWithOptions('ws://broker:8080/mqtt', options);
 
-// Publish - large payloads are compressed automatically
-await client.publish_with_options('topic', largePayload, pubOpts);
+await client.publishWithOptions('topic', largePayload, pubOpts);
 ```
 
 ## Compression Efficiency

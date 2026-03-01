@@ -304,7 +304,7 @@
     </div>
 
     <script type="module">
-        import init, { WasmBroker, WasmBrokerConfig, WasmMqttClient, WasmConnectOptions } from './pkg/mqtt5_wasm.js';
+        import init, { Broker, BrokerConfig, MqttClient, ConnectOptions } from './pkg/mqtt5_wasm.js';
 
         let broker;
         let currentClient;
@@ -407,10 +407,10 @@
                 currentPort.close();
             }
 
-            currentClient = new WasmMqttClient(username);
+            currentClient = new MqttClient(username);
             const statusEl = document.getElementById('user-status');
 
-            currentClient.on_connect(() => {
+            currentClient.onConnect(() => {
                 statusEl.className = 'status connected';
                 statusEl.textContent = `Connected as ${username}`;
                 currentUser = username;
@@ -418,22 +418,22 @@
                 debugLog(`${username} connected`);
             });
 
-            currentClient.on_disconnect(() => {
+            currentClient.onDisconnect(() => {
                 statusEl.className = 'status disconnected';
                 statusEl.textContent = 'Disconnected';
             });
 
-            currentClient.on_error((err) => {
+            currentClient.onError((err) => {
                 debugLog(`Error: ${err}`);
             });
 
-            currentPort = broker.create_client_port();
+            currentPort = broker.createClientPort();
 
-            const options = new WasmConnectOptions();
+            const options = new ConnectOptions();
             options.username = username;
             options.password = new TextEncoder().encode(password);
 
-            await currentClient.connect_message_port_with_options(currentPort, options);
+            await currentClient.connectMessagePortWithOptions(currentPort, options);
         }
 
         async function testSubscribe(topic) {
@@ -445,7 +445,7 @@
             const allowed = checkPermission(currentUser, 'subscribe', topic);
 
             try {
-                await currentClient.subscribe_with_callback(topic, (t, payload) => {
+                await currentClient.subscribeWithCallback(topic, (t, payload) => {
                     debugLog(`Received on ${t}`);
                 });
 
@@ -491,33 +491,33 @@
                 debugLog('Initializing WASM...');
                 await init();
 
-                const config = new WasmBrokerConfig();
+                const config = new BrokerConfig();
                 config.max_clients = 10;
                 config.allow_anonymous = true;
 
-                broker = WasmBroker.with_config(config);
+                broker = Broker.withConfig(config);
 
-                await broker.add_user('admin', 'admin123');
-                await broker.add_user('publisher', 'pub123');
-                await broker.add_user('subscriber', 'sub123');
-                await broker.add_user('guest', 'guest123');
+                await broker.addUser('admin', 'admin123');
+                await broker.addUser('publisher', 'pub123');
+                await broker.addUser('subscriber', 'sub123');
+                await broker.addUser('guest', 'guest123');
 
-                await broker.add_role('admin');
-                await broker.add_role_rule('admin', '#', 'readwrite');
+                await broker.addRole('admin');
+                await broker.addRoleRule('admin', '#', 'readwrite');
 
-                await broker.add_role('publisher');
-                await broker.add_role_rule('publisher', 'data/#', 'write');
+                await broker.addRole('publisher');
+                await broker.addRoleRule('publisher', 'data/#', 'write');
 
-                await broker.add_role('subscriber');
-                await broker.add_role_rule('subscriber', 'data/#', 'read');
+                await broker.addRole('subscriber');
+                await broker.addRoleRule('subscriber', 'data/#', 'read');
 
-                await broker.add_role('guest');
-                await broker.add_role_rule('guest', 'public/#', 'read');
+                await broker.addRole('guest');
+                await broker.addRoleRule('guest', 'public/#', 'read');
 
-                await broker.assign_role('admin', 'admin');
-                await broker.assign_role('publisher', 'publisher');
-                await broker.assign_role('subscriber', 'subscriber');
-                await broker.assign_role('guest', 'guest');
+                await broker.assignRole('admin', 'admin');
+                await broker.assignRole('publisher', 'publisher');
+                await broker.assignRole('subscriber', 'subscriber');
+                await broker.assignRole('guest', 'guest');
 
                 debugLog('Broker created with ACL rules');
 

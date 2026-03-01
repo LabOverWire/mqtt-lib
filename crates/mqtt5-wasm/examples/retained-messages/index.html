@@ -234,7 +234,7 @@
     </div>
 
     <script type="module">
-        import init, { WasmBroker, WasmBrokerConfig, WasmMqttClient, WasmPublishOptions } from './pkg/mqtt5_wasm.js';
+        import init, { Broker, BrokerConfig, MqttClient, PublishOptions } from './pkg/mqtt5_wasm.js';
 
         let broker;
         let publisherClient;
@@ -311,18 +311,18 @@
             }
 
             const encoder = new TextEncoder();
-            const options = new WasmPublishOptions();
+            const options = new PublishOptions();
             options.retain = true;
 
-            await publisherClient.publish_with_options(topic, encoder.encode(payload), options);
+            await publisherClient.publishWithOptions(topic, encoder.encode(payload), options);
             debugLog(`Published retained: ${topic} = ${payload}`);
         }
 
         async function clearRetained(topic) {
             const encoder = new TextEncoder();
-            const options = new WasmPublishOptions();
+            const options = new PublishOptions();
             options.retain = true;
-            await publisherClient.publish_with_options(topic, encoder.encode(''), options);
+            await publisherClient.publishWithOptions(topic, encoder.encode(''), options);
             debugLog(`Cleared retained message for: ${topic}`);
         }
 
@@ -331,24 +331,24 @@
                 debugLog('Initializing WASM...');
                 await init();
 
-                const config = new WasmBrokerConfig();
+                const config = new BrokerConfig();
                 config.max_clients = 10;
                 config.retain_available = true;
                 config.allow_anonymous = true;
 
-                broker = WasmBroker.with_config(config);
+                broker = Broker.withConfig(config);
                 debugLog('Broker created with retain support');
 
-                publisherClient = new WasmMqttClient('publisher');
+                publisherClient = new MqttClient('publisher');
                 const publisherStatus = document.getElementById('status-publisher');
 
-                publisherClient.on_connect(() => {
+                publisherClient.onConnect(() => {
                     publisherStatus.className = 'status connected';
                     publisherStatus.textContent = 'Connected';
                 });
 
-                const publisherPort = broker.create_client_port();
-                await publisherClient.connect_message_port(publisherPort);
+                const publisherPort = broker.createClientPort();
+                await publisherClient.connectMessagePort(publisherPort);
 
                 for (const card of document.querySelectorAll('.device-card')) {
                     const topic = card.dataset.topic;
@@ -405,24 +405,24 @@
                 document.getElementById('subscribe-btn').addEventListener('click', async () => {
                     if (isSubscribed) return;
 
-                    subscriberClient = new WasmMqttClient('subscriber-late');
+                    subscriberClient = new MqttClient('subscriber-late');
                     const subscriberStatus = document.getElementById('status-subscriber');
 
-                    subscriberClient.on_connect(() => {
+                    subscriberClient.onConnect(() => {
                         subscriberStatus.className = 'status connected';
                         subscriberStatus.textContent = 'Connected & Subscribed';
                     });
 
-                    subscriberClient.on_disconnect(() => {
+                    subscriberClient.onDisconnect(() => {
                         subscriberStatus.className = 'status disconnected';
                         subscriberStatus.textContent = 'Disconnected';
                     });
 
-                    subscriberPort = broker.create_client_port();
-                    await subscriberClient.connect_message_port(subscriberPort);
+                    subscriberPort = broker.createClientPort();
+                    await subscriberClient.connectMessagePort(subscriberPort);
 
                     const subscribeTime = Date.now();
-                    await subscriberClient.subscribe_with_callback('devices/+', (topic, payload, props) => {
+                    await subscriberClient.subscribeWithCallback('devices/+', (topic, payload, props) => {
                         const decoder = new TextDecoder();
                         const message = decoder.decode(payload);
                         const isRetained = (Date.now() - subscribeTime) < 500;

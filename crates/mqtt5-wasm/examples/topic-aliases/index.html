@@ -274,7 +274,7 @@
     </div>
 
     <script type="module">
-        import init, { WasmBroker, WasmBrokerConfig, WasmMqttClient, WasmPublishOptions } from './pkg/mqtt5_wasm.js';
+        import init, { Broker, BrokerConfig, MqttClient, PublishOptions } from './pkg/mqtt5_wasm.js';
 
         let broker;
         let clientNoAlias;
@@ -412,9 +412,9 @@
             stats.withAlias.bytes += sizeWithAlias;
             addPacketViz('packets-with-alias', sizeWithAlias, 'with-alias');
 
-            const options = new WasmPublishOptions();
+            const options = new PublishOptions();
             options.topicAlias = aliasMap.get(topic);
-            await clientWithAlias.publish_with_options(topic, payloadBytes, options);
+            await clientWithAlias.publishWithOptions(topic, payloadBytes, options);
 
             updateStats();
         }
@@ -436,29 +436,29 @@
                 debugLog('Initializing WASM...');
                 await init();
 
-                const config = new WasmBrokerConfig();
+                const config = new BrokerConfig();
                 config.max_clients = 10;
                 config.topic_alias_maximum = 20;
                 config.allow_anonymous = true;
 
-                broker = WasmBroker.with_config(config);
+                broker = Broker.withConfig(config);
                 debugLog('Broker created with topic alias support (max: 20)');
 
-                clientNoAlias = new WasmMqttClient('client-no-alias');
-                clientNoAlias.on_connect(() => {
+                clientNoAlias = new MqttClient('client-no-alias');
+                clientNoAlias.onConnect(() => {
                     document.getElementById('status-no-alias').className = 'status connected';
                     document.getElementById('status-no-alias').textContent = 'Connected';
                 });
-                const portNoAlias = broker.create_client_port();
-                await clientNoAlias.connect_message_port(portNoAlias);
+                const portNoAlias = broker.createClientPort();
+                await clientNoAlias.connectMessagePort(portNoAlias);
 
-                clientWithAlias = new WasmMqttClient('client-with-alias');
-                clientWithAlias.on_connect(() => {
+                clientWithAlias = new MqttClient('client-with-alias');
+                clientWithAlias.onConnect(() => {
                     document.getElementById('status-with-alias').className = 'status connected';
                     document.getElementById('status-with-alias').textContent = 'Connected';
                 });
-                const portWithAlias = broker.create_client_port();
-                await clientWithAlias.connect_message_port(portWithAlias);
+                const portWithAlias = broker.createClientPort();
+                await clientWithAlias.connectMessagePort(portWithAlias);
 
                 let messageCount = 0;
                 let lastSecond = Date.now();

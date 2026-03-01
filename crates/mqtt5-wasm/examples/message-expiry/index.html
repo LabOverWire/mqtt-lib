@@ -254,7 +254,7 @@
     </div>
 
     <script type="module">
-        import init, { WasmBroker, WasmBrokerConfig, WasmMqttClient, WasmPublishOptions } from './pkg/mqtt5_wasm.js';
+        import init, { Broker, BrokerConfig, MqttClient, PublishOptions } from './pkg/mqtt5_wasm.js';
 
         let broker;
         let publisherClient;
@@ -387,11 +387,11 @@
             const encoder = new TextEncoder();
             const payload = JSON.stringify({ id, content, originalTtl: ttl });
 
-            const options = new WasmPublishOptions();
+            const options = new PublishOptions();
             options.messageExpiryInterval = ttl;
             options.qos = 1;
 
-            await publisherClient.publish_with_options('notifications/alerts', encoder.encode(payload), options);
+            await publisherClient.publishWithOptions('notifications/alerts', encoder.encode(payload), options);
             addPublishedMessage(id, ttl, content);
             debugLog(`Published message #${id} with TTL=${ttl}s`);
         }
@@ -401,22 +401,22 @@
                 debugLog('Initializing WASM...');
                 await init();
 
-                const config = new WasmBrokerConfig();
+                const config = new BrokerConfig();
                 config.max_clients = 10;
                 config.allow_anonymous = true;
 
-                broker = WasmBroker.with_config(config);
+                broker = Broker.withConfig(config);
                 debugLog('Broker created');
 
-                publisherClient = new WasmMqttClient('publisher');
-                publisherClient.on_connect(() => {
+                publisherClient = new MqttClient('publisher');
+                publisherClient.onConnect(() => {
                     document.getElementById('status-publisher').className = 'status connected';
                     document.getElementById('status-publisher').textContent = 'Connected';
                     document.querySelectorAll('.ttl-btn').forEach(btn => btn.disabled = false);
                 });
 
-                const publisherPort = broker.create_client_port();
-                await publisherClient.connect_message_port(publisherPort);
+                const publisherPort = broker.createClientPort();
+                await publisherClient.connectMessagePort(publisherPort);
 
                 document.querySelectorAll('.ttl-btn').forEach(btn => {
                     btn.addEventListener('click', () => {
@@ -428,22 +428,22 @@
                 document.getElementById('subscribe-btn').addEventListener('click', async () => {
                     if (isSubscribed) return;
 
-                    subscriberClient = new WasmMqttClient('slow-subscriber');
+                    subscriberClient = new MqttClient('slow-subscriber');
 
-                    subscriberClient.on_connect(() => {
+                    subscriberClient.onConnect(() => {
                         document.getElementById('status-subscriber').className = 'status connected';
                         document.getElementById('status-subscriber').textContent = 'Connected & Subscribed';
                     });
 
-                    subscriberClient.on_disconnect(() => {
+                    subscriberClient.onDisconnect(() => {
                         document.getElementById('status-subscriber').className = 'status disconnected';
                         document.getElementById('status-subscriber').textContent = 'Not subscribed';
                     });
 
-                    subscriberPort = broker.create_client_port();
-                    await subscriberClient.connect_message_port(subscriberPort);
+                    subscriberPort = broker.createClientPort();
+                    await subscriberClient.connectMessagePort(subscriberPort);
 
-                    await subscriberClient.subscribe_with_callback('notifications/alerts', (topic, payload, props) => {
+                    await subscriberClient.subscribeWithCallback('notifications/alerts', (topic, payload, props) => {
                         const decoder = new TextDecoder();
                         const data = JSON.parse(decoder.decode(payload));
                         const remainingTtl = props.messageExpiryInterval || 0;

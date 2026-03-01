@@ -237,7 +237,7 @@
     </div>
 
     <script type="module">
-        import init, { WasmBroker, WasmBrokerConfig, WasmMqttClient, WasmConnectOptions } from './pkg/mqtt5_wasm.js';
+        import init, { Broker, BrokerConfig, MqttClient, ConnectOptions } from './pkg/mqtt5_wasm.js';
 
         function debugLog(msg) {
             const debugDiv = document.getElementById('debug');
@@ -250,24 +250,24 @@
         }
 
         async function createClient(clientId, clientNum) {
-            const client = new WasmMqttClient(clientId);
+            const client = new MqttClient(clientId);
             const statusEl = document.getElementById(`status-${clientNum}`);
             const messagesEl = document.getElementById(`messages-${clientNum}`);
             const subscriptions = new Set();
 
-            client.on_connect((reasonCode, sessionPresent) => {
+            client.onConnect((reasonCode, sessionPresent) => {
                 console.log(`${clientId} connected!`, reasonCode, sessionPresent);
                 statusEl.className = 'status connected';
                 statusEl.textContent = `Status: Connected`;
             });
 
-            client.on_disconnect(() => {
+            client.onDisconnect(() => {
                 console.log(`${clientId} disconnected`);
                 statusEl.className = 'status disconnected';
                 statusEl.textContent = 'Status: Disconnected';
             });
 
-            client.on_error((error) => {
+            client.onError((error) => {
                 console.error(`${clientId} error:`, error);
             });
 
@@ -278,7 +278,7 @@
                     return;
                 }
 
-                await client.subscribe_with_callback(topic, (receivedTopic, payload) => {
+                await client.subscribeWithCallback(topic, (receivedTopic, payload) => {
                     const decoder = new TextDecoder();
                     const message = decoder.decode(payload);
 
@@ -333,7 +333,7 @@
                 debugLog('WASM initialized');
 
                 debugLog('Creating broker configuration...');
-                const config = new WasmBrokerConfig();
+                const config = new BrokerConfig();
 
                 config.max_clients = 100;
                 config.max_packet_size = 1048576;
@@ -350,38 +350,38 @@
                 config.shared_subscription_available = true;
 
                 debugLog('Creating broker with custom config...');
-                const broker = WasmBroker.with_config(config);
+                const broker = Broker.withConfig(config);
 
-                await broker.add_user("alice", "secret123");
-                await broker.add_user("bob", "password456");
-                await broker.add_user("charlie", "guest789");
+                await broker.addUser("alice", "secret123");
+                await broker.addUser("bob", "password456");
+                await broker.addUser("charlie", "guest789");
 
-                const userCount = await broker.user_count();
+                const userCount = await broker.userCount();
                 debugLog(`Broker created with ${userCount} users configured`);
 
                 debugLog('Setting up RBAC roles...');
-                await broker.add_role("admin");
-                await broker.add_role_rule("admin", "admin/#", "readwrite");
-                await broker.add_role_rule("admin", "$SYS/#", "read");
+                await broker.addRole("admin");
+                await broker.addRoleRule("admin", "admin/#", "readwrite");
+                await broker.addRoleRule("admin", "$SYS/#", "read");
 
-                await broker.add_role("publisher");
-                await broker.add_role_rule("publisher", "demo/#", "write");
+                await broker.addRole("publisher");
+                await broker.addRoleRule("publisher", "demo/#", "write");
 
-                await broker.add_role("subscriber");
-                await broker.add_role_rule("subscriber", "demo/#", "read");
+                await broker.addRole("subscriber");
+                await broker.addRoleRule("subscriber", "demo/#", "read");
 
-                const roleCount = await broker.role_count();
+                const roleCount = await broker.roleCount();
                 debugLog(`Created ${roleCount} roles`);
 
-                await broker.assign_role("alice", "admin");
-                await broker.assign_role("bob", "publisher");
-                await broker.assign_role("bob", "subscriber");
-                await broker.assign_role("charlie", "subscriber");
+                await broker.assignRole("alice", "admin");
+                await broker.assignRole("bob", "publisher");
+                await broker.assignRole("bob", "subscriber");
+                await broker.assignRole("charlie", "subscriber");
 
-                const roles = await broker.list_roles();
-                const aliceRoles = await broker.get_user_roles("alice");
-                const bobRoles = await broker.get_user_roles("bob");
-                const charlieRoles = await broker.get_user_roles("charlie");
+                const roles = await broker.listRoles();
+                const aliceRoles = await broker.getUserRoles("alice");
+                const bobRoles = await broker.getUserRoles("bob");
+                const charlieRoles = await broker.getUserRoles("charlie");
 
                 const rbacDiv = document.getElementById('rbac-info');
                 rbacDiv.style.display = 'block';
@@ -406,15 +406,15 @@
                 debugLog('Clients created');
 
                 debugLog('Getting ports from broker...');
-                const portA = broker.create_client_port();
+                const portA = broker.createClientPort();
                 debugLog('Port A created');
-                const portB = broker.create_client_port();
+                const portB = broker.createClientPort();
                 debugLog('Port B created');
-                const portC = broker.create_client_port();
+                const portC = broker.createClientPort();
                 debugLog('Port C created');
 
                 function createConnectOptions(username, password) {
-                    const options = new WasmConnectOptions();
+                    const options = new ConnectOptions();
                     options.username = username;
                     options.password = new TextEncoder().encode(password);
                     return options;
@@ -422,16 +422,16 @@
 
                 debugLog('Connecting Client A...');
                 const timeoutA = setTimeout(() => debugLog('⚠️ Client A taking longer than expected...'), 2000);
-                await clientA.connect_message_port_with_options(portA, createConnectOptions('alice', 'secret123'));
+                await clientA.connectMessagePortWithOptions(portA, createConnectOptions('alice', 'secret123'));
                 clearTimeout(timeoutA);
                 debugLog('Client A connected!');
 
                 debugLog('Connecting Client B...');
-                await clientB.connect_message_port_with_options(portB, createConnectOptions('bob', 'password456'));
+                await clientB.connectMessagePortWithOptions(portB, createConnectOptions('bob', 'password456'));
                 debugLog('Client B connected!');
 
                 debugLog('Connecting Client C...');
-                await clientC.connect_message_port_with_options(portC, createConnectOptions('charlie', 'guest789'));
+                await clientC.connectMessagePortWithOptions(portC, createConnectOptions('charlie', 'guest789'));
                 debugLog('Client C connected!');
 
                 debugLog('✅ All clients connected! Ready to use.');

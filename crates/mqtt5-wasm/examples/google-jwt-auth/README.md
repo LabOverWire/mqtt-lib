@@ -70,22 +70,22 @@ python3 -m http.server 8000
 The WASM client uses the same API as the native Rust client:
 
 ```javascript
-import init, { WasmMqttClient, WasmConnectOptions } from './pkg/mqtt5_wasm.js';
+import init, { MqttClient, ConnectOptions } from './pkg/mqtt5_wasm.js';
 
 await init();
 
-const client = new WasmMqttClient('my-client-id');
+const client = new MqttClient('my-client-id');
 
-client.on_connect((reasonCode, sessionPresent) => {
+client.onConnect((reasonCode, sessionPresent) => {
     console.log('Connected!', reasonCode);
 });
 
-const options = new WasmConnectOptions();
+const options = new ConnectOptions();
 options.authenticationMethod = 'JWT';
 options.set_authenticationData(new TextEncoder().encode(jwtToken));
 
-await client.connect_with_options('ws://localhost:8080/mqtt', options);
-await client.subscribe_with_callback('test/#', (topic, payload) => {
+await client.connectWithOptions('ws://localhost:8080/mqtt', options);
+await client.subscribeWithCallback('test/#', (topic, payload) => {
     console.log('Message:', new TextDecoder().decode(payload));
 });
 await client.publish('test/hello', new TextEncoder().encode('Hello!'));

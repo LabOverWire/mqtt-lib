@@ -258,7 +258,7 @@
     </div>
 
     <script type="module">
-        import init, { WasmBroker, WasmBrokerConfig, WasmMqttClient } from './pkg/mqtt5_wasm.js';
+        import init, { Broker, BrokerConfig, MqttClient } from './pkg/mqtt5_wasm.js';
 
         let broker;
         let monitorClient;
@@ -371,9 +371,9 @@
 
         async function addTestClient() {
             const clientId = `test-client-${testClients.length + 1}`;
-            const client = new WasmMqttClient(clientId);
+            const client = new MqttClient(clientId);
 
-            client.on_connect(() => {
+            client.onConnect(() => {
                 stats.clientsConnected++;
                 stats.subscriptions++;
                 stats.load = Math.min(100, stats.clientsConnected * 10);
@@ -381,17 +381,17 @@
                 updateClientList();
             });
 
-            client.on_disconnect(() => {
+            client.onDisconnect(() => {
                 stats.clientsConnected = Math.max(1, stats.clientsConnected - 1);
                 stats.subscriptions = Math.max(1, stats.subscriptions - 1);
                 stats.load = Math.min(100, stats.clientsConnected * 10);
                 updateDisplay();
             });
 
-            const port = broker.create_client_port();
-            await client.connect_message_port(port);
+            const port = broker.createClientPort();
+            await client.connectMessagePort(port);
 
-            await client.subscribe_with_callback('test/messages', (topic, payload) => {
+            await client.subscribeWithCallback('test/messages', (topic, payload) => {
                 stats.messagesReceived++;
                 messagesThisSecond++;
                 updateDisplay();
@@ -438,31 +438,31 @@
                 debugLog('Initializing WASM...');
                 await init();
 
-                const config = new WasmBrokerConfig();
+                const config = new BrokerConfig();
                 config.max_clients = 100;
                 config.allow_anonymous = true;
 
-                broker = WasmBroker.with_config(config);
+                broker = Broker.withConfig(config);
                 debugLog('Broker created');
 
-                monitorClient = new WasmMqttClient('monitor-client');
+                monitorClient = new MqttClient('monitor-client');
 
-                monitorClient.on_connect(() => {
+                monitorClient.onConnect(() => {
                     debugLog('Monitor connected');
                     updateDisplay();
                     updateClientList();
                 });
 
-                const monitorPort = broker.create_client_port();
-                await monitorClient.connect_message_port(monitorPort);
+                const monitorPort = broker.createClientPort();
+                await monitorClient.connectMessagePort(monitorPort);
 
-                await monitorClient.subscribe_with_callback('$SYS/#', (topic, payload) => {
+                await monitorClient.subscribeWithCallback('$SYS/#', (topic, payload) => {
                     const decoder = new TextDecoder();
                     const value = decoder.decode(payload);
                     debugLog(`$SYS: ${topic} = ${value}`);
                 });
 
-                await monitorClient.subscribe_with_callback('test/messages', (topic, payload) => {
+                await monitorClient.subscribeWithCallback('test/messages', (topic, payload) => {
                     stats.messagesReceived++;
                     messagesThisSecond++;
                     updateDisplay();

@@ -300,7 +300,7 @@
     </div>
 
     <script type="module">
-        import init, { WasmBroker, WasmBrokerConfig, WasmMqttClient, WasmConnectOptions, WasmSubscribeOptions } from './pkg/mqtt5_wasm.js';
+        import init, { Broker, BrokerConfig, MqttClient, ConnectOptions, SubscribeOptions } from './pkg/mqtt5_wasm.js';
 
         let broker;
         let publisherClient;
@@ -396,11 +396,11 @@
         }
 
         async function connectSubscriber(onMessage) {
-            subscriberClient = new WasmMqttClient('mobile-device-001');
+            subscriberClient = new MqttClient('mobile-device-001');
             const statusEl = document.getElementById('sub-status');
 
             return new Promise((resolve) => {
-                subscriberClient.on_connect((reasonCode, sessionPresent) => {
+                subscriberClient.onConnect((reasonCode, sessionPresent) => {
                     log(`Subscriber connected, sessionPresent=${sessionPresent}`, 'success');
                     statusEl.className = 'status connected';
                     statusEl.textContent = `Connected (session ${sessionPresent ? 'restored' : 'new'})`;
@@ -408,20 +408,20 @@
                     resolve(sessionPresent);
                 });
 
-                subscriberClient.on_disconnect(() => {
+                subscriberClient.onDisconnect(() => {
                     log('Subscriber disconnected', 'warn');
                 });
 
-                subscriberPort = broker.create_client_port();
+                subscriberPort = broker.createClientPort();
 
-                const opts = new WasmConnectOptions();
+                const opts = new ConnectOptions();
                 opts.cleanStart = false;
                 opts.sessionExpiryInterval = 3600;
 
-                subscriberClient.connect_message_port_with_options(subscriberPort, opts).then(() => {
-                    const subOpts = new WasmSubscribeOptions();
+                subscriberClient.connectMessagePortWithOptions(subscriberPort, opts).then(() => {
+                    const subOpts = new SubscribeOptions();
                     subOpts.qos = 2;
-                    subscriberClient.subscribe_with_options('demo/qos2', onMessage, subOpts);
+                    subscriberClient.subscribeWithOptions('demo/qos2', onMessage, subOpts);
                     log('Subscriber subscribed to demo/qos2 at QoS 2');
                 });
             });
@@ -434,20 +434,20 @@
             await init();
             log('WASM initialized');
 
-            const config = new WasmBrokerConfig();
+            const config = new BrokerConfig();
             config.max_clients = 10;
             config.session_expiry_interval_secs = 3600;
             config.allow_anonymous = true;
-            broker = WasmBroker.with_config(config);
+            broker = Broker.withConfig(config);
             log('Broker created with session persistence');
 
-            publisherClient = new WasmMqttClient('publisher');
-            publisherClient.on_connect(() => {
+            publisherClient = new MqttClient('publisher');
+            publisherClient.onConnect(() => {
                 document.getElementById('pub-status').className = 'status connected';
                 document.getElementById('pub-status').textContent = 'Connected';
             });
-            const pubPort = broker.create_client_port();
-            await publisherClient.connect_message_port(pubPort);
+            const pubPort = broker.createClientPort();
+            await publisherClient.connectMessagePort(pubPort);
             log('Publisher connected', 'success');
 
             setStep(1);
@@ -516,7 +516,7 @@
             messageCounter++;
             const normalPayload = `Normal delivery #${messageCounter}`;
             const enc = new TextEncoder();
-            await publisherClient.publish_qos2('demo/qos2', enc.encode(normalPayload));
+            await publisherClient.publishQos2('demo/qos2', enc.encode(normalPayload));
             addPublishedMessage('demo/qos2', normalPayload, 'normal');
             log(`Published QoS 2: "${normalPayload}"`);
 
@@ -531,7 +531,7 @@
 
             messageCounter++;
             const interruptPayload = `Critical update #${messageCounter}`;
-            await publisherClient.publish_qos2('demo/qos2', enc.encode(interruptPayload));
+            await publisherClient.publishQos2('demo/qos2', enc.encode(interruptPayload));
             addPublishedMessage('demo/qos2', interruptPayload, 'interrupted');
             log(`Published QoS 2: "${interruptPayload}" (will interrupt on receipt)`);
         }

@@ -294,7 +294,7 @@
     </div>
 
     <script type="module">
-        import init, { WasmBroker, WasmBrokerConfig, WasmMqttClient, WasmSubscribeOptions } from './pkg/mqtt5_wasm.js';
+        import init, { Broker, BrokerConfig, MqttClient, SubscribeOptions } from './pkg/mqtt5_wasm.js';
 
         let broker;
         let client;
@@ -385,50 +385,50 @@
                 debugLog('Initializing WASM...');
                 await init();
 
-                const config = new WasmBrokerConfig();
+                const config = new BrokerConfig();
                 config.max_clients = 10;
                 config.subscription_identifier_available = true;
                 config.allow_anonymous = true;
 
-                broker = WasmBroker.with_config(config);
+                broker = Broker.withConfig(config);
                 debugLog('Broker created with subscription identifiers enabled');
 
-                publisherClient = new WasmMqttClient('publisher');
-                const pubPort = broker.create_client_port();
-                await publisherClient.connect_message_port(pubPort);
+                publisherClient = new MqttClient('publisher');
+                const pubPort = broker.createClientPort();
+                await publisherClient.connectMessagePort(pubPort);
                 debugLog('Publisher connected');
 
-                client = new WasmMqttClient('subscriber');
+                client = new MqttClient('subscriber');
 
-                client.on_connect(() => {
+                client.onConnect(() => {
                     document.getElementById('status').className = 'status connected';
                     document.getElementById('status').textContent = 'Connected with 3 subscriptions';
                 });
 
-                const clientPort = broker.create_client_port();
-                await client.connect_message_port(clientPort);
+                const clientPort = broker.createClientPort();
+                await client.connectMessagePort(clientPort);
 
-                const opts1 = new WasmSubscribeOptions();
+                const opts1 = new SubscribeOptions();
                 opts1.subscriptionIdentifier = 1001;
-                await client.subscribe_with_options('sensors/#', (topic, payload, props) => {
+                await client.subscribeWithOptions('sensors/#', (topic, payload, props) => {
                     const decoder = new TextDecoder();
                     const subIds = props.subscriptionIdentifiers || [1001];
                     addMessage(topic, decoder.decode(payload), subIds);
                 }, opts1);
                 debugLog('Subscribed to sensors/# with ID 1001');
 
-                const opts2 = new WasmSubscribeOptions();
+                const opts2 = new SubscribeOptions();
                 opts2.subscriptionIdentifier = 1002;
-                await client.subscribe_with_options('sensors/+/temperature', (topic, payload, props) => {
+                await client.subscribeWithOptions('sensors/+/temperature', (topic, payload, props) => {
                     const decoder = new TextDecoder();
                     const subIds = props.subscriptionIdentifiers || [1002];
                     addMessage(topic, decoder.decode(payload), subIds);
                 }, opts2);
                 debugLog('Subscribed to sensors/+/temperature with ID 1002');
 
-                const opts3 = new WasmSubscribeOptions();
+                const opts3 = new SubscribeOptions();
                 opts3.subscriptionIdentifier = 1003;
-                await client.subscribe_with_options('alerts/+', (topic, payload, props) => {
+                await client.subscribeWithOptions('alerts/+', (topic, payload, props) => {
                     const decoder = new TextDecoder();
                     const subIds = props.subscriptionIdentifiers || [1003];
                     addMessage(topic, decoder.decode(payload), subIds);

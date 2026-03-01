@@ -444,7 +444,7 @@
     </div>
 
     <script type="module">
-        import init, { WasmBroker } from './pkg/mqtt5_wasm.js';
+        import init, { Broker } from './pkg/mqtt5_wasm.js';
 
         const state = {
             passwords: [],
@@ -722,7 +722,7 @@
                 }
 
                 try {
-                    const hash = WasmBroker.hash_password(password);
+                    const hash = Broker.hashPassword(password);
                     state.passwords.push({ username, hash });
                     renderPasswordEntries();
 

@@ -284,13 +284,13 @@
 
     <script type="module">
         import init, {
-            WasmBroker,
-            WasmBrokerConfig,
-            WasmMqttClient,
-            WasmBridgeConfig,
-            WasmBridgeDirection,
-            WasmTopicMapping,
-            WasmSubscribeOptions
+            Broker,
+            BrokerConfig,
+            MqttClient,
+            BridgeConfig,
+            BridgeDirection,
+            TopicMapping,
+            SubscribeOptions
         } from './pkg/mqtt5_wasm.js';
 
         function debugLog(msg) {
@@ -335,19 +335,19 @@
         }
 
         async function setupClient(clientId, broker, statusId, messagesId, subscribeBtnId, subscribeTopicId, publishBtnId, publishTopicId, publishMessageId) {
-            const client = new WasmMqttClient(clientId);
+            const client = new MqttClient(clientId);
 
-            client.on_connect((reasonCode, sessionPresent) => {
+            client.onConnect((reasonCode, sessionPresent) => {
                 debugLog(`${clientId} connected (reason: ${reasonCode})`);
                 updateStatus(statusId, 'Client: Connected', true);
             });
 
-            client.on_disconnect(() => {
+            client.onDisconnect(() => {
                 debugLog(`${clientId} disconnected`);
                 updateStatus(statusId, 'Client: Disconnected', false);
             });
 
-            client.on_error((error) => {
+            client.onError((error) => {
                 debugLog(`${clientId} error: ${error}`);
             });
 
@@ -355,10 +355,10 @@
                 const topic = document.getElementById(subscribeTopicId).value;
                 if (!topic) return;
 
-                const options = new WasmSubscribeOptions();
+                const options = new SubscribeOptions();
                 options.noLocal = true;
 
-                await client.subscribe_with_options(topic, (receivedTopic, payload) => {
+                await client.subscribeWithOptions(topic, (receivedTopic, payload) => {
                     const decoder = new TextDecoder();
                     const message = decoder.decode(payload);
                     addMessage(messagesId, receivedTopic, message);
@@ -377,8 +377,8 @@
                 debugLog(`${clientId} published: ${topic} = ${message}`);
             });
 
-            const port = broker.create_client_port();
-            await client.connect_message_port(port);
+            const port = broker.createClientPort();
+            await client.connectMessagePort(port);
 
             return client;
         }
@@ -389,32 +389,32 @@
                 await init();
                 debugLog('WASM initialized');
 
-                const config = new WasmBrokerConfig();
+                const config = new BrokerConfig();
                 config.max_clients = 100;
                 config.wildcard_subscription_available = true;
                 config.allow_anonymous = true;
 
                 debugLog('Creating Broker A...');
-                const brokerA = WasmBroker.with_config(config);
+                const brokerA = Broker.withConfig(config);
                 updateStatus('broker-a-status', 'Broker: Ready', true);
                 debugLog('Broker A ready');
 
-                const configB = new WasmBrokerConfig();
+                const configB = new BrokerConfig();
                 configB.allow_anonymous = true;
                 debugLog('Creating Broker B...');
-                const brokerB = WasmBroker.with_config(configB);
+                const brokerB = Broker.withConfig(configB);
                 updateStatus('broker-b-status', 'Broker: Ready', true);
                 debugLog('Broker B ready');
 
                 debugLog('Setting up bridge from Broker A to Broker B...');
-                const bridgeConfig = new WasmBridgeConfig('broker-a-to-b');
+                const bridgeConfig = new BridgeConfig('broker-a-to-b');
 
-                const topicMapping = new WasmTopicMapping('sensors/#', WasmBridgeDirection.Both);
+                const topicMapping = new TopicMapping('sensors/#', BridgeDirection.Both);
                 topicMapping.qos = 1;
-                bridgeConfig.add_topic(topicMapping);
+                bridgeConfig.addTopic(topicMapping);
 
-                const bridgePort = brokerB.create_client_port();
-                await brokerA.add_bridge(bridgeConfig, bridgePort);
+                const bridgePort = brokerB.createClientPort();
+                await brokerA.addBridge(bridgeConfig, bridgePort);
 
                 document.getElementById('bridge-status').textContent =
                     'Bridge Status: Active (sensors/# bidirectional)';

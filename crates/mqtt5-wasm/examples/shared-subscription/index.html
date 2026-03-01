@@ -326,7 +326,7 @@
     </div>
 
     <script type="module">
-        import init, { WasmBroker, WasmBrokerConfig, WasmMqttClient } from './pkg/mqtt5_wasm.js';
+        import init, { Broker, BrokerConfig, MqttClient } from './pkg/mqtt5_wasm.js';
 
         let broker;
         let publisher;
@@ -380,28 +380,28 @@
         }
 
         async function createWorker(id, num) {
-            const client = new WasmMqttClient(id);
+            const client = new MqttClient(id);
             const statusEl = document.getElementById(`status-${num}`);
 
-            client.on_connect(() => {
+            client.onConnect(() => {
                 debugLog(`${id} connected`);
                 statusEl.className = 'status connected';
                 statusEl.textContent = 'Connected';
             });
 
-            client.on_disconnect(() => {
+            client.onDisconnect(() => {
                 statusEl.className = 'status disconnected';
                 statusEl.textContent = 'Disconnected';
             });
 
-            client.on_error((error) => {
+            client.onError((error) => {
                 debugLog(`${id} error: ${error}`);
             });
 
-            const port = broker.create_client_port();
-            await client.connect_message_port(port);
+            const port = broker.createClientPort();
+            await client.connectMessagePort(port);
 
-            await client.subscribe_with_callback('$share/workers/tasks/+', (topic, payload) => {
+            await client.subscribeWithCallback('$share/workers/tasks/+', (topic, payload) => {
                 const decoder = new TextDecoder();
                 const message = decoder.decode(payload);
                 addMessage(num, topic, message);
@@ -415,28 +415,28 @@
         }
 
         async function createMonitor() {
-            const client = new WasmMqttClient('monitor');
+            const client = new MqttClient('monitor');
             const statusEl = document.getElementById('status-mon');
 
-            client.on_connect(() => {
+            client.onConnect(() => {
                 debugLog('Monitor connected');
                 statusEl.className = 'status connected';
                 statusEl.textContent = 'Connected';
             });
 
-            client.on_disconnect(() => {
+            client.onDisconnect(() => {
                 statusEl.className = 'status disconnected';
                 statusEl.textContent = 'Disconnected';
             });
 
-            client.on_error((error) => {
+            client.onError((error) => {
                 debugLog(`Monitor error: ${error}`);
             });
 
-            const port = broker.create_client_port();
-            await client.connect_message_port(port);
+            const port = broker.createClientPort();
+            await client.connectMessagePort(port);
 
-            await client.subscribe_with_callback('tasks/+', (topic, payload) => {
+            await client.subscribeWithCallback('tasks/+', (topic, payload) => {
                 const decoder = new TextDecoder();
                 const message = decoder.decode(payload);
                 addMessage('mon', topic, message);
@@ -449,10 +449,10 @@
         }
 
         async function createPublisher() {
-            const client = new WasmMqttClient('publisher');
+            const client = new MqttClient('publisher');
             const statusEl = document.getElementById('status-pub');
 
-            client.on_connect(() => {
+            client.onConnect(() => {
                 debugLog('Publisher connected');
                 statusEl.className = 'status connected';
                 statusEl.textContent = 'Connected';
@@ -460,17 +460,17 @@
                 document.getElementById('publish-batch').disabled = false;
             });
 
-            client.on_disconnect(() => {
+            client.onDisconnect(() => {
                 statusEl.className = 'status disconnected';
                 statusEl.textContent = 'Disconnected';
             });
 
-            client.on_error((error) => {
+            client.onError((error) => {
                 debugLog(`Publisher error: ${error}`);
             });
 
-            const port = broker.create_client_port();
-            await client.connect_message_port(port);
+            const port = broker.createClientPort();
+            await client.connectMessagePort(port);
 
             return client;
         }
@@ -523,14 +523,14 @@
                 await init();
                 debugLog('WASM initialized');
 
-                const config = new WasmBrokerConfig();
+                const config = new BrokerConfig();
                 config.max_clients = 10;
                 config.maximum_qos = 2;
                 config.shared_subscription_available = true;
                 config.allow_anonymous = true;
 
                 debugLog('Creating in-tab broker with shared subscriptions enabled...');
-                broker = WasmBroker.with_config(config);
+                broker = Broker.withConfig(config);
                 debugLog('Broker created');
 
                 await createWorker('worker-1', 'w1');

@@ -287,7 +287,7 @@
     </div>
 
     <script type="module">
-        import init, { WasmBroker, WasmBrokerConfig, WasmMqttClient, WasmConnectOptions } from './pkg/mqtt5_wasm.js';
+        import init, { Broker, BrokerConfig, MqttClient, ConnectOptions } from './pkg/mqtt5_wasm.js';
 
         let publishedCount = 0;
         let deliveredCount = 0;
@@ -363,62 +363,62 @@
                 debugLog('WASM initialized');
 
                 debugLog('Creating broker configuration with change-only deliverys...');
-                const config = new WasmBrokerConfig();
+                const config = new BrokerConfig();
 
                 config.max_clients = 100;
                 config.max_packet_size = 1048576;
                 config.allow_anonymous = true;
 
                 config.change_only_delivery_enabled = true;
-                config.add_change_only_delivery_pattern('sensors/#');
+                config.addChangeOnlyDeliveryPattern('sensors/#');
 
                 debugLog('Change-only delivery enabled for pattern: sensors/#');
 
                 debugLog('Creating broker...');
-                const broker = WasmBroker.with_config(config);
+                const broker = Broker.withConfig(config);
                 debugLog('Broker created');
 
                 debugLog('Creating publisher client...');
-                const publisher = new WasmMqttClient('publisher');
+                const publisher = new MqttClient('publisher');
 
-                publisher.on_connect((reasonCode, sessionPresent) => {
+                publisher.onConnect((reasonCode, sessionPresent) => {
                     debugLog('Publisher connected');
                     document.getElementById('publisher-status').className = 'status connected';
                     document.getElementById('publisher-status').textContent = 'Status: Connected';
                 });
 
-                publisher.on_disconnect(() => {
+                publisher.onDisconnect(() => {
                     document.getElementById('publisher-status').className = 'status disconnected';
                     document.getElementById('publisher-status').textContent = 'Status: Disconnected';
                 });
 
                 debugLog('Creating subscriber client...');
-                const subscriber = new WasmMqttClient('subscriber');
+                const subscriber = new MqttClient('subscriber');
 
-                subscriber.on_connect((reasonCode, sessionPresent) => {
+                subscriber.onConnect((reasonCode, sessionPresent) => {
                     debugLog('Subscriber connected');
                     document.getElementById('subscriber-status').className = 'status connected';
                     document.getElementById('subscriber-status').textContent = 'Status: Connected (Change-Only Mode)';
                 });
 
-                subscriber.on_disconnect(() => {
+                subscriber.onDisconnect(() => {
                     document.getElementById('subscriber-status').className = 'status disconnected';
                     document.getElementById('subscriber-status').textContent = 'Status: Disconnected';
                 });
 
-                const publisherPort = broker.create_client_port();
-                const subscriberPort = broker.create_client_port();
+                const publisherPort = broker.createClientPort();
+                const subscriberPort = broker.createClientPort();
 
                 debugLog('Connecting publisher...');
-                await publisher.connect_message_port(publisherPort);
+                await publisher.connectMessagePort(publisherPort);
                 debugLog('Publisher connected!');
 
                 debugLog('Connecting subscriber...');
-                await subscriber.connect_message_port(subscriberPort);
+                await subscriber.connectMessagePort(subscriberPort);
                 debugLog('Subscriber connected!');
 
                 debugLog('Subscribing to sensors/#...');
-                await subscriber.subscribe_with_callback('sensors/#', (topic, payload) => {
+                await subscriber.subscribeWithCallback('sensors/#', (topic, payload) => {
                     const decoder = new TextDecoder();
                     const message = decoder.decode(payload);
 

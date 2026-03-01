@@ -288,7 +288,7 @@
     </div>
 
     <script type="module">
-        import init, { WasmBroker, WasmBrokerConfig, WasmMqttClient, WasmConnectOptions } from './pkg/mqtt5_wasm.js';
+        import init, { Broker, BrokerConfig, MqttClient, ConnectOptions } from './pkg/mqtt5_wasm.js';
 
         let broker;
         let publisherClient;
@@ -410,7 +410,7 @@
             const encoder = new TextEncoder();
             const payload = JSON.stringify({ id: msgId, timestamp: Date.now() });
 
-            await publisherClient.publish_qos1('flow/test', encoder.encode(payload));
+            await publisherClient.publishQos1('flow/test', encoder.encode(payload));
             messagesThisSecond++;
             updateDisplay();
             return true;
@@ -436,25 +436,25 @@
                 debugLog('Initializing WASM...');
                 await init();
 
-                const config = new WasmBrokerConfig();
+                const config = new BrokerConfig();
                 config.max_clients = 10;
                 config.allow_anonymous = true;
 
-                broker = WasmBroker.with_config(config);
+                broker = Broker.withConfig(config);
                 debugLog('Broker created');
 
-                subscriberClient = new WasmMqttClient('slow-subscriber');
-                subscriberClient.on_connect(() => {
+                subscriberClient = new MqttClient('slow-subscriber');
+                subscriberClient.onConnect(() => {
                     document.getElementById('status-subscriber').className = 'status connected';
                     document.getElementById('status-subscriber').textContent = 'Connected';
                 });
 
-                const subPort = broker.create_client_port();
-                const subOptions = new WasmConnectOptions();
+                const subPort = broker.createClientPort();
+                const subOptions = new ConnectOptions();
                 subOptions.receiveMaximum = receiveMaximum;
-                await subscriberClient.connect_message_port_with_options(subPort, subOptions);
+                await subscriberClient.connectMessagePortWithOptions(subPort, subOptions);
 
-                await subscriberClient.subscribe_with_callback('flow/test', (topic, payload) => {
+                await subscriberClient.subscribeWithCallback('flow/test', (topic, payload) => {
                     const decoder = new TextDecoder();
                     const data = JSON.parse(decoder.decode(payload));
                     stats.received++;
@@ -463,14 +463,14 @@
 
                 debugLog('Subscriber connected with receiveMaximum=' + receiveMaximum);
 
-                publisherClient = new WasmMqttClient('fast-publisher');
-                publisherClient.on_connect(() => {
+                publisherClient = new MqttClient('fast-publisher');
+                publisherClient.onConnect(() => {
                     document.getElementById('status-publisher').className = 'status connected';
                     document.getElementById('status-publisher').textContent = 'Connected';
                 });
 
-                const pubPort = broker.create_client_port();
-                await publisherClient.connect_message_port(pubPort);
+                const pubPort = broker.createClientPort();
+                await publisherClient.connectMessagePort(pubPort);
                 debugLog('Publisher connected');
 
                 document.getElementById('start-btn').addEventListener('click', () => {

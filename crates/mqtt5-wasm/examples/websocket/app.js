@@ -1,4 +1,4 @@
-import init, { WasmMqttClient, WasmConnectOptions, WasmWillMessage, WasmPublishOptions, WasmSubscribeOptions } from './pkg/mqtt5_wasm.js';
+import init, { MqttClient, ConnectOptions, WillMessage, PublishOptions, SubscribeOptions } from './pkg/mqtt5_wasm.js';
 
 let client = null;
 let isConnected = false;
@@ -160,10 +160,10 @@ async function handleConnect(e) {
         updateStatus('connecting');
         console.log('Connecting to:', brokerUrl, 'with client ID:', clientId);
 
-        client = new WasmMqttClient(clientId);
+        client = new MqttClient(clientId);
         console.log('WASM client created');
 
-        const connectOpts = new WasmConnectOptions();
+        const connectOpts = new ConnectOptions();
         connectOpts.keepAlive = 60;
         connectOpts.cleanStart = true;
         connectOpts.sessionExpiryInterval = 3600;
@@ -175,7 +175,7 @@ async function handleConnect(e) {
         connectOpts.addUserProperty("example", "websocket");
 
         const encoder = new TextEncoder();
-        const will = new WasmWillMessage(
+        const will = new WillMessage(
             `clients/${clientId}/status`,
             encoder.encode("offline")
         );
@@ -184,7 +184,7 @@ async function handleConnect(e) {
         will.willDelayInterval = 5;
         will.messageExpiryInterval = 300;
 
-        connectOpts.set_will(will);
+        connectOpts.setWill(will);
 
         console.log('Connection options configured:', {
             keepAlive: connectOpts.keepAlive,
@@ -193,25 +193,25 @@ async function handleConnect(e) {
             will: 'configured'
         });
 
-        client.on_connect((reasonCode, sessionPresent) => {
+        client.onConnect((reasonCode, sessionPresent) => {
             console.log('onConnect callback:', reasonCode, sessionPresent);
             updateStatus('connected');
             toggleControls(true);
             addMessage('system', `Connected to ${brokerUrl} (reason: ${reasonCode}, session: ${sessionPresent})`, 'system');
 
             const onlinePayload = encoder.encode("online");
-            const onlineOpts = new WasmPublishOptions();
+            const onlineOpts = new PublishOptions();
             onlineOpts.qos = 1;
             onlineOpts.retain = true;
             onlineOpts.messageExpiryInterval = 300;
             onlineOpts.addUserProperty("status-update", "true");
 
-            client.publish_with_options(`clients/${clientId}/status`, onlinePayload, onlineOpts).catch(err => {
+            client.publishWithOptions(`clients/${clientId}/status`, onlinePayload, onlineOpts).catch(err => {
                 console.error('Failed to publish online status:', err);
             });
         });
 
-        client.on_disconnect(() => {
+        client.onDisconnect(() => {
             console.log('onDisconnect callback');
             updateStatus('disconnected');
             toggleControls(false);
@@ -220,12 +220,12 @@ async function handleConnect(e) {
             addMessage('system', 'Disconnected from broker', 'system');
         });
 
-        client.on_error((error) => {
+        client.onError((error) => {
             console.error('onError callback:', error);
             addMessage('system', `Error: ${error}`, 'error');
         });
 
-        await client.connect_with_options(brokerUrl, connectOpts);
+        await client.connectWithOptions(brokerUrl, connectOpts);
         console.log('Connection initiated');
 
     } catch (error) {
@@ -283,7 +283,7 @@ async function handleSubscribe(e) {
     }
 
     try {
-        const subOpts = new WasmSubscribeOptions();
+        const subOpts = new SubscribeOptions();
         subOpts.qos = 1;
         subOpts.noLocal = false;
         subOpts.retainAsPublished = true;
@@ -291,7 +291,7 @@ async function handleSubscribe(e) {
         subOpts.subscriptionIdentifier = Math.floor(Math.random() * 1000000);
 
         console.log('handleSubscribe: Calling subscribe_with_options for topic:', topic);
-        const packetId = await client.subscribe_with_options(topic, (receivedTopic, payload) => {
+        const packetId = await client.subscribeWithOptions(topic, (receivedTopic, payload) => {
             console.log('Message received:', receivedTopic, payload);
             addMessage(receivedTopic, payload, 'received');
         }, subOpts);
@@ -333,7 +333,7 @@ async function handlePublish(e) {
         const encoder = new TextEncoder();
         const payloadBytes = encoder.encode(payload);
 
-        const pubOpts = new WasmPublishOptions();
+        const pubOpts = new PublishOptions();
         pubOpts.qos = 1;
         pubOpts.retain = false;
         pubOpts.messageExpiryInterval = 300;
@@ -342,9 +342,9 @@ async function handlePublish(e) {
         pubOpts.addUserProperty("sender", "websocket-example");
         pubOpts.addUserProperty("timestamp", new Date().toISOString());
 
-        console.log('handlePublish: Calling client.publish_with_options, topic:', topic);
-        await client.publish_with_options(topic, payloadBytes, pubOpts);
-        console.log('handlePublish: client.publish_with_options completed');
+        console.log('handlePublish: Calling client.publishWithOptions, topic:', topic);
+        await client.publishWithOptions(topic, payloadBytes, pubOpts);
+        console.log('handlePublish: client.publishWithOptions completed');
 
         addMessage(topic, payloadBytes, 'sent');
         document.getElementById('publish-payload').value = '';
@@ -379,11 +379,11 @@ async function initApp() {
 
         console.log('Application ready');
         console.log('Configuration features demonstrated:');
-        console.log('- WasmConnectOptions: keepAlive, cleanStart, sessionExpiryInterval, receiveMaximum, maximumPacketSize');
-        console.log('- WasmWillMessage: topic, payload, qos, retain, willDelayInterval, messageExpiryInterval');
+        console.log('- ConnectOptions: keepAlive, cleanStart, sessionExpiryInterval, receiveMaximum, maximumPacketSize');
+        console.log('- WillMessage: topic, payload, qos, retain, willDelayInterval, messageExpiryInterval');
         console.log('- User properties: client-type, client-version, example');
-        console.log('- WasmPublishOptions: qos, retain, messageExpiryInterval, payloadFormatIndicator, contentType, user properties');
-        console.log('- WasmSubscribeOptions: qos, noLocal, retainAsPublished, retainHandling, subscriptionIdentifier');
+        console.log('- PublishOptions: qos, retain, messageExpiryInterval, payloadFormatIndicator, contentType, user properties');
+        console.log('- SubscribeOptions: qos, noLocal, retainAsPublished, retainHandling, subscriptionIdentifier');
 
     } catch (error) {
         console.error('Failed to initialize WASM:', error);

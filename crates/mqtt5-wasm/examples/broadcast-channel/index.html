@@ -252,7 +252,7 @@
     </div>
 
     <script type="module">
-        import init, { WasmBroker, WasmBrokerConfig, WasmMqttClient } from './pkg/mqtt5_wasm.js';
+        import init, { Broker, BrokerConfig, MqttClient } from './pkg/mqtt5_wasm.js';
 
         const tabId = Math.random().toString(36).substr(2, 4).toUpperCase();
         const tabColors = ['#667eea', '#e91e63', '#00bcd4', '#4caf50', '#ff9800', '#9c27b0'];
@@ -403,25 +403,25 @@
                 document.getElementById('my-tab-id').textContent = tabId;
                 document.getElementById('my-tab-id').style.background = myColor;
 
-                const config = new WasmBrokerConfig();
+                const config = new BrokerConfig();
                 config.max_clients = 50;
                 config.allow_anonymous = true;
 
-                broker = WasmBroker.with_config(config);
+                broker = Broker.withConfig(config);
                 debugLog('Broker created in this tab');
 
-                client = new WasmMqttClient(`tab-${tabId}`);
+                client = new MqttClient(`tab-${tabId}`);
 
-                client.on_connect(() => {
+                client.onConnect(() => {
                     debugLog('Client connected');
                     document.getElementById('status').className = 'status connected';
                     document.getElementById('status').textContent = 'Connected to shared broker';
                 });
 
-                const port = broker.create_client_port();
-                await client.connect_message_port(port);
+                const port = broker.createClientPort();
+                await client.connectMessagePort(port);
 
-                await client.subscribe_with_callback('canvas/draw', (topic, payload) => {
+                await client.subscribeWithCallback('canvas/draw', (topic, payload) => {
                     const decoder = new TextDecoder();
                     const data = JSON.parse(decoder.decode(payload));
                     if (data.tabId !== tabId) {
@@ -429,7 +429,7 @@
                     }
                 });
 
-                await client.subscribe_with_callback('canvas/clear', (topic, payload) => {
+                await client.subscribeWithCallback('canvas/clear', (topic, payload) => {
                     const decoder = new TextDecoder();
                     const data = JSON.parse(decoder.decode(payload));
                     if (data.tabId !== tabId) {
@@ -437,7 +437,7 @@
                     }
                 });
 
-                await client.subscribe_with_callback('chat/messages', (topic, payload) => {
+                await client.subscribeWithCallback('chat/messages', (topic, payload) => {
                     const decoder = new TextDecoder();
                     const data = JSON.parse(decoder.decode(payload));
                     if (data.tabId !== tabId) {
@@ -447,7 +447,7 @@
                     }
                 });
 
-                await client.subscribe_with_callback('presence/announce', (topic, payload) => {
+                await client.subscribeWithCallback('presence/announce', (topic, payload) => {
                     const decoder = new TextDecoder();
                     const data = JSON.parse(decoder.decode(payload));
                     activeTabs.set(data.tabId, data.color);
