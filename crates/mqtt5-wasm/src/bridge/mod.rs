@@ -12,7 +12,7 @@ use std::sync::Arc;
 use wasm_bindgen::prelude::*;
 use web_sys::MessagePort;
 
-#[wasm_bindgen]
+#[wasm_bindgen(js_name = "BridgeDirection")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WasmBridgeDirection {
     In,
@@ -40,7 +40,7 @@ impl From<BridgeDirection> for WasmBridgeDirection {
     }
 }
 
-#[wasm_bindgen]
+#[wasm_bindgen(js_name = "TopicMapping")]
 #[derive(Debug, Clone)]
 pub struct WasmTopicMapping {
     core: TopicMappingCore,
@@ -61,12 +61,12 @@ impl WasmTopicMapping {
         self.core.qos = QoS::from(qos.min(2));
     }
 
-    #[wasm_bindgen(setter)]
+    #[wasm_bindgen(setter, js_name = "localPrefix")]
     pub fn set_local_prefix(&mut self, prefix: Option<String>) {
         self.core.local_prefix = prefix;
     }
 
-    #[wasm_bindgen(setter)]
+    #[wasm_bindgen(setter, js_name = "remotePrefix")]
     pub fn set_remote_prefix(&mut self, prefix: Option<String>) {
         self.core.remote_prefix = prefix;
     }
@@ -90,7 +90,7 @@ impl WasmTopicMapping {
     }
 }
 
-#[wasm_bindgen]
+#[wasm_bindgen(js_name = "BridgeConfig")]
 #[derive(Debug, Clone)]
 pub struct WasmBridgeConfig {
     name: String,
@@ -123,17 +123,17 @@ impl WasmBridgeConfig {
         }
     }
 
-    #[wasm_bindgen(setter)]
+    #[wasm_bindgen(setter, js_name = "clientId")]
     pub fn set_client_id(&mut self, client_id: String) {
         self.client_id = client_id;
     }
 
-    #[wasm_bindgen(setter)]
+    #[wasm_bindgen(setter, js_name = "cleanStart")]
     pub fn set_clean_start(&mut self, clean_start: bool) {
         self.clean_start = clean_start;
     }
 
-    #[wasm_bindgen(setter)]
+    #[wasm_bindgen(setter, js_name = "keepAliveSecs")]
     pub fn set_keep_alive_secs(&mut self, secs: u16) {
         self.keep_alive_secs = secs;
     }
@@ -152,7 +152,7 @@ impl WasmBridgeConfig {
     ///
     /// Messages with the same fingerprint seen within this window are blocked.
     /// Set to 0 to disable loop prevention (default).
-    #[wasm_bindgen(setter)]
+    #[wasm_bindgen(setter, js_name = "loopPreventionTtlSecs")]
     pub fn set_loop_prevention_ttl_secs(&mut self, secs: u64) {
         self.loop_prevention_ttl_secs = secs;
     }
@@ -160,12 +160,12 @@ impl WasmBridgeConfig {
     /// Sets the maximum number of message fingerprints to cache.
     ///
     /// When exceeded, expired entries are cleaned up. Default: 10000.
-    #[wasm_bindgen(setter)]
+    #[wasm_bindgen(setter, js_name = "loopPreventionCacheSize")]
     pub fn set_loop_prevention_cache_size(&mut self, size: usize) {
         self.loop_prevention_cache_size = size;
     }
 
-    #[wasm_bindgen]
+    #[wasm_bindgen(js_name = "addTopic")]
     pub fn add_topic(&mut self, mapping: WasmTopicMapping) {
         self.topics.push(mapping);
     }

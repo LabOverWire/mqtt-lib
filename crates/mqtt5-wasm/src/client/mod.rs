@@ -59,7 +59,7 @@ pub struct RustMessage {
 
 type RustCallback = Rc<dyn Fn(RustMessage)>;
 
-#[wasm_bindgen]
+#[wasm_bindgen(js_name = "MqttClient")]
 pub struct WasmMqttClient {
     state: Rc<RefCell<ClientState>>,
 }
@@ -91,6 +91,7 @@ impl WasmMqttClient {
 
     /// # Errors
     /// Returns an error if connection fails.
+    #[wasm_bindgen(js_name = "connectWithOptions")]
     pub async fn connect_with_options(
         &self,
         url: &str,
@@ -114,6 +115,7 @@ impl WasmMqttClient {
 
     /// # Errors
     /// Returns an error if connection fails.
+    #[wasm_bindgen(js_name = "connectMessagePort")]
     pub async fn connect_message_port(&self, port: MessagePort) -> Result<(), JsValue> {
         let config = WasmConnectOptions::default();
         self.connect_message_port_with_options(port, &config).await
@@ -121,6 +123,7 @@ impl WasmMqttClient {
 
     /// # Errors
     /// Returns an error if connection fails.
+    #[wasm_bindgen(js_name = "connectMessagePortWithOptions")]
     pub async fn connect_message_port_with_options(
         &self,
         port: MessagePort,
@@ -135,6 +138,7 @@ impl WasmMqttClient {
 
     /// # Errors
     /// Returns an error if connection fails.
+    #[wasm_bindgen(js_name = "connectBroadcastChannel")]
     pub async fn connect_broadcast_channel(&self, channel_name: &str) -> Result<(), JsValue> {
         let config = WasmConnectOptions::default();
         let transport = WasmTransportType::BroadcastChannel(
@@ -316,6 +320,7 @@ impl WasmMqttClient {
 
     /// # Errors
     /// Returns an error if not connected or publish fails.
+    #[wasm_bindgen(js_name = "publishWithOptions")]
     pub async fn publish_with_options(
         &self,
         topic: &str,
@@ -386,6 +391,7 @@ impl WasmMqttClient {
 
     /// # Errors
     /// Returns an error if not connected or publish fails.
+    #[wasm_bindgen(js_name = "publishQos1")]
     pub async fn publish_qos1(
         &self,
         topic: &str,
@@ -418,6 +424,7 @@ impl WasmMqttClient {
 
     /// # Errors
     /// Returns an error if not connected or publish fails.
+    #[wasm_bindgen(js_name = "publishQos2")]
     pub async fn publish_qos2(
         &self,
         topic: &str,
@@ -477,6 +484,7 @@ impl WasmMqttClient {
     /// # Errors
     /// Returns an error if not connected or subscribe fails.
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    #[wasm_bindgen(js_name = "subscribeWithOptions")]
     pub async fn subscribe_with_options(
         &self,
         topic: &str,
@@ -562,6 +570,7 @@ impl WasmMqttClient {
     /// # Errors
     /// Returns an error if not connected or subscribe fails.
     #[allow(clippy::unused_async)]
+    #[wasm_bindgen(js_name = "subscribeWithCallback")]
     pub async fn subscribe_with_callback(
         &self,
         topic: &str,
@@ -658,39 +667,48 @@ impl WasmMqttClient {
     }
 
     #[must_use]
+    #[wasm_bindgen(js_name = "isConnected")]
     pub fn is_connected(&self) -> bool {
         self.state.borrow().connected
     }
 
+    #[wasm_bindgen(js_name = "onConnect")]
     pub fn on_connect(&self, callback: js_sys::Function) {
         self.state.borrow_mut().on_connect = Some(callback);
     }
 
+    #[wasm_bindgen(js_name = "onDisconnect")]
     pub fn on_disconnect(&self, callback: js_sys::Function) {
         self.state.borrow_mut().on_disconnect = Some(callback);
     }
 
+    #[wasm_bindgen(js_name = "onError")]
     pub fn on_error(&self, callback: js_sys::Function) {
         self.state.borrow_mut().on_error = Some(callback);
     }
 
+    #[wasm_bindgen(js_name = "onAuthChallenge")]
     pub fn on_auth_challenge(&self, callback: js_sys::Function) {
         self.state.borrow_mut().on_auth_challenge = Some(callback);
     }
 
+    #[wasm_bindgen(js_name = "onReconnecting")]
     pub fn on_reconnecting(&self, callback: js_sys::Function) {
         self.state.borrow_mut().on_reconnecting = Some(callback);
     }
 
+    #[wasm_bindgen(js_name = "onReconnectFailed")]
     pub fn on_reconnect_failed(&self, callback: js_sys::Function) {
         self.state.borrow_mut().on_reconnect_failed = Some(callback);
     }
 
+    #[wasm_bindgen(js_name = "onConnectivityChange")]
     pub fn on_connectivity_change(&self, callback: js_sys::Function) {
         self.state.borrow_mut().on_connectivity_change = Some(callback);
     }
 
     #[must_use]
+    #[wasm_bindgen(js_name = "isBrowserOnline")]
     pub fn is_browser_online(&self) -> bool {
         connectivity::is_browser_online()
     }
@@ -704,21 +722,25 @@ impl WasmMqttClient {
         }
     }
 
+    #[wasm_bindgen(js_name = "setReconnectOptions")]
     pub fn set_reconnect_options(&self, options: &WasmReconnectOptions) {
         self.state.borrow_mut().reconnect_config = options.to_reconnect_config();
     }
 
+    #[wasm_bindgen(js_name = "enableAutoReconnect")]
     pub fn enable_auto_reconnect(&self, enabled: bool) {
         self.state.borrow_mut().reconnect_config.enabled = enabled;
     }
 
     #[must_use]
+    #[wasm_bindgen(js_name = "isReconnecting")]
     pub fn is_reconnecting(&self) -> bool {
         self.state.borrow().reconnecting
     }
 
     /// # Errors
     /// Returns an error if no auth method is set or send fails.
+    #[wasm_bindgen(js_name = "respondAuth")]
     pub fn respond_auth(&self, auth_data: &[u8]) -> Result<(), JsValue> {
         let auth_method = self
             .state

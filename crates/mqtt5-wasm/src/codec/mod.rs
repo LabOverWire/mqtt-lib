@@ -25,7 +25,7 @@ pub trait WasmPayloadCodec {
     }
 }
 
-#[wasm_bindgen]
+#[wasm_bindgen(js_name = "CodecRegistry")]
 pub struct WasmCodecRegistry {
     codecs: RefCell<HashMap<String, Rc<dyn WasmPayloadCodec>>>,
     default_codec: RefCell<Option<String>>,

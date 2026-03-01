@@ -34,7 +34,7 @@ fn gzip_compress_native(input: &[u8], level: u8) -> Result<Vec<u8>, String> {
 
 const DEFAULT_MAX_DECOMPRESSED_SIZE: usize = 10 * 1024 * 1024;
 
-#[wasm_bindgen]
+#[wasm_bindgen(js_name = "GzipCodec")]
 pub struct WasmGzipCodec {
     level: u8,
     min_size: usize,

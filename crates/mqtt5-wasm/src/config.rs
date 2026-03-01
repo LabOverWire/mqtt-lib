@@ -16,7 +16,7 @@ fn add_property_or_warn(properties: &mut Properties, id: PropertyId, value: Prop
     }
 }
 
-#[wasm_bindgen]
+#[wasm_bindgen(js_name = "ReconnectOptions")]
 pub struct WasmReconnectOptions {
     pub(crate) enabled: bool,
     pub(crate) initial_delay_ms: u32,
@@ -135,7 +135,7 @@ impl Clone for WasmReconnectOptions {
     }
 }
 
-#[wasm_bindgen]
+#[wasm_bindgen(js_name = "ConnectOptions")]
 pub struct WasmConnectOptions {
     pub(crate) keep_alive: u16,
     pub(crate) clean_start: bool,
@@ -223,10 +223,12 @@ impl WasmConnectOptions {
         self.password = Some(value.to_vec());
     }
 
+    #[wasm_bindgen(js_name = "setWill")]
     pub fn set_will(&mut self, will: WasmWillMessage) {
         self.will = Some(will);
     }
 
+    #[wasm_bindgen(js_name = "clearWill")]
     pub fn clear_will(&mut self) {
         self.will = None;
     }
@@ -449,7 +451,7 @@ impl Default for WasmConnectOptions {
     }
 }
 
-#[wasm_bindgen]
+#[wasm_bindgen(js_name = "PublishOptions")]
 pub struct WasmPublishOptions {
     pub(crate) qos: u8,
     pub(crate) retain: bool,
@@ -678,7 +680,7 @@ impl Default for WasmPublishOptions {
     }
 }
 
-#[wasm_bindgen]
+#[wasm_bindgen(js_name = "SubscribeOptions")]
 pub struct WasmSubscribeOptions {
     pub(crate) qos: u8,
     pub(crate) no_local: bool,
@@ -782,7 +784,7 @@ impl Default for WasmSubscribeOptions {
     }
 }
 
-#[wasm_bindgen]
+#[wasm_bindgen(js_name = "WillMessage")]
 pub struct WasmWillMessage {
     pub(crate) topic: String,
     pub(crate) payload: Vec<u8>,
@@ -918,7 +920,7 @@ impl WasmWillMessage {
     }
 }
 
-#[wasm_bindgen]
+#[wasm_bindgen(js_name = "MessageProperties")]
 pub struct WasmMessageProperties {
     response_topic: Option<String>,
     correlation_data: Option<Vec<u8>>,
