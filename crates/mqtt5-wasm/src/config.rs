@@ -25,7 +25,7 @@ pub struct WasmReconnectOptions {
     pub(crate) max_attempts: Option<u32>,
 }
 
-#[wasm_bindgen]
+#[wasm_bindgen(js_class = "ReconnectOptions")]
 #[allow(non_snake_case)]
 impl WasmReconnectOptions {
     #[wasm_bindgen(constructor)]
@@ -157,7 +157,7 @@ pub struct WasmConnectOptions {
     pub(crate) codec_registry: Option<Rc<WasmCodecRegistry>>,
 }
 
-#[wasm_bindgen]
+#[wasm_bindgen(js_class = "ConnectOptions")]
 #[allow(non_snake_case)]
 impl WasmConnectOptions {
     #[wasm_bindgen(constructor)]
@@ -464,7 +464,7 @@ pub struct WasmPublishOptions {
     pub(crate) user_properties: Vec<(String, String)>,
 }
 
-#[wasm_bindgen]
+#[wasm_bindgen(js_class = "PublishOptions")]
 #[allow(non_snake_case)]
 impl WasmPublishOptions {
     #[wasm_bindgen(constructor)]
@@ -689,7 +689,7 @@ pub struct WasmSubscribeOptions {
     pub(crate) subscription_identifier: Option<u32>,
 }
 
-#[wasm_bindgen]
+#[wasm_bindgen(js_class = "SubscribeOptions")]
 #[allow(non_snake_case)]
 impl WasmSubscribeOptions {
     #[wasm_bindgen(constructor)]
@@ -796,7 +796,7 @@ pub struct WasmWillMessage {
     pub(crate) response_topic: Option<String>,
 }
 
-#[wasm_bindgen]
+#[wasm_bindgen(js_class = "WillMessage")]
 #[allow(non_snake_case)]
 impl WasmWillMessage {
     #[wasm_bindgen(constructor)]
@@ -931,7 +931,7 @@ pub struct WasmMessageProperties {
     user_properties: Vec<(String, String)>,
 }
 
-#[wasm_bindgen]
+#[wasm_bindgen(js_class = "MessageProperties")]
 #[allow(non_snake_case)]
 impl WasmMessageProperties {
     #[wasm_bindgen(getter)]

@@ -12,7 +12,7 @@ pub struct WasmDeflateCodec {
     max_decompressed_size: usize,
 }
 
-#[wasm_bindgen]
+#[wasm_bindgen(js_class = "DeflateCodec")]
 impl WasmDeflateCodec {
     #[wasm_bindgen(constructor)]
     #[must_use]

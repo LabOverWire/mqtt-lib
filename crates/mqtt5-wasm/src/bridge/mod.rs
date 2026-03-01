@@ -46,7 +46,7 @@ pub struct WasmTopicMapping {
     core: TopicMappingCore,
 }
 
-#[wasm_bindgen]
+#[wasm_bindgen(js_class = "TopicMapping")]
 impl WasmTopicMapping {
     #[wasm_bindgen(constructor)]
     #[allow(clippy::must_use_candidate)]
@@ -104,7 +104,7 @@ pub struct WasmBridgeConfig {
     loop_prevention_cache_size: usize,
 }
 
-#[wasm_bindgen]
+#[wasm_bindgen(js_class = "BridgeConfig")]
 impl WasmBridgeConfig {
     #[wasm_bindgen(constructor)]
     #[allow(clippy::must_use_candidate)]

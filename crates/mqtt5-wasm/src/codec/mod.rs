@@ -31,7 +31,7 @@ pub struct WasmCodecRegistry {
     default_codec: RefCell<Option<String>>,
 }
 
-#[wasm_bindgen]
+#[wasm_bindgen(js_class = "CodecRegistry")]
 impl WasmCodecRegistry {
     #[wasm_bindgen(constructor)]
     #[must_use]

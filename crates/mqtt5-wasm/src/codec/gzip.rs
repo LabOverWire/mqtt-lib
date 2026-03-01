@@ -41,7 +41,7 @@ pub struct WasmGzipCodec {
     max_decompressed_size: usize,
 }
 
-#[wasm_bindgen]
+#[wasm_bindgen(js_class = "GzipCodec")]
 impl WasmGzipCodec {
     #[wasm_bindgen(constructor)]
     #[must_use]

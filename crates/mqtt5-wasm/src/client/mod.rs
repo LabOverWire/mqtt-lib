@@ -64,7 +64,7 @@ pub struct WasmMqttClient {
     state: Rc<RefCell<ClientState>>,
 }
 
-#[wasm_bindgen]
+#[wasm_bindgen(js_class = "MqttClient")]
 impl WasmMqttClient {
     #[wasm_bindgen(constructor)]
     #[allow(clippy::must_use_candidate)]

@@ -67,7 +67,7 @@ pub struct WasmBrokerConfig {
     echo_suppression_property_key: Option<String>,
 }
 
-#[wasm_bindgen]
+#[wasm_bindgen(js_class = "BrokerConfig")]
 impl WasmBrokerConfig {
     #[wasm_bindgen(constructor)]
     #[allow(clippy::must_use_candidate)]
@@ -247,7 +247,7 @@ pub struct WasmBroker {
     event_callbacks: WasmEventCallbacks,
 }
 
-#[wasm_bindgen]
+#[wasm_bindgen(js_class = "Broker")]
 impl WasmBroker {
     /// # Errors
     /// Returns an error if broker initialization fails.
