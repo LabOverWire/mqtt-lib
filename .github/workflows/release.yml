@@ -122,10 +122,14 @@ jobs:
             "files": [
               "mqtt5_wasm_bg.wasm",
               "mqtt5_wasm.js",
-              "mqtt5_wasm.d.ts"
+              "mqtt5_wasm.d.ts",
+              "mqtt5_wasm_bg.wasm.d.ts"
             ],
             "main": "mqtt5_wasm.js",
             "types": "mqtt5_wasm.d.ts",
+            "sideEffects": [
+              "./mqtt5_wasm.js"
+            ],
             "keywords": ["mqtt", "wasm", "webassembly", "iot", "pubsub"]
           }
           PKGJSON
