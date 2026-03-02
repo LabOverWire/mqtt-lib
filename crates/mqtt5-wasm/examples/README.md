@@ -2,6 +2,8 @@
 
 This directory contains browser examples demonstrating the mqtt5-wasm library with full client and broker functionality.
 
+> **Upgrading from 0.x?** See the [Migration Guide](../MIGRATION-1.0.md) for the complete list of renamed types, methods, and properties.
+
 ## Use Cases
 
 ### External Broker (websocket/)

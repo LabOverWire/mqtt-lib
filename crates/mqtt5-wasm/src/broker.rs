@@ -261,10 +261,10 @@ impl WasmBroker {
     /// Returns an error if broker initialization fails.
     #[wasm_bindgen(js_name = "withConfig")]
     #[allow(clippy::needless_pass_by_value, clippy::arc_with_non_send_sync)]
-    pub fn with_config(config: WasmBrokerConfig) -> Result<WasmBroker, JsValue> {
-        let allow_anonymous = config.allow_anonymous;
-        let config_hash = config.calculate_hash();
-        let config = Arc::new(RwLock::new(config.to_broker_config()));
+    pub fn with_config(options: WasmBrokerConfig) -> Result<WasmBroker, JsValue> {
+        let allow_anonymous = options.allow_anonymous;
+        let config_hash = options.calculate_hash();
+        let config = Arc::new(RwLock::new(options.to_broker_config()));
 
         let storage = Arc::new(DynamicStorage::Memory(MemoryBackend::new()));
         let broker_config = config
