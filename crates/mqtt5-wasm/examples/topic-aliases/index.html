@@ -437,9 +437,9 @@
                 await init();
 
                 const config = new BrokerConfig();
-                config.max_clients = 10;
-                config.topic_alias_maximum = 20;
-                config.allow_anonymous = true;
+                config.maxClients = 10;
+                config.topicAliasMaximum = 20;
+                config.allowAnonymous = true;
 
                 broker = Broker.withConfig(config);
                 debugLog('Broker created with topic alias support (max: 20)');

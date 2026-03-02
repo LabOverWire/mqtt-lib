@@ -524,10 +524,10 @@
                 debugLog('WASM initialized');
 
                 const config = new BrokerConfig();
-                config.max_clients = 10;
-                config.maximum_qos = 2;
-                config.shared_subscription_available = true;
-                config.allow_anonymous = true;
+                config.maxClients = 10;
+                config.maximumQos = 2;
+                config.sharedSubscriptionAvailable = true;
+                config.allowAnonymous = true;
 
                 debugLog('Creating in-tab broker with shared subscriptions enabled...');
                 broker = Broker.withConfig(config);

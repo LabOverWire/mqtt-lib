@@ -475,16 +475,16 @@
             }
 
             const config = new BrokerConfig();
-            config.max_clients = 100;
-            config.wildcard_subscription_available = true;
-            config.allow_anonymous = true;
+            config.maxClients = 100;
+            config.wildcardSubscriptionAvailable = true;
+            config.allowAnonymous = true;
 
             debugLog('Creating Broker A...');
             brokerA = Broker.withConfig(config);
             updateStatus('broker-a-status', 'Broker: Ready', true);
 
             const configB = new BrokerConfig();
-            configB.allow_anonymous = true;
+            configB.allowAnonymous = true;
             debugLog('Creating Broker B...');
             brokerB = Broker.withConfig(configB);
             updateStatus('broker-b-status', 'Broker: Ready', true);

@@ -45,14 +45,15 @@ impl WasmCodecRegistry {
     /// # Errors
     /// Returns an error if no codec is registered for the specified content type.
     #[wasm_bindgen(js_name = "setDefault")]
-    pub fn set_default(&self, content_type: &str) -> Result<(), JsValue> {
+    #[allow(non_snake_case)]
+    pub fn set_default(&self, contentType: &str) -> Result<(), JsValue> {
         let codecs = self.codecs.borrow();
-        if codecs.contains_key(content_type) {
-            *self.default_codec.borrow_mut() = Some(content_type.to_string());
+        if codecs.contains_key(contentType) {
+            *self.default_codec.borrow_mut() = Some(contentType.to_string());
             Ok(())
         } else {
             Err(JsValue::from_str(&format!(
-                "No codec registered for content type: {content_type}"
+                "No codec registered for content type: {contentType}"
             )))
         }
     }
@@ -65,8 +66,9 @@ impl WasmCodecRegistry {
 
     #[wasm_bindgen(js_name = "hasCodec")]
     #[must_use]
-    pub fn has_codec(&self, content_type: &str) -> bool {
-        self.codecs.borrow().contains_key(content_type)
+    #[allow(non_snake_case)]
+    pub fn has_codec(&self, contentType: &str) -> bool {
+        self.codecs.borrow().contains_key(contentType)
     }
 
     #[wasm_bindgen(js_name = "registerGzip")]
@@ -150,12 +152,13 @@ pub fn create_codec_registry() -> WasmCodecRegistry {
 
 #[wasm_bindgen(js_name = "createGzipCodec")]
 #[must_use]
-pub fn create_gzip_codec(level: Option<u8>, min_size: Option<usize>) -> WasmGzipCodec {
+#[allow(non_snake_case)]
+pub fn create_gzip_codec(level: Option<u8>, minSize: Option<usize>) -> WasmGzipCodec {
     let mut codec = WasmGzipCodec::new();
     if let Some(l) = level {
         codec = codec.with_level(l);
     }
-    if let Some(s) = min_size {
+    if let Some(s) = minSize {
         codec = codec.with_min_size(s);
     }
     codec
@@ -163,12 +166,13 @@ pub fn create_gzip_codec(level: Option<u8>, min_size: Option<usize>) -> WasmGzip
 
 #[wasm_bindgen(js_name = "createDeflateCodec")]
 #[must_use]
-pub fn create_deflate_codec(level: Option<u8>, min_size: Option<usize>) -> WasmDeflateCodec {
+#[allow(non_snake_case)]
+pub fn create_deflate_codec(level: Option<u8>, minSize: Option<usize>) -> WasmDeflateCodec {
     let mut codec = WasmDeflateCodec::new();
     if let Some(l) = level {
         codec = codec.with_level(l);
     }
-    if let Some(s) = min_size {
+    if let Some(s) = minSize {
         codec = codec.with_min_size(s);
     }
     codec

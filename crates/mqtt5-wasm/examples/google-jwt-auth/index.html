@@ -328,7 +328,7 @@
                 log('Client created: ' + clientId, 'info');
 
                 mqttClient.onConnect((reasonCode, sessionPresent) => {
-                    console.log('on_connect callback', reasonCode, sessionPresent);
+                    console.log('onConnect callback', reasonCode, sessionPresent);
                     if (reasonCode === 0) {
                         setStatus('mqttStatus', 'connected', 'Connected');
                         log('Connected to MQTT broker!', 'success');
@@ -345,7 +345,7 @@
                 });
 
                 mqttClient.onDisconnect(() => {
-                    console.log('on_disconnect callback');
+                    console.log('onDisconnect callback');
                     setStatus('mqttStatus', 'disconnected', 'Disconnected');
                     log('Disconnected from broker', 'warn');
                     document.getElementById('connectBtn').disabled = false;
@@ -355,7 +355,7 @@
                 });
 
                 mqttClient.onError((error) => {
-                    console.log('on_error callback', error);
+                    console.log('onError callback', error);
                     setStatus('mqttStatus', 'error', 'Error: ' + error);
                     log('MQTT Error: ' + error, 'error');
                 });
@@ -370,9 +370,9 @@
                 options.authenticationData = tokenBytes;
                 log('Options configured with JWT auth', 'info');
 
-                log('Calling connect_with_options...', 'info');
+                log('Calling connectWithOptions...', 'info');
                 await mqttClient.connectWithOptions(brokerUrl, options);
-                log('connect_with_options returned', 'info');
+                log('connectWithOptions returned', 'info');
 
             } catch (err) {
                 console.error('Connection error:', err);

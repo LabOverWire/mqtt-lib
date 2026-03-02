@@ -394,7 +394,7 @@ import init, { Broker, BrokerConfig, MqttClient } from "./pkg/mqtt5_wasm.js";
 await init();
 
 const config = new BrokerConfig();
-config.shared_subscription_available = true;
+config.sharedSubscriptionAvailable = true;
 
 const broker = Broker.withConfig(config);
 
@@ -477,7 +477,7 @@ The client automatically:
 
 - Sends PINGREQ packets every 30 seconds
 - Detects connection timeout after 90 seconds
-- Triggers `on_error` and `on_disconnect` callbacks on timeout
+- Triggers `onError` and `onDisconnect` callbacks on timeout
 
 ## Testing
 
@@ -488,12 +488,12 @@ The client automatically:
 3. Watch for "PINGRESP received" messages every ~30 seconds
 4. Stop the broker or disconnect network
 5. See connection timeout after 90 seconds
-6. Observe `on_error("Keepalive timeout")` and `on_disconnect()` callbacks
+6. Observe `onError("Keepalive timeout")` and `onDisconnect()` callbacks
 
 ### Testing Error Handling
 
 1. Try connecting to an invalid URL
-2. Observe `on_error` callback with connection error
+2. Observe `onError` callback with connection error
 3. Try publishing while disconnected
 4. See JavaScript error alerts
 

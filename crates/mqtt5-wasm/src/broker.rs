@@ -261,10 +261,10 @@ impl WasmBroker {
     /// Returns an error if broker initialization fails.
     #[wasm_bindgen(js_name = "withConfig")]
     #[allow(clippy::needless_pass_by_value, clippy::arc_with_non_send_sync)]
-    pub fn with_config(wasm_config: WasmBrokerConfig) -> Result<WasmBroker, JsValue> {
-        let allow_anonymous = wasm_config.allow_anonymous;
-        let config_hash = wasm_config.calculate_hash();
-        let config = Arc::new(RwLock::new(wasm_config.to_broker_config()));
+    pub fn with_config(config: WasmBrokerConfig) -> Result<WasmBroker, JsValue> {
+        let allow_anonymous = config.allow_anonymous;
+        let config_hash = config.calculate_hash();
+        let config = Arc::new(RwLock::new(config.to_broker_config()));
 
         let storage = Arc::new(DynamicStorage::Memory(MemoryBackend::new()));
         let broker_config = config
@@ -329,10 +329,11 @@ impl WasmBroker {
     }
 
     #[wasm_bindgen(js_name = "addUserWithHash")]
-    pub fn add_user_with_hash(&self, username: String, password_hash: String) {
+    #[allow(non_snake_case)]
+    pub fn add_user_with_hash(&self, username: String, passwordHash: String) {
         self.auth_provider
             .password_provider()
-            .add_user_with_hash(username, password_hash);
+            .add_user_with_hash(username, passwordHash);
     }
 
     #[wasm_bindgen(js_name = "removeUser")]
@@ -363,10 +364,11 @@ impl WasmBroker {
     /// # Errors
     /// Returns an error if the permission string is invalid.
     #[wasm_bindgen(js_name = "addAclRule")]
+    #[allow(non_snake_case)]
     pub async fn add_acl_rule(
         &self,
         username: String,
-        topic_pattern: String,
+        topicPattern: String,
         permission: String,
     ) -> Result<(), JsValue> {
         let perm: Permission = permission
@@ -374,7 +376,7 @@ impl WasmBroker {
             .map_err(|e: mqtt5::error::MqttError| JsValue::from_str(&e.to_string()))?;
         self.auth_provider
             .acl_manager()
-            .add_rule(AclRule::new(username, topic_pattern, perm))
+            .add_rule(AclRule::new(username, topicPattern, perm))
             .await;
         Ok(())
     }
@@ -412,10 +414,11 @@ impl WasmBroker {
     /// # Errors
     /// Returns an error if the permission string is invalid or role does not exist.
     #[wasm_bindgen(js_name = "addRoleRule")]
+    #[allow(non_snake_case)]
     pub async fn add_role_rule(
         &self,
-        role_name: String,
-        topic_pattern: String,
+        roleName: String,
+        topicPattern: String,
         permission: String,
     ) -> Result<(), JsValue> {
         let perm: Permission = permission
@@ -423,7 +426,7 @@ impl WasmBroker {
             .map_err(|e: mqtt5::error::MqttError| JsValue::from_str(&e.to_string()))?;
         self.auth_provider
             .acl_manager()
-            .add_role_rule(&role_name, topic_pattern, perm)
+            .add_role_rule(&roleName, topicPattern, perm)
             .await
             .map_err(|e| JsValue::from_str(&e.to_string()))
     }
@@ -431,19 +434,21 @@ impl WasmBroker {
     /// # Errors
     /// Returns an error if the role does not exist.
     #[wasm_bindgen(js_name = "assignRole")]
-    pub async fn assign_role(&self, username: String, role_name: String) -> Result<(), JsValue> {
+    #[allow(non_snake_case)]
+    pub async fn assign_role(&self, username: String, roleName: String) -> Result<(), JsValue> {
         self.auth_provider
             .acl_manager()
-            .assign_role(&username, &role_name)
+            .assign_role(&username, &roleName)
             .await
             .map_err(|e| JsValue::from_str(&e.to_string()))
     }
 
     #[wasm_bindgen(js_name = "unassignRole")]
-    pub async fn unassign_role(&self, username: &str, role_name: &str) -> bool {
+    #[allow(non_snake_case)]
+    pub async fn unassign_role(&self, username: &str, roleName: &str) -> bool {
         self.auth_provider
             .acl_manager()
-            .unassign_role(username, role_name)
+            .unassign_role(username, roleName)
             .await
     }
 
@@ -502,13 +507,14 @@ impl WasmBroker {
     /// # Errors
     /// Returns an error if the bridge cannot be added.
     #[wasm_bindgen(js_name = "addBridge")]
+    #[allow(non_snake_case)]
     pub async fn add_bridge(
         &self,
         config: WasmBridgeConfig,
-        remote_port: MessagePort,
+        remotePort: MessagePort,
     ) -> Result<(), JsValue> {
         let manager = self.bridge_manager.borrow().clone();
-        manager.add_bridge(config, remote_port).await
+        manager.add_bridge(config, remotePort).await
     }
 
     /// # Errors
@@ -537,14 +543,15 @@ impl WasmBroker {
     }
 
     #[wasm_bindgen(js_name = "startSysTopicsWithIntervalSecs")]
-    pub fn start_sys_topics_with_interval_secs(&self, interval_secs: u32) {
+    #[allow(non_snake_case)]
+    pub fn start_sys_topics_with_interval_secs(&self, intervalSecs: u32) {
         if self.sys_topics_running.get() {
             return;
         }
         self.sys_topics_running.set(true);
 
         let provider = SysTopicsProvider::new(Arc::clone(&self.router), Arc::clone(&self.stats));
-        let interval_ms = u64::from(interval_secs) * 1000;
+        let interval_ms = u64::from(intervalSecs) * 1000;
         let running = Rc::clone(&self.sys_topics_running);
 
         wasm_bindgen_futures::spawn_local(async move {
@@ -586,16 +593,16 @@ impl WasmBroker {
     /// # Errors
     /// Returns an error if the config write lock cannot be acquired.
     #[wasm_bindgen(js_name = "updateConfig")]
-    #[allow(clippy::needless_pass_by_value)]
-    pub fn update_config(&self, new_config: WasmBrokerConfig) -> Result<(), JsValue> {
-        let new_hash = new_config.calculate_hash();
+    #[allow(clippy::needless_pass_by_value, non_snake_case)]
+    pub fn update_config(&self, newConfig: WasmBrokerConfig) -> Result<(), JsValue> {
+        let new_hash = newConfig.calculate_hash();
         let old_hash = self.config_hash.get();
 
         if new_hash == old_hash {
             return Ok(());
         }
 
-        let broker_config = new_config.to_broker_config();
+        let broker_config = newConfig.to_broker_config();
 
         let echo_key = if broker_config.echo_suppression_config.enabled {
             Some(broker_config.echo_suppression_config.property_key.clone())

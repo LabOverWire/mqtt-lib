@@ -332,9 +332,9 @@
                 await init();
 
                 const config = new BrokerConfig();
-                config.max_clients = 10;
-                config.retain_available = true;
-                config.allow_anonymous = true;
+                config.maxClients = 10;
+                config.retainAvailable = true;
+                config.allowAnonymous = true;
 
                 broker = Broker.withConfig(config);
                 debugLog('Broker created with retain support');

@@ -45,7 +45,7 @@ Change-only delivery is configured on the broker:
 
 ```javascript
 const config = new BrokerConfig();
-config.change_only_delivery_enabled = true;
+config.changeOnlyDeliveryEnabled = true;
 config.addChangeOnlyDeliveryPattern('sensors/#');
 config.addChangeOnlyDeliveryPattern('telemetry/+/status');
 ```

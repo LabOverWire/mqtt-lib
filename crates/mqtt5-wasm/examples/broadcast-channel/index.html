@@ -404,8 +404,8 @@
                 document.getElementById('my-tab-id').style.background = myColor;
 
                 const config = new BrokerConfig();
-                config.max_clients = 50;
-                config.allow_anonymous = true;
+                config.maxClients = 50;
+                config.allowAnonymous = true;
 
                 broker = Broker.withConfig(config);
                 debugLog('Broker created in this tab');

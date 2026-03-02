@@ -67,11 +67,11 @@ pub struct WasmMqttClient {
 #[wasm_bindgen(js_class = "MqttClient")]
 impl WasmMqttClient {
     #[wasm_bindgen(constructor)]
-    #[allow(clippy::must_use_candidate)]
-    pub fn new(client_id: String) -> Self {
+    #[allow(clippy::must_use_candidate, non_snake_case)]
+    pub fn new(clientId: String) -> Self {
         console_error_panic_hook::set_once();
 
-        let state = Rc::new(RefCell::new(ClientState::new(client_id)));
+        let state = Rc::new(RefCell::new(ClientState::new(clientId)));
         let (online_fn, offline_fn) = connectivity::register_connectivity_listeners(&state);
         {
             let mut s = state.borrow_mut();
@@ -139,10 +139,11 @@ impl WasmMqttClient {
     /// # Errors
     /// Returns an error if connection fails.
     #[wasm_bindgen(js_name = "connectBroadcastChannel")]
-    pub async fn connect_broadcast_channel(&self, channel_name: &str) -> Result<(), JsValue> {
+    #[allow(non_snake_case)]
+    pub async fn connect_broadcast_channel(&self, channelName: &str) -> Result<(), JsValue> {
         let config = WasmConnectOptions::default();
         let transport = WasmTransportType::BroadcastChannel(
-            crate::transport::broadcast::BroadcastChannelTransport::new(channel_name),
+            crate::transport::broadcast::BroadcastChannelTransport::new(channelName),
         );
         self.connect_with_transport_and_config(transport, &config)
             .await
@@ -741,7 +742,8 @@ impl WasmMqttClient {
     /// # Errors
     /// Returns an error if no auth method is set or send fails.
     #[wasm_bindgen(js_name = "respondAuth")]
-    pub fn respond_auth(&self, auth_data: &[u8]) -> Result<(), JsValue> {
+    #[allow(non_snake_case)]
+    pub fn respond_auth(&self, authData: &[u8]) -> Result<(), JsValue> {
         let auth_method = self
             .state
             .borrow()
@@ -757,7 +759,7 @@ impl WasmMqttClient {
             .set_authentication_method(auth_method);
         auth_packet
             .properties
-            .set_authentication_data(auth_data.to_vec().into());
+            .set_authentication_data(authData.to_vec().into());
 
         self.send_packet(&Packet::Auth(auth_packet))
     }

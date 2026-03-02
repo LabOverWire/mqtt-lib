@@ -82,7 +82,7 @@ client.onConnect((reasonCode, sessionPresent) => {
 
 const options = new ConnectOptions();
 options.authenticationMethod = 'JWT';
-options.set_authenticationData(new TextEncoder().encode(jwtToken));
+options.authenticationData = new TextEncoder().encode(jwtToken);
 
 await client.connectWithOptions('ws://localhost:8080/mqtt', options);
 await client.subscribeWithCallback('test/#', (topic, payload) => {

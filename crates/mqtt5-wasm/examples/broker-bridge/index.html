@@ -390,9 +390,9 @@
                 debugLog('WASM initialized');
 
                 const config = new BrokerConfig();
-                config.max_clients = 100;
-                config.wildcard_subscription_available = true;
-                config.allow_anonymous = true;
+                config.maxClients = 100;
+                config.wildcardSubscriptionAvailable = true;
+                config.allowAnonymous = true;
 
                 debugLog('Creating Broker A...');
                 const brokerA = Broker.withConfig(config);
@@ -400,7 +400,7 @@
                 debugLog('Broker A ready');
 
                 const configB = new BrokerConfig();
-                configB.allow_anonymous = true;
+                configB.allowAnonymous = true;
                 debugLog('Creating Broker B...');
                 const brokerB = Broker.withConfig(configB);
                 updateStatus('broker-b-status', 'Broker: Ready', true);

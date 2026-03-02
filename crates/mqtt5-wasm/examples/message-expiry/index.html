@@ -402,8 +402,8 @@
                 await init();
 
                 const config = new BrokerConfig();
-                config.max_clients = 10;
-                config.allow_anonymous = true;
+                config.maxClients = 10;
+                config.allowAnonymous = true;
 
                 broker = Broker.withConfig(config);
                 debugLog('Broker created');

@@ -496,9 +496,9 @@
                 await init();
 
                 const config = new BrokerConfig();
-                config.max_clients = 10;
-                config.session_expiry_interval_secs = 3600;
-                config.allow_anonymous = true;
+                config.maxClients = 10;
+                config.sessionExpiryIntervalSecs = 3600;
+                config.allowAnonymous = true;
 
                 broker = Broker.withConfig(config);
                 debugLog('Broker created with session persistence');

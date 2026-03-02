@@ -386,9 +386,9 @@
                 await init();
 
                 const config = new BrokerConfig();
-                config.max_clients = 10;
-                config.subscription_identifier_available = true;
-                config.allow_anonymous = true;
+                config.maxClients = 10;
+                config.subscriptionIdentifierAvailable = true;
+                config.allowAnonymous = true;
 
                 broker = Broker.withConfig(config);
                 debugLog('Broker created with subscription identifiers enabled');

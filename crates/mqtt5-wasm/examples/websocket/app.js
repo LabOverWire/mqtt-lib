@@ -290,13 +290,13 @@ async function handleSubscribe(e) {
         subOpts.retainHandling = 0;
         subOpts.subscriptionIdentifier = Math.floor(Math.random() * 1000000);
 
-        console.log('handleSubscribe: Calling subscribe_with_options for topic:', topic);
+        console.log('handleSubscribe: Calling subscribeWithOptions for topic:', topic);
         const packetId = await client.subscribeWithOptions(topic, (receivedTopic, payload) => {
             console.log('Message received:', receivedTopic, payload);
             addMessage(receivedTopic, payload, 'received');
         }, subOpts);
 
-        console.log('handleSubscribe: subscribe_with_options returned, packet_id:', packetId);
+        console.log('handleSubscribe: subscribeWithOptions returned, packet_id:', packetId);
         addSubscription(topic);
         addMessage('system', `Subscribed to ${topic} (packet_id: ${packetId}, sub_id: ${subOpts.subscriptionIdentifier})`, 'system');
         document.getElementById('subscribe-topic').value = '';

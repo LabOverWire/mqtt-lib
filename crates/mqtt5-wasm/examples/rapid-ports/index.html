@@ -93,7 +93,7 @@
 
         <div class="warning">
             <strong>Purpose:</strong> This example attempts to reproduce the error by creating multiple
-            <code>create_client_port()</code> calls in rapid succession without awaiting between them.
+            <code>createClientPort()</code> calls in rapid succession without awaiting between them.
         </div>
     </div>
 
@@ -151,7 +151,7 @@
                 return;
             }
             const config = new BrokerConfig();
-            config.max_clients = 200;
+            config.maxClients = 200;
             broker = Broker.withConfig(config);
             logSuccess('Broker created');
         }
@@ -189,7 +189,7 @@
                     log(`  Port created for ${clientId}`);
 
                     await client.connectMessagePort(port);
-                    log(`  ${clientId} connect_message_port completed`);
+                    log(`  ${clientId} connectMessagePort completed`);
 
                     clients.push(client);
                 }
@@ -398,7 +398,6 @@
 
                     await new Promise(resolve => setTimeout(resolve, 0));
 
-                    // Use connect_with_options like frontend does
                     const connectOpts = new ConnectOptions();
                     connectOpts.cleanStart = true;
                     connectOpts.keepAlive = 60;
@@ -427,7 +426,7 @@
             // Create a NEW broker with allowAnonymous=false
             log('Creating broker with allowAnonymous=false...');
             const config = new BrokerConfig();
-            config.max_clients = 200;
+            config.maxClients = 200;
             const authBroker = Broker.withConfig(config);
             authBroker.allowAnonymous = false;
             logSuccess('Auth broker created');

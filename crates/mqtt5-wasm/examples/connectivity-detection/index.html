@@ -140,8 +140,8 @@
         <div class="highlight">
             <strong>How it works:</strong>
             <ul style="margin: 10px 0 0 0; padding-left: 20px;">
-                <li><code>on_connectivity_change(callback)</code> fires when the browser goes online or offline</li>
-                <li><code>is_browser_online()</code> returns the current network state synchronously</li>
+                <li><code>onConnectivityChange(callback)</code> fires when the browser goes online or offline</li>
+                <li><code>isBrowserOnline()</code> returns the current network state synchronously</li>
                 <li>Reconnection pauses while offline and resumes immediately when the network returns</li>
                 <li>Backoff resets after a network outage (the failure was connectivity, not server rejection)</li>
             </ul>
@@ -171,7 +171,7 @@
         <div style="margin: 15px 0;">
             <button id="connect-btn" class="success">Connect to Broker</button>
             <button id="disconnect-btn" class="danger" disabled>Disconnect</button>
-            <button id="check-online-btn">Check is_browser_online()</button>
+            <button id="check-online-btn">Check isBrowserOnline()</button>
         </div>
         <div class="instructions">
             <strong>To test connectivity detection:</strong>
@@ -323,7 +323,7 @@
                 return;
             }
             const online = client.isBrowserOnline();
-            logEvent(`is_browser_online() => ${online}`, 'connectivity');
+            logEvent(`isBrowserOnline() => ${online}`, 'connectivity');
         }
 
         async function main() {
@@ -332,8 +332,8 @@
                 logEvent('WASM module initialized', 'info');
 
                 const config = new BrokerConfig();
-                config.max_clients = 10;
-                config.allow_anonymous = true;
+                config.maxClients = 10;
+                config.allowAnonymous = true;
                 broker = Broker.withConfig(config);
                 logEvent('In-browser MQTT broker started', 'info');
 

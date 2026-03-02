@@ -365,11 +365,11 @@
                 debugLog('Creating broker configuration with change-only deliverys...');
                 const config = new BrokerConfig();
 
-                config.max_clients = 100;
-                config.max_packet_size = 1048576;
-                config.allow_anonymous = true;
+                config.maxClients = 100;
+                config.maxPacketSize = 1048576;
+                config.allowAnonymous = true;
 
-                config.change_only_delivery_enabled = true;
+                config.changeOnlyDeliveryEnabled = true;
                 config.addChangeOnlyDeliveryPattern('sensors/#');
 
                 debugLog('Change-only delivery enabled for pattern: sensors/#');
