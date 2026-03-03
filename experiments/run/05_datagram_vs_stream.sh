@@ -11,15 +11,17 @@ start_broker "--tls-cert /opt/mqtt-certs/server.pem --tls-key /opt/mqtt-certs/se
 for loss in "${LOSSES[@]}"; do
     apply_netem "$DELAY" "$loss"
 
-    label="quic-stream_loss${loss}pct"
-    echo "[${EXPERIMENT}] ${label}"
-    run_monitored "$EXPERIMENT" "$label" \
-        "--url quic://${BROKER_IP}:14567 --ca-cert /opt/mqtt-certs/ca.pem --mode latency --qos 0 --duration 30"
+    for mode in latency throughput; do
+        label="quic-stream_loss${loss}pct_${mode}"
+        echo "[${EXPERIMENT}] ${label}"
+        run_monitored "$EXPERIMENT" "$label" \
+            "--url quic://${BROKER_IP}:14567 --ca-cert /opt/mqtt-certs/ca.pem --mode ${mode} --qos 0 --duration 30 --warmup 5 --payload-size 256"
 
-    label="quic-datagram_loss${loss}pct"
-    echo "[${EXPERIMENT}] ${label}"
-    run_monitored "$EXPERIMENT" "$label" \
-        "--url quic://${BROKER_IP}:14567 --ca-cert /opt/mqtt-certs/ca.pem --quic-datagrams --mode latency --qos 0 --duration 30"
+        label="quic-datagram_loss${loss}pct_${mode}"
+        echo "[${EXPERIMENT}] ${label}"
+        run_monitored "$EXPERIMENT" "$label" \
+            "--url quic://${BROKER_IP}:14567 --ca-cert /opt/mqtt-certs/ca.pem --quic-datagrams --mode ${mode} --qos 0 --duration 30 --warmup 5 --payload-size 256"
+    done
 
     clear_netem
 done
