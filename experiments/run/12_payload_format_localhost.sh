@@ -3,7 +3,14 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+REPO_DIR="$(cd "${ROOT_DIR}/.." && pwd)"
 RESULTS_DIR="${ROOT_DIR}/results"
+MQTTV5="${REPO_DIR}/target/release/mqttv5"
+
+if [ ! -x "$MQTTV5" ]; then
+    echo "release binary not found at ${MQTTV5} — run: cargo build --release -p mqttv5-cli"
+    exit 1
+fi
 
 EXPERIMENT="12_payload_format_localhost"
 FORMATS=(raw json bebytes compressed-json)
@@ -13,11 +20,12 @@ WARMUP=5
 RUNS=5
 QOS=0
 
+BENCH_PORT="${BENCH_PORT:-11883}"
 BROKER_PID=""
 
 start_local_broker() {
-    echo "starting local broker..."
-    mqttv5 broker --allow-anonymous --host 0.0.0.0:1883 --storage-backend memory > /tmp/bench_broker.log 2>&1 &
+    echo "starting local broker on port ${BENCH_PORT}..."
+    "$MQTTV5" broker --allow-anonymous --host "0.0.0.0:${BENCH_PORT}" --storage-backend memory > /tmp/bench_broker.log 2>&1 &
     BROKER_PID=$!
     sleep 2
     echo "broker pid: ${BROKER_PID}"
@@ -47,7 +55,8 @@ for fmt in "${FORMATS[@]}"; do
             for run in $(seq 1 "$RUNS"); do
                 run_label="${label}_run${run}"
                 echo "  run ${run}/${RUNS}..."
-                mqttv5 bench \
+                "$MQTTV5" bench \
+                    --port "$BENCH_PORT" \
                     --mode "$mode" \
                     --duration "$DURATION" \
                     --warmup "$WARMUP" \
