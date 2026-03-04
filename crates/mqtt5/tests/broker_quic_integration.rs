@@ -320,6 +320,7 @@ async fn test_broker_quic_data_per_topic() {
 }
 
 #[tokio::test]
+#[allow(deprecated)]
 async fn test_broker_quic_data_per_subscription() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 

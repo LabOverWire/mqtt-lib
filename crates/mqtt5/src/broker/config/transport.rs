@@ -2,6 +2,15 @@ use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServerDeliveryStrategy {
+    ControlOnly,
+    #[default]
+    PerTopic,
+    PerPublish,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct QuicConfig {
     pub cert_file: PathBuf,

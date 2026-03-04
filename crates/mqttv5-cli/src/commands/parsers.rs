@@ -1,6 +1,7 @@
 use anyhow::Result;
 use mqtt5::transport::StreamStrategy;
 
+#[allow(deprecated)]
 pub fn parse_stream_strategy(s: &str) -> Result<StreamStrategy, String> {
     match s.to_lowercase().as_str() {
         "control-only" | "control" => Ok(StreamStrategy::ControlOnly),
@@ -9,6 +10,20 @@ pub fn parse_stream_strategy(s: &str) -> Result<StreamStrategy, String> {
         "per-subscription" | "subscription" => Ok(StreamStrategy::DataPerSubscription),
         _ => Err(format!(
             "Invalid stream strategy: {s}. Valid: control-only, per-publish, per-topic, per-subscription"
+        )),
+    }
+}
+
+pub fn parse_delivery_strategy(
+    s: &str,
+) -> Result<mqtt5::broker::config::ServerDeliveryStrategy, String> {
+    use mqtt5::broker::config::ServerDeliveryStrategy;
+    match s.to_lowercase().as_str() {
+        "control-only" | "control" => Ok(ServerDeliveryStrategy::ControlOnly),
+        "per-topic" | "topic" => Ok(ServerDeliveryStrategy::PerTopic),
+        "per-publish" | "publish" => Ok(ServerDeliveryStrategy::PerPublish),
+        _ => Err(format!(
+            "Invalid delivery strategy: {s}. Valid: control-only, per-topic, per-publish"
         )),
     }
 }

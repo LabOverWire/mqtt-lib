@@ -298,14 +298,6 @@ impl QuicStreamManager {
         Ok(())
     }
 
-    /// Sends a packet on a subscription-specific stream.
-    ///
-    /// # Errors
-    /// Returns an error if the stream operation or packet encoding fails.
-    pub async fn send_on_subscription_stream(&self, topic: String, packet: Packet) -> Result<()> {
-        self.send_on_topic_stream(topic, packet).await
-    }
-
     pub async fn get_flow_id_for_topic(&self, topic: &str) -> Option<FlowId> {
         let streams = self.topic_streams.lock().await;
         streams.get(topic).map(|info| info.flow_id)
@@ -415,6 +407,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_stream_strategy_variants() {
         assert_eq!(StreamStrategy::ControlOnly, StreamStrategy::default());
         assert_ne!(StreamStrategy::DataPerPublish, StreamStrategy::ControlOnly);
