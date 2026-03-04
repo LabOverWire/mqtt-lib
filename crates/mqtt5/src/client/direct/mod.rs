@@ -421,6 +421,7 @@ impl DirectClientInner {
             dup: false,
             properties: options.properties.clone().into(),
             protocol_version: self.options.protocol_version.as_u8(),
+            stream_id: None,
         };
 
         self.queued_messages.lock().push(publish);
@@ -524,6 +525,7 @@ impl DirectClientInner {
             packet_id,
             properties,
             protocol_version: self.options.protocol_version.as_u8(),
+            stream_id: None,
         };
 
         let mut buf = bytes::BytesMut::new();

@@ -182,6 +182,7 @@ impl MockMqttClient {
                     qos,
                     retain: false,
                     properties: MessageProperties::default(),
+                    stream_id: None,
                 };
                 callback(message);
                 return Ok(());

@@ -447,6 +447,7 @@ mod tests {
             qos: mqtt5::QoS::AtMostOnce,
             retain: false,
             properties: mqtt5::MessageProperties::default(),
+            stream_id: None,
         };
         callback(message);
 

@@ -58,6 +58,7 @@ impl TestPacketBuilder for PublishPacket {
             dup: false,
             properties: Properties::new(),
             protocol_version: 5,
+            stream_id: None,
         }
     }
 }
@@ -126,6 +127,7 @@ pub fn create_test_publish(topic: &str, payload: &[u8], qos: QoS) -> Packet {
         dup: false,
         properties: Properties::new(),
         protocol_version: 5,
+        stream_id: None,
     })
 }
 

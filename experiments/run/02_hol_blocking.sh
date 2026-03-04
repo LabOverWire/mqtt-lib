@@ -5,6 +5,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 EXPERIMENT="02_hol_blocking"
 LOSSES=(0 1 2 5)
 DELAY=25
+TRACE_LOSSES=(0 1)
 
 BROKER_TLS="--tls-cert /opt/mqtt-certs/server.pem --tls-key /opt/mqtt-certs/server.key"
 BROKER_QUIC="--quic-host 0.0.0.0:14567"
@@ -30,6 +31,27 @@ BROKER_DELIVERY[quic-perpub]="--quic-delivery-strategy per-publish"
 
 TRANSPORTS=(tcp quic-control quic-pertopic quic-perpub)
 
+should_trace() {
+    local loss="$1"
+    for tl in "${TRACE_LOSSES[@]}"; do
+        [[ "$loss" == "$tl" ]] && return 0
+    done
+    return 1
+}
+
+collect_traces() {
+    local experiment="$1"
+    local run_label="$2"
+    local remote_dir="$3"
+    local output_dir="${RESULTS_DIR}/${experiment}"
+
+    for csv in messages.csv quinn_stats.csv; do
+        scp -i "$SSH_KEY_PATH" "${SSH_USER}@${CLIENT_IP}:${remote_dir}/${csv}" \
+            "${output_dir}/${run_label}_${csv}" 2>/dev/null || true
+    done
+    ssh_client "rm -rf ${remote_dir}" 2>/dev/null || true
+}
+
 for tname in "${TRANSPORTS[@]}"; do
     url="${TRANSPORT_URLS[$tname]}"
     flags="${TRANSPORT_FLAGS[$tname]}"
@@ -42,8 +64,22 @@ for tname in "${TRANSPORTS[@]}"; do
         apply_netem "$DELAY" "$loss"
         label="${tname}_loss${loss}pct"
         echo "[${EXPERIMENT}] ${label}"
+
+        trace_flag=""
+        if should_trace "$loss"; then
+            trace_flag="--trace-dir /tmp/hol-traces"
+        fi
+
         run_monitored "$EXPERIMENT" "$label" \
-            "--url ${url} ${flags} --mode hol-blocking --topics 8 --duration 30 --warmup 5 --payload-size 512 --rate 5000"
+            "--url ${url} ${flags} --mode hol-blocking --topics 8 --duration 30 --warmup 5 --payload-size 512 --rate 5000 ${trace_flag}"
+
+        if should_trace "$loss"; then
+            output_dir="${RESULTS_DIR}/${EXPERIMENT}"
+            for run in $(seq 1 "$RUNS_PER_DATAPOINT"); do
+                collect_traces "$EXPERIMENT" "${label}_run${run}" "/tmp/hol-traces"
+            done
+        fi
+
         clear_netem
     done
 done

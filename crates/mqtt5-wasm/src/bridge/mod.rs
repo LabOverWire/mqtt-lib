@@ -1,6 +1,7 @@
 mod loop_prevention;
 
 use crate::client::{RustMessage, WasmMqttClient};
+use crate::config::WasmConnectOptions;
 use loop_prevention::WasmLoopPrevention;
 use mqtt5::broker::router::MessageRouter;
 use mqtt5::packet::publish::PublishPacket;
@@ -225,6 +226,15 @@ impl WasmBridgeConnection {
         Ok(())
     }
 
+    /// # Errors
+    /// Returns an error if WebSocket connection or subscription setup fails.
+    pub async fn connect_ws(&self, url: &str, opts: &WasmConnectOptions) -> Result<(), JsValue> {
+        self.client.connect_with_options(url, opts).await?;
+        *self.running.borrow_mut() = true;
+        self.setup_subscriptions().await?;
+        Ok(())
+    }
+
     async fn setup_subscriptions(&self) -> Result<(), JsValue> {
         for mapping in &self.config.topics {
             let direction = mapping.direction();
@@ -404,6 +414,32 @@ impl WasmBridgeManager {
         let connection = WasmBridgeConnection::new(config, self.router.clone())
             .map_err(|e| JsValue::from_str(&e))?;
         connection.connect(port).await?;
+
+        self.bridges.borrow_mut().insert(name, Rc::new(connection));
+        Ok(())
+    }
+
+    /// # Errors
+    /// Returns an error if the bridge already exists or WebSocket connection fails.
+    pub async fn add_bridge_ws(
+        &self,
+        config: WasmBridgeConfig,
+        url: &str,
+        opts: &WasmConnectOptions,
+    ) -> Result<(), JsValue> {
+        let name = config.name.clone();
+
+        if self.bridges.borrow().contains_key(&name) {
+            return Err(JsValue::from_str(&format!(
+                "Bridge '{name}' already exists"
+            )));
+        }
+
+        self.get_or_init_loop_prevention(&config);
+
+        let connection = WasmBridgeConnection::new(config, self.router.clone())
+            .map_err(|e| JsValue::from_str(&e))?;
+        connection.connect_ws(url, opts).await?;
 
         self.bridges.borrow_mut().insert(name, Rc::new(connection));
         Ok(())
