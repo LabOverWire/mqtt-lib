@@ -112,6 +112,7 @@ proptest! {
             packet_id,
             properties: Properties::new(),
             protocol_version: 5,
+            stream_id: None,
         };
 
         // Test encoding
@@ -285,6 +286,7 @@ mod property_invariant_tests {
                 packet_id: None,
                 properties: Properties::new(),
                 protocol_version: 5,
+                stream_id: None,
             };
 
             let mut pub_buffer = Vec::new();

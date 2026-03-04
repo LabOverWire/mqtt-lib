@@ -310,6 +310,7 @@ mod tests {
             packet_id: None,
             properties: Properties::default(),
             protocol_version: 5,
+            stream_id: None,
         };
         let result = handle_publish(publish, &transport, &session, &callback_manager).await;
 
@@ -331,6 +332,7 @@ mod tests {
             packet_id: Some(123),
             properties: Properties::default(),
             protocol_version: 5,
+            stream_id: None,
         };
         assert_eq!(publish.packet_id, Some(123));
     }
@@ -346,6 +348,7 @@ mod tests {
             packet_id: Some(456),
             properties: Properties::default(),
             protocol_version: 5,
+            stream_id: None,
         };
         assert_eq!(publish.packet_id, Some(456));
     }
@@ -363,6 +366,7 @@ mod tests {
             packet_id: Some(100),
             properties: Properties::default(),
             protocol_version: 5,
+            stream_id: None,
         };
         session
             .write()
@@ -453,6 +457,7 @@ mod tests {
             packet_id: None,
             properties: Properties::default(),
             protocol_version: 5,
+            stream_id: None,
         };
         route_message(&publish, &callback_manager);
         tokio::task::yield_now().await;

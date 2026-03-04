@@ -125,6 +125,9 @@ pub struct BenchCommand {
 
     #[arg(long, value_enum, default_value = "raw")]
     pub payload_format: PayloadFormat,
+
+    #[arg(long)]
+    pub trace_dir: Option<PathBuf>,
 }
 
 fn parse_qos(s: &str) -> Result<QoS, String> {
@@ -171,9 +174,10 @@ fn encode_payload(format: PayloadFormat, payload_size: usize, sequence: u32) -> 
     let ts = nanos_as_u64();
     match format {
         PayloadFormat::Raw => {
-            let size = payload_size.max(8);
+            let size = payload_size.max(12);
             let mut buf = vec![0u8; size];
             buf[0..8].copy_from_slice(&ts.to_be_bytes());
+            buf[8..12].copy_from_slice(&sequence.to_be_bytes());
             buf
         }
         PayloadFormat::Json => {
@@ -244,6 +248,41 @@ fn decode_timestamp(format: PayloadFormat, payload: &[u8]) -> u64 {
             if decoder.read_to_end(&mut json_bytes).is_ok() {
                 serde_json::from_slice::<JsonPayload>(&json_bytes)
                     .map(|p| p.ts)
+                    .unwrap_or(0)
+            } else {
+                0
+            }
+        }
+    }
+}
+
+fn decode_sequence(format: PayloadFormat, payload: &[u8]) -> u32 {
+    match format {
+        PayloadFormat::Raw => {
+            if payload.len() >= 12 {
+                u32::from_be_bytes(payload[8..12].try_into().unwrap())
+            } else {
+                0
+            }
+        }
+        PayloadFormat::Json => serde_json::from_slice::<JsonPayload>(payload)
+            .map(|p| p.seq)
+            .unwrap_or(0),
+        PayloadFormat::Bebytes => {
+            if payload.len() >= BEBYTES_HEADER_SIZE {
+                BebytesHeader::try_from_be_bytes(payload)
+                    .map(|(h, _)| h.sequence)
+                    .unwrap_or(0)
+            } else {
+                0
+            }
+        }
+        PayloadFormat::CompressedJson => {
+            let mut decoder = GzDecoder::new(payload);
+            let mut json_bytes = Vec::new();
+            if decoder.read_to_end(&mut json_bytes).is_ok() {
+                serde_json::from_slice::<JsonPayload>(&json_bytes)
+                    .map(|p| p.seq)
                     .unwrap_or(0)
             } else {
                 0
@@ -332,6 +371,30 @@ struct HolBlockingResults {
     window_count: usize,
     total_messages: u64,
     measured_rate: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    inter_arrival_cluster_ratio: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    spike_isolation_ratio: Option<f64>,
+}
+
+struct TraceRecord {
+    topic_idx: u16,
+    seq: u32,
+    publish_ns: u64,
+    receive_ns: u64,
+    latency_us: u64,
+    stream_id: u64,
+}
+
+struct StatsRecord {
+    timestamp_ns: u64,
+    rtt_us: u64,
+    cwnd: u64,
+    lost_packets: u64,
+    congestion_events: u64,
+    sent_packets: u64,
+    stream_data_blocked: u64,
+    data_blocked: u64,
 }
 
 #[derive(Serialize)]
@@ -1054,11 +1117,15 @@ async fn subscribe_hol_topics(
     format: PayloadFormat,
     topic_samples: &[Arc<std::sync::Mutex<Vec<TimestampedSample>>>],
     measure_start_nanos: &Arc<AtomicU64>,
+    trace_records: Option<&Arc<std::sync::Mutex<Vec<TraceRecord>>>>,
 ) -> Result<()> {
     for (i, samples_vec) in topic_samples.iter().enumerate() {
         let topic_filter = format!("bench/hol/{i}");
         let samples_clone = Arc::clone(samples_vec);
         let start_nanos = Arc::clone(measure_start_nanos);
+        let trace_clone = trace_records.map(Arc::clone);
+        #[allow(clippy::cast_possible_truncation)]
+        let topic_idx = i as u16;
         sub_client
             .subscribe(&topic_filter, move |msg| {
                 let sent_nanos = decode_timestamp(format, &msg.payload);
@@ -1075,6 +1142,17 @@ async fn subscribe_hol_topics(
                         received_at_us,
                         latency_us,
                     });
+                    if let Some(ref traces) = trace_clone {
+                        let seq = decode_sequence(format, &msg.payload);
+                        traces.lock().unwrap().push(TraceRecord {
+                            topic_idx,
+                            seq,
+                            publish_ns: sent_nanos,
+                            receive_ns: now_nanos,
+                            latency_us,
+                            stream_id: msg.stream_id.unwrap_or(0),
+                        });
+                    }
                 }
             })
             .await
@@ -1084,22 +1162,252 @@ async fn subscribe_hol_topics(
     Ok(())
 }
 
+fn spawn_quinn_stats_sampler(
+    conn: Arc<mqtt5::quinn::Connection>,
+    records: Arc<std::sync::Mutex<Vec<StatsRecord>>>,
+    running: Arc<std::sync::atomic::AtomicBool>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_millis(100));
+        while running.load(Ordering::Relaxed) {
+            interval.tick().await;
+            let stats = conn.stats();
+            let rtt = conn.rtt();
+            #[allow(clippy::cast_possible_truncation)]
+            let rtt_us = rtt.as_micros() as u64;
+            records.lock().unwrap().push(StatsRecord {
+                timestamp_ns: nanos_as_u64(),
+                rtt_us,
+                cwnd: stats.path.cwnd,
+                lost_packets: stats.path.lost_packets,
+                congestion_events: stats.path.congestion_events,
+                sent_packets: stats.path.sent_packets,
+                stream_data_blocked: stats.frame_rx.stream_data_blocked,
+                data_blocked: stats.frame_rx.data_blocked,
+            });
+        }
+    })
+}
+
+fn write_trace_csv(dir: &std::path::Path, records: &[TraceRecord]) -> Result<()> {
+    std::fs::create_dir_all(dir)?;
+    let path = dir.join("messages.csv");
+    let mut out = std::io::BufWriter::new(std::fs::File::create(&path)?);
+    writeln!(
+        out,
+        "topic_idx,seq,publish_ns,receive_ns,latency_us,stream_id"
+    )?;
+    for r in records {
+        writeln!(
+            out,
+            "{},{},{},{},{},{}",
+            r.topic_idx, r.seq, r.publish_ns, r.receive_ns, r.latency_us, r.stream_id
+        )?;
+    }
+    eprintln!(
+        "wrote {} trace records to {}",
+        records.len(),
+        path.display()
+    );
+    Ok(())
+}
+
+fn write_stats_csv(dir: &std::path::Path, records: &[StatsRecord]) -> Result<()> {
+    std::fs::create_dir_all(dir)?;
+    let path = dir.join("quinn_stats.csv");
+    let mut out = std::io::BufWriter::new(std::fs::File::create(&path)?);
+    writeln!(out, "timestamp_ns,rtt_us,cwnd,lost_packets,congestion_events,sent_packets,stream_data_blocked,data_blocked")?;
+    for r in records {
+        writeln!(
+            out,
+            "{},{},{},{},{},{},{},{}",
+            r.timestamp_ns,
+            r.rtt_us,
+            r.cwnd,
+            r.lost_packets,
+            r.congestion_events,
+            r.sent_packets,
+            r.stream_data_blocked,
+            r.data_blocked
+        )?;
+    }
+    eprintln!(
+        "wrote {} stats records to {}",
+        records.len(),
+        path.display()
+    );
+    Ok(())
+}
+
+fn compute_inter_arrival_cluster_ratio(records: &[TraceRecord]) -> f64 {
+    if records.len() < 2 {
+        return 0.0;
+    }
+    let mut sorted: Vec<&TraceRecord> = records.iter().collect();
+    sorted.sort_by_key(|r| r.receive_ns);
+
+    let threshold_ns: u64 = 100_000;
+    let mut clustered: u64 = 0;
+    let mut cross_topic_pairs: u64 = 0;
+
+    for i in 0..sorted.len() {
+        for j in (i + 1)..sorted.len() {
+            let delta = sorted[j].receive_ns.saturating_sub(sorted[i].receive_ns);
+            if delta > threshold_ns {
+                break;
+            }
+            if sorted[i].topic_idx != sorted[j].topic_idx {
+                cross_topic_pairs += 1;
+                clustered += 1;
+            }
+        }
+    }
+
+    if cross_topic_pairs == 0 {
+        return 0.0;
+    }
+
+    let total_cross = total_cross_topic_adjacent_pairs(&sorted, threshold_ns);
+    if total_cross == 0 {
+        return 0.0;
+    }
+    as_f64_lossy(clustered) / as_f64_lossy(total_cross)
+}
+
+fn total_cross_topic_adjacent_pairs(sorted: &[&TraceRecord], window_ns: u64) -> u64 {
+    let mut count: u64 = 0;
+    for i in 0..sorted.len() {
+        for j in (i + 1)..sorted.len() {
+            let delta = sorted[j].receive_ns.saturating_sub(sorted[i].receive_ns);
+            if delta > window_ns {
+                break;
+            }
+            if sorted[i].topic_idx != sorted[j].topic_idx {
+                count += 1;
+            }
+        }
+    }
+    count
+}
+
+struct SpikeEvent {
+    topic: u16,
+    receive_ns: u64,
+}
+
+fn compute_spike_isolation_ratio(records: &[TraceRecord], num_topics: u16) -> f64 {
+    let mut per_topic: Vec<Vec<(u64, u64)>> = vec![Vec::new(); num_topics as usize];
+    for r in records {
+        if (r.topic_idx as usize) < per_topic.len() {
+            per_topic[r.topic_idx as usize].push((r.receive_ns, r.latency_us));
+        }
+    }
+
+    for topic_data in &mut per_topic {
+        topic_data.sort_by_key(|(ns, _)| *ns);
+    }
+
+    let spike_window: usize = 50;
+    let spike_threshold: f64 = 2.0;
+    let co_occur_window_ns: u64 = 10_000_000;
+
+    let mut all_spikes: Vec<SpikeEvent> = Vec::new();
+
+    for (topic_idx, topic_data) in per_topic.iter().enumerate() {
+        if topic_data.len() < spike_window {
+            continue;
+        }
+        let latencies: Vec<f64> = topic_data.iter().map(|(_, l)| as_f64_lossy(*l)).collect();
+
+        for i in spike_window..latencies.len() {
+            let window = &latencies[i.saturating_sub(spike_window)..i];
+            let mut window_sorted: Vec<f64> = window.to_vec();
+            window_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let median = window_sorted[window_sorted.len() / 2];
+
+            if median > 0.0 && latencies[i] > median * spike_threshold {
+                #[allow(clippy::cast_possible_truncation)]
+                all_spikes.push(SpikeEvent {
+                    topic: topic_idx as u16,
+                    receive_ns: topic_data[i].0,
+                });
+            }
+        }
+    }
+
+    if all_spikes.is_empty() {
+        return 0.0;
+    }
+
+    all_spikes.sort_by_key(|s| s.receive_ns);
+
+    let mut co_occurring: u64 = 0;
+    let total_spikes = all_spikes.len() as u64;
+
+    for i in 0..all_spikes.len() {
+        let spike = &all_spikes[i];
+        let has_co_spike = all_spikes.iter().any(|other| {
+            other.topic != spike.topic
+                && other.receive_ns.abs_diff(spike.receive_ns) <= co_occur_window_ns
+        });
+        if has_co_spike {
+            co_occurring += 1;
+        }
+    }
+
+    as_f64_lossy(co_occurring) / as_f64_lossy(total_spikes)
+}
+
+fn finalize_hol_traces(
+    results: &mut HolBlockingResults,
+    num_topics: usize,
+    trace_records: Option<&Arc<std::sync::Mutex<Vec<TraceRecord>>>>,
+    stats_records: Option<&Arc<std::sync::Mutex<Vec<StatsRecord>>>>,
+    trace_dir: Option<&std::path::PathBuf>,
+) -> Result<()> {
+    if let Some(traces) = trace_records {
+        let records = traces.lock().unwrap();
+        #[allow(clippy::cast_possible_truncation)]
+        let ntopics = num_topics as u16;
+        results.inter_arrival_cluster_ratio = Some(compute_inter_arrival_cluster_ratio(&records));
+        results.spike_isolation_ratio = Some(compute_spike_isolation_ratio(&records, ntopics));
+        eprintln!(
+            "  inter_arrival_cluster_ratio: {:.4}, spike_isolation_ratio: {:.4}",
+            results.inter_arrival_cluster_ratio.unwrap_or(0.0),
+            results.spike_isolation_ratio.unwrap_or(0.0),
+        );
+    }
+
+    if let Some(dir) = trace_dir {
+        if let Some(traces) = trace_records {
+            write_trace_csv(dir, &traces.lock().unwrap())?;
+        }
+        if let Some(stats) = stats_records {
+            write_stats_csv(dir, &stats.lock().unwrap())?;
+        }
+    }
+    Ok(())
+}
+
 async fn run_hol_blocking(cmd: BenchCommand) -> Result<()> {
     use std::sync::Mutex;
 
     let url = broker_url(&cmd);
     let base_id = base_client_id(&cmd, "hol");
     let num_topics = cmd.topics;
-    let payload_size = cmd.payload_size.max(8);
+    let payload_size = cmd.payload_size.max(12);
+    let trace_dir = cmd.trace_dir.clone();
 
     eprintln!("connecting to {url} for HOL blocking test with {num_topics} topics...");
-
     let pub_client = connect_client(format!("{base_id}-pub"), &url, &cmd).await?;
     let sub_client = connect_client(format!("{base_id}-sub"), &url, &cmd).await?;
 
     let topic_samples: Vec<Arc<Mutex<Vec<TimestampedSample>>>> = (0..num_topics)
         .map(|_| Arc::new(Mutex::new(Vec::with_capacity(100_000))))
         .collect();
+    let trace_records: Option<Arc<Mutex<Vec<TraceRecord>>>> = trace_dir
+        .as_ref()
+        .map(|_| Arc::new(Mutex::new(Vec::with_capacity(200_000))));
 
     let format = cmd.payload_format;
     let measure_start_nanos = Arc::new(AtomicU64::new(0));
@@ -1109,6 +1417,7 @@ async fn run_hol_blocking(cmd: BenchCommand) -> Result<()> {
         format,
         &topic_samples,
         &measure_start_nanos,
+        trace_records.as_ref(),
     )
     .await?;
 
@@ -1119,7 +1428,6 @@ async fn run_hol_blocking(cmd: BenchCommand) -> Result<()> {
     } else {
         None
     };
-
     let rate_label = if cmd.rate > 0 {
         format!("{} msg/s", cmd.rate)
     } else {
@@ -1144,17 +1452,33 @@ async fn run_hol_blocking(cmd: BenchCommand) -> Result<()> {
     for handle in warmup_handles {
         handle.await.ok();
     }
-
     for sv in &topic_samples {
         sv.lock().unwrap().clear();
     }
+    if let Some(ref traces) = trace_records {
+        traces.lock().unwrap().clear();
+    }
     published.store(0, Ordering::SeqCst);
 
-    eprintln!("measuring for {}s at {rate_label}...", cmd.duration);
+    let stats_records: Option<Arc<Mutex<Vec<StatsRecord>>>> = trace_dir.as_ref().map(|_| {
+        #[allow(clippy::cast_possible_truncation)]
+        let cap = (cmd.duration * 10) as usize + 10;
+        Arc::new(Mutex::new(Vec::with_capacity(cap)))
+    });
+
     running.store(true, Ordering::SeqCst);
+    let stats_handle = if let Some(ref stats) = stats_records {
+        sub_client.quic_connection().await.map(|conn| {
+            eprintln!("  quinn stats sampler active (100ms interval)");
+            spawn_quinn_stats_sampler(conn, Arc::clone(stats), Arc::clone(&running))
+        })
+    } else {
+        None
+    };
+
+    eprintln!("measuring for {}s at {rate_label}...", cmd.duration);
     measure_start_nanos.store(nanos_as_u64(), Ordering::SeqCst);
     let measure_wall = Instant::now();
-
     let measure_handles = spawn_hol_publishers(
         &pub_client,
         num_topics,
@@ -1169,13 +1493,22 @@ async fn run_hol_blocking(cmd: BenchCommand) -> Result<()> {
     for handle in measure_handles {
         handle.await.ok();
     }
+    if let Some(handle) = stats_handle {
+        handle.await.ok();
+    }
 
     let elapsed = measure_wall.elapsed().as_secs_f64();
     let total_published = published.load(Ordering::Relaxed);
-
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    let results = gather_hol_results(&topic_samples, elapsed);
+    let mut results = gather_hol_results(&topic_samples, elapsed);
+    finalize_hol_traces(
+        &mut results,
+        num_topics,
+        trace_records.as_ref(),
+        stats_records.as_ref(),
+        trace_dir.as_ref(),
+    )?;
 
     eprintln!(
         "  published: {total_published}, received: {}, rate: {:.0} msg/s",
@@ -1194,7 +1527,6 @@ async fn run_hol_blocking(cmd: BenchCommand) -> Result<()> {
         config: bench_config(&cmd, &url),
         results: BenchResults::HolBlocking(results),
     };
-
     println!("{}", serde_json::to_string_pretty(&output)?);
 
     pub_client.disconnect().await.ok();
@@ -1285,6 +1617,8 @@ fn gather_hol_results(
         window_count,
         total_messages,
         measured_rate,
+        inter_arrival_cluster_ratio: None,
+        spike_isolation_ratio: None,
     }
 }
 

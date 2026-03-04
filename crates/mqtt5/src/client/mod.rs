@@ -757,6 +757,10 @@ impl MqttClient {
         let mut inner = self.inner.write().await;
         inner.disconnect_with_packet(false).await
     }
+
+    pub async fn quic_connection(&self) -> Option<Arc<quinn::Connection>> {
+        self.inner.read().await.quic_connection.clone()
+    }
 }
 
 #[allow(clippy::manual_async_fn)]

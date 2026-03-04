@@ -617,6 +617,7 @@ mod tests {
             packet_id: Some(123),
             properties: Properties::new(),
             protocol_version: 5,
+            stream_id: None,
         };
 
         transport
@@ -737,6 +738,7 @@ mod tests {
             packet_id: None,
             properties: Properties::new(),
             protocol_version: 5,
+            stream_id: None,
         };
 
         transport

@@ -144,6 +144,7 @@ pub(super) async fn handle_publish_with_ack(
         }
     }
 
+    publish.stream_id = flow_id.map(|f| f.raw());
     let _ = callback_manager.dispatch(&publish);
 
     Ok(())

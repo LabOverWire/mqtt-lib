@@ -798,6 +798,7 @@ mod tests {
             dup: false,
             properties: Properties::default(),
             protocol_version: 5,
+            stream_id: None,
         };
 
         session.store_unacked_publish(packet.clone()).await.unwrap();
@@ -1051,6 +1052,7 @@ mod tests {
             dup: false,
             properties: Properties::default(),
             protocol_version: 5,
+            stream_id: None,
         };
 
         assert!(session.store_unacked_publish(packet).await.is_err());
@@ -1069,6 +1071,7 @@ mod tests {
             dup: false,
             properties: Properties::default(),
             protocol_version: 5,
+            stream_id: None,
         };
 
         session.store_unacked_publish(packet).await.unwrap();
@@ -1117,6 +1120,7 @@ mod tests {
             dup: false,
             properties: Properties::default(),
             protocol_version: 5,
+            stream_id: None,
         };
 
         session.store_retained_message(&packet1).await;
@@ -1135,6 +1139,7 @@ mod tests {
             dup: false,
             properties: Properties::default(),
             protocol_version: 5,
+            stream_id: None,
         };
 
         session.store_retained_message(&packet2).await;
@@ -1157,6 +1162,7 @@ mod tests {
             dup: false,
             properties: Properties::default(),
             protocol_version: 5,
+            stream_id: None,
         };
 
         let packet2 = PublishPacket {
@@ -1168,6 +1174,7 @@ mod tests {
             dup: false,
             properties: Properties::default(),
             protocol_version: 5,
+            stream_id: None,
         };
 
         session.store_retained_message(&packet1).await;
@@ -1312,6 +1319,7 @@ mod tests {
             dup: false,
             properties: Properties::default(),
             protocol_version: 5,
+            stream_id: None,
         };
 
         session.store_unacked_publish(packet).await.unwrap();
