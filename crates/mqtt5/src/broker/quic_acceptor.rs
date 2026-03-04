@@ -159,6 +159,11 @@ impl QuicAcceptorConfig {
         ));
         transport_config.datagram_receive_buffer_size(Some(65536));
         transport_config.datagram_send_buffer_size(65536);
+
+        transport_config.stream_receive_window(262_144u32.into());
+        transport_config.receive_window(1_048_576u32.into());
+        transport_config.send_window(1_048_576);
+
         server_config.transport_config(Arc::new(transport_config));
 
         Ok(server_config)
@@ -562,6 +567,7 @@ async fn run_quic_handler_inner(
     let stream = QuicStreamWrapper::new(send, recv, peer_addr);
     let transport = BrokerTransport::quic(stream);
 
+    let delivery_strategy = config.server_delivery_strategy;
     let handler = ClientHandler::new_with_external_packets(
         transport,
         peer_addr,
@@ -575,6 +581,7 @@ async fn run_quic_handler_inner(
         Some(packet_rx),
     )
     .with_quic_connection(connection.clone())
+    .with_server_delivery_strategy(delivery_strategy)
     .with_skip_bridge_forwarding(skip_bridge_forwarding);
 
     let handler_label = label;

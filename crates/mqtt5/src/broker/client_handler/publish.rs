@@ -681,12 +681,18 @@ impl ClientHandler {
 
     #[cfg(not(target_arch = "wasm32"))]
     async fn write_publish_bytes(&mut self, topic: &str) -> Result<()> {
+        use crate::broker::config::ServerDeliveryStrategy;
         use crate::broker::server_stream_manager::ServerStreamManager;
 
         if self.quic_connection.is_some() {
+            if self.server_delivery_strategy == ServerDeliveryStrategy::ControlOnly {
+                return self.transport.write(&self.write_buffer).await;
+            }
             if self.server_stream_manager.is_none() {
                 let conn = self.quic_connection.clone().unwrap();
-                self.server_stream_manager = Some(ServerStreamManager::new(conn));
+                self.server_stream_manager = Some(
+                    ServerStreamManager::new(conn).with_strategy(self.server_delivery_strategy),
+                );
             }
             self.server_stream_manager
                 .as_mut()

@@ -31,6 +31,8 @@ use tokio::time::{interval, timeout};
 use tracing::{debug, info, warn};
 
 #[cfg(not(target_arch = "wasm32"))]
+use crate::broker::config::ServerDeliveryStrategy;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::broker::server_stream_manager::ServerStreamManager;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -85,6 +87,8 @@ pub struct ClientHandler {
     pub(super) quic_connection: Option<Arc<quinn::Connection>>,
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) server_stream_manager: Option<ServerStreamManager>,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) server_delivery_strategy: ServerDeliveryStrategy,
 }
 
 impl ClientHandler {
@@ -169,6 +173,8 @@ impl ClientHandler {
             quic_connection: None,
             #[cfg(not(target_arch = "wasm32"))]
             server_stream_manager: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            server_delivery_strategy: ServerDeliveryStrategy::default(),
         }
     }
 
@@ -182,6 +188,13 @@ impl ClientHandler {
     #[must_use]
     pub fn with_quic_connection(mut self, conn: Arc<quinn::Connection>) -> Self {
         self.quic_connection = Some(conn);
+        self
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn with_server_delivery_strategy(mut self, strategy: ServerDeliveryStrategy) -> Self {
+        self.server_delivery_strategy = strategy;
         self
     }
 

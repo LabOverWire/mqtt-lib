@@ -384,6 +384,7 @@ async fn test_quic_data_per_topic_strategy() {
 
 #[tokio::test]
 #[ignore = "requires EMQX broker with QUIC support"]
+#[allow(deprecated)]
 async fn test_quic_data_per_subscription_strategy() {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let client_id = test_client_id("quic-data-per-subscription");

@@ -371,12 +371,13 @@ fn transport_from_url(url: &str) -> String {
     url.split("://").next().unwrap_or("tcp").to_string()
 }
 
+#[allow(deprecated)]
 fn strategy_display(s: mqtt5::transport::StreamStrategy) -> String {
     match s {
         mqtt5::transport::StreamStrategy::ControlOnly => "control-only".to_string(),
         mqtt5::transport::StreamStrategy::DataPerPublish => "per-publish".to_string(),
-        mqtt5::transport::StreamStrategy::DataPerTopic => "per-topic".to_string(),
-        mqtt5::transport::StreamStrategy::DataPerSubscription => "per-subscription".to_string(),
+        mqtt5::transport::StreamStrategy::DataPerTopic
+        | mqtt5::transport::StreamStrategy::DataPerSubscription => "per-topic".to_string(),
     }
 }
 

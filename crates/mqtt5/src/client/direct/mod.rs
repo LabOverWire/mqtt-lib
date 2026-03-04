@@ -656,28 +656,16 @@ impl DirectClientInner {
                         .await?;
                     return Ok(());
                 }
-                StreamStrategy::DataPerTopic => {
+                #[allow(deprecated)]
+                StreamStrategy::DataPerTopic | StreamStrategy::DataPerSubscription => {
                     tracing::debug!(
                         topic = %publish.topic_name,
                         qos = ?qos,
-                        "Using topic-specific QUIC stream for PUBLISH (DataPerTopic)"
+                        strategy = ?manager.strategy(),
+                        "Using topic-specific QUIC stream for PUBLISH"
                     );
                     manager
                         .send_on_topic_stream(publish.topic_name.clone(), Packet::Publish(publish))
-                        .await?;
-                    return Ok(());
-                }
-                StreamStrategy::DataPerSubscription => {
-                    tracing::debug!(
-                        topic = %publish.topic_name,
-                        qos = ?qos,
-                        "Using subscription-based QUIC stream for PUBLISH (DataPerSubscription)"
-                    );
-                    manager
-                        .send_on_subscription_stream(
-                            publish.topic_name.clone(),
-                            Packet::Publish(publish),
-                        )
                         .await?;
                     return Ok(());
                 }
