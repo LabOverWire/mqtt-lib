@@ -1436,29 +1436,25 @@ async fn run_hol_blocking(cmd: BenchCommand) -> Result<()> {
 
     let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let published = Arc::new(AtomicU64::new(0));
-
-    eprintln!("warming up for {}s at {rate_label}...", cmd.warmup);
-    let warmup_handles = spawn_hol_publishers(
-        &pub_client,
+    let pub_cfg = HolPublishConfig {
         num_topics,
         format,
         payload_size,
         per_topic_interval_us,
+        qos: cmd.qos,
+    };
+
+    eprintln!("warming up for {}s at {rate_label}...", cmd.warmup);
+    run_hol_warmup(
+        &pub_client,
+        &pub_cfg,
         &running,
         &published,
-    );
-    tokio::time::sleep(Duration::from_secs(cmd.warmup)).await;
-    running.store(false, Ordering::SeqCst);
-    for handle in warmup_handles {
-        handle.await.ok();
-    }
-    for sv in &topic_samples {
-        sv.lock().unwrap().clear();
-    }
-    if let Some(ref traces) = trace_records {
-        traces.lock().unwrap().clear();
-    }
-    published.store(0, Ordering::SeqCst);
+        &topic_samples,
+        trace_records.as_ref(),
+        cmd.warmup,
+    )
+    .await;
 
     let stats_records: Option<Arc<Mutex<Vec<StatsRecord>>>> = trace_dir.as_ref().map(|_| {
         #[allow(clippy::cast_possible_truncation)]
@@ -1479,15 +1475,7 @@ async fn run_hol_blocking(cmd: BenchCommand) -> Result<()> {
     eprintln!("measuring for {}s at {rate_label}...", cmd.duration);
     measure_start_nanos.store(nanos_as_u64(), Ordering::SeqCst);
     let measure_wall = Instant::now();
-    let measure_handles = spawn_hol_publishers(
-        &pub_client,
-        num_topics,
-        format,
-        payload_size,
-        per_topic_interval_us,
-        &running,
-        &published,
-    );
+    let measure_handles = spawn_hol_publishers(&pub_client, &pub_cfg, &running, &published);
     tokio::time::sleep(Duration::from_secs(cmd.duration)).await;
     running.store(false, Ordering::SeqCst);
     for handle in measure_handles {
@@ -1501,13 +1489,44 @@ async fn run_hol_blocking(cmd: BenchCommand) -> Result<()> {
     let total_published = published.load(Ordering::Relaxed);
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    let mut results = gather_hol_results(&topic_samples, elapsed);
-    finalize_hol_traces(
-        &mut results,
+    let results = finalize_and_report_hol(
+        &topic_samples,
+        elapsed,
+        total_published,
         num_topics,
         trace_records.as_ref(),
         stats_records.as_ref(),
         trace_dir.as_ref(),
+    )?;
+
+    let output = BenchOutput {
+        mode: "hol-blocking".to_string(),
+        config: bench_config(&cmd, &url),
+        results: BenchResults::HolBlocking(results),
+    };
+    println!("{}", serde_json::to_string_pretty(&output)?);
+
+    pub_client.disconnect().await.ok();
+    sub_client.disconnect().await.ok();
+    Ok(())
+}
+
+fn finalize_and_report_hol(
+    topic_samples: &[Arc<std::sync::Mutex<Vec<TimestampedSample>>>],
+    elapsed: f64,
+    total_published: u64,
+    num_topics: usize,
+    trace_records: Option<&Arc<std::sync::Mutex<Vec<TraceRecord>>>>,
+    stats_records: Option<&Arc<std::sync::Mutex<Vec<StatsRecord>>>>,
+    trace_dir: Option<&PathBuf>,
+) -> Result<HolBlockingResults> {
+    let mut results = gather_hol_results(topic_samples, elapsed);
+    finalize_hol_traces(
+        &mut results,
+        num_topics,
+        trace_records,
+        stats_records,
+        trace_dir,
     )?;
 
     eprintln!(
@@ -1522,39 +1541,66 @@ async fn run_hol_blocking(cmd: BenchCommand) -> Result<()> {
         results.window_size_ms
     );
 
-    let output = BenchOutput {
-        mode: "hol-blocking".to_string(),
-        config: bench_config(&cmd, &url),
-        results: BenchResults::HolBlocking(results),
-    };
-    println!("{}", serde_json::to_string_pretty(&output)?);
-
-    pub_client.disconnect().await.ok();
-    sub_client.disconnect().await.ok();
-    Ok(())
+    Ok(results)
 }
 
-fn spawn_hol_publishers(
+async fn run_hol_warmup(
     pub_client: &MqttClient,
+    pub_cfg: &HolPublishConfig,
+    running: &Arc<std::sync::atomic::AtomicBool>,
+    published: &Arc<AtomicU64>,
+    topic_samples: &[Arc<std::sync::Mutex<Vec<TimestampedSample>>>],
+    trace_records: Option<&Arc<std::sync::Mutex<Vec<TraceRecord>>>>,
+    warmup_secs: u64,
+) {
+    let warmup_handles = spawn_hol_publishers(pub_client, pub_cfg, running, published);
+    tokio::time::sleep(Duration::from_secs(warmup_secs)).await;
+    running.store(false, Ordering::SeqCst);
+    for handle in warmup_handles {
+        handle.await.ok();
+    }
+    for sv in topic_samples {
+        sv.lock().unwrap().clear();
+    }
+    if let Some(traces) = trace_records {
+        traces.lock().unwrap().clear();
+    }
+    published.store(0, Ordering::SeqCst);
+}
+
+struct HolPublishConfig {
     num_topics: usize,
     format: PayloadFormat,
     payload_size: usize,
     per_topic_interval_us: Option<u64>,
+    qos: QoS,
+}
+
+fn spawn_hol_publishers(
+    pub_client: &MqttClient,
+    cfg: &HolPublishConfig,
     running: &Arc<std::sync::atomic::AtomicBool>,
     published: &Arc<AtomicU64>,
 ) -> Vec<tokio::task::JoinHandle<()>> {
-    let mut handles = Vec::with_capacity(num_topics);
-    for topic_idx in 0..num_topics {
+    let mut handles = Vec::with_capacity(cfg.num_topics);
+    for topic_idx in 0..cfg.num_topics {
         let client = pub_client.clone();
         let running = Arc::clone(running);
         let published = Arc::clone(published);
+        let format = cfg.format;
+        let payload_size = cfg.payload_size;
+        let per_topic_interval_us = cfg.per_topic_interval_us;
+        let qos = cfg.qos;
 
         handles.push(tokio::spawn(async move {
             let topic = format!("bench/hol/{topic_idx}");
             let mut seq = 0u32;
             while running.load(Ordering::Relaxed) {
                 let payload = encode_payload(format, payload_size, seq);
-                if client.publish(&topic, payload).await.is_ok() {
+                if publish_message(&client, &topic, &payload, qos)
+                    .await
+                    .is_ok()
+                {
                     published.fetch_add(1, Ordering::Relaxed);
                 }
                 seq = seq.wrapping_add(1);

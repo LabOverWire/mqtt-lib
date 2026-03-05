@@ -2,10 +2,9 @@
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
-EXPERIMENT="02_hol_blocking"
-LOSSES=(0 1 2 5)
-DELAY=25
-TRACE_LOSSES=(0 1)
+EXPERIMENT="02d_hol_rtt_boundary"
+DELAYS=(15 20)
+LOSS=1
 
 BROKER_TLS="--tls-cert /opt/mqtt-certs/server.pem --tls-key /opt/mqtt-certs/server.key"
 BROKER_QUIC="--quic-host 0.0.0.0:14567"
@@ -31,14 +30,6 @@ BROKER_DELIVERY[quic-perpub]="--quic-delivery-strategy per-publish"
 
 TRANSPORTS=(tcp quic-control quic-pertopic quic-perpub)
 
-should_trace() {
-    local loss="$1"
-    for tl in "${TRACE_LOSSES[@]}"; do
-        [[ "$loss" == "$tl" ]] && return 0
-    done
-    return 1
-}
-
 collect_traces() {
     local experiment="$1"
     local run_label="$2"
@@ -60,17 +51,12 @@ for tname in "${TRANSPORTS[@]}"; do
     stop_broker 2>/dev/null || true
     start_broker "${BROKER_TLS} ${BROKER_QUIC} ${delivery}"
 
-    for loss in "${LOSSES[@]}"; do
-        apply_netem "$DELAY" "$loss"
-        label="${tname}_loss${loss}pct"
+    for delay in "${DELAYS[@]}"; do
+        apply_netem "$delay" "$LOSS"
+        label="${tname}_rtt${delay}ms"
         echo "[${EXPERIMENT}] ${label}"
 
-        trace_flag=""
-        if should_trace "$loss"; then
-            trace_flag="--trace-dir /tmp/hol-traces"
-        fi
-
-        bench_args="--url ${url} ${flags} --mode hol-blocking --topics 8 --duration 30 --warmup 5 --payload-size 512 --rate 5000 ${trace_flag}"
+        bench_args="--url ${url} ${flags} --mode hol-blocking --topics 8 --duration 30 --warmup 5 --payload-size 512 --rate 5000 --trace-dir /tmp/hol-traces"
         output_dir="${RESULTS_DIR}/${EXPERIMENT}"
         mkdir -p "$output_dir"
 
@@ -81,11 +67,7 @@ for tname in "${TRANSPORTS[@]}"; do
             run_bench "$EXPERIMENT" "$run_label" "$bench_args"
             stop_client_monitor "${output_dir}/${run_label}_client_resources.csv"
             stop_monitor "${output_dir}/${run_label}_broker_resources.csv"
-
-            if should_trace "$loss"; then
-                collect_traces "$EXPERIMENT" "$run_label" "/tmp/hol-traces"
-            fi
-
+            collect_traces "$EXPERIMENT" "$run_label" "/tmp/hol-traces"
             sleep 5
         done
 
@@ -94,4 +76,4 @@ for tname in "${TRANSPORTS[@]}"; do
 done
 
 stop_broker
-echo "experiment ${EXPERIMENT} complete"
+echo "experiment ${EXPERIMENT} (RTT boundary 15/20ms) complete"
