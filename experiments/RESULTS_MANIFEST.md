@@ -39,6 +39,25 @@ Active results in `experiments/results/`. Archived results in `experiments/archi
 - **Status**: COMPLETE
 - **Cross-references**: 8-topic data comes from exp 02 (loss1pct), not duplicated here
 
+## 02d_hol_rtt_boundary
+
+- **Experiment**: RTT boundary for QUIC per-topic stream isolation (15/20ms)
+- **Date**: 2026-03-05
+- **Branch**: `payload-format-experiments`
+- **Conditions**: 4 transports × 2 RTTs (15/20ms) × 5 runs = 40 JSON files
+- **Trace data**: all runs include traces
+- **Status**: COMPLETE
+- **Cross-references**: Combined with exp02 (25ms) and exp02b (10/50/100ms) gives 6-point RTT sweep
+
+## 02e_hol_qos1
+
+- **Experiment**: HOL blocking with QoS 1 acknowledged delivery
+- **Date**: 2026-03-05
+- **Branch**: `payload-format-experiments`
+- **Conditions**: 2 transports (tcp, quic-pertopic) × 1 condition (25ms/1%) × 5 runs = 10 JSON files
+- **Trace data**: all runs include traces
+- **Status**: COMPLETE
+
 ## 03_throughput_under_loss
 
 - **Experiment**: Message throughput degradation under packet loss

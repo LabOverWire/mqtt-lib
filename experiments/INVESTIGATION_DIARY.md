@@ -14,8 +14,32 @@ New entries on top, beneath the planned work list.
 - [x] Phase 6C: Topic count scaling — 2, 4, 16, 32 topics at 25ms/1% loss
 - [x] Phase 7: Deep trace analysis and cross-experiment synthesis
 - [x] Phase 8: Publication preparation — analysis scripts, figures, archive
-- [ ] Phase 9: RTT boundary experiment (02d) — 15ms/20ms at 1% loss
-- [ ] Phase 10: QoS 1 HOL experiment (02e) — tcp + per-topic at 25ms/1%
+- [x] Phase 9: RTT boundary experiment (02d) — 15ms/20ms at 1% loss
+- [x] Phase 10: QoS 1 HOL experiment (02e) — tcp + per-topic at 25ms/1%
+
+---
+
+## 2026-03-05 — Phase 10: QoS 1 HOL experiment (02e)
+
+**What**: Ran HOL blocking experiment with QoS 1 (acknowledged delivery) at reference conditions (25ms RTT, 1% loss, 8 topics) for TCP and QUIC per-topic.
+
+**Results**: 10 JSON files + 40 CSV files in `results/02e_hol_qos1/`
+
+---
+
+## 2026-03-05 — Phase 9: RTT boundary experiment (02d)
+
+**What**: Pinpointed the RTT threshold where QUIC per-topic stream isolation breaks down. Tested 15ms and 20ms RTT (1% loss, 8 topics, all 4 transports) to fill the gap between 10ms (isolation fails) and 25ms (isolation succeeds).
+
+**Results**: 40 JSON files + 160 CSV files in `results/02d_hol_rtt_boundary/`
+
+**Key findings** (from regenerated publication_stats.py):
+- **15ms RTT**: per-topic spike_iso = 0.967 (isolation still fails, similar to 10ms)
+- **20ms RTT**: per-topic spike_iso = 0.610 (transition zone — partial isolation)
+- **25ms RTT**: per-topic spike_iso = 0.000 (isolation succeeds, from exp02)
+- Transition happens between 20-25ms RTT, consistent with QUIC loss detection timer (~PTO ≈ 2×RTT)
+- TCP and ctrl remain high (0.79-0.99) at all RTT values, as expected
+- Merged RTT sweep now has 6 data points: 10/15/20/25/50/100ms
 
 ---
 
