@@ -1,5 +1,6 @@
 use crate::bridge::{WasmBridgeConfig, WasmBridgeManager};
 use crate::client_handler::WasmClientHandler;
+use crate::config::WasmConnectOptions;
 use mqtt5::broker::acl::{AclRule, Permission};
 use mqtt5::broker::auth::{ComprehensiveAuthProvider, PasswordAuthProvider};
 use mqtt5::broker::config::{BrokerConfig, ChangeOnlyDeliveryConfig};
@@ -515,6 +516,20 @@ impl WasmBroker {
     ) -> Result<(), JsValue> {
         let manager = self.bridge_manager.borrow().clone();
         manager.add_bridge(config, remotePort).await
+    }
+
+    /// # Errors
+    /// Returns an error if the bridge cannot be added or WebSocket connection fails.
+    #[wasm_bindgen(js_name = "addBridgeWebSocket")]
+    #[allow(non_snake_case)]
+    pub async fn add_bridge_ws(
+        &self,
+        config: WasmBridgeConfig,
+        url: &str,
+        opts: &WasmConnectOptions,
+    ) -> Result<(), JsValue> {
+        let manager = self.bridge_manager.borrow().clone();
+        manager.add_bridge_ws(config, url, opts).await
     }
 
     /// # Errors
