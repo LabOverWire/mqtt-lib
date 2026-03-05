@@ -64,8 +64,8 @@ pub use auth_mechanisms::{
 pub use config::{BrokerConfig, StorageBackend as StorageBackendType, StorageConfig};
 pub use events::{
     BrokerEventHandler, ClientConnectEvent, ClientDisconnectEvent, ClientPublishEvent,
-    ClientSubscribeEvent, ClientUnsubscribeEvent, MessageDeliveredEvent, RetainedSetEvent,
-    SubAckReasonCode, SubscriptionInfo,
+    ClientSubscribeEvent, ClientUnsubscribeEvent, MessageDeliveredEvent, PublishAction,
+    RetainedSetEvent, SubAckReasonCode, SubscriptionInfo,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use hot_reload::HotReloadManager;

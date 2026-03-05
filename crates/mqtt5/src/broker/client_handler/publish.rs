@@ -1,4 +1,4 @@
-use crate::broker::events::{ClientPublishEvent, MessageDeliveredEvent};
+use crate::broker::events::{ClientPublishEvent, MessageDeliveredEvent, PublishAction};
 use crate::broker::storage::{
     InflightDirection, InflightMessage, InflightPhase, QueuedMessage, StorageBackend,
 };
@@ -22,7 +22,7 @@ use tracing::{debug, warn};
 #[cfg(feature = "opentelemetry")]
 use crate::telemetry::propagation;
 
-use super::ClientHandler;
+use super::{ClientHandler, InflightPublish};
 
 impl ClientHandler {
     #[cfg(feature = "opentelemetry")]
@@ -100,8 +100,13 @@ impl ClientHandler {
             return self.send_rate_limit_response(&publish).await;
         }
 
-        self.fire_publish_event(&publish, &client_id).await;
-        self.route_publish_by_qos(publish, &client_id).await
+        match self.fire_publish_event(&publish, &client_id).await {
+            PublishAction::Continue => self.route_publish_by_qos(publish, &client_id).await,
+            PublishAction::Handled => self.complete_qos_handshake(publish).await,
+            PublishAction::Transform(modified) => {
+                self.route_publish_by_qos(modified, &client_id).await
+            }
+        }
     }
 
     async fn check_receive_maximum(
@@ -199,10 +204,9 @@ impl ClientHandler {
             }
             QoS::ExactlyOnce => {
                 let packet_id = publish.packet_id.unwrap();
-                self.inflight_publishes.insert(packet_id, publish);
                 if let Some(ref storage) = self.storage {
                     let inflight = InflightMessage::from_publish(
-                        self.inflight_publishes.get(&packet_id).unwrap(),
+                        &publish,
                         client_id.to_string(),
                         InflightDirection::Inbound,
                         InflightPhase::AwaitingPubrel,
@@ -211,6 +215,28 @@ impl ClientHandler {
                         debug!("failed to persist inbound inflight {packet_id}: {e}");
                     }
                 }
+                self.inflight_publishes
+                    .insert(packet_id, InflightPublish::Pending(publish));
+                let mut pubrec = PubRecPacket::new(packet_id);
+                pubrec.reason_code = ReasonCode::Success;
+                self.transport.write_packet(Packet::PubRec(pubrec)).await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn complete_qos_handshake(&mut self, publish: PublishPacket) -> Result<()> {
+        match publish.qos {
+            QoS::AtMostOnce => {}
+            QoS::AtLeastOnce => {
+                let mut puback = PubAckPacket::new(publish.packet_id.unwrap());
+                puback.reason_code = ReasonCode::Success;
+                self.transport.write_packet(Packet::PubAck(puback)).await?;
+            }
+            QoS::ExactlyOnce => {
+                let packet_id = publish.packet_id.unwrap();
+                self.inflight_publishes
+                    .insert(packet_id, InflightPublish::Handled);
                 let mut pubrec = PubRecPacket::new(packet_id);
                 pubrec.reason_code = ReasonCode::Success;
                 self.transport.write_packet(Packet::PubRec(pubrec)).await?;
@@ -386,7 +412,7 @@ impl ClientHandler {
         Ok(())
     }
 
-    async fn fire_publish_event(&self, publish: &PublishPacket, client_id: &str) {
+    async fn fire_publish_event(&self, publish: &PublishPacket, client_id: &str) -> PublishAction {
         if let Some(ref handler) = self.config.event_handler {
             let response_topic = publish
                 .properties
@@ -421,7 +447,9 @@ impl ClientHandler {
                 response_topic,
                 correlation_data,
             };
-            handler.on_client_publish(event).await;
+            handler.on_client_publish(event).await
+        } else {
+            PublishAction::Continue
         }
     }
 
@@ -486,7 +514,7 @@ impl ClientHandler {
     }
 
     pub(super) async fn handle_pubrel(&mut self, pubrel: PubRelPacket) -> Result<()> {
-        let reason_code = if let Some(publish) = self.inflight_publishes.remove(&pubrel.packet_id) {
+        let reason_code = if let Some(entry) = self.inflight_publishes.remove(&pubrel.packet_id) {
             let client_id = self.client_id.as_ref().unwrap();
 
             if let Some(ref storage) = self.storage {
@@ -505,10 +533,12 @@ impl ClientHandler {
                 }
             }
 
-            #[cfg(feature = "opentelemetry")]
-            self.route_with_trace_context(&publish, client_id).await?;
-            #[cfg(not(feature = "opentelemetry"))]
-            self.route_publish(&publish, Some(client_id)).await;
+            if let InflightPublish::Pending(publish) = entry {
+                #[cfg(feature = "opentelemetry")]
+                self.route_with_trace_context(&publish, client_id).await?;
+                #[cfg(not(feature = "opentelemetry"))]
+                self.route_publish(&publish, Some(client_id)).await;
+            }
 
             ReasonCode::Success
         } else {
@@ -746,7 +776,8 @@ impl ClientHandler {
                     },
                     InflightDirection::Inbound => {
                         let publish = msg.to_publish_packet();
-                        self.inflight_publishes.insert(msg.packet_id, publish);
+                        self.inflight_publishes
+                            .insert(msg.packet_id, InflightPublish::Pending(publish));
                     }
                 }
             }

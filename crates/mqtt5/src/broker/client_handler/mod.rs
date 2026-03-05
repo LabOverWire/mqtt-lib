@@ -47,6 +47,11 @@ pub(super) struct PendingConnect {
     pub(super) assigned_client_id: Option<String>,
 }
 
+pub(super) enum InflightPublish {
+    Pending(PublishPacket),
+    Handled,
+}
+
 #[allow(clippy::struct_excessive_bools)]
 pub struct ClientHandler {
     pub(super) transport: BrokerTransport,
@@ -63,7 +68,7 @@ pub struct ClientHandler {
     pub(super) keep_alive: Duration,
     pub(super) publish_rx: flume::Receiver<PublishPacket>,
     pub(super) publish_tx: flume::Sender<PublishPacket>,
-    pub(super) inflight_publishes: HashMap<u16, PublishPacket>,
+    pub(super) inflight_publishes: HashMap<u16, InflightPublish>,
     pub(super) session: Option<ClientSession>,
     pub(super) next_packet_id: u16,
     pub(super) normal_disconnect: bool,
