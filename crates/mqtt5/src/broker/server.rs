@@ -632,11 +632,16 @@ impl MqttBroker {
         } else {
             base
         };
-        let router = if config.echo_suppression_config.enabled {
+        let with_echo = if config.echo_suppression_config.enabled {
             with_handler
                 .with_echo_suppression_key(config.echo_suppression_config.property_key.clone())
         } else {
             with_handler
+        };
+        let router = if config.max_outbound_rate_per_client > 0 {
+            with_echo.with_max_outbound_rate(config.max_outbound_rate_per_client)
+        } else {
+            with_echo
         };
         Arc::new(router)
     }
@@ -1423,6 +1428,7 @@ impl MqttBroker {
                             None
                         };
                         router.update_echo_suppression_key(echo_key).await;
+                        router.update_max_outbound_rate(new_config.max_outbound_rate_per_client);
 
                         let new_config = Arc::new(new_config);
                         let _ = config_watch_tx.send(Arc::clone(&new_config));

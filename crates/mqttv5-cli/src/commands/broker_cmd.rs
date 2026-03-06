@@ -340,6 +340,7 @@ fn build_example_config() -> BrokerConfig {
         },
         change_only_delivery_config: ChangeOnlyDeliveryConfig::default(),
         echo_suppression_config: mqtt5::broker::config::EchoSuppressionConfig::default(),
+        max_outbound_rate_per_client: 0,
         server_delivery_strategy: mqtt5::broker::config::ServerDeliveryStrategy::default(),
         bridges: vec![],
         #[cfg(feature = "opentelemetry")]

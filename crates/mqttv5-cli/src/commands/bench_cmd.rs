@@ -1462,32 +1462,18 @@ async fn run_hol_blocking(cmd: BenchCommand) -> Result<()> {
         Arc::new(Mutex::new(Vec::with_capacity(cap)))
     });
 
-    running.store(true, Ordering::SeqCst);
-    let stats_handle = if let Some(ref stats) = stats_records {
-        sub_client.quic_connection().await.map(|conn| {
-            eprintln!("  quinn stats sampler active (100ms interval)");
-            spawn_quinn_stats_sampler(conn, Arc::clone(stats), Arc::clone(&running))
-        })
-    } else {
-        None
-    };
-
-    eprintln!("measuring for {}s at {rate_label}...", cmd.duration);
-    measure_start_nanos.store(nanos_as_u64(), Ordering::SeqCst);
-    let measure_wall = Instant::now();
-    let measure_handles = spawn_hol_publishers(&pub_client, &pub_cfg, &running, &published);
-    tokio::time::sleep(Duration::from_secs(cmd.duration)).await;
-    running.store(false, Ordering::SeqCst);
-    for handle in measure_handles {
-        handle.await.ok();
-    }
-    if let Some(handle) = stats_handle {
-        handle.await.ok();
-    }
-
-    let elapsed = measure_wall.elapsed().as_secs_f64();
-    let total_published = published.load(Ordering::Relaxed);
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    let (elapsed, total_published) = run_hol_measure_phase(
+        &sub_client,
+        &pub_client,
+        &pub_cfg,
+        &running,
+        &published,
+        &measure_start_nanos,
+        stats_records.as_ref(),
+        &rate_label,
+        cmd.duration,
+    )
+    .await;
 
     let results = finalize_and_report_hol(
         &topic_samples,
@@ -1542,6 +1528,47 @@ fn finalize_and_report_hol(
     );
 
     Ok(results)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_hol_measure_phase(
+    sub_client: &MqttClient,
+    pub_client: &MqttClient,
+    pub_cfg: &HolPublishConfig,
+    running: &Arc<std::sync::atomic::AtomicBool>,
+    published: &Arc<AtomicU64>,
+    measure_start_nanos: &Arc<AtomicU64>,
+    stats_records: Option<&Arc<std::sync::Mutex<Vec<StatsRecord>>>>,
+    rate_label: &str,
+    duration: u64,
+) -> (f64, u64) {
+    running.store(true, Ordering::SeqCst);
+    let stats_handle = if let Some(stats) = stats_records {
+        sub_client.quic_connection().await.map(|conn| {
+            eprintln!("  quinn stats sampler active (100ms interval)");
+            spawn_quinn_stats_sampler(conn, Arc::clone(stats), Arc::clone(running))
+        })
+    } else {
+        None
+    };
+
+    eprintln!("measuring for {duration}s at {rate_label}...");
+    measure_start_nanos.store(nanos_as_u64(), Ordering::SeqCst);
+    let measure_wall = Instant::now();
+    let measure_handles = spawn_hol_publishers(pub_client, pub_cfg, running, published);
+    tokio::time::sleep(Duration::from_secs(duration)).await;
+    running.store(false, Ordering::SeqCst);
+    for handle in measure_handles {
+        handle.await.ok();
+    }
+    if let Some(handle) = stats_handle {
+        handle.await.ok();
+    }
+
+    let elapsed = measure_wall.elapsed().as_secs_f64();
+    let total_published = published.load(Ordering::Relaxed);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    (elapsed, total_published)
 }
 
 async fn run_hol_warmup(
