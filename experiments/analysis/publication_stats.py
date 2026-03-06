@@ -15,6 +15,7 @@ Usage:
 
 import json
 import math
+import random
 import re
 import sys
 from collections import defaultdict
@@ -66,6 +67,37 @@ def cohens_d(group_a: list[float], group_b: list[float]) -> float:
     return (ma - mb) / pooled_std
 
 
+def bootstrap_ci(values: list[float], n_resamples: int = 10000, confidence: float = 0.95) -> tuple[float, float]:
+    n = len(values)
+    if n < 2:
+        m = mean(values)
+        return m, m
+    rng = random.Random(42)
+    means = []
+    for _ in range(n_resamples):
+        sample = [rng.choice(values) for _ in range(n)]
+        means.append(mean(sample))
+    means.sort()
+    alpha = 1 - confidence
+    lo_idx = int(math.floor(alpha / 2 * n_resamples))
+    hi_idx = int(math.ceil((1 - alpha / 2) * n_resamples)) - 1
+    return means[lo_idx], means[hi_idx]
+
+
+def cliff_delta(group_a: list[float], group_b: list[float]) -> float:
+    na, nb = len(group_a), len(group_b)
+    if na == 0 or nb == 0:
+        return float("nan")
+    dominance = 0
+    for a in group_a:
+        for b in group_b:
+            if a > b:
+                dominance += 1
+            elif a < b:
+                dominance -= 1
+    return dominance / (na * nb)
+
+
 def extract_metrics(data: dict) -> dict:
     results = data["results"]
     topics = results["topics"]
@@ -89,6 +121,25 @@ def extract_metrics(data: dict) -> dict:
     }
 
 
+def extract_conn_metrics(data: dict) -> dict:
+    results = data["results"]
+    return {
+        "p50_connect_us": results["p50_connect_us"],
+        "p95_connect_us": results["p95_connect_us"],
+        "p99_connect_us": results["p99_connect_us"],
+        "connections_per_sec": results["connections_per_sec"],
+    }
+
+
+def extract_throughput_metrics(data: dict) -> dict:
+    results = data["results"]
+    return {
+        "throughput_avg": results["throughput_avg"],
+        "published": results["published"],
+        "received": results["received"],
+    }
+
+
 PARSERS = {
     "02_hol_blocking": (
         re.compile(r"(.+?)_loss(\d+)pct_run(\d+)\.json"),
@@ -109,6 +160,20 @@ PARSERS = {
     "02e_hol_qos1": (
         re.compile(r"(.+?)_qos1_run(\d+)\.json"),
         lambda m: (m.group(1), "qos1"),
+    ),
+}
+
+CONN_PARSERS = {
+    "01_connection_latency": (
+        re.compile(r"(.+?)_delay(\d+)ms_run(\d+)\.json"),
+        lambda m: (m.group(1), f"delay{m.group(2)}ms"),
+    ),
+}
+
+THROUGHPUT_PARSERS = {
+    "03_throughput_under_loss": (
+        re.compile(r"(.+?)_qos(\d)_loss(\d+)pct_run(\d+)\.json"),
+        lambda m: (m.group(1), f"qos{m.group(2)}_loss{m.group(3)}pct"),
     ),
 }
 
@@ -150,14 +215,86 @@ def compute_stats(metrics_list: list[dict], field: str) -> dict | None:
     if not values:
         return None
     m, lo, hi = ci_95(values)
+    boot_lo, boot_hi = bootstrap_ci(values)
     return {
         "mean": m,
         "std": std(values),
         "ci_lo": lo,
         "ci_hi": hi,
+        "bootstrap_ci_lo": boot_lo,
+        "bootstrap_ci_hi": boot_hi,
         "n": len(values),
         "values": values,
     }
+
+
+def aggregate_conn_experiment(base_dir: Path, experiment: str) -> dict[tuple[str, str], list[dict]]:
+    exp_dir = base_dir / experiment
+    if not exp_dir.exists():
+        return {}
+
+    parser_info = CONN_PARSERS.get(experiment)
+    if not parser_info:
+        return {}
+
+    pattern, extractor = parser_info
+    grouped: dict[tuple[str, str], list[dict]] = defaultdict(list)
+
+    for jf in sorted(exp_dir.glob("*.json")):
+        m = pattern.match(jf.name)
+        if not m:
+            continue
+        transport, condition = extractor(m)
+        data = load_json(jf)
+        metrics = extract_conn_metrics(data)
+        grouped[(transport, condition)].append(metrics)
+
+    return grouped
+
+
+def aggregate_throughput_experiment(base_dir: Path, experiment: str) -> dict[tuple[str, str], list[dict]]:
+    exp_dir = base_dir / experiment
+    if not exp_dir.exists():
+        return {}
+
+    parser_info = THROUGHPUT_PARSERS.get(experiment)
+    if not parser_info:
+        return {}
+
+    pattern, extractor = parser_info
+    grouped: dict[tuple[str, str], list[dict]] = defaultdict(list)
+
+    for jf in sorted(exp_dir.glob("*.json")):
+        m = pattern.match(jf.name)
+        if not m:
+            continue
+        strategy, condition = extractor(m)
+        data = load_json(jf)
+        metrics = extract_throughput_metrics(data)
+        grouped[(strategy, condition)].append(metrics)
+
+    return grouped
+
+
+def build_stats_table_generic(
+    grouped: dict[tuple[str, str], list[dict]],
+    transport_order: list[str],
+    conditions: list[str],
+    fields: list[str],
+) -> dict:
+    table = {}
+    for transport in transport_order:
+        for condition in conditions:
+            key = (transport, condition)
+            if key not in grouped:
+                continue
+            entry = {"transport": transport, "condition": condition}
+            for field in fields:
+                stat = compute_stats(grouped[key], field)
+                if stat:
+                    entry[field] = stat
+            table[f"{transport}_{condition}"] = entry
+    return table
 
 
 def build_stats_table(
@@ -224,6 +361,7 @@ def run_comparisons(grouped: dict, conditions: list[str]) -> list[dict]:
 
         bonferroni_p = min(p_value * num_comparisons, 1.0)
         d = cohens_d(vals_a, vals_b)
+        cd = cliff_delta(vals_a, vals_b)
 
         comparisons.append({
             "condition": condition,
@@ -237,6 +375,7 @@ def run_comparisons(grouped: dict, conditions: list[str]) -> list[dict]:
             "p_value": p_value,
             "bonferroni_p": bonferroni_p,
             "cohens_d": d if not math.isnan(d) else None,
+            "cliff_delta": cd if not math.isnan(cd) else None,
             "significant": bonferroni_p < 0.05,
             "n_comparisons": num_comparisons,
         })
@@ -294,19 +433,93 @@ def generate_latex(all_stats: dict, comparisons: list[dict]) -> str:
         lines.append("\\centering")
         lines.append("\\caption{Statistical comparisons (Mann-Whitney U, Bonferroni-corrected)}")
         lines.append("\\label{tab:comparisons}")
-        lines.append("\\begin{tabular}{llcccl}")
+        lines.append("\\begin{tabular}{llccccl}")
         lines.append("\\toprule")
-        lines.append("Condition & Comparison & $U$ & $p$ (corrected) & Cohen's $d$ & Sig. \\\\")
+        lines.append("Condition & Comparison & $U$ & $p$ (corrected) & Cohen's $d$ & Cliff's $\\delta$ & Sig. \\\\")
         lines.append("\\midrule")
 
         for comp in comparisons:
             d_str = f"{comp['cohens_d']:.2f}" if comp["cohens_d"] is not None else "---"
+            cd_str = f"{comp['cliff_delta']:.2f}" if comp.get("cliff_delta") is not None else "---"
             sig_str = "***" if comp["significant"] else "n.s."
             lines.append(
                 f"{comp['condition']} & {comp['comparison']} & "
                 f"{comp['u_statistic']:.1f} & {comp['bonferroni_p']:.4f} & "
-                f"{d_str} & {sig_str} \\\\"
+                f"{d_str} & {cd_str} & {sig_str} \\\\"
             )
+
+        lines.append("\\bottomrule")
+        lines.append("\\end{tabular}")
+        lines.append("\\end{table}")
+        lines.append("")
+
+    if "exp01" in all_stats:
+        conn_transport_order = ["tcp", "tls", "quic"]
+        conn_labels = {"tcp": "TCP", "tls": "TLS 1.3", "quic": "QUIC"}
+        delays = ["delay0ms", "delay25ms", "delay50ms", "delay100ms", "delay200ms"]
+        delay_headers = ["0ms", "25ms", "50ms", "100ms", "200ms"]
+
+        lines.append("\\begin{table}[h]")
+        lines.append("\\centering")
+        lines.append("\\caption{Connection latency p50 (us) across network delays}")
+        lines.append("\\label{tab:conn_latency}")
+        lines.append("\\begin{tabular}{l" + "c" * len(delays) + "}")
+        lines.append("\\toprule")
+        lines.append("Transport & " + " & ".join(delay_headers) + " \\\\")
+        lines.append("\\midrule")
+
+        for transport in conn_transport_order:
+            label = conn_labels.get(transport, transport)
+            cells = [label]
+            for delay in delays:
+                key = f"{transport}_{delay}"
+                entry = all_stats["exp01"].get(key, {})
+                p50 = entry.get("p50_connect_us")
+                if p50:
+                    boot_lo = p50.get("bootstrap_ci_lo", p50["ci_lo"])
+                    boot_hi = p50.get("bootstrap_ci_hi", p50["ci_hi"])
+                    cells.append(f"${p50['mean']:.0f}$ [{boot_lo:.0f}, {boot_hi:.0f}]")
+                else:
+                    cells.append("---")
+            lines.append(" & ".join(cells) + " \\\\")
+
+        lines.append("\\bottomrule")
+        lines.append("\\end{tabular}")
+        lines.append("\\end{table}")
+        lines.append("")
+
+    if "exp03" in all_stats:
+        tp_order = ["tcp", "quic-control-only", "quic-per-topic", "quic-per-publish"]
+        tp_labels = {
+            "tcp": "TCP",
+            "quic-control-only": "QUIC control",
+            "quic-per-topic": "QUIC per-topic",
+            "quic-per-publish": "QUIC per-publish",
+        }
+        loss_conditions = ["qos0_loss0pct", "qos0_loss1pct", "qos0_loss5pct", "qos0_loss10pct"]
+        loss_headers = ["0\\%", "1\\%", "5\\%", "10\\%"]
+
+        lines.append("\\begin{table}[h]")
+        lines.append("\\centering")
+        lines.append("\\caption{QoS 0 throughput (msgs/sec) across packet loss rates}")
+        lines.append("\\label{tab:throughput_qos0}")
+        lines.append("\\begin{tabular}{l" + "c" * len(loss_conditions) + "}")
+        lines.append("\\toprule")
+        lines.append("Strategy & " + " & ".join(loss_headers) + " \\\\")
+        lines.append("\\midrule")
+
+        for transport in tp_order:
+            label = tp_labels.get(transport, transport)
+            cells = [label]
+            for cond in loss_conditions:
+                key = f"{transport}_{cond}"
+                entry = all_stats["exp03"].get(key, {})
+                tp_stat = entry.get("throughput_avg")
+                if tp_stat:
+                    cells.append(f"${tp_stat['mean']:.0f} \\pm {tp_stat['std']:.0f}$")
+                else:
+                    cells.append("---")
+            lines.append(" & ".join(cells) + " \\\\")
 
         lines.append("\\bottomrule")
         lines.append("\\end{tabular}")
@@ -360,6 +573,22 @@ def main():
         qos_conditions = ["qos1"]
         all_stats["exp02e"] = build_stats_table(exp02e, qos_conditions, fields)
         print("Exp 02e (QoS 1): processed")
+
+    exp01 = aggregate_conn_experiment(base_dir, "01_connection_latency")
+    if exp01:
+        conn_order = ["tcp", "tls", "quic"]
+        conn_conditions = sorted({k[1] for k in exp01})
+        conn_fields = ["p50_connect_us", "p95_connect_us", "p99_connect_us", "connections_per_sec"]
+        all_stats["exp01"] = build_stats_table_generic(exp01, conn_order, conn_conditions, conn_fields)
+        print(f"Exp 01 (connection latency): processed ({len(conn_conditions)} delays)")
+
+    exp03 = aggregate_throughput_experiment(base_dir, "03_throughput_under_loss")
+    if exp03:
+        tp_order = ["tcp", "quic-control-only", "quic-per-topic", "quic-per-publish"]
+        tp_conditions = sorted({k[1] for k in exp03})
+        tp_fields = ["throughput_avg", "published", "received"]
+        all_stats["exp03"] = build_stats_table_generic(exp03, tp_order, tp_conditions, tp_fields)
+        print(f"Exp 03 (throughput): processed ({len(tp_conditions)} conditions)")
 
     merged_rtt = {}
     if exp02:
@@ -429,10 +658,11 @@ def main():
     for comp in all_comparisons:
         sig = "***" if comp["significant"] else "n.s."
         d_str = f"d={comp['cohens_d']:.2f}" if comp["cohens_d"] is not None else "d=N/A"
+        cd_str = f"cd={comp['cliff_delta']:.2f}" if comp.get("cliff_delta") is not None else "cd=N/A"
         print(
             f"  {comp['condition']:12s} {comp['comparison']:20s} "
             f"spike_iso: {comp['mean_a']:.3f} vs {comp['mean_b']:.3f}  "
-            f"U={comp['u_statistic']:.1f}  p={comp['bonferroni_p']:.4f} {sig}  {d_str}"
+            f"U={comp['u_statistic']:.1f}  p={comp['bonferroni_p']:.4f} {sig}  {d_str}  {cd_str}"
         )
 
 

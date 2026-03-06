@@ -8,6 +8,10 @@ from fig04_wcorr_vs_spike_iso import main as fig04
 from fig05_latency_percentiles import main as fig05
 from fig06_timeseries_cwnd import main as fig06
 from fig07_inter_arrival import main as fig07
+from fig08_connection_latency import main as fig08
+from fig09_throughput_vs_loss import main as fig09
+from fig10_resource_overhead import main as fig10
+from fig11_qos_comparison import main as fig11
 
 FIGURES = [
     ("fig01_spike_iso_vs_loss", fig01),
@@ -17,6 +21,10 @@ FIGURES = [
     ("fig05_latency_percentiles", fig05),
     ("fig06_timeseries_cwnd", fig06),
     ("fig07_inter_arrival", fig07),
+    ("fig08_connection_latency", fig08),
+    ("fig09_throughput_vs_loss", fig09),
+    ("fig10_resource_overhead", fig10),
+    ("fig11_qos_comparison", fig11),
 ]
 
 
