@@ -68,15 +68,18 @@ def main(results_dir: Path, output_dir: Path):
 
     for transport_idx, transport in enumerate(TRANSPORT_ORDER):
         means = []
-        ci_widths = []
+        err_lo = []
+        err_hi = []
         for loss in LOSS_RATES:
             if loss in data[transport]:
                 mean, ci_half = compute_ci(data[transport][loss])
                 means.append(mean)
-                ci_widths.append(ci_half)
+                err_lo.append(min(ci_half, mean))
+                err_hi.append(min(ci_half, 1.0 - mean))
             else:
                 means.append(0)
-                ci_widths.append(0)
+                err_lo.append(0)
+                err_hi.append(0)
 
         offset = (transport_idx - (num_transports - 1) / 2) * bar_width
         positions = group_positions + offset
@@ -85,7 +88,7 @@ def main(results_dir: Path, output_dir: Path):
             positions,
             means,
             bar_width,
-            yerr=ci_widths,
+            yerr=[err_lo, err_hi],
             capsize=3,
             color=TRANSPORT_COLORS[transport],
             label=TRANSPORT_LABELS[transport],
@@ -98,7 +101,7 @@ def main(results_dir: Path, output_dir: Path):
     ax.set_title("HOL Blocking: Spike Isolation vs. Loss Rate")
     ax.set_xticks(group_positions)
     ax.set_xticklabels(LOSS_LABELS)
-    ax.set_ylim(0, 1.05)
+    ax.set_ylim(0, 1.2)
     ax.legend(loc="best", framealpha=0.9)
 
     fig.tight_layout()
@@ -106,7 +109,10 @@ def main(results_dir: Path, output_dir: Path):
 
 
 if __name__ == "__main__":
-    results_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("../../results")
-    output_dir = Path(sys.argv[2]) if len(sys.argv) > 2 else Path("./output")
+    script_dir = Path(__file__).resolve().parent
+    default_results = script_dir.parent.parent / "results"
+    default_output = script_dir / "output"
+    results_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else default_results
+    output_dir = Path(sys.argv[2]) if len(sys.argv) > 2 else default_output
     output_dir.mkdir(parents=True, exist_ok=True)
     main(results_dir, output_dir)

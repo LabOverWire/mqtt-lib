@@ -73,6 +73,23 @@ Active results in `experiments/results/`. Archived results in `experiments/archi
 - **Status**: COMPLETE (control-only, per-publish, per-topic modes complete)
 - **Note**: per-subscription results are identical to per-topic (code alias, deprecated)
 
+## Publication Figures (fig08-fig11)
+
+- **fig08_connection_latency**: Grouped bar chart of p50/p95 connection latency vs network delay (exp01 data)
+- **fig09_throughput_vs_loss**: Line plot of throughput vs loss rate for QoS 0 and QoS 1 (exp03 data)
+- **fig10_resource_overhead**: Time series of broker RSS and CPU at 1% loss (exp02 broker_resources.csv)
+- **fig11_qos_comparison**: Grouped bars comparing QoS 0 vs QoS 1 spike isolation and throughput (exp02 + exp02e data)
+- **Scripts**: `experiments/analysis/figures/fig08-11_*.py`
+- **Generated via**: `python3 experiments/analysis/figures/generate_all.py experiments/results/ experiments/analysis/figures/output/`
+
+## Statistical Analysis (publication_stats.py)
+
+- **Bootstrap CI**: Distribution-free 95% CI (10k resamples) for all metrics — more robust than t-CI for n=5 bimodal data
+- **Cliff's delta**: Non-parametric effect size [-1,1] alongside Cohen's d in comparison tables
+- **Exp01 parser**: Connection latency metrics (p50/p95/p99, connections/sec) with LaTeX table
+- **Exp03 parser**: Throughput metrics (avg, published, received) with LaTeX table
+- **Generated via**: `python3 experiments/analysis/publication_stats.py experiments/results/`
+
 ## 12_payload_format_localhost
 
 - **Experiment**: Payload format performance on localhost

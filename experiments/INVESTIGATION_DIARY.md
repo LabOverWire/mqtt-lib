@@ -16,6 +16,24 @@ New entries on top, beneath the planned work list.
 - [x] Phase 8: Publication preparation — analysis scripts, figures, archive
 - [x] Phase 9: RTT boundary experiment (02d) — 15ms/20ms at 1% loss
 - [x] Phase 10: QoS 1 HOL experiment (02e) — tcp + per-topic at 25ms/1%
+- [x] Phase 11: Publication gap closure — additional figures + statistical robustness
+
+---
+
+## 2026-03-05 — Phase 11: Publication gap closure
+
+**What**: Added 4 new publication figures (fig08-11) covering connection latency, throughput vs loss, broker resource overhead, and QoS 0 vs QoS 1 comparison. Added bootstrap CI (10k resamples) and Cliff's delta non-parametric effect size to publication_stats.py. Added exp01 (connection latency) and exp03 (throughput) parsers with LaTeX table generation.
+
+**New figures**:
+- fig08: Connection latency vs network delay (exp01 data, grouped bars, log-y)
+- fig09: Throughput vs loss rate (exp03 data, QoS 0/1 subplots, line + CI bands)
+- fig10: Broker resource overhead at 1% loss (exp02 broker CSV, RSS + CPU time series)
+- fig11: QoS 0 vs QoS 1 comparison (exp02 + exp02e, spike isolation + throughput)
+
+**Statistical robustness**:
+- Bootstrap CI addresses unreliable parametric t-CI for bimodal n=5 data
+- Cliff's delta provides bounded [-1,1] effect size for non-normal distributions
+- All stats tables now include both parametric and bootstrap CIs
 
 ---
 
