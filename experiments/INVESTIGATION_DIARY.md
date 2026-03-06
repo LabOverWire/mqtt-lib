@@ -372,7 +372,9 @@ Per-publish has the lowest latency (17x better than per-topic) but worst isolati
 
 **What**: Marked `StreamStrategy::DataPerSubscription` as `#[deprecated]`, merged client publish path to treat it identically to `DataPerTopic`, removed `send_on_subscription_stream()` method.
 
-**Why**: `send_on_subscription_stream()` delegated directly to `send_on_topic_stream()` — they were identical code paths producing identical experiment results. Rather than implementing true per-subscription grouping (which has unclear semantics for the paper), deprecated the variant to make the alias explicit.
+**Why**: `send_on_subscription_stream()` delegated directly to `send_on_topic_stream()` — they were identical code paths producing identical experiment results.
+
+**Architectural rationale**: Per-subscription stream mapping is fundamentally impossible at the publisher side. Stream strategy is a client-side publish decision: the publisher chooses which QUIC stream to send each PUBLISH on. The publisher only knows the topic name — it has no visibility into who is subscribed or what subscription filters exist. Any "per-subscription" grouping at the publisher therefore collapses to "per-topic" since the topic name is the only routing key available to the sender. A true per-subscription strategy would require the *broker* to map outbound delivery onto different streams based on each subscriber's filter, which is a broker-side concern (not a client stream strategy). This is not a Quinn limitation — it's inherent to pub/sub decoupling: publishers and subscribers are independent, so the publisher cannot make stream decisions based on subscription topology.
 
 **Result**: CLI still accepts `--quic-stream-strategy per-subscription` for backwards compatibility but logs it as `per-topic`. Experiment results correctly labeled.
 
