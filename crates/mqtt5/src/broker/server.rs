@@ -711,6 +711,7 @@ impl MqttBroker {
             storage.cleanup_expired().await?;
 
             let storage_clone = Arc::clone(storage);
+            let router_clone = Arc::clone(&self.router);
             let cleanup_interval = self.config.storage_config.cleanup_interval;
             let mut shutdown_rx = shutdown_tx.subscribe();
 
@@ -722,6 +723,7 @@ impl MqttBroker {
                             if let Err(e) = storage_clone.cleanup_expired().await {
                                 error!("Storage cleanup error: {e}");
                             }
+                            router_clone.cleanup_stale_subscriptions().await;
                         }
                         _ = shutdown_rx.recv() => {
                             debug!("Storage cleanup task shutting down");

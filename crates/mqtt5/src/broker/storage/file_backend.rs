@@ -11,7 +11,7 @@ use crate::validation::topic_matches_filter;
 use serde_json;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::fs::{self, File};
 use tokio::io::AsyncWriteExt;
@@ -39,6 +39,7 @@ pub struct FileBackend {
     sessions_cache: Arc<RwLock<HashMap<String, ClientSession>>>,
     dirty_sessions: Arc<RwLock<HashSet<String>>>,
     shutdown: Arc<AtomicBool>,
+    queue_seq: AtomicU64,
 }
 
 impl FileBackend {
@@ -76,6 +77,7 @@ impl FileBackend {
             sessions_cache: Arc::new(RwLock::new(HashMap::new())),
             dirty_sessions: Arc::new(RwLock::new(HashSet::new())),
             shutdown: Arc::new(AtomicBool::new(false)),
+            queue_seq: AtomicU64::new(0),
         })
     }
 
@@ -498,7 +500,8 @@ impl StorageBackend for FileBackend {
         })?;
 
         let timestamp = message.queued_at_secs * 1000;
-        let filename = format!("{timestamp}_{}.json", timestamp % 1_000_000);
+        let seq = self.queue_seq.fetch_add(1, Ordering::Relaxed);
+        let filename = format!("{timestamp}_{seq}.json");
         let path = client_dir.join(filename);
 
         debug!("Queuing message for client: {}", message.client_id);
