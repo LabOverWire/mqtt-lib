@@ -17,6 +17,40 @@ New entries on top, beneath the planned work list.
 - [x] Phase 9: RTT boundary experiment (02d) — 15ms/20ms at 1% loss
 - [x] Phase 10: QoS 1 HOL experiment (02e) — tcp + per-topic at 25ms/1%
 - [x] Phase 11: Publication gap closure — additional figures + statistical robustness
+- [x] Phase 12: Experiment 05 — datagram vs stream (QoS 0, RTT sweep)
+- [x] Phase 13: Experiment 06 — resource overhead at scale
+
+---
+
+## 2026-03-05 — Phase 13: Experiment 06 — resource overhead at scale
+
+**What**: Measured throughput and resource overhead (RSS, CPU, network) across TCP and 3 QUIC strategies at 10, 50, and 100 concurrent pub/sub pairs. 60s duration, 3 runs per datapoint.
+
+**Results**: 36 JSON + 72 CSV files in `results/06_resource_overhead/`
+
+**Key findings**:
+- TCP throughput scales well: 161K → 174K msg/s from 10→100 connections
+- QUIC control-only outperforms TCP at low concurrency (192K at 10 conn) but drops to 130K at 100
+- QUIC per-topic: 143K → 107K msg/s (stream-per-topic overhead grows with connections)
+- QUIC per-publish: 94K → 85K msg/s (most overhead — new stream per publish)
+- Per-publish throughput at 100 conn is 49% of TCP's throughput
+
+---
+
+## 2026-03-05 — Phase 12: Experiment 05 — datagram vs stream
+
+**What**: Compared QUIC datagrams (RFC 9221, unreliable) vs QUIC streams (reliable) for QoS 0 delivery across 3 RTTs (0ms, 10ms, 50ms) × 4 loss rates (0%, 1%, 5%, 10%) × 2 modes (latency, throughput). 5 runs per datapoint.
+
+**Results**: 240 JSON files in `results/05_datagram_vs_stream/`
+
+**Key findings**:
+- At 0ms delay: stream throughput (56K msg/s) > datagram (42K msg/s) — QUIC flow control provides effective pacing
+- At 50ms/10% loss: datagram latency p50 (108ms) < stream (128ms) — 16% advantage from skipping retransmissions
+- Datagram throughput drops less gracefully: at 50ms/10%, both collapse to ~650 msg/s
+- Stream consistently beats datagram for throughput at all conditions due to flow control backpressure
+- Datagrams only win on latency under loss — the tail latency advantage is the key differentiator
+- CV% mostly under 10%, indicating good reproducibility; 50ms/10% datagram latency has 20.8% CV (expected)
+- Bench tool exits with code 1 at high loss (50ms/10%) due to connection drop after measurement; data is still valid
 
 ---
 

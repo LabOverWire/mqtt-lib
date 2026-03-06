@@ -210,3 +210,6 @@ experiments/results/**/*.csv
 public/
 
 articles/
+
+# Analysis artifacts (generated figures, stats output)
+artifacts/
