@@ -213,3 +213,6 @@ articles/
 
 # Analysis artifacts (generated figures, stats output)
 artifacts/
+experiments/analysis/figures/output/
+experiments/results/**/*.txt
+experiments/results/**/*.tex
