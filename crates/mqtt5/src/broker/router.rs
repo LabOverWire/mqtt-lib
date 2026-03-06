@@ -9,7 +9,7 @@ use crate::types::ProtocolVersion;
 use crate::validation::{parse_shared_subscription, topic_matches_filter};
 use crate::QoS;
 use crate::Result;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
@@ -281,6 +281,80 @@ impl MessageRouter {
         }
 
         debug!("Unregistered client: {}", client_id);
+    }
+
+    pub async fn cleanup_stale_subscriptions(&self) {
+        let clients = self.clients.read().await;
+
+        let subscribed_ids: HashSet<String> = {
+            let exact = self.exact_subscriptions.read().await;
+            let wildcard = self.wildcard_subscriptions.read().await;
+            exact
+                .values()
+                .flatten()
+                .chain(wildcard.values().flatten())
+                .map(|sub| sub.client_id.clone())
+                .collect()
+        };
+
+        let mut stale: Vec<String> = Vec::new();
+        let storage = self.storage.as_ref();
+
+        for client_id in &subscribed_ids {
+            if clients.contains_key(client_id) {
+                continue;
+            }
+            let has_session = if let Some(storage) = storage {
+                matches!(storage.get_session(client_id).await, Ok(Some(s)) if !s.is_expired())
+            } else {
+                false
+            };
+            if !has_session {
+                stale.push(client_id.clone());
+            }
+        }
+
+        drop(clients);
+
+        if stale.is_empty() {
+            return;
+        }
+
+        {
+            let mut exact = self.exact_subscriptions.write().await;
+            for subs in exact.values_mut() {
+                subs.retain(|sub| !stale.contains(&sub.client_id));
+            }
+            exact.retain(|_, subs| !subs.is_empty());
+        }
+
+        {
+            let mut wildcard = self.wildcard_subscriptions.write().await;
+            for subs in wildcard.values_mut() {
+                subs.retain(|sub| !stale.contains(&sub.client_id));
+            }
+            wildcard.retain(|_, subs| !subs.is_empty());
+        }
+
+        {
+            let mut change_only = self.change_only_states.write().await;
+            for client_id in &stale {
+                change_only.remove(client_id);
+            }
+        }
+
+        if let Some(storage) = storage {
+            for client_id in &stale {
+                if let Err(e) = storage.remove_queued_messages(client_id).await {
+                    debug!("failed to remove queued messages for stale client {client_id}: {e}");
+                }
+            }
+        }
+
+        info!(
+            "Cleaned up stale subscriptions for {} disconnected client(s)",
+            stale.len()
+        );
     }
 
     /// Adds a subscription for a client.
