@@ -72,6 +72,8 @@ pub struct BrokerConfig {
     #[serde(default)]
     pub echo_suppression_config: EchoSuppressionConfig,
     #[serde(default)]
+    pub max_outbound_rate_per_client: u32,
+    #[serde(default)]
     pub server_delivery_strategy: ServerDeliveryStrategy,
     #[cfg(not(target_arch = "wasm32"))]
     #[serde(default)]
@@ -127,6 +129,10 @@ impl std::fmt::Debug for BrokerConfig {
                 &self.change_only_delivery_config,
             )
             .field("echo_suppression_config", &self.echo_suppression_config)
+            .field(
+                "max_outbound_rate_per_client",
+                &self.max_outbound_rate_per_client,
+            )
             .field("server_delivery_strategy", &self.server_delivery_strategy);
         #[cfg(not(target_arch = "wasm32"))]
         d.field("bridges", &self.bridges);
@@ -169,6 +175,7 @@ impl Default for BrokerConfig {
             storage_config: StorageConfig::default(),
             change_only_delivery_config: ChangeOnlyDeliveryConfig::default(),
             echo_suppression_config: EchoSuppressionConfig::default(),
+            max_outbound_rate_per_client: 0,
             server_delivery_strategy: ServerDeliveryStrategy::default(),
             #[cfg(not(target_arch = "wasm32"))]
             bridges: vec![],
@@ -308,6 +315,12 @@ impl BrokerConfig {
     #[must_use]
     pub fn with_echo_suppression(mut self, config: EchoSuppressionConfig) -> Self {
         self.echo_suppression_config = config;
+        self
+    }
+
+    #[must_use]
+    pub fn with_max_outbound_rate_per_client(mut self, rate: u32) -> Self {
+        self.max_outbound_rate_per_client = rate;
         self
     }
 
