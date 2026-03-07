@@ -12,6 +12,9 @@ from fig08_connection_latency import main as fig08
 from fig09_throughput_vs_loss import main as fig09
 from fig10_resource_overhead import main as fig10
 from fig11_qos_comparison import main as fig11
+from fig12_datagram_vs_stream import main as fig12
+from fig13_resource_overhead_scaled import main as fig13
+from fig14_strategy_comparison import main as fig14
 
 FIGURES = [
     ("fig01_spike_iso_vs_loss", fig01),
@@ -25,6 +28,9 @@ FIGURES = [
     ("fig09_throughput_vs_loss", fig09),
     ("fig10_resource_overhead", fig10),
     ("fig11_qos_comparison", fig11),
+    ("fig12_datagram_vs_stream", fig12),
+    ("fig13_resource_overhead_scaled", fig13),
+    ("fig14_strategy_comparison", fig14),
 ]
 
 

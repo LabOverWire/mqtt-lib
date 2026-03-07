@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from style import (
     TRANSPORT_COLORS,
     TRANSPORT_LABELS,
+    TRANSPORT_MARKERS,
     TRANSPORT_ORDER,
     apply_style,
     save_figure,
@@ -61,48 +62,50 @@ def main(results_dir: Path, output_dir: Path):
 
     fig, ax = plt.subplots(figsize=(7, 4.5))
 
-    num_transports = len(TRANSPORT_ORDER)
-    num_groups = len(LOSS_RATES)
-    bar_width = 0.18
-    group_positions = np.arange(num_groups)
+    x_offsets = {
+        "tcp": -0.15,
+        "quic-control": -0.05,
+        "quic-pertopic": 0.05,
+        "quic-perpub": 0.15,
+    }
 
-    for transport_idx, transport in enumerate(TRANSPORT_ORDER):
+    group_positions = np.arange(len(LOSS_RATES))
+
+    for transport in TRANSPORT_ORDER:
         means = []
-        err_lo = []
-        err_hi = []
-        for loss in LOSS_RATES:
+        ci_halves = []
+        positions = []
+        for loss_idx, loss in enumerate(LOSS_RATES):
             if loss in data[transport]:
                 mean, ci_half = compute_ci(data[transport][loss])
                 means.append(mean)
-                err_lo.append(min(ci_half, mean))
-                err_hi.append(min(ci_half, 1.0 - mean))
-            else:
-                means.append(0)
-                err_lo.append(0)
-                err_hi.append(0)
+                ci_halves.append(ci_half)
+                positions.append(group_positions[loss_idx] + x_offsets[transport])
 
-        offset = (transport_idx - (num_transports - 1) / 2) * bar_width
-        positions = group_positions + offset
-
-        ax.bar(
+        ax.errorbar(
             positions,
             means,
-            bar_width,
-            yerr=[err_lo, err_hi],
-            capsize=3,
+            yerr=ci_halves,
+            fmt=TRANSPORT_MARKERS[transport],
             color=TRANSPORT_COLORS[transport],
             label=TRANSPORT_LABELS[transport],
-            edgecolor="white",
-            linewidth=0.5,
+            markersize=8,
+            capsize=4,
+            capthick=1.5,
+            linewidth=0,
+            elinewidth=1.5,
+            markeredgecolor="white",
+            markeredgewidth=0.8,
+            zorder=3,
         )
 
     ax.set_xlabel("Packet Loss Rate")
     ax.set_ylabel("Spike Isolation Ratio")
-    ax.set_title("HOL Blocking: Spike Isolation vs. Loss Rate")
     ax.set_xticks(group_positions)
     ax.set_xticklabels(LOSS_LABELS)
-    ax.set_ylim(0, 1.2)
-    ax.legend(loc="best", framealpha=0.9)
+    ax.set_ylim(-0.05, 1.15)
+    ax.axhline(y=0, color="gray", linewidth=0.5, linestyle="-", zorder=1)
+    ax.legend(loc="upper left", framealpha=0.9)
 
     fig.tight_layout()
     save_figure(fig, output_dir, "fig01_spike_iso_vs_loss")

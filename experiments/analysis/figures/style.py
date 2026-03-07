@@ -51,6 +51,16 @@ THROUGHPUT_MARKERS = {
     "quic-per-publish": "D",
 }
 
+DATAGRAM_ORDER = ["quic-stream", "quic-datagram"]
+DATAGRAM_COLORS = {"quic-stream": "#2ca02c", "quic-datagram": "#e377c2"}
+DATAGRAM_LABELS = {"quic-stream": "QUIC Stream", "quic-datagram": "QUIC Datagram"}
+DATAGRAM_MARKERS = {"quic-stream": "^", "quic-datagram": "X"}
+
+STRATEGY_ORDER = ["control-only", "per-publish", "per-topic"]
+STRATEGY_COLORS = {"control-only": "#ff7f0e", "per-publish": "#d62728", "per-topic": "#2ca02c"}
+STRATEGY_LABELS = {"control-only": "Control-only", "per-publish": "Per-publish", "per-topic": "Per-topic"}
+STRATEGY_MARKERS = {"control-only": "s", "per-publish": "D", "per-topic": "^"}
+
 FIGURE_WIDTH = 7
 FIGURE_HEIGHT = 4.5
 FONT_SIZE = 10
