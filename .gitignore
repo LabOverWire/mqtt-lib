@@ -216,3 +216,6 @@ artifacts/
 experiments/analysis/figures/output/
 experiments/results/**/*.txt
 experiments/results/**/*.tex
+
+# Paper (LaTeX build artifacts and all paper content)
+paper/
