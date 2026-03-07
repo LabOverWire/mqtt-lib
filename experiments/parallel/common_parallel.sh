@@ -15,7 +15,7 @@ source "${SCRIPT_DIR}/group${GROUP}.env"
 : "${RUNS_PER_DATAPOINT:=10}"
 
 SSH_USER="${SSH_USER:-bench}"
-RESULTS_DIR="${ROOT_DIR}/results"
+RESULTS_DIR="${ROOT_DIR}/results_v2"
 mkdir -p "$RESULTS_DIR"
 
 SSH_OPTS="-o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=10"
