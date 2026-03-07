@@ -177,6 +177,27 @@ THROUGHPUT_PARSERS = {
     ),
 }
 
+DATAGRAM_PARSERS = {
+    "05_datagram_vs_stream": (
+        re.compile(r"quic-(datagram|stream)_delay(\d+)ms_loss(\d+)pct_(latency|throughput)_run(\d+)\.json"),
+        lambda m: (f"quic-{m.group(1)}", f"delay{m.group(2)}ms_loss{m.group(3)}pct_{m.group(4)}"),
+    ),
+}
+
+RESOURCE_PARSERS = {
+    "06_resource_overhead": (
+        re.compile(r"(.+?)_(\d+)conn_run(\d+)\.json"),
+        lambda m: (m.group(1), f"{m.group(2)}conn"),
+    ),
+}
+
+STRATEGY_PARSERS = {
+    "04_stream_strategies": (
+        re.compile(r"(.+?)_(\d+)topics_(latency|throughput)_run(\d+)\.json"),
+        lambda m: (m.group(1), f"{m.group(2)}topics_{m.group(3)}"),
+    ),
+}
+
 TRANSPORT_ORDER = ["tcp", "quic-control", "quic-pertopic", "quic-perpub"]
 TRANSPORT_LABELS = {
     "tcp": "TCP",
@@ -392,6 +413,113 @@ def format_ms(us: float) -> str:
     return f"{ms:.0f}ms"
 
 
+def extract_datagram_metrics(data: dict) -> dict:
+    results = data["results"]
+    mode = data["mode"]
+    if mode == "latency":
+        return {
+            "p50_us": results["p50_us"],
+            "p95_us": results["p95_us"],
+            "p99_us": results["p99_us"],
+            "messages": results["messages"],
+        }
+    return {
+        "throughput_avg": results["throughput_avg"],
+        "published": results["published"],
+        "received": results["received"],
+    }
+
+
+def aggregate_datagram_experiment(base_dir: Path, experiment: str) -> dict[tuple[str, str], list[dict]]:
+    exp_dir = base_dir / experiment
+    if not exp_dir.exists():
+        return {}
+
+    parser_info = DATAGRAM_PARSERS.get(experiment)
+    if not parser_info:
+        return {}
+
+    pattern, extractor = parser_info
+    grouped: dict[tuple[str, str], list[dict]] = defaultdict(list)
+
+    for jf in sorted(exp_dir.glob("*.json")):
+        m = pattern.match(jf.name)
+        if not m:
+            continue
+        transport, condition = extractor(m)
+        data = load_json(jf)
+        metrics = extract_datagram_metrics(data)
+        grouped[(transport, condition)].append(metrics)
+
+    return grouped
+
+
+def aggregate_resource_experiment(base_dir: Path, experiment: str) -> dict[tuple[str, str], list[dict]]:
+    exp_dir = base_dir / experiment
+    if not exp_dir.exists():
+        return {}
+
+    parser_info = RESOURCE_PARSERS.get(experiment)
+    if not parser_info:
+        return {}
+
+    pattern, extractor = parser_info
+    grouped: dict[tuple[str, str], list[dict]] = defaultdict(list)
+
+    for jf in sorted(exp_dir.glob("*.json")):
+        m = pattern.match(jf.name)
+        if not m:
+            continue
+        transport, condition = extractor(m)
+        data = load_json(jf)
+        metrics = extract_throughput_metrics(data)
+        grouped[(transport, condition)].append(metrics)
+
+    return grouped
+
+
+def aggregate_strategy_experiment(base_dir: Path, experiment: str) -> dict[tuple[str, str], list[dict]]:
+    exp_dir = base_dir / experiment
+    if not exp_dir.exists():
+        return {}
+
+    parser_info = STRATEGY_PARSERS.get(experiment)
+    if not parser_info:
+        return {}
+
+    pattern, extractor = parser_info
+    grouped: dict[tuple[str, str], list[dict]] = defaultdict(list)
+
+    excluded = {"per-subscription"}
+    for jf in sorted(exp_dir.glob("*.json")):
+        m = pattern.match(jf.name)
+        if not m:
+            continue
+        strategy, condition = extractor(m)
+        if strategy in excluded:
+            continue
+        try:
+            data = load_json(jf)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        mode = data["mode"]
+        if mode == "latency":
+            metrics = {
+                "p50_us": data["results"]["p50_us"],
+                "p95_us": data["results"]["p95_us"],
+                "throughput_avg": None,
+            }
+        else:
+            metrics = {
+                "p50_us": None,
+                "p95_us": None,
+                "throughput_avg": data["results"]["throughput_avg"],
+            }
+        grouped[(strategy, condition)].append(metrics)
+
+    return grouped
+
+
 def generate_latex(all_stats: dict, comparisons: list[dict]) -> str:
     lines = []
 
@@ -526,6 +654,77 @@ def generate_latex(all_stats: dict, comparisons: list[dict]) -> str:
         lines.append("\\end{table}")
         lines.append("")
 
+    if "exp05_latency" in all_stats:
+        dgram_labels = {"quic-stream": "Stream", "quic-datagram": "Datagram"}
+        delays = ["delay0ms", "delay25ms", "delay50ms"]
+        delay_headers = ["0ms", "25ms", "50ms"]
+        losses = ["0", "1", "5", "10"]
+        loss_headers = ["0\\%", "1\\%", "5\\%", "10\\%"]
+
+        lines.append("\\begin{table}[h]")
+        lines.append("\\centering")
+        lines.append("\\caption{Datagram vs.~stream p50 latency ($\\mu$s) at 50ms RTT}")
+        lines.append("\\label{tab:datagram_latency}")
+        lines.append("\\begin{tabular}{l" + "c" * len(losses) + "}")
+        lines.append("\\toprule")
+        lines.append("Mode & " + " & ".join(loss_headers) + " \\\\")
+        lines.append("\\midrule")
+
+        for transport in ["quic-stream", "quic-datagram"]:
+            label = dgram_labels[transport]
+            cells = [label]
+            for loss in losses:
+                key = f"{transport}_delay50ms_loss{loss}pct_latency"
+                entry = all_stats["exp05_latency"].get(key, {})
+                p50 = entry.get("p50_us")
+                if p50:
+                    cells.append(f"${p50['mean']:.0f} \\pm {p50['std']:.0f}$")
+                else:
+                    cells.append("---")
+            lines.append(" & ".join(cells) + " \\\\")
+
+        lines.append("\\bottomrule")
+        lines.append("\\end{tabular}")
+        lines.append("\\end{table}")
+        lines.append("")
+
+    if "exp06" in all_stats:
+        res_labels = {
+            "tcp": "TCP",
+            "quic-control-only": "QUIC control",
+            "quic-per-topic": "QUIC per-topic",
+            "quic-per-publish": "QUIC per-publish",
+        }
+        conns = ["10conn", "50conn", "100conn"]
+        conn_headers = ["10", "50", "100"]
+
+        lines.append("\\begin{table}[h]")
+        lines.append("\\centering")
+        lines.append("\\caption{Throughput (msgs/sec) vs.~connection count}")
+        lines.append("\\label{tab:resource_throughput}")
+        lines.append("\\begin{tabular}{l" + "c" * len(conns) + "}")
+        lines.append("\\toprule")
+        lines.append("Strategy & " + " & ".join(conn_headers) + " \\\\")
+        lines.append("\\midrule")
+
+        for transport in ["tcp", "quic-control-only", "quic-per-topic", "quic-per-publish"]:
+            label = res_labels[transport]
+            cells = [label]
+            for conn in conns:
+                key = f"{transport}_{conn}"
+                entry = all_stats["exp06"].get(key, {})
+                tp = entry.get("throughput_avg")
+                if tp:
+                    cells.append(f"${tp['mean']:.0f} \\pm {tp['std']:.0f}$")
+                else:
+                    cells.append("---")
+            lines.append(" & ".join(cells) + " \\\\")
+
+        lines.append("\\bottomrule")
+        lines.append("\\end{tabular}")
+        lines.append("\\end{table}")
+        lines.append("")
+
     return "\n".join(lines)
 
 
@@ -589,6 +788,36 @@ def main():
         tp_fields = ["throughput_avg", "published", "received"]
         all_stats["exp03"] = build_stats_table_generic(exp03, tp_order, tp_conditions, tp_fields)
         print(f"Exp 03 (throughput): processed ({len(tp_conditions)} conditions)")
+
+    exp05 = aggregate_datagram_experiment(base_dir, "05_datagram_vs_stream")
+    if exp05:
+        dgram_order = ["quic-stream", "quic-datagram"]
+        dgram_conditions = sorted({k[1] for k in exp05})
+        lat_conditions = [c for c in dgram_conditions if c.endswith("_latency")]
+        tp_conditions = [c for c in dgram_conditions if c.endswith("_throughput")]
+        dgram_lat_fields = ["p50_us", "p95_us", "p99_us", "messages"]
+        dgram_tp_fields = ["throughput_avg", "published", "received"]
+        lat_stats = build_stats_table_generic(exp05, dgram_order, lat_conditions, dgram_lat_fields)
+        tp_stats = build_stats_table_generic(exp05, dgram_order, tp_conditions, dgram_tp_fields)
+        all_stats["exp05_latency"] = lat_stats
+        all_stats["exp05_throughput"] = tp_stats
+        print(f"Exp 05 (datagram vs stream): processed ({len(dgram_conditions)} conditions)")
+
+    exp06 = aggregate_resource_experiment(base_dir, "06_resource_overhead")
+    if exp06:
+        res_order = ["tcp", "quic-control-only", "quic-per-topic", "quic-per-publish"]
+        res_conditions = sorted({k[1] for k in exp06})
+        res_fields = ["throughput_avg", "published", "received"]
+        all_stats["exp06"] = build_stats_table_generic(exp06, res_order, res_conditions, res_fields)
+        print(f"Exp 06 (resource overhead): processed ({len(res_conditions)} conditions)")
+
+    exp04 = aggregate_strategy_experiment(base_dir, "04_stream_strategies")
+    if exp04:
+        strat_order = ["control-only", "per-publish", "per-topic"]
+        strat_conditions = sorted({k[1] for k in exp04})
+        strat_fields = ["p50_us", "p95_us", "throughput_avg"]
+        all_stats["exp04"] = build_stats_table_generic(exp04, strat_order, strat_conditions, strat_fields)
+        print(f"Exp 04 (stream strategies): processed ({len(strat_conditions)} conditions)")
 
     merged_rtt = {}
     if exp02:
