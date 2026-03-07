@@ -692,6 +692,7 @@ impl ClientHandler {
             packet_id = ?publish.packet_id,
             "Sending PUBLISH to client"
         );
+        let qos = publish.qos;
         self.write_buffer.clear();
         encode_packet_to_buffer(&Packet::Publish(publish), &mut self.write_buffer)?;
         if let Some(max) = self.client_max_packet_size {
@@ -704,13 +705,13 @@ impl ClientHandler {
                 return Ok(());
             }
         }
-        self.write_publish_bytes(&topic_name).await?;
+        self.write_publish_bytes(&topic_name, qos).await?;
         self.stats.publish_sent(payload_size);
         Ok(())
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    async fn write_publish_bytes(&mut self, topic: &str) -> Result<()> {
+    async fn write_publish_bytes(&mut self, topic: &str, qos: QoS) -> Result<()> {
         use crate::broker::config::ServerDeliveryStrategy;
         use crate::broker::server_stream_manager::ServerStreamManager;
 
@@ -727,7 +728,7 @@ impl ClientHandler {
             self.server_stream_manager
                 .as_mut()
                 .unwrap()
-                .write_publish(topic, &self.write_buffer)
+                .write_publish(topic, &self.write_buffer, qos)
                 .await
         } else {
             self.transport.write(&self.write_buffer).await
@@ -735,7 +736,7 @@ impl ClientHandler {
     }
 
     #[cfg(target_arch = "wasm32")]
-    async fn write_publish_bytes(&mut self, _topic: &str) -> Result<()> {
+    async fn write_publish_bytes(&mut self, _topic: &str, _qos: QoS) -> Result<()> {
         self.transport.write(&self.write_buffer).await
     }
 

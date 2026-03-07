@@ -631,7 +631,7 @@ async fn run_quic_handler_inner(
     let stream_label = label;
     tokio::spawn(async move {
         loop {
-            if let Ok((_send, recv)) = connection.accept_bi().await {
+            if let Ok(recv) = connection.accept_uni().await {
                 debug!(
                     "Additional {} data stream accepted from {}",
                     stream_label, peer_addr

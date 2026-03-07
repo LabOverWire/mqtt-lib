@@ -6,6 +6,7 @@ use crate::error::{MqttError, Result};
 use crate::packet::Packet;
 use crate::protocol::v5::properties::Properties;
 use crate::session::SessionState;
+use crate::transport::flow::FlowId;
 use crate::transport::PacketWriter;
 use parking_lot::Mutex;
 use std::sync::Arc;
@@ -148,6 +149,44 @@ pub(super) async fn handle_publish_with_ack(
     let _ = callback_manager.dispatch(&publish);
 
     Ok(())
+}
+
+pub(super) async fn handle_incoming_packet_no_writer(
+    packet: Packet,
+    callback_manager: &Arc<CallbackManager>,
+    flow_id: Option<FlowId>,
+    keepalive_state: &Arc<Mutex<KeepaliveState>>,
+    codec_registry: Option<&Arc<CodecRegistry>>,
+) -> Result<()> {
+    match packet {
+        Packet::Publish(mut publish) => {
+            if publish.qos != crate::QoS::AtMostOnce {
+                return Err(MqttError::ProtocolError(
+                    "QoS > 0 publish received on unidirectional stream".to_string(),
+                ));
+            }
+            if let Some(registry) = codec_registry {
+                let content_type = publish.properties.get_content_type();
+                let decoded =
+                    registry.decode_if_needed(&publish.payload, content_type.as_deref())?;
+                publish.payload = decoded;
+            }
+            publish.stream_id = flow_id.map(|f| f.raw());
+            let _ = callback_manager.dispatch(&publish);
+            Ok(())
+        }
+        Packet::PingResp => {
+            keepalive_state.lock().record_pong_received();
+            Ok(())
+        }
+        Packet::Disconnect(disconnect) => {
+            tracing::info!("Server sent DISCONNECT: {:?}", disconnect.reason_code);
+            Err(MqttError::ConnectionError(
+                "Server disconnected".to_string(),
+            ))
+        }
+        _ => Ok(()),
+    }
 }
 
 pub(super) async fn handle_pubrec_outgoing(

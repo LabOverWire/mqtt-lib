@@ -23,7 +23,7 @@ use std::sync::Arc;
 use std::time::Duration as StdDuration;
 use tokio::sync::oneshot;
 
-use super::handlers::handle_incoming_packet_with_writer;
+use super::handlers::{handle_incoming_packet_no_writer, handle_incoming_packet_with_writer};
 use super::keepalive::KeepaliveState;
 use super::unified::{UnifiedReader, UnifiedWriter};
 
@@ -198,18 +198,38 @@ pub(super) async fn quic_stream_acceptor_task(
     ctx: PacketReaderContext,
 ) {
     loop {
-        match connection.accept_bi().await {
-            Ok((send, recv)) => {
-                tracing::debug!("Accepted new QUIC stream");
-                let ctx_for_reader = ctx.clone();
-                tokio::spawn(async move {
-                    quic_stream_reader_task(recv, send, ctx_for_reader).await;
-                });
+        tokio::select! {
+            result = connection.accept_uni() => {
+                match result {
+                    Ok(recv) => {
+                        tracing::debug!("Accepted unidirectional QUIC stream");
+                        let ctx_for_reader = ctx.clone();
+                        tokio::spawn(async move {
+                            quic_uni_stream_reader_task(recv, ctx_for_reader).await;
+                        });
+                    }
+                    Err(e) => {
+                        tracing::error!("Error accepting unidirectional QUIC stream: {e}");
+                        ctx.connected.store(false, Ordering::SeqCst);
+                        break;
+                    }
+                }
             }
-            Err(e) => {
-                tracing::error!("Error accepting QUIC stream: {e}");
-                ctx.connected.store(false, Ordering::SeqCst);
-                break;
+            result = connection.accept_bi() => {
+                match result {
+                    Ok((send, recv)) => {
+                        tracing::debug!("Accepted bidirectional QUIC stream");
+                        let ctx_for_reader = ctx.clone();
+                        tokio::spawn(async move {
+                            quic_stream_reader_task(recv, send, ctx_for_reader).await;
+                        });
+                    }
+                    Err(e) => {
+                        tracing::error!("Error accepting bidirectional QUIC stream: {e}");
+                        ctx.connected.store(false, Ordering::SeqCst);
+                        break;
+                    }
+                }
             }
         }
     }
@@ -463,6 +483,54 @@ async fn quic_stream_reader_task(
             }
             Err(e) => {
                 tracing::debug!(flow_id = ?flow_id, "Server-initiated QUIC stream closed or error: {e}");
+                break;
+            }
+        }
+    }
+}
+
+async fn quic_uni_stream_reader_task(mut recv: quinn::RecvStream, ctx: PacketReaderContext) {
+    let (flow_id, mut buffer) = match try_read_server_flow_header(&mut recv).await {
+        Ok(result) => {
+            let flow_id = if let (Some(id), Some(flags)) = (result.flow_id, result.flags) {
+                tracing::debug!(
+                    flow_id = ?id,
+                    ?flags,
+                    expire = ?result.expire,
+                    "Unidirectional server stream with flow header"
+                );
+                Some(id)
+            } else {
+                tracing::trace!("No flow header on unidirectional server stream");
+                None
+            };
+            (flow_id, result.leftover)
+        }
+        Err(e) => {
+            tracing::warn!("Error parsing server flow header on uni stream: {e}");
+            (None, BytesMut::new())
+        }
+    };
+
+    loop {
+        match read_packet_with_buffer(&mut recv, &mut buffer, ctx.protocol_version).await {
+            Ok(packet) => {
+                tracing::trace!(flow_id = ?flow_id, "Received packet on unidirectional server stream");
+                if let Err(e) = handle_incoming_packet_no_writer(
+                    packet,
+                    &ctx.callback_manager,
+                    flow_id,
+                    &ctx.keepalive_state,
+                    ctx.codec_registry.as_ref(),
+                )
+                .await
+                {
+                    tracing::error!(flow_id = ?flow_id, "Error handling packet from uni stream: {e}");
+                    break;
+                }
+            }
+            Err(e) => {
+                tracing::debug!(flow_id = ?flow_id, "Unidirectional server stream closed: {e}");
                 break;
             }
         }
