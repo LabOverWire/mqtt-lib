@@ -19,9 +19,24 @@ RESULTS_DIR="${ROOT_DIR}/results_v2"
 mkdir -p "$RESULTS_DIR"
 
 SSH_OPTS="-o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=10"
+SUB_SSH_OPTS="$SSH_OPTS"
+if [ -n "${SUB_PROXY:-}" ]; then
+    SUB_SSH_OPTS="$SSH_OPTS -o ProxyJump=${SSH_USER}@${SUB_PROXY}"
+fi
 ssh_broker() { ssh -i "$SSH_KEY_PATH" $SSH_OPTS "${SSH_USER}@${BROKER_SSH_IP}" "$@"; }
 ssh_pub()    { ssh -i "$SSH_KEY_PATH" $SSH_OPTS "${SSH_USER}@${PUB_IP}" "$@"; }
-ssh_sub()    { ssh -i "$SSH_KEY_PATH" $SSH_OPTS "${SSH_USER}@${SUB_IP}" "$@"; }
+ssh_sub()    { ssh -i "$SSH_KEY_PATH" $SUB_SSH_OPTS "${SSH_USER}@${SUB_IP}" "$@"; }
+
+scp_from_sub() {
+    local remote_path="$1"
+    local local_path="$2"
+    if [ -n "${SUB_PROXY:-}" ]; then
+        scp -i "$SSH_KEY_PATH" -o ProxyJump="${SSH_USER}@${SUB_PROXY}" \
+            "${SSH_USER}@${SUB_IP}:${remote_path}" "$local_path"
+    else
+        scp -i "$SSH_KEY_PATH" "${SSH_USER}@${SUB_IP}:${remote_path}" "$local_path"
+    fi
+}
 
 BROKER_PID=""
 
@@ -76,8 +91,7 @@ stop_monitors() {
         "${output_dir}/${run_label}_broker_resources.csv"
     scp -i "$SSH_KEY_PATH" "${SSH_USER}@${PUB_IP}:/tmp/client_monitor.csv" \
         "${output_dir}/${run_label}_pub_resources.csv"
-    scp -i "$SSH_KEY_PATH" "${SSH_USER}@${SUB_IP}:/tmp/client_monitor.csv" \
-        "${output_dir}/${run_label}_sub_resources.csv"
+    scp_from_sub "/tmp/client_monitor.csv" "${output_dir}/${run_label}_sub_resources.csv"
 
     BROKER_MONITOR_PID=""
     PUB_MONITOR_PID=""
@@ -126,8 +140,7 @@ run_bench_split() {
     sleep 3
     ssh_sub "kill ${sub_bench_pid}" 2>/dev/null || true
     sleep 1
-    scp -i "$SSH_KEY_PATH" "${SSH_USER}@${SUB_IP}:/tmp/sub_bench.json" \
-        "${output_dir}/${label}.json"
+    scp_from_sub "/tmp/sub_bench.json" "${output_dir}/${label}.json"
     echo "  saved: ${output_dir}/${label}.json"
 }
 

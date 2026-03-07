@@ -48,7 +48,7 @@ collect_traces() {
     local output_dir="${RESULTS_DIR}/${experiment}"
 
     for csv in messages.csv quinn_stats.csv; do
-        scp -i "$SSH_KEY_PATH" "${SSH_USER}@${SUB_IP}:${remote_dir}/${csv}" \
+        scp_from_sub "${remote_dir}/${csv}" \
             "${output_dir}/${run_label}_${csv}" 2>/dev/null || true
     done
     ssh_sub "rm -rf ${remote_dir}" 2>/dev/null || true
