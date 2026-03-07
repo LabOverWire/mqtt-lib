@@ -1,6 +1,7 @@
 use crate::broker::config::ServerDeliveryStrategy;
 use crate::error::{MqttError, Result};
 use crate::transport::flow::{DataFlowHeader, FlowFlags, FlowId, FlowIdGenerator};
+use crate::QoS;
 use bytes::BytesMut;
 use quinn::{Connection, SendStream};
 use std::collections::HashMap;
@@ -43,7 +44,12 @@ impl ServerStreamManager {
         self
     }
 
-    pub async fn write_publish(&mut self, topic: &str, encoded_packet: &[u8]) -> Result<()> {
+    pub async fn write_publish(
+        &mut self,
+        topic: &str,
+        encoded_packet: &[u8],
+        qos: QoS,
+    ) -> Result<()> {
         match self.strategy {
             ServerDeliveryStrategy::ControlOnly => Err(MqttError::ConnectionError(
                 "control-only delivery: caller should write to control stream directly".to_string(),
@@ -52,7 +58,8 @@ impl ServerStreamManager {
                 self.write_on_topic_stream(topic, encoded_packet).await
             }
             ServerDeliveryStrategy::PerPublish => {
-                self.write_on_ephemeral_stream(topic, encoded_packet).await
+                self.write_on_ephemeral_stream(topic, encoded_packet, qos)
+                    .await
             }
         }
     }
@@ -104,10 +111,18 @@ impl ServerStreamManager {
         &mut self,
         topic: &str,
         encoded_packet: &[u8],
+        qos: QoS,
     ) -> Result<()> {
-        let (mut send, _recv) = self.connection.open_bi().await.map_err(|e| {
-            MqttError::ConnectionError(format!("failed to open server QUIC stream: {e}"))
-        })?;
+        let mut send = if qos == QoS::AtMostOnce {
+            self.connection.open_uni().await.map_err(|e| {
+                MqttError::ConnectionError(format!("failed to open server QUIC stream: {e}"))
+            })?
+        } else {
+            let (send, _recv) = self.connection.open_bi().await.map_err(|e| {
+                MqttError::ConnectionError(format!("failed to open server QUIC stream: {e}"))
+            })?;
+            send
+        };
 
         let flow_id = self.flow_id_generator.next_server();
 

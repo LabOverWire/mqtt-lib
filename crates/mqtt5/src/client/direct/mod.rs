@@ -1066,7 +1066,7 @@ impl DirectClientInner {
             let recovery_flags = FlowFlags { clean: 0, ..flags };
 
             match manager.open_recovery_stream(flow_id, recovery_flags).await {
-                Ok((send, _recv)) => {
+                Ok(send) => {
                     manager.register_flow_stream(flow_id, send).await;
                     tracing::debug!(
                         flow_id = ?flow_id,
