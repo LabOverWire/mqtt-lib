@@ -19,6 +19,49 @@ New entries on top, beneath the planned work list.
 - [x] Phase 11: Publication gap closure — additional figures + statistical robustness
 - [x] Phase 12: Experiment 05 — datagram vs stream (QoS 0, RTT sweep)
 - [x] Phase 13: Experiment 06 — resource overhead at scale
+- [x] Phase 14: HOL Blocking v3 — redesigned experiment with proper rate, new metrics
+
+---
+
+## 2026-03-09 — Phase 14: HOL Blocking v3 Redesign & QUIC Frame Packing Analysis
+
+**Why v2 failed**: Publishing at 5000 msg/s exceeded connection capacity under loss (440-1150 msg/s), causing unbounded queue buildup. Latency grew monotonically from 25ms to 8-20 seconds. Pearson correlation of monotonically growing series is always ~1.0 regardless of actual HOL isolation. Additionally, split pub/sub mode was broken — `run_hol_blocking()` ignores `--publishers 0`/`--subscribers 0`.
+
+**v3 parameters**: Rate 500 msg/s, duration 60s, payload 256B, 8 topics, co-located pub/sub, always trace. No queue buildup at any loss rate.
+
+**QUIC frame packing artifact**: QUIC shows elevated baseline correlation (wcorr 0.5-0.7 at 0% loss, vs TCP's ~0) because Quinn packs STREAM frames for multiple topics into the same QUIC packet/datagram. When one datagram is delayed by kernel scheduling, all topic frames in it experience the delay together. Three distinct layers:
+
+1. **QUIC packet coalescing** (protocol layer, `quinn-proto`): Multiple QUIC packets (Initial, Handshake, 1-RTT) combined into one UDP datagram. Automatic, not configurable.
+
+2. **QUIC frame packing** (protocol layer, `quinn-proto`): Multiple STREAM frames from different topics packed into the same 1-RTT packet. This causes the correlation artifact. Not user-configurable — Quinn fills each packet up to MTU.
+
+3. **GSO (Generic Segmentation Offload)** (UDP layer, `quinn-udp`): Multiple UDP datagrams batched into a single system call. Configurable via `TransportConfig::enable_segmentation_offload()`, defaults to true. Affects syscall efficiency, NOT frame packing.
+
+Disabling GSO would NOT eliminate the frame packing artifact — it only reduces batching at the kernel level. Separating each topic into distinct datagrams would be extremely wasteful.
+
+**New metrics**: `inter_topic_spread_mean_us` (max-min of per-topic means in 100ms windows) and `detrended_correlation` (first-differences then Pearson). Spread is the primary HOL metric; correlation is not discriminative due to shared congestion control.
+
+**v3 final results** (240 JSON files — 4 transports × 4 loss rates × 15 runs, all complete):
+
+Inter-topic spread mean (µs):
+| Transport | 0% | 1% | 2% | 5% | 5%/0% ratio |
+|-----------|-----|------|------|-------|------|
+| TCP | 6648 | 7053 | 7376 | 8476 | 1.3x |
+| QUIC control | 70 | 1749 | 3331 | 6271 | 90x |
+| QUIC per-topic | 93 | 3746 | 7313 | 17810 | 192x |
+| QUIC per-pub | 106 | 3334 | 5877 | 11760 | 111x |
+
+Spike isolation ratio (0.0=fully isolated, 1.0=all co-occur):
+| Transport | 1% | 2% | 5% |
+|-----------|------|------|------|
+| TCP | 0.99 | 0.98 | 0.99 |
+| QUIC control | 0.98 | 0.98 | 0.98 |
+| QUIC per-topic | 0.72 | 0.82 | 0.91 |
+| QUIC per-pub | 0.60 | 0.74 | 0.90 |
+
+TCP spread barely changes under loss (topics blocked together). QUIC per-topic spread explodes 192x (topics independently affected by retransmissions). Per-topic provides more isolation than per-pub because long-lived streams accumulate independent retransmission queues.
+
+**Script fix**: `stop_monitors` in v3 script overridden to skip sub VM (not used in co-located mode). Original crash: `scp_from_sub` failure killed script via `set -euo pipefail`.
 
 ---
 
