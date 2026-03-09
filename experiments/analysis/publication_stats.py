@@ -110,6 +110,10 @@ def extract_metrics(data: dict) -> dict:
         "wcorr": results["windowed_correlation"],
         "spike_iso": results.get("spike_isolation_ratio"),
         "cluster_ratio": results.get("inter_arrival_cluster_ratio"),
+        "inter_topic_spread_mean_us": results.get("inter_topic_spread_mean_us"),
+        "inter_topic_spread_p95_us": results.get("inter_topic_spread_p95_us"),
+        "inter_topic_spread_max_us": results.get("inter_topic_spread_max_us"),
+        "detrended_correlation": results.get("detrended_correlation"),
         "total_msgs": results["total_messages"],
         "measured_rate": results["measured_rate"],
         "p50_mean": mean(p50s),
@@ -529,8 +533,8 @@ def generate_latex(all_stats: dict, comparisons: list[dict]) -> str:
     if "exp02" in all_stats:
         lines.append("\\begin{table}[h]")
         lines.append("\\centering")
-        lines.append("\\caption{Windowed correlation across packet loss rates (25ms RTT, 8 topics)}")
-        lines.append("\\label{tab:wcorr_vs_loss}")
+        lines.append("\\caption{Inter-topic spread (\\textmu{}s) across packet loss rates (25ms RTT, 8 topics)}")
+        lines.append("\\label{tab:spread_vs_loss}")
         lines.append("\\begin{tabular}{lcccc}")
         lines.append("\\toprule")
         lines.append("Strategy & 0\\% loss & 1\\% loss & 2\\% loss & 5\\% loss \\\\")
@@ -542,10 +546,39 @@ def generate_latex(all_stats: dict, comparisons: list[dict]) -> str:
             for loss in ["loss0pct", "loss1pct", "loss2pct", "loss5pct"]:
                 key = f"{transport}_{loss}"
                 entry = all_stats["exp02"].get(key, {})
-                wc = entry.get("wcorr")
-                if wc:
+                spread = entry.get("inter_topic_spread_mean_us")
+                if spread:
                     cells.append(
-                        f"${wc['mean']:.3f} \\pm {wc['std']:.3f}$"
+                        f"${spread['mean']:.0f} \\pm {spread['std']:.0f}$"
+                    )
+                else:
+                    cells.append("---")
+            lines.append(" & ".join(cells) + " \\\\")
+
+        lines.append("\\bottomrule")
+        lines.append("\\end{tabular}")
+        lines.append("\\end{table}")
+        lines.append("")
+
+        lines.append("\\begin{table}[h]")
+        lines.append("\\centering")
+        lines.append("\\caption{Spike isolation ratio across packet loss rates (25ms RTT, 8 topics)}")
+        lines.append("\\label{tab:spike_iso_vs_loss}")
+        lines.append("\\begin{tabular}{lcccc}")
+        lines.append("\\toprule")
+        lines.append("Strategy & 0\\% loss & 1\\% loss & 2\\% loss & 5\\% loss \\\\")
+        lines.append("\\midrule")
+
+        for transport in TRANSPORT_ORDER:
+            label = TRANSPORT_LABELS.get(transport, transport)
+            cells = [label]
+            for loss in ["loss0pct", "loss1pct", "loss2pct", "loss5pct"]:
+                key = f"{transport}_{loss}"
+                entry = all_stats["exp02"].get(key, {})
+                si = entry.get("spike_iso")
+                if si:
+                    cells.append(
+                        f"${si['mean']:.3f} \\pm {si['std']:.3f}$"
                     )
                 else:
                     cells.append("---")
@@ -734,7 +767,7 @@ def main():
         sys.exit(1)
 
     base_dir = Path(sys.argv[1])
-    fields = ["spike_iso", "wcorr", "cluster_ratio", "measured_rate", "p50_mean", "p95_mean", "p99_mean", "total_msgs"]
+    fields = ["spike_iso", "wcorr", "cluster_ratio", "inter_topic_spread_mean_us", "inter_topic_spread_p95_us", "inter_topic_spread_max_us", "detrended_correlation", "measured_rate", "p50_mean", "p95_mean", "p99_mean", "total_msgs"]
 
     all_stats = {}
     all_comparisons = []
@@ -883,7 +916,7 @@ def main():
     tex_path.write_text(latex)
     print(f"LaTeX written to: {tex_path}")
 
-    print("\n=== COMPARISON SUMMARY ===\n")
+    print("\n=== COMPARISON SUMMARY (wcorr) ===\n")
     for comp in all_comparisons:
         sig = "***" if comp["significant"] else "n.s."
         d_str = f"d={comp['cohens_d']:.2f}" if comp["cohens_d"] is not None else "d=N/A"
@@ -893,6 +926,31 @@ def main():
             f"wcorr: {comp['mean_a']:.3f} vs {comp['mean_b']:.3f}  "
             f"U={comp['u_statistic']:.1f}  p={comp['bonferroni_p']:.4f} {sig}  {d_str}  {cd_str}"
         )
+
+    if "exp02" in all_stats:
+        print("\n=== INTER-TOPIC SPREAD SUMMARY ===\n")
+        for loss in ["loss0pct", "loss1pct", "loss2pct", "loss5pct"]:
+            parts = []
+            for transport in TRANSPORT_ORDER:
+                key = f"{transport}_{loss}"
+                entry = all_stats["exp02"].get(key, {})
+                spread = entry.get("inter_topic_spread_mean_us")
+                if spread:
+                    parts.append(f"{TRANSPORT_LABELS[transport]}: {spread['mean']:.0f}us")
+            if parts:
+                print(f"  {loss:12s} {', '.join(parts)}")
+
+        print("\n=== SPIKE ISOLATION SUMMARY ===\n")
+        for loss in ["loss0pct", "loss1pct", "loss2pct", "loss5pct"]:
+            parts = []
+            for transport in TRANSPORT_ORDER:
+                key = f"{transport}_{loss}"
+                entry = all_stats["exp02"].get(key, {})
+                si = entry.get("spike_iso")
+                if si:
+                    parts.append(f"{TRANSPORT_LABELS[transport]}: {si['mean']:.3f}")
+            if parts:
+                print(f"  {loss:12s} {', '.join(parts)}")
 
 
 if __name__ == "__main__":
