@@ -3,63 +3,43 @@ import sys
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent))
 from style import (
     TRANSPORT_COLORS,
     TRANSPORT_LABELS,
-    TRANSPORT_MARKERS,
     TRANSPORT_ORDER,
     apply_style,
     save_figure,
 )
 
-EXP_DIRS = [
-    "02_hol_blocking",
-    "02b_hol_rtt_sweep",
-    "02c_hol_topic_scaling",
-    "02d_hol_rtt_boundary",
-    "02e_hol_qos1",
-]
+LOSS_RATES = [0, 1, 2, 5]
+LOSS_LABELS = ["0%", "1%", "2%", "5%"]
+RUNS = range(1, 16)
 
 
 def load_all_runs(results_dir: Path):
-    scatter_data = {t: {"wcorr": [], "spike_iso": []} for t in TRANSPORT_ORDER}
-
-    for exp_name in EXP_DIRS:
-        exp_dir = results_dir / exp_name
-        if not exp_dir.exists():
-            continue
-
-        for filepath in sorted(exp_dir.glob("*.json")):
-            stem = filepath.stem
-            transport = None
-            for t in TRANSPORT_ORDER:
-                if stem.startswith(t + "_"):
-                    transport = t
-                    break
-            if transport is None:
-                continue
-
-            with open(filepath) as f:
-                result = json.load(f)
-
-            results_block = result.get("results", {})
-            wcorr = results_block.get("windowed_correlation")
-            spike_iso = results_block.get("spike_isolation_ratio")
-
-            if wcorr is not None and spike_iso is not None:
-                scatter_data[transport]["wcorr"].append(wcorr)
-                scatter_data[transport]["spike_iso"].append(spike_iso)
-
-    total_points = sum(
-        len(v["wcorr"]) for v in scatter_data.values()
-    )
-    if total_points == 0:
-        print("  WARNING: no scatter data found, skipping fig04")
+    exp02_dir = results_dir / "02_hol_blocking"
+    if not exp02_dir.exists():
+        print("  WARNING: 02_hol_blocking not found, skipping fig04")
         return None
 
-    return scatter_data
+    data = {}
+    for transport in TRANSPORT_ORDER:
+        data[transport] = {}
+        for loss in LOSS_RATES:
+            values = []
+            for run in RUNS:
+                filepath = exp02_dir / f"{transport}_loss{loss}pct_run{run}.json"
+                if filepath.exists():
+                    with open(filepath) as f:
+                        result = json.load(f)
+                    values.append(result["results"]["windowed_correlation"])
+            if values:
+                data[transport][loss] = values
+
+    return data
 
 
 def main(results_dir: Path, output_dir: Path):
@@ -70,42 +50,52 @@ def main(results_dir: Path, output_dir: Path):
 
     fig, ax = plt.subplots(figsize=(7, 5.5))
 
-    for transport in TRANSPORT_ORDER:
-        wcorr_vals = data[transport]["wcorr"]
-        spike_vals = data[transport]["spike_iso"]
-        if not wcorr_vals:
-            continue
-        ax.scatter(
-            wcorr_vals,
-            spike_vals,
+    num_transports = len(TRANSPORT_ORDER)
+    bar_width = 0.18
+    group_positions = np.arange(len(LOSS_RATES))
+
+    for t_idx, transport in enumerate(TRANSPORT_ORDER):
+        means = []
+        lows = []
+        highs = []
+        for loss in LOSS_RATES:
+            vals = data[transport].get(loss, [])
+            if vals:
+                arr = np.array(vals)
+                means.append(np.median(arr))
+                lows.append(np.percentile(arr, 25))
+                highs.append(np.percentile(arr, 75))
+            else:
+                means.append(0)
+                lows.append(0)
+                highs.append(0)
+
+        offset = (t_idx - (num_transports - 1) / 2) * bar_width
+        positions = group_positions + offset
+        yerr_low = [m - lo for m, lo in zip(means, lows)]
+        yerr_high = [hi - m for m, hi in zip(means, highs)]
+
+        ax.bar(
+            positions,
+            means,
+            bar_width,
+            yerr=[yerr_low, yerr_high],
+            capsize=3,
             color=TRANSPORT_COLORS[transport],
-            marker=TRANSPORT_MARKERS[transport],
             label=TRANSPORT_LABELS[transport],
-            s=30,
-            alpha=0.6,
-            edgecolors="none",
+            edgecolor="white",
+            linewidth=0.5,
+            alpha=0.85,
         )
 
-    ax.axvline(x=0.5, color="gray", linestyle="--", linewidth=0.8, alpha=0.6)
-    ax.axhline(y=0.5, color="gray", linestyle="--", linewidth=0.8, alpha=0.6)
-
-    ax.annotate(
-        "Divergent\nregion",
-        xy=(0.85, 0.15),
-        fontsize=9,
-        fontstyle="italic",
-        color="gray",
-        ha="center",
-        va="center",
-        bbox=dict(boxstyle="round,pad=0.3", facecolor="lightyellow", alpha=0.7),
-    )
-
-    ax.set_xlabel("Windowed Correlation")
-    ax.set_ylabel("Spike Isolation Ratio")
-    ax.set_title("Windowed Correlation vs. Spike Isolation (All Experiments)")
-    ax.set_xlim(-0.1, 1.1)
-    ax.set_ylim(-0.05, 1.05)
-    ax.legend(loc="upper left", framealpha=0.9)
+    ax.set_xlabel("Packet Loss Rate")
+    ax.set_ylabel("Windowed Correlation (median, IQR)")
+    ax.set_title("Latency Correlation Across Topics by Transport and Loss")
+    ax.set_xticks(group_positions)
+    ax.set_xticklabels(LOSS_LABELS)
+    ax.set_ylim(0, 1.12)
+    ax.axhline(y=1.0, color="gray", linewidth=0.5, linestyle="--", zorder=1)
+    ax.legend(loc="lower right", framealpha=0.9)
 
     fig.tight_layout()
     save_figure(fig, output_dir, "fig04_wcorr_vs_spike_iso")
@@ -113,7 +103,7 @@ def main(results_dir: Path, output_dir: Path):
 
 if __name__ == "__main__":
     script_dir = Path(__file__).resolve().parent
-    default_results = script_dir.parent.parent / "results"
+    default_results = script_dir.parent.parent / "results_v2"
     default_output = script_dir / "output"
     results_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else default_results
     output_dir = Path(sys.argv[2]) if len(sys.argv) > 2 else default_output

@@ -356,8 +356,8 @@ def run_comparisons(grouped: dict, conditions: list[str]) -> list[dict]:
     num_comparisons = len(pairs)
 
     for condition, key_a, key_b, label in pairs:
-        vals_a = [m["spike_iso"] for m in grouped[key_a] if m.get("spike_iso") is not None]
-        vals_b = [m["spike_iso"] for m in grouped[key_b] if m.get("spike_iso") is not None]
+        vals_a = [m["wcorr"] for m in grouped[key_a] if m.get("wcorr") is not None]
+        vals_b = [m["wcorr"] for m in grouped[key_b] if m.get("wcorr") is not None]
 
         if len(vals_a) < 2 or len(vals_b) < 2:
             continue
@@ -389,7 +389,7 @@ def run_comparisons(grouped: dict, conditions: list[str]) -> list[dict]:
             "comparison": label,
             "group_a": f"{key_a[0]}",
             "group_b": f"{key_b[0]}",
-            "metric": "spike_iso",
+            "metric": "wcorr",
             "mean_a": mean(vals_a),
             "mean_b": mean(vals_b),
             "u_statistic": statistic,
@@ -529,8 +529,8 @@ def generate_latex(all_stats: dict, comparisons: list[dict]) -> str:
     if "exp02" in all_stats:
         lines.append("\\begin{table}[h]")
         lines.append("\\centering")
-        lines.append("\\caption{Spike isolation ratio across packet loss rates (25ms RTT, 8 topics)}")
-        lines.append("\\label{tab:spike_iso_vs_loss}")
+        lines.append("\\caption{Windowed correlation across packet loss rates (25ms RTT, 8 topics)}")
+        lines.append("\\label{tab:wcorr_vs_loss}")
         lines.append("\\begin{tabular}{lcccc}")
         lines.append("\\toprule")
         lines.append("Strategy & 0\\% loss & 1\\% loss & 2\\% loss & 5\\% loss \\\\")
@@ -542,10 +542,10 @@ def generate_latex(all_stats: dict, comparisons: list[dict]) -> str:
             for loss in ["loss0pct", "loss1pct", "loss2pct", "loss5pct"]:
                 key = f"{transport}_{loss}"
                 entry = all_stats["exp02"].get(key, {})
-                si = entry.get("spike_iso")
-                if si:
+                wc = entry.get("wcorr")
+                if wc:
                     cells.append(
-                        f"${si['mean']:.3f} \\pm {si['std']:.3f}$"
+                        f"${wc['mean']:.3f} \\pm {wc['std']:.3f}$"
                     )
                 else:
                     cells.append("---")
@@ -890,7 +890,7 @@ def main():
         cd_str = f"cd={comp['cliff_delta']:.2f}" if comp.get("cliff_delta") is not None else "cd=N/A"
         print(
             f"  {comp['condition']:12s} {comp['comparison']:20s} "
-            f"spike_iso: {comp['mean_a']:.3f} vs {comp['mean_b']:.3f}  "
+            f"wcorr: {comp['mean_a']:.3f} vs {comp['mean_b']:.3f}  "
             f"U={comp['u_statistic']:.1f}  p={comp['bonferroni_p']:.4f} {sig}  {d_str}  {cd_str}"
         )
 

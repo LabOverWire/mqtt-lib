@@ -16,7 +16,7 @@ from style import (
 )
 
 TOPIC_SCALING_TRANSPORTS = ["tcp", "quic-pertopic", "quic-perpub"]
-RUNS = range(1, 6)
+RUNS = range(1, 16)
 
 
 def load_topic_scaling_data(results_dir: Path):
@@ -34,7 +34,7 @@ def load_topic_scaling_data(results_dir: Path):
                     with open(filepath) as f:
                         result = json.load(f)
                     sources[transport][8].append(
-                        result["results"]["spike_isolation_ratio"]
+                        result["results"]["windowed_correlation"]
                     )
 
     if exp02c_dir.exists():
@@ -52,7 +52,7 @@ def load_topic_scaling_data(results_dir: Path):
                         with open(filepath) as f:
                             result = json.load(f)
                         sources[transport][topic_count].append(
-                            result["results"]["spike_isolation_ratio"]
+                            result["results"]["windowed_correlation"]
                         )
 
     if not sources:
@@ -113,12 +113,14 @@ def main(results_dir: Path, output_dir: Path):
         )
 
     ax.set_xlabel("Number of Topics")
-    ax.set_ylabel("Spike Isolation Ratio")
-    ax.set_title("HOL Blocking: Spike Isolation vs. Topic Count")
-    ax.set_ylim(0, 1.05)
-    ax.set_xscale("log", base=2)
-    ax.set_xticks([2, 4, 8, 16, 32])
-    ax.set_xticklabels(["2", "4", "8", "16", "32"])
+    ax.set_ylabel("Windowed Correlation")
+    ax.set_title("HOL Blocking: Windowed Correlation vs. Topic Count")
+    ax.set_ylim(0, 1.12)
+    ax.axhline(y=1.0, color="gray", linewidth=0.5, linestyle="--", zorder=1)
+    if len(data.get("tcp", {}).keys()) > 1:
+        ax.set_xscale("log", base=2)
+        ax.set_xticks([2, 4, 8, 16, 32])
+        ax.set_xticklabels(["2", "4", "8", "16", "32"])
     ax.legend(loc="best", framealpha=0.9)
 
     fig.tight_layout()
@@ -127,7 +129,7 @@ def main(results_dir: Path, output_dir: Path):
 
 if __name__ == "__main__":
     script_dir = Path(__file__).resolve().parent
-    default_results = script_dir.parent.parent / "results"
+    default_results = script_dir.parent.parent / "results_v2"
     default_output = script_dir / "output"
     results_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else default_results
     output_dir = Path(sys.argv[2]) if len(sys.argv) > 2 else default_output

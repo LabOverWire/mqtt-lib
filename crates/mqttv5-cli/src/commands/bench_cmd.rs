@@ -366,7 +366,11 @@ struct TopicLatencyResult {
 struct HolBlockingResults {
     topics: Vec<TopicLatencyResult>,
     windowed_correlation: f64,
+    detrended_correlation: f64,
     raw_correlation: f64,
+    inter_topic_spread_mean_us: f64,
+    inter_topic_spread_p95_us: f64,
+    inter_topic_spread_max_us: f64,
     window_size_ms: u64,
     window_count: usize,
     total_messages: u64,
@@ -1526,6 +1530,13 @@ fn finalize_and_report_hol(
         results.window_count,
         results.window_size_ms
     );
+    eprintln!(
+        "  detrended_correlation: {:.4}, inter_topic_spread: mean={:.1}us p95={:.1}us max={:.1}us",
+        results.detrended_correlation,
+        results.inter_topic_spread_mean_us,
+        results.inter_topic_spread_p95_us,
+        results.inter_topic_spread_max_us,
+    );
 
     Ok(results)
 }
@@ -1680,12 +1691,18 @@ fn gather_hol_results(
     let raw_correlation = pearson_correlation(&raw_latency_vecs);
     let window_size_ms = 500;
     let (windowed_corr, window_count) = windowed_correlation(&all_samples, window_size_ms);
+    let detrended_corr = detrended_correlation(&all_samples, window_size_ms);
+    let (spread_mean, spread_p95, spread_max) = inter_topic_spread(&all_samples, 100);
     let measured_rate = as_f64_lossy(total_messages) / elapsed_secs;
 
     HolBlockingResults {
         topics: topic_results,
         windowed_correlation: windowed_corr,
+        detrended_correlation: detrended_corr,
         raw_correlation,
+        inter_topic_spread_mean_us: spread_mean,
+        inter_topic_spread_p95_us: spread_p95,
+        inter_topic_spread_max_us: spread_max,
         window_size_ms,
         window_count,
         total_messages,
@@ -1752,11 +1769,10 @@ fn pearson_pair_f64(xs: &[f64], ys: &[f64]) -> f64 {
     numerator / denominator
 }
 
-fn windowed_correlation(topic_samples: &[Vec<TimestampedSample>], window_ms: u64) -> (f64, usize) {
-    if topic_samples.len() < 2 {
-        return (0.0, 0);
-    }
-
+fn compute_windowed_means(
+    topic_samples: &[Vec<TimestampedSample>],
+    window_ms: u64,
+) -> (Vec<Vec<f64>>, usize) {
     let max_time_us = topic_samples
         .iter()
         .flat_map(|s| s.iter().map(|ts| ts.received_at_us))
@@ -1765,7 +1781,7 @@ fn windowed_correlation(topic_samples: &[Vec<TimestampedSample>], window_ms: u64
 
     let bucket_us = window_ms * 1000;
     if bucket_us == 0 || max_time_us == 0 {
-        return (0.0, 0);
+        return (vec![Vec::new(); topic_samples.len()], 0);
     }
 
     #[allow(clippy::cast_possible_truncation)]
@@ -1803,24 +1819,93 @@ fn windowed_correlation(topic_samples: &[Vec<TimestampedSample>], window_ms: u64
         }
     }
 
-    if valid_windows < 2 {
-        return (0.0, valid_windows);
-    }
+    (per_topic_means, valid_windows)
+}
 
+fn mean_pairwise_correlation(per_topic_series: &[Vec<f64>]) -> f64 {
     let mut total_r = 0.0;
     let mut pair_count = 0u64;
-    for i in 0..per_topic_means.len() {
-        for j in (i + 1)..per_topic_means.len() {
-            let r = pearson_pair_f64(&per_topic_means[i], &per_topic_means[j]);
+    for i in 0..per_topic_series.len() {
+        for j in (i + 1)..per_topic_series.len() {
+            let r = pearson_pair_f64(&per_topic_series[i], &per_topic_series[j]);
             if r.is_finite() {
                 total_r += r;
                 pair_count += 1;
             }
         }
     }
-
     if pair_count == 0 {
+        return 0.0;
+    }
+    total_r / as_f64_lossy(pair_count)
+}
+
+fn windowed_correlation(topic_samples: &[Vec<TimestampedSample>], window_ms: u64) -> (f64, usize) {
+    if topic_samples.len() < 2 {
+        return (0.0, 0);
+    }
+
+    let (per_topic_means, valid_windows) = compute_windowed_means(topic_samples, window_ms);
+    if valid_windows < 2 {
         return (0.0, valid_windows);
     }
-    (total_r / as_f64_lossy(pair_count), valid_windows)
+
+    (mean_pairwise_correlation(&per_topic_means), valid_windows)
+}
+
+fn detrended_correlation(topic_samples: &[Vec<TimestampedSample>], window_ms: u64) -> f64 {
+    if topic_samples.len() < 2 {
+        return 0.0;
+    }
+
+    let (per_topic_means, valid_windows) = compute_windowed_means(topic_samples, window_ms);
+    if valid_windows < 3 {
+        return 0.0;
+    }
+
+    let diffs: Vec<Vec<f64>> = per_topic_means
+        .iter()
+        .map(|means| means.windows(2).map(|w| w[1] - w[0]).collect())
+        .collect();
+
+    mean_pairwise_correlation(&diffs)
+}
+
+fn inter_topic_spread(topic_samples: &[Vec<TimestampedSample>], window_ms: u64) -> (f64, f64, f64) {
+    if topic_samples.len() < 2 {
+        return (0.0, 0.0, 0.0);
+    }
+
+    let (per_topic_means, valid_windows) = compute_windowed_means(topic_samples, window_ms);
+    if valid_windows == 0 {
+        return (0.0, 0.0, 0.0);
+    }
+
+    let num_topics = per_topic_means.len();
+    let mut spreads = Vec::with_capacity(valid_windows);
+
+    for w in 0..valid_windows {
+        let mut min_mean = f64::MAX;
+        let mut max_mean = f64::MIN;
+        for topic_means in &per_topic_means[..num_topics] {
+            let mean = topic_means[w];
+            if mean < min_mean {
+                min_mean = mean;
+            }
+            if mean > max_mean {
+                max_mean = mean;
+            }
+        }
+        spreads.push(max_mean - min_mean);
+    }
+
+    spreads.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    let sum: f64 = spreads.iter().sum();
+    let mean = sum / usize_as_f64_lossy(spreads.len());
+    let p95_idx = (spreads.len() * 95) / 100;
+    let p95 = spreads[p95_idx.min(spreads.len() - 1)];
+    let max = spreads.last().copied().unwrap_or(0.0);
+
+    (mean, p95, max)
 }

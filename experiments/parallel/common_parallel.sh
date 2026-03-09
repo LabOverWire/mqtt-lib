@@ -107,7 +107,7 @@ run_bench_pub_only() {
     mkdir -p "$output_dir"
 
     echo "  running (pub-only): mqttv5 bench ${bench_args}"
-    ssh_pub "ulimit -n 65536; mqttv5 bench ${bench_args}" > "${output_dir}/${label}.json" 2>/dev/null
+    ssh_pub "ulimit -n 65536; mqttv5 bench ${bench_args}" > "${output_dir}/${label}.json" 2>/dev/null || true
     echo "  saved: ${output_dir}/${label}.json"
 }
 
@@ -127,19 +127,35 @@ run_bench_split() {
 
     local sub_args
     sub_args=$(echo "$bench_args" | sed "s/--duration ${sub_duration}/--duration ${sub_total}/")
+    sub_args=$(echo "$sub_args" | sed 's/--publishers [0-9]*/--publishers 0/')
+    if ! echo "$sub_args" | grep -q -- '--publishers'; then
+        sub_args="${sub_args} --publishers 0"
+    fi
 
-    ssh_sub "ulimit -n 65536; nohup mqttv5 bench ${sub_args} --publishers 0 \
-        > /tmp/sub_bench.json 2>/dev/null & echo \$!" > /tmp/sub_pid_${GROUP}
-    local sub_bench_pid
-    sub_bench_pid=$(cat /tmp/sub_pid_${GROUP})
+    local pub_args
+    pub_args=$(echo "$bench_args" | sed 's/--subscribers [0-9]*/--subscribers 0/')
+    if ! echo "$pub_args" | grep -q -- '--subscribers'; then
+        pub_args="${pub_args} --subscribers 0"
+    fi
+
+    ssh_sub "rm -f /tmp/sub_bench.json; ulimit -n 65536; nohup mqttv5 bench ${sub_args} \
+        > /tmp/sub_bench.json 2>/dev/null &"
     sleep 2
 
-    ssh_pub "ulimit -n 65536; mqttv5 bench ${bench_args} --subscribers 0" \
+    ssh_pub "ulimit -n 65536; mqttv5 bench ${pub_args}" \
         > "${output_dir}/${label}_pub.json" 2>/dev/null || true
 
-    sleep 3
-    ssh_sub "kill ${sub_bench_pid}" 2>/dev/null || true
-    sleep 1
+    local waited=0
+    while [ "$waited" -lt 60 ]; do
+        local size
+        size=$(ssh_sub "stat -c%s /tmp/sub_bench.json 2>/dev/null || echo 0")
+        if [ "$size" -gt 0 ]; then
+            break
+        fi
+        sleep 2
+        waited=$((waited + 2))
+    done
+
     scp_from_sub "/tmp/sub_bench.json" "${output_dir}/${label}.json"
     echo "  saved: ${output_dir}/${label}.json"
 }
