@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::time::Instant;
 
-use super::parsers::{parse_duration_secs, parse_stream_strategy};
+use super::parsers::{parse_duration_secs, parse_frame_packing, parse_stream_strategy};
 
 #[derive(Debug, Clone, Copy, ValueEnum, Default)]
 pub enum BenchMode {
@@ -116,6 +116,9 @@ pub struct BenchCommand {
 
     #[arg(long, default_value = "30", value_parser = parse_duration_secs)]
     pub quic_connect_timeout: u64,
+
+    #[arg(long, value_parser = parse_frame_packing)]
+    pub quic_frame_packing: Option<String>,
 
     #[arg(long, default_value = "4")]
     pub topics: usize,
@@ -306,6 +309,8 @@ struct BenchConfig {
     quic_stream_strategy: Option<String>,
     quic_datagrams: bool,
     quic_flow_headers: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    quic_frame_packing: Option<String>,
     rate: u64,
     payload_format: String,
     actual_payload_bytes: usize,
@@ -464,6 +469,7 @@ fn bench_config(cmd: &BenchCommand, url: &str) -> BenchConfig {
         quic_stream_strategy: cmd.quic_stream_strategy.map(strategy_display),
         quic_datagrams: cmd.quic_datagrams,
         quic_flow_headers: cmd.quic_flow_headers,
+        quic_frame_packing: cmd.quic_frame_packing.clone(),
         rate: cmd.rate,
         payload_format: format_name(cmd.payload_format),
         actual_payload_bytes: sample.len(),
@@ -498,6 +504,20 @@ async fn configure_transport(client: &MqttClient, cmd: &BenchCommand, url: &str)
     client
         .set_quic_connect_timeout(Duration::from_secs(cmd.quic_connect_timeout))
         .await;
+    if let Some(ref fp) = cmd.quic_frame_packing {
+        let policy = match fp.as_str() {
+            "stream-isolated" | "isolated" => mqtt5::quinn::FramePackingPolicy::StreamIsolated,
+            budgeted if budgeted.starts_with("budgeted-") => {
+                let n = budgeted
+                    .strip_prefix("budgeted-")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(2);
+                mqtt5::quinn::FramePackingPolicy::BudgetedPacking(n)
+            }
+            _ => mqtt5::quinn::FramePackingPolicy::Greedy,
+        };
+        client.set_quic_frame_packing(policy).await;
+    }
 
     let is_secure =
         url.starts_with("ssl://") || url.starts_with("mqtts://") || url.starts_with("quics://");
@@ -927,6 +947,7 @@ async fn run_connections(cmd: BenchCommand) -> Result<()> {
         quic_max_streams: cmd.quic_max_streams,
         quic_datagrams: cmd.quic_datagrams,
         quic_connect_timeout: cmd.quic_connect_timeout,
+        quic_frame_packing: cmd.quic_frame_packing.clone(),
         cert_pem: tls.cert,
         key_pem: tls.key,
         ca_pem: tls.ca,
@@ -1016,6 +1037,7 @@ struct ConnectionBenchState {
     quic_max_streams: Option<usize>,
     quic_datagrams: bool,
     quic_connect_timeout: u64,
+    quic_frame_packing: Option<String>,
     cert_pem: Option<Arc<Vec<u8>>>,
     key_pem: Option<Arc<Vec<u8>>>,
     ca_pem: Option<Arc<Vec<u8>>>,
@@ -1046,6 +1068,7 @@ fn spawn_connection_workers(
         let quic_max_streams = state.quic_max_streams;
         let quic_datagrams = state.quic_datagrams;
         let quic_connect_timeout = state.quic_connect_timeout;
+        let quic_frame_packing = state.quic_frame_packing.clone();
         let cert_pem = state.cert_pem.clone();
         let key_pem = state.key_pem.clone();
         let ca_pem = state.ca_pem.clone();
@@ -1092,6 +1115,22 @@ fn spawn_connection_workers(
                 client
                     .set_quic_connect_timeout(Duration::from_secs(quic_connect_timeout))
                     .await;
+                if let Some(ref fp) = quic_frame_packing {
+                    let policy = match fp.as_str() {
+                        "stream-isolated" | "isolated" => {
+                            mqtt5::quinn::FramePackingPolicy::StreamIsolated
+                        }
+                        budgeted if budgeted.starts_with("budgeted-") => {
+                            let n = budgeted
+                                .strip_prefix("budgeted-")
+                                .and_then(|v| v.parse().ok())
+                                .unwrap_or(2);
+                            mqtt5::quinn::FramePackingPolicy::BudgetedPacking(n)
+                        }
+                        _ => mqtt5::quinn::FramePackingPolicy::Greedy,
+                    };
+                    client.set_quic_frame_packing(policy).await;
+                }
 
                 let options = ConnectOptions::new(client_id)
                     .with_clean_start(true)

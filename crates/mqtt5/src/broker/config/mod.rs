@@ -83,6 +83,8 @@ pub struct BrokerConfig {
     pub opentelemetry_config: Option<TelemetryConfig>,
     #[serde(skip)]
     pub event_handler: Option<Arc<dyn BrokerEventHandler>>,
+    #[serde(skip)]
+    pub frame_packing_str: Option<String>,
 }
 
 impl std::fmt::Debug for BrokerConfig {
@@ -139,6 +141,7 @@ impl std::fmt::Debug for BrokerConfig {
         #[cfg(feature = "opentelemetry")]
         d.field("opentelemetry_config", &self.opentelemetry_config);
         d.field("event_handler", &self.event_handler.as_ref().map(|_| "..."))
+            .field("frame_packing_str", &self.frame_packing_str)
             .finish()
     }
 }
@@ -182,6 +185,7 @@ impl Default for BrokerConfig {
             #[cfg(feature = "opentelemetry")]
             opentelemetry_config: None,
             event_handler: None,
+            frame_packing_str: None,
         }
     }
 }

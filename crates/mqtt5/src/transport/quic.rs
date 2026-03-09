@@ -34,6 +34,7 @@ pub struct ClientTransportConfig {
     pub max_streams: Option<usize>,
     pub datagrams: bool,
     pub connect_timeout: Duration,
+    pub frame_packing: quinn::FramePackingPolicy,
 }
 
 impl Default for ClientTransportConfig {
@@ -46,6 +47,7 @@ impl Default for ClientTransportConfig {
             max_streams: None,
             datagrams: false,
             connect_timeout: Duration::from_secs(30),
+            frame_packing: quinn::FramePackingPolicy::default(),
         }
     }
 }
@@ -70,6 +72,7 @@ pub struct QuicConfig {
     pub enable_flow_headers: bool,
     pub flow_expire_interval: u64,
     pub flow_flags: FlowFlags,
+    pub frame_packing: quinn::FramePackingPolicy,
 }
 
 const DEFAULT_DATAGRAM_BUFFER_SIZE: usize = 65536;
@@ -95,6 +98,7 @@ impl QuicConfig {
             enable_flow_headers: false,
             flow_expire_interval: DEFAULT_FLOW_EXPIRE_INTERVAL,
             flow_flags: FlowFlags::default(),
+            frame_packing: quinn::FramePackingPolicy::default(),
         }
     }
 
@@ -168,6 +172,12 @@ impl QuicConfig {
     #[must_use]
     pub fn with_flow_flags(mut self, flags: FlowFlags) -> Self {
         self.flow_flags = flags;
+        self
+    }
+
+    #[must_use]
+    pub fn with_frame_packing(mut self, policy: quinn::FramePackingPolicy) -> Self {
+        self.frame_packing = policy;
         self
     }
 
@@ -255,6 +265,8 @@ impl QuicConfig {
             transport_config.datagram_send_buffer_size(self.datagram_send_buffer_size);
             transport_config.datagram_receive_buffer_size(Some(self.datagram_receive_buffer_size));
         }
+
+        transport_config.frame_packing(self.frame_packing.clone());
 
         client_config.transport_config(Arc::new(transport_config));
 

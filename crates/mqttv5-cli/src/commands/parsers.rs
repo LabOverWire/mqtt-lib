@@ -28,6 +28,21 @@ pub fn parse_delivery_strategy(
     }
 }
 
+pub fn parse_frame_packing(s: &str) -> Result<String, String> {
+    match s.to_lowercase().as_str() {
+        "greedy" | "default" | "stream-isolated" | "isolated" => Ok(s.to_lowercase()),
+        _ if s.starts_with("budgeted-") => {
+            let n = s.strip_prefix("budgeted-").unwrap_or("");
+            n.parse::<usize>()
+                .map_err(|_| format!("invalid budget: {n}"))?;
+            Ok(s.to_string())
+        }
+        _ => Err(format!(
+            "invalid frame packing: {s}. Valid: greedy, stream-isolated, budgeted-N"
+        )),
+    }
+}
+
 pub fn parse_duration_secs(s: &str) -> Result<u64, String> {
     if let Ok(secs) = s.parse::<u64>() {
         return Ok(secs);

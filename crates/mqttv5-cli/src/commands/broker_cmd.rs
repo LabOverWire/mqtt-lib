@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use tokio::signal;
 use tracing::{debug, info};
 
-use super::parsers::{parse_delivery_strategy, parse_duration_secs};
+use super::parsers::{parse_delivery_strategy, parse_duration_secs, parse_frame_packing};
 
 fn parse_storage_backend(
     s: &str,
@@ -191,6 +191,10 @@ pub struct RunArgs {
     #[arg(long, value_parser = parse_delivery_strategy)]
     pub quic_delivery_strategy: Option<mqtt5::broker::config::ServerDeliveryStrategy>,
 
+    /// QUIC frame packing policy: greedy (default), stream-isolated, budgeted-N
+    #[arg(long, value_parser = parse_frame_packing)]
+    pub quic_frame_packing: Option<String>,
+
     /// Storage directory for persistent data
     #[arg(long, default_value = "./mqtt_storage")]
     pub storage_dir: PathBuf,
@@ -346,6 +350,7 @@ fn build_example_config() -> BrokerConfig {
         #[cfg(feature = "opentelemetry")]
         opentelemetry_config: None,
         event_handler: None,
+        frame_packing_str: None,
     }
 }
 
@@ -953,6 +958,7 @@ fn configure_quic(config: &mut BrokerConfig, cmd: &RunArgs) -> Result<()> {
         if let Some(strategy) = cmd.quic_delivery_strategy {
             config.server_delivery_strategy = strategy;
         }
+        config.frame_packing_str.clone_from(&cmd.quic_frame_packing);
         info!("QUIC enabled on {:?}", cmd.quic_host);
     } else {
         anyhow::bail!("Both --tls-cert and --tls-key must be provided when using --quic-host");

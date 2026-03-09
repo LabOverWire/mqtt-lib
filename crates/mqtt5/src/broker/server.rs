@@ -507,6 +507,10 @@ impl MqttBroker {
             acceptor_config =
                 acceptor_config.with_require_client_cert(quic_config.require_client_cert);
 
+            if let Some(ref fp_str) = config.frame_packing_str {
+                acceptor_config.frame_packing = Self::parse_frame_packing_policy(fp_str);
+            }
+
             let mut endpoints = Vec::new();
             for addr in &quic_config.bind_addresses {
                 match acceptor_config.build_endpoint(*addr) {
@@ -527,6 +531,21 @@ impl MqttBroker {
             Ok(endpoints)
         } else {
             Ok(Vec::new())
+        }
+    }
+
+    fn parse_frame_packing_policy(s: &str) -> quinn::FramePackingPolicy {
+        match s {
+            "stream-isolated" | "isolated" => quinn::FramePackingPolicy::StreamIsolated,
+            "greedy" | "default" => quinn::FramePackingPolicy::Greedy,
+            budgeted if budgeted.starts_with("budgeted-") => {
+                let n: usize = budgeted
+                    .strip_prefix("budgeted-")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(2);
+                quinn::FramePackingPolicy::BudgetedPacking(n)
+            }
+            _ => quinn::FramePackingPolicy::default(),
         }
     }
 

@@ -115,6 +115,10 @@ impl MqttClient {
         self.transport_config.write().await.connect_timeout = timeout;
     }
 
+    pub async fn set_quic_frame_packing(&self, policy: quinn::FramePackingPolicy) {
+        self.transport_config.write().await.frame_packing = policy;
+    }
+
     pub async fn set_tls_config(
         &self,
         cert_pem: Option<Vec<u8>>,

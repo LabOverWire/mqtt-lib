@@ -40,7 +40,7 @@ def load_spread_by_loss(results_dir: Path):
                         result = json.load(f)
                     val = result["results"].get("inter_topic_spread_mean_us")
                     if val is not None:
-                        values.append(val)
+                        values.append(val / 1000.0)
             if values:
                 data[transport][loss] = values
     return data
@@ -102,7 +102,7 @@ def main(results_dir: Path, output_dir: Path):
         )
 
     ax.set_xlabel("Packet Loss Rate")
-    ax.set_ylabel("Inter-Topic Spread (µs)")
+    ax.set_ylabel("Inter-Topic Spread (ms)")
     ax.set_xticks(group_positions)
     ax.set_xticklabels(LOSS_LABELS)
     ax.set_ylim(bottom=0)

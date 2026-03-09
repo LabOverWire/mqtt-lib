@@ -533,7 +533,7 @@ def generate_latex(all_stats: dict, comparisons: list[dict]) -> str:
     if "exp02" in all_stats:
         lines.append("\\begin{table}[h]")
         lines.append("\\centering")
-        lines.append("\\caption{Inter-topic spread (\\textmu{}s) across packet loss rates (25ms RTT, 8 topics)}")
+        lines.append("\\caption{Inter-topic spread (ms) across packet loss rates (25ms RTT, 8 topics)}")
         lines.append("\\label{tab:spread_vs_loss}")
         lines.append("\\begin{tabular}{lcccc}")
         lines.append("\\toprule")
@@ -548,8 +548,10 @@ def generate_latex(all_stats: dict, comparisons: list[dict]) -> str:
                 entry = all_stats["exp02"].get(key, {})
                 spread = entry.get("inter_topic_spread_mean_us")
                 if spread:
+                    mean_ms = spread['mean'] / 1000.0
+                    std_ms = spread['std'] / 1000.0
                     cells.append(
-                        f"${spread['mean']:.0f} \\pm {spread['std']:.0f}$"
+                        f"${mean_ms:.2f} \\pm {std_ms:.2f}$"
                     )
                 else:
                     cells.append("---")
@@ -936,7 +938,7 @@ def main():
                 entry = all_stats["exp02"].get(key, {})
                 spread = entry.get("inter_topic_spread_mean_us")
                 if spread:
-                    parts.append(f"{TRANSPORT_LABELS[transport]}: {spread['mean']:.0f}us")
+                    parts.append(f"{TRANSPORT_LABELS[transport]}: {spread['mean'] / 1000:.2f}ms")
             if parts:
                 print(f"  {loss:12s} {', '.join(parts)}")
 
