@@ -16,7 +16,7 @@ from style import (
     save_figure,
 )
 
-RUNS = range(1, 6)
+RUNS = range(1, 16)
 
 
 def load_rtt_data(results_dir: Path):
@@ -35,7 +35,7 @@ def load_rtt_data(results_dir: Path):
                     with open(filepath) as f:
                         result = json.load(f)
                     sources[transport][25].append(
-                        result["results"]["spike_isolation_ratio"]
+                        result["results"]["windowed_correlation"]
                     )
 
     if exp02b_dir.exists():
@@ -48,7 +48,7 @@ def load_rtt_data(results_dir: Path):
                         with open(filepath) as f:
                             result = json.load(f)
                         sources[transport][rtt_ms].append(
-                            result["results"]["spike_isolation_ratio"]
+                            result["results"]["windowed_correlation"]
                         )
 
     if exp02d_dir.exists():
@@ -63,7 +63,7 @@ def load_rtt_data(results_dir: Path):
                         with open(filepath) as f:
                             result = json.load(f)
                         sources[transport][rtt_ms].append(
-                            result["results"]["spike_isolation_ratio"]
+                            result["results"]["windowed_correlation"]
                         )
 
     if not sources:
@@ -124,9 +124,10 @@ def main(results_dir: Path, output_dir: Path):
         )
 
     ax.set_xlabel("RTT (ms)")
-    ax.set_ylabel("Spike Isolation Ratio")
-    ax.set_title("HOL Blocking: Spike Isolation vs. RTT")
+    ax.set_ylabel("Windowed Correlation")
+    ax.set_title("HOL Blocking: Windowed Correlation vs. RTT")
     ax.set_ylim(0, 1.12)
+    ax.axhline(y=1.0, color="gray", linewidth=0.5, linestyle="--", zorder=1)
     ax.legend(loc="best", framealpha=0.9)
 
     fig.tight_layout()
@@ -135,7 +136,7 @@ def main(results_dir: Path, output_dir: Path):
 
 if __name__ == "__main__":
     script_dir = Path(__file__).resolve().parent
-    default_results = script_dir.parent.parent / "results"
+    default_results = script_dir.parent.parent / "results_v2"
     default_output = script_dir / "output"
     results_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else default_results
     output_dir = Path(sys.argv[2]) if len(sys.argv) > 2 else default_output

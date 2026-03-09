@@ -33,8 +33,9 @@ def load_qos_data(results_dir: Path):
             if qos0_path.exists():
                 with open(qos0_path) as f:
                     result = json.load(f)
-                data[transport]["qos0"]["spike_iso"].append(
-                    result["results"]["spike_isolation_ratio"])
+                val = result["results"].get("spike_isolation_ratio")
+                if val is not None:
+                    data[transport]["qos0"]["spike_iso"].append(val)
                 data[transport]["qos0"]["measured_rate"].append(
                     result["results"]["measured_rate"])
 
@@ -42,8 +43,9 @@ def load_qos_data(results_dir: Path):
             if qos1_path.exists():
                 with open(qos1_path) as f:
                     result = json.load(f)
-                data[transport]["qos1"]["spike_iso"].append(
-                    result["results"]["spike_isolation_ratio"])
+                val = result["results"].get("spike_isolation_ratio")
+                if val is not None:
+                    data[transport]["qos1"]["spike_iso"].append(val)
                 data[transport]["qos1"]["measured_rate"].append(
                     result["results"]["measured_rate"])
 
@@ -123,7 +125,7 @@ def main(results_dir: Path, output_dir: Path):
 
 if __name__ == "__main__":
     script_dir = Path(__file__).resolve().parent
-    default_results = script_dir.parent.parent / "results"
+    default_results = script_dir.parent.parent / "results_v2"
     default_output = script_dir / "output"
     results_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else default_results
     output_dir = Path(sys.argv[2]) if len(sys.argv) > 2 else default_output
