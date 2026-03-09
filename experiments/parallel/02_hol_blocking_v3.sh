@@ -35,6 +35,29 @@ BROKER_DELIVERY[quic-perpub]="--quic-delivery-strategy per-publish"
 : "${V3_TRANSPORTS:=tcp quic-control quic-pertopic quic-perpub}"
 read -ra TRANSPORTS <<< "$V3_TRANSPORTS"
 
+start_monitors() {
+    BROKER_MONITOR_PID=$(ssh_broker "nohup bash /opt/mqtt-lib/experiments/monitor/resource_monitor.sh ${BROKER_PID} \
+        > /tmp/monitor.csv 2>&1 & echo \$!")
+    PUB_MONITOR_PID=$(ssh_pub "nohup bash /opt/mqtt-lib/experiments/monitor/client_monitor.sh \
+        > /tmp/client_monitor.csv 2>&1 & echo \$!")
+}
+
+stop_monitors() {
+    local output_dir="$1"
+    local run_label="$2"
+
+    ssh_broker "kill ${BROKER_MONITOR_PID}" 2>/dev/null || true
+    ssh_pub "kill ${PUB_MONITOR_PID}" 2>/dev/null || true
+
+    scp -i "$SSH_KEY_PATH" $SSH_OPTS "${SSH_USER}@${BROKER_SSH_IP}:/tmp/monitor.csv" \
+        "${output_dir}/${run_label}_broker_resources.csv" 2>/dev/null || true
+    scp -i "$SSH_KEY_PATH" $SSH_OPTS "${SSH_USER}@${PUB_IP}:/tmp/client_monitor.csv" \
+        "${output_dir}/${run_label}_pub_resources.csv" 2>/dev/null || true
+
+    BROKER_MONITOR_PID=""
+    PUB_MONITOR_PID=""
+}
+
 collect_traces() {
     local experiment="$1"
     local run_label="$2"
