@@ -4,11 +4,13 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
+from scipy import stats
 
 sys.path.insert(0, str(Path(__file__).parent))
 from style import (
     TRANSPORT_COLORS,
     TRANSPORT_LABELS,
+    TRANSPORT_MARKERS,
     TRANSPORT_ORDER,
     apply_style,
     save_figure,
@@ -19,7 +21,7 @@ LOSS_LABELS = ["0%", "1%", "2%", "5%"]
 RUNS = range(1, 16)
 
 
-def load_all_runs(results_dir: Path):
+def load_spike_iso_by_loss(results_dir: Path):
     exp02_dir = results_dir / "02_hol_blocking"
     if not exp02_dir.exists():
         print("  WARNING: 02_hol_blocking not found, skipping fig04")
@@ -32,70 +34,80 @@ def load_all_runs(results_dir: Path):
             values = []
             for run in RUNS:
                 filepath = exp02_dir / f"{transport}_loss{loss}pct_run{run}.json"
-                if filepath.exists():
+                if filepath.exists() and filepath.stat().st_size > 10:
                     with open(filepath) as f:
                         result = json.load(f)
-                    values.append(result["results"]["windowed_correlation"])
+                    val = result["results"].get("spike_isolation_ratio")
+                    if val is not None:
+                        values.append(val)
             if values:
                 data[transport][loss] = values
 
     return data
 
 
+def compute_ci(values, confidence=0.95):
+    n = len(values)
+    if n < 2:
+        return np.mean(values), 0.0
+    mean = np.mean(values)
+    sem = stats.sem(values)
+    t_crit = stats.t.ppf((1 + confidence) / 2, df=n - 1)
+    return mean, t_crit * sem
+
+
 def main(results_dir: Path, output_dir: Path):
     apply_style()
-    data = load_all_runs(results_dir)
+    data = load_spike_iso_by_loss(results_dir)
     if data is None:
         return
 
-    fig, ax = plt.subplots(figsize=(7, 5.5))
+    fig, ax = plt.subplots(figsize=(7, 4.5))
 
-    num_transports = len(TRANSPORT_ORDER)
-    bar_width = 0.18
+    x_offsets = {
+        "tcp": -0.15,
+        "quic-control": -0.05,
+        "quic-pertopic": 0.05,
+        "quic-perpub": 0.15,
+    }
+
     group_positions = np.arange(len(LOSS_RATES))
 
-    for t_idx, transport in enumerate(TRANSPORT_ORDER):
+    for transport in TRANSPORT_ORDER:
         means = []
-        lows = []
-        highs = []
-        for loss in LOSS_RATES:
-            vals = data[transport].get(loss, [])
-            if vals:
-                arr = np.array(vals)
-                means.append(np.median(arr))
-                lows.append(np.percentile(arr, 25))
-                highs.append(np.percentile(arr, 75))
-            else:
-                means.append(0)
-                lows.append(0)
-                highs.append(0)
+        ci_halves = []
+        positions = []
+        for loss_idx, loss in enumerate(LOSS_RATES):
+            if loss in data[transport]:
+                mean, ci_half = compute_ci(data[transport][loss])
+                means.append(mean)
+                ci_halves.append(ci_half)
+                positions.append(group_positions[loss_idx] + x_offsets[transport])
 
-        offset = (t_idx - (num_transports - 1) / 2) * bar_width
-        positions = group_positions + offset
-        yerr_low = [m - lo for m, lo in zip(means, lows)]
-        yerr_high = [hi - m for m, hi in zip(means, highs)]
-
-        ax.bar(
+        ax.errorbar(
             positions,
             means,
-            bar_width,
-            yerr=[yerr_low, yerr_high],
-            capsize=3,
+            yerr=ci_halves,
+            fmt=TRANSPORT_MARKERS[transport] + "-",
             color=TRANSPORT_COLORS[transport],
             label=TRANSPORT_LABELS[transport],
-            edgecolor="white",
-            linewidth=0.5,
-            alpha=0.85,
+            markersize=8,
+            capsize=4,
+            capthick=1.5,
+            linewidth=1.5,
+            elinewidth=1.5,
+            markeredgecolor="white",
+            markeredgewidth=0.8,
+            zorder=3,
         )
 
     ax.set_xlabel("Packet Loss Rate")
-    ax.set_ylabel("Windowed Correlation (median, IQR)")
-    ax.set_title("Latency Correlation Across Topics by Transport and Loss")
+    ax.set_ylabel("Spike Isolation Ratio")
     ax.set_xticks(group_positions)
     ax.set_xticklabels(LOSS_LABELS)
-    ax.set_ylim(0, 1.12)
+    ax.set_ylim(-0.05, 1.15)
     ax.axhline(y=1.0, color="gray", linewidth=0.5, linestyle="--", zorder=1)
-    ax.legend(loc="lower right", framealpha=0.9)
+    ax.legend(loc="center right", framealpha=0.9)
 
     fig.tight_layout()
     save_figure(fig, output_dir, "fig04_wcorr_vs_spike_iso")
@@ -103,7 +115,7 @@ def main(results_dir: Path, output_dir: Path):
 
 if __name__ == "__main__":
     script_dir = Path(__file__).resolve().parent
-    default_results = script_dir.parent.parent / "results_v2"
+    default_results = script_dir.parent.parent / "results_v3"
     default_output = script_dir / "output"
     results_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else default_results
     output_dir = Path(sys.argv[2]) if len(sys.argv) > 2 else default_output
