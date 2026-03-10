@@ -136,6 +136,7 @@ where
     let path = config.path.clone();
     let allowed_origins = config.allowed_origins.clone();
 
+    #[allow(clippy::result_large_err)]
     let callback =
         |req: &tokio_tungstenite::tungstenite::handshake::server::Request,
          response: tokio_tungstenite::tungstenite::handshake::server::Response| {
@@ -162,7 +163,6 @@ where
                 }
             }
 
-            // Check for the MQTT subprotocol
             let has_mqtt_subprotocol = req
                 .headers()
                 .get("Sec-WebSocket-Protocol")
@@ -174,7 +174,6 @@ where
                 });
 
             if has_mqtt_subprotocol {
-                // Add the subprotocol to the response
                 let mut response = response;
                 response.headers_mut().insert(
                     "Sec-WebSocket-Protocol",
