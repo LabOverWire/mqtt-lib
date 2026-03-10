@@ -102,7 +102,7 @@ impl ClientHandler {
 
         match self.fire_publish_event(&publish, &client_id).await {
             PublishAction::Continue => self.route_publish_by_qos(publish, &client_id).await,
-            PublishAction::Handled => self.complete_qos_handshake(publish).await,
+            PublishAction::Handled => self.complete_qos_handshake(publish, &client_id).await,
             PublishAction::Transform(modified) => {
                 self.route_publish_by_qos(modified, &client_id).await
             }
@@ -225,7 +225,11 @@ impl ClientHandler {
         Ok(())
     }
 
-    async fn complete_qos_handshake(&mut self, publish: PublishPacket) -> Result<()> {
+    async fn complete_qos_handshake(
+        &mut self,
+        publish: PublishPacket,
+        client_id: &str,
+    ) -> Result<()> {
         match publish.qos {
             QoS::AtMostOnce => {}
             QoS::AtLeastOnce => {
@@ -235,6 +239,17 @@ impl ClientHandler {
             }
             QoS::ExactlyOnce => {
                 let packet_id = publish.packet_id.unwrap();
+                if let Some(ref storage) = self.storage {
+                    let inflight = InflightMessage::from_publish(
+                        &publish,
+                        client_id.to_string(),
+                        InflightDirection::Inbound,
+                        InflightPhase::AwaitingPubrel,
+                    );
+                    if let Err(e) = storage.store_inflight_message(inflight).await {
+                        debug!("failed to persist handled inbound inflight {packet_id}: {e}");
+                    }
+                }
                 self.inflight_publishes
                     .insert(packet_id, InflightPublish::Handled);
                 let mut pubrec = PubRecPacket::new(packet_id);

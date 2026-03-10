@@ -208,6 +208,3 @@ pub use mqtt5_protocol::{
     StandardValidator, SubscribeOptions, TopicValidator, Transport, WillMessage, WillProperties,
 };
 pub use types::{ConnectOptions, ConnectionStats};
-
-#[cfg(not(target_arch = "wasm32"))]
-pub use quinn;

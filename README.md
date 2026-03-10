@@ -690,7 +690,8 @@ Monitor and react to broker events with custom handlers:
 ```rust
 use mqtt5::broker::config::BrokerConfig;
 use mqtt5::broker::events::{
-    BrokerEventHandler, ClientConnectEvent, ClientPublishEvent, ClientDisconnectEvent,
+    BrokerEventHandler, ClientConnectEvent, ClientPublishEvent,
+    ClientDisconnectEvent, PublishAction,
 };
 use std::future::Future;
 use std::pin::Pin;
@@ -711,16 +712,16 @@ impl BrokerEventHandler for MetricsHandler {
     fn on_client_publish<'a>(
         &'a self,
         event: ClientPublishEvent,
-    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = PublishAction> + Send + 'a>> {
         Box::pin(async move {
             println!("Message published to {}: {} bytes", event.topic, event.payload.len());
-            // MQTT 5.0 request/response support
             if let Some(response_topic) = &event.response_topic {
                 println!("  Response topic: {response_topic}");
             }
             if let Some(correlation_data) = &event.correlation_data {
                 println!("  Correlation data: {} bytes", correlation_data.len());
             }
+            PublishAction::Continue
         })
     }
 

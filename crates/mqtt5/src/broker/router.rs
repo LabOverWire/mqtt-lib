@@ -284,24 +284,25 @@ impl MessageRouter {
     }
 
     pub async fn cleanup_stale_subscriptions(&self) {
-        let clients = self.clients.read().await;
-
-        let subscribed_ids: HashSet<String> = {
+        let (subscribed_ids, connected_ids) = {
+            let clients = self.clients.read().await;
             let exact = self.exact_subscriptions.read().await;
             let wildcard = self.wildcard_subscriptions.read().await;
-            exact
+            let subscribed: HashSet<String> = exact
                 .values()
                 .flatten()
                 .chain(wildcard.values().flatten())
                 .map(|sub| sub.client_id.clone())
-                .collect()
+                .collect();
+            let connected: HashSet<String> = clients.keys().cloned().collect();
+            (subscribed, connected)
         };
 
         let mut stale: Vec<String> = Vec::new();
         let storage = self.storage.as_ref();
 
         for client_id in &subscribed_ids {
-            if clients.contains_key(client_id) {
+            if connected_ids.contains(client_id) {
                 continue;
             }
             let has_session = if let Some(storage) = storage {
@@ -314,16 +315,16 @@ impl MessageRouter {
             }
         }
 
-        drop(clients);
-
         if stale.is_empty() {
             return;
         }
 
+        let stale_set: HashSet<&str> = stale.iter().map(String::as_str).collect();
+
         {
             let mut exact = self.exact_subscriptions.write().await;
             for subs in exact.values_mut() {
-                subs.retain(|sub| !stale.contains(&sub.client_id));
+                subs.retain(|sub| !stale_set.contains(sub.client_id.as_str()));
             }
             exact.retain(|_, subs| !subs.is_empty());
         }
@@ -331,7 +332,7 @@ impl MessageRouter {
         {
             let mut wildcard = self.wildcard_subscriptions.write().await;
             for subs in wildcard.values_mut() {
-                subs.retain(|sub| !stale.contains(&sub.client_id));
+                subs.retain(|sub| !stale_set.contains(sub.client_id.as_str()));
             }
             wildcard.retain(|_, subs| !subs.is_empty());
         }
