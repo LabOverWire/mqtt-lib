@@ -1,15 +1,17 @@
 use anyhow::Result;
 use mqtt5::transport::StreamStrategy;
 
-#[allow(deprecated)]
 pub fn parse_stream_strategy(s: &str) -> Result<StreamStrategy, String> {
     match s.to_lowercase().as_str() {
         "control-only" | "control" => Ok(StreamStrategy::ControlOnly),
         "per-publish" | "publish" => Ok(StreamStrategy::DataPerPublish),
         "per-topic" | "topic" => Ok(StreamStrategy::DataPerTopic),
-        "per-subscription" | "subscription" => Ok(StreamStrategy::DataPerSubscription),
+        "per-subscription" | "subscription" => {
+            eprintln!("warning: per-subscription is deprecated and maps to per-topic");
+            Ok(StreamStrategy::DataPerTopic)
+        }
         _ => Err(format!(
-            "Invalid stream strategy: {s}. Valid: control-only, per-publish, per-topic, per-subscription"
+            "Invalid stream strategy: {s}. Valid: control-only, per-publish, per-topic"
         )),
     }
 }

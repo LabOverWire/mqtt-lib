@@ -165,7 +165,7 @@ Publish an MQTT message.
 | `--otel-endpoint <URL>`   | OpenTelemetry OTLP endpoint                   | None           |
 | `--otel-service-name <NAME>` | OpenTelemetry service name                 | `mqttv5-pub`   |
 | `--otel-sampling <0.0-1.0>` | OpenTelemetry sampling ratio                | `1.0`          |
-| `--quic-stream-strategy <S>` | QUIC stream strategy (control-only, per-publish, per-topic, per-subscription) | `control-only` |
+| `--quic-stream-strategy <S>` | QUIC stream strategy (control-only, per-publish, per-topic) | `control-only` |
 | `--quic-flow-headers`     | Enable QUIC flow headers for state recovery   | `false`        |
 | `--quic-flow-expire <SECS>` | Flow header expiry interval in seconds      | `300`          |
 | `--quic-max-streams <N>`  | Maximum concurrent QUIC streams               | None           |
@@ -293,7 +293,7 @@ Subscribe to MQTT topics.
 | `--otel-endpoint <URL>`   | OpenTelemetry OTLP endpoint                         | None           |
 | `--otel-service-name <NAME>` | OpenTelemetry service name                       | `mqttv5-sub`   |
 | `--otel-sampling <0.0-1.0>` | OpenTelemetry sampling ratio                      | `1.0`          |
-| `--quic-stream-strategy <S>` | QUIC stream strategy (control-only, per-publish, per-topic, per-subscription) | `control-only` |
+| `--quic-stream-strategy <S>` | QUIC stream strategy (control-only, per-publish, per-topic) | `control-only` |
 | `--quic-flow-headers`     | Enable QUIC flow headers for state recovery         | `false`        |
 | `--quic-flow-expire <SECS>` | Flow header expiry interval in seconds            | `300`          |
 | `--quic-max-streams <N>`  | Maximum concurrent QUIC streams                     | None           |
@@ -341,13 +341,13 @@ mqttv5 sub -t sensors/# \
   -v
 ```
 
-Subscribe over QUIC with per-subscription streams:
+Subscribe over QUIC with per-topic streams:
 
 ```bash
 mqttv5 sub -t sensors/# -t commands/# \
   --url quic://broker.example.com:14567 \
   --ca-cert ca.pem \
-  --quic-stream-strategy per-subscription \
+  --quic-stream-strategy per-topic \
   --quic-flow-headers \
   -v
 ```

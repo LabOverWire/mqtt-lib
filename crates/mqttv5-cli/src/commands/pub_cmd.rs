@@ -179,7 +179,7 @@ pub struct PubCommand {
     #[arg(long)]
     pub auto_reconnect: bool,
 
-    /// QUIC stream strategy (control-only, per-publish, per-topic, per-subscription)
+    /// QUIC stream strategy (control-only, per-publish, per-topic)
     #[arg(long, value_parser = parse_stream_strategy)]
     pub quic_stream_strategy: Option<mqtt5::transport::StreamStrategy>,
 
