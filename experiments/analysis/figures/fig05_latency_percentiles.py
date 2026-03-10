@@ -99,11 +99,16 @@ def main(results_dir: Path, output_dir: Path):
         )
 
     ax.set_xlabel("Latency Percentile")
-    ax.set_ylabel("Latency (us)")
-    ax.set_yscale("log")
+    ax.set_ylabel("Latency (ms)")
     ax.set_title("Latency Percentiles at 1% Loss (8 Topics)")
     ax.set_xticks(group_positions)
     ax.set_xticklabels(PERCENTILE_LABELS)
+
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x / 1000:.0f}"))
+    ax.set_yticks(np.arange(0, 80001, 10000))
+    ax.set_ylim(0, 80000)
+    ax.grid(axis="y", alpha=0.3)
+
     ax.legend(loc="best", framealpha=0.9)
 
     fig.tight_layout()

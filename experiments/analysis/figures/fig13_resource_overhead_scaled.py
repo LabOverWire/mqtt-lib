@@ -79,9 +79,8 @@ def main(results_dir: Path, output_dir: Path):
     if data is None:
         return
 
-    fig, axes = plt.subplots(1, 2, figsize=(7, 3.5))
+    fig, ax_tp = plt.subplots(figsize=(5, 3.5))
 
-    ax_tp = axes[0]
     for transport in THROUGHPUT_ORDER:
         x_vals = []
         y_means = []
@@ -107,39 +106,9 @@ def main(results_dir: Path, output_dir: Path):
 
     ax_tp.set_xlabel("Connections")
     ax_tp.set_ylabel("Throughput (K msgs/sec)")
-    ax_tp.set_title("(a) Throughput vs. Connection Count")
+    ax_tp.set_title("Throughput vs. Connection Count")
     ax_tp.set_xticks(CONCURRENCIES)
     ax_tp.legend(loc="best", fontsize=8)
-
-    ax_rss = axes[1]
-    for transport in THROUGHPUT_ORDER:
-        x_vals = []
-        y_means = []
-        y_errs = []
-        for conns in CONCURRENCIES:
-            rss_data = data[transport]["peak_rss"].get(conns)
-            if rss_data:
-                m, e = compute_ci(rss_data)
-                x_vals.append(conns)
-                y_means.append(m)
-                y_errs.append(e)
-
-        if not x_vals:
-            continue
-
-        ax_rss.errorbar(
-            x_vals, y_means, yerr=y_errs,
-            marker=THROUGHPUT_MARKERS[transport],
-            color=THROUGHPUT_COLORS[transport],
-            label=THROUGHPUT_LABELS[transport],
-            linewidth=1.5, markersize=6, capsize=4,
-        )
-
-    ax_rss.set_xlabel("Connections")
-    ax_rss.set_ylabel("Peak Broker RSS (MB)")
-    ax_rss.set_title("(b) Memory vs. Connection Count")
-    ax_rss.set_xticks(CONCURRENCIES)
-    ax_rss.legend(loc="best", fontsize=8)
 
     fig.tight_layout()
     save_figure(fig, output_dir, "fig13_resource_overhead_scaled")

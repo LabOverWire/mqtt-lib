@@ -101,16 +101,14 @@ def main(results_dir: Path, output_dir: Path):
         color = DATAGRAM_COLORS[transport]
         label = DATAGRAM_LABELS[transport]
 
+        p95_extensions = [max(0, p95 - p50) for p50, p95 in zip(p50_means, p95_means)]
+        yerr_asym = [p50_errs, p95_extensions]
+
         ax_lat.bar(
-            x + offset, p50_means, bar_width, yerr=p50_errs,
-            color=color, alpha=0.85, label=f"{label} p50",
+            x + offset, p50_means, bar_width, yerr=yerr_asym,
+            color=color, alpha=0.85, label=f"{label}",
             capsize=3, edgecolor="white", linewidth=0.5,
         )
-        for xi, p95m, p95e in zip(x + offset, p95_means, p95_errs):
-            ax_lat.errorbar(
-                xi, p95m, yerr=p95e, fmt="_",
-                color=color, markersize=8, capsize=3, linewidth=1.5,
-            )
 
     ax_lat.set_xlabel("Packet Loss Rate")
     ax_lat.set_ylabel("Latency (ms)")

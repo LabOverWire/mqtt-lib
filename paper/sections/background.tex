@@ -1,0 +1,47 @@
+\section{Background and Related Work}
+\label{sec:background}
+
+\subsection{MQTT Protocol}
+
+MQTT~\cite{mqtt-v5-spec} provides three quality-of-service levels (QoS~0: at-most-once, QoS~1: at-least-once, QoS~2: exactly-once), retained messages, last will and testament, and topic-based filtering with wildcard support. MQTT~v5.0 added user properties, shared subscriptions, and enhanced authentication. The protocol's minimal framing overhead (2-byte minimum header) makes it well-suited for constrained devices.
+
+\subsection{QUIC Transport Protocol}
+
+Beyond the stream multiplexing described in Section~\ref{sec:introduction}, QUIC~\cite{rfc9000} provides several features relevant to IoT messaging:
+
+\textbf{Integrated security.} QUIC integrates TLS~1.3 into the transport handshake, achieving a 1-RTT connection establishment that includes both transport and cryptographic setup~\cite{rfc9001}. This compares favorably to TCP's 1-RTT handshake plus TLS's additional 1--2 RTTs.
+
+\textbf{Unreliable datagrams.} The DATAGRAM extension (RFC~9221)~\cite{rfc9221} allows sending unreliable data within a QUIC connection, benefiting from the connection's encryption and congestion control without reliability or ordering guarantees.
+
+\textbf{Loss detection.} QUIC uses per-packet sequence numbers (unlike TCP's per-byte) and acknowledgment-based loss detection with probe timeout (PTO) for tail loss~\cite{rfc9002}. This enables more precise loss recovery than TCP's retransmission timeout mechanism.
+
+\subsection{Related Work}
+
+\begin{table}[t]
+\centering
+\caption{Feature comparison of MQTT-over-QUIC approaches.}
+\label{tab:feature-comparison}
+\begin{tabular}{lccc}
+\toprule
+Feature & \texttt{mqtt5} & EMQX~\cite{emqx} & Kumar~\cite{kumar2019mqtt-quic} \\
+\midrule
+Stream strategies & 3 & 1 & 1 \\
+Per-topic isolation & \checkmark & --- & --- \\
+Per-publish isolation & \checkmark & --- & --- \\
+Datagram transport & \checkmark & --- & --- \\
+MQTT v5.0 full & \checkmark & \checkmark & --- \\
+Open-source & \checkmark & \checkmark & \checkmark \\
+Empirical evaluation & \checkmark & partial & \checkmark \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Prior work on MQTT over QUIC falls into three categories.
+
+\textbf{Implementations and evaluations.} Kumar and Dezfouli~\cite{kumar2019mqtt-quic} implemented MQTT over QUIC using a single bidirectional stream, demonstrating reduced connection overhead (up to 56\% fewer handshake packets) and lower delivery latency (up to 55\%) compared to MQTT over TCP across wired and wireless testbeds. Fern{\'a}ndez et al.~\cite{fernandez2020iot-quic} evaluated MQTT over QUIC under emulated wireless conditions (WiFi, LTE, satellite), finding that QUIC maintains stable throughput under packet loss while TCP degrades significantly. Neither study explored stream multiplexing for topic-level HOL blocking isolation.
+
+\textbf{Industrial implementations.} EMQX~\cite{emqx} is the only production MQTT broker to support QUIC transport, but uses a single-stream approach without configurable stream mapping. Table~\ref{tab:feature-comparison} compares the feature sets.
+
+The HOL blocking problem in multiplexed protocols has been studied extensively in the context of HTTP/2~\cite{rfc7540} and HTTP/3~\cite{rfc9114}. Langley et al.~\cite{langley2017quic} demonstrated QUIC's benefits at Internet scale, reporting reduced search latency and video rebuffering across Google's infrastructure. Subsequent empirical evaluations found that while QUIC's stream multiplexing reduces transport-layer HOL blocking, its practical effect on web page loading is modest~\cite{kakhki2017quic, marx2020hol}, partly because web workloads exhibit different dependency patterns than IoT messaging. Yu and Benson~\cite{yu2021quic} corroborated these nuanced findings through production-scale measurements. Our work applies stream multiplexing to the messaging domain, where the ``resource'' granularity is the MQTT topic rather than the HTTP request, and independent topic flows may benefit more directly from stream isolation.
+
+To our knowledge, no prior work has (1)~defined multiple stream mapping strategies for MQTT over QUIC, (2)~evaluated the HOL blocking implications of each strategy under controlled network impairment, or (3)~quantified the throughput and resource overhead tradeoffs across strategies.

@@ -1,0 +1,152 @@
+\section{Evaluation}
+\label{sec:evaluation}
+
+We evaluate \texttt{mqtt5} across six experiments measuring connection establishment, head-of-line blocking, throughput, stream strategy behavior, datagram transport, and resource overhead at scale. All experiments use QoS~0 unless otherwise noted.
+
+\subsection{Experimental Setup}
+
+\begin{table}[t]
+\centering
+\caption{Experimental parameters across all six experiments.}
+\label{tab:params}
+\begin{tabular}{ll}
+\toprule
+Parameter & Value \\
+\midrule
+Hardware & GCP n2-standard-4 (4 vCPU, 16 GB RAM) \\
+Topology & Co-located pub/sub (Exp 2), separate VMs (others) \\
+Region & us-west1-b (same zone, $<$1ms baseline RTT) \\
+OS & Debian 12, kernel 6.1 \\
+Network emulation & \texttt{tc-netem} on broker (symmetric) \\
+QUIC implementation & Quinn 0.11 (Rust) \\
+TLS & rustls 0.23 (TLS 1.3 only) \\
+Congestion control & QUIC: NewReno / TCP: CUBIC \\
+Payload size & 256 bytes (Exp 1--3, 5--6), 64 bytes (Exp 4) \\
+Publish rate & 500 msg/s fixed (Exp 2), max throughput (others) \\
+Measurement & 30--70s duration, 5s warmup (0s for Exp 1) \\
+Runs per config & 15 (Exp 2), 10 (Exp 1, 3--5), 3 (Exp 6) \\
+Frame packing & Greedy (default); StreamIsolated (Exp 2 ablation) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:params} summarizes the common parameters. Network impairment is applied symmetrically on the broker interface using \texttt{tc-netem}. Each experiment varies one or two factors while holding others constant. Experiment~2 uses co-located publisher and subscriber on a single client VM to eliminate network variability between pub/sub; all other experiments use separate VMs.
+
+\subsection{Experiment 1: Connection Establishment Latency}
+
+We measure cold-start connection latency across TCP, TLS~1.3, and QUIC at five one-way delays (0, 25, 50, 100, 200\,ms) using 100 sequential connections per run.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{fig08}
+\caption{Connection latency (p50 bars, p95 whiskers) across network delays. QUIC's integrated TLS handshake achieves comparable latency to raw TCP despite cryptographic overhead, and outperforms the separate TCP+TLS~1.3 handshake at all RTTs.}
+\label{fig:conn-latency}
+\end{figure}
+
+Fig.~\ref{fig:conn-latency} shows that QUIC 1-RTT connection establishment matches TCP's cold-connect latency at all tested delays. TLS~1.3 over TCP consistently adds one additional round trip. At 200\,ms delay, QUIC connects in 402\,ms (p50) versus TCP's 400\,ms and TLS's 842\,ms. The integrated handshake eliminates the sequential TCP+TLS penalty without sacrificing security. We did not test QUIC 0-RTT resumption, which could further reduce connection latency for returning clients.
+
+\subsection{Experiment 2: Head-of-Line Blocking}
+
+This experiment is the core motivation for MQTT-over-QUIC multistream transport. We publish to 8 topics simultaneously at a fixed rate of 500\,msg/s and measure whether latency fluctuations on one topic propagate to others. The fixed rate is chosen to remain well below connection capacity at all loss rates (the minimum sustained capacity under 5\% loss at 25\,ms RTT exceeds 500\,msg/s), ensuring that any observed latency variation reflects transport-layer behavior rather than queue buildup from rate saturation.
+
+We quantify HOL blocking using two complementary metrics. \emph{Inter-topic spread} measures the maximum difference between per-topic mean latencies within 100\,ms time windows: high spread means topics experience different latencies (isolation), while low spread means topics are coupled. \emph{Spike isolation ratio} measures the fraction of latency spikes that co-occur across all topics: a ratio of 1.0 means every spike affects all topics simultaneously (full HOL blocking), while lower values indicate independent spikes.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{fig01}
+\caption{Inter-topic latency spread across packet loss rates (25\,ms RTT, 8 topics, 15 runs per configuration). Per-topic QUIC spread amplifies 192$\times$ from baseline to 5\% loss, confirming independent per-stream loss recovery. TCP spread increases only 1.3$\times$, indicating that all topics remain tightly coupled under loss.}
+\label{fig:spread}
+\end{figure}
+
+Fig.~\ref{fig:spread} shows inter-topic spread at 25\,ms RTT across four loss rates with 15 runs per configuration. At 0\% loss, all transports show low spread: TCP at 6.6\,ms, QUIC per-topic at 0.09\,ms, per-publish at 0.11\,ms, and control-only at 0.07\,ms. Under 5\% loss, per-topic QUIC spread amplifies to 17.8\,ms (192$\times$ baseline), while TCP increases to only 8.5\,ms (1.3$\times$). Per-publish shows 111$\times$ amplification and control-only shows 90$\times$.
+
+The high spread for multi-stream QUIC strategies under loss reflects independent stream loss recovery: when a QUIC packet carrying data for one topic is lost, only that topic's stream experiences retransmission delay, while other streams continue unaffected. TCP, by contrast, stalls the entire byte stream on any loss, so all topics experience the same delay---hence the low spread amplification.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{fig04}
+\caption{Spike isolation ratio across packet loss rates. A ratio of 1.0 means all latency spikes co-occur across topics (full HOL blocking). TCP remains near 1.0 at all loss rates, while per-topic (0.72) and per-publish (0.60) QUIC show progressively more independent spike behavior at 1\% loss.}
+\label{fig:spike-iso}
+\end{figure}
+
+Fig.~\ref{fig:spike-iso} provides a complementary view through spike isolation ratio. TCP maintains a ratio near 1.0 at all loss rates (0.99 at 1\% loss), confirming that virtually all latency spikes propagate to every topic. Per-topic QUIC drops to 0.72 and per-publish to 0.60 at 1\% loss, indicating that 28--40\% of spikes affect individual topics independently. Control-only QUIC remains at 0.98, consistent with its single-stream architecture that provides no inter-topic isolation.
+
+QUIC's congestion control operates per-connection (shared congestion window across all streams), which limits the degree of isolation: a loss event triggers congestion window reduction affecting all concurrent streams. This explains why per-topic isolation is partial (0.72) rather than complete ($\approx$0): stream-level loss recovery is independent, but congestion response is shared.
+
+\textbf{Ablation: frame packing policy.} To determine whether the partial correlation observed at 0\% loss reflects QUIC's congestion control architecture or an implementation-level artifact, we conducted a control experiment varying Quinn's frame packing behavior. By default, Quinn packs STREAM frames from multiple streams into single QUIC packets---a hardcoded optimization we term \emph{Greedy} packing. When a single packet is lost, all streams whose data it carried experience retransmission delay simultaneously, potentially creating artificial inter-stream coupling. We extended Quinn with a \emph{StreamIsolated} policy that restricts each packet to a single stream's data, eliminating this cross-stream coupling at the packet level. We tested both policies using the same parameters as the main experiment (500\,msg/s, 8 topics, 25\,ms RTT, 15 runs per configuration).
+
+At 0\% loss, the baseline correlation persists under StreamIsolated packing: per-topic windowed correlation is 0.64 versus 0.60 with Greedy. Since no packets are lost at 0\% loss, packet-level frame co-location cannot be the cause. Instead, the correlation arises from per-connection state shared across all streams. QUIC specifies a single congestion controller per connection~\cite{rfc9002, rfc9308}: the pacer gates when any stream can send, so all streams are subject to the same send schedule. Additionally, all streams share a single UDP socket and the subscriber processes them from the same connection, creating correlated jitter regardless of how frames are packed into packets. Under loss, however, StreamIsolated per-topic packing shows 25\% higher inter-topic spread (22.3\,ms versus 17.8\,ms at 5\% loss) and 7\% lower spike isolation ratio (0.85 versus 0.91 at 5\% loss), demonstrating genuine per-stream isolation improvement when retransmission events cannot cross stream boundaries within a single packet (Fig.~\ref{fig:frame-packing}).
+
+The effect is asymmetric across strategies. For per-publish, StreamIsolated packing is counterproductive: p50 latency at 5\% loss rises from 29\,ms to 115\,ms. Isolated packing creates more QUIC packets for ephemeral streams (each publish opens and closes a new stream), increasing the number of packets subject to loss and retransmission. Under high loss, the resulting retransmission volume overwhelms connection capacity, causing queue buildup. This interaction between frame packing policy and stream lifetime---beneficial for persistent streams, harmful for ephemeral ones---has implications for adaptive transport configuration (Section~\ref{sec:discussion}).
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{fig15}
+\caption{Effect of frame packing policy on HOL blocking metrics. \emph{Greedy} packing (default) batches multiple streams per packet; \emph{StreamIsolated} restricts each packet to one stream. For per-topic (left), StreamIsolated improves spread and reduces correlation under loss. For per-publish (right), StreamIsolated increases overhead, degrading performance at high loss rates.}
+\label{fig:frame-packing}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{fig05}
+\caption{Latency percentiles at 1\% loss, 25\,ms RTT. TCP exhibits higher tail latency than all QUIC strategies, with the gap widening at higher percentiles. Multi-stream QUIC strategies (per-topic, per-publish) achieve the lowest p95 and p99 values.}
+\label{fig:lat-percentiles}
+\end{figure}
+
+Fig.~\ref{fig:lat-percentiles} shows latency percentiles at 1\% loss. TCP exhibits the highest tail latency across all percentiles, with the gap between TCP and QUIC widening from p50 to p99. Multi-stream QUIC strategies (per-topic, per-publish) achieve the lowest p95 and p99 values, consistent with independent per-stream loss recovery reducing tail latency when retransmission delays are confined to individual streams rather than stalling the entire connection.
+
+\subsection{Experiment 3: Throughput Under Loss}
+
+We measure sustained throughput using 64 publishers and 1 subscriber (fan-in pattern) at loss rates from 0\% to 10\%.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{fig09}
+\caption{Throughput vs.\ packet loss for QoS~0 (top) and QoS~1 (bottom). TCP outperforms all QUIC strategies at baseline (0\% loss), but under loss ($\geq$1\%) all QUIC strategies outperform TCP.}
+\label{fig:throughput-loss}
+\end{figure}
+
+Fig.~\ref{fig:throughput-loss} reveals that at 0\% loss, TCP outperforms all QUIC strategies in raw throughput. With QoS~0, TCP achieves 303K\,msg/s versus QUIC control-only at 134K\,msg/s, per-topic at 86K\,msg/s, and per-publish at 78K\,msg/s. The throughput gap at baseline reflects QUIC's per-packet encryption overhead (absent in unencrypted TCP) and per-stream state management.
+
+Under loss ($\geq$1\%), the ordering reverses: all QUIC strategies outperform TCP, achieving 1.8$\times$ TCP's throughput at 1\% loss and 2.7$\times$ at 10\% loss. TCP's CUBIC congestion control backs off more aggressively than QUIC's NewReno under symmetric loss, and QUIC's per-connection loss recovery handles retransmissions more efficiently. Per-publish QUIC matches control-only throughput under loss because stream creation overhead becomes negligible relative to loss recovery delays.
+
+QoS~1 throughput drops to approximately 1.2K\,msg/s across all transports at 0\% loss, as the per-message acknowledgment round-trip dominates in the 64-publisher fan-in topology. Under loss, QUIC maintains higher QoS~1 throughput than TCP (809 versus 367\,msg/s at 10\% loss), as QUIC's loss recovery is more efficient than TCP CUBIC's backoff behavior.
+
+\subsection{Experiment 4: Stream Strategy Comparison}
+
+We compare the three stream mapping strategies (control-only, per-publish, per-topic) while varying topic count (1, 4, 8, 16) to understand how strategy selection interacts with workload structure.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{fig14}
+\caption{Strategy comparison across topic counts. (a)~Latency is stable across all strategies and topic counts. (b)~Throughput scales linearly with topic count for all strategies.}
+\label{fig:strategy-comparison}
+\end{figure}
+
+Fig.~\ref{fig:strategy-comparison} shows that latency is stable at approximately 28.5\,ms across all strategies and topic counts, indicating that stream management overhead does not materially affect per-message latency in this workload. Throughput scales linearly with topic count for all strategies as parallelism increases. At 16 topics, control-only achieves 116K\,msg/s, per-topic 101K\,msg/s, and per-publish 108K\,msg/s. The gap between strategies narrows at higher topic counts as increased parallelism dominates over per-stream overhead.
+
+\subsection{Experiment 5: Datagram vs.\ Stream Transport}
+
+QUIC datagrams (RFC~9221) bypass the stream abstraction entirely, sending messages as unreliable datagrams within the QUIC connection. We compare datagram transport against stream-based transport at 50\,ms delay across four loss rates.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{fig12}
+\caption{Datagram vs.\ stream transport at 50\,ms RTT. (a)~Datagrams achieve lower p50 latency at 5\% loss by avoiding retransmission delays. (b)~Both transports achieve comparable throughput since they share the same QUIC connection and congestion controller.}
+\label{fig:datagram}
+\end{figure}
+
+Fig.~\ref{fig:datagram} shows that at 50\,ms RTT, datagram and stream transport perform similarly at low loss rates. At 0\% loss, both achieve approximately 12K\,msg/s throughput and 50\,ms p50 latency. At 5\% loss, datagrams show 19\% lower p50 latency (1.1\,s versus 1.4\,s) because lost datagrams are skipped rather than retransmitted. At 10\% loss, both transports exhibit multi-second latencies (8.7\,s for datagrams, 7.7\,s for streams) as severe congestion dominates and the datagram advantage disappears. Throughput remains comparable across all conditions ($\approx$980\,msg/s at 5\% loss for both), as both transports share the same QUIC connection and congestion controller.
+
+\subsection{Experiment 6: Resource Overhead at Scale}
+
+We scale from 10 to 100 concurrent publisher-subscriber pairs to measure how transport strategies affect throughput under load.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{fig13}
+\caption{Throughput scaling from 10 to 100 connections. TCP remains stable while QUIC strategies show declining throughput as per-connection state overhead accumulates.}
+\label{fig:resource-scale}
+\end{figure}
+
+Fig.~\ref{fig:resource-scale} shows that TCP throughput remains stable at 444--455K\,msg/s across connection counts. QUIC control-only starts at 312K\,msg/s with 10 connections but drops to 242K at 100 connections---a 22\% decline attributable to per-connection QUIC state overhead. Per-topic and per-publish show similar degradation from 262--266K at 10 connections to 185--191K at 100 connections.

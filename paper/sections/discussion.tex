@@ -1,0 +1,44 @@
+\section{Discussion}
+\label{sec:discussion}
+
+\subsection{Strategy Selection Guidelines}
+
+Our results suggest the following guidelines for practitioners selecting a stream mapping strategy:
+
+\textbf{Use control-only} when throughput is the primary concern and topics are not independent. This strategy adds QUIC's security benefits (integrated TLS~1.3) and connection management (migration, 0-RTT potential) with minimal overhead compared to TCP. It provides no inter-topic isolation (spike isolation ratio 0.98, comparable to TCP's 0.99), making it appropriate for single-topic workloads or scenarios where HOL blocking is acceptable.
+
+\textbf{Use per-topic} when topic independence matters and the number of topics is bounded. At 1\% loss---representative of typical wireless IoT conditions---per-topic mapping already provides measurable isolation: inter-topic spread amplifies 40$\times$ from baseline, and 28\% of latency spikes affect individual topics independently (spike isolation ratio 0.72 versus TCP's 0.99). At higher loss (5\%), spread amplification reaches 192$\times$. Throughput remains within 13--32\% of control-only. The overhead scales with the number of active topics, not the message rate, making it efficient for workloads with moderate topic counts (tens to hundreds). StreamIsolated frame packing further improves isolation (+25\% spread, $-$7\% spike ratio at 5\% loss) with modest latency cost, making it recommended for loss-prone deployments. This is the recommended default for multi-topic IoT deployments on lossy networks.
+
+\textbf{Use per-publish} only when message-level isolation is required and throughput is secondary. Per-publish shows the strongest spike isolation (ratio 0.60 at 1\% loss, meaning 40\% of spikes are topic-independent), but the per-message stream creation overhead makes this strategy unsuitable for high-throughput workloads. StreamIsolated frame packing should be avoided for this strategy, as isolated packing amplifies retransmission overhead for ephemeral streams. It may be appropriate for low-rate command-and-control channels where every message must be independently deliverable.
+
+\textbf{Use datagrams} for latency-sensitive telemetry with QoS~0 where occasional message loss is acceptable. Datagrams achieve 19\% lower latency than streams at 5\% loss with comparable throughput, as both share the same QUIC connection and congestion controller. They are unsuitable for QoS~1 or QoS~2 workloads that require acknowledgment semantics.
+
+\subsection{Throughput--Isolation Tradeoff}
+
+A central finding is that the throughput tradeoff between TCP and QUIC is condition-dependent. At baseline (0\% loss), TCP achieves 1.5--2.4$\times$ the throughput of QUIC strategies, with the gap widening at higher connection counts. This overhead comes from three sources: (1)~per-stream state management within QUIC, (2)~more complex congestion control interactions between streams, and (3)~the computational cost of QUIC's per-packet encryption (though this is shared with TLS~1.3 over TCP).
+
+However, the ordering reverses even at 1\% loss: QUIC outperforms TCP by 1.8$\times$, reaching 2.7$\times$ at 10\% loss. QUIC's NewReno handles loss recovery more efficiently than TCP's CUBIC in our symmetric loss setup. This reversal at modest loss rates is significant for IoT deployments, where 1--2\% packet loss is common on wireless links. For throughput-dominated workloads on reliable networks, TCP remains the better choice, while QUIC is preferable on lossy links where its throughput advantage and independent stream recovery provide concrete benefits.
+
+\subsection{HOL Blocking Isolation: Partial but Meaningful}
+
+Our HOL blocking results show that QUIC stream multiplexing provides \emph{partial} rather than \emph{complete} isolation between topics. The spike isolation ratio for per-topic QUIC drops to 0.72 at 1\% loss rather than approaching 0 (full independence). This partial isolation arises because QUIC's congestion control operates per-connection: a loss event triggers congestion window reduction that affects all concurrent streams, even though stream-level loss recovery (retransmission) is independent. The inter-topic spread metric captures this nuance---topics experience different \emph{retransmission delays} (high spread) but correlated \emph{congestion responses} (partial spike co-occurrence).
+
+We tested whether Quinn's default frame packing---batching STREAM frames from multiple streams into single QUIC packets---contributes to this baseline correlation by running the same experiment with StreamIsolated packing, which restricts each packet to a single stream's data. The correlation persists (0.64 versus 0.60 at 0\% loss), confirming that it is not caused by frame co-location. Since no packets are lost at 0\% loss, the correlation instead reflects per-connection shared state~\cite{rfc9002, rfc9308}: all streams are subject to the same congestion controller, pacer, and UDP socket, creating correlated jitter independent of frame packing. Under loss, StreamIsolated improves per-topic isolation: inter-topic spread increases 25\% and spike isolation ratio decreases 7\% at 5\% loss, because a single lost packet can no longer simultaneously affect multiple streams' data. However, for per-publish, isolated packing is counterproductive: the increased packet count overwhelms connection capacity under loss, causing queue buildup (p50 latency rises from 29\,ms to 115\,ms at 5\% loss with StreamIsolated versus Greedy).
+
+\subsection{Limitations}
+
+\textbf{Single broker with co-located pub/sub.} The HOL blocking experiment uses co-located publisher and subscriber on a single VM to eliminate network variability. Production deployments involve separate clients with independent network paths that may affect the relative performance of transport strategies.
+
+\textbf{Symmetric impairment.} Network impairment is applied symmetrically at the broker. Real networks exhibit asymmetric conditions, bursty loss, and variable delay that may interact differently with QUIC's loss recovery mechanisms.
+
+\textbf{No 0-RTT or connection migration.} We did not evaluate QUIC 0-RTT resumption or connection migration, both of which are significant advantages for mobile IoT clients. These features are orthogonal to stream mapping strategies and are left for future work.
+
+\textbf{Limited scale.} Our largest experiment uses 100 connections. Production IoT deployments may involve thousands of concurrent connections, where QUIC's per-connection state overhead could become more significant.
+
+\textbf{Unencrypted TCP baseline.} Throughput experiments compare QUIC (which always encrypts) against unencrypted TCP. Using TLS~1.3 over TCP would add comparable per-packet encryption overhead, narrowing the baseline throughput gap reported at 0\% loss. The throughput reversal under loss is driven by congestion control behavior and would persist regardless of encryption.
+
+\textbf{Congestion control.} QUIC uses NewReno while TCP uses CUBIC in our experiments. Different congestion control algorithms could affect the relative throughput results. The HOL blocking isolation findings (inter-topic spread, spike isolation) depend on the shared-CWND property of QUIC congestion control, which is common to all standard QUIC congestion controllers.
+
+\subsection{Future Work}
+
+Several directions emerge from this work. First, evaluating 0-RTT connection resumption would quantify the benefit for mobile clients that reconnect frequently. Second, testing connection migration could demonstrate QUIC's advantage for devices that change network interfaces. Third, exploring adaptive strategy selection---where the broker dynamically switches strategies based on observed network conditions---could automate the throughput--isolation tradeoff. Additionally, exploring adaptive frame packing that automatically selects Greedy packing for per-publish and StreamIsolated for per-topic based on the negotiated stream strategy could optimize the transport layer without manual configuration. Finally, extending the evaluation to constrained devices (e.g., ESP32, Raspberry Pi) would assess whether QUIC's computational overhead is viable for resource-limited IoT endpoints.
