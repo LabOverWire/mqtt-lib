@@ -344,6 +344,19 @@ impl MessageRouter {
             }
         }
 
+        {
+            let exact = self.exact_subscriptions.read().await;
+            let wildcard = self.wildcard_subscriptions.read().await;
+            let active_groups: HashSet<&str> = exact
+                .values()
+                .flatten()
+                .chain(wildcard.values().flatten())
+                .filter_map(|sub| sub.share_group.as_deref())
+                .collect();
+            let mut counters = self.share_group_counters.write().await;
+            counters.retain(|group, _| active_groups.contains(group.as_str()));
+        }
+
         if let Some(storage) = storage {
             for client_id in &stale {
                 if let Err(e) = storage.remove_queued_messages(client_id).await {

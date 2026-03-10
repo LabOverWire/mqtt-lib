@@ -103,7 +103,9 @@ impl ClientHandler {
         match self.fire_publish_event(&publish, &client_id).await {
             PublishAction::Continue => self.route_publish_by_qos(publish, &client_id).await,
             PublishAction::Handled => self.complete_qos_handshake(publish, &client_id).await,
-            PublishAction::Transform(modified) => {
+            PublishAction::Transform(mut modified) => {
+                modified.properties.inject_sender(self.user_id.as_deref());
+                modified.properties.inject_client_id(Some(&client_id));
                 self.route_publish_by_qos(modified, &client_id).await
             }
         }
