@@ -158,7 +158,8 @@ def main(v3_dir: Path, v4_dir: Path, output_dir: Path):
             "wcorr", "Windowed Correlation",
             cfg["title"],
         )
-        axes[1, col].set_ylim(-0.1, 1.1)
+    axes[1, 0].set_ylim(0.4, 1.05)
+    axes[1, 1].set_ylim(0.6, 1.05)
 
     axes[0, 0].set_ylim(bottom=0)
     axes[0, 1].set_ylim(bottom=0)

@@ -1,0 +1,22 @@
+\section{Introduction}
+\label{sec:introduction}
+
+MQTT is the dominant messaging protocol for Internet of Things (IoT) deployments, widely adopted for device-to-cloud communication across industrial, smart city, and consumer IoT platforms~\cite{bansal2020iot-mqtt-survey}. MQTT's publish-subscribe model, lightweight framing, and multiple quality-of-service levels make it well-suited for constrained devices and unreliable networks~\cite{mqtt-v5-spec}.
+
+However, MQTT operates over TCP, which introduces a fundamental limitation: \emph{head-of-line (HOL) blocking}. When an IoT device publishes to multiple topics over a single TCP connection---as is common for devices reporting temperature, humidity, GPS, and status simultaneously---a packet loss on any one topic's data blocks delivery of \emph{all} topics until retransmission completes. This creates artificial coupling between logically independent data flows, increasing tail latency and reducing the responsiveness of multi-topic workloads.
+
+QUIC~\cite{rfc9000}, the transport protocol underlying HTTP/3, addresses HOL blocking through \emph{stream multiplexing}: multiple independent streams share a single connection, each with its own flow control and loss recovery. A lost packet on one stream does not block data on other streams. This property has been extensively studied for web traffic~\cite{langley2017quic, kakhki2017quic, marx2020hol, yu2021quic}, but its application to IoT messaging protocols remains largely unexplored.
+
+Running MQTT over QUIC is not simply a matter of replacing the TCP socket. The question of \emph{how} to map MQTT's control and data packets onto QUIC streams admits multiple answers, each with different performance characteristics. A single-stream approach (equivalent to TCP) gains QUIC's security and connection management benefits but not HOL blocking elimination. A per-topic approach maps each MQTT topic to a dedicated QUIC stream, providing topic-level isolation. A per-message approach creates a new stream for each PUBLISH, maximizing isolation at the cost of stream management overhead.
+
+In this paper, we define three configurable stream mapping strategies for MQTT over QUIC, implement them in \texttt{mqtt5}, an open-source MQTT library, and evaluate them across six experiments on GCP infrastructure under controlled network impairment.
+
+Our contributions are:
+\begin{enumerate}
+\item Three stream mapping strategies (control-only, per-topic, per-publish) for MQTT over QUIC with a lightweight flow header protocol for stream demultiplexing.
+\item The first empirical evaluation of MQTT stream mapping strategies under controlled network impairment, quantifying HOL blocking, throughput, and resource overhead.
+\item An evaluation of QUIC datagram transport for MQTT as an alternative to stream-based delivery.
+\item An open-source implementation with integrated benchmarking tools.
+\end{enumerate}
+
+The remainder of this paper is organized as follows. Section~\ref{sec:background} covers MQTT, QUIC, and related work. Section~\ref{sec:architecture} describes the stream mapping architecture. Section~\ref{sec:implementation} details the implementation. Section~\ref{sec:evaluation} presents experimental results. Section~\ref{sec:discussion} discusses strategy selection guidelines and limitations. Section~\ref{sec:conclusion} concludes.

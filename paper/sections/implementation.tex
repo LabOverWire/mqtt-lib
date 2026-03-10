@@ -1,0 +1,28 @@
+\section{Implementation}
+\label{sec:implementation}
+
+\texttt{mqtt5} is an open-source MQTT library written in Rust. The library provides both a client and broker, supporting TCP, TLS~1.3, WebSocket, and QUIC transports. The QUIC implementation uses Quinn~\cite{quinn}, a Rust QUIC library built on the \texttt{tokio} async runtime.
+
+\subsection{Transport Abstraction}
+
+The library defines a \texttt{Transport} trait abstracting read/write operations over any underlying connection. For TCP and TLS, this wraps a single byte stream. For QUIC, the transport layer manages multiple streams through a \texttt{StreamDispatcher} that implements the configured strategy.
+
+The stream dispatcher maintains a \texttt{HashMap<String, QuicStream>} for per-topic mapping, creating streams lazily on first use and reusing them for subsequent messages on the same topic. For per-publish, the dispatcher opens a new unidirectional stream for each PUBLISH and closes it after sending. Stream~0 (the initial bidirectional stream) is always reserved for control packets. Quinn's default behavior packs STREAM frames from multiple streams into single QUIC packets for efficiency. To isolate the effect of this frame packing on inter-stream coupling, we extended Quinn with a configurable frame packing policy: the default \emph{Greedy} policy preserves the original batching behavior, while a new \emph{StreamIsolated} policy restricts each packet to a single stream's data, preventing cross-stream coupling at the packet level.
+
+\subsection{Connection Lifecycle}
+
+QUIC connections follow the same MQTT session lifecycle as TCP connections. The CONNECT packet is always sent on stream~0. After CONNACK, subsequent PUBLISH packets are dispatched according to the client's configured stream strategy.
+
+On the broker side, the QUIC acceptor spawns a dedicated task per connection. Incoming streams are classified by their stream ID: stream~0 receives the full MQTT packet parser, while non-zero streams use the flow header parser to extract PUBLISH packets and route them into the broker's topic distribution engine.
+
+\subsection{Datagram Path}
+
+When datagram mode is enabled, QoS~0 PUBLISH packets are sent as QUIC DATAGRAM frames. The MQTT packet is serialized with the flow header prepended and submitted via Quinn's \texttt{send\_datagram} API. The maximum datagram size is bounded by the connection's \texttt{max\_datagram\_size} parameter, which is negotiated during the QUIC handshake. Messages exceeding this limit fall back to stream transport.
+
+On the receive path, datagrams are delivered via a separate channel from stream data. The broker's QUIC handler polls both the stream accept loop and the datagram receive loop concurrently, feeding both into the same message processing pipeline.
+
+\subsection{Benchmarking Infrastructure}
+
+The library includes an integrated benchmarking tool (\texttt{mqttv5 bench}) that measures latency and throughput. Latency mode embeds microsecond timestamps in payloads and computes p50/p95/p99 percentiles. Throughput mode counts messages per second over a configurable duration with warmup. Both modes support configurable publisher/subscriber counts, QoS levels, payload sizes, and transport parameters.
+
+Network impairment is applied externally via \texttt{tc-netem}, and broker/client resource usage (RSS, CPU, network I/O) is sampled at 1\,Hz during each run using procfs monitors.
