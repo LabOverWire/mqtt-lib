@@ -51,7 +51,7 @@ bash setup/provision.sh teardown
 | `02d_hol_rtt_boundary.sh` | RTT boundary experiment (15/20ms) to narrow isolation transition |
 | `02e_hol_qos1.sh` | HOL blocking with QoS 1 at reference conditions |
 | `03_throughput_under_loss.sh` | Message throughput degradation under packet loss for all transports |
-| `04_stream_strategies.sh` | Comparison of QUIC stream strategies (control-only, per-publish, per-topic, per-subscription) |
+| `04_stream_strategies.sh` | Comparison of QUIC stream strategies (control-only, per-publish, per-topic) |
 | `05_datagram_vs_stream.sh` | QUIC datagrams vs streams for QoS 0 under varying loss |
 | `06_resource_overhead.sh` | Memory, CPU, and thread usage under different connection counts |
 | `12_payload_format_localhost.sh` | Payload format performance on localhost |

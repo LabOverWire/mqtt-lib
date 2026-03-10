@@ -307,7 +307,6 @@ Client                                    Broker
 1. **ControlOnly**: Single stream (traditional MQTT behavior)
 2. **DataPerPublish**: New stream per QoS 1/2 publish
 3. **DataPerTopic**: Stream pooling by topic
-4. **DataPerSubscription**: Dedicated streams per subscription
 
 ### Benefits
 

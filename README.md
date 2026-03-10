@@ -289,7 +289,6 @@ QUIC multistream support allows different stream allocation strategies:
 | `ControlOnly` | Single stream for all packets | Simple deployments |
 | `DataPerPublish` | New stream per QoS 1/2 publish | High-throughput publishing |
 | `DataPerTopic` | Dedicated stream per topic | Topic isolation |
-| `DataPerSubscription` | Stream per subscription | Subscriber isolation |
 
 ### Flow Headers
 

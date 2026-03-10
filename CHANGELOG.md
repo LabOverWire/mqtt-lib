@@ -473,7 +473,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **QUIC transport options for bridges**: Fine-grained control over QUIC bridge behavior
-  - `quic_stream_strategy`: Control stream usage (`control_only`, `data_per_publish`, `data_per_topic`, `data_per_subscription`)
+  - `quic_stream_strategy`: Control stream usage (`control_only`, `data_per_publish`, `data_per_topic`)
   - `quic_flow_headers`: Enable/disable flow control headers in QUIC streams
   - `quic_datagrams`: Enable/disable QUIC datagram support for low-latency messaging
   - `quic_max_streams`: Limit concurrent QUIC streams per bridge connection
@@ -773,7 +773,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **QUIC data stream byte consumption bug** in broker's QUIC acceptor
   - `try_read_flow_header()` was consuming bytes when checking for flow headers but not returning them when they weren't flow headers
-  - This caused QUIC stream strategies (DataPerPublish, DataPerTopic, DataPerSubscription) to fail with "Malformed packet" errors
+  - This caused QUIC stream strategies (DataPerPublish, DataPerTopic) to fail with "Malformed packet" errors
   - Added `FlowHeaderResult` with `leftover` field to preserve non-flow-header bytes
   - Added `read_packet_with_buffer()` to use leftover bytes before reading from stream
 
@@ -885,7 +885,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **QUIC multistream architecture** for parallel MQTT operations
   - Eliminates head-of-line blocking for concurrent publishes
-  - Stream strategies: `ControlOnly`, `DataPerPublish`, `DataPerTopic`, `DataPerSubscription`
+  - Stream strategies: `ControlOnly`, `DataPerPublish`, `DataPerTopic`
   - Configurable stream management with `QuicStreamManager`
   - Automatic stream lifecycle management
 

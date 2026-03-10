@@ -114,7 +114,6 @@
 - ControlOnly: minimal overhead, all packets on single stream, datagrams for QoS 0
 - DataPerPublish: maximum parallelism, one stream per PUBLISH, flow header per stream
 - DataPerTopic: LRU stream cache (100 max), 300s idle timeout, topic-to-stream affinity
-- DataPerSubscription: subscription-scoped streams, isolated flow state per subscription
 - Runtime switching without reconnection
 
 3.4 MQoQ flow header protocol
@@ -216,7 +215,7 @@
 - Include datagram mode for QoS 0
 
 5.6 Experiment 4: Stream strategy comparison
-- ControlOnly vs. DataPerPublish vs. DataPerTopic vs. DataPerSubscription
+- ControlOnly vs. DataPerPublish vs. DataPerTopic
 - Metrics: throughput, latency (p50/p95/p99), memory usage, stream count
 - Varying topic counts (1 → 1000)
 - Characterize crossover points where strategies change relative performance
@@ -242,7 +241,6 @@
 - ControlOnly: low-topic-count, latency-sensitive, resource-constrained
 - DataPerPublish: high-parallelism, independent messages, bursty traffic
 - DataPerTopic: many topics, mixed QoS, HOL blocking concern
-- DataPerSubscription: isolated subscriber flows, server-push scenarios
 
 6.2 Spec compliance observations
 - Areas where OASIS MQoQ draft is ambiguous or underspecified
