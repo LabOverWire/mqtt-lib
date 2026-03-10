@@ -218,5 +218,13 @@ experiments/analysis/figures/output/
 experiments/results/**/*.txt
 experiments/results/**/*.tex
 
-# Paper (LaTeX build artifacts and all paper content)
-paper/
+# Paper (LaTeX build artifacts)
+paper/*.aux
+paper/*.bbl
+paper/*.blg
+paper/*.log
+paper/*.out
+paper/*.pdf
+paper/*.fls
+paper/*.fdb_latexmk
+paper/*.synctex.gz
