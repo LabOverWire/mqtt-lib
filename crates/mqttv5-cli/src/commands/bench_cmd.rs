@@ -807,7 +807,13 @@ async fn run_latency(cmd: BenchCommand) -> Result<()> {
     let mut seq = 0u32;
     while measure_start.elapsed() < measure_duration {
         let payload = encode_payload(format, cmd.payload_size, seq);
-        publish_message(&pub_client, &topic, &payload, cmd.qos).await?;
+        if publish_message(&pub_client, &topic, &payload, cmd.qos)
+            .await
+            .is_err()
+        {
+            eprintln!("connection lost after {seq} messages, reporting partial results");
+            break;
+        }
         seq = seq.wrapping_add(1);
         tokio::time::sleep(Duration::from_micros(interval_us)).await;
     }
@@ -873,7 +879,10 @@ async fn send_timed_messages_formatted(
     for seq in 0..count {
         #[allow(clippy::cast_possible_truncation)]
         let payload = encode_payload(format, payload_size, seq as u32);
-        publish_message(client, topic, &payload, qos).await?;
+        if publish_message(client, topic, &payload, qos).await.is_err() {
+            eprintln!("connection lost during warmup after {seq} messages");
+            break;
+        }
         tokio::time::sleep(Duration::from_micros(interval_us)).await;
     }
     Ok(())
