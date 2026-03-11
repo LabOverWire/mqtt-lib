@@ -197,11 +197,14 @@ experiments/terraform/*.tfvars
 !experiments/terraform/*.tfvars.example
 
 # Experiment results (raw benchmark data)
-experiments/results/*.json
-experiments/results/**/*.json
-experiments/results/*.csv
-experiments/results/**/*.csv
-experiments/results_v2/
+experiments/results-phase1/*.json
+experiments/results-phase1/**/*.json
+experiments/results-phase1/*.csv
+experiments/results-phase1/**/*.csv
+experiments/results-phase2/
+experiments/results-hol-v3/
+experiments/results-hol-v4-framepacking/
+experiments/results-v5/
 
 # Allow experiment scripts and config
 !experiments/**/*.sh
@@ -215,16 +218,20 @@ articles/
 # Analysis artifacts (generated figures, stats output)
 artifacts/
 experiments/analysis/figures/output/
-experiments/results/**/*.txt
-experiments/results/**/*.tex
+experiments/results-phase1/**/*.txt
+experiments/results-phase1/**/*.tex
 
 # Paper (LaTeX build artifacts)
-paper/*.aux
-paper/*.bbl
-paper/*.blg
-paper/*.log
-paper/*.out
-paper/*.pdf
-paper/*.fls
-paper/*.fdb_latexmk
-paper/*.synctex.gz
+comnet/*.aux
+comnet/*.bbl
+comnet/*.blg
+comnet/*.log
+comnet/*.out
+comnet/*.pdf
+comnet/*.fls
+comnet/*.fdb_latexmk
+comnet/*.synctex.gz
+
+# Submission artifacts
+submission/
+submission.zip
