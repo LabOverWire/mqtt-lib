@@ -1,6 +1,6 @@
 # QUIC Transport Implementation Specification
 
-**Status:** Implementation Complete (Simple Multistreams + Broker + Datagrams + Flow Headers + Frame Packing)
+**Status:** Implementation Complete (Simple Multistreams + Broker + Datagrams + Flow Headers)
 **Last Updated:** 2026-03-12
 
 ## Table of Contents
@@ -10,12 +10,11 @@
 3. [Architecture](#architecture)
 4. [Dependencies](#dependencies)
 5. [Core Components](#core-components)
-6. [Frame Packing Policy](#frame-packing-policy)
-7. [Flow Headers](#flow-headers)
-8. [Configuration](#configuration)
-9. [Error Handling](#error-handling)
-10. [Testing Strategy](#testing-strategy)
-11. [Performance Considerations](#performance-considerations)
+6. [Flow Headers](#flow-headers)
+7. [Configuration](#configuration)
+8. [Error Handling](#error-handling)
+9. [Testing Strategy](#testing-strategy)
+10. [Performance Considerations](#performance-considerations)
 
 ---
 
@@ -35,7 +34,6 @@
 | Server-initiated streams | Complete | ServerStreamManager with per-topic/per-publish delivery |
 | Datagram support | Complete | QoS 0 over unreliable QUIC datagrams (RFC 9221) |
 | Flow headers | Complete | Encode/decode for types 0x11-0x14, FlowRegistry |
-| Frame packing policy | Complete | Greedy (default), StreamIsolated, BudgetedPacking via Quinn fork |
 
 ### Key Files
 
@@ -154,7 +152,7 @@ Data stream readers detect flow headers by inspecting the first byte (0x11-0x13)
 
 ### Quinn Dependency
 
-The project uses a **forked version of Quinn** (branch `frame-packing-policy-0.11` based on `origin/0.11.x`, quinn-proto 0.11.14) that adds `FramePackingPolicy` support. The fork is referenced via `[patch.crates-io]` in the workspace `Cargo.toml`.
+The project uses Quinn 0.11.x from crates.io.
 
 ### ALPN
 
@@ -215,7 +213,6 @@ pub struct ClientTransportConfig {
     pub max_streams: Option<usize>,
     pub datagrams: bool,
     pub connect_timeout: Duration,
-    pub frame_packing: quinn::FramePackingPolicy,
 }
 ```
 
@@ -231,7 +228,6 @@ Full client connection configuration:
 - Concurrent stream limit: `max_concurrent_streams: Option<usize>`
 - Datagrams: `enable_datagrams`, `datagram_send_buffer_size`, `datagram_receive_buffer_size` (default 65536)
 - Flow headers: `enable_flow_headers`, `flow_expire_interval` (default 300s), `flow_flags: FlowFlags`
-- Frame packing: `frame_packing: quinn::FramePackingPolicy`
 
 Transport parameters set in `build_client_config()`:
 - Max idle timeout: 120s
@@ -282,7 +278,6 @@ Broker-side QUIC configuration:
 - `cert_chain` and `private_key`
 - Optional `client_ca_certs` with `require_client_cert` for mutual TLS
 - `alpn_protocols` (default: `["mqtt"]`)
-- `frame_packing: quinn::FramePackingPolicy`
 
 Transport parameters in `build_server_config()`:
 - Max idle timeout: 60s
@@ -341,36 +336,6 @@ pub enum TransportType {
     Quic(Box<QuicTransport>),
 }
 ```
-
----
-
-## Frame Packing Policy
-
-The project uses a **forked Quinn** that exposes `FramePackingPolicy` on `TransportConfig`. This controls how QUIC STREAM frames from different streams are packed into UDP datagrams.
-
-### Variants
-
-| Policy | Description | Best For |
-|--------|-------------|----------|
-| `Greedy` (default) | Pack as many STREAM frames as possible into each datagram | Maximum throughput |
-| `StreamIsolated` | One STREAM frame per datagram — frames from different streams are never coalesced | HOL blocking isolation with persistent streams (DataPerTopic) |
-| `BudgetedPacking(n)` | Pack up to `n` STREAM frames per datagram | Tunable tradeoff between throughput and isolation |
-
-### Configuration
-
-**CLI (broker):** `--quic-frame-packing <policy>` parsed by `MqttBroker::parse_frame_packing_policy()`:
-- `"greedy"` or `"default"` -> `Greedy`
-- `"stream-isolated"` or `"isolated"` -> `StreamIsolated`
-- `"budgeted-N"` (e.g., `"budgeted-2"`) -> `BudgetedPacking(N)`
-
-**Client:** `ClientTransportConfig.frame_packing` flows through `QuicConfig.frame_packing` to `quinn::TransportConfig`.
-
-**Broker:** `BrokerConfig.frame_packing_str` is parsed and applied to `QuicAcceptorConfig.frame_packing`.
-
-### Experimental Findings
-
-- `StreamIsolated` improves HOL blocking isolation with **persistent streams** (DataPerTopic): +25% inter-topic spread, -10% windowed correlation at 5% loss
-- `StreamIsolated` is **harmful** with **ephemeral streams** (DataPerPublish): causes catastrophic queue buildup at 5% loss due to increased packet overhead
 
 ---
 
@@ -468,8 +433,7 @@ let config = QuicConfig::new(
 .with_stream_strategy(StreamStrategy::DataPerTopic)
 .with_datagrams(true)
 .with_flow_headers(true)
-.with_flow_expire_interval(600)
-.with_frame_packing(quinn::FramePackingPolicy::StreamIsolated);
+.with_flow_expire_interval(600);
 ```
 
 ### URL-Based Connection
@@ -489,8 +453,6 @@ let config = QuicAcceptorConfig::new(cert_chain, private_key)
     .with_require_client_cert(true)
     .with_alpn_protocols(vec![b"mqtt".to_vec()]);
 ```
-
-Frame packing is configured via `BrokerConfig.frame_packing_str` and parsed at startup.
 
 ---
 
