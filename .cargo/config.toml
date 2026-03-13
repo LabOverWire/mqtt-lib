@@ -1,5 +1,4 @@
 [build]
-target-dir = "/Users/fabriciobracht/.cargo-target/mqtt-lib"
 
 [target.wasm32-unknown-unknown]
 # Use lld linker for faster builds and enable getrandom WASM support
