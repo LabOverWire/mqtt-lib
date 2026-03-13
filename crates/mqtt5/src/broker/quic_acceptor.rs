@@ -612,15 +612,16 @@ async fn run_quic_handler_inner(
                         peer_addr
                     );
                     match decode_datagram_packet(&datagram) {
-                        Ok(packet) => {
+                        Some(Ok(packet)) => {
                             if datagram_packet_tx.send(packet).await.is_err() {
                                 debug!("Datagram packet channel closed for {}", peer_addr);
                                 break;
                             }
                         }
-                        Err(e) => {
+                        Some(Err(e)) => {
                             warn!("Failed to decode datagram from {}: {}", peer_addr, e);
                         }
+                        None => {}
                     }
                 }
                 Err(e) => {
@@ -651,16 +652,21 @@ async fn run_quic_handler_inner(
     });
 }
 
-fn decode_datagram_packet(data: &Bytes) -> Result<Packet> {
-    if data.is_empty() {
-        return Err(MqttError::MalformedPacket(
-            "Empty datagram received".to_string(),
-        ));
+fn decode_datagram_packet(data: &Bytes) -> Option<Result<Packet>> {
+    if data.is_empty() || data[0] == 0x00 {
+        return None;
     }
 
     let mut buf = BytesMut::from(data.as_ref());
-    let fixed_header = FixedHeader::decode(&mut buf)?;
-    Packet::decode_from_body(fixed_header.packet_type, &fixed_header, &mut buf)
+    let fixed_header = match FixedHeader::decode(&mut buf) {
+        Ok(h) => h,
+        Err(e) => return Some(Err(e)),
+    };
+    Some(Packet::decode_from_body(
+        fixed_header.packet_type,
+        &fixed_header,
+        &mut buf,
+    ))
 }
 
 // [MQoQ§5] Data stream processing
