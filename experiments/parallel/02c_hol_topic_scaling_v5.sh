@@ -2,12 +2,13 @@
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/common_parallel.sh"
 
-EXPERIMENT="02_hol_blocking"
-LOSSES=(0 1 2 5)
+EXPERIMENT="02c_hol_topic_scaling"
+TOPIC_COUNTS=(2 4 16 32)
+LOSS=1
 DELAY=25
 RUNS_PER_DATAPOINT=15
 
-RESULTS_DIR="${ROOT_DIR}/results-hol-v4-framepacking"
+RESULTS_DIR="${ROOT_DIR}/results-v5"
 mkdir -p "$RESULTS_DIR"
 
 BROKER_TLS="--tls-cert /opt/mqtt-certs/server.pem --tls-key /opt/mqtt-certs/server.key"
@@ -15,25 +16,28 @@ BROKER_QUIC="--quic-host 0.0.0.0:14567"
 CA="--ca-cert /opt/mqtt-certs/ca.pem"
 
 declare -A TRANSPORT_URLS
-TRANSPORT_URLS[quic-pertopic-isolated]="quic://${BROKER_IP}:14567"
-TRANSPORT_URLS[quic-perpub-isolated]="quic://${BROKER_IP}:14567"
+TRANSPORT_URLS[tcp]="mqtt://${BROKER_IP}:1883"
+TRANSPORT_URLS[quic-pertopic]="quic://${BROKER_IP}:14567"
+TRANSPORT_URLS[quic-perpub]="quic://${BROKER_IP}:14567"
 
 declare -A TRANSPORT_FLAGS
-TRANSPORT_FLAGS[quic-pertopic-isolated]="--quic-stream-strategy per-topic --quic-frame-packing stream-isolated ${CA}"
-TRANSPORT_FLAGS[quic-perpub-isolated]="--quic-stream-strategy per-publish --quic-frame-packing stream-isolated ${CA}"
+TRANSPORT_FLAGS[tcp]=""
+TRANSPORT_FLAGS[quic-pertopic]="--quic-stream-strategy per-topic ${CA}"
+TRANSPORT_FLAGS[quic-perpub]="--quic-stream-strategy per-publish ${CA}"
 
 declare -A BROKER_DELIVERY
-BROKER_DELIVERY[quic-pertopic-isolated]="--quic-delivery-strategy per-topic --quic-frame-packing stream-isolated"
-BROKER_DELIVERY[quic-perpub-isolated]="--quic-delivery-strategy per-publish --quic-frame-packing stream-isolated"
+BROKER_DELIVERY[tcp]=""
+BROKER_DELIVERY[quic-pertopic]="--quic-delivery-strategy per-topic"
+BROKER_DELIVERY[quic-perpub]="--quic-delivery-strategy per-publish"
 
-: "${V4_TRANSPORTS:=quic-pertopic-isolated quic-perpub-isolated}"
-read -ra TRANSPORTS <<< "$V4_TRANSPORTS"
+: "${V3_TRANSPORTS:=tcp quic-pertopic quic-perpub}"
+read -ra TRANSPORTS <<< "$V3_TRANSPORTS"
 
 start_monitors() {
     BROKER_MONITOR_PID=$(ssh_broker "nohup bash /opt/mqtt-lib/experiments/monitor/resource_monitor.sh ${BROKER_PID} \
-        > /tmp/monitor.csv 2>&1 & echo \$!")
+        > /tmp/monitor.csv 2>&1 & echo \$!" || echo "0")
     PUB_MONITOR_PID=$(ssh_pub "nohup bash /opt/mqtt-lib/experiments/monitor/client_monitor.sh \
-        > /tmp/client_monitor.csv 2>&1 & echo \$!")
+        > /tmp/client_monitor.csv 2>&1 & echo \$!" || echo "0")
 }
 
 stop_monitors() {
@@ -59,7 +63,7 @@ collect_traces() {
     local output_dir="${RESULTS_DIR}/${experiment}"
 
     for csv in messages.csv quinn_stats.csv; do
-        scp -i "$SSH_KEY_PATH" "${SSH_USER}@${PUB_IP}:${remote_dir}/${csv}" \
+        scp -i "$SSH_KEY_PATH" $SSH_OPTS "${SSH_USER}@${PUB_IP}:${remote_dir}/${csv}" \
             "${output_dir}/${run_label}_${csv}" 2>/dev/null || true
     done
     ssh_pub "rm -rf ${remote_dir}" 2>/dev/null || true
@@ -79,6 +83,8 @@ run_hol_colocated() {
     echo "  saved: ${output_dir}/${label}.json"
 }
 
+apply_netem "$DELAY" "$LOSS"
+
 for tname in "${TRANSPORTS[@]}"; do
     url="${TRANSPORT_URLS[$tname]}"
     flags="${TRANSPORT_FLAGS[$tname]}"
@@ -87,12 +93,11 @@ for tname in "${TRANSPORTS[@]}"; do
     stop_broker 2>/dev/null || true
     start_broker "${BROKER_TLS} ${BROKER_QUIC} ${delivery}"
 
-    for loss in "${LOSSES[@]}"; do
-        apply_netem "$DELAY" "$loss"
-        label="${tname}_loss${loss}pct"
+    for topics in "${TOPIC_COUNTS[@]}"; do
+        label="${tname}_${topics}topics"
         echo "[${EXPERIMENT}] ${label}"
 
-        bench_args="--url ${url} ${flags} --mode hol-blocking --topics 8 --duration 60 --warmup 5 --payload-size 256 --rate 500 --trace-dir /tmp/hol-traces"
+        bench_args="--url ${url} ${flags} --mode hol-blocking --topics ${topics} --duration 60 --warmup 5 --payload-size 256 --rate 500 --trace-dir /tmp/hol-traces"
         output_dir="${RESULTS_DIR}/${EXPERIMENT}"
         mkdir -p "$output_dir"
 
@@ -104,10 +109,9 @@ for tname in "${TRANSPORTS[@]}"; do
             collect_traces "$EXPERIMENT" "$run_label" "/tmp/hol-traces"
             sleep 5
         done
-
-        clear_netem
     done
 done
 
+clear_netem
 stop_broker
-echo "experiment ${EXPERIMENT} v4 complete (group ${GROUP})"
+echo "experiment ${EXPERIMENT} v5 complete (group ${GROUP})"

@@ -36,7 +36,7 @@ Table~\ref{tab:params} summarizes the common parameters. Network impairment is a
 
 We measure cold-start connection latency across TCP, TLS~1.3, and QUIC at five one-way delays (0, 25, 50, 100, 200\,ms) using 100 sequential connections per run.
 
-\begin{figure}[t]
+\begin{figure}[htbp]
 \centering
 \includegraphics[width=\columnwidth]{fig08}
 \caption{Connection latency (p50 bars, p95 whiskers) across network delays. QUIC's integrated TLS handshake achieves comparable latency to raw TCP despite cryptographic overhead, and outperforms the separate TCP+TLS~1.3 handshake at all RTTs.}
@@ -51,7 +51,7 @@ This experiment is the core motivation for MQTT-over-QUIC multistream transport.
 
 We quantify HOL blocking using two complementary metrics. \emph{Inter-topic spread} measures the maximum difference between per-topic mean latencies within 100\,ms time windows: high spread means topics experience different latencies (isolation), while low spread means topics are coupled. \emph{Spike isolation ratio} measures the fraction of latency spikes that co-occur across all topics: a ratio of 1.0 means every spike affects all topics simultaneously (full HOL blocking), while lower values indicate independent spikes.
 
-\begin{figure}[t]
+\begin{figure}[htbp]
 \centering
 \includegraphics[width=\columnwidth]{fig01}
 \caption{Inter-topic latency spread across packet loss rates (25\,ms RTT, 8 topics, 15 runs per configuration). Per-topic QUIC spread amplifies 192$\times$ from baseline to 5\% loss, confirming independent per-stream loss recovery. TCP spread increases only 1.3$\times$, indicating that all topics remain tightly coupled under loss.}
@@ -62,7 +62,7 @@ Fig.~\ref{fig:spread} shows inter-topic spread at 25\,ms RTT across four loss ra
 
 The high spread for multi-stream QUIC strategies under loss reflects independent stream loss recovery: when a QUIC packet carrying data for one topic is lost, only that topic's stream experiences retransmission delay, while other streams continue unaffected. TCP, by contrast, stalls the entire byte stream on any loss, so all topics experience the same delay---hence the low spread amplification.
 
-\begin{figure}[t]
+\begin{figure}[htbp]
 \centering
 \includegraphics[width=\columnwidth]{fig04}
 \caption{Spike isolation ratio across packet loss rates. A ratio of 1.0 means all latency spikes co-occur across topics (full HOL blocking). TCP remains near 1.0 at all loss rates, while per-topic (0.72) and per-publish (0.60) QUIC show progressively more independent spike behavior at 1\% loss.}
@@ -79,14 +79,14 @@ At 0\% loss, the baseline correlation persists under StreamIsolated packing: per
 
 The effect is asymmetric across strategies. For per-publish, StreamIsolated packing is counterproductive: p50 latency at 5\% loss rises from 29\,ms to 115\,ms. Isolated packing creates more QUIC packets for ephemeral streams (each publish opens and closes a new stream), increasing the number of packets subject to loss and retransmission. Under high loss, the resulting retransmission volume overwhelms connection capacity, causing queue buildup. This interaction between frame packing policy and stream lifetime---beneficial for persistent streams, harmful for ephemeral ones---has implications for adaptive transport configuration (Section~\ref{sec:discussion}).
 
-\begin{figure}[t]
+\begin{figure}[htbp]
 \centering
 \includegraphics[width=\columnwidth]{fig15}
 \caption{Effect of frame packing policy on HOL blocking metrics. \emph{Greedy} packing (default) batches multiple streams per packet; \emph{StreamIsolated} restricts each packet to one stream. For per-topic (left), StreamIsolated improves spread and reduces correlation under loss. For per-publish (right), StreamIsolated increases overhead, degrading performance at high loss rates.}
 \label{fig:frame-packing}
 \end{figure}
 
-\begin{figure}[t]
+\begin{figure}[htbp]
 \centering
 \includegraphics[width=\columnwidth]{fig05}
 \caption{Latency percentiles at 1\% loss, 25\,ms RTT. TCP exhibits higher tail latency than all QUIC strategies, with the gap widening at higher percentiles. Multi-stream QUIC strategies (per-topic, per-publish) achieve the lowest p95 and p99 values.}
@@ -99,7 +99,7 @@ Fig.~\ref{fig:lat-percentiles} shows latency percentiles at 1\% loss. TCP exhibi
 
 We measure sustained throughput using 64 publishers and 1 subscriber (fan-in pattern) at loss rates from 0\% to 10\%.
 
-\begin{figure}[t]
+\begin{figure}[htbp]
 \centering
 \includegraphics[width=\columnwidth]{fig09}
 \caption{Throughput vs.\ packet loss for QoS~0 (top) and QoS~1 (bottom). TCP outperforms all QUIC strategies at baseline (0\% loss), but under loss ($\geq$1\%) all QUIC strategies outperform TCP.}
@@ -116,7 +116,7 @@ QoS~1 throughput drops to approximately 1.2K\,msg/s across all transports at 0\%
 
 We compare the three stream mapping strategies (control-only, per-publish, per-topic) while varying topic count (1, 4, 8, 16) to understand how strategy selection interacts with workload structure.
 
-\begin{figure}[t]
+\begin{figure}[htbp]
 \centering
 \includegraphics[width=\columnwidth]{fig14}
 \caption{Strategy comparison across topic counts. (a)~Latency is stable across all strategies and topic counts. (b)~Throughput scales linearly with topic count for all strategies.}
@@ -129,7 +129,7 @@ Fig.~\ref{fig:strategy-comparison} shows that latency is stable at approximately
 
 QUIC datagrams (RFC~9221) bypass the stream abstraction entirely, sending messages as unreliable datagrams within the QUIC connection. We compare datagram transport against stream-based transport at 50\,ms delay across four loss rates.
 
-\begin{figure}[t]
+\begin{figure}[htbp]
 \centering
 \includegraphics[width=\columnwidth]{fig12}
 \caption{Datagram vs.\ stream transport at 50\,ms RTT. (a)~Datagrams achieve lower p50 latency at 5\% loss by avoiding retransmission delays. (b)~Both transports achieve comparable throughput since they share the same QUIC connection and congestion controller.}
@@ -142,7 +142,7 @@ Fig.~\ref{fig:datagram} shows that at 50\,ms RTT, datagram and stream transport 
 
 We scale from 10 to 100 concurrent publisher-subscriber pairs to measure how transport strategies affect throughput under load.
 
-\begin{figure}[t]
+\begin{figure}[htbp]
 \centering
 \includegraphics[width=\columnwidth]{fig13}
 \caption{Throughput scaling from 10 to 100 connections. TCP remains stable while QUIC strategies show declining throughput as per-connection state overhead accumulates.}

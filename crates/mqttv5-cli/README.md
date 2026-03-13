@@ -8,7 +8,7 @@ A unified MQTT CLI tool with pub, sub, and broker commands. Supports v5.0 and v3
 
 ## Features
 
-- Single binary: pub, sub, broker, and bench subcommands
+- Single binary: pub, sub, broker, bench, acl, passwd, and scram subcommands
 - Interactive prompts for missing arguments
 - Input validation with error messages and suggestions
 - MQTT v5.0 and v3.1.1 protocol support (`--protocol-version 3.1.1`)
@@ -105,7 +105,7 @@ mqttv5 broker --allow-anonymous --storage-backend memory
 mqttv5 passwd alice passwd.txt
 
 # Batch mode (password on command line)
-mqttv5 passwd -b bob secretpass passwd.txt
+mqttv5 passwd bob -b secretpass passwd.txt
 
 # Delete user
 mqttv5 passwd -D alice passwd.txt
@@ -140,7 +140,7 @@ mqttv5 acl user-roles alice -f acl.txt
 mqttv5 scram alice scram.txt
 
 # Batch mode (password on command line)
-mqttv5 scram -b bob secretpass scram.txt
+mqttv5 scram bob -b secretpass scram.txt
 
 # Use SCRAM authentication with broker
 mqttv5 broker --auth-method scram --scram-file scram.txt
@@ -224,13 +224,13 @@ mqttv5 pub -t "test/topic" -m "data" --keep-alive 120 \
 mqttv5 pub --url "ws://broker:8080/mqtt" -t "test/websocket" -m "WebSocket message"
 mqttv5 sub --url "wss://secure-broker:8443/mqtt" -t "test/+"
 
-# QUIC transport (insecure mode for testing)
+# QUIC transport (quic:// skips certificate verification)
 mqttv5 pub --url "quic://broker:14567" -t "test/quic" -m "QUIC message"
 mqttv5 sub --url "quic://broker:14567" -t "test/+"
 
-# QUIC transport with certificate verification
+# QUIC transport with certificate verification (quics:// verifies by default)
 mqttv5 pub --url "quics://broker:14567" -t "test/quic" -m "Secure QUIC" --ca-cert ca.crt
-mqttv5 sub --url "quics://broker:14567" -t "test/+" --insecure
+mqttv5 sub --url "quics://broker:14567" -t "test/+" --ca-cert ca.crt
 
 # Message expiry and topic alias
 mqttv5 pub -t "sensors/temp" -m "23.5" --message-expiry-interval 300 --topic-alias 1
@@ -238,11 +238,6 @@ mqttv5 pub -t "sensors/temp" -m "23.5" --message-expiry-interval 300 --topic-ali
 # Subscription options (retain handling: 0=send, 1=send if new, 2=don't send)
 mqttv5 sub -t "config/#" --retain-handling 2 --retain-as-published
 ```
-
-## Environment Variables
-
-- `MQTT_HOST`: Default broker host (default: localhost)
-- `MQTT_PORT`: Default broker port (default: 1883)
 
 ## License
 

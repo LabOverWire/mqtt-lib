@@ -15,6 +15,7 @@ from fig11_qos_comparison import main as fig11
 from fig12_datagram_vs_stream import main as fig12
 from fig13_resource_overhead_scaled import main as fig13
 from fig14_strategy_comparison import main as fig14
+from fig15_frame_packing import main as fig15
 
 FIGURES = [
     ("fig01_spike_iso_vs_loss", fig01),
@@ -31,6 +32,7 @@ FIGURES = [
     ("fig12_datagram_vs_stream", fig12),
     ("fig13_resource_overhead_scaled", fig13),
     ("fig14_strategy_comparison", fig14),
+    ("fig15_frame_packing", fig15),
 ]
 
 

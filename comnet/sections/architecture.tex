@@ -7,7 +7,7 @@ The \texttt{mqtt5} library maps MQTT protocol operations onto QUIC streams using
 
 We define three strategies for mapping MQTT control and data packets onto QUIC streams, each offering a different point in the isolation--overhead tradeoff space.
 
-\begin{figure}[t]
+\begin{figure}[htbp]
 \centering
 \begin{tikzpicture}[
     stream/.style={draw, rounded corners=2pt, minimum width=1.6cm, minimum height=0.5cm, font=\footnotesize},
@@ -18,7 +18,7 @@ We define three strategies for mapping MQTT control and data packets onto QUIC s
 
 \begin{scope}[shift={(0,0)}]
 \node[label] at (0.8, 2.0) {(a) Control-only};
-\node[connbox, minimum width=2.2cm, minimum height=2.8cm] at (0.8, 0.2) {};
+\node[connbox, minimum width=2.53cm, minimum height=3.0cm] at (0.8, 0.3) {};
 \node[stream, fill=blue!15] at (0.8, 1.2) {Stream 0};
 \node[font=\tiny, align=center] at (0.8, 0.6) {CONNECT, PUBLISH,\\SUBSCRIBE, \ldots};
 \node[font=\tiny, text=gray] at (0.8, -0.4) {All on one stream};
@@ -26,24 +26,24 @@ We define three strategies for mapping MQTT control and data packets onto QUIC s
 
 \begin{scope}[shift={(3.2,0)}]
 \node[label] at (0.8, 2.0) {(b) Per-topic};
-\node[connbox, minimum width=2.2cm, minimum height=2.8cm] at (0.8, 0.2) {};
+\node[connbox, minimum width=2.53cm, minimum height=3.0cm] at (0.8, 0.3) {};
 \node[stream, fill=blue!15] at (0.8, 1.2) {Stream 0};
-\node[stream, fill=green!15] at (0.8, 0.5) {Stream 1};
-\node[stream, fill=orange!15] at (0.8, -0.2) {Stream 2};
+\node[stream, fill=green!15] at (0.8, 0.4) {Stream 1};
+\node[stream, fill=orange!15] at (0.8, -0.4) {Stream 2};
 \node[font=\tiny] at (0.8, 1.55) {\textit{control}};
-\node[font=\tiny] at (0.8, 0.85) {\textit{topic/a}};
-\node[font=\tiny] at (0.8, 0.15) {\textit{topic/b}};
+\node[font=\tiny] at (0.8, 0.75) {\textit{topic/a}};
+\node[font=\tiny] at (0.8, -0.05) {\textit{topic/b}};
 \end{scope}
 
 \begin{scope}[shift={(6.4,0)}]
 \node[label] at (0.8, 2.0) {(c) Per-publish};
-\node[connbox, minimum width=2.2cm, minimum height=2.8cm] at (0.8, 0.2) {};
+\node[connbox, minimum width=2.53cm, minimum height=3.0cm] at (0.8, 0.3) {};
 \node[stream, fill=blue!15] at (0.8, 1.2) {Stream 0};
-\node[stream, fill=yellow!20] at (0.8, 0.5) {Stream $n$};
-\node[stream, fill=yellow!20] at (0.8, -0.2) {Stream $n$+1};
+\node[stream, fill=yellow!20] at (0.8, 0.4) {Stream $n$};
+\node[stream, fill=yellow!20] at (0.8, -0.4) {Stream $n$+1};
 \node[font=\tiny] at (0.8, 1.55) {\textit{control}};
-\node[font=\tiny] at (0.8, 0.85) {\textit{msg 1}};
-\node[font=\tiny] at (0.8, 0.15) {\textit{msg 2}};
+\node[font=\tiny] at (0.8, 0.75) {\textit{msg 1}};
+\node[font=\tiny] at (0.8, -0.05) {\textit{msg 2}};
 \end{scope}
 
 \end{tikzpicture}
@@ -59,9 +59,9 @@ We define three strategies for mapping MQTT control and data packets onto QUIC s
 
 \subsection{Flow Header Protocol}
 
-When using per-topic or per-publish strategies, the receiver must determine how to demultiplex incoming data on non-control streams. We introduce a lightweight \emph{flow header} prepended to the MQTT payload on data streams.
+On a TCP connection, MQTT uses a fixed header with variable-length encoding to delimit successive packets on a single byte stream. When using per-topic or per-publish strategies, QUIC stream boundaries replace this framing---each data stream carries a single flow---but the receiver still needs to identify the packet type and flags. We introduce a lightweight \emph{flow header} prepended to the MQTT packet data on non-control streams.
 
-\begin{figure}[t]
+\begin{figure}[htbp]
 \centering
 \begin{tikzpicture}[font=\footnotesize]
 \draw (0,0) rectangle (7, 0.8);
@@ -81,11 +81,11 @@ When using per-topic or per-publish strategies, the receiver must determine how 
 \draw[decorate, decoration={brace, amplitude=4pt, mirror}] (0, -0.6) -- (7, -0.6)
   node[midway, below=5pt, font=\tiny] {QUIC stream payload};
 \end{tikzpicture}
-\caption{Flow header format. The 2-byte header identifies the packet type and flags, enabling the receiver to parse data streams without full MQTT framing on stream~0.}
+\caption{Flow header format. The 2-byte header replaces MQTT's variable-length fixed header on data streams, where QUIC stream boundaries provide message delimitation.}
 \label{fig:flow-header}
 \end{figure}
 
-The flow header (Fig.~\ref{fig:flow-header}) consists of two bytes: a type field identifying the MQTT packet type (PUBLISH for data streams) and a flags byte encoding QoS level, retain, and DUP. The receiver reads this header to determine how to parse the remainder of the stream. This is more efficient than transmitting the full MQTT fixed header on every stream, since the stream itself provides the framing boundary.
+The flow header (Fig.~\ref{fig:flow-header}) consists of two bytes: a type field identifying the MQTT packet type (PUBLISH for data streams) and a flags byte encoding QoS level, retain, and DUP (duplicate delivery). Since the QUIC stream boundary already delimits the message, the two-byte header is sufficient---the receiver reads the type and flags, then parses the remaining stream payload as MQTT packet data without needing MQTT's variable-length framing.
 
 \subsection{Datagram Transport}
 
@@ -97,4 +97,4 @@ Datagram transport is appropriate for latency-sensitive telemetry where occasion
 
 The client and broker configure their stream strategies independently. On the client side, the application selects a strategy (control-only, per-topic, or per-publish) before connecting; this governs how outbound PUBLISH packets are dispatched onto QUIC streams. On the broker side, a server-wide delivery strategy governs how the broker sends messages to subscribers. In a typical deployment, both sides are configured to the same strategy, but the architecture does not enforce this---a per-topic client can connect to a control-only broker, or vice versa.
 
-For outbound delivery, the broker's stream manager maintains a per-connection topic-to-stream mapping. When configured for per-topic delivery, streams are created lazily on first use and reused for subsequent messages on the same topic, with LRU eviction to bound stream count. For per-publish delivery, the broker opens a new unidirectional stream for each message. On the receive side, the broker's QUIC acceptor classifies incoming streams by ID: stream~0 carries the full MQTT packet parser, while non-zero streams use the flow header parser to extract PUBLISH packets and route them into the topic distribution engine.
+The broker mirrors the client's three strategies for outbound delivery to subscribers, maintaining per-connection stream state with LRU eviction to bound stream count. Section~\ref{sec:implementation} details the stream dispatch and receive-side demultiplexing mechanisms.

@@ -13,7 +13,7 @@ source "${ROOT_DIR}/setup/config.env"
 
 SSH_USER="${SSH_USER:-bench}"
 
-RESULTS_DIR="${ROOT_DIR}/results"
+RESULTS_DIR="${ROOT_DIR}/results-phase1"
 mkdir -p "$RESULTS_DIR"
 
 SSH_OPTS="-o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=10"

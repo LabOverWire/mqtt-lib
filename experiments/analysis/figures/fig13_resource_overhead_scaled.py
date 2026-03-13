@@ -18,7 +18,7 @@ from style import (
 )
 
 CONCURRENCIES = [10, 50, 100]
-RUNS = range(1, 4)
+RUNS = range(1, 16)
 
 
 def compute_ci(values, confidence=0.95):
@@ -116,7 +116,7 @@ def main(results_dir: Path, output_dir: Path):
 
 if __name__ == "__main__":
     script_dir = Path(__file__).resolve().parent
-    default_results = script_dir.parent.parent / "results_v2"
+    default_results = script_dir.parent.parent / "results-v5"
     default_output = script_dir / "output"
     results_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else default_results
     output_dir = Path(sys.argv[2]) if len(sys.argv) > 2 else default_output

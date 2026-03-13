@@ -35,7 +35,6 @@ pub struct QuicAcceptorConfig {
     pub client_ca_certs: Option<Vec<CertificateDer<'static>>>,
     pub require_client_cert: bool,
     pub alpn_protocols: Vec<Vec<u8>>,
-    pub frame_packing: quinn::FramePackingPolicy,
 }
 
 impl QuicAcceptorConfig {
@@ -50,7 +49,6 @@ impl QuicAcceptorConfig {
             client_ca_certs: None,
             require_client_cert: false,
             alpn_protocols: vec![b"mqtt".to_vec()],
-            frame_packing: quinn::FramePackingPolicy::default(),
         }
     }
 
@@ -165,7 +163,6 @@ impl QuicAcceptorConfig {
         transport_config.stream_receive_window(262_144u32.into());
         transport_config.receive_window(1_048_576u32.into());
         transport_config.send_window(1_048_576);
-        transport_config.frame_packing(self.frame_packing.clone());
 
         server_config.transport_config(Arc::new(transport_config));
 

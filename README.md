@@ -132,7 +132,7 @@ mqttv5 pub
 
 ### CLI Features
 
-- Single binary: broker, pub, sub, passwd, acl commands
+- Single binary: broker, pub, sub, bench, passwd, acl, scram commands
 - Interactive prompts for missing arguments
 - Input validation with error messages
 - Long flags (`--topic`) with short aliases (`-t`)
@@ -248,33 +248,28 @@ MQTT over QUIC provides modern, high-performance transport with built-in encrypt
 
 - **Built-in TLS 1.3** - QUIC mandates encryption, no separate TLS handshake
 - **Multistream support** - Parallel MQTT operations without head-of-line blocking
-- **0-RTT connection** - Reduced latency for resumed connections
-- **Connection migration** - Seamless IP address changes (mobile networks)
 - **Flow headers** - Stream state recovery for persistent QoS sessions
 
 ### Client Usage
 
 ```rust
-use mqtt5::{MqttClient, ConnectOptions};
-use mqtt5::transport::quic::QuicClientConfig;
+use mqtt5::MqttClient;
+use mqtt5::transport::StreamStrategy;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = MqttClient::new("quic-client");
 
-    // Basic QUIC connection (insecure, for testing)
+    // Configure QUIC stream strategy before connecting
+    client.set_quic_stream_strategy(StreamStrategy::DataPerTopic).await;
+
+    // Basic QUIC connection (with system root certificates)
     client.connect("quic://broker.example.com:14567").await?;
 
-    // With certificate verification
-    let quic_config = QuicClientConfig::builder()
-        .with_ca_cert_file("ca.crt")?
-        .with_server_name("broker.example.com")
-        .build()?;
-
-    let options = ConnectOptions::new("quic-client".to_string())
-        .with_quic_config(quic_config);
-
-    client.connect_with_options("quic://broker.example.com:14567", options).await?;
+    // Or with custom TLS certificates loaded from PEM bytes
+    let ca_pem = std::fs::read("ca.crt")?;
+    client.set_tls_config(None, None, Some(ca_pem)).await;
+    client.connect("quics://broker.example.com:14567").await?;
 
     Ok(())
 }
@@ -289,7 +284,7 @@ QUIC multistream support allows different stream allocation strategies:
 | `ControlOnly` | Single stream for all packets | Simple deployments |
 | `DataPerPublish` | New stream per QoS 1/2 publish | High-throughput publishing |
 | `DataPerTopic` | Dedicated stream per topic | Topic isolation |
-| `DataPerSubscription` | Stream per subscription | Subscriber isolation |
+| `DataPerSubscription` | Stream per subscription (deprecated, use `DataPerTopic`) | Subscriber isolation |
 
 ### Flow Headers
 
@@ -572,7 +567,8 @@ See the [mqtt5-protocol README](crates/mqtt5-protocol/README.md) for detailed em
 ### Multi-Transport Broker
 
 ```rust
-use mqtt5::broker::{BrokerConfig, TlsConfig, WebSocketConfig};
+use mqtt5::broker::{BrokerConfig, MqttBroker};
+use mqtt5::broker::config::{TlsConfig, WebSocketConfig};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -609,7 +605,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ### Broker with Authentication
 
 ```rust
-use mqtt5::broker::{BrokerConfig, AuthConfig, AuthMethod};
+use mqtt5::broker::BrokerConfig;
+use mqtt5::broker::config::{AuthConfig, AuthMethod};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -689,9 +686,10 @@ Or via JSON configuration:
 Monitor and react to broker events with custom handlers:
 
 ```rust
-use mqtt5::broker::config::BrokerConfig;
+use mqtt5::broker::BrokerConfig;
 use mqtt5::broker::events::{
     BrokerEventHandler, ClientConnectEvent, ClientPublishEvent, ClientDisconnectEvent,
+    PublishAction,
 };
 use std::future::Future;
 use std::pin::Pin;
@@ -712,16 +710,16 @@ impl BrokerEventHandler for MetricsHandler {
     fn on_client_publish<'a>(
         &'a self,
         event: ClientPublishEvent,
-    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = PublishAction> + Send + 'a>> {
         Box::pin(async move {
             println!("Message published to {}: {} bytes", event.topic, event.payload.len());
-            // MQTT 5.0 request/response support
             if let Some(response_topic) = &event.response_topic {
                 println!("  Response topic: {response_topic}");
             }
             if let Some(correlation_data) = &event.correlation_data {
                 println!("  Correlation data: {} bytes", correlation_data.len());
             }
+            PublishAction::Continue
         })
     }
 
@@ -857,7 +855,7 @@ See `crates/mqtt5/examples/broker_with_opentelemetry.rs` for a complete example.
 
 ### Prerequisites
 
-- Rust 1.83 or later
+- Rust 1.88 or later
 - cargo-make (`cargo install cargo-make`)
 
 ### Quick Setup

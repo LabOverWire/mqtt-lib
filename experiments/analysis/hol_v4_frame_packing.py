@@ -8,8 +8,8 @@ Usage:
     python hol_v4_frame_packing.py [v3_dir] [v4_dir]
 
 Default dirs:
-    v3: experiments/results_v3/02_hol_blocking
-    v4: experiments/results_v4/02_hol_blocking
+    v3: experiments/results-v5/02_hol_blocking
+    v4: experiments/results-v5/02_hol_blocking
 """
 
 import json
@@ -175,8 +175,8 @@ def main():
         v3_dir = Path(sys.argv[1])
         v4_dir = Path(sys.argv[2])
     else:
-        v3_dir = base / "results_v3" / "02_hol_blocking"
-        v4_dir = base / "results_v4" / "02_hol_blocking"
+        v3_dir = base / "results-v5" / "02_hol_blocking"
+        v4_dir = base / "results-v5" / "02_hol_blocking"
 
     for d, label in [(v3_dir, "v3"), (v4_dir, "v4")]:
         if not d.exists():

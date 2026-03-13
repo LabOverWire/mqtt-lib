@@ -7,7 +7,7 @@ and validates that no queue buildup occurred.
 Usage:
     python hol_v3_analysis.py [results_dir]
 
-Default results_dir: experiments/results_v3/02_hol_blocking
+Default results_dir: experiments/results-v5/02_hol_blocking
 """
 
 import json
@@ -232,7 +232,7 @@ def main():
     if len(sys.argv) > 1:
         results_dir = Path(sys.argv[1])
     else:
-        results_dir = Path(__file__).parent.parent / "results_v3" / "02_hol_blocking"
+        results_dir = Path(__file__).parent.parent / "results-v5" / "02_hol_blocking"
 
     if not results_dir.exists():
         print(f"Results directory not found: {results_dir}", file=sys.stderr)

@@ -13,7 +13,7 @@ TRANSPORTS = ["tcp", "quic-pertopic"]
 TRANSPORT_LABELS = {"tcp": "TCP", "quic-pertopic": "QUIC per-topic"}
 QOS_COLORS = {"qos0": "#1f77b4", "qos1": "#d62728"}
 QOS_LABELS = {"qos0": "QoS 0", "qos1": "QoS 1"}
-RUNS = range(1, 6)
+RUNS = range(1, 16)
 
 
 def load_qos_data(results_dir: Path):
@@ -125,7 +125,7 @@ def main(results_dir: Path, output_dir: Path):
 
 if __name__ == "__main__":
     script_dir = Path(__file__).resolve().parent
-    default_results = script_dir.parent.parent / "results_v2"
+    default_results = script_dir.parent.parent / "results-v5"
     default_output = script_dir / "output"
     results_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else default_results
     output_dir = Path(sys.argv[2]) if len(sys.argv) > 2 else default_output

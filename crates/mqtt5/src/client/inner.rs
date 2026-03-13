@@ -229,8 +229,7 @@ impl MqttClient {
             .with_flow_headers(qc.flow_headers)
             .with_flow_expire_interval(qc.flow_expire.as_secs())
             .with_datagrams(qc.datagrams)
-            .with_connect_timeout(qc.connect_timeout)
-            .with_frame_packing(qc.frame_packing.clone());
+            .with_connect_timeout(qc.connect_timeout);
         if let Some(max) = qc.max_streams {
             config = config.with_max_concurrent_streams(max);
         }
@@ -262,8 +261,7 @@ impl MqttClient {
             .with_flow_headers(qc.flow_headers)
             .with_flow_expire_interval(qc.flow_expire.as_secs())
             .with_datagrams(qc.datagrams)
-            .with_connect_timeout(qc.connect_timeout)
-            .with_frame_packing(qc.frame_packing.clone());
+            .with_connect_timeout(qc.connect_timeout);
 
         if let Some(max) = qc.max_streams {
             config = config.with_max_concurrent_streams(max);

@@ -15,7 +15,7 @@ source "${SCRIPT_DIR}/group${GROUP}.env"
 : "${RUNS_PER_DATAPOINT:=10}"
 
 SSH_USER="${SSH_USER:-bench}"
-RESULTS_DIR="${ROOT_DIR}/results_v2"
+RESULTS_DIR="${ROOT_DIR}/results-phase2"
 mkdir -p "$RESULTS_DIR"
 
 SSH_OPTS="-o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=10"
@@ -31,10 +31,10 @@ scp_from_sub() {
     local remote_path="$1"
     local local_path="$2"
     if [ -n "${SUB_PROXY:-}" ]; then
-        scp -i "$SSH_KEY_PATH" -o ProxyJump="${SSH_USER}@${SUB_PROXY}" \
+        scp -i "$SSH_KEY_PATH" $SSH_OPTS -o ProxyJump="${SSH_USER}@${SUB_PROXY}" \
             "${SSH_USER}@${SUB_IP}:${remote_path}" "$local_path"
     else
-        scp -i "$SSH_KEY_PATH" "${SSH_USER}@${SUB_IP}:${remote_path}" "$local_path"
+        scp -i "$SSH_KEY_PATH" $SSH_OPTS "${SSH_USER}@${SUB_IP}:${remote_path}" "$local_path"
     fi
 }
 
@@ -59,11 +59,11 @@ stop_broker() {
 apply_netem() {
     local delay_ms="$1"
     local loss_pct="${2:-0}"
-    ssh_broker "sudo bash /opt/mqtt-lib/experiments/netem/apply.sh ${delay_ms} ${loss_pct}"
+    ssh_broker "sudo bash /opt/mqtt-lib/experiments/netem/apply.sh ${delay_ms} ${loss_pct}" || true
 }
 
 clear_netem() {
-    ssh_broker "sudo bash /opt/mqtt-lib/experiments/netem/clear.sh"
+    ssh_broker "sudo bash /opt/mqtt-lib/experiments/netem/clear.sh" || true
 }
 
 BROKER_MONITOR_PID=""
@@ -72,11 +72,11 @@ SUB_MONITOR_PID=""
 
 start_monitors() {
     BROKER_MONITOR_PID=$(ssh_broker "nohup bash /opt/mqtt-lib/experiments/monitor/resource_monitor.sh ${BROKER_PID} \
-        > /tmp/monitor.csv 2>&1 & echo \$!")
+        > /tmp/monitor.csv 2>&1 & echo \$!" || echo "0")
     PUB_MONITOR_PID=$(ssh_pub "nohup bash /opt/mqtt-lib/experiments/monitor/client_monitor.sh \
-        > /tmp/client_monitor.csv 2>&1 & echo \$!")
+        > /tmp/client_monitor.csv 2>&1 & echo \$!" || echo "0")
     SUB_MONITOR_PID=$(ssh_sub "nohup bash /opt/mqtt-lib/experiments/monitor/client_monitor.sh \
-        > /tmp/client_monitor.csv 2>&1 & echo \$!")
+        > /tmp/client_monitor.csv 2>&1 & echo \$!" || echo "0")
 }
 
 stop_monitors() {
@@ -87,11 +87,11 @@ stop_monitors() {
     ssh_pub "kill ${PUB_MONITOR_PID}" 2>/dev/null || true
     ssh_sub "kill ${SUB_MONITOR_PID}" 2>/dev/null || true
 
-    scp -i "$SSH_KEY_PATH" "${SSH_USER}@${BROKER_SSH_IP}:/tmp/monitor.csv" \
-        "${output_dir}/${run_label}_broker_resources.csv"
-    scp -i "$SSH_KEY_PATH" "${SSH_USER}@${PUB_IP}:/tmp/client_monitor.csv" \
-        "${output_dir}/${run_label}_pub_resources.csv"
-    scp_from_sub "/tmp/client_monitor.csv" "${output_dir}/${run_label}_sub_resources.csv"
+    scp -i "$SSH_KEY_PATH" $SSH_OPTS "${SSH_USER}@${BROKER_SSH_IP}:/tmp/monitor.csv" \
+        "${output_dir}/${run_label}_broker_resources.csv" || true
+    scp -i "$SSH_KEY_PATH" $SSH_OPTS "${SSH_USER}@${PUB_IP}:/tmp/client_monitor.csv" \
+        "${output_dir}/${run_label}_pub_resources.csv" || true
+    scp_from_sub "/tmp/client_monitor.csv" "${output_dir}/${run_label}_sub_resources.csv" || true
 
     BROKER_MONITOR_PID=""
     PUB_MONITOR_PID=""
@@ -139,7 +139,7 @@ run_bench_split() {
     fi
 
     ssh_sub "rm -f /tmp/sub_bench.json; ulimit -n 65536; nohup mqttv5 bench ${sub_args} \
-        > /tmp/sub_bench.json 2>/dev/null &"
+        > /tmp/sub_bench.json 2>/dev/null &" || true
     sleep 2
 
     ssh_pub "ulimit -n 65536; mqttv5 bench ${pub_args}" \
@@ -148,7 +148,7 @@ run_bench_split() {
     local waited=0
     while [ "$waited" -lt 60 ]; do
         local size
-        size=$(ssh_sub "stat -c%s /tmp/sub_bench.json 2>/dev/null || echo 0")
+        size=$(ssh_sub "stat -c%s /tmp/sub_bench.json 2>/dev/null || echo 0" 2>/dev/null || echo "0")
         if [ "$size" -gt 0 ]; then
             break
         fi
@@ -156,7 +156,7 @@ run_bench_split() {
         waited=$((waited + 2))
     done
 
-    scp_from_sub "/tmp/sub_bench.json" "${output_dir}/${label}.json"
+    scp_from_sub "/tmp/sub_bench.json" "${output_dir}/${label}.json" || true
     echo "  saved: ${output_dir}/${label}.json"
 }
 

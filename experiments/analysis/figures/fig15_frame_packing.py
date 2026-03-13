@@ -126,25 +126,24 @@ def plot_panel(ax, greedy_data, isolated_data, greedy_key, isolated_key,
     ax.set_xlabel("Packet Loss Rate")
 
 
-def main(v3_dir: Path, v4_dir: Path, output_dir: Path):
+def main(results_dir: Path, output_dir: Path):
     apply_style()
 
-    v3_pertopic = load_results(v3_dir, ["quic-pertopic"])
-    v3_perpub = load_results(v3_dir, ["quic-perpub"])
-    v4_pertopic = load_results(v4_dir, ["quic-pertopic-isolated"])
-    v4_perpub = load_results(v4_dir, ["quic-perpub-isolated"])
+    hol_dir = results_dir / "02_hol_blocking"
+    if not hol_dir.exists():
+        print(f"  WARNING: {hol_dir} not found, skipping fig15")
+        return
 
-    has_v4 = bool(v4_pertopic or v4_perpub)
-    if not has_v4:
-        print("  WARNING: no v4 data found, skipping fig15")
+    greedy_data = load_results(hol_dir, ["quic-pertopic", "quic-perpub"])
+    isolated_data = load_results(hol_dir, ["quic-pertopic-isolated", "quic-perpub-isolated"])
+
+    if not isolated_data:
+        print("  WARNING: no StreamIsolated data found, skipping fig15")
         return
 
     fig, axes = plt.subplots(2, 2, figsize=(12, 8))
 
-    for col, (strategy, cfg) in enumerate(STRATEGY_CONFIGS.items()):
-        greedy_data = v3_pertopic if strategy == "per-topic" else v3_perpub
-        isolated_data = v4_pertopic if strategy == "per-topic" else v4_perpub
-
+    for col, cfg in enumerate(STRATEGY_CONFIGS.values()):
         plot_panel(
             axes[0, col], greedy_data, isolated_data,
             cfg["greedy_key"], cfg["isolated_key"],
@@ -171,9 +170,9 @@ def main(v3_dir: Path, v4_dir: Path, output_dir: Path):
 
 if __name__ == "__main__":
     script_dir = Path(__file__).resolve().parent
-    base = script_dir.parent.parent
-    v3_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else base / "results_v3" / "02_hol_blocking"
-    v4_dir = Path(sys.argv[2]) if len(sys.argv) > 2 else base / "results_v4" / "02_hol_blocking"
-    output_dir = Path(sys.argv[3]) if len(sys.argv) > 3 else script_dir / "output"
+    default_results = script_dir.parent.parent / "results-v5"
+    default_output = script_dir / "output"
+    results_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else default_results
+    output_dir = Path(sys.argv[2]) if len(sys.argv) > 2 else default_output
     output_dir.mkdir(parents=True, exist_ok=True)
-    main(v3_dir, v4_dir, output_dir)
+    main(results_dir, output_dir)

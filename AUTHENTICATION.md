@@ -2,11 +2,12 @@
 
 ## Overview
 
-The broker supports three layers of security:
+The broker supports four layers of security:
 
 1. **Authentication** - Verifies client identity
 2. **Authorization** - Controls topic access via ACL
 3. **RBAC** - Groups permissions into roles
+4. **Identity Injection** - Stamps publisher identity on messages
 
 ## Authentication Methods
 
@@ -25,6 +26,18 @@ mqttv5 passwd alice passwd.txt
 mqttv5 broker --auth-password-file passwd.txt
 ```
 
+Password file format: `username:argon2id_hash` (one per line). Lines starting with `#` are comments.
+
+### PLAIN SASL
+
+Enhanced authentication method using RFC 4616 PLAIN SASL. Credentials are sent as three NUL-separated fields: `[authzid]\0username\0password` in the auth data field (authzid is typically empty). Requires the same password file as password authentication.
+
+```bash
+mqttv5 broker --auth-password-file passwd.txt
+```
+
+Clients connect with `auth_method: "PLAIN"` and provide credentials in the MQTT v5 enhanced authentication flow.
+
 ### SCRAM-SHA-256
 
 Challenge-response authentication without transmitting passwords.
@@ -32,6 +45,16 @@ Challenge-response authentication without transmitting passwords.
 ```bash
 mqttv5 broker --auth-method scram --scram-file scram.txt
 ```
+
+SCRAM credentials file format: `username:salt_b64:iterations:stored_key_b64:server_key_b64` (one per line, 5 colon-separated fields). Lines starting with `#` are comments.
+
+Generate credentials with:
+
+```bash
+mqttv5 scram alice scram.txt
+```
+
+Default iteration count: 310,000. Authentication state per client expires after 60 seconds. Maximum 1,000 concurrent SCRAM handshakes.
 
 ### JWT Authentication
 
@@ -58,6 +81,8 @@ mqttv5 broker \
   --jwt-auth-mode identity-only
 ```
 
+Federated JWT constructs user IDs in the format `issuer_domain:sub` (e.g., `accounts.google.com:12345`). The `sub` claim is validated: maximum 256 characters, no colons, no control characters. A custom prefix can replace the issuer domain via `--jwt-issuer-prefix`.
+
 ## Federated Authentication Modes
 
 | Mode | Description |
@@ -82,6 +107,8 @@ mqttv5 broker \
   --jwt-default-roles "guest"
 ```
 
+Claim patterns support: Equals, Contains, EndsWith, StartsWith, Regex, and Any. In JSON config, specify as `{"EndsWith": "@company.com"}` or `"Any"`.
+
 ### TrustedRoles
 
 Trust roles from IdP (Keycloak, Azure AD):
@@ -92,6 +119,8 @@ mqttv5 broker \
   --jwt-trusted-role-claim "realm_access.roles" \
   --jwt-trusted-role-claim "groups"
 ```
+
+When no trusted role claims are configured, defaults to checking `roles`, `groups`, and `realm_access.roles`.
 
 ## Authorization (ACL)
 
@@ -111,10 +140,17 @@ assign bob sensors
 
 ### Permissions
 
-- `read` - Subscribe only
-- `write` - Publish only
-- `readwrite` - Both
-- `deny` - Explicit denial
+- `read` (or `subscribe`) - Subscribe only
+- `write` (or `publish`) - Publish only
+- `readwrite` (or `rw`, `all`) - Both
+- `deny` (or `none`) - Explicit denial
+
+### Permission Evaluation Order
+
+1. Direct user rules (exact username match) checked first
+2. Role-based rules checked next (deny overrides allow across roles)
+3. Wildcard user rules (`user *`) checked last
+4. Default permission applied if no rule matches (deny unless `allow_all` mode)
 
 ### Username Substitution (`%u`)
 
@@ -144,11 +180,22 @@ user * topic devices/%u/+/telemetry/# permission read
 
 ### Sender Identity Injection
 
-The broker stamps an `x-mqtt-sender` MQTT v5 user property on every PUBLISH packet before routing. The value is the authenticated username of the publishing client. Any client-provided `x-mqtt-sender` property is stripped and replaced by the broker to prevent spoofing.
+The broker stamps two MQTT v5 user properties on every PUBLISH packet before routing:
+
+- **`x-mqtt-sender`** - The authenticated username (`user_id`) of the publishing client. Any client-provided `x-mqtt-sender` property is stripped and replaced by the broker to prevent spoofing.
+- **`x-mqtt-client-id`** - The MQTT `client_id` of the immediate publisher. Any client-provided `x-mqtt-client-id` property is stripped and replaced by the broker to prevent spoofing.
 
 Anonymous clients (no authenticated identity) produce no `x-mqtt-sender` property. Internal/bridge messages also carry no `x-mqtt-sender`.
 
-Subscribers can read `x-mqtt-sender` from received messages to determine who published them, enabling ownership validation and access control at the application layer.
+These are distinct from `x-origin-client-id`, which is an application-layer property set by intermediaries (e.g., event republishers) to track the original causation client through republish hops.
+
+### Echo Suppression
+
+When enabled, the broker skips delivery of a PUBLISH to a subscriber whose `client_id` matches the value of a configurable user property on the message. This prevents clients from receiving their own published messages when routed through intermediaries.
+
+Default property key: `x-origin-client-id`. The suppression key is hot-reloadable via SIGHUP.
+
+Echo suppression defaults to checking `x-origin-client-id` (not `x-mqtt-client-id`) because when an intermediary republishes on behalf of the original client, `x-mqtt-client-id` reflects the intermediary's client_id, not the originator.
 
 ### CLI Management
 
@@ -174,18 +221,23 @@ mqttv5 acl list -f acl.txt
 | `--jwt-key-file` | JWT secret or public key |
 | `--jwt-issuer` | Required JWT issuer |
 | `--jwt-audience` | Required JWT audience |
+| `--jwt-clock-skew` | Clock skew tolerance in seconds (default: 60) |
 
 ### Federated JWT Options
 
 | Option | Description |
 |--------|-------------|
 | `--jwt-jwks-uri` | JWKS endpoint URL |
+| `--jwt-jwks-refresh` | JWKS refresh interval in seconds (default: 3600) |
 | `--jwt-fallback-key` | Fallback key when JWKS unavailable |
 | `--jwt-auth-mode` | identity-only, claim-binding, trusted-roles |
 | `--jwt-role-claim` | Claim path for role extraction |
 | `--jwt-role-map` | Claim-to-role mapping (repeatable) |
+| `--jwt-default-roles` | Default roles for authenticated users (comma-separated) |
 | `--jwt-trusted-role-claim` | Trusted role claim paths (repeatable) |
 | `--jwt-session-scoped-roles` | Clear roles on disconnect |
+| `--jwt-role-merge-mode` | merge or replace (deprecated, use `--jwt-auth-mode`) |
+| `--jwt-issuer-prefix` | Custom prefix for user ID namespacing |
 | `--jwt-config-file` | JSON config for multi-issuer |
 
 ### ACL Commands
@@ -198,16 +250,20 @@ mqttv5 acl list -f acl.txt
 | `acl check <user> <topic> <action> -f <file>` | Test permission |
 | `acl role-add <role> <topic> <perm> -f <file>` | Add role rule |
 | `acl role-remove <role> [topic] -f <file>` | Remove role |
+| `acl role-list [role] -f <file>` | List role rules |
 | `acl assign <user> <role> -f <file>` | Assign role |
 | `acl unassign <user> <role> -f <file>` | Remove role assignment |
+| `acl user-roles <user> -f <file>` | List user's roles |
 
 ### Password Commands
 
 | Command | Description |
 |---------|-------------|
-| `passwd <user> <file>` | Add/update user |
-| `passwd -b <user> <pass> <file>` | Batch mode |
+| `passwd <user> [file]` | Add/update user (file optional with `-n`) |
+| `passwd <user> [file] -b <pass>` | Batch mode |
 | `passwd -D <user> <file>` | Delete user |
+| `passwd -c <user> <file>` | Create new password file |
+| `passwd -n <user>` | Output hash to stdout |
 
 ## Common Configurations
 
@@ -278,6 +334,24 @@ mqttv5 broker \
 }
 ```
 
+## Auth Provider Architecture
+
+### ComprehensiveAuthProvider
+
+The primary broker auth provider. Wraps `PasswordAuthProvider` + `AclManager` into a single provider handling both authentication and authorization. Factory methods: `from_files()`, `with_password_file_and_allow_all_acl()`, `with_providers()`. Supports file reloading for both password and ACL files.
+
+### CompositeAuthProvider
+
+Chains a primary and fallback auth provider. If the primary returns `BadAuthenticationMethod`, the fallback is tried. Other rejection reasons (e.g., `NotAuthorized`) are final.
+
+Authorization modes control how publish/subscribe checks combine:
+
+| Mode | Behavior |
+|------|----------|
+| `PrimaryOnly` (default) | Only primary provider's authorization checked |
+| `Or` | Allowed if either provider authorizes |
+| `And` | Allowed only if both providers authorize |
+
 ## Session Security
 
 ### Session-to-User Binding
@@ -294,7 +368,7 @@ When restoring subscriptions from a previous session, each topic filter is re-au
 
 - Passwords hashed with Argon2id
 - SCRAM never transmits passwords; client-side passwords zeroized on drop
-- Password fields excluded from tracing/log output
+- Password fields are not logged (no explicit tracing of credentials)
 - Password/ACL files should have mode 0600
 - Bridge config Debug output redacts password fields
 - Enable TLS to protect credentials in transit
@@ -306,11 +380,21 @@ When restoring subscriptions from a previous session, each topic filter is re-au
 - Single-verifier configurations ignore the token's `alg` header entirely
 - JWKS endpoints must use HTTPS
 - Claim pattern regexes compiled once at config load (invalid patterns fail early)
+- Default clock skew tolerance: 60 seconds
+
+### JWKS
+
+- Background refresh with configurable interval (default: 3600s)
+- Cache TTL configurable per endpoint (default: 86400s)
+- Circuit breaker: after 3 consecutive failures, endpoint marked as open for 60 seconds before half-open retry
+- Fallback static key used when JWKS endpoint is unavailable or key not found
 
 ### SCRAM
 
 - Authentication state keyed by `client_id`; concurrent authentication for the same client ID is rejected
-- Channel binding supported for additional transport-layer verification
+- Channel binding is **not** supported; clients using `y,,` (requesting) or `p=` (requiring) channel binding are rejected
+- Constant-time comparison used for credential verification
+- PBKDF2-HMAC-SHA256 key derivation
 
 ### Certificate Authentication
 
@@ -321,20 +405,21 @@ When restoring subscriptions from a previous session, each topic filter is re-au
 
 ### ACL
 
-- Deny rules evaluated before allow rules
+- Deny rules evaluated before allow rules within role-based checks
 - `%u` substitution rejects usernames containing `+`, `#`, or `/` to prevent wildcard injection
 - Topic names validated on publish after topic alias resolution
 
 ### Transport
 
 - Rate limiting enabled by default (5 attempts per 60s, 5-minute lockout)
+- Rate limiting tracks both IP address and username independently
 - QUIC bridges default to certificate verification enabled
 - WebSocket `allowed_origins` configuration prevents Cross-Site WebSocket Hijacking
-- WebSocket path enforcement rejects connections to non-configured paths
+- WebSocket path enforcement rejects connections to non-configured paths with HTTP 404
 
 ## Rate Limiting
 
-Authentication rate limiting protects against brute-force attacks. Enabled by default with configurable limits.
+Authentication rate limiting protects against brute-force attacks. Enabled by default with configurable limits. Tracks failed attempts by both IP address and username independently.
 
 ### Default Settings
 
@@ -371,3 +456,5 @@ AuthConfig {
     ..Default::default()
 }
 ```
+
+Successful authentication clears the attempt counter for that IP/username. Expired entries are cleaned up periodically.
