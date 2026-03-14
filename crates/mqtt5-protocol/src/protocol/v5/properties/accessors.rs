@@ -278,6 +278,17 @@ impl Properties {
             .push(PropertyValue::Utf8String(reference));
     }
 
+    #[must_use]
+    pub fn get_server_reference(&self) -> Option<&str> {
+        self.properties
+            .get(&PropertyId::ServerReference)
+            .and_then(|values| values.first())
+            .and_then(|v| match v {
+                PropertyValue::Utf8String(s) => Some(s.as_str()),
+                _ => None,
+            })
+    }
+
     pub fn set_reason_string(&mut self, reason: String) {
         self.properties
             .entry(PropertyId::ReasonString)

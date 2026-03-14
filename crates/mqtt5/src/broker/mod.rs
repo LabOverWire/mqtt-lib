@@ -61,7 +61,9 @@ pub use auth_mechanisms::{
     JwtAuthProvider, PasswordCredentialStore, PlainAuthProvider, ScramCredentialStore,
     ScramCredentials, ScramSha256AuthProvider,
 };
-pub use config::{BrokerConfig, StorageBackend as StorageBackendType, StorageConfig};
+pub use config::{
+    BrokerConfig, LoadBalancerConfig, StorageBackend as StorageBackendType, StorageConfig,
+};
 pub use events::{
     BrokerEventHandler, ClientConnectEvent, ClientDisconnectEvent, ClientPublishEvent,
     ClientSubscribeEvent, ClientUnsubscribeEvent, MessageDeliveredEvent, PublishAction,

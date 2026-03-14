@@ -62,6 +62,27 @@ impl ClientHandler {
         self.validate_protocol_version(connect.protocol_version)
             .await?;
 
+        if let Some(ref lb) = self.config.load_balancer {
+            let client_id = if connect.client_id.is_empty() {
+                "auto"
+            } else {
+                &connect.client_id
+            };
+            let backend = lb.select_backend(client_id).to_string();
+            info!(
+                client_id = %client_id,
+                backend = %backend,
+                addr = %self.client_addr,
+                "Redirecting client to backend"
+            );
+            let connack = ConnAckPacket::new(false, ReasonCode::UseAnotherServer)
+                .with_server_reference(backend);
+            self.transport
+                .write_packet(Packet::ConnAck(connack))
+                .await?;
+            return Err(MqttError::UseAnotherServer);
+        }
+
         self.request_problem_information = connect
             .properties
             .get_request_problem_information()
