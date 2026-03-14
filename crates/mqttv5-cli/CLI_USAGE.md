@@ -204,6 +204,44 @@ Generate example configuration file:
 mqttv5 broker generate-config --output config.json --format json
 ```
 
+Broker as load balancer (redirects clients to backend brokers):
+
+```bash
+mqttv5 broker --config lb-config.json
+```
+
+Where `lb-config.json` contains a `load_balancer` section:
+
+```json
+{
+  "bind_addresses": ["0.0.0.0:1883"],
+  "load_balancer": {
+    "backends": [
+      "mqtt://backend1.example.com:1883",
+      "mqtt://backend2.example.com:1883"
+    ]
+  }
+}
+```
+
+Clients connecting to the load balancer receive a CONNACK with reason code `UseAnotherServer` (0x9C) and a Server Reference property pointing to one of the backends. The client library automatically follows the redirect (up to 3 hops).
+
+Publish through a load balancer (automatic redirect):
+
+```bash
+mqttv5 pub -t test/topic -m "Hello" \
+  --url mqtt://lb.example.com:1883 \
+  --non-interactive
+```
+
+Subscribe through a load balancer (automatic redirect):
+
+```bash
+mqttv5 sub -t test/# \
+  --url mqtt://lb.example.com:1883 \
+  --non-interactive
+```
+
 ### mqttv5 pub
 
 Publish an MQTT message.
@@ -941,6 +979,7 @@ The broker accepts a JSON configuration file with `--config` flag.
   "websocket_config": WebSocketConfig | null,
   "websocket_tls_config": WebSocketConfig | null,
   "storage_config": StorageConfig,
+  "load_balancer": LoadBalancerConfig | null,
   "bridges": [BridgeConfig]
 }
 ```
@@ -1039,6 +1078,20 @@ The broker accepts a JSON configuration file with `--config` flag.
 | `base_dir` | `string` | Base directory for file storage | `"./mqtt_storage"` |
 | `cleanup_interval` | `duration` | Cleanup interval for expired data | `"1h"` |
 | `enable_persistence` | `boolean` | Enable message persistence | `false` |
+
+### LoadBalancerConfig
+
+```json
+{
+  "backends": ["string"]
+}
+```
+
+| Field | Type | Description | Default |
+| --- | --- | --- | --- |
+| `backends` | `string[]` | Backend broker URLs (e.g., `mqtt://host:port`) | Required |
+
+When `load_balancer` is set, the broker acts as a connection redirector. On each CONNECT, it selects a backend using a hash of the client ID and responds with CONNACK reason code `UseAnotherServer` (0x9C) containing a Server Reference property. The client automatically follows the redirect.
 
 ### BridgeConfig
 
@@ -1154,6 +1207,21 @@ The broker accepts a JSON configuration file with `--config` flag.
     "cert_file": "/etc/mqtt/certs/server.pem",
     "key_file": "/etc/mqtt/certs/server-key.pem",
     "bind_addresses": ["0.0.0.0:8883"]
+  }
+}
+```
+
+#### Load Balancer Broker
+
+```json
+{
+  "bind_addresses": ["0.0.0.0:1883"],
+  "load_balancer": {
+    "backends": [
+      "mqtt://backend1.example.com:1883",
+      "mqtt://backend2.example.com:1883",
+      "mqtt://backend3.example.com:1883"
+    ]
   }
 }
 ```
