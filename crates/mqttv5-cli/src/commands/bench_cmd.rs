@@ -1174,7 +1174,7 @@ async fn subscribe_hol_topics(
 }
 
 fn spawn_quinn_stats_sampler(
-    conn: Arc<mqtt5::quinn::Connection>,
+    conn: Arc<quinn::Connection>,
     records: Arc<std::sync::Mutex<Vec<StatsRecord>>>,
     running: Arc<std::sync::atomic::AtomicBool>,
 ) -> tokio::task::JoinHandle<()> {

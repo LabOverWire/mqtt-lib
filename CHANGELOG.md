@@ -21,7 +21,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Bench HOL blocking metrics** - `inter_topic_spread`, `detrended_correlation`, `spike_isolation_ratio`, and `inter_arrival_cluster_ratio` metrics in HOL mode JSON output
 - **Bench payload sequence numbers** - Raw payload format now encodes a 4-byte sequence number at offset 8 for message ordering analysis
 - **WebSocket bridge support** - WASM broker `addBridgeWebSocket()` and `BridgeConnection.connect_ws()` for WebSocket-based bridge connections
-- **Re-export `quinn` crate** - `mqtt5::quinn` re-exported on native targets for direct QUIC configuration access
 
 ### Changed
 
