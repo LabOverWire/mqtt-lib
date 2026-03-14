@@ -53,7 +53,6 @@ mqttv5 broker generate-config [--output FILE] [--format json|toml]
 | `--ws-path <PATH>` | WebSocket path | `/mqtt` |
 | `--quic-host <ADDR>` | QUIC bind address(es), requires TLS cert/key | None |
 | `--quic-delivery-strategy <S>` | QUIC server delivery strategy: `control-only`, `per-topic`, `per-publish` | `per-topic` |
-| `--quic-frame-packing <P>` | QUIC frame packing policy: `greedy`, `stream-isolated`, `budgeted-N` | `greedy` |
 | `--storage-dir <DIR>` | Storage directory for persistence | `./mqtt_storage` |
 | `--storage-backend <TYPE>` | Storage backend: `memory` or `file` | `file` |
 | `--no-persistence` | Disable message persistence | `false` |
@@ -621,7 +620,6 @@ Run performance benchmarks against a broker.
 | `--quic-max-streams <N>` | Maximum concurrent QUIC streams | None |
 | `--quic-datagrams` | Enable QUIC datagrams for unreliable transport | `false` |
 | `--quic-connect-timeout <SECS>` | QUIC connection timeout in seconds | `30` |
-| `--quic-frame-packing <P>` | QUIC frame packing policy: `greedy`, `stream-isolated`, `budgeted-N` | `greedy` |
 
 #### Bench Examples
 
@@ -675,16 +673,6 @@ Benchmark with JSON payload format:
 
 ```bash
 mqttv5 bench --payload-format json --payload-size 256
-```
-
-Benchmark with frame packing policy:
-
-```bash
-mqttv5 bench --mode hol-blocking \
-  --url quic://broker.example.com:14567 \
-  --ca-cert ca.pem \
-  --quic-stream-strategy per-topic \
-  --quic-frame-packing stream-isolated
 ```
 
 ### mqttv5 passwd

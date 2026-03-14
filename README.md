@@ -22,7 +22,7 @@
 
 ```toml
 [dependencies]
-mqtt5 = "0.22"
+mqtt5 = "0.23"
 ```
 
 ### CLI Tool
@@ -510,7 +510,7 @@ The `mqtt5-protocol` crate supports `no_std` environments for embedded systems.
 
 ```toml
 [dependencies]
-mqtt5-protocol = { version = "0.9", default-features = false }
+mqtt5-protocol = { version = "0.10", default-features = false }
 ```
 
 For single-core MCUs (more efficient atomics), configure via `.cargo/config.toml`:
