@@ -242,6 +242,7 @@ mod tests {
             dup: false,
             properties: Properties::default(),
             protocol_version: 5,
+            stream_id: None,
         };
 
         manager.dispatch(&message).unwrap();
@@ -279,6 +280,7 @@ mod tests {
             dup: false,
             properties: Properties::default(),
             protocol_version: 5,
+            stream_id: None,
         };
 
         manager.dispatch(&message1).unwrap();
@@ -332,6 +334,7 @@ mod tests {
             dup: false,
             properties: Properties::default(),
             protocol_version: 5,
+            stream_id: None,
         };
 
         manager.dispatch(&message).unwrap();
@@ -362,6 +365,7 @@ mod tests {
             dup: false,
             properties: Properties::default(),
             protocol_version: 5,
+            stream_id: None,
         };
 
         manager.dispatch(&message).unwrap();
@@ -420,6 +424,7 @@ mod tests {
             dup: false,
             properties: Properties::default(),
             protocol_version: 5,
+            stream_id: None,
         };
 
         manager.dispatch(&message).unwrap();
@@ -467,6 +472,7 @@ mod tests {
             dup: false,
             properties: Properties::default(),
             protocol_version: 5,
+            stream_id: None,
         };
 
         let start = std::time::Instant::now();
@@ -511,6 +517,7 @@ mod tests {
             dup: false,
             properties: Properties::default(),
             protocol_version: 5,
+            stream_id: None,
         };
 
         manager.dispatch(&message).unwrap();

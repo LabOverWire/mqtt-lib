@@ -173,6 +173,7 @@ pub struct Message {
     pub qos: QoS,
     pub retain: bool,
     pub properties: MessageProperties,
+    pub stream_id: Option<u64>,
 }
 
 impl From<crate::packet::publish::PublishPacket> for Message {
@@ -183,6 +184,7 @@ impl From<crate::packet::publish::PublishPacket> for Message {
             qos: packet.qos,
             retain: packet.retain,
             properties: MessageProperties::from(packet.properties),
+            stream_id: packet.stream_id,
         }
     }
 }

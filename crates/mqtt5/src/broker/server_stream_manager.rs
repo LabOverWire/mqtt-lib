@@ -1,5 +1,7 @@
+use crate::broker::config::ServerDeliveryStrategy;
 use crate::error::{MqttError, Result};
 use crate::transport::flow::{DataFlowHeader, FlowFlags, FlowId, FlowIdGenerator};
+use crate::QoS;
 use bytes::BytesMut;
 use quinn::{Connection, SendStream};
 use std::collections::HashMap;
@@ -19,6 +21,7 @@ const FLOW_EXPIRE_INTERVAL: u64 = 300;
 
 pub struct ServerStreamManager {
     connection: Arc<Connection>,
+    strategy: ServerDeliveryStrategy,
     topic_streams: HashMap<String, ServerStreamInfo>,
     flow_id_generator: FlowIdGenerator,
     header_buffer: BytesMut,
@@ -28,13 +31,40 @@ impl ServerStreamManager {
     pub fn new(connection: Arc<Connection>) -> Self {
         Self {
             connection,
+            strategy: ServerDeliveryStrategy::default(),
             topic_streams: HashMap::new(),
             flow_id_generator: FlowIdGenerator::new(),
             header_buffer: BytesMut::with_capacity(32),
         }
     }
 
-    pub async fn write_publish(&mut self, topic: &str, encoded_packet: &[u8]) -> Result<()> {
+    #[must_use]
+    pub fn with_strategy(mut self, strategy: ServerDeliveryStrategy) -> Self {
+        self.strategy = strategy;
+        self
+    }
+
+    pub async fn write_publish(
+        &mut self,
+        topic: &str,
+        encoded_packet: &[u8],
+        qos: QoS,
+    ) -> Result<()> {
+        match self.strategy {
+            ServerDeliveryStrategy::ControlOnly => Err(MqttError::ConnectionError(
+                "control-only delivery: caller should write to control stream directly".to_string(),
+            )),
+            ServerDeliveryStrategy::PerTopic => {
+                self.write_on_topic_stream(topic, encoded_packet).await
+            }
+            ServerDeliveryStrategy::PerPublish => {
+                self.write_on_ephemeral_stream(topic, encoded_packet, qos)
+                    .await
+            }
+        }
+    }
+
+    async fn write_on_topic_stream(&mut self, topic: &str, encoded_packet: &[u8]) -> Result<()> {
         self.evict_idle_streams();
 
         if let Some(info) = self.topic_streams.get_mut(topic) {
@@ -73,6 +103,44 @@ impl ServerStreamManager {
                 last_used: Instant::now(),
             },
         );
+
+        Ok(())
+    }
+
+    async fn write_on_ephemeral_stream(
+        &mut self,
+        topic: &str,
+        encoded_packet: &[u8],
+        qos: QoS,
+    ) -> Result<()> {
+        let mut send = if qos == QoS::AtMostOnce {
+            self.connection.open_uni().await.map_err(|e| {
+                MqttError::ConnectionError(format!("failed to open server QUIC stream: {e}"))
+            })?
+        } else {
+            let (send, _recv) = self.connection.open_bi().await.map_err(|e| {
+                MqttError::ConnectionError(format!("failed to open server QUIC stream: {e}"))
+            })?;
+            send
+        };
+
+        let flow_id = self.flow_id_generator.next_server();
+
+        self.header_buffer.clear();
+        let header = DataFlowHeader::server(flow_id, FLOW_EXPIRE_INTERVAL, FlowFlags::default());
+        header.encode(&mut self.header_buffer);
+
+        send.write_all(&self.header_buffer).await.map_err(|e| {
+            MqttError::ConnectionError(format!("failed to write server flow header: {e}"))
+        })?;
+
+        write_to_stream(&mut send, encoded_packet).await?;
+
+        let _ = send.finish();
+
+        tokio::task::yield_now().await;
+
+        debug!(topic = %topic, flow_id = ?flow_id, "Sent publish on ephemeral server stream");
 
         Ok(())
     }

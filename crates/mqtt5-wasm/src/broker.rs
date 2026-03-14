@@ -1,5 +1,6 @@
 use crate::bridge::{WasmBridgeConfig, WasmBridgeManager};
 use crate::client_handler::WasmClientHandler;
+use crate::config::WasmConnectOptions;
 use mqtt5::broker::acl::{AclRule, Permission};
 use mqtt5::broker::auth::{ComprehensiveAuthProvider, PasswordAuthProvider};
 use mqtt5::broker::config::{BrokerConfig, ChangeOnlyDeliveryConfig};
@@ -45,6 +46,7 @@ struct ConfigHashFields {
     change_only_delivery_patterns: Vec<String>,
     echo_suppression_enabled: bool,
     echo_suppression_property_key: Option<String>,
+    max_outbound_rate_per_client: u32,
 }
 
 #[wasm_bindgen(js_name = "BrokerConfig")]
@@ -65,6 +67,7 @@ pub struct WasmBrokerConfig {
     change_only_delivery_patterns: Vec<String>,
     echo_suppression_enabled: bool,
     echo_suppression_property_key: Option<String>,
+    max_outbound_rate_per_client: u32,
 }
 
 #[wasm_bindgen(js_class = "BrokerConfig")]
@@ -88,6 +91,7 @@ impl WasmBrokerConfig {
             change_only_delivery_patterns: Vec::new(),
             echo_suppression_enabled: false,
             echo_suppression_property_key: None,
+            max_outbound_rate_per_client: 0,
         }
     }
 
@@ -171,6 +175,11 @@ impl WasmBrokerConfig {
         self.echo_suppression_property_key = value;
     }
 
+    #[wasm_bindgen(setter, js_name = "maxOutboundRatePerClient")]
+    pub fn set_max_outbound_rate_per_client(&mut self, value: u32) {
+        self.max_outbound_rate_per_client = value;
+    }
+
     fn to_broker_config(&self) -> BrokerConfig {
         BrokerConfig {
             max_clients: self.max_clients as usize,
@@ -198,6 +207,7 @@ impl WasmBrokerConfig {
                     .clone()
                     .unwrap_or_else(|| "x-origin-client-id".to_string()),
             },
+            max_outbound_rate_per_client: self.max_outbound_rate_per_client,
             ..Default::default()
         }
     }
@@ -219,6 +229,7 @@ impl WasmBrokerConfig {
             change_only_delivery_patterns: self.change_only_delivery_patterns.clone(),
             echo_suppression_enabled: self.echo_suppression_enabled,
             echo_suppression_property_key: self.echo_suppression_property_key.clone(),
+            max_outbound_rate_per_client: self.max_outbound_rate_per_client,
         };
         let mut hasher = DefaultHasher::new();
         fields.hash(&mut hasher);
@@ -271,12 +282,17 @@ impl WasmBroker {
             .read()
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
         let base_router = MessageRouter::with_storage(Arc::clone(&storage));
-        let router = if broker_config.echo_suppression_config.enabled {
-            Arc::new(base_router.with_echo_suppression_key(
+        let with_echo = if broker_config.echo_suppression_config.enabled {
+            base_router.with_echo_suppression_key(
                 broker_config.echo_suppression_config.property_key.clone(),
-            ))
+            )
         } else {
-            Arc::new(base_router)
+            base_router
+        };
+        let router = if broker_config.max_outbound_rate_per_client > 0 {
+            Arc::new(with_echo.with_max_outbound_rate(broker_config.max_outbound_rate_per_client))
+        } else {
+            Arc::new(with_echo)
         };
         drop(broker_config);
 
@@ -518,6 +534,20 @@ impl WasmBroker {
     }
 
     /// # Errors
+    /// Returns an error if the bridge cannot be added or WebSocket connection fails.
+    #[wasm_bindgen(js_name = "addBridgeWebSocket")]
+    #[allow(non_snake_case)]
+    pub async fn add_bridge_ws(
+        &self,
+        config: WasmBridgeConfig,
+        url: &str,
+        opts: &WasmConnectOptions,
+    ) -> Result<(), JsValue> {
+        let manager = self.bridge_manager.borrow().clone();
+        manager.add_bridge_ws(config, url, opts).await
+    }
+
+    /// # Errors
     /// Returns an error if the bridge cannot be removed.
     #[wasm_bindgen(js_name = "removeBridge")]
     pub async fn remove_bridge(&self, name: &str) -> Result<(), JsValue> {
@@ -609,6 +639,7 @@ impl WasmBroker {
         } else {
             None
         };
+        let max_rate = broker_config.max_outbound_rate_per_client;
 
         if let Ok(mut config) = self.config.try_write() {
             *config = broker_config;
@@ -626,6 +657,8 @@ impl WasmBroker {
                 &"Echo suppression key update skipped: router lock contention".into(),
             );
         }
+
+        self.router.update_max_outbound_rate(max_rate);
 
         self.config_hash.set(new_hash);
 

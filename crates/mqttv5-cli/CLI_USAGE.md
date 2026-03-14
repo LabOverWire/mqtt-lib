@@ -11,6 +11,8 @@ The `mqttv5` CLI provides commands for:
 - **sub** - Subscribe to MQTT topics
 - **bench** - Run performance benchmarks
 - **passwd** - Manage password file for authentication
+- **scram** - Manage SCRAM-SHA-256 credentials file
+- **acl** - Manage ACL file for authorization
 
 Global flags:
 
@@ -23,38 +25,74 @@ Global flags:
 
 Start an MQTT v5.0 broker.
 
+The broker also supports a `generate-config` subcommand to produce a full example configuration file.
+
+```
+mqttv5 broker generate-config [--output FILE] [--format json|toml]
+```
+
 #### Broker Flags
 
-| Flag                          | Description                                                     | Default                     |
-| ----------------------------- | --------------------------------------------------------------- | --------------------------- |
-| `--config, -c <FILE>`         | Configuration file path (JSON format)                           | None                        |
-| `--host, -H <ADDR>`           | TCP bind address(es), can be specified multiple times           | `0.0.0.0:1883`, `[::]:1883` |
-| `--max-clients <N>`           | Maximum concurrent clients                                      | `10000`                     |
-| `--allow-anonymous`           | Allow anonymous connections                                     | `true`                      |
-| `--auth-password-file <FILE>` | Password file for authentication                                | None                        |
-| `--acl-file <FILE>`           | ACL file for authorization                                      | None                        |
-| `--tls-cert <FILE>`           | TLS certificate file (PEM format)                               | None                        |
-| `--tls-key <FILE>`            | TLS private key file (PEM format)                               | None                        |
-| `--tls-ca-cert <FILE>`        | TLS CA certificate for client verification                      | None                        |
-| `--tls-require-client-cert`   | Require client certificates (mTLS)                              | `false`                     |
-| `--tls-host <ADDR>`           | TLS bind address(es), can be specified multiple times           | `0.0.0.0:8883`, `[::]:8883` |
-| `--ws-host <ADDR>`            | WebSocket bind address(es), can be specified multiple times     | None                        |
-| `--ws-tls-host <ADDR>`        | WebSocket TLS bind address(es), can be specified multiple times | None                        |
-| `--ws-path <PATH>`            | WebSocket path                                                  | `/mqtt`                     |
-| `--quic-host <ADDR>`          | QUIC bind address(es), requires TLS cert/key                    | None                        |
-| `--storage-dir <DIR>`         | Storage directory for persistence                               | `./mqtt_storage`            |
-| `--storage-backend <TYPE>`    | Storage backend: `memory` or `file`                             | `file`                      |
-| `--no-persistence`            | Disable message persistence                                     | `false`                     |
-| `--session-expiry <SECS>`     | Default session expiry interval in seconds                      | `3600`                      |
-| `--max-qos <0\|1\|2>`         | Maximum QoS level                                               | `2`                         |
-| `--keep-alive <SECS>`         | Server keep-alive time in seconds                               | None                        |
-| `--response-information <STR>` | Response information sent to clients that request it           | None                        |
-| `--no-retain`                 | Disable retained messages                                       | `false`                     |
-| `--no-wildcards`              | Disable wildcard subscriptions                                  | `false`                     |
-| `--non-interactive`           | Skip interactive prompts                                        | `false`                     |
-| `--otel-endpoint <URL>`       | OpenTelemetry OTLP endpoint (e.g., http://localhost:4317)       | None                        |
-| `--otel-service-name <NAME>`  | OpenTelemetry service name                                      | `mqttv5-broker`             |
-| `--otel-sampling <0.0-1.0>`   | OpenTelemetry sampling ratio                                    | `1.0`                       |
+| Flag | Description | Default |
+| --- | --- | --- |
+| `--config, -c <FILE>` | Configuration file path (JSON format) | None |
+| `--host, -H <ADDR>` | TCP bind address(es), can be specified multiple times | `0.0.0.0:1883`, `[::]:1883` |
+| `--max-clients <N>` | Maximum concurrent clients | `10000` |
+| `--allow-anonymous` | Allow anonymous connections | None (prompted if no auth configured) |
+| `--auth-password-file <FILE>` | Password file for authentication | None |
+| `--acl-file <FILE>` | ACL file for authorization | None |
+| `--auth-method <METHOD>` | Authentication method: `password`, `scram`, `jwt`, `jwt-federated` | `password` if auth file provided |
+| `--scram-file <FILE>` | SCRAM credentials file path | None |
+| `--tls-cert <FILE>` | TLS certificate file (PEM format) | None |
+| `--tls-key <FILE>` | TLS private key file (PEM format) | None |
+| `--tls-ca-cert <FILE>` | TLS CA certificate for client verification | None |
+| `--tls-require-client-cert` | Require client certificates (mTLS) | `false` |
+| `--tls-host <ADDR>` | TLS bind address(es), can be specified multiple times | `0.0.0.0:8883`, `[::]:8883` |
+| `--ws-host <ADDR>` | WebSocket bind address(es), can be specified multiple times | None |
+| `--ws-tls-host <ADDR>` | WebSocket TLS bind address(es), can be specified multiple times | None |
+| `--ws-path <PATH>` | WebSocket path | `/mqtt` |
+| `--quic-host <ADDR>` | QUIC bind address(es), requires TLS cert/key | None |
+| `--quic-delivery-strategy <S>` | QUIC server delivery strategy: `control-only`, `per-topic`, `per-publish` | `per-topic` |
+| `--storage-dir <DIR>` | Storage directory for persistence | `./mqtt_storage` |
+| `--storage-backend <TYPE>` | Storage backend: `memory` or `file` | `file` |
+| `--no-persistence` | Disable message persistence | `false` |
+| `--session-expiry <SECS>` | Default session expiry interval in seconds | `3600` |
+| `--max-qos <0\|1\|2>` | Maximum QoS level | `2` |
+| `--keep-alive <SECS>` | Server keep-alive time in seconds | None |
+| `--response-information <STR>` | Response information sent to clients that request it | None |
+| `--no-retain` | Disable retained messages | `false` |
+| `--no-wildcards` | Disable wildcard subscriptions | `false` |
+| `--non-interactive` | Skip interactive prompts | `false` |
+
+##### Broker JWT Auth Flags
+
+| Flag | Description | Default |
+| --- | --- | --- |
+| `--jwt-algorithm <ALG>` | JWT algorithm: `hs256`, `rs256`, `es256` | None |
+| `--jwt-key-file <FILE>` | JWT secret file (HS256) or public key file (RS256/ES256) | None |
+| `--jwt-issuer <ISS>` | JWT required issuer | None |
+| `--jwt-audience <AUD>` | JWT required audience | None |
+| `--jwt-clock-skew <SECS>` | JWT clock skew tolerance | `60` |
+| `--jwt-jwks-uri <URL>` | JWKS endpoint URL for federated JWT auth | None |
+| `--jwt-fallback-key <FILE>` | Fallback key file when JWKS is unavailable | None |
+| `--jwt-jwks-refresh <SECS>` | JWKS refresh interval | `3600` |
+| `--jwt-role-claim <PATH>` | Claim path for extracting roles (e.g., `roles`, `realm_access.roles`) | None |
+| `--jwt-role-map <MAP>` | Role mapping `claim_value:mqtt_role`, can be specified multiple times | None |
+| `--jwt-default-roles <ROLES>` | Default roles for authenticated JWT users (comma-separated) | None |
+| `--jwt-role-merge-mode <MODE>` | Role merge mode: `merge` or `replace` (deprecated, use `--jwt-auth-mode`) | `merge` |
+| `--jwt-auth-mode <MODE>` | Federated auth mode: `identity-only`, `claim-binding`, `trusted-roles` | None |
+| `--jwt-trusted-role-claim <PATH>` | Trusted role claim paths, can be specified multiple times | None |
+| `--jwt-session-scoped-roles` | Whether JWT roles are session-scoped (cleared on disconnect) | None |
+| `--jwt-issuer-prefix <PREFIX>` | Custom issuer prefix for user ID namespacing | None |
+| `--jwt-config-file <FILE>` | Federated JWT config file (JSON) for multi-issuer setup | None |
+
+##### Broker OpenTelemetry Flags (requires `opentelemetry` feature)
+
+| Flag | Description | Default |
+| --- | --- | --- |
+| `--otel-endpoint <URL>` | OpenTelemetry OTLP endpoint (e.g., `http://localhost:4317`) | None |
+| `--otel-service-name <NAME>` | OpenTelemetry service name | `mqttv5-broker` |
+| `--otel-sampling <0.0-1.0>` | OpenTelemetry sampling ratio | `1.0` |
 
 #### Broker Examples
 
@@ -88,6 +126,40 @@ mqttv5 broker \
   --auth-password-file passwords.txt \
   --acl-file acl.txt \
   --allow-anonymous=false
+```
+
+Broker with SCRAM-SHA-256 authentication:
+
+```bash
+mqttv5 broker \
+  --auth-method scram \
+  --scram-file scram_credentials.txt \
+  --allow-anonymous=false
+```
+
+Broker with JWT authentication:
+
+```bash
+mqttv5 broker \
+  --auth-method jwt \
+  --jwt-algorithm rs256 \
+  --jwt-key-file public_key.pem \
+  --jwt-issuer "https://auth.example.com" \
+  --jwt-audience "mqtt-broker"
+```
+
+Broker with federated JWT authentication:
+
+```bash
+mqttv5 broker \
+  --auth-method jwt-federated \
+  --jwt-jwks-uri "https://accounts.google.com/.well-known/jwks" \
+  --jwt-fallback-key fallback_key.pem \
+  --jwt-issuer "https://accounts.google.com" \
+  --jwt-auth-mode claim-binding \
+  --jwt-role-claim "roles" \
+  --jwt-role-map "admin:admin" \
+  --jwt-role-map "viewer:readonly"
 ```
 
 Broker from config file:
@@ -126,51 +198,83 @@ mqttv5 broker \
   --otel-sampling 1.0
 ```
 
+Generate example configuration file:
+
+```bash
+mqttv5 broker generate-config --output config.json --format json
+```
+
 ### mqttv5 pub
 
 Publish an MQTT message.
 
 #### Pub Flags
 
-| Flag                      | Description                                   | Default        |
-| ------------------------- | --------------------------------------------- | -------------- |
-| `--topic, -t <TOPIC>`     | MQTT topic (required)                         | None           |
-| `--message, -m <MSG>`     | Message payload                               | None           |
-| `--file, -f <FILE>`       | Read message from file                        | None           |
-| `--stdin`                 | Read message from stdin                       | `false`        |
-| `--url, -U <URL>`         | Broker URL (mqtt://, mqtts://, ws://, wss://, quic://) | None           |
-| `--host, -H <HOST>`       | Broker hostname                               | `localhost`    |
-| `--port, -p <PORT>`       | Broker port                                   | `1883`         |
-| `--qos, -q <0\|1\|2>`     | QoS level                                     | `0`            |
-| `--retain, -r`            | Retain message                                | `false`        |
-| `--message-expiry-interval <SECS>` | Message expiry interval in seconds   | None           |
-| `--topic-alias <N>`       | Topic alias (1-65535)                         | None           |
-| `--username, -u <USER>`   | Authentication username                       | None           |
-| `--password, -P <PASS>`   | Authentication password                       | None           |
-| `--client-id, -c <ID>`    | Client ID                                     | Auto-generated |
-| `--no-clean-start`        | Resume existing session                       | `false`        |
-| `--session-expiry <SECS>` | Session expiry interval in seconds            | `0`            |
-| `--keep-alive, -k <SECS>` | Keep-alive interval                           | `60`           |
-| `--will-topic <TOPIC>`    | Will message topic                            | None           |
-| `--will-message <MSG>`    | Will message payload                          | None           |
-| `--will-qos <0\|1\|2>`    | Will message QoS                              | `0`            |
-| `--will-retain`           | Will message retain flag                      | `false`        |
-| `--will-delay <SECS>`     | Will message delay in seconds                 | `0`            |
-| `--cert <FILE>`           | TLS client certificate (PEM)                  | None           |
-| `--key <FILE>`            | TLS client private key (PEM)                  | None           |
-| `--ca-cert <FILE>`        | TLS CA certificate (PEM)                      | None           |
-| `--insecure`              | Skip TLS certificate verification             | `false`        |
-| `--auto-reconnect`        | Enable automatic reconnection                 | `false`        |
-| `--non-interactive`       | Skip interactive prompts                      | `false`        |
-| `--otel-endpoint <URL>`   | OpenTelemetry OTLP endpoint                   | None           |
-| `--otel-service-name <NAME>` | OpenTelemetry service name                 | `mqttv5-pub`   |
-| `--otel-sampling <0.0-1.0>` | OpenTelemetry sampling ratio                | `1.0`          |
-| `--quic-stream-strategy <S>` | QUIC stream strategy (control-only, per-publish, per-topic, per-subscription) | `control-only` |
-| `--quic-flow-headers`     | Enable QUIC flow headers for state recovery   | `false`        |
-| `--quic-flow-expire <SECS>` | Flow header expiry interval in seconds      | `300`          |
-| `--quic-max-streams <N>`  | Maximum concurrent QUIC streams               | None           |
-| `--quic-datagrams`        | Enable QUIC datagrams for unreliable transport | `false`       |
-| `--quic-connect-timeout <SECS>` | QUIC connection timeout in seconds      | `30`           |
+| Flag | Description | Default |
+| --- | --- | --- |
+| `--topic, -t <TOPIC>` | MQTT topic (required) | None |
+| `--message, -m <MSG>` | Message payload | None |
+| `--file, -f <FILE>` | Read message from file | None |
+| `--stdin` | Read message from stdin | `false` |
+| `--url, -U <URL>` | Broker URL (mqtt://, mqtts://, ws://, wss://, quic://) | None |
+| `--host, -H <HOST>` | Broker hostname | `localhost` |
+| `--port, -p <PORT>` | Broker port | `1883` |
+| `--qos, -q <0\|1\|2>` | QoS level | `0` |
+| `--retain, -r` | Retain message | `false` |
+| `--message-expiry-interval <SECS>` | Message expiry interval in seconds | None |
+| `--topic-alias <N>` | Topic alias (1-65535) | None |
+| `--response-topic <TOPIC>` | Response topic for request/response pattern (MQTT 5.0) | None |
+| `--correlation-data <HEX>` | Correlation data for request/response pattern (hex-encoded) | None |
+| `--wait-response` | Wait for response after publishing (requires `--response-topic`) | `false` |
+| `--timeout <SECS>` | Timeout when waiting for response | `30` |
+| `--response-count <N>` | Number of responses to wait for (0 = unlimited until timeout) | `1` |
+| `--output-format <FMT>` | Output format for responses: `raw`, `json`, `verbose` | `raw` |
+| `--username, -u <USER>` | Authentication username | None |
+| `--password, -P <PASS>` | Authentication password | None |
+| `--auth-method <METHOD>` | Authentication method: `password`, `scram`, `jwt` | `password` |
+| `--jwt-token <TOKEN>` | JWT token for JWT authentication | None |
+| `--client-id, -c <ID>` | Client ID | Auto-generated |
+| `--no-clean-start` | Resume existing session | `false` |
+| `--session-expiry <SECS>` | Session expiry interval in seconds | `0` |
+| `--keep-alive, -k <SECS>` | Keep-alive interval | `60` |
+| `--protocol-version <VER>` | MQTT protocol version: `3.1.1`, `311`, `4`, `5`, `5.0` | `5` |
+| `--will-topic <TOPIC>` | Will message topic | None |
+| `--will-message <MSG>` | Will message payload | None |
+| `--will-qos <0\|1\|2>` | Will message QoS | `0` |
+| `--will-retain` | Will message retain flag | `false` |
+| `--will-delay <SECS>` | Will message delay in seconds | None |
+| `--cert <FILE>` | TLS client certificate (PEM) | None |
+| `--key <FILE>` | TLS client private key (PEM) | None |
+| `--ca-cert <FILE>` | TLS CA certificate (PEM) | None |
+| `--insecure` | Skip TLS certificate verification | `false` |
+| `--auto-reconnect` | Enable automatic reconnection | `false` |
+| `--non-interactive` | Skip interactive prompts | `false` |
+| `--delay <SECS>` | Delay before publishing | None |
+| `--repeat <N>` | Repeat publishing N times (0 = infinite until Ctrl+C) | None |
+| `--interval <MS>` | Interval between repeated publishes in ms (requires `--repeat`) | `1000` |
+| `--at <TIME>` | Schedule publish at specific time (e.g., `14:30`, `2025-01-15T14:30:00`) | None |
+| `--quic-stream-strategy <S>` | QUIC stream strategy: `control-only`, `per-publish`, `per-topic`, `per-subscription` | `control-only` |
+| `--quic-flow-headers` | Enable QUIC flow headers for state recovery | `false` |
+| `--quic-flow-expire <SECS>` | Flow header expiry interval in seconds | `300` |
+| `--quic-max-streams <N>` | Maximum concurrent QUIC streams | None |
+| `--quic-datagrams` | Enable QUIC datagrams for unreliable transport | `false` |
+| `--quic-connect-timeout <SECS>` | QUIC connection timeout in seconds | `30` |
+
+##### Pub Codec Flags (requires `codec` feature)
+
+| Flag | Description | Default |
+| --- | --- | --- |
+| `--codec <CODEC>` | Compress payload using codec: `gzip`, `deflate` | None |
+| `--codec-level <0-9>` | Codec compression level (requires `--codec`) | `6` |
+| `--codec-min-size <BYTES>` | Minimum payload size for compression (requires `--codec`) | `128` |
+
+##### Pub OpenTelemetry Flags (requires `opentelemetry` feature)
+
+| Flag | Description | Default |
+| --- | --- | --- |
+| `--otel-endpoint <URL>` | OpenTelemetry OTLP endpoint | None |
+| `--otel-service-name <NAME>` | OpenTelemetry service name | `mqttv5-pub` |
+| `--otel-sampling <0.0-1.0>` | OpenTelemetry sampling ratio | `1.0` |
 
 #### Pub Examples
 
@@ -246,6 +350,52 @@ With topic alias:
 mqttv5 pub -t sensors/room1/temperature -m "22.5" --topic-alias 1
 ```
 
+Request/response pattern:
+
+```bash
+mqttv5 pub -t commands/request -m '{"action":"status"}' \
+  --response-topic commands/response \
+  --wait-response \
+  --timeout 10 \
+  -q 1
+```
+
+Repeated publishing:
+
+```bash
+mqttv5 pub -t sensors/data -m "reading" --repeat 100 --interval 500
+```
+
+Scheduled publish:
+
+```bash
+mqttv5 pub -t alerts/scheduled -m "wake up" --at 14:30
+```
+
+SCRAM authentication:
+
+```bash
+mqttv5 pub -t test/topic -m "authenticated" \
+  --auth-method scram \
+  --username alice \
+  --password secret
+```
+
+JWT authentication:
+
+```bash
+mqttv5 pub -t test/topic -m "jwt message" \
+  --auth-method jwt \
+  --jwt-token eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9...
+```
+
+With codec compression:
+
+```bash
+mqttv5 pub -t data/large -f large_payload.json \
+  --codec gzip --codec-level 9
+```
+
 Publish with OpenTelemetry tracing:
 
 ```bash
@@ -254,51 +404,71 @@ mqttv5 pub -t test/topic -m "Traced message" \
   --otel-service-name my-publisher
 ```
 
+Using MQTT 3.1.1 protocol:
+
+```bash
+mqttv5 pub -t test/topic -m "v3.1.1 message" --protocol-version 3.1.1
+```
+
 ### mqttv5 sub
 
 Subscribe to MQTT topics.
 
 #### Sub Flags
 
-| Flag                      | Description                                         | Default        |
-| ------------------------- | --------------------------------------------------- | -------------- |
-| `--topic, -t <TOPIC>`     | MQTT topic pattern (required, can specify multiple) | None           |
-| `--url, -U <URL>`         | Broker URL (mqtt://, mqtts://, ws://, wss://)       | None           |
-| `--host, -H <HOST>`       | Broker hostname                                     | `localhost`    |
-| `--port, -p <PORT>`       | Broker port                                         | `1883`         |
-| `--qos, -q <0\|1\|2>`     | Subscription QoS level                              | `0`            |
-| `--verbose, -v`           | Include topic names in output                       | `false`        |
-| `--count, -n <N>`         | Exit after receiving N messages                     | `0` (infinite) |
-| `--no-local`              | Don't receive own published messages                | `false`        |
-| `--retain-handling <0\|1\|2>` | Retain handling: 0=send, 1=send if new, 2=don't send | `0`         |
-| `--retain-as-published`   | Keep original retain flag on delivery               | `false`        |
-| `--subscription-identifier <ID>` | Subscription identifier (1-268435455)         | None           |
-| `--username, -u <USER>`   | Authentication username                             | None           |
-| `--password, -P <PASS>`   | Authentication password                             | None           |
-| `--client-id, -c <ID>`    | Client ID                                           | Auto-generated |
-| `--no-clean-start`        | Resume existing session                             | `false`        |
-| `--session-expiry <SECS>` | Session expiry interval in seconds                  | `0`            |
-| `--keep-alive, -k <SECS>` | Keep-alive interval                                 | `60`           |
-| `--will-topic <TOPIC>`    | Will message topic                                  | None           |
-| `--will-message <MSG>`    | Will message payload                                | None           |
-| `--will-qos <0\|1\|2>`    | Will message QoS                                    | `0`            |
-| `--will-retain`           | Will message retain flag                            | `false`        |
-| `--will-delay <SECS>`     | Will message delay in seconds                       | `0`            |
-| `--cert <FILE>`           | TLS client certificate (PEM)                        | None           |
-| `--key <FILE>`            | TLS client private key (PEM)                        | None           |
-| `--ca-cert <FILE>`        | TLS CA certificate (PEM)                            | None           |
-| `--insecure`              | Skip TLS certificate verification                   | `false`        |
-| `--auto-reconnect`        | Enable automatic reconnection                       | `false`        |
-| `--non-interactive`       | Skip interactive prompts                            | `false`        |
-| `--otel-endpoint <URL>`   | OpenTelemetry OTLP endpoint                         | None           |
-| `--otel-service-name <NAME>` | OpenTelemetry service name                       | `mqttv5-sub`   |
-| `--otel-sampling <0.0-1.0>` | OpenTelemetry sampling ratio                      | `1.0`          |
-| `--quic-stream-strategy <S>` | QUIC stream strategy (control-only, per-publish, per-topic, per-subscription) | `control-only` |
-| `--quic-flow-headers`     | Enable QUIC flow headers for state recovery         | `false`        |
-| `--quic-flow-expire <SECS>` | Flow header expiry interval in seconds            | `300`          |
-| `--quic-max-streams <N>`  | Maximum concurrent QUIC streams                     | None           |
-| `--quic-datagrams`        | Enable QUIC datagrams for unreliable transport      | `false`        |
-| `--quic-connect-timeout <SECS>` | QUIC connection timeout in seconds            | `30`           |
+| Flag | Description | Default |
+| --- | --- | --- |
+| `--topic, -t <TOPIC>` | MQTT topic pattern (required) | None |
+| `--url, -U <URL>` | Broker URL (mqtt://, mqtts://, ws://, wss://, quic://) | None |
+| `--host, -H <HOST>` | Broker hostname | `localhost` |
+| `--port, -p <PORT>` | Broker port | `1883` |
+| `--qos, -q <0\|1\|2>` | Subscription QoS level | `0` |
+| `--verbose, -v` | Include topic names in output | `false` |
+| `--count, -n <N>` | Exit after receiving N messages | `0` (infinite) |
+| `--no-local` | Don't receive own published messages | `false` |
+| `--retain-handling <0\|1\|2>` | Retain handling: 0=send, 1=send if new, 2=don't send | `0` |
+| `--retain-as-published` | Keep original retain flag on delivery | `false` |
+| `--subscription-identifier <ID>` | Subscription identifier (1-268435455) | None |
+| `--username, -u <USER>` | Authentication username | None |
+| `--password, -P <PASS>` | Authentication password | None |
+| `--auth-method <METHOD>` | Authentication method: `password`, `scram`, `jwt` | `password` |
+| `--jwt-token <TOKEN>` | JWT token for JWT authentication | None |
+| `--client-id, -c <ID>` | Client ID | Auto-generated |
+| `--no-clean-start` | Resume existing session | `false` |
+| `--session-expiry <SECS>` | Session expiry interval in seconds | `0` |
+| `--keep-alive, -k <SECS>` | Keep-alive interval | `60` |
+| `--protocol-version <VER>` | MQTT protocol version: `3.1.1`, `311`, `4`, `5`, `5.0` | `5` |
+| `--will-topic <TOPIC>` | Will message topic | None |
+| `--will-message <MSG>` | Will message payload | None |
+| `--will-qos <0\|1\|2>` | Will message QoS | `0` |
+| `--will-retain` | Will message retain flag | `false` |
+| `--will-delay <SECS>` | Will message delay in seconds | None |
+| `--cert <FILE>` | TLS client certificate (PEM) | None |
+| `--key <FILE>` | TLS client private key (PEM) | None |
+| `--ca-cert <FILE>` | TLS CA certificate (PEM) | None |
+| `--insecure` | Skip TLS certificate verification | `false` |
+| `--auto-reconnect` | Enable automatic reconnection | `false` |
+| `--non-interactive` | Skip interactive prompts | `false` |
+| `--quic-stream-strategy <S>` | QUIC stream strategy: `control-only`, `per-publish`, `per-topic`, `per-subscription` | `control-only` |
+| `--quic-flow-headers` | Enable QUIC flow headers for state recovery | `false` |
+| `--quic-flow-expire <SECS>` | Flow header expiry interval in seconds | `300` |
+| `--quic-max-streams <N>` | Maximum concurrent QUIC streams | None |
+| `--quic-datagrams` | Enable QUIC datagrams for unreliable transport | `false` |
+| `--quic-connect-timeout <SECS>` | QUIC connection timeout in seconds | `30` |
+
+##### Sub Codec Flags (requires `codec` feature)
+
+| Flag | Description | Default |
+| --- | --- | --- |
+| `--codec <CODEC>` | Enable codec decoding for incoming messages: `gzip`, `deflate`, `all` | None |
+
+##### Sub OpenTelemetry Flags (requires `opentelemetry` feature)
+
+| Flag | Description | Default |
+| --- | --- | --- |
+| `--otel-endpoint <URL>` | OpenTelemetry OTLP endpoint | None |
+| `--otel-service-name <NAME>` | OpenTelemetry service name | `mqttv5-sub` |
+| `--otel-sampling <0.0-1.0>` | OpenTelemetry sampling ratio | `1.0` |
 
 #### Sub Examples
 
@@ -380,6 +550,31 @@ mqttv5 sub -t data/# \
   -q 1
 ```
 
+SCRAM authentication:
+
+```bash
+mqttv5 sub -t secure/# \
+  --auth-method scram \
+  --username alice \
+  --password secret \
+  -v
+```
+
+JWT authentication:
+
+```bash
+mqttv5 sub -t protected/# \
+  --auth-method jwt \
+  --jwt-token eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9... \
+  -v
+```
+
+With codec decoding:
+
+```bash
+mqttv5 sub -t data/compressed -v --codec all
+```
+
 Subscribe with OpenTelemetry tracing:
 
 ```bash
@@ -395,20 +590,36 @@ Run performance benchmarks against a broker.
 
 #### Bench Flags
 
-| Flag                      | Description                                      | Default        |
-| ------------------------- | ------------------------------------------------ | -------------- |
-| `--mode <MODE>`           | Benchmark mode: `throughput`, `latency`, `connections` | `throughput`   |
-| `--duration <SECS>`       | Test duration in seconds                         | `10`           |
-| `--warmup <SECS>`         | Warmup period in seconds                         | `2`            |
-| `--host <HOST>`           | Broker hostname                                  | `localhost`    |
-| `--port <PORT>`           | Broker port                                      | `1883`         |
-| `--publishers <N>`        | Number of publisher clients                      | `1`            |
-| `--subscribers <N>`       | Number of subscriber clients                     | `1`            |
-| `--concurrency <N>`       | Concurrent connections (connections mode)        | `10`           |
-| `--payload-size <BYTES>`  | Message payload size in bytes                    | `100`          |
-| `--topic <TOPIC>`         | Publish topic                                    | `bench/test`   |
-| `--filter <FILTER>`       | Subscription filter (supports wildcards)         | Same as topic  |
-| `--qos <0\|1\|2>`         | QoS level                                        | `0`            |
+| Flag | Description | Default |
+| --- | --- | --- |
+| `--mode <MODE>` | Benchmark mode: `throughput`, `latency`, `connections`, `hol-blocking` | `throughput` |
+| `--duration <SECS>` | Test duration in seconds | `10` |
+| `--warmup <SECS>` | Warmup period in seconds | `2` |
+| `--payload-size <BYTES>` | Message payload size in bytes | `64` |
+| `--topic, -t <TOPIC>` | Publish topic | `bench/test` |
+| `--filter, -f <FILTER>` | Subscription filter (defaults to topic) | Same as topic |
+| `--qos, -q <0\|1\|2>` | QoS level | `0` |
+| `--url, -U <URL>` | Full broker URL (mqtt://, mqtts://, ws://, wss://, quic://) | None |
+| `--host, -H <HOST>` | Broker hostname | `localhost` |
+| `--port, -p <PORT>` | Broker port | `1883` |
+| `--client-id, -c <ID>` | Client ID prefix | Auto-generated |
+| `--publishers <N>` | Number of publisher clients | `1` |
+| `--subscribers <N>` | Number of subscriber clients | `1` |
+| `--concurrency <N>` | Concurrent connections (connections mode) | `10` |
+| `--topics <N>` | Number of topics (hol-blocking mode) | `4` |
+| `--rate <N>` | Publish rate in msg/s (0 = unlimited) | `0` |
+| `--payload-format <FMT>` | Payload format: `raw`, `json`, `bebytes`, `compressed-json` | `raw` |
+| `--trace-dir <DIR>` | Directory for trace CSV output (hol-blocking mode) | None |
+| `--insecure` | Skip TLS certificate verification | `false` |
+| `--ca-cert <FILE>` | TLS CA certificate (PEM) | None |
+| `--cert <FILE>` | TLS client certificate (PEM) | None |
+| `--key <FILE>` | TLS client private key (PEM) | None |
+| `--quic-stream-strategy <S>` | QUIC stream strategy: `control-only`, `per-publish`, `per-topic`, `per-subscription` | `control-only` |
+| `--quic-flow-headers` | Enable QUIC flow headers for state tracking | `false` |
+| `--quic-flow-expire <SECS>` | Flow header expiry interval in seconds | `300` |
+| `--quic-max-streams <N>` | Maximum concurrent QUIC streams | None |
+| `--quic-datagrams` | Enable QUIC datagrams for unreliable transport | `false` |
+| `--quic-connect-timeout <SECS>` | QUIC connection timeout in seconds | `30` |
 
 #### Bench Examples
 
@@ -430,6 +641,13 @@ Connection rate benchmark:
 mqttv5 bench --mode connections --duration 10 --concurrency 10
 ```
 
+HOL blocking test:
+
+```bash
+mqttv5 bench --mode hol-blocking --topics 4 --rate 500 --duration 60 \
+  --trace-dir ./traces
+```
+
 Custom payload and QoS:
 
 ```bash
@@ -440,6 +658,21 @@ Wildcard subscription testing:
 
 ```bash
 mqttv5 bench --topic "bench/test" --filter "bench/+"
+```
+
+Benchmark over QUIC with per-topic streams:
+
+```bash
+mqttv5 bench --mode latency \
+  --url quic://broker.example.com:14567 \
+  --ca-cert ca.pem \
+  --quic-stream-strategy per-topic
+```
+
+Benchmark with JSON payload format:
+
+```bash
+mqttv5 bench --payload-format json --payload-size 256
 ```
 
 ### mqttv5 passwd
@@ -454,12 +687,12 @@ mqttv5 passwd [OPTIONS] <USERNAME> [FILE]
 
 #### Passwd Flags
 
-| Flag              | Description                                               |
-| ----------------- | --------------------------------------------------------- |
-| `--create, -c`    | Create new password file                                  |
+| Flag | Description |
+| --- | --- |
+| `--create, -c` | Create new password file (overwrites if exists) |
 | `--batch, -b <P>` | Password on command line (insecure, use for scripts only) |
-| `--delete, -D`    | Delete user from password file                            |
-| `--stdout, -n`    | Output hash to stdout instead of file                     |
+| `--delete, -D` | Delete user from password file |
+| `--stdout, -n` | Output hash to stdout instead of file |
 
 #### Passwd Examples
 
@@ -484,13 +717,79 @@ mqttv5 passwd -D alice passwords.txt
 Batch mode (scripting):
 
 ```bash
-echo "mypassword" | mqttv5 passwd -b charlie passwords.txt
+mqttv5 passwd -b "mypassword" charlie passwords.txt
 ```
 
 Generate hash to stdout:
 
 ```bash
 mqttv5 passwd -n testuser
+```
+
+### mqttv5 scram
+
+Manage SCRAM-SHA-256 credentials file for broker authentication.
+
+#### Scram Usage
+
+```
+mqttv5 scram [OPTIONS] <USERNAME> [FILE]
+```
+
+#### Scram Flags
+
+| Flag | Description | Default |
+| --- | --- | --- |
+| `--create, -c` | Create new SCRAM file (overwrites if exists) | `false` |
+| `--batch, -b <P>` | Password on command line (insecure, use for scripts only) | None |
+| `--delete, -D` | Delete user from SCRAM file | `false` |
+| `--stdout, -n` | Output credentials to stdout instead of file | `false` |
+| `--iterations, -i <N>` | PBKDF2 iteration count (minimum 10000) | `310000` |
+
+#### Scram File Format
+
+SCRAM credentials files use one line per user with five colon-separated fields:
+
+```
+username:salt:iterations:stored_key:server_key
+```
+
+#### Scram Examples
+
+Create SCRAM file and add user:
+
+```bash
+mqttv5 scram -c alice scram_credentials.txt
+```
+
+Add user to existing file:
+
+```bash
+mqttv5 scram bob scram_credentials.txt
+```
+
+Delete user:
+
+```bash
+mqttv5 scram -D alice scram_credentials.txt
+```
+
+Batch mode (scripting):
+
+```bash
+mqttv5 scram -b "mypassword" charlie scram_credentials.txt
+```
+
+Generate credentials to stdout:
+
+```bash
+mqttv5 scram -n testuser
+```
+
+Custom iteration count:
+
+```bash
+mqttv5 scram -i 500000 alice scram_credentials.txt
 ```
 
 ### mqttv5 acl
@@ -505,12 +804,18 @@ mqttv5 acl <COMMAND>
 
 #### ACL Commands
 
-| Command                                       | Description                                  |
-| --------------------------------------------- | -------------------------------------------- |
-| `add <user> <topic> <permission> --file FILE` | Add ACL rule                                 |
-| `remove <user> [topic] --file FILE`           | Remove ACL rule(s) for user                  |
-| `list [user] --file FILE`                     | List ACL rules (all or for specific user)    |
-| `check <user> <topic> <action> --file FILE`   | Check if user can perform action on topic    |
+| Command | Description |
+| --- | --- |
+| `add <user> <topic> <permission> --file FILE` | Add ACL rule for a user |
+| `remove <user> [topic] --file FILE` | Remove ACL rule(s) for user |
+| `list [user] --file FILE` | List ACL rules (all or for specific user) |
+| `check <user> <topic> <action> --file FILE` | Check if user can perform action on topic |
+| `role-add <role> <topic> <permission> --file FILE` | Add ACL rule for a role |
+| `role-remove <role> [topic] --file FILE` | Remove ACL rule(s) for a role |
+| `role-list [role] --file FILE` | List role definitions (all or specific role) |
+| `assign <user> <role> --file FILE` | Assign a role to a user |
+| `unassign <user> <role> --file FILE` | Remove a role from a user |
+| `user-roles <user> --file FILE` | List roles assigned to a user |
 
 #### Permissions
 
@@ -581,6 +886,36 @@ Remove all rules for user:
 mqttv5 acl remove alice --file acl.txt
 ```
 
+Add a role definition:
+
+```bash
+mqttv5 acl role-add sensor-reader "sensors/#" read --file acl.txt
+```
+
+Assign a role to a user:
+
+```bash
+mqttv5 acl assign alice sensor-reader --file acl.txt
+```
+
+List roles for a user:
+
+```bash
+mqttv5 acl user-roles alice --file acl.txt
+```
+
+Remove a role from a user:
+
+```bash
+mqttv5 acl unassign alice sensor-reader --file acl.txt
+```
+
+List all role definitions:
+
+```bash
+mqttv5 acl role-list --file acl.txt
+```
+
 ## Configuration File Reference
 
 The broker accepts a JSON configuration file with `--config` flag.
@@ -612,20 +947,20 @@ The broker accepts a JSON configuration file with `--config` flag.
 
 ### Core Broker Settings
 
-| Field                               | Type           | Description                           | Default                         |
-| ----------------------------------- | -------------- | ------------------------------------- | ------------------------------- |
-| `bind_addresses`                    | `string[]`     | TCP listener addresses                | `["0.0.0.0:1883", "[::]:1883"]` |
-| `max_clients`                       | `number`       | Maximum concurrent client connections | `10000`                         |
-| `session_expiry_interval`           | `duration`     | Default session expiry for clients    | `"1h"`                          |
-| `max_packet_size`                   | `number`       | Maximum MQTT packet size in bytes     | `268435456` (256 MB)            |
-| `topic_alias_maximum`               | `number`       | Maximum number of topic aliases       | `65535`                         |
-| `retain_available`                  | `boolean`      | Enable retained messages              | `true`                          |
-| `maximum_qos`                       | `0\|1\|2`      | Maximum QoS level supported           | `2`                             |
-| `wildcard_subscription_available`   | `boolean`      | Enable wildcard subscriptions         | `true`                          |
-| `subscription_identifier_available` | `boolean`      | Enable subscription identifiers       | `true`                          |
-| `shared_subscription_available`     | `boolean`      | Enable shared subscriptions           | `true`                          |
-| `server_keep_alive`                 | `number\|null` | Override client keep-alive (seconds)  | `null`                          |
-| `response_information`              | `string\|null` | Response information property         | `null`                          |
+| Field | Type | Description | Default |
+| --- | --- | --- | --- |
+| `bind_addresses` | `string[]` | TCP listener addresses | `["0.0.0.0:1883", "[::]:1883"]` |
+| `max_clients` | `number` | Maximum concurrent client connections | `10000` |
+| `session_expiry_interval` | `duration` | Default session expiry for clients | `"1h"` |
+| `max_packet_size` | `number` | Maximum MQTT packet size in bytes | `268435456` (256 MB) |
+| `topic_alias_maximum` | `number` | Maximum number of topic aliases | `65535` |
+| `retain_available` | `boolean` | Enable retained messages | `true` |
+| `maximum_qos` | `0\|1\|2` | Maximum QoS level supported | `2` |
+| `wildcard_subscription_available` | `boolean` | Enable wildcard subscriptions | `true` |
+| `subscription_identifier_available` | `boolean` | Enable subscription identifiers | `true` |
+| `shared_subscription_available` | `boolean` | Enable shared subscriptions | `true` |
+| `server_keep_alive` | `number\|null` | Override client keep-alive (seconds) | `null` |
+| `response_information` | `string\|null` | Response information property | `null` |
 
 ### AuthConfig
 
@@ -639,13 +974,13 @@ The broker accepts a JSON configuration file with `--config` flag.
 }
 ```
 
-| Field             | Type           | Description                 | Default  |
-| ----------------- | -------------- | --------------------------- | -------- |
-| `allow_anonymous` | `boolean`      | Allow anonymous connections | `true`   |
-| `password_file`   | `string\|null` | Path to password file       | `null`   |
-| `acl_file`        | `string\|null` | Path to ACL file            | `null`   |
-| `auth_method`     | `string`       | Authentication method       | `"None"` |
-| `auth_data`       | `string\|null` | Additional auth data        | `null`   |
+| Field | Type | Description | Default |
+| --- | --- | --- | --- |
+| `allow_anonymous` | `boolean` | Allow anonymous connections | `true` |
+| `password_file` | `string\|null` | Path to password file | `null` |
+| `acl_file` | `string\|null` | Path to ACL file | `null` |
+| `auth_method` | `string` | Authentication method | `"None"` |
+| `auth_data` | `string\|null` | Additional auth data | `null` |
 
 ### TlsConfig
 
@@ -659,13 +994,13 @@ The broker accepts a JSON configuration file with `--config` flag.
 }
 ```
 
-| Field                 | Type           | Description                            | Default                         |
-| --------------------- | -------------- | -------------------------------------- | ------------------------------- |
-| `cert_file`           | `string`       | TLS certificate file (PEM)             | Required                        |
-| `key_file`            | `string`       | TLS private key file (PEM)             | Required                        |
-| `ca_file`             | `string\|null` | CA certificate for client verification | `null`                          |
-| `require_client_cert` | `boolean`      | Require client certificates (mTLS)     | `false`                         |
-| `bind_addresses`      | `string[]`     | TLS listener addresses                 | `["0.0.0.0:8883", "[::]:8883"]` |
+| Field | Type | Description | Default |
+| --- | --- | --- | --- |
+| `cert_file` | `string` | TLS certificate file (PEM) | Required |
+| `key_file` | `string` | TLS private key file (PEM) | Required |
+| `ca_file` | `string\|null` | CA certificate for client verification | `null` |
+| `require_client_cert` | `boolean` | Require client certificates (mTLS) | `false` |
+| `bind_addresses` | `string[]` | TLS listener addresses | `["0.0.0.0:8883", "[::]:8883"]` |
 
 ### WebSocketConfig
 
@@ -679,13 +1014,13 @@ The broker accepts a JSON configuration file with `--config` flag.
 }
 ```
 
-| Field              | Type             | Description                                        | Default   |
-| ------------------ | ---------------- | -------------------------------------------------- | --------- |
-| `bind_addresses`   | `string[]`       | WebSocket listener addresses                       | Required  |
-| `path`             | `string`         | WebSocket endpoint path (non-matching paths return 404) | `"/mqtt"` |
-| `subprotocol`      | `string`         | WebSocket subprotocol                              | `"mqtt"`  |
-| `use_tls`          | `boolean`        | Use TLS for WebSocket                              | `false`   |
-| `allowed_origins`  | `string[]\|null` | Allowed Origin headers for CSWSH prevention (null = all origins allowed) | `null` |
+| Field | Type | Description | Default |
+| --- | --- | --- | --- |
+| `bind_addresses` | `string[]` | WebSocket listener addresses | Required |
+| `path` | `string` | WebSocket endpoint path (non-matching paths return 404) | `"/mqtt"` |
+| `subprotocol` | `string` | WebSocket subprotocol | `"mqtt"` |
+| `use_tls` | `boolean` | Use TLS for WebSocket | `false` |
+| `allowed_origins` | `string[]\|null` | Allowed Origin headers for CSWSH prevention (null = all origins allowed) | `null` |
 
 ### StorageConfig
 
@@ -698,12 +1033,12 @@ The broker accepts a JSON configuration file with `--config` flag.
 }
 ```
 
-| Field                | Type       | Description                       | Default            |
-| -------------------- | ---------- | --------------------------------- | ------------------ |
-| `backend`            | `string`   | Storage backend type              | `"Memory"`         |
-| `base_dir`           | `string`   | Base directory for file storage   | `"./mqtt_storage"` |
-| `cleanup_interval`   | `duration` | Cleanup interval for expired data | `"1h"`             |
-| `enable_persistence` | `boolean`  | Enable message persistence        | `false`            |
+| Field | Type | Description | Default |
+| --- | --- | --- | --- |
+| `backend` | `string` | Storage backend type | `"Memory"` |
+| `base_dir` | `string` | Base directory for file storage | `"./mqtt_storage"` |
+| `cleanup_interval` | `duration` | Cleanup interval for expired data | `"1h"` |
+| `enable_persistence` | `boolean` | Enable message persistence | `false` |
 
 ### BridgeConfig
 
@@ -735,31 +1070,31 @@ The broker accepts a JSON configuration file with `--config` flag.
 }
 ```
 
-| Field                     | Type             | Description                                             | Default           |
-| ------------------------- | ---------------- | ------------------------------------------------------- | ----------------- |
-| `name`                    | `string`         | Unique bridge name                                      | Required          |
-| `remote_address`          | `string`         | Remote broker address (host:port)                       | Required          |
-| `client_id`               | `string`         | Client ID for bridge connection                         | `"bridge-{name}"` |
-| `username`                | `string\|null`   | Authentication username                                 | `null`            |
-| `password`                | `string\|null`   | Authentication password                                 | `null`            |
-| `use_tls`                 | `boolean`        | Enable TLS connection                                   | `false`           |
-| `tls_server_name`         | `string\|null`   | Override TLS server name for verification               | `null`            |
-| `ca_file`                 | `string\|null`   | CA certificate file for TLS verification                | `null`            |
-| `client_cert_file`        | `string\|null`   | Client certificate for mTLS                             | `null`            |
-| `client_key_file`         | `string\|null`   | Client private key for mTLS                             | `null`            |
-| `insecure`                | `boolean\|null`  | Disable TLS certificate verification                    | `false`           |
-| `alpn_protocols`          | `string[]\|null` | ALPN protocols (e.g., `["x-amzn-mqtt-ca"]` for AWS IoT) | `null`            |
-| `try_private`             | `boolean`        | Send bridge user property (Mosquitto compatible)        | `true`            |
-| `clean_start`             | `boolean`        | Start with clean session                                | `false`           |
-| `keepalive`               | `number`         | Keep-alive interval in seconds                          | `60`              |
-| `protocol_version`        | `string`         | MQTT protocol version                                   | `"mqttv50"`       |
-| `reconnect_delay`         | `duration`       | Reconnection delay (deprecated)                         | `"5s"`            |
-| `initial_reconnect_delay` | `duration`       | Initial reconnection delay                              | `"5s"`            |
-| `max_reconnect_delay`     | `duration`       | Maximum reconnection delay                              | `"5m"`            |
-| `backoff_multiplier`      | `number`         | Exponential backoff multiplier                          | `2.0`             |
-| `max_reconnect_attempts`  | `number\|null`   | Max reconnection attempts (null = infinite)             | `null`            |
-| `backup_brokers`          | `string[]`       | Backup broker addresses for failover                    | `[]`              |
-| `topics`                  | `TopicMapping[]` | Topic mappings for message forwarding                   | Required          |
+| Field | Type | Description | Default |
+| --- | --- | --- | --- |
+| `name` | `string` | Unique bridge name | Required |
+| `remote_address` | `string` | Remote broker address (host:port) | Required |
+| `client_id` | `string` | Client ID for bridge connection | `"bridge-{name}"` |
+| `username` | `string\|null` | Authentication username | `null` |
+| `password` | `string\|null` | Authentication password | `null` |
+| `use_tls` | `boolean` | Enable TLS connection | `false` |
+| `tls_server_name` | `string\|null` | Override TLS server name for verification | `null` |
+| `ca_file` | `string\|null` | CA certificate file for TLS verification | `null` |
+| `client_cert_file` | `string\|null` | Client certificate for mTLS | `null` |
+| `client_key_file` | `string\|null` | Client private key for mTLS | `null` |
+| `insecure` | `boolean\|null` | Disable TLS certificate verification | `false` |
+| `alpn_protocols` | `string[]\|null` | ALPN protocols (e.g., `["x-amzn-mqtt-ca"]` for AWS IoT) | `null` |
+| `try_private` | `boolean` | Send bridge user property (Mosquitto compatible) | `true` |
+| `clean_start` | `boolean` | Start with clean session | `false` |
+| `keepalive` | `number` | Keep-alive interval in seconds | `60` |
+| `protocol_version` | `string` | MQTT protocol version | `"mqttv50"` |
+| `reconnect_delay` | `duration` | Reconnection delay (deprecated) | `"5s"` |
+| `initial_reconnect_delay` | `duration` | Initial reconnection delay | `"5s"` |
+| `max_reconnect_delay` | `duration` | Maximum reconnection delay | `"5m"` |
+| `backoff_multiplier` | `number` | Exponential backoff multiplier | `2.0` |
+| `max_reconnect_attempts` | `number\|null` | Max reconnection attempts (null = infinite) | `null` |
+| `backup_brokers` | `string[]` | Backup broker addresses for failover | `[]` |
+| `topics` | `TopicMapping[]` | Topic mappings for message forwarding | Required |
 
 ### TopicMapping
 
@@ -773,13 +1108,13 @@ The broker accepts a JSON configuration file with `--config` flag.
 }
 ```
 
-| Field           | Type           | Description                       | Default  |
-| --------------- | -------------- | --------------------------------- | -------- |
-| `pattern`       | `string`       | Topic pattern with MQTT wildcards | Required |
-| `direction`     | `string`       | Message flow direction            | Required |
-| `qos`           | `string`       | QoS level for forwarding          | Required |
-| `local_prefix`  | `string\|null` | Prefix to add to local topics     | `null`   |
-| `remote_prefix` | `string\|null` | Prefix to add to remote topics    | `null`   |
+| Field | Type | Description | Default |
+| --- | --- | --- | --- |
+| `pattern` | `string` | Topic pattern with MQTT wildcards | Required |
+| `direction` | `string` | Message flow direction | Required |
+| `qos` | `string` | QoS level for forwarding | Required |
+| `local_prefix` | `string\|null` | Prefix to add to local topics | `null` |
+| `remote_prefix` | `string\|null` | Prefix to add to remote topics | `null` |
 
 **Direction values:**
 
@@ -937,6 +1272,16 @@ username:$argon2id$v=19$m=...
 - Argon2 hash of password
 - Use `mqttv5 passwd` command to manage
 
+### SCRAM Credentials File Format
+
+SCRAM files use one line per user with five colon-separated fields:
+
+```
+username:salt:iterations:stored_key:server_key
+```
+
+- Use `mqttv5 scram` command to manage
+
 ### ACL File Format
 
 ACL files define topic-level access control with one rule per line:
@@ -950,6 +1295,13 @@ user <username> topic <pattern> permission <type>
 - `<pattern>` - Topic pattern with MQTT wildcards (`+` for single level, `#` for multi-level). Use `%u` to substitute the authenticated username.
 - `<type>` - Permission: `read`, `write`, `readwrite`, or `deny`
 
+**Role-based ACL rules:**
+
+```
+role <rolename> topic <pattern> permission <type>
+assign <username> <rolename>
+```
+
 **Example ACL file:**
 
 ```
@@ -959,6 +1311,10 @@ user admin topic admin/# permission readwrite
 user * topic public/# permission readwrite
 user * topic admin/# permission deny
 user * topic $DB/u/%u/# permission readwrite
+role sensor-reader topic sensors/# permission read
+role actuator-writer topic actuators/# permission write
+assign alice sensor-reader
+assign bob actuator-writer
 ```
 
 **Rule Priority:**
@@ -969,7 +1325,7 @@ user * topic $DB/u/%u/# permission readwrite
 **Security:**
 - `%u` substitution rejects usernames containing `+`, `#`, or `/` to prevent wildcard injection
 - Anonymous clients never match `%u` patterns
-- Sessions are bound to authenticated user identity — reconnecting with a different user is rejected
+- Sessions are bound to authenticated user identity -- reconnecting with a different user is rejected
 - On session restore, subscriptions are re-checked against current ACL rules
 
 Use `mqttv5 acl` command to manage ACL files.
@@ -994,7 +1350,7 @@ Requirements:
 **Reconnection Behavior:**
 
 - Exponential backoff: delay = initial_delay \* (multiplier ^ attempt)
-- Default: 5s → 10s → 20s → 40s → ... → 300s (max)
+- Default: 5s -> 10s -> 20s -> 40s -> ... -> 300s (max)
 - Resets to initial delay after successful connection
 
 **Backup Brokers:**

@@ -421,6 +421,7 @@ impl DirectClientInner {
             dup: false,
             properties: options.properties.clone().into(),
             protocol_version: self.options.protocol_version.as_u8(),
+            stream_id: None,
         };
 
         self.queued_messages.lock().push(publish);
@@ -524,6 +525,7 @@ impl DirectClientInner {
             packet_id,
             properties,
             protocol_version: self.options.protocol_version.as_u8(),
+            stream_id: None,
         };
 
         let mut buf = bytes::BytesMut::new();
@@ -656,28 +658,16 @@ impl DirectClientInner {
                         .await?;
                     return Ok(());
                 }
-                StreamStrategy::DataPerTopic => {
+                #[allow(deprecated)]
+                StreamStrategy::DataPerTopic | StreamStrategy::DataPerSubscription => {
                     tracing::debug!(
                         topic = %publish.topic_name,
                         qos = ?qos,
-                        "Using topic-specific QUIC stream for PUBLISH (DataPerTopic)"
+                        strategy = ?manager.strategy(),
+                        "Using topic-specific QUIC stream for PUBLISH"
                     );
                     manager
                         .send_on_topic_stream(publish.topic_name.clone(), Packet::Publish(publish))
-                        .await?;
-                    return Ok(());
-                }
-                StreamStrategy::DataPerSubscription => {
-                    tracing::debug!(
-                        topic = %publish.topic_name,
-                        qos = ?qos,
-                        "Using subscription-based QUIC stream for PUBLISH (DataPerSubscription)"
-                    );
-                    manager
-                        .send_on_subscription_stream(
-                            publish.topic_name.clone(),
-                            Packet::Publish(publish),
-                        )
                         .await?;
                     return Ok(());
                 }
@@ -1076,7 +1066,7 @@ impl DirectClientInner {
             let recovery_flags = FlowFlags { clean: 0, ..flags };
 
             match manager.open_recovery_stream(flow_id, recovery_flags).await {
-                Ok((send, _recv)) => {
+                Ok(send) => {
                     manager.register_flow_stream(flow_id, send).await;
                     tracing::debug!(
                         flow_id = ?flow_id,

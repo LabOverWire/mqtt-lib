@@ -73,28 +73,21 @@ impl QuicStreamManager {
         self
     }
 
-    /// Opens a bidirectional QUIC data stream.
-    ///
     /// # Errors
     /// Returns an error if the QUIC connection fails to open a stream.
     #[instrument(skip(self), level = "debug")]
-    pub async fn open_data_stream(&self) -> Result<(quinn::SendStream, quinn::RecvStream)> {
-        let (send, recv) =
-            self.connection.open_bi().await.map_err(|e| {
-                MqttError::ConnectionError(format!("Failed to open QUIC stream: {e}"))
-            })?;
-        Ok((send, recv))
+    pub async fn open_data_stream(&self) -> Result<quinn::SendStream> {
+        self.connection
+            .open_uni()
+            .await
+            .map_err(|e| MqttError::ConnectionError(format!("Failed to open QUIC stream: {e}")))
     }
 
-    /// Opens a data stream with flow header.
-    ///
     /// # Errors
     /// Returns an error if the stream cannot be opened or the flow header write fails.
     #[instrument(skip(self), fields(strategy = ?self.strategy), level = "debug")]
-    pub async fn open_data_stream_with_flow(
-        &self,
-    ) -> Result<(quinn::SendStream, quinn::RecvStream, FlowId)> {
-        let (mut send, recv) = self.open_data_stream().await?;
+    pub async fn open_data_stream_with_flow(&self) -> Result<(quinn::SendStream, FlowId)> {
+        let mut send = self.open_data_stream().await?;
 
         let flow_id = if self.enable_flow_headers {
             let flow_id = {
@@ -117,19 +110,17 @@ impl QuicStreamManager {
             FlowId::client(0)
         };
 
-        Ok((send, recv, flow_id))
+        Ok((send, flow_id))
     }
 
-    /// Opens a stream for flow state recovery.
-    ///
     /// # Errors
     /// Returns an error if the stream cannot be opened or the recovery header write fails.
     pub async fn open_recovery_stream(
         &self,
         flow_id: FlowId,
         recovery_flags: FlowFlags,
-    ) -> Result<(quinn::SendStream, quinn::RecvStream)> {
-        let (mut send, recv) = self.open_data_stream().await?;
+    ) -> Result<quinn::SendStream> {
+        let mut send = self.open_data_stream().await?;
 
         if self.enable_flow_headers {
             let mut buf = BytesMut::with_capacity(32);
@@ -147,7 +138,7 @@ impl QuicStreamManager {
             );
         }
 
-        Ok((send, recv))
+        Ok(send)
     }
 
     pub fn set_recovery_mode(&mut self, enable: bool) {
@@ -165,7 +156,7 @@ impl QuicStreamManager {
     /// Returns an error if the stream operation or packet encoding fails.
     #[instrument(skip(self, packet), level = "debug")]
     pub async fn send_packet_on_stream(&self, packet: Packet) -> Result<()> {
-        let (mut send, _recv, flow_id) = self.open_data_stream_with_flow().await?;
+        let (mut send, flow_id) = self.open_data_stream_with_flow().await?;
 
         let mut buf = BytesMut::with_capacity(1024);
         encode_packet_to_buffer(&packet, &mut buf)?;
@@ -241,7 +232,7 @@ impl QuicStreamManager {
         drop(streams);
 
         debug!(topic = %topic, "Opening new stream for topic");
-        let (mut send, _recv) = self.connection.open_bi().await.map_err(|e| {
+        let mut send = self.connection.open_uni().await.map_err(|e| {
             MqttError::ConnectionError(format!("Failed to open QUIC stream for topic: {e}"))
         })?;
 
@@ -298,14 +289,6 @@ impl QuicStreamManager {
         Ok(())
     }
 
-    /// Sends a packet on a subscription-specific stream.
-    ///
-    /// # Errors
-    /// Returns an error if the stream operation or packet encoding fails.
-    pub async fn send_on_subscription_stream(&self, topic: String, packet: Packet) -> Result<()> {
-        self.send_on_topic_stream(topic, packet).await
-    }
-
     pub async fn get_flow_id_for_topic(&self, topic: &str) -> Option<FlowId> {
         let streams = self.topic_streams.lock().await;
         streams.get(topic).map(|info| info.flow_id)
@@ -347,7 +330,7 @@ impl QuicStreamManager {
         } else {
             drop(flows);
 
-            let (mut send, _recv, new_flow_id) = self.open_data_stream_with_flow().await?;
+            let (mut send, new_flow_id) = self.open_data_stream_with_flow().await?;
 
             let mut buf = BytesMut::with_capacity(1024);
             encode_packet_to_buffer(&packet, &mut buf)?;
@@ -415,6 +398,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_stream_strategy_variants() {
         assert_eq!(StreamStrategy::ControlOnly, StreamStrategy::default());
         assert_ne!(StreamStrategy::DataPerPublish, StreamStrategy::ControlOnly);

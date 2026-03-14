@@ -1,10 +1,17 @@
 use bytes::Bytes;
+use mqtt5_protocol::packet::publish::PublishPacket;
 use mqtt5_protocol::packet::suback::SubAckReasonCode as ProtocolSubAckReasonCode;
 use mqtt5_protocol::types::ReasonCode;
 use mqtt5_protocol::QoS;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+
+pub enum PublishAction {
+    Continue,
+    Handled,
+    Transform(PublishPacket),
+}
 
 #[derive(Debug, Clone)]
 pub struct ClientConnectEvent {
@@ -139,8 +146,8 @@ pub trait BrokerEventHandler: Send + Sync {
     fn on_client_publish<'a>(
         &'a self,
         _event: ClientPublishEvent,
-    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-        Box::pin(async {})
+    ) -> Pin<Box<dyn Future<Output = PublishAction> + Send + 'a>> {
+        Box::pin(async { PublishAction::Continue })
     }
 
     fn on_client_disconnect<'a>(

@@ -1,6 +1,6 @@
 [package]
 name = "mqttv5-cli"
-version = "0.20.7"
+version = "0.21.0"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -22,7 +22,7 @@ opentelemetry = ["mqtt5/opentelemetry"]
 codec = ["mqtt5/codec-all"]
 
 [dependencies]
-mqtt5 = "0.22"
+mqtt5 = "0.23"
 anyhow = "1.0"
 tracing = "0.1"
 serde = { version = "1.0", features = ["derive"] }
@@ -33,6 +33,7 @@ humantime = "2.3.0"
 time = { version = "0.3.44", features = ["local-offset", "parsing", "formatting", "macros"] }
 bebytes = "3.0.2"
 flate2 = "1.1.9"
+quinn = { version = "0.11.9", features = ["rustls-ring", "runtime-tokio"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 clap = { version = "4.5", features = ["derive", "env"] }

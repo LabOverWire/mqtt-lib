@@ -10,7 +10,7 @@ source "${ROOT_DIR}/setup/config.env"
 : "${RUNS_PER_DATAPOINT:=5}"
 
 SSH_USER="${SSH_USER:-bench}"
-RESULTS_DIR="${ROOT_DIR}/results"
+RESULTS_DIR="${ROOT_DIR}/results-phase1"
 BROKER_INTERNAL_IP="10.138.0.5"
 IMAGE="us-west1-docker.pkg.dev/quic-experiments-488321/mqoq-bench/mqttv5:bench"
 

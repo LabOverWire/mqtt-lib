@@ -7,7 +7,7 @@ MQTT v5.0 and v3.1.1 protocol implementation - packets, encoding, and validation
 
 ## Features
 
-- **`no_std` compatible** - Works on embedded systems without heap or standard library
+- **`no_std` compatible** - Works on embedded systems without standard library (requires `alloc`)
 - **Platform-agnostic** - Runs on Linux, macOS, Windows, WASM, and bare-metal embedded targets
 - **Zero-copy parsing** - Uses `bytes` crate for efficient buffer management
 - **Full MQTT v5.0** - All packet types, properties, and reason codes
@@ -16,14 +16,14 @@ MQTT v5.0 and v3.1.1 protocol implementation - packets, encoding, and validation
 
 ```toml
 [dependencies]
-mqtt5-protocol = "0.9"
+mqtt5-protocol = "0.10"
 ```
 
 ### For Embedded (no_std)
 
 ```toml
 [dependencies]
-mqtt5-protocol = { version = "0.9", default-features = false }
+mqtt5-protocol = { version = "0.10", default-features = false }
 ```
 
 ### For Single-Core Embedded

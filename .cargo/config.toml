@@ -1,6 +1,4 @@
 [build]
-# Default target for WASM builds
-# target = "wasm32-unknown-unknown"
 
 [target.wasm32-unknown-unknown]
 # Use lld linker for faster builds and enable getrandom WASM support

@@ -13,7 +13,9 @@ pub use change_only::ChangeOnlyDeliveryConfig;
 pub use echo_suppression::EchoSuppressionConfig;
 pub use storage::{StorageBackend, StorageConfig};
 pub use tls::TlsConfig;
-pub use transport::{ClusterListenerConfig, ClusterTransport, QuicConfig, WebSocketConfig};
+pub use transport::{
+    ClusterListenerConfig, ClusterTransport, QuicConfig, ServerDeliveryStrategy, WebSocketConfig,
+};
 
 #[cfg(not(target_arch = "wasm32"))]
 use crate::broker::bridge::BridgeConfig;
@@ -69,6 +71,10 @@ pub struct BrokerConfig {
     pub change_only_delivery_config: ChangeOnlyDeliveryConfig,
     #[serde(default)]
     pub echo_suppression_config: EchoSuppressionConfig,
+    #[serde(default)]
+    pub max_outbound_rate_per_client: u32,
+    #[serde(default)]
+    pub server_delivery_strategy: ServerDeliveryStrategy,
     #[cfg(not(target_arch = "wasm32"))]
     #[serde(default)]
     pub bridges: Vec<BridgeConfig>,
@@ -122,7 +128,12 @@ impl std::fmt::Debug for BrokerConfig {
                 "change_only_delivery_config",
                 &self.change_only_delivery_config,
             )
-            .field("echo_suppression_config", &self.echo_suppression_config);
+            .field("echo_suppression_config", &self.echo_suppression_config)
+            .field(
+                "max_outbound_rate_per_client",
+                &self.max_outbound_rate_per_client,
+            )
+            .field("server_delivery_strategy", &self.server_delivery_strategy);
         #[cfg(not(target_arch = "wasm32"))]
         d.field("bridges", &self.bridges);
         #[cfg(feature = "opentelemetry")]
@@ -164,6 +175,8 @@ impl Default for BrokerConfig {
             storage_config: StorageConfig::default(),
             change_only_delivery_config: ChangeOnlyDeliveryConfig::default(),
             echo_suppression_config: EchoSuppressionConfig::default(),
+            max_outbound_rate_per_client: 0,
+            server_delivery_strategy: ServerDeliveryStrategy::default(),
             #[cfg(not(target_arch = "wasm32"))]
             bridges: vec![],
             #[cfg(feature = "opentelemetry")]
@@ -302,6 +315,18 @@ impl BrokerConfig {
     #[must_use]
     pub fn with_echo_suppression(mut self, config: EchoSuppressionConfig) -> Self {
         self.echo_suppression_config = config;
+        self
+    }
+
+    #[must_use]
+    pub fn with_max_outbound_rate_per_client(mut self, rate: u32) -> Self {
+        self.max_outbound_rate_per_client = rate;
+        self
+    }
+
+    #[must_use]
+    pub fn with_server_delivery_strategy(mut self, strategy: ServerDeliveryStrategy) -> Self {
+        self.server_delivery_strategy = strategy;
         self
     }
 

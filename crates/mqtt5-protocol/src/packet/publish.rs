@@ -8,25 +8,17 @@ use crate::types::ProtocolVersion;
 use crate::QoS;
 use bytes::{Buf, BufMut, Bytes};
 
-/// MQTT PUBLISH packet
 #[derive(Debug, Clone)]
 pub struct PublishPacket {
-    /// Topic name
     pub topic_name: String,
-    /// Packet identifier (required for `QoS` > 0)
     pub packet_id: Option<u16>,
-    /// Message payload
     pub payload: Bytes,
-    /// Quality of Service level
     pub qos: QoS,
-    /// Retain flag
     pub retain: bool,
-    /// Duplicate delivery flag
     pub dup: bool,
-    /// PUBLISH properties (v5.0 only)
     pub properties: Properties,
-    /// Protocol version (4 = v3.1.1, 5 = v5.0)
     pub protocol_version: u8,
+    pub stream_id: Option<u64>,
 }
 
 impl PublishPacket {
@@ -42,6 +34,7 @@ impl PublishPacket {
             dup: false,
             properties: Properties::default(),
             protocol_version: 5,
+            stream_id: None,
         }
     }
 
@@ -57,6 +50,7 @@ impl PublishPacket {
             dup: false,
             properties: Properties::default(),
             protocol_version: 4,
+            stream_id: None,
         }
     }
 
@@ -314,6 +308,7 @@ impl PublishPacket {
             dup,
             properties,
             protocol_version,
+            stream_id: None,
         })
     }
 }

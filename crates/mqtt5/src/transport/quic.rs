@@ -21,6 +21,7 @@ pub enum StreamStrategy {
     ControlOnly,
     DataPerPublish,
     DataPerTopic,
+    #[deprecated(note = "architecturally identical to DataPerTopic; use DataPerTopic instead")]
     DataPerSubscription,
 }
 
@@ -245,6 +246,10 @@ impl QuicConfig {
                 .try_into()
                 .expect("valid duration"),
         ));
+
+        transport_config.stream_receive_window(262_144u32.into());
+        transport_config.receive_window(1_048_576u32.into());
+        transport_config.send_window(1_048_576);
 
         if self.enable_datagrams {
             transport_config.datagram_send_buffer_size(self.datagram_send_buffer_size);

@@ -1,0 +1,66 @@
+\documentclass[3p,number]{elsarticle}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,calc,decorations.pathreplacing}
+\usepackage[hidelinks]{hyperref}
+\usepackage{natbib}
+\usepackage{microtype}
+\usepackage{subcaption}
+\usepackage[section]{placeins}
+
+\graphicspath{{figures/}}
+
+\newcommand{\ie}{\textit{i.e.}\@\xspace}
+\newcommand{\eg}{\textit{e.g.}\@\xspace}
+\newcommand{\cf}{\textit{cf.}\@\xspace}
+
+\begin{document}
+
+\begin{frontmatter}
+
+\title{MQTT over QUIC: Multistream Transport\\with Configurable Stream Mapping Strategies}
+
+\author[lab]{Fabr\'{i}cio Bracht\corref{cor1}}
+\cortext[cor1]{Corresponding author}
+\ead{fabracht@gmail.com}
+\affiliation[lab]{organization={LabOverWire}, city={Abbotsford}, state={BC}, country={Canada}}
+
+\input{sections/abstract}
+
+\end{frontmatter}
+
+\input{sections/introduction}
+\input{sections/background}
+\input{sections/architecture}
+\input{sections/implementation}
+\input{sections/evaluation}
+\input{sections/discussion}
+\input{sections/conclusion}
+
+\section*{Declaration of competing interests}
+The author declares no competing interests.
+
+\section*{Funding}
+This research received no external funding.
+
+\section*{CRediT author statement}
+\textbf{Fabr\'{i}cio Bracht:} Conceptualization, Methodology, Software, Investigation, Formal analysis, Writing -- original draft, Visualization.
+
+\section*{Declaration of generative AI and AI-assisted technologies in the writing process}
+During the preparation of this work the author used Claude (Anthropic) for code generation assistance and iterative refinement of experiment scripts. After using this tool, the author reviewed and edited the content as needed and takes full responsibility for the content of the published article.
+
+\section*{Data availability}
+The experiment data, analysis scripts, and figure generation code are available
+in the project repository at \url{https://github.com/fabracht/mqtt-lib}.
+
+\bibliographystyle{elsarticle-num}
+\bibliography{references}
+
+\end{document}

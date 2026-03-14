@@ -159,6 +159,11 @@ impl QuicAcceptorConfig {
         ));
         transport_config.datagram_receive_buffer_size(Some(65536));
         transport_config.datagram_send_buffer_size(65536);
+
+        transport_config.stream_receive_window(262_144u32.into());
+        transport_config.receive_window(1_048_576u32.into());
+        transport_config.send_window(1_048_576);
+
         server_config.transport_config(Arc::new(transport_config));
 
         Ok(server_config)
@@ -562,6 +567,7 @@ async fn run_quic_handler_inner(
     let stream = QuicStreamWrapper::new(send, recv, peer_addr);
     let transport = BrokerTransport::quic(stream);
 
+    let delivery_strategy = config.server_delivery_strategy;
     let handler = ClientHandler::new_with_external_packets(
         transport,
         peer_addr,
@@ -575,6 +581,7 @@ async fn run_quic_handler_inner(
         Some(packet_rx),
     )
     .with_quic_connection(connection.clone())
+    .with_server_delivery_strategy(delivery_strategy)
     .with_skip_bridge_forwarding(skip_bridge_forwarding);
 
     let handler_label = label;
@@ -602,15 +609,16 @@ async fn run_quic_handler_inner(
                         peer_addr
                     );
                     match decode_datagram_packet(&datagram) {
-                        Ok(packet) => {
+                        Some(Ok(packet)) => {
                             if datagram_packet_tx.send(packet).await.is_err() {
                                 debug!("Datagram packet channel closed for {}", peer_addr);
                                 break;
                             }
                         }
-                        Err(e) => {
+                        Some(Err(e)) => {
                             warn!("Failed to decode datagram from {}: {}", peer_addr, e);
                         }
+                        None => {}
                     }
                 }
                 Err(e) => {
@@ -624,7 +632,7 @@ async fn run_quic_handler_inner(
     let stream_label = label;
     tokio::spawn(async move {
         loop {
-            if let Ok((_send, recv)) = connection.accept_bi().await {
+            if let Ok(recv) = connection.accept_uni().await {
                 debug!(
                     "Additional {} data stream accepted from {}",
                     stream_label, peer_addr
@@ -641,16 +649,21 @@ async fn run_quic_handler_inner(
     });
 }
 
-fn decode_datagram_packet(data: &Bytes) -> Result<Packet> {
-    if data.is_empty() {
-        return Err(MqttError::MalformedPacket(
-            "Empty datagram received".to_string(),
-        ));
+fn decode_datagram_packet(data: &Bytes) -> Option<Result<Packet>> {
+    if data.is_empty() || data[0] == 0x00 {
+        return None;
     }
 
     let mut buf = BytesMut::from(data.as_ref());
-    let fixed_header = FixedHeader::decode(&mut buf)?;
-    Packet::decode_from_body(fixed_header.packet_type, &fixed_header, &mut buf)
+    let fixed_header = match FixedHeader::decode(&mut buf) {
+        Ok(h) => h,
+        Err(e) => return Some(Err(e)),
+    };
+    Some(Packet::decode_from_body(
+        fixed_header.packet_type,
+        &fixed_header,
+        &mut buf,
+    ))
 }
 
 // [MQoQ§5] Data stream processing

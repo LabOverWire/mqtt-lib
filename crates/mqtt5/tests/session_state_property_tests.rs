@@ -60,6 +60,7 @@ fn publish_packet(packet_id: u16, qos: QoS) -> PublishPacket {
         properties: Properties::default(),
         payload: vec![1, 2, 3, 4].into(),
         protocol_version: 5,
+        stream_id: None,
     }
 }
 
@@ -631,6 +632,7 @@ mod retained_message_tests {
                         properties: Properties::default(),
                         payload: vec![i as u8].into(),
                         protocol_version: 5,
+                        stream_id: None,
                     };
                     session.store_retained_message(&packet).await;
                 }
@@ -653,6 +655,7 @@ mod retained_message_tests {
                         properties: Properties::default(),
                         payload: vec![].into(),
                         protocol_version: 5,
+                        stream_id: None,
                     };
                     session.store_retained_message(&clear_packet).await;
 
@@ -688,6 +691,7 @@ mod retained_message_tests {
                         properties: Properties::default(),
                         payload: vec![i as u8].into(),
                         protocol_version: 5,
+                        stream_id: None,
                     };
                     session.store_retained_message(&packet).await;
                 }

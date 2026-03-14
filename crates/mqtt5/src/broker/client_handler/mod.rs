@@ -31,6 +31,8 @@ use tokio::time::{interval, timeout};
 use tracing::{debug, info, warn};
 
 #[cfg(not(target_arch = "wasm32"))]
+use crate::broker::config::ServerDeliveryStrategy;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::broker::server_stream_manager::ServerStreamManager;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -43,6 +45,11 @@ pub(super) enum AuthState {
 pub(super) struct PendingConnect {
     pub(super) connect: ConnectPacket,
     pub(super) assigned_client_id: Option<String>,
+}
+
+pub(super) enum InflightPublish {
+    Pending(PublishPacket),
+    Handled,
 }
 
 #[allow(clippy::struct_excessive_bools)]
@@ -61,7 +68,7 @@ pub struct ClientHandler {
     pub(super) keep_alive: Duration,
     pub(super) publish_rx: flume::Receiver<PublishPacket>,
     pub(super) publish_tx: flume::Sender<PublishPacket>,
-    pub(super) inflight_publishes: HashMap<u16, PublishPacket>,
+    pub(super) inflight_publishes: HashMap<u16, InflightPublish>,
     pub(super) session: Option<ClientSession>,
     pub(super) next_packet_id: u16,
     pub(super) normal_disconnect: bool,
@@ -85,6 +92,8 @@ pub struct ClientHandler {
     pub(super) quic_connection: Option<Arc<quinn::Connection>>,
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) server_stream_manager: Option<ServerStreamManager>,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) server_delivery_strategy: ServerDeliveryStrategy,
 }
 
 impl ClientHandler {
@@ -169,6 +178,8 @@ impl ClientHandler {
             quic_connection: None,
             #[cfg(not(target_arch = "wasm32"))]
             server_stream_manager: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            server_delivery_strategy: ServerDeliveryStrategy::default(),
         }
     }
 
@@ -182,6 +193,13 @@ impl ClientHandler {
     #[must_use]
     pub fn with_quic_connection(mut self, conn: Arc<quinn::Connection>) -> Self {
         self.quic_connection = Some(conn);
+        self
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn with_server_delivery_strategy(mut self, strategy: ServerDeliveryStrategy) -> Self {
+        self.server_delivery_strategy = strategy;
         self
     }
 

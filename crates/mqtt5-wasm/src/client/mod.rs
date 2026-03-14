@@ -314,6 +314,7 @@ impl WasmMqttClient {
             properties: Properties::default(),
             payload: payload.to_vec().into(),
             protocol_version,
+            stream_id: None,
         };
 
         self.send_packet(&Packet::Publish(publish_packet))
@@ -384,6 +385,7 @@ impl WasmMqttClient {
             properties,
             payload: final_payload.into(),
             protocol_version,
+            stream_id: None,
         };
 
         self.send_packet(&Packet::Publish(publish_packet))?;
@@ -417,6 +419,7 @@ impl WasmMqttClient {
             properties: Properties::default(),
             payload: payload.to_vec().into(),
             protocol_version,
+            stream_id: None,
         };
 
         self.send_packet(&Packet::Publish(publish_packet))?;
@@ -451,6 +454,7 @@ impl WasmMqttClient {
             properties: Properties::default(),
             payload: payload.to_vec().into(),
             protocol_version,
+            stream_id: None,
         };
 
         self.send_packet(&Packet::Publish(publish_packet))?;

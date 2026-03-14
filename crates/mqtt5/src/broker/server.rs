@@ -632,11 +632,16 @@ impl MqttBroker {
         } else {
             base
         };
-        let router = if config.echo_suppression_config.enabled {
+        let with_echo = if config.echo_suppression_config.enabled {
             with_handler
                 .with_echo_suppression_key(config.echo_suppression_config.property_key.clone())
         } else {
             with_handler
+        };
+        let router = if config.max_outbound_rate_per_client > 0 {
+            with_echo.with_max_outbound_rate(config.max_outbound_rate_per_client)
+        } else {
+            with_echo
         };
         Arc::new(router)
     }
@@ -706,6 +711,7 @@ impl MqttBroker {
             storage.cleanup_expired().await?;
 
             let storage_clone = Arc::clone(storage);
+            let router_clone = Arc::clone(&self.router);
             let cleanup_interval = self.config.storage_config.cleanup_interval;
             let mut shutdown_rx = shutdown_tx.subscribe();
 
@@ -717,6 +723,7 @@ impl MqttBroker {
                             if let Err(e) = storage_clone.cleanup_expired().await {
                                 error!("Storage cleanup error: {e}");
                             }
+                            router_clone.cleanup_stale_subscriptions().await;
                         }
                         _ = shutdown_rx.recv() => {
                             debug!("Storage cleanup task shutting down");
@@ -1423,6 +1430,7 @@ impl MqttBroker {
                             None
                         };
                         router.update_echo_suppression_key(echo_key).await;
+                        router.update_max_outbound_rate(new_config.max_outbound_rate_per_client);
 
                         let new_config = Arc::new(new_config);
                         let _ = config_watch_tx.send(Arc::clone(&new_config));

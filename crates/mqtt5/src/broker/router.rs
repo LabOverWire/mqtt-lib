@@ -9,13 +9,48 @@ use crate::types::ProtocolVersion;
 use crate::validation::{parse_shared_subscription, topic_matches_filter};
 use crate::QoS;
 use crate::Result;
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::Weak;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, trace, warn};
+
+struct OutboundRateState {
+    count: AtomicU32,
+    window_start: parking_lot::Mutex<crate::time::Instant>,
+}
+
+impl OutboundRateState {
+    fn new() -> Self {
+        Self {
+            count: AtomicU32::new(0),
+            window_start: parking_lot::Mutex::new(crate::time::Instant::now()),
+        }
+    }
+
+    fn check_and_increment(&self, max_rate: u32) -> bool {
+        if max_rate == 0 {
+            return true;
+        }
+
+        let mut window_start = self.window_start.lock();
+        if window_start.elapsed() >= crate::time::Duration::from_secs(1) {
+            *window_start = crate::time::Instant::now();
+            self.count.store(1, Ordering::Relaxed);
+            return true;
+        }
+        drop(window_start);
+
+        let prev = self.count.fetch_add(1, Ordering::Relaxed);
+        if prev >= max_rate {
+            self.count.fetch_sub(1, Ordering::Relaxed);
+            return false;
+        }
+        true
+    }
+}
 
 #[cfg(target_arch = "wasm32")]
 type WasmBridgeCallback = Box<dyn Fn(&PublishPacket)>;
@@ -58,6 +93,8 @@ pub struct MessageRouter {
     #[cfg(target_arch = "wasm32")]
     wasm_bridge_callback: Arc<RwLock<Option<WasmBridgeCallback>>>,
     echo_suppression_key: Arc<RwLock<Option<String>>>,
+    outbound_rates: parking_lot::RwLock<HashMap<String, OutboundRateState>>,
+    max_outbound_rate: AtomicU32,
 }
 
 /// Information about a connected client
@@ -88,6 +125,8 @@ impl MessageRouter {
             #[allow(clippy::arc_with_non_send_sync)]
             wasm_bridge_callback: Arc::new(RwLock::new(None)),
             echo_suppression_key: Arc::new(RwLock::new(None)),
+            outbound_rates: parking_lot::RwLock::new(HashMap::new()),
+            max_outbound_rate: AtomicU32::new(0),
         }
     }
 
@@ -109,6 +148,8 @@ impl MessageRouter {
             #[allow(clippy::arc_with_non_send_sync)]
             wasm_bridge_callback: Arc::new(RwLock::new(None)),
             echo_suppression_key: Arc::new(RwLock::new(None)),
+            outbound_rates: parking_lot::RwLock::new(HashMap::new()),
+            max_outbound_rate: AtomicU32::new(0),
         }
     }
 
@@ -137,6 +178,16 @@ impl MessageRouter {
             }
             Err(_) => false,
         }
+    }
+
+    #[must_use]
+    pub fn with_max_outbound_rate(self, rate: u32) -> Self {
+        self.max_outbound_rate.store(rate, Ordering::Relaxed);
+        self
+    }
+
+    pub fn update_max_outbound_rate(&self, rate: u32) {
+        self.max_outbound_rate.store(rate, Ordering::Relaxed);
     }
 
     fn has_wildcards(topic_filter: &str) -> bool {
@@ -195,18 +246,23 @@ impl MessageRouter {
                 disconnect_tx: new_disconnect_tx,
             },
         );
+        self.outbound_rates
+            .write()
+            .insert(client_id.clone(), OutboundRateState::new());
         info!("Registered client: {}", client_id);
     }
 
     pub async fn disconnect_client(&self, client_id: &str) {
         let mut clients = self.clients.write().await;
         clients.remove(client_id);
+        self.outbound_rates.write().remove(client_id);
         debug!("Disconnected client (keeping subscriptions): {}", client_id);
     }
 
     pub async fn unregister_client(&self, client_id: &str) {
         let mut clients = self.clients.write().await;
         clients.remove(client_id);
+        self.outbound_rates.write().remove(client_id);
 
         {
             let mut exact = self.exact_subscriptions.write().await;
@@ -225,6 +281,80 @@ impl MessageRouter {
         }
 
         debug!("Unregistered client: {}", client_id);
+    }
+
+    pub async fn cleanup_stale_subscriptions(&self) {
+        let clients = self.clients.read().await;
+
+        let subscribed_ids: HashSet<String> = {
+            let exact = self.exact_subscriptions.read().await;
+            let wildcard = self.wildcard_subscriptions.read().await;
+            exact
+                .values()
+                .flatten()
+                .chain(wildcard.values().flatten())
+                .map(|sub| sub.client_id.clone())
+                .collect()
+        };
+
+        let mut stale: Vec<String> = Vec::new();
+        let storage = self.storage.as_ref();
+
+        for client_id in &subscribed_ids {
+            if clients.contains_key(client_id) {
+                continue;
+            }
+            let has_session = if let Some(storage) = storage {
+                matches!(storage.get_session(client_id).await, Ok(Some(s)) if !s.is_expired())
+            } else {
+                false
+            };
+            if !has_session {
+                stale.push(client_id.clone());
+            }
+        }
+
+        drop(clients);
+
+        if stale.is_empty() {
+            return;
+        }
+
+        {
+            let mut exact = self.exact_subscriptions.write().await;
+            for subs in exact.values_mut() {
+                subs.retain(|sub| !stale.contains(&sub.client_id));
+            }
+            exact.retain(|_, subs| !subs.is_empty());
+        }
+
+        {
+            let mut wildcard = self.wildcard_subscriptions.write().await;
+            for subs in wildcard.values_mut() {
+                subs.retain(|sub| !stale.contains(&sub.client_id));
+            }
+            wildcard.retain(|_, subs| !subs.is_empty());
+        }
+
+        {
+            let mut change_only = self.change_only_states.write().await;
+            for client_id in &stale {
+                change_only.remove(client_id);
+            }
+        }
+
+        if let Some(storage) = storage {
+            for client_id in &stale {
+                if let Err(e) = storage.remove_queued_messages(client_id).await {
+                    debug!("failed to remove queued messages for stale client {client_id}: {e}");
+                }
+            }
+        }
+
+        info!(
+            "Cleaned up stale subscriptions for {} disconnected client(s)",
+            stale.len()
+        );
     }
 
     /// Adds a subscription for a client.
@@ -648,6 +778,26 @@ impl MessageRouter {
                 }
             }
             drop(change_only_states);
+        }
+
+        let max_rate = self.max_outbound_rate.load(Ordering::Relaxed);
+        if max_rate > 0 {
+            let rate_exceeded = {
+                let rates = self.outbound_rates.read();
+                rates
+                    .get(&sub.client_id)
+                    .is_some_and(|state| !state.check_and_increment(max_rate))
+            };
+            if rate_exceeded {
+                let qos = Self::effective_qos(publish.qos, sub.qos);
+                if qos != QoS::AtMostOnce {
+                    if let Some(storage) = storage {
+                        let message = Self::prepare_message(publish, sub, qos);
+                        Self::queue_message(storage, message, &sub.client_id, qos).await;
+                    }
+                }
+                return;
+            }
         }
 
         if let Some(client_info) = clients.get(&sub.client_id) {
@@ -1255,5 +1405,137 @@ mod tests {
         let retained = router.get_retained_messages("test/status").await;
         assert_eq!(retained.len(), 1);
         assert_eq!(&retained[0].payload[..], b"online");
+    }
+
+    #[tokio::test]
+    async fn test_outbound_rate_qos0_dropped_when_exceeded() {
+        let router = MessageRouter::new().with_max_outbound_rate(5);
+        let (tx, rx) = flume::bounded(100);
+        let (dtx, _drx) = tokio::sync::oneshot::channel();
+        router.register_client("sub1".to_string(), tx, dtx).await;
+        router
+            .subscribe(
+                "sub1".to_string(),
+                "test/rate".to_string(),
+                QoS::AtMostOnce,
+                None,
+                false,
+                false,
+                0,
+                ProtocolVersion::V5,
+                false,
+            )
+            .await
+            .unwrap();
+
+        for i in 0..20u8 {
+            let publish =
+                PublishPacket::new("test/rate", Bytes::copy_from_slice(&[i]), QoS::AtMostOnce);
+            router.route_message(&publish, None).await;
+        }
+
+        let mut received = 0;
+        while rx.try_recv().is_ok() {
+            received += 1;
+        }
+        assert!(received <= 5, "expected at most 5 messages, got {received}");
+        assert!(received >= 1, "expected at least 1 message, got {received}");
+    }
+
+    #[tokio::test]
+    async fn test_outbound_rate_qos1_queued_when_exceeded() {
+        let storage = Arc::new(DynamicStorage::Memory(
+            crate::broker::storage::MemoryBackend::new(),
+        ));
+        let router = MessageRouter::with_storage(Arc::clone(&storage)).with_max_outbound_rate(3);
+        let (tx, rx) = flume::bounded(100);
+        let (dtx, _drx) = tokio::sync::oneshot::channel();
+        router.register_client("sub1".to_string(), tx, dtx).await;
+        router
+            .subscribe(
+                "sub1".to_string(),
+                "test/rate".to_string(),
+                QoS::AtLeastOnce,
+                None,
+                false,
+                false,
+                0,
+                ProtocolVersion::V5,
+                false,
+            )
+            .await
+            .unwrap();
+
+        for i in 0..10u8 {
+            let publish =
+                PublishPacket::new("test/rate", Bytes::copy_from_slice(&[i]), QoS::AtLeastOnce);
+            router.route_message(&publish, None).await;
+        }
+
+        let mut delivered = 0;
+        while rx.try_recv().is_ok() {
+            delivered += 1;
+        }
+        assert!(
+            delivered <= 3,
+            "expected at most 3 delivered, got {delivered}"
+        );
+
+        let queued = storage.get_queued_messages("sub1").await.unwrap();
+        assert!(
+            !queued.is_empty(),
+            "expected queued messages for rate-limited QoS 1"
+        );
+        assert_eq!(
+            delivered + queued.len(),
+            10,
+            "delivered + queued should equal total sent"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_outbound_rate_zero_means_unlimited() {
+        let router = MessageRouter::new().with_max_outbound_rate(0);
+        let (tx, rx) = flume::bounded(1000);
+        let (dtx, _drx) = tokio::sync::oneshot::channel();
+        router.register_client("sub1".to_string(), tx, dtx).await;
+        router
+            .subscribe(
+                "sub1".to_string(),
+                "test/rate".to_string(),
+                QoS::AtMostOnce,
+                None,
+                false,
+                false,
+                0,
+                ProtocolVersion::V5,
+                false,
+            )
+            .await
+            .unwrap();
+
+        for i in 0..100u8 {
+            let publish =
+                PublishPacket::new("test/rate", Bytes::copy_from_slice(&[i]), QoS::AtMostOnce);
+            router.route_message(&publish, None).await;
+        }
+
+        let mut received = 0;
+        while rx.try_recv().is_ok() {
+            received += 1;
+        }
+        assert_eq!(received, 100);
+    }
+
+    #[tokio::test]
+    async fn test_outbound_rate_cleanup_on_unregister() {
+        let router = MessageRouter::new().with_max_outbound_rate(10);
+        let (tx, _rx) = flume::bounded(100);
+        let (dtx, _drx) = tokio::sync::oneshot::channel();
+        router.register_client("sub1".to_string(), tx, dtx).await;
+        assert!(router.outbound_rates.read().contains_key("sub1"));
+
+        router.unregister_client("sub1").await;
+        assert!(!router.outbound_rates.read().contains_key("sub1"));
     }
 }

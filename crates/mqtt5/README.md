@@ -34,13 +34,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ### Client (QUIC)
 
 ```rust
-use mqtt5::{MqttClient, ConnectOptions};
+use mqtt5::MqttClient;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = MqttClient::new("quic-client");
 
-    // QUIC transport with built-in TLS 1.3
     client.connect("quic://broker.example.com:14567").await?;
     client.publish("sensors/temp", b"25.5").await?;
     client.disconnect().await?;
@@ -52,7 +51,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ### Keepalive Configuration
 
 ```rust
-use mqtt5::{MqttClient, ConnectOptions, KeepaliveConfig};
+use mqtt5::ConnectOptions;
+use mqtt5::types::KeepaliveConfig;
 use std::time::Duration;
 
 let options = ConnectOptions::new("client-id")
@@ -60,9 +60,9 @@ let options = ConnectOptions::new("client-id")
     .with_keepalive_config(KeepaliveConfig::new(75, 200));
 ```
 
-The `KeepaliveConfig` controls ping timing and timeout tolerance:
-- `ping_interval_percent`: When to send PINGREQ (default 75% of keep_alive)
-- `timeout_percent`: How long to wait for PINGRESP (default 150%, use 200%+ for high-latency)
+`KeepaliveConfig` controls ping timing and timeout tolerance:
+- `ping_interval_percent`: when to send PINGREQ (default 75% of keep_alive)
+- `timeout_percent`: how long to wait for PINGRESP (default 150%, use 200%+ for high-latency)
 
 ### Broker
 
@@ -80,7 +80,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ### Broker with Authentication
 
 ```rust
-use mqtt5::broker::{BrokerConfig, AuthConfig, AuthMethod};
+use mqtt5::broker::BrokerConfig;
+use mqtt5::broker::config::{AuthConfig, AuthMethod};
 
 let config = BrokerConfig::default()
     .with_auth(AuthConfig {
@@ -97,6 +98,7 @@ Use `CompositeAuthProvider` to chain enhanced auth with a password fallback for 
 
 ```rust
 use mqtt5::broker::auth::{CompositeAuthProvider, PasswordAuthProvider};
+use std::sync::Arc;
 
 let primary = broker.auth_provider();
 let fallback = Arc::new(PasswordAuthProvider::new());

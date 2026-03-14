@@ -1,0 +1,47 @@
+\section{Background and Related Work}
+\label{sec:background}
+
+\subsection{MQTT Protocol}
+
+MQTT~\cite{mqtt-v5-spec} provides three quality-of-service levels (QoS~0: at-most-once, QoS~1: at-least-once, QoS~2: exactly-once), retained messages, last will and testament, and topic-based filtering with wildcard support. MQTT~v5.0~\cite{mqtt-v5-spec} added user properties, shared subscriptions, and enhanced authentication. The protocol's minimal framing overhead (2-byte minimum header) makes it well-suited for constrained devices.
+
+\subsection{QUIC Transport Protocol}
+
+Beyond the stream multiplexing described in Section~\ref{sec:introduction}, QUIC~\cite{rfc9000} provides several features relevant to IoT messaging:
+
+\textbf{Integrated security.} QUIC integrates TLS~1.3 into the transport handshake, achieving a 1-RTT connection establishment that includes both transport and cryptographic setup~\cite{rfc9001}. This compares favorably to TCP's 1-RTT handshake plus TLS's additional 1--2 RTTs~\cite{rfc7540}.
+
+\textbf{Unreliable datagrams.} The DATAGRAM extension (RFC~9221)~\cite{rfc9221} allows sending unreliable data within a QUIC connection, benefiting from the connection's encryption and congestion control without reliability or ordering guarantees.
+
+\textbf{Loss detection.} QUIC uses per-packet sequence numbers (unlike TCP's per-byte) and acknowledgment-based loss detection with probe timeout (PTO) for tail loss~\cite{rfc9002}. This enables more precise loss recovery than TCP's retransmission timeout mechanism.
+
+\subsection{Related Work}
+
+\begin{table}[t]
+\centering
+\caption{Feature comparison of MQTT-over-QUIC approaches.}
+\label{tab:feature-comparison}
+\begin{tabular}{lccc}
+\toprule
+Feature & \texttt{mqtt5} & EMQX~\cite{emqx} & Kumar~\cite{kumar2019mqtt-quic} \\
+\midrule
+Stream strategies & 3 & 1 & 1 \\
+Per-topic isolation & \checkmark & --- & --- \\
+Per-publish isolation & \checkmark & --- & --- \\
+Datagram transport & \checkmark & --- & --- \\
+MQTT v5.0 full & \checkmark & \checkmark & --- \\
+Open-source & \checkmark & \checkmark & \checkmark \\
+Empirical evaluation & \checkmark & partial & \checkmark \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Prior work on MQTT over QUIC falls into three categories.
+
+\textbf{Implementations and evaluations.} Kumar and Dezfouli~\cite{kumar2019mqtt-quic} implemented MQTT over QUIC using a single bidirectional stream, demonstrating reduced connection overhead (up to 56\% fewer handshake packets) and lower delivery latency (up to 55\%) compared to MQTT over TCP across wired and wireless testbeds. Fern{\'a}ndez et al.~\cite{fernandez2020iot-quic} evaluated MQTT over QUIC under emulated wireless conditions (WiFi, LTE, satellite), finding that QUIC maintains stable throughput under packet loss while TCP degrades significantly. Neither study explored stream multiplexing for topic-level HOL blocking isolation.
+
+\textbf{Industrial implementations.} EMQX~\cite{emqx} is the only production MQTT broker to support QUIC transport, but uses a single-stream approach without configurable stream mapping. Table~\ref{tab:feature-comparison} compares the feature sets.
+
+\textbf{HOL blocking empirics.} HOL blocking in multiplexed protocols has been studied in the context of HTTP/2~\cite{rfc7540} and HTTP/3~\cite{rfc9114}, but direct empirical measurement of inter-stream independence remains sparse. Langley et al.~\cite{langley2017quic} reported 3.6--8\% search latency improvements and 15--18\% fewer YouTube rebuffers with QUIC at Google scale, but these figures reflect all QUIC benefits (0-RTT, loss recovery, encryption integration), not HOL blocking in isolation. Marx et al.~\cite{marx2020multiplexing} directly measured HOL blocking by computing the ratio of maximum blocked bytes between QUIC and TCP across 10 implementations, finding ratios between 0.1 and 0.3 (70--90\% fewer blocked bytes in QUIC). However, they also showed that sequential resource scheduling---which is optimal for web page loading---keeps only one stream active at a time, preventing QUIC's inter-stream isolation from taking effect. Sander et al.~\cite{sander2022hol} confirmed this tension: parallel scheduling in HTTP/3 reduces intra-stream HOL blocked bytes, but the effect on visual page load metrics is ``less pronounced.'' Yu and Benson~\cite{yu2021quic} tested production endpoints from Google, Facebook, and Cloudflare, concluding that ``QUIC's removal of head-of-line (HOL) blocking has little impact on web-page performance in practice,'' with congestion control dominating performance differences. All of these studies measure HOL blocking through web page loading metrics (blocked bytes, SpeedIndex, page load time). No prior work has measured per-stream latency independence in a continuous message streaming context, where logically independent data flows (MQTT topics) may benefit more directly from stream isolation than HTTP resources with sequential dependencies.
+
+To our knowledge, no prior work has (1)~defined multiple stream mapping strategies for MQTT over QUIC, (2)~evaluated the HOL blocking implications of each strategy under controlled network impairment, or (3)~quantified the throughput and resource overhead tradeoffs across strategies.
