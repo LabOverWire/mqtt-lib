@@ -136,57 +136,7 @@ where
     let path = config.path.clone();
     let allowed_origins = config.allowed_origins.clone();
 
-    let callback =
-        |req: &tokio_tungstenite::tungstenite::handshake::server::Request,
-         response: tokio_tungstenite::tungstenite::handshake::server::Response| {
-            if req.uri().path() != path {
-                debug!("WebSocket path mismatch: {} != {}", req.uri().path(), path);
-                let reject = http::Response::builder()
-                    .status(http::StatusCode::NOT_FOUND)
-                    .body(None)
-                    .expect("building 404 response");
-                return Err(reject);
-            }
-
-            if let Some(ref origins) = allowed_origins {
-                let origin = req.headers().get("Origin").and_then(|v| v.to_str().ok());
-                let allowed =
-                    origin.is_some_and(|o| origins.iter().any(|a| a.eq_ignore_ascii_case(o)));
-                if !allowed {
-                    debug!("WebSocket origin rejected: {:?}", origin);
-                    let reject = http::Response::builder()
-                        .status(http::StatusCode::FORBIDDEN)
-                        .body(None)
-                        .expect("building 403 response");
-                    return Err(reject);
-                }
-            }
-
-            // Check for the MQTT subprotocol
-            let has_mqtt_subprotocol = req
-                .headers()
-                .get("Sec-WebSocket-Protocol")
-                .and_then(|v| v.to_str().ok())
-                .is_some_and(|protocols| {
-                    protocols
-                        .split(',')
-                        .any(|p| p.trim() == subprotocol.as_str())
-                });
-
-            if has_mqtt_subprotocol {
-                // Add the subprotocol to the response
-                let mut response = response;
-                response.headers_mut().insert(
-                    "Sec-WebSocket-Protocol",
-                    subprotocol
-                        .parse()
-                        .unwrap_or_else(|_| "mqtt".parse().unwrap()),
-                );
-                Ok(response)
-            } else {
-                Ok(response)
-            }
-        };
+    let callback = websocket_handshake_callback(subprotocol, path, allowed_origins);
 
     match accept_hdr_async(stream, callback).await {
         Ok(ws_stream) => {
@@ -321,6 +271,66 @@ where
                 std::task::Poll::Ready(Err(std::io::Error::other(e.to_string())))
             }
             std::task::Poll::Pending => std::task::Poll::Pending,
+        }
+    }
+}
+
+#[allow(clippy::result_large_err)]
+fn websocket_handshake_callback(
+    subprotocol: String,
+    path: String,
+    allowed_origins: Option<Vec<String>>,
+) -> impl FnOnce(
+    &tokio_tungstenite::tungstenite::handshake::server::Request,
+    tokio_tungstenite::tungstenite::handshake::server::Response,
+) -> std::result::Result<
+    tokio_tungstenite::tungstenite::handshake::server::Response,
+    http::Response<Option<String>>,
+> {
+    move |req, response| {
+        if req.uri().path() != path {
+            debug!("WebSocket path mismatch: {} != {}", req.uri().path(), path);
+            let reject = http::Response::builder()
+                .status(http::StatusCode::NOT_FOUND)
+                .body(None)
+                .expect("building 404 response");
+            return Err(reject);
+        }
+
+        if let Some(ref origins) = allowed_origins {
+            let origin = req.headers().get("Origin").and_then(|v| v.to_str().ok());
+            let allowed = origin.is_some_and(|o| origins.iter().any(|a| a.eq_ignore_ascii_case(o)));
+            if !allowed {
+                debug!("WebSocket origin rejected: {:?}", origin);
+                let reject = http::Response::builder()
+                    .status(http::StatusCode::FORBIDDEN)
+                    .body(None)
+                    .expect("building 403 response");
+                return Err(reject);
+            }
+        }
+
+        let has_mqtt_subprotocol = req
+            .headers()
+            .get("Sec-WebSocket-Protocol")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|protocols| {
+                protocols
+                    .split(',')
+                    .any(|p| p.trim() == subprotocol.as_str())
+            });
+
+        if has_mqtt_subprotocol {
+            let mut response = response;
+            response.headers_mut().insert(
+                "Sec-WebSocket-Protocol",
+                subprotocol
+                    .parse()
+                    .unwrap_or_else(|_| "mqtt".parse().unwrap()),
+            );
+            Ok(response)
+        } else {
+            Ok(response)
         }
     }
 }
