@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [mqtt5-protocol 0.10.0] / [mqtt5 0.23.0] / [mqttv5-cli 0.21.0] / [mqtt5-wasm 1.1.0] - 2026-03-13
+
+### Added
+
+- **Per-client outbound rate limiting** - `max_outbound_rate_per_client` config limits messages/second delivered to each subscriber; hot-reloadable via SIGHUP (native) and config change (WASM)
+- **`PublishAction` event hooks** - `on_client_publish` now returns `PublishAction` (`Continue`, `Handled`, `Transform`) for intercepting and modifying publishes before routing
+- **`ServerDeliveryStrategy` config** - Broker-side QUIC delivery strategy (`ControlOnly`, `PerTopic`, `PerPublish`) replaces client-driven stream strategy for server-to-client data paths
+- **Datagram type discrimination** - QUIC datagram receiver distinguishes MQTT packets from non-MQTT datagrams instead of treating all as errors
+- **Unidirectional QUIC streams** - Data streams changed from bidirectional to unidirectional for server-to-client delivery, reducing resource overhead
+- **QUIC flow control tuning** - Configurable stream receive window (256KB), connection receive window (1MB), and send window (1MB)
+- **Stale subscription cleanup** - Router periodically removes subscriptions for disconnected clients during storage cleanup cycle
+- **`--quic-delivery-strategy` CLI flag** - Broker CLI option to set server delivery strategy
+- **`--trace-dir` bench flag** - Per-message trace CSV output for latency analysis with topic, sequence, stream ID, and timing columns
+- **Bench HOL blocking metrics** - `inter_topic_spread`, `detrended_correlation`, `spike_isolation_ratio`, and `inter_arrival_cluster_ratio` metrics in HOL mode JSON output
+- **Bench payload sequence numbers** - Raw payload format now encodes a 4-byte sequence number at offset 8 for message ordering analysis
+- **WebSocket bridge support** - WASM broker `addBridgeWebSocket()` and `BridgeConnection.connect_ws()` for WebSocket-based bridge connections
+- **Re-export `quinn` crate** - `mqtt5::quinn` re-exported on native targets for direct QUIC configuration access
+
+### Changed
+
+- **BREAKING: `PublishPacket.stream_id`** - New `stream_id: Option<u64>` field on `PublishPacket` and `Message` (mqtt5-protocol)
+- **BREAKING: `on_client_publish` return type** - Changed from `Pin<Box<Future<Output = ()>>>` to `Pin<Box<Future<Output = PublishAction>>>`
+- **BREAKING: `QuicStreamManager::open_data_stream`** - Returns `SendStream` instead of `(SendStream, RecvStream)` (unidirectional streams)
+- **`DataPerSubscription` deprecated** - Client-side `StreamStrategy::DataPerSubscription` marked deprecated; use `ServerDeliveryStrategy::PerTopic` instead
+- **`BrokerConfig` new fields** - `max_outbound_rate_per_client: u32` and `server_delivery_strategy: ServerDeliveryStrategy` added with defaults
+
+### Fixed
+
+- **File backend queue filename collision** - Queue filenames now use a global atomic sequence counter instead of `timestamp % 1_000_000`, preventing overwrites when multiple messages are queued in the same millisecond
+
 ## [mqtt5-wasm 1.0.0] - 2026-03-02
 
 ### Changed
