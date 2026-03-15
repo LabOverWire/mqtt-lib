@@ -24,6 +24,8 @@ use crate::error::Result;
 use crate::telemetry::TelemetryConfig;
 use crate::time::Duration;
 use serde::{Deserialize, Serialize};
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -54,10 +56,9 @@ impl LoadBalancerConfig {
         if self.backends.is_empty() {
             return None;
         }
-        let hash = client_id
-            .as_bytes()
-            .iter()
-            .fold(0_usize, |acc, &b| acc.wrapping_add(usize::from(b)));
+        let mut hasher = DefaultHasher::new();
+        client_id.hash(&mut hasher);
+        let hash = mqtt5_protocol::u64_to_usize_saturating(hasher.finish());
         Some(&self.backends[hash % self.backends.len()])
     }
 }

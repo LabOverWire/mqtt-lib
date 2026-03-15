@@ -82,27 +82,46 @@ async fn test_redirect_to_dead_backend() {
 
 #[tokio::test]
 async fn test_redirect_loop_capped() {
-    let lb1_config = lb_config(vec!["mqtt://127.0.0.1:1".to_string()]);
-    let mut lb1 = TestBroker::start_with_config(lb1_config).await;
+    let listener_a = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listener_b = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr_a = listener_a.local_addr().unwrap();
+    let addr_b = listener_b.local_addr().unwrap();
 
-    let lb2_config = lb_config(vec![lb1.address().to_string()]);
-    let lb2 = TestBroker::start_with_config(lb2_config).await;
+    let target_b = format!("mqtt://{addr_b}");
+    let target_a = format!("mqtt://{addr_a}");
 
-    lb1.stop().await;
-    let reconfig = lb_config(vec![lb2.address().to_string()]);
-    lb1 = TestBroker::start_with_config(reconfig).await;
+    let spawn_redirector = |listener: TcpListener, target: String, count: usize| {
+        tokio::spawn(async move {
+            for _ in 0..count {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut buf = [0u8; 4096];
+                if stream.read(&mut buf).await.is_err() {
+                    break;
+                }
+                let connack = ConnAckPacket::new(false, ReasonCode::UseAnotherServer)
+                    .with_server_reference(target.clone());
+                let mut encoded = Vec::new();
+                connack.encode(&mut encoded).unwrap();
+                let _ = stream.write_all(&encoded).await;
+                let _ = stream.flush().await;
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+    };
+
+    let _handle_a = spawn_redirector(listener_a, target_b, 4);
+    let _handle_b = spawn_redirector(listener_b, target_a, 4);
 
     let client = MqttClient::new("redirect-loop-client");
-    let result = client.connect(lb1.address()).await;
+    let result = client.connect(&format!("mqtt://{addr_a}")).await;
     assert!(result.is_err());
     let err_msg = format!("{}", result.unwrap_err());
     assert!(
-        err_msg.contains("redirect") || err_msg.contains("connect"),
-        "unexpected error: {err_msg}"
+        err_msg.contains("too many redirects"),
+        "expected 'too many redirects' error, got: {err_msg}"
     );
-
-    drop(lb1);
-    drop(lb2);
 }
 
 #[tokio::test]
@@ -133,20 +152,35 @@ async fn test_multiple_clients_distribute() {
 }
 
 async fn mock_redirect_server(target: String, reason_code: ReasonCode) -> SocketAddr {
+    mock_redirect_server_multi(target, reason_code, 1).await
+}
+
+async fn mock_redirect_server_multi(
+    target: String,
+    reason_code: ReasonCode,
+    accept_count: usize,
+) -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
 
     tokio::spawn(async move {
-        let (mut stream, _) = listener.accept().await.unwrap();
-        let mut buf = [0u8; 4096];
-        let _ = stream.read(&mut buf).await.unwrap();
+        for _ in 0..accept_count {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                break;
+            };
+            let mut buf = [0u8; 4096];
+            if stream.read(&mut buf).await.is_err() {
+                break;
+            }
 
-        let connack = ConnAckPacket::new(false, reason_code).with_server_reference(target);
-        let mut encoded = Vec::new();
-        connack.encode(&mut encoded).unwrap();
-        stream.write_all(&encoded).await.unwrap();
-        stream.flush().await.unwrap();
-        tokio::time::sleep(Duration::from_millis(100)).await;
+            let connack =
+                ConnAckPacket::new(false, reason_code).with_server_reference(target.clone());
+            let mut encoded = Vec::new();
+            connack.encode(&mut encoded).unwrap();
+            let _ = stream.write_all(&encoded).await;
+            let _ = stream.flush().await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     });
 
     addr

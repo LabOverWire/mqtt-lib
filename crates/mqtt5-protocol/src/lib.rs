@@ -61,8 +61,9 @@ pub use error_classification::RecoverableError;
 
 pub use numeric::{
     i32_to_u32_saturating, u128_to_f64_saturating, u128_to_u32_saturating, u128_to_u64_saturating,
-    u64_to_f64_saturating, u64_to_u16_saturating, u64_to_u32_saturating, usize_to_f64_saturating,
-    usize_to_u16_saturating, usize_to_u32_saturating, F64_MAX_SAFE_INTEGER,
+    u64_to_f64_saturating, u64_to_u16_saturating, u64_to_u32_saturating, u64_to_usize_saturating,
+    usize_to_f64_saturating, usize_to_u16_saturating, usize_to_u32_saturating,
+    F64_MAX_SAFE_INTEGER,
 };
 
 pub use bridge::{
