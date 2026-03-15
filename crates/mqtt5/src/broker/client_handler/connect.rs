@@ -68,19 +68,21 @@ impl ClientHandler {
             } else {
                 &connect.client_id
             };
-            let backend = lb.select_backend(client_id).to_string();
-            info!(
-                client_id = %client_id,
-                backend = %backend,
-                addr = %self.client_addr,
-                "Redirecting client to backend"
-            );
-            let connack = ConnAckPacket::new(false, ReasonCode::UseAnotherServer)
-                .with_server_reference(backend);
-            self.transport
-                .write_packet(Packet::ConnAck(connack))
-                .await?;
-            return Err(MqttError::UseAnotherServer);
+            if let Some(backend) = lb.select_backend(client_id) {
+                let backend = backend.to_string();
+                info!(
+                    client_id = %client_id,
+                    backend = %backend,
+                    addr = %self.client_addr,
+                    "Redirecting client to backend"
+                );
+                let connack = ConnAckPacket::new(false, ReasonCode::UseAnotherServer)
+                    .with_server_reference(backend);
+                self.transport
+                    .write_packet(Packet::ConnAck(connack))
+                    .await?;
+                return Err(MqttError::UseAnotherServer);
+            }
         }
 
         self.request_problem_information = connect

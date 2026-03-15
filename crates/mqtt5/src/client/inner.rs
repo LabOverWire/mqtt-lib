@@ -480,6 +480,23 @@ impl MqttClient {
 
                 Ok(result)
             }
+            Err(MqttError::ConnectionRefused(
+                reason @ (ReasonCode::UseAnotherServer | ReasonCode::ServerMoved),
+            )) => {
+                let redirect_url = inner.server_redirect.take();
+                drop(inner);
+                if let Some(url) = redirect_url {
+                    tracing::info!(
+                        to = %url,
+                        reason = ?reason,
+                        "Following server redirect from TLS connection"
+                    );
+                    return Box::pin(self.connect_internal(&url)).await;
+                }
+                Err(MqttError::ConnectionError(
+                    "Server redirect missing server reference".to_string(),
+                ))
+            }
             Err(e) => {
                 drop(inner);
                 Err(e)

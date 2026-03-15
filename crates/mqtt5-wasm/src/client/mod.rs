@@ -222,9 +222,20 @@ impl WasmMqttClient {
                     if reason_code != 0 {
                         if reason_code == 0x9C || reason_code == 0x9D {
                             if let Some(server_ref) = connack.properties.get_server_reference() {
-                                return Err(JsValue::from_str(&format!(
-                                    "Server redirect: {server_ref}"
-                                )));
+                                let obj = js_sys::Object::new();
+                                js_sys::Reflect::set(
+                                    &obj,
+                                    &JsValue::from_str("type"),
+                                    &JsValue::from_str("redirect"),
+                                )
+                                .ok();
+                                js_sys::Reflect::set(
+                                    &obj,
+                                    &JsValue::from_str("url"),
+                                    &JsValue::from_str(server_ref),
+                                )
+                                .ok();
+                                return Err(obj.into());
                             }
                         }
                         return Err(JsValue::from_str(&format!(

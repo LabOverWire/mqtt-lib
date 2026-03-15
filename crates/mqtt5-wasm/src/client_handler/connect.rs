@@ -340,16 +340,18 @@ impl WasmClientHandler {
                 } else {
                     &connect.client_id
                 };
-                let backend = lb.select_backend(client_id).to_string();
-                info!(
-                    client_id = %client_id,
-                    backend = %backend,
-                    "Redirecting client to backend"
-                );
-                let connack = ConnAckPacket::new(false, ReasonCode::UseAnotherServer)
-                    .with_server_reference(backend);
-                self.write_packet(&Packet::ConnAck(connack), writer)?;
-                return Err(MqttError::UseAnotherServer);
+                if let Some(backend) = lb.select_backend(client_id) {
+                    let backend = backend.to_string();
+                    info!(
+                        client_id = %client_id,
+                        backend = %backend,
+                        "Redirecting client to backend"
+                    );
+                    let connack = ConnAckPacket::new(false, ReasonCode::UseAnotherServer)
+                        .with_server_reference(backend);
+                    self.write_packet(&Packet::ConnAck(connack), writer)?;
+                    return Err(MqttError::UseAnotherServer);
+                }
             }
         }
         Ok(())

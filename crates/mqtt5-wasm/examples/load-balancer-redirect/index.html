@@ -350,13 +350,12 @@ mqttv5 broker --host 0.0.0.0:1885 --ws-host 0.0.0.0:9002 --allow-anonymous</code
                 debugLog(`${clientId}: ERROR - should have been redirected!`);
                 return null;
             } catch (err) {
-                const errStr = String(err);
-                if (!errStr.startsWith('Server redirect: ')) {
-                    debugLog(`${clientId}: connection error: ${errStr}`);
+                if (!err || err.type !== 'redirect' || !err.url) {
+                    debugLog(`${clientId}: connection error: ${err}`);
                     return null;
                 }
 
-                const backend = errStr.replace('Server redirect: ', '');
+                const backend = err.url;
                 debugLog(`${clientId}: redirected to ${backend}`);
 
                 redirectCount++;

@@ -230,10 +230,10 @@ The load balancer only redirects — it does not broker messages. You must run t
 
 ```bash
 # Terminal 1: Start backend broker A on port 1884
-mqttv5 broker --tcp-port 1884
+mqttv5 broker --host 0.0.0.0:1884 --allow-anonymous
 
 # Terminal 2: Start backend broker B on port 1885
-mqttv5 broker --tcp-port 1885
+mqttv5 broker --host 0.0.0.0:1885 --allow-anonymous
 
 # Terminal 3: Start load balancer on port 1883
 mqttv5 broker --config lb-config.json

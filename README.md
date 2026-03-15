@@ -221,8 +221,8 @@ Redirects clients to backend brokers using MQTT v5 `UseAnotherServer` (0x9C) wit
 
 ```bash
 # Start two backend brokers
-mqttv5 broker --tcp-port 1884
-mqttv5 broker --tcp-port 1885
+mqttv5 broker --host 0.0.0.0:1884 --allow-anonymous
+mqttv5 broker --host 0.0.0.0:1885 --allow-anonymous
 
 # Start the load balancer (redirects only, does not broker messages)
 mqttv5 broker --config lb.json

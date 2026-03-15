@@ -45,12 +45,20 @@ impl LoadBalancerConfig {
     }
 
     #[must_use]
-    pub fn select_backend(&self, client_id: &str) -> &str {
+    pub fn is_empty(&self) -> bool {
+        self.backends.is_empty()
+    }
+
+    #[must_use]
+    pub fn select_backend(&self, client_id: &str) -> Option<&str> {
+        if self.backends.is_empty() {
+            return None;
+        }
         let hash = client_id
             .as_bytes()
             .iter()
             .fold(0_usize, |acc, &b| acc.wrapping_add(usize::from(b)));
-        &self.backends[hash % self.backends.len()]
+        Some(&self.backends[hash % self.backends.len()])
     }
 }
 

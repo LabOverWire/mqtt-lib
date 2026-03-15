@@ -161,10 +161,8 @@ const port = lb.createClientPort();
 try {
   await client.connectMessagePort(port);
 } catch (err) {
-  const errStr = String(err);
-  if (errStr.startsWith("Server redirect: ")) {
-    const backend = errStr.replace("Server redirect: ", "");
-    console.log(`Redirected to ${backend}`);
+  if (err.type === "redirect") {
+    console.log(`Redirected to ${err.url}`);
   }
 }
 ```
