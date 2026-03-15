@@ -190,7 +190,7 @@ connectOpts.receiveMaximum = 100;
 connectOpts.maximumPacketSize = 131072;
 
 connectOpts.addUserProperty("client-type", "browser");
-connectOpts.addUserProperty("client-version", "0.10.0");
+connectOpts.addUserProperty("client-version", "1.2.0");
 
 const will = new WillMessage("status/offline", encoder.encode("offline"));
 will.qos = 1;

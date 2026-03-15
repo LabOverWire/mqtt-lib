@@ -16,14 +16,14 @@ MQTT v5.0 and v3.1.1 protocol implementation - packets, encoding, and validation
 
 ```toml
 [dependencies]
-mqtt5-protocol = "0.10"
+mqtt5-protocol = "0.11"
 ```
 
 ### For Embedded (no_std)
 
 ```toml
 [dependencies]
-mqtt5-protocol = { version = "0.10", default-features = false }
+mqtt5-protocol = { version = "0.11", default-features = false }
 ```
 
 ### For Single-Core Embedded

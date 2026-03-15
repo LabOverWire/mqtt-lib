@@ -22,7 +22,7 @@
 
 ```toml
 [dependencies]
-mqtt5 = "0.23"
+mqtt5 = "0.24"
 ```
 
 ### CLI Tool
@@ -536,7 +536,7 @@ The `mqtt5-protocol` crate supports `no_std` environments for embedded systems.
 
 ```toml
 [dependencies]
-mqtt5-protocol = { version = "0.10", default-features = false }
+mqtt5-protocol = { version = "0.11", default-features = false }
 ```
 
 For single-core MCUs (more efficient atomics), configure via `.cargo/config.toml`:
@@ -843,7 +843,7 @@ Distributed tracing with OpenTelemetry support:
 
 ```toml
 [dependencies]
-mqtt5 = { version = "0.22", features = ["opentelemetry"] }
+mqtt5 = { version = "0.24", features = ["opentelemetry"] }
 ```
 
 ### Features
