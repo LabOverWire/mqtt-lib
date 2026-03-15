@@ -361,8 +361,9 @@ impl MqttClient {
     pub(crate) async fn connect_internal(&self, address: &str) -> Result<ConnectResult> {
         const MAX_REDIRECTS: u8 = 3;
         let mut current_address = address.to_string();
+        let mut redirect_count: u8 = 0;
 
-        for redirect_count in 0..=MAX_REDIRECTS {
+        loop {
             let client_id = self.inner.read().await.options.client_id.clone();
             tracing::debug!(
                 address = %current_address,
@@ -392,6 +393,7 @@ impl MqttClient {
                                 reason = ?reason,
                                 "Following server redirect"
                             );
+                            redirect_count += 1;
                             current_address = url;
                             continue;
                         }
@@ -404,10 +406,6 @@ impl MqttClient {
                 Err(e) => return Err(e),
             }
         }
-
-        Err(MqttError::ConnectionError(
-            "Maximum server redirects exceeded".to_string(),
-        ))
     }
 
     /// Internal connection method using custom TLS configuration
@@ -419,6 +417,8 @@ impl MqttClient {
         &self,
         tls_config: crate::transport::tls::TlsConfig,
     ) -> Result<ConnectResult> {
+        *self.tls_config.write().await = Some(tls_config.clone());
+
         let mut tls_transport = crate::transport::tls::TlsTransport::new(tls_config);
         tls_transport
             .connect()

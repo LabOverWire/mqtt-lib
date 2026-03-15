@@ -3,8 +3,13 @@ mod common;
 use common::{MessageCollector, TestBroker};
 use mqtt5::broker::config::{BrokerConfig, LoadBalancerConfig, StorageBackend, StorageConfig};
 use mqtt5::MqttClient;
+use mqtt5_protocol::packet::connack::ConnAckPacket;
+use mqtt5_protocol::packet::MqttPacket;
+use mqtt5_protocol::protocol::v5::reason_codes::ReasonCode;
 use std::net::SocketAddr;
 use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
 
 fn memory_storage() -> StorageConfig {
     StorageConfig {
@@ -125,4 +130,83 @@ async fn test_multiple_clients_distribute() {
     drop(lb);
     drop(backend1);
     drop(backend2);
+}
+
+async fn mock_redirect_server(target: String, reason_code: ReasonCode) -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut buf = [0u8; 4096];
+        let _ = stream.read(&mut buf).await.unwrap();
+
+        let connack = ConnAckPacket::new(false, reason_code).with_server_reference(target);
+        let mut encoded = Vec::new();
+        connack.encode(&mut encoded).unwrap();
+        stream.write_all(&encoded).await.unwrap();
+        stream.flush().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    });
+
+    addr
+}
+
+#[tokio::test]
+async fn test_server_moved_redirect() {
+    let backend = TestBroker::start_with_config(backend_config()).await;
+    let mock_addr =
+        mock_redirect_server(backend.address().to_string(), ReasonCode::ServerMoved).await;
+
+    let client = MqttClient::new("server-moved-client");
+    client
+        .connect(&format!("mqtt://{mock_addr}"))
+        .await
+        .unwrap();
+    assert!(client.is_connected().await);
+
+    let collector = MessageCollector::new();
+    client
+        .subscribe("test/moved", collector.callback())
+        .await
+        .unwrap();
+
+    client
+        .publish("test/moved", b"hello from moved")
+        .await
+        .unwrap();
+
+    assert!(collector.wait_for_messages(1, Duration::from_secs(3)).await);
+    let msgs = collector.get_messages().await;
+    assert_eq!(msgs[0].payload, b"hello from moved");
+
+    client.disconnect().await.unwrap();
+    drop(backend);
+}
+
+#[tokio::test]
+async fn test_empty_backends_acts_as_normal_broker() {
+    let broker = TestBroker::start_with_config(lb_config(vec![])).await;
+
+    let client = MqttClient::new("empty-backends-client");
+    client.connect(broker.address()).await.unwrap();
+    assert!(client.is_connected().await);
+
+    let collector = MessageCollector::new();
+    client
+        .subscribe("test/empty-lb", collector.callback())
+        .await
+        .unwrap();
+
+    client
+        .publish("test/empty-lb", b"no redirect")
+        .await
+        .unwrap();
+
+    assert!(collector.wait_for_messages(1, Duration::from_secs(3)).await);
+    let msgs = collector.get_messages().await;
+    assert_eq!(msgs[0].payload, b"no redirect");
+
+    client.disconnect().await.unwrap();
+    drop(broker);
 }

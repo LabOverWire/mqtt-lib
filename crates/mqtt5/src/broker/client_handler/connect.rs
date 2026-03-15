@@ -63,8 +63,12 @@ impl ClientHandler {
             .await?;
 
         if let Some(ref lb) = self.config.load_balancer {
+            let generated;
             let client_id = if connect.client_id.is_empty() {
-                "auto"
+                use std::sync::atomic::{AtomicU64, Ordering};
+                static LB_COUNTER: AtomicU64 = AtomicU64::new(0);
+                generated = format!("auto-{}", LB_COUNTER.fetch_add(1, Ordering::Relaxed));
+                &generated
             } else {
                 &connect.client_id
             };
