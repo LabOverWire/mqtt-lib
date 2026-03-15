@@ -62,6 +62,33 @@ impl ClientHandler {
         self.validate_protocol_version(connect.protocol_version)
             .await?;
 
+        if let Some(ref lb) = self.config.load_balancer {
+            let generated;
+            let client_id = if connect.client_id.is_empty() {
+                use std::sync::atomic::{AtomicU64, Ordering};
+                static LB_COUNTER: AtomicU64 = AtomicU64::new(0);
+                generated = format!("auto-{}", LB_COUNTER.fetch_add(1, Ordering::Relaxed));
+                &generated
+            } else {
+                &connect.client_id
+            };
+            if let Some(backend) = lb.select_backend(client_id) {
+                let backend = backend.to_string();
+                info!(
+                    client_id = %client_id,
+                    backend = %backend,
+                    addr = %self.client_addr,
+                    "Redirecting client to backend"
+                );
+                let connack = ConnAckPacket::new(false, ReasonCode::UseAnotherServer)
+                    .with_server_reference(backend);
+                self.transport
+                    .write_packet(Packet::ConnAck(connack))
+                    .await?;
+                return Err(MqttError::UseAnotherServer);
+            }
+        }
+
         self.request_problem_information = connect
             .properties
             .get_request_problem_information()

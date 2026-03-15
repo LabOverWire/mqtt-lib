@@ -9,7 +9,7 @@ use mqtt5_protocol::protocol::v5::reason_codes::ReasonCode;
 use mqtt5_protocol::types::ProtocolVersion;
 use mqtt5_protocol::{u64_to_u32_saturating, usize_to_u32_saturating};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::decoder::read_packet;
 use crate::transport::{WasmReader, WasmWriter};
@@ -48,6 +48,8 @@ impl WasmClientHandler {
             ));
         }
         self.protocol_version = connect.protocol_version;
+
+        self.check_load_balancer_redirect(&connect, writer)?;
 
         let mut assigned_client_id = None;
         if connect.client_id.is_empty() {
@@ -324,6 +326,39 @@ impl WasmClientHandler {
                 Err(MqttError::AuthenticationFailed)
             }
         }
+    }
+
+    fn check_load_balancer_redirect(
+        &self,
+        connect: &ConnectPacket,
+        writer: &mut WasmWriter,
+    ) -> Result<()> {
+        if let Ok(config) = self.config.read() {
+            if let Some(ref lb) = config.load_balancer {
+                let generated;
+                let client_id = if connect.client_id.is_empty() {
+                    use std::sync::atomic::{AtomicU64, Ordering};
+                    static LB_COUNTER: AtomicU64 = AtomicU64::new(0);
+                    generated = format!("auto-{}", LB_COUNTER.fetch_add(1, Ordering::Relaxed));
+                    &generated
+                } else {
+                    &connect.client_id
+                };
+                if let Some(backend) = lb.select_backend(client_id) {
+                    let backend = backend.to_string();
+                    info!(
+                        client_id = %client_id,
+                        backend = %backend,
+                        "Redirecting client to backend"
+                    );
+                    let connack = ConnAckPacket::new(false, ReasonCode::UseAnotherServer)
+                        .with_server_reference(backend);
+                    self.write_packet(&Packet::ConnAck(connack), writer)?;
+                    return Err(MqttError::UseAnotherServer);
+                }
+            }
+        }
+        Ok(())
     }
 
     fn validate_will_capabilities(

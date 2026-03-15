@@ -278,7 +278,10 @@ impl MqttError {
     #[must_use]
     pub fn is_normal_disconnect(&self) -> bool {
         match self {
-            Self::ClientClosed | Self::ConnectionClosedByPeer => true,
+            Self::ClientClosed
+            | Self::ConnectionClosedByPeer
+            | Self::UseAnotherServer
+            | Self::ServerMoved => true,
             Self::Io(msg)
                 if msg.contains("stream has been shut down")
                     || msg.contains("Connection reset") =>

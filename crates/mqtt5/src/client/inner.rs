@@ -1,4 +1,5 @@
 use crate::error::{MqttError, Result};
+use crate::protocol::v5::reason_codes::ReasonCode;
 use crate::types::{ConnectOptions, ConnectResult};
 use crate::Transport;
 use std::net::ToSocketAddrs;
@@ -337,6 +338,14 @@ impl MqttClient {
 
                     return Ok(result);
                 }
+                Err(
+                    e @ MqttError::ConnectionRefused(
+                        ReasonCode::UseAnotherServer | ReasonCode::ServerMoved,
+                    ),
+                ) => {
+                    drop(inner);
+                    return Err(e);
+                }
                 Err(e) => {
                     drop(inner);
                     last_error = Some(e);
@@ -350,19 +359,53 @@ impl MqttClient {
     }
 
     pub(crate) async fn connect_internal(&self, address: &str) -> Result<ConnectResult> {
-        let client_id = self.inner.read().await.options.client_id.clone();
-        tracing::debug!(
-            address = %address,
-            client_id = %client_id,
-            "🔄 CONNECTION ATTEMPT - Tracking source of connection attempt"
-        );
+        const MAX_REDIRECTS: u8 = 3;
+        let mut current_address = address.to_string();
+        let mut redirect_count: u8 = 0;
 
-        let (client_transport_type, host, port) = Self::parse_address(address)?;
-        let addrs = Self::resolve_addresses(host, port)?;
-        let addresses_to_try = Self::select_addresses_for_connection(&addrs, host);
+        loop {
+            let client_id = self.inner.read().await.options.client_id.clone();
+            tracing::debug!(
+                address = %current_address,
+                client_id = %client_id,
+                redirect_count,
+                "Connection attempt"
+            );
 
-        self.try_connect_to_addresses(addresses_to_try, client_transport_type, host)
-            .await
+            let (client_transport_type, host, port) = Self::parse_address(&current_address)?;
+            let addrs = Self::resolve_addresses(host, port)?;
+            let addresses_to_try = Self::select_addresses_for_connection(&addrs, host);
+
+            match self
+                .try_connect_to_addresses(addresses_to_try, client_transport_type, host)
+                .await
+            {
+                Ok(result) => return Ok(result),
+                Err(MqttError::ConnectionRefused(
+                    reason @ (ReasonCode::UseAnotherServer | ReasonCode::ServerMoved),
+                )) => {
+                    let redirect_url = self.inner.write().await.server_redirect.take();
+                    if let Some(url) = redirect_url {
+                        if redirect_count < MAX_REDIRECTS {
+                            tracing::info!(
+                                from = %current_address,
+                                to = %url,
+                                reason = ?reason,
+                                "Following server redirect"
+                            );
+                            redirect_count += 1;
+                            current_address = url;
+                            continue;
+                        }
+                    }
+                    return Err(MqttError::ConnectionError(
+                        "Server redirect failed: too many redirects or missing server reference"
+                            .to_string(),
+                    ));
+                }
+                Err(e) => return Err(e),
+            }
+        }
     }
 
     /// Internal connection method using custom TLS configuration
@@ -374,6 +417,8 @@ impl MqttClient {
         &self,
         tls_config: crate::transport::tls::TlsConfig,
     ) -> Result<ConnectResult> {
+        *self.tls_config.write().await = Some(tls_config.clone());
+
         let mut tls_transport = crate::transport::tls::TlsTransport::new(tls_config);
         tls_transport
             .connect()
@@ -434,6 +479,23 @@ impl MqttClient {
                 }
 
                 Ok(result)
+            }
+            Err(MqttError::ConnectionRefused(
+                reason @ (ReasonCode::UseAnotherServer | ReasonCode::ServerMoved),
+            )) => {
+                let redirect_url = inner.server_redirect.take();
+                drop(inner);
+                if let Some(url) = redirect_url {
+                    tracing::info!(
+                        to = %url,
+                        reason = ?reason,
+                        "Following server redirect from TLS connection"
+                    );
+                    return Box::pin(self.connect_internal(&url)).await;
+                }
+                Err(MqttError::ConnectionError(
+                    "Server redirect missing server reference".to_string(),
+                ))
             }
             Err(e) => {
                 drop(inner);

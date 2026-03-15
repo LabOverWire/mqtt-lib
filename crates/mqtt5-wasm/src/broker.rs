@@ -3,7 +3,7 @@ use crate::client_handler::WasmClientHandler;
 use crate::config::WasmConnectOptions;
 use mqtt5::broker::acl::{AclRule, Permission};
 use mqtt5::broker::auth::{ComprehensiveAuthProvider, PasswordAuthProvider};
-use mqtt5::broker::config::{BrokerConfig, ChangeOnlyDeliveryConfig};
+use mqtt5::broker::config::{BrokerConfig, ChangeOnlyDeliveryConfig, LoadBalancerConfig};
 use mqtt5::broker::resource_monitor::{ResourceLimits, ResourceMonitor};
 use mqtt5::broker::router::MessageRouter;
 use mqtt5::broker::storage::{DynamicStorage, MemoryBackend};
@@ -47,6 +47,7 @@ struct ConfigHashFields {
     echo_suppression_enabled: bool,
     echo_suppression_property_key: Option<String>,
     max_outbound_rate_per_client: u32,
+    load_balancer_backends: Vec<String>,
 }
 
 #[wasm_bindgen(js_name = "BrokerConfig")]
@@ -68,6 +69,7 @@ pub struct WasmBrokerConfig {
     echo_suppression_enabled: bool,
     echo_suppression_property_key: Option<String>,
     max_outbound_rate_per_client: u32,
+    load_balancer_backends: Vec<String>,
 }
 
 #[wasm_bindgen(js_class = "BrokerConfig")]
@@ -92,6 +94,7 @@ impl WasmBrokerConfig {
             echo_suppression_enabled: false,
             echo_suppression_property_key: None,
             max_outbound_rate_per_client: 0,
+            load_balancer_backends: Vec::new(),
         }
     }
 
@@ -180,6 +183,16 @@ impl WasmBrokerConfig {
         self.max_outbound_rate_per_client = value;
     }
 
+    #[wasm_bindgen(js_name = "addLoadBalancerBackend")]
+    pub fn add_load_balancer_backend(&mut self, backend: String) {
+        self.load_balancer_backends.push(backend);
+    }
+
+    #[wasm_bindgen(js_name = "clearLoadBalancerBackends")]
+    pub fn clear_load_balancer_backends(&mut self) {
+        self.load_balancer_backends.clear();
+    }
+
     fn to_broker_config(&self) -> BrokerConfig {
         BrokerConfig {
             max_clients: self.max_clients as usize,
@@ -208,6 +221,11 @@ impl WasmBrokerConfig {
                     .unwrap_or_else(|| "x-origin-client-id".to_string()),
             },
             max_outbound_rate_per_client: self.max_outbound_rate_per_client,
+            load_balancer: if self.load_balancer_backends.is_empty() {
+                None
+            } else {
+                Some(LoadBalancerConfig::new(self.load_balancer_backends.clone()))
+            },
             ..Default::default()
         }
     }
@@ -230,6 +248,7 @@ impl WasmBrokerConfig {
             echo_suppression_enabled: self.echo_suppression_enabled,
             echo_suppression_property_key: self.echo_suppression_property_key.clone(),
             max_outbound_rate_per_client: self.max_outbound_rate_per_client,
+            load_balancer_backends: self.load_balancer_backends.clone(),
         };
         let mut hasher = DefaultHasher::new();
         fields.hash(&mut hasher);

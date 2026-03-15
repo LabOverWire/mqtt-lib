@@ -189,6 +189,7 @@ mqttv5 pub
 - Hot configuration reload - Update settings without restart
 - Storage backends - File-based or in-memory persistence
 - Event hooks - Custom handlers for connect, publish, subscribe, disconnect events
+- Load balancer mode - Server redirect via CONNACK UseAnotherServer for horizontal scaling
 
 ### Change-Only Delivery
 
@@ -213,6 +214,30 @@ let config = BrokerConfig::new()
 **Bridge behavior:**
 - Messages from bridges → local subscribers: change-only filtering applies
 - Messages to bridges (outgoing): all messages forwarded (no filtering)
+
+### Load Balancer Mode
+
+Redirects clients to backend brokers using MQTT v5 `UseAnotherServer` (0x9C) with consistent hashing on the client ID.
+
+```bash
+# Start two backend brokers
+mqttv5 broker --host 0.0.0.0:1884 --allow-anonymous
+mqttv5 broker --host 0.0.0.0:1885 --allow-anonymous
+
+# Start the load balancer (redirects only, does not broker messages)
+mqttv5 broker --config lb.json
+```
+
+```json
+{
+  "bind_addresses": ["0.0.0.0:1883"],
+  "load_balancer": {
+    "backends": ["mqtt://127.0.0.1:1884", "mqtt://127.0.0.1:1885"]
+  }
+}
+```
+
+Clients connecting to port 1883 receive a redirect and automatically reconnect to the assigned backend (up to 3 hops).
 
 ## Client Capabilities
 
@@ -492,6 +517,7 @@ See `crates/mqtt5-wasm/examples/` for browser examples:
 
 - `websocket/` - External broker connections
 - `local-broker/` - In-tab broker with MessagePort
+- `load-balancer-redirect/` - Server redirect via CONNACK UseAnotherServer
 - Complete HTML/JavaScript/CSS applications
 - Build instructions with `wasm-pack`
 

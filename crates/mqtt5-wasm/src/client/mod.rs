@@ -220,6 +220,24 @@ impl WasmMqttClient {
                     let session_present = connack.session_present;
 
                     if reason_code != 0 {
+                        if reason_code == 0x9C || reason_code == 0x9D {
+                            if let Some(server_ref) = connack.properties.get_server_reference() {
+                                let obj = js_sys::Object::new();
+                                js_sys::Reflect::set(
+                                    &obj,
+                                    &JsValue::from_str("type"),
+                                    &JsValue::from_str("redirect"),
+                                )
+                                .ok();
+                                js_sys::Reflect::set(
+                                    &obj,
+                                    &JsValue::from_str("url"),
+                                    &JsValue::from_str(server_ref),
+                                )
+                                .ok();
+                                return Err(obj.into());
+                            }
+                        }
                         return Err(JsValue::from_str(&format!(
                             "Connection rejected: {}",
                             connack_error_description(reason_code)
@@ -848,6 +866,8 @@ fn connack_error_description(reason_code: u8) -> &'static str {
         0x8C => "Bad authentication method",
         0x90 => "Topic name invalid",
         0x97 => "Quota exceeded",
+        0x9C => "Use another server",
+        0x9D => "Server moved",
         0x9F => "Connection rate exceeded",
         _ => "Unknown error",
     }
