@@ -226,6 +226,33 @@ Where `lb-config.json` contains a `load_balancer` section:
 
 Clients connecting to the load balancer receive a CONNACK with reason code `UseAnotherServer` (0x9C) and a Server Reference property pointing to one of the backends. The client library automatically follows the redirect (up to 3 hops).
 
+The load balancer only redirects — it does not broker messages. You must run the backend brokers separately:
+
+```bash
+# Terminal 1: Start backend broker A on port 1884
+mqttv5 broker --tcp-port 1884
+
+# Terminal 2: Start backend broker B on port 1885
+mqttv5 broker --tcp-port 1885
+
+# Terminal 3: Start load balancer on port 1883
+mqttv5 broker --config lb-config.json
+```
+
+Where `lb-config.json` points to the running backends:
+
+```json
+{
+  "bind_addresses": ["0.0.0.0:1883"],
+  "load_balancer": {
+    "backends": [
+      "mqtt://127.0.0.1:1884",
+      "mqtt://127.0.0.1:1885"
+    ]
+  }
+}
+```
+
 Publish through a load balancer (automatic redirect):
 
 ```bash
@@ -1089,9 +1116,19 @@ The broker accepts a JSON configuration file with `--config` flag.
 
 | Field | Type | Description | Default |
 | --- | --- | --- | --- |
-| `backends` | `string[]` | Backend broker URLs (e.g., `mqtt://host:port`) | Required |
+| `backends` | `string[]` | Backend broker URLs | Required |
 
-When `load_balancer` is set, the broker acts as a connection redirector. On each CONNECT, it selects a backend using a hash of the client ID and responds with CONNACK reason code `UseAnotherServer` (0x9C) containing a Server Reference property. The client automatically follows the redirect.
+When `load_balancer` is set, the broker acts as a connection redirector. On each CONNECT, it selects a backend using a hash of the client ID (byte-sum modulo backend count) and responds with CONNACK reason code `UseAnotherServer` (0x9C) containing a Server Reference property. The client automatically follows the redirect (up to 3 hops). The same client ID always routes to the same backend.
+
+Backend URL format determines the transport the client uses after redirect:
+
+| Scheme | Transport | Default Port |
+| --- | --- | --- |
+| `mqtt://host:port` | TCP | 1883 |
+| `mqtts://host:port` | TLS | 8883 |
+| `quic://host:port` | QUIC | 14567 |
+
+The backend URL scheme must match the transport the client should use for the backend connection. The LB broker always requires at least one TCP `bind_addresses` entry, even for TLS-only or QUIC-only load balancing.
 
 ### BridgeConfig
 
@@ -1221,6 +1258,44 @@ When `load_balancer` is set, the broker acts as a connection redirector. On each
       "mqtt://backend1.example.com:1883",
       "mqtt://backend2.example.com:1883",
       "mqtt://backend3.example.com:1883"
+    ]
+  }
+}
+```
+
+#### TLS Load Balancer Broker
+
+```json
+{
+  "bind_addresses": ["0.0.0.0:1883"],
+  "tls_config": {
+    "cert_file": "/etc/mqtt/certs/server.pem",
+    "key_file": "/etc/mqtt/certs/server-key.pem",
+    "bind_addresses": ["0.0.0.0:8883"]
+  },
+  "load_balancer": {
+    "backends": [
+      "mqtts://backend1.example.com:8883",
+      "mqtts://backend2.example.com:8883"
+    ]
+  }
+}
+```
+
+#### QUIC Load Balancer Broker
+
+```json
+{
+  "bind_addresses": ["0.0.0.0:1883"],
+  "quic_config": {
+    "cert_file": "/etc/mqtt/certs/server.pem",
+    "key_file": "/etc/mqtt/certs/server-key.pem",
+    "bind_addresses": ["0.0.0.0:14567"]
+  },
+  "load_balancer": {
+    "backends": [
+      "quic://backend1.example.com:14567",
+      "quic://backend2.example.com:14567"
     ]
   }
 }

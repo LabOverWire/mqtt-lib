@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WASM Load Balancer Redirect Demo</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            max-width: 1200px;
+            margin: 40px auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .header {
+            background: white;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+        h1 { color: #333; margin-top: 0; }
+        .highlight {
+            background: #e7f3ff;
+            padding: 15px;
+            border-radius: 4px;
+            border-left: 4px solid #007bff;
+            margin: 15px 0;
+        }
+        .architecture {
+            background: #fff3cd;
+            padding: 15px;
+            border-radius: 4px;
+            border-left: 4px solid #ffc107;
+            margin: 15px 0;
+        }
+        .prereq {
+            background: #f8d7da;
+            padding: 15px;
+            border-radius: 4px;
+            border-left: 4px solid #dc3545;
+            margin: 15px 0;
+            font-size: 0.9em;
+        }
+        .prereq code {
+            background: #f1c0c5;
+            padding: 2px 5px;
+            border-radius: 3px;
+        }
+        .topology {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 20px;
+            margin-top: 20px;
+        }
+        .card {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .card h2 {
+            margin-top: 0;
+            color: #333;
+            font-size: 1.1em;
+            border-bottom: 2px solid #6c757d;
+            padding-bottom: 10px;
+        }
+        .lb h2 { border-color: #ffc107; }
+        .backend-a h2 { border-color: #28a745; }
+        .backend-b h2 { border-color: #007bff; }
+        .status {
+            padding: 8px 12px;
+            margin: 8px 0;
+            border-radius: 4px;
+            font-weight: 500;
+            font-size: 0.85em;
+        }
+        .status.running {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        .status.error {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        .client-list {
+            margin-top: 10px;
+            min-height: 40px;
+        }
+        .client-tag {
+            display: inline-block;
+            padding: 4px 10px;
+            margin: 3px;
+            border-radius: 12px;
+            font-size: 0.8em;
+            font-weight: 500;
+        }
+        .client-tag.a { background: #d4edda; color: #155724; }
+        .client-tag.b { background: #cce5ff; color: #004085; }
+        .messages {
+            margin-top: 10px;
+            max-height: 250px;
+            overflow-y: auto;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            padding: 10px;
+            background: #fafafa;
+            font-size: 0.82em;
+        }
+        .message {
+            padding: 6px 8px;
+            margin: 3px 0;
+            background: white;
+            border-left: 3px solid #6c757d;
+            border-radius: 2px;
+        }
+        .message.redirect { border-left-color: #ffc107; background: #fffdf5; }
+        .message.success-a { border-left-color: #28a745; background: #f5fff5; }
+        .message.success-b { border-left-color: #007bff; background: #f5f8ff; }
+        .topic { font-weight: bold; color: #007bff; }
+        .controls {
+            margin-top: 20px;
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .controls h2 {
+            margin-top: 0;
+            font-size: 1.1em;
+            border-bottom: 2px solid #17a2b8;
+            padding-bottom: 10px;
+        }
+        button {
+            background: #007bff;
+            color: white;
+            border: none;
+            cursor: pointer;
+            padding: 10px 20px;
+            border-radius: 4px;
+            font-size: 14px;
+            margin: 5px 5px 5px 0;
+        }
+        button:hover { background: #0056b3; }
+        button:disabled { background: #6c757d; cursor: not-allowed; }
+        button.connect-btn { background: #ffc107; color: #333; }
+        button.connect-btn:hover { background: #e0a800; }
+        button.publish-btn { background: #17a2b8; }
+        button.publish-btn:hover { background: #138496; }
+        .stats {
+            display: flex;
+            gap: 15px;
+            margin: 15px 0;
+            flex-wrap: wrap;
+        }
+        .stat-item {
+            padding: 8px 14px;
+            background: #f8f9fa;
+            border-radius: 4px;
+            border: 1px solid #dee2e6;
+        }
+        .stat-value {
+            font-size: 1.3em;
+            font-weight: bold;
+            color: #007bff;
+        }
+        .stat-value.a { color: #28a745; }
+        .stat-value.b { color: #007bff; }
+        .stat-label { font-size: 0.75em; color: #666; }
+        #debug {
+            margin-top: 15px;
+            padding: 10px;
+            background: #f8f9fa;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 0.82em;
+            max-height: 200px;
+            overflow-y: auto;
+            display: none;
+        }
+        .btn-row { display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>Load Balancer Redirect Demo</h1>
+        <p>This demonstrates <strong>MQTT v5 Server Redirect</strong> using the <code>UseAnotherServer</code> reason code.
+        An in-browser WASM load balancer redirects clients to one of two native backend brokers running on localhost.</p>
+
+        <div class="architecture">
+            <strong>Architecture:</strong>
+            WASM Client &rarr; WASM LB Broker (CONNACK 0x9C + ServerReference) &rarr; Client reconnects via WebSocket to native Backend A or B
+        </div>
+
+        <div class="prereq">
+            <strong>Prerequisites:</strong> Start two native brokers with WebSocket enabled before opening this page:
+            <pre style="margin:8px 0 0 0;"><code>mqttv5 broker --host 0.0.0.0:1884 --ws-host 0.0.0.0:9001 --allow-anonymous
+mqttv5 broker --host 0.0.0.0:1885 --ws-host 0.0.0.0:9002 --allow-anonymous</code></pre>
+        </div>
+
+        <div class="highlight">
+            <strong>Try this:</strong> Click "Connect 4 Clients via LB" to see clients get distributed across the two native backends.
+            Then use the CLI to cross-verify: <code>mqttv5 sub -t demo/# --host 127.0.0.1 --port 1884 --non-interactive</code>
+        </div>
+    </div>
+
+    <div class="stats">
+        <div class="stat-item">
+            <div class="stat-value" id="redirect-count">0</div>
+            <div class="stat-label">Redirects</div>
+        </div>
+        <div class="stat-item">
+            <div class="stat-value a" id="backend-a-count">0</div>
+            <div class="stat-label">Backend A Clients</div>
+        </div>
+        <div class="stat-item">
+            <div class="stat-value b" id="backend-b-count">0</div>
+            <div class="stat-label">Backend B Clients</div>
+        </div>
+        <div class="stat-item">
+            <div class="stat-value" id="msg-count">0</div>
+            <div class="stat-label">Messages Delivered</div>
+        </div>
+    </div>
+
+    <div class="topology">
+        <div class="card lb">
+            <h2>WASM LB Broker (In-Browser)</h2>
+            <div id="lb-status" class="status running">Redirecting to: ws://localhost:9001, ws://localhost:9002</div>
+            <h4>Redirect Log:</h4>
+            <div id="lb-log" class="messages"><em>No redirects yet</em></div>
+        </div>
+
+        <div class="card backend-a">
+            <h2>Backend A (localhost:9001)</h2>
+            <div id="a-status" class="status running">Native broker on TCP 1884 / WS 9001</div>
+            <h4>Connected WASM Clients:</h4>
+            <div id="a-clients" class="client-list"><em>None</em></div>
+            <h4>Messages:</h4>
+            <div id="a-messages" class="messages"><em>No messages yet</em></div>
+        </div>
+
+        <div class="card backend-b">
+            <h2>Backend B (localhost:9002)</h2>
+            <div id="b-status" class="status running">Native broker on TCP 1885 / WS 9002</div>
+            <h4>Connected WASM Clients:</h4>
+            <div id="b-clients" class="client-list"><em>None</em></div>
+            <h4>Messages:</h4>
+            <div id="b-messages" class="messages"><em>No messages yet</em></div>
+        </div>
+    </div>
+
+    <div class="controls">
+        <h2>Client Controls</h2>
+        <div class="btn-row">
+            <button id="connect-all-btn" class="connect-btn">Connect 4 Clients via LB</button>
+            <button id="connect-one-btn" class="connect-btn">Connect 1 Random Client</button>
+            <button id="publish-btn" class="publish-btn" disabled>Publish to All Connected</button>
+        </div>
+    </div>
+
+    <div id="debug">
+        <strong>Debug Log:</strong>
+        <div id="debug-messages"></div>
+    </div>
+
+    <script type="module">
+        import init, { Broker, BrokerConfig, MqttClient } from './pkg/mqtt5_wasm.js';
+
+        const BACKEND_A = 'ws://127.0.0.1:9001/mqtt';
+        const BACKEND_B = 'ws://127.0.0.1:9002/mqtt';
+
+        let redirectCount = 0;
+        let backendACount = 0;
+        let backendBCount = 0;
+        let msgCount = 0;
+        let clientCounter = 0;
+
+        const connectedClients = [];
+        const backendMap = {};
+        backendMap[BACKEND_A] = [];
+        backendMap[BACKEND_B] = [];
+
+        let lbBroker;
+
+        function debugLog(msg) {
+            const debugDiv = document.getElementById('debug');
+            const messagesDiv = document.getElementById('debug-messages');
+            debugDiv.style.display = 'block';
+            const line = document.createElement('div');
+            line.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+            messagesDiv.appendChild(line);
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+            console.log(msg);
+        }
+
+        function updateStats() {
+            document.getElementById('redirect-count').textContent = redirectCount;
+            document.getElementById('backend-a-count').textContent = backendACount;
+            document.getElementById('backend-b-count').textContent = backendBCount;
+            document.getElementById('msg-count').textContent = msgCount;
+        }
+
+        function addLbLog(clientId, backend) {
+            const el = document.getElementById('lb-log');
+            if (el.querySelector('em')) el.innerHTML = '';
+            const div = document.createElement('div');
+            div.className = 'message redirect';
+            const ts = new Date().toLocaleTimeString();
+            div.textContent = `[${ts}] ${clientId} → ${backend}`;
+            el.prepend(div);
+        }
+
+        function isBackendA(backend) {
+            return backend === BACKEND_A;
+        }
+
+        function updateClientList(backend) {
+            const id = isBackendA(backend) ? 'a-clients' : 'b-clients';
+            const el = document.getElementById(id);
+            const cls = isBackendA(backend) ? 'a' : 'b';
+            el.innerHTML = backendMap[backend]
+                .map(c => `<span class="client-tag ${cls}">${c}</span>`)
+                .join('') || '<em>None</em>';
+        }
+
+        function addBackendMessage(backend, clientId, topic, payload) {
+            const id = isBackendA(backend) ? 'a-messages' : 'b-messages';
+            const cls = isBackendA(backend) ? 'success-a' : 'success-b';
+            const el = document.getElementById(id);
+            if (el.querySelector('em')) el.innerHTML = '';
+            const div = document.createElement('div');
+            div.className = `message ${cls}`;
+            const ts = new Date().toLocaleTimeString();
+            div.innerHTML = `<span class="topic">${topic}</span> ${payload} <small>(from ${clientId}, ${ts})</small>`;
+            el.prepend(div);
+        }
+
+        async function connectClientViaLB(clientId) {
+            const client = new MqttClient(clientId);
+            const lbPort = lbBroker.createClientPort();
+
+            debugLog(`${clientId}: connecting to LB broker...`);
+
+            try {
+                await client.connectMessagePort(lbPort);
+                debugLog(`${clientId}: ERROR - should have been redirected!`);
+                return null;
+            } catch (err) {
+                const errStr = String(err);
+                if (!errStr.startsWith('Server redirect: ')) {
+                    debugLog(`${clientId}: connection error: ${errStr}`);
+                    return null;
+                }
+
+                const backend = errStr.replace('Server redirect: ', '');
+                debugLog(`${clientId}: redirected to ${backend}`);
+
+                redirectCount++;
+                addLbLog(clientId, backend);
+                updateStats();
+
+                const redirectedClient = new MqttClient(clientId);
+
+                try {
+                    await redirectedClient.connect(backend);
+                } catch (connectErr) {
+                    debugLog(`${clientId}: failed to connect to ${backend}: ${connectErr}`);
+                    const statusId = isBackendA(backend) ? 'a-status' : 'b-status';
+                    document.getElementById(statusId).className = 'status error';
+                    document.getElementById(statusId).textContent = `Connection failed - is the broker running?`;
+                    return null;
+                }
+
+                debugLog(`${clientId}: connected to ${backend} via WebSocket`);
+
+                if (isBackendA(backend)) {
+                    backendACount++;
+                } else {
+                    backendBCount++;
+                }
+                updateStats();
+
+                if (!backendMap[backend]) backendMap[backend] = [];
+                backendMap[backend].push(clientId);
+                updateClientList(backend);
+
+                await redirectedClient.subscribeWithCallback('demo/#', (topic, payload) => {
+                    const decoder = new TextDecoder();
+                    const message = decoder.decode(payload);
+                    msgCount++;
+                    updateStats();
+                    addBackendMessage(backend, clientId, topic, message);
+                    debugLog(`${clientId}@${backend}: received ${topic} = ${message}`);
+                });
+
+                connectedClients.push({ clientId, client: redirectedClient, backend });
+                return { clientId, backend };
+            }
+        }
+
+        async function main() {
+            try {
+                debugLog('Initializing WASM...');
+                await init();
+
+                const lbConfig = new BrokerConfig();
+                lbConfig.allowAnonymous = true;
+                lbConfig.addLoadBalancerBackend(BACKEND_A);
+                lbConfig.addLoadBalancerBackend(BACKEND_B);
+                lbBroker = Broker.withConfig(lbConfig);
+                debugLog(`LB broker created (backends: ${BACKEND_A}, ${BACKEND_B})`);
+
+                document.getElementById('connect-all-btn').addEventListener('click', async () => {
+                    document.getElementById('connect-all-btn').disabled = true;
+                    const names = ['alice', 'bob', 'charlie', 'dave'];
+                    for (const name of names) {
+                        await connectClientViaLB(name);
+                    }
+                    if (connectedClients.length > 0) {
+                        document.getElementById('publish-btn').disabled = false;
+                    }
+                    document.getElementById('connect-all-btn').disabled = false;
+                });
+
+                document.getElementById('connect-one-btn').addEventListener('click', async () => {
+                    document.getElementById('connect-one-btn').disabled = true;
+                    clientCounter++;
+                    const name = `client-${clientCounter}`;
+                    await connectClientViaLB(name);
+                    if (connectedClients.length > 0) {
+                        document.getElementById('publish-btn').disabled = false;
+                    }
+                    document.getElementById('connect-one-btn').disabled = false;
+                });
+
+                document.getElementById('publish-btn').addEventListener('click', async () => {
+                    const encoder = new TextEncoder();
+                    const ts = new Date().toLocaleTimeString();
+                    for (const { clientId, client } of connectedClients) {
+                        const payload = `hello from ${clientId} at ${ts}`;
+                        await client.publish('demo/greetings', encoder.encode(payload));
+                        debugLog(`${clientId}: published to demo/greetings`);
+                    }
+                });
+
+                debugLog('Demo ready! Click "Connect 4 Clients via LB" to start.');
+
+            } catch (error) {
+                debugLog(`ERROR: ${error.message || error}`);
+                console.error('Initialization error:', error);
+            }
+        }
+
+        main().catch(err => {
+            debugLog(`FATAL ERROR: ${err.message || err}`);
+            console.error('Fatal error:', err);
+        });
+    </script>
+</body>
+</html>

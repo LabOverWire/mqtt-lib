@@ -47,6 +47,7 @@ cp -r pkg examples/loop-prevention/
 cp -r pkg examples/change-only-delivery/
 cp -r pkg examples/qos2-recovery/
 cp -r pkg examples/connectivity-detection/
+cp -r pkg examples/load-balancer-redirect/
 
 echo "✨ Build complete!"
 echo ""
@@ -142,6 +143,10 @@ echo "  python3 -m http.server 8000"
 echo ""
 echo "Connectivity Detection (Online/Offline):"
 echo "  cd examples/connectivity-detection"
+echo "  python3 -m http.server 8000"
+echo ""
+echo "Load Balancer Redirect (Server Redirect):"
+echo "  cd examples/load-balancer-redirect"
 echo "  python3 -m http.server 8000"
 echo ""
 echo "Then open http://localhost:8000 in your browser"
