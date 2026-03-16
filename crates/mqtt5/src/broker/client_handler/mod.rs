@@ -464,6 +464,8 @@ impl ClientHandler {
                     match packet_result {
                         Ok(packet) => {
                             self.handle_packet(packet).await?;
+                            #[cfg(not(target_arch = "wasm32"))]
+                            self.check_quic_migration().await;
                         }
                         Err(e) if e.is_normal_disconnect() => {
                             debug!("Client disconnected");
@@ -527,6 +529,8 @@ impl ClientHandler {
                         Ok(packet) => {
                             last_packet_time = tokio::time::Instant::now();
                             self.handle_packet(packet).await?;
+                            #[cfg(not(target_arch = "wasm32"))]
+                            self.check_quic_migration().await;
                         }
                         Err(e) if e.is_normal_disconnect() => {
                             debug!("Client disconnected");
@@ -585,6 +589,29 @@ impl ClientHandler {
                     }
                     return Ok(false);
                 }
+            }
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn check_quic_migration(&mut self) {
+        let Some(conn) = &self.quic_connection else {
+            return;
+        };
+        let current_addr = conn.remote_address();
+        if current_addr != self.client_addr {
+            let old_addr = self.client_addr;
+            self.client_addr = current_addr;
+            if let Some(ref client_id) = self.client_id {
+                info!(
+                    client_id = %client_id,
+                    old_addr = %old_addr,
+                    new_addr = %current_addr,
+                    "QUIC connection migrated"
+                );
+                self.resource_monitor
+                    .update_connection_ip(client_id, old_addr.ip(), current_addr.ip())
+                    .await;
             }
         }
     }

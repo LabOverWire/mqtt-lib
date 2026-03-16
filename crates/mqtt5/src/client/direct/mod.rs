@@ -1098,6 +1098,25 @@ impl DirectClientInner {
         Ok(recovered)
     }
 
+    pub fn migrate(&self) -> Result<()> {
+        if !self.is_connected() {
+            return Err(MqttError::NotConnected);
+        }
+        let endpoint = self.quic_endpoint.as_ref().ok_or_else(|| {
+            MqttError::ConnectionError("migration only supported for QUIC connections".into())
+        })?;
+        let socket = std::net::UdpSocket::bind("0.0.0.0:0")
+            .map_err(|e| MqttError::ConnectionError(format!("failed to bind new socket: {e}")))?;
+        endpoint
+            .rebind(socket)
+            .map_err(|e| MqttError::ConnectionError(format!("failed to rebind endpoint: {e}")))?;
+        tracing::info!(
+            local_addr = ?endpoint.local_addr(),
+            "QUIC endpoint rebound to new socket"
+        );
+        Ok(())
+    }
+
     fn stop_background_tasks(&mut self) {
         if let Some(handle) = self.packet_reader_handle.take() {
             handle.abort();

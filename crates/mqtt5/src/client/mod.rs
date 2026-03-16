@@ -761,6 +761,17 @@ impl MqttClient {
     pub async fn quic_connection(&self) -> Option<Arc<quinn::Connection>> {
         self.inner.read().await.quic_connection.clone()
     }
+
+    /// Triggers QUIC connection migration by rebinding the endpoint to a new UDP socket.
+    ///
+    /// # Errors
+    ///
+    /// Returns `NotConnected` if the client is not connected, or `ConnectionError`
+    /// if the transport is not QUIC or rebinding fails.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn migrate(&self) -> Result<()> {
+        self.inner.read().await.migrate()
+    }
 }
 
 #[allow(clippy::manual_async_fn)]

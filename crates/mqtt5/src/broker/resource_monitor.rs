@@ -329,6 +329,18 @@ impl ResourceMonitor {
         self.get_memory_usage() > max_memory_bytes
     }
 
+    pub async fn update_connection_ip(&self, client_id: &str, old_ip: IpAddr, new_ip: IpAddr) {
+        let mut ip_connections = self.ip_connections.write().await;
+        if let Some(count) = ip_connections.get_mut(&old_ip) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                ip_connections.remove(&old_ip);
+            }
+        }
+        *ip_connections.entry(new_ip).or_insert(0) += 1;
+        debug!("Connection IP updated for {client_id}: {old_ip} -> {new_ip}");
+    }
+
     pub async fn cleanup_expired_windows(&self) {
         let rate_limit_window = self.limits.read().rate_limit_window;
 
@@ -440,6 +452,39 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(1100)).await;
         monitor.cleanup_expired_windows().await;
         assert!(monitor.can_send_message("client1", 100).await);
+    }
+
+    #[tokio::test]
+    async fn test_update_connection_ip() {
+        let monitor = ResourceMonitor::new(ResourceLimits::default());
+        let old_ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1));
+        let new_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+
+        monitor
+            .register_connection("client1".to_string(), old_ip)
+            .await;
+
+        let stats = monitor.get_stats().await;
+        assert_eq!(stats.current_connections, 1);
+
+        {
+            let ip_conns = monitor.ip_connections.read().await;
+            assert_eq!(ip_conns.get(&old_ip).copied(), Some(1));
+            assert_eq!(ip_conns.get(&new_ip).copied(), None);
+        }
+
+        monitor
+            .update_connection_ip("client1", old_ip, new_ip)
+            .await;
+
+        {
+            let ip_conns = monitor.ip_connections.read().await;
+            assert_eq!(ip_conns.get(&old_ip).copied(), None);
+            assert_eq!(ip_conns.get(&new_ip).copied(), Some(1));
+        }
+
+        let stats = monitor.get_stats().await;
+        assert_eq!(stats.current_connections, 1);
     }
 
     #[tokio::test]
