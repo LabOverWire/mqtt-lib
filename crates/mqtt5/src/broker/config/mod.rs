@@ -24,6 +24,8 @@ use crate::error::Result;
 use crate::telemetry::TelemetryConfig;
 use crate::time::Duration;
 use serde::{Deserialize, Serialize};
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -31,6 +33,34 @@ use super::events::BrokerEventHandler;
 
 fn default_client_channel_capacity() -> usize {
     10000
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoadBalancerConfig {
+    pub backends: Vec<String>,
+}
+
+impl LoadBalancerConfig {
+    #[must_use]
+    pub fn new(backends: Vec<String>) -> Self {
+        Self { backends }
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.backends.is_empty()
+    }
+
+    #[must_use]
+    pub fn select_backend(&self, client_id: &str) -> Option<&str> {
+        if self.backends.is_empty() {
+            return None;
+        }
+        let mut hasher = DefaultHasher::new();
+        client_id.hash(&mut hasher);
+        let hash = mqtt5_protocol::u64_to_usize_saturating(hasher.finish());
+        Some(&self.backends[hash % self.backends.len()])
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -81,6 +111,8 @@ pub struct BrokerConfig {
     #[cfg(feature = "opentelemetry")]
     #[serde(skip)]
     pub opentelemetry_config: Option<TelemetryConfig>,
+    #[serde(default)]
+    pub load_balancer: Option<LoadBalancerConfig>,
     #[serde(skip)]
     pub event_handler: Option<Arc<dyn BrokerEventHandler>>,
 }
@@ -133,7 +165,8 @@ impl std::fmt::Debug for BrokerConfig {
                 "max_outbound_rate_per_client",
                 &self.max_outbound_rate_per_client,
             )
-            .field("server_delivery_strategy", &self.server_delivery_strategy);
+            .field("server_delivery_strategy", &self.server_delivery_strategy)
+            .field("load_balancer", &self.load_balancer);
         #[cfg(not(target_arch = "wasm32"))]
         d.field("bridges", &self.bridges);
         #[cfg(feature = "opentelemetry")]
@@ -181,6 +214,7 @@ impl Default for BrokerConfig {
             bridges: vec![],
             #[cfg(feature = "opentelemetry")]
             opentelemetry_config: None,
+            load_balancer: None,
             event_handler: None,
         }
     }
@@ -340,6 +374,12 @@ impl BrokerConfig {
     #[cfg(feature = "opentelemetry")]
     pub fn with_opentelemetry(mut self, config: TelemetryConfig) -> Self {
         self.opentelemetry_config = Some(config);
+        self
+    }
+
+    #[must_use]
+    pub fn with_load_balancer(mut self, config: LoadBalancerConfig) -> Self {
+        self.load_balancer = Some(config);
         self
     }
 

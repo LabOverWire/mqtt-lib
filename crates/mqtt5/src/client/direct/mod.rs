@@ -67,6 +67,7 @@ pub struct DirectClientInner {
     pub pending_pubcomps: Arc<Mutex<HashMap<u16, oneshot::Sender<ReasonCode>>>>,
     pub reconnect_attempt: u32,
     pub last_address: Option<String>,
+    pub server_redirect: Option<String>,
     pub queued_messages: Arc<Mutex<Vec<PublishPacket>>>,
     pub stored_subscriptions: Arc<Mutex<Vec<(String, SubscriptionOptions, CallbackId)>>>,
     pub queue_on_disconnect: bool,
@@ -109,6 +110,7 @@ impl DirectClientInner {
             pending_pubcomps: Arc::new(Mutex::new(HashMap::new())),
             reconnect_attempt: 0,
             last_address: None,
+            server_redirect: None,
             queued_messages: Arc::new(Mutex::new(Vec::new())),
             stored_subscriptions: Arc::new(Mutex::new(Vec::new())),
             queue_on_disconnect,
@@ -246,6 +248,13 @@ impl DirectClientInner {
         tracing::debug!("CLIENT: Waiting for CONNACK or AUTH");
 
         let connack = self.wait_for_connack(&mut transport).await?;
+
+        if connack.reason_code == ReasonCode::UseAnotherServer
+            || connack.reason_code == ReasonCode::ServerMoved
+        {
+            self.server_redirect = connack.properties.get_server_reference().map(String::from);
+            return Err(MqttError::ConnectionRefused(connack.reason_code));
+        }
 
         if connack.reason_code != ReasonCode::Success {
             return Err(MqttError::ConnectionRefused(connack.reason_code));

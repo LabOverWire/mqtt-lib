@@ -17,6 +17,7 @@ MQTT v5.0 and v3.1.1 WebAssembly client and broker for browser environments.
 - **Broker lifecycle events** - Monitor client connections, publishes, and subscriptions
 - **Automatic keepalive** - Connection health monitoring with timeout detection
 - **Will messages** - Last Will and Testament (LWT) support
+- **Load balancer redirect** - Server redirect via CONNACK UseAnotherServer for horizontal scaling
 
 ## Installation
 
@@ -30,7 +31,7 @@ npm install mqtt5-wasm
 
 ```toml
 [dependencies]
-mqtt5-wasm = "1.1"
+mqtt5-wasm = "1.2"
 ```
 
 Build with wasm-bindgen:
@@ -139,6 +140,31 @@ broker.onClientUnsubscribe((event) => {
 broker.onMessageDelivered((event) => {
   console.log(`Message delivered: packetId=${event.packetId}, QoS ${event.qos}`);
 });
+```
+
+### Load Balancer Redirect
+
+```javascript
+import init, { Broker, BrokerConfig, MqttClient } from "mqtt5-wasm";
+
+await init();
+
+const lbConfig = new BrokerConfig();
+lbConfig.allowAnonymous = true;
+lbConfig.addLoadBalancerBackend("broker-a");
+lbConfig.addLoadBalancerBackend("broker-b");
+const lb = Broker.withConfig(lbConfig);
+
+const client = new MqttClient("my-client");
+const port = lb.createClientPort();
+
+try {
+  await client.connectMessagePort(port);
+} catch (err) {
+  if (err.type === "redirect") {
+    console.log(`Redirected to ${err.url}`);
+  }
+}
 ```
 
 ## Documentation

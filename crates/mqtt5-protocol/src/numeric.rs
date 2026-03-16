@@ -70,6 +70,11 @@ pub fn usize_to_u16_saturating(value: usize) -> u16 {
 }
 
 #[must_use]
+pub fn u64_to_usize_saturating(value: u64) -> usize {
+    usize::try_from(value).unwrap_or(usize::MAX)
+}
+
+#[must_use]
 pub fn i32_to_u32_saturating(value: i32) -> u32 {
     if value < 0 {
         0
@@ -133,6 +138,16 @@ mod tests {
         assert_eq!(u64_to_u16_saturating(1000), 1000);
         assert_eq!(u64_to_u16_saturating(u64::from(u16::MAX)), u16::MAX);
         assert_eq!(u64_to_u16_saturating(u64::MAX), u16::MAX);
+    }
+
+    #[test]
+    fn test_u64_to_usize_saturating() {
+        assert_eq!(u64_to_usize_saturating(0), 0);
+        assert_eq!(u64_to_usize_saturating(1000), 1000);
+        assert_eq!(
+            u64_to_usize_saturating(u64::from(u32::MAX)),
+            u32::MAX as usize
+        );
     }
 
     #[test]

@@ -314,6 +314,27 @@ Broker-to-broker connections:
 - TLS/mTLS support with AWS IoT integration
 - Exponential backoff reconnection
 
+### Load Balancer (Server Redirect)
+
+The broker can act as a pure connection redirector for horizontal scaling. When `load_balancer` is configured, the broker never handles MQTT traffic — it only redirects clients to a backend.
+
+On each CONNECT, the broker hashes the client ID (byte-sum modulo backend count) to deterministically select a backend. It responds with a CONNACK containing reason code `UseAnotherServer` (0x9C) and a `ServerReference` property set to the backend URL. The client parses the URL and reconnects directly to the backend.
+
+The client-side redirect loop in `connect_internal()` follows up to 3 hops. The URL scheme in `ServerReference` determines the transport for the backend connection:
+- `mqtt://` → TCP
+- `mqtts://` → TLS
+- `quic://` → QUIC
+
+Configuration:
+
+```rust
+BrokerConfig::default()
+    .with_load_balancer(LoadBalancerConfig::new(vec![
+        "mqtt://backend1:1883".into(),
+        "mqtt://backend2:1883".into(),
+    ]))
+```
+
 ### Resource Monitor
 
 - Tracks connections, bandwidth, messages

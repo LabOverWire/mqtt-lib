@@ -107,6 +107,25 @@ let broker = broker.with_auth_provider(Arc::new(CompositeAuthProvider::new(prima
 
 See [Authentication & Authorization Guide](../../AUTHENTICATION.md) for details.
 
+## Broker as Load Balancer
+
+Run the broker as a pure connection redirector that hashes client IDs to select a backend:
+
+```rust
+use mqtt5::broker::{MqttBroker, config::{BrokerConfig, LoadBalancerConfig}};
+
+let config = BrokerConfig::new()
+    .with_load_balancer(LoadBalancerConfig::new(vec![
+        "mqtt://backend1:1883".into(),
+        "mqtt://backend2:1883".into(),
+    ]));
+
+let broker = MqttBroker::new(config);
+broker.start().await?;
+```
+
+Clients connecting to the LB receive a CONNACK with reason code `UseAnotherServer` (0x9C) and a `ServerReference` property. The client library follows the redirect automatically (up to 3 hops).
+
 ## Transport URLs
 
 | Transport | URL Format | Port |

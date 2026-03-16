@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [mqtt5-protocol 0.11.0] / [mqtt5 0.24.0] / [mqttv5-cli 0.22.0] / [mqtt5-wasm 1.2.0] - 2026-03-14
+
+### Added
+
+- **Server redirect via CONNACK** - Load balancer support using MQTT v5.0 `UseAnotherServer` (0x9C) reason code
+  - `LoadBalancerConfig` with consistent-hash backend selection based on client ID
+  - `BrokerConfig::with_load_balancer()` and `--load-balancer-backend` CLI flag (repeatable)
+  - Client automatically follows up to 3 redirect hops
+  - Both `UseAnotherServer` and `ServerMoved` (0x9D) reason codes handled
+  - WASM broker support via `addLoadBalancerBackend()`/`clearLoadBalancerBackends()` on `BrokerConfig`
+  - WASM client returns structured `{type: "redirect", url: "..."}` error for application-level handling
+  - `MqttError::UseAnotherServer` variant for clean redirect error propagation
+  - TLS redirect preserves CA certificate configuration across redirect hops
+  - Empty client IDs distribute across backends via monotonic counter (not static hash)
+
+### Fixed
+
+- **`select_backend` panic on empty backends** - Returns `Option<&str>` instead of indexing empty vec
+
 ## [mqtt5-protocol 0.10.0] / [mqtt5 0.23.0] / [mqttv5-cli 0.21.0] / [mqtt5-wasm 1.1.0] - 2026-03-13
 
 ### Added
