@@ -22,7 +22,7 @@
 
 ```toml
 [dependencies]
-mqtt5 = "0.24"
+mqtt5 = "0.25"
 ```
 
 ### CLI Tool
@@ -255,7 +255,7 @@ Clients connecting to port 1883 receive a redirect and automatically reconnect t
 - Certificate loading from memory (PEM/DER formats)
 - WebSocket transport - MQTT over WebSocket for browsers
 - TLS/SSL support - Secure connections with certificate validation
-- QUIC transport - UDP-based with multistream support and flow headers
+- QUIC transport - UDP-based with multistream support, flow headers, and connection migration
 - Session persistence - Survives disconnections with clean_start=false
 
 ### Testing & Development
@@ -273,6 +273,7 @@ MQTT over QUIC provides modern, high-performance transport with built-in encrypt
 
 - **Built-in TLS 1.3** - QUIC mandates encryption, no separate TLS handshake
 - **Multistream support** - Parallel MQTT operations without head-of-line blocking
+- **Connection migration** - Seamless network address changes for mobile clients
 - **Flow headers** - Stream state recovery for persistent QoS sessions
 
 ### Client Usage
@@ -310,6 +311,30 @@ QUIC multistream support allows different stream allocation strategies:
 | `DataPerPublish` | New stream per QoS 1/2 publish | High-throughput publishing |
 | `DataPerTopic` | Dedicated stream per topic | Topic isolation |
 | `DataPerSubscription` | Stream per subscription (deprecated, use `DataPerTopic`) | Subscriber isolation |
+
+### Connection Migration
+
+Handle network changes (WiFi to cellular, IP address changes) without reconnecting:
+
+```rust
+use mqtt5::MqttClient;
+
+let client = MqttClient::new("mobile-client");
+client.connect("quic://broker.example.com:14567").await?;
+
+client.subscribe("sensors/#", |msg| {
+    println!("{}: {}", msg.topic, String::from_utf8_lossy(&msg.payload));
+}).await?;
+
+// Network changes (WiFi → cellular, etc.)
+// Migrate to new local address — sessions, streams, subscriptions all survive
+client.migrate().await?;
+
+// Continue publishing/subscribing as normal
+client.publish("sensors/temp", b"25.5").await?;
+```
+
+The broker automatically detects the address change and updates its per-IP connection tracking. Non-QUIC transports return an error from `migrate()`.
 
 ### Flow Headers
 

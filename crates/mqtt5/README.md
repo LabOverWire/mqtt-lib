@@ -7,6 +7,7 @@ MQTT v5.0 and v3.1.1 client and broker for native platforms (Linux, macOS, Windo
 - MQTT v5.0 and v3.1.1 protocol support
 - Multiple transports: TCP, TLS, WebSocket, QUIC
 - QUIC multistream support with flow headers
+- QUIC connection migration for mobile clients
 - Automatic reconnection with exponential backoff
 - Configurable keepalive with timeout tolerance
 - Mock client for unit testing
@@ -46,6 +47,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
+```
+
+### Connection Migration (QUIC)
+
+```rust
+use mqtt5::MqttClient;
+
+let client = MqttClient::new("mobile-client");
+client.connect("quic://broker.example.com:14567").await?;
+
+// Network changes — migrate to new local address
+client.migrate().await?;
+// All streams, subscriptions, and sessions survive
 ```
 
 ### Keepalive Configuration

@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [mqtt5 0.25.0] / [mqttv5-cli 0.23.0] / [mqtt5-wasm 1.3.0] - 2026-03-15
+
+### Added
+
+- **QUIC connection migration** - Client and server support for seamless network address changes
+  - `MqttClient::migrate()` triggers connection migration via `Endpoint::rebind()` to a new UDP socket
+  - Server-side detection via `ClientHandler::check_quic_migration()` polling `Connection::remote_address()` after each packet
+  - `ResourceMonitor::update_connection_ip()` atomically transitions per-IP connection tracking
+  - All streams, subscriptions, and sessions survive migration transparently
+  - Non-QUIC transports return a descriptive error; not-connected state returns `NotConnected`
+
 ## [mqtt5-protocol 0.11.0] / [mqtt5 0.24.0] / [mqttv5-cli 0.22.0] / [mqtt5-wasm 1.2.0] - 2026-03-14
 
 ### Added

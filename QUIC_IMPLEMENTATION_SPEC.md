@@ -1,7 +1,7 @@
 # QUIC Transport Implementation Specification
 
-**Status:** Implementation Complete (Simple Multistreams + Broker + Datagrams + Flow Headers)
-**Last Updated:** 2026-03-12
+**Status:** Implementation Complete (Simple Multistreams + Broker + Datagrams + Flow Headers + Connection Migration)
+**Last Updated:** 2026-03-15
 
 ## Table of Contents
 
@@ -34,6 +34,8 @@
 | Server-initiated streams | Complete | ServerStreamManager with per-topic/per-publish delivery |
 | Datagram support | Complete | QoS 0 over unreliable QUIC datagrams (RFC 9221) |
 | Flow headers | Complete | Encode/decode for types 0x11-0x14, FlowRegistry |
+| Connection migration (server) | Complete | Detects via remote_address(), per-IP tracking updated atomically |
+| Connection migration (client) | Complete | MqttClient::migrate() with Endpoint::rebind() |
 
 ### Key Files
 
@@ -145,6 +147,24 @@ The broker spawns three concurrent tasks per QUIC connection:
 3. **Data stream acceptor** - accepts unidirectional streams (`accept_uni`), spawns per-stream readers that parse flow headers and forward packets to handler
 
 Data stream readers detect flow headers by inspecting the first byte (0x11-0x13) and register flows in a per-connection `FlowRegistry`. User-defined flow headers (0x14) are not currently detected.
+
+### Connection Migration
+
+QUIC connection migration allows a client's network address to change (e.g., WiFi to cellular) without re-establishing the MQTT session.
+
+**Server-side detection:** `ClientHandler::check_quic_migration()` runs after each packet in both `handle_packets` and `handle_packets_no_keepalive`. It compares `Connection::remote_address()` against the stored `client_addr`. On mismatch:
+1. Updates `self.client_addr` to the new address
+2. Logs the migration event with client_id, old address, and new address
+3. Calls `ResourceMonitor::update_connection_ip()` which atomically decrements the old IP count and increments the new IP count in a single lock acquisition
+
+**Client-side active migration:** `MqttClient::migrate()` calls `Endpoint::rebind()` with a freshly bound UDP socket (`0.0.0.0:0`). This changes the local address while keeping all QUIC streams and the Connection object valid. Non-QUIC transports return `MqttError::ConnectionError` and disconnected clients return `MqttError::NotConnected`.
+
+**Key files:**
+- `crates/mqtt5/src/broker/client_handler/mod.rs` — `check_quic_migration()`
+- `crates/mqtt5/src/broker/resource_monitor.rs` — `update_connection_ip()`
+- `crates/mqtt5/src/client/direct/mod.rs` — `DirectClientInner::migrate()`
+- `crates/mqtt5/src/client/mod.rs` — `MqttClient::migrate()`
+- `crates/mqtt5/tests/quic_migration_tests.rs` — 5 integration tests
 
 ---
 
@@ -496,6 +516,13 @@ Quinn errors are mapped to `MqttError` variants via string formatting in each ca
 - test_quic_concurrent_publishes
 - test_quic_large_message
 - test_quic_reconnect
+
+**Connection migration (`quic_migration_tests.rs`):**
+- test_quic_migration_detected_by_server — captures tracing output, verifies server logs migration event
+- test_quic_migration_qos1_survives — QoS 1 publish/ack works across migration boundary
+- test_quic_multiple_migrations — 3 sequential migrations, all messages delivered
+- test_migrate_non_quic_returns_error — TCP client gets error mentioning "QUIC"
+- test_migrate_not_connected_returns_error — disconnected client gets `NotConnected`
 
 ---
 

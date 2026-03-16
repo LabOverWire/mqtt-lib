@@ -390,11 +390,19 @@ graph LR
 3. **DataPerTopic**: Stream pooling by topic
 4. **DataPerSubscription**: Deprecated (architecturally identical to DataPerTopic)
 
+### Connection Migration
+
+QUIC connections survive network address changes (WiFi to cellular, IP reassignment):
+
+- **Server-side:** `ClientHandler::check_quic_migration()` polls `Connection::remote_address()` after each packet. On change, updates `client_addr` and atomically transitions per-IP tracking in `ResourceMonitor::update_connection_ip()`
+- **Client-side:** `MqttClient::migrate()` calls `Endpoint::rebind()` with a new UDP socket. All streams, sessions, and subscriptions remain valid
+
 ### Benefits
 
 - No head-of-line blocking
 - Parallel QoS flows
 - Built-in TLS 1.3
+- Connection migration for mobile clients
 
 ## WASM Architecture
 
