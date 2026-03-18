@@ -1,5 +1,0 @@
-Per-topic QUIC mapping amplifies inter-topic spread 192x under 5% packet loss
-TCP spike isolation ratio is 0.99 vs 0.72 for per-topic QUIC at 1% loss
-QUIC outperforms TCP throughput by up to 2.7x under packet loss
-QUIC datagrams achieve 19% lower latency than streams at 5% loss
-StreamIsolated frame packing improves per-topic HOL isolation by 25%

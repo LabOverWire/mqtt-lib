@@ -1,0 +1,136 @@
+\begin{thebibliography}{18}
+\expandafter\ifx\csname natexlab\endcsname\relax\def\natexlab#1{#1}\fi
+\providecommand{\url}[1]{\texttt{#1}}
+\providecommand{\href}[2]{#2}
+\providecommand{\path}[1]{#1}
+\providecommand{\DOIprefix}{doi:}
+\providecommand{\ArXivprefix}{arXiv:}
+\providecommand{\URLprefix}{URL: }
+\providecommand{\Pubmedprefix}{pmid:}
+\providecommand{\doi}[1]{\href{http://dx.doi.org/#1}{\path{#1}}}
+\providecommand{\Pubmed}[1]{\href{pmid:#1}{\path{#1}}}
+\providecommand{\bibinfo}[2]{#2}
+\ifx\xfnm\relax \def\xfnm[#1]{\unskip,\space#1}\fi
+%Type = Misc
+\bibitem[{Belshe et~al.(2015)Belshe, Peon and Thomson}]{rfc7540}
+\bibinfo{author}{Belshe, M.}, \bibinfo{author}{Peon, R.},
+  \bibinfo{author}{Thomson, M.}, \bibinfo{year}{2015}.
+\newblock \bibinfo{title}{Hypertext transfer protocol version 2 ({HTTP/2})}.
+\newblock \bibinfo{howpublished}{RFC 7540}.
+%Type = Misc
+\bibitem[{Bishop(2022)}]{rfc9114}
+\bibinfo{author}{Bishop, M.}, \bibinfo{year}{2022}.
+\newblock \bibinfo{title}{{HTTP/3}}.
+\newblock \bibinfo{howpublished}{RFC 9114}.
+%Type = Misc
+\bibitem[{Bracht(2026)}]{bracht2026zenodo}
+\bibinfo{author}{Bracht, F.}, \bibinfo{year}{2026}.
+\newblock \bibinfo{title}{Experiment data for ``{Evaluating Stream Mapping
+  Strategies for MQTT over QUIC}''}.
+\newblock \DOIprefix\doi{10.5281/zenodo.19098820}.
+%Type = Misc
+\bibitem[{{EMQ Technologies}(2024)}]{emqx}
+\bibinfo{author}{{EMQ Technologies}}, \bibinfo{year}{2024}.
+\newblock \bibinfo{title}{{EMQX}: An open-source, highly scalable {MQTT}
+  broker}.
+\newblock \URLprefix \url{https://www.emqx.io/}.
+%Type = Inproceedings
+\bibitem[{Fern{\'a}ndez et~al.(2020)Fern{\'a}ndez, Zverev, Garrido
+  et~al.}]{fernandez2020iot-quic}
+\bibinfo{author}{Fern{\'a}ndez, F.}, \bibinfo{author}{Zverev, M.},
+  \bibinfo{author}{Garrido, P.}, et~al., \bibinfo{year}{2020}.
+\newblock \bibinfo{title}{And {QUIC} meets {IoT}: Performance assessment of
+  {MQTT} over {QUIC}}, in: \bibinfo{booktitle}{IEEE International Conference on
+  Wireless and Mobile Computing, Networking and Communications (WiMob)}.
+%Type = Misc
+\bibitem[{Iyengar and Swett(2021)}]{rfc9002}
+\bibinfo{author}{Iyengar, J.}, \bibinfo{author}{Swett, I.},
+  \bibinfo{year}{2021}.
+\newblock \bibinfo{title}{{QUIC} loss detection and congestion control}.
+\newblock \bibinfo{howpublished}{RFC 9002}.
+%Type = Misc
+\bibitem[{Iyengar and Thomson(2021)}]{rfc9000}
+\bibinfo{author}{Iyengar, J.}, \bibinfo{author}{Thomson, M.},
+  \bibinfo{year}{2021}.
+\newblock \bibinfo{title}{{QUIC}: A {UDP}-based multiplexed and secure
+  transport}.
+\newblock \bibinfo{howpublished}{RFC 9000}.
+%Type = Inproceedings
+\bibitem[{Kakhki et~al.(2017)Kakhki, Jero, Choffnes, Nita-Rotaru and
+  Mislove}]{kakhki2017quic}
+\bibinfo{author}{Kakhki, A.M.}, \bibinfo{author}{Jero, S.},
+  \bibinfo{author}{Choffnes, D.}, \bibinfo{author}{Nita-Rotaru, C.},
+  \bibinfo{author}{Mislove, A.}, \bibinfo{year}{2017}.
+\newblock \bibinfo{title}{Taking a long look at {QUIC}: An approach for
+  rigorous evaluation of rapidly evolving transport protocols}, in:
+  \bibinfo{booktitle}{Proceedings of the 2017 Internet Measurement Conference
+  (IMC)}, \bibinfo{publisher}{ACM}.
+%Type = Misc
+\bibitem[{K{\"u}hlewind and Trammell(2022)}]{rfc9308}
+\bibinfo{author}{K{\"u}hlewind, M.}, \bibinfo{author}{Trammell, B.},
+  \bibinfo{year}{2022}.
+\newblock \bibinfo{title}{Applicability of the {QUIC} transport protocol}.
+\newblock \bibinfo{howpublished}{RFC 9308}.
+%Type = Article
+\bibitem[{Kumar and Dezfouli(2019)}]{kumar2019mqtt-quic}
+\bibinfo{author}{Kumar, P.}, \bibinfo{author}{Dezfouli, B.},
+  \bibinfo{year}{2019}.
+\newblock \bibinfo{title}{Implementation and analysis of {QUIC} for {MQTT}}.
+\newblock \bibinfo{journal}{Computer Networks} .
+%Type = Article
+\bibitem[{Langley et~al.(2017)Langley, Riddoch et~al.}]{langley2017quic}
+\bibinfo{author}{Langley, A.}, \bibinfo{author}{Riddoch, A.}, et~al.,
+  \bibinfo{year}{2017}.
+\newblock \bibinfo{title}{The {QUIC} transport protocol: Design and
+  internet-scale deployment}.
+\newblock \bibinfo{journal}{Proceedings of ACM SIGCOMM} .
+%Type = Inproceedings
+\bibitem[{Marx et~al.(2020)}]{marx2020hol}
+\bibinfo{author}{Marx, R.}, et~al., \bibinfo{year}{2020}.
+\newblock \bibinfo{title}{Same standards, different decisions: A study of
+  {QUIC} and {HTTP/3} implementation diversity}, in:
+  \bibinfo{booktitle}{Workshop on the Evolution, Performance, and
+  Interoperability of QUIC (EPIQ)}.
+%Type = Article
+\bibitem[{Mishra and Kertesz(2020)}]{mishra2020mqtt-survey}
+\bibinfo{author}{Mishra, B.}, \bibinfo{author}{Kertesz, A.},
+  \bibinfo{year}{2020}.
+\newblock \bibinfo{title}{The use of {MQTT} in {M2M} and {IoT} systems: A
+  survey}.
+\newblock \bibinfo{journal}{IEEE Access} \bibinfo{volume}{8},
+  \bibinfo{pages}{201071--201086}.
+\newblock \DOIprefix\doi{10.1109/ACCESS.2020.3035849}.
+%Type = Misc
+\bibitem[{{OASIS}(2019)}]{mqtt-v5-spec}
+\bibinfo{author}{{OASIS}}, \bibinfo{year}{2019}.
+\newblock \bibinfo{title}{{MQTT} version 5.0}.
+\newblock \bibinfo{howpublished}{OASIS Standard}.
+\newblock \URLprefix
+  \url{https://docs.oasis-open.org/mqtt/mqtt/v5.0/mqtt-v5.0.html}.
+%Type = Misc
+\bibitem[{Ochtman et~al.(2024)Ochtman, Saunders et~al.}]{quinn}
+\bibinfo{author}{Ochtman, D.}, \bibinfo{author}{Saunders, B.}, et~al.,
+  \bibinfo{year}{2024}.
+\newblock \bibinfo{title}{Quinn: {QUIC} transport protocol implementation for
+  {Rust}}.
+\newblock \URLprefix \url{https://github.com/quinn-rs/quinn}.
+%Type = Misc
+\bibitem[{Pauly et~al.(2022)Pauly, Kinnear and Schinazi}]{rfc9221}
+\bibinfo{author}{Pauly, T.}, \bibinfo{author}{Kinnear, E.},
+  \bibinfo{author}{Schinazi, D.}, \bibinfo{year}{2022}.
+\newblock \bibinfo{title}{An unreliable datagram extension to {QUIC}}.
+\newblock \bibinfo{howpublished}{RFC 9221}.
+%Type = Misc
+\bibitem[{Thomson and Turner(2021)}]{rfc9001}
+\bibinfo{author}{Thomson, M.}, \bibinfo{author}{Turner, S.},
+  \bibinfo{year}{2021}.
+\newblock \bibinfo{title}{Using {TLS} to secure {QUIC}}.
+\newblock \bibinfo{howpublished}{RFC 9001}.
+%Type = Inproceedings
+\bibitem[{Yu and Benson(2021)}]{yu2021quic}
+\bibinfo{author}{Yu, A.}, \bibinfo{author}{Benson, T.A.}, \bibinfo{year}{2021}.
+\newblock \bibinfo{title}{Dissecting performance of production {QUIC}}, in:
+  \bibinfo{booktitle}{Proceedings of the Web Conference 2021 (WWW)},
+  \bibinfo{publisher}{ACM}.
+
+\end{thebibliography}
