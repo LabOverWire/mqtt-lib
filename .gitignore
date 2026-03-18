@@ -190,25 +190,13 @@ TEMP_BDD_SCENARIO_GUIDE.md
 .playwright-mcp/
 
 # Terraform
-experiments/terraform/.terraform/
-experiments/terraform/.terraform.lock.hcl
-experiments/terraform/terraform.tfstate*
-experiments/terraform/*.tfvars
-!experiments/terraform/*.tfvars.example
 **/.terraform/
 **/.terraform.lock.hcl
 **/terraform.tfstate*
 **/terraform.tfvars
+!**/terraform.tfvars.example
 
 # Experiment results (raw benchmark data)
-experiments/results-phase1/*.json
-experiments/results-phase1/**/*.json
-experiments/results-phase1/*.csv
-experiments/results-phase1/**/*.csv
-experiments/results-phase2/
-experiments/results-hol-v3/
-experiments/results-hol-v4-framepacking/
-experiments/results-v5/
 publications/comnet/experiments/results-phase1/*.json
 publications/comnet/experiments/results-phase1/**/*.json
 publications/comnet/experiments/results-phase1/*.csv
@@ -218,21 +206,13 @@ publications/comnet/experiments/results-hol-v3/
 publications/comnet/experiments/results-hol-v4-framepacking/
 publications/comnet/experiments/results-v5/
 
-# Allow experiment scripts and config
-!experiments/**/*.sh
-!experiments/**/*.py
-!experiments/setup/config.env.example
-!experiments/README.md
 public/
 
 articles/
 
 # Analysis artifacts (generated figures, stats output)
 artifacts/
-experiments/analysis/figures/output/
 publications/comnet/experiments/analysis/figures/output/
-experiments/results-phase1/**/*.txt
-experiments/results-phase1/**/*.tex
 publications/comnet/experiments/results-phase1/**/*.txt
 publications/comnet/experiments/results-phase1/**/*.tex
 
