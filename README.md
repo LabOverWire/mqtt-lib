@@ -1087,10 +1087,15 @@ at your option.
 
 We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
+## Publications
+
+- **Evaluating Stream Mapping Strategies for MQTT over QUIC** — Computer Networks (Elsevier), 2026. Defines three stream mapping strategies (control-only, per-topic, per-publish) and evaluates them across five experiments on GCP infrastructure. Experiment data archived at [Zenodo](https://doi.org/10.5281/zenodo.19098820). See [`publications/comnet/`](publications/comnet/) for the paper, experiment scripts, and reproduction guide.
+
 ## Documentation
 
 - [Architecture Overview](ARCHITECTURE.md) - System design and principles
 - [Authentication & Authorization](AUTHENTICATION.md) - Auth methods, ACL, RBAC, federated JWT
 - [CLI Usage Guide](crates/mqttv5-cli/CLI_USAGE.md) - Complete CLI reference and examples
 - [Conformance Test Suite](crates/mqtt5-conformance/README.md) - MQTT v5.0 OASIS specification conformance
+- [Publications](publications/) - Academic papers and experiment infrastructure
 - [API Documentation](https://docs.rs/mqtt5) - API reference
