@@ -1,7 +1,0 @@
-\begin{abstract}
-MQTT, the dominant IoT messaging protocol, operates over TCP, where head-of-line (HOL) blocking couples logically independent topic flows: a single packet loss delays delivery across all topics sharing a connection. While QUIC's stream multiplexing is widely expected to eliminate this coupling, no prior work has empirically measured per-stream latency independence for IoT messaging workloads. We define three stream mapping strategies---control-only, per-topic, and per-publish---for running MQTT over QUIC and implement them in \texttt{mqtt5}, an open-source MQTT library. Across six experiments under controlled network impairment, we find that per-topic stream mapping provides measurable HOL blocking isolation, with latency spikes becoming largely independent across topics rather than co-occurring as they do over TCP. However, this isolation is partial: QUIC's shared congestion window introduces residual inter-stream coupling that prior theoretical analyses do not predict. These results provide the first empirical characterization of HOL blocking isolation in MQTT over QUIC.
-\end{abstract}
-
-\begin{keyword}
-MQTT \sep QUIC \sep IoT \sep head-of-line blocking \sep stream multiplexing \sep transport protocols
-\end{keyword}
