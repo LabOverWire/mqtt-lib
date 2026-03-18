@@ -211,7 +211,7 @@ Infrastructure-as-code for GCP n2-standard-4 VMs. Outputs broker and client exte
 
 ### Results data
 
-Experiment results are stored in `results-v5/` (gitignored due to size). Each experiment subdirectory contains:
+Experiment results are archived on Zenodo: [10.5281/zenodo.19098820](https://doi.org/10.5281/zenodo.19098820) (384 MB zip, 1.3 GB uncompressed). Download and extract into `experiments/results-v5/` to reproduce the figures. Each experiment subdirectory contains:
 
 - **JSON files**: One per run, containing configuration, metrics, and summary statistics
 - **CSV files**: Per-run trace data (message timestamps, Quinn QUIC stats, resource samples)
@@ -261,6 +261,20 @@ python3 generate_all.py ../../results-v5 output/
 # 6. Teardown
 cd experiments/setup
 bash provision.sh teardown
+```
+
+### Reproducing figures from archived data
+
+If you just want to regenerate the figures without running the experiments:
+
+```bash
+# 1. Download results from Zenodo
+wget https://zenodo.org/records/19098820/files/mqtt-quic-experiment-results-v5.zip
+unzip mqtt-quic-experiment-results-v5.zip -d experiments/
+
+# 2. Generate figures
+cd experiments/analysis/figures
+python3 generate_all.py ../../results-v5 output/
 ```
 
 ### Key investigation documents
