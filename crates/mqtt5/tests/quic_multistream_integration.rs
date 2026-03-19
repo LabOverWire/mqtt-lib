@@ -719,3 +719,80 @@ async fn test_flow_registry_register_external_flow() {
     let retrieved = registry.get(FlowId::client(999)).unwrap();
     assert_eq!(retrieved.flags.persistent_subscriptions, 1);
 }
+
+#[tokio::test]
+async fn test_discard_flow_removes_peer_state() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    let (mut broker, quic_addr) = start_quic_broker(24690).await;
+
+    let broker_handle = tokio::spawn(async move { broker.run().await });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let client_id = test_client_id("quic-discard");
+    let topic = format!("discard/{}/test", Ulid::new());
+
+    let client = MqttClient::new(client_id);
+    client.set_insecure_tls(true).await;
+    client
+        .set_quic_stream_strategy(StreamStrategy::DataPerTopic)
+        .await;
+    client.set_quic_flow_headers(true).await;
+    client.set_quic_flow_expire(Duration::from_secs(300)).await;
+
+    let broker_url = format!("quic://{quic_addr}");
+
+    if client.connect(&broker_url).await.is_err() {
+        broker_handle.abort();
+        return;
+    }
+
+    client.publish(&topic, b"establish flow").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let flow_id = FlowId::client(1);
+    let result = client.discard_flow(flow_id).await;
+    assert!(result.is_ok(), "discard_flow should succeed: {result:?}");
+
+    client.publish(&topic, b"after discard").await.unwrap();
+
+    client.disconnect().await.unwrap();
+    broker_handle.abort();
+}
+
+#[tokio::test]
+async fn test_discard_flow_not_connected() {
+    let client = MqttClient::new("discard-not-connected");
+    let result = client.discard_flow(FlowId::client(1)).await;
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn test_discard_flow_without_flow_headers_returns_error() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    let (mut broker, quic_addr) = start_quic_broker(24691).await;
+    let broker_handle = tokio::spawn(async move { broker.run().await });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let client = MqttClient::new(test_client_id("discard-no-flow"));
+    client.set_insecure_tls(true).await;
+    client
+        .set_quic_stream_strategy(StreamStrategy::DataPerTopic)
+        .await;
+
+    let broker_url = format!("quic://{quic_addr}");
+    if client.connect(&broker_url).await.is_err() {
+        broker_handle.abort();
+        return;
+    }
+
+    let result = client.discard_flow(FlowId::client(1)).await;
+    assert!(
+        result.is_err(),
+        "discard_flow should fail when flow headers are not enabled"
+    );
+
+    client.disconnect().await.unwrap();
+    broker_handle.abort();
+}
