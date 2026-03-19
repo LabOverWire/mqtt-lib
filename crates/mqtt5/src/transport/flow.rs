@@ -88,6 +88,22 @@ impl FlowFlags {
             Err(_) => Self::default(),
         }
     }
+
+    #[must_use]
+    pub fn is_discard_signal(&self) -> bool {
+        self.clean == 1
+            && self.persistent_qos == 0
+            && self.persistent_subscriptions == 0
+            && self.persistent_topic_alias == 0
+    }
+
+    #[must_use]
+    pub fn discard() -> Self {
+        Self {
+            clean: 1,
+            ..Self::default()
+        }
+    }
 }
 
 // [MQoQ§4.5.1] Control flow header format
@@ -525,6 +541,46 @@ mod tests {
             }
             _ => panic!("expected Control flow header"),
         }
+    }
+
+    #[test]
+    fn test_discard_signal_true() {
+        let flags = FlowFlags::discard();
+        assert!(flags.is_discard_signal());
+        assert_eq!(flags.clean, 1);
+        assert_eq!(flags.persistent_qos, 0);
+        assert_eq!(flags.persistent_subscriptions, 0);
+        assert_eq!(flags.persistent_topic_alias, 0);
+    }
+
+    #[test]
+    fn test_discard_signal_default_is_not_discard() {
+        let flags = FlowFlags::default();
+        assert!(!flags.is_discard_signal());
+    }
+
+    #[test]
+    fn test_discard_signal_false_with_persistent_flags() {
+        let flags = FlowFlags {
+            clean: 1,
+            persistent_qos: 1,
+            ..Default::default()
+        };
+        assert!(!flags.is_discard_signal());
+
+        let flags = FlowFlags {
+            clean: 1,
+            persistent_subscriptions: 1,
+            ..Default::default()
+        };
+        assert!(!flags.is_discard_signal());
+
+        let flags = FlowFlags {
+            clean: 1,
+            persistent_topic_alias: 1,
+            ..Default::default()
+        };
+        assert!(!flags.is_discard_signal());
     }
 
     #[test]

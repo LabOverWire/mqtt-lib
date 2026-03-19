@@ -772,6 +772,18 @@ impl MqttClient {
     pub async fn migrate(&self) -> Result<()> {
         self.inner.read().await.migrate()
     }
+
+    /// Discards a flow's state at the remote peer by opening a bidirectional QUIC stream
+    /// with `clean_start=1` and all persistent flags cleared.
+    ///
+    /// # Errors
+    ///
+    /// Returns `NotConnected` if the client is not connected, `ConnectionError`
+    /// if the transport is not QUIC, or `Timeout` if the peer does not respond.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn discard_flow(&self, flow_id: crate::transport::flow::FlowId) -> Result<()> {
+        self.inner.read().await.discard_flow(flow_id).await
+    }
 }
 
 #[allow(clippy::manual_async_fn)]

@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
-use tracing::{debug, instrument, trace};
+use tracing::{debug, instrument, trace, warn};
 
 struct StreamInfo {
     stream: SendStream,
@@ -369,6 +369,66 @@ impl QuicStreamManager {
         } else {
             false
         }
+    }
+
+    /// # Errors
+    /// Returns an error if flow headers are not enabled, the bi stream cannot be opened,
+    /// or the peer does not respond within 2 seconds.
+    #[instrument(skip(self), level = "debug")]
+    pub async fn discard_flow(&self, flow_id: FlowId) -> Result<()> {
+        if !self.enable_flow_headers {
+            return Err(MqttError::ProtocolError(
+                "flow headers not enabled, cannot discard flow".into(),
+            ));
+        }
+
+        let (mut send, mut recv) = self.connection.open_bi().await.map_err(|e| {
+            MqttError::ConnectionError(format!("failed to open bi stream for discard: {e}"))
+        })?;
+
+        let discard_flags = FlowFlags::discard();
+        let header = DataFlowHeader::client(flow_id, 0, discard_flags);
+        let mut buf = BytesMut::with_capacity(32);
+        header.encode(&mut buf);
+
+        send.write_all(&buf).await.map_err(|e| {
+            MqttError::ConnectionError(format!("failed to write discard flow header: {e}"))
+        })?;
+
+        send.finish().map_err(|e| {
+            MqttError::ConnectionError(format!("failed to finish discard send stream: {e}"))
+        })?;
+
+        let read_result = tokio::time::timeout(Duration::from_secs(2), recv.read_to_end(64)).await;
+
+        match read_result {
+            Ok(Ok(data)) => {
+                if !data.is_empty() {
+                    warn!(
+                        flow_id = ?flow_id,
+                        len = data.len(),
+                        "peer returned non-empty data on discard response"
+                    );
+                }
+            }
+            Ok(Err(e)) => {
+                return Err(MqttError::ConnectionError(format!(
+                    "failed to read discard response: {e}"
+                )));
+            }
+            Err(_) => {
+                return Err(MqttError::Timeout);
+            }
+        }
+
+        self.flow_streams.lock().await.remove(&flow_id);
+
+        let mut topics = self.topic_streams.lock().await;
+        topics.retain(|_, info| info.flow_id != flow_id);
+
+        debug!(flow_id = ?flow_id, "discarded flow at peer and cleaned up local state");
+
+        Ok(())
     }
 
     pub async fn close_all_streams(&self) {
