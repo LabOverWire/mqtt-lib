@@ -507,6 +507,10 @@ impl MqttBroker {
             acceptor_config =
                 acceptor_config.with_require_client_cert(quic_config.require_client_cert);
 
+            if quic_config.enable_early_data {
+                acceptor_config = acceptor_config.with_early_data(true);
+            }
+
             let mut endpoints = Vec::new();
             for addr in &quic_config.bind_addresses {
                 match acceptor_config.build_endpoint(*addr) {

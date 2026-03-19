@@ -114,6 +114,7 @@ pub struct MqttClient {
     pub(crate) connection_mutex: Arc<tokio::sync::Mutex<()>>,
     pub(crate) tls_config: Arc<RwLock<Option<TlsConfig>>>,
     pub(crate) transport_config: Arc<RwLock<crate::transport::ClientTransportConfig>>,
+    pub(crate) quic_client_config: Arc<RwLock<Option<quinn::ClientConfig>>>,
 }
 
 impl MqttClient {
@@ -760,6 +761,10 @@ impl MqttClient {
 
     pub async fn quic_connection(&self) -> Option<Arc<quinn::Connection>> {
         self.inner.read().await.quic_connection.clone()
+    }
+
+    pub async fn was_zero_rtt(&self) -> bool {
+        self.inner.read().await.zero_rtt_accepted
     }
 
     /// Triggers QUIC connection migration by rebinding the endpoint to a new UDP socket.

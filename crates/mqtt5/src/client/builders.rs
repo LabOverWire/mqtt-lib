@@ -62,6 +62,7 @@ impl MqttClient {
             transport_config: Arc::new(RwLock::new(
                 crate::transport::ClientTransportConfig::default(),
             )),
+            quic_client_config: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -113,6 +114,10 @@ impl MqttClient {
 
     pub async fn set_quic_connect_timeout(&self, timeout: crate::time::Duration) {
         self.transport_config.write().await.connect_timeout = timeout;
+    }
+
+    pub async fn set_quic_early_data(&self, enable: bool) {
+        self.transport_config.write().await.enable_early_data = enable;
     }
 
     pub async fn set_tls_config(

@@ -191,6 +191,10 @@ pub struct RunArgs {
     #[arg(long, value_parser = parse_delivery_strategy)]
     pub quic_delivery_strategy: Option<mqtt5::broker::config::ServerDeliveryStrategy>,
 
+    /// Enable QUIC 0-RTT early data acceptance
+    #[arg(long)]
+    pub quic_early_data: bool,
+
     /// Storage directory for persistent data
     #[arg(long, default_value = "./mqtt_storage")]
     pub storage_dir: PathBuf,
@@ -330,6 +334,7 @@ fn build_example_config() -> BrokerConfig {
                 "0.0.0.0:14567".parse().unwrap(),
                 "[::]:14567".parse().unwrap(),
             ],
+            enable_early_data: false,
         }),
         cluster_listener_config: None,
         storage_config: StorageConfig {
@@ -950,6 +955,9 @@ fn configure_quic(config: &mut BrokerConfig, cmd: &RunArgs) -> Result<()> {
                 .with_require_client_cert(cmd.tls_require_client_cert);
         }
 
+        if cmd.quic_early_data {
+            quic_config = quic_config.with_early_data(true);
+        }
         config.quic_config = Some(quic_config);
         if let Some(strategy) = cmd.quic_delivery_strategy {
             config.server_delivery_strategy = strategy;

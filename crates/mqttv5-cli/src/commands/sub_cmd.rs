@@ -168,6 +168,10 @@ pub struct SubCommand {
     #[arg(long, default_value = "30", value_parser = parse_duration_secs)]
     pub quic_connect_timeout: u64,
 
+    /// Enable QUIC 0-RTT early data for faster reconnections
+    #[arg(long)]
+    pub quic_early_data: bool,
+
     /// OpenTelemetry OTLP endpoint (e.g., `http://localhost:4317`)
     #[cfg(feature = "opentelemetry")]
     #[arg(long)]
@@ -356,6 +360,10 @@ async fn configure_quic_transport(client: &MqttClient, cmd: &SubCommand) {
     client
         .set_quic_connect_timeout(Duration::from_secs(cmd.quic_connect_timeout))
         .await;
+    if cmd.quic_early_data {
+        client.set_quic_early_data(true).await;
+        debug!("QUIC 0-RTT early data enabled");
+    }
 }
 
 async fn configure_tls_certs(

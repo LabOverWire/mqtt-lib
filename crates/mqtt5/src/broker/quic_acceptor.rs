@@ -35,6 +35,7 @@ pub struct QuicAcceptorConfig {
     pub client_ca_certs: Option<Vec<CertificateDer<'static>>>,
     pub require_client_cert: bool,
     pub alpn_protocols: Vec<Vec<u8>>,
+    pub enable_early_data: bool,
 }
 
 impl QuicAcceptorConfig {
@@ -49,6 +50,7 @@ impl QuicAcceptorConfig {
             client_ca_certs: None,
             require_client_cert: false,
             alpn_protocols: vec![b"MQTT-next".to_vec(), b"mqtt".to_vec()],
+            enable_early_data: false,
         }
     }
 
@@ -87,6 +89,12 @@ impl QuicAcceptorConfig {
     #[must_use]
     pub fn with_alpn_protocols(mut self, protocols: Vec<Vec<u8>>) -> Self {
         self.alpn_protocols = protocols;
+        self
+    }
+
+    #[must_use]
+    pub fn with_early_data(mut self, enable: bool) -> Self {
+        self.enable_early_data = enable;
         self
     }
 
@@ -143,6 +151,11 @@ impl QuicAcceptorConfig {
         };
 
         tls_config.alpn_protocols.clone_from(&self.alpn_protocols);
+
+        if self.enable_early_data {
+            tls_config.max_early_data_size = u32::MAX;
+            tls_config.send_half_rtt_data = true;
+        }
 
         let quic_config =
             quinn::crypto::rustls::QuicServerConfig::try_from(tls_config).map_err(|e| {

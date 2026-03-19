@@ -117,6 +117,9 @@ pub struct BenchCommand {
     #[arg(long, default_value = "30", value_parser = parse_duration_secs)]
     pub quic_connect_timeout: u64,
 
+    #[arg(long)]
+    pub quic_early_data: bool,
+
     #[arg(long, default_value = "4")]
     pub topics: usize,
 
@@ -498,6 +501,9 @@ async fn configure_transport(client: &MqttClient, cmd: &BenchCommand, url: &str)
     client
         .set_quic_connect_timeout(Duration::from_secs(cmd.quic_connect_timeout))
         .await;
+    if cmd.quic_early_data {
+        client.set_quic_early_data(true).await;
+    }
     let is_secure =
         url.starts_with("ssl://") || url.starts_with("mqtts://") || url.starts_with("quics://");
     let has_certs = cmd.cert.is_some() || cmd.key.is_some() || cmd.ca_cert.is_some();
@@ -935,6 +941,7 @@ async fn run_connections(cmd: BenchCommand) -> Result<()> {
         quic_max_streams: cmd.quic_max_streams,
         quic_datagrams: cmd.quic_datagrams,
         quic_connect_timeout: cmd.quic_connect_timeout,
+        quic_early_data: cmd.quic_early_data,
         cert_pem: tls.cert,
         key_pem: tls.key,
         ca_pem: tls.ca,
@@ -1024,6 +1031,7 @@ struct ConnectionBenchState {
     quic_max_streams: Option<usize>,
     quic_datagrams: bool,
     quic_connect_timeout: u64,
+    quic_early_data: bool,
     cert_pem: Option<Arc<Vec<u8>>>,
     key_pem: Option<Arc<Vec<u8>>>,
     ca_pem: Option<Arc<Vec<u8>>>,
@@ -1054,6 +1062,7 @@ fn spawn_connection_workers(
         let quic_max_streams = state.quic_max_streams;
         let quic_datagrams = state.quic_datagrams;
         let quic_connect_timeout = state.quic_connect_timeout;
+        let quic_early_data = state.quic_early_data;
         let cert_pem = state.cert_pem.clone();
         let key_pem = state.key_pem.clone();
         let ca_pem = state.ca_pem.clone();
@@ -1100,6 +1109,9 @@ fn spawn_connection_workers(
                 client
                     .set_quic_connect_timeout(Duration::from_secs(quic_connect_timeout))
                     .await;
+                if quic_early_data {
+                    client.set_quic_early_data(true).await;
+                }
                 let options = ConnectOptions::new(client_id)
                     .with_clean_start(true)
                     .with_keep_alive(Duration::from_secs(30));

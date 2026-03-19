@@ -397,3 +397,192 @@ async fn test_broker_quic_data_per_subscription() {
     sub_client.disconnect().await.unwrap();
     broker_handle.abort();
 }
+
+async fn start_quic_broker_with_early_data(quic_port: u16) -> (MqttBroker, SocketAddr) {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    let quic_addr: SocketAddr = format!("127.0.0.1:{quic_port}").parse().unwrap();
+
+    let config = BrokerConfig::default()
+        .with_bind_address(([127, 0, 0, 1], 0))
+        .with_quic(
+            QuicConfig::new(
+                PathBuf::from("../../test_certs/server.pem"),
+                PathBuf::from("../../test_certs/server.key"),
+            )
+            .with_bind_address(quic_addr)
+            .with_early_data(true),
+        );
+
+    let broker = MqttBroker::with_config(config).await.unwrap();
+    (broker, quic_addr)
+}
+
+#[tokio::test]
+async fn test_quic_0rtt_first_connection_is_1rtt() {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .with_test_writer()
+        .try_init();
+
+    let (mut broker, quic_addr) = start_quic_broker_with_early_data(24580).await;
+    let broker_handle = tokio::spawn(async move { broker.run().await });
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let client = MqttClient::new(test_client_id("0rtt-first"));
+    client.set_insecure_tls(true).await;
+    client.set_quic_early_data(true).await;
+
+    let broker_url = format!("quic://{quic_addr}");
+    if client.connect(&broker_url).await.is_err() {
+        eprintln!("Skipping 0-RTT test - QUIC connection failed");
+        broker_handle.abort();
+        return;
+    }
+    assert!(client.is_connected().await);
+    assert!(!client.was_zero_rtt().await);
+
+    client.disconnect().await.unwrap();
+    broker_handle.abort();
+}
+
+#[tokio::test]
+async fn test_quic_0rtt_reconnection() {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .with_test_writer()
+        .try_init();
+
+    let (mut broker, quic_addr) = start_quic_broker_with_early_data(24581).await;
+    let broker_handle = tokio::spawn(async move { broker.run().await });
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let client = MqttClient::new(test_client_id("0rtt-reconnect"));
+    client.set_insecure_tls(true).await;
+    client.set_quic_early_data(true).await;
+
+    let broker_url = format!("quic://{quic_addr}");
+
+    if client.connect(&broker_url).await.is_err() {
+        eprintln!("Skipping 0-RTT reconnection test - QUIC connection failed");
+        broker_handle.abort();
+        return;
+    }
+    assert!(client.is_connected().await);
+    assert!(!client.was_zero_rtt().await);
+    client.disconnect().await.unwrap();
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    if client.connect(&broker_url).await.is_err() {
+        eprintln!("Skipping 0-RTT reconnection test - second QUIC connection failed");
+        broker_handle.abort();
+        return;
+    }
+    assert!(client.is_connected().await);
+    assert!(
+        client.was_zero_rtt().await,
+        "second connection should use 0-RTT"
+    );
+
+    client.disconnect().await.unwrap();
+    broker_handle.abort();
+}
+
+#[tokio::test]
+async fn test_quic_0rtt_server_without_early_data_falls_back() {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .with_test_writer()
+        .try_init();
+
+    let (mut broker, quic_addr) = start_quic_broker(24582).await;
+    let broker_handle = tokio::spawn(async move { broker.run().await });
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let client = MqttClient::new(test_client_id("0rtt-fallback"));
+    client.set_insecure_tls(true).await;
+    client.set_quic_early_data(true).await;
+
+    let broker_url = format!("quic://{quic_addr}");
+
+    if client.connect(&broker_url).await.is_err() {
+        eprintln!("Skipping 0-RTT fallback test - QUIC connection failed");
+        broker_handle.abort();
+        return;
+    }
+    assert!(client.is_connected().await);
+    client.disconnect().await.unwrap();
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    if client.connect(&broker_url).await.is_err() {
+        eprintln!("Skipping 0-RTT fallback test - second QUIC connection failed");
+        broker_handle.abort();
+        return;
+    }
+    assert!(client.is_connected().await);
+    assert!(
+        !client.was_zero_rtt().await,
+        "should fall back to 1-RTT when server has early data disabled"
+    );
+
+    client.disconnect().await.unwrap();
+    broker_handle.abort();
+}
+
+#[tokio::test]
+async fn test_quic_0rtt_pubsub_after_reconnect() {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .with_test_writer()
+        .try_init();
+
+    let (mut broker, quic_addr) = start_quic_broker_with_early_data(24583).await;
+    let broker_handle = tokio::spawn(async move { broker.run().await });
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let broker_url = format!("quic://{quic_addr}");
+
+    let client = MqttClient::new(test_client_id("0rtt-pubsub"));
+    client.set_insecure_tls(true).await;
+    client.set_quic_early_data(true).await;
+
+    if client.connect(&broker_url).await.is_err() {
+        eprintln!("Skipping 0-RTT pubsub test - QUIC connection failed");
+        broker_handle.abort();
+        return;
+    }
+    client.disconnect().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    if client.connect(&broker_url).await.is_err() {
+        eprintln!("Skipping 0-RTT pubsub test - second QUIC connection failed");
+        broker_handle.abort();
+        return;
+    }
+    assert!(client.is_connected().await);
+
+    let received = Arc::new(AtomicU32::new(0));
+    let received_clone = received.clone();
+    client
+        .subscribe("test/0rtt/#", move |_msg| {
+            received_clone.fetch_add(1, Ordering::Relaxed);
+        })
+        .await
+        .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    client.publish("test/0rtt/hello", b"world").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    assert_eq!(
+        received.load(Ordering::Relaxed),
+        1,
+        "should receive message after 0-RTT reconnection"
+    );
+
+    client.disconnect().await.unwrap();
+    broker_handle.abort();
+}
