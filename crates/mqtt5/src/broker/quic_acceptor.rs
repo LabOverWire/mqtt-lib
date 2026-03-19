@@ -595,22 +595,30 @@ async fn run_quic_handler_inner(
         }
     });
 
-    let datagram_connection = connection.clone();
-    let datagram_packet_tx = packet_tx.clone();
-    let datagram_label = label;
+    spawn_datagram_reader(connection.clone(), packet_tx.clone(), peer_addr, label);
+    spawn_bi_accept_loop(connection.clone(), flow_registry.clone(), peer_addr, label);
+    spawn_uni_accept_loop(connection, packet_tx, peer_addr, flow_registry, label);
+}
+
+fn spawn_datagram_reader(
+    connection: Arc<Connection>,
+    packet_tx: mpsc::Sender<Packet>,
+    peer_addr: SocketAddr,
+    label: &'static str,
+) {
     tokio::spawn(async move {
         loop {
-            match datagram_connection.read_datagram().await {
+            match connection.read_datagram().await {
                 Ok(datagram) => {
                     trace!(
                         len = datagram.len(),
                         "Received {} datagram from {}",
-                        datagram_label,
+                        label,
                         peer_addr
                     );
                     match decode_datagram_packet(&datagram) {
                         Some(Ok(packet)) => {
-                            if datagram_packet_tx.send(packet).await.is_err() {
+                            if packet_tx.send(packet).await.is_err() {
                                 debug!("Datagram packet channel closed for {}", peer_addr);
                                 break;
                             }
@@ -628,20 +636,46 @@ async fn run_quic_handler_inner(
             }
         }
     });
+}
 
-    let stream_label = label;
+fn spawn_bi_accept_loop(
+    connection: Arc<Connection>,
+    flow_registry: Arc<Mutex<FlowRegistry>>,
+    peer_addr: SocketAddr,
+    label: &'static str,
+) {
+    tokio::spawn(async move {
+        loop {
+            if let Ok((send, recv)) = connection.accept_bi().await {
+                debug!("{} bidirectional stream accepted from {}", label, peer_addr);
+                spawn_discard_handler(send, recv, peer_addr, flow_registry.clone());
+            } else {
+                debug!("{} bi stream accept loop ended for {}", label, peer_addr);
+                break;
+            }
+        }
+    });
+}
+
+fn spawn_uni_accept_loop(
+    connection: Arc<Connection>,
+    packet_tx: mpsc::Sender<Packet>,
+    peer_addr: SocketAddr,
+    flow_registry: Arc<Mutex<FlowRegistry>>,
+    label: &'static str,
+) {
     tokio::spawn(async move {
         loop {
             if let Ok(recv) = connection.accept_uni().await {
                 debug!(
                     "Additional {} data stream accepted from {}",
-                    stream_label, peer_addr
+                    label, peer_addr
                 );
                 spawn_data_stream_reader(recv, packet_tx.clone(), peer_addr, flow_registry.clone());
             } else {
                 debug!(
                     "{} connection stream accept loop ended for {}",
-                    stream_label, peer_addr
+                    label, peer_addr
                 );
                 break;
             }
@@ -664,6 +698,57 @@ fn decode_datagram_packet(data: &Bytes) -> Option<Result<Packet>> {
         &fixed_header,
         &mut buf,
     ))
+}
+
+fn spawn_discard_handler(
+    mut send: SendStream,
+    mut recv: RecvStream,
+    peer_addr: SocketAddr,
+    flow_registry: Arc<Mutex<FlowRegistry>>,
+) {
+    tokio::spawn(async move {
+        let result = match try_read_flow_header(&mut recv).await {
+            Ok(result) => result,
+            Err(e) => {
+                warn!("failed to read flow header on bi stream from {peer_addr}: {e}");
+                return;
+            }
+        };
+
+        let (Some(flow_id), Some(flags)) = (result.flow_id, result.flags) else {
+            warn!("bi stream from {peer_addr} has no flow header, resetting");
+            let _ = send.reset(quinn::VarInt::from_u32(0xC1));
+            return;
+        };
+
+        if !flags.is_discard_signal() {
+            warn!(
+                flow_id = ?flow_id,
+                "bi stream from {peer_addr} is not a discard signal, resetting"
+            );
+            let _ = send.reset(quinn::VarInt::from_u32(0xC1));
+            return;
+        }
+
+        {
+            let mut registry = flow_registry.lock().await;
+            if let Some(state) = registry.remove(flow_id) {
+                debug!(
+                    flow_id = ?flow_id,
+                    "discarded flow state for {peer_addr}: {state:?}"
+                );
+            } else {
+                debug!(
+                    flow_id = ?flow_id,
+                    "no flow state to discard for {peer_addr} (already expired or unknown)"
+                );
+            }
+        }
+
+        let _ = send.finish();
+
+        debug!(flow_id = ?flow_id, "completed discard handshake for {peer_addr}");
+    });
 }
 
 // [MQoQ§5] Data stream processing

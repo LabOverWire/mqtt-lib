@@ -1104,6 +1104,16 @@ impl DirectClientInner {
         Ok(recovered)
     }
 
+    pub async fn discard_flow(&self, flow_id: FlowId) -> Result<()> {
+        if !self.is_connected() {
+            return Err(MqttError::NotConnected);
+        }
+        let manager = self.quic_stream_manager.as_ref().ok_or_else(|| {
+            MqttError::ConnectionError("discard_flow only supported for QUIC connections".into())
+        })?;
+        manager.discard_flow(flow_id).await
+    }
+
     pub fn migrate(&self) -> Result<()> {
         if !self.is_connected() {
             return Err(MqttError::NotConnected);

@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [mqtt5 0.27.0] / [mqttv5-cli 0.24.0] - 2026-03-18
+
+### Added
+
+- **Discard flow state at peer** - Client can force the broker to discard flow state per MQoQ §9.16
+  - `MqttClient::discard_flow(flow_id)` opens bidirectional QUIC stream with `clean_start=1` and all persistent flags cleared
+  - Broker `accept_bi` loop dispatches to `spawn_discard_handler` which validates the discard signal, removes the flow from `FlowRegistry`, and responds with FIN
+  - `FlowFlags::is_discard_signal()` and `FlowFlags::discard()` for detecting and constructing discard signals
+  - Non-discard bidirectional streams are reset with error code `0xC1` (`ERROR_NO_FLOW_STATE`)
+
+### Changed
+
+- Refactored `run_quic_handler_inner` into `spawn_datagram_reader`, `spawn_bi_accept_loop`, `spawn_uni_accept_loop` helpers
+
 ## [mqtt5 0.26.0] - 2026-03-18
 
 ### Added

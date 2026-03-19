@@ -23,6 +23,8 @@ use crate::error::Result;
 use crate::Transport;
 
 #[cfg(not(target_arch = "wasm32"))]
+pub use flow::{FlowFlags, FlowId};
+#[cfg(not(target_arch = "wasm32"))]
 pub use manager::{ConnectionState, ConnectionStats, ManagerConfig, TransportManager};
 #[cfg(not(target_arch = "wasm32"))]
 pub use packet_io::{PacketIo, PacketReader, PacketWriter};
