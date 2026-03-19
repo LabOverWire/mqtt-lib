@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [mqtt5 0.28.0] / [mqttv5-cli 0.25.0] - 2026-03-19
+
+### Added
+
+- **QUIC 0-RTT connection resumption** - Reconnecting clients can skip the TLS handshake round trip per MQTT-next §8.1
+  - Broker `enable_early_data` config sets `max_early_data_size` and `send_half_rtt_data` on rustls `ServerConfig`
+  - Client caches `quinn::ClientConfig` (session ticket store) across reconnections for `Connecting::into_0rtt()`
+  - Automatic 1-RTT fallback when no session ticket exists or server rejects early data
+  - `MqttClient::was_zero_rtt()` reports whether the current connection used 0-RTT
+  - `--quic-early-data` CLI flag on broker, pub, sub, and bench commands
+
 ## [mqtt5 0.27.0] / [mqttv5-cli 0.24.0] - 2026-03-18
 
 ### Added

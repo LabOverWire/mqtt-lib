@@ -28,7 +28,7 @@ codec = ["client", "dep:miniz_oxide"]
 
 [dependencies]
 mqtt5-protocol = "0.11.0"
-mqtt5 = { version = "0.27", optional = true, default-features = false, features = [
+mqtt5 = { version = "0.28", optional = true, default-features = false, features = [
     "tokio",
 ] }
 
