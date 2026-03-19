@@ -22,7 +22,7 @@
 
 ```toml
 [dependencies]
-mqtt5 = "0.25"
+mqtt5 = "0.27"
 ```
 
 ### CLI Tool
@@ -868,7 +868,7 @@ Distributed tracing with OpenTelemetry support:
 
 ```toml
 [dependencies]
-mqtt5 = { version = "0.24", features = ["opentelemetry"] }
+mqtt5 = { version = "0.27", features = ["opentelemetry"] }
 ```
 
 ### Features
