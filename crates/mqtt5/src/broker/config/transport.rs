@@ -18,6 +18,8 @@ pub struct QuicConfig {
     pub ca_file: Option<PathBuf>,
     pub require_client_cert: bool,
     pub bind_addresses: Vec<SocketAddr>,
+    #[serde(default)]
+    pub enable_early_data: bool,
 }
 
 impl QuicConfig {
@@ -36,6 +38,7 @@ impl QuicConfig {
                 "0.0.0.0:14567".parse().expect("valid IPv4 address"),
                 "[::]:14567".parse().expect("valid IPv6 address"),
             ],
+            enable_early_data: false,
         }
     }
 
@@ -66,6 +69,12 @@ impl QuicConfig {
     #[must_use]
     pub fn with_bind_address(mut self, addr: impl Into<SocketAddr>) -> Self {
         self.bind_addresses = vec![addr.into()];
+        self
+    }
+
+    #[must_use]
+    pub fn with_early_data(mut self, enable: bool) -> Self {
+        self.enable_early_data = enable;
         self
     }
 }

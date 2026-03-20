@@ -230,9 +230,15 @@ impl MqttClient {
             .with_flow_headers(qc.flow_headers)
             .with_flow_expire_interval(qc.flow_expire.as_secs())
             .with_datagrams(qc.datagrams)
-            .with_connect_timeout(qc.connect_timeout);
+            .with_connect_timeout(qc.connect_timeout)
+            .with_early_data(qc.enable_early_data);
         if let Some(max) = qc.max_streams {
             config = config.with_max_concurrent_streams(max);
+        }
+        if qc.enable_early_data {
+            if let Some(cached) = self.quic_client_config.read().await.clone() {
+                config = config.with_cached_client_config(cached);
+            }
         }
         drop(qc);
         let mut quic_transport = QuicTransport::new(config);
@@ -262,10 +268,17 @@ impl MqttClient {
             .with_flow_headers(qc.flow_headers)
             .with_flow_expire_interval(qc.flow_expire.as_secs())
             .with_datagrams(qc.datagrams)
-            .with_connect_timeout(qc.connect_timeout);
+            .with_connect_timeout(qc.connect_timeout)
+            .with_early_data(qc.enable_early_data);
 
         if let Some(max) = qc.max_streams {
             config = config.with_max_concurrent_streams(max);
+        }
+
+        if qc.enable_early_data {
+            if let Some(cached) = self.quic_client_config.read().await.clone() {
+                config = config.with_cached_client_config(cached);
+            }
         }
 
         if let Some(existing_config) = &*tls_config_lock {
@@ -326,6 +339,9 @@ impl MqttClient {
             let mut inner = self.inner.write().await;
             match inner.connect(transport).await {
                 Ok(result) => {
+                    if let Some(cached) = inner.cached_quic_client_config.take() {
+                        *self.quic_client_config.write().await = Some(cached);
+                    }
                     let stored_subs = inner.stored_subscriptions.lock().clone();
                     let session_present = result.session_present;
                     drop(inner);

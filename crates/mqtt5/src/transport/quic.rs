@@ -29,6 +29,7 @@ pub enum StreamStrategy {
 }
 
 #[derive(Debug, Clone)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct ClientTransportConfig {
     pub insecure_tls: bool,
     pub stream_strategy: StreamStrategy,
@@ -37,6 +38,7 @@ pub struct ClientTransportConfig {
     pub max_streams: Option<usize>,
     pub datagrams: bool,
     pub connect_timeout: Duration,
+    pub enable_early_data: bool,
 }
 
 impl Default for ClientTransportConfig {
@@ -49,6 +51,7 @@ impl Default for ClientTransportConfig {
             max_streams: None,
             datagrams: false,
             connect_timeout: Duration::from_secs(30),
+            enable_early_data: false,
         }
     }
 }
@@ -73,6 +76,8 @@ pub struct QuicConfig {
     pub enable_flow_headers: bool,
     pub flow_expire_interval: u64,
     pub flow_flags: FlowFlags,
+    pub enable_early_data: bool,
+    pub cached_client_config: Option<ClientConfig>,
 }
 
 const DEFAULT_DATAGRAM_BUFFER_SIZE: usize = 65536;
@@ -98,6 +103,8 @@ impl QuicConfig {
             enable_flow_headers: false,
             flow_expire_interval: DEFAULT_FLOW_EXPIRE_INTERVAL,
             flow_flags: FlowFlags::default(),
+            enable_early_data: false,
+            cached_client_config: None,
         }
     }
 
@@ -174,6 +181,18 @@ impl QuicConfig {
         self
     }
 
+    #[must_use]
+    pub fn with_early_data(mut self, enable: bool) -> Self {
+        self.enable_early_data = enable;
+        self
+    }
+
+    #[must_use]
+    pub fn with_cached_client_config(mut self, config: ClientConfig) -> Self {
+        self.cached_client_config = Some(config);
+        self
+    }
+
     fn build_client_config(&self) -> Result<ClientConfig> {
         let crypto_provider = Arc::new(rustls::crypto::ring::default_provider());
 
@@ -236,6 +255,10 @@ impl QuicConfig {
                 .with_no_client_auth()
         };
 
+        if self.enable_early_data {
+            crypto.enable_early_data = true;
+        }
+
         crypto.alpn_protocols = if self.enable_flow_headers {
             vec![ALPN_MQTT_NEXT.to_vec(), ALPN_MQTT.to_vec()]
         } else {
@@ -269,6 +292,7 @@ impl QuicConfig {
     }
 }
 
+#[allow(clippy::struct_excessive_bools)]
 pub struct QuicSplitResult {
     pub send: SendStream,
     pub recv: RecvStream,
@@ -280,6 +304,8 @@ pub struct QuicSplitResult {
     pub negotiated_mqtt_next: bool,
     pub flow_expire_interval: u64,
     pub flow_flags: FlowFlags,
+    pub zero_rtt_accepted: bool,
+    pub client_config: Option<ClientConfig>,
 }
 
 #[derive(Debug)]
@@ -289,6 +315,8 @@ pub struct QuicTransport {
     connection: Option<Connection>,
     control_stream: Option<(SendStream, RecvStream)>,
     negotiated_mqtt_next: bool,
+    zero_rtt_accepted: bool,
+    built_client_config: Option<ClientConfig>,
 }
 
 impl QuicTransport {
@@ -300,6 +328,8 @@ impl QuicTransport {
             connection: None,
             control_stream: None,
             negotiated_mqtt_next: false,
+            zero_rtt_accepted: false,
+            built_client_config: None,
         }
     }
 
@@ -327,6 +357,8 @@ impl QuicTransport {
             negotiated_mqtt_next: self.negotiated_mqtt_next,
             flow_expire_interval: self.config.flow_expire_interval,
             flow_flags: self.config.flow_flags,
+            zero_rtt_accepted: self.zero_rtt_accepted,
+            client_config: self.built_client_config.take(),
         })
     }
 
@@ -382,7 +414,14 @@ impl Transport for QuicTransport {
             return Err(MqttError::AlreadyConnected);
         }
 
-        let client_config = self.config.build_client_config()?;
+        let client_config = if let Some(cached) = self.config.cached_client_config.take() {
+            debug!("using cached quinn::ClientConfig (session ticket store preserved)");
+            cached
+        } else {
+            self.config.build_client_config()?
+        };
+
+        self.built_client_config = Some(client_config.clone());
 
         let mut endpoint = Endpoint::client("0.0.0.0:0".parse().unwrap())
             .map_err(|e| MqttError::ConnectionError(format!("Failed to create endpoint: {e}")))?;
@@ -392,10 +431,38 @@ impl Transport for QuicTransport {
             .connect(self.config.addr, &self.config.server_name)
             .map_err(|e| MqttError::ConnectionError(format!("QUIC connect failed: {e}")))?;
 
-        let connection = tokio::time::timeout(self.config.connect_timeout, connecting)
-            .await
-            .map_err(|_| MqttError::Timeout)?
-            .map_err(|e| MqttError::ConnectionError(format!("QUIC handshake failed: {e}")))?;
+        let (connection, zero_rtt_accepted) = if self.config.enable_early_data {
+            match connecting.into_0rtt() {
+                Ok((conn, zero_rtt_future)) => {
+                    debug!("0-RTT connection attempt succeeded, awaiting server confirmation");
+                    let accepted = zero_rtt_future.await;
+                    if accepted {
+                        tracing::info!("QUIC 0-RTT accepted by server");
+                    } else {
+                        debug!("QUIC 0-RTT rejected by server, fell back to 1-RTT");
+                    }
+                    (conn, accepted)
+                }
+                Err(connecting) => {
+                    debug!("no session ticket available, falling back to 1-RTT");
+                    let conn = tokio::time::timeout(self.config.connect_timeout, connecting)
+                        .await
+                        .map_err(|_| MqttError::Timeout)?
+                        .map_err(|e| {
+                            MqttError::ConnectionError(format!("QUIC handshake failed: {e}"))
+                        })?;
+                    (conn, false)
+                }
+            }
+        } else {
+            let conn = tokio::time::timeout(self.config.connect_timeout, connecting)
+                .await
+                .map_err(|_| MqttError::Timeout)?
+                .map_err(|e| MqttError::ConnectionError(format!("QUIC handshake failed: {e}")))?;
+            (conn, false)
+        };
+
+        self.zero_rtt_accepted = zero_rtt_accepted;
 
         let negotiated_mqtt_next = connection
             .handshake_data()
@@ -410,10 +477,10 @@ impl Transport for QuicTransport {
         tracing::info!(
             remote_addr = %connection.remote_address(),
             alpn = if negotiated_mqtt_next { "MQTT-next" } else { "mqtt" },
+            zero_rtt = zero_rtt_accepted,
             "QUIC connection established"
         );
 
-        // [MQoQ§4] Control flow (mandatory first bidirectional stream)
         let (send, recv) = connection.open_bi().await.map_err(|e| {
             MqttError::ConnectionError(format!("Failed to open control stream: {e}"))
         })?;

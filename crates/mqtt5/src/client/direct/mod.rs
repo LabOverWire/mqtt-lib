@@ -75,6 +75,8 @@ pub struct DirectClientInner {
     pub auth_handler: Option<Arc<dyn AuthHandler>>,
     pub auth_method: Option<String>,
     pub keepalive_state: Arc<Mutex<KeepaliveState>>,
+    pub cached_quic_client_config: Option<quinn::ClientConfig>,
+    pub zero_rtt_accepted: bool,
 }
 
 impl DirectClientInner {
@@ -118,6 +120,8 @@ impl DirectClientInner {
             auth_handler: None,
             auth_method,
             keepalive_state: Arc::new(Mutex::new(KeepaliveState::default())),
+            cached_quic_client_config: None,
+            zero_rtt_accepted: false,
         }
     }
 
@@ -297,6 +301,8 @@ impl DirectClientInner {
                 self.quic_endpoint = Some(split.endpoint);
                 self.stream_strategy = Some(split.strategy);
                 self.quic_datagrams_enabled = split.datagrams_enabled;
+                self.zero_rtt_accepted = split.zero_rtt_accepted;
+                self.cached_quic_client_config = split.client_config;
                 let effective_flow_headers =
                     split.flow_headers_enabled && split.negotiated_mqtt_next;
                 self.quic_stream_manager = Some(Arc::new(
