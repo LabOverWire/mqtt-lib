@@ -47,15 +47,21 @@ pub enum ReasonCode {
     SubscriptionIdentifiersNotSupported = 0xA1,
     WildcardSubscriptionsNotSupported = 0xA2,
 
-    // [MQoQ§Error] MQoQ-specific error codes
     MqoqNoFlowState = 0xB3,
-    MqoqProtocolError = 0xB4,
+    MqoqNotFlowOwner = 0xB4,
     MqoqStreamTypeError = 0xB5,
     MqoqBadFlowId = 0xB6,
+    MqoqPersistentTopic = 0xB7,
     MqoqPersistentSubError = 0xB8,
+    MqoqOptionalHeader = 0xB9,
     MqoqIncompletePacket = 0xBA,
     MqoqFlowOpenIdle = 0xBB,
     MqoqFlowCancelled = 0xBC,
+    MqoqFlowPacketCancelled = 0xBD,
+    MqoqFlowRefused = 0xBE,
+    MqoqDiscardState = 0xBF,
+    MqoqServerPushNotWelcome = 0xC0,
+    MqoqRecoveryFailed = 0xC1,
 }
 
 // Aliases for ReasonCode::Success (0x00) used in different contexts
@@ -84,26 +90,40 @@ impl ReasonCode {
         matches!(
             self,
             Self::MqoqNoFlowState
-                | Self::MqoqProtocolError
+                | Self::MqoqNotFlowOwner
                 | Self::MqoqStreamTypeError
                 | Self::MqoqBadFlowId
+                | Self::MqoqPersistentTopic
                 | Self::MqoqPersistentSubError
+                | Self::MqoqOptionalHeader
                 | Self::MqoqIncompletePacket
                 | Self::MqoqFlowOpenIdle
                 | Self::MqoqFlowCancelled
+                | Self::MqoqFlowPacketCancelled
+                | Self::MqoqFlowRefused
+                | Self::MqoqDiscardState
+                | Self::MqoqServerPushNotWelcome
+                | Self::MqoqRecoveryFailed
         )
     }
 
     #[must_use]
     pub fn mqoq_error_level(&self) -> Option<u8> {
         match self {
-            Self::MqoqNoFlowState | Self::MqoqProtocolError => Some(0),
-            Self::MqoqStreamTypeError | Self::MqoqBadFlowId | Self::MqoqPersistentSubError => {
-                Some(1)
-            }
-            Self::MqoqIncompletePacket | Self::MqoqFlowOpenIdle | Self::MqoqFlowCancelled => {
-                Some(2)
-            }
+            Self::MqoqNoFlowState | Self::MqoqNotFlowOwner => Some(0),
+            Self::MqoqStreamTypeError
+            | Self::MqoqBadFlowId
+            | Self::MqoqPersistentTopic
+            | Self::MqoqPersistentSubError
+            | Self::MqoqOptionalHeader
+            | Self::MqoqDiscardState
+            | Self::MqoqServerPushNotWelcome
+            | Self::MqoqRecoveryFailed => Some(1),
+            Self::MqoqIncompletePacket
+            | Self::MqoqFlowOpenIdle
+            | Self::MqoqFlowCancelled
+            | Self::MqoqFlowPacketCancelled
+            | Self::MqoqFlowRefused => Some(2),
             _ => None,
         }
     }
@@ -155,15 +175,37 @@ impl ReasonCode {
             0xA1 => Some(Self::SubscriptionIdentifiersNotSupported),
             0xA2 => Some(Self::WildcardSubscriptionsNotSupported),
             0xB3 => Some(Self::MqoqNoFlowState),
-            0xB4 => Some(Self::MqoqProtocolError),
+            0xB4 => Some(Self::MqoqNotFlowOwner),
             0xB5 => Some(Self::MqoqStreamTypeError),
             0xB6 => Some(Self::MqoqBadFlowId),
+            0xB7 => Some(Self::MqoqPersistentTopic),
             0xB8 => Some(Self::MqoqPersistentSubError),
+            0xB9 => Some(Self::MqoqOptionalHeader),
             0xBA => Some(Self::MqoqIncompletePacket),
             0xBB => Some(Self::MqoqFlowOpenIdle),
             0xBC => Some(Self::MqoqFlowCancelled),
+            0xBD => Some(Self::MqoqFlowPacketCancelled),
+            0xBE => Some(Self::MqoqFlowRefused),
+            0xBF => Some(Self::MqoqDiscardState),
+            0xC0 => Some(Self::MqoqServerPushNotWelcome),
+            0xC1 => Some(Self::MqoqRecoveryFailed),
             _ => None,
         }
+    }
+
+    #[must_use]
+    pub fn to_quic_stream_code(self) -> Option<crate::quic_error_codes::QuicStreamCode> {
+        crate::quic_error_codes::QuicStreamCode::from_code(u32::from(self as u8))
+    }
+
+    #[must_use]
+    pub fn from_quic_stream_code(code: crate::quic_error_codes::QuicStreamCode) -> Option<Self> {
+        let value = code.code();
+        if value > 255 {
+            return None;
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        Self::from_u8(value as u8)
     }
 }
 
@@ -239,13 +281,20 @@ mod tests {
     #[test]
     fn test_mqoq_error_codes() {
         assert_eq!(ReasonCode::MqoqNoFlowState as u8, 0xB3);
-        assert_eq!(ReasonCode::MqoqProtocolError as u8, 0xB4);
+        assert_eq!(ReasonCode::MqoqNotFlowOwner as u8, 0xB4);
         assert_eq!(ReasonCode::MqoqStreamTypeError as u8, 0xB5);
         assert_eq!(ReasonCode::MqoqBadFlowId as u8, 0xB6);
+        assert_eq!(ReasonCode::MqoqPersistentTopic as u8, 0xB7);
         assert_eq!(ReasonCode::MqoqPersistentSubError as u8, 0xB8);
+        assert_eq!(ReasonCode::MqoqOptionalHeader as u8, 0xB9);
         assert_eq!(ReasonCode::MqoqIncompletePacket as u8, 0xBA);
         assert_eq!(ReasonCode::MqoqFlowOpenIdle as u8, 0xBB);
         assert_eq!(ReasonCode::MqoqFlowCancelled as u8, 0xBC);
+        assert_eq!(ReasonCode::MqoqFlowPacketCancelled as u8, 0xBD);
+        assert_eq!(ReasonCode::MqoqFlowRefused as u8, 0xBE);
+        assert_eq!(ReasonCode::MqoqDiscardState as u8, 0xBF);
+        assert_eq!(ReasonCode::MqoqServerPushNotWelcome as u8, 0xC0);
+        assert_eq!(ReasonCode::MqoqRecoveryFailed as u8, 0xC1);
     }
 
     #[test]
@@ -253,7 +302,7 @@ mod tests {
         assert_eq!(ReasonCode::from_u8(0xB3), Some(ReasonCode::MqoqNoFlowState));
         assert_eq!(
             ReasonCode::from_u8(0xB4),
-            Some(ReasonCode::MqoqProtocolError)
+            Some(ReasonCode::MqoqNotFlowOwner)
         );
         assert_eq!(
             ReasonCode::from_u8(0xB5),
@@ -261,8 +310,16 @@ mod tests {
         );
         assert_eq!(ReasonCode::from_u8(0xB6), Some(ReasonCode::MqoqBadFlowId));
         assert_eq!(
+            ReasonCode::from_u8(0xB7),
+            Some(ReasonCode::MqoqPersistentTopic)
+        );
+        assert_eq!(
             ReasonCode::from_u8(0xB8),
             Some(ReasonCode::MqoqPersistentSubError)
+        );
+        assert_eq!(
+            ReasonCode::from_u8(0xB9),
+            Some(ReasonCode::MqoqOptionalHeader)
         );
         assert_eq!(
             ReasonCode::from_u8(0xBA),
@@ -276,20 +333,42 @@ mod tests {
             ReasonCode::from_u8(0xBC),
             Some(ReasonCode::MqoqFlowCancelled)
         );
-        assert_eq!(ReasonCode::from_u8(0xB7), None);
-        assert_eq!(ReasonCode::from_u8(0xB9), None);
+        assert_eq!(
+            ReasonCode::from_u8(0xBD),
+            Some(ReasonCode::MqoqFlowPacketCancelled)
+        );
+        assert_eq!(ReasonCode::from_u8(0xBE), Some(ReasonCode::MqoqFlowRefused));
+        assert_eq!(
+            ReasonCode::from_u8(0xBF),
+            Some(ReasonCode::MqoqDiscardState)
+        );
+        assert_eq!(
+            ReasonCode::from_u8(0xC0),
+            Some(ReasonCode::MqoqServerPushNotWelcome)
+        );
+        assert_eq!(
+            ReasonCode::from_u8(0xC1),
+            Some(ReasonCode::MqoqRecoveryFailed)
+        );
     }
 
     #[test]
     fn test_mqoq_error_detection() {
         assert!(ReasonCode::MqoqNoFlowState.is_mqoq_error());
-        assert!(ReasonCode::MqoqProtocolError.is_mqoq_error());
+        assert!(ReasonCode::MqoqNotFlowOwner.is_mqoq_error());
         assert!(ReasonCode::MqoqStreamTypeError.is_mqoq_error());
         assert!(ReasonCode::MqoqBadFlowId.is_mqoq_error());
+        assert!(ReasonCode::MqoqPersistentTopic.is_mqoq_error());
         assert!(ReasonCode::MqoqPersistentSubError.is_mqoq_error());
+        assert!(ReasonCode::MqoqOptionalHeader.is_mqoq_error());
         assert!(ReasonCode::MqoqIncompletePacket.is_mqoq_error());
         assert!(ReasonCode::MqoqFlowOpenIdle.is_mqoq_error());
         assert!(ReasonCode::MqoqFlowCancelled.is_mqoq_error());
+        assert!(ReasonCode::MqoqFlowPacketCancelled.is_mqoq_error());
+        assert!(ReasonCode::MqoqFlowRefused.is_mqoq_error());
+        assert!(ReasonCode::MqoqDiscardState.is_mqoq_error());
+        assert!(ReasonCode::MqoqServerPushNotWelcome.is_mqoq_error());
+        assert!(ReasonCode::MqoqRecoveryFailed.is_mqoq_error());
         assert!(!ReasonCode::Success.is_mqoq_error());
         assert!(!ReasonCode::ProtocolError.is_mqoq_error());
     }
@@ -297,17 +376,79 @@ mod tests {
     #[test]
     fn test_mqoq_error_levels() {
         assert_eq!(ReasonCode::MqoqNoFlowState.mqoq_error_level(), Some(0));
-        assert_eq!(ReasonCode::MqoqProtocolError.mqoq_error_level(), Some(0));
+        assert_eq!(ReasonCode::MqoqNotFlowOwner.mqoq_error_level(), Some(0));
         assert_eq!(ReasonCode::MqoqStreamTypeError.mqoq_error_level(), Some(1));
         assert_eq!(ReasonCode::MqoqBadFlowId.mqoq_error_level(), Some(1));
+        assert_eq!(ReasonCode::MqoqPersistentTopic.mqoq_error_level(), Some(1));
         assert_eq!(
             ReasonCode::MqoqPersistentSubError.mqoq_error_level(),
             Some(1)
         );
+        assert_eq!(ReasonCode::MqoqOptionalHeader.mqoq_error_level(), Some(1));
+        assert_eq!(ReasonCode::MqoqDiscardState.mqoq_error_level(), Some(1));
+        assert_eq!(
+            ReasonCode::MqoqServerPushNotWelcome.mqoq_error_level(),
+            Some(1)
+        );
+        assert_eq!(ReasonCode::MqoqRecoveryFailed.mqoq_error_level(), Some(1));
         assert_eq!(ReasonCode::MqoqIncompletePacket.mqoq_error_level(), Some(2));
         assert_eq!(ReasonCode::MqoqFlowOpenIdle.mqoq_error_level(), Some(2));
         assert_eq!(ReasonCode::MqoqFlowCancelled.mqoq_error_level(), Some(2));
+        assert_eq!(
+            ReasonCode::MqoqFlowPacketCancelled.mqoq_error_level(),
+            Some(2)
+        );
+        assert_eq!(ReasonCode::MqoqFlowRefused.mqoq_error_level(), Some(2));
         assert_eq!(ReasonCode::Success.mqoq_error_level(), None);
         assert_eq!(ReasonCode::ProtocolError.mqoq_error_level(), None);
+    }
+
+    #[test]
+    fn test_reason_to_quic_stream_code_round_trip() {
+        use crate::quic_error_codes::QuicStreamCode;
+
+        let pairs = [
+            (ReasonCode::MqoqNoFlowState, QuicStreamCode::NoFlowState),
+            (ReasonCode::MqoqNotFlowOwner, QuicStreamCode::NotFlowOwner),
+            (ReasonCode::MqoqStreamTypeError, QuicStreamCode::StreamType),
+            (ReasonCode::MqoqBadFlowId, QuicStreamCode::BadFlowId),
+            (
+                ReasonCode::MqoqPersistentTopic,
+                QuicStreamCode::PersistentTopic,
+            ),
+            (
+                ReasonCode::MqoqPersistentSubError,
+                QuicStreamCode::PersistentSub,
+            ),
+            (
+                ReasonCode::MqoqOptionalHeader,
+                QuicStreamCode::OptionalHeader,
+            ),
+            (
+                ReasonCode::MqoqIncompletePacket,
+                QuicStreamCode::IncompletePacket,
+            ),
+            (ReasonCode::MqoqFlowOpenIdle, QuicStreamCode::FlowOpenIdle),
+            (ReasonCode::MqoqFlowCancelled, QuicStreamCode::FlowCancelled),
+            (
+                ReasonCode::MqoqFlowPacketCancelled,
+                QuicStreamCode::FlowPacketCancelled,
+            ),
+            (ReasonCode::MqoqFlowRefused, QuicStreamCode::FlowRefused),
+            (ReasonCode::MqoqDiscardState, QuicStreamCode::DiscardState),
+            (
+                ReasonCode::MqoqServerPushNotWelcome,
+                QuicStreamCode::ServerPushNotWelcome,
+            ),
+            (
+                ReasonCode::MqoqRecoveryFailed,
+                QuicStreamCode::RecoveryFailed,
+            ),
+        ];
+
+        for (reason, stream) in pairs {
+            assert_eq!(reason.to_quic_stream_code(), Some(stream));
+            assert_eq!(ReasonCode::from_quic_stream_code(stream), Some(reason));
+        }
     }
 }

@@ -586,3 +586,127 @@ async fn test_quic_0rtt_pubsub_after_reconnect() {
     client.disconnect().await.unwrap();
     broker_handle.abort();
 }
+
+#[tokio::test]
+async fn test_quic_connection_close_sends_no_error() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    let (mut broker, quic_addr) = start_quic_broker(24584).await;
+    let broker_handle = tokio::spawn(async move { broker.run().await });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let client = MqttClient::new(test_client_id("quic-graceful"));
+    client.set_insecure_tls(true).await;
+
+    let broker_url = format!("quic://{quic_addr}");
+    if client.connect(&broker_url).await.is_err() {
+        broker_handle.abort();
+        return;
+    }
+
+    assert!(client.is_connected().await);
+    client.disconnect().await.unwrap();
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let client2 = MqttClient::new(test_client_id("quic-after-graceful"));
+    client2.set_insecure_tls(true).await;
+    if client2.connect(&broker_url).await.is_err() {
+        broker_handle.abort();
+        return;
+    }
+    assert!(
+        client2.is_connected().await,
+        "broker should still accept connections after graceful disconnect"
+    );
+    client2.disconnect().await.unwrap();
+    broker_handle.abort();
+}
+
+#[test]
+fn test_quic_error_codes_round_trip() {
+    use mqtt5_protocol::quic_error_codes::{QuicConnectionCode, QuicStreamCode};
+
+    let conn_codes = [
+        (QuicConnectionCode::NoError, 0x00),
+        (QuicConnectionCode::TlsError, 0xB1),
+        (QuicConnectionCode::Unspecified, 0xB2),
+        (QuicConnectionCode::TooManyRecoverAttempts, 0xB3),
+        (QuicConnectionCode::ProtocolLevel0, 0xB4),
+    ];
+    for (code, expected_value) in conn_codes {
+        assert_eq!(code.code(), expected_value);
+        assert_eq!(QuicConnectionCode::from_code(expected_value), Some(code));
+    }
+
+    let stream_codes = [
+        (QuicStreamCode::NoError, 0x00),
+        (QuicStreamCode::NoFlowState, 0xB3),
+        (QuicStreamCode::NotFlowOwner, 0xB4),
+        (QuicStreamCode::StreamType, 0xB5),
+        (QuicStreamCode::BadFlowId, 0xB6),
+        (QuicStreamCode::PersistentTopic, 0xB7),
+        (QuicStreamCode::PersistentSub, 0xB8),
+        (QuicStreamCode::OptionalHeader, 0xB9),
+        (QuicStreamCode::IncompletePacket, 0xBA),
+        (QuicStreamCode::FlowOpenIdle, 0xBB),
+        (QuicStreamCode::FlowCancelled, 0xBC),
+        (QuicStreamCode::FlowPacketCancelled, 0xBD),
+        (QuicStreamCode::FlowRefused, 0xBE),
+        (QuicStreamCode::DiscardState, 0xBF),
+        (QuicStreamCode::ServerPushNotWelcome, 0xC0),
+        (QuicStreamCode::RecoveryFailed, 0xC1),
+    ];
+    for (code, expected_value) in stream_codes {
+        assert_eq!(code.code(), expected_value);
+        assert_eq!(QuicStreamCode::from_code(expected_value), Some(code));
+    }
+
+    assert_eq!(QuicConnectionCode::TooManyRecoverAttempts.code(), 0xB3);
+    assert_eq!(QuicStreamCode::NoFlowState.code(), 0xB3);
+
+    assert_eq!(QuicConnectionCode::from_code(0xC0), None);
+    assert_eq!(QuicStreamCode::from_code(0xB1), None);
+}
+
+#[test]
+fn test_quic_error_level_consistency() {
+    use mqtt5_protocol::quic_error_codes::QuicStreamCode;
+    use mqtt5_protocol::ReasonCode;
+
+    let level_0_codes = [QuicStreamCode::NoFlowState, QuicStreamCode::NotFlowOwner];
+    for code in level_0_codes {
+        assert_eq!(code.error_level(), Some(0));
+        let reason = ReasonCode::from_quic_stream_code(code).unwrap();
+        assert_eq!(reason.mqoq_error_level(), Some(0));
+    }
+
+    let level_1_codes = [
+        QuicStreamCode::StreamType,
+        QuicStreamCode::BadFlowId,
+        QuicStreamCode::PersistentTopic,
+        QuicStreamCode::PersistentSub,
+        QuicStreamCode::OptionalHeader,
+        QuicStreamCode::DiscardState,
+        QuicStreamCode::ServerPushNotWelcome,
+        QuicStreamCode::RecoveryFailed,
+    ];
+    for code in level_1_codes {
+        assert_eq!(code.error_level(), Some(1));
+        let reason = ReasonCode::from_quic_stream_code(code).unwrap();
+        assert_eq!(reason.mqoq_error_level(), Some(1));
+    }
+
+    let level_2_codes = [
+        QuicStreamCode::IncompletePacket,
+        QuicStreamCode::FlowOpenIdle,
+        QuicStreamCode::FlowCancelled,
+        QuicStreamCode::FlowPacketCancelled,
+        QuicStreamCode::FlowRefused,
+    ];
+    for code in level_2_codes {
+        assert_eq!(code.error_level(), Some(2));
+        let reason = ReasonCode::from_quic_stream_code(code).unwrap();
+        assert_eq!(reason.mqoq_error_level(), Some(2));
+    }
+}

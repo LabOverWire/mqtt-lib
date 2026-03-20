@@ -2,8 +2,6 @@
 
 MQTT v5.0 and v3.1.1 WebAssembly client and broker for browser environments.
 
-> **Upgrading from 0.x?** See the [Migration Guide](MIGRATION-1.0.md) for the complete list of renamed types, methods, and properties.
-
 ## Features
 
 - **WebSocket transport** - Connect to remote MQTT brokers via `ws://` or `wss://`

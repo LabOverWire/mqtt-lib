@@ -19,6 +19,7 @@ pub mod packet;
 pub mod packet_id;
 pub mod protocol;
 pub mod qos2;
+pub mod quic_error_codes;
 pub mod session;
 pub mod time;
 pub mod topic_matching;
@@ -58,6 +59,8 @@ pub use connection::{
 pub use keepalive::{calculate_ping_interval, is_keepalive_timeout, KeepaliveConfig};
 
 pub use error_classification::RecoverableError;
+
+pub use quic_error_codes::{QuicConnectionCode, QuicStreamCode};
 
 pub use numeric::{
     i32_to_u32_saturating, u128_to_f64_saturating, u128_to_u32_saturating, u128_to_u64_saturating,

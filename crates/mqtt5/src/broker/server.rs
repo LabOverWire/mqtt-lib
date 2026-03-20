@@ -1064,7 +1064,10 @@ impl MqttBroker {
 
                                 if !state.resource_monitor.can_accept_connection(peer_addr.ip()).await {
                                     warn!("QUIC connection rejected from {peer_addr}: resource limits exceeded");
-                                    connection.close(0u32.into(), b"resource limit");
+                                    connection.close(
+                                        quinn::VarInt::from_u32(mqtt5_protocol::QuicConnectionCode::Unspecified.code()),
+                                        b"resource limit",
+                                    );
                                     return;
                                 }
 
@@ -1248,7 +1251,10 @@ impl MqttBroker {
 
                                 if !state.resource_monitor.can_accept_connection(peer_addr.ip()).await {
                                     warn!("Cluster QUIC connection rejected from {peer_addr}: resource limits exceeded");
-                                    connection.close(0u32.into(), b"resource limit");
+                                    connection.close(
+                                        quinn::VarInt::from_u32(mqtt5_protocol::QuicConnectionCode::Unspecified.code()),
+                                        b"resource limit",
+                                    );
                                     return;
                                 }
 

@@ -1,8 +1,5 @@
 # mqtt5-protocol
 
-[![Crates.io](https://img.shields.io/crates/v/mqtt5-protocol.svg)](https://crates.io/crates/mqtt5-protocol)
-[![Documentation](https://docs.rs/mqtt5-protocol/badge.svg)](https://docs.rs/mqtt5-protocol)
-
 MQTT v5.0 and v3.1.1 protocol implementation - packets, encoding, and validation.
 
 ## Features

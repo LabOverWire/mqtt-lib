@@ -411,7 +411,10 @@ impl DirectClientInner {
         self.set_connected(false);
         self.writer = None;
         if let Some(conn) = self.quic_connection.take() {
-            conn.close(0u32.into(), b"disconnect");
+            conn.close(
+                quinn::VarInt::from_u32(mqtt5_protocol::QuicConnectionCode::NoError.code()),
+                b"disconnect",
+            );
         }
         if let Some(endpoint) = self.quic_endpoint.take() {
             tokio::spawn(async move {

@@ -291,11 +291,9 @@ pub async fn accept_quic_stream(
     peer_addr: SocketAddr,
 ) -> Result<QuicStreamWrapper> {
     let (send, recv) = connection.accept_bi().await.map_err(|e| {
-        error!(
-            "Failed to accept bidirectional stream from {}: {}",
-            peer_addr, e
-        );
-        MqttError::ConnectionError(format!("Failed to accept QUIC stream: {e}"))
+        let reason = crate::transport::quic_error::parse_connection_error(&e);
+        error!("Failed to accept bidirectional stream from {peer_addr}: {reason}");
+        MqttError::ConnectionError(format!("Failed to accept QUIC stream: {reason}"))
     })?;
 
     debug!("QUIC bidirectional stream accepted from {}", peer_addr);
@@ -567,7 +565,8 @@ async fn run_quic_handler_inner(
     let (send, recv) = match connection.accept_bi().await {
         Ok(streams) => streams,
         Err(e) => {
-            error!("Failed to accept control stream from {}: {}", peer_addr, e);
+            let reason = crate::transport::quic_error::parse_connection_error(&e);
+            error!("Failed to accept control stream from {peer_addr}: {reason}");
             return;
         }
     };
@@ -659,12 +658,22 @@ fn spawn_bi_accept_loop(
 ) {
     tokio::spawn(async move {
         loop {
-            if let Ok((send, recv)) = connection.accept_bi().await {
-                debug!("{} bidirectional stream accepted from {}", label, peer_addr);
-                spawn_discard_handler(send, recv, peer_addr, flow_registry.clone());
-            } else {
-                debug!("{} bi stream accept loop ended for {}", label, peer_addr);
-                break;
+            match connection.accept_bi().await {
+                Ok((send, recv)) => {
+                    debug!("{} bidirectional stream accepted from {}", label, peer_addr);
+                    spawn_discard_handler(
+                        send,
+                        recv,
+                        peer_addr,
+                        flow_registry.clone(),
+                        connection.clone(),
+                    );
+                }
+                Err(e) => {
+                    let reason = crate::transport::quic_error::parse_connection_error(&e);
+                    debug!("{label} bi stream accept loop ended for {peer_addr}: {reason}");
+                    break;
+                }
             }
         }
     });
@@ -679,18 +688,24 @@ fn spawn_uni_accept_loop(
 ) {
     tokio::spawn(async move {
         loop {
-            if let Ok(recv) = connection.accept_uni().await {
-                debug!(
-                    "Additional {} data stream accepted from {}",
-                    label, peer_addr
-                );
-                spawn_data_stream_reader(recv, packet_tx.clone(), peer_addr, flow_registry.clone());
-            } else {
-                debug!(
-                    "{} connection stream accept loop ended for {}",
-                    label, peer_addr
-                );
-                break;
+            match connection.accept_uni().await {
+                Ok(recv) => {
+                    debug!(
+                        "Additional {} data stream accepted from {}",
+                        label, peer_addr
+                    );
+                    spawn_data_stream_reader(
+                        recv,
+                        packet_tx.clone(),
+                        peer_addr,
+                        flow_registry.clone(),
+                    );
+                }
+                Err(e) => {
+                    let reason = crate::transport::quic_error::parse_connection_error(&e);
+                    debug!("{label} uni stream accept loop ended for {peer_addr}: {reason}");
+                    break;
+                }
             }
         }
     });
@@ -713,11 +728,52 @@ fn decode_datagram_packet(data: &Bytes) -> Option<Result<Packet>> {
     ))
 }
 
+fn handle_stream_error(
+    send: &mut SendStream,
+    connection: &Connection,
+    peer_addr: SocketAddr,
+    code: mqtt5_protocol::QuicStreamCode,
+    err_tolerance: u8,
+) {
+    let error_level = code.error_level().unwrap_or(0);
+
+    if error_level == 0 || err_tolerance == 0 {
+        warn!(
+            ?code,
+            error_level, err_tolerance, "Level 0 error from {peer_addr}, closing connection"
+        );
+        connection.close(
+            quinn::VarInt::from_u32(mqtt5_protocol::QuicConnectionCode::ProtocolLevel0.code()),
+            code.to_string().as_bytes(),
+        );
+        return;
+    }
+
+    if error_level <= 1 || err_tolerance >= error_level {
+        warn!(
+            ?code,
+            error_level, err_tolerance, "Stream error from {peer_addr}, resetting stream"
+        );
+        let _ = send.reset(quinn::VarInt::from_u32(code.code()));
+        return;
+    }
+
+    warn!(
+        ?code,
+        error_level, err_tolerance, "Error exceeds tolerance for {peer_addr}, closing connection"
+    );
+    connection.close(
+        quinn::VarInt::from_u32(mqtt5_protocol::QuicConnectionCode::ProtocolLevel0.code()),
+        code.to_string().as_bytes(),
+    );
+}
+
 fn spawn_discard_handler(
     mut send: SendStream,
     mut recv: RecvStream,
     peer_addr: SocketAddr,
     flow_registry: Arc<Mutex<FlowRegistry>>,
+    connection: Arc<Connection>,
 ) {
     tokio::spawn(async move {
         let result = match try_read_flow_header(&mut recv).await {
@@ -729,17 +785,24 @@ fn spawn_discard_handler(
         };
 
         let (Some(flow_id), Some(flags)) = (result.flow_id, result.flags) else {
-            warn!("bi stream from {peer_addr} has no flow header, resetting");
-            let _ = send.reset(quinn::VarInt::from_u32(0xC1));
+            handle_stream_error(
+                &mut send,
+                &connection,
+                peer_addr,
+                mqtt5_protocol::QuicStreamCode::NoFlowState,
+                0,
+            );
             return;
         };
 
         if !flags.is_discard_signal() {
-            warn!(
-                flow_id = ?flow_id,
-                "bi stream from {peer_addr} is not a discard signal, resetting"
+            handle_stream_error(
+                &mut send,
+                &connection,
+                peer_addr,
+                mqtt5_protocol::QuicStreamCode::NotFlowOwner,
+                flags.err_tolerance,
             );
-            let _ = send.reset(quinn::VarInt::from_u32(0xC1));
             return;
         }
 
@@ -821,7 +884,12 @@ fn spawn_data_stream_reader(
 
         if let Some(id) = flow_id {
             let mut registry = flow_registry.lock().await;
-            if registry.remove(id).is_some() {
+            let should_keep = registry
+                .get(id)
+                .is_some_and(|state| state.flags.err_tolerance >= 2);
+            if should_keep {
+                debug!(flow_id = ?id, "Preserving flow state (err_tolerance >= 2) for recovery");
+            } else if registry.remove(id).is_some() {
                 debug!(flow_id = ?id, "Removed flow from registry");
             }
         }

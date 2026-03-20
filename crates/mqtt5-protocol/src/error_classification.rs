@@ -100,7 +100,9 @@ fn classify_connection_refused(reason: ReasonCode) -> Option<RecoverableError> {
         ReasonCode::ServerShuttingDown => Some(RecoverableError::ServerShuttingDown),
         ReasonCode::MqoqIncompletePacket
         | ReasonCode::MqoqFlowOpenIdle
-        | ReasonCode::MqoqFlowCancelled => Some(RecoverableError::MqoqFlowRecoverable),
+        | ReasonCode::MqoqFlowCancelled
+        | ReasonCode::MqoqFlowPacketCancelled
+        | ReasonCode::MqoqFlowRefused => Some(RecoverableError::MqoqFlowRecoverable),
         _ => None,
     }
 }

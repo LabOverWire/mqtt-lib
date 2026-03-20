@@ -9,6 +9,8 @@ pub mod packet_io;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod quic;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod quic_error;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod quic_stream_manager;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod tcp;

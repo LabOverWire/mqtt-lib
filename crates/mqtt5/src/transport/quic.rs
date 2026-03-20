@@ -532,7 +532,10 @@ impl Transport for QuicTransport {
             let _ = send.finish();
         }
         if let Some(conn) = self.connection.take() {
-            conn.close(0u32.into(), b"normal close");
+            conn.close(
+                quinn::VarInt::from_u32(mqtt5_protocol::QuicConnectionCode::NoError.code()),
+                b"normal close",
+            );
         }
         if let Some(endpoint) = self.endpoint.take() {
             endpoint.wait_idle().await;

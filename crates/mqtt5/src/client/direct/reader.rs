@@ -209,7 +209,8 @@ pub(super) async fn quic_stream_acceptor_task(
                         });
                     }
                     Err(e) => {
-                        tracing::error!("Error accepting unidirectional QUIC stream: {e}");
+                        let reason = crate::transport::quic_error::parse_connection_error(&e);
+                        tracing::error!("QUIC uni stream accept ended: {reason}");
                         ctx.connected.store(false, Ordering::SeqCst);
                         break;
                     }
@@ -225,7 +226,8 @@ pub(super) async fn quic_stream_acceptor_task(
                         });
                     }
                     Err(e) => {
-                        tracing::error!("Error accepting bidirectional QUIC stream: {e}");
+                        let reason = crate::transport::quic_error::parse_connection_error(&e);
+                        tracing::error!("QUIC bi stream accept ended: {reason}");
                         ctx.connected.store(false, Ordering::SeqCst);
                         break;
                     }
