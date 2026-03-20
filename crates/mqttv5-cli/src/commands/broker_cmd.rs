@@ -424,6 +424,22 @@ fn print_startup_info(config: &BrokerConfig, max_clients: usize, config_path: Op
             ws_tls_cfg.path
         );
     }
+    if let Some(ref quic_cfg) = config.quic_config {
+        println!(
+            "  🚀 QUIC: {}{}",
+            quic_cfg
+                .bind_addresses
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", "),
+            if quic_cfg.enable_early_data {
+                " (0-RTT enabled)"
+            } else {
+                ""
+            }
+        );
+    }
     println!("  👥 Max clients: {max_clients}");
     #[cfg(feature = "opentelemetry")]
     if let Some(ref otel_config) = config.opentelemetry_config {
