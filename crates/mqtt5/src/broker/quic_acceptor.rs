@@ -876,6 +876,8 @@ fn spawn_data_stream_reader(
                         debug!(flow_id = ?flow_id, "QUIC data stream closed from {}", peer_addr);
                     } else {
                         warn!(flow_id = ?flow_id, "Error reading from QUIC data stream: {e}");
+                        let stop_code = mqtt5_protocol::QuicStreamCode::IncompletePacket;
+                        let _ = recv.stop(quinn::VarInt::from_u32(stop_code.code()));
                     }
                     break;
                 }
