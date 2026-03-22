@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [mqtt5-protocol 0.12.0] / [mqtt5 0.29.0] - 2026-03-20
+
+### Added
+
+- **QUIC error code enums** - `QuicConnectionCode` (5 variants) and `QuicStreamCode` (16 variants) for typed QUIC APPLICATION_CLOSE and RESET_STREAM codes per MQTT-next §12
+- **Error tolerance levels** - `handle_stream_error()` implements graduated response based on `FlowFlags.err_tolerance` per MQTT-next §11: Level 0 closes connection, Level 1 resets stream and discards flow, Level 2 resets stream but preserves flow state for recovery
+- **Quinn error parsing** - `QuicCloseReason`, `StreamResetReason`, `StreamStopReason` enums with `parse_connection_error()`, `parse_read_error()`, `parse_write_error()` for structured QUIC error diagnostics
+- **STOP_SENDING on data stream errors** - Broker sends STOP_SENDING with `IncompletePacket` code when a data stream read fails
+- 7 new `ReasonCode` variants: `MqoqPersistentTopic`, `MqoqOptionalHeader`, `MqoqFlowPacketCancelled`, `MqoqFlowRefused`, `MqoqDiscardState`, `MqoqServerPushNotWelcome`, `MqoqRecoveryFailed`
+- `ReasonCode::to_quic_stream_code()` and `ReasonCode::from_quic_stream_code()` conversions
+
+### Changed
+
+- **BREAKING: `MqoqProtocolError` renamed to `MqoqNotFlowOwner`** to match spec naming
+- All `conn.close()` and `send.reset()` calls now use typed error codes instead of hard-coded `0u32` / `0xC1`
+
 ## [mqtt5 0.28.0] / [mqttv5-cli 0.25.0] - 2026-03-19
 
 ### Added
