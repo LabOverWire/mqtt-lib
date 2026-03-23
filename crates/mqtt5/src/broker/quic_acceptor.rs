@@ -357,37 +357,49 @@ async fn try_read_flow_header(recv: &mut RecvStream) -> Result<FlowHeaderResult>
     let mut header_buf = Vec::with_capacity(32);
     header_buf.extend_from_slice(&chunk.bytes);
 
-    while header_buf.len() < 32 {
-        match recv.read_chunk(32 - header_buf.len(), true).await {
-            Ok(Some(chunk)) if !chunk.bytes.is_empty() => {
-                header_buf.extend_from_slice(&chunk.bytes);
+    let (flow_header, leftover) = loop {
+        let mut bytes = Bytes::copy_from_slice(&header_buf);
+        match FlowHeader::decode(&mut bytes) {
+            Ok(header) => {
+                let consumed = header_buf.len() - bytes.remaining();
+                let mut lo = BytesMut::with_capacity(bytes.remaining());
+                if consumed < header_buf.len() {
+                    lo.extend_from_slice(&header_buf[consumed..]);
+                }
+                break (header, lo);
             }
-            Ok(_) => break,
-            Err(e) => {
-                return Err(MqttError::ConnectionError(format!(
-                    "Failed to read flow header: {e}"
-                )));
+            Err(_) if header_buf.len() >= 32 => {
+                return Err(MqttError::ProtocolError("flow header too large".into()));
             }
+            Err(_) => match recv.read_chunk(32 - header_buf.len(), true).await {
+                Ok(Some(c)) if !c.bytes.is_empty() => {
+                    header_buf.extend_from_slice(&c.bytes);
+                }
+                Ok(_) => {
+                    return Err(MqttError::ProtocolError("incomplete flow header".into()));
+                }
+                Err(e) => {
+                    return Err(MqttError::ConnectionError(format!(
+                        "Failed to read flow header: {e}"
+                    )));
+                }
+            },
         }
-    }
+    };
 
-    let mut bytes = Bytes::from(header_buf);
-    let flow_header = FlowHeader::decode(&mut bytes)?;
+    Ok(build_flow_header_result(flow_header, leftover))
+}
 
-    let mut leftover = BytesMut::with_capacity(bytes.remaining());
-    if bytes.has_remaining() {
-        leftover.extend_from_slice(&bytes);
-    }
-
+fn build_flow_header_result(flow_header: FlowHeader, leftover: BytesMut) -> FlowHeaderResult {
     match flow_header {
         FlowHeader::Control(h) => {
             trace!(flow_id = ?h.flow_id, "Parsed control flow header");
-            Ok(FlowHeaderResult {
+            FlowHeaderResult {
                 flow_id: Some(h.flow_id),
                 flags: Some(h.flags),
                 expire: None,
                 leftover,
-            })
+            }
         }
         FlowHeader::ClientData(h) | FlowHeader::ServerData(h) => {
             let expire = if h.expire_interval > 0 {
@@ -396,21 +408,21 @@ async fn try_read_flow_header(recv: &mut RecvStream) -> Result<FlowHeaderResult>
                 None
             };
             trace!(flow_id = ?h.flow_id, expire = ?expire, "Parsed data flow header");
-            Ok(FlowHeaderResult {
+            FlowHeaderResult {
                 flow_id: Some(h.flow_id),
                 flags: Some(h.flags),
                 expire,
                 leftover,
-            })
+            }
         }
         FlowHeader::UserDefined(_) => {
             trace!("Ignoring user-defined flow header");
-            Ok(FlowHeaderResult {
+            FlowHeaderResult {
                 flow_id: None,
                 flags: None,
                 expire: None,
                 leftover,
-            })
+            }
         }
     }
 }
