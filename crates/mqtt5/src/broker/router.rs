@@ -55,27 +55,24 @@ impl OutboundRateState {
 #[cfg(target_arch = "wasm32")]
 type WasmBridgeCallback = Box<dyn Fn(&PublishPacket)>;
 
+pub struct RoutableMessage {
+    pub publish: PublishPacket,
+    pub target_flow: Option<u64>,
+}
+
 /// Client subscription information
 #[derive(Debug, Clone)]
 pub struct Subscription {
-    /// Client ID that owns this subscription
     pub client_id: String,
-    /// Quality of Service level
     pub qos: QoS,
-    /// Subscription identifier (MQTT v5.0)
     pub subscription_id: Option<u32>,
-    /// Shared subscription group name (if this is a shared subscription)
     pub share_group: Option<String>,
-    /// No Local option - if true, messages published by this client are not delivered back to it
     pub no_local: bool,
-    /// Retain As Published option - if true, the retain flag is kept as-is when delivering
     pub retain_as_published: bool,
-    /// Retain handling option - controls when retained messages are sent
     pub retain_handling: u8,
-    /// Protocol version of the subscriber
     pub protocol_version: ProtocolVersion,
-    /// Change-only mode - if true, only deliver messages when payload changes
     pub change_only: bool,
+    pub flow_id: Option<u64>,
 }
 
 /// Message router for the broker
@@ -100,9 +97,7 @@ pub struct MessageRouter {
 /// Information about a connected client
 #[derive(Debug)]
 pub struct ClientInfo {
-    /// Channel to send messages to this client
-    pub sender: flume::Sender<PublishPacket>,
-    /// Channel to signal disconnection (for session takeover)
+    pub sender: flume::Sender<RoutableMessage>,
     pub disconnect_tx: tokio::sync::oneshot::Sender<()>,
 }
 
@@ -229,7 +224,7 @@ impl MessageRouter {
     pub async fn register_client(
         &self,
         client_id: String,
-        sender: flume::Sender<PublishPacket>,
+        sender: flume::Sender<RoutableMessage>,
         new_disconnect_tx: tokio::sync::oneshot::Sender<()>,
     ) {
         let mut clients = self.clients.write().await;
@@ -373,6 +368,7 @@ impl MessageRouter {
         retain_handling: u8,
         protocol_version: ProtocolVersion,
         change_only: bool,
+        flow_id: Option<u64>,
     ) -> Result<bool> {
         if retain_handling > 2 {
             return Err(crate::MqttError::ProtocolError(format!(
@@ -393,12 +389,15 @@ impl MessageRouter {
             retain_handling,
             protocol_version,
             change_only,
+            flow_id,
         };
 
         let is_new = if Self::has_wildcards(actual_filter) {
             let mut wildcard = self.wildcard_subscriptions.write().await;
             let subs = wildcard.entry(actual_filter.to_string()).or_default();
-            let existing_pos = subs.iter().position(|s| s.client_id == client_id);
+            let existing_pos = subs
+                .iter()
+                .position(|s| s.client_id == client_id && s.flow_id == flow_id);
             if let Some(pos) = existing_pos {
                 subs[pos] = subscription;
                 debug!(
@@ -417,7 +416,9 @@ impl MessageRouter {
         } else {
             let mut exact = self.exact_subscriptions.write().await;
             let subs = exact.entry(actual_filter.to_string()).or_default();
-            let existing_pos = subs.iter().position(|s| s.client_id == client_id);
+            let existing_pos = subs
+                .iter()
+                .position(|s| s.client_id == client_id && s.flow_id == flow_id);
             if let Some(pos) = existing_pos {
                 subs[pos] = subscription;
                 debug!(
@@ -442,7 +443,12 @@ impl MessageRouter {
         Ok(is_new)
     }
 
-    pub async fn unsubscribe(&self, client_id: &str, topic_filter: &str) -> bool {
+    pub async fn unsubscribe(
+        &self,
+        client_id: &str,
+        topic_filter: &str,
+        flow_id: Option<u64>,
+    ) -> bool {
         let (actual_filter, _) = parse_shared_subscription(topic_filter);
 
         let subscriptions = if Self::has_wildcards(actual_filter) {
@@ -455,7 +461,7 @@ impl MessageRouter {
 
         if let Some(subs) = subs_map.get_mut(actual_filter) {
             let initial_len = subs.len();
-            subs.retain(|sub| sub.client_id != client_id);
+            subs.retain(|sub| !(sub.client_id == client_id && sub.flow_id == flow_id));
 
             let removed = initial_len != subs.len();
 
@@ -469,6 +475,44 @@ impl MessageRouter {
         } else {
             false
         }
+    }
+
+    pub async fn unsubscribe_by_flow(&self, client_id: &str, flow_id: u64) -> Vec<String> {
+        let mut removed_filters = Vec::new();
+
+        {
+            let mut exact = self.exact_subscriptions.write().await;
+            for (filter, subs) in exact.iter_mut() {
+                let before = subs.len();
+                subs.retain(|sub| !(sub.client_id == client_id && sub.flow_id == Some(flow_id)));
+                if subs.len() < before {
+                    removed_filters.push(filter.clone());
+                }
+            }
+            exact.retain(|_, subs| !subs.is_empty());
+        }
+
+        {
+            let mut wildcard = self.wildcard_subscriptions.write().await;
+            for (filter, subs) in wildcard.iter_mut() {
+                let before = subs.len();
+                subs.retain(|sub| !(sub.client_id == client_id && sub.flow_id == Some(flow_id)));
+                if subs.len() < before {
+                    removed_filters.push(filter.clone());
+                }
+            }
+            wildcard.retain(|_, subs| !subs.is_empty());
+        }
+
+        if !removed_filters.is_empty() {
+            debug!(
+                "Removed {} flow-bound subscriptions for client {} flow {}",
+                removed_filters.len(),
+                client_id,
+                flow_id
+            );
+        }
+        removed_filters
     }
 
     /// Routes a publish message to all matching subscribers and forwards to bridges
@@ -804,7 +848,11 @@ impl MessageRouter {
             let qos = Self::effective_qos(publish.qos, sub.qos);
             let message = Self::prepare_message(publish, sub, qos);
 
-            if let Err(e) = client_info.sender.try_send(message) {
+            let routable = RoutableMessage {
+                publish: message,
+                target_flow: sub.flow_id,
+            };
+            if let Err(e) = client_info.sender.try_send(routable) {
                 warn!(
                     client_id = %sub.client_id,
                     topic = %publish.topic_name,
@@ -812,7 +860,8 @@ impl MessageRouter {
                 );
                 if let Some(storage) = storage {
                     if qos != QoS::AtMostOnce {
-                        Self::queue_message(storage, e.into_inner(), &sub.client_id, qos).await;
+                        Self::queue_message(storage, e.into_inner().publish, &sub.client_id, qos)
+                            .await;
                     }
                 }
             } else if sub.change_only {
@@ -950,13 +999,14 @@ mod tests {
                 0,
                 ProtocolVersion::V5,
                 false,
+                None,
             )
             .await
             .unwrap();
 
         assert_eq!(router.topic_count().await, 1);
 
-        let removed = router.unsubscribe("client1", "test/+").await;
+        let removed = router.unsubscribe("client1", "test/+", None).await;
         assert!(removed);
         assert_eq!(router.topic_count().await, 0);
     }
@@ -988,6 +1038,7 @@ mod tests {
                 0,
                 ProtocolVersion::V5,
                 false,
+                None,
             )
             .await
             .unwrap();
@@ -1002,6 +1053,7 @@ mod tests {
                 0,
                 ProtocolVersion::V5,
                 false,
+                None,
             )
             .await
             .unwrap();
@@ -1012,14 +1064,13 @@ mod tests {
         router.route_message(&publish, None).await;
 
         // Client 1 should receive with QoS 1 (downgraded)
-        let msg1 = rx1.try_recv().unwrap();
-        assert_eq!(msg1.topic_name, "test/data");
-        assert_eq!(msg1.qos, QoS::AtLeastOnce);
+        let rm1 = rx1.try_recv().unwrap();
+        assert_eq!(rm1.publish.topic_name, "test/data");
+        assert_eq!(rm1.publish.qos, QoS::AtLeastOnce);
 
-        // Client 2 should receive with QoS 2
-        let msg2 = rx2.try_recv().unwrap();
-        assert_eq!(msg2.topic_name, "test/data");
-        assert_eq!(msg2.qos, QoS::ExactlyOnce);
+        let rm2 = rx2.try_recv().unwrap();
+        assert_eq!(rm2.publish.topic_name, "test/data");
+        assert_eq!(rm2.publish.qos, QoS::ExactlyOnce);
     }
 
     #[tokio::test]
@@ -1078,6 +1129,7 @@ mod tests {
                 0,
                 ProtocolVersion::V5,
                 false,
+                None,
             )
             .await
             .unwrap();
@@ -1092,6 +1144,7 @@ mod tests {
                 0,
                 ProtocolVersion::V5,
                 false,
+                None,
             )
             .await
             .unwrap();
@@ -1106,6 +1159,7 @@ mod tests {
                 0,
                 ProtocolVersion::V5,
                 false,
+                None,
             )
             .await
             .unwrap();
@@ -1172,6 +1226,7 @@ mod tests {
                 0,
                 ProtocolVersion::V5,
                 false,
+                None,
             )
             .await
             .unwrap();
@@ -1186,6 +1241,7 @@ mod tests {
                 0,
                 ProtocolVersion::V5,
                 false,
+                None,
             )
             .await
             .unwrap();
@@ -1201,6 +1257,7 @@ mod tests {
                 0,
                 ProtocolVersion::V5,
                 false,
+                None,
             )
             .await
             .unwrap();
@@ -1210,8 +1267,8 @@ mod tests {
         router.route_message(&publish, None).await;
 
         // Regular subscriber should receive the message
-        let regular_msg = rx3.try_recv().unwrap();
-        assert_eq!(&regular_msg.payload[..], b"hello");
+        let regular_rm = rx3.try_recv().unwrap();
+        assert_eq!(&regular_rm.publish.payload[..], b"hello");
 
         // Only one of the shared subscribers should receive it
         let shared1_received = rx1.try_recv().is_ok();
@@ -1246,6 +1303,7 @@ mod tests {
                 0,
                 ProtocolVersion::V5,
                 false,
+                None,
             )
             .await
             .unwrap();
@@ -1260,6 +1318,7 @@ mod tests {
                 0,
                 ProtocolVersion::V5,
                 false,
+                None,
             )
             .await
             .unwrap();
@@ -1268,15 +1327,15 @@ mod tests {
 
         router.route_message_local_only(&publish, None).await;
 
-        let msg1 = rx1.try_recv().unwrap();
-        assert_eq!(msg1.topic_name, "test/data");
-        assert_eq!(&msg1.payload[..], b"local-only");
-        assert_eq!(msg1.qos, QoS::AtLeastOnce);
+        let rm1 = rx1.try_recv().unwrap();
+        assert_eq!(rm1.publish.topic_name, "test/data");
+        assert_eq!(&rm1.publish.payload[..], b"local-only");
+        assert_eq!(rm1.publish.qos, QoS::AtLeastOnce);
 
-        let msg2 = rx2.try_recv().unwrap();
-        assert_eq!(msg2.topic_name, "test/data");
-        assert_eq!(&msg2.payload[..], b"local-only");
-        assert_eq!(msg2.qos, QoS::ExactlyOnce);
+        let rm2 = rx2.try_recv().unwrap();
+        assert_eq!(rm2.publish.topic_name, "test/data");
+        assert_eq!(&rm2.publish.payload[..], b"local-only");
+        assert_eq!(rm2.publish.qos, QoS::ExactlyOnce);
     }
 
     #[tokio::test]
@@ -1305,6 +1364,7 @@ mod tests {
                 0,
                 ProtocolVersion::V5,
                 false,
+                None,
             )
             .await
             .unwrap();
@@ -1319,6 +1379,7 @@ mod tests {
                 0,
                 ProtocolVersion::V5,
                 false,
+                None,
             )
             .await
             .unwrap();
@@ -1332,8 +1393,8 @@ mod tests {
 
         assert!(rx1.try_recv().is_err());
 
-        let msg2 = rx2.try_recv().unwrap();
-        assert_eq!(msg2.topic_name, "test/echo");
+        let rm2 = rx2.try_recv().unwrap();
+        assert_eq!(rm2.publish.topic_name, "test/echo");
     }
 
     #[tokio::test]
@@ -1362,6 +1423,7 @@ mod tests {
                 0,
                 ProtocolVersion::V5,
                 false,
+                None,
             )
             .await
             .unwrap();
@@ -1376,6 +1438,7 @@ mod tests {
                 0,
                 ProtocolVersion::V5,
                 false,
+                None,
             )
             .await
             .unwrap();
@@ -1424,6 +1487,7 @@ mod tests {
                 0,
                 ProtocolVersion::V5,
                 false,
+                None,
             )
             .await
             .unwrap();
@@ -1462,6 +1526,7 @@ mod tests {
                 0,
                 ProtocolVersion::V5,
                 false,
+                None,
             )
             .await
             .unwrap();
@@ -1510,6 +1575,7 @@ mod tests {
                 0,
                 ProtocolVersion::V5,
                 false,
+                None,
             )
             .await
             .unwrap();
@@ -1537,5 +1603,200 @@ mod tests {
 
         router.unregister_client("sub1").await;
         assert!(!router.outbound_rates.read().contains_key("sub1"));
+    }
+
+    #[tokio::test]
+    async fn test_flow_bound_subscription_delivers_with_target_flow() {
+        let router = MessageRouter::new();
+        let (tx, rx) = flume::bounded(100);
+        let (dtx, _drx) = tokio::sync::oneshot::channel();
+        router.register_client("c1".to_string(), tx, dtx).await;
+
+        router
+            .subscribe(
+                "c1".to_string(),
+                "sensor/#".to_string(),
+                QoS::AtLeastOnce,
+                None,
+                false,
+                false,
+                0,
+                ProtocolVersion::V5,
+                false,
+                Some(42),
+            )
+            .await
+            .unwrap();
+
+        let publish = PublishPacket::new("sensor/temp", &b"25C"[..], QoS::AtMostOnce);
+        router.route_message(&publish, Some("pub1")).await;
+
+        let routable = rx.recv_async().await.unwrap();
+        assert_eq!(routable.target_flow, Some(42));
+        assert_eq!(routable.publish.topic_name, "sensor/temp");
+    }
+
+    #[tokio::test]
+    async fn test_flow_and_control_subscriptions_coexist() {
+        let router = MessageRouter::new();
+        let (tx, rx) = flume::bounded(100);
+        let (dtx, _drx) = tokio::sync::oneshot::channel();
+        router.register_client("c1".to_string(), tx, dtx).await;
+
+        router
+            .subscribe(
+                "c1".to_string(),
+                "data/#".to_string(),
+                QoS::AtMostOnce,
+                None,
+                false,
+                false,
+                0,
+                ProtocolVersion::V5,
+                false,
+                None,
+            )
+            .await
+            .unwrap();
+
+        router
+            .subscribe(
+                "c1".to_string(),
+                "data/#".to_string(),
+                QoS::AtMostOnce,
+                None,
+                false,
+                false,
+                0,
+                ProtocolVersion::V5,
+                false,
+                Some(7),
+            )
+            .await
+            .unwrap();
+
+        let publish = PublishPacket::new("data/x", &b"val"[..], QoS::AtMostOnce);
+        router.route_message(&publish, Some("pub1")).await;
+
+        let msg1 = rx.recv_async().await.unwrap();
+        let msg2 = rx.recv_async().await.unwrap();
+        let flows: Vec<Option<u64>> = vec![msg1.target_flow, msg2.target_flow];
+        assert!(flows.contains(&None));
+        assert!(flows.contains(&Some(7)));
+    }
+
+    #[tokio::test]
+    async fn test_unsubscribe_by_flow_removes_only_flow_subs() {
+        let router = MessageRouter::new();
+        let (tx, rx) = flume::bounded(100);
+        let (dtx, _drx) = tokio::sync::oneshot::channel();
+        router.register_client("c1".to_string(), tx, dtx).await;
+
+        router
+            .subscribe(
+                "c1".to_string(),
+                "topic/a".to_string(),
+                QoS::AtMostOnce,
+                None,
+                false,
+                false,
+                0,
+                ProtocolVersion::V5,
+                false,
+                None,
+            )
+            .await
+            .unwrap();
+
+        router
+            .subscribe(
+                "c1".to_string(),
+                "topic/a".to_string(),
+                QoS::AtMostOnce,
+                None,
+                false,
+                false,
+                0,
+                ProtocolVersion::V5,
+                false,
+                Some(10),
+            )
+            .await
+            .unwrap();
+
+        router
+            .subscribe(
+                "c1".to_string(),
+                "topic/b".to_string(),
+                QoS::AtMostOnce,
+                None,
+                false,
+                false,
+                0,
+                ProtocolVersion::V5,
+                false,
+                Some(10),
+            )
+            .await
+            .unwrap();
+
+        let removed = router.unsubscribe_by_flow("c1", 10).await;
+        assert_eq!(removed.len(), 2);
+        assert!(removed.contains(&"topic/a".to_string()));
+        assert!(removed.contains(&"topic/b".to_string()));
+
+        let publish = PublishPacket::new("topic/a", &b"data"[..], QoS::AtMostOnce);
+        router.route_message(&publish, Some("pub1")).await;
+
+        let routable = rx.recv_async().await.unwrap();
+        assert_eq!(routable.target_flow, None);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn test_flow_dedup_same_topic_same_flow() {
+        let router = MessageRouter::new();
+        let (tx, rx) = flume::bounded(100);
+        let (dtx, _drx) = tokio::sync::oneshot::channel();
+        router.register_client("c1".to_string(), tx, dtx).await;
+
+        router
+            .subscribe(
+                "c1".to_string(),
+                "dup/test".to_string(),
+                QoS::AtMostOnce,
+                None,
+                false,
+                false,
+                0,
+                ProtocolVersion::V5,
+                false,
+                Some(5),
+            )
+            .await
+            .unwrap();
+
+        router
+            .subscribe(
+                "c1".to_string(),
+                "dup/test".to_string(),
+                QoS::AtLeastOnce,
+                None,
+                false,
+                false,
+                0,
+                ProtocolVersion::V5,
+                false,
+                Some(5),
+            )
+            .await
+            .unwrap();
+
+        let publish = PublishPacket::new("dup/test", &b"once"[..], QoS::AtMostOnce);
+        router.route_message(&publish, Some("pub1")).await;
+
+        let routable = rx.recv_async().await.unwrap();
+        assert_eq!(routable.target_flow, Some(5));
+        assert!(rx.try_recv().is_err());
     }
 }

@@ -16,6 +16,8 @@ use crate::validation::{parse_shared_subscription, topic_matches_filter, validat
 use crate::QoS;
 use tracing::{debug, warn};
 
+use crate::broker::router::RoutableMessage;
+
 use super::ClientHandler;
 
 impl ClientHandler {
@@ -48,6 +50,7 @@ impl ClientHandler {
                     .iter()
                     .any(|pattern| topic_matches_filter(&filter.filter, pattern));
 
+            let flow_id = self.pending_external_flow_id;
             let is_new = self
                 .router
                 .subscribe(
@@ -60,6 +63,7 @@ impl ClientHandler {
                     filter.options.retain_handling as u8,
                     ProtocolVersion::try_from(self.protocol_version).unwrap_or_default(),
                     change_only,
+                    flow_id,
                 )
                 .await?;
 
@@ -71,6 +75,11 @@ impl ClientHandler {
                 change_only,
             )
             .await;
+
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some(fid) = flow_id {
+                self.track_flow_subscription(fid, &filter.filter).await;
+            }
 
             self.deliver_retained_for_filter(&filter.filter, &filter.options, is_new)
                 .await?;
@@ -192,6 +201,7 @@ impl ClientHandler {
                 subscription_id,
                 protocol_version: self.protocol_version,
                 change_only,
+                flow_id: self.pending_external_flow_id,
             };
             session.add_subscription(topic_filter.to_string(), stored);
             if let Some(ref storage) = self.storage {
@@ -230,7 +240,11 @@ impl ClientHandler {
                     "Queuing retained message for delivery"
                 );
                 msg.retain = true;
-                self.publish_tx.send_async(msg).await.map_err(|_| {
+                let routable = RoutableMessage {
+                    publish: msg,
+                    target_flow: None,
+                };
+                self.publish_tx.send_async(routable).await.map_err(|_| {
                     MqttError::InvalidState("Failed to queue retained message".to_string())
                 })?;
             }
@@ -284,6 +298,62 @@ impl ClientHandler {
         result
     }
 
+    pub(super) async fn handle_flow_closed(&mut self, flow_id: u64) {
+        let Some(ref client_id) = self.client_id else {
+            return;
+        };
+
+        let removed_filters = self.router.unsubscribe_by_flow(client_id, flow_id).await;
+        if removed_filters.is_empty() {
+            return;
+        }
+
+        debug!(
+            client_id = %client_id,
+            flow_id = flow_id,
+            count = removed_filters.len(),
+            "Removed flow-bound subscriptions on flow close"
+        );
+
+        if let Some(ref mut session) = self.session {
+            for filter in &removed_filters {
+                session.remove_subscription(filter);
+            }
+            if let Some(ref storage) = self.storage {
+                if let Err(e) = storage.store_session(session.clone()).await {
+                    warn!("Failed to store session after flow close: {e}");
+                }
+            }
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(ref mut ssm) = self.server_stream_manager {
+            ssm.remove_flow_stream(flow_id);
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn track_flow_subscription(&self, flow_id: u64, topic_filter: &str) {
+        if let Some(ref registry) = self.flow_registry {
+            let fid = crate::transport::flow::FlowId::from(flow_id);
+            let mut reg = registry.lock().await;
+            if let Some(state) = reg.get_mut(fid) {
+                state.add_subscription(topic_filter.to_string());
+            }
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn untrack_flow_subscription(&self, flow_id: u64, topic_filter: &str) {
+        if let Some(ref registry) = self.flow_registry {
+            let fid = crate::transport::flow::FlowId::from(flow_id);
+            let mut reg = registry.lock().await;
+            if let Some(state) = reg.get_mut(fid) {
+                state.remove_subscription(topic_filter);
+            }
+        }
+    }
+
     pub(super) async fn handle_unsubscribe(
         &mut self,
         unsubscribe: UnsubscribePacket,
@@ -292,7 +362,10 @@ impl ClientHandler {
         let mut reason_codes = Vec::new();
 
         for topic_filter in &unsubscribe.filters {
-            let removed = self.router.unsubscribe(client_id, topic_filter).await;
+            let removed = self
+                .router
+                .unsubscribe(client_id, topic_filter, self.pending_external_flow_id)
+                .await;
 
             if removed {
                 if let Some(ref mut session) = self.session {
@@ -302,6 +375,11 @@ impl ClientHandler {
                             warn!("Failed to store session: {e}");
                         }
                     }
+                }
+
+                #[cfg(not(target_arch = "wasm32"))]
+                if let Some(fid) = self.pending_external_flow_id {
+                    self.untrack_flow_subscription(fid, topic_filter).await;
                 }
             }
 

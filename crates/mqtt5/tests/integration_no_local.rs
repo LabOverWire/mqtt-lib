@@ -29,6 +29,7 @@ async fn test_no_local_true_filters_own_messages() {
             0,
             ProtocolVersion::V5,
             false,
+            None,
         )
         .await
         .unwrap();
@@ -69,6 +70,7 @@ async fn test_no_local_false_allows_own_messages() {
             0,
             ProtocolVersion::V5,
             false,
+            None,
         )
         .await
         .unwrap();
@@ -87,8 +89,8 @@ async fn test_no_local_false_allows_own_messages() {
     );
 
     let received = result.unwrap().unwrap();
-    assert_eq!(received.topic_name, "test/topic");
-    assert_eq!(&received.payload[..], b"test message");
+    assert_eq!(received.publish.topic_name, "test/topic");
+    assert_eq!(&received.publish.payload[..], b"test message");
 }
 
 #[tokio::test]
@@ -119,6 +121,7 @@ async fn test_no_local_other_clients_receive_messages() {
             0,
             ProtocolVersion::V5,
             false,
+            None,
         )
         .await
         .unwrap();
@@ -134,6 +137,7 @@ async fn test_no_local_other_clients_receive_messages() {
             0,
             ProtocolVersion::V5,
             false,
+            None,
         )
         .await
         .unwrap();
@@ -158,8 +162,8 @@ async fn test_no_local_other_clients_receive_messages() {
     );
 
     let received = sub_result.unwrap().unwrap();
-    assert_eq!(received.topic_name, "test/topic");
-    assert_eq!(&received.payload[..], b"test message");
+    assert_eq!(received.publish.topic_name, "test/topic");
+    assert_eq!(&received.publish.payload[..], b"test message");
 }
 
 #[tokio::test]
@@ -184,6 +188,7 @@ async fn test_no_local_with_wildcards() {
             0,
             ProtocolVersion::V5,
             false,
+            None,
         )
         .await
         .unwrap();
@@ -231,6 +236,7 @@ async fn test_no_local_with_multilevel_wildcard() {
             0,
             ProtocolVersion::V5,
             false,
+            None,
         )
         .await
         .unwrap();
@@ -268,6 +274,7 @@ async fn test_no_local_server_generated_messages() {
             0,
             ProtocolVersion::V5,
             false,
+            None,
         )
         .await
         .unwrap();
@@ -286,8 +293,8 @@ async fn test_no_local_server_generated_messages() {
     );
 
     let received = result.unwrap().unwrap();
-    assert_eq!(received.topic_name, "test/topic");
-    assert_eq!(&received.payload[..], b"server message");
+    assert_eq!(received.publish.topic_name, "test/topic");
+    assert_eq!(&received.publish.payload[..], b"server message");
 }
 
 #[tokio::test]
@@ -312,6 +319,7 @@ async fn test_no_local_multiple_subscriptions_same_client() {
             0,
             ProtocolVersion::V5,
             false,
+            None,
         )
         .await
         .unwrap();
@@ -327,6 +335,7 @@ async fn test_no_local_multiple_subscriptions_same_client() {
             0,
             ProtocolVersion::V5,
             false,
+            None,
         )
         .await
         .unwrap();
@@ -352,8 +361,8 @@ async fn test_no_local_multiple_subscriptions_same_client() {
     );
 
     let received = result1.unwrap().unwrap();
-    assert_eq!(received.topic_name, "test/topic2");
-    assert_eq!(&received.payload[..], b"message 2");
+    assert_eq!(received.publish.topic_name, "test/topic2");
+    assert_eq!(&received.publish.payload[..], b"message 2");
 
     let result2 = timeout(Duration::from_millis(100), rx.recv_async()).await;
     assert!(
@@ -384,6 +393,7 @@ async fn test_no_local_with_qos_levels() {
             0,
             ProtocolVersion::V5,
             false,
+            None,
         )
         .await
         .unwrap();

@@ -43,6 +43,7 @@ fn test_basic_publish_subscribe() {
                 0,
                 ProtocolVersion::V5,
                 false,
+                None,
             )
             .await
             .unwrap();
@@ -60,9 +61,9 @@ fn test_basic_publish_subscribe() {
 
         // Verify message received
         let msg = sub_rx.try_recv().expect("Should receive message");
-        assert_eq!(&msg.payload[..], b"Hello, World!");
-        assert_eq!(msg.topic_name, "test/topic");
-        assert_eq!(msg.qos, QoS::AtMostOnce);
+        assert_eq!(&msg.publish.payload[..], b"Hello, World!");
+        assert_eq!(msg.publish.topic_name, "test/topic");
+        assert_eq!(msg.publish.qos, QoS::AtMostOnce);
 
         // No more messages
         assert!(sub_rx.try_recv().is_err());
@@ -108,6 +109,7 @@ fn test_wildcard_subscriptions() {
                 0,
                 ProtocolVersion::V5,
                 false,
+                None,
             )
             .await
             .unwrap();
@@ -124,6 +126,7 @@ fn test_wildcard_subscriptions() {
                 0,
                 ProtocolVersion::V5,
                 false,
+                None,
             )
             .await
             .unwrap();
@@ -151,7 +154,7 @@ fn test_wildcard_subscriptions() {
         let mut single_messages = Vec::new();
         while let Ok(msg) = single_rx.try_recv() {
             single_count += 1;
-            single_messages.push(msg.topic_name);
+            single_messages.push(msg.publish.topic_name);
         }
 
         // Count messages received by multi wildcard subscriber
@@ -159,7 +162,7 @@ fn test_wildcard_subscriptions() {
         let mut multi_messages = Vec::new();
         while let Ok(msg) = multi_rx.try_recv() {
             multi_count += 1;
-            multi_messages.push(msg.topic_name);
+            multi_messages.push(msg.publish.topic_name);
         }
 
         // Single wildcard should get 3 temperature messages
@@ -224,6 +227,7 @@ fn test_multiple_subscribers_same_topic() {
                     0,
                     ProtocolVersion::V5,
                     false,
+                    None,
                 )
                 .await
                 .unwrap();
@@ -251,7 +255,7 @@ fn test_multiple_subscribers_same_topic() {
             let mut messages = Vec::new();
             while let Ok(msg) = rx.try_recv() {
                 count += 1;
-                messages.push(String::from_utf8(msg.payload.to_vec()).unwrap());
+                messages.push(String::from_utf8(msg.publish.payload.to_vec()).unwrap());
             }
 
             assert_eq!(count, 5, "{name} should receive 5 messages");
@@ -301,6 +305,7 @@ fn test_qos_levels() {
                 0,
                 ProtocolVersion::V5,
                 false,
+                None,
             )
             .await
             .unwrap();
@@ -316,6 +321,7 @@ fn test_qos_levels() {
                 0,
                 ProtocolVersion::V5,
                 false,
+                None,
             )
             .await
             .unwrap();
@@ -339,13 +345,13 @@ fn test_qos_levels() {
 
         // Verify QoS 0 message
         let msg0 = qos0_rx.try_recv().expect("Should receive QoS 0 message");
-        assert_eq!(&msg0.payload[..], b"QoS 0 message");
-        assert_eq!(msg0.qos, QoS::AtMostOnce);
+        assert_eq!(&msg0.publish.payload[..], b"QoS 0 message");
+        assert_eq!(msg0.publish.qos, QoS::AtMostOnce);
 
         // Verify QoS 1 message
         let msg1 = qos1_rx.try_recv().expect("Should receive QoS 1 message");
-        assert_eq!(&msg1.payload[..], b"QoS 1 message");
-        assert_eq!(msg1.qos, QoS::AtLeastOnce);
+        assert_eq!(&msg1.publish.payload[..], b"QoS 1 message");
+        assert_eq!(msg1.publish.qos, QoS::AtLeastOnce);
 
         // No additional messages
         assert!(qos0_rx.try_recv().is_err());
@@ -385,6 +391,7 @@ fn test_unsubscribe_functionality() {
                 0,
                 ProtocolVersion::V5,
                 false,
+                None,
             )
             .await
             .unwrap();
@@ -403,10 +410,12 @@ fn test_unsubscribe_functionality() {
         let received = sub_rx
             .try_recv()
             .expect("Should receive message before unsubscribe");
-        assert_eq!(&received.payload[..], b"Before unsubscribe");
+        assert_eq!(&received.publish.payload[..], b"Before unsubscribe");
 
         // Unsubscribe
-        router.unsubscribe("test_client", "test/unsubscribe").await;
+        router
+            .unsubscribe("test_client", "test/unsubscribe", None)
+            .await;
 
         // Publish second message
         let msg2 = PublishPacket::new(

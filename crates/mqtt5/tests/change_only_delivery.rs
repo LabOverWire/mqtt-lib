@@ -29,6 +29,7 @@ async fn test_change_only_filters_duplicate_payloads() {
             0,
             ProtocolVersion::V5,
             true,
+            None,
         )
         .await
         .unwrap();
@@ -79,6 +80,7 @@ async fn test_change_only_allows_different_payloads() {
             0,
             ProtocolVersion::V5,
             true,
+            None,
         )
         .await
         .unwrap();
@@ -93,7 +95,7 @@ async fn test_change_only_allows_different_payloads() {
     let result1 = timeout(Duration::from_millis(100), rx.recv_async()).await;
     assert!(result1.is_ok(), "First message should be delivered");
     let received1 = result1.unwrap().unwrap();
-    assert_eq!(&received1.payload[..], b"25.5");
+    assert_eq!(&received1.publish.payload[..], b"25.5");
 
     let packet2 = PublishPacket::new(
         "sensors/temperature".to_string(),
@@ -105,7 +107,7 @@ async fn test_change_only_allows_different_payloads() {
     let result2 = timeout(Duration::from_millis(100), rx.recv_async()).await;
     assert!(result2.is_ok(), "Different payload should be delivered");
     let received2 = result2.unwrap().unwrap();
-    assert_eq!(&received2.payload[..], b"26.0");
+    assert_eq!(&received2.publish.payload[..], b"26.0");
 }
 
 #[tokio::test]
@@ -130,6 +132,7 @@ async fn test_change_only_disabled_allows_duplicates() {
             0,
             ProtocolVersion::V5,
             false,
+            None,
         )
         .await
         .unwrap();
@@ -180,6 +183,7 @@ async fn test_change_only_per_topic_tracking() {
             0,
             ProtocolVersion::V5,
             true,
+            None,
         )
         .await
         .unwrap();
@@ -230,6 +234,7 @@ async fn test_change_only_state_persistence() {
             0,
             ProtocolVersion::V5,
             true,
+            None,
         )
         .await
         .unwrap();
@@ -281,6 +286,7 @@ async fn test_change_only_state_load_on_reconnect() {
             0,
             ProtocolVersion::V5,
             true,
+            None,
         )
         .await
         .unwrap();
@@ -366,6 +372,7 @@ async fn test_change_only_with_qos_levels() {
             0,
             ProtocolVersion::V5,
             true,
+            None,
         )
         .await
         .unwrap();
@@ -422,6 +429,7 @@ async fn test_change_only_multiple_clients_independent() {
             0,
             ProtocolVersion::V5,
             true,
+            None,
         )
         .await
         .unwrap();
@@ -437,6 +445,7 @@ async fn test_change_only_multiple_clients_independent() {
             0,
             ProtocolVersion::V5,
             true,
+            None,
         )
         .await
         .unwrap();

@@ -100,6 +100,8 @@ pub struct StoredSubscription {
     pub protocol_version: u8,
     #[serde(default)]
     pub change_only: bool,
+    #[serde(default)]
+    pub flow_id: Option<u64>,
 }
 
 fn default_protocol_version() -> u8 {
@@ -117,6 +119,7 @@ impl StoredSubscription {
             subscription_id: None,
             protocol_version: 5,
             change_only: false,
+            flow_id: None,
         }
     }
 }

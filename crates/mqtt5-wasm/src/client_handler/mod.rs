@@ -13,6 +13,7 @@ use mqtt5::broker::auth::AuthProvider;
 use mqtt5::broker::config::BrokerConfig;
 use mqtt5::broker::resource_monitor::ResourceMonitor;
 use mqtt5::broker::router::MessageRouter;
+use mqtt5::broker::router::RoutableMessage;
 use mqtt5::broker::storage::{ClientSession, DynamicStorage};
 use mqtt5::broker::sys_topics::BrokerStats;
 use mqtt5_protocol::error::{MqttError, Result};
@@ -55,8 +56,8 @@ pub struct WasmClientHandler {
     pub(super) stats: Arc<BrokerStats>,
     pub(super) resource_monitor: Arc<ResourceMonitor>,
     pub(super) session: Option<ClientSession>,
-    publish_rx: flume::Receiver<PublishPacket>,
-    publish_tx: flume::Sender<PublishPacket>,
+    publish_rx: flume::Receiver<RoutableMessage>,
+    publish_tx: flume::Sender<RoutableMessage>,
     pub(super) inflight_publishes: HashMap<u16, PublishPacket>,
     pub(super) outbound_inflight: Rc<RefCell<HashMap<u16, PublishPacket>>>,
     pub(super) next_packet_id: Rc<Cell<u16>>,
@@ -312,7 +313,8 @@ impl WasmClientHandler {
                 }
 
                 match publish_rx.recv_async().await {
-                    Ok(mut publish) => {
+                    Ok(routable) => {
+                        let mut publish = routable.publish;
                         if publish.qos != QoS::AtMostOnce {
                             let pid = next_pid_fwd.get();
                             next_pid_fwd.set(if pid == u16::MAX { 1 } else { pid + 1 });

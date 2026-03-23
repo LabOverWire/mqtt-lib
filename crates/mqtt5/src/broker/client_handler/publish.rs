@@ -22,6 +22,8 @@ use tracing::{debug, warn};
 #[cfg(feature = "opentelemetry")]
 use crate::telemetry::propagation;
 
+use crate::broker::router::RoutableMessage;
+
 use super::{ClientHandler, InflightPublish};
 
 impl ClientHandler {
@@ -642,6 +644,13 @@ impl ClientHandler {
         }
     }
 
+    pub(super) async fn send_routable(&mut self, routable: RoutableMessage) -> Result<()> {
+        self.pending_target_flow = routable.target_flow;
+        let result = self.send_publish(routable.publish).await;
+        self.pending_target_flow = None;
+        result
+    }
+
     pub(super) async fn send_publish(&mut self, mut publish: PublishPacket) -> Result<()> {
         if publish.qos != QoS::AtMostOnce {
             if self.outbound_inflight.len() >= usize::from(self.client_receive_maximum) {
@@ -716,6 +725,20 @@ impl ClientHandler {
         use crate::broker::server_stream_manager::ServerStreamManager;
 
         if self.quic_connection.is_some() {
+            if let Some(flow_id) = self.pending_target_flow {
+                if self.server_stream_manager.is_none() {
+                    let conn = self.quic_connection.clone().unwrap();
+                    self.server_stream_manager = Some(
+                        ServerStreamManager::new(conn).with_strategy(self.server_delivery_strategy),
+                    );
+                }
+                return self
+                    .server_stream_manager
+                    .as_mut()
+                    .unwrap()
+                    .write_publish_to_flow(flow_id, &self.write_buffer)
+                    .await;
+            }
             if self.server_delivery_strategy == ServerDeliveryStrategy::ControlOnly {
                 return self.transport.write(&self.write_buffer).await;
             }

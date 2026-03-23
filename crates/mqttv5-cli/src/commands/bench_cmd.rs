@@ -120,6 +120,12 @@ pub struct BenchCommand {
     #[arg(long)]
     pub quic_early_data: bool,
 
+    #[arg(
+        long,
+        help = "Separate URL for publishers in HOL mode (e.g., mqtt://host:1883)"
+    )]
+    pub pub_url: Option<String>,
+
     #[arg(long, default_value = "4")]
     pub topics: usize,
 
@@ -1416,13 +1422,14 @@ async fn run_hol_blocking(cmd: BenchCommand) -> Result<()> {
     use std::sync::Mutex;
 
     let url = broker_url(&cmd);
+    let pub_url = cmd.pub_url.clone().unwrap_or_else(|| url.clone());
     let base_id = base_client_id(&cmd, "hol");
     let num_topics = cmd.topics;
     let payload_size = cmd.payload_size.max(12);
     let trace_dir = cmd.trace_dir.clone();
 
-    eprintln!("connecting to {url} for HOL blocking test with {num_topics} topics...");
-    let pub_client = connect_client(format!("{base_id}-pub"), &url, &cmd).await?;
+    eprintln!("connecting pub to {pub_url}, sub to {url} for HOL blocking test with {num_topics} topics...");
+    let pub_client = connect_client(format!("{base_id}-pub"), &pub_url, &cmd).await?;
     let sub_client = connect_client(format!("{base_id}-sub"), &url, &cmd).await?;
 
     let topic_samples: Vec<Arc<Mutex<Vec<TimestampedSample>>>> = (0..num_topics)

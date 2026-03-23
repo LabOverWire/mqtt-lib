@@ -23,6 +23,7 @@ pub struct ServerStreamManager {
     connection: Arc<Connection>,
     strategy: ServerDeliveryStrategy,
     topic_streams: HashMap<String, ServerStreamInfo>,
+    flow_streams: HashMap<u64, ServerStreamInfo>,
     flow_id_generator: FlowIdGenerator,
     header_buffer: BytesMut,
 }
@@ -33,6 +34,7 @@ impl ServerStreamManager {
             connection,
             strategy: ServerDeliveryStrategy::default(),
             topic_streams: HashMap::new(),
+            flow_streams: HashMap::new(),
             flow_id_generator: FlowIdGenerator::new(),
             header_buffer: BytesMut::with_capacity(32),
         }
@@ -61,6 +63,57 @@ impl ServerStreamManager {
                 self.write_on_ephemeral_stream(topic, encoded_packet, qos)
                     .await
             }
+        }
+    }
+
+    pub async fn write_publish_to_flow(
+        &mut self,
+        flow_id: u64,
+        encoded_packet: &[u8],
+    ) -> Result<()> {
+        if let Some(info) = self.flow_streams.get_mut(&flow_id) {
+            info.last_used = Instant::now();
+            trace!(flow_id = flow_id, "Reusing server stream for flow");
+            return write_to_stream(&mut info.stream, encoded_packet).await;
+        }
+
+        let (mut send, _recv) = self.connection.open_bi().await.map_err(|e| {
+            MqttError::ConnectionError(format!("failed to open server QUIC stream for flow: {e}"))
+        })?;
+
+        let fid = FlowId::from(flow_id);
+
+        self.header_buffer.clear();
+        let header = DataFlowHeader::server(fid, FLOW_EXPIRE_INTERVAL, FlowFlags::default());
+        header.encode(&mut self.header_buffer);
+
+        send.write_all(&self.header_buffer).await.map_err(|e| {
+            MqttError::ConnectionError(format!("failed to write server flow header: {e}"))
+        })?;
+
+        debug!(
+            flow_id = flow_id,
+            "Opened new server stream for flow-bound subscription"
+        );
+
+        write_to_stream(&mut send, encoded_packet).await?;
+
+        self.flow_streams.insert(
+            flow_id,
+            ServerStreamInfo {
+                stream: send,
+                flow_id: fid,
+                last_used: Instant::now(),
+            },
+        );
+
+        Ok(())
+    }
+
+    pub fn remove_flow_stream(&mut self, flow_id: u64) {
+        if let Some(mut info) = self.flow_streams.remove(&flow_id) {
+            let _ = info.stream.finish();
+            debug!(flow_id = flow_id, "Closed server stream for flow");
         }
     }
 
@@ -181,6 +234,10 @@ impl ServerStreamManager {
         for (topic, mut info) in self.topic_streams.drain() {
             let _ = info.stream.finish();
             trace!(topic = %topic, flow_id = ?info.flow_id, "Closed server stream");
+        }
+        for (raw_id, mut info) in self.flow_streams.drain() {
+            let _ = info.stream.finish();
+            trace!(flow_id = raw_id, "Closed flow-bound server stream");
         }
     }
 }

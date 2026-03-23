@@ -56,6 +56,7 @@ fn test_multi_client_message_routing() {
                 0,
                 ProtocolVersion::V5,
                 false,
+                None,
             )
             .await
             .unwrap();
@@ -83,6 +84,7 @@ fn test_multi_client_message_routing() {
                 0,
                 ProtocolVersion::V5,
                 false,
+                None,
             )
             .await
             .unwrap();
@@ -110,6 +112,7 @@ fn test_multi_client_message_routing() {
                 0,
                 ProtocolVersion::V5,
                 false,
+                None,
             )
             .await
             .unwrap();
@@ -137,6 +140,7 @@ fn test_multi_client_message_routing() {
                 0,
                 ProtocolVersion::V5,
                 false,
+                None,
             )
             .await
             .unwrap();
@@ -236,6 +240,7 @@ fn test_client_subscription_changes() {
                 0,
                 ProtocolVersion::V5,
                 false,
+                None,
             )
             .await
             .unwrap();
@@ -277,6 +282,7 @@ fn test_client_subscription_changes() {
                 0,
                 ProtocolVersion::V5,
                 false,
+                None,
             )
             .await
             .unwrap();
@@ -334,6 +340,7 @@ fn test_message_ordering_with_multiple_clients() {
                 0,
                 ProtocolVersion::V5,
                 false,
+                None,
             )
             .await
             .unwrap();
@@ -349,6 +356,7 @@ fn test_message_ordering_with_multiple_clients() {
                 0,
                 ProtocolVersion::V5,
                 false,
+                None,
             )
             .await
             .unwrap();

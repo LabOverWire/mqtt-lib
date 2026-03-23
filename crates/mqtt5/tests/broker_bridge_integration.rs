@@ -99,6 +99,7 @@ async fn test_bridge_message_routing() {
             0,
             ProtocolVersion::V5,
             false,
+            None,
         )
         .await
         .unwrap();
@@ -117,8 +118,8 @@ async fn test_bridge_message_routing() {
         .expect("Timeout waiting for message")
         .expect("Should receive message");
 
-    assert_eq!(received.topic_name, "test/topic");
-    assert_eq!(&received.payload[..], b"test message");
+    assert_eq!(received.publish.topic_name, "test/topic");
+    assert_eq!(&received.publish.payload[..], b"test message");
 }
 
 #[tokio::test]

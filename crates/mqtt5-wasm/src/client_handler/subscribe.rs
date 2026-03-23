@@ -100,6 +100,7 @@ impl WasmClientHandler {
                     filter.options.retain_handling as u8,
                     ProtocolVersion::try_from(self.protocol_version).unwrap_or_default(),
                     change_only,
+                    None,
                 )
                 .await?;
 
@@ -166,6 +167,7 @@ impl WasmClientHandler {
                 subscription_id,
                 protocol_version: self.protocol_version,
                 change_only,
+                flow_id: None,
             };
             session.add_subscription(filter.filter.clone(), stored);
             self.storage.store_session(session.clone()).await.ok();
@@ -198,7 +200,7 @@ impl WasmClientHandler {
         let mut reason_codes = Vec::new();
 
         for filter in &unsubscribe.filters {
-            let removed = self.router.unsubscribe(client_id, filter).await;
+            let removed = self.router.unsubscribe(client_id, filter, None).await;
 
             if removed {
                 if let Some(ref mut session) = self.session {

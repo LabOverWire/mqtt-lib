@@ -13,6 +13,8 @@ use crate::QoS;
 use std::sync::Arc;
 use tracing::{debug, info, trace, warn};
 
+use crate::broker::router::RoutableMessage;
+
 use super::{AuthState, ClientHandler, PendingConnect};
 
 enum AuthOutcome {
@@ -489,6 +491,7 @@ impl ClientHandler {
                     stored.retain_handling,
                     ProtocolVersion::try_from(self.protocol_version).unwrap_or_default(),
                     stored.change_only,
+                    stored.flow_id,
                 )
                 .await?;
         }
@@ -536,7 +539,11 @@ impl ClientHandler {
                 if publish.qos != QoS::AtMostOnce && publish.packet_id.is_none() {
                     publish.packet_id = Some(self.next_packet_id());
                 }
-                if let Err(e) = self.publish_tx.try_send(publish) {
+                let routable = RoutableMessage {
+                    publish,
+                    target_flow: None,
+                };
+                if let Err(e) = self.publish_tx.try_send(routable) {
                     warn!("Failed to deliver queued message to {}: {:?}", client_id, e);
                 }
             }

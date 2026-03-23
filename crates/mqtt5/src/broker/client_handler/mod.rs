@@ -8,7 +8,7 @@ use crate::broker::auth::AuthProvider;
 use crate::broker::config::BrokerConfig;
 use crate::broker::events::{ClientConnectEvent, ClientDisconnectEvent};
 use crate::broker::resource_monitor::ResourceMonitor;
-use crate::broker::router::MessageRouter;
+use crate::broker::router::{MessageRouter, RoutableMessage};
 use crate::broker::storage::{ClientSession, DynamicStorage, StorageBackend};
 use crate::broker::sys_topics::BrokerStats;
 use crate::broker::transport::BrokerTransport;
@@ -66,8 +66,8 @@ pub struct ClientHandler {
     pub(super) client_id: Option<String>,
     pub(super) user_id: Option<String>,
     pub(super) keep_alive: Duration,
-    pub(super) publish_rx: flume::Receiver<PublishPacket>,
-    pub(super) publish_tx: flume::Sender<PublishPacket>,
+    pub(super) publish_rx: flume::Receiver<RoutableMessage>,
+    pub(super) publish_tx: flume::Sender<RoutableMessage>,
     pub(super) inflight_publishes: HashMap<u16, InflightPublish>,
     pub(super) session: Option<ClientSession>,
     pub(super) next_packet_id: u16,
@@ -79,7 +79,8 @@ pub struct ClientHandler {
     pub(super) auth_state: AuthState,
     pub(super) pending_connect: Option<PendingConnect>,
     pub(super) topic_aliases: HashMap<u16, String>,
-    pub(super) external_packet_rx: Option<mpsc::Receiver<Packet>>,
+    pub(super) external_packet_rx: Option<mpsc::Receiver<(Packet, Option<u64>)>>,
+    pub(super) pending_external_flow_id: Option<u64>,
     pub(super) client_receive_maximum: u16,
     pub(super) server_receive_maximum: u16,
     pub(super) client_max_packet_size: Option<u32>,
@@ -88,6 +89,11 @@ pub struct ClientHandler {
     pub(super) write_buffer: BytesMut,
     pub(super) read_buffer: BytesMut,
     pub(super) skip_bridge_forwarding: bool,
+    pub(super) pending_target_flow: Option<u64>,
+    pub(super) flow_closed_rx: Option<mpsc::Receiver<u64>>,
+    #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
+    pub(super) flow_registry:
+        Option<Arc<tokio::sync::Mutex<crate::session::quic_flow::FlowRegistry>>>,
     #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
     pub(super) quic_connection: Option<Arc<quinn::Connection>>,
     #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
@@ -134,7 +140,7 @@ impl ClientHandler {
         stats: Arc<BrokerStats>,
         resource_monitor: Arc<ResourceMonitor>,
         shutdown_rx: tokio::sync::broadcast::Receiver<()>,
-        external_packet_rx: Option<mpsc::Receiver<Packet>>,
+        external_packet_rx: Option<mpsc::Receiver<(Packet, Option<u64>)>>,
     ) -> Self {
         let (publish_tx, publish_rx) = flume::bounded(config.client_channel_capacity);
         let server_receive_maximum = config.server_receive_maximum.unwrap_or(65535);
@@ -166,6 +172,7 @@ impl ClientHandler {
             pending_connect: None,
             topic_aliases: HashMap::new(),
             external_packet_rx,
+            pending_external_flow_id: None,
             client_receive_maximum: 65535,
             server_receive_maximum,
             client_max_packet_size: None,
@@ -174,6 +181,10 @@ impl ClientHandler {
             write_buffer: BytesMut::with_capacity(4096),
             read_buffer: BytesMut::with_capacity(4096),
             skip_bridge_forwarding: false,
+            pending_target_flow: None,
+            flow_closed_rx: None,
+            #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
+            flow_registry: None,
             #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
             quic_connection: None,
             #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
@@ -200,6 +211,22 @@ impl ClientHandler {
     #[must_use]
     pub fn with_server_delivery_strategy(mut self, strategy: ServerDeliveryStrategy) -> Self {
         self.server_delivery_strategy = strategy;
+        self
+    }
+
+    #[must_use]
+    pub fn with_flow_closed_rx(mut self, rx: mpsc::Receiver<u64>) -> Self {
+        self.flow_closed_rx = Some(rx);
+        self
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn with_flow_registry(
+        mut self,
+        registry: Arc<tokio::sync::Mutex<crate::session::quic_flow::FlowRegistry>>,
+    ) -> Self {
+        self.flow_registry = Some(registry);
         self
     }
 
@@ -481,19 +508,34 @@ impl ClientHandler {
                     if let Some(ref mut rx) = self.external_packet_rx {
                         rx.recv().await
                     } else {
-                        std::future::pending::<Option<Packet>>().await
+                        std::future::pending::<Option<(Packet, Option<u64>)>>().await
                     }
                 } => {
-                    if let Some(packet) = external_packet {
-                        self.handle_packet(packet).await?;
+                    if let Some((packet, flow_id)) = external_packet {
+                        self.pending_external_flow_id = flow_id;
+                        let result = self.handle_packet(packet).await;
+                        self.pending_external_flow_id = None;
+                        result?;
+                    }
+                }
+
+                closed_flow_id = async {
+                    if let Some(ref mut rx) = self.flow_closed_rx {
+                        rx.recv().await
+                    } else {
+                        std::future::pending::<Option<u64>>().await
+                    }
+                } => {
+                    if let Some(flow_id) = closed_flow_id {
+                        self.handle_flow_closed(flow_id).await;
                     }
                 }
 
                 publish_result = self.publish_rx.recv_async() => {
-                    if let Ok(publish) = publish_result {
-                        self.send_publish(publish).await?;
+                    if let Ok(routable) = publish_result {
+                        self.send_routable(routable).await?;
                         while let Ok(more) = self.publish_rx.try_recv() {
-                            self.send_publish(more).await?;
+                            self.send_routable(more).await?;
                         }
                     } else {
                         warn!("Publish channel closed unexpectedly");
@@ -546,20 +588,35 @@ impl ClientHandler {
                     if let Some(ref mut rx) = self.external_packet_rx {
                         rx.recv().await
                     } else {
-                        std::future::pending::<Option<Packet>>().await
+                        std::future::pending::<Option<(Packet, Option<u64>)>>().await
                     }
                 } => {
-                    if let Some(packet) = external_packet {
+                    if let Some((packet, flow_id)) = external_packet {
                         last_packet_time = tokio::time::Instant::now();
-                        self.handle_packet(packet).await?;
+                        self.pending_external_flow_id = flow_id;
+                        let result = self.handle_packet(packet).await;
+                        self.pending_external_flow_id = None;
+                        result?;
+                    }
+                }
+
+                closed_flow_id = async {
+                    if let Some(ref mut rx) = self.flow_closed_rx {
+                        rx.recv().await
+                    } else {
+                        std::future::pending::<Option<u64>>().await
+                    }
+                } => {
+                    if let Some(flow_id) = closed_flow_id {
+                        self.handle_flow_closed(flow_id).await;
                     }
                 }
 
                 publish_result = self.publish_rx.recv_async() => {
-                    if let Ok(publish) = publish_result {
-                        self.send_publish(publish).await?;
+                    if let Ok(routable) = publish_result {
+                        self.send_routable(routable).await?;
                         while let Ok(more) = self.publish_rx.try_recv() {
-                            self.send_publish(more).await?;
+                            self.send_routable(more).await?;
                         }
                     } else {
                         warn!("Publish channel closed unexpectedly in handle_packets");

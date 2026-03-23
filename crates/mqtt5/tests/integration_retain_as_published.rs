@@ -29,6 +29,7 @@ async fn test_retain_as_published_false_clears_retain_flag() {
             0,
             ProtocolVersion::V5,
             false,
+            None,
         )
         .await
         .unwrap();
@@ -45,7 +46,7 @@ async fn test_retain_as_published_false_clears_retain_flag() {
         .await
         .expect("timeout")
         .expect("message");
-    assert!(!received.retain, "retain flag should be cleared");
+    assert!(!received.publish.retain, "retain flag should be cleared");
 }
 
 #[tokio::test]
@@ -70,6 +71,7 @@ async fn test_retain_as_published_true_preserves_retain_flag() {
             0,
             ProtocolVersion::V5,
             false,
+            None,
         )
         .await
         .unwrap();
@@ -86,5 +88,5 @@ async fn test_retain_as_published_true_preserves_retain_flag() {
         .await
         .expect("timeout")
         .expect("message");
-    assert!(received.retain, "retain flag should be preserved");
+    assert!(received.publish.retain, "retain flag should be preserved");
 }

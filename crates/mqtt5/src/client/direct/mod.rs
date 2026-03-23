@@ -754,6 +754,44 @@ impl DirectClientInner {
     }
 
     #[cfg(feature = "transport-quic")]
+    #[allow(deprecated)]
+    async fn should_unsubscribe_on_data_flow(&self, packet: &UnsubscribePacket) -> bool {
+        if packet.filters.len() != 1 {
+            return false;
+        }
+        if let Some(manager) = &self.quic_stream_manager {
+            if !matches!(
+                manager.strategy(),
+                StreamStrategy::DataPerTopic | StreamStrategy::DataPerSubscription
+            ) {
+                return false;
+            }
+            manager
+                .get_flow_id_for_topic(&packet.filters[0])
+                .await
+                .is_some()
+        } else {
+            false
+        }
+    }
+
+    #[cfg(feature = "transport-quic")]
+    #[allow(deprecated)]
+    fn should_subscribe_on_data_flow(&self, packet: &SubscribePacket) -> bool {
+        if packet.filters.len() != 1 {
+            return false;
+        }
+        if let Some(manager) = &self.quic_stream_manager {
+            matches!(
+                manager.strategy(),
+                StreamStrategy::DataPerTopic | StreamStrategy::DataPerSubscription
+            )
+        } else {
+            false
+        }
+    }
+
+    #[cfg(feature = "transport-quic")]
     fn datagrams_available(&self) -> bool {
         self.quic_datagrams_enabled
             && self
@@ -866,11 +904,19 @@ impl DirectClientInner {
             ));
         }
 
-        writer
-            .lock()
-            .await
-            .write_packet(Packet::Subscribe(packet.clone()))
-            .await?;
+        if self.should_subscribe_on_data_flow(&packet) {
+            let manager = self.quic_stream_manager.as_ref().unwrap();
+            let topic = packet.filters[0].filter.clone();
+            manager
+                .send_on_topic_stream(topic, Packet::Subscribe(packet.clone()))
+                .await?;
+        } else {
+            writer
+                .lock()
+                .await
+                .write_packet(Packet::Subscribe(packet.clone()))
+                .await?;
+        }
 
         let suback = self.wait_for_suback(rx, packet_id).await?;
 
@@ -923,11 +969,19 @@ impl DirectClientInner {
             }
         }
 
-        writer
-            .lock()
-            .await
-            .write_packet(Packet::Unsubscribe(packet.clone()))
-            .await?;
+        if self.should_unsubscribe_on_data_flow(&packet).await {
+            let manager = self.quic_stream_manager.as_ref().unwrap();
+            let topic = packet.filters[0].clone();
+            manager
+                .send_on_topic_stream(topic, Packet::Unsubscribe(packet.clone()))
+                .await?;
+        } else {
+            writer
+                .lock()
+                .await
+                .write_packet(Packet::Unsubscribe(packet.clone()))
+                .await?;
+        }
 
         let timeout = Duration::from_secs(10);
         let unsuback = match tokio::time::timeout(timeout, rx).await {

@@ -1,6 +1,6 @@
 #![cfg(feature = "transport-quic")]
 
-use mqtt5::broker::config::{BrokerConfig, QuicConfig};
+use mqtt5::broker::config::{BrokerConfig, QuicConfig, ServerDeliveryStrategy};
 use mqtt5::broker::MqttBroker;
 use mqtt5::time::Duration;
 use mqtt5::transport::StreamStrategy;
@@ -711,4 +711,133 @@ fn test_quic_error_level_consistency() {
         let reason = ReasonCode::from_quic_stream_code(code).unwrap();
         assert_eq!(reason.mqoq_error_level(), Some(2));
     }
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn test_subscribe_on_data_flow_delivers_on_server_stream() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    let quic_addr: SocketAddr = "127.0.0.1:24590".parse().unwrap();
+    let config = BrokerConfig::default()
+        .with_bind_address(([127, 0, 0, 1], 0))
+        .with_server_delivery_strategy(ServerDeliveryStrategy::PerTopic)
+        .with_quic(
+            QuicConfig::new(
+                PathBuf::from("../../test_certs/server.pem"),
+                PathBuf::from("../../test_certs/server.key"),
+            )
+            .with_bind_address(quic_addr),
+        );
+
+    let broker = MqttBroker::with_config(config).await.unwrap();
+    let tcp_addr = broker.local_addr().unwrap();
+    let mut broker = broker;
+    let broker_handle = tokio::spawn(async move { broker.run().await });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let topic1 = format!("flow-test/{}/t1", Ulid::new());
+    let topic2 = format!("flow-test/{}/t2", Ulid::new());
+
+    let pub_client = MqttClient::new(test_client_id("tcp-pub"));
+    let tcp_url = format!("mqtt://{tcp_addr}");
+    if pub_client.connect(&tcp_url).await.is_err() {
+        broker_handle.abort();
+        return;
+    }
+
+    let sub_client = MqttClient::new(test_client_id("quic-flow-sub"));
+    sub_client.set_insecure_tls(true).await;
+    sub_client
+        .set_quic_stream_strategy(StreamStrategy::DataPerTopic)
+        .await;
+    sub_client.set_quic_flow_headers(true).await;
+
+    let quic_url = format!("quic://{quic_addr}");
+    if sub_client.connect(&quic_url).await.is_err() {
+        pub_client.disconnect().await.ok();
+        broker_handle.abort();
+        return;
+    }
+
+    let stream_ids_1 = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let stream_ids_2 = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let received = Arc::new(AtomicU32::new(0));
+
+    let topic1_sids = stream_ids_1.clone();
+    let topic1_recv = received.clone();
+    sub_client
+        .subscribe(&topic1, move |msg| {
+            if let Some(sid) = msg.stream_id {
+                topic1_sids.lock().unwrap().push(sid);
+            }
+            topic1_recv.fetch_add(1, Ordering::Relaxed);
+        })
+        .await
+        .unwrap();
+
+    let topic2_sids = stream_ids_2.clone();
+    let topic2_recv = received.clone();
+    sub_client
+        .subscribe(&topic2, move |msg| {
+            if let Some(sid) = msg.stream_id {
+                topic2_sids.lock().unwrap().push(sid);
+            }
+            topic2_recv.fetch_add(1, Ordering::Relaxed);
+        })
+        .await
+        .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    for i in 0..5 {
+        pub_client
+            .publish(&topic1, format!("t1-{i}").as_bytes())
+            .await
+            .unwrap();
+        pub_client
+            .publish(&topic2, format!("t2-{i}").as_bytes())
+            .await
+            .unwrap();
+    }
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    assert_eq!(
+        received.load(Ordering::Relaxed),
+        10,
+        "Should receive all 10 messages (5 per topic)"
+    );
+
+    let captured_topic1: Vec<u64> = stream_ids_1.lock().unwrap().clone();
+    let captured_topic2: Vec<u64> = stream_ids_2.lock().unwrap().clone();
+
+    assert!(
+        !captured_topic1.is_empty(),
+        "Topic 1 messages should have stream_id set"
+    );
+    assert!(
+        !captured_topic2.is_empty(),
+        "Topic 2 messages should have stream_id set"
+    );
+
+    let first_stream_topic1 = captured_topic1[0];
+    let first_stream_topic2 = captured_topic2[0];
+    assert_ne!(
+        first_stream_topic1, first_stream_topic2,
+        "Different topics should be delivered on different server streams"
+    );
+
+    assert!(
+        captured_topic1.iter().all(|s| *s == first_stream_topic1),
+        "All messages for topic 1 should arrive on the same stream"
+    );
+    assert!(
+        captured_topic2.iter().all(|s| *s == first_stream_topic2),
+        "All messages for topic 2 should arrive on the same stream"
+    );
+
+    pub_client.disconnect().await.ok();
+    sub_client.disconnect().await.ok();
+    broker_handle.abort();
 }
