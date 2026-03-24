@@ -2,7 +2,6 @@
 
 use crate::error::Result;
 use crate::packet::Packet;
-use crate::session::SessionState;
 use crate::transport::PacketWriter;
 use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -10,6 +9,8 @@ use std::sync::Arc;
 use tokio::time::Duration;
 
 use super::unified::UnifiedWriter;
+#[cfg(feature = "transport-quic")]
+use crate::session::SessionState;
 
 #[derive(Debug, Default)]
 pub(crate) struct KeepaliveState {
@@ -106,6 +107,7 @@ pub(super) async fn keepalive_task_with_writer(
     }
 }
 
+#[cfg(feature = "transport-quic")]
 pub(super) async fn flow_expiration_task(session: Arc<tokio::sync::RwLock<SessionState>>) {
     let check_interval = Duration::from_secs(60);
     let mut interval = tokio::time::interval(check_interval);

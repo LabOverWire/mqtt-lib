@@ -6,13 +6,14 @@ use crate::error::{MqttError, Result};
 use crate::packet::Packet;
 use crate::protocol::v5::properties::Properties;
 use crate::session::SessionState;
-use crate::transport::flow::FlowId;
 use crate::transport::PacketWriter;
 use parking_lot::Mutex;
 use std::sync::Arc;
 
 use super::keepalive::KeepaliveState;
 use super::unified::UnifiedWriter;
+#[cfg(feature = "transport-quic")]
+use crate::transport::flow::FlowId;
 
 pub(super) async fn handle_incoming_packet_with_writer(
     packet: Packet,
@@ -151,6 +152,7 @@ pub(super) async fn handle_publish_with_ack(
     Ok(())
 }
 
+#[cfg(feature = "transport-quic")]
 pub(super) async fn handle_incoming_packet_no_writer(
     packet: Packet,
     callback_manager: &Arc<CallbackManager>,
