@@ -17,7 +17,7 @@
 - **Control**: All PUBLISH packets delivered on the QUIC control stream (stream 0)
 - **Per-topic flow**: Each topic routed to a dedicated QUIC stream with flow header framing
 
-**Infrastructure**: GCP n2-standard-4 VMs (us-west1-b), mqttv5 v0.25.0 from `subscribe-on-data-flows` branch.
+**Infrastructure**: GCP n2-standard-4 VMs (us-west1-b), mqttv5 v0.26.0 from `subscribe-on-data-flows` branch.
 
 ## Data Completeness
 
