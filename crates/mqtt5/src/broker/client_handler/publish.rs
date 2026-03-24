@@ -710,7 +710,7 @@ impl ClientHandler {
         Ok(())
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
     async fn write_publish_bytes(&mut self, topic: &str, qos: QoS) -> Result<()> {
         use crate::broker::config::ServerDeliveryStrategy;
         use crate::broker::server_stream_manager::ServerStreamManager;
@@ -735,7 +735,7 @@ impl ClientHandler {
         }
     }
 
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(any(target_arch = "wasm32", not(feature = "transport-quic")))]
     async fn write_publish_bytes(&mut self, _topic: &str, _qos: QoS) -> Result<()> {
         self.transport.write(&self.write_buffer).await
     }

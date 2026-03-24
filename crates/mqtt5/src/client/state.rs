@@ -34,7 +34,14 @@ impl MqttClient {
     }
 
     pub(crate) async fn recover_quic_flows(&self) {
+        #[cfg(not(feature = "transport-quic"))]
+        {
+            return;
+        }
+
+        #[cfg(feature = "transport-quic")]
         let inner = self.inner.read().await;
+        #[cfg(feature = "transport-quic")]
         match inner.recover_flows().await {
             Ok(0) => {}
             Ok(n) => tracing::info!(recovered = n, "Recovered QUIC flows after reconnect"),

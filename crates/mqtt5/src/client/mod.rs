@@ -114,6 +114,7 @@ pub struct MqttClient {
     pub(crate) connection_mutex: Arc<tokio::sync::Mutex<()>>,
     pub(crate) tls_config: Arc<RwLock<Option<TlsConfig>>>,
     pub(crate) transport_config: Arc<RwLock<crate::transport::ClientTransportConfig>>,
+    #[cfg(feature = "transport-quic")]
     pub(crate) quic_client_config: Arc<RwLock<Option<quinn::ClientConfig>>>,
 }
 
@@ -759,10 +760,12 @@ impl MqttClient {
         inner.disconnect_with_packet(false).await
     }
 
+    #[cfg(feature = "transport-quic")]
     pub async fn quic_connection(&self) -> Option<Arc<quinn::Connection>> {
         self.inner.read().await.quic_connection.clone()
     }
 
+    #[cfg(feature = "transport-quic")]
     pub async fn was_zero_rtt(&self) -> bool {
         self.inner.read().await.zero_rtt_accepted
     }
@@ -773,7 +776,7 @@ impl MqttClient {
     ///
     /// Returns `NotConnected` if the client is not connected, or `ConnectionError`
     /// if the transport is not QUIC or rebinding fails.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
     pub async fn migrate(&self) -> Result<()> {
         self.inner.read().await.migrate()
     }
@@ -785,7 +788,7 @@ impl MqttClient {
     ///
     /// Returns `NotConnected` if the client is not connected, `ConnectionError`
     /// if the transport is not QUIC, or `Timeout` if the peer does not respond.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
     pub async fn discard_flow(&self, flow_id: crate::transport::flow::FlowId) -> Result<()> {
         self.inner.read().await.discard_flow(flow_id).await
     }

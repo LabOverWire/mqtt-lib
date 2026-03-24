@@ -23,7 +23,7 @@ exclude = [
 ]
 
 [features]
-default = []
+default = ["transport-websocket", "transport-quic"]
 turmoil-testing = ["turmoil"]
 opentelemetry = [
     "dep:opentelemetry",
@@ -36,6 +36,8 @@ opentelemetry_sdk = ["dep:opentelemetry_sdk"]
 opentelemetry-otlp = ["dep:opentelemetry-otlp"]
 tracing-opentelemetry = ["dep:tracing-opentelemetry"]
 tokio = ["dep:tokio"]
+transport-websocket = ["dep:tokio-tungstenite"]
+transport-quic = ["dep:quinn"]
 codec-gzip = ["dep:flate2"]
 codec-deflate = ["dep:flate2"]
 codec-all = ["codec-gzip", "codec-deflate"]
@@ -69,10 +71,12 @@ path = "examples/broker_with_tls.rs"
 [[example]]
 name = "broker_with_websocket"
 path = "examples/broker_with_websocket.rs"
+required-features = ["transport-websocket"]
 
 [[example]]
 name = "broker_all_transports"
 path = "examples/broker_all_transports.rs"
+required-features = ["transport-websocket", "transport-quic"]
 
 [[example]]
 name = "broker_bridge_demo"
@@ -150,8 +154,8 @@ rustls-pemfile = "2.2"
 rustls-pki-types = "1.13.0"
 tokio = { version = "1.47", features = ["full"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
-tokio-tungstenite = { version = "0.28", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
-quinn = { version = "0.11", default-features = false, features = ["rustls-ring", "runtime-tokio", "platform-verifier"] }
+tokio-tungstenite = { version = "0.28", default-features = false, features = ["connect", "rustls-tls-native-roots"], optional = true }
+quinn = { version = "0.11", default-features = false, features = ["rustls-ring", "runtime-tokio", "platform-verifier"], optional = true }
 webpki-roots = "1.0"
 
 [target.wasm32-unknown-unknown.dependencies]

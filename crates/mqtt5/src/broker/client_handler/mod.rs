@@ -30,9 +30,9 @@ use tokio::sync::mpsc;
 use tokio::time::{interval, timeout};
 use tracing::{debug, info, warn};
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
 use crate::broker::config::ServerDeliveryStrategy;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
 use crate::broker::server_stream_manager::ServerStreamManager;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -88,11 +88,11 @@ pub struct ClientHandler {
     pub(super) write_buffer: BytesMut,
     pub(super) read_buffer: BytesMut,
     pub(super) skip_bridge_forwarding: bool,
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
     pub(super) quic_connection: Option<Arc<quinn::Connection>>,
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
     pub(super) server_stream_manager: Option<ServerStreamManager>,
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
     pub(super) server_delivery_strategy: ServerDeliveryStrategy,
 }
 
@@ -174,11 +174,11 @@ impl ClientHandler {
             write_buffer: BytesMut::with_capacity(4096),
             read_buffer: BytesMut::with_capacity(4096),
             skip_bridge_forwarding: false,
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
             quic_connection: None,
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
             server_stream_manager: None,
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
             server_delivery_strategy: ServerDeliveryStrategy::default(),
         }
     }
@@ -189,14 +189,14 @@ impl ClientHandler {
         self
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
     #[must_use]
     pub fn with_quic_connection(mut self, conn: Arc<quinn::Connection>) -> Self {
         self.quic_connection = Some(conn);
         self
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
     #[must_use]
     pub fn with_server_delivery_strategy(mut self, strategy: ServerDeliveryStrategy) -> Self {
         self.server_delivery_strategy = strategy;
@@ -593,7 +593,7 @@ impl ClientHandler {
         }
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
     async fn check_quic_migration(&mut self) {
         let Some(conn) = &self.quic_connection else {
             return;
@@ -615,6 +615,9 @@ impl ClientHandler {
             }
         }
     }
+
+    #[cfg(any(target_arch = "wasm32", not(feature = "transport-quic")))]
+    async fn check_quic_migration(&mut self) {}
 
     async fn handle_packet(&mut self, packet: Packet) -> Result<()> {
         match packet {

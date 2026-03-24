@@ -6,9 +6,6 @@ use crate::broker::bridge::BridgeManager;
 use crate::broker::client_handler::ClientHandler;
 use crate::broker::config::{BrokerConfig, StorageBackend as StorageBackendType};
 use crate::broker::hot_reload::HotReloadManager;
-use crate::broker::quic_acceptor::{
-    run_quic_cluster_connection_handler, run_quic_connection_handler, QuicAcceptorConfig,
-};
 use crate::broker::resource_monitor::{ResourceLimits, ResourceMonitor};
 use crate::broker::router::MessageRouter;
 use crate::broker::storage::{DynamicStorage, FileBackend, MemoryBackend, StorageBackend};
@@ -17,7 +14,6 @@ use crate::broker::tls_acceptor::{accept_tls_connection, TlsAcceptorConfig};
 use crate::broker::transport::BrokerTransport;
 use crate::broker::websocket_server::{accept_websocket_connection, WebSocketServerConfig};
 use crate::error::{MqttError, Result};
-use quinn::Endpoint;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -25,8 +21,16 @@ use tokio::sync::{mpsc, watch};
 use tokio_rustls::TlsAcceptor;
 use tracing::{debug, error, info, warn};
 
+#[cfg(feature = "transport-quic")]
+use crate::broker::quic_acceptor::{
+    run_quic_cluster_connection_handler, run_quic_connection_handler, QuicAcceptorConfig,
+};
 #[cfg(feature = "opentelemetry")]
 use crate::telemetry;
+#[cfg(feature = "transport-quic")]
+use quinn::Endpoint;
+#[cfg(not(feature = "transport-quic"))]
+type Endpoint = ();
 
 #[derive(Clone)]
 struct AcceptLoopState {
@@ -383,6 +387,14 @@ impl MqttBroker {
     async fn setup_websocket(
         config: &BrokerConfig,
     ) -> Result<(Vec<TcpListener>, Option<WebSocketServerConfig>)> {
+        #[cfg(not(feature = "transport-websocket"))]
+        if config.websocket_config.is_some() {
+            return Err(MqttError::Configuration(
+                "broker websocket transport is disabled at compile time; enable the `transport-websocket` feature"
+                    .to_string(),
+            ));
+        }
+
         if let Some(ref ws_config) = config.websocket_config {
             let bind_result = bind_tcp_addresses(&ws_config.bind_addresses, "WebSocket").await;
             if bind_result.is_empty() {
@@ -411,6 +423,14 @@ impl MqttBroker {
         Option<WebSocketServerConfig>,
         Option<TlsAcceptor>,
     )> {
+        #[cfg(not(feature = "transport-websocket"))]
+        if config.websocket_tls_config.is_some() {
+            return Err(MqttError::Configuration(
+                "broker websocket transport is disabled at compile time; enable the `transport-websocket` feature"
+                    .to_string(),
+            ));
+        }
+
         if let Some(ref ws_tls_config) = config.websocket_tls_config {
             if let Some(ref tls_config) = config.tls_config {
                 let cert_chain =
@@ -491,6 +511,18 @@ impl MqttBroker {
     }
 
     async fn setup_quic(config: &BrokerConfig) -> Result<Vec<Endpoint>> {
+        #[cfg(not(feature = "transport-quic"))]
+        {
+            if config.quic_config.is_some() {
+                return Err(MqttError::Configuration(
+                    "broker quic transport is disabled at compile time; enable the `transport-quic` feature"
+                        .to_string(),
+                ));
+            }
+            return Ok(Vec::new());
+        }
+
+        #[cfg(feature = "transport-quic")]
         if let Some(ref quic_config) = config.quic_config {
             let cert_chain =
                 QuicAcceptorConfig::load_cert_chain_from_file(&quic_config.cert_file).await?;
@@ -537,11 +569,24 @@ impl MqttBroker {
     async fn setup_cluster_listener(
         config: &BrokerConfig,
     ) -> Result<(Vec<TcpListener>, Option<TlsAcceptor>, Vec<Endpoint>)> {
+        #[cfg(not(feature = "transport-quic"))]
+        if config
+            .cluster_listener_config
+            .as_ref()
+            .is_some_and(crate::broker::config::ClusterListenerConfig::is_quic)
+        {
+            return Err(MqttError::Configuration(
+                "cluster QUIC transport is disabled at compile time; enable the `transport-quic` feature"
+                    .to_string(),
+            ));
+        }
+
         if let Some(ref cluster_config) = config.cluster_listener_config {
             if let Err(e) = cluster_config.validate() {
                 return Err(MqttError::Configuration(e));
             }
 
+            #[cfg(feature = "transport-quic")]
             if cluster_config.is_quic() {
                 let cert_file = cluster_config.cert_file.as_ref().ok_or_else(|| {
                     MqttError::Configuration("QUIC cluster listener requires cert_file".to_string())
@@ -1027,6 +1072,7 @@ impl MqttBroker {
         }
     }
 
+    #[cfg(feature = "transport-quic")]
     fn spawn_quic_accept_tasks(
         quic_endpoints: Vec<Endpoint>,
         state: &AcceptLoopState,
@@ -1097,6 +1143,14 @@ impl MqttBroker {
                 }
             }));
         }
+    }
+
+    #[cfg(not(feature = "transport-quic"))]
+    fn spawn_quic_accept_tasks(
+        _quic_endpoints: Vec<Endpoint>,
+        _state: &AcceptLoopState,
+        _task_handles: &mut Vec<tokio::task::JoinHandle<()>>,
+    ) {
     }
 
     fn spawn_cluster_accept_tasks(
@@ -1211,6 +1265,7 @@ impl MqttBroker {
         }
     }
 
+    #[cfg(feature = "transport-quic")]
     fn spawn_cluster_quic_accept_tasks(
         cluster_quic_endpoints: Vec<Endpoint>,
         state: &AcceptLoopState,
@@ -1284,6 +1339,14 @@ impl MqttBroker {
                 }
             }));
         }
+    }
+
+    #[cfg(not(feature = "transport-quic"))]
+    fn spawn_cluster_quic_accept_tasks(
+        _cluster_quic_endpoints: Vec<Endpoint>,
+        _state: &AcceptLoopState,
+        _task_handles: &mut Vec<tokio::task::JoinHandle<()>>,
+    ) {
     }
 
     fn spawn_tcp_accept_tasks(

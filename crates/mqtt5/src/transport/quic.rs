@@ -1,6 +1,7 @@
 use crate::crypto::NoVerification;
 use crate::error::{MqttError, Result};
 use crate::time::Duration;
+use crate::transport::client_config::StreamStrategy;
 use crate::transport::flow::FlowFlags;
 use crate::transport::packet_io::{encode_packet_to_buffer, PacketReader, PacketWriter};
 use crate::Transport;
@@ -15,46 +16,6 @@ use tracing::{debug, instrument, warn};
 
 pub const ALPN_MQTT: &[u8] = b"mqtt";
 pub const ALPN_MQTT_NEXT: &[u8] = b"MQTT-next";
-
-// [MQoQ§5] Multi-stream modes
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum StreamStrategy {
-    #[default]
-    ControlOnly,
-    DataPerPublish,
-    DataPerTopic,
-    #[deprecated(note = "architecturally identical to DataPerTopic; use DataPerTopic instead")]
-    DataPerSubscription,
-}
-
-#[derive(Debug, Clone)]
-#[allow(clippy::struct_excessive_bools)]
-pub struct ClientTransportConfig {
-    pub insecure_tls: bool,
-    pub stream_strategy: StreamStrategy,
-    pub flow_headers: bool,
-    pub flow_expire: Duration,
-    pub max_streams: Option<usize>,
-    pub datagrams: bool,
-    pub connect_timeout: Duration,
-    pub enable_early_data: bool,
-}
-
-impl Default for ClientTransportConfig {
-    fn default() -> Self {
-        Self {
-            insecure_tls: false,
-            stream_strategy: StreamStrategy::default(),
-            flow_headers: false,
-            flow_expire: Duration::from_secs(300),
-            max_streams: None,
-            datagrams: false,
-            connect_timeout: Duration::from_secs(30),
-            enable_early_data: false,
-        }
-    }
-}
 
 #[derive(Debug)]
 #[allow(clippy::struct_excessive_bools)]

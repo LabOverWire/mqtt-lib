@@ -5,22 +5,31 @@ use crate::Transport;
 use std::net::ToSocketAddrs;
 use tracing::instrument;
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
 use crate::transport::quic::QuicConfig;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::transport::tcp::TcpConfig;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::transport::tls::TlsConfig;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "transport-websocket"))]
 use crate::transport::websocket::{WebSocketConfig, WebSocketTransport};
+#[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
+use crate::transport::QuicTransport;
 #[cfg(not(target_arch = "wasm32"))]
-use crate::transport::{QuicTransport, TcpTransport, TlsTransport, TransportType};
+use crate::transport::{TcpTransport, TlsTransport, TransportType};
 
 use super::connection::{ConnectionEvent, DisconnectReason};
 use super::state::ClientTransportType;
 use super::MqttClient;
 
 impl MqttClient {
+    #[cfg(any(not(feature = "transport-websocket"), not(feature = "transport-quic")))]
+    fn unsupported_transport_feature(transport: &str, feature: &str) -> MqttError {
+        MqttError::Configuration(format!(
+            "{transport} transport is disabled at compile time; enable the `{feature}` feature"
+        ))
+    }
+
     pub(crate) fn is_aws_iot_endpoint(hostname: &str) -> bool {
         hostname.contains(".iot.") && hostname.ends_with(".amazonaws.com")
     }
@@ -183,6 +192,7 @@ impl MqttClient {
         Ok(TransportType::Tls(Box::new(tls_transport)))
     }
 
+    #[cfg(feature = "transport-websocket")]
     async fn connect_websocket(url: &str) -> Result<TransportType> {
         let config = WebSocketConfig::new(url)
             .map_err(|e| MqttError::ConnectionError(format!("Invalid WebSocket URL: {e}")))?;
@@ -194,6 +204,15 @@ impl MqttClient {
         Ok(TransportType::WebSocket(Box::new(ws_transport)))
     }
 
+    #[cfg(not(feature = "transport-websocket"))]
+    async fn connect_websocket(_url: &str) -> Result<TransportType> {
+        Err(Self::unsupported_transport_feature(
+            "websocket",
+            "transport-websocket",
+        ))
+    }
+
+    #[cfg(feature = "transport-websocket")]
     async fn connect_websocket_secure(
         &self,
         addr: std::net::SocketAddr,
@@ -217,6 +236,20 @@ impl MqttClient {
         Ok(TransportType::WebSocket(Box::new(ws_transport)))
     }
 
+    #[cfg(not(feature = "transport-websocket"))]
+    async fn connect_websocket_secure(
+        &self,
+        _addr: std::net::SocketAddr,
+        _host: &str,
+        _url: &str,
+    ) -> Result<TransportType> {
+        Err(Self::unsupported_transport_feature(
+            "websocket",
+            "transport-websocket",
+        ))
+    }
+
+    #[cfg(feature = "transport-quic")]
     async fn connect_quic(&self, addr: std::net::SocketAddr, host: &str) -> Result<TransportType> {
         let qc = self.transport_config.read().await;
         let server_name = if host.parse::<std::net::IpAddr>().is_ok() {
@@ -249,6 +282,19 @@ impl MqttClient {
         Ok(TransportType::Quic(Box::new(quic_transport)))
     }
 
+    #[cfg(not(feature = "transport-quic"))]
+    async fn connect_quic(
+        &self,
+        _addr: std::net::SocketAddr,
+        _host: &str,
+    ) -> Result<TransportType> {
+        Err(Self::unsupported_transport_feature(
+            "quic",
+            "transport-quic",
+        ))
+    }
+
+    #[cfg(feature = "transport-quic")]
     async fn connect_quic_secure(
         &self,
         addr: std::net::SocketAddr,
@@ -311,6 +357,18 @@ impl MqttClient {
         Ok(TransportType::Quic(Box::new(quic_transport)))
     }
 
+    #[cfg(not(feature = "transport-quic"))]
+    async fn connect_quic_secure(
+        &self,
+        _addr: std::net::SocketAddr,
+        _host: &str,
+    ) -> Result<TransportType> {
+        Err(Self::unsupported_transport_feature(
+            "quic",
+            "transport-quic",
+        ))
+    }
+
     pub(crate) async fn try_connect_to_addresses(
         &self,
         addresses: &[std::net::SocketAddr],
@@ -339,6 +397,7 @@ impl MqttClient {
             let mut inner = self.inner.write().await;
             match inner.connect(transport).await {
                 Ok(result) => {
+                    #[cfg(feature = "transport-quic")]
                     if let Some(cached) = inner.cached_quic_client_config.take() {
                         *self.quic_client_config.write().await = Some(cached);
                     }

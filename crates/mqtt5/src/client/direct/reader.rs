@@ -10,22 +10,29 @@ use crate::packet::unsuback::UnsubAckPacket;
 use crate::packet::Packet;
 use crate::protocol::v5::reason_codes::ReasonCode;
 use crate::session::SessionState;
-use crate::transport::flow::{
-    FlowFlags, FlowHeader, FlowId, FLOW_TYPE_CLIENT_DATA, FLOW_TYPE_CONTROL, FLOW_TYPE_SERVER_DATA,
-};
 use crate::transport::PacketWriter;
-use bytes::{Buf, Bytes, BytesMut};
 use parking_lot::Mutex;
-use quinn::Connection;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration as StdDuration;
 use tokio::sync::oneshot;
 
-use super::handlers::{handle_incoming_packet_no_writer, handle_incoming_packet_with_writer};
+use super::handlers::handle_incoming_packet_with_writer;
 use super::keepalive::KeepaliveState;
 use super::unified::{UnifiedReader, UnifiedWriter};
+
+#[cfg(feature = "transport-quic")]
+use super::handlers::handle_incoming_packet_no_writer;
+#[cfg(feature = "transport-quic")]
+use crate::transport::flow::{
+    FlowFlags, FlowHeader, FlowId, FLOW_TYPE_CLIENT_DATA, FLOW_TYPE_CONTROL, FLOW_TYPE_SERVER_DATA,
+};
+#[cfg(feature = "transport-quic")]
+use bytes::{Buf, Bytes, BytesMut};
+#[cfg(feature = "transport-quic")]
+use quinn::Connection;
+#[cfg(feature = "transport-quic")]
+use std::time::Duration as StdDuration;
 
 #[derive(Clone)]
 pub(super) struct PacketReaderContext {
@@ -37,6 +44,7 @@ pub(super) struct PacketReaderContext {
     pub(super) pubcomp_channels: Arc<Mutex<HashMap<u16, oneshot::Sender<ReasonCode>>>>,
     pub(super) writer: Arc<tokio::sync::Mutex<UnifiedWriter>>,
     pub(super) connected: Arc<AtomicBool>,
+    #[cfg(feature = "transport-quic")]
     pub(super) protocol_version: u8,
     pub(super) auth_handler: Option<Arc<dyn AuthHandler>>,
     pub(super) auth_method: Option<String>,
@@ -193,6 +201,7 @@ async fn handle_auth_packet(auth: AuthPacket, ctx: &PacketReaderContext) -> Resu
     Ok(())
 }
 
+#[cfg(feature = "transport-quic")]
 pub(super) async fn quic_stream_acceptor_task(
     connection: Arc<Connection>,
     ctx: PacketReaderContext,
@@ -237,6 +246,7 @@ pub(super) async fn quic_stream_acceptor_task(
     }
 }
 
+#[cfg(feature = "transport-quic")]
 fn is_flow_header_byte(b: u8) -> bool {
     matches!(
         b,
@@ -244,6 +254,7 @@ fn is_flow_header_byte(b: u8) -> bool {
     )
 }
 
+#[cfg(feature = "transport-quic")]
 struct ServerFlowResult {
     flow_id: Option<FlowId>,
     flags: Option<FlowFlags>,
@@ -251,6 +262,7 @@ struct ServerFlowResult {
     leftover: BytesMut,
 }
 
+#[cfg(feature = "transport-quic")]
 async fn try_read_server_flow_header(recv: &mut quinn::RecvStream) -> Result<ServerFlowResult> {
     let chunk = recv
         .read_chunk(1, true)
@@ -348,6 +360,7 @@ async fn try_read_server_flow_header(recv: &mut quinn::RecvStream) -> Result<Ser
     }
 }
 
+#[cfg(feature = "transport-quic")]
 async fn read_packet_with_buffer(
     recv: &mut quinn::RecvStream,
     buffer: &mut BytesMut,
@@ -434,6 +447,7 @@ async fn read_packet_with_buffer(
     )
 }
 
+#[cfg(feature = "transport-quic")]
 async fn quic_stream_reader_task(
     mut recv: quinn::RecvStream,
     send: quinn::SendStream,
@@ -491,6 +505,7 @@ async fn quic_stream_reader_task(
     }
 }
 
+#[cfg(feature = "transport-quic")]
 async fn quic_uni_stream_reader_task(mut recv: quinn::RecvStream, ctx: PacketReaderContext) {
     let (flow_id, mut buffer) = match try_read_server_flow_header(&mut recv).await {
         Ok(result) => {

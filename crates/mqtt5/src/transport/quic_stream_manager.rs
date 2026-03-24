@@ -1,7 +1,7 @@
 use crate::error::{MqttError, Result};
+use crate::transport::client_config::StreamStrategy;
 use crate::transport::flow::{DataFlowHeader, FlowFlags, FlowId, FlowIdGenerator};
 use crate::transport::packet_io::encode_packet_to_buffer;
-use crate::transport::quic::StreamStrategy;
 use bytes::BytesMut;
 use mqtt5_protocol::packet::Packet;
 use quinn::{Connection, SendStream};

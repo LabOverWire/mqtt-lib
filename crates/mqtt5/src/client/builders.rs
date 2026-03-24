@@ -62,6 +62,7 @@ impl MqttClient {
             transport_config: Arc::new(RwLock::new(
                 crate::transport::ClientTransportConfig::default(),
             )),
+            #[cfg(feature = "transport-quic")]
             quic_client_config: Arc::new(RwLock::new(None)),
         }
     }

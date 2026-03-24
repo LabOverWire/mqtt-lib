@@ -4,13 +4,21 @@
 //! allowing browsers and other WebSocket clients to connect to the broker.
 
 use crate::error::{MqttError, Result};
-use futures_util::{SinkExt, StreamExt};
 use std::net::SocketAddr;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
+
+#[cfg(feature = "transport-websocket")]
+use futures_util::{SinkExt, StreamExt};
+#[cfg(not(feature = "transport-websocket"))]
+use std::task::{Context, Poll};
+#[cfg(feature = "transport-websocket")]
 use tokio_tungstenite::{
     accept_hdr_async, tungstenite::protocol::WebSocketConfig, WebSocketStream,
 };
+#[cfg(not(feature = "transport-websocket"))]
+type WebSocketConfig = ();
+#[cfg(feature = "transport-websocket")]
 use tracing::{debug, error};
 
 /// WebSocket server configuration
@@ -75,6 +83,7 @@ impl WebSocketServerConfig {
 }
 
 /// Wrapper for WebSocket streams that implements AsyncRead/AsyncWrite
+#[cfg(feature = "transport-websocket")]
 pub struct WebSocketStreamWrapper<S = TcpStream>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -84,6 +93,15 @@ where
     read_pos: usize,
 }
 
+#[cfg(not(feature = "transport-websocket"))]
+pub struct WebSocketStreamWrapper<S = TcpStream>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    _marker: std::marker::PhantomData<S>,
+}
+
+#[cfg(feature = "transport-websocket")]
 impl<S> WebSocketStreamWrapper<S>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -112,6 +130,32 @@ where
     }
 }
 
+#[cfg(not(feature = "transport-websocket"))]
+impl<S> WebSocketStreamWrapper<S>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    /// Creates a placeholder wrapper when websocket support is disabled.
+    pub fn new(_stream: S) -> Self {
+        Self {
+            _marker: std::marker::PhantomData,
+        }
+    }
+
+    /// Gets the peer address (only works for `TcpStream`).
+    ///
+    /// # Errors
+    /// Returns an error because websocket support is disabled.
+    pub fn peer_addr(&self) -> Result<SocketAddr>
+    where
+        S: std::ops::Deref<Target = TcpStream>,
+    {
+        Err(MqttError::Configuration(
+            "websocket transport is disabled at compile time".to_string(),
+        ))
+    }
+}
+
 /// Accepts a WebSocket connection with the given configuration
 ///
 /// # Errors
@@ -121,6 +165,7 @@ where
 /// # Panics
 ///
 /// Panics if the subprotocol string cannot be parsed as an HTTP header value
+#[cfg(feature = "transport-websocket")]
 pub async fn accept_websocket_connection<S>(
     stream: S,
     config: &WebSocketServerConfig,
@@ -153,6 +198,7 @@ where
 }
 
 // Implement AsyncRead and AsyncWrite for WebSocketStreamWrapper
+#[cfg(feature = "transport-websocket")]
 impl<S> AsyncRead for WebSocketStreamWrapper<S>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -221,6 +267,7 @@ where
     }
 }
 
+#[cfg(feature = "transport-websocket")]
 impl<S> AsyncWrite for WebSocketStreamWrapper<S>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -275,7 +322,73 @@ where
     }
 }
 
+#[cfg(not(feature = "transport-websocket"))]
+pub async fn accept_websocket_connection<S>(
+    _stream: S,
+    _config: &WebSocketServerConfig,
+    _peer_addr: SocketAddr,
+) -> Result<WebSocketStreamWrapper<S>>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    Err(MqttError::Configuration(
+        "websocket transport is disabled at compile time; enable the `transport-websocket` feature"
+            .to_string(),
+    ))
+}
+
+#[cfg(not(feature = "transport-websocket"))]
+impl<S> AsyncRead for WebSocketStreamWrapper<S>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        _buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Poll::Ready(Err(std::io::Error::other(
+            "websocket transport is disabled at compile time",
+        )))
+    }
+}
+
+#[cfg(not(feature = "transport-websocket"))]
+impl<S> AsyncWrite for WebSocketStreamWrapper<S>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        _buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Poll::Ready(Err(std::io::Error::other(
+            "websocket transport is disabled at compile time",
+        )))
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Poll::Ready(Err(std::io::Error::other(
+            "websocket transport is disabled at compile time",
+        )))
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Poll::Ready(Err(std::io::Error::other(
+            "websocket transport is disabled at compile time",
+        )))
+    }
+}
+
 #[allow(clippy::result_large_err)]
+#[cfg(feature = "transport-websocket")]
 fn websocket_handshake_callback(
     subprotocol: String,
     path: String,
