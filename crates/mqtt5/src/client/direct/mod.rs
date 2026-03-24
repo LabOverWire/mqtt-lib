@@ -42,6 +42,8 @@ use crate::transport::flow::{FlowFlags, FlowId};
 #[cfg(feature = "transport-quic")]
 use crate::transport::QuicStreamManager;
 #[cfg(feature = "transport-quic")]
+use crate::transport::StreamStrategy;
+#[cfg(feature = "transport-quic")]
 use quinn::{Connection, Endpoint};
 
 pub use unified::{UnifiedReader, UnifiedWriter};
@@ -1408,5 +1410,3 @@ pub mod tests {
         assert_eq!(session.client_id(), "test-client");
     }
 }
-#[cfg(feature = "transport-quic")]
-use crate::transport::StreamStrategy;
