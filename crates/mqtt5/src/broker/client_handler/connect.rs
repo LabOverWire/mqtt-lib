@@ -491,7 +491,7 @@ impl ClientHandler {
                     stored.retain_handling,
                     ProtocolVersion::try_from(self.protocol_version).unwrap_or_default(),
                     stored.change_only,
-                    stored.flow_id,
+                    None,
                 )
                 .await?;
         }
