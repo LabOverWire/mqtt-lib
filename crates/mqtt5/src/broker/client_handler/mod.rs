@@ -220,7 +220,7 @@ impl ClientHandler {
         self
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
     #[must_use]
     pub fn with_flow_registry(
         mut self,

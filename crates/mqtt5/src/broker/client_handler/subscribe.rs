@@ -76,7 +76,7 @@ impl ClientHandler {
             )
             .await;
 
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
             if let Some(fid) = flow_id {
                 self.track_flow_subscription(fid, &filter.filter).await;
             }
@@ -326,13 +326,13 @@ impl ClientHandler {
             }
         }
 
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
         if let Some(ref mut ssm) = self.server_stream_manager {
             ssm.remove_flow_stream(flow_id);
         }
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
     async fn track_flow_subscription(&self, flow_id: u64, topic_filter: &str) {
         if let Some(ref registry) = self.flow_registry {
             let fid = crate::transport::flow::FlowId::from(flow_id);
@@ -343,7 +343,7 @@ impl ClientHandler {
         }
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
     async fn untrack_flow_subscription(&self, flow_id: u64, topic_filter: &str) {
         if let Some(ref registry) = self.flow_registry {
             let fid = crate::transport::flow::FlowId::from(flow_id);
@@ -377,7 +377,7 @@ impl ClientHandler {
                     }
                 }
 
-                #[cfg(not(target_arch = "wasm32"))]
+                #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
                 if let Some(fid) = self.pending_external_flow_id {
                     self.untrack_flow_subscription(fid, topic_filter).await;
                 }

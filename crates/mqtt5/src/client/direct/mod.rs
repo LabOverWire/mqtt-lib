@@ -904,13 +904,21 @@ impl DirectClientInner {
             ));
         }
 
-        if self.should_subscribe_on_data_flow(&packet) {
+        #[cfg(feature = "transport-quic")]
+        let sent_on_flow = if self.should_subscribe_on_data_flow(&packet) {
             let manager = self.quic_stream_manager.as_ref().unwrap();
             let topic = packet.filters[0].filter.clone();
             manager
                 .send_on_topic_stream(topic, Packet::Subscribe(packet.clone()))
                 .await?;
+            true
         } else {
+            false
+        };
+        #[cfg(not(feature = "transport-quic"))]
+        let sent_on_flow = false;
+
+        if !sent_on_flow {
             writer
                 .lock()
                 .await
@@ -969,13 +977,21 @@ impl DirectClientInner {
             }
         }
 
-        if self.should_unsubscribe_on_data_flow(&packet).await {
+        #[cfg(feature = "transport-quic")]
+        let sent_on_flow = if self.should_unsubscribe_on_data_flow(&packet).await {
             let manager = self.quic_stream_manager.as_ref().unwrap();
             let topic = packet.filters[0].clone();
             manager
                 .send_on_topic_stream(topic, Packet::Unsubscribe(packet.clone()))
                 .await?;
+            true
         } else {
+            false
+        };
+        #[cfg(not(feature = "transport-quic"))]
+        let sent_on_flow = false;
+
+        if !sent_on_flow {
             writer
                 .lock()
                 .await
