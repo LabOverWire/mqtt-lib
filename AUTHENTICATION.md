@@ -1,13 +1,6 @@
 # Authentication and Authorization
 
-## Overview
-
-The broker supports four layers of security:
-
-1. **Authentication** - Verifies client identity
-2. **Authorization** - Controls topic access via ACL
-3. **RBAC** - Groups permissions into roles
-4. **Identity Injection** - Stamps publisher identity on messages
+The broker provides a layered security model that combines identity verification, topic-level authorization, role-based grouping, and tamper-resistant publisher identity. These four layers — **authentication**, **authorization (ACL)**, **RBAC**, and **identity injection** — compose freely: enable any combination depending on your deployment requirements.
 
 ## Authentication Methods
 
@@ -19,7 +12,7 @@ mqttv5 broker --allow-anonymous
 
 ### Password Authentication
 
-Passwords stored with Argon2id hashing.
+Passwords are stored with Argon2id hashing. Password fields are excluded from log output, and files should have mode 0600.
 
 ```bash
 mqttv5 passwd alice passwd.txt
@@ -40,7 +33,7 @@ Clients connect with `auth_method: "PLAIN"` and provide credentials in the MQTT 
 
 ### SCRAM-SHA-256
 
-Challenge-response authentication without transmitting passwords.
+Challenge-response authentication that never transmits passwords over the wire. Client-side passwords are zeroized on drop, and constant-time comparison is used for credential verification. Channel binding is not supported — clients using `y,,` (requesting) or `p=` (requiring) channel binding are rejected.
 
 ```bash
 mqttv5 broker --auth-method scram --scram-file scram.txt
@@ -54,11 +47,11 @@ Generate credentials with:
 mqttv5 scram alice scram.txt
 ```
 
-Default iteration count: 310,000. Authentication state per client expires after 60 seconds. Maximum 1,000 concurrent SCRAM handshakes.
+Default iteration count: 310,000. Authentication state per client expires after 60 seconds. Maximum 1,000 concurrent SCRAM handshakes. Concurrent authentication for the same client ID is rejected.
 
 ### JWT Authentication
 
-Stateless token verification with HS256, RS256, or ES256.
+Stateless token verification with HS256, RS256, or ES256. Tokens **must** include `exp` (expiration) and `sub` (subject) claims — tokens missing either are rejected. Verifier selection uses the `kid` (key ID) header, not the `alg` header, which prevents algorithm confusion attacks.
 
 ```bash
 mqttv5 broker \
@@ -70,7 +63,7 @@ mqttv5 broker \
 
 ### Federated JWT
 
-Multi-issuer support with automatic JWKS key refresh.
+Multi-issuer support with automatic JWKS key refresh. The JWKS cache includes a circuit breaker (3 consecutive failures trigger a 60-second open period before half-open retry) and a configurable fallback static key.
 
 ```bash
 mqttv5 broker \
@@ -85,6 +78,8 @@ Federated JWT constructs user IDs in the format `issuer_domain:sub` (e.g., `acco
 
 ## Federated Authentication Modes
 
+Three modes control how JWT claims map to broker authorization:
+
 | Mode | Description |
 |------|-------------|
 | `identity-only` | IdP verifies identity, broker handles authorization |
@@ -97,7 +92,7 @@ Use with generic OAuth providers (Google, Auth0). Authorization via ACL.
 
 ### ClaimBinding
 
-Map JWT claims to roles:
+Map JWT claims to roles using pattern matching. Claim patterns support Equals, Contains, EndsWith, StartsWith, Regex, and Any. In JSON config, specify as `{"EndsWith": "@company.com"}` or `"Any"`.
 
 ```bash
 mqttv5 broker \
@@ -107,11 +102,9 @@ mqttv5 broker \
   --jwt-default-roles "guest"
 ```
 
-Claim patterns support: Equals, Contains, EndsWith, StartsWith, Regex, and Any. In JSON config, specify as `{"EndsWith": "@company.com"}` or `"Any"`.
-
 ### TrustedRoles
 
-Trust roles from IdP (Keycloak, Azure AD):
+Trust roles directly from your IdP (Keycloak, Azure AD). When no trusted role claims are configured, the broker defaults to checking `roles`, `groups`, and `realm_access.roles`.
 
 ```bash
 mqttv5 broker \
@@ -119,8 +112,6 @@ mqttv5 broker \
   --jwt-trusted-role-claim "realm_access.roles" \
   --jwt-trusted-role-claim "groups"
 ```
-
-When no trusted role claims are configured, defaults to checking `roles`, `groups`, and `realm_access.roles`.
 
 ## Authorization (ACL)
 
@@ -338,7 +329,7 @@ mqttv5 broker \
 
 ### ComprehensiveAuthProvider
 
-The primary broker auth provider. Wraps `PasswordAuthProvider` + `AclManager` into a single provider handling both authentication and authorization. Factory methods: `from_files()`, `with_password_file_and_allow_all_acl()`, `with_providers()`. Supports file reloading for both password and ACL files.
+The primary broker auth provider wraps `PasswordAuthProvider` + `AclManager` into a single provider handling both authentication and authorization. Factory methods include `from_files()`, `with_password_file_and_allow_all_acl()`, and `with_providers()`. Both password and ACL files support live reloading.
 
 ### CompositeAuthProvider
 
@@ -362,64 +353,31 @@ Sessions store the authenticated `user_id`. When a client reconnects with `clean
 
 When restoring subscriptions from a previous session, each topic filter is re-authorized against current ACL rules. Subscriptions that no longer pass authorization are silently pruned from the restored session. This ensures ACL rule changes take effect even for persistent sessions.
 
-## Security Notes
+## Security Best Practices
 
 ### Credentials
 
-- Passwords hashed with Argon2id
-- SCRAM never transmits passwords; client-side passwords zeroized on drop
-- Password fields are not logged (no explicit tracing of credentials)
-- Password/ACL files should have mode 0600
-- Bridge config Debug output redacts password fields
-- Enable TLS to protect credentials in transit
+Passwords are hashed with Argon2id and never logged. SCRAM-SHA-256 never transmits passwords — client-side passwords are zeroized on drop, and PBKDF2-HMAC-SHA256 handles key derivation. Password and ACL files should have mode 0600, and bridge config Debug output redacts password fields. Enable TLS to protect credentials in transit.
 
 ### JWT
 
-- Tokens **must** include `exp` (expiration) and `sub` (subject) claims; tokens without either are rejected
-- Verifier selection uses `kid` (key ID) header matching, not the `alg` header, preventing algorithm confusion attacks
-- Single-verifier configurations ignore the token's `alg` header entirely
-- JWKS endpoints must use HTTPS
-- Claim pattern regexes compiled once at config load (invalid patterns fail early)
-- Default clock skew tolerance: 60 seconds
-
-### JWKS
-
-- Background refresh with configurable interval (default: 3600s)
-- Cache TTL configurable per endpoint (default: 86400s)
-- Circuit breaker: after 3 consecutive failures, endpoint marked as open for 60 seconds before half-open retry
-- Fallback static key used when JWKS endpoint is unavailable or key not found
-
-### SCRAM
-
-- Authentication state keyed by `client_id`; concurrent authentication for the same client ID is rejected
-- Channel binding is **not** supported; clients using `y,,` (requesting) or `p=` (requiring) channel binding are rejected
-- Constant-time comparison used for credential verification
-- PBKDF2-HMAC-SHA256 key derivation
+Tokens require both `exp` and `sub` claims. Verifier selection uses the `kid` header (not `alg`) to prevent algorithm confusion attacks — single-verifier configurations ignore the token's `alg` header entirely. JWKS endpoints must use HTTPS, and claim pattern regexes are compiled once at config load (invalid patterns fail early). Default clock skew tolerance is 60 seconds. JWKS background refresh runs at a configurable interval (default: 3600s) with cache TTL (default: 86400s).
 
 ### Certificate Authentication
 
-- `CertificateAuthProvider` validates TLS peer certificate fingerprints (64-char hex SHA-256)
-- Client IDs starting with `cert:` are matched against registered fingerprints from the actual TLS connection
-- The broker rejects `cert:` prefixed client IDs at the transport layer before authentication unless the connection has a verified TLS client certificate (`client_cert_info`). This prevents spoofing over plain TCP, WebSocket, or QUIC
-- Fingerprints are case-insensitive and must be exactly 64 hex characters
-
-### ACL
-
-- Deny rules evaluated before allow rules within role-based checks
-- `%u` substitution rejects usernames containing `+`, `#`, or `/` to prevent wildcard injection
-- Topic names validated on publish after topic alias resolution
+`CertificateAuthProvider` validates TLS peer certificate fingerprints (64-char hex SHA-256, case-insensitive). Client IDs starting with `cert:` are matched against registered fingerprints from the actual TLS connection. The broker rejects `cert:` prefixed client IDs at the transport layer before authentication unless the connection has a verified TLS client certificate, preventing spoofing over plain TCP, WebSocket, or QUIC.
 
 ### Transport
 
-- Rate limiting enabled by default (5 attempts per 60s, 5-minute lockout)
-- Rate limiting tracks both IP address and username independently
-- QUIC bridges default to certificate verification enabled
-- WebSocket `allowed_origins` configuration prevents Cross-Site WebSocket Hijacking
-- WebSocket path enforcement rejects connections to non-configured paths with HTTP 404
+Rate limiting is enabled by default (5 attempts per 60s, 5-minute lockout) and tracks both IP address and username independently. QUIC bridges default to certificate verification enabled. WebSocket `allowed_origins` prevents Cross-Site WebSocket Hijacking, and path enforcement rejects connections to non-configured paths with HTTP 404.
+
+### Storage
+
+File storage uses percent-encoding for topic-to-filename mapping (bijective, no collisions) with atomic writes and fsync before rename for crash-safe durability. The `NoVerification` TLS bypass is restricted to `pub(crate)` scope.
 
 ## Rate Limiting
 
-Authentication rate limiting protects against brute-force attacks. Enabled by default with configurable limits. Tracks failed attempts by both IP address and username independently.
+Authentication rate limiting protects against brute-force attacks. Enabled by default, it tracks failed attempts by both IP address and username independently.
 
 ### Default Settings
 
@@ -445,53 +403,4 @@ AuthConfig {
 }
 ```
 
-To disable rate limiting:
-
-```rust
-AuthConfig {
-    rate_limit: RateLimitConfig {
-        enabled: false,
-        ..Default::default()
-    },
-    ..Default::default()
-}
-```
-
 Successful authentication clears the attempt counter for that IP/username. Expired entries are cleaned up periodically.
-
-## Security
-
-### Transport Security
-
-- TLS 1.2+ with certificate validation
-- QUIC with built-in TLS 1.3 (certificate verification enforced by default)
-- Mutual TLS (client certificates) with fingerprint validation
-- WebSocket Origin validation (`allowed_origins`) for CSWSH prevention
-- WebSocket path enforcement (rejects non-configured paths with HTTP 404)
-
-### Authentication Security
-
-- JWT tokens require `exp` and `sub` claims (reject tokens without expiration or subject)
-- JWT algorithm confusion prevention via `kid`-based verifier selection
-- SCRAM-SHA-256 rejects concurrent authentication for the same client ID
-- SCRAM client passwords zeroized on drop
-- Password fields excluded from log output
-- Authentication rate limiting (5 attempts/60s, 5-minute lockout)
-- Certificate auth validates TLS peer fingerprints (64-char hex) instead of trusting client ID prefix
-
-### Session & Authorization Security
-
-- Sessions bound to authenticated user identity (rejects reconnection from different user)
-- ACL re-checked on session restore (prunes subscriptions that no longer pass authorization)
-- Topic name validation on publish (after topic alias resolution)
-- Bridge config Debug output redacts passwords
-
-### Storage Security
-
-- File storage uses percent-encoding for topic-to-filename mapping (bijective, no collisions)
-- Atomic writes with fsync before rename for crash-safe durability
-- `NoVerification` TLS bypass restricted to `pub(crate)` scope
-
-### Example Security
-
-- All WASM example HTML files use safe DOM manipulation (no innerHTML with user data)

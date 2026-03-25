@@ -4,26 +4,30 @@ Complete reference for the mqttv5 command-line tool.
 
 ## Overview
 
-The `mqttv5` CLI provides commands for:
-
-- **broker** - Run an MQTT v5.0 broker
-- **pub** - Publish MQTT messages
-- **sub** - Subscribe to MQTT topics
-- **bench** - Run performance benchmarks
-- **passwd** - Manage password file for authentication
-- **scram** - Manage SCRAM-SHA-256 credentials file
-- **acl** - Manage ACL file for authorization
+The `mqttv5` CLI is a single binary that covers every common MQTT workflow: running a broker, publishing messages, subscribing to topics, benchmarking performance, and managing authentication credentials. All commands share a consistent set of connection, TLS, and authentication flags, so the patterns you learn for `pub` carry over to `sub`, `bench`, and beyond.
 
 Global flags:
 
 - `--verbose, -v` - Enable verbose logging
 - `--debug` - Enable debug logging
 
+## Quick Start
+
+Start a broker, publish a message, and subscribe — all in three terminals:
+
+```bash
+mqttv5 broker --allow-anonymous
+
+mqttv5 pub -t "hello/world" -m "Hello, MQTT!"
+
+mqttv5 sub -t "hello/#" -v
+```
+
 ## Command Reference
 
 ### mqttv5 broker
 
-Start an MQTT v5.0 broker.
+Start an MQTT v5.0 broker with support for multiple transports, authentication methods, and storage backends. The broker listens on one or more addresses and can serve TCP, TLS, WebSocket, and QUIC simultaneously.
 
 The broker also supports a `generate-config` subcommand to produce a full example configuration file.
 
@@ -230,13 +234,10 @@ Clients connecting to the load balancer receive a CONNACK with reason code `UseA
 The load balancer only redirects — it does not broker messages. You must run the backend brokers separately:
 
 ```bash
-# Terminal 1: Start backend broker A on port 1884
 mqttv5 broker --host 0.0.0.0:1884 --allow-anonymous
 
-# Terminal 2: Start backend broker B on port 1885
 mqttv5 broker --host 0.0.0.0:1885 --allow-anonymous
 
-# Terminal 3: Start load balancer on port 1883
 mqttv5 broker --config lb-config.json
 ```
 
@@ -272,7 +273,7 @@ mqttv5 sub -t test/# \
 
 ### mqttv5 pub
 
-Publish an MQTT message.
+Publish an MQTT message to a broker. Supports all transport types (TCP, TLS, WebSocket, QUIC), authentication methods, will messages, scheduled and repeated publishing, and request/response patterns.
 
 #### Pub Flags
 
@@ -479,7 +480,7 @@ mqttv5 pub -t test/topic -m "v3.1.1 message" --protocol-version 3.1.1
 
 ### mqttv5 sub
 
-Subscribe to MQTT topics.
+Subscribe to one or more MQTT topics and print received messages. The subscriber runs until interrupted (Ctrl+C) or a target message count is reached. Use `--auto-reconnect` for long-running subscribers that should survive broker restarts.
 
 #### Sub Flags
 
@@ -654,7 +655,7 @@ mqttv5 sub -t test/# \
 
 ### mqttv5 bench
 
-Run performance benchmarks against a broker.
+Run performance benchmarks against a broker. Four modes are available: **throughput** (sustained message rate), **latency** (p50/p95/p99 round-trip times), **connections** (connection setup rate), and **hol-blocking** (head-of-line blocking measurement with per-topic trace output).
 
 #### Bench Flags
 
@@ -756,7 +757,7 @@ mqttv5 bench --payload-format json --payload-size 256
 
 ### mqttv5 passwd
 
-Manage password file for broker authentication.
+Manage the password file used by the broker's password authentication. Passwords are hashed with Argon2id before storage.
 
 #### Passwd Usage
 
@@ -807,7 +808,7 @@ mqttv5 passwd -n testuser
 
 ### mqttv5 scram
 
-Manage SCRAM-SHA-256 credentials file for broker authentication.
+Manage SCRAM-SHA-256 credentials for the broker's challenge-response authentication. SCRAM credentials use PBKDF2-HMAC-SHA256 key derivation with a configurable iteration count.
 
 #### Scram Usage
 
@@ -873,7 +874,7 @@ mqttv5 scram -i 500000 alice scram_credentials.txt
 
 ### mqttv5 acl
 
-Manage ACL (Access Control List) file for broker authorization.
+Manage ACL (Access Control List) files for the broker's topic-level authorization. ACL rules control which users can publish or subscribe to which topics, with support for wildcards, roles, and username substitution.
 
 #### ACL Usage
 
@@ -997,7 +998,7 @@ mqttv5 acl role-list --file acl.txt
 
 ## Configuration File Reference
 
-The broker accepts a JSON configuration file with `--config` flag.
+The broker accepts a JSON configuration file via `--config`. This section documents every field and provides ready-to-use examples.
 
 ### Complete Configuration Schema
 
@@ -1220,11 +1221,7 @@ The backend URL scheme must match the transport the client should use for the ba
 | `local_prefix` | `string\|null` | Prefix to add to local topics | `null` |
 | `remote_prefix` | `string\|null` | Prefix to add to remote topics | `null` |
 
-**Direction values:**
-
-- `"in"` - Forward from remote broker to local broker
-- `"out"` - Forward from local broker to remote broker
-- `"both"` - Bidirectional forwarding
+Direction values: `"in"` forwards from remote to local, `"out"` forwards from local to remote, and `"both"` enables bidirectional forwarding.
 
 ### Complete Configuration Examples
 
@@ -1406,6 +1403,8 @@ The backend URL scheme must match the transport the client should use for the ba
 ```
 
 ## Special Topics
+
+This section covers file formats, certificate requirements, and bridge behavior that apply across multiple commands.
 
 ### Duration Format
 

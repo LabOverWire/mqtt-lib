@@ -1,6 +1,6 @@
 # mqttv5 - MQTT Command Line Interface
 
-A unified MQTT CLI tool with pub, sub, and broker commands. Supports v5.0 and v3.1.1.
+A unified MQTT CLI tool for publishing, subscribing, running a broker, benchmarking, and managing authentication credentials. A single `mqttv5` binary covers every common MQTT workflow with consistent flags across all commands, support for TCP/TLS/WebSocket/QUIC transports, and both v5.0 and v3.1.1 protocol versions.
 
 ## Features
 
@@ -165,11 +165,7 @@ mqttv5 bench --topic "bench/test" --filter "bench/+"
 
 ## CLI Design
 
-- Error messages with suggestions
-- Prompts for missing required arguments
-- Single binary for all MQTT operations
-- Long flags with short aliases
-- MQTT v5.0 support including properties and reason codes
+The CLI is designed for both interactive exploration and automated scripting. When required arguments are missing, it prompts for them interactively with suggestions and validation. Error messages include contextual hints to guide correction. Long flags have short aliases (`-t` for `--topic`, `-q` for `--qos`), and all MQTT v5.0 features — including properties, reason codes, and subscription options — are accessible from the command line.
 
 ### Connection Behavior
 
