@@ -29,7 +29,9 @@ The **packet** module defines all MQTT v5.0 packet types (CONNECT, PUBLISH, SUBS
 
 Session management spans several submodules: **flow_control** for QoS pacing, **limits** for connection constraints and message expiry, **queue** for priority-aware message queuing with expiry, **subscription** for subscription state, and **topic_alias** for alias mapping. The **validation** module enforces topic rules, namespace constraints, and shared subscription parsing.
 
-Supporting infrastructure includes **types** (ConnectOptions, PublishOptions, QoS, Message, WillMessage), **bridge** (direction, topic mapping, forwarding evaluation), **connection** (state machine, reconnect config, events), **topic_matching** (MQTT wildcard matching), **error** and **error_classification** (error types and recoverability), **keepalive** (timeout calculation), **flags** (CONNECT/CONNACK/PUBLISH flag parsing), **qos2** (QoS 2 state machine), **packet_id** (identifier management), **transport** (transport trait), **time** (platform-abstracted time for std, WASM, and embedded), and **prelude** (alloc/std compatibility).
+The remaining modules provide supporting infrastructure. **types** defines core domain objects (ConnectOptions, PublishOptions, QoS, Message, WillMessage). **connection** implements the connection state machine with reconnect config and events. **topic_matching** handles MQTT wildcard matching, and **bridge** provides direction, topic mapping, and forwarding evaluation primitives.
+
+Lower-level utilities include **error** and **error_classification** (error types and recoverability), **keepalive** (timeout calculation), **flags** (CONNECT/CONNACK/PUBLISH flag parsing), **qos2** (QoS 2 state machine), **packet_id** (identifier management), **transport** (transport trait definition), **time** (platform-abstracted time for std, WASM, and embedded), and **prelude** (alloc/std compatibility).
 
 | Feature | Description |
 |---------|-------------|
@@ -41,9 +43,11 @@ For single-core targets, use cfg: `rustflags = ["--cfg", "portable_atomic_unsafe
 
 Full-featured async client and broker for Linux, macOS, Windows. This is the primary crate for production deployments.
 
-The **client** provides `MqttClient` with automatic reconnection and exponential backoff, QoS 0/1/2 with proper flow control, TLS via rustls with CA and client certificate support, QUIC multistream for parallel operations, enhanced authentication (SCRAM-SHA-256, JWT, custom handlers), and connection event callbacks. Additional client modules include **callback** (subscription callback dispatch), **tasks** (background packet reader, keepalive, reconnection), and **types** (ConnectOptions, ConnectionStats).
+The **client** provides `MqttClient` with automatic reconnection and exponential backoff, QoS 0/1/2 with proper flow control, and connection event callbacks. Transport options include TLS via rustls (CA and client certificate support) and QUIC multistream for parallel operations. Enhanced authentication covers SCRAM-SHA-256, JWT, and custom handlers. Supporting modules include **callback** (subscription callback dispatch), **tasks** (background packet reader, keepalive, reconnection), and **types** (ConnectOptions, ConnectionStats).
 
-The **broker** supports multi-transport operation (TCP, TLS, WebSocket, QUIC on different ports), pluggable authentication (password with argon2, certificate, JWT, federated JWT), ACL-based authorization with wildcard topic matching, broker-to-broker bridging with loop prevention, file-based and in-memory storage backends, `$SYS` topics for statistics, session takeover semantics, configuration hot-reload (file watching, SIGHUP via CLI), echo suppression via configurable user property matching, and optional payload codec support (gzip, deflate) behind feature flags. The **session** module extends protocol-level session primitives with async flow control (Tokio semaphores), QUIC stream flow registry, retained message storage, and full session state. Supporting modules include **codec** (payload compression with `CodecRegistry`), **crypto** (TLS certificate verifiers), and optional **OpenTelemetry** integration for distributed tracing.
+The **broker** supports multi-transport operation (TCP, TLS, WebSocket, QUIC on different ports) with pluggable authentication (password with argon2, certificate, JWT, federated JWT) and ACL-based authorization with wildcard topic matching. Broker-to-broker bridging with loop prevention, file-based and in-memory storage backends, and `$SYS` topics for statistics round out the core feature set.
+
+Additional broker capabilities include session takeover semantics, configuration hot-reload (file watching, SIGHUP via CLI), echo suppression via configurable user property matching, and optional payload codec support (gzip, deflate) behind feature flags. The **session** module extends protocol-level primitives with async flow control (Tokio semaphores), QUIC stream flow registry, retained message storage, and full session state. Supporting modules include **codec** (payload compression with `CodecRegistry`), **crypto** (TLS certificate verifiers), and optional **OpenTelemetry** integration.
 
 ### mqtt5-wasm (WebAssembly)
 
@@ -96,7 +100,7 @@ Every operation in the platform is a direct async function call — no event loo
 
 **MqttClient** is the main client struct. It holds shared state (transport, session, callbacks) behind `Arc<RwLock<T>>` for concurrent access, and exposes direct async methods for all MQTT operations.
 
-The **transport layer** provides async I/O through `read_packet()` and `write_packet()` methods, with implementations for TCP, TLS, WebSocket, and QUIC. Three **background tasks** run concurrently: a packet reader that continuously reads and dispatches incoming packets, a keep-alive task that sends PINGREQ at intervals, and a reconnection task with exponential backoff recovery. **TLS configuration** stores CA certs and client certificates, applied automatically for `mqtts://` URLs with AWS IoT ALPN support.
+The **transport layer** provides async I/O through `read_packet()` and `write_packet()` methods, with implementations for TCP, TLS, WebSocket, and QUIC. Three **background tasks** run concurrently: a packet reader that dispatches incoming packets, a keep-alive task that sends PINGREQ at intervals, and a reconnection task with exponential backoff. TLS configuration stores CA certs and client certificates, applied automatically for `mqtts://` URLs with AWS IoT ALPN support.
 
 ### Data Flow
 
@@ -144,9 +148,9 @@ graph LR
 
 ### Authentication System
 
-Authentication is pluggable via the `AuthProvider` trait. Basic providers include **AllowAllAuthProvider** (development), **PasswordAuthProvider** (file-based with argon2 hashing), **CertificateAuthProvider** (TLS peer certificate fingerprint validation, 64-char hex SHA-256), **ComprehensiveAuthProvider** (combines password auth + ACL), **CompositeAuthProvider** (primary/fallback chain), and **RateLimitedAuthProvider** (wraps any provider with rate limiting).
+Authentication is pluggable via the `AuthProvider` trait. Basic providers include **AllowAllAuthProvider** (development), **PasswordAuthProvider** (file-based with argon2 hashing), and **CertificateAuthProvider** (TLS peer certificate fingerprint validation, 64-char hex SHA-256). **ComprehensiveAuthProvider** combines password auth with ACL into a single provider, **CompositeAuthProvider** chains a primary and fallback provider, and **RateLimitedAuthProvider** wraps any provider with rate limiting.
 
-Enhanced authentication mechanisms add **ScramSha256AuthProvider** (SCRAM-SHA-256 without channel binding, rejects concurrent auth for same client ID), **PlainAuthProvider** (PLAIN over TLS with pluggable credential store), **JwtAuthProvider** (JWT with `kid`-based verifier selection, mandatory `exp`/`sub` claims), and **FederatedJwtAuthProvider** (multi-issuer JWT with JWKS auto-refresh and compiled regex claim patterns).
+Enhanced authentication mechanisms live in a separate module. **ScramSha256AuthProvider** implements SCRAM-SHA-256 without channel binding (rejects concurrent auth for the same client ID). **PlainAuthProvider** handles PLAIN over TLS with a pluggable credential store. **JwtAuthProvider** validates JWT tokens with `kid`-based verifier selection and mandatory `exp`/`sub` claims. **FederatedJwtAuthProvider** adds multi-issuer support with JWKS auto-refresh and compiled regex claim patterns.
 
 Client-side auth handlers implement the `AuthHandler` trait: **ScramSha256AuthHandler**, **JwtAuthHandler**, and **PlainAuthHandler**. The **MqttClientTrait** enables mock testing via `MockMqttClient`.
 
@@ -154,7 +158,9 @@ Sessions are bound to the authenticated `user_id` (rejects reconnection from a d
 
 ### ACL System
 
-Rule-based access control supports wildcard topic matching, `%u` substitution (expands to the authenticated username in topic patterns, rejecting usernames with `+`, `#`, `/`), separate publish and subscribe permissions, topic name validation on publish (after topic alias resolution), and role-based access control (RBAC). The broker stamps two user properties on every PUBLISH: **x-mqtt-sender** (authenticated user_id) and **x-mqtt-client-id** (publisher's MQTT client_id, anti-spoof stripped). ACL files are managed via `mqttv5 acl add/remove/list/check`.
+Rule-based access control supports wildcard topic matching, separate publish and subscribe permissions, and role-based access control (RBAC). The `%u` substitution expands to the authenticated username in topic patterns, rejecting usernames that contain `+`, `#`, or `/` to prevent wildcard injection. Topic names are validated on publish after topic alias resolution.
+
+The broker stamps two user properties on every PUBLISH: **x-mqtt-sender** (authenticated user_id) and **x-mqtt-client-id** (publisher's MQTT client_id, anti-spoof stripped). ACL files are managed via `mqttv5 acl add/remove/list/check`.
 
 ### Bridge Manager
 
