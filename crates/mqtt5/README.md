@@ -167,8 +167,8 @@ let config = BrokerConfig::new()
         "mqtt://backend2:1883".into(),
     ]));
 
-let broker = MqttBroker::new(config);
-broker.start().await?;
+let mut broker = MqttBroker::with_config(config).await?;
+broker.run().await?;
 ```
 
 #### Broker Bridging
