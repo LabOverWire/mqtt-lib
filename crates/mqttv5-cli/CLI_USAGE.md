@@ -324,6 +324,7 @@ Publish an MQTT message.
 | `--quic-max-streams <N>` | Maximum concurrent QUIC streams | None |
 | `--quic-datagrams` | Enable QUIC datagrams for unreliable transport | `false` |
 | `--quic-connect-timeout <SECS>` | QUIC connection timeout in seconds | `30` |
+| `--quic-early-data` | Enable QUIC 0-RTT early data | `false` |
 
 ##### Pub Codec Flags (requires `codec` feature)
 
@@ -520,6 +521,7 @@ Subscribe to MQTT topics.
 | `--quic-max-streams <N>` | Maximum concurrent QUIC streams | None |
 | `--quic-datagrams` | Enable QUIC datagrams for unreliable transport | `false` |
 | `--quic-connect-timeout <SECS>` | QUIC connection timeout in seconds | `30` |
+| `--quic-early-data` | Enable QUIC 0-RTT early data | `false` |
 
 ##### Sub Codec Flags (requires `codec` feature)
 
@@ -679,12 +681,14 @@ Run performance benchmarks against a broker.
 | `--ca-cert <FILE>` | TLS CA certificate (PEM) | None |
 | `--cert <FILE>` | TLS client certificate (PEM) | None |
 | `--key <FILE>` | TLS client private key (PEM) | None |
+| `--pub-url <URL>` | Separate URL for publishers in HOL mode | None |
 | `--quic-stream-strategy <S>` | QUIC stream strategy: `control-only`, `per-publish`, `per-topic`, `per-subscription` | `control-only` |
 | `--quic-flow-headers` | Enable QUIC flow headers for state tracking | `false` |
 | `--quic-flow-expire <SECS>` | Flow header expiry interval in seconds | `300` |
 | `--quic-max-streams <N>` | Maximum concurrent QUIC streams | None |
 | `--quic-datagrams` | Enable QUIC datagrams for unreliable transport | `false` |
 | `--quic-connect-timeout <SECS>` | QUIC connection timeout in seconds | `30` |
+| `--quic-early-data` | Enable QUIC 0-RTT early data | `false` |
 
 #### Bench Examples
 
@@ -710,6 +714,15 @@ HOL blocking test:
 
 ```bash
 mqttv5 bench --mode hol-blocking --topics 4 --rate 500 --duration 60 \
+  --trace-dir ./traces
+```
+
+HOL blocking with separate publisher transport (TCP pub, QUIC sub):
+
+```bash
+mqttv5 bench --mode hol-blocking --topics 4 --rate 500 --duration 60 \
+  --url quic://localhost:14567 --pub-url mqtt://localhost:1883 \
+  --quic-stream-strategy per-topic --ca-cert ca.pem \
   --trace-dir ./traces
 ```
 

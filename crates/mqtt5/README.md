@@ -17,7 +17,7 @@ MQTT v5.0 and v3.1.1 client and broker for native platforms (Linux, macOS, Windo
 
 ```toml
 [dependencies]
-mqtt5 = "0.28"
+mqtt5 = "0.31"
 ```
 
 ## Quick Start
@@ -431,7 +431,7 @@ Distributed tracing with OpenTelemetry support:
 
 ```toml
 [dependencies]
-mqtt5 = { version = "0.27", features = ["opentelemetry"] }
+mqtt5 = { version = "0.31", features = ["opentelemetry"] }
 ```
 
 - W3C trace context propagation via MQTT user properties
