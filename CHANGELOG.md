@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [mqtt5 0.30.0] - 2026-03-24
+
+### Added
+
+- **Optional transport features** - QUIC and WebSocket transports are now behind cargo feature flags (`transport-quic`, `transport-websocket`), both enabled by default for backward compatibility
+  - `cargo add mqtt5 --no-default-features` gives TCP/TLS only, with no quinn or tungstenite dependencies
+  - Modules gated at declaration site — disabled transports simply don't exist rather than providing stubs
+  - Clear compile-time errors when attempting to use a disabled transport (e.g., `ws://` URL without `transport-websocket`)
+  - Broker rejects config requesting disabled transports with descriptive error messages
+
 ## [mqtt5-protocol 0.12.0] / [mqtt5 0.29.0] - 2026-03-20
 
 ### Added
