@@ -1,6 +1,6 @@
 # mqtt5
 
-MQTT v5.0 and v3.1.1 client and broker for native platforms (Linux, macOS, Windows).
+Full-featured MQTT v5.0 and v3.1.1 client and broker for native platforms (Linux, macOS, Windows). This is the primary crate for building MQTT applications — it provides both the async client for connecting to any MQTT broker and a production-ready broker implementation with multi-transport support, authentication, and bridging. For browser environments, see the companion `mqtt5-wasm` crate.
 
 ## Features
 
@@ -17,7 +17,7 @@ MQTT v5.0 and v3.1.1 client and broker for native platforms (Linux, macOS, Windo
 
 ```toml
 [dependencies]
-mqtt5 = "0.28"
+mqtt5 = "0.31"
 ```
 
 ## Quick Start
@@ -55,23 +55,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Broker
 
-### Core Capabilities
-
-- **MQTT v5.0 and v3.1.1** - Full compliance, cross-version interoperability
-- **Multiple QoS levels** - QoS 0, 1, 2 with flow control
-- **Session persistence** - Clean start, session expiry, message queuing
-- **Retained messages** - Persistent message storage
-- **Shared subscriptions** - Load balancing across clients
-- **Will messages** - Last Will and Testament (LWT)
+The broker handles the full MQTT v5.0 and v3.1.1 protocol with cross-version interoperability. It supports **QoS 0, 1, and 2** with proper flow control, **session persistence** (clean start, session expiry, message queuing), **retained messages**, **shared subscriptions** for load balancing across clients, and **will messages** (Last Will and Testament).
 
 ### Transport & Security
 
-- **TCP transport** - Standard MQTT over TCP on port 1883
-- **TLS/SSL transport** - Secure MQTT over TLS on port 8883
-- **WebSocket transport** - MQTT over WebSocket for browsers
-- **QUIC transport** - Modern UDP-based transport with built-in TLS 1.3
-- **Certificate authentication** - Client certificate validation
-- **Username/password authentication** - File-based user management
+Four transport types can run simultaneously in a single broker instance. **TCP** serves standard MQTT on port 1883. **TLS/SSL** provides encrypted MQTT on port 8883 with certificate authentication and client certificate validation. **WebSocket** enables browser-based MQTT connections. **QUIC** offers a modern UDP-based transport with built-in TLS 1.3 and multistream support.
 
 ### Authentication
 
@@ -167,8 +155,8 @@ let config = BrokerConfig::new()
         "mqtt://backend2:1883".into(),
     ]));
 
-let broker = MqttBroker::new(config);
-broker.start().await?;
+let mut broker = MqttBroker::with_config(config).await?;
+broker.run().await?;
 ```
 
 #### Broker Bridging
@@ -316,14 +304,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Client
 
+The client library provides an async MQTT client designed for both IoT devices and cloud applications.
+
 ### Core Capabilities
 
-- **MQTT v5.0 and v3.1.1** protocol support
-- **Callback-based message handling** with automatic routing
-- **Cloud SDK compatible** - Subscribe returns `(packet_id, qos)` tuple
-- **Automatic reconnection** with exponential backoff
-- **Client-side message queuing** for offline scenarios
-- **Reason code validation** for broker publish rejections (ACL, quota limits)
+The client speaks both **MQTT v5.0 and v3.1.1**, with **callback-based message handling** that automatically routes messages to registered handlers. Subscribe returns a `(packet_id, qos)` tuple for **cloud SDK compatibility** (AWS IoT, Azure IoT Hub). **Automatic reconnection** with exponential backoff keeps connections alive through network disruptions, while **client-side message queuing** buffers publishes during offline periods. The client validates broker responses and surfaces **reason code validation** for publish rejections (ACL denials, quota limits).
 
 ### QUIC Transport
 
@@ -431,7 +416,7 @@ Distributed tracing with OpenTelemetry support:
 
 ```toml
 [dependencies]
-mqtt5 = { version = "0.27", features = ["opentelemetry"] }
+mqtt5 = { version = "0.31", features = ["opentelemetry"] }
 ```
 
 - W3C trace context propagation via MQTT user properties

@@ -1,6 +1,6 @@
 # mqtt5-wasm
 
-MQTT v5.0 and v3.1.1 WebAssembly client and broker for browser environments.
+MQTT v5.0 and v3.1.1 WebAssembly client and broker for browser environments. This crate compiles to WASM and exposes a JavaScript-friendly API via `wasm-bindgen`, giving browser applications a full MQTT client with QoS 0/1/2 and an optional in-tab broker — no server required for local development and testing.
 
 ## Features
 

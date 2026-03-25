@@ -225,7 +225,7 @@ export default {
 
 ### MqttClient API
 
-The JavaScript class is exported as `MqttClient` (Rust type: `WasmMqttClient`).
+The JavaScript class is exported as `MqttClient` (Rust type: `WasmMqttClient`). The methods below are grouped by concern: connection management, publishing, subscribing, authentication, reconnection, and event callbacks.
 
 #### Construction
 
@@ -735,31 +735,22 @@ BridgeDirection.Both  // Bidirectional
 
 ## Transport Types Explained
 
+Three transport types serve different deployment scenarios. Choose based on whether you have an external broker, need a self-contained in-tab setup, or want cross-tab communication.
+
 ### 1. WebSocket (External Broker)
 
-Connect to external MQTT broker over WebSocket.
-
-**Use when:** You have a broker running somewhere (cloud, local network)
+Use WebSocket when you have a broker running on a remote server or local network. The client connects over standard HTTP upgrade, which works through firewalls and proxies. Use `ws://` for development and `wss://` (TLS) for production.
 
 ```javascript
 const client = new MqttClient('my-client-id');
 await client.connect('ws://broker.example.com:8000/mqtt');
 ```
 
-**Broker URL format:**
-- `ws://host:port/path` - Unencrypted
-- `wss://host:port/path` - TLS encrypted (production)
-
-**Free public brokers:**
-- `ws://broker.hivemq.com:8000/mqtt`
-- `ws://test.mosquitto.org:8080`
-- `ws://broker.emqx.io:8083/mqtt`
+Free public brokers for testing: `ws://broker.hivemq.com:8000/mqtt`, `ws://test.mosquitto.org:8080`, `ws://broker.emqx.io:8083/mqtt`
 
 ### 2. MessagePort (In-Tab Broker)
 
-Run complete MQTT broker in browser tab, client connects via MessagePort.
-
-**Use when:** Testing, demos, offline apps, no external broker needed
+Use MessagePort when you need a fully self-contained setup with no external dependencies. The broker runs inside your browser tab, and clients connect via MessagePort for zero-network-overhead communication. This is ideal for testing, demos, and offline-capable applications. The in-tab broker provides full MQTT v5.0 support (QoS 0/1/2, retained messages, shared subscriptions) with memory-only storage, configurable authentication, and bridging to remote brokers.
 
 ```javascript
 const broker = new Broker();
@@ -769,29 +760,16 @@ const port = broker.createClientPort();
 await client.connectMessagePort(port);
 ```
 
-**Features:**
-- Full MQTT v5.0 support (QoS 0/1/2, retained messages, subscriptions)
-- Memory-only storage (no persistence)
-- Configurable authentication (allow anonymous or add users)
-- Bridging to remote brokers
-
 See `crates/mqtt5-wasm/examples/local-broker/` for complete implementation.
 
 ### 3. BroadcastChannel (Cross-Tab Communication)
 
-Connect clients across browser tabs or iframes using the BroadcastChannel API.
-
-**Use when:** Multiple tabs need to share an MQTT connection, or you need cross-tab pub/sub
+Use BroadcastChannel when multiple browser tabs or iframes need to share an MQTT connection. All tabs joined to the same channel name can exchange MQTT packets. One tab must run a broker that listens on the same channel.
 
 ```javascript
 const client = new MqttClient('tab-client');
 await client.connectBroadcastChannel('mqtt-channel');
 ```
-
-**How it works:**
-- Uses the browser's `BroadcastChannel` API for inter-tab messaging
-- All tabs joined to the same channel name can exchange MQTT packets
-- Requires one tab to run a broker that listens on the same channel
 
 **Tab running the broker:**
 ```javascript

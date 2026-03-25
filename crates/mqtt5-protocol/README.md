@@ -1,6 +1,6 @@
 # mqtt5-protocol
 
-MQTT v5.0 and v3.1.1 protocol implementation - packets, encoding, and validation.
+Platform-agnostic MQTT v5.0 and v3.1.1 protocol implementation covering packet parsing, binary encoding, and topic validation. This crate is the shared foundation used by both `mqtt5` (native) and `mqtt5-wasm` (browser), and supports `no_std` environments for embedded systems like ARM Cortex-M, RISC-V, and ESP32.
 
 ## Features
 
@@ -13,14 +13,14 @@ MQTT v5.0 and v3.1.1 protocol implementation - packets, encoding, and validation
 
 ```toml
 [dependencies]
-mqtt5-protocol = "0.11"
+mqtt5-protocol = "0.12"
 ```
 
 ### For Embedded (no_std)
 
 ```toml
 [dependencies]
-mqtt5-protocol = { version = "0.11", default-features = false }
+mqtt5-protocol = { version = "0.12", default-features = false }
 ```
 
 ### For Single-Core Embedded
@@ -144,7 +144,7 @@ This crate provides the protocol layer used by:
 | `time` | Platform-agnostic time types (Duration, Instant, SystemTime) |
 | `types` | Core types (QoS, RetainHandling, etc.) |
 
-## Features
+## Feature Flags
 
 | Feature | Description | Default |
 |---------|-------------|---------|

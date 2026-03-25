@@ -16,7 +16,7 @@ Both client and broker support QUIC transport. The client auto-detects QUIC from
 
 ## Stream Strategies
 
-QUIC multistream support allows different stream allocation strategies:
+QUIC multistream support allows different stream allocation strategies, each offering a different trade-off between simplicity, throughput, and topic isolation.
 
 | Strategy | Description | Use Case |
 |----------|-------------|----------|
@@ -68,7 +68,7 @@ mqttv5 broker \
 
 ## Connection Migration
 
-QUIC connection migration allows a client's network address to change (e.g., WiFi to cellular) without re-establishing the MQTT session. All streams, subscriptions, and sessions survive the migration.
+QUIC connection migration allows a client's network address to change (e.g., WiFi to cellular) without re-establishing the MQTT session. All streams, subscriptions, and sessions survive the migration transparently.
 
 ### Client-Side
 
@@ -98,7 +98,7 @@ The broker automatically detects address changes by comparing `Connection::remot
 
 ## Flow Headers
 
-Flow headers are written at the beginning of each QUIC data stream to identify flow ownership, persistence flags, and expiry. They follow the mqtt.ai Advanced Multistreams specification.
+Flow headers are written at the beginning of each QUIC data stream to identify flow ownership, persistence flags, and expiry. They follow the mqtt.ai Advanced Multistreams specification and enable session state recovery across stream resets.
 
 ### Flow Header Types
 
@@ -207,9 +207,9 @@ Compatible with MQTT-over-QUIC brokers:
 
 ---
 
-## Implementation Details
+## Internals (for Contributors)
 
-This section contains source-level details for developers working on the QUIC transport implementation.
+This section contains source-level details for developers working on the QUIC transport implementation itself. If you are using the library as a dependency, the sections above cover everything you need.
 
 ### Implementation Status
 
@@ -283,11 +283,7 @@ graph TD
 
 #### Broker Connection Handling
 
-The broker spawns three concurrent tasks per QUIC connection:
-
-1. **Client handler** — processes packets from control stream via `ClientHandler::run()`
-2. **Datagram reader** — reads unreliable datagrams, decodes packets, forwards to handler via mpsc channel
-3. **Data stream acceptor** — accepts unidirectional streams (`accept_uni`), spawns per-stream readers that parse flow headers and forward packets to handler
+The broker spawns three concurrent tasks per QUIC connection: a **client handler** that processes packets from the control stream, a **datagram reader** that decodes unreliable datagrams and forwards them via mpsc channel, and a **data stream acceptor** that accepts unidirectional streams and spawns per-stream readers with flow header parsing.
 
 Data stream readers detect flow headers by inspecting the first byte (0x11-0x13) and register flows in a per-connection `FlowRegistry`.
 

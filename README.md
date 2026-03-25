@@ -6,7 +6,7 @@
 [![License](https://img.shields.io/crates/l/mqtt5.svg)](https://github.com/LabOverWire/mqtt-lib#license)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/LabOverWire/mqtt-lib)
 
-**MQTT v5.0 and v3.1.1 platform featuring client library and broker implementation**
+A production-ready MQTT v5.0 and v3.1.1 platform that ships a client library, a multi-transport broker, and a protocol crate for embedded systems — all from the same codebase. Whether you need a cloud-connected IoT client, a self-hosted broker with QUIC multistream, or a `no_std` packet parser for bare-metal firmware, this platform covers it.
 
 ## Dual Architecture: Client + Broker
 
@@ -22,7 +22,7 @@
 
 ```toml
 [dependencies]
-mqtt5 = "0.28"
+mqtt5 = "0.31"
 ```
 
 ### CLI Tool
@@ -138,54 +138,9 @@ Four authentication methods (Password, SCRAM-SHA-256, JWT, Federated JWT), role-
 
 See the [Authentication & Authorization Guide](AUTHENTICATION.md) for configuration details and security hardening.
 
-## Development & Building
+## Publications
 
-### Prerequisites
-
-- Rust 1.88 or later
-- cargo-make (`cargo install cargo-make`)
-
-### Quick Setup
-
-```bash
-git clone https://github.com/LabOverWire/mqtt-lib.git
-cd mqtt-lib
-
-./scripts/install-hooks.sh
-
-cargo make ci-verify
-```
-
-### Available Commands
-
-```bash
-cargo make build          # Build the project
-cargo make test           # Run all tests
-cargo make fmt            # Format code
-cargo make clippy         # Run linter
-cargo make ci-verify      # Run ALL CI checks (must pass before push)
-```
-
-## AI Assistance Disclosure
-
-### Tools and Models Used
-
-This project was developed with assistance from **Claude** (Anthropic) via **Claude Code** (CLI agent). Versions used include Claude Opus 4, Claude Sonnet 4, and Claude Sonnet 3.5. AI assistance was applied across the codebase, documentation, and test suites.
-
-### Nature and Scope of Assistance
-
-AI tools were used for:
-
-- **Code generation** — implementing features, modules, and data structures
-- **Refactoring** — restructuring existing code for clarity, performance, and correctness
-- **Test scaffolding** — writing unit tests, integration tests, property-based tests, and conformance tests
-- **Bug fixing** — diagnosing and resolving defects
-- **Documentation drafting** — README content, architecture docs, and inline documentation
-- **Code review** — identifying security issues, lint violations, and correctness problems
-
-### Human Review and Oversight
-
-All AI-generated and AI-assisted outputs were reviewed, edited, and validated by human authors. Core architectural decisions, design trade-offs, and feature direction were made by the human maintainers. The human authors take full responsibility for the final state of all code, documentation, and tests in this repository.
+- **Evaluating Stream Mapping Strategies for MQTT over QUIC** — Computer Networks (Elsevier), 2026. Defines three stream mapping strategies (control-only, per-topic, per-publish) and evaluates them across five experiments on GCP infrastructure. Experiment data archived at [Zenodo](https://doi.org/10.5281/zenodo.19098820). See the [paper directory on GitHub](https://github.com/LabOverWire/mqtt-lib/tree/main/publications/comnet) for the paper, experiment scripts, and reproduction guide.
 
 ## License
 
@@ -199,10 +154,6 @@ at your option.
 ## Contributing
 
 We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
-
-## Publications
-
-- **Evaluating Stream Mapping Strategies for MQTT over QUIC** — Computer Networks (Elsevier), 2026. Defines three stream mapping strategies (control-only, per-topic, per-publish) and evaluates them across five experiments on GCP infrastructure. Experiment data archived at [Zenodo](https://doi.org/10.5281/zenodo.19098820). See [`publications/comnet/`](publications/comnet/) for the paper, experiment scripts, and reproduction guide.
 
 ## Documentation
 
