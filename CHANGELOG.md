@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [mqtt5 0.31.1] - 2026-03-27
+
+### Added
+
+- **OpenTelemetry span instrumentation** - distributed tracing spans across broker hot paths behind `#[cfg(feature = "opentelemetry")]`: connect, disconnect, publish, subscribe, unsubscribe, QoS handshake (puback/pubrec/pubrel/pubcomp), will message, route, deliver (regular and shared subscriptions), and bridge forward
+- **OpenTelemetry metrics bridge** - `MetricsBridge` registers 10 observable instruments (clients connected/total/maximum, messages sent/received, publish sent/received, bytes sent/received, uptime) that read `BrokerStats` atomics via OTLP periodic export
+- **Telemetry provider lifecycle** - `OnceLock`-stored `SdkTracerProvider` and `SdkMeterProvider` with `shutdown_telemetry()` that flushes and shuts down both providers on broker shutdown
+- `TelemetryConfig::with_metrics_enabled()` builder method and `init_meter_provider()` for OTLP metric export setup
+
 ## [mqtt5 0.30.0] - 2026-03-24
 
 ### Added
