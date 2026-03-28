@@ -515,6 +515,7 @@ impl MessageRouter {
         removed_filters
     }
 
+    /// Routes a publish message to all matching subscribers and forwards to bridges.
     pub async fn route_message(&self, publish: &PublishPacket, publishing_client_id: Option<&str>) {
         #[cfg(feature = "opentelemetry")]
         {
@@ -534,6 +535,10 @@ impl MessageRouter {
             .await;
     }
 
+    /// Routes a publish message to local subscribers only, without forwarding to bridges.
+    ///
+    /// Used by bridge connections to prevent message loops when receiving messages
+    /// from remote brokers.
     pub async fn route_message_local_only(
         &self,
         publish: &PublishPacket,
@@ -740,6 +745,26 @@ impl MessageRouter {
                     let index = counter.fetch_add(1, Ordering::Relaxed) % online_subs.len();
                     let chosen_sub = online_subs[index];
 
+                    #[cfg(feature = "opentelemetry")]
+                    {
+                        use tracing::Instrument;
+                        let span = tracing::info_span!(
+                            "mqtt.deliver",
+                            mqtt.subscriber = %chosen_sub.client_id,
+                            mqtt.topic = %publish.topic_name,
+                            mqtt.shared_group = %group_name,
+                        );
+                        self.deliver_to_subscriber(
+                            chosen_sub,
+                            publish,
+                            clients,
+                            self.storage.as_ref(),
+                            publishing_client_id,
+                        )
+                        .instrument(span)
+                        .await;
+                    }
+                    #[cfg(not(feature = "opentelemetry"))]
                     self.deliver_to_subscriber(
                         chosen_sub,
                         publish,
