@@ -28,6 +28,8 @@ use crate::broker::quic_acceptor::{
 };
 #[cfg(feature = "opentelemetry")]
 use crate::telemetry;
+#[cfg(feature = "opentelemetry")]
+use opentelemetry::metrics::MeterProvider;
 #[cfg(feature = "transport-quic")]
 use quinn::Endpoint;
 
@@ -352,9 +354,7 @@ impl MqttBroker {
         let (ready_tx, ready_rx) = watch::channel(false);
 
         #[cfg(feature = "opentelemetry")]
-        if let Some(ref otel_config) = config.opentelemetry_config {
-            telemetry::init_tracing_subscriber(otel_config)?;
-        }
+        Self::init_opentelemetry(&config, &stats)?;
 
         let bridge_manager = Self::setup_bridges(&config, &router).await;
 
@@ -701,6 +701,19 @@ impl MqttBroker {
         } else {
             Ok((Vec::new(), None))
         }
+    }
+
+    #[cfg(feature = "opentelemetry")]
+    fn init_opentelemetry(config: &BrokerConfig, stats: &Arc<BrokerStats>) -> Result<()> {
+        if let Some(ref otel_config) = config.opentelemetry_config {
+            telemetry::init_tracing_subscriber(otel_config)?;
+            if otel_config.metrics_enabled {
+                let meter_provider = telemetry::init_meter_provider(otel_config)?;
+                let meter = meter_provider.meter("mqtt5");
+                telemetry::metrics::MetricsBridge::register(&meter, Arc::clone(stats));
+            }
+        }
+        Ok(())
     }
 
     async fn setup_bridges(
@@ -1714,8 +1727,10 @@ impl MqttBroker {
             }
         }
 
-        // Give clients time to disconnect gracefully
         tokio::time::sleep(crate::time::Duration::from_millis(100)).await;
+
+        #[cfg(feature = "opentelemetry")]
+        telemetry::shutdown_telemetry();
 
         info!("Broker shutdown complete");
         Ok(())

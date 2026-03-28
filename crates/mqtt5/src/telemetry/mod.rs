@@ -1,6 +1,9 @@
 pub mod propagation;
 
 #[cfg(feature = "opentelemetry")]
+pub mod metrics;
+
+#[cfg(feature = "opentelemetry")]
 use crate::error::{MqttError, Result};
 #[cfg(feature = "opentelemetry")]
 use crate::time::Duration;
@@ -11,9 +14,18 @@ use opentelemetry::{trace::TracerProvider as _, KeyValue};
 use opentelemetry_otlp::WithExportConfig;
 #[cfg(feature = "opentelemetry")]
 use opentelemetry_sdk::{
+    metrics::SdkMeterProvider,
     trace::{RandomIdGenerator, Sampler, SdkTracerProvider},
     Resource,
 };
+#[cfg(feature = "opentelemetry")]
+use std::sync::OnceLock;
+
+#[cfg(feature = "opentelemetry")]
+static PROVIDER: OnceLock<SdkTracerProvider> = OnceLock::new();
+
+#[cfg(feature = "opentelemetry")]
+static METER_PROVIDER: OnceLock<SdkMeterProvider> = OnceLock::new();
 
 #[cfg(feature = "opentelemetry")]
 #[derive(Debug, Clone)]
@@ -23,6 +35,7 @@ pub struct TelemetryConfig {
     pub service_version: String,
     pub sampling_ratio: f64,
     pub timeout: Duration,
+    pub metrics_enabled: bool,
 }
 
 #[cfg(feature = "opentelemetry")]
@@ -34,6 +47,7 @@ impl Default for TelemetryConfig {
             service_version: env!("CARGO_PKG_VERSION").to_string(),
             sampling_ratio: 0.1,
             timeout: Duration::from_secs(10),
+            metrics_enabled: true,
         }
     }
 }
@@ -65,6 +79,23 @@ impl TelemetryConfig {
         self.timeout = timeout;
         self
     }
+
+    #[must_use]
+    pub fn with_metrics_enabled(mut self, enabled: bool) -> Self {
+        self.metrics_enabled = enabled;
+        self
+    }
+}
+
+#[cfg(feature = "opentelemetry")]
+fn build_resource(config: &TelemetryConfig) -> Resource {
+    Resource::builder()
+        .with_service_name(config.service_name.clone())
+        .with_attributes([KeyValue::new(
+            "service.version",
+            config.service_version.clone(),
+        )])
+        .build()
 }
 
 /// Initializes the OpenTelemetry tracer provider.
@@ -81,13 +112,7 @@ pub fn init_tracer(config: &TelemetryConfig) -> Result<SdkTracerProvider> {
         Sampler::TraceIdRatioBased(config.sampling_ratio)
     };
 
-    let resource = Resource::builder()
-        .with_service_name(config.service_name.clone())
-        .with_attributes([KeyValue::new(
-            "service.version",
-            config.service_version.clone(),
-        )])
-        .build();
+    let resource = build_resource(config);
 
     let exporter = opentelemetry_otlp::SpanExporter::builder()
         .with_tonic()
@@ -106,6 +131,37 @@ pub fn init_tracer(config: &TelemetryConfig) -> Result<SdkTracerProvider> {
     Ok(tracer_provider)
 }
 
+/// Initializes the OpenTelemetry meter provider for metrics export.
+///
+/// # Errors
+/// Returns an error if the OTLP metric exporter cannot be created.
+#[cfg(feature = "opentelemetry")]
+pub fn init_meter_provider(config: &TelemetryConfig) -> Result<SdkMeterProvider> {
+    use opentelemetry_sdk::metrics::PeriodicReader;
+
+    let resource = build_resource(config);
+
+    let exporter = opentelemetry_otlp::MetricExporter::builder()
+        .with_tonic()
+        .with_endpoint(&config.otlp_endpoint)
+        .with_timeout(config.timeout)
+        .build()
+        .map_err(|e| {
+            MqttError::Configuration(format!("Failed to create OTLP metric exporter: {e}"))
+        })?;
+
+    let reader = PeriodicReader::builder(exporter).build();
+
+    let meter_provider = SdkMeterProvider::builder()
+        .with_reader(reader)
+        .with_resource(resource)
+        .build();
+
+    let _ = METER_PROVIDER.set(meter_provider.clone());
+
+    Ok(meter_provider)
+}
+
 /// Initializes the tracing subscriber with OpenTelemetry support.
 ///
 /// # Errors
@@ -115,6 +171,7 @@ pub fn init_tracing_subscriber(config: &TelemetryConfig) -> Result<()> {
     use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
     let tracer_provider = init_tracer(config)?;
+    let _ = PROVIDER.set(tracer_provider.clone());
     let tracer = tracer_provider.tracer("mqtt5");
 
     let telemetry_layer = tracing_opentelemetry::layer().with_tracer(tracer);
@@ -141,8 +198,29 @@ pub fn init_tracing_subscriber(config: &TelemetryConfig) -> Result<()> {
 }
 
 #[cfg(feature = "opentelemetry")]
+pub fn shutdown_telemetry() {
+    if let Some(provider) = PROVIDER.get() {
+        if let Err(e) = provider.force_flush() {
+            tracing::warn!("Failed to flush tracer provider: {e}");
+        }
+        if let Err(e) = provider.shutdown() {
+            tracing::warn!("Failed to shutdown tracer provider: {e}");
+        }
+    }
+    if let Some(meter_provider) = METER_PROVIDER.get() {
+        if let Err(e) = meter_provider.force_flush() {
+            tracing::warn!("Failed to flush meter provider: {e}");
+        }
+        if let Err(e) = meter_provider.shutdown() {
+            tracing::warn!("Failed to shutdown meter provider: {e}");
+        }
+    }
+    tracing::debug!("OpenTelemetry telemetry shutdown complete");
+}
+
+#[cfg(feature = "opentelemetry")]
 pub fn shutdown_tracer() {
-    tracing::debug!("OpenTelemetry tracer shutdown initiated");
+    shutdown_telemetry();
 }
 
 #[cfg(all(test, feature = "opentelemetry"))]
@@ -155,6 +233,7 @@ mod tests {
         assert_eq!(config.otlp_endpoint, "http://localhost:4317");
         assert_eq!(config.service_name, "mqtt-broker");
         assert!((config.sampling_ratio - 0.1).abs() < f64::EPSILON);
+        assert!(config.metrics_enabled);
     }
 
     #[test]
@@ -177,5 +256,11 @@ mod tests {
 
         let config = TelemetryConfig::new("test").with_sampling_ratio(-0.5);
         assert!(config.sampling_ratio.abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_metrics_enabled_builder() {
+        let config = TelemetryConfig::new("test").with_metrics_enabled(false);
+        assert!(!config.metrics_enabled);
     }
 }

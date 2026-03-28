@@ -515,26 +515,45 @@ impl MessageRouter {
         removed_filters
     }
 
-    /// Routes a publish message to all matching subscribers and forwards to bridges
     pub async fn route_message(&self, publish: &PublishPacket, publishing_client_id: Option<&str>) {
+        #[cfg(feature = "opentelemetry")]
+        {
+            use tracing::Instrument;
+            let span = tracing::info_span!(
+                "mqtt.route",
+                mqtt.topic = %publish.topic_name,
+                mqtt.qos = publish.qos as u8,
+                mqtt.retain = publish.retain,
+            );
+            self.route_message_internal(publish, publishing_client_id, true)
+                .instrument(span)
+                .await;
+        }
+        #[cfg(not(feature = "opentelemetry"))]
         self.route_message_internal(publish, publishing_client_id, true)
             .await;
     }
 
-    /// Routes a publish message to local subscribers only, without forwarding to bridges.
-    ///
-    /// This method is used by bridge connections to prevent message loops when receiving
-    /// messages from remote brokers. It performs all local routing (retained messages,
-    /// subscriptions, shared subscriptions) but skips bridge forwarding.
-    ///
-    /// # Arguments
-    /// * `publish` - The publish packet to route
-    /// * `publishing_client_id` - Optional client ID that published the message (used for `no_local` filtering)
     pub async fn route_message_local_only(
         &self,
         publish: &PublishPacket,
         publishing_client_id: Option<&str>,
     ) {
+        #[cfg(feature = "opentelemetry")]
+        {
+            use tracing::Instrument;
+            let span = tracing::info_span!(
+                "mqtt.route",
+                mqtt.topic = %publish.topic_name,
+                mqtt.qos = publish.qos as u8,
+                mqtt.retain = publish.retain,
+                mqtt.bridge_forward = false,
+            );
+            self.route_message_internal(publish, publishing_client_id, false)
+                .instrument(span)
+                .await;
+        }
+        #[cfg(not(feature = "opentelemetry"))]
         self.route_message_internal(publish, publishing_client_id, false)
             .await;
     }
@@ -569,6 +588,25 @@ impl MessageRouter {
             .await;
 
         for sub in &regular_subs {
+            #[cfg(feature = "opentelemetry")]
+            {
+                use tracing::Instrument;
+                let span = tracing::info_span!(
+                    "mqtt.deliver",
+                    mqtt.subscriber = %sub.client_id,
+                    mqtt.topic = %publish.topic_name,
+                );
+                self.deliver_to_subscriber(
+                    sub,
+                    publish,
+                    &clients,
+                    self.storage.as_ref(),
+                    publishing_client_id,
+                )
+                .instrument(span)
+                .await;
+            }
+            #[cfg(not(feature = "opentelemetry"))]
             self.deliver_to_subscriber(
                 sub,
                 publish,
@@ -584,6 +622,16 @@ impl MessageRouter {
         drop(clients);
 
         if forward_to_bridges {
+            #[cfg(feature = "opentelemetry")]
+            {
+                use tracing::Instrument;
+                let span = tracing::info_span!(
+                    "mqtt.bridge.forward",
+                    mqtt.topic = %publish.topic_name,
+                );
+                self.forward_to_bridges(publish).instrument(span).await;
+            }
+            #[cfg(not(feature = "opentelemetry"))]
             self.forward_to_bridges(publish).await;
         }
     }

@@ -64,31 +64,8 @@ impl ClientHandler {
         self.validate_protocol_version(connect.protocol_version)
             .await?;
 
-        if let Some(ref lb) = self.config.load_balancer {
-            let generated;
-            let client_id = if connect.client_id.is_empty() {
-                use std::sync::atomic::{AtomicU64, Ordering};
-                static LB_COUNTER: AtomicU64 = AtomicU64::new(0);
-                generated = format!("auto-{}", LB_COUNTER.fetch_add(1, Ordering::Relaxed));
-                &generated
-            } else {
-                &connect.client_id
-            };
-            if let Some(backend) = lb.select_backend(client_id) {
-                let backend = backend.to_string();
-                info!(
-                    client_id = %client_id,
-                    backend = %backend,
-                    addr = %self.client_addr,
-                    "Redirecting client to backend"
-                );
-                let connack = ConnAckPacket::new(false, ReasonCode::UseAnotherServer)
-                    .with_server_reference(backend);
-                self.transport
-                    .write_packet(Packet::ConnAck(connack))
-                    .await?;
-                return Err(MqttError::UseAnotherServer);
-            }
+        if let Some(redirect) = self.check_load_balancer_redirect(&connect).await? {
+            return redirect;
         }
 
         self.request_problem_information = connect
@@ -126,6 +103,16 @@ impl ClientHandler {
             "Client connection limits"
         );
 
+        #[cfg(feature = "opentelemetry")]
+        let session_present = {
+            use tracing::Instrument;
+            let span = tracing::info_span!(
+                "mqtt.session",
+                mqtt.client_id = %connect.client_id,
+            );
+            self.handle_session(&connect).instrument(span).await?
+        };
+        #[cfg(not(feature = "opentelemetry"))]
         let session_present = self.handle_session(&connect).await?;
 
         let mut connack = if self.protocol_version == 4 {
@@ -156,6 +143,40 @@ impl ClientHandler {
         }
 
         Ok(())
+    }
+
+    async fn check_load_balancer_redirect(
+        &mut self,
+        connect: &ConnectPacket,
+    ) -> Result<Option<Result<()>>> {
+        let Some(ref lb) = self.config.load_balancer else {
+            return Ok(None);
+        };
+        let generated;
+        let client_id = if connect.client_id.is_empty() {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static LB_COUNTER: AtomicU64 = AtomicU64::new(0);
+            generated = format!("auto-{}", LB_COUNTER.fetch_add(1, Ordering::Relaxed));
+            &generated
+        } else {
+            &connect.client_id
+        };
+        if let Some(backend) = lb.select_backend(client_id) {
+            let backend = backend.to_string();
+            info!(
+                client_id = %client_id,
+                backend = %backend,
+                addr = %self.client_addr,
+                "Redirecting client to backend"
+            );
+            let connack = ConnAckPacket::new(false, ReasonCode::UseAnotherServer)
+                .with_server_reference(backend);
+            self.transport
+                .write_packet(Packet::ConnAck(connack))
+                .await?;
+            return Ok(Some(Err(MqttError::UseAnotherServer)));
+        }
+        Ok(None)
     }
 
     fn assign_client_id_if_empty(connect: &mut ConnectPacket) -> Option<String> {

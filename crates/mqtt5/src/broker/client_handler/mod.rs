@@ -277,24 +277,8 @@ impl ClientHandler {
             }
         };
 
-        self.handle_client_unregister(&client_id, session_taken_over)
+        self.handle_disconnect_cleanup(&client_id, session_taken_over)
             .await;
-
-        self.resource_monitor
-            .unregister_connection(&client_id, self.client_addr.ip())
-            .await;
-
-        self.cleanup_session_storage(&client_id).await;
-
-        if let Some(ref user_id) = self.user_id {
-            self.auth_provider.cleanup_session(user_id).await;
-        }
-
-        if !self.normal_disconnect {
-            self.publish_will_message(&client_id).await;
-        }
-
-        self.fire_disconnect_event(&client_id).await;
 
         info!("Client {} disconnected", client_id);
 
@@ -384,6 +368,63 @@ impl ClientHandler {
         }
     }
 
+    async fn handle_disconnect_cleanup(&mut self, client_id: &str, session_taken_over: bool) {
+        #[cfg(feature = "opentelemetry")]
+        {
+            use tracing::Instrument;
+            let span = tracing::info_span!(
+                "mqtt.disconnect",
+                mqtt.client_id = %client_id,
+            );
+            self.handle_disconnect_cleanup_inner(client_id, session_taken_over)
+                .instrument(span)
+                .await;
+        }
+        #[cfg(not(feature = "opentelemetry"))]
+        self.handle_disconnect_cleanup_inner(client_id, session_taken_over)
+            .await;
+    }
+
+    async fn handle_disconnect_cleanup_inner(&mut self, client_id: &str, session_taken_over: bool) {
+        self.handle_client_unregister(client_id, session_taken_over)
+            .await;
+
+        self.resource_monitor
+            .unregister_connection(client_id, self.client_addr.ip())
+            .await;
+
+        self.cleanup_session_storage(client_id).await;
+
+        if let Some(ref user_id) = self.user_id {
+            self.auth_provider.cleanup_session(user_id).await;
+        }
+
+        if !self.normal_disconnect {
+            #[cfg(feature = "opentelemetry")]
+            {
+                use tracing::Instrument;
+                if let Some(ref session) = self.session {
+                    if let Some(ref will) = session.will_message {
+                        let span = tracing::info_span!(
+                            "mqtt.will",
+                            mqtt.client_id = %client_id,
+                            mqtt.topic = %will.topic,
+                        );
+                        self.publish_will_message(client_id).instrument(span).await;
+                    } else {
+                        self.publish_will_message(client_id).await;
+                    }
+                } else {
+                    self.publish_will_message(client_id).await;
+                }
+            }
+            #[cfg(not(feature = "opentelemetry"))]
+            self.publish_will_message(client_id).await;
+        }
+
+        self.fire_disconnect_event(client_id).await;
+    }
+
     async fn handle_client_unregister(&self, client_id: &str, session_taken_over: bool) {
         let preserve_session = if let Some(ref session) = self.session {
             session.expiry_interval != Some(0)
@@ -468,7 +509,21 @@ impl ClientHandler {
                 .await?;
 
         match packet {
-            Packet::Connect(connect) => self.handle_connect(*connect).await,
+            Packet::Connect(connect) => {
+                #[cfg(feature = "opentelemetry")]
+                {
+                    use tracing::Instrument;
+                    let span = tracing::info_span!(
+                        "mqtt.connect",
+                        mqtt.client_id = %connect.client_id,
+                        mqtt.clean_start = connect.clean_start,
+                        mqtt.protocol_version = connect.protocol_version,
+                    );
+                    self.handle_connect(*connect).instrument(span).await
+                }
+                #[cfg(not(feature = "opentelemetry"))]
+                self.handle_connect(*connect).await
+            }
             _ => Err(MqttError::ProtocolError(
                 "Expected CONNECT packet".to_string(),
             )),
@@ -680,6 +735,67 @@ impl ClientHandler {
     }
 
     async fn handle_packet(&mut self, packet: Packet) -> Result<()> {
+        #[cfg(feature = "opentelemetry")]
+        return self.handle_packet_instrumented(packet).await;
+        #[cfg(not(feature = "opentelemetry"))]
+        self.handle_packet_inner(packet).await
+    }
+
+    #[cfg(feature = "opentelemetry")]
+    async fn handle_packet_instrumented(&mut self, packet: Packet) -> Result<()> {
+        use tracing::Instrument;
+
+        match packet {
+            Packet::Publish(publish) => {
+                let span = tracing::info_span!(
+                    "mqtt.publish.receive",
+                    mqtt.client_id = self.client_id.as_deref().unwrap_or(""),
+                    mqtt.topic = %publish.topic_name,
+                    mqtt.qos = publish.qos as u8,
+                    mqtt.retain = publish.retain,
+                    mqtt.payload_size = publish.payload.len(),
+                );
+                self.handle_publish(publish).instrument(span).await
+            }
+            Packet::Subscribe(subscribe) => {
+                let span = tracing::info_span!(
+                    "mqtt.subscribe",
+                    mqtt.client_id = self.client_id.as_deref().unwrap_or(""),
+                    mqtt.filter_count = subscribe.filters.len(),
+                );
+                self.handle_subscribe(subscribe).instrument(span).await
+            }
+            Packet::Unsubscribe(unsubscribe) => {
+                let span = tracing::info_span!(
+                    "mqtt.unsubscribe",
+                    mqtt.client_id = self.client_id.as_deref().unwrap_or(""),
+                    mqtt.filter_count = unsubscribe.filters.len(),
+                );
+                self.handle_unsubscribe(unsubscribe).instrument(span).await
+            }
+            Packet::PubAck(ref puback) => {
+                let span = tracing::info_span!("mqtt.puback", mqtt.packet_id = puback.packet_id);
+                self.handle_puback(puback).instrument(span).await;
+                Ok(())
+            }
+            Packet::PubRec(pubrec) => {
+                let span = tracing::info_span!("mqtt.pubrec", mqtt.packet_id = pubrec.packet_id);
+                self.handle_pubrec(pubrec).instrument(span).await
+            }
+            Packet::PubRel(pubrel) => {
+                let span = tracing::info_span!("mqtt.pubrel", mqtt.packet_id = pubrel.packet_id);
+                self.handle_pubrel(pubrel).instrument(span).await
+            }
+            Packet::PubComp(ref pubcomp) => {
+                let span = tracing::info_span!("mqtt.pubcomp", mqtt.packet_id = pubcomp.packet_id);
+                self.handle_pubcomp(pubcomp).instrument(span).await;
+                Ok(())
+            }
+            other => self.handle_packet_inner(other).await,
+        }
+    }
+
+    async fn handle_packet_inner(&mut self, packet: Packet) -> Result<()> {
         match packet {
             Packet::Connect(_) => {
                 if self.protocol_version == 5 {

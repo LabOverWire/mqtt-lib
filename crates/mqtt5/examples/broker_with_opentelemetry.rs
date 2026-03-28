@@ -21,7 +21,7 @@
 //!    cargo run --example broker_with_opentelemetry --features opentelemetry
 //!    ```
 //!
-//! 3. Open Jaeger UI at <http://localhost:16686> to view traces
+//! 3. Open Jaeger UI at <http://localhost:16686> to view traces and metrics
 
 use mqtt5::broker::{BrokerConfig, MqttBroker};
 use mqtt5::telemetry::TelemetryConfig;
@@ -35,7 +35,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let telemetry_config = TelemetryConfig::new("mqtt-broker-example")
         .with_endpoint("http://localhost:4317")
         .with_sampling_ratio(1.0)
-        .with_timeout(Duration::from_secs(10));
+        .with_timeout(Duration::from_secs(10))
+        .with_metrics_enabled(true);
 
     let config = BrokerConfig::default()
         .with_bind_address(([127, 0, 0, 1], 1883))
