@@ -12,6 +12,7 @@ A unified MQTT CLI tool for publishing, subscribing, running a broker, benchmark
 - Will message support: Last will and testament with delay and QoS options
 - Automatic reconnection: Opt-in reconnection with exponential backoff
 - Multi-transport: TCP, TLS, WebSocket, and QUIC support
+- Environment variables: Every flag configurable via `MQTT5_` prefixed env vars
 - Cross-platform: Linux, macOS, and Windows
 
 ## Installation
@@ -176,6 +177,29 @@ Use `--auto-reconnect` to enable automatic reconnection with exponential backoff
 - The library handles reconnection automatically
 - Subscriptions are restored based on session state
 - The client continues running until Ctrl+C or target message count reached
+
+### Environment Variables
+
+Every flag on the `broker`, `pub`, and `sub` subcommands can be set via environment variables using the `MQTT5_` prefix followed by the upper-snake-case flag name:
+
+```
+--host               → MQTT5_HOST
+--tls-cert           → MQTT5_TLS_CERT
+--max-clients        → MQTT5_MAX_CLIENTS
+--non-interactive    → MQTT5_NON_INTERACTIVE
+```
+
+CLI flags take precedence over environment variables, which take precedence over defaults. Repeatable flags (e.g., `--host`, `--tls-host`) accept comma-separated values from env vars.
+
+```bash
+# Configure broker entirely via environment variables
+export MQTT5_HOST=0.0.0.0:1883
+export MQTT5_ALLOW_ANONYMOUS=true
+export MQTT5_STORAGE_BACKEND=memory
+mqttv5 broker
+```
+
+The Docker image sets `MQTT5_NON_INTERACTIVE=true` by default. Use `--help` on any subcommand to see the env var name for each flag (shown as `[env: MQTT5_...]`).
 
 ## Examples
 

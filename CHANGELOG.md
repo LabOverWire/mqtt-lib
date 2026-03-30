@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [mqttv5-cli 0.27.0] - 2026-03-29
+
+### Added
+
+- **Environment variable support for all CLI flags** - Every flag on `broker`, `pub`, and `sub` subcommands can now be set via `MQTT5_` prefixed environment variables (e.g., `MQTT5_HOST`, `MQTT5_TLS_CERT`, `MQTT5_NON_INTERACTIVE`). CLI flags take precedence over env vars. Repeatable flags (`--host`, `--tls-host`, `--ws-host`, `--ws-tls-host`, `--quic-host`, `--jwt-role-map`, `--jwt-trusted-role-claim`) accept comma-separated values from env vars. Dockerfile sets `MQTT5_NON_INTERACTIVE=true` by default.
+
 ## [mqtt5 0.31.1] - 2026-03-27
 
 ### Added

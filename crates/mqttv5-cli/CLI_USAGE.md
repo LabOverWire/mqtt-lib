@@ -8,8 +8,8 @@ The `mqttv5` CLI is a single binary that covers every common MQTT workflow: runn
 
 Global flags:
 
-- `--verbose, -v` - Enable verbose logging
-- `--debug` - Enable debug logging
+- `--verbose, -v` - Enable verbose logging (`MQTT5_VERBOSE`)
+- `--debug` - Enable debug logging (`MQTT5_DEBUG`)
 
 ## Quick Start
 
@@ -21,6 +21,69 @@ mqttv5 broker --allow-anonymous
 mqttv5 pub -t "hello/world" -m "Hello, MQTT!"
 
 mqttv5 sub -t "hello/#" -v
+```
+
+## Environment Variables
+
+Every flag on the `broker`, `pub`, and `sub` subcommands can be set via environment variables. The naming convention is `MQTT5_` prefix + upper-snake-case of the long flag name:
+
+| CLI Flag | Environment Variable |
+| --- | --- |
+| `--host` | `MQTT5_HOST` |
+| `--tls-cert` | `MQTT5_TLS_CERT` |
+| `--max-clients` | `MQTT5_MAX_CLIENTS` |
+| `--non-interactive` | `MQTT5_NON_INTERACTIVE` |
+| `--jwt-jwks-uri` | `MQTT5_JWT_JWKS_URI` |
+| `--quic-stream-strategy` | `MQTT5_QUIC_STREAM_STRATEGY` |
+| `--otel-endpoint` | `MQTT5_OTEL_ENDPOINT` |
+
+### Precedence
+
+CLI flag > environment variable > default value.
+
+When `--config` is provided to the broker, the config file takes over and other broker flags are ignored (existing behavior, unchanged).
+
+### Repeatable Flags
+
+Flags that accept multiple values (`--host`, `--tls-host`, `--ws-host`, `--ws-tls-host`, `--quic-host`, `--jwt-role-map`, `--jwt-trusted-role-claim`) use comma-separated values when set via environment variables:
+
+```bash
+# These are equivalent:
+mqttv5 broker --host 0.0.0.0:1883 --host [::]:1883
+MQTT5_HOST="0.0.0.0:1883,[::]:1883" mqttv5 broker
+```
+
+On the CLI, repeated `-H` flags still work as before. The env var adds comma-splitting as an alternative.
+
+### Boolean Flags
+
+Boolean flags (`--allow-anonymous`, `--retain`, `--insecure`, etc.) treat any non-empty env var value as `true`:
+
+```bash
+MQTT5_ALLOW_ANONYMOUS=true mqttv5 broker
+MQTT5_ALLOW_ANONYMOUS=1 mqttv5 broker    # also works
+```
+
+### Docker Usage
+
+The Docker image sets `MQTT5_NON_INTERACTIVE=true` by default. All broker configuration can be done via env vars:
+
+```bash
+docker run -e MQTT5_HOST=0.0.0.0:1883 \
+           -e MQTT5_ALLOW_ANONYMOUS=true \
+           -e MQTT5_STORAGE_BACKEND=memory \
+           -p 1883:1883 \
+           mqttv5 broker
+```
+
+### Discovery
+
+Run `--help` on any subcommand to see the env var name for each flag:
+
+```bash
+mqttv5 broker --help   # shows [env: MQTT5_HOST=] etc.
+mqttv5 pub --help
+mqttv5 sub --help
 ```
 
 ## Command Reference
