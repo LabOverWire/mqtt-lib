@@ -56,7 +56,7 @@ pub struct RunArgs {
     pub config: Option<PathBuf>,
 
     /// TCP bind address (e.g., `0.0.0.0:1883` `[::]:1883`) - can be specified multiple times
-    #[arg(long, short = 'H', action = ArgAction::Append, env = "MQTT5_HOST", value_delimiter = ',')]
+    #[arg(long, short = 'H', action = ArgAction::Append, env = "MQTT5_BIND", value_delimiter = ',')]
     pub host: Vec<String>,
 
     /// Maximum number of concurrent clients
@@ -168,15 +168,15 @@ pub struct RunArgs {
     pub tls_require_client_cert: bool,
 
     /// TLS bind address - can be specified multiple times
-    #[arg(long, action = ArgAction::Append, env = "MQTT5_TLS_HOST", value_delimiter = ',')]
+    #[arg(long, action = ArgAction::Append, env = "MQTT5_TLS_BIND", value_delimiter = ',')]
     pub tls_host: Vec<String>,
 
     /// WebSocket bind address - can be specified multiple times
-    #[arg(long, action = ArgAction::Append, env = "MQTT5_WS_HOST", value_delimiter = ',')]
+    #[arg(long, action = ArgAction::Append, env = "MQTT5_WS_BIND", value_delimiter = ',')]
     pub ws_host: Vec<String>,
 
     /// WebSocket TLS bind address - can be specified multiple times
-    #[arg(long, action = ArgAction::Append, env = "MQTT5_WS_TLS_HOST", value_delimiter = ',')]
+    #[arg(long, action = ArgAction::Append, env = "MQTT5_WS_TLS_BIND", value_delimiter = ',')]
     pub ws_tls_host: Vec<String>,
 
     /// WebSocket path (e.g., /mqtt)
@@ -184,7 +184,7 @@ pub struct RunArgs {
     pub ws_path: String,
 
     /// QUIC bind address - can be specified multiple times (requires --tls-cert and --tls-key)
-    #[arg(long, action = ArgAction::Append, env = "MQTT5_QUIC_HOST", value_delimiter = ',')]
+    #[arg(long, action = ArgAction::Append, env = "MQTT5_QUIC_BIND", value_delimiter = ',')]
     pub quic_host: Vec<String>,
 
     /// QUIC server delivery strategy: control-only, per-topic (default), per-publish

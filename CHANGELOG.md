@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Environment variable support for all CLI flags** - Every flag on `broker`, `pub`, and `sub` subcommands can now be set via `MQTT5_` prefixed environment variables (e.g., `MQTT5_HOST`, `MQTT5_TLS_CERT`, `MQTT5_NON_INTERACTIVE`). CLI flags take precedence over env vars. Repeatable flags (`--host`, `--tls-host`, `--ws-host`, `--ws-tls-host`, `--quic-host`, `--jwt-role-map`, `--jwt-trusted-role-claim`) accept comma-separated values from env vars. Dockerfile sets `MQTT5_NON_INTERACTIVE=true` by default.
+- **Environment variable support for all CLI flags** - Every flag on `broker`, `pub`, and `sub` subcommands can now be set via `MQTT5_` prefixed environment variables (e.g., `MQTT5_HOST`, `MQTT5_TLS_CERT`, `MQTT5_NON_INTERACTIVE`). CLI flags take precedence over env vars. Broker bind addresses use `MQTT5_BIND`, `MQTT5_TLS_BIND`, `MQTT5_WS_BIND`, `MQTT5_WS_TLS_BIND`, and `MQTT5_QUIC_BIND` to avoid collision with the client `MQTT5_HOST` (hostname). Repeatable flags accept comma-separated values from env vars. Dockerfile sets `MQTT5_NON_INTERACTIVE=true` by default.
 
 ## [mqtt5 0.31.1] - 2026-03-27
 

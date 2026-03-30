@@ -183,17 +183,18 @@ Use `--auto-reconnect` to enable automatic reconnection with exponential backoff
 Every flag on the `broker`, `pub`, and `sub` subcommands can be set via environment variables using the `MQTT5_` prefix followed by the upper-snake-case flag name:
 
 ```
---host               → MQTT5_HOST
+--host               → MQTT5_HOST (pub/sub: broker hostname)
+--host               → MQTT5_BIND (broker: bind address)
 --tls-cert           → MQTT5_TLS_CERT
 --max-clients        → MQTT5_MAX_CLIENTS
 --non-interactive    → MQTT5_NON_INTERACTIVE
 ```
 
-CLI flags take precedence over environment variables, which take precedence over defaults. Repeatable flags (e.g., `--host`, `--tls-host`) accept comma-separated values from env vars.
+CLI flags take precedence over environment variables, which take precedence over defaults. Broker bind addresses use distinct env var names (`MQTT5_BIND`, `MQTT5_TLS_BIND`, etc.) to avoid collision with the client hostname (`MQTT5_HOST`). Repeatable flags accept comma-separated values from env vars.
 
 ```bash
 # Configure broker entirely via environment variables
-export MQTT5_HOST=0.0.0.0:1883
+export MQTT5_BIND=0.0.0.0:1883
 export MQTT5_ALLOW_ANONYMOUS=true
 export MQTT5_STORAGE_BACKEND=memory
 mqttv5 broker

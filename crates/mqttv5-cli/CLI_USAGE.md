@@ -27,15 +27,16 @@ mqttv5 sub -t "hello/#" -v
 
 Every flag on the `broker`, `pub`, and `sub` subcommands can be set via environment variables. The naming convention is `MQTT5_` prefix + upper-snake-case of the long flag name:
 
-| CLI Flag | Environment Variable |
-| --- | --- |
-| `--host` | `MQTT5_HOST` |
-| `--tls-cert` | `MQTT5_TLS_CERT` |
-| `--max-clients` | `MQTT5_MAX_CLIENTS` |
-| `--non-interactive` | `MQTT5_NON_INTERACTIVE` |
-| `--jwt-jwks-uri` | `MQTT5_JWT_JWKS_URI` |
-| `--quic-stream-strategy` | `MQTT5_QUIC_STREAM_STRATEGY` |
-| `--otel-endpoint` | `MQTT5_OTEL_ENDPOINT` |
+| CLI Flag | Environment Variable | Notes |
+| --- | --- | --- |
+| `--host` (pub/sub) | `MQTT5_HOST` | Broker hostname to connect to |
+| `--host` (broker) | `MQTT5_BIND` | TCP bind address(es) |
+| `--tls-host` (broker) | `MQTT5_TLS_BIND` | TLS bind address(es) |
+| `--ws-host` (broker) | `MQTT5_WS_BIND` | WebSocket bind address(es) |
+| `--tls-cert` | `MQTT5_TLS_CERT` | |
+| `--max-clients` | `MQTT5_MAX_CLIENTS` | |
+| `--non-interactive` | `MQTT5_NON_INTERACTIVE` | |
+| `--otel-endpoint` | `MQTT5_OTEL_ENDPOINT` | |
 
 ### Precedence
 
@@ -50,7 +51,7 @@ Flags that accept multiple values (`--host`, `--tls-host`, `--ws-host`, `--ws-tl
 ```bash
 # These are equivalent:
 mqttv5 broker --host 0.0.0.0:1883 --host [::]:1883
-MQTT5_HOST="0.0.0.0:1883,[::]:1883" mqttv5 broker
+MQTT5_BIND="0.0.0.0:1883,[::]:1883" mqttv5 broker
 ```
 
 On the CLI, repeated `-H` flags still work as before. The env var adds comma-splitting as an alternative.
@@ -69,7 +70,7 @@ MQTT5_ALLOW_ANONYMOUS=1 mqttv5 broker    # also works
 The Docker image sets `MQTT5_NON_INTERACTIVE=true` by default. All broker configuration can be done via env vars:
 
 ```bash
-docker run -e MQTT5_HOST=0.0.0.0:1883 \
+docker run -e MQTT5_BIND=0.0.0.0:1883 \
            -e MQTT5_ALLOW_ANONYMOUS=true \
            -e MQTT5_STORAGE_BACKEND=memory \
            -p 1883:1883 \
