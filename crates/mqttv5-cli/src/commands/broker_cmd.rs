@@ -52,202 +52,202 @@ pub struct GenerateConfigArgs {
 #[derive(Args)]
 pub struct RunArgs {
     /// Configuration file path (JSON format)
-    #[arg(long, short)]
+    #[arg(long, short, env = "MQTT5_CONFIG")]
     pub config: Option<PathBuf>,
 
     /// TCP bind address (e.g., `0.0.0.0:1883` `[::]:1883`) - can be specified multiple times
-    #[arg(long, short = 'H', action = ArgAction::Append)]
+    #[arg(long, short = 'H', action = ArgAction::Append, env = "MQTT5_HOST", value_delimiter = ',')]
     pub host: Vec<String>,
 
     /// Maximum number of concurrent clients
-    #[arg(long, default_value = "10000")]
+    #[arg(long, default_value = "10000", env = "MQTT5_MAX_CLIENTS")]
     pub max_clients: usize,
 
     /// Allow anonymous access (no authentication required)
-    #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+    #[arg(long, num_args = 0..=1, default_missing_value = "true", env = "MQTT5_ALLOW_ANONYMOUS")]
     pub allow_anonymous: Option<bool>,
 
     /// Password file path (format: username:password per line)
-    #[arg(long)]
+    #[arg(long, env = "MQTT5_AUTH_PASSWORD_FILE")]
     pub auth_password_file: Option<PathBuf>,
 
     /// ACL file path (format: `user <username> topic <pattern> permission <type>` per line)
-    #[arg(long)]
+    #[arg(long, env = "MQTT5_ACL_FILE")]
     pub acl_file: Option<PathBuf>,
 
     /// Authentication method: password, scram, jwt, jwt-federated (default: password if auth file provided)
-    #[arg(long, value_parser = ["password", "scram", "jwt", "jwt-federated"])]
+    #[arg(long, value_parser = ["password", "scram", "jwt", "jwt-federated"], env = "MQTT5_AUTH_METHOD")]
     pub auth_method: Option<String>,
 
     /// SCRAM credentials file path (format: username:salt:iterations:stored_key:server_key)
-    #[arg(long)]
+    #[arg(long, env = "MQTT5_SCRAM_FILE")]
     pub scram_file: Option<PathBuf>,
 
     /// JWT algorithm: hs256, rs256, es256
-    #[arg(long, value_parser = ["hs256", "rs256", "es256"])]
+    #[arg(long, value_parser = ["hs256", "rs256", "es256"], env = "MQTT5_JWT_ALGORITHM")]
     pub jwt_algorithm: Option<String>,
 
     /// JWT secret file (for HS256) or public key file (for RS256/ES256)
-    #[arg(long)]
+    #[arg(long, env = "MQTT5_JWT_KEY_FILE")]
     pub jwt_key_file: Option<PathBuf>,
 
     /// JWT required issuer
-    #[arg(long)]
+    #[arg(long, env = "MQTT5_JWT_ISSUER")]
     pub jwt_issuer: Option<String>,
 
     /// JWT required audience
-    #[arg(long)]
+    #[arg(long, env = "MQTT5_JWT_AUDIENCE")]
     pub jwt_audience: Option<String>,
 
     /// JWT clock skew tolerance (e.g., 60, 60s, 1m)
-    #[arg(long, default_value = "60", value_parser = parse_duration_secs)]
+    #[arg(long, default_value = "60", value_parser = parse_duration_secs, env = "MQTT5_JWT_CLOCK_SKEW")]
     pub jwt_clock_skew: u64,
 
     /// JWKS endpoint URL for federated JWT auth (e.g., <https://accounts.google.com/.well-known/jwks>)
-    #[arg(long)]
+    #[arg(long, env = "MQTT5_JWT_JWKS_URI")]
     pub jwt_jwks_uri: Option<String>,
 
     /// Fallback key file when JWKS is unavailable (required with --jwt-jwks-uri)
-    #[arg(long)]
+    #[arg(long, env = "MQTT5_JWT_FALLBACK_KEY")]
     pub jwt_fallback_key: Option<PathBuf>,
 
     /// JWKS refresh interval (e.g., 3600, 1h, 30m)
-    #[arg(long, default_value = "3600", value_parser = parse_duration_secs)]
+    #[arg(long, default_value = "3600", value_parser = parse_duration_secs, env = "MQTT5_JWT_JWKS_REFRESH")]
     pub jwt_jwks_refresh: u64,
 
     /// Claim path for extracting roles (e.g., "roles", "groups", "realm_access.roles")
-    #[arg(long)]
+    #[arg(long, env = "MQTT5_JWT_ROLE_CLAIM")]
     pub jwt_role_claim: Option<String>,
 
     /// Role mapping in format "claim_value:mqtt_role" (can be specified multiple times)
-    #[arg(long, action = ArgAction::Append)]
+    #[arg(long, action = ArgAction::Append, env = "MQTT5_JWT_ROLE_MAP", value_delimiter = ',')]
     pub jwt_role_map: Vec<String>,
 
     /// Default roles for authenticated JWT users (comma-separated)
-    #[arg(long)]
+    #[arg(long, env = "MQTT5_JWT_DEFAULT_ROLES")]
     pub jwt_default_roles: Option<String>,
 
     /// Role merge mode: merge (combine with static ACL) or replace (JWT roles only) [DEPRECATED: use --jwt-auth-mode]
-    #[arg(long, value_parser = ["merge", "replace"], default_value = "merge")]
+    #[arg(long, value_parser = ["merge", "replace"], default_value = "merge", env = "MQTT5_JWT_ROLE_MERGE_MODE")]
     pub jwt_role_merge_mode: String,
 
     /// Federated authentication mode: identity-only (external IdP for identity, internal ACL), claim-binding (admin-defined mappings), trusted-roles (trust JWT role claims)
-    #[arg(long, value_parser = ["identity-only", "claim-binding", "trusted-roles"])]
+    #[arg(long, value_parser = ["identity-only", "claim-binding", "trusted-roles"], env = "MQTT5_JWT_AUTH_MODE")]
     pub jwt_auth_mode: Option<String>,
 
     /// Claim paths for extracting trusted roles (can be specified multiple times, e.g., "roles", "groups", "realm_access.roles")
-    #[arg(long, action = ArgAction::Append)]
+    #[arg(long, action = ArgAction::Append, env = "MQTT5_JWT_TRUSTED_ROLE_CLAIM", value_delimiter = ',')]
     pub jwt_trusted_role_claim: Vec<String>,
 
     /// Whether JWT-derived roles are session-scoped (cleared on disconnect)
-    #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+    #[arg(long, num_args = 0..=1, default_missing_value = "true", env = "MQTT5_JWT_SESSION_SCOPED_ROLES")]
     pub jwt_session_scoped_roles: Option<bool>,
 
     /// Custom issuer prefix for user ID namespacing (default: issuer domain)
-    #[arg(long)]
+    #[arg(long, env = "MQTT5_JWT_ISSUER_PREFIX")]
     pub jwt_issuer_prefix: Option<String>,
 
     /// Federated JWT config file (JSON) for multi-issuer setup
-    #[arg(long)]
+    #[arg(long, env = "MQTT5_JWT_CONFIG_FILE")]
     pub jwt_config_file: Option<PathBuf>,
 
     /// TLS certificate file path (PEM format)
-    #[arg(long)]
+    #[arg(long, env = "MQTT5_TLS_CERT")]
     pub tls_cert: Option<PathBuf>,
 
     /// TLS private key file path (PEM format)
-    #[arg(long)]
+    #[arg(long, env = "MQTT5_TLS_KEY")]
     pub tls_key: Option<PathBuf>,
 
     /// TLS CA certificate file for client verification (PEM format, enables mTLS)
-    #[arg(long)]
+    #[arg(long, env = "MQTT5_TLS_CA_CERT")]
     pub tls_ca_cert: Option<PathBuf>,
 
     /// Require client certificates for TLS connections (mutual TLS)
-    #[arg(long)]
+    #[arg(long, env = "MQTT5_TLS_REQUIRE_CLIENT_CERT")]
     pub tls_require_client_cert: bool,
 
     /// TLS bind address - can be specified multiple times
-    #[arg(long, action = ArgAction::Append)]
+    #[arg(long, action = ArgAction::Append, env = "MQTT5_TLS_HOST", value_delimiter = ',')]
     pub tls_host: Vec<String>,
 
     /// WebSocket bind address - can be specified multiple times
-    #[arg(long, action = ArgAction::Append)]
+    #[arg(long, action = ArgAction::Append, env = "MQTT5_WS_HOST", value_delimiter = ',')]
     pub ws_host: Vec<String>,
 
     /// WebSocket TLS bind address - can be specified multiple times
-    #[arg(long, action = ArgAction::Append)]
+    #[arg(long, action = ArgAction::Append, env = "MQTT5_WS_TLS_HOST", value_delimiter = ',')]
     pub ws_tls_host: Vec<String>,
 
     /// WebSocket path (e.g., /mqtt)
-    #[arg(long, default_value = "/mqtt")]
+    #[arg(long, default_value = "/mqtt", env = "MQTT5_WS_PATH")]
     pub ws_path: String,
 
     /// QUIC bind address - can be specified multiple times (requires --tls-cert and --tls-key)
-    #[arg(long, action = ArgAction::Append)]
+    #[arg(long, action = ArgAction::Append, env = "MQTT5_QUIC_HOST", value_delimiter = ',')]
     pub quic_host: Vec<String>,
 
     /// QUIC server delivery strategy: control-only, per-topic (default), per-publish
-    #[arg(long, value_parser = parse_delivery_strategy)]
+    #[arg(long, value_parser = parse_delivery_strategy, env = "MQTT5_QUIC_DELIVERY_STRATEGY")]
     pub quic_delivery_strategy: Option<mqtt5::broker::config::ServerDeliveryStrategy>,
 
     /// Enable QUIC 0-RTT early data acceptance
-    #[arg(long)]
+    #[arg(long, env = "MQTT5_QUIC_EARLY_DATA")]
     pub quic_early_data: bool,
 
     /// Storage directory for persistent data
-    #[arg(long, default_value = "./mqtt_storage")]
+    #[arg(long, default_value = "./mqtt_storage", env = "MQTT5_STORAGE_DIR")]
     pub storage_dir: PathBuf,
 
     /// Storage backend type: file or memory
-    #[arg(long, default_value = "file", value_parser = parse_storage_backend)]
+    #[arg(long, default_value = "file", value_parser = parse_storage_backend, env = "MQTT5_STORAGE_BACKEND")]
     pub storage_backend: mqtt5::broker::config::StorageBackend,
 
     /// Disable message persistence
-    #[arg(long)]
+    #[arg(long, env = "MQTT5_NO_PERSISTENCE")]
     pub no_persistence: bool,
 
     /// Session expiry interval (e.g., 3600, 1h, 30m)
-    #[arg(long, default_value = "3600", value_parser = parse_duration_secs)]
+    #[arg(long, default_value = "3600", value_parser = parse_duration_secs, env = "MQTT5_SESSION_EXPIRY")]
     pub session_expiry: u64,
 
     /// Maximum `QoS` level supported (0, 1, or 2)
-    #[arg(long, default_value = "2")]
+    #[arg(long, default_value = "2", env = "MQTT5_MAX_QOS")]
     pub max_qos: u8,
 
     /// Server keep-alive time (e.g., 60, 60s, 2m)
-    #[arg(long, value_parser = parse_duration_secs)]
+    #[arg(long, value_parser = parse_duration_secs, env = "MQTT5_KEEP_ALIVE")]
     pub keep_alive: Option<u64>,
 
     /// Response information string sent to clients that request it
-    #[arg(long)]
+    #[arg(long, env = "MQTT5_RESPONSE_INFORMATION")]
     pub response_information: Option<String>,
 
     /// Disable retained messages
-    #[arg(long)]
+    #[arg(long, env = "MQTT5_NO_RETAIN")]
     pub no_retain: bool,
 
     /// Disable wildcard subscriptions
-    #[arg(long)]
+    #[arg(long, env = "MQTT5_NO_WILDCARDS")]
     pub no_wildcards: bool,
 
     /// Skip prompts and use defaults
-    #[arg(long)]
+    #[arg(long, env = "MQTT5_NON_INTERACTIVE")]
     pub non_interactive: bool,
 
     /// OpenTelemetry OTLP endpoint (e.g., http://localhost:4317)
     #[cfg(feature = "opentelemetry")]
-    #[arg(long)]
+    #[arg(long, env = "MQTT5_OTEL_ENDPOINT")]
     pub otel_endpoint: Option<String>,
 
     /// OpenTelemetry service name (default: mqttv5-broker)
     #[cfg(feature = "opentelemetry")]
-    #[arg(long, default_value = "mqttv5-broker")]
+    #[arg(long, default_value = "mqttv5-broker", env = "MQTT5_OTEL_SERVICE_NAME")]
     pub otel_service_name: String,
 
     /// OpenTelemetry sampling ratio (0.0-1.0, default: 1.0)
     #[cfg(feature = "opentelemetry")]
-    #[arg(long, default_value = "1.0")]
+    #[arg(long, default_value = "1.0", env = "MQTT5_OTEL_SAMPLING")]
     pub otel_sampling: f64,
 }
 

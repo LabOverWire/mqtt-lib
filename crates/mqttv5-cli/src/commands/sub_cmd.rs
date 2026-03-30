@@ -21,43 +21,43 @@ use super::parsers::{duration_secs_to_u32, parse_duration_secs, parse_stream_str
 #[derive(Args)]
 pub struct SubCommand {
     /// MQTT topic to subscribe to (supports wildcards + and #)
-    #[arg(long, short)]
+    #[arg(long, short, env = "MQTT5_TOPIC")]
     pub topic: Option<String>,
 
     /// Full broker URL for TLS/WebSocket/QUIC (e.g., <mqtts://host:8883>, <wss://host/mqtt>)
-    #[arg(long, short = 'U', conflicts_with_all = &["host", "port"])]
+    #[arg(long, short = 'U', conflicts_with_all = &["host", "port"], env = "MQTT5_URL")]
     pub url: Option<String>,
 
     /// Broker hostname (builds mqtt:// URL, use --url for TLS/WebSocket/QUIC)
-    #[arg(long, short = 'H', default_value = "localhost")]
+    #[arg(long, short = 'H', default_value = "localhost", env = "MQTT5_HOST")]
     pub host: String,
 
     /// Broker port (used with --host)
-    #[arg(long, short, default_value = "1883")]
+    #[arg(long, short, default_value = "1883", env = "MQTT5_PORT")]
     pub port: u16,
 
     /// Quality of Service level (0, 1, or 2)
-    #[arg(long, short, value_parser = parse_qos)]
+    #[arg(long, short, value_parser = parse_qos, env = "MQTT5_QOS")]
     pub qos: Option<QoS>,
 
     /// Username for authentication
-    #[arg(long, short)]
+    #[arg(long, short, env = "MQTT5_USERNAME")]
     pub username: Option<String>,
 
     /// Password for authentication
-    #[arg(long, short = 'P')]
+    #[arg(long, short = 'P', env = "MQTT5_PASSWORD")]
     pub password: Option<String>,
 
     /// Authentication method: password, scram, jwt (default: password)
-    #[arg(long, value_parser = ["password", "scram", "jwt"])]
+    #[arg(long, value_parser = ["password", "scram", "jwt"], env = "MQTT5_AUTH_METHOD")]
     pub auth_method: Option<String>,
 
     /// JWT token for JWT authentication
-    #[arg(long)]
+    #[arg(long, env = "MQTT5_JWT_TOKEN")]
     pub jwt_token: Option<String>,
 
     /// Client ID
-    #[arg(long, short)]
+    #[arg(long, short, env = "MQTT5_CLIENT_ID")]
     pub client_id: Option<String>,
 
     /// Print verbose output (include topic names)
@@ -65,131 +65,131 @@ pub struct SubCommand {
     pub verbose: bool,
 
     /// Skip prompts and use defaults/fail if required args missing
-    #[arg(long)]
+    #[arg(long, env = "MQTT5_NON_INTERACTIVE")]
     pub non_interactive: bool,
 
     /// Number of messages to receive before exiting (0 = infinite)
-    #[arg(long, short = 'n', default_value = "0")]
+    #[arg(long, short = 'n', default_value = "0", env = "MQTT5_COUNT")]
     pub count: u32,
 
     /// Don't clean start (resume existing session)
-    #[arg(long = "no-clean-start")]
+    #[arg(long = "no-clean-start", env = "MQTT5_NO_CLEAN_START")]
     pub no_clean_start: bool,
 
     /// Session expiry interval (e.g., 1h, 30m) (0 = expire on disconnect)
-    #[arg(long, value_parser = parse_duration_secs)]
+    #[arg(long, value_parser = parse_duration_secs, env = "MQTT5_SESSION_EXPIRY")]
     pub session_expiry: Option<u64>,
 
     /// Keep alive interval (e.g., 60s, 1m) (default: 60s)
-    #[arg(long, short = 'k', default_value = "60", value_parser = parse_duration_secs)]
+    #[arg(long, short = 'k', default_value = "60", value_parser = parse_duration_secs, env = "MQTT5_KEEP_ALIVE")]
     pub keep_alive: u64,
 
     /// MQTT protocol version (3.1.1 or 5, default: 5)
-    #[arg(long, value_parser = parse_protocol_version)]
+    #[arg(long, value_parser = parse_protocol_version, env = "MQTT5_PROTOCOL_VERSION")]
     pub protocol_version: Option<ProtocolVersion>,
 
     /// Will topic (last will and testament)
-    #[arg(long)]
+    #[arg(long, env = "MQTT5_WILL_TOPIC")]
     pub will_topic: Option<String>,
 
     /// Will message payload
-    #[arg(long)]
+    #[arg(long, env = "MQTT5_WILL_MESSAGE")]
     pub will_message: Option<String>,
 
     /// Will `QoS` level (0, 1, or 2)
-    #[arg(long, value_parser = parse_qos)]
+    #[arg(long, value_parser = parse_qos, env = "MQTT5_WILL_QOS")]
     pub will_qos: Option<QoS>,
 
     /// Will retain flag
-    #[arg(long)]
+    #[arg(long, env = "MQTT5_WILL_RETAIN")]
     pub will_retain: bool,
 
     /// Will delay interval (e.g., 5m, 1h)
-    #[arg(long, value_parser = parse_duration_secs)]
+    #[arg(long, value_parser = parse_duration_secs, env = "MQTT5_WILL_DELAY")]
     pub will_delay: Option<u64>,
 
     /// TLS certificate file (PEM format) for secure connections
-    #[arg(long)]
+    #[arg(long, env = "MQTT5_CERT")]
     pub cert: Option<PathBuf>,
 
     /// TLS private key file (PEM format) for secure connections
-    #[arg(long)]
+    #[arg(long, env = "MQTT5_KEY")]
     pub key: Option<PathBuf>,
 
     /// TLS CA certificate file (PEM format) for server verification
-    #[arg(long)]
+    #[arg(long, env = "MQTT5_CA_CERT")]
     pub ca_cert: Option<PathBuf>,
 
     /// Skip certificate verification for TLS/QUIC connections (insecure, for testing only)
-    #[arg(long)]
+    #[arg(long, env = "MQTT5_INSECURE")]
     pub insecure: bool,
 
     /// Enable automatic reconnection when broker disconnects
-    #[arg(long)]
+    #[arg(long, env = "MQTT5_AUTO_RECONNECT")]
     pub auto_reconnect: bool,
 
     /// No Local - if true, Application Messages published by this client will not be received back
-    #[arg(long)]
+    #[arg(long, env = "MQTT5_NO_LOCAL")]
     pub no_local: bool,
 
     /// Subscription identifier (1-268435455) to identify which subscription matched a message
-    #[arg(long)]
+    #[arg(long, env = "MQTT5_SUBSCRIPTION_IDENTIFIER")]
     pub subscription_identifier: Option<u32>,
 
     /// Retain handling: 0=SendAtSubscribe, 1=SendAtSubscribeIfNew, 2=DoNotSend
-    #[arg(long, value_parser = parse_retain_handling)]
+    #[arg(long, value_parser = parse_retain_handling, env = "MQTT5_RETAIN_HANDLING")]
     pub retain_handling: Option<mqtt5::RetainHandling>,
 
     /// Retain As Published - keep original retain flag when delivering messages
-    #[arg(long)]
+    #[arg(long, env = "MQTT5_RETAIN_AS_PUBLISHED")]
     pub retain_as_published: bool,
 
     /// QUIC stream strategy (control-only, per-publish, per-topic, per-subscription)
-    #[arg(long, value_parser = parse_stream_strategy)]
+    #[arg(long, value_parser = parse_stream_strategy, env = "MQTT5_QUIC_STREAM_STRATEGY")]
     pub quic_stream_strategy: Option<mqtt5::transport::StreamStrategy>,
 
     /// Enable `MQoQ` flow headers for stream state tracking
-    #[arg(long)]
+    #[arg(long, env = "MQTT5_QUIC_FLOW_HEADERS")]
     pub quic_flow_headers: bool,
 
     /// Flow expiration interval (e.g., 5m, 1h) (default: 5m)
-    #[arg(long, default_value = "300", value_parser = parse_duration_secs)]
+    #[arg(long, default_value = "300", value_parser = parse_duration_secs, env = "MQTT5_QUIC_FLOW_EXPIRE")]
     pub quic_flow_expire: u64,
 
     /// Maximum concurrent QUIC streams
-    #[arg(long)]
+    #[arg(long, env = "MQTT5_QUIC_MAX_STREAMS")]
     pub quic_max_streams: Option<usize>,
 
     /// Enable QUIC datagrams for unreliable transport
-    #[arg(long)]
+    #[arg(long, env = "MQTT5_QUIC_DATAGRAMS")]
     pub quic_datagrams: bool,
 
     /// QUIC connection timeout (e.g., 30s, 1m) (default: 30s)
-    #[arg(long, default_value = "30", value_parser = parse_duration_secs)]
+    #[arg(long, default_value = "30", value_parser = parse_duration_secs, env = "MQTT5_QUIC_CONNECT_TIMEOUT")]
     pub quic_connect_timeout: u64,
 
     /// Enable QUIC 0-RTT early data for faster reconnections
-    #[arg(long)]
+    #[arg(long, env = "MQTT5_QUIC_EARLY_DATA")]
     pub quic_early_data: bool,
 
     /// OpenTelemetry OTLP endpoint (e.g., `http://localhost:4317`)
     #[cfg(feature = "opentelemetry")]
-    #[arg(long)]
+    #[arg(long, env = "MQTT5_OTEL_ENDPOINT")]
     pub otel_endpoint: Option<String>,
 
     /// OpenTelemetry service name (default: mqttv5-sub)
     #[cfg(feature = "opentelemetry")]
-    #[arg(long, default_value = "mqttv5-sub")]
+    #[arg(long, default_value = "mqttv5-sub", env = "MQTT5_OTEL_SERVICE_NAME")]
     pub otel_service_name: String,
 
     /// OpenTelemetry sampling ratio (0.0-1.0, default: 1.0)
     #[cfg(feature = "opentelemetry")]
-    #[arg(long, default_value = "1.0")]
+    #[arg(long, default_value = "1.0", env = "MQTT5_OTEL_SAMPLING")]
     pub otel_sampling: f64,
 
     /// Enable codec decoding for incoming messages (gzip, deflate, or all)
     #[cfg(feature = "codec")]
-    #[arg(long, value_parser = ["gzip", "deflate", "all"])]
+    #[arg(long, value_parser = ["gzip", "deflate", "all"], env = "MQTT5_CODEC")]
     pub codec: Option<String>,
 }
 

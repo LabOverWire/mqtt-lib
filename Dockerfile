@@ -7,6 +7,7 @@ RUN cargo build --release -p mqttv5-cli \
     && upx --best --lzma target/release/mqttv5
 
 FROM scratch
+ENV MQTT5_NON_INTERACTIVE=true
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 COPY --from=builder /build/target/release/mqttv5 /mqttv5
 EXPOSE 1883 8883 8080 8443 14567/udp

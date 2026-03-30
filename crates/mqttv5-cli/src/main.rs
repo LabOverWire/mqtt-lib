@@ -18,11 +18,11 @@ struct Cli {
     command: Commands,
 
     /// Enable verbose logging
-    #[arg(long, short, global = true)]
+    #[arg(long, short, global = true, env = "MQTT5_VERBOSE")]
     verbose: bool,
 
     /// Enable debug logging
-    #[arg(long, global = true)]
+    #[arg(long, global = true, env = "MQTT5_DEBUG")]
     debug: bool,
 }
 
