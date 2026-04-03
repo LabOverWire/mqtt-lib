@@ -8,6 +8,7 @@ use crate::protocol::v5::properties::Properties;
 use tokio::time::Duration;
 
 use super::connection::{ConnectionEvent, ReconnectConfig};
+use super::direct::AutomaticReconnectLifecycle;
 use super::MqttClient;
 
 #[derive(Debug, Clone)]
@@ -80,7 +81,7 @@ impl MqttClient {
     }
 
     pub(crate) async fn monitor_connection(&self) {
-        tracing::info!("🔍 MONITOR TASK - Starting connection monitor task");
+        tracing::info!("Starting connection monitor task");
 
         loop {
             tokio::time::sleep(Duration::from_secs(1)).await;
@@ -88,30 +89,33 @@ impl MqttClient {
             let inner = self.inner.read().await;
             if !inner.is_connected() {
                 tracing::info!(
-                    "🔍 MONITOR TASK - Detected disconnection, triggering reconnection logic"
+                    "Connection monitor detected disconnection, triggering reconnection logic"
                 );
 
                 let reconnect_config = inner.options.reconnect_config.clone();
                 let last_address = inner.last_address.clone();
+                let automatic_reconnect_lifecycle = inner.automatic_reconnect_lifecycle;
                 drop(inner);
 
-                if !reconnect_config.enabled {
-                    tracing::info!("🔍 MONITOR TASK - Reconnection disabled, exiting monitor");
+                if automatic_reconnect_lifecycle == AutomaticReconnectLifecycle::Stopped
+                    || !reconnect_config.enabled
+                {
+                    tracing::info!("Reconnection disabled, exiting connection monitor");
                     break;
                 }
 
                 if let Some(address) = last_address {
                     tracing::info!(
                         address = %address,
-                        "🔍 MONITOR TASK - Starting reconnection attempt"
+                        "Starting reconnection attempt"
                     );
 
                     if let Err(e) = self.attempt_reconnection(&address, &reconnect_config).await {
-                        tracing::error!("🔍 MONITOR TASK - Reconnection failed: {e}");
+                        tracing::error!("Reconnection failed: {e}");
                         break;
                     }
                 } else {
-                    tracing::info!("🔍 MONITOR TASK - No last address available for reconnection");
+                    tracing::info!("No last address available for reconnection");
                     break;
                 }
             }
@@ -132,16 +136,23 @@ impl MqttClient {
             address = %address,
             max_attempts = ?config.max_attempts,
             initial_delay = ?config.initial_delay,
-            "🔄 RECONNECTION - Starting reconnection loop"
+            "Starting reconnection loop"
         );
 
         let mut delay = config.initial_delay;
 
         loop {
+            let automatic_reconnect_lifecycle = {
+                let inner = self.inner.read().await;
+                inner.automatic_reconnect_lifecycle
+            };
+            if automatic_reconnect_lifecycle == AutomaticReconnectLifecycle::Stopped {
+                tracing::info!("Automatic reconnect disabled for current lifecycle");
+                return Ok(());
+            }
+
             if self.is_connected().await {
-                tracing::info!(
-                    "🔄 RECONNECTION - Already connected, stopping reconnection attempts"
-                );
+                tracing::info!("Already connected, stopping reconnection attempts");
                 return Ok(());
             }
 
@@ -155,7 +166,7 @@ impl MqttClient {
                 attempt = attempt,
                 max_attempts = ?config.max_attempts,
                 delay = ?delay,
-                "🔄 RECONNECTION - Attempting reconnection #{}", attempt
+                "Attempting reconnection #{}", attempt
             );
 
             if let Some(max) = config.max_attempts {
@@ -163,7 +174,7 @@ impl MqttClient {
                     tracing::error!(
                         attempt = attempt,
                         max_attempts = max,
-                        "🔄 RECONNECTION - Max attempts exceeded"
+                        "Max reconnection attempts exceeded"
                     );
                     return Err(MqttError::ConnectionError(
                         "Max reconnection attempts exceeded".to_string(),
@@ -178,6 +189,16 @@ impl MqttClient {
 
             let connection_guard = self.connection_mutex.lock().await;
 
+            let automatic_reconnect_lifecycle = {
+                let inner = self.inner.read().await;
+                inner.automatic_reconnect_lifecycle
+            };
+            if automatic_reconnect_lifecycle == AutomaticReconnectLifecycle::Stopped {
+                tracing::info!("Automatic reconnect disabled before attempt, exiting");
+                drop(connection_guard);
+                return Ok(());
+            }
+
             if self.is_connected().await {
                 tracing::info!("Connected during wait, stopping reconnection attempts");
                 return Ok(());
@@ -186,7 +207,7 @@ impl MqttClient {
             tracing::info!(
                 attempt = attempt,
                 address = %address,
-                "🔄 RECONNECTION - Making connection attempt #{} to {}", attempt, address
+                "Making connection attempt #{} to {}", attempt, address
             );
             let reconnection_result = self.connect_internal(address).await;
 
@@ -194,10 +215,7 @@ impl MqttClient {
 
             match reconnection_result {
                 Ok(_) => {
-                    tracing::info!(
-                        "🔄 RECONNECTION - Reconnected successfully after {} attempts",
-                        attempt
-                    );
+                    tracing::info!("Reconnected successfully after {} attempts", attempt);
 
                     let inner = self.inner.read().await;
                     let stored_subs = inner.stored_subscriptions.lock().clone();

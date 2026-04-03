@@ -22,6 +22,8 @@ use super::connection::{ConnectionEvent, DisconnectReason};
 use super::state::ClientTransportType;
 use super::MqttClient;
 
+use super::direct::AutomaticReconnectLifecycle;
+
 impl MqttClient {
     #[cfg(any(not(feature = "transport-websocket"), not(feature = "transport-quic")))]
     fn unsupported_transport_feature(transport: &str, feature: &str) -> MqttError {
@@ -599,6 +601,7 @@ impl MqttClient {
                 .clone_from(&options.properties.authentication_method);
             inner.options = options.clone();
             inner.last_address = Some(address.to_string());
+            inner.automatic_reconnect_lifecycle = AutomaticReconnectLifecycle::Armed;
         }
 
         let result = self.connect_internal(address).await;
@@ -610,7 +613,10 @@ impl MqttClient {
                 crate::client::error_recovery::is_recoverable(error, &error_recovery_config)
             {
                 if options.reconnect_config.enabled {
-                    tracing::debug!(error = %error, "🔄 SPAWN MONITOR - Initial connection failed with recoverable error, starting background reconnection");
+                    tracing::debug!(
+                        error = %error,
+                        "Initial connection failed with recoverable error, starting background reconnection"
+                    );
                     let client = self.clone();
                     tokio::spawn(async move {
                         client.monitor_connection().await;
@@ -622,7 +628,9 @@ impl MqttClient {
                 tracing::debug!(error = %error, "Initial connection failed with non-recoverable error, not starting background reconnection");
             }
         } else if result.is_ok() && options.reconnect_config.enabled {
-            tracing::debug!("🔄 SPAWN MONITOR - Successful connection, starting monitor task for future disconnections");
+            tracing::debug!(
+                "Successful connection, starting monitor task for future disconnections"
+            );
             let client = self.clone();
             tokio::spawn(async move {
                 client.monitor_connection().await;
@@ -654,6 +662,7 @@ impl MqttClient {
                 tls_config.hostname,
                 tls_config.addr.port()
             ));
+            inner.automatic_reconnect_lifecycle = AutomaticReconnectLifecycle::Armed;
         }
 
         let result = self.connect_internal_with_tls(tls_config).await;

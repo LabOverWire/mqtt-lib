@@ -55,6 +55,12 @@ use keepalive::{keepalive_task_with_writer, KeepaliveState};
 use reader::quic_stream_acceptor_task;
 use reader::{packet_reader_task_with_responses, PacketReaderContext};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutomaticReconnectLifecycle {
+    Armed,
+    Stopped,
+}
+
 pub struct DirectClientInner {
     pub writer: Option<Arc<tokio::sync::Mutex<UnifiedWriter>>>,
     #[cfg(feature = "transport-quic")]
@@ -84,6 +90,7 @@ pub struct DirectClientInner {
     pub pending_pubcomps: Arc<Mutex<HashMap<u16, oneshot::Sender<ReasonCode>>>>,
     pub reconnect_attempt: u32,
     pub last_address: Option<String>,
+    pub automatic_reconnect_lifecycle: AutomaticReconnectLifecycle,
     pub server_redirect: Option<String>,
     pub queued_messages: Arc<Mutex<Vec<PublishPacket>>>,
     pub stored_subscriptions: Arc<Mutex<Vec<(String, SubscriptionOptions, CallbackId)>>>,
@@ -138,6 +145,7 @@ impl DirectClientInner {
             pending_pubcomps: Arc::new(Mutex::new(HashMap::new())),
             reconnect_attempt: 0,
             last_address: None,
+            automatic_reconnect_lifecycle: AutomaticReconnectLifecycle::Armed,
             server_redirect: None,
             queued_messages: Arc::new(Mutex::new(Vec::new())),
             stored_subscriptions: Arc::new(Mutex::new(Vec::new())),
