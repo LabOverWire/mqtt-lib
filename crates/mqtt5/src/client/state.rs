@@ -80,11 +80,21 @@ impl MqttClient {
         }
     }
 
+    async fn is_reconnect_stopped(&self) -> bool {
+        let inner = self.inner.read().await;
+        inner.automatic_reconnect_lifecycle == AutomaticReconnectLifecycle::Stopped
+    }
+
     pub(crate) async fn monitor_connection(&self) {
         tracing::info!("Starting connection monitor task");
 
         loop {
             tokio::time::sleep(Duration::from_secs(1)).await;
+
+            if self.is_reconnect_stopped().await {
+                tracing::info!("Reconnection disabled, exiting connection monitor");
+                break;
+            }
 
             let inner = self.inner.read().await;
             if !inner.is_connected() {
@@ -94,12 +104,9 @@ impl MqttClient {
 
                 let reconnect_config = inner.options.reconnect_config.clone();
                 let last_address = inner.last_address.clone();
-                let automatic_reconnect_lifecycle = inner.automatic_reconnect_lifecycle;
                 drop(inner);
 
-                if automatic_reconnect_lifecycle == AutomaticReconnectLifecycle::Stopped
-                    || !reconnect_config.enabled
-                {
+                if !reconnect_config.enabled {
                     tracing::info!("Reconnection disabled, exiting connection monitor");
                     break;
                 }
@@ -142,12 +149,8 @@ impl MqttClient {
         let mut delay = config.initial_delay;
 
         loop {
-            let automatic_reconnect_lifecycle = {
-                let inner = self.inner.read().await;
-                inner.automatic_reconnect_lifecycle
-            };
-            if automatic_reconnect_lifecycle == AutomaticReconnectLifecycle::Stopped {
-                tracing::info!("Automatic reconnect disabled for current lifecycle");
+            if self.is_reconnect_stopped().await {
+                tracing::info!("Automatic reconnect disabled, exiting reconnection loop");
                 return Ok(());
             }
 
@@ -189,11 +192,7 @@ impl MqttClient {
 
             let connection_guard = self.connection_mutex.lock().await;
 
-            let automatic_reconnect_lifecycle = {
-                let inner = self.inner.read().await;
-                inner.automatic_reconnect_lifecycle
-            };
-            if automatic_reconnect_lifecycle == AutomaticReconnectLifecycle::Stopped {
+            if self.is_reconnect_stopped().await {
                 tracing::info!("Automatic reconnect disabled before attempt, exiting");
                 drop(connection_guard);
                 return Ok(());

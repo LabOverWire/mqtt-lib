@@ -314,9 +314,6 @@ impl MqttClient {
         tracing::info!(client_id = %client_id, "Initiating MQTT disconnect");
 
         let mut inner = self.inner.write().await;
-        // A caller-initiated disconnect is terminal for the current client lifecycle.
-        // Disable runtime reconnect before tearing down the transport so background
-        // monitor/reconnect tasks observe the terminal state and exit cleanly.
         inner.automatic_reconnect_lifecycle = AutomaticReconnectLifecycle::Stopped;
         match inner.disconnect().await {
             Ok(()) => {

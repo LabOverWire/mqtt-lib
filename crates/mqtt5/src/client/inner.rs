@@ -609,8 +609,8 @@ impl MqttClient {
         if let Err(ref error) = result {
             let error_recovery_config =
                 crate::client::error_recovery::ErrorRecoveryConfig::default();
-            if let Some(_recoverable_error) =
-                crate::client::error_recovery::is_recoverable(error, &error_recovery_config)
+            if crate::client::error_recovery::is_recoverable(error, &error_recovery_config)
+                .is_some()
             {
                 if options.reconnect_config.enabled {
                     tracing::debug!(
