@@ -1,17 +1,25 @@
+//! Section 6 — MQTT over WebSocket.
+
+use crate::conformance_test;
+use crate::raw_client::RawPacketBuilder;
+use crate::sut::SutHandle;
 use futures_util::{SinkExt, StreamExt};
-use mqtt5_conformance::harness::ConformanceBroker;
-use mqtt5_conformance::raw_client::RawPacketBuilder;
+use std::net::SocketAddr;
 use std::time::Duration;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
 
 const TIMEOUT: Duration = Duration::from_secs(3);
 
+fn ws_addr(sut: &SutHandle) -> SocketAddr {
+    sut.expect_ws_addr()
+}
+
 async fn ws_connect_raw(
-    broker: &ConformanceBroker,
+    sut: &SutHandle,
 ) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
-    let ws_port = broker.ws_port().expect("WebSocket not enabled");
-    let url = format!("ws://127.0.0.1:{ws_port}/mqtt");
+    let addr = ws_addr(sut);
+    let url = format!("ws://{addr}/mqtt");
     let mut request = url.into_client_request().expect("valid request");
     request.headers_mut().insert(
         "Sec-WebSocket-Protocol",
@@ -24,13 +32,13 @@ async fn ws_connect_raw(
 }
 
 async fn ws_connect_raw_with_response(
-    broker: &ConformanceBroker,
+    sut: &SutHandle,
 ) -> (
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
     http::Response<Option<Vec<u8>>>,
 ) {
-    let ws_port = broker.ws_port().expect("WebSocket not enabled");
-    let url = format!("ws://127.0.0.1:{ws_port}/mqtt");
+    let addr = ws_addr(sut);
+    let url = format!("ws://{addr}/mqtt");
     let mut request = url.into_client_request().expect("valid request");
     request.headers_mut().insert(
         "Sec-WebSocket-Protocol",
@@ -43,10 +51,12 @@ async fn ws_connect_raw_with_response(
 
 /// `[MQTT-6.0.0-1]` Server MUST close the connection if a non-binary
 /// data frame is received.
-#[tokio::test]
-async fn websocket_text_frame_closes() {
-    let broker = ConformanceBroker::start_with_websocket().await;
-    let mut ws = ws_connect_raw(&broker).await;
+#[conformance_test(
+    ids = ["MQTT-6.0.0-1"],
+    requires = ["transport.websocket"],
+)]
+async fn websocket_text_frame_closes(sut: SutHandle) {
+    let mut ws = ws_connect_raw(&sut).await;
 
     let connect_bytes = RawPacketBuilder::valid_connect("ws-text-test");
     ws.send(Message::Binary(connect_bytes.into()))
@@ -74,10 +84,12 @@ async fn websocket_text_frame_closes() {
 
 /// `[MQTT-6.0.0-2]` Server MUST NOT assume MQTT packets are aligned on
 /// WebSocket frame boundaries; partial packets across frames must work.
-#[tokio::test]
-async fn websocket_packet_across_frames() {
-    let broker = ConformanceBroker::start_with_websocket().await;
-    let mut ws = ws_connect_raw(&broker).await;
+#[conformance_test(
+    ids = ["MQTT-6.0.0-2"],
+    requires = ["transport.websocket"],
+)]
+async fn websocket_packet_across_frames(sut: SutHandle) {
+    let mut ws = ws_connect_raw(&sut).await;
 
     let connect_bytes = RawPacketBuilder::valid_connect("ws-split-test");
     let mid = connect_bytes.len() / 2;
@@ -113,10 +125,12 @@ async fn websocket_packet_across_frames() {
 }
 
 /// `[MQTT-6.0.0-4]` Server MUST select "mqtt" as the WebSocket subprotocol.
-#[tokio::test]
-async fn websocket_subprotocol_is_mqtt() {
-    let broker = ConformanceBroker::start_with_websocket().await;
-    let (_ws, response) = ws_connect_raw_with_response(&broker).await;
+#[conformance_test(
+    ids = ["MQTT-6.0.0-4"],
+    requires = ["transport.websocket"],
+)]
+async fn websocket_subprotocol_is_mqtt(sut: SutHandle) {
+    let (_ws, response) = ws_connect_raw_with_response(&sut).await;
 
     let subprotocol = response
         .headers()

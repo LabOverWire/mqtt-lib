@@ -5,6 +5,8 @@ members = [
     "crates/mqtt5-wasm",
     "crates/mqttv5-cli",
     "crates/mqtt5-conformance",
+    "crates/mqtt5-conformance-macros",
+    "crates/mqtt5-conformance-cli",
 ]
 resolver = "2"
 

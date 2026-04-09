@@ -1,0 +1,30 @@
+name = "emqx-5.x"
+address = "mqtt://127.0.0.1:1883"
+tls_address = "mqtts://127.0.0.1:8883"
+ws_address = "ws://127.0.0.1:8083/mqtt"
+
+[capabilities]
+max_qos = 2
+retain_available = true
+wildcard_subscription_available = true
+subscription_identifier_available = true
+shared_subscription_available = true
+topic_alias_maximum = 65535
+server_receive_maximum = 32
+maximum_packet_size = 1048576
+assigned_client_id_supported = true
+acl = true
+injected_user_properties = []
+
+[capabilities.transports]
+tcp = true
+tls = true
+websocket = true
+quic = true
+
+[capabilities.enhanced_auth]
+methods = ["SCRAM-SHA-256", "SCRAM-SHA-512"]
+
+[hooks]
+restart_command = "emqx restart"
+cleanup_command = ""

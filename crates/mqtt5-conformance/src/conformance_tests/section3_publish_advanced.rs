@@ -1,22 +1,31 @@
-use mqtt5::{PublishOptions, PublishProperties, QoS, SubscribeOptions};
-use mqtt5_conformance::harness::{
-    connected_client, unique_client_id, ConformanceBroker, MessageCollector,
-};
-use mqtt5_conformance::raw_client::{RawMqttClient, RawPacketBuilder};
+//! Section 3.3 — Advanced PUBLISH features (overlapping subs, `no_local`,
+//! message expiry, response topic).
+
+use crate::conformance_test;
+use crate::harness::unique_client_id;
+use crate::raw_client::{RawMqttClient, RawPacketBuilder};
+use crate::sut::SutHandle;
+use crate::test_client::TestClient;
+use mqtt5_protocol::types::{PublishOptions, PublishProperties, QoS, SubscribeOptions};
 use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_secs(3);
 
-#[tokio::test]
-async fn overlapping_subs_max_qos_delivered() {
-    let broker = ConformanceBroker::start().await;
+/// `[MQTT-3.3.4-2]` Overlapping subscriptions: at least one PUBLISH copy
+/// must be delivered at the maximum granted `QoS` across the matching
+/// subscriptions.
+#[conformance_test(
+    ids = ["MQTT-3.3.4-2"],
+    requires = ["transport.tcp", "max_qos>=1"],
+)]
+async fn overlapping_subs_max_qos_delivered(sut: SutHandle) {
     let tag = unique_client_id("overlap");
     let topic = format!("overlap/{tag}/data");
     let filter_plus = format!("overlap/{tag}/+");
     let filter_hash = format!("overlap/{tag}/#");
 
     let sub_id = unique_client_id("sub-oq");
-    let mut sub = RawMqttClient::connect_tcp(broker.socket_addr())
+    let mut sub = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     sub.connect_and_establish(&sub_id, TIMEOUT).await;
@@ -37,7 +46,9 @@ async fn overlapping_subs_max_qos_delivered() {
     .unwrap();
     sub.expect_suback(TIMEOUT).await;
 
-    let publisher = connected_client("pub-overlap-qos", &broker).await;
+    let publisher = TestClient::connect_with_prefix(&sut, "pub-overlap-qos")
+        .await
+        .unwrap();
     let pub_opts = PublishOptions {
         qos: QoS::AtLeastOnce,
         ..Default::default()
@@ -78,16 +89,21 @@ async fn overlapping_subs_max_qos_delivered() {
     publisher.disconnect().await.expect("disconnect failed");
 }
 
-#[tokio::test]
-async fn overlapping_subs_subscription_ids_per_copy() {
-    let broker = ConformanceBroker::start().await;
+/// `[MQTT-3.3.4-3]` `[MQTT-3.3.4-5]` Each PUBLISH copy delivered for
+/// overlapping subscriptions must carry its matching Subscription
+/// Identifier.
+#[conformance_test(
+    ids = ["MQTT-3.3.4-3", "MQTT-3.3.4-5"],
+    requires = ["transport.tcp", "max_qos>=1"],
+)]
+async fn overlapping_subs_subscription_ids_per_copy(sut: SutHandle) {
     let tag = unique_client_id("subid");
     let topic = format!("subid/{tag}/data");
     let filter_a = format!("subid/{tag}/+");
     let filter_b = format!("subid/{tag}/#");
 
     let sub_id = unique_client_id("sub-oi");
-    let mut sub = RawMqttClient::connect_tcp(broker.socket_addr())
+    let mut sub = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     sub.connect_and_establish(&sub_id, TIMEOUT).await;
@@ -104,7 +120,9 @@ async fn overlapping_subs_subscription_ids_per_copy() {
     .unwrap();
     sub.expect_suback(TIMEOUT).await;
 
-    let publisher = connected_client("pub-overlap-id", &broker).await;
+    let publisher = TestClient::connect_with_prefix(&sut, "pub-overlap-id")
+        .await
+        .unwrap();
     let pub_opts = PublishOptions {
         qos: QoS::AtLeastOnce,
         ..Default::default()
@@ -153,35 +171,41 @@ async fn overlapping_subs_subscription_ids_per_copy() {
     publisher.disconnect().await.expect("disconnect failed");
 }
 
-#[tokio::test]
-async fn overlapping_subs_no_local_prevents_echo() {
-    let broker = ConformanceBroker::start().await;
+/// `[MQTT-3.8.3-3]` A subscription with No Local set must not receive
+/// messages published by the same client.
+#[conformance_test(
+    ids = ["MQTT-3.8.3-3"],
+    requires = ["transport.tcp", "max_qos>=1"],
+)]
+async fn overlapping_subs_no_local_prevents_echo(sut: SutHandle) {
     let tag = unique_client_id("nolocal");
     let topic = format!("nolocal/{tag}/data");
     let filter = format!("nolocal/{tag}/+");
 
-    let self_collector = MessageCollector::new();
-    let client = connected_client("client-nolocal", &broker).await;
+    let client = TestClient::connect_with_prefix(&sut, "client-nolocal")
+        .await
+        .unwrap();
 
     let sub_opts = SubscribeOptions {
         qos: QoS::AtLeastOnce,
         no_local: true,
         ..Default::default()
     };
-    client
-        .subscribe_with_options(&filter, sub_opts, self_collector.callback())
+    let self_subscription = client
+        .subscribe(&filter, sub_opts)
         .await
         .expect("subscribe failed");
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let other_collector = MessageCollector::new();
-    let other = connected_client("other-nolocal", &broker).await;
+    let other = TestClient::connect_with_prefix(&sut, "other-nolocal")
+        .await
+        .unwrap();
     let other_sub_opts = SubscribeOptions {
         qos: QoS::AtLeastOnce,
         ..Default::default()
     };
-    other
-        .subscribe_with_options(&filter, other_sub_opts, other_collector.callback())
+    let other_subscription = other
+        .subscribe(&filter, other_sub_opts)
         .await
         .expect("other subscribe failed");
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -192,13 +216,13 @@ async fn overlapping_subs_no_local_prevents_echo() {
         .expect("publish failed");
 
     assert!(
-        other_collector.wait_for_messages(1, TIMEOUT).await,
+        other_subscription.wait_for_messages(1, TIMEOUT).await,
         "other subscriber should receive the message"
     );
 
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(
-        self_collector.count(),
+        self_subscription.count(),
         0,
         "no_local subscriber must not receive its own publish on wildcard subscription"
     );
@@ -207,13 +231,19 @@ async fn overlapping_subs_no_local_prevents_echo() {
     other.disconnect().await.expect("disconnect failed");
 }
 
-#[tokio::test]
-async fn message_expiry_drops_expired_retained() {
-    let broker = ConformanceBroker::start().await;
+/// `[MQTT-3.3.2-5]` A retained message that has expired must not be
+/// delivered to a new subscriber.
+#[conformance_test(
+    ids = ["MQTT-3.3.2-5"],
+    requires = ["transport.tcp", "max_qos>=1", "retain_available"],
+)]
+async fn message_expiry_drops_expired_retained(sut: SutHandle) {
     let tag = unique_client_id("expiry");
     let topic = format!("expiry/{tag}");
 
-    let publisher = connected_client("pub-expiry", &broker).await;
+    let publisher = TestClient::connect_with_prefix(&sut, "pub-expiry")
+        .await
+        .unwrap();
     let pub_opts = PublishOptions {
         qos: QoS::AtLeastOnce,
         retain: true,
@@ -231,17 +261,18 @@ async fn message_expiry_drops_expired_retained() {
 
     tokio::time::sleep(Duration::from_secs(2)).await;
 
-    let collector = MessageCollector::new();
-    let subscriber = connected_client("sub-expiry", &broker).await;
-    subscriber
-        .subscribe(&topic, collector.callback())
+    let subscriber = TestClient::connect_with_prefix(&sut, "sub-expiry")
+        .await
+        .unwrap();
+    let subscription = subscriber
+        .subscribe(&topic, SubscribeOptions::default())
         .await
         .expect("subscribe failed");
 
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     assert_eq!(
-        collector.count(),
+        subscription.count(),
         0,
         "[MQTT-3.3.2-5] expired retained message must not be delivered to new subscriber"
     );
@@ -249,13 +280,19 @@ async fn message_expiry_drops_expired_retained() {
     subscriber.disconnect().await.expect("disconnect failed");
 }
 
-#[tokio::test]
-async fn message_expiry_interval_decremented() {
-    let broker = ConformanceBroker::start().await;
+/// `[MQTT-3.3.2-6]` Message Expiry Interval must be decremented by the
+/// time the message has been held by the broker.
+#[conformance_test(
+    ids = ["MQTT-3.3.2-6"],
+    requires = ["transport.tcp", "max_qos>=1", "retain_available"],
+)]
+async fn message_expiry_interval_decremented(sut: SutHandle) {
     let tag = unique_client_id("decrement");
     let topic = format!("decrement/{tag}");
 
-    let publisher = connected_client("pub-decrement", &broker).await;
+    let publisher = TestClient::connect_with_prefix(&sut, "pub-decrement")
+        .await
+        .unwrap();
     let pub_opts = PublishOptions {
         qos: QoS::AtLeastOnce,
         retain: true,
@@ -273,21 +310,21 @@ async fn message_expiry_interval_decremented() {
 
     tokio::time::sleep(Duration::from_secs(2)).await;
 
-    let collector = MessageCollector::new();
-    let subscriber = connected_client("sub-decrement", &broker).await;
-    subscriber
-        .subscribe(&topic, collector.callback())
+    let subscriber = TestClient::connect_with_prefix(&sut, "sub-decrement")
+        .await
+        .unwrap();
+    let subscription = subscriber
+        .subscribe(&topic, SubscribeOptions::default())
         .await
         .expect("subscribe failed");
 
     assert!(
-        collector.wait_for_messages(1, TIMEOUT).await,
+        subscription.wait_for_messages(1, TIMEOUT).await,
         "retained message should be delivered"
     );
 
-    let msgs = collector.get_messages();
+    let msgs = subscription.snapshot();
     let expiry = msgs[0]
-        .properties
         .message_expiry_interval
         .expect("[MQTT-3.3.2-6] delivered retained message must include message_expiry_interval");
     assert!(
@@ -298,11 +335,14 @@ async fn message_expiry_interval_decremented() {
     subscriber.disconnect().await.expect("disconnect failed");
 }
 
-#[tokio::test]
-async fn response_topic_wildcard_rejected() {
-    let broker = ConformanceBroker::start().await;
-
-    let mut raw = RawMqttClient::connect_tcp(broker.socket_addr())
+/// `[MQTT-3.3.2-14]` The Response Topic must not contain wildcards.
+/// Sending PUBLISH with a wildcard Response Topic must cause disconnect.
+#[conformance_test(
+    ids = ["MQTT-3.3.2-14"],
+    requires = ["transport.tcp"],
+)]
+async fn response_topic_wildcard_rejected(sut: SutHandle) {
+    let mut raw = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let client_id = unique_client_id("rt-wc");
@@ -322,21 +362,28 @@ async fn response_topic_wildcard_rejected() {
     );
 }
 
-#[tokio::test]
-async fn response_topic_valid_utf8_forwarded() {
-    let broker = ConformanceBroker::start().await;
+/// `[MQTT-3.3.2-13]` A valid UTF-8 Response Topic must be forwarded to
+/// subscribers unchanged.
+#[conformance_test(
+    ids = ["MQTT-3.3.2-13"],
+    requires = ["transport.tcp"],
+)]
+async fn response_topic_valid_utf8_forwarded(sut: SutHandle) {
     let tag = unique_client_id("rt-fwd");
     let topic = format!("rtfwd/{tag}");
 
-    let collector = MessageCollector::new();
-    let subscriber = connected_client("sub-rt-fwd", &broker).await;
-    subscriber
-        .subscribe(&topic, collector.callback())
+    let subscriber = TestClient::connect_with_prefix(&sut, "sub-rt-fwd")
+        .await
+        .unwrap();
+    let subscription = subscriber
+        .subscribe(&topic, SubscribeOptions::default())
         .await
         .expect("subscribe failed");
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let publisher = connected_client("pub-rt-fwd", &broker).await;
+    let publisher = TestClient::connect_with_prefix(&sut, "pub-rt-fwd")
+        .await
+        .unwrap();
     let pub_opts = PublishOptions {
         qos: QoS::AtMostOnce,
         properties: PublishProperties {
@@ -351,13 +398,13 @@ async fn response_topic_valid_utf8_forwarded() {
         .expect("publish failed");
 
     assert!(
-        collector.wait_for_messages(1, TIMEOUT).await,
+        subscription.wait_for_messages(1, TIMEOUT).await,
         "subscriber should receive message with response topic"
     );
 
-    let msgs = collector.get_messages();
+    let msgs = subscription.snapshot();
     assert_eq!(
-        msgs[0].properties.response_topic.as_deref(),
+        msgs[0].response_topic.as_deref(),
         Some("reply/topic"),
         "[MQTT-3.3.2-13] valid UTF-8 Response Topic must be forwarded to subscriber"
     );

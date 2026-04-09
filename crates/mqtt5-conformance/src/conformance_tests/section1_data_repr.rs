@@ -1,5 +1,9 @@
-use mqtt5_conformance::harness::{unique_client_id, ConformanceBroker};
-use mqtt5_conformance::raw_client::{RawMqttClient, RawPacketBuilder};
+//! Section 1.5 — Data Representation: UTF-8 strings, variable byte integers.
+
+use crate::conformance_test;
+use crate::harness::unique_client_id;
+use crate::raw_client::{RawMqttClient, RawPacketBuilder};
+use crate::sut::SutHandle;
 use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_secs(3);
@@ -8,13 +12,12 @@ const TIMEOUT: Duration = Duration::from_secs(3);
 /// well-formed UTF-8 as defined by the Unicode specification and restated
 /// in RFC 3629. In particular it MUST NOT include encodings of code points
 /// between U+D800 and U+DFFF.
-///
-/// Sends a CONNECT with `client_id` containing UTF-16 surrogate bytes
-/// (0xED 0xA0 0x80 = U+D800). Server must disconnect (malformed packet).
-#[tokio::test]
-async fn utf8_surrogate_codepoints_rejected() {
-    let broker = ConformanceBroker::start().await;
-    let mut raw = RawMqttClient::connect_tcp(broker.socket_addr())
+#[conformance_test(
+    ids = ["MQTT-1.5.4-1"],
+    requires = ["transport.tcp"],
+)]
+async fn utf8_surrogate_codepoints_rejected(sut: SutHandle) {
+    let mut raw = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
 
@@ -31,12 +34,11 @@ async fn utf8_surrogate_codepoints_rejected() {
 /// [MQTT-1.5.4-3] A UTF-8 Encoded String MUST NOT include an encoding of the
 /// null character U+0000. A Byte Order Mark (BOM, U+FEFF) is valid and MUST NOT
 /// be stripped by the server.
-///
-/// Subscribes to a topic with BOM prefix and publishes to the same topic,
-/// verifying the subscriber receives the message (BOM is preserved, not stripped).
-#[tokio::test]
-async fn bom_preserved_in_topic() {
-    let broker = ConformanceBroker::start().await;
+#[conformance_test(
+    ids = ["MQTT-1.5.4-3"],
+    requires = ["transport.tcp"],
+)]
+async fn bom_preserved_in_topic(sut: SutHandle) {
     let tag = unique_client_id("bom");
 
     let bom_prefix: &[u8] = &[0xEF, 0xBB, 0xBF];
@@ -45,7 +47,7 @@ async fn bom_preserved_in_topic() {
     topic_with_bom.extend_from_slice(bom_prefix);
     topic_with_bom.extend_from_slice(topic_suffix.as_bytes());
 
-    let mut subscriber = RawMqttClient::connect_tcp(broker.socket_addr())
+    let mut subscriber = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let sub_id = unique_client_id("bom-sub");
@@ -69,7 +71,7 @@ async fn bom_preserved_in_topic() {
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let mut publisher = RawMqttClient::connect_tcp(broker.socket_addr())
+    let mut publisher = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let pub_id = unique_client_id("bom-pub");
@@ -99,14 +101,12 @@ async fn bom_preserved_in_topic() {
 /// [MQTT-1.5.5-1] The encoded value MUST use the minimum number of bytes
 /// necessary to represent the value. A variable byte integer MUST NOT use
 /// more than 4 bytes.
-///
-/// Sends a raw CONNECT packet with a 5-byte variable byte integer in the
-/// remaining length field (exceeds the 4-byte maximum). Server should
-/// disconnect.
-#[tokio::test]
-async fn non_minimal_varint_rejected() {
-    let broker = ConformanceBroker::start().await;
-    let mut raw = RawMqttClient::connect_tcp(broker.socket_addr())
+#[conformance_test(
+    ids = ["MQTT-1.5.5-1"],
+    requires = ["transport.tcp"],
+)]
+async fn non_minimal_varint_rejected(sut: SutHandle) {
+    let mut raw = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
 
@@ -122,13 +122,12 @@ async fn non_minimal_varint_rejected() {
 
 /// [MQTT-1.5.7-1] Both the key and value of a UTF-8 String Pair MUST comply
 /// with the requirements for UTF-8 Encoded Strings.
-///
-/// Sends a PUBLISH with a user property key containing invalid UTF-8 bytes.
-/// Server must disconnect (malformed).
-#[tokio::test]
-async fn invalid_utf8_user_property_rejected() {
-    let broker = ConformanceBroker::start().await;
-    let mut raw = RawMqttClient::connect_tcp(broker.socket_addr())
+#[conformance_test(
+    ids = ["MQTT-1.5.7-1"],
+    requires = ["transport.tcp"],
+)]
+async fn invalid_utf8_user_property_rejected(sut: SutHandle) {
+    let mut raw = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let client_id = unique_client_id("utf8prop");
@@ -149,14 +148,12 @@ async fn invalid_utf8_user_property_rejected() {
 
 /// [MQTT-4.7.3-3] Topic Names and Topic Filters are UTF-8 Encoded Strings;
 /// they MUST NOT encode to more than 65,535 bytes.
-///
-/// Sends a PUBLISH with a topic of 65535 'A' characters (the maximum
-/// allowed by the 2-byte length prefix). The broker should either accept
-/// the packet or cleanly reject it. The connection must not hang or crash.
-#[tokio::test]
-async fn max_length_topic_handled() {
-    let broker = ConformanceBroker::start().await;
-    let mut raw = RawMqttClient::connect_tcp(broker.socket_addr())
+#[conformance_test(
+    ids = ["MQTT-4.7.3-3"],
+    requires = ["transport.tcp"],
+)]
+async fn max_length_topic_handled(sut: SutHandle) {
+    let mut raw = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let client_id = unique_client_id("bigtopic");
@@ -168,9 +165,7 @@ async fn max_length_topic_handled() {
 
     let response = raw.expect_any_packet(TIMEOUT).await;
     match response {
-        Some(data) if !data.is_empty() && data[0] == 0xE0 => {
-            // pass
-        }
+        Some(data) if !data.is_empty() && data[0] == 0xE0 => {}
         Some(_) | None => {
             raw.send_raw(&RawPacketBuilder::pingreq()).await.unwrap();
             let alive = raw.expect_pingresp(TIMEOUT).await;

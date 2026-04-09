@@ -10,7 +10,22 @@
 
 #![warn(clippy::pedantic)]
 
+extern crate self as mqtt5_conformance;
+
+pub mod assertions;
+pub mod capabilities;
+#[cfg(feature = "inprocess-fixture")]
+pub mod conformance_tests;
+#[cfg(feature = "inprocess-fixture")]
 pub mod harness;
 pub mod manifest;
+pub mod packet_parser;
 pub mod raw_client;
+pub mod registry;
 pub mod report;
+pub mod skip;
+pub mod sut;
+pub mod test_client;
+pub mod transport;
+
+pub use mqtt5_conformance_macros::conformance_test;

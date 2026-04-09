@@ -1,13 +1,14 @@
-//! Raw TCP client for sending hand-crafted MQTT packets.
+//! Raw transport-level client for sending hand-crafted MQTT packets.
 //!
 //! The normal [`MqttClient`](mqtt5::MqttClient) API enforces well-formed packets,
 //! making it impossible to test how the broker handles malformed input.
-//! [`RawMqttClient`] operates at the TCP byte level, and [`RawPacketBuilder`]
-//! constructs both valid and deliberately invalid MQTT v5.0 packets for
-//! conformance edge-case testing.
+//! [`RawMqttClient`] operates at the byte level over any [`Transport`], and
+//! [`RawPacketBuilder`] constructs both valid and deliberately invalid MQTT
+//! v5.0 packets for conformance edge-case testing.
 
 #![allow(clippy::cast_possible_truncation, clippy::missing_errors_doc)]
 
+use crate::transport::{TcpTransport, Transport};
 use bytes::{BufMut, BytesMut};
 use mqtt5_protocol::packet::connack::ConnAckPacket;
 use mqtt5_protocol::packet::MqttPacket;
@@ -15,26 +16,41 @@ use mqtt5_protocol::FixedHeader;
 use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
 
-/// A raw TCP client for sending arbitrary bytes to an MQTT broker.
+/// A raw transport-level client for sending arbitrary bytes to an MQTT broker.
 ///
 /// Unlike [`MqttClient`](mqtt5::MqttClient), this client performs no packet
-/// validation or encoding — it writes raw bytes directly to the TCP stream.
-/// Use this for testing broker behavior with malformed, truncated, or
+/// validation or encoding — it writes raw bytes directly to the underlying
+/// transport. Use it for testing broker behavior with malformed, truncated, or
 /// protocol-violating packets.
-pub struct RawMqttClient {
-    stream: TcpStream,
+///
+/// The default transport is [`TcpTransport`]; future phases add TLS and
+/// WebSocket variants so the same test code can drive a broker over every
+/// protocol it speaks.
+pub struct RawMqttClient<T: Transport = TcpTransport> {
+    stream: T,
 }
 
-impl RawMqttClient {
+impl RawMqttClient<TcpTransport> {
     /// Opens a raw TCP connection to the broker.
     pub async fn connect_tcp(addr: SocketAddr) -> std::io::Result<Self> {
-        let stream = TcpStream::connect(addr).await?;
+        let stream = TcpTransport::connect(addr).await?;
         Ok(Self { stream })
     }
+}
 
-    /// Sends raw bytes over the TCP connection.
+impl<T: Transport> RawMqttClient<T> {
+    /// Wraps an already-established transport.
+    pub fn from_transport(stream: T) -> Self {
+        Self { stream }
+    }
+
+    /// Consumes the client and returns the underlying transport.
+    pub fn into_transport(self) -> T {
+        self.stream
+    }
+
+    /// Sends raw bytes over the transport.
     pub async fn send_raw(&mut self, data: &[u8]) -> std::io::Result<()> {
         self.stream.write_all(data).await
     }

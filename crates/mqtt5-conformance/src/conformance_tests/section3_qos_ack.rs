@@ -1,22 +1,24 @@
-use mqtt5::{QoS, SubscribeOptions};
-use mqtt5_conformance::harness::{
-    connected_client, unique_client_id, ConformanceBroker, MessageCollector,
-};
-use mqtt5_conformance::raw_client::{RawMqttClient, RawPacketBuilder};
+//! Sections 3.4–3.7 — PUBACK / PUBREC / PUBREL / PUBCOMP.
+
+use crate::conformance_test;
+use crate::harness::unique_client_id;
+use crate::raw_client::{RawMqttClient, RawPacketBuilder};
+use crate::sut::SutHandle;
+use crate::test_client::TestClient;
+use mqtt5_protocol::types::{PublishOptions, QoS, SubscribeOptions};
 use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_secs(3);
 
-// ---------------------------------------------------------------------------
-// Group 1: PUBACK — Section 3.4
-// ---------------------------------------------------------------------------
-
-/// Server MUST send PUBACK in response to a `QoS` 1 PUBLISH, containing
-/// the matching Packet Identifier and a valid reason code.
-#[tokio::test]
-async fn puback_correct_packet_id_and_reason() {
-    let broker = ConformanceBroker::start().await;
-    let mut raw = RawMqttClient::connect_tcp(broker.socket_addr())
+/// `[MQTT-3.4.0-1]` `[MQTT-3.4.2-1]` Server MUST send PUBACK in response to
+/// a `QoS` 1 PUBLISH, containing the matching Packet Identifier and a valid
+/// reason code.
+#[conformance_test(
+    ids = ["MQTT-3.4.0-1", "MQTT-3.4.2-1"],
+    requires = ["transport.tcp", "max_qos>=1"],
+)]
+async fn puback_correct_packet_id_and_reason(sut: SutHandle) {
+    let mut raw = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let client_id = unique_client_id("puback-pid");
@@ -43,46 +45,50 @@ async fn puback_correct_packet_id_and_reason() {
     assert_eq!(reason, 0x00, "PUBACK reason code should be Success (0x00)");
 }
 
-/// `QoS` 1 PUBLISH results in message delivery to subscriber.
-#[tokio::test]
-async fn puback_message_delivered_on_qos1() {
-    let broker = ConformanceBroker::start().await;
-    let subscriber = connected_client("puback-sub", &broker).await;
-    let collector = MessageCollector::new();
-    let opts = SubscribeOptions {
-        qos: QoS::AtLeastOnce,
-        ..Default::default()
-    };
-    subscriber
-        .subscribe_with_options("test/qos1-deliver", opts, collector.callback())
+/// `[MQTT-3.4.0-1]` `QoS` 1 PUBLISH results in message delivery to subscriber.
+#[conformance_test(
+    ids = ["MQTT-3.4.0-1"],
+    requires = ["transport.tcp", "max_qos>=1"],
+)]
+async fn puback_message_delivered_on_qos1(sut: SutHandle) {
+    let subscriber = TestClient::connect_with_prefix(&sut, "puback-sub")
         .await
         .unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    let subscription = subscriber
+        .subscribe(
+            "test/qos1-deliver",
+            SubscribeOptions {
+                qos: QoS::AtLeastOnce,
+                ..SubscribeOptions::default()
+            },
+        )
+        .await
+        .unwrap();
 
-    let publisher = connected_client("puback-pub", &broker).await;
+    let publisher = TestClient::connect_with_prefix(&sut, "puback-pub")
+        .await
+        .unwrap();
     publisher
-        .publish("test/qos1-deliver", b"qos1-payload".to_vec())
+        .publish("test/qos1-deliver", b"qos1-payload")
         .await
         .unwrap();
 
-    assert!(
-        collector.wait_for_messages(1, TIMEOUT).await,
-        "subscriber should receive QoS 1 message"
-    );
-    let msgs = collector.get_messages();
-    assert_eq!(msgs[0].payload, b"qos1-payload");
+    let msg = subscription
+        .expect_publish(TIMEOUT)
+        .await
+        .expect("subscriber should receive QoS 1 message");
+    assert_eq!(msg.payload, b"qos1-payload");
 }
 
-// ---------------------------------------------------------------------------
-// Group 2: PUBREC — Section 3.5
-// ---------------------------------------------------------------------------
-
-/// Server MUST send PUBREC in response to a `QoS` 2 PUBLISH, containing
-/// the matching Packet Identifier and a valid reason code.
-#[tokio::test]
-async fn pubrec_correct_packet_id_and_reason() {
-    let broker = ConformanceBroker::start().await;
-    let mut raw = RawMqttClient::connect_tcp(broker.socket_addr())
+/// `[MQTT-3.5.0-1]` `[MQTT-3.5.2-1]` Server MUST send PUBREC in response to
+/// a `QoS` 2 PUBLISH, containing the matching Packet Identifier and a valid
+/// reason code.
+#[conformance_test(
+    ids = ["MQTT-3.5.0-1", "MQTT-3.5.2-1"],
+    requires = ["transport.tcp", "max_qos>=2"],
+)]
+async fn pubrec_correct_packet_id_and_reason(sut: SutHandle) {
+    let mut raw = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let client_id = unique_client_id("pubrec-pid");
@@ -109,27 +115,28 @@ async fn pubrec_correct_packet_id_and_reason() {
     assert_eq!(reason, 0x00, "PUBREC reason code should be Success (0x00)");
 }
 
-/// `QoS` 2 message MUST NOT be delivered to subscribers until PUBREL is received.
-///
-/// Sends `QoS` 2 PUBLISH → gets PUBREC, but does NOT send PUBREL.
-/// Verifies subscriber does not receive the message.
-#[tokio::test]
-async fn pubrec_no_delivery_before_pubrel() {
-    let broker = ConformanceBroker::start().await;
-
-    let subscriber = connected_client("pubrec-nosub", &broker).await;
-    let collector = MessageCollector::new();
-    let opts = SubscribeOptions {
-        qos: QoS::ExactlyOnce,
-        ..Default::default()
-    };
-    subscriber
-        .subscribe_with_options("test/nodelay", opts, collector.callback())
+/// `[MQTT-3.7.4-1]` `QoS` 2 message MUST NOT be delivered to subscribers
+/// until PUBREL is received.
+#[conformance_test(
+    ids = ["MQTT-3.7.4-1"],
+    requires = ["transport.tcp", "max_qos>=2"],
+)]
+async fn pubrec_no_delivery_before_pubrel(sut: SutHandle) {
+    let subscriber = TestClient::connect_with_prefix(&sut, "pubrec-nosub")
         .await
         .unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    let subscription = subscriber
+        .subscribe(
+            "test/nodelay",
+            SubscribeOptions {
+                qos: QoS::ExactlyOnce,
+                ..SubscribeOptions::default()
+            },
+        )
+        .await
+        .unwrap();
 
-    let mut raw = RawMqttClient::connect_tcp(broker.socket_addr())
+    let mut raw = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let client_id = unique_client_id("pubrec-raw");
@@ -150,22 +157,20 @@ async fn pubrec_no_delivery_before_pubrel() {
 
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(
-        collector.count(),
+        subscription.count(),
         0,
         "message must NOT be delivered before PUBREL"
     );
 }
 
-// ---------------------------------------------------------------------------
-// Group 3: PUBREL — Section 3.6
-// ---------------------------------------------------------------------------
-
-/// `[MQTT-3.6.1-1]` PUBREL fixed header flags MUST be `0x02`. The Server MUST
-/// treat any other value as malformed and close the Network Connection.
-#[tokio::test]
-async fn pubrel_invalid_flags_rejected() {
-    let broker = ConformanceBroker::start().await;
-    let mut raw = RawMqttClient::connect_tcp(broker.socket_addr())
+/// `[MQTT-3.6.1-1]` PUBREL fixed header flags MUST be `0x02`. The Server
+/// MUST treat any other value as malformed and close the Network Connection.
+#[conformance_test(
+    ids = ["MQTT-3.6.1-1"],
+    requires = ["transport.tcp", "max_qos>=2"],
+)]
+async fn pubrel_invalid_flags_rejected(sut: SutHandle) {
+    let mut raw = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let client_id = unique_client_id("pubrel-flags");
@@ -191,12 +196,14 @@ async fn pubrel_invalid_flags_rejected() {
     );
 }
 
-/// PUBREL for an unknown Packet Identifier MUST result in PUBCOMP with
-/// reason code `PacketIdentifierNotFound` (0x92).
-#[tokio::test]
-async fn pubrel_unknown_packet_id() {
-    let broker = ConformanceBroker::start().await;
-    let mut raw = RawMqttClient::connect_tcp(broker.socket_addr())
+/// `[MQTT-3.6.2-1]` `[MQTT-3.7.2-1]` PUBREL for an unknown Packet Identifier
+/// MUST result in PUBCOMP with reason code `PacketIdentifierNotFound` (0x92).
+#[conformance_test(
+    ids = ["MQTT-3.6.2-1", "MQTT-3.7.2-1"],
+    requires = ["transport.tcp", "max_qos>=2"],
+)]
+async fn pubrel_unknown_packet_id(sut: SutHandle) {
+    let mut raw = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let client_id = unique_client_id("pubrel-unk");
@@ -216,16 +223,15 @@ async fn pubrel_unknown_packet_id() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Group 4: PUBCOMP — Section 3.7
-// ---------------------------------------------------------------------------
-
-/// Full inbound `QoS` 2 flow: PUBLISH → PUBREC → PUBREL → PUBCOMP.
-/// Verifies PUBCOMP has matching packet ID and reason=Success.
-#[tokio::test]
-async fn pubcomp_correct_packet_id_and_reason() {
-    let broker = ConformanceBroker::start().await;
-    let mut raw = RawMqttClient::connect_tcp(broker.socket_addr())
+/// `[MQTT-3.6.4-1]` `[MQTT-3.7.2-1]` Full inbound `QoS` 2 flow: PUBLISH →
+/// PUBREC → PUBREL → PUBCOMP. Verifies PUBCOMP has matching packet ID and
+/// reason=Success.
+#[conformance_test(
+    ids = ["MQTT-3.6.4-1", "MQTT-3.7.2-1"],
+    requires = ["transport.tcp", "max_qos>=2"],
+)]
+async fn pubcomp_correct_packet_id_and_reason(sut: SutHandle) {
+    let mut raw = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let client_id = unique_client_id("pubcomp-pid");
@@ -259,24 +265,28 @@ async fn pubcomp_correct_packet_id_and_reason() {
     assert_eq!(reason, 0x00, "PUBCOMP reason code should be Success (0x00)");
 }
 
-/// Full `QoS` 2 exchange delivers the message to a subscriber.
-#[tokio::test]
-async fn pubcomp_message_delivered_after_exchange() {
-    let broker = ConformanceBroker::start().await;
-
-    let subscriber = connected_client("pubcomp-sub", &broker).await;
-    let collector = MessageCollector::new();
-    let opts = SubscribeOptions {
-        qos: QoS::ExactlyOnce,
-        ..Default::default()
-    };
-    subscriber
-        .subscribe_with_options("test/qos2-deliver", opts, collector.callback())
+/// `[MQTT-3.7.4-1]` Full `QoS` 2 exchange delivers the message to a
+/// subscriber.
+#[conformance_test(
+    ids = ["MQTT-3.7.4-1"],
+    requires = ["transport.tcp", "max_qos>=2"],
+)]
+async fn pubcomp_message_delivered_after_exchange(sut: SutHandle) {
+    let subscriber = TestClient::connect_with_prefix(&sut, "pubcomp-sub")
         .await
         .unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    let subscription = subscriber
+        .subscribe(
+            "test/qos2-deliver",
+            SubscribeOptions {
+                qos: QoS::ExactlyOnce,
+                ..SubscribeOptions::default()
+            },
+        )
+        .await
+        .unwrap();
 
-    let mut raw = RawMqttClient::connect_tcp(broker.socket_addr())
+    let mut raw = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let client_id = unique_client_id("pubcomp-raw");
@@ -296,25 +306,22 @@ async fn pubcomp_message_delivered_after_exchange() {
 
     let _ = raw.expect_pubcomp(TIMEOUT).await.expect("expected PUBCOMP");
 
-    assert!(
-        collector.wait_for_messages(1, TIMEOUT).await,
-        "subscriber should receive message after full QoS 2 exchange"
-    );
-    let msgs = collector.get_messages();
-    assert_eq!(msgs[0].payload, b"qos2-payload");
+    let msg = subscription
+        .expect_publish(TIMEOUT)
+        .await
+        .expect("subscriber should receive message after full QoS 2 exchange");
+    assert_eq!(msg.payload, b"qos2-payload");
 }
 
-// ---------------------------------------------------------------------------
-// Group 5: Outbound Server PUBREL
-// ---------------------------------------------------------------------------
-
-/// When the server delivers a `QoS` 2 message to a subscriber, the PUBREL
-/// it sends MUST have fixed header flags = `0x02` (byte `0x62`).
-#[tokio::test]
-async fn server_pubrel_correct_flags() {
-    let broker = ConformanceBroker::start().await;
-
-    let mut raw_sub = RawMqttClient::connect_tcp(broker.socket_addr())
+/// `[MQTT-3.6.1-1]` `[MQTT-3.6.2-1]` When the server delivers a `QoS` 2
+/// message to a subscriber, the PUBREL it sends MUST have fixed header
+/// flags = `0x02` (byte `0x62`).
+#[conformance_test(
+    ids = ["MQTT-3.6.1-1", "MQTT-3.6.2-1"],
+    requires = ["transport.tcp", "max_qos>=2"],
+)]
+async fn server_pubrel_correct_flags(sut: SutHandle) {
+    let mut raw_sub = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let sub_id = unique_client_id("srv-pubrel-sub");
@@ -326,13 +333,15 @@ async fn server_pubrel_correct_flags() {
     let _ = raw_sub.read_packet_bytes(TIMEOUT).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let publisher = connected_client("srv-pubrel-pub", &broker).await;
-    let pub_opts = mqtt5::PublishOptions {
+    let publisher = TestClient::connect_with_prefix(&sut, "srv-pubrel-pub")
+        .await
+        .unwrap();
+    let pub_opts = PublishOptions {
         qos: QoS::ExactlyOnce,
         ..Default::default()
     };
     publisher
-        .publish_with_options("test/srv-pubrel", b"outbound-qos2".to_vec(), pub_opts)
+        .publish_with_options("test/srv-pubrel", b"outbound-qos2", pub_opts)
         .await
         .unwrap();
 

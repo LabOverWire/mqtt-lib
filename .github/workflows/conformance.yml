@@ -1,0 +1,117 @@
+name: Conformance Suite
+
+on:
+  push:
+    branches: ["main", "develop"]
+  pull_request:
+    branches: ["main", "develop"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  inprocess:
+    name: Conformance (in-process fixture)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build conformance CLI
+        run: cargo build --release -p mqtt5-conformance-cli
+
+      - name: Run conformance suite (in-process)
+        run: ./target/release/mqtt5-conformance
+
+      - name: Generate JSON report
+        run: ./target/release/mqtt5-conformance --report conformance-report.json
+
+      - name: Upload report
+        uses: actions/upload-artifact@v4
+        with:
+          name: conformance-report-inprocess
+          path: conformance-report.json
+          if-no-files-found: error
+
+  external-mqtt5:
+    name: Conformance (external mqtt5 broker)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build mqttv5 broker
+        run: cargo build --release -p mqttv5-cli
+
+      - name: Build conformance CLI
+        run: cargo build --release -p mqtt5-conformance-cli
+
+      - name: Start mqttv5 broker
+        run: |
+          ./target/release/mqttv5 broker \
+            --host 127.0.0.1:1883 \
+            --allow-anonymous true \
+            > broker.log 2>&1 &
+          echo $! > broker.pid
+          sleep 2
+
+      - name: Run conformance suite against external broker
+        run: |
+          ./target/release/mqtt5-conformance \
+            --sut crates/mqtt5-conformance/tests/fixtures/external-mqtt5.toml \
+            --report conformance-report.json
+
+      - name: Stop broker
+        if: always()
+        run: |
+          if [ -f broker.pid ]; then
+            kill "$(cat broker.pid)" || true
+          fi
+
+      - name: Upload broker log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: broker-log-external-mqtt5
+          path: broker.log
+          if-no-files-found: ignore
+
+      - name: Upload report
+        uses: actions/upload-artifact@v4
+        with:
+          name: conformance-report-external-mqtt5
+          path: conformance-report.json
+          if-no-files-found: error
+
+  fixtures:
+    name: Validate fixtures and profiles
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run schema unit tests
+        run: cargo test -p mqtt5-conformance --lib --features inprocess-fixture

@@ -1,16 +1,26 @@
-use mqtt5::{PublishOptions, QoS};
-use mqtt5_conformance::harness::{connected_client, unique_client_id, ConformanceBroker};
-use mqtt5_conformance::raw_client::{RawMqttClient, RawPacketBuilder};
+//! Section 4.9 — Flow Control (receive maximum quota enforcement).
+
+use crate::conformance_test;
+use crate::harness::unique_client_id;
+use crate::raw_client::{RawMqttClient, RawPacketBuilder};
+use crate::sut::SutHandle;
+use crate::test_client::TestClient;
+use mqtt5_protocol::types::{PublishOptions, QoS};
 use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_secs(3);
 
-#[tokio::test]
-async fn flow_control_quota_enforced() {
-    let broker = ConformanceBroker::start().await;
+/// `[MQTT-4.9.0-1]` / `[MQTT-4.9.0-2]` Server must not send more unACKed
+/// `QoS` 1/2 PUBLISH packets than the client's Receive Maximum. Further
+/// queued messages are delivered only after PUBACKs free the quota.
+#[conformance_test(
+    ids = ["MQTT-4.9.0-1", "MQTT-4.9.0-2"],
+    requires = ["transport.tcp", "max_qos>=1"],
+)]
+async fn flow_control_quota_enforced(sut: SutHandle) {
     let topic = format!("fc-quota/{}", unique_client_id("t"));
 
-    let mut sub = RawMqttClient::connect_tcp(broker.socket_addr())
+    let mut sub = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let sub_id = unique_client_id("sub-fc");
@@ -27,7 +37,7 @@ async fn flow_control_quota_enforced() {
         .unwrap();
     let _ = sub.expect_suback(TIMEOUT).await;
 
-    let mut pub_raw = RawMqttClient::connect_tcp(broker.socket_addr())
+    let mut pub_raw = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let pub_id = unique_client_id("pub-fc");
@@ -74,13 +84,18 @@ async fn flow_control_quota_enforced() {
     }
 }
 
-#[tokio::test]
-async fn flow_control_other_packets_at_zero_quota() {
-    let broker = ConformanceBroker::start().await;
+/// `[MQTT-4.9.0-3]` PINGREQ, SUBSCRIBE and other non-PUBLISH control
+/// packets must still be processed even when the PUBLISH quota is fully
+/// consumed.
+#[conformance_test(
+    ids = ["MQTT-4.9.0-3"],
+    requires = ["transport.tcp", "max_qos>=1"],
+)]
+async fn flow_control_other_packets_at_zero_quota(sut: SutHandle) {
     let topic = format!("fc-zero/{}", unique_client_id("t"));
     let topic2 = format!("fc-zero2/{}", unique_client_id("t"));
 
-    let mut sub = RawMqttClient::connect_tcp(broker.socket_addr())
+    let mut sub = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let sub_id = unique_client_id("sub-fc0");
@@ -97,7 +112,9 @@ async fn flow_control_other_packets_at_zero_quota() {
         .unwrap();
     let _ = sub.expect_suback(TIMEOUT).await;
 
-    let publisher = connected_client("pub-fc0", &broker).await;
+    let publisher = TestClient::connect_with_prefix(&sut, "pub-fc0")
+        .await
+        .unwrap();
     let pub_opts = PublishOptions {
         qos: QoS::AtLeastOnce,
         ..Default::default()
@@ -149,10 +166,14 @@ async fn flow_control_other_packets_at_zero_quota() {
     );
 }
 
-#[tokio::test]
-async fn auth_invalid_flags_malformed() {
-    let broker = ConformanceBroker::start().await;
-    let mut raw = RawMqttClient::connect_tcp(broker.socket_addr())
+/// `[MQTT-3.15.1-1]` AUTH packet with non-zero reserved flags is a
+/// Malformed Packet and MUST cause disconnection.
+#[conformance_test(
+    ids = ["MQTT-3.15.1-1"],
+    requires = ["transport.tcp"],
+)]
+async fn auth_invalid_flags_malformed(sut: SutHandle) {
+    let mut raw = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let client_id = unique_client_id("auth-flags");

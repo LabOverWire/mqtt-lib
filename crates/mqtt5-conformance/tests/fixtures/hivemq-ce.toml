@@ -1,0 +1,30 @@
+name = "hivemq-ce"
+address = "mqtt://127.0.0.1:1883"
+tls_address = ""
+ws_address = "ws://127.0.0.1:8000/mqtt"
+
+[capabilities]
+max_qos = 2
+retain_available = true
+wildcard_subscription_available = true
+subscription_identifier_available = true
+shared_subscription_available = true
+topic_alias_maximum = 5
+server_receive_maximum = 10
+maximum_packet_size = 268435456
+assigned_client_id_supported = true
+acl = false
+injected_user_properties = []
+
+[capabilities.transports]
+tcp = true
+tls = false
+websocket = true
+quic = false
+
+[capabilities.enhanced_auth]
+methods = []
+
+[hooks]
+restart_command = ""
+cleanup_command = ""

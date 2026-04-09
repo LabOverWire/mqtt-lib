@@ -1,8 +1,11 @@
-use mqtt5::{PublishOptions, QoS, SubscribeOptions};
-use mqtt5_conformance::harness::{
-    connected_client, unique_client_id, ConformanceBroker, MessageCollector,
-};
-use mqtt5_conformance::raw_client::{RawMqttClient, RawPacketBuilder};
+//! Section 4.3 — `QoS` delivery protocols and Section 4.4 — message redelivery.
+
+use crate::conformance_test;
+use crate::harness::unique_client_id;
+use crate::raw_client::{RawMqttClient, RawPacketBuilder};
+use crate::sut::SutHandle;
+use crate::test_client::TestClient;
+use mqtt5_protocol::types::{PublishOptions, QoS, SubscribeOptions};
 use std::collections::HashSet;
 use std::time::Duration;
 
@@ -10,15 +13,14 @@ const TIMEOUT: Duration = Duration::from_secs(3);
 
 /// `[MQTT-4.3.1-1]` In the `QoS` 0 delivery protocol, the Server MUST send a
 /// PUBLISH packet with DUP=0.
-///
-/// Subscribes a raw client at `QoS` 0, publishes from another client, and
-/// verifies the received PUBLISH has DUP=0 (first byte `0x30` for non-retained).
-#[tokio::test]
-async fn qos0_server_outbound_publish_has_dup_zero() {
-    let broker = ConformanceBroker::start().await;
+#[conformance_test(
+    ids = ["MQTT-4.3.1-1"],
+    requires = ["transport.tcp"],
+)]
+async fn qos0_server_outbound_publish_has_dup_zero(sut: SutHandle) {
     let topic = format!("qos0-dup/{}", unique_client_id("t"));
 
-    let mut sub = RawMqttClient::connect_tcp(broker.socket_addr())
+    let mut sub = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let sub_id = unique_client_id("sub");
@@ -29,11 +31,8 @@ async fn qos0_server_outbound_publish_has_dup_zero() {
     let _ = sub.expect_suback(TIMEOUT).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let publisher = connected_client("pub", &broker).await;
-    publisher
-        .publish(&topic, b"qos0-data".to_vec())
-        .await
-        .unwrap();
+    let publisher = TestClient::connect_with_prefix(&sut, "pub").await.unwrap();
+    publisher.publish(&topic, b"qos0-data").await.unwrap();
 
     let (first_byte, _packet_id, qos, recv_topic, payload) = sub
         .expect_publish_with_id(TIMEOUT)
@@ -46,7 +45,7 @@ async fn qos0_server_outbound_publish_has_dup_zero() {
     let dup = (first_byte >> 3) & 0x01;
     assert_eq!(
         dup, 0,
-        "[MQTT-4.3.1-1] Server outbound QoS 0 PUBLISH must have DUP=0"
+        "[MQTT-4.3.1-1] Server outbound `QoS` 0 PUBLISH must have DUP=0"
     );
 }
 
@@ -54,15 +53,14 @@ async fn qos0_server_outbound_publish_has_dup_zero() {
 /// Server MUST assign a non-zero Packet Identifier each time it has a new
 /// Application Message to deliver, and the PUBLISH MUST have DUP=0 on first
 /// delivery.
-///
-/// Subscribes at `QoS` 1, publishes messages one at a time, acknowledges each,
-/// and verifies each received PUBLISH has a unique non-zero packet ID and DUP=0.
-#[tokio::test]
-async fn qos1_server_outbound_unique_nonzero_id_and_dup_zero() {
-    let broker = ConformanceBroker::start().await;
+#[conformance_test(
+    ids = ["MQTT-4.3.2-1", "MQTT-4.3.2-2"],
+    requires = ["transport.tcp", "max_qos>=1"],
+)]
+async fn qos1_server_outbound_unique_nonzero_id_and_dup_zero(sut: SutHandle) {
     let topic = format!("qos1-id/{}", unique_client_id("t"));
 
-    let mut sub = RawMqttClient::connect_tcp(broker.socket_addr())
+    let mut sub = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let sub_id = unique_client_id("sub");
@@ -73,7 +71,7 @@ async fn qos1_server_outbound_unique_nonzero_id_and_dup_zero() {
     let _ = sub.expect_suback(TIMEOUT).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let mut pub_raw = RawMqttClient::connect_tcp(broker.socket_addr())
+    let mut pub_raw = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let pub_id = unique_client_id("pub");
@@ -122,15 +120,14 @@ async fn qos1_server_outbound_unique_nonzero_id_and_dup_zero() {
 
 /// `[MQTT-4.3.2-5]` After the Server has sent a PUBACK, the Packet Identifier
 /// is available for reuse.
-///
-/// Subscribes at `QoS` 1, receives a message, sends PUBACK, receives next
-/// message — verifies the second message can reuse the same packet ID.
-#[tokio::test]
-async fn qos1_packet_id_reusable_after_puback() {
-    let broker = ConformanceBroker::start().await;
+#[conformance_test(
+    ids = ["MQTT-4.3.2-5"],
+    requires = ["transport.tcp", "max_qos>=1"],
+)]
+async fn qos1_packet_id_reusable_after_puback(sut: SutHandle) {
     let topic = format!("qos1-reuse/{}", unique_client_id("t"));
 
-    let mut sub = RawMqttClient::connect_tcp(broker.socket_addr())
+    let mut sub = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let sub_id = unique_client_id("sub");
@@ -141,14 +138,14 @@ async fn qos1_packet_id_reusable_after_puback() {
     let _ = sub.expect_suback(TIMEOUT).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let publisher = connected_client("pub", &broker).await;
+    let publisher = TestClient::connect_with_prefix(&sut, "pub").await.unwrap();
     let pub_opts = PublishOptions {
         qos: QoS::AtLeastOnce,
         ..Default::default()
     };
 
     publisher
-        .publish_with_options(&topic, b"msg-1".to_vec(), pub_opts.clone())
+        .publish_with_options(&topic, b"msg-1", pub_opts.clone())
         .await
         .unwrap();
 
@@ -164,7 +161,7 @@ async fn qos1_packet_id_reusable_after_puback() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     publisher
-        .publish_with_options(&topic, b"msg-2".to_vec(), pub_opts)
+        .publish_with_options(&topic, b"msg-2", pub_opts)
         .await
         .unwrap();
 
@@ -180,17 +177,16 @@ async fn qos1_packet_id_reusable_after_puback() {
 }
 
 /// `[MQTT-2.2.1-4]` The Server assigns non-zero Packet Identifiers to outbound
-/// `QoS`>0 packets.
-///
-/// Subscribes at `QoS` 1 and `QoS` 2 on separate topics, publishes to both,
-/// and verifies all received packet IDs are non-zero.
-#[tokio::test]
-async fn server_assigns_nonzero_packet_ids() {
-    let broker = ConformanceBroker::start().await;
+/// QoS>0 packets.
+#[conformance_test(
+    ids = ["MQTT-2.2.1-4"],
+    requires = ["transport.tcp", "max_qos>=2"],
+)]
+async fn server_assigns_nonzero_packet_ids(sut: SutHandle) {
     let topic_q1 = format!("pid-nz-q1/{}", unique_client_id("t"));
     let topic_q2 = format!("pid-nz-q2/{}", unique_client_id("t"));
 
-    let mut sub = RawMqttClient::connect_tcp(broker.socket_addr())
+    let mut sub = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let sub_id = unique_client_id("sub");
@@ -205,14 +201,14 @@ async fn server_assigns_nonzero_packet_ids() {
     let _ = sub.expect_suback(TIMEOUT).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let publisher = connected_client("pub", &broker).await;
+    let publisher = TestClient::connect_with_prefix(&sut, "pub").await.unwrap();
 
     let q1_opts = PublishOptions {
         qos: QoS::AtLeastOnce,
         ..Default::default()
     };
     publisher
-        .publish_with_options(&topic_q1, b"q1-data".to_vec(), q1_opts)
+        .publish_with_options(&topic_q1, b"q1-data", q1_opts)
         .await
         .unwrap();
 
@@ -232,7 +228,7 @@ async fn server_assigns_nonzero_packet_ids() {
         ..Default::default()
     };
     publisher
-        .publish_with_options(&topic_q2, b"q2-data".to_vec(), q2_opts)
+        .publish_with_options(&topic_q2, b"q2-data", q2_opts)
         .await
         .unwrap();
 
@@ -255,12 +251,14 @@ async fn server_assigns_nonzero_packet_ids() {
 /// `[MQTT-4.3.3-1]` `[MQTT-4.3.3-2]` In the `QoS` 2 delivery protocol, the
 /// Server MUST assign a non-zero Packet Identifier and the outbound PUBLISH
 /// MUST have DUP=0 on first delivery.
-#[tokio::test]
-async fn qos2_server_outbound_unique_nonzero_id_and_dup_zero() {
-    let broker = ConformanceBroker::start().await;
+#[conformance_test(
+    ids = ["MQTT-4.3.3-1", "MQTT-4.3.3-2"],
+    requires = ["transport.tcp", "max_qos>=2"],
+)]
+async fn qos2_server_outbound_unique_nonzero_id_and_dup_zero(sut: SutHandle) {
     let topic = format!("qos2-id/{}", unique_client_id("t"));
 
-    let mut sub = RawMqttClient::connect_tcp(broker.socket_addr())
+    let mut sub = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let sub_id = unique_client_id("sub");
@@ -271,13 +269,13 @@ async fn qos2_server_outbound_unique_nonzero_id_and_dup_zero() {
     let _ = sub.expect_suback(TIMEOUT).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let publisher = connected_client("pub", &broker).await;
+    let publisher = TestClient::connect_with_prefix(&sut, "pub").await.unwrap();
     let pub_opts = PublishOptions {
         qos: QoS::ExactlyOnce,
         ..Default::default()
     };
     publisher
-        .publish_with_options(&topic, b"qos2-data".to_vec(), pub_opts)
+        .publish_with_options(&topic, b"qos2-data", pub_opts)
         .await
         .unwrap();
 
@@ -312,16 +310,14 @@ async fn qos2_server_outbound_unique_nonzero_id_and_dup_zero() {
 /// `[MQTT-4.3.3-3]` The `QoS` 2 message is considered "unacknowledged" until
 /// the corresponding PUBREC has been received. The Server MUST hold the message
 /// state.
-///
-/// Subscribes at `QoS` 2, receives PUBLISH, does NOT send PUBREC. Verifies the
-/// server does not discard the message state by checking that no further packets
-/// arrive spontaneously.
-#[tokio::test]
-async fn qos2_unacknowledged_until_pubrec() {
-    let broker = ConformanceBroker::start().await;
+#[conformance_test(
+    ids = ["MQTT-4.3.3-3"],
+    requires = ["transport.tcp", "max_qos>=2"],
+)]
+async fn qos2_unacknowledged_until_pubrec(sut: SutHandle) {
     let topic = format!("qos2-hold/{}", unique_client_id("t"));
 
-    let mut sub = RawMqttClient::connect_tcp(broker.socket_addr())
+    let mut sub = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let sub_id = unique_client_id("sub");
@@ -332,13 +328,13 @@ async fn qos2_unacknowledged_until_pubrec() {
     let _ = sub.expect_suback(TIMEOUT).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let publisher = connected_client("pub", &broker).await;
+    let publisher = TestClient::connect_with_prefix(&sut, "pub").await.unwrap();
     let pub_opts = PublishOptions {
         qos: QoS::ExactlyOnce,
         ..Default::default()
     };
     publisher
-        .publish_with_options(&topic, b"held".to_vec(), pub_opts)
+        .publish_with_options(&topic, b"held", pub_opts)
         .await
         .unwrap();
 
@@ -359,15 +355,14 @@ async fn qos2_unacknowledged_until_pubrec() {
 /// `[MQTT-4.3.3-5]` The Server MUST send a PUBREL after receiving PUBREC, and
 /// MUST hold the Packet Identifier state until the corresponding PUBCOMP is
 /// received.
-///
-/// Full outbound `QoS` 2 flow from server perspective: subscriber receives
-/// PUBLISH, sends PUBREC, receives PUBREL, sends PUBCOMP.
-#[tokio::test]
-async fn qos2_server_sends_pubrel_after_pubrec_and_holds_until_pubcomp() {
-    let broker = ConformanceBroker::start().await;
+#[conformance_test(
+    ids = ["MQTT-4.3.3-5"],
+    requires = ["transport.tcp", "max_qos>=2"],
+)]
+async fn qos2_server_sends_pubrel_after_pubrec_and_holds_until_pubcomp(sut: SutHandle) {
     let topic = format!("qos2-flow/{}", unique_client_id("t"));
 
-    let mut sub = RawMqttClient::connect_tcp(broker.socket_addr())
+    let mut sub = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let sub_id = unique_client_id("sub");
@@ -378,13 +373,13 @@ async fn qos2_server_sends_pubrel_after_pubrec_and_holds_until_pubcomp() {
     let _ = sub.expect_suback(TIMEOUT).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let publisher = connected_client("pub", &broker).await;
+    let publisher = TestClient::connect_with_prefix(&sut, "pub").await.unwrap();
     let pub_opts = PublishOptions {
         qos: QoS::ExactlyOnce,
         ..Default::default()
     };
     publisher
-        .publish_with_options(&topic, b"flow-data".to_vec(), pub_opts)
+        .publish_with_options(&topic, b"flow-data", pub_opts)
         .await
         .unwrap();
 
@@ -417,37 +412,25 @@ async fn qos2_server_sends_pubrel_after_pubrec_and_holds_until_pubcomp() {
 /// `[MQTT-4.3.3-9]` A PUBREC with a Reason Code of 0x80 or greater indicates
 /// the Server MUST discard the message and treat the Packet Identifier as
 /// available for reuse.
-///
-/// Client publishes `QoS` 2, receives PUBREC, sends PUBREL, receives PUBCOMP
-/// from the server (inbound flow). We test the *inbound* direction: client
-/// sends `QoS` 2 PUBLISH, server sends PUBREC; client then sends PUBREC with
-/// error for an *outbound* server publish. Since we cannot easily force the
-/// server to send us a `QoS` 2 PUBLISH and then us respond with PUBREC error,
-/// we test the equivalent: client sends `QoS` 2 PUBLISH, server sends PUBREC
-/// with success, client sends PUBREL, server sends PUBCOMP. Then we verify a
-/// new PUBLISH with the same packet ID is treated as new.
-///
-/// Actually, this statement applies to the *receiver* side. For the inbound
-/// direction, the server IS the receiver. We send a `QoS` 2 PUBLISH, get
-/// PUBREC with error code, and verify the server treated the ID as released.
-#[tokio::test]
-async fn qos2_pubrec_error_allows_packet_id_reuse() {
-    let broker = ConformanceBroker::start().await;
+#[conformance_test(
+    ids = ["MQTT-4.3.3-9"],
+    requires = ["transport.tcp", "max_qos>=2"],
+)]
+async fn qos2_pubrec_error_allows_packet_id_reuse(sut: SutHandle) {
     let topic = format!("qos2-pubrec-err/{}", unique_client_id("t"));
 
-    let collector = MessageCollector::new();
-    let subscriber = connected_client("sub", &broker).await;
+    let subscriber = TestClient::connect_with_prefix(&sut, "sub").await.unwrap();
     let sub_opts = SubscribeOptions {
         qos: QoS::ExactlyOnce,
         ..Default::default()
     };
-    subscriber
-        .subscribe_with_options(&topic, sub_opts, collector.callback())
+    let _subscription = subscriber
+        .subscribe(&topic, sub_opts)
         .await
-        .unwrap();
+        .expect("subscribe failed");
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let mut pub_raw = RawMqttClient::connect_tcp(broker.socket_addr())
+    let mut pub_raw = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let pub_id = unique_client_id("pub");
@@ -502,28 +485,25 @@ async fn qos2_pubrec_error_allows_packet_id_reuse() {
 
 /// `[MQTT-4.3.3-10]` A `QoS` 2 PUBLISH with DUP=1 (retransmission) MUST NOT
 /// cause the message to be duplicated to subscribers.
-///
-/// Sends a `QoS` 2 PUBLISH, gets PUBREC. Then sends the same PUBLISH again
-/// with DUP=1 and same packet ID. The subscriber should receive the message
-/// only once.
-#[tokio::test]
-async fn qos2_duplicate_publish_no_double_delivery() {
-    let broker = ConformanceBroker::start().await;
+#[conformance_test(
+    ids = ["MQTT-4.3.3-10"],
+    requires = ["transport.tcp", "max_qos>=2"],
+)]
+async fn qos2_duplicate_publish_no_double_delivery(sut: SutHandle) {
     let topic = format!("qos2-dup/{}", unique_client_id("t"));
 
-    let collector = MessageCollector::new();
-    let subscriber = connected_client("sub", &broker).await;
+    let subscriber = TestClient::connect_with_prefix(&sut, "sub").await.unwrap();
     let sub_opts = SubscribeOptions {
         qos: QoS::ExactlyOnce,
         ..Default::default()
     };
-    subscriber
-        .subscribe_with_options(&topic, sub_opts, collector.callback())
+    let subscription = subscriber
+        .subscribe(&topic, sub_opts)
         .await
-        .unwrap();
+        .expect("subscribe failed");
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let mut pub_raw = RawMqttClient::connect_tcp(broker.socket_addr())
+    let mut pub_raw = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let pub_id = unique_client_id("pub");
@@ -567,7 +547,7 @@ async fn qos2_duplicate_publish_no_double_delivery() {
     let _ = pub_raw.expect_pubcomp(TIMEOUT).await;
 
     tokio::time::sleep(Duration::from_millis(500)).await;
-    let msgs = collector.get_messages();
+    let msgs = subscription.snapshot();
     assert_eq!(
         msgs.len(),
         1,
@@ -579,27 +559,25 @@ async fn qos2_duplicate_publish_no_double_delivery() {
 
 /// `[MQTT-4.3.3-12]` After PUBCOMP, the same Packet Identifier is treated as
 /// a new publication.
-///
-/// Completes a full `QoS` 2 inbound flow, then sends a new PUBLISH with the
-/// same packet ID and verifies the server treats it as a new message.
-#[tokio::test]
-async fn qos2_after_pubcomp_same_id_is_new_message() {
-    let broker = ConformanceBroker::start().await;
+#[conformance_test(
+    ids = ["MQTT-4.3.3-12"],
+    requires = ["transport.tcp", "max_qos>=2"],
+)]
+async fn qos2_after_pubcomp_same_id_is_new_message(sut: SutHandle) {
     let topic = format!("qos2-new/{}", unique_client_id("t"));
 
-    let collector = MessageCollector::new();
-    let subscriber = connected_client("sub", &broker).await;
+    let subscriber = TestClient::connect_with_prefix(&sut, "sub").await.unwrap();
     let sub_opts = SubscribeOptions {
         qos: QoS::ExactlyOnce,
         ..Default::default()
     };
-    subscriber
-        .subscribe_with_options(&topic, sub_opts, collector.callback())
+    let subscription = subscriber
+        .subscribe(&topic, sub_opts)
         .await
-        .unwrap();
+        .expect("subscribe failed");
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let mut pub_raw = RawMqttClient::connect_tcp(broker.socket_addr())
+    let mut pub_raw = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let pub_id = unique_client_id("pub");
@@ -640,25 +618,24 @@ async fn qos2_after_pubcomp_same_id_is_new_message() {
     let _ = pub_raw.expect_pubcomp(TIMEOUT).await.expect("PUBCOMP #2");
 
     assert!(
-        collector.wait_for_messages(2, TIMEOUT).await,
+        subscription.wait_for_messages(2, TIMEOUT).await,
         "[MQTT-4.3.3-12] Both messages must be delivered"
     );
-    let msgs = collector.get_messages();
+    let msgs = subscription.snapshot();
     assert_eq!(msgs[0].payload, b"first");
     assert_eq!(msgs[1].payload, b"second");
 }
 
 /// `[MQTT-4.4.0-1]` The Server MUST NOT resend a PUBLISH during the same
 /// Network Connection (no spontaneous retransmission on active connections).
-///
-/// Subscribes at `QoS` 1, receives a PUBLISH, does NOT send PUBACK for 2
-/// seconds, and verifies the server does not spontaneously retransmit.
-#[tokio::test]
-async fn no_spontaneous_retransmission_on_active_connection() {
-    let broker = ConformanceBroker::start().await;
+#[conformance_test(
+    ids = ["MQTT-4.4.0-1"],
+    requires = ["transport.tcp", "max_qos>=1"],
+)]
+async fn no_spontaneous_retransmission_on_active_connection(sut: SutHandle) {
     let topic = format!("no-resend/{}", unique_client_id("t"));
 
-    let mut sub = RawMqttClient::connect_tcp(broker.socket_addr())
+    let mut sub = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let sub_id = unique_client_id("sub");
@@ -669,13 +646,13 @@ async fn no_spontaneous_retransmission_on_active_connection() {
     let _ = sub.expect_suback(TIMEOUT).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let publisher = connected_client("pub", &broker).await;
+    let publisher = TestClient::connect_with_prefix(&sut, "pub").await.unwrap();
     let pub_opts = PublishOptions {
         qos: QoS::AtLeastOnce,
         ..Default::default()
     };
     publisher
-        .publish_with_options(&topic, b"no-retry".to_vec(), pub_opts)
+        .publish_with_options(&topic, b"no-retry", pub_opts)
         .await
         .unwrap();
 
@@ -699,15 +676,14 @@ async fn no_spontaneous_retransmission_on_active_connection() {
 /// `[MQTT-4.4.0-2]` When a Client sends a PUBACK with a Reason Code of 0x80
 /// or greater, the Server MUST treat the PUBLISH as acknowledged and MUST NOT
 /// attempt to retransmit.
-///
-/// Subscribes at `QoS` 1, receives PUBLISH, sends PUBACK with error reason
-/// code `0x80`, waits, and verifies no retransmission occurs.
-#[tokio::test]
-async fn puback_error_stops_retransmission() {
-    let broker = ConformanceBroker::start().await;
+#[conformance_test(
+    ids = ["MQTT-4.4.0-2"],
+    requires = ["transport.tcp", "max_qos>=1"],
+)]
+async fn puback_error_stops_retransmission(sut: SutHandle) {
     let topic = format!("puback-err/{}", unique_client_id("t"));
 
-    let mut sub = RawMqttClient::connect_tcp(broker.socket_addr())
+    let mut sub = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let sub_id = unique_client_id("sub");
@@ -718,13 +694,13 @@ async fn puback_error_stops_retransmission() {
     let _ = sub.expect_suback(TIMEOUT).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let publisher = connected_client("pub", &broker).await;
+    let publisher = TestClient::connect_with_prefix(&sut, "pub").await.unwrap();
     let pub_opts = PublishOptions {
         qos: QoS::AtLeastOnce,
         ..Default::default()
     };
     publisher
-        .publish_with_options(&topic, b"ack-err".to_vec(), pub_opts)
+        .publish_with_options(&topic, b"ack-err", pub_opts)
         .await
         .unwrap();
 

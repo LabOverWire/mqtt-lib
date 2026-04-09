@@ -1,10 +1,13 @@
 use crate::error::Result;
 use crate::packet::publish::PublishPacket;
+#[cfg(feature = "opentelemetry")]
+use crate::telemetry::propagation::UserProperty;
 use crate::validation::strip_shared_subscription_prefix;
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+use tokio::sync::mpsc;
 
 /// Type alias for publish callback functions
 pub type PublishCallback = Arc<dyn Fn(PublishPacket) + Send + Sync>;
@@ -20,6 +23,13 @@ pub(crate) struct CallbackEntry {
     topic_filter: String,
 }
 
+struct DispatchItem {
+    callbacks: Vec<PublishCallback>,
+    message: PublishPacket,
+    #[cfg(feature = "opentelemetry")]
+    user_props: Vec<UserProperty>,
+}
+
 /// Manages message callbacks for topic subscriptions
 pub struct CallbackManager {
     /// Callbacks indexed by topic filter for exact matches
@@ -30,6 +40,8 @@ pub struct CallbackManager {
     callback_registry: Arc<Mutex<HashMap<CallbackId, CallbackEntry>>>,
     /// Next callback ID
     next_id: Arc<AtomicU64>,
+    /// FIFO worker channel; lazily spawned on first dispatch.
+    dispatch_tx: OnceLock<mpsc::UnboundedSender<DispatchItem>>,
 }
 
 impl CallbackManager {
@@ -41,6 +53,44 @@ impl CallbackManager {
             wildcard_callbacks: Arc::new(Mutex::new(Vec::new())),
             callback_registry: Arc::new(Mutex::new(HashMap::new())),
             next_id: Arc::new(AtomicU64::new(1)),
+            dispatch_tx: OnceLock::new(),
+        }
+    }
+
+    fn dispatch_sender(&self) -> &mpsc::UnboundedSender<DispatchItem> {
+        self.dispatch_tx.get_or_init(|| {
+            let (tx, mut rx) = mpsc::unbounded_channel::<DispatchItem>();
+            tokio::spawn(async move {
+                while let Some(item) = rx.recv().await {
+                    Self::run_dispatch_item(item);
+                }
+            });
+            tx
+        })
+    }
+
+    #[cfg(feature = "opentelemetry")]
+    fn run_dispatch_item(item: DispatchItem) {
+        use crate::telemetry::propagation;
+        propagation::with_remote_context(&item.user_props, || {
+            let span = tracing::info_span!(
+                "message_received",
+                topic = %item.message.topic_name,
+                qos = ?item.message.qos,
+                payload_size = item.message.payload.len(),
+                retain = item.message.retain,
+            );
+            let _enter = span.enter();
+            for callback in item.callbacks {
+                callback(item.message.clone());
+            }
+        });
+    }
+
+    #[cfg(not(feature = "opentelemetry"))]
+    fn run_dispatch_item(item: DispatchItem) {
+        for callback in item.callbacks {
+            callback(item.message.clone());
         }
     }
 
@@ -164,34 +214,24 @@ impl CallbackManager {
             }
         }
 
-        for callback in callbacks_to_call {
-            let message = message.clone();
-            #[cfg(feature = "opentelemetry")]
-            {
-                use crate::telemetry::propagation;
-                let user_props = propagation::extract_user_properties(&message.properties);
-                tokio::spawn(async move {
-                    propagation::with_remote_context(&user_props, || {
-                        let span = tracing::info_span!(
-                            "message_received",
-                            topic = %message.topic_name,
-                            qos = ?message.qos,
-                            payload_size = message.payload.len(),
-                            retain = message.retain,
-                        );
-                        let _enter = span.enter();
-                        callback(message);
-                    });
-                });
-            }
-
-            #[cfg(not(feature = "opentelemetry"))]
-            {
-                tokio::spawn(async move {
-                    callback(message);
-                });
-            }
+        if callbacks_to_call.is_empty() {
+            return Ok(());
         }
+
+        #[cfg(feature = "opentelemetry")]
+        let user_props = {
+            use crate::telemetry::propagation;
+            propagation::extract_user_properties(&message.properties)
+        };
+
+        let item = DispatchItem {
+            callbacks: callbacks_to_call,
+            message: message.clone(),
+            #[cfg(feature = "opentelemetry")]
+            user_props,
+        };
+
+        let _ = self.dispatch_sender().send(item);
 
         Ok(())
     }

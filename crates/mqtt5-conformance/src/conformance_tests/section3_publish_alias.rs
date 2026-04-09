@@ -1,25 +1,24 @@
-use mqtt5_conformance::harness::{unique_client_id, ConformanceBroker};
-use mqtt5_conformance::raw_client::{RawMqttClient, RawPacketBuilder};
+//! Section 3.3 — PUBLISH Topic Alias and DUP flag.
+
+use crate::conformance_test;
+use crate::harness::unique_client_id;
+use crate::raw_client::{RawMqttClient, RawPacketBuilder};
+use crate::sut::SutHandle;
 use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_secs(3);
 
-// ---------------------------------------------------------------------------
-// Group 1: Topic Alias Lifecycle
-// ---------------------------------------------------------------------------
-
-/// `[MQTT-3.3.2-12]` A sender can modify the Topic Alias mapping by sending
-/// another PUBLISH with the same Topic Alias value and a different topic.
-///
-/// Registers alias 1 → topic A via PUBLISH with both topic+alias, then reuses
-/// alias 1 via PUBLISH with empty topic+alias. Subscriber receives both
-/// messages with the correct topic.
-#[tokio::test]
-async fn topic_alias_register_and_reuse() {
-    let broker = ConformanceBroker::start().await;
+/// `[MQTT-3.3.2-12]` A sender can modify the Topic Alias mapping by
+/// sending another PUBLISH with the same Topic Alias value and a
+/// different topic.
+#[conformance_test(
+    ids = ["MQTT-3.3.2-12"],
+    requires = ["transport.tcp"],
+)]
+async fn topic_alias_register_and_reuse(sut: SutHandle) {
     let topic = format!("alias/{}", unique_client_id("reg"));
 
-    let mut sub = RawMqttClient::connect_tcp(broker.socket_addr())
+    let mut sub = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let sub_id = unique_client_id("asub");
@@ -29,7 +28,7 @@ async fn topic_alias_register_and_reuse() {
         .unwrap();
     sub.expect_suback(TIMEOUT).await;
 
-    let mut pub_client = RawMqttClient::connect_tcp(broker.socket_addr())
+    let mut pub_client = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let pub_id = unique_client_id("apub");
@@ -69,21 +68,20 @@ async fn topic_alias_register_and_reuse() {
     assert_eq!(recv_payload2, b"second");
 }
 
-/// `[MQTT-3.3.2-12]` A sender can modify the Topic Alias mapping by sending
-/// another PUBLISH with the same Topic Alias value and a different non-zero
-/// length Topic Name.
-///
-/// Registers alias 5 = topic A, remaps alias 5 = topic B, then reuses alias 5.
-/// The reused alias resolves to topic B.
-#[tokio::test]
-async fn topic_alias_update_mapping() {
-    let broker = ConformanceBroker::start().await;
+/// `[MQTT-3.3.2-12]` A sender can modify the Topic Alias mapping by
+/// sending another PUBLISH with the same Topic Alias value and a
+/// different non-zero length Topic Name.
+#[conformance_test(
+    ids = ["MQTT-3.3.2-12"],
+    requires = ["transport.tcp"],
+)]
+async fn topic_alias_update_mapping(sut: SutHandle) {
     let prefix = unique_client_id("remap");
     let topic_a = format!("alias/{prefix}/a");
     let topic_b = format!("alias/{prefix}/b");
     let filter = format!("alias/{prefix}/+");
 
-    let mut sub = RawMqttClient::connect_tcp(broker.socket_addr())
+    let mut sub = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let sub_id = unique_client_id("rsub");
@@ -93,7 +91,7 @@ async fn topic_alias_update_mapping() {
         .unwrap();
     sub.expect_suback(TIMEOUT).await;
 
-    let mut pub_client = RawMqttClient::connect_tcp(broker.socket_addr())
+    let mut pub_client = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let pub_id = unique_client_id("rpub");
@@ -133,18 +131,16 @@ async fn topic_alias_update_mapping() {
     );
 }
 
-/// `[MQTT-3.3.2-10]` `[MQTT-3.3.2-11]` Topic Alias mappings are scoped to the
-/// Network Connection. A new connection starts with no mappings.
-///
-/// Registers alias 1 on connection A. Opens connection B and tries an
-/// alias-only PUBLISH with alias 1 — broker disconnects because alias 1 is
-/// not registered on connection B.
-#[tokio::test]
-async fn topic_alias_not_shared_across_connections() {
-    let broker = ConformanceBroker::start().await;
+/// `[MQTT-3.3.2-10]` `[MQTT-3.3.2-11]` Topic Alias mappings are scoped to
+/// the Network Connection. A new connection starts with no mappings.
+#[conformance_test(
+    ids = ["MQTT-3.3.2-10", "MQTT-3.3.2-11"],
+    requires = ["transport.tcp"],
+)]
+async fn topic_alias_not_shared_across_connections(sut: SutHandle) {
     let topic = format!("alias/{}", unique_client_id("scope"));
 
-    let mut conn_a = RawMqttClient::connect_tcp(broker.socket_addr())
+    let mut conn_a = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let id_a = unique_client_id("sca");
@@ -157,7 +153,7 @@ async fn topic_alias_not_shared_across_connections() {
         .unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let mut conn_b = RawMqttClient::connect_tcp(broker.socket_addr())
+    let mut conn_b = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let id_b = unique_client_id("scb");
@@ -175,17 +171,15 @@ async fn topic_alias_not_shared_across_connections() {
 
 /// `[MQTT-3.3.2-10]` `[MQTT-3.3.2-11]` Topic Alias mappings do not survive
 /// reconnection.
-///
-/// Registers alias 3 on a connection, disconnects normally, reconnects with
-/// the same client ID, then tries alias-only PUBLISH with alias 3 — broker
-/// disconnects because alias mappings were cleared.
-#[tokio::test]
-async fn topic_alias_cleared_on_reconnect() {
-    let broker = ConformanceBroker::start().await;
+#[conformance_test(
+    ids = ["MQTT-3.3.2-10", "MQTT-3.3.2-11"],
+    requires = ["transport.tcp"],
+)]
+async fn topic_alias_cleared_on_reconnect(sut: SutHandle) {
     let topic = format!("alias/{}", unique_client_id("recon"));
     let client_id = unique_client_id("rcid");
 
-    let mut conn1 = RawMqttClient::connect_tcp(broker.socket_addr())
+    let mut conn1 = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     conn1.connect_and_establish(&client_id, TIMEOUT).await;
@@ -202,7 +196,7 @@ async fn topic_alias_cleared_on_reconnect() {
         .unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let mut conn2 = RawMqttClient::connect_tcp(broker.socket_addr())
+    let mut conn2 = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     conn2.connect_and_establish(&client_id, TIMEOUT).await;
@@ -217,16 +211,15 @@ async fn topic_alias_cleared_on_reconnect() {
     );
 }
 
-/// Topic Alias is stripped before delivery to subscribers.
-///
-/// Publishes with a Topic Alias. The subscriber must receive the full topic
-/// name (not an empty string).
-#[tokio::test]
-async fn topic_alias_stripped_before_delivery() {
-    let broker = ConformanceBroker::start().await;
+/// `[MQTT-3.3.2-8]` Topic Alias is stripped before delivery to subscribers.
+#[conformance_test(
+    ids = ["MQTT-3.3.2-8"],
+    requires = ["transport.tcp"],
+)]
+async fn topic_alias_stripped_before_delivery(sut: SutHandle) {
     let topic = format!("alias/{}", unique_client_id("strip"));
 
-    let mut sub = RawMqttClient::connect_tcp(broker.socket_addr())
+    let mut sub = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let sub_id = unique_client_id("ssub");
@@ -236,7 +229,7 @@ async fn topic_alias_stripped_before_delivery() {
         .unwrap();
     sub.expect_suback(TIMEOUT).await;
 
-    let mut pub_client = RawMqttClient::connect_tcp(broker.socket_addr())
+    let mut pub_client = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let pub_id = unique_client_id("spub");
@@ -261,22 +254,17 @@ async fn topic_alias_stripped_before_delivery() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Group 2: DUP Flag
-// ---------------------------------------------------------------------------
-
-/// `[MQTT-3.3.1-3]` The value of the DUP flag from an incoming PUBLISH packet
-/// is not propagated when the PUBLISH packet is sent to subscribers.
-///
-/// Raw publisher sends a `QoS` 1 PUBLISH with DUP=1 (header byte `0x3A`). Raw
-/// subscriber receives the forwarded PUBLISH. The DUP bit (bit 3 of the first
-/// byte) MUST be 0 in the forwarded copy.
-#[tokio::test]
-async fn dup_flag_not_propagated_to_subscribers() {
-    let broker = ConformanceBroker::start().await;
+/// `[MQTT-3.3.1-3]` The value of the DUP flag from an incoming PUBLISH
+/// packet is not propagated when the PUBLISH packet is sent to
+/// subscribers.
+#[conformance_test(
+    ids = ["MQTT-3.3.1-3"],
+    requires = ["transport.tcp", "max_qos>=1"],
+)]
+async fn dup_flag_not_propagated_to_subscribers(sut: SutHandle) {
     let topic = format!("dup/{}", unique_client_id("prop"));
 
-    let mut sub = RawMqttClient::connect_tcp(broker.socket_addr())
+    let mut sub = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let sub_id = unique_client_id("dsub");
@@ -286,7 +274,7 @@ async fn dup_flag_not_propagated_to_subscribers() {
         .unwrap();
     sub.expect_suback(TIMEOUT).await;
 
-    let mut pub_client = RawMqttClient::connect_tcp(broker.socket_addr())
+    let mut pub_client = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let pub_id = unique_client_id("dpub");

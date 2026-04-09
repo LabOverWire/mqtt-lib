@@ -1,19 +1,23 @@
-use mqtt5_conformance::harness::{
-    connected_client, unique_client_id, ConformanceBroker, MessageCollector,
-};
-use mqtt5_conformance::raw_client::{RawMqttClient, RawPacketBuilder};
+//! Section 4.7 — Topic Names and Topic Filters.
+
+use crate::conformance_test;
+use crate::harness::unique_client_id;
+use crate::raw_client::{RawMqttClient, RawPacketBuilder};
+use crate::sut::SutHandle;
+use crate::test_client::TestClient;
+use mqtt5_protocol::types::SubscribeOptions;
 use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_secs(3);
 
-// ---------------------------------------------------------------------------
-// Group 1: Topic Filter Wildcard Rules — Section 4.7.1
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn multi_level_wildcard_must_be_last() {
-    let broker = ConformanceBroker::start().await;
-    let mut raw = RawMqttClient::connect_tcp(broker.socket_addr())
+/// `[MQTT-4.7.1-1]` The multi-level wildcard `#` MUST be the last character
+/// in a topic filter.
+#[conformance_test(
+    ids = ["MQTT-4.7.1-1"],
+    requires = ["transport.tcp"],
+)]
+async fn multi_level_wildcard_must_be_last(sut: SutHandle) {
+    let mut raw = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let client_id = unique_client_id("mlwild-last");
@@ -38,10 +42,14 @@ async fn multi_level_wildcard_must_be_last() {
     );
 }
 
-#[tokio::test]
-async fn multi_level_wildcard_must_be_full_level() {
-    let broker = ConformanceBroker::start().await;
-    let mut raw = RawMqttClient::connect_tcp(broker.socket_addr())
+/// `[MQTT-4.7.1-1]` The multi-level wildcard `#` MUST occupy a complete
+/// topic level on its own.
+#[conformance_test(
+    ids = ["MQTT-4.7.1-1"],
+    requires = ["transport.tcp"],
+)]
+async fn multi_level_wildcard_must_be_full_level(sut: SutHandle) {
+    let mut raw = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let client_id = unique_client_id("mlwild-full");
@@ -66,10 +74,14 @@ async fn multi_level_wildcard_must_be_full_level() {
     );
 }
 
-#[tokio::test]
-async fn single_level_wildcard_must_be_full_level() {
-    let broker = ConformanceBroker::start().await;
-    let mut raw = RawMqttClient::connect_tcp(broker.socket_addr())
+/// `[MQTT-4.7.1-2]` The single-level wildcard `+` MUST occupy a complete
+/// topic level on its own.
+#[conformance_test(
+    ids = ["MQTT-4.7.1-2"],
+    requires = ["transport.tcp"],
+)]
+async fn single_level_wildcard_must_be_full_level(sut: SutHandle) {
+    let mut raw = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let client_id = unique_client_id("slwild-full");
@@ -97,10 +109,14 @@ async fn single_level_wildcard_must_be_full_level() {
     );
 }
 
-#[tokio::test]
-async fn valid_wildcard_filters_accepted() {
-    let broker = ConformanceBroker::start().await;
-    let mut raw = RawMqttClient::connect_tcp(broker.socket_addr())
+/// `[MQTT-4.7.1-1]` `[MQTT-4.7.1-2]` Valid wildcard filters must be
+/// accepted with reason code Success (0x00).
+#[conformance_test(
+    ids = ["MQTT-4.7.1-1", "MQTT-4.7.1-2"],
+    requires = ["transport.tcp"],
+)]
+async fn valid_wildcard_filters_accepted(sut: SutHandle) {
+    let mut raw = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let client_id = unique_client_id("wild-ok");
@@ -129,31 +145,34 @@ async fn valid_wildcard_filters_accepted() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Group 2: Dollar-Prefix Topic Matching — Section 4.7.2
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn dollar_topics_not_matched_by_root_wildcards() {
-    let broker = ConformanceBroker::start().await;
-
-    let sub_hash = connected_client("dollar-hash", &broker).await;
-    let collector_hash = MessageCollector::new();
-    sub_hash
-        .subscribe("#", collector_hash.callback())
+/// `[MQTT-4.7.2-1]` Topic Names beginning with `$` MUST NOT be matched by
+/// a Topic Filter starting with a wildcard character (`#` or `+`).
+#[conformance_test(
+    ids = ["MQTT-4.7.2-1"],
+    requires = ["transport.tcp"],
+)]
+async fn dollar_topics_not_matched_by_root_wildcards(sut: SutHandle) {
+    let sub_hash = TestClient::connect_with_prefix(&sut, "dollar-hash")
         .await
         .unwrap();
+    let subscription_hash = sub_hash
+        .subscribe("#", SubscribeOptions::default())
+        .await
+        .expect("subscribe failed");
 
-    let sub_plus = connected_client("dollar-plus", &broker).await;
-    let collector_plus = MessageCollector::new();
-    sub_plus
-        .subscribe("+/info", collector_plus.callback())
+    let sub_plus = TestClient::connect_with_prefix(&sut, "dollar-plus")
         .await
         .unwrap();
+    let subscription_plus = sub_plus
+        .subscribe("+/info", SubscribeOptions::default())
+        .await
+        .expect("subscribe failed");
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let publisher = connected_client("dollar-pub", &broker).await;
+    let publisher = TestClient::connect_with_prefix(&sut, "dollar-pub")
+        .await
+        .unwrap();
     publisher
         .publish("$SYS/test", b"sys-payload")
         .await
@@ -163,38 +182,44 @@ async fn dollar_topics_not_matched_by_root_wildcards() {
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     assert_eq!(
-        collector_hash.count(),
+        subscription_hash.count(),
         0,
         "[MQTT-4.7.2-1] # must not match $SYS/test"
     );
     assert_eq!(
-        collector_plus.count(),
+        subscription_plus.count(),
         0,
         "[MQTT-4.7.2-1] +/info must not match $SYS/info"
     );
 }
 
-#[tokio::test]
-async fn dollar_topics_matched_by_explicit_prefix() {
-    let broker = ConformanceBroker::start().await;
-
-    let subscriber = connected_client("dollar-explicit", &broker).await;
-    let collector = MessageCollector::new();
-    subscriber
-        .subscribe("$SYS/#", collector.callback())
+/// `[MQTT-4.7.2-1]` Topic Filters that explicitly include `$` (e.g.
+/// `$SYS/#`) MAY match topics beginning with `$`.
+#[conformance_test(
+    ids = ["MQTT-4.7.2-1"],
+    requires = ["transport.tcp"],
+)]
+async fn dollar_topics_matched_by_explicit_prefix(sut: SutHandle) {
+    let subscriber = TestClient::connect_with_prefix(&sut, "dollar-explicit")
         .await
         .unwrap();
+    let subscription = subscriber
+        .subscribe("$SYS/#", SubscribeOptions::default())
+        .await
+        .expect("subscribe failed");
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let publisher = connected_client("dollar-explpub", &broker).await;
+    let publisher = TestClient::connect_with_prefix(&sut, "dollar-explpub")
+        .await
+        .unwrap();
     publisher.publish("$SYS/test", b"payload").await.unwrap();
 
-    collector.wait_for_messages(1, TIMEOUT).await;
+    subscription.wait_for_messages(1, TIMEOUT).await;
 
     tokio::time::sleep(Duration::from_millis(300)).await;
 
-    let msgs = collector.get_messages();
+    let msgs = subscription.snapshot();
     let found = msgs
         .iter()
         .find(|m| m.topic == "$SYS/test")
@@ -202,14 +227,14 @@ async fn dollar_topics_matched_by_explicit_prefix() {
     assert_eq!(found.payload, b"payload");
 }
 
-// ---------------------------------------------------------------------------
-// Group 3: Topic Name/Filter Minimum Rules — Section 4.7.3
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn topic_filter_must_not_be_empty() {
-    let broker = ConformanceBroker::start().await;
-    let mut raw = RawMqttClient::connect_tcp(broker.socket_addr())
+/// `[MQTT-4.7.3-1]` Topic Filters MUST be at least one character long.
+/// An empty filter must be rejected with `TopicFilterInvalid` or disconnect.
+#[conformance_test(
+    ids = ["MQTT-4.7.3-1"],
+    requires = ["transport.tcp"],
+)]
+async fn topic_filter_must_not_be_empty(sut: SutHandle) {
+    let mut raw = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let client_id = unique_client_id("empty-filter");
@@ -237,10 +262,15 @@ async fn topic_filter_must_not_be_empty() {
     }
 }
 
-#[tokio::test]
-async fn null_char_in_topic_name_rejected() {
-    let broker = ConformanceBroker::start().await;
-    let mut raw = RawMqttClient::connect_tcp(broker.socket_addr())
+/// `[MQTT-4.7.3-2]` Topic Names and Topic Filters MUST NOT include the
+/// null character (U+0000). PUBLISH with a null in the topic name must
+/// cause disconnect.
+#[conformance_test(
+    ids = ["MQTT-4.7.3-2"],
+    requires = ["transport.tcp"],
+)]
+async fn null_char_in_topic_name_rejected(sut: SutHandle) {
+    let mut raw = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let client_id = unique_client_id("null-topic");
@@ -256,24 +286,26 @@ async fn null_char_in_topic_name_rejected() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Group 4: Topic Matching Correctness — Section 4.7
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn single_level_wildcard_matches_one_level() {
-    let broker = ConformanceBroker::start().await;
-
-    let subscriber = connected_client("sl-match", &broker).await;
-    let collector = MessageCollector::new();
-    subscriber
-        .subscribe("sport/+/player", collector.callback())
+/// `[MQTT-4.7.1-2]` The single-level wildcard `+` matches exactly one
+/// topic level — not zero, not multiple.
+#[conformance_test(
+    ids = ["MQTT-4.7.1-2"],
+    requires = ["transport.tcp"],
+)]
+async fn single_level_wildcard_matches_one_level(sut: SutHandle) {
+    let subscriber = TestClient::connect_with_prefix(&sut, "sl-match")
         .await
         .unwrap();
+    let subscription = subscriber
+        .subscribe("sport/+/player", SubscribeOptions::default())
+        .await
+        .expect("subscribe failed");
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let publisher = connected_client("sl-pub", &broker).await;
+    let publisher = TestClient::connect_with_prefix(&sut, "sl-pub")
+        .await
+        .unwrap();
     publisher
         .publish("sport/tennis/player", b"match")
         .await
@@ -284,13 +316,13 @@ async fn single_level_wildcard_matches_one_level() {
         .unwrap();
 
     assert!(
-        collector.wait_for_messages(1, TIMEOUT).await,
+        subscription.wait_for_messages(1, TIMEOUT).await,
         "sport/+/player must match sport/tennis/player"
     );
 
     tokio::time::sleep(Duration::from_millis(300)).await;
 
-    let msgs = collector.get_messages();
+    let msgs = subscription.snapshot();
     assert_eq!(
         msgs.len(),
         1,
@@ -299,20 +331,26 @@ async fn single_level_wildcard_matches_one_level() {
     assert_eq!(msgs[0].topic, "sport/tennis/player");
 }
 
-#[tokio::test]
-async fn multi_level_wildcard_matches_all_descendants() {
-    let broker = ConformanceBroker::start().await;
-
-    let subscriber = connected_client("ml-match", &broker).await;
-    let collector = MessageCollector::new();
-    subscriber
-        .subscribe("sport/#", collector.callback())
+/// `[MQTT-4.7.1-1]` The multi-level wildcard `#` matches the parent topic
+/// and any descendants.
+#[conformance_test(
+    ids = ["MQTT-4.7.1-1"],
+    requires = ["transport.tcp"],
+)]
+async fn multi_level_wildcard_matches_all_descendants(sut: SutHandle) {
+    let subscriber = TestClient::connect_with_prefix(&sut, "ml-match")
         .await
         .unwrap();
+    let subscription = subscriber
+        .subscribe("sport/#", SubscribeOptions::default())
+        .await
+        .expect("subscribe failed");
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let publisher = connected_client("ml-pub", &broker).await;
+    let publisher = TestClient::connect_with_prefix(&sut, "ml-pub")
+        .await
+        .unwrap();
     publisher.publish("sport", b"zero").await.unwrap();
     publisher.publish("sport/tennis", b"one").await.unwrap();
     publisher
@@ -321,107 +359,113 @@ async fn multi_level_wildcard_matches_all_descendants() {
         .unwrap();
 
     assert!(
-        collector.wait_for_messages(3, TIMEOUT).await,
+        subscription.wait_for_messages(3, TIMEOUT).await,
         "sport/# must match sport, sport/tennis, and sport/tennis/player"
     );
 
-    let msgs = collector.get_messages();
+    let msgs = subscription.snapshot();
     let topics: Vec<&str> = msgs.iter().map(|m| m.topic.as_str()).collect();
     assert!(topics.contains(&"sport"));
     assert!(topics.contains(&"sport/tennis"));
     assert!(topics.contains(&"sport/tennis/player"));
 }
 
-// ---------------------------------------------------------------------------
-// Group 5: Message Delivery & Ordering — Sections 4.5 & 4.6
-// ---------------------------------------------------------------------------
-
 /// `[MQTT-4.5.0-1]` The server MUST deliver published messages to clients
-/// that have matching subscriptions.
-#[tokio::test]
-async fn server_delivers_to_matching_subscribers() {
-    let broker = ConformanceBroker::start().await;
+/// that have matching subscriptions, and MUST NOT deliver to non-matching
+/// subscribers.
+#[conformance_test(
+    ids = ["MQTT-4.5.0-1"],
+    requires = ["transport.tcp"],
+)]
+async fn server_delivers_to_matching_subscribers(sut: SutHandle) {
     let tag = unique_client_id("deliver");
     let topic = format!("deliver/{tag}");
 
-    let collector_exact = MessageCollector::new();
-    let sub_exact = connected_client("sub-exact", &broker).await;
-    sub_exact
-        .subscribe(&topic, collector_exact.callback())
+    let sub_exact = TestClient::connect_with_prefix(&sut, "sub-exact")
         .await
         .unwrap();
+    let subscription_exact = sub_exact
+        .subscribe(&topic, SubscribeOptions::default())
+        .await
+        .expect("subscribe failed");
 
     let filter_wild = format!("deliver/{tag}/+");
-    let collector_wild = MessageCollector::new();
-    let sub_wild = connected_client("sub-wild", &broker).await;
-    sub_wild
-        .subscribe(&filter_wild, collector_wild.callback())
+    let sub_wild = TestClient::connect_with_prefix(&sut, "sub-wild")
         .await
         .unwrap();
+    let subscription_wild = sub_wild
+        .subscribe(&filter_wild, SubscribeOptions::default())
+        .await
+        .expect("subscribe failed");
 
-    let collector_non = MessageCollector::new();
-    let sub_non = connected_client("sub-non", &broker).await;
-    sub_non
-        .subscribe("other/topic", collector_non.callback())
+    let sub_non = TestClient::connect_with_prefix(&sut, "sub-non")
         .await
         .unwrap();
+    let subscription_non = sub_non
+        .subscribe("other/topic", SubscribeOptions::default())
+        .await
+        .expect("subscribe failed");
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let publisher = connected_client("pub-deliver", &broker).await;
+    let publisher = TestClient::connect_with_prefix(&sut, "pub-deliver")
+        .await
+        .unwrap();
     publisher.publish(&topic, b"match-payload").await.unwrap();
 
     assert!(
-        collector_exact.wait_for_messages(1, TIMEOUT).await,
+        subscription_exact.wait_for_messages(1, TIMEOUT).await,
         "[MQTT-4.5.0-1] exact-match subscriber must receive the message"
     );
-    let msgs = collector_exact.get_messages();
+    let msgs = subscription_exact.snapshot();
     assert_eq!(msgs[0].payload, b"match-payload");
 
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(
-        collector_wild.count(),
+        subscription_wild.count(),
         0,
         "wildcard subscriber for deliver/tag/+ must not match deliver/tag"
     );
     assert_eq!(
-        collector_non.count(),
+        subscription_non.count(),
         0,
         "non-matching subscriber must not receive the message"
     );
 }
 
 /// `[MQTT-4.6.0-5]` Message ordering MUST be preserved per topic for the
-/// same `QoS` level. Send multiple `QoS` 0 messages on the same topic and
-/// verify they arrive in order.
-#[tokio::test]
-async fn message_ordering_preserved_same_qos() {
-    let broker = ConformanceBroker::start().await;
+/// same `QoS` level.
+#[conformance_test(
+    ids = ["MQTT-4.6.0-5"],
+    requires = ["transport.tcp"],
+)]
+async fn message_ordering_preserved_same_qos(sut: SutHandle) {
     let tag = unique_client_id("order");
     let topic = format!("order/{tag}");
 
-    let collector = MessageCollector::new();
-    let subscriber = connected_client("sub-order", &broker).await;
-    subscriber
-        .subscribe(&topic, collector.callback())
+    let subscriber = TestClient::connect_with_prefix(&sut, "sub-order")
         .await
         .unwrap();
+    let subscription = subscriber
+        .subscribe(&topic, SubscribeOptions::default())
+        .await
+        .expect("subscribe failed");
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let publisher = connected_client("pub-order", &broker).await;
+    let publisher = TestClient::connect_with_prefix(&sut, "pub-order")
+        .await
+        .unwrap();
     for i in 0u32..5 {
-        publisher
-            .publish(&topic, format!("msg-{i}").into_bytes())
-            .await
-            .unwrap();
+        let payload = format!("msg-{i}");
+        publisher.publish(&topic, payload.as_bytes()).await.unwrap();
     }
 
     assert!(
-        collector.wait_for_messages(5, TIMEOUT).await,
+        subscription.wait_for_messages(5, TIMEOUT).await,
         "subscriber should receive all 5 messages"
     );
 
-    let msgs = collector.get_messages();
+    let msgs = subscription.snapshot();
     for (i, msg) in msgs.iter().enumerate() {
         let expected = format!("msg-{i}");
         assert_eq!(
@@ -433,51 +477,53 @@ async fn message_ordering_preserved_same_qos() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Group 6: Unicode Normalization — Section 4.7.3
-// ---------------------------------------------------------------------------
-
 /// `[MQTT-4.7.3-4]` Topic matching MUST NOT apply Unicode normalization.
 /// U+00C5 (A-ring precomposed) and U+0041 U+030A (A + combining ring)
-/// are visually identical but must be treated as different topics.
-#[tokio::test]
-async fn topic_matching_no_unicode_normalization() {
-    let broker = ConformanceBroker::start().await;
+/// must be treated as different topics.
+#[conformance_test(
+    ids = ["MQTT-4.7.3-4"],
+    requires = ["transport.tcp"],
+)]
+async fn topic_matching_no_unicode_normalization(sut: SutHandle) {
     let tag = unique_client_id("unicode");
 
     let precomposed = format!("uni/{tag}/\u{00C5}");
     let decomposed = format!("uni/{tag}/A\u{030A}");
 
-    let collector_pre = MessageCollector::new();
-    let sub_pre = connected_client("sub-pre", &broker).await;
-    sub_pre
-        .subscribe(&precomposed, collector_pre.callback())
+    let sub_pre = TestClient::connect_with_prefix(&sut, "sub-pre")
         .await
         .unwrap();
+    let subscription_pre = sub_pre
+        .subscribe(&precomposed, SubscribeOptions::default())
+        .await
+        .expect("subscribe failed");
 
-    let collector_dec = MessageCollector::new();
-    let sub_dec = connected_client("sub-dec", &broker).await;
-    sub_dec
-        .subscribe(&decomposed, collector_dec.callback())
+    let sub_dec = TestClient::connect_with_prefix(&sut, "sub-dec")
         .await
         .unwrap();
+    let subscription_dec = sub_dec
+        .subscribe(&decomposed, SubscribeOptions::default())
+        .await
+        .expect("subscribe failed");
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let publisher = connected_client("pub-unicode", &broker).await;
+    let publisher = TestClient::connect_with_prefix(&sut, "pub-unicode")
+        .await
+        .unwrap();
     publisher
         .publish(&precomposed, b"precomposed")
         .await
         .unwrap();
 
     assert!(
-        collector_pre.wait_for_messages(1, TIMEOUT).await,
+        subscription_pre.wait_for_messages(1, TIMEOUT).await,
         "precomposed subscriber must receive message on precomposed topic"
     );
 
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(
-        collector_dec.count(),
+        subscription_dec.count(),
         0,
         "[MQTT-4.7.3-4] decomposed subscriber must NOT receive message on precomposed topic \
          (no Unicode normalization)"
@@ -486,12 +532,12 @@ async fn topic_matching_no_unicode_normalization() {
     publisher.publish(&decomposed, b"decomposed").await.unwrap();
 
     assert!(
-        collector_dec.wait_for_messages(1, TIMEOUT).await,
+        subscription_dec.wait_for_messages(1, TIMEOUT).await,
         "decomposed subscriber must receive message on decomposed topic"
     );
 
     tokio::time::sleep(Duration::from_millis(300)).await;
-    let pre_msgs = collector_pre.get_messages();
+    let pre_msgs = subscription_pre.snapshot();
     assert_eq!(
         pre_msgs.len(),
         1,

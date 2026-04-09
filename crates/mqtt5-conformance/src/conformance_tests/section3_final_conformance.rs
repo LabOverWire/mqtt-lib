@@ -1,15 +1,23 @@
-use mqtt5_conformance::harness::{unique_client_id, ConformanceBroker};
-use mqtt5_conformance::raw_client::{RawMqttClient, RawPacketBuilder};
+//! Section 3 — Final conformance tests for UTF-8 validation, server
+//! DISCONNECT ordering, request-problem-information suppression, and `QoS` 2
+//! message expiry behaviour.
+
+use crate::conformance_test;
+use crate::harness::unique_client_id;
+use crate::raw_client::{RawMqttClient, RawPacketBuilder};
+use crate::sut::SutHandle;
 use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_secs(3);
 
 /// `[MQTT-3.1.3-11]` The Will Topic MUST be a UTF-8 Encoded String.
 /// Sending invalid UTF-8 bytes in the Will Topic must cause disconnect.
-#[tokio::test]
-async fn will_topic_invalid_utf8_rejected() {
-    let broker = ConformanceBroker::start().await;
-    let mut raw = RawMqttClient::connect_tcp(broker.socket_addr())
+#[conformance_test(
+    ids = ["MQTT-3.1.3-11"],
+    requires = ["transport.tcp"],
+)]
+async fn will_topic_invalid_utf8_rejected(sut: SutHandle) {
+    let mut raw = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let client_id = unique_client_id("will-utf8");
@@ -28,10 +36,12 @@ async fn will_topic_invalid_utf8_rejected() {
 
 /// `[MQTT-3.1.3-12]` The User Name MUST be a UTF-8 Encoded String.
 /// Sending invalid UTF-8 bytes in the Username must cause disconnect.
-#[tokio::test]
-async fn username_invalid_utf8_rejected() {
-    let broker = ConformanceBroker::start().await;
-    let mut raw = RawMqttClient::connect_tcp(broker.socket_addr())
+#[conformance_test(
+    ids = ["MQTT-3.1.3-12"],
+    requires = ["transport.tcp"],
+)]
+async fn username_invalid_utf8_rejected(sut: SutHandle) {
+    let mut raw = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let client_id = unique_client_id("user-utf8");
@@ -50,13 +60,12 @@ async fn username_invalid_utf8_rejected() {
 
 /// `[MQTT-3.14.0-1]` Server MUST NOT send DISCONNECT until after it has sent a
 /// CONNACK with Reason Code < 0x80.
-///
-/// Send a CONNECT with an invalid protocol version — the broker should send
-/// a CONNACK with error code, NOT a DISCONNECT first.
-#[tokio::test]
-async fn no_server_disconnect_before_connack() {
-    let broker = ConformanceBroker::start().await;
-    let mut raw = RawMqttClient::connect_tcp(broker.socket_addr())
+#[conformance_test(
+    ids = ["MQTT-3.14.0-1"],
+    requires = ["transport.tcp"],
+)]
+async fn no_server_disconnect_before_connack(sut: SutHandle) {
+    let mut raw = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
 
@@ -78,14 +87,14 @@ async fn no_server_disconnect_before_connack() {
     }
 }
 
-/// `[MQTT-3.14.2-2]` Session Expiry Interval MUST NOT be sent on a server DISCONNECT.
-///
-/// Trigger a server-initiated DISCONNECT (second CONNECT) and verify the
-/// DISCONNECT packet properties do not contain Session Expiry Interval (0x11).
-#[tokio::test]
-async fn server_disconnect_no_session_expiry() {
-    let broker = ConformanceBroker::start().await;
-    let mut raw = RawMqttClient::connect_tcp(broker.socket_addr())
+/// `[MQTT-3.14.2-2]` Session Expiry Interval MUST NOT be sent on a server
+/// DISCONNECT.
+#[conformance_test(
+    ids = ["MQTT-3.14.2-2"],
+    requires = ["transport.tcp"],
+)]
+async fn server_disconnect_no_session_expiry(sut: SutHandle) {
+    let mut raw = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let client_id = unique_client_id("disc-noexp");
@@ -176,14 +185,12 @@ async fn server_disconnect_no_session_expiry() {
 /// `[MQTT-3.1.2-29]` If Request Problem Information is 0, the Server MUST NOT
 /// send a Reason String or User Property on any packet other than PUBLISH,
 /// CONNACK, or DISCONNECT.
-///
-/// Connect with `request_problem_info=0`, trigger a SUBACK with an error reason
-/// code (subscribe to a topic matching an ACL deny pattern), and verify the
-/// SUBACK contains no Reason String (`0x1F`) or User Property (`0x26`).
-#[tokio::test]
-async fn request_problem_info_zero_suppresses_properties() {
-    let broker = ConformanceBroker::start().await;
-    let mut raw = RawMqttClient::connect_tcp(broker.socket_addr())
+#[conformance_test(
+    ids = ["MQTT-3.1.2-29"],
+    requires = ["transport.tcp"],
+)]
+async fn request_problem_info_zero_suppresses_properties(sut: SutHandle) {
+    let mut raw = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let client_id = unique_client_id("rpi-zero");
@@ -244,15 +251,14 @@ async fn request_problem_info_zero_suppresses_properties() {
     }
 }
 
-/// `[MQTT-4.3.3-7]` Server MUST NOT apply message expiry if PUBLISH has been sent.
-///
-/// Subscribe at `QoS` 2, publish with Message Expiry Interval=1s, receive the
-/// PUBLISH from the broker, wait >1s, then send PUBREC. The broker must
-/// still respond with PUBREL (not drop the message).
-#[tokio::test]
-async fn qos2_no_message_expiry_after_publish_sent() {
-    let broker = ConformanceBroker::start().await;
-    let mut sub_raw = RawMqttClient::connect_tcp(broker.socket_addr())
+/// `[MQTT-4.3.3-7]` Server MUST NOT apply message expiry if PUBLISH has been
+/// sent.
+#[conformance_test(
+    ids = ["MQTT-4.3.3-7"],
+    requires = ["transport.tcp", "max_qos>=2"],
+)]
+async fn qos2_no_message_expiry_after_publish_sent(sut: SutHandle) {
+    let mut sub_raw = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let sub_id = unique_client_id("exp-sub");
@@ -272,7 +278,7 @@ async fn qos2_no_message_expiry_after_publish_sent() {
         .expect("expected SUBACK");
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let mut pub_raw = RawMqttClient::connect_tcp(broker.socket_addr())
+    let mut pub_raw = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let pub_id = unique_client_id("exp-pub");
@@ -327,14 +333,12 @@ async fn qos2_no_message_expiry_after_publish_sent() {
 
 /// `[MQTT-4.3.3-13]` Server MUST continue the `QoS` 2 acknowledgement sequence
 /// even if it has applied message expiry.
-///
-/// Publisher sends `QoS` 2 PUBLISH with Message Expiry Interval=1s, broker
-/// responds with PUBREC, publisher waits >1s, then sends PUBREL. Broker
-/// must respond with PUBCOMP.
-#[tokio::test]
-async fn qos2_continues_despite_expiry() {
-    let broker = ConformanceBroker::start().await;
-    let mut raw = RawMqttClient::connect_tcp(broker.socket_addr())
+#[conformance_test(
+    ids = ["MQTT-4.3.3-13"],
+    requires = ["transport.tcp", "max_qos>=2"],
+)]
+async fn qos2_continues_despite_expiry(sut: SutHandle) {
+    let mut raw = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let client_id = unique_client_id("exp-cont");

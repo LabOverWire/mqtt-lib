@@ -1,22 +1,23 @@
-use mqtt5::{QoS, SubscribeOptions};
-use mqtt5_conformance::harness::{
-    connected_client, unique_client_id, ConformanceBroker, MessageCollector,
-};
-use mqtt5_conformance::raw_client::{RawMqttClient, RawPacketBuilder};
+//! Sections 3.10–3.11 — UNSUBSCRIBE and UNSUBACK.
+
+use crate::conformance_test;
+use crate::harness::unique_client_id;
+use crate::raw_client::{RawMqttClient, RawPacketBuilder};
+use crate::sut::SutHandle;
+use crate::test_client::TestClient;
+use mqtt5_protocol::types::{QoS, SubscribeOptions};
 use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_secs(3);
 
-// ---------------------------------------------------------------------------
-// Group 1: UNSUBSCRIBE Structure — Section 3.10
-// ---------------------------------------------------------------------------
-
 /// `[MQTT-3.10.1-1]` UNSUBSCRIBE fixed header flags MUST be `0x02`.
 /// A raw UNSUBSCRIBE with flags `0x00` (byte `0xA0`) must cause disconnect.
-#[tokio::test]
-async fn unsubscribe_invalid_flags_rejected() {
-    let broker = ConformanceBroker::start().await;
-    let mut raw = RawMqttClient::connect_tcp(broker.socket_addr())
+#[conformance_test(
+    ids = ["MQTT-3.10.1-1"],
+    requires = ["transport.tcp"],
+)]
+async fn unsubscribe_invalid_flags_rejected(sut: SutHandle) {
+    let mut raw = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let client_id = unique_client_id("unsub-flags");
@@ -35,12 +36,14 @@ async fn unsubscribe_invalid_flags_rejected() {
     );
 }
 
-/// `[MQTT-3.10.3-2]` UNSUBSCRIBE payload MUST contain at least one topic filter.
-/// An empty-payload UNSUBSCRIBE must cause disconnect.
-#[tokio::test]
-async fn unsubscribe_empty_payload_rejected() {
-    let broker = ConformanceBroker::start().await;
-    let mut raw = RawMqttClient::connect_tcp(broker.socket_addr())
+/// `[MQTT-3.10.3-2]` UNSUBSCRIBE payload MUST contain at least one topic
+/// filter.
+#[conformance_test(
+    ids = ["MQTT-3.10.3-2"],
+    requires = ["transport.tcp"],
+)]
+async fn unsubscribe_empty_payload_rejected(sut: SutHandle) {
+    let mut raw = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let client_id = unique_client_id("unsub-empty");
@@ -56,15 +59,13 @@ async fn unsubscribe_empty_payload_rejected() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Group 2: UNSUBACK Response — Section 3.11
-// ---------------------------------------------------------------------------
-
 /// `[MQTT-3.11.2-1]` UNSUBACK packet ID must match UNSUBSCRIBE packet ID.
-#[tokio::test]
-async fn unsuback_packet_id_matches() {
-    let broker = ConformanceBroker::start().await;
-    let mut raw = RawMqttClient::connect_tcp(broker.socket_addr())
+#[conformance_test(
+    ids = ["MQTT-3.11.2-1"],
+    requires = ["transport.tcp"],
+)]
+async fn unsuback_packet_id_matches(sut: SutHandle) {
+    let mut raw = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let client_id = unique_client_id("unsuback-pid");
@@ -104,10 +105,12 @@ async fn unsuback_packet_id_matches() {
 }
 
 /// `[MQTT-3.11.3-1]` UNSUBACK must contain one reason code per topic filter.
-#[tokio::test]
-async fn unsuback_reason_codes_per_filter() {
-    let broker = ConformanceBroker::start().await;
-    let mut raw = RawMqttClient::connect_tcp(broker.socket_addr())
+#[conformance_test(
+    ids = ["MQTT-3.11.3-1"],
+    requires = ["transport.tcp"],
+)]
+async fn unsuback_reason_codes_per_filter(sut: SutHandle) {
+    let mut raw = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let client_id = unique_client_id("unsuback-multi");
@@ -131,11 +134,14 @@ async fn unsuback_reason_codes_per_filter() {
     );
 }
 
-/// Subscribe then unsubscribe — reason code should be Success (0x00).
-#[tokio::test]
-async fn unsuback_success_for_existing() {
-    let broker = ConformanceBroker::start().await;
-    let mut raw = RawMqttClient::connect_tcp(broker.socket_addr())
+/// `[MQTT-3.11.3-2]` Subscribe then unsubscribe — reason code should be
+/// Success (0x00).
+#[conformance_test(
+    ids = ["MQTT-3.11.3-2"],
+    requires = ["transport.tcp"],
+)]
+async fn unsuback_success_for_existing(sut: SutHandle) {
+    let mut raw = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let client_id = unique_client_id("unsuback-ok");
@@ -166,12 +172,14 @@ async fn unsuback_success_for_existing() {
     );
 }
 
-/// Unsubscribe from a topic never subscribed — reason code should be
-/// `NoSubscriptionExisted` (0x11).
-#[tokio::test]
-async fn unsuback_no_subscription_existed() {
-    let broker = ConformanceBroker::start().await;
-    let mut raw = RawMqttClient::connect_tcp(broker.socket_addr())
+/// `[MQTT-3.11.3-2]` Unsubscribe from a topic never subscribed — reason code
+/// should be `NoSubscriptionExisted` (0x11).
+#[conformance_test(
+    ids = ["MQTT-3.11.3-2"],
+    requires = ["transport.tcp"],
+)]
+async fn unsuback_no_subscription_existed(sut: SutHandle) {
+    let mut raw = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let client_id = unique_client_id("unsuback-noexist");
@@ -193,35 +201,33 @@ async fn unsuback_no_subscription_existed() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Group 3: Subscription Removal Verification
-// ---------------------------------------------------------------------------
-
 /// `[MQTT-3.10.4-1]` After unsubscribing, the broker must stop sending
 /// messages for that topic filter.
-#[tokio::test]
-async fn unsubscribe_stops_delivery() {
-    let broker = ConformanceBroker::start().await;
-    let subscriber = connected_client("unsub-stop", &broker).await;
-    let collector = MessageCollector::new();
+#[conformance_test(
+    ids = ["MQTT-3.10.4-1"],
+    requires = ["transport.tcp"],
+)]
+async fn unsubscribe_stops_delivery(sut: SutHandle) {
+    let subscriber = TestClient::connect_with_prefix(&sut, "unsub-stop")
+        .await
+        .unwrap();
     let opts = SubscribeOptions {
         qos: QoS::AtMostOnce,
         ..Default::default()
     };
-    subscriber
-        .subscribe_with_options("test/unsub-stop", opts, collector.callback())
-        .await
-        .unwrap();
+    let subscription = subscriber.subscribe("test/unsub-stop", opts).await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let publisher = connected_client("unsub-stop-pub", &broker).await;
+    let publisher = TestClient::connect_with_prefix(&sut, "unsub-stop-pub")
+        .await
+        .unwrap();
     publisher
-        .publish("test/unsub-stop", b"before".to_vec())
+        .publish("test/unsub-stop", b"before")
         .await
         .unwrap();
 
     assert!(
-        collector.wait_for_messages(1, TIMEOUT).await,
+        subscription.wait_for_messages(1, TIMEOUT).await,
         "subscriber should receive message before unsubscribe"
     );
 
@@ -229,11 +235,11 @@ async fn unsubscribe_stops_delivery() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     publisher
-        .publish("test/unsub-stop", b"after".to_vec())
+        .publish("test/unsub-stop", b"after")
         .await
         .unwrap();
 
-    let got_more = collector
+    let got_more = subscription
         .wait_for_messages(2, Duration::from_millis(500))
         .await;
     assert!(
@@ -242,13 +248,16 @@ async fn unsubscribe_stops_delivery() {
     );
 }
 
-/// Multi-filter UNSUBSCRIBE: one existing, one non-existing. Verify
-/// reason codes (Success + `NoSubscriptionExisted`) and that messages
-/// stop for unsubscribed topic but continue for remaining.
-#[tokio::test]
-async fn unsubscribe_partial_multi() {
-    let broker = ConformanceBroker::start().await;
-    let mut raw = RawMqttClient::connect_tcp(broker.socket_addr())
+/// `[MQTT-3.10.4-1]` `[MQTT-3.11.3-2]` Multi-filter UNSUBSCRIBE: one
+/// existing, one non-existing. Verify reason codes (Success +
+/// `NoSubscriptionExisted`) and that messages stop for unsubscribed topic
+/// but continue for remaining.
+#[conformance_test(
+    ids = ["MQTT-3.10.4-1", "MQTT-3.11.3-2"],
+    requires = ["transport.tcp"],
+)]
+async fn unsubscribe_partial_multi(sut: SutHandle) {
+    let mut raw = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let client_id = unique_client_id("unsub-partial");
@@ -285,11 +294,10 @@ async fn unsubscribe_partial_multi() {
         reason_codes[1]
     );
 
-    let publisher = connected_client("unsub-partial-pub", &broker).await;
-    publisher
-        .publish("test/keep", b"still-here".to_vec())
+    let publisher = TestClient::connect_with_prefix(&sut, "unsub-partial-pub")
         .await
         .unwrap();
+    publisher.publish("test/keep", b"still-here").await.unwrap();
 
     let msg = raw.expect_publish(TIMEOUT).await;
     assert!(
@@ -297,10 +305,7 @@ async fn unsubscribe_partial_multi() {
         "messages on test/keep should still be delivered"
     );
 
-    publisher
-        .publish("test/remove", b"gone".to_vec())
-        .await
-        .unwrap();
+    publisher.publish("test/remove", b"gone").await.unwrap();
 
     let stale = raw.expect_publish(Duration::from_millis(500)).await;
     assert!(
@@ -309,12 +314,14 @@ async fn unsubscribe_partial_multi() {
     );
 }
 
-/// Unsubscribe twice from the same topic. First UNSUBACK=Success,
-/// second UNSUBACK=`NoSubscriptionExisted`.
-#[tokio::test]
-async fn unsubscribe_idempotent() {
-    let broker = ConformanceBroker::start().await;
-    let mut raw = RawMqttClient::connect_tcp(broker.socket_addr())
+/// `[MQTT-3.11.3-2]` Unsubscribe twice from the same topic. First
+/// UNSUBACK=Success, second UNSUBACK=`NoSubscriptionExisted`.
+#[conformance_test(
+    ids = ["MQTT-3.11.3-2"],
+    requires = ["transport.tcp"],
+)]
+async fn unsubscribe_idempotent(sut: SutHandle) {
+    let mut raw = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let client_id = unique_client_id("unsub-idempotent");
@@ -356,17 +363,15 @@ async fn unsubscribe_idempotent() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Group 4: UNSUBACK Reason Code Validation — Section 3.11.3
-// ---------------------------------------------------------------------------
-
 /// `[MQTT-3.11.3-2]` UNSUBACK reason codes must be spec-defined values.
 /// Success (0x00) and `NoSubscriptionExisted` (0x11) are the two valid
 /// outcomes for a well-formed UNSUBSCRIBE. Verify both are in range.
-#[tokio::test]
-async fn unsuback_reason_codes_are_valid_spec_values() {
-    let broker = ConformanceBroker::start().await;
-    let mut raw = RawMqttClient::connect_tcp(broker.socket_addr())
+#[conformance_test(
+    ids = ["MQTT-3.11.3-2"],
+    requires = ["transport.tcp"],
+)]
+async fn unsuback_reason_codes_are_valid_spec_values(sut: SutHandle) {
+    let mut raw = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let client_id = unique_client_id("unsuback-valid");
@@ -410,16 +415,14 @@ async fn unsuback_reason_codes_are_valid_spec_values() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Group 5: Invalid UTF-8 — Section 3.10.3
-// ---------------------------------------------------------------------------
-
 /// `[MQTT-3.10.3-1]` Topic filter in UNSUBSCRIBE must be valid UTF-8.
 /// Sending invalid UTF-8 bytes must cause disconnect.
-#[tokio::test]
-async fn unsubscribe_invalid_utf8_rejected() {
-    let broker = ConformanceBroker::start().await;
-    let mut raw = RawMqttClient::connect_tcp(broker.socket_addr())
+#[conformance_test(
+    ids = ["MQTT-3.10.3-1"],
+    requires = ["transport.tcp"],
+)]
+async fn unsubscribe_invalid_utf8_rejected(sut: SutHandle) {
+    let mut raw = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let client_id = unique_client_id("unsub-bad-utf8");

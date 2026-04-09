@@ -1,20 +1,23 @@
-use mqtt5::{PublishOptions, QoS};
-use mqtt5_conformance::harness::{
-    connected_client, unique_client_id, ConformanceBroker, MessageCollector,
-};
-use mqtt5_conformance::raw_client::{RawMqttClient, RawPacketBuilder};
+//! Section 4.8 — Shared Subscriptions.
+
+use crate::conformance_test;
+use crate::harness::unique_client_id;
+use crate::raw_client::{RawMqttClient, RawPacketBuilder};
+use crate::sut::SutHandle;
+use crate::test_client::TestClient;
+use mqtt5_protocol::types::{PublishOptions, QoS, SubscribeOptions};
 use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_secs(3);
 
-// ---------------------------------------------------------------------------
-// Group 1: Shared Subscription Format Validation — Section 4.8.2
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn shared_sub_valid_format_accepted() {
-    let broker = ConformanceBroker::start().await;
-    let mut raw = RawMqttClient::connect_tcp(broker.socket_addr())
+/// `[MQTT-4.8.2-1]` A valid shared subscription filter
+/// (`$share/<name>/<filter>`) must be accepted.
+#[conformance_test(
+    ids = ["MQTT-4.8.2-1"],
+    requires = ["transport.tcp", "shared_subscription_available"],
+)]
+async fn shared_sub_valid_format_accepted(sut: SutHandle) {
+    let mut raw = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let client_id = unique_client_id("shared-valid");
@@ -39,10 +42,13 @@ async fn shared_sub_valid_format_accepted() {
     );
 }
 
-#[tokio::test]
-async fn shared_sub_share_name_with_wildcard_rejected() {
-    let broker = ConformanceBroker::start().await;
-    let mut raw = RawMqttClient::connect_tcp(broker.socket_addr())
+/// `[MQTT-4.8.2-2]` The `ShareName` MUST NOT contain `#` or `+`.
+#[conformance_test(
+    ids = ["MQTT-4.8.2-2"],
+    requires = ["transport.tcp", "shared_subscription_available"],
+)]
+async fn shared_sub_share_name_with_wildcard_rejected(sut: SutHandle) {
+    let mut raw = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let client_id = unique_client_id("shared-badname");
@@ -70,10 +76,14 @@ async fn shared_sub_share_name_with_wildcard_rejected() {
     );
 }
 
-#[tokio::test]
-async fn shared_sub_incomplete_format_rejected() {
-    let broker = ConformanceBroker::start().await;
-    let mut raw = RawMqttClient::connect_tcp(broker.socket_addr())
+/// `[MQTT-4.8.2-1]` Incomplete `$share/<name>` without a topic filter after
+/// the second `/` must be rejected with `TopicFilterInvalid`.
+#[conformance_test(
+    ids = ["MQTT-4.8.2-1"],
+    requires = ["transport.tcp", "shared_subscription_available"],
+)]
+async fn shared_sub_incomplete_format_rejected(sut: SutHandle) {
+    let mut raw = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let client_id = unique_client_id("shared-incomplete");
@@ -98,42 +108,46 @@ async fn shared_sub_incomplete_format_rejected() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Group 2: Shared Subscription Message Distribution — Section 4.8.2
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn shared_sub_round_robin_delivery() {
-    let broker = ConformanceBroker::start().await;
-
-    let worker1 = connected_client("shared-rr-w1", &broker).await;
-    let collector1 = MessageCollector::new();
-    worker1
-        .subscribe("$share/workers/tasks", collector1.callback())
+/// `[MQTT-4.8.2-4]` Messages published to a shared subscription are
+/// distributed across the members of the shared group.
+#[conformance_test(
+    ids = ["MQTT-4.8.2-4"],
+    requires = ["transport.tcp", "shared_subscription_available"],
+)]
+async fn shared_sub_round_robin_delivery(sut: SutHandle) {
+    let worker1 = TestClient::connect_with_prefix(&sut, "shared-rr-w1")
+        .await
+        .unwrap();
+    let sub1 = worker1
+        .subscribe("$share/workers/tasks", SubscribeOptions::default())
         .await
         .unwrap();
 
-    let worker2 = connected_client("shared-rr-w2", &broker).await;
-    let collector2 = MessageCollector::new();
-    worker2
-        .subscribe("$share/workers/tasks", collector2.callback())
+    let worker2 = TestClient::connect_with_prefix(&sut, "shared-rr-w2")
+        .await
+        .unwrap();
+    let sub2 = worker2
+        .subscribe("$share/workers/tasks", SubscribeOptions::default())
         .await
         .unwrap();
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let publisher = connected_client("shared-rr-pub", &broker).await;
+    let publisher = TestClient::connect_with_prefix(&sut, "shared-rr-pub")
+        .await
+        .unwrap();
     for i in 0..6 {
+        let payload = format!("msg-{i}");
         publisher
-            .publish("tasks", format!("msg-{i}").as_bytes())
+            .publish("tasks", payload.as_bytes())
             .await
             .unwrap();
     }
 
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    let count1 = collector1.count();
-    let count2 = collector2.count();
+    let count1 = sub1.count();
+    let count2 = sub2.count();
     assert_eq!(
         count1 + count2,
         6,
@@ -145,60 +159,69 @@ async fn shared_sub_round_robin_delivery() {
     );
 }
 
-#[tokio::test]
-async fn shared_sub_mixed_with_regular() {
-    let broker = ConformanceBroker::start().await;
-
-    let shared = connected_client("shared-mix-s", &broker).await;
-    let collector_shared = MessageCollector::new();
-    shared
-        .subscribe("$share/workers/tasks", collector_shared.callback())
+/// `[MQTT-4.8.2-4]` A shared subscription coexists with regular
+/// subscriptions on the same topic; both must receive the message.
+#[conformance_test(
+    ids = ["MQTT-4.8.2-4"],
+    requires = ["transport.tcp", "shared_subscription_available"],
+)]
+async fn shared_sub_mixed_with_regular(sut: SutHandle) {
+    let shared = TestClient::connect_with_prefix(&sut, "shared-mix-s")
+        .await
+        .unwrap();
+    let sub_shared = shared
+        .subscribe("$share/workers/tasks", SubscribeOptions::default())
         .await
         .unwrap();
 
-    let regular = connected_client("shared-mix-r", &broker).await;
-    let collector_regular = MessageCollector::new();
-    regular
-        .subscribe("tasks", collector_regular.callback())
+    let regular = TestClient::connect_with_prefix(&sut, "shared-mix-r")
+        .await
+        .unwrap();
+    let sub_regular = regular
+        .subscribe("tasks", SubscribeOptions::default())
         .await
         .unwrap();
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let publisher = connected_client("shared-mix-pub", &broker).await;
+    let publisher = TestClient::connect_with_prefix(&sut, "shared-mix-pub")
+        .await
+        .unwrap();
     for i in 0..4 {
+        let payload = format!("msg-{i}");
         publisher
-            .publish("tasks", format!("msg-{i}").as_bytes())
+            .publish("tasks", payload.as_bytes())
             .await
             .unwrap();
     }
 
-    collector_regular.wait_for_messages(4, TIMEOUT).await;
-    collector_shared.wait_for_messages(4, TIMEOUT).await;
+    sub_regular.wait_for_messages(4, TIMEOUT).await;
+    sub_shared.wait_for_messages(4, TIMEOUT).await;
 
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     assert_eq!(
-        collector_regular.count(),
+        sub_regular.count(),
         4,
         "regular subscriber must receive all 4 messages"
     );
     assert_eq!(
-        collector_shared.count(),
+        sub_shared.count(),
         4,
         "sole shared group member must receive all 4 messages"
     );
 }
 
-// ---------------------------------------------------------------------------
-// Group 3: Shared Subscription Retained Messages — Section 4.8
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn shared_sub_no_retained_on_subscribe() {
-    let broker = ConformanceBroker::start().await;
-
-    let publisher = connected_client("shared-ret-pub", &broker).await;
+/// `[MQTT-4.8.2-5]` Shared subscriptions MUST NOT receive retained messages
+/// on subscribe.
+#[conformance_test(
+    ids = ["MQTT-4.8.2-5"],
+    requires = ["transport.tcp", "shared_subscription_available", "retain_available"],
+)]
+async fn shared_sub_no_retained_on_subscribe(sut: SutHandle) {
+    let publisher = TestClient::connect_with_prefix(&sut, "shared-ret-pub")
+        .await
+        .unwrap();
     publisher
         .publish_with_options(
             "sensor/temp",
@@ -213,30 +236,32 @@ async fn shared_sub_no_retained_on_subscribe() {
 
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let shared_sub = connected_client("shared-ret-s", &broker).await;
-    let collector_shared = MessageCollector::new();
-    shared_sub
-        .subscribe("$share/readers/sensor/temp", collector_shared.callback())
+    let shared_sub = TestClient::connect_with_prefix(&sut, "shared-ret-s")
+        .await
+        .unwrap();
+    let sub_shared = shared_sub
+        .subscribe("$share/readers/sensor/temp", SubscribeOptions::default())
         .await
         .unwrap();
 
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     assert_eq!(
-        collector_shared.count(),
+        sub_shared.count(),
         0,
         "shared subscription must not receive retained messages on subscribe"
     );
 
-    let regular_sub = connected_client("shared-ret-r", &broker).await;
-    let collector_regular = MessageCollector::new();
-    regular_sub
-        .subscribe("sensor/temp", collector_regular.callback())
+    let regular_sub = TestClient::connect_with_prefix(&sut, "shared-ret-r")
+        .await
+        .unwrap();
+    let sub_regular = regular_sub
+        .subscribe("sensor/temp", SubscribeOptions::default())
         .await
         .unwrap();
 
-    collector_regular.wait_for_messages(1, TIMEOUT).await;
-    let msgs = collector_regular.get_messages();
+    sub_regular.wait_for_messages(1, TIMEOUT).await;
+    let msgs = sub_regular.snapshot();
     assert_eq!(
         msgs.len(),
         1,
@@ -245,29 +270,31 @@ async fn shared_sub_no_retained_on_subscribe() {
     assert_eq!(msgs[0].payload, b"25.5");
 }
 
-// ---------------------------------------------------------------------------
-// Group 4: Shared Subscription Unsubscribe and Multiple Groups — Section 4.8
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn shared_sub_unsubscribe_stops_delivery() {
-    let broker = ConformanceBroker::start().await;
-
-    let subscriber = connected_client("shared-unsub-s", &broker).await;
-    let collector = MessageCollector::new();
-    subscriber
-        .subscribe("$share/workers/tasks", collector.callback())
+/// `[MQTT-4.8.2-4]` After unsubscribing from a shared subscription, the
+/// client must no longer receive messages distributed to the share group.
+#[conformance_test(
+    ids = ["MQTT-4.8.2-4"],
+    requires = ["transport.tcp", "shared_subscription_available"],
+)]
+async fn shared_sub_unsubscribe_stops_delivery(sut: SutHandle) {
+    let subscriber = TestClient::connect_with_prefix(&sut, "shared-unsub-s")
+        .await
+        .unwrap();
+    let subscription = subscriber
+        .subscribe("$share/workers/tasks", SubscribeOptions::default())
         .await
         .unwrap();
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let publisher = connected_client("shared-unsub-pub", &broker).await;
+    let publisher = TestClient::connect_with_prefix(&sut, "shared-unsub-pub")
+        .await
+        .unwrap();
     publisher.publish("tasks", b"before").await.unwrap();
 
-    collector.wait_for_messages(1, TIMEOUT).await;
+    subscription.wait_for_messages(1, TIMEOUT).await;
     assert_eq!(
-        collector.count(),
+        subscription.count(),
         1,
         "must receive message before unsubscribe"
     );
@@ -284,57 +311,68 @@ async fn shared_sub_unsubscribe_stops_delivery() {
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     assert_eq!(
-        collector.count(),
+        subscription.count(),
         1,
         "must not receive messages after unsubscribe from shared subscription"
     );
 }
 
-#[tokio::test]
-async fn shared_sub_multiple_groups_independent() {
-    let broker = ConformanceBroker::start().await;
-
-    let client_a = connected_client("shared-grpA", &broker).await;
-    let collector_a = MessageCollector::new();
-    client_a
-        .subscribe("$share/groupA/topic", collector_a.callback())
+/// `[MQTT-4.8.2-4]` Multiple shared groups with different `ShareNames` on the
+/// same topic are independent; each group receives the message.
+#[conformance_test(
+    ids = ["MQTT-4.8.2-4"],
+    requires = ["transport.tcp", "shared_subscription_available"],
+)]
+async fn shared_sub_multiple_groups_independent(sut: SutHandle) {
+    let client_a = TestClient::connect_with_prefix(&sut, "shared-grpA")
+        .await
+        .unwrap();
+    let sub_a = client_a
+        .subscribe("$share/groupA/topic", SubscribeOptions::default())
         .await
         .unwrap();
 
-    let client_b = connected_client("shared-grpB", &broker).await;
-    let collector_b = MessageCollector::new();
-    client_b
-        .subscribe("$share/groupB/topic", collector_b.callback())
+    let client_b = TestClient::connect_with_prefix(&sut, "shared-grpB")
+        .await
+        .unwrap();
+    let sub_b = client_b
+        .subscribe("$share/groupB/topic", SubscribeOptions::default())
         .await
         .unwrap();
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let publisher = connected_client("shared-grp-pub", &broker).await;
+    let publisher = TestClient::connect_with_prefix(&sut, "shared-grp-pub")
+        .await
+        .unwrap();
     publisher.publish("topic", b"payload").await.unwrap();
 
-    collector_a.wait_for_messages(1, TIMEOUT).await;
-    collector_b.wait_for_messages(1, TIMEOUT).await;
+    sub_a.wait_for_messages(1, TIMEOUT).await;
+    sub_b.wait_for_messages(1, TIMEOUT).await;
 
     assert_eq!(
-        collector_a.count(),
+        sub_a.count(),
         1,
         "groupA must receive the message independently"
     );
     assert_eq!(
-        collector_b.count(),
+        sub_b.count(),
         1,
         "groupB must receive the message independently"
     );
 }
 
-#[tokio::test]
-async fn shared_sub_respects_granted_qos() {
-    let broker = ConformanceBroker::start().await;
+/// `[MQTT-4.8.2-3]` Messages delivered to a shared subscription are
+/// delivered at the minimum of the publish `QoS` and the granted `QoS`.
+#[conformance_test(
+    ids = ["MQTT-4.8.2-3"],
+    requires = ["transport.tcp", "shared_subscription_available", "max_qos>=1"],
+)]
+async fn shared_sub_respects_granted_qos(sut: SutHandle) {
     let topic = format!("shared-qos/{}", unique_client_id("t"));
     let shared_filter = format!("$share/qgrp/{topic}");
 
-    let mut sub = RawMqttClient::connect_tcp(broker.socket_addr())
+    let mut sub = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let sub_id = unique_client_id("sub-sqos");
@@ -358,7 +396,7 @@ async fn shared_sub_respects_granted_qos() {
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let mut pub_raw = RawMqttClient::connect_tcp(broker.socket_addr())
+    let mut pub_raw = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let pub_id = unique_client_id("pub-sqos");
@@ -383,13 +421,18 @@ async fn shared_sub_respects_granted_qos() {
     );
 }
 
-#[tokio::test]
-async fn shared_sub_puback_error_discards() {
-    let broker = ConformanceBroker::start().await;
+/// `[MQTT-4.8.2-6]` A message rejected by a shared subscriber with a
+/// PUBACK error reason code MUST NOT be redistributed to other members of
+/// the share group.
+#[conformance_test(
+    ids = ["MQTT-4.8.2-6"],
+    requires = ["transport.tcp", "shared_subscription_available", "max_qos>=1"],
+)]
+async fn shared_sub_puback_error_discards(sut: SutHandle) {
     let topic = format!("shared-err/{}", unique_client_id("t"));
     let shared_filter = format!("$share/errgrp/{topic}");
 
-    let mut worker = RawMqttClient::connect_tcp(broker.socket_addr())
+    let mut worker = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let worker_id = unique_client_id("shared-err-w");
@@ -406,7 +449,9 @@ async fn shared_sub_puback_error_discards() {
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let publisher = connected_client("shared-err-pub", &broker).await;
+    let publisher = TestClient::connect_with_prefix(&sut, "shared-err-pub")
+        .await
+        .unwrap();
     let pub_opts = PublishOptions {
         qos: QoS::AtLeastOnce,
         ..Default::default()

@@ -1,0 +1,56 @@
+[core-broker]
+max_qos = 2
+retain_available = true
+wildcard_subscription_available = true
+subscription_identifier_available = true
+shared_subscription_available = false
+topic_alias_maximum = 0
+assigned_client_id_supported = true
+acl = false
+
+[core-broker.transports]
+tcp = true
+tls = false
+websocket = false
+quic = false
+
+[core-broker-tls]
+max_qos = 2
+retain_available = true
+wildcard_subscription_available = true
+subscription_identifier_available = true
+shared_subscription_available = false
+topic_alias_maximum = 0
+assigned_client_id_supported = true
+acl = false
+
+[core-broker-tls.transports]
+tcp = true
+tls = true
+websocket = false
+quic = false
+
+[full-broker]
+max_qos = 2
+retain_available = true
+wildcard_subscription_available = true
+subscription_identifier_available = true
+shared_subscription_available = true
+topic_alias_maximum = 65535
+server_receive_maximum = 65535
+maximum_packet_size = 268435456
+assigned_client_id_supported = true
+acl = true
+
+[full-broker.transports]
+tcp = true
+tls = true
+websocket = true
+quic = false
+
+[full-broker.enhanced_auth]
+methods = ["SCRAM-SHA-256"]
+
+[full-broker.hooks]
+restart = true
+cleanup = true

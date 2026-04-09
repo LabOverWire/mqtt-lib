@@ -1,18 +1,24 @@
-use mqtt5_conformance::harness::{unique_client_id, ConformanceBroker};
-use mqtt5_conformance::raw_client::{RawMqttClient, RawPacketBuilder};
+//! Section 3.12 — PINGREQ/PINGRESP and Section 3.1.2-11 — keep-alive timeout.
+//!
+//! Proof-of-concept module for the `#[conformance_test]` proc-macro and the
+//! `mqtt5-conformance-cli` runner. Exercises the raw-client path because the
+//! assertions under test live at the packet level.
+
+use crate::conformance_test;
+use crate::harness::unique_client_id;
+use crate::raw_client::{RawMqttClient, RawPacketBuilder};
+use crate::sut::SutHandle;
 use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_secs(3);
 
-// ---------------------------------------------------------------------------
-// Group 1: PINGREQ/PINGRESP Exchange — Section 3.12
-// ---------------------------------------------------------------------------
-
 /// `[MQTT-3.12.4-1]` Server MUST send PINGRESP in response to PINGREQ.
-#[tokio::test]
-async fn pingresp_sent_on_pingreq() {
-    let broker = ConformanceBroker::start().await;
-    let mut raw = RawMqttClient::connect_tcp(broker.socket_addr())
+#[conformance_test(
+    ids = ["MQTT-3.12.4-1"],
+    requires = ["transport.tcp"],
+)]
+async fn pingresp_sent_on_pingreq(sut: SutHandle) {
+    let mut raw = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let client_id = unique_client_id("ping-resp");
@@ -27,10 +33,12 @@ async fn pingresp_sent_on_pingreq() {
 }
 
 /// Send 3 PINGREQs in sequence, verify all 3 PINGRESPs are received.
-#[tokio::test]
-async fn multiple_pingreqs_all_responded() {
-    let broker = ConformanceBroker::start().await;
-    let mut raw = RawMqttClient::connect_tcp(broker.socket_addr())
+#[conformance_test(
+    ids = ["MQTT-3.12.4-1"],
+    requires = ["transport.tcp"],
+)]
+async fn multiple_pingreqs_all_responded(sut: SutHandle) {
+    let mut raw = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let client_id = unique_client_id("ping-multi");
@@ -46,16 +54,14 @@ async fn multiple_pingreqs_all_responded() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Group 2: Keep-Alive Timeout Enforcement — Section 3.1.2-11
-// ---------------------------------------------------------------------------
-
 /// `[MQTT-3.1.2-11]` Connect with keep-alive=2s, go silent, verify broker
 /// closes the connection within 1.5x the keep-alive (3s), with 1s margin.
-#[tokio::test]
-async fn keepalive_timeout_closes_connection() {
-    let broker = ConformanceBroker::start().await;
-    let mut raw = RawMqttClient::connect_tcp(broker.socket_addr())
+#[conformance_test(
+    ids = ["MQTT-3.1.2-11"],
+    requires = ["transport.tcp"],
+)]
+async fn keepalive_timeout_closes_connection(sut: SutHandle) {
+    let mut raw = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let client_id = unique_client_id("ka-timeout");
@@ -72,10 +78,12 @@ async fn keepalive_timeout_closes_connection() {
 
 /// Connect with keep-alive=0 (disabled), go silent for 5s, verify connection
 /// stays open by sending a PINGREQ and getting a PINGRESP.
-#[tokio::test]
-async fn keepalive_zero_no_timeout() {
-    let broker = ConformanceBroker::start().await;
-    let mut raw = RawMqttClient::connect_tcp(broker.socket_addr())
+#[conformance_test(
+    ids = ["MQTT-3.1.2-11"],
+    requires = ["transport.tcp"],
+)]
+async fn keepalive_zero_no_timeout(sut: SutHandle) {
+    let mut raw = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let client_id = unique_client_id("ka-zero");
@@ -95,10 +103,12 @@ async fn keepalive_zero_no_timeout() {
 
 /// Connect with keep-alive=2s, send PINGREQ every second for 5s. The
 /// PINGREQs reset the keep-alive timer so the connection must stay alive.
-#[tokio::test]
-async fn pingreq_resets_keepalive() {
-    let broker = ConformanceBroker::start().await;
-    let mut raw = RawMqttClient::connect_tcp(broker.socket_addr())
+#[conformance_test(
+    ids = ["MQTT-3.1.2-11"],
+    requires = ["transport.tcp"],
+)]
+async fn pingreq_resets_keepalive(sut: SutHandle) {
+    let mut raw = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
     let client_id = unique_client_id("ka-reset");
