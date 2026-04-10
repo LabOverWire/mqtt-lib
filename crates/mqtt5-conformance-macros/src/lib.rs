@@ -1,7 +1,7 @@
 //! Procedural macros for the MQTT v5 conformance test suite.
 //!
 //! Provides the `#[conformance_test]` attribute, which both registers a
-//! conformance test in the [`mqtt5_conformance::registry::CONFORMANCE_TESTS`]
+//! conformance test in the `mqtt5_conformance::registry::CONFORMANCE_TESTS`
 //! distributed slice and wraps the body in `#[tokio::test]` so the file
 //! still works under `cargo test`.
 //!

@@ -208,7 +208,7 @@ impl SutHandle {
     /// Returns the SUT's primary TCP `SocketAddr`, panicking with a clear
     /// message if the SUT does not declare one or if the declared address is
     /// malformed. Intended for test bodies that require a working TCP
-    /// endpoint; production code should use [`tcp_socket_addr`].
+    /// endpoint; production code should use [`Self::tcp_socket_addr`].
     ///
     /// # Panics
     /// Panics if the SUT has no TCP address or if the declared address
