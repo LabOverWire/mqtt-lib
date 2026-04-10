@@ -28,7 +28,7 @@ use mqtt5_protocol::packet::{
 use mqtt5_protocol::types::{
     ConnectOptions, PublishOptions, QoS, RetainHandling, SubscribeOptions,
 };
-use mqtt5_protocol::validation::topic_matches_filter;
+use mqtt5_protocol::validation::{strip_shared_subscription_prefix, topic_matches_filter};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU16, Ordering};
@@ -333,10 +333,11 @@ impl RawTestClient {
         options: SubscribeOptions,
     ) -> Result<Subscription, TestClientError> {
         let messages: MessageQueue = Arc::new(StdMutex::new(Vec::new()));
+        let matching_filter = strip_shared_subscription_prefix(filter);
         {
             let mut subs = self.shared.subscriptions.lock().unwrap();
             subs.push(SubscriptionEntry {
-                filter: filter.to_string(),
+                filter: matching_filter.to_string(),
                 queue: Arc::clone(&messages),
             });
         }
@@ -456,6 +457,9 @@ impl RawTestClient {
 
 impl Drop for RawTestClient {
     fn drop(&mut self) {
+        if let Ok(mut writer) = self.shared.writer.try_lock() {
+            drop(writer.take());
+        }
         self.stop_reader();
     }
 }

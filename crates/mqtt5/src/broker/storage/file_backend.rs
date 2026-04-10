@@ -448,7 +448,8 @@ impl StorageBackend for FileBackend {
     }
 
     async fn get_session(&self, client_id: &str) -> Result<Option<ClientSession>> {
-        if let Some(session) = self.sessions_cache.read().await.get(client_id).cloned() {
+        let cached = self.sessions_cache.read().await.get(client_id).cloned();
+        if let Some(session) = cached {
             if session.is_expired() {
                 self.remove_session(client_id).await?;
                 return Ok(None);

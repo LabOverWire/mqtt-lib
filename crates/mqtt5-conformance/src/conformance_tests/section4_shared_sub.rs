@@ -115,11 +115,14 @@ async fn shared_sub_incomplete_format_rejected(sut: SutHandle) {
     requires = ["transport.tcp", "shared_subscription_available"],
 )]
 async fn shared_sub_round_robin_delivery(sut: SutHandle) {
+    let topic = format!("tasks/{}", unique_client_id("rr"));
+    let shared_filter = format!("$share/workers/{topic}");
+
     let worker1 = TestClient::connect_with_prefix(&sut, "shared-rr-w1")
         .await
         .unwrap();
     let sub1 = worker1
-        .subscribe("$share/workers/tasks", SubscribeOptions::default())
+        .subscribe(&shared_filter, SubscribeOptions::default())
         .await
         .unwrap();
 
@@ -127,7 +130,7 @@ async fn shared_sub_round_robin_delivery(sut: SutHandle) {
         .await
         .unwrap();
     let sub2 = worker2
-        .subscribe("$share/workers/tasks", SubscribeOptions::default())
+        .subscribe(&shared_filter, SubscribeOptions::default())
         .await
         .unwrap();
 
@@ -138,10 +141,7 @@ async fn shared_sub_round_robin_delivery(sut: SutHandle) {
         .unwrap();
     for i in 0..6 {
         let payload = format!("msg-{i}");
-        publisher
-            .publish("tasks", payload.as_bytes())
-            .await
-            .unwrap();
+        publisher.publish(&topic, payload.as_bytes()).await.unwrap();
     }
 
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -166,11 +166,14 @@ async fn shared_sub_round_robin_delivery(sut: SutHandle) {
     requires = ["transport.tcp", "shared_subscription_available"],
 )]
 async fn shared_sub_mixed_with_regular(sut: SutHandle) {
+    let topic = format!("tasks/{}", unique_client_id("mix"));
+    let shared_filter = format!("$share/workers/{topic}");
+
     let shared = TestClient::connect_with_prefix(&sut, "shared-mix-s")
         .await
         .unwrap();
     let sub_shared = shared
-        .subscribe("$share/workers/tasks", SubscribeOptions::default())
+        .subscribe(&shared_filter, SubscribeOptions::default())
         .await
         .unwrap();
 
@@ -178,7 +181,7 @@ async fn shared_sub_mixed_with_regular(sut: SutHandle) {
         .await
         .unwrap();
     let sub_regular = regular
-        .subscribe("tasks", SubscribeOptions::default())
+        .subscribe(&topic, SubscribeOptions::default())
         .await
         .unwrap();
 
@@ -189,10 +192,7 @@ async fn shared_sub_mixed_with_regular(sut: SutHandle) {
         .unwrap();
     for i in 0..4 {
         let payload = format!("msg-{i}");
-        publisher
-            .publish("tasks", payload.as_bytes())
-            .await
-            .unwrap();
+        publisher.publish(&topic, payload.as_bytes()).await.unwrap();
     }
 
     sub_regular.wait_for_messages(4, TIMEOUT).await;
@@ -219,12 +219,15 @@ async fn shared_sub_mixed_with_regular(sut: SutHandle) {
     requires = ["transport.tcp", "shared_subscription_available", "retain_available"],
 )]
 async fn shared_sub_no_retained_on_subscribe(sut: SutHandle) {
+    let topic = format!("sensor/temp/{}", unique_client_id("ret"));
+    let shared_filter = format!("$share/readers/{topic}");
+
     let publisher = TestClient::connect_with_prefix(&sut, "shared-ret-pub")
         .await
         .unwrap();
     publisher
         .publish_with_options(
-            "sensor/temp",
+            &topic,
             b"25.5",
             PublishOptions {
                 retain: true,
@@ -240,7 +243,7 @@ async fn shared_sub_no_retained_on_subscribe(sut: SutHandle) {
         .await
         .unwrap();
     let sub_shared = shared_sub
-        .subscribe("$share/readers/sensor/temp", SubscribeOptions::default())
+        .subscribe(&shared_filter, SubscribeOptions::default())
         .await
         .unwrap();
 
@@ -256,7 +259,7 @@ async fn shared_sub_no_retained_on_subscribe(sut: SutHandle) {
         .await
         .unwrap();
     let sub_regular = regular_sub
-        .subscribe("sensor/temp", SubscribeOptions::default())
+        .subscribe(&topic, SubscribeOptions::default())
         .await
         .unwrap();
 
@@ -277,11 +280,14 @@ async fn shared_sub_no_retained_on_subscribe(sut: SutHandle) {
     requires = ["transport.tcp", "shared_subscription_available"],
 )]
 async fn shared_sub_unsubscribe_stops_delivery(sut: SutHandle) {
+    let topic = format!("tasks/{}", unique_client_id("unsub"));
+    let shared_filter = format!("$share/workers/{topic}");
+
     let subscriber = TestClient::connect_with_prefix(&sut, "shared-unsub-s")
         .await
         .unwrap();
     let subscription = subscriber
-        .subscribe("$share/workers/tasks", SubscribeOptions::default())
+        .subscribe(&shared_filter, SubscribeOptions::default())
         .await
         .unwrap();
 
@@ -290,7 +296,7 @@ async fn shared_sub_unsubscribe_stops_delivery(sut: SutHandle) {
     let publisher = TestClient::connect_with_prefix(&sut, "shared-unsub-pub")
         .await
         .unwrap();
-    publisher.publish("tasks", b"before").await.unwrap();
+    publisher.publish(&topic, b"before").await.unwrap();
 
     subscription.wait_for_messages(1, TIMEOUT).await;
     assert_eq!(
@@ -299,14 +305,11 @@ async fn shared_sub_unsubscribe_stops_delivery(sut: SutHandle) {
         "must receive message before unsubscribe"
     );
 
-    subscriber
-        .unsubscribe("$share/workers/tasks")
-        .await
-        .unwrap();
+    subscriber.unsubscribe(&shared_filter).await.unwrap();
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    publisher.publish("tasks", b"after").await.unwrap();
+    publisher.publish(&topic, b"after").await.unwrap();
 
     tokio::time::sleep(Duration::from_millis(300)).await;
 
@@ -324,11 +327,15 @@ async fn shared_sub_unsubscribe_stops_delivery(sut: SutHandle) {
     requires = ["transport.tcp", "shared_subscription_available"],
 )]
 async fn shared_sub_multiple_groups_independent(sut: SutHandle) {
+    let topic = format!("topic/{}", unique_client_id("grp"));
+    let filter_a = format!("$share/groupA/{topic}");
+    let filter_b = format!("$share/groupB/{topic}");
+
     let client_a = TestClient::connect_with_prefix(&sut, "shared-grpA")
         .await
         .unwrap();
     let sub_a = client_a
-        .subscribe("$share/groupA/topic", SubscribeOptions::default())
+        .subscribe(&filter_a, SubscribeOptions::default())
         .await
         .unwrap();
 
@@ -336,7 +343,7 @@ async fn shared_sub_multiple_groups_independent(sut: SutHandle) {
         .await
         .unwrap();
     let sub_b = client_b
-        .subscribe("$share/groupB/topic", SubscribeOptions::default())
+        .subscribe(&filter_b, SubscribeOptions::default())
         .await
         .unwrap();
 
@@ -345,7 +352,7 @@ async fn shared_sub_multiple_groups_independent(sut: SutHandle) {
     let publisher = TestClient::connect_with_prefix(&sut, "shared-grp-pub")
         .await
         .unwrap();
-    publisher.publish("topic", b"payload").await.unwrap();
+    publisher.publish(&topic, b"payload").await.unwrap();
 
     sub_a.wait_for_messages(1, TIMEOUT).await;
     sub_b.wait_for_messages(1, TIMEOUT).await;

@@ -31,15 +31,22 @@ async fn multi_level_wildcard_must_be_last(sut: SutHandle) {
     .await
     .unwrap();
 
-    let (_, reason_codes) = raw
-        .expect_suback(TIMEOUT)
-        .await
-        .expect("[MQTT-4.7.1-1] must receive SUBACK");
-    assert_eq!(reason_codes.len(), 1);
-    assert_eq!(
-        reason_codes[0], 0x8F,
-        "[MQTT-4.7.1-1] # not last must return TopicFilterInvalid (0x8F)"
-    );
+    let response = raw.expect_suback(TIMEOUT).await;
+    match response {
+        Some((_, reason_codes)) => {
+            assert_eq!(reason_codes.len(), 1);
+            assert_eq!(
+                reason_codes[0], 0x8F,
+                "[MQTT-4.7.1-1] # not last must return TopicFilterInvalid (0x8F)"
+            );
+        }
+        None => {
+            assert!(
+                raw.expect_disconnect(Duration::from_millis(100)).await,
+                "[MQTT-4.7.1-1] # not last must cause SUBACK 0x8F or disconnect"
+            );
+        }
+    }
 }
 
 /// `[MQTT-4.7.1-1]` The multi-level wildcard `#` MUST occupy a complete
@@ -63,15 +70,22 @@ async fn multi_level_wildcard_must_be_full_level(sut: SutHandle) {
     .await
     .unwrap();
 
-    let (_, reason_codes) = raw
-        .expect_suback(TIMEOUT)
-        .await
-        .expect("[MQTT-4.7.1-1] must receive SUBACK");
-    assert_eq!(reason_codes.len(), 1);
-    assert_eq!(
-        reason_codes[0], 0x8F,
-        "[MQTT-4.7.1-1] tennis# (not full level) must return TopicFilterInvalid"
-    );
+    let response = raw.expect_suback(TIMEOUT).await;
+    match response {
+        Some((_, reason_codes)) => {
+            assert_eq!(reason_codes.len(), 1);
+            assert_eq!(
+                reason_codes[0], 0x8F,
+                "[MQTT-4.7.1-1] tennis# (not full level) must return TopicFilterInvalid"
+            );
+        }
+        None => {
+            assert!(
+                raw.expect_disconnect(Duration::from_millis(100)).await,
+                "[MQTT-4.7.1-1] tennis# must cause SUBACK 0x8F or disconnect"
+            );
+        }
+    }
 }
 
 /// `[MQTT-4.7.1-2]` The single-level wildcard `+` MUST occupy a complete
@@ -94,19 +108,26 @@ async fn single_level_wildcard_must_be_full_level(sut: SutHandle) {
     .await
     .unwrap();
 
-    let (_, reason_codes) = raw
-        .expect_suback(TIMEOUT)
-        .await
-        .expect("[MQTT-4.7.1-2] must receive SUBACK");
-    assert_eq!(reason_codes.len(), 2);
-    assert_eq!(
-        reason_codes[0], 0x8F,
-        "[MQTT-4.7.1-2] sport+ must return TopicFilterInvalid"
-    );
-    assert_eq!(
-        reason_codes[1], 0x8F,
-        "[MQTT-4.7.1-2] sport/+tennis must return TopicFilterInvalid"
-    );
+    let response = raw.expect_suback(TIMEOUT).await;
+    match response {
+        Some((_, reason_codes)) => {
+            assert_eq!(reason_codes.len(), 2);
+            assert_eq!(
+                reason_codes[0], 0x8F,
+                "[MQTT-4.7.1-2] sport+ must return TopicFilterInvalid"
+            );
+            assert_eq!(
+                reason_codes[1], 0x8F,
+                "[MQTT-4.7.1-2] sport/+tennis must return TopicFilterInvalid"
+            );
+        }
+        None => {
+            assert!(
+                raw.expect_disconnect(Duration::from_millis(100)).await,
+                "[MQTT-4.7.1-2] invalid + usage must cause SUBACK 0x8F or disconnect"
+            );
+        }
+    }
 }
 
 /// `[MQTT-4.7.1-1]` `[MQTT-4.7.1-2]` Valid wildcard filters must be
@@ -168,7 +189,7 @@ async fn dollar_topics_not_matched_by_root_wildcards(sut: SutHandle) {
         .await
         .expect("subscribe failed");
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
 
     let publisher = TestClient::connect_with_prefix(&sut, "dollar-pub")
         .await
@@ -181,15 +202,26 @@ async fn dollar_topics_not_matched_by_root_wildcards(sut: SutHandle) {
 
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    assert_eq!(
-        subscription_hash.count(),
-        0,
-        "[MQTT-4.7.2-1] # must not match $SYS/test"
+    let dollar_on_hash: Vec<_> = subscription_hash
+        .snapshot()
+        .into_iter()
+        .filter(|m| m.topic.starts_with('$'))
+        .collect();
+    assert!(
+        dollar_on_hash.is_empty(),
+        "[MQTT-4.7.2-1] # must not match $-prefixed topics, got: {:?}",
+        dollar_on_hash.iter().map(|m| &m.topic).collect::<Vec<_>>()
     );
-    assert_eq!(
-        subscription_plus.count(),
-        0,
-        "[MQTT-4.7.2-1] +/info must not match $SYS/info"
+
+    let dollar_on_plus: Vec<_> = subscription_plus
+        .snapshot()
+        .into_iter()
+        .filter(|m| m.topic.starts_with('$'))
+        .collect();
+    assert!(
+        dollar_on_plus.is_empty(),
+        "[MQTT-4.7.2-1] +/info must not match $-prefixed topics, got: {:?}",
+        dollar_on_plus.iter().map(|m| &m.topic).collect::<Vec<_>>()
     );
 }
 

@@ -18,6 +18,7 @@
 
 #![warn(clippy::pedantic)]
 
+use futures_util::FutureExt;
 use libtest_mimic::{Arguments, Conclusion, Failed, Trial};
 use mqtt5_conformance::{
     capabilities::{Capabilities, Requirement},
@@ -178,9 +179,12 @@ fn first_unmet_requirement(
 fn run_trial(plan: &SutPlan, runtime: &Runtime, test: &ConformanceTest) -> Result<(), Failed> {
     let handle = plan.build_handle(runtime);
     let test = *test;
-    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        runtime.block_on((test.runner)(handle));
-    }));
+    let future = (test.runner)(handle);
+    let outcome: Result<(), Box<dyn std::any::Any + Send>> = runtime.block_on(async {
+        let result = std::panic::AssertUnwindSafe(future).catch_unwind().await;
+        tokio::task::yield_now().await;
+        result
+    });
     match outcome {
         Ok(()) => Ok(()),
         Err(payload) => Err(Failed::from(format!(
