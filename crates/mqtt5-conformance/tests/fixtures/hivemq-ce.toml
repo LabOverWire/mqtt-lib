@@ -1,3 +1,7 @@
+# HiveMQ Community Edition — free tier of the HiveMQ broker.
+# No TLS in CE (Enterprise-only). WebSocket on port 8000.
+# No ACL or enhanced auth support in the community edition.
+
 name = "hivemq-ce"
 address = "mqtt://127.0.0.1:1883"
 tls_address = ""

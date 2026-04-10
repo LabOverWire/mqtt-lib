@@ -38,7 +38,7 @@ The platform is organized into four crates:
 - **mqtt5-protocol** - Platform-agnostic MQTT v5.0 core (packets, types, Transport trait). Supports `no_std` for embedded targets.
 - **mqtt5** - Native client and broker for Linux, macOS, Windows
 - **mqtt5-wasm** - WebAssembly client and broker for browsers
-- **mqtt5-conformance** - OASIS specification conformance test suite (247 normative statements)
+- **mqtt5-conformance** - OASIS specification conformance test suite (183 automated tests, 247 normative statements)
 
 ## Quick Start
 
@@ -137,6 +137,17 @@ See the [mqtt5-protocol Crate Reference](crates/mqtt5-protocol/README.md) for em
 Four authentication methods (Password, SCRAM-SHA-256, JWT, Federated JWT), role-based access control with topic-level permissions, composite auth provider chaining, session-to-user binding, and comprehensive transport security.
 
 See the [Authentication & Authorization Guide](AUTHENTICATION.md) for configuration details and security hardening.
+
+### Conformance Testing
+
+The conformance test suite validates any MQTT v5.0 broker against the OASIS specification. Create a TOML descriptor for your broker and run the CLI runner:
+
+```bash
+cargo build --release -p mqtt5-conformance-cli
+./target/release/mqtt5-conformance --sut your-broker.toml --report report.json
+```
+
+See the [Conformance Test Suite](crates/mqtt5-conformance/README.md) for test organization and architecture, and the [CLI Reference](crates/mqtt5-conformance-cli/README.md) for the full SUT descriptor schema and report format.
 
 ## Publications
 

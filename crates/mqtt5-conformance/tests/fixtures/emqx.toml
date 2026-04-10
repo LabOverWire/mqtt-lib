@@ -1,3 +1,7 @@
+# EMQX 5.x — enterprise MQTT platform with clustering and rule engine.
+# Full transport support including QUIC, ACL, and SCRAM-SHA-256/512 auth.
+# WebSocket listens on port 8083 (not the common 8080).
+
 name = "emqx-5.x"
 address = "mqtt://127.0.0.1:1883"
 tls_address = "mqtts://127.0.0.1:8883"

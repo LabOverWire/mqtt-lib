@@ -1,3 +1,7 @@
+# In-process mqtt-lib broker (used by `cargo test`).
+# Addresses are empty because the harness binds to a random loopback port.
+# Primarily used for parser tests and fast iteration during development.
+
 name = "mqtt5-inprocess"
 address = ""
 tls_address = ""

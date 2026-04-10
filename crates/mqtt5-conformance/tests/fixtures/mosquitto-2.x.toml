@@ -1,3 +1,7 @@
+# Mosquitto 2.x — popular open-source MQTT broker.
+# Supports TCP, TLS, and WebSocket. No enhanced auth or ACL in default config.
+# Topic alias maximum and receive maximum are lower than protocol defaults.
+
 name = "mosquitto-2.x"
 address = "mqtt://127.0.0.1:1883"
 tls_address = "mqtts://127.0.0.1:8883"

@@ -1,20 +1,90 @@
+# mqtt-lib running as an external process.
+# Same capabilities as the in-process fixture but tested over real TCP.
+# This file serves as the reference template — every field is annotated.
+
+# string — human-readable broker identifier shown in reports
 name = "mqtt5-external"
+
+# string — TCP address in scheme://host:port format (scheme: "mqtt" or omit)
 address = "mqtt://127.0.0.1:1883"
 
+# string — TLS address (scheme: "mqtts"); empty string = TLS not available
+# tls_address = "mqtts://127.0.0.1:8883"
+
+# string — WebSocket address (scheme: "ws" or "wss"); empty string = WS not available
+# ws_address = "ws://127.0.0.1:8080/mqtt"
+
 [capabilities]
+# u8 (0, 1, or 2) — maximum QoS level the broker supports [default: 2]
 max_qos = 2
+
+# bool — broker supports retained messages [default: true]
 retain_available = true
+
+# bool — broker supports wildcard topic filters (+, #) [default: true]
 wildcard_subscription_available = true
+
+# bool — broker supports subscription identifiers [default: true]
 subscription_identifier_available = true
+
+# bool — broker supports shared subscriptions ($share/...) [default: true]
 shared_subscription_available = true
+
+# u16 — maximum topic alias value the broker accepts (0 = disabled) [default: 65535]
 topic_alias_maximum = 65535
+
+# u16 — server receive maximum from CONNACK (0 = use protocol default) [default: 65535]
 server_receive_maximum = 65535
+
+# u32 — maximum packet size in bytes (0 = protocol maximum 268435456) [default: 268435456]
 maximum_packet_size = 268435456
+
+# bool — broker assigns client IDs when client sends empty string [default: true]
 assigned_client_id_supported = true
+
+# string[] — user property keys the broker injects on PUBLISH [default: []]
 injected_user_properties = ["x-mqtt-sender", "x-mqtt-client-id"]
 
+# bool — broker uses DISCONNECT (not CONNACK) for auth failures [default: false]
+# auth_failure_uses_disconnect = false
+
+# string — how broker handles unsupported properties [default: "DisconnectMalformed"]
+# unsupported_property_behavior = "DisconnectMalformed"
+
+# string — shared subscription distribution strategy [default: "RoundRobin"]
+# shared_subscription_distribution = "RoundRobin"
+
+# bool — broker enforces inbound receive maximum [default: true]
+# enforces_inbound_receive_maximum = true
+
+# bool — broker supports topic-level ACL rules [default: false]
+# acl = false
+
 [capabilities.transports]
+# bool — TCP transport available [default: true]
 tcp = true
+
+# bool — TLS transport available [default: false]
 tls = false
+
+# bool — WebSocket transport available [default: false]
 websocket = false
+
+# bool — QUIC transport available [default: false]
 quic = false
+
+# [capabilities.enhanced_auth]
+# string[] — supported enhanced auth method names [default: []]
+# methods = ["SCRAM-SHA-256"]
+
+# [capabilities.hooks]
+# bool — broker can be restarted between tests [default: false]
+# restart = false
+# bool — broker state can be cleaned up between tests [default: false]
+# cleanup = false
+
+# [hooks]
+# string — shell command to restart the broker [default: ""]
+# restart_command = "systemctl restart mqtt-broker"
+# string — shell command to clean up broker state [default: ""]
+# cleanup_command = ""

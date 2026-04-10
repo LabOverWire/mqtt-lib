@@ -28,6 +28,11 @@ opt-level = "z"
 [profile.dev]
 debug = true
 
+[profile.conformance]
+inherits = "release"
+panic = "unwind"
+lto = false
+
 [profile.profiling]
 inherits = "release"
 debug = 2

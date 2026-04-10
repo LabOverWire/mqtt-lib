@@ -1,3 +1,10 @@
+# Conformance profiles define minimum capability sets for broker classes.
+# Each profile specifies what a broker must support to qualify for that tier.
+# Tests declare requirements via `requires = [...]`; the CLI skips tests
+# whose requirements exceed the SUT's declared capabilities.
+
+# Minimal spec-compliant MQTT v5.0 broker.
+# TCP only, no shared subscriptions, no ACL, no lifecycle hooks.
 [core-broker]
 max_qos = 2
 retain_available = true
@@ -14,6 +21,8 @@ tls = false
 websocket = false
 quic = false
 
+# Core broker with TLS transport enabled.
+# Same baseline as core-broker, plus TLS on a second listener.
 [core-broker-tls]
 max_qos = 2
 retain_available = true
@@ -30,6 +39,8 @@ tls = true
 websocket = false
 quic = false
 
+# Feature-complete broker with all transports except QUIC.
+# Shared subscriptions, ACL, SCRAM-SHA-256 enhanced auth, and lifecycle hooks.
 [full-broker]
 max_qos = 2
 retain_available = true
