@@ -38,6 +38,51 @@
 
 ## Diary Entries
 
+### Fix: FileBackend session expiry deadlock (Rust 2021 edition)
+
+`FileBackend::get_session()` had a deadlock triggered by expired sessions.
+The code used an `if let` with a temporary `RwLockReadGuard`:
+
+```rust
+if let Some(session) = self.sessions_cache.read().await.get(client_id).cloned() {
+    if session.is_expired() {
+        self.remove_session(client_id).await?;  // DEADLOCK
+```
+
+In Rust 2021 edition, temporaries in `if let` conditions live for the entire
+block body. The read guard was still held when `remove_session()` tried to
+acquire a write lock on the same `sessions_cache`. Fix: extract the read into
+a `let` binding so the guard drops at the semicolon before the body executes.
+
+This only manifested with `clean_start=false` after a session with short
+expiry had expired — the exact scenario tested by `session_discarded_after_expiry`.
+
+Discovery: the `mqttv5-cli` binary was using `mqtt5 = "0.29"` from crates.io
+instead of the local code. The workspace `[patch.crates-io]` didn't apply
+because the local version `0.31.1` didn't satisfy `^0.29`. Updated to
+`mqtt5 = "0.31"` so the patch resolves correctly.
+
+### Fix: shared subscription message matching in RawTestClient
+
+`RawTestClient::subscribe()` stored the full `$share/group/topic` filter for
+local message routing. When messages arrived on topic `topic`, the matching
+check `topic_matches_filter("topic", "$share/group/topic")` returned false.
+
+Fix: import `strip_shared_subscription_prefix()` and use the extracted topic
+filter for local matching.
+
+### Fix: conformance test isolation for parallel execution
+
+Multiple shared subscription tests used hardcoded topic names (`tasks`,
+`topic`) causing cross-pollination when tests ran in parallel. Each test
+now generates unique topic names via `unique_client_id()`.
+
+The `$SYS` wildcard test (`dollar_topics_not_matched_by_root_wildcards`)
+subscribed to `#` which caught messages from all parallel tests. Changed
+from count-based assertion to content filtering — checks that no received
+messages have `$`-prefixed topics, ignoring non-`$SYS` messages from
+parallel tests.
+
 ### Fix: MQTT message ordering violation in `CallbackManager::dispatch()`
 
 The conformance CLI runner exposed a real bug in `crates/mqtt5/src/callback.rs`.
