@@ -98,6 +98,11 @@ command = "cargo"
 args = ["test", "--lib", "--bins", "--verbose"]
 description = "Run only unit tests and binary tests (excludes integration tests)"
 
+[tasks.test-quic]
+command = "cargo"
+args = ["test", "--test", "broker_quic_integration", "--features", "transport-quic", "--verbose"]
+description = "Run QUIC integration tests"
+
 [tasks.test-cli]
 dependencies = ["build-cli"]
 command = "cargo"

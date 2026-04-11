@@ -155,7 +155,9 @@ fn validate_require_spec(spec: &LitStr) -> syn::Result<()> {
         | "shared_subscription_available"
         | "hooks.restart"
         | "hooks.cleanup"
-        | "acl" => Ok(()),
+        | "acl"
+        | "strict_client_id_charset"
+        | "dollar_sys_publish" => Ok(()),
         _ => Err(Error::new_spanned(
             spec,
             "unknown requirement spec (see Requirement::from_spec for accepted forms)",
@@ -192,6 +194,8 @@ fn requirement_to_tokens(spec: &LitStr) -> syn::Result<proc_macro2::TokenStream>
         "hooks.restart" => quote! { HookRestart },
         "hooks.cleanup" => quote! { HookCleanup },
         "acl" => quote! { Acl },
+        "strict_client_id_charset" => quote! { StrictClientIdCharset },
+        "dollar_sys_publish" => quote! { DollarSysPublish },
         _ => {
             return Err(Error::new_spanned(
                 spec,

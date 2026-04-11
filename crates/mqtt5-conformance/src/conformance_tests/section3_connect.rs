@@ -364,7 +364,7 @@ async fn connect_empty_client_id_server_assigns(sut: SutHandle) {
 /// (`ClientIdentifierNotValid`).
 #[conformance_test(
     ids = ["MQTT-3.1.3-5"],
-    requires = ["transport.tcp"],
+    requires = ["transport.tcp", "strict_client_id_charset"],
 )]
 async fn client_id_rejected_with_0x85(sut: SutHandle) {
     let mut raw = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
@@ -399,6 +399,8 @@ async fn connect_malformed_packet_closes_connection(sut: SutHandle) {
     raw.send_raw(&RawPacketBuilder::connect_malformed_truncated())
         .await
         .unwrap();
+
+    let _ = raw.shutdown_write().await;
 
     assert!(
         raw.expect_disconnect(Duration::from_secs(12)).await,

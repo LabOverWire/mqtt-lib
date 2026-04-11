@@ -51,6 +51,8 @@ topic_alias_maximum = 65535
 server_receive_maximum = 65535
 maximum_packet_size = 268435456
 assigned_client_id_supported = true
+strict_client_id_charset = true
+dollar_sys_publish = true
 acl = true
 
 [full-broker.transports]

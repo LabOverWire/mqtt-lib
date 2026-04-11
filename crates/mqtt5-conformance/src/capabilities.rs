@@ -47,6 +47,9 @@ pub struct Capabilities {
     pub unsupported_property_behavior: String,
     pub shared_subscription_distribution: String,
 
+    pub strict_client_id_charset: bool,
+    pub dollar_sys_publish: bool,
+
     pub transports: TransportSupport,
     pub enhanced_auth: EnhancedAuthSupport,
     pub acl: bool,
@@ -74,6 +77,8 @@ impl Default for Capabilities {
             auth_failure_uses_disconnect: false,
             unsupported_property_behavior: "DisconnectMalformed".to_owned(),
             shared_subscription_distribution: "RoundRobin".to_owned(),
+            strict_client_id_charset: false,
+            dollar_sys_publish: false,
             transports: TransportSupport::default(),
             enhanced_auth: EnhancedAuthSupport::default(),
             acl: false,
@@ -143,6 +148,8 @@ pub enum Requirement {
     HookRestart,
     HookCleanup,
     Acl,
+    StrictClientIdCharset,
+    DollarSysPublish,
 }
 
 impl Requirement {
@@ -167,6 +174,8 @@ impl Requirement {
             Self::HookRestart => capabilities.hooks.restart,
             Self::HookCleanup => capabilities.hooks.cleanup,
             Self::Acl => capabilities.acl,
+            Self::StrictClientIdCharset => capabilities.strict_client_id_charset,
+            Self::DollarSysPublish => capabilities.dollar_sys_publish,
         }
     }
 
@@ -187,6 +196,8 @@ impl Requirement {
             Self::HookRestart => "hooks.restart".to_owned(),
             Self::HookCleanup => "hooks.cleanup".to_owned(),
             Self::Acl => "acl".to_owned(),
+            Self::StrictClientIdCharset => "strict_client_id_charset".to_owned(),
+            Self::DollarSysPublish => "dollar_sys_publish".to_owned(),
         }
     }
 
@@ -232,6 +243,8 @@ impl Requirement {
             "hooks.restart" => Ok(Self::HookRestart),
             "hooks.cleanup" => Ok(Self::HookCleanup),
             "acl" => Ok(Self::Acl),
+            "strict_client_id_charset" => Ok(Self::StrictClientIdCharset),
+            "dollar_sys_publish" => Ok(Self::DollarSysPublish),
             _ => Err(spec),
         }
     }

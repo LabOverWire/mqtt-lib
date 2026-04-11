@@ -229,7 +229,7 @@ async fn dollar_topics_not_matched_by_root_wildcards(sut: SutHandle) {
 /// `$SYS/#`) MAY match topics beginning with `$`.
 #[conformance_test(
     ids = ["MQTT-4.7.2-1"],
-    requires = ["transport.tcp"],
+    requires = ["transport.tcp", "dollar_sys_publish"],
 )]
 async fn dollar_topics_matched_by_explicit_prefix(sut: SutHandle) {
     let subscriber = TestClient::connect_with_prefix(&sut, "dollar-explicit")

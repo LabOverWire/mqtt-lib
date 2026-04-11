@@ -38,6 +38,24 @@
 
 ## Diary Entries
 
+### Fix 9 conformance test failures verified against Mosquitto source
+
+None of the 9 failures were broker bugs. All were test expectations beyond what the spec mandates, or test infrastructure issues.
+
+**RawMqttClient framing bug (Fix #4)**: `read_packet_bytes()` did a single raw TCP read. When the broker sent an echoed PUBLISH + PUBACK in one TCP segment, the test saw PUBLISH first byte 0x30 instead of PUBACK 0x40. Added `BytesMut` buffer, `try_extract_packet()`, and `read_mqtt_packet()` for proper MQTT framing. Also added `shutdown_write()` for EOF signaling.
+
+**PUBACK/PUBREC 0x10 (Fixes #5, #5b)**: Tests asserted `reason == 0x00` but `NoMatchingSubscribers` (0x10) is a valid success-class reason code returned by both Mosquitto and EMQX. Now accepts both.
+
+**PUBREL unknown packet ID (Fix #6)**: Spec says server "should" respond with 0x92, not "MUST". Mosquitto hardcodes 0x00. Now accepts both 0x92 and 0x00.
+
+**Shared sub invalid format (Fix #7)**: Tests expected SUBACK with 0x8F but Mosquitto/EMQX send DISCONNECT + close instead. Spec allows both. Tests now use `read_mqtt_packet()` and branch on packet type: SUBACK → check 0x8F, DISCONNECT or EOF → pass.
+
+**Client ID charset (Fix #2)**: Tests sent "bad/id" expecting 0x85 rejection, but spec says servers MAY accept extended characters. Added `strict_client_id_charset` capability flag so tests only run against brokers that reject non-alphanumeric client IDs.
+
+**$SYS publish (Fix #1)**: Test published to `$SYS/test` but most brokers reject client publishes to `$`-prefixed topics. Added `dollar_sys_publish` capability flag.
+
+**Truncated CONNECT (Fix #3)**: Some brokers wait for more data since the packet is genuinely truncated. Added `shutdown_write()` call after sending truncated bytes to signal EOF and force the broker to stop waiting.
+
 ### Fix: FileBackend session expiry deadlock (Rust 2021 edition)
 
 `FileBackend::get_session()` had a deadlock triggered by expired sessions.

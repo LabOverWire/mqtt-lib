@@ -45,6 +45,12 @@ assigned_client_id_supported = true
 # string[] — user property keys the broker injects on PUBLISH [default: []]
 injected_user_properties = ["x-mqtt-sender", "x-mqtt-client-id"]
 
+# bool — broker rejects client IDs with non-alphanumeric chars (/, etc.) [default: false]
+strict_client_id_charset = true
+
+# bool — broker allows clients to publish to $-prefixed topics [default: false]
+dollar_sys_publish = true
+
 # bool — broker uses DISCONNECT (not CONNACK) for auth failures [default: false]
 # auth_failure_uses_disconnect = false
 

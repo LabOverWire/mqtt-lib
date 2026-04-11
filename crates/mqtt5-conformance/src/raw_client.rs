@@ -29,23 +29,27 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 /// protocol it speaks.
 pub struct RawMqttClient<T: Transport = TcpTransport> {
     stream: T,
+    buf: BytesMut,
 }
 
 impl RawMqttClient<TcpTransport> {
-    /// Opens a raw TCP connection to the broker.
     pub async fn connect_tcp(addr: SocketAddr) -> std::io::Result<Self> {
         let stream = TcpTransport::connect(addr).await?;
-        Ok(Self { stream })
+        Ok(Self {
+            stream,
+            buf: BytesMut::new(),
+        })
     }
 }
 
 impl<T: Transport> RawMqttClient<T> {
-    /// Wraps an already-established transport.
     pub fn from_transport(stream: T) -> Self {
-        Self { stream }
+        Self {
+            stream,
+            buf: BytesMut::new(),
+        }
     }
 
-    /// Consumes the client and returns the underlying transport.
     pub fn into_transport(self) -> T {
         self.stream
     }
@@ -689,18 +693,12 @@ impl<T: Transport> RawMqttClient<T> {
         Some((reason_code, auth_method))
     }
 
-    /// Waits for the broker to close the connection or send a DISCONNECT packet.
-    ///
-    /// Returns `true` if the broker either closed the TCP connection (read
-    /// returns 0 bytes), sent a DISCONNECT packet (first byte `0xE0`), or
-    /// the connection errored. Returns `false` if the timeout elapses with
-    /// the connection still open.
     pub async fn expect_disconnect(&mut self, timeout_dur: Duration) -> bool {
-        let mut buf = [0u8; 4096];
-        match tokio::time::timeout(timeout_dur, self.stream.read(&mut buf)).await {
+        let mut tmp = [0u8; 4096];
+        match tokio::time::timeout(timeout_dur, self.stream.read(&mut tmp)).await {
             Ok(Ok(0) | Err(_)) => true,
             Ok(Ok(n)) => {
-                if buf[..n].first() == Some(&0xE0) {
+                if tmp[..n].first() == Some(&0xE0) {
                     return true;
                 }
                 let mut second_buf = [0u8; 1];
@@ -711,6 +709,57 @@ impl<T: Transport> RawMqttClient<T> {
             }
             Err(_) => false,
         }
+    }
+
+    fn try_extract_packet(buf: &mut BytesMut) -> Option<Vec<u8>> {
+        if buf.is_empty() {
+            return None;
+        }
+        let mut idx = 1;
+        let mut remaining_len: u32 = 0;
+        let mut shift = 0;
+        loop {
+            if idx >= buf.len() {
+                return None;
+            }
+            let byte = buf[idx];
+            idx += 1;
+            remaining_len |= u32::from(byte & 0x7F) << shift;
+            if byte & 0x80 == 0 {
+                break;
+            }
+            shift += 7;
+            if shift > 21 {
+                return None;
+            }
+        }
+        let total = idx + remaining_len as usize;
+        if buf.len() < total {
+            return None;
+        }
+        Some(buf.split_to(total).to_vec())
+    }
+
+    pub async fn read_mqtt_packet(&mut self, timeout_dur: Duration) -> Option<Vec<u8>> {
+        let deadline = tokio::time::Instant::now() + timeout_dur;
+        loop {
+            if let Some(pkt) = Self::try_extract_packet(&mut self.buf) {
+                return Some(pkt);
+            }
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return None;
+            }
+            let mut tmp = [0u8; 8192];
+            match tokio::time::timeout(remaining, self.stream.read(&mut tmp)).await {
+                Ok(Ok(0) | Err(_)) | Err(_) => return None,
+                Ok(Ok(n)) => self.buf.extend_from_slice(&tmp[..n]),
+            }
+        }
+    }
+
+    pub async fn shutdown_write(&mut self) -> std::io::Result<()> {
+        self.stream.shutdown().await
     }
 }
 

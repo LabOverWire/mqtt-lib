@@ -333,7 +333,7 @@ async fn request_response_info_zero_suppresses(sut: SutHandle) {
 /// with 0x85 and MUST then close the Network Connection.
 #[conformance_test(
     ids = ["MQTT-3.1.3-8"],
-    requires = ["transport.tcp"],
+    requires = ["transport.tcp", "strict_client_id_charset"],
 )]
 async fn client_id_rejected_closes_connection(sut: SutHandle) {
     let mut raw = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
@@ -583,10 +583,16 @@ async fn reserved_flags_correct_on_server_packets(sut: SutHandle) {
     raw.send_raw(&RawPacketBuilder::publish_qos1(&topic, b"test", 1))
         .await
         .unwrap();
-    let puback_data = raw
-        .read_packet_bytes(TIMEOUT)
-        .await
-        .expect("Must receive PUBACK");
+    let puback_data = loop {
+        let pkt = raw
+            .read_mqtt_packet(TIMEOUT)
+            .await
+            .expect("Must receive PUBACK");
+        if pkt[0] & 0xF0 == 0x30 {
+            continue;
+        }
+        break pkt;
+    };
     assert_eq!(
         puback_data[0], 0x40,
         "[MQTT-2.1.3-1] PUBACK fixed header byte must be 0x40"

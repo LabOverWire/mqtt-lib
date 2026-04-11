@@ -42,7 +42,10 @@ async fn puback_correct_packet_id_and_reason(sut: SutHandle) {
         ack_id, packet_id,
         "PUBACK packet ID must match PUBLISH packet ID"
     );
-    assert_eq!(reason, 0x00, "PUBACK reason code should be Success (0x00)");
+    assert!(
+        reason == 0x00 || reason == 0x10,
+        "PUBACK reason code must be Success (0x00) or NoMatchingSubscribers (0x10), got {reason:#04x}"
+    );
 }
 
 /// `[MQTT-3.4.0-1]` `QoS` 1 PUBLISH results in message delivery to subscriber.
@@ -112,7 +115,10 @@ async fn pubrec_correct_packet_id_and_reason(sut: SutHandle) {
         rec_id, packet_id,
         "PUBREC packet ID must match PUBLISH packet ID"
     );
-    assert_eq!(reason, 0x00, "PUBREC reason code should be Success (0x00)");
+    assert!(
+        reason == 0x00 || reason == 0x10,
+        "PUBREC reason code must be Success (0x00) or NoMatchingSubscribers (0x10), got {reason:#04x}"
+    );
 }
 
 /// `[MQTT-3.7.4-1]` `QoS` 2 message MUST NOT be delivered to subscribers
@@ -217,9 +223,9 @@ async fn pubrel_unknown_packet_id(sut: SutHandle) {
         .expect("expected PUBCOMP from broker");
 
     assert_eq!(comp_id, 999, "PUBCOMP packet ID must match PUBREL");
-    assert_eq!(
-        reason, 0x92,
-        "PUBCOMP reason code should be PacketIdentifierNotFound (0x92)"
+    assert!(
+        reason == 0x92 || reason == 0x00,
+        "PUBCOMP reason code should be PacketIdentifierNotFound (0x92) or Success (0x00), got {reason:#04x}"
     );
 }
 
