@@ -31,13 +31,10 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Build conformance CLI
-        run: cargo build --release -p mqtt5-conformance-cli
+        run: cargo build --profile conformance -p mqtt5-conformance-cli
 
       - name: Run conformance suite (in-process)
-        run: ./target/release/mqtt5-conformance
-
-      - name: Generate JSON report
-        run: ./target/release/mqtt5-conformance --report conformance-report.json
+        run: ./target/conformance/mqtt5-conformance --report conformance-report.json
 
       - name: Upload report
         uses: actions/upload-artifact@v4
@@ -62,7 +59,7 @@ jobs:
         run: cargo build --release -p mqttv5-cli
 
       - name: Build conformance CLI
-        run: cargo build --release -p mqtt5-conformance-cli
+        run: cargo build --profile conformance -p mqtt5-conformance-cli
 
       - name: Start mqttv5 broker
         run: |
@@ -75,7 +72,7 @@ jobs:
 
       - name: Run conformance suite against external broker
         run: |
-          ./target/release/mqtt5-conformance \
+          ./target/conformance/mqtt5-conformance \
             --sut crates/mqtt5-conformance/tests/fixtures/external-mqtt5.toml \
             --report conformance-report.json
 

@@ -113,7 +113,14 @@ impl SutDescriptor {
     /// Returns an error if the TOML is invalid.
     #[allow(clippy::should_implement_trait)]
     pub fn from_str(text: &str) -> Result<Self, SutDescriptorError> {
-        toml::from_str(text).map_err(SutDescriptorError::Parse)
+        let mut descriptor: Self = toml::from_str(text).map_err(SutDescriptorError::Parse)?;
+        if !descriptor.hooks.restart_command.is_empty() {
+            descriptor.capabilities.hooks.restart = true;
+        }
+        if !descriptor.hooks.cleanup_command.is_empty() {
+            descriptor.capabilities.hooks.cleanup = true;
+        }
+        Ok(descriptor)
     }
 
     /// Returns the plain-TCP `SocketAddr` if the descriptor declares one.
