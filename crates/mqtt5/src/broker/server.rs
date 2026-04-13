@@ -451,6 +451,7 @@ impl MqttBroker {
 
                 acceptor_config =
                     acceptor_config.with_require_client_cert(tls_config.require_client_cert);
+                acceptor_config = acceptor_config.with_alpn_protocols(vec![b"http/1.1".to_vec()]);
                 let acceptor = acceptor_config.build_acceptor()?;
 
                 let bind_result =
