@@ -11,6 +11,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **WSS ALPN mismatch** - WebSocket TLS listener now advertises `http/1.1` ALPN instead of `mqtt`, allowing browsers to complete the TLS handshake on the WSS port
 
+## [mqtt5 0.31.3] - 2026-04-11
+
+### Fixed
+
+- **Conformance test fixes** - fix 9 conformance test failures verified against Mosquitto (test parsing bug, spec ambiguity adjustments)
+- **QUIC integration test hardening** - replace ad-hoc sleeps with `ready_receiver()`, fix port conflicts, add graceful connection failure handling
+- **Conformance platform** - vendor-neutral conformance test platform with `#[conformance_test]` proc-macro and CLI runner supporting in-process and external SUT testing
+- **FileBackend deadlock** - fix `get_session()` deadlock caused by Rust 2021 `if let` temporary lifetime holding read guard across write lock
+
 ## [mqtt5 0.31.2] - 2026-04-09
 
 ### Fixed
