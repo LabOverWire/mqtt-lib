@@ -467,7 +467,8 @@ async fn execute_run(mut cmd: RunArgs, verbose: bool, debug: bool) -> Result<()>
 
     info!("Starting MQTT v5.0 broker...");
 
-    let (config, config_path) = if let Some(config_path) = &cmd.config {
+    #[cfg_attr(not(feature = "opentelemetry"), allow(unused_mut))]
+    let (mut config, config_path) = if let Some(config_path) = &cmd.config {
         debug!("Loading configuration from: {:?}", config_path);
         let cfg = load_config_from_file(config_path)
             .await
@@ -476,6 +477,19 @@ async fn execute_run(mut cmd: RunArgs, verbose: bool, debug: bool) -> Result<()>
     } else {
         (create_interactive_config(&mut cmd).await?, None)
     };
+
+    #[cfg(feature = "opentelemetry")]
+    if let Some(endpoint) = &cmd.otel_endpoint {
+        use mqtt5::telemetry::TelemetryConfig;
+        let telemetry_config = TelemetryConfig::new(&cmd.otel_service_name)
+            .with_endpoint(endpoint)
+            .with_sampling_ratio(cmd.otel_sampling);
+        config = config.with_opentelemetry(telemetry_config);
+        info!(
+            "OpenTelemetry enabled: endpoint={}, service={}, sampling={}",
+            endpoint, cmd.otel_service_name, cmd.otel_sampling
+        );
+    }
 
     config
         .validate()
@@ -1077,19 +1091,6 @@ async fn create_interactive_config(cmd: &mut RunArgs) -> Result<BrokerConfig> {
         cleanup_interval: std::time::Duration::from_secs(300),
     };
     config.storage_config = storage_config;
-
-    #[cfg(feature = "opentelemetry")]
-    if let Some(endpoint) = &cmd.otel_endpoint {
-        use mqtt5::telemetry::TelemetryConfig;
-        let telemetry_config = TelemetryConfig::new(&cmd.otel_service_name)
-            .with_endpoint(endpoint)
-            .with_sampling_ratio(cmd.otel_sampling);
-        config = config.with_opentelemetry(telemetry_config);
-        info!(
-            "OpenTelemetry enabled: endpoint={}, service={}, sampling={}",
-            endpoint, cmd.otel_service_name, cmd.otel_sampling
-        );
-    }
 
     Ok(config)
 }
