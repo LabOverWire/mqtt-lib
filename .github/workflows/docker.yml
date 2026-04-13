@@ -10,6 +10,11 @@ on:
         description: 'Image tag (default: dev)'
         required: false
         default: 'dev'
+      opentelemetry:
+        description: 'Enable OpenTelemetry support'
+        type: boolean
+        required: false
+        default: false
 
 env:
   REGISTRY: ghcr.io
@@ -59,5 +64,7 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            FEATURES=${{ github.event.inputs.opentelemetry == 'true' && '--features opentelemetry' || '' }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

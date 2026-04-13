@@ -2,7 +2,8 @@ FROM rust:alpine AS builder
 RUN apk add --no-cache musl-dev upx
 WORKDIR /build
 COPY . .
-RUN cargo build --release -p mqttv5-cli \
+ARG FEATURES=""
+RUN cargo build --release -p mqttv5-cli $FEATURES \
     && strip target/release/mqttv5 \
     && upx --best --lzma target/release/mqttv5
 
