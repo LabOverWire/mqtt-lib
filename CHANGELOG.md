@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [mqttv5-cli 0.27.2] - 2026-04-13
+
+### Fixed
+
+- **OTel ignored with --config** - OpenTelemetry env vars (`MQTT5_OTEL_ENDPOINT`, `MQTT5_OTEL_SERVICE_NAME`, `MQTT5_OTEL_SAMPLING`) were only applied in the CLI-args code path; when using `--config <file>`, the OTel setup was skipped entirely because `opentelemetry_config` is `#[serde(skip)]` and the env var merge lived inside `create_interactive_config()`. Moved OTel initialization to `execute_run()` so it applies regardless of config source.
+
 ## [mqtt5 0.31.4] - 2026-04-12
 
 ### Fixed
