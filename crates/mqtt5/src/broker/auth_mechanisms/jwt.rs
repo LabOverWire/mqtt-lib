@@ -166,8 +166,7 @@ impl JwtAuthProvider {
 
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+            .map_or(0, |d| d.as_secs());
 
         let exp = claims.exp.ok_or(JwtError::MissingClaim("exp"))?;
         if now > exp + self.clock_skew_secs {

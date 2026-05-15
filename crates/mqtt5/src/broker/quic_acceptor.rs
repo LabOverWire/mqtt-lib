@@ -650,17 +650,17 @@ fn spawn_datagram_reader(
                         label,
                         peer_addr
                     );
-                    match decode_datagram_packet(&datagram) {
-                        Some(Ok(packet)) => {
-                            if packet_tx.send((packet, None)).await.is_err() {
-                                debug!("Datagram packet channel closed for {}", peer_addr);
-                                break;
-                            }
-                        }
+                    let packet = match decode_datagram_packet(&datagram) {
+                        Some(Ok(packet)) => packet,
                         Some(Err(e)) => {
                             warn!("Failed to decode datagram from {}: {}", peer_addr, e);
+                            continue;
                         }
-                        None => {}
+                        None => continue,
+                    };
+                    if packet_tx.send((packet, None)).await.is_err() {
+                        debug!("Datagram packet channel closed for {}", peer_addr);
+                        break;
                     }
                 }
                 Err(e) => {

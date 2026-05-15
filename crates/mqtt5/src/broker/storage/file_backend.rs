@@ -320,10 +320,7 @@ impl FileBackend {
             .map_err(|e| MqttError::Io(format!("Failed to read directory entry: {e}")))?
         {
             let path = entry.path();
-            let is_file = fs::metadata(&path)
-                .await
-                .map(|m| m.is_file())
-                .unwrap_or(false);
+            let is_file = fs::metadata(&path).await.is_ok_and(|m| m.is_file());
             if is_file && path.extension().is_some_and(|ext| ext == extension) {
                 files.push(path);
             }
@@ -338,10 +335,7 @@ impl FileBackend {
             if let Ok(mut inflight_entries) = fs::read_dir(&self.inflight_dir).await {
                 while let Ok(Some(entry)) = inflight_entries.next_entry().await {
                     let client_dir = entry.path();
-                    let is_dir = fs::metadata(&client_dir)
-                        .await
-                        .map(|m| m.is_dir())
-                        .unwrap_or(false);
+                    let is_dir = fs::metadata(&client_dir).await.is_ok_and(|m| m.is_dir());
                     if is_dir {
                         let files = self.list_files(&client_dir, "json").await?;
                         for file_path in files {
@@ -665,10 +659,7 @@ impl StorageBackend for FileBackend {
             .map_err(|e| MqttError::Io(format!("Failed to read queue entry: {e}")))?
         {
             let client_dir = entry.path();
-            let is_dir = fs::metadata(&client_dir)
-                .await
-                .map(|m| m.is_dir())
-                .unwrap_or(false);
+            let is_dir = fs::metadata(&client_dir).await.is_ok_and(|m| m.is_dir());
             if is_dir {
                 let queue_files = self.list_files(&client_dir, "json").await?;
                 for file_path in queue_files {

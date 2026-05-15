@@ -324,7 +324,7 @@ impl WasmBroker {
 
         let stats = Arc::new(BrokerStats::new());
 
-        let max_clients = config.read().map(|c| c.max_clients).unwrap_or(1000);
+        let max_clients = config.read().map_or(1000, |c| c.max_clients);
         let limits = ResourceLimits {
             max_connections: max_clients,
             ..Default::default()

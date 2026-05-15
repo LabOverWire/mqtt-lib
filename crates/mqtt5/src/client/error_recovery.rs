@@ -201,7 +201,7 @@ mod tests {
         );
         assert_eq!(
             retry_delay(RecoverableError::QuotaExceeded, 0, &config),
-            Duration::from_millis(1000)
+            Duration::from_secs(1)
         );
     }
 

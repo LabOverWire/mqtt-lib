@@ -272,7 +272,7 @@ mod tests {
                 assert!(msg.starts_with("c=biws,r="));
                 assert!(msg.contains(",p="));
             }
-            other => panic!("Expected Continue, got {other:?}",),
+            other => panic!("Expected Continue, got {other:?}"),
         }
     }
 
@@ -314,7 +314,7 @@ mod tests {
             AuthResponse::Abort(msg) => {
                 assert!(msg.contains("Server signature verification failed"));
             }
-            other => panic!("Expected Abort, got {other:?}",),
+            other => panic!("Expected Abort, got {other:?}"),
         }
     }
 
@@ -338,7 +338,7 @@ mod tests {
             AuthResponse::Abort(msg) => {
                 assert!(msg.contains("nonce"));
             }
-            other => panic!("Expected Abort, got {other:?}",),
+            other => panic!("Expected Abort, got {other:?}"),
         }
     }
 }

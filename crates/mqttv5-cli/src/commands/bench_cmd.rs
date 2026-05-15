@@ -1453,7 +1453,9 @@ async fn run_hol_blocking(cmd: BenchCommand) -> Result<()> {
 
     let per_topic_interval_us = if cmd.rate > 0 {
         #[allow(clippy::cast_possible_truncation)]
-        let interval = 1_000_000u64 * (num_topics as u64) / cmd.rate;
+        let interval = (1_000_000u64 * (num_topics as u64))
+            .checked_div(cmd.rate)
+            .unwrap_or(0);
         Some(interval)
     } else {
         None
