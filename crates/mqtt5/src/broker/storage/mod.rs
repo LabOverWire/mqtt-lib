@@ -51,6 +51,16 @@ pub struct RetainedMessage {
     /// Message expiry time (computed from `stored_at` + interval)
     #[serde(skip)]
     pub expires_at: Option<SystemTime>,
+    #[serde(default)]
+    pub user_properties: Vec<(String, String)>,
+    #[serde(default)]
+    pub content_type: Option<String>,
+    #[serde(default)]
+    pub response_topic: Option<String>,
+    #[serde(default)]
+    pub correlation_data: Option<Vec<u8>>,
+    #[serde(default)]
+    pub payload_format_indicator: Option<bool>,
 }
 
 const CHANGE_ONLY_MAX_TOPICS: usize = 10_000;
@@ -582,6 +592,8 @@ impl RetainedMessage {
     /// Create new retained message from PUBLISH packet
     #[must_use]
     pub fn new(packet: PublishPacket) -> Self {
+        use crate::protocol::v5::properties::{PropertyId, PropertyValue};
+
         let now = SystemTime::now();
         let stored_at_secs = now
             .duration_since(SystemTime::UNIX_EPOCH)
@@ -591,6 +603,58 @@ impl RetainedMessage {
         let expires_at =
             message_expiry_interval.map(|interval| now + Duration::from_secs(u64::from(interval)));
 
+        let user_properties = packet
+            .properties
+            .get_all(PropertyId::UserProperty)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(|v| {
+                        if let PropertyValue::Utf8StringPair(k, val) = v {
+                            Some((k.clone(), val.clone()))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let content_type = packet.properties.get_content_type();
+
+        let response_topic = packet
+            .properties
+            .get(PropertyId::ResponseTopic)
+            .and_then(|v| {
+                if let PropertyValue::Utf8String(s) = v {
+                    Some(s.clone())
+                } else {
+                    None
+                }
+            });
+
+        let correlation_data = packet
+            .properties
+            .get(PropertyId::CorrelationData)
+            .and_then(|v| {
+                if let PropertyValue::BinaryData(b) = v {
+                    Some(b.to_vec())
+                } else {
+                    None
+                }
+            });
+
+        let payload_format_indicator = packet
+            .properties
+            .get(PropertyId::PayloadFormatIndicator)
+            .and_then(|v| {
+                if let PropertyValue::Byte(b) = v {
+                    Some(*b != 0)
+                } else {
+                    None
+                }
+            });
+
         Self {
             topic: packet.topic_name,
             payload: packet.payload.to_vec(),
@@ -599,6 +663,11 @@ impl RetainedMessage {
             stored_at_secs,
             message_expiry_interval,
             expires_at,
+            user_properties,
+            content_type,
+            response_topic,
+            correlation_data,
+            payload_format_indicator,
         }
     }
 
@@ -618,6 +687,28 @@ impl RetainedMessage {
 
         if let Some(remaining) = self.remaining_expiry_interval() {
             packet.properties.set_message_expiry_interval(remaining);
+        }
+
+        for (key, value) in &self.user_properties {
+            packet
+                .properties
+                .add_user_property(key.clone(), value.clone());
+        }
+
+        if let Some(ref ct) = self.content_type {
+            packet.properties.set_content_type(ct.clone());
+        }
+
+        if let Some(ref rt) = self.response_topic {
+            packet.properties.set_response_topic(rt.clone());
+        }
+
+        if let Some(ref cd) = self.correlation_data {
+            packet.properties.set_correlation_data(cd.clone().into());
+        }
+
+        if let Some(pfi) = self.payload_format_indicator {
+            packet.properties.set_payload_format_indicator(pfi);
         }
 
         packet
