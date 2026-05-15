@@ -33,6 +33,115 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::warn;
 
+/// MQTT v5 publish properties extracted from a `PublishPacket` for storage.
+///
+/// Shared by `RetainedMessage` and `InflightMessage` to avoid duplicating the
+/// `PropertyId`/`PropertyValue` extraction and round-trip logic.
+struct V5PublishProps {
+    user_properties: Vec<(String, String)>,
+    content_type: Option<String>,
+    response_topic: Option<String>,
+    correlation_data: Option<Vec<u8>>,
+    payload_format_indicator: Option<bool>,
+}
+
+impl V5PublishProps {
+    fn from_packet(packet: &PublishPacket) -> Self {
+        use crate::protocol::v5::properties::{PropertyId, PropertyValue};
+
+        let user_properties = packet
+            .properties
+            .get_all(PropertyId::UserProperty)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(|v| {
+                        if let PropertyValue::Utf8StringPair(k, val) = v {
+                            Some((k.clone(), val.clone()))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let content_type = packet.properties.get_content_type();
+
+        let response_topic = packet
+            .properties
+            .get(PropertyId::ResponseTopic)
+            .and_then(|v| {
+                if let PropertyValue::Utf8String(s) = v {
+                    Some(s.clone())
+                } else {
+                    None
+                }
+            });
+
+        let correlation_data = packet
+            .properties
+            .get(PropertyId::CorrelationData)
+            .and_then(|v| {
+                if let PropertyValue::BinaryData(b) = v {
+                    Some(b.to_vec())
+                } else {
+                    None
+                }
+            });
+
+        let payload_format_indicator = packet
+            .properties
+            .get(PropertyId::PayloadFormatIndicator)
+            .and_then(|v| {
+                if let PropertyValue::Byte(b) = v {
+                    Some(*b != 0)
+                } else {
+                    None
+                }
+            });
+
+        Self {
+            user_properties,
+            content_type,
+            response_topic,
+            correlation_data,
+            payload_format_indicator,
+        }
+    }
+}
+
+fn apply_v5_props(
+    packet: &mut PublishPacket,
+    user_properties: &[(String, String)],
+    content_type: Option<&str>,
+    response_topic: Option<&str>,
+    correlation_data: Option<&[u8]>,
+    payload_format_indicator: Option<bool>,
+) {
+    for (key, value) in user_properties {
+        packet
+            .properties
+            .add_user_property(key.clone(), value.clone());
+    }
+
+    if let Some(ct) = content_type {
+        packet.properties.set_content_type(ct.to_string());
+    }
+
+    if let Some(rt) = response_topic {
+        packet.properties.set_response_topic(rt.to_string());
+    }
+
+    if let Some(cd) = correlation_data {
+        packet.properties.set_correlation_data(cd.to_vec().into());
+    }
+
+    if let Some(pfi) = payload_format_indicator {
+        packet.properties.set_payload_format_indicator(pfi);
+    }
+}
+
 /// Retained message with metadata
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RetainedMessage {
@@ -592,8 +701,6 @@ impl RetainedMessage {
     /// Create new retained message from PUBLISH packet
     #[must_use]
     pub fn new(packet: PublishPacket) -> Self {
-        use crate::protocol::v5::properties::{PropertyId, PropertyValue};
-
         let now = SystemTime::now();
         let stored_at_secs = now
             .duration_since(SystemTime::UNIX_EPOCH)
@@ -603,57 +710,7 @@ impl RetainedMessage {
         let expires_at =
             message_expiry_interval.map(|interval| now + Duration::from_secs(u64::from(interval)));
 
-        let user_properties = packet
-            .properties
-            .get_all(PropertyId::UserProperty)
-            .map(|values| {
-                values
-                    .iter()
-                    .filter_map(|v| {
-                        if let PropertyValue::Utf8StringPair(k, val) = v {
-                            Some((k.clone(), val.clone()))
-                        } else {
-                            None
-                        }
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        let content_type = packet.properties.get_content_type();
-
-        let response_topic = packet
-            .properties
-            .get(PropertyId::ResponseTopic)
-            .and_then(|v| {
-                if let PropertyValue::Utf8String(s) = v {
-                    Some(s.clone())
-                } else {
-                    None
-                }
-            });
-
-        let correlation_data = packet
-            .properties
-            .get(PropertyId::CorrelationData)
-            .and_then(|v| {
-                if let PropertyValue::BinaryData(b) = v {
-                    Some(b.to_vec())
-                } else {
-                    None
-                }
-            });
-
-        let payload_format_indicator = packet
-            .properties
-            .get(PropertyId::PayloadFormatIndicator)
-            .and_then(|v| {
-                if let PropertyValue::Byte(b) = v {
-                    Some(*b != 0)
-                } else {
-                    None
-                }
-            });
+        let v5 = V5PublishProps::from_packet(&packet);
 
         Self {
             topic: packet.topic_name,
@@ -663,11 +720,11 @@ impl RetainedMessage {
             stored_at_secs,
             message_expiry_interval,
             expires_at,
-            user_properties,
-            content_type,
-            response_topic,
-            correlation_data,
-            payload_format_indicator,
+            user_properties: v5.user_properties,
+            content_type: v5.content_type,
+            response_topic: v5.response_topic,
+            correlation_data: v5.correlation_data,
+            payload_format_indicator: v5.payload_format_indicator,
         }
     }
 
@@ -689,27 +746,14 @@ impl RetainedMessage {
             packet.properties.set_message_expiry_interval(remaining);
         }
 
-        for (key, value) in &self.user_properties {
-            packet
-                .properties
-                .add_user_property(key.clone(), value.clone());
-        }
-
-        if let Some(ref ct) = self.content_type {
-            packet.properties.set_content_type(ct.clone());
-        }
-
-        if let Some(ref rt) = self.response_topic {
-            packet.properties.set_response_topic(rt.clone());
-        }
-
-        if let Some(ref cd) = self.correlation_data {
-            packet.properties.set_correlation_data(cd.clone().into());
-        }
-
-        if let Some(pfi) = self.payload_format_indicator {
-            packet.properties.set_payload_format_indicator(pfi);
-        }
+        apply_v5_props(
+            &mut packet,
+            &self.user_properties,
+            self.content_type.as_deref(),
+            self.response_topic.as_deref(),
+            self.correlation_data.as_deref(),
+            self.payload_format_indicator,
+        );
 
         packet
     }
@@ -923,8 +967,6 @@ impl InflightMessage {
         direction: InflightDirection,
         phase: InflightPhase,
     ) -> Self {
-        use crate::protocol::v5::properties::{PropertyId, PropertyValue};
-
         let now = SystemTime::now();
         let stored_at_secs = now
             .duration_since(SystemTime::UNIX_EPOCH)
@@ -936,57 +978,7 @@ impl InflightMessage {
         let expires_at_cache =
             message_expiry_interval.map(|interval| now + Duration::from_secs(u64::from(interval)));
 
-        let user_properties = packet
-            .properties
-            .get_all(PropertyId::UserProperty)
-            .map(|values| {
-                values
-                    .iter()
-                    .filter_map(|v| {
-                        if let PropertyValue::Utf8StringPair(k, val) = v {
-                            Some((k.clone(), val.clone()))
-                        } else {
-                            None
-                        }
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        let content_type = packet.properties.get_content_type();
-
-        let response_topic = packet
-            .properties
-            .get(PropertyId::ResponseTopic)
-            .and_then(|v| {
-                if let PropertyValue::Utf8String(s) = v {
-                    Some(s.clone())
-                } else {
-                    None
-                }
-            });
-
-        let correlation_data = packet
-            .properties
-            .get(PropertyId::CorrelationData)
-            .and_then(|v| {
-                if let PropertyValue::BinaryData(b) = v {
-                    Some(b.to_vec())
-                } else {
-                    None
-                }
-            });
-
-        let payload_format_indicator = packet
-            .properties
-            .get(PropertyId::PayloadFormatIndicator)
-            .and_then(|v| {
-                if let PropertyValue::Byte(b) = v {
-                    Some(*b != 0)
-                } else {
-                    None
-                }
-            });
+        let v5 = V5PublishProps::from_packet(packet);
 
         Self {
             client_id,
@@ -1001,11 +993,11 @@ impl InflightMessage {
             message_expiry_interval,
             expires_at_secs,
             expires_at_cache,
-            user_properties,
-            content_type,
-            response_topic,
-            correlation_data,
-            payload_format_indicator,
+            user_properties: v5.user_properties,
+            content_type: v5.content_type,
+            response_topic: v5.response_topic,
+            correlation_data: v5.correlation_data,
+            payload_format_indicator: v5.payload_format_indicator,
         }
     }
 
@@ -1019,27 +1011,14 @@ impl InflightMessage {
             packet.properties.set_message_expiry_interval(remaining);
         }
 
-        for (key, value) in &self.user_properties {
-            packet
-                .properties
-                .add_user_property(key.clone(), value.clone());
-        }
-
-        if let Some(ref ct) = self.content_type {
-            packet.properties.set_content_type(ct.clone());
-        }
-
-        if let Some(ref rt) = self.response_topic {
-            packet.properties.set_response_topic(rt.clone());
-        }
-
-        if let Some(ref cd) = self.correlation_data {
-            packet.properties.set_correlation_data(cd.clone().into());
-        }
-
-        if let Some(pfi) = self.payload_format_indicator {
-            packet.properties.set_payload_format_indicator(pfi);
-        }
+        apply_v5_props(
+            &mut packet,
+            &self.user_properties,
+            self.content_type.as_deref(),
+            self.response_topic.as_deref(),
+            self.correlation_data.as_deref(),
+            self.payload_format_indicator,
+        );
 
         packet
     }

@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 use crate::packet::publish::PublishPacket;
 use crate::topic_matching::matches as topic_matches;
 use crate::QoS;
@@ -6,6 +8,10 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 /// Storage for retained messages
+#[deprecated(
+    since = "0.31.5",
+    note = "session-level retained store is unused by the broker; use the broker's storage backend (broker::storage::RetainedMessage) instead. Scheduled for removal in 0.32.0."
+)]
 #[derive(Debug, Clone)]
 pub struct RetainedMessageStore {
     /// Map of topic names to retained messages
@@ -13,6 +19,10 @@ pub struct RetainedMessageStore {
 }
 
 /// A retained message
+#[deprecated(
+    since = "0.31.5",
+    note = "session-level retained store is unused by the broker; use broker::storage::RetainedMessage instead. Scheduled for removal in 0.32.0."
+)]
 #[derive(Debug, Clone)]
 pub struct RetainedMessage {
     /// The topic name

@@ -10,6 +10,7 @@
 //! - Subscription management
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::cast_precision_loss)]
+#![allow(deprecated)]
 
 use mqtt5::packet::publish::PublishPacket;
 use mqtt5::packet::subscribe::{RetainHandling, SubscriptionOptions};

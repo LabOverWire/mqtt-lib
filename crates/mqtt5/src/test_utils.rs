@@ -9,6 +9,7 @@ use crate::packet::Packet;
 use crate::protocol::v5::properties::Properties;
 use crate::protocol::v5::reason_codes::ReasonCode;
 use crate::session::limits::{ExpiringMessage, LimitsManager};
+#[allow(deprecated)]
 use crate::session::retained::RetainedMessage;
 use crate::time::Duration;
 use crate::{MqttClient, QoS, Result};
@@ -296,6 +297,7 @@ pub fn test_expiring_message(index: u8) -> ExpiringMessage {
 
 /// Creates a test retained message with standard defaults
 #[must_use]
+#[allow(deprecated)]
 pub fn test_retained_message(index: u8) -> RetainedMessage {
     RetainedMessage {
         topic: format!("topic/{index}"),
@@ -364,6 +366,7 @@ impl TestMessageBuilder {
 
     /// Builds a batch of retained messages
     #[must_use]
+    #[allow(deprecated)]
     pub fn build_retained_batch(self, count: u8) -> Vec<RetainedMessage> {
         (0..count)
             .map(|i| RetainedMessage {

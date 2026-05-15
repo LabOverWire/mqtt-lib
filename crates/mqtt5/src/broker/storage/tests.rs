@@ -241,6 +241,109 @@ async fn test_file_backend_persistence() {
 }
 
 #[tokio::test]
+async fn test_file_backend_retained_v5_properties_round_trip() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend_path = dir.path().to_path_buf();
+
+    {
+        let backend = FileBackend::new(&backend_path).await.unwrap();
+
+        let mut packet =
+            PublishPacket::new("sensors/request", &b"25C"[..], QoS::ExactlyOnce).with_retain(true);
+        packet.properties.set_message_expiry_interval(3600);
+        packet
+            .properties
+            .set_response_topic("sensors/response".to_string());
+        packet
+            .properties
+            .set_correlation_data(Bytes::from_static(b"corr-77"));
+        packet.properties.set_content_type("text/plain".to_string());
+        packet.properties.set_payload_format_indicator(true);
+        packet
+            .properties
+            .add_user_property("trace-id".to_string(), "issue-77".to_string());
+
+        let retained = RetainedMessage::new(packet);
+        backend
+            .store_retained_message("sensors/request", retained)
+            .await
+            .unwrap();
+    }
+
+    let backend = FileBackend::new(&backend_path).await.unwrap();
+    let loaded = backend
+        .get_retained_message("sensors/request")
+        .await
+        .unwrap()
+        .expect("retained message should have been persisted");
+
+    assert_eq!(loaded.response_topic.as_deref(), Some("sensors/response"));
+    assert_eq!(loaded.correlation_data.as_deref(), Some(&b"corr-77"[..]));
+    assert_eq!(loaded.content_type.as_deref(), Some("text/plain"));
+    assert_eq!(loaded.payload_format_indicator, Some(true));
+    assert!(
+        loaded
+            .user_properties
+            .iter()
+            .any(|(k, v)| k == "trace-id" && v == "issue-77"),
+        "user property survived round-trip; got {:?}",
+        loaded.user_properties
+    );
+
+    let packet = loaded.to_publish_packet();
+    let restored_response_topic = packet
+        .properties
+        .get(PropertyId::ResponseTopic)
+        .and_then(|v| {
+            if let PropertyValue::Utf8String(s) = v {
+                Some(s.clone())
+            } else {
+                None
+            }
+        });
+    assert_eq!(restored_response_topic.as_deref(), Some("sensors/response"));
+}
+
+#[tokio::test]
+async fn test_file_backend_retained_legacy_json_deserializes() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend_path = dir.path().to_path_buf();
+
+    let backend = FileBackend::new(&backend_path).await.unwrap();
+    let retained_dir = backend_path.join("retained");
+    tokio::fs::create_dir_all(&retained_dir).await.unwrap();
+
+    let legacy_json = serde_json::json!({
+        "topic": "legacytopic",
+        "payload": [104, 105],
+        "qos": "AtLeastOnce",
+        "retain": true,
+        "stored_at_secs": 1_700_000_000u64,
+        "message_expiry_interval": null,
+    });
+    tokio::fs::write(
+        retained_dir.join("legacytopic.json"),
+        serde_json::to_vec_pretty(&legacy_json).unwrap(),
+    )
+    .await
+    .unwrap();
+
+    let loaded = backend
+        .get_retained_message("legacytopic")
+        .await
+        .unwrap()
+        .expect("legacy JSON should deserialize via serde defaults");
+
+    assert_eq!(loaded.topic, "legacytopic");
+    assert_eq!(&loaded.payload[..], b"hi");
+    assert!(loaded.user_properties.is_empty());
+    assert!(loaded.content_type.is_none());
+    assert!(loaded.response_topic.is_none());
+    assert!(loaded.correlation_data.is_none());
+    assert!(loaded.payload_format_indicator.is_none());
+}
+
+#[tokio::test]
 async fn test_concurrent_access() {
     let storage = Arc::new(create_memory_storage());
 

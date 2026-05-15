@@ -14,6 +14,7 @@ pub use limits::{ExpiringMessage, LimitsConfig, LimitsManager};
 pub use queue::{MessageQueue, QueueResult, QueueStats, QueuedMessage};
 #[cfg(not(target_arch = "wasm32"))]
 pub use quic_flow::{FlowRegistry, FlowState, FlowType};
+#[allow(deprecated)]
 pub use retained::{RetainedMessage, RetainedMessageStore};
 pub use state::{SessionConfig, SessionState, SessionStats};
 pub use subscription::{Subscription, SubscriptionManager};

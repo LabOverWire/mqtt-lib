@@ -5,6 +5,7 @@ use crate::session::limits::LimitsManager;
 use crate::session::queue::{MessageQueue, QueuedMessage};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::session::quic_flow::{FlowRegistry, FlowState};
+#[allow(deprecated)]
 use crate::session::retained::{RetainedMessage, RetainedMessageStore};
 use crate::session::subscription::{Subscription, SubscriptionManager};
 use crate::time::{Duration, Instant};
@@ -70,6 +71,7 @@ pub struct SessionState {
     /// Topic alias manager for incoming messages
     topic_alias_in: Arc<RwLock<TopicAliasManager>>,
     /// Retained message store
+    #[allow(deprecated)]
     retained_messages: Arc<RetainedMessageStore>,
     /// Will message (to be published on abnormal disconnection)
     will_message: Arc<RwLock<Option<WillMessage>>>,
@@ -104,7 +106,10 @@ impl SessionState {
             flow_control: Arc::new(RwLock::new(FlowControlManager::new(65535))), // Default to max
             topic_alias_out: Arc::new(RwLock::new(TopicAliasManager::new(0))), // Default to disabled
             topic_alias_in: Arc::new(RwLock::new(TopicAliasManager::new(0))), // Default to disabled
-            retained_messages: Arc::new(RetainedMessageStore::new()),
+            retained_messages: Arc::new({
+                #[allow(deprecated)]
+                RetainedMessageStore::new()
+            }),
             will_message: Arc::new(RwLock::new(None)),
             will_delay_handle: Arc::new(RwLock::new(None)),
             limits: Arc::new(RwLock::new(LimitsManager::with_defaults())),
@@ -432,26 +437,39 @@ impl SessionState {
     }
 
     /// Stores or clears a retained message
+    #[deprecated(
+        since = "0.31.5",
+        note = "session-level retained store is unused by the broker; the broker uses broker::storage::RetainedMessage. Scheduled for removal in 0.32.0."
+    )]
+    #[allow(deprecated)]
     pub async fn store_retained_message(&self, packet: &PublishPacket) {
         let topic = packet.topic_name.clone();
 
         if packet.payload.is_empty() {
-            // Empty payload clears the retained message
             self.retained_messages.store(topic, None).await;
         } else {
-            // Store the retained message
             let message = RetainedMessage::from(packet);
             self.retained_messages.store(topic, Some(message)).await;
         }
     }
 
     /// Gets retained messages matching a topic filter
+    #[deprecated(
+        since = "0.31.5",
+        note = "session-level retained store is unused by the broker; the broker uses broker::storage::RetainedMessage. Scheduled for removal in 0.32.0."
+    )]
+    #[allow(deprecated)]
     pub async fn get_retained_messages(&self, topic_filter: &str) -> Vec<RetainedMessage> {
         self.retained_messages.get_matching(topic_filter).await
     }
 
     #[must_use]
     /// Gets the retained message store
+    #[deprecated(
+        since = "0.31.5",
+        note = "session-level retained store is unused by the broker; the broker uses broker::storage::RetainedMessage. Scheduled for removal in 0.32.0."
+    )]
+    #[allow(deprecated)]
     pub fn retained_messages(&self) -> &Arc<RetainedMessageStore> {
         &self.retained_messages
     }
@@ -692,6 +710,7 @@ pub struct SessionStats {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
     use crate::packet::subscribe::SubscriptionOptions;
