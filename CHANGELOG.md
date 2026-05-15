@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [mqtt5-wasm 1.3.1] - 2026-05-15
+
+### Fixed
+
+- **Retained message properties dropped (wasm broker)** - pulls in the `mqtt5 0.31.5` fix for issue #77. The wasm broker uses the same `broker::storage::RetainedMessage` as the native broker and shared the same v5-property loss on retained delivery to late subscribers; transitively fixed by the upstream change.
+
+## [mqtt5 0.31.5] - 2026-05-15
+
+### Fixed
+
+- **Retained message properties dropped** - `response_topic`, `correlation_data`, `content_type`, `user_properties`, and `payload_format_indicator` were stripped when a retained message was stored and never restored on delivery to a late subscriber (issue #77). `broker::storage::RetainedMessage` had no fields for them; added the fields (each `#[serde(default)]` for file-backend back-compat) and routed extraction/restoration through a shared `V5PublishProps` helper now used by both `RetainedMessage` and `InflightMessage`.
+
+### Deprecated
+
+- **`session::retained::{RetainedMessage, RetainedMessageStore}` and `SessionState::{store_retained_message, get_retained_messages, retained_messages}`** - the session-level retained store is unused by the broker (the broker uses `broker::storage::RetainedMessage`). Scheduled for removal in 0.32.0.
+
 ## [mqttv5-cli 0.27.2] - 2026-04-13
 
 ### Fixed
