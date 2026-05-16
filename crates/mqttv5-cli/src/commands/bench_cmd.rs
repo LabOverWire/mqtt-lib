@@ -1451,15 +1451,8 @@ async fn run_hol_blocking(cmd: BenchCommand) -> Result<()> {
     )
     .await?;
 
-    let per_topic_interval_us = if cmd.rate > 0 {
-        #[allow(clippy::cast_possible_truncation)]
-        let interval = (1_000_000u64 * (num_topics as u64))
-            .checked_div(cmd.rate)
-            .unwrap_or(0);
-        Some(interval)
-    } else {
-        None
-    };
+    #[allow(clippy::cast_possible_truncation)]
+    let per_topic_interval_us = (1_000_000u64 * (num_topics as u64)).checked_div(cmd.rate);
     let rate_label = if cmd.rate > 0 {
         format!("{} msg/s", cmd.rate)
     } else {
