@@ -132,6 +132,11 @@ impl MqttClient {
     /// returned value matches the broker-imposed interval, otherwise it matches
     /// the value passed to [`ConnectOptions::with_keep_alive`].
     ///
+    /// Per `[MQTT-3.2.2-22]` a broker-returned `ServerKeepAlive` always wins,
+    /// including the case where the client requested `Duration::ZERO`
+    /// (disabled): a non-zero `ServerKeepAlive` will re-enable keep-alive on
+    /// the connection. A `ServerKeepAlive` of zero disables keep-alive.
+    ///
     /// Before the first successful `connect()` call this returns the value
     /// configured on the [`ConnectOptions`]. A returned value of
     /// `Duration::ZERO` means keep-alive is disabled.

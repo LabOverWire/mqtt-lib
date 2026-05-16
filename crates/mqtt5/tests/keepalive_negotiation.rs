@@ -121,3 +121,32 @@ async fn keep_alive_renegotiates_against_each_broker_on_reconnect() {
     );
     client.disconnect().await.unwrap();
 }
+
+#[tokio::test]
+async fn server_keep_alive_zero_disables_keepalive_even_with_nonzero_client_request() {
+    let storage_config = StorageConfig {
+        backend: StorageBackend::Memory,
+        enable_persistence: true,
+        ..Default::default()
+    };
+    let mut config = BrokerConfig::default()
+        .with_bind_address("127.0.0.1:0".parse::<SocketAddr>().unwrap())
+        .with_storage(storage_config);
+    config.server_keep_alive = Some(Duration::ZERO);
+
+    let broker = TestBroker::start_with_config(config).await;
+
+    let mut options = ConnectOptions::new("kanego-5");
+    options.keep_alive = Duration::from_secs(60);
+
+    let client = MqttClient::with_options(options);
+    client.connect(broker.address()).await.unwrap();
+
+    assert_eq!(
+        client.keep_alive().await,
+        Duration::ZERO,
+        "ServerKeepAlive=0 must disable keep-alive even when the client requested a non-zero interval",
+    );
+
+    client.disconnect().await.unwrap();
+}
