@@ -61,8 +61,8 @@
 //!             ConnectionEvent::Connecting => {
 //!                 println!("Connecting...");
 //!             }
-//!             ConnectionEvent::Connected { session_present } => {
-//!                 println!("Connected! Session present: {}", session_present);
+//!             ConnectionEvent::Connected { session_present, keep_alive } => {
+//!                 println!("Connected! Session present: {session_present}, keep-alive: {keep_alive:?}");
 //!             }
 //!             ConnectionEvent::Disconnected { reason } => {
 //!                 println!("Disconnected: {:?}", reason);

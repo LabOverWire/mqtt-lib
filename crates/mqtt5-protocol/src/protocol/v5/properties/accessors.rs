@@ -173,6 +173,20 @@ impl Properties {
             .push(PropertyValue::TwoByteInteger(seconds));
     }
 
+    #[must_use]
+    pub fn get_server_keep_alive(&self) -> Option<u16> {
+        self.properties
+            .get(&PropertyId::ServerKeepAlive)
+            .and_then(|values| values.first())
+            .and_then(|value| {
+                if let PropertyValue::TwoByteInteger(v) = value {
+                    Some(*v)
+                } else {
+                    None
+                }
+            })
+    }
+
     pub fn set_authentication_method(&mut self, method: String) {
         self.properties
             .entry(PropertyId::AuthenticationMethod)

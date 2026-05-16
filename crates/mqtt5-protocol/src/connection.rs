@@ -52,10 +52,22 @@ pub enum DisconnectReason {
 #[derive(Debug, Clone)]
 pub enum ConnectionEvent {
     Connecting,
-    Connected { session_present: bool },
-    Disconnected { reason: DisconnectReason },
-    Reconnecting { attempt: u32 },
-    ReconnectFailed { error: MqttError },
+    Connected {
+        session_present: bool,
+        /// Effective keep-alive interval after MQTT v5 `ServerKeepAlive` negotiation.
+        ///
+        /// Equals `Duration::ZERO` if keep-alive is disabled.
+        keep_alive: Duration,
+    },
+    Disconnected {
+        reason: DisconnectReason,
+    },
+    Reconnecting {
+        attempt: u32,
+    },
+    ReconnectFailed {
+        error: MqttError,
+    },
 }
 
 #[derive(Debug, Clone, Default)]
@@ -197,9 +209,13 @@ impl ConnectionStateMachine {
             ConnectionEvent::Connecting => {
                 self.state = ConnectionState::Connecting;
             }
-            ConnectionEvent::Connected { session_present } => {
+            ConnectionEvent::Connected {
+                session_present,
+                keep_alive,
+            } => {
                 self.state = ConnectionState::Connected;
                 self.info.session_present = *session_present;
+                self.info.server_keep_alive = u16::try_from(keep_alive.as_secs()).ok();
             }
             ConnectionEvent::Disconnected { .. } | ConnectionEvent::ReconnectFailed { .. } => {
                 self.state = ConnectionState::Disconnected;
@@ -275,9 +291,11 @@ mod tests {
 
         sm.transition(&ConnectionEvent::Connected {
             session_present: true,
+            keep_alive: Duration::from_secs(60),
         });
         assert!(sm.is_connected());
         assert!(sm.info().session_present);
+        assert_eq!(sm.info().server_keep_alive, Some(60));
 
         sm.transition(&ConnectionEvent::Disconnected {
             reason: DisconnectReason::NetworkError("timeout".into()),
@@ -338,6 +356,7 @@ mod tests {
         sm.transition(&ConnectionEvent::Connecting);
         sm.transition(&ConnectionEvent::Connected {
             session_present: false,
+            keep_alive: Duration::from_secs(60),
         });
         assert!(sm.is_connected());
 

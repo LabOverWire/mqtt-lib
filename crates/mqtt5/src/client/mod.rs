@@ -125,6 +125,25 @@ impl MqttClient {
         self.inner.read().await.is_connected()
     }
 
+    /// Returns the keep-alive interval currently in effect.
+    ///
+    /// On MQTT v5 this reflects the value after `ServerKeepAlive` negotiation:
+    /// if the broker returned a `ServerKeepAlive` property in CONNACK the
+    /// returned value matches the broker-imposed interval, otherwise it matches
+    /// the value passed to [`ConnectOptions::with_keep_alive`].
+    ///
+    /// Per `[MQTT-3.2.2-22]` a broker-returned `ServerKeepAlive` always wins,
+    /// including the case where the client requested `Duration::ZERO`
+    /// (disabled): a non-zero `ServerKeepAlive` will re-enable keep-alive on
+    /// the connection. A `ServerKeepAlive` of zero disables keep-alive.
+    ///
+    /// Before the first successful `connect()` call this returns the value
+    /// configured on the [`ConnectOptions`]. A returned value of
+    /// `Duration::ZERO` means keep-alive is disabled.
+    pub async fn keep_alive(&self) -> std::time::Duration {
+        self.inner.read().await.negotiated_keep_alive()
+    }
+
     /// Gets the client ID
     pub async fn client_id(&self) -> String {
         self.inner
@@ -152,8 +171,8 @@ impl MqttClient {
     ///         ConnectionEvent::Connecting => {
     ///             println!("Connecting...");
     ///         }
-    ///         ConnectionEvent::Connected { session_present } => {
-    ///             println!("Connected! Session present: {}", session_present);
+    ///         ConnectionEvent::Connected { session_present, keep_alive } => {
+    ///             println!("Connected! Session present: {session_present}, keep-alive: {keep_alive:?}");
     ///         }
     ///         ConnectionEvent::Disconnected { reason } => {
     ///             println!("Disconnected: {:?}", reason);

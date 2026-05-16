@@ -28,9 +28,13 @@ impl MqttClient {
         &self,
         stored_subs: Vec<StoredSubscription>,
         session_present: bool,
+        keep_alive: std::time::Duration,
     ) {
-        self.trigger_connection_event(ConnectionEvent::Connected { session_present })
-            .await;
+        self.trigger_connection_event(ConnectionEvent::Connected {
+            session_present,
+            keep_alive,
+        })
+        .await;
         self.recover_quic_flows().await;
         self.restore_subscriptions_after_connect(stored_subs, session_present)
             .await;
@@ -419,9 +423,10 @@ impl MqttClient {
                     }
                     let stored_subs = inner.stored_subscriptions.lock().clone();
                     let session_present = result.session_present;
+                    let keep_alive = inner.negotiated_keep_alive();
                     drop(inner);
 
-                    self.on_successful_connect(stored_subs, session_present)
+                    self.on_successful_connect(stored_subs, session_present, keep_alive)
                         .await;
 
                     return Ok(result);
@@ -525,9 +530,10 @@ impl MqttClient {
             Ok(result) => {
                 let stored_subs = inner.stored_subscriptions.lock().clone();
                 let session_present = result.session_present;
+                let keep_alive = inner.negotiated_keep_alive();
                 drop(inner);
 
-                self.on_successful_connect(stored_subs, session_present)
+                self.on_successful_connect(stored_subs, session_present, keep_alive)
                     .await;
 
                 Ok(result)

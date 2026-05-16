@@ -21,6 +21,7 @@ async fn test_connection_event_callback() {
         .on_connection_event(move |event| match event {
             ConnectionEvent::Connected {
                 session_present: sp,
+                ..
             } => {
                 connected_count_clone.fetch_add(1, Ordering::Relaxed);
                 session_present_clone.store(sp, Ordering::Relaxed);

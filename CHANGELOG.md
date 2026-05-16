@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [mqttv5-cli 0.27.3] - 2026-05-16
+
+### Changed
+
+- **Bump `mqtt5` dep to `0.32`** - transitive bump for the breaking `ConnectionEvent::Connected` field addition. No CLI surface changes.
+
+## [mqtt5-wasm 1.3.2] - 2026-05-16
+
+### Changed
+
+- **Bump `mqtt5` dep to `0.32` and `mqtt5-protocol` to `0.13`** - transitive bump for the breaking `ConnectionEvent::Connected` field addition. No wasm surface changes.
+
+## [mqtt5 0.32.0] - 2026-05-16
+
+### Changed
+
+- **BREAKING: `ConnectionEvent::Connected` gained `keep_alive: Duration`** - exposes the broker-negotiated keep-alive interval from CONNACK to event consumers. Existing match arms that destructure the variant must be updated.
+
+### Added
+
+- **Honor MQTT v5 ServerKeepAlive negotiation** - the client now adopts the broker-supplied keep-alive interval from the CONNACK `Server Keep Alive` property when present ([MQTT-3.2.2-22]), driving PINGREQ cadence and read timeouts off the negotiated value rather than the requested one. The originally configured interval is preserved on `ConnectOptions::keep_alive` so subsequent CONNECTs re-negotiate from the user's intent. New `MqttClient::keep_alive() -> Duration` accessor exposes the current effective value.
+
+## [mqtt5-protocol 0.13.0] - 2026-05-16
+
+### Changed
+
+- **BREAKING: `ConnectionEvent::Connected` variant gained `keep_alive: Duration`** - carries the broker-negotiated keep-alive interval out to event consumers. Adding a field to a public enum variant is a SemVer-major change.
+
+### Added
+
+- **`Properties::get_server_keep_alive() -> Option<u16>`** - getter for the v5 `ServerKeepAlive` CONNACK property, symmetric with the existing `set_server_keep_alive` setter.
+
 ## [mqtt5-wasm 1.3.1] - 2026-05-15
 
 ### Fixed

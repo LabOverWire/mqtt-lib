@@ -110,6 +110,7 @@ pub struct DirectClientInner {
     pub auth_handler: Option<Arc<dyn AuthHandler>>,
     pub auth_method: Option<String>,
     pub keepalive_state: Arc<Mutex<KeepaliveState>>,
+    pub negotiated_keep_alive_secs: AtomicU64,
     #[cfg(feature = "transport-quic")]
     pub cached_quic_client_config: Option<quinn::ClientConfig>,
     #[cfg(feature = "transport-quic")]
@@ -126,6 +127,7 @@ impl DirectClientInner {
 
         let queue_on_disconnect = !options.clean_start;
         let auth_method = options.properties.authentication_method.clone();
+        let initial_keep_alive_secs = options.keep_alive.as_secs();
 
         Self {
             writer: None,
@@ -166,6 +168,7 @@ impl DirectClientInner {
             auth_handler: None,
             auth_method,
             keepalive_state: Arc::new(Mutex::new(KeepaliveState::default())),
+            negotiated_keep_alive_secs: AtomicU64::new(initial_keep_alive_secs),
             #[cfg(feature = "transport-quic")]
             cached_quic_client_config: None,
             #[cfg(feature = "transport-quic")]
@@ -179,6 +182,38 @@ impl DirectClientInner {
 
     pub fn is_connected(&self) -> bool {
         self.connected.load(Ordering::SeqCst)
+    }
+
+    pub fn negotiated_keep_alive(&self) -> Duration {
+        Duration::from_secs(self.negotiated_keep_alive_secs.load(Ordering::Relaxed))
+    }
+
+    fn configured_keep_alive_u16(&self) -> u16 {
+        let requested = self.options.keep_alive.as_secs();
+        u16::try_from(requested).unwrap_or_else(|_| {
+            tracing::warn!(
+                "Configured keep-alive {}s exceeds the u16 wire range; clamping to {}s",
+                requested,
+                u16::MAX,
+            );
+            u16::MAX
+        })
+    }
+
+    fn apply_negotiated_keep_alive(&self, server_value: Option<u16>) {
+        let effective = server_value.map_or_else(
+            || self.configured_keep_alive_u16(),
+            |v| {
+                tracing::debug!(
+                    "Server overrode keep-alive: requested={}s, negotiated={}s",
+                    self.options.keep_alive.as_secs(),
+                    v,
+                );
+                v
+            },
+        );
+        self.negotiated_keep_alive_secs
+            .store(u64::from(effective), Ordering::Relaxed);
     }
 
     pub fn set_connected(&self, connected: bool) {
@@ -358,6 +393,8 @@ impl DirectClientInner {
         } else {
             *self.server_max_qos.lock() = None;
         }
+
+        self.apply_negotiated_keep_alive(connack.properties.get_server_keep_alive());
 
         let protocol_version = self.options.protocol_version.as_u8();
         let (reader, writer) = match transport {
@@ -1139,12 +1176,7 @@ impl DirectClientInner {
         ConnectPacket {
             protocol_version: self.options.protocol_version.as_u8(),
             clean_start: self.options.clean_start,
-            keep_alive: self
-                .options
-                .keep_alive
-                .as_secs()
-                .try_into()
-                .unwrap_or(u16::MAX),
+            keep_alive: self.configured_keep_alive_u16(),
             client_id: session.client_id().to_string(),
             will: self.options.will.clone(),
             username: self.options.username.clone(),
@@ -1201,7 +1233,7 @@ impl DirectClientInner {
             tracing::debug!("📦 PACKET READER - Task exited");
         }));
 
-        let keepalive_interval = self.options.keep_alive;
+        let keepalive_interval = self.negotiated_keep_alive();
         if keepalive_interval.is_zero() {
             tracing::debug!("💓 KEEPALIVE - Disabled (interval is zero)");
         } else {

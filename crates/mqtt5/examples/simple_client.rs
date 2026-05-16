@@ -72,8 +72,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ConnectionEvent::Connecting => {
                 println!("🔌 Connecting to MQTT broker...");
             }
-            ConnectionEvent::Connected { session_present } => {
-                println!("✅ Connected to MQTT broker (session_present: {session_present})");
+            ConnectionEvent::Connected {
+                session_present,
+                keep_alive,
+            } => {
+                println!(
+                    "✅ Connected to MQTT broker (session_present: {session_present}, keep_alive: {keep_alive:?})"
+                );
             }
             ConnectionEvent::Disconnected { reason } => {
                 println!("❌ Disconnected from broker: {reason:?}");

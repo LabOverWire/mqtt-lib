@@ -650,17 +650,21 @@ fn spawn_datagram_reader(
                         label,
                         peer_addr
                     );
-                    let packet = match decode_datagram_packet(&datagram) {
-                        Some(Ok(packet)) => packet,
+                    #[allow(
+                        clippy::collapsible_match,
+                        reason = "cannot move `packet` into async send from a pattern guard"
+                    )]
+                    match decode_datagram_packet(&datagram) {
+                        Some(Ok(packet)) => {
+                            if packet_tx.send((packet, None)).await.is_err() {
+                                debug!("Datagram packet channel closed for {}", peer_addr);
+                                break;
+                            }
+                        }
                         Some(Err(e)) => {
                             warn!("Failed to decode datagram from {}: {}", peer_addr, e);
-                            continue;
                         }
-                        None => continue,
-                    };
-                    if packet_tx.send((packet, None)).await.is_err() {
-                        debug!("Datagram packet channel closed for {}", peer_addr);
-                        break;
+                        None => {}
                     }
                 }
                 Err(e) => {

@@ -715,7 +715,9 @@ async fn keep_alive_loop(client: &MqttClient, auto_reconnect: bool) -> Result<()
                 ConnectionEvent::Connecting => {
                     info!("Connecting to broker...");
                 }
-                ConnectionEvent::Connected { session_present } => {
+                ConnectionEvent::Connected {
+                    session_present, ..
+                } => {
                     if session_present {
                         info!("✓ Reconnected (session present)");
                     } else {
