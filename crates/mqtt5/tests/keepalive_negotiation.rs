@@ -79,3 +79,45 @@ async fn keep_alive_before_connect_returns_configured_value() {
     let client = MqttClient::with_options(options);
     assert_eq!(client.keep_alive().await, Duration::from_secs(45));
 }
+
+#[tokio::test]
+async fn keep_alive_renegotiates_against_each_broker_on_reconnect() {
+    let storage_config = StorageConfig {
+        backend: StorageBackend::Memory,
+        enable_persistence: true,
+        ..Default::default()
+    };
+
+    let mut config_a = BrokerConfig::default()
+        .with_bind_address("127.0.0.1:0".parse::<SocketAddr>().unwrap())
+        .with_storage(storage_config.clone());
+    config_a.server_keep_alive = Some(Duration::from_secs(10));
+    let broker_a = TestBroker::start_with_config(config_a).await;
+
+    let mut config_b = BrokerConfig::default()
+        .with_bind_address("127.0.0.1:0".parse::<SocketAddr>().unwrap())
+        .with_storage(storage_config);
+    config_b.server_keep_alive = Some(Duration::from_secs(25));
+    let broker_b = TestBroker::start_with_config(config_b).await;
+
+    let mut options = ConnectOptions::new("kanego-4");
+    options.keep_alive = Duration::from_secs(60);
+
+    let client = MqttClient::with_options(options);
+
+    client.connect(broker_a.address()).await.unwrap();
+    assert_eq!(
+        client.keep_alive().await,
+        Duration::from_secs(10),
+        "first CONNECT must adopt broker A's ServerKeepAlive",
+    );
+    client.disconnect().await.unwrap();
+
+    client.connect(broker_b.address()).await.unwrap();
+    assert_eq!(
+        client.keep_alive().await,
+        Duration::from_secs(25),
+        "reconnect must re-negotiate from the original 60s request, not the previously-negotiated 10s",
+    );
+    client.disconnect().await.unwrap();
+}

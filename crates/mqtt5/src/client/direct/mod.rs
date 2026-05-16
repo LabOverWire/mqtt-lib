@@ -185,12 +185,22 @@ impl DirectClientInner {
     }
 
     pub fn negotiated_keep_alive(&self) -> Duration {
-        Duration::from_secs(self.negotiated_keep_alive_secs.load(Ordering::SeqCst))
+        Duration::from_secs(self.negotiated_keep_alive_secs.load(Ordering::Relaxed))
     }
 
     fn apply_negotiated_keep_alive(&self, server_value: Option<u16>) {
         let effective = server_value.map_or_else(
-            || u16::try_from(self.options.keep_alive.as_secs()).unwrap_or(u16::MAX),
+            || {
+                let requested = self.options.keep_alive.as_secs();
+                u16::try_from(requested).unwrap_or_else(|_| {
+                    tracing::warn!(
+                        "Configured keep-alive {}s exceeds the u16 wire range; clamping to {}s",
+                        requested,
+                        u16::MAX,
+                    );
+                    u16::MAX
+                })
+            },
             |v| {
                 tracing::debug!(
                     "Server overrode keep-alive: requested={}s, negotiated={}s",
@@ -201,7 +211,7 @@ impl DirectClientInner {
             },
         );
         self.negotiated_keep_alive_secs
-            .store(u64::from(effective), Ordering::SeqCst);
+            .store(u64::from(effective), Ordering::Relaxed);
     }
 
     pub fn set_connected(&self, connected: bool) {
