@@ -23,6 +23,18 @@ enum AuthOutcome {
     Failed(MqttError),
 }
 
+fn clamp_keep_alive_to_u16(keep_alive: Duration) -> u16 {
+    let secs = keep_alive.as_secs();
+    u16::try_from(secs).unwrap_or_else(|_| {
+        warn!(
+            "Configured server_keep_alive {}s exceeds the u16 wire range; clamping to {}s",
+            secs,
+            u16::MAX,
+        );
+        u16::MAX
+    })
+}
+
 impl ClientHandler {
     pub(super) async fn validate_protocol_version(&mut self, protocol_version: u8) -> Result<()> {
         match protocol_version {
@@ -362,7 +374,7 @@ impl ClientHandler {
     }
 
     fn build_connack_properties(
-        &self,
+        &mut self,
         connack: &mut ConnAckPacket,
         assigned_client_id: Option<&String>,
     ) {
@@ -401,9 +413,14 @@ impl ClientHandler {
         }
 
         if let Some(keep_alive) = self.config.server_keep_alive {
-            connack
-                .properties
-                .set_server_keep_alive(u16::try_from(keep_alive.as_secs()).unwrap_or(u16::MAX));
+            let secs = clamp_keep_alive_to_u16(keep_alive);
+            connack.properties.set_server_keep_alive(secs);
+            self.keep_alive = Duration::from_secs(u64::from(secs));
+            debug!(
+                client_id = ?self.client_id,
+                negotiated_keep_alive_secs = secs,
+                "Broker overrode client keep-alive via ServerKeepAlive"
+            );
         }
 
         if self.request_response_information {
