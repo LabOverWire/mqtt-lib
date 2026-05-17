@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [mqtt5 0.32.1] - 2026-05-17
+
+### Fixed
+
+- **Broker ignored its own `ServerKeepAlive` override for read timeout** - when `BrokerConfig.server_keep_alive` was set, the broker wrote the overridden value into CONNACK ([MQTT-3.2.2-22]) but kept computing its read timeout (`keep_alive * 1.5`) from the client's *original* CONNECT value. A client requesting 600s against a broker configured for 1s would not be disconnected for ~900s. The broker now updates `self.keep_alive` at the same point as the CONNACK property write so read timeouts and the keep-alive enforcement interval both reflect the negotiated value. Also corrects `server_keep_alive = Some(0)`: previously the broker still enforced the client's non-zero interval; now the zero override actually disables broker-side enforcement (issue #80, PR #81).
+
 ## [mqttv5-cli 0.27.3] - 2026-05-16
 
 ### Changed
