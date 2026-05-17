@@ -5,8 +5,13 @@ use common::TestBroker;
 use mqtt5::broker::config::{BrokerConfig, StorageBackend, StorageConfig};
 use mqtt5::time::Duration;
 use mqtt5::{ConnectOptions, ConnectionEvent, MqttClient};
+use mqtt5_protocol::packet::connect::ConnectPacket;
+use mqtt5_protocol::packet::MqttPacket;
+use mqtt5_protocol::protocol::v5::properties::Properties;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 
 #[tokio::test]
@@ -120,6 +125,64 @@ async fn keep_alive_renegotiates_against_each_broker_on_reconnect() {
         "reconnect must re-negotiate from the original 60s request, not the previously-negotiated 10s",
     );
     client.disconnect().await.unwrap();
+}
+
+#[tokio::test]
+async fn broker_read_timeout_uses_negotiated_keep_alive_not_client_request() {
+    let storage_config = StorageConfig {
+        backend: StorageBackend::Memory,
+        enable_persistence: true,
+        ..Default::default()
+    };
+    let mut config = BrokerConfig::default()
+        .with_bind_address("127.0.0.1:0".parse::<SocketAddr>().unwrap())
+        .with_storage(storage_config);
+    config.server_keep_alive = Some(Duration::from_secs(1));
+
+    let broker = TestBroker::start_with_config(config).await;
+    let addr = broker.address().trim_start_matches("mqtt://").to_string();
+
+    let mut stream = TcpStream::connect(&addr).await.expect("connect tcp");
+
+    let connect = ConnectPacket {
+        protocol_version: 5,
+        clean_start: true,
+        keep_alive: 600,
+        client_id: "kanego-broker-timeout".to_string(),
+        username: None,
+        password: None,
+        will: None,
+        properties: Properties::new(),
+        will_properties: Properties::new(),
+    };
+    let mut buf = Vec::new();
+    connect.encode(&mut buf).expect("encode CONNECT");
+    stream.write_all(&buf).await.expect("write CONNECT");
+    stream.flush().await.expect("flush");
+
+    let mut connack = [0u8; 64];
+    let n = tokio::time::timeout(Duration::from_secs(2), stream.read(&mut connack))
+        .await
+        .expect("CONNACK read timed out")
+        .expect("read CONNACK");
+    assert!(n > 0, "broker closed before sending CONNACK");
+
+    let start = tokio::time::Instant::now();
+    let mut drain = [0u8; 256];
+    let read_result = tokio::time::timeout(Duration::from_secs(4), stream.read(&mut drain)).await;
+    let elapsed = start.elapsed();
+
+    let bytes = read_result
+        .expect("broker did not close connection within 4s — read_timeout still using client's 600s request")
+        .expect("socket read error");
+    assert_eq!(
+        bytes, 0,
+        "expected EOF after broker timeout, got {bytes} bytes",
+    );
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "broker disconnect took {elapsed:?}; expected ~1.5s (negotiated 1s * 1.5)",
+    );
 }
 
 #[tokio::test]
