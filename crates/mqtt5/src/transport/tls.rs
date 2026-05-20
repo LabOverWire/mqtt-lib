@@ -2,6 +2,7 @@ use crate::crypto::NoVerification;
 use crate::error::{MqttError, Result};
 use crate::time::Duration;
 use crate::Transport;
+use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
 use rustls::{ClientConfig, RootCertStore};
 use std::net::SocketAddr;
@@ -175,13 +176,9 @@ impl TlsConfig {
     /// # Errors
     ///
     /// Returns an error if the file cannot be read or parsed
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the operation fails
     pub fn load_client_cert_pem(&mut self, cert_path: &str) -> Result<()> {
         let cert_pem = std::fs::read(cert_path)?;
-        let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut &cert_pem[..])
+        let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(&cert_pem)
             .filter_map(std::result::Result::ok)
             .collect();
         if certs.is_empty() {
@@ -198,34 +195,12 @@ impl TlsConfig {
     /// # Errors
     ///
     /// Returns an error if the file cannot be read or parsed
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the operation fails
     pub fn load_client_key_pem(&mut self, key_path: &str) -> Result<()> {
         let key_pem = std::fs::read(key_path)?;
-        let mut keys: Vec<PrivateKeyDer<'static>> =
-            rustls_pemfile::pkcs8_private_keys(&mut &key_pem[..])
-                .filter_map(std::result::Result::ok)
-                .map(PrivateKeyDer::from)
-                .collect();
-
-        if keys.is_empty() {
-            // Try RSA keys if PKCS8 didn't work
-            keys = rustls_pemfile::rsa_private_keys(&mut &key_pem[..])
-                .filter_map(std::result::Result::ok)
-                .map(PrivateKeyDer::from)
-                .collect();
-        }
-
-        if keys.is_empty() {
-            return Err(MqttError::ProtocolError(
-                "No private keys found in file".to_string(),
-            ));
-        }
-        self.client_key = Some(keys.into_iter().next().ok_or_else(|| {
-            MqttError::ProtocolError("Keys vector unexpectedly empty".to_string())
-        })?);
+        let key = PrivateKeyDer::pem_slice_iter(&key_pem)
+            .find_map(std::result::Result::ok)
+            .ok_or_else(|| MqttError::ProtocolError("No private keys found in file".to_string()))?;
+        self.client_key = Some(key);
         Ok(())
     }
 
@@ -234,13 +209,9 @@ impl TlsConfig {
     /// # Errors
     ///
     /// Returns an error if the file cannot be read or parsed
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the operation fails
     pub fn load_ca_cert_pem(&mut self, ca_path: &str) -> Result<()> {
         let ca_pem = std::fs::read(ca_path)?;
-        let ca_certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut &ca_pem[..])
+        let ca_certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(&ca_pem)
             .filter_map(std::result::Result::ok)
             .collect();
         if ca_certs.is_empty() {
@@ -258,7 +229,7 @@ impl TlsConfig {
     ///
     /// Returns an error if the bytes cannot be parsed as PEM certificate
     pub fn load_client_cert_pem_bytes(&mut self, cert_pem: &[u8]) -> Result<()> {
-        let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut &cert_pem[..])
+        let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(cert_pem)
             .filter_map(std::result::Result::ok)
             .collect();
         if certs.is_empty() {
@@ -276,28 +247,12 @@ impl TlsConfig {
     ///
     /// Returns an error if the bytes cannot be parsed as PEM private key
     pub fn load_client_key_pem_bytes(&mut self, key_pem: &[u8]) -> Result<()> {
-        let mut keys: Vec<PrivateKeyDer<'static>> =
-            rustls_pemfile::pkcs8_private_keys(&mut &key_pem[..])
-                .filter_map(std::result::Result::ok)
-                .map(PrivateKeyDer::from)
-                .collect();
-
-        if keys.is_empty() {
-            // Try RSA keys if PKCS8 didn't work
-            keys = rustls_pemfile::rsa_private_keys(&mut &key_pem[..])
-                .filter_map(std::result::Result::ok)
-                .map(PrivateKeyDer::from)
-                .collect();
-        }
-
-        if keys.is_empty() {
-            return Err(MqttError::ProtocolError(
-                "No private keys found in PEM bytes".to_string(),
-            ));
-        }
-        self.client_key = Some(keys.into_iter().next().ok_or_else(|| {
-            MqttError::ProtocolError("Keys vector unexpectedly empty".to_string())
-        })?);
+        let key = PrivateKeyDer::pem_slice_iter(key_pem)
+            .find_map(std::result::Result::ok)
+            .ok_or_else(|| {
+                MqttError::ProtocolError("No private keys found in PEM bytes".to_string())
+            })?;
+        self.client_key = Some(key);
         Ok(())
     }
 
@@ -307,7 +262,7 @@ impl TlsConfig {
     ///
     /// Returns an error if the bytes cannot be parsed as PEM certificate
     pub fn load_ca_cert_pem_bytes(&mut self, ca_pem: &[u8]) -> Result<()> {
-        let ca_certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut &ca_pem[..])
+        let ca_certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(ca_pem)
             .filter_map(std::result::Result::ok)
             .collect();
         if ca_certs.is_empty() {
@@ -336,7 +291,6 @@ impl TlsConfig {
     ///
     /// Returns an error if the bytes are not valid DER-encoded private key
     pub fn load_client_key_der_bytes(&mut self, key_der: &[u8]) -> Result<()> {
-        // Assume PKCS#8 format for DER keys - this is the most common format
         use rustls::pki_types::PrivatePkcs8KeyDer;
         let key = PrivateKeyDer::from(PrivatePkcs8KeyDer::from(key_der.to_vec()));
         self.client_key = Some(key);
