@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [mqtt5 0.32.2] - 2026-05-20
+
+### Changed
+
+- **Drop unmaintained `rustls-pemfile` dependency** - migrated all PEM parsing to `rustls-pki-types::pem::PemObject` (already implemented by `CertificateDer` and `PrivateKeyDer`). Closes [RUSTSEC-2025-0134](https://rustsec.org/advisories/RUSTSEC-2025-0134.html). As a side effect, private-key loading now accepts PKCS#8, PKCS#1 (RSA), and SEC1 (EC) sections in one pass instead of three sequential format probes, and respects file order when multiple key types are present (issue #82, PR #83).
+
 ## [mqtt5 0.32.1] - 2026-05-17
 
 ### Fixed

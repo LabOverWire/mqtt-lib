@@ -4,6 +4,7 @@
 //! allowing secure connections on a dedicated TLS port (typically 8883).
 
 use crate::error::{MqttError, Result};
+use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::WebPkiClientVerifier;
 use rustls::{RootCertStore, ServerConfig};
@@ -53,7 +54,7 @@ impl TlsAcceptorConfig {
         path: impl AsRef<Path>,
     ) -> Result<Vec<CertificateDer<'static>>> {
         let cert_pem = tokio::fs::read(path.as_ref()).await?;
-        let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut &cert_pem[..])
+        let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(&cert_pem)
             .filter_map(std::result::Result::ok)
             .collect();
 
@@ -75,32 +76,8 @@ impl TlsAcceptorConfig {
         path: impl AsRef<Path>,
     ) -> Result<PrivateKeyDer<'static>> {
         let key_pem = tokio::fs::read(path.as_ref()).await?;
-
-        // Try PKCS#8 format first
-        let mut keys: Vec<PrivateKeyDer<'static>> =
-            rustls_pemfile::pkcs8_private_keys(&mut &key_pem[..])
-                .filter_map(std::result::Result::ok)
-                .map(PrivateKeyDer::from)
-                .collect();
-
-        // Try RSA format if PKCS#8 didn't work
-        if keys.is_empty() {
-            keys = rustls_pemfile::rsa_private_keys(&mut &key_pem[..])
-                .filter_map(std::result::Result::ok)
-                .map(PrivateKeyDer::from)
-                .collect();
-        }
-
-        // Try EC format if RSA didn't work
-        if keys.is_empty() {
-            keys = rustls_pemfile::ec_private_keys(&mut &key_pem[..])
-                .filter_map(std::result::Result::ok)
-                .map(PrivateKeyDer::from)
-                .collect();
-        }
-
-        keys.into_iter()
-            .next()
+        PrivateKeyDer::pem_slice_iter(&key_pem)
+            .find_map(std::result::Result::ok)
             .ok_or_else(|| MqttError::Configuration("No private keys found in file".to_string()))
     }
 

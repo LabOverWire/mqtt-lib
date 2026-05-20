@@ -3,7 +3,8 @@ use common::{find_workspace_root, TestBroker};
 use mqtt5::broker::config::{
     BrokerConfig, StorageBackend, StorageConfig, TlsConfig as BrokerTlsConfig, WebSocketConfig,
 };
-use rustls::pki_types::ServerName;
+use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::{CertificateDer, ServerName};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Arc;
@@ -48,7 +49,7 @@ fn build_tls_connector(alpn_protocols: Vec<Vec<u8>>) -> tokio_rustls::TlsConnect
     let mut root_store = rustls::RootCertStore::empty();
     let workspace_root = find_workspace_root();
     let ca_pem = std::fs::read(workspace_root.join("test_certs/ca.pem")).unwrap();
-    let ca_certs: Vec<_> = rustls_pemfile::certs(&mut &ca_pem[..])
+    let ca_certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(&ca_pem)
         .filter_map(std::result::Result::ok)
         .collect();
     for cert in ca_certs {
