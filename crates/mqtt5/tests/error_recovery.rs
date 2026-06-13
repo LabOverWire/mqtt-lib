@@ -158,11 +158,11 @@ async fn test_retry_delay_calculation() {
 
     assert_eq!(
         retry_delay(RecoverableError::QuotaExceeded, 0, &config),
-        Duration::from_millis(1000)
+        Duration::from_secs(1)
     );
     assert_eq!(
         retry_delay(RecoverableError::QuotaExceeded, 1, &config),
-        Duration::from_millis(2000)
+        Duration::from_secs(2)
     );
 
     assert_eq!(

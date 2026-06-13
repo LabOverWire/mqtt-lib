@@ -36,16 +36,16 @@ wasm-bindgen = { version = "0.2", optional = true }
 wasm-bindgen-futures = { version = "0.4", optional = true }
 js-sys = { version = "0.3", optional = true }
 console_error_panic_hook = "0.1"
-getrandom = { version = "0.3", features = ["wasm_js"] }
+getrandom = { version = "0.4", features = ["wasm_js"] }
 
 bytes = "1.10"
 futures = "0.3"
 futures-util = "0.3"
 tracing = "0.1.41"
-gloo-timers = { version = "0.3.0", features = ["futures"] }
+gloo-timers = { version = "0.4", features = ["futures"] }
 flume = "0.12.0"
 miniz_oxide = { version = "0.9", optional = true }
-sha2 = "0.10.9"
+sha2 = "0.11"
 
 [dependencies.web-sys]
 version = "0.3"

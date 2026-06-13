@@ -946,4 +946,4 @@ async fn get_message_content(cmd: &mut PubCommand) -> Result<String> {
     anyhow::bail!("Message content is required. Use one of:\n  --message \"your message\"\n  --file message.txt\n  --stdin\n  Or run without --non-interactive to be prompted");
 }
 
-use rand::Rng;
+use rand::RngExt;

@@ -394,7 +394,7 @@ async fn test_session_persistence() {
 
     // Wait longer to see if the offline message is delivered automatically
     println!("Waiting for offline message from restored session...");
-    tokio::time::sleep(Duration::from_millis(1000)).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
     let count = received.load(Ordering::SeqCst);
     println!("Received message count after waiting: {count}");
 

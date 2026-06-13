@@ -130,7 +130,7 @@ async fn test_quic_bridge_outbound() {
         .await
         .unwrap();
 
-    tokio::time::sleep(Duration::from_millis(2000)).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
 
     let count = received.load(Ordering::Relaxed);
     eprintln!("Messages received on remote broker: {count}");
@@ -206,7 +206,7 @@ async fn test_quic_bridge_inbound() {
         .await
         .unwrap();
 
-    tokio::time::sleep(Duration::from_millis(2000)).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
 
     let count = received.load(Ordering::Relaxed);
     eprintln!("Messages received on local broker: {count}");
@@ -316,7 +316,7 @@ async fn test_quic_bridge_bidirectional() {
         .await
         .unwrap();
 
-    tokio::time::sleep(Duration::from_millis(2000)).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
 
     let local_count = local_received.load(Ordering::Relaxed);
     let remote_count = remote_received.load(Ordering::Relaxed);

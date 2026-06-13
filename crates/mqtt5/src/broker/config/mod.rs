@@ -64,6 +64,7 @@ impl LoadBalancerConfig {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(default)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct BrokerConfig {
     pub bind_addresses: Vec<SocketAddr>,
@@ -430,6 +431,33 @@ mod tests {
         assert_eq!(config.max_clients, 10000);
         assert_eq!(config.maximum_qos, 2);
         assert!(config.retain_available);
+    }
+
+    #[test]
+    fn test_partial_config_uses_defaults() {
+        let config: BrokerConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(config.max_clients, 10000);
+        assert_eq!(config.maximum_qos, 2);
+        assert!(config.retain_available);
+        assert_eq!(config.bind_addresses.len(), 2);
+    }
+
+    #[test]
+    fn test_partial_config_overrides_single_field() {
+        let config: BrokerConfig = serde_json::from_str(r#"{"max_clients": 42}"#).unwrap();
+        assert_eq!(config.max_clients, 42);
+        assert_eq!(config.maximum_qos, 2);
+        assert!(config.retain_available);
+        assert!(config.auth_config.allow_anonymous);
+    }
+
+    #[test]
+    fn test_partial_nested_config_uses_defaults() {
+        let config: BrokerConfig =
+            serde_json::from_str(r#"{"auth_config": {"allow_anonymous": false}}"#).unwrap();
+        assert!(!config.auth_config.allow_anonymous);
+        assert_eq!(config.auth_config.auth_method, AuthMethod::None);
+        assert!(config.auth_config.rate_limit.enabled);
     }
 
     #[test]
