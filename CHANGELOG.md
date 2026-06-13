@@ -13,9 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **BREAKING: bumped `getrandom` 0.3 → 0.4** - `getrandom::Error` is exposed in the public API via `ScramCredentials::from_password` and the SCRAM nonce helpers, so the crate-version change of that error type is SemVer-breaking for consumers that name it.
+- **BREAKING: SCRAM credential functions no longer expose `getrandom::Error`** - `ScramCredentials::from_password`, `ScramCredentials::from_password_with_iterations`, `generate_scram_credential_line`, and `generate_scram_credential_line_with_iterations` now return the crate's own `Result<_, MqttError>` (mapping salt-generation failure to `MqttError::Io`) instead of `std::result::Result<_, getrandom::Error>`. This removes the third-party error type from the public API so future `getrandom` bumps are no longer breaking. Callers matching on `getrandom::Error` must switch to `MqttError`; callers using `?` or `anyhow` are unaffected.
 - **Bumped `mqtt5-protocol` dependency to 0.14** - pulls in the breaking `hashbrown` 0.17 change (see below).
-- **Updated remaining dependencies** - `sha2` 0.10 → 0.11, `rand` 0.9 → 0.10 (the `random()` method moved to the new `RngExt` trait, updated internally), `toml` 0.9 → 1, `tokio-tungstenite` 0.28 → 0.29, and the OpenTelemetry stack (`opentelemetry`/`opentelemetry_sdk`/`opentelemetry-otlp` 0.31 → 0.32, `tracing-opentelemetry` 0.32 → 0.33). All internal; no further public-API impact.
+- **Updated dependencies** - `getrandom` 0.3 → 0.4 (now an internal detail), `sha2` 0.10 → 0.11, `rand` 0.9 → 0.10 (the `random()` method moved to the new `RngExt` trait, updated internally), `toml` 0.9 → 1, `tokio-tungstenite` 0.28 → 0.29, and the OpenTelemetry stack (`opentelemetry`/`opentelemetry_sdk`/`opentelemetry-otlp` 0.31 → 0.32, `tracing-opentelemetry` 0.32 → 0.33). All internal; no further public-API impact.
 
 ## [mqtt5-protocol 0.14.0] - 2026-06-13
 
