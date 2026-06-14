@@ -200,9 +200,11 @@ jobs:
         id: changelog
         run: |
           VERSION=${GITHUB_REF#refs/tags/v}
-          # Extract the changelog section for this version
-          sed -n "/## \[${VERSION}\]/,/## \[/p" CHANGELOG.md | sed '$d' > release_notes.md
-          # If empty, use a default message
+          awk -v ver="$VERSION" '
+            $0 ~ "^## \\[mqtt5 " ver "\\]" {capture=1; print; next}
+            capture && /^## \[mqtt5 / {exit}
+            capture {print}
+          ' CHANGELOG.md > release_notes.md
           if [ ! -s release_notes.md ]; then
             echo "Release ${VERSION}" > release_notes.md
           fi
