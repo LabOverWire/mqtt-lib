@@ -461,6 +461,18 @@ mod tests {
     }
 
     #[test]
+    fn test_partial_storage_config_uses_defaults() {
+        let config: BrokerConfig =
+            serde_json::from_str(r#"{"storage_config": {"enable_persistence": false}}"#).unwrap();
+        assert!(!config.storage_config.enable_persistence);
+        assert_eq!(config.storage_config.backend, StorageBackend::File);
+        assert_eq!(
+            config.storage_config.base_dir,
+            std::path::PathBuf::from("./mqtt_storage")
+        );
+    }
+
+    #[test]
     fn test_config_builder() {
         let config = BrokerConfig::new()
             .with_bind_address("127.0.0.1:1884".parse::<SocketAddr>().unwrap())
