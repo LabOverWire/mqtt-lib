@@ -60,88 +60,6 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
-  # Publish to npm
-  publish-npm:
-    name: Publish to npm
-    needs: [publish]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Check if npm publish is needed
-        id: npm-check
-        run: |
-          LOCAL_VERSION=$(grep '^version' crates/mqtt5-wasm/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-          NPM_VERSION=$(npm view mqtt5-wasm version 2>/dev/null || echo "0.0.0")
-          echo "local=$LOCAL_VERSION" >> "$GITHUB_OUTPUT"
-          echo "npm=$NPM_VERSION" >> "$GITHUB_OUTPUT"
-          if [ "$LOCAL_VERSION" = "$NPM_VERSION" ]; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "mqtt5-wasm $LOCAL_VERSION already published to npm, skipping"
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-            echo "Publishing mqtt5-wasm $LOCAL_VERSION (npm has $NPM_VERSION)"
-          fi
-
-      - name: Install Rust
-        if: steps.npm-check.outputs.skip == 'false'
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
-
-      - name: Install wasm-bindgen-cli
-        if: steps.npm-check.outputs.skip == 'false'
-        run: cargo install wasm-bindgen-cli
-
-      - name: Setup Node.js
-        if: steps.npm-check.outputs.skip == 'false'
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          registry-url: 'https://registry.npmjs.org'
-
-      - name: Build and publish WASM package
-        if: steps.npm-check.outputs.skip == 'false'
-        run: |
-          cd crates/mqtt5-wasm
-          cargo build --target wasm32-unknown-unknown --release --features client,broker,codec
-          mkdir -p pkg
-          wasm-bindgen --target web --out-dir pkg ../../target/wasm32-unknown-unknown/release/mqtt5_wasm.wasm
-          VERSION=${{ steps.npm-check.outputs.local }}
-          cat > pkg/package.json << PKGJSON
-          {
-            "name": "mqtt5-wasm",
-            "type": "module",
-            "version": "$VERSION",
-            "description": "MQTT v5.0 WebAssembly client and broker for browser environments",
-            "license": "MIT OR Apache-2.0",
-            "repository": {
-              "type": "git",
-              "url": "https://github.com/LabOverWire/mqtt-lib"
-            },
-            "files": [
-              "mqtt5_wasm_bg.wasm",
-              "mqtt5_wasm.js",
-              "mqtt5_wasm.d.ts",
-              "mqtt5_wasm_bg.wasm.d.ts"
-            ],
-            "main": "mqtt5_wasm.js",
-            "types": "mqtt5_wasm.d.ts",
-            "sideEffects": [
-              "./mqtt5_wasm.js"
-            ],
-            "keywords": ["mqtt", "wasm", "webassembly", "iot", "pubsub"]
-          }
-          PKGJSON
-          cp ../../LICENSE-MIT pkg/ 2>/dev/null || true
-          cp ../../LICENSE-APACHE-2.0 pkg/ 2>/dev/null || true
-          cp README.md pkg/ 2>/dev/null || true
-          cd pkg
-          npm pkg fix
-          npm publish
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
   # Build CLI binaries
   build-binaries:
     name: Build CLI Binaries
@@ -191,7 +109,7 @@ jobs:
   # Create GitHub release
   create-release:
     name: Create GitHub Release
-    needs: [publish, publish-npm, build-binaries]
+    needs: [publish, build-binaries]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
