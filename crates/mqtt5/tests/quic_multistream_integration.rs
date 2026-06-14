@@ -507,7 +507,7 @@ async fn test_quic_mixed_qos_with_streams() {
     pub_client.publish_qos1(&topic, b"qos1").await.unwrap();
     pub_client.publish_qos2(&topic, b"qos2").await.unwrap();
 
-    tokio::time::sleep(Duration::from_millis(1000)).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
 
     assert!(
         received.load(Ordering::Relaxed) >= 2,
@@ -644,7 +644,7 @@ async fn test_quic_large_payload_per_stream() {
         pub_client.publish(&topic, payload).await.unwrap();
     }
 
-    tokio::time::sleep(Duration::from_millis(1000)).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
 
     let received = received_sizes.lock().await;
     assert_eq!(

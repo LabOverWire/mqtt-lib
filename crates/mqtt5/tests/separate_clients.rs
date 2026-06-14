@@ -225,7 +225,7 @@ async fn test_qos_levels_separate_clients() {
         .await
         .unwrap();
 
-    sleep(Duration::from_millis(1000)).await;
+    sleep(Duration::from_secs(1)).await;
 
     {
         let messages = qos_messages.lock().unwrap();

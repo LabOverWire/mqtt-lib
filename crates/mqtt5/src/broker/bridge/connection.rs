@@ -11,7 +11,7 @@ use crate::time::{Duration, Instant};
 use crate::transport::tls::TlsConfig;
 use crate::types::ConnectOptions;
 use mqtt5_protocol::bridge::{evaluate_forwarding, TopicMappingCore};
-use rand::Rng;
+use rand::RngExt;
 use std::collections::VecDeque;
 use std::net::ToSocketAddrs;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

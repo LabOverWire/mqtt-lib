@@ -629,4 +629,4 @@ fn validate_topic_filter(topic: &str) -> Result<()> {
     Ok(())
 }
 
-use rand::Rng;
+use rand::RngExt;

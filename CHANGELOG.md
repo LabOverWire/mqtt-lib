@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [mqtt5 0.33.0] - 2026-06-13
+
+### Fixed
+
+- **Broker config required every field to be present** - `BrokerConfig` derived `Deserialize` without a container-level `#[serde(default)]`, so a config file passed to `mqttv5 broker --config` failed to parse if it omitted any non-`Option`, non-defaulted field (e.g. `max_clients`), contradicting the per-field defaults documented in `CLI_USAGE.md`. Added `#[serde(default)]` to `BrokerConfig` and the nested `AuthConfig`, `RateLimitConfig`, `StorageConfig`, and `WebSocketConfig`, so omitted fields (including nested sub-fields) fall back to their `Default` impls. A minimal `{}` config is now valid (issue #85).
+
+### Changed
+
+- **BREAKING: SCRAM credential functions no longer expose `getrandom::Error`** - `ScramCredentials::from_password`, `ScramCredentials::from_password_with_iterations`, `generate_scram_credential_line`, and `generate_scram_credential_line_with_iterations` now return the crate's own `Result<_, MqttError>` (mapping salt-generation failure to `MqttError::Io`) instead of `std::result::Result<_, getrandom::Error>`. This removes the third-party error type from the public API so future `getrandom` bumps are no longer breaking. Callers matching on `getrandom::Error` must switch to `MqttError`; callers using `?` or `anyhow` are unaffected.
+- **Bumped `mqtt5-protocol` dependency to 0.14** - pulls in the breaking `hashbrown` 0.17 change (see below).
+- **Updated dependencies** - `getrandom` 0.3 → 0.4 (now an internal detail), `sha2` 0.10 → 0.11, `rand` 0.9 → 0.10 (the `random()` method moved to the new `RngExt` trait, updated internally), `toml` 0.9 → 1, `tokio-tungstenite` 0.28 → 0.29, and the OpenTelemetry stack (`opentelemetry`/`opentelemetry_sdk`/`opentelemetry-otlp` 0.31 → 0.32, `tracing-opentelemetry` 0.32 → 0.33). All internal; no further public-API impact.
+
+## [mqtt5-protocol 0.14.0] - 2026-06-13
+
+### Changed
+
+- **BREAKING: bumped `hashbrown` 0.16 → 0.17** - `SubscriptionManager::all()` returns `hashbrown::HashMap<String, Subscription>`, a public return type, so the crate-version change of `HashMap` is SemVer-breaking for consumers that name it.
+
+## [mqtt5-wasm 1.3.3] - 2026-06-13
+
+### Changed
+
+- **Transitive bump: `mqtt5` 0.33 and `mqtt5-protocol` 0.14** - no wasm surface changes; the breaking dependency changes are not re-exported through the wasm API. Also updates own dependencies `getrandom` 0.3 → 0.4, `sha2` 0.10 → 0.11, and `gloo-timers` 0.3 → 0.4.
+
+## [mqttv5-cli 0.27.4] - 2026-06-13
+
+### Changed
+
+- **Transitive bump: `mqtt5` 0.33** - picks up the config-file defaults fix (issue #85) end-to-end. Also updates own dependencies `rand` 0.9 → 0.10, `toml` 0.9 → 1, and `getrandom` 0.3 → 0.4. No CLI surface changes.
+
 ## [mqtt5 0.32.2] - 2026-05-20
 
 ### Changed

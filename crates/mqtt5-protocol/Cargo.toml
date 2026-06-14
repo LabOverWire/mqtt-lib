@@ -1,6 +1,6 @@
 [package]
 name = "mqtt5-protocol"
-version = "0.13.0"
+version = "0.14.0"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -35,7 +35,7 @@ serde = { version = "1.0", features = [
     "alloc",
 ], default-features = false }
 tracing = { version = "0.1.41", default-features = false, optional = true }
-hashbrown = "0.16"
+hashbrown = "0.17"
 portable-atomic = { version = "1.12", default-features = false }
 portable-atomic-util = { version = "0.2.4", default-features = false, features = [
     "alloc",

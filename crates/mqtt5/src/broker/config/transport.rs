@@ -80,6 +80,7 @@ impl QuicConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct WebSocketConfig {
     pub bind_addresses: Vec<SocketAddr>,
     pub path: String,

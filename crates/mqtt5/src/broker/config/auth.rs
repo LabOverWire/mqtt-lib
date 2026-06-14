@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AuthConfig {
     pub allow_anonymous: bool,
     pub password_file: Option<PathBuf>,
@@ -16,6 +17,7 @@ pub struct AuthConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct RateLimitConfig {
     pub enabled: bool,
     pub max_attempts: u32,

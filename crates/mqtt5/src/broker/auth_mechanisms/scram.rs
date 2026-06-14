@@ -1,5 +1,5 @@
 use crate::broker::auth::{AuthProvider, AuthResult, EnhancedAuthResult};
-use crate::error::Result;
+use crate::error::{MqttError, Result};
 use crate::packet::connect::ConnectPacket;
 use crate::protocol::v5::reason_codes::ReasonCode;
 use base64::prelude::*;
@@ -33,7 +33,7 @@ impl ScramCredentials {
     ///
     /// # Errors
     /// Returns an error if random salt generation fails.
-    pub fn from_password(password: &str) -> std::result::Result<Self, getrandom::Error> {
+    pub fn from_password(password: &str) -> Result<Self> {
         Self::from_password_with_iterations(password, SCRAM_ITERATION_COUNT)
     }
 
@@ -41,12 +41,10 @@ impl ScramCredentials {
     ///
     /// # Errors
     /// Returns an error if random salt generation fails.
-    pub fn from_password_with_iterations(
-        password: &str,
-        iterations: u32,
-    ) -> std::result::Result<Self, getrandom::Error> {
+    pub fn from_password_with_iterations(password: &str, iterations: u32) -> Result<Self> {
         let mut salt = vec![0u8; SCRAM_SALT_LENGTH];
-        getrandom::fill(&mut salt)?;
+        getrandom::fill(&mut salt)
+            .map_err(|e| MqttError::Io(format!("failed to generate random salt: {e}")))?;
 
         Ok(Self::from_password_and_salt(password, &salt, iterations))
     }
@@ -181,10 +179,7 @@ impl ScramCredentialStore for FileBasedScramCredentialStore {
 ///
 /// # Errors
 /// Returns an error if random salt generation fails.
-pub fn generate_scram_credential_line(
-    username: &str,
-    password: &str,
-) -> std::result::Result<String, getrandom::Error> {
+pub fn generate_scram_credential_line(username: &str, password: &str) -> Result<String> {
     let creds = ScramCredentials::from_password(password)?;
     Ok(format!(
         "{}:{}:{}:{}:{}",
@@ -204,7 +199,7 @@ pub fn generate_scram_credential_line_with_iterations(
     username: &str,
     password: &str,
     iterations: u32,
-) -> std::result::Result<String, getrandom::Error> {
+) -> Result<String> {
     let creds = ScramCredentials::from_password_with_iterations(password, iterations)?;
     Ok(format!(
         "{}:{}:{}:{}:{}",

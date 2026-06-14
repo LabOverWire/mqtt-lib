@@ -1064,6 +1064,8 @@ mqttv5 acl role-list --file acl.txt
 
 The broker accepts a JSON configuration file via `--config`. This section documents every field and provides ready-to-use examples.
 
+Every field is optional. Any field omitted from the file falls back to the default listed in the tables below, including nested objects such as `auth_config` and `storage_config`, where individual sub-fields may also be omitted. A minimal config such as `{}` is valid and starts the broker entirely on defaults.
+
 ### Complete Configuration Schema
 
 ```json

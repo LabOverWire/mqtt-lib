@@ -775,7 +775,7 @@ async fn test_subscription_restoration_after_reconnect() {
     // Disconnect and reconnect
     println!("Disconnecting...");
     client.disconnect().await.expect("Failed to disconnect");
-    tokio::time::sleep(Duration::from_millis(1000)).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
     message_count.store(0, Ordering::SeqCst);
 
     println!("Reconnecting...");

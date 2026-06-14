@@ -8,7 +8,7 @@ use flate2::write::GzEncoder;
 use flate2::Compression;
 use mqtt5::time::Duration;
 use mqtt5::{ConnectOptions, MqttClient, QoS};
-use rand::Rng;
+use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use std::io::{Read as _, Write as _};
 use std::path::PathBuf;
@@ -239,14 +239,10 @@ fn decode_timestamp(format: PayloadFormat, payload: &[u8]) -> u64 {
                 0
             }
         }
-        PayloadFormat::Json => serde_json::from_slice::<JsonPayload>(payload)
-            .map(|p| p.ts)
-            .unwrap_or(0),
+        PayloadFormat::Json => serde_json::from_slice::<JsonPayload>(payload).map_or(0, |p| p.ts),
         PayloadFormat::Bebytes => {
             if payload.len() >= BEBYTES_HEADER_SIZE {
-                BebytesHeader::try_from_be_bytes(payload)
-                    .map(|(h, _)| h.timestamp_ns)
-                    .unwrap_or(0)
+                BebytesHeader::try_from_be_bytes(payload).map_or(0, |(h, _)| h.timestamp_ns)
             } else {
                 0
             }
@@ -255,9 +251,7 @@ fn decode_timestamp(format: PayloadFormat, payload: &[u8]) -> u64 {
             let mut decoder = GzDecoder::new(payload);
             let mut json_bytes = Vec::new();
             if decoder.read_to_end(&mut json_bytes).is_ok() {
-                serde_json::from_slice::<JsonPayload>(&json_bytes)
-                    .map(|p| p.ts)
-                    .unwrap_or(0)
+                serde_json::from_slice::<JsonPayload>(&json_bytes).map_or(0, |p| p.ts)
             } else {
                 0
             }
@@ -274,14 +268,10 @@ fn decode_sequence(format: PayloadFormat, payload: &[u8]) -> u32 {
                 0
             }
         }
-        PayloadFormat::Json => serde_json::from_slice::<JsonPayload>(payload)
-            .map(|p| p.seq)
-            .unwrap_or(0),
+        PayloadFormat::Json => serde_json::from_slice::<JsonPayload>(payload).map_or(0, |p| p.seq),
         PayloadFormat::Bebytes => {
             if payload.len() >= BEBYTES_HEADER_SIZE {
-                BebytesHeader::try_from_be_bytes(payload)
-                    .map(|(h, _)| h.sequence)
-                    .unwrap_or(0)
+                BebytesHeader::try_from_be_bytes(payload).map_or(0, |(h, _)| h.sequence)
             } else {
                 0
             }
@@ -290,9 +280,7 @@ fn decode_sequence(format: PayloadFormat, payload: &[u8]) -> u32 {
             let mut decoder = GzDecoder::new(payload);
             let mut json_bytes = Vec::new();
             if decoder.read_to_end(&mut json_bytes).is_ok() {
-                serde_json::from_slice::<JsonPayload>(&json_bytes)
-                    .map(|p| p.seq)
-                    .unwrap_or(0)
+                serde_json::from_slice::<JsonPayload>(&json_bytes).map_or(0, |p| p.seq)
             } else {
                 0
             }
