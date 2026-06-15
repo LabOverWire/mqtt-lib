@@ -673,20 +673,12 @@ TA==
             "localhost",
         );
 
-        // Test valid RSA private key in PEM format
-        let valid_key_pem = b"-----BEGIN RSA PRIVATE KEY-----
-MIIBOgIBAAJBALtUlNS31SzxwoFSZEq9bZogYwEwTF2oanidzJ/gHMZM4hS1KGA/
-r67uSPuYEfar2w/ls7EUqpBLMAODyFI3jPzPajcZhQGPm4QmOHyJVHU4aWa/SJiD
-OBlaOknDsEsbQczA19v4fiFOWByllgfyAzGYZCJCY7FIo0kDPnE8lMEY0mO8/5nc
-13xtB7aqc7PgenezaqzsLgapo9U/mrsvFcgCAgMBAAECQBKmZi7m2J+5nEoM0YKU
-wQgRqT2kFz8tJO0Q9r4rQfkbFm8OmVZs9FcX+Z8vCcOqS8nG0z8cRGhX+rKhRrVu
-uoECIQDdwJmRZQhCGpX0P8Q6v5B2J7mOZQVg7VK1g4YFcYHyeQIhANJFfHjHgKqJ
-x8Z9fQzK8u0FDlq0wGHkL1rCgJzQLHmBAiEA6VjXlZGhF2G8EL4P+7+P6u6W2Qrb
-u9W5m0K4kV2sQ2ECIDTqoHEfL2+OzPsQpBxZ5kD6XpGuL6UKYXyF+VZw9uGBAiBm
-QK8Q2JGfQtK+7F6vGgR8QKrMgJh6EwZhLl3mPVH+QQ==
------END RSA PRIVATE KEY-----";
+        let key_pair = rcgen::KeyPair::generate().expect("generate key pair");
+        let valid_key_pem = key_pair.serialize_pem();
 
-        assert!(config.load_client_key_pem_bytes(valid_key_pem).is_ok());
+        assert!(config
+            .load_client_key_pem_bytes(valid_key_pem.as_bytes())
+            .is_ok());
         assert!(config.client_key.is_some());
 
         // Test invalid PEM data

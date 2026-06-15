@@ -55,6 +55,7 @@ wasm-bindgen-test = "0.3"
 
 url = "2.5.4"
 tempfile = "3.12.0"
+rcgen = "0.14.8"
 
 [[example]]
 name = "simple_broker"
