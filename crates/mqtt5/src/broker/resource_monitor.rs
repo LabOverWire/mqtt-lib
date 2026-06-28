@@ -23,10 +23,7 @@ pub struct ResourceLimits {
     /// Maximum connections per IP address
     pub max_connections_per_ip: usize,
 
-    /// Maximum memory usage in bytes (0 = unlimited)
-    pub max_memory_bytes: u64,
-
-    /// Maximum message rate per client (messages/second)
+    /// Maximum message rate per client (messages/second, 0 = unlimited)
     pub max_message_rate_per_client: u32,
 
     /// Maximum bandwidth per client (bytes/second)
@@ -44,10 +41,9 @@ impl Default for ResourceLimits {
         Self {
             max_connections: 10_000,
             max_connections_per_ip: 100,
-            max_memory_bytes: 1024 * 1024 * 1024,       // 1GB
-            max_message_rate_per_client: 1000,          // 1000 msg/sec
+            max_message_rate_per_client: 1000, // 1000 msg/sec
             max_bandwidth_per_client: 10 * 1024 * 1024, // 10MB/sec
-            max_connection_rate: 100,                   // 100 conn/sec
+            max_connection_rate: 100,          // 100 conn/sec
             rate_limit_window: Duration::from_secs(60),
         }
     }
@@ -250,7 +246,10 @@ impl ResourceMonitor {
             )
         };
 
-        if max_message_rate >= 1_000_000 {
+        let rate_limited = max_message_rate > 0;
+        let bandwidth_limited = max_bandwidth > 0;
+
+        if !rate_limited && !bandwidth_limited {
             self.total_messages.fetch_add(1, Ordering::Relaxed);
             self.total_bytes
                 .fetch_add(message_size as u64, Ordering::Relaxed);
@@ -267,22 +266,26 @@ impl ResourceMonitor {
             resources.reset_window();
         }
 
-        let current_messages = resources.message_count.load(Ordering::Relaxed);
-        if current_messages >= u64::from(max_message_rate) {
-            warn!(
-                "Message rejected for {client_id}: rate limit exceeded ({current_messages} msg/{}s)",
-                rate_limit_window.as_secs()
-            );
-            return false;
+        if rate_limited {
+            let current_messages = resources.message_count.load(Ordering::Relaxed);
+            if current_messages >= u64::from(max_message_rate) {
+                warn!(
+                    "Message rejected for {client_id}: rate limit exceeded ({current_messages} msg/{}s)",
+                    rate_limit_window.as_secs()
+                );
+                return false;
+            }
         }
 
-        let current_bytes = resources.bytes_transferred.load(Ordering::Relaxed);
-        if current_bytes + message_size as u64 > max_bandwidth {
-            warn!(
-                "Message rejected for {client_id}: bandwidth limit exceeded ({current_bytes} bytes/{}s)",
-                rate_limit_window.as_secs()
-            );
-            return false;
+        if bandwidth_limited {
+            let current_bytes = resources.bytes_transferred.load(Ordering::Relaxed);
+            if current_bytes + message_size as u64 > max_bandwidth {
+                warn!(
+                    "Message rejected for {client_id}: bandwidth limit exceeded ({current_bytes} bytes/{}s)",
+                    rate_limit_window.as_secs()
+                );
+                return false;
+            }
         }
 
         resources.message_count.fetch_add(1, Ordering::Relaxed);
@@ -313,20 +316,6 @@ impl ResourceMonitor {
             total_messages: self.total_messages.load(Ordering::Relaxed),
             total_bytes: self.total_bytes.load(Ordering::Relaxed),
         }
-    }
-
-    pub fn get_memory_usage(&self) -> u64 {
-        let connection_count = self.connection_count.load(Ordering::Relaxed) as u64;
-        let memory_per_connection = 4096_u64;
-        connection_count * memory_per_connection
-    }
-
-    pub fn is_memory_limit_exceeded(&self) -> bool {
-        let max_memory_bytes = self.limits.read().max_memory_bytes;
-        if max_memory_bytes == 0 {
-            return false;
-        }
-        self.get_memory_usage() > max_memory_bytes
     }
 
     pub async fn update_connection_ip(&self, client_id: &str, old_ip: IpAddr, new_ip: IpAddr) {

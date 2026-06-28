@@ -105,6 +105,10 @@ pub struct BrokerConfig {
     #[serde(default)]
     pub max_outbound_rate_per_client: u32,
     #[serde(default)]
+    pub max_message_rate_per_client: u32,
+    #[serde(default)]
+    pub max_bandwidth_per_client: u64,
+    #[serde(default)]
     pub server_delivery_strategy: ServerDeliveryStrategy,
     #[cfg(not(target_arch = "wasm32"))]
     #[serde(default)]
@@ -166,6 +170,11 @@ impl std::fmt::Debug for BrokerConfig {
                 "max_outbound_rate_per_client",
                 &self.max_outbound_rate_per_client,
             )
+            .field(
+                "max_message_rate_per_client",
+                &self.max_message_rate_per_client,
+            )
+            .field("max_bandwidth_per_client", &self.max_bandwidth_per_client)
             .field("server_delivery_strategy", &self.server_delivery_strategy)
             .field("load_balancer", &self.load_balancer);
         #[cfg(not(target_arch = "wasm32"))]
@@ -210,6 +219,8 @@ impl Default for BrokerConfig {
             change_only_delivery_config: ChangeOnlyDeliveryConfig::default(),
             echo_suppression_config: EchoSuppressionConfig::default(),
             max_outbound_rate_per_client: 0,
+            max_message_rate_per_client: 0,
+            max_bandwidth_per_client: 0,
             server_delivery_strategy: ServerDeliveryStrategy::default(),
             #[cfg(not(target_arch = "wasm32"))]
             bridges: vec![],
