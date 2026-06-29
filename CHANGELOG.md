@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [mqtt5 0.34.0] - 2026-06-28
+
+### Added
+
+- **Inbound per-client rate and bandwidth limits are now configurable** - `BrokerConfig` gained `max_message_rate_per_client` (messages/sec) and `max_bandwidth_per_client` (bytes/sec), both defaulting to `0` (unlimited). These drive the broker's existing per-client inbound limiters, which were previously hardcoded "off" and unreachable from a config file. The values are hot-reloadable through the existing SIGHUP path. Adding these public fields to `BrokerConfig` (not `#[non_exhaustive]`) is technically breaking for code that constructs it with a struct literal; builder- and `Default`-based construction is unaffected.
+
+### Changed
+
+- **Inbound rate and bandwidth limits are now enforced independently** - `ResourceMonitor::can_send_message` previously short-circuited on `max_message_rate >= 1_000_000`, so the bandwidth limit silently did nothing unless message-rate limiting was also enabled. Each limit is now evaluated on its own (`0 = unlimited`), so `max_bandwidth_per_client` takes effect without also setting a message-rate cap. Default behavior is unchanged: both `0` takes the fast path with no per-message accounting.
+- **SCRAM credential store no longer uses a poisoning lock** - `FileBasedScramCredentialStore` switched from `std::sync::RwLock` to `parking_lot::RwLock`, matching the rest of the broker and removing the poison-on-panic footgun on the authentication path. Internal; no public-API impact.
+
+### Removed
+
+- **BREAKING: removed the unenforced memory-limit API** - deleted `ResourceLimits.max_memory_bytes` (public field) and the `ResourceMonitor::get_memory_usage` / `ResourceMonitor::is_memory_limit_exceeded` methods. They were never wired into connection admission, and the estimate was a fixed `connections * 4096` that undercounted real usage; `max_clients` remains the deterministic bound on connection memory. Code referencing these items must drop those references.
+
+## [mqtt5-wasm 1.3.4] - 2026-06-28
+
+### Changed
+
+- **Transitive bump: `mqtt5` 0.34** - picks up the configurable inbound rate/bandwidth limits and the removal of the unenforced memory-limit API. No wasm surface changes; the affected `mqtt5` items are not re-exported through the wasm API.
+
+## [mqttv5-cli 0.28.0] - 2026-06-28
+
+### Added
+
+- **`generate-config` emits the new inbound limit keys** - the example config produced by `mqttv5 broker generate-config` now includes `max_message_rate_per_client` and `max_bandwidth_per_client` (both `0` = unlimited), matching the new `mqtt5` 0.34 `BrokerConfig` fields.
+
+### Changed
+
+- **Transitive bump: `mqtt5` 0.34** - no other CLI surface changes.
+
 ## [mqtt5 0.33.0] - 2026-06-13
 
 ### Fixed
