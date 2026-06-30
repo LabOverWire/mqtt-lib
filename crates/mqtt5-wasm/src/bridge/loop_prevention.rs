@@ -155,10 +155,30 @@ mod tests {
 
     #[test]
     fn test_fingerprint_uniqueness() {
-        let fp1 = WasmLoopPrevention::calculate_fingerprint("topic/a", b"payload", 1, false);
-        let fp2 = WasmLoopPrevention::calculate_fingerprint("topic/b", b"payload", 1, false);
-        let fp3 = WasmLoopPrevention::calculate_fingerprint("topic/a", b"payload", 2, false);
-        let fp4 = WasmLoopPrevention::calculate_fingerprint("topic/a", b"payload", 1, true);
+        let fp1 = WasmLoopPrevention::calculate_fingerprint(
+            "topic/a",
+            b"payload",
+            QoS::AtLeastOnce,
+            false,
+        );
+        let fp2 = WasmLoopPrevention::calculate_fingerprint(
+            "topic/b",
+            b"payload",
+            QoS::AtLeastOnce,
+            false,
+        );
+        let fp3 = WasmLoopPrevention::calculate_fingerprint(
+            "topic/a",
+            b"payload",
+            QoS::ExactlyOnce,
+            false,
+        );
+        let fp4 = WasmLoopPrevention::calculate_fingerprint(
+            "topic/a",
+            b"payload",
+            QoS::AtLeastOnce,
+            true,
+        );
 
         assert_ne!(fp1, fp2);
         assert_ne!(fp1, fp3);
@@ -167,8 +187,18 @@ mod tests {
 
     #[test]
     fn test_fingerprint_same_content() {
-        let fp1 = WasmLoopPrevention::calculate_fingerprint("topic/a", b"payload", 1, false);
-        let fp2 = WasmLoopPrevention::calculate_fingerprint("topic/a", b"payload", 1, false);
+        let fp1 = WasmLoopPrevention::calculate_fingerprint(
+            "topic/a",
+            b"payload",
+            QoS::AtLeastOnce,
+            false,
+        );
+        let fp2 = WasmLoopPrevention::calculate_fingerprint(
+            "topic/a",
+            b"payload",
+            QoS::AtLeastOnce,
+            false,
+        );
 
         assert_eq!(fp1, fp2);
     }

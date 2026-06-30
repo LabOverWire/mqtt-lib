@@ -20,11 +20,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **BREAKING: removed the unenforced memory-limit API** - deleted `ResourceLimits.max_memory_bytes` (public field) and the `ResourceMonitor::get_memory_usage` / `ResourceMonitor::is_memory_limit_exceeded` methods. They were never wired into connection admission, and the estimate was a fixed `connections * 4096` that undercounted real usage; `max_clients` remains the deterministic bound on connection memory. Code referencing these items must drop those references.
 
-## [mqtt5-wasm 1.3.4] - 2026-06-28
+## [mqtt5-wasm 1.4.0] - 2026-06-28
+
+### Added
+
+- **Inbound per-client rate and bandwidth limits are now configurable on the wasm broker** - the wasm `BrokerConfig` binding gained `maxMessageRatePerClient` (messages/sec) and `maxBandwidthPerClient` (bytes/sec) setters, both defaulting to `0` (unlimited). They drive the broker's per-client inbound limiter and are applied both on construction and through `updateConfig`, mirroring the new native `mqtt5` 0.34 `BrokerConfig` fields.
 
 ### Changed
 
-- **Transitive bump: `mqtt5` 0.34** - picks up the configurable inbound rate/bandwidth limits and the removal of the unenforced memory-limit API. No wasm surface changes; the affected `mqtt5` items are not re-exported through the wasm API.
+- **Transitive bump: `mqtt5` 0.34** - picks up the configurable inbound rate/bandwidth limits and the removal of the unenforced memory-limit API. The wasm broker now wires these inbound limits through to its resource monitor; previously it always used the library defaults regardless of config.
 
 ## [mqttv5-cli 0.28.0] - 2026-06-28
 

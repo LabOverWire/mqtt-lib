@@ -225,7 +225,11 @@ impl DirectClientInner {
     }
 
     async fn reset_connection_runtime(&mut self, reason: &[u8]) {
-        self.stop_background_tasks();
+        tracing::debug!(
+            reason = %String::from_utf8_lossy(reason),
+            "resetting connection runtime"
+        );
+        self.stop_background_tasks().await;
         self.keepalive_state.lock().reset();
 
         #[cfg(feature = "transport-quic")]
@@ -1358,20 +1362,24 @@ impl DirectClientInner {
         Ok(())
     }
 
-    fn stop_background_tasks(&mut self) {
+    async fn stop_background_tasks(&mut self) {
         if let Some(handle) = self.packet_reader_handle.take() {
             handle.abort();
+            let _ = handle.await;
         }
         if let Some(handle) = self.keepalive_handle.take() {
             handle.abort();
+            let _ = handle.await;
         }
         #[cfg(feature = "transport-quic")]
         if let Some(handle) = self.quic_stream_acceptor_handle.take() {
             handle.abort();
+            let _ = handle.await;
         }
         #[cfg(feature = "transport-quic")]
         if let Some(handle) = self.flow_expiration_handle.take() {
             handle.abort();
+            let _ = handle.await;
         }
     }
 }
