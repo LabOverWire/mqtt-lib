@@ -47,6 +47,8 @@ struct ConfigHashFields {
     echo_suppression_enabled: bool,
     echo_suppression_property_key: Option<String>,
     max_outbound_rate_per_client: u32,
+    max_message_rate_per_client: u32,
+    max_bandwidth_per_client: u64,
     load_balancer_backends: Vec<String>,
 }
 
@@ -69,6 +71,8 @@ pub struct WasmBrokerConfig {
     echo_suppression_enabled: bool,
     echo_suppression_property_key: Option<String>,
     max_outbound_rate_per_client: u32,
+    max_message_rate_per_client: u32,
+    max_bandwidth_per_client: u64,
     load_balancer_backends: Vec<String>,
 }
 
@@ -94,6 +98,8 @@ impl WasmBrokerConfig {
             echo_suppression_enabled: false,
             echo_suppression_property_key: None,
             max_outbound_rate_per_client: 0,
+            max_message_rate_per_client: 0,
+            max_bandwidth_per_client: 0,
             load_balancer_backends: Vec::new(),
         }
     }
@@ -183,6 +189,16 @@ impl WasmBrokerConfig {
         self.max_outbound_rate_per_client = value;
     }
 
+    #[wasm_bindgen(setter, js_name = "maxMessageRatePerClient")]
+    pub fn set_max_message_rate_per_client(&mut self, value: u32) {
+        self.max_message_rate_per_client = value;
+    }
+
+    #[wasm_bindgen(setter, js_name = "maxBandwidthPerClient")]
+    pub fn set_max_bandwidth_per_client(&mut self, value: u64) {
+        self.max_bandwidth_per_client = value;
+    }
+
     #[wasm_bindgen(js_name = "addLoadBalancerBackend")]
     pub fn add_load_balancer_backend(&mut self, backend: String) {
         self.load_balancer_backends.push(backend);
@@ -221,6 +237,8 @@ impl WasmBrokerConfig {
                     .unwrap_or_else(|| "x-origin-client-id".to_string()),
             },
             max_outbound_rate_per_client: self.max_outbound_rate_per_client,
+            max_message_rate_per_client: self.max_message_rate_per_client,
+            max_bandwidth_per_client: self.max_bandwidth_per_client,
             load_balancer: if self.load_balancer_backends.is_empty() {
                 None
             } else {
@@ -248,6 +266,8 @@ impl WasmBrokerConfig {
             echo_suppression_enabled: self.echo_suppression_enabled,
             echo_suppression_property_key: self.echo_suppression_property_key.clone(),
             max_outbound_rate_per_client: self.max_outbound_rate_per_client,
+            max_message_rate_per_client: self.max_message_rate_per_client,
+            max_bandwidth_per_client: self.max_bandwidth_per_client,
             load_balancer_backends: self.load_balancer_backends.clone(),
         };
         let mut hasher = DefaultHasher::new();
@@ -259,6 +279,16 @@ impl WasmBrokerConfig {
 impl Default for WasmBrokerConfig {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+fn resource_limits_from(config: &BrokerConfig) -> ResourceLimits {
+    ResourceLimits {
+        max_connections: config.max_clients,
+        max_message_rate_per_client: config.max_message_rate_per_client,
+        max_bandwidth_per_client: config.max_bandwidth_per_client,
+        rate_limit_window: Duration::from_secs(1),
+        ..Default::default()
     }
 }
 
@@ -324,11 +354,9 @@ impl WasmBroker {
 
         let stats = Arc::new(BrokerStats::new());
 
-        let max_clients = config.read().map_or(1000, |c| c.max_clients);
-        let limits = ResourceLimits {
-            max_connections: max_clients,
-            ..Default::default()
-        };
+        let limits = config
+            .read()
+            .map_or_else(|_| ResourceLimits::default(), |c| resource_limits_from(&c));
         let resource_monitor = Arc::new(ResourceMonitor::new(limits));
 
         let bridge_manager = Rc::new(RefCell::new(WasmBridgeManager::new(Arc::clone(&router))));
@@ -659,6 +687,7 @@ impl WasmBroker {
             None
         };
         let max_rate = broker_config.max_outbound_rate_per_client;
+        let new_limits = resource_limits_from(&broker_config);
 
         if let Ok(mut config) = self.config.try_write() {
             *config = broker_config;
@@ -678,6 +707,7 @@ impl WasmBroker {
         }
 
         self.router.update_max_outbound_rate(max_rate);
+        self.resource_monitor.update_limits(new_limits);
 
         self.config_hash.set(new_hash);
 

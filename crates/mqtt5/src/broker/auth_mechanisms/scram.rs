@@ -3,6 +3,7 @@ use crate::error::{MqttError, Result};
 use crate::packet::connect::ConnectPacket;
 use crate::protocol::v5::reason_codes::ReasonCode;
 use base64::prelude::*;
+use parking_lot::RwLock;
 use ring::{hmac, pbkdf2};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -10,7 +11,7 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::num::NonZeroU32;
 use std::pin::Pin;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock as TokioRwLock;
 use tracing::{debug, warn};
@@ -171,7 +172,7 @@ impl Default for FileBasedScramCredentialStore {
 
 impl ScramCredentialStore for FileBasedScramCredentialStore {
     fn get_credentials(&self, username: &str) -> Option<ScramCredentials> {
-        self.credentials.read().unwrap().get(username).cloned()
+        self.credentials.read().get(username).cloned()
     }
 }
 
@@ -599,24 +600,18 @@ mod tests {
 
         fn add_user(&self, username: &str, password: &str) {
             let creds = ScramCredentials::from_password(password).unwrap();
-            self.credentials
-                .write()
-                .unwrap()
-                .insert(username.to_string(), creds);
+            self.credentials.write().insert(username.to_string(), creds);
         }
 
         fn add_user_with_salt(&self, username: &str, password: &str, salt: &[u8], iterations: u32) {
             let creds = ScramCredentials::from_password_and_salt(password, salt, iterations);
-            self.credentials
-                .write()
-                .unwrap()
-                .insert(username.to_string(), creds);
+            self.credentials.write().insert(username.to_string(), creds);
         }
     }
 
     impl ScramCredentialStore for TestCredentialStore {
         fn get_credentials(&self, username: &str) -> Option<ScramCredentials> {
-            self.credentials.read().unwrap().get(username).cloned()
+            self.credentials.read().get(username).cloned()
         }
     }
 

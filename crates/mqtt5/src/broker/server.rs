@@ -347,9 +347,8 @@ impl MqttBroker {
 
         let auth_provider = create_auth_provider(&config.auth_config).await?;
         let stats = Arc::new(BrokerStats::new());
-        let resource_monitor = Arc::new(ResourceMonitor::new(Self::default_resource_limits(
-            config.max_clients,
-        )));
+        let resource_monitor =
+            Arc::new(ResourceMonitor::new(Self::default_resource_limits(&config)));
         let (shutdown_tx, _) = tokio::sync::broadcast::channel(1);
         let (ready_tx, ready_rx) = watch::channel(false);
 
@@ -764,13 +763,12 @@ impl MqttBroker {
         Arc::new(router)
     }
 
-    fn default_resource_limits(max_clients: usize) -> ResourceLimits {
+    fn default_resource_limits(config: &BrokerConfig) -> ResourceLimits {
         ResourceLimits {
-            max_connections: max_clients,
+            max_connections: config.max_clients,
             max_connections_per_ip: 10_000,
-            max_memory_bytes: 1024 * 1024 * 1024,
-            max_message_rate_per_client: 10_000_000,
-            max_bandwidth_per_client: 1024 * 1024 * 1024,
+            max_message_rate_per_client: config.max_message_rate_per_client,
+            max_bandwidth_per_client: config.max_bandwidth_per_client,
             max_connection_rate: 10_000,
             rate_limit_window: crate::time::Duration::from_secs(1),
         }
@@ -1544,8 +1542,7 @@ impl MqttBroker {
 
                 Self::warn_non_reloadable_changes(&old_config, &new_config);
 
-                resource_monitor
-                    .update_limits(Self::default_resource_limits(new_config.max_clients));
+                resource_monitor.update_limits(Self::default_resource_limits(&new_config));
 
                 match create_auth_provider(&new_config.auth_config).await {
                     Ok(new_auth) => {

@@ -116,54 +116,13 @@ async fn test_message_rate_limiting() {
         .register_connection("test_client".to_string(), ip)
         .await;
 
-    // Test message rate limiting (default is 1000 messages/sec)
-    // Send messages within limit
     for _ in 0..10 {
         assert!(resource_monitor.can_send_message("test_client", 100).await);
     }
 
-    // Check stats were updated
     let stats = resource_monitor.get_stats().await;
     assert_eq!(stats.total_messages, 10);
-    assert_eq!(stats.total_bytes, 1000); // 10 messages * 100 bytes each
-
-    broker_handle.abort();
-}
-
-#[tokio::test]
-async fn test_memory_monitoring() {
-    let config = BrokerConfig::default()
-        .with_bind_address("127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap())
-        .with_max_clients(5);
-
-    let mut broker = MqttBroker::with_config(config).await.unwrap();
-    let resource_monitor = broker.resource_monitor();
-
-    let broker_handle = tokio::spawn(async move {
-        let _ = broker.run().await;
-    });
-
-    sleep(Duration::from_millis(100)).await;
-
-    // Test memory usage estimation
-    let initial_memory = resource_monitor.get_memory_usage();
-    assert_eq!(initial_memory, 0); // No connections initially
-
-    let ip = std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
-
-    // Add some connections
-    for i in 0..3 {
-        resource_monitor
-            .register_connection(format!("client{i}"), ip)
-            .await;
-    }
-
-    let memory_with_connections = resource_monitor.get_memory_usage();
-    assert!(memory_with_connections > initial_memory);
-    assert_eq!(memory_with_connections, 3 * 4096); // 3 connections * 4KB estimate each
-
-    // Test memory limit checking (default is 1GB, should not be exceeded)
-    assert!(!resource_monitor.is_memory_limit_exceeded());
+    assert_eq!(stats.total_bytes, 1000);
 
     broker_handle.abort();
 }
