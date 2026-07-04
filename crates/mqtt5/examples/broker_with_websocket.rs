@@ -30,16 +30,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("  WebSocket: ws://localhost:8080/mqtt");
     info!("Press Ctrl+C to stop");
 
-    // Run until shutdown signal
-    tokio::select! {
-        result = broker.run() => {
-            if let Err(e) = result {
-                eprintln!("Broker error: {e}");
-            }
-        }
-        _ = tokio::signal::ctrl_c() => {
-            info!("Shutting down...");
-        }
+    let shutdown = broker.shutdown_handle();
+    tokio::spawn(async move {
+        tokio::signal::ctrl_c().await.ok();
+        info!("Shutting down...");
+        shutdown.shutdown();
+    });
+
+    if let Err(e) = broker.run().await {
+        eprintln!("Broker error: {e}");
     }
 
     Ok(())
