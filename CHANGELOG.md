@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [mqtt5 0.35.1] - 2026-07-06
+
+### Changed
+
+- Updated dependencies to their latest compatible versions: `bytes` 1.12, `rand` 0.10.2, `getrandom` 0.4.3, `quinn` 0.11.11, `rustls` 0.23.41, `rustls-pki-types` 1.15, `webpki-roots` 1.0.8, and dev-dependencies `anyhow`/`wasm-bindgen-test`. No API or behavior changes.
+
+## [mqtt5-protocol 0.14.1] - 2026-07-06
+
+### Changed
+
+- Updated `bytes` to 1.12. No API or behavior changes.
+
+## [mqttv5-cli 0.28.1] - 2026-07-06
+
+### Changed
+
+- Updated dependencies to their latest compatible versions: `anyhow` 1.0.103, `getrandom` 0.4.3, `humantime` 2.4, `time` 0.3.53, `quinn` 0.11.11, `rand` 0.10.2, `rustls` 0.23.41.
+
+## [mqtt5-wasm 1.4.1] - 2026-07-06
+
+### Changed
+
+- Updated dependencies to their latest compatible versions: `wasm-bindgen` 0.2.126, `wasm-bindgen-futures` 0.4.76, `js-sys`/`web-sys` 0.3.103, `getrandom` 0.4.3, `bytes` 1.12.
+
 ## [mqtt5 0.35.0] - 2026-07-04
 
 ### Added

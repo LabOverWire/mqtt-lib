@@ -1,6 +1,6 @@
 [package]
 name = "mqttv5-cli"
-version = "0.28.0"
+version = "0.28.1"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -23,17 +23,17 @@ codec = ["mqtt5/codec-all"]
 
 [dependencies]
 mqtt5 = { path = "../mqtt5", version = "0.35" }
-anyhow = "1.0"
+anyhow = "1.0.103"
 tracing = "0.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0.145"
 hex = "0.4.3"
-getrandom = "0.4"
-humantime = "2.3.0"
-time = { version = "0.3.44", features = ["local-offset", "parsing", "formatting", "macros"] }
+getrandom = "0.4.3"
+humantime = "2.4.0"
+time = { version = "0.3.53", features = ["local-offset", "parsing", "formatting", "macros"] }
 bebytes = "3.0.2"
 flate2 = "1.1.9"
-quinn = { version = "0.11.9", features = ["rustls-ring", "runtime-tokio"] }
+quinn = { version = "0.11.11", features = ["rustls-ring", "runtime-tokio"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 clap = { version = "4.5", features = ["derive", "env"] }
@@ -41,7 +41,7 @@ tokio = { version = "1", features = ["full"] }
 dialoguer = "0.12"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 toml = "1"
-rand = "0.10"
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rand = "0.10.2"
+rustls = { version = "0.23.41", default-features = false, features = ["ring", "std", "tls12"] }
 rpassword = "7.4"
 argon2 = "0.5"
