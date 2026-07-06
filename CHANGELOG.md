@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [mqtt5 0.35.0] - 2026-07-04
+
+### Added
+
+- **`MqttBroker::shutdown_handle()` returns a cloneable `BrokerShutdownHandle`** - obtain the handle before moving the broker into `run()`, then call `handle.shutdown()` from a signal handler or any other task to make `run()` return after completing its graceful shutdown. This is the correct way to trigger shutdown of a running broker; the previous pattern of racing `run()` in a `tokio::select!` dropped the `run()` future without signaling it, leaving the `$SYS` publisher and transport accept loops running as detached tasks.
+
+### Changed
+
+- **BREAKING: `MqttBroker::shutdown()` is now `fn shutdown(&self)` instead of `async fn shutdown(&self) -> Result<()>`** - it now only fires the internal shutdown signal, which is synchronous. The graceful teardown (aborting the `$SYS` task, stopping bridges, joining transport accept loops with a 5s timeout, flushing telemetry) moved into `run()`'s post-signal path, where the spawned tasks actually live. Callers using `broker.shutdown().await?` must drop the `.await` and `?`. The old method was effectively a no-op once `run()` had started, because `run()` had taken ownership of the shutdown sender.
+
 ## [mqtt5 0.34.0] - 2026-06-28
 
 ### Added

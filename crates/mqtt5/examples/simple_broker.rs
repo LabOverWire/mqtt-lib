@@ -82,25 +82,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("📡 Clients can connect to mqtt://localhost:1883");
     info!("🛑 Press Ctrl+C to stop the broker\n");
 
-    // Handle shutdown signal
-    let shutdown = tokio::spawn(async {
+    // Trigger graceful shutdown on Ctrl+C
+    let shutdown = broker.shutdown_handle();
+    tokio::spawn(async move {
         tokio::signal::ctrl_c()
             .await
             .expect("Failed to listen for ctrl-c");
         info!("\n⚠️  Shutdown signal received");
+        shutdown.shutdown();
     });
 
-    // Run the broker
-    tokio::select! {
-        result = broker.run() => {
-            match result {
-                Ok(()) => info!("Broker stopped normally"),
-                Err(e) => error!("Broker error: {e}"),
-            }
-        }
-        _ = shutdown => {
-            info!("Shutting down broker...");
-        }
+    // Run the broker until shutdown is signaled
+    if let Err(e) = broker.run().await {
+        error!("Broker error: {e}");
     }
 
     info!("✅ Broker shutdown complete");

@@ -54,6 +54,26 @@ impl AcceptLoopState {
     }
 }
 
+/// Handle for triggering graceful shutdown of a running [`MqttBroker`].
+///
+/// Obtained from [`MqttBroker::shutdown_handle`]. Cloneable and `Send`, so it
+/// can be moved into a signal handler or any other task while the broker itself
+/// is driven by [`MqttBroker::run`].
+#[derive(Clone)]
+pub struct BrokerShutdownHandle {
+    shutdown_tx: tokio::sync::broadcast::Sender<()>,
+}
+
+impl BrokerShutdownHandle {
+    /// Signals the broker to shut down gracefully.
+    ///
+    /// Delivery is best effort: if the broker has already stopped, the signal is
+    /// dropped silently.
+    pub fn shutdown(&self) {
+        self.shutdown_tx.send(()).ok();
+    }
+}
+
 /// MQTT v5.0 Broker
 pub struct MqttBroker {
     config: Arc<BrokerConfig>,
@@ -82,7 +102,7 @@ pub struct MqttBroker {
     cluster_tls_acceptor: Option<TlsAcceptor>,
     #[cfg(feature = "transport-quic")]
     cluster_quic_endpoints: Vec<Endpoint>,
-    shutdown_tx: Option<tokio::sync::broadcast::Sender<()>>,
+    shutdown_tx: tokio::sync::broadcast::Sender<()>,
     ready_tx: Option<watch::Sender<bool>>,
     ready_rx: watch::Receiver<bool>,
     config_watch_tx: watch::Sender<Arc<BrokerConfig>>,
@@ -388,7 +408,7 @@ impl MqttBroker {
             cluster_tls_acceptor,
             #[cfg(feature = "transport-quic")]
             cluster_quic_endpoints,
-            shutdown_tx: Some(shutdown_tx),
+            shutdown_tx,
             ready_tx: Some(ready_tx),
             ready_rx,
             config_watch_tx,
@@ -1607,11 +1627,7 @@ impl MqttBroker {
         #[cfg(feature = "transport-quic")]
         let cluster_quic_endpoints = std::mem::take(&mut self.cluster_quic_endpoints);
 
-        let Some(shutdown_tx) = self.shutdown_tx.take() else {
-            return Err(MqttError::InvalidState(
-                "Broker already running".to_string(),
-            ));
-        };
+        let shutdown_tx = self.shutdown_tx.clone();
 
         let mut task_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
@@ -1696,28 +1712,6 @@ impl MqttBroker {
 
         sys_handle.abort();
 
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            for handle in task_handles {
-                let _ = handle.await;
-            }
-        })
-        .await;
-
-        Ok(())
-    }
-
-    /// Shuts down the broker gracefully
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if no receivers are available for shutdown signal
-    pub async fn shutdown(&self) -> Result<()> {
-        if let Some(ref shutdown_tx) = self.shutdown_tx {
-            shutdown_tx.send(()).map_err(|_| {
-                MqttError::InvalidState("No receivers for shutdown signal".to_string())
-            })?;
-        }
-
         if let Some(ref bridge_manager) = self.bridge_manager {
             info!("Stopping all bridges");
             if let Err(e) = bridge_manager.stop_all().await {
@@ -1725,13 +1719,46 @@ impl MqttBroker {
             }
         }
 
-        tokio::time::sleep(crate::time::Duration::from_millis(100)).await;
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            for handle in task_handles {
+                let _ = handle.await;
+            }
+        })
+        .await;
 
         #[cfg(feature = "opentelemetry")]
         telemetry::shutdown_telemetry();
 
         info!("Broker shutdown complete");
+
         Ok(())
+    }
+
+    /// Signals the broker to shut down gracefully.
+    ///
+    /// This triggers the same graceful shutdown path as [`MqttBroker::run`]
+    /// observing its shutdown signal: background tasks are stopped, bridges are
+    /// closed, and telemetry is flushed inside `run`. Returns once the signal is
+    /// delivered without waiting for `run` to finish unwinding.
+    ///
+    /// Prefer [`MqttBroker::shutdown_handle`] when the broker is moved into a
+    /// task by [`MqttBroker::run`], since that returns a cloneable handle that
+    /// can trigger shutdown from a signal handler.
+    pub fn shutdown(&self) {
+        self.shutdown_tx.send(()).ok();
+    }
+
+    /// Returns a cloneable handle that can trigger graceful shutdown of a
+    /// running broker from another task.
+    ///
+    /// Obtain the handle before moving the broker into [`MqttBroker::run`], then
+    /// call [`BrokerShutdownHandle::shutdown`] from a signal handler or any other
+    /// task to make `run` return after completing its graceful shutdown.
+    #[must_use]
+    pub fn shutdown_handle(&self) -> BrokerShutdownHandle {
+        BrokerShutdownHandle {
+            shutdown_tx: self.shutdown_tx.clone(),
+        }
     }
 
     /// Gets broker statistics
@@ -1824,17 +1851,23 @@ mod tests {
 
     #[tokio::test]
     async fn test_broker_shutdown() {
-        let mut broker = MqttBroker::bind("127.0.0.1:0").await.unwrap();
+        let config = BrokerConfig::default()
+            .with_bind_address(([127, 0, 0, 1], 0))
+            .with_storage(crate::broker::config::StorageConfig::default().with_persistence(false));
+        let mut broker = MqttBroker::with_config(config).await.unwrap();
+        let shutdown = broker.shutdown_handle();
 
-        // Start broker in background
         let broker_handle = tokio::spawn(async move { broker.run().await });
 
-        // Give broker time to start
-        tokio::time::sleep(crate::time::Duration::from_millis(10)).await;
+        tokio::time::sleep(crate::time::Duration::from_millis(50)).await;
 
-        // Now test shutdown - but we can't call it because broker was moved
-        // Just ensure the broker starts without error for now
-        broker_handle.abort();
+        shutdown.shutdown();
+
+        let result = tokio::time::timeout(crate::time::Duration::from_secs(5), broker_handle)
+            .await
+            .expect("run did not return after shutdown signal")
+            .expect("run task panicked");
+        result.expect("run returned an error after shutdown");
     }
 
     #[tokio::test]

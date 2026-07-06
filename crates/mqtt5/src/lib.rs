@@ -112,16 +112,21 @@
 //! This library also provides a complete MQTT broker implementation:
 //!
 //! ```rust,no_run
-//! use mqtt5::broker::{BrokerConfig, MqttBroker};
+//! use mqtt5::broker::MqttBroker;
 //!
 //! #[tokio::main]
-//! async fn main() -> Result<(), Box<dyn std::error::Error>> {  
-//!     // Create a basic broker
+//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     let mut broker = MqttBroker::bind("0.0.0.0:1883").await?;
-//!     
+//!
 //!     println!("🚀 MQTT broker running on port 1883");
-//!     
-//!     // Run until shutdown
+//!
+//!     // Trigger graceful shutdown on Ctrl+C
+//!     let shutdown = broker.shutdown_handle();
+//!     tokio::spawn(async move {
+//!         tokio::signal::ctrl_c().await.ok();
+//!         shutdown.shutdown();
+//!     });
+//!
 //!     broker.run().await?;
 //!     Ok(())
 //! }
@@ -152,12 +157,18 @@
 //!         );
 //!
 //!     let mut broker = MqttBroker::with_config(config).await?;
-//!     
+//!
 //!     println!("🚀 Multi-transport MQTT broker running");
 //!     println!("  📡 TCP:       mqtt://localhost:1883");
-//!     println!("  🔒 TLS:       mqtts://localhost:8883");  
+//!     println!("  🔒 TLS:       mqtts://localhost:8883");
 //!     println!("  🌐 WebSocket: ws://localhost:8080/mqtt");
-//!     
+//!
+//!     let shutdown = broker.shutdown_handle();
+//!     tokio::spawn(async move {
+//!         tokio::signal::ctrl_c().await.ok();
+//!         shutdown.shutdown();
+//!     });
+//!
 //!     broker.run().await?;
 //!     Ok(())
 //! }

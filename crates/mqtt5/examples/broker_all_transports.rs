@@ -61,16 +61,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("  QUIC:       quic://localhost:14567");
     info!("Press Ctrl+C to stop");
 
-    // Run until shutdown signal
-    tokio::select! {
-        result = broker.run() => {
-            if let Err(e) = result {
-                eprintln!("Broker error: {e}");
-            }
-        }
-        _ = tokio::signal::ctrl_c() => {
-            info!("Shutting down...");
-        }
+    let shutdown = broker.shutdown_handle();
+    tokio::spawn(async move {
+        tokio::signal::ctrl_c().await.ok();
+        info!("Shutting down...");
+        shutdown.shutdown();
+    });
+
+    if let Err(e) = broker.run().await {
+        eprintln!("Broker error: {e}");
     }
 
     Ok(())

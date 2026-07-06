@@ -171,23 +171,17 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     info!("📋 Expected response: correct-response-67890");
     info!("🛑 Press Ctrl+C to stop\n");
 
-    let shutdown = tokio::spawn(async {
+    let shutdown = broker.shutdown_handle();
+    tokio::spawn(async move {
         tokio::signal::ctrl_c()
             .await
             .expect("Failed to listen for ctrl-c");
         info!("\n⚠️  Shutdown signal received");
+        shutdown.shutdown();
     });
 
-    tokio::select! {
-        result = broker.run() => {
-            match result {
-                Ok(()) => info!("Broker stopped normally"),
-                Err(e) => error!("Broker error: {e}"),
-            }
-        }
-        _ = shutdown => {
-            info!("Shutting down broker...");
-        }
+    if let Err(e) = broker.run().await {
+        error!("Broker error: {e}");
     }
 
     info!("✅ Broker shutdown complete");

@@ -5,17 +5,19 @@
 //! # Example
 //!
 //! ```rust,no_run
-//! use mqtt5::broker::{MqttBroker, BrokerConfig};
+//! use mqtt5::broker::MqttBroker;
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     // Start a simple broker
-//!     let broker = MqttBroker::bind("0.0.0.0:1883").await?;
-//!     
-//!     // Run until shutdown signal
-//!     tokio::signal::ctrl_c().await?;
-//!     broker.shutdown().await?;
-//!     
+//!     let mut broker = MqttBroker::bind("0.0.0.0:1883").await?;
+//!
+//!     let shutdown = broker.shutdown_handle();
+//!     tokio::spawn(async move {
+//!         tokio::signal::ctrl_c().await.ok();
+//!         shutdown.shutdown();
+//!     });
+//!
+//!     broker.run().await?;
 //!     Ok(())
 //! }
 //! ```
@@ -73,7 +75,7 @@ pub use events::{
 pub use hot_reload::HotReloadManager;
 pub use resource_monitor::{ResourceLimits, ResourceMonitor, ResourceStats};
 #[cfg(not(target_arch = "wasm32"))]
-pub use server::MqttBroker;
+pub use server::{BrokerShutdownHandle, MqttBroker};
 #[cfg(not(target_arch = "wasm32"))]
 pub use storage::{DynamicStorage, FileBackend, MemoryBackend, Storage, StorageBackend};
 #[cfg(target_arch = "wasm32")]
