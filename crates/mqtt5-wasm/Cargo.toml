@@ -1,6 +1,6 @@
 [package]
 name = "mqtt5-wasm"
-version = "1.4.0"
+version = "1.4.1"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -32,13 +32,13 @@ mqtt5 = { version = "0.35", optional = true, default-features = false, features 
     "tokio",
 ] }
 
-wasm-bindgen = { version = "0.2", optional = true }
-wasm-bindgen-futures = { version = "0.4", optional = true }
-js-sys = { version = "0.3", optional = true }
+wasm-bindgen = { version = "0.2.126", optional = true }
+wasm-bindgen-futures = { version = "0.4.76", optional = true }
+js-sys = { version = "0.3.103", optional = true }
 console_error_panic_hook = "0.1"
-getrandom = { version = "0.4", features = ["wasm_js"] }
+getrandom = { version = "0.4.3", features = ["wasm_js"] }
 
-bytes = "1.10"
+bytes = "1.12.0"
 futures = "0.3"
 futures-util = "0.3"
 tracing = "0.1.41"
@@ -48,28 +48,9 @@ miniz_oxide = { version = "0.9", optional = true }
 sha2 = "0.11"
 
 [dependencies.web-sys]
-version = "0.3"
+version = "0.3.103"
 optional = true
-features = [
-    "BinaryType",
-    "Blob",
-    "BroadcastChannel",
-    "CloseEvent",
-    "ErrorEvent",
-    "Event",
-    "EventTarget",
-    "ExtendableMessageEvent",
-    "MessageChannel",
-    "MessageEvent",
-    "MessagePort",
-    "ServiceWorkerGlobalScope",
-    "WebSocket",
-    "Window",
-    "Navigator",
-    "AddEventListenerOptions",
-    "console",
-    "Performance",
-]
+features = ["BinaryType", "Blob", "BroadcastChannel", "CloseEvent", "ErrorEvent", "Event", "EventTarget", "ExtendableMessageEvent", "MessageChannel", "MessageEvent", "MessagePort", "ServiceWorkerGlobalScope", "WebSocket", "Window", "Navigator", "AddEventListenerOptions", "console", "Performance"]
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 tokio = { version = "1.47", optional = true, features = ["sync"] }
 
