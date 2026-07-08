@@ -1,3 +1,4 @@
+#![cfg(feature = "broker")]
 //! Comprehensive tests for bridge loop prevention
 
 use mqtt5::broker::bridge::LoopPrevention;

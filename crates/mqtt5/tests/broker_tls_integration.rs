@@ -1,3 +1,4 @@
+#![cfg(feature = "broker")]
 //! Integration test for broker TLS support
 
 use mqtt5::broker::config::{BrokerConfig, TlsConfig};

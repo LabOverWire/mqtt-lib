@@ -1,3 +1,4 @@
+#![cfg(feature = "broker")]
 #![allow(clippy::large_futures)]
 
 mod common;

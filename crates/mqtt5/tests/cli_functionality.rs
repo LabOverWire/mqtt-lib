@@ -1,3 +1,4 @@
+#![cfg(feature = "broker")]
 //! CLI Functionality Integration Tests
 //!
 //! Tests that validate our mqttv5 CLI tool works correctly in real scenarios.

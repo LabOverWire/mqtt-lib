@@ -1,3 +1,4 @@
+#![cfg(feature = "broker")]
 //! Basic connectivity tests using Turmoil
 //!
 //! These tests verify that the broker can accept connections and handle

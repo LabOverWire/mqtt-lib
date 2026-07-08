@@ -1,3 +1,4 @@
+#![cfg(feature = "broker")]
 #![allow(clippy::doc_markdown)]
 //! End-to-end CLI integration tests
 //!

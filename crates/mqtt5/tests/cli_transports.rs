@@ -1,3 +1,4 @@
+#![cfg(feature = "broker")]
 //! CLI transport tests
 //!
 //! Tests different transport types: TCP, TLS

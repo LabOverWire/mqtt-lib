@@ -181,6 +181,7 @@ pub use mqtt5_protocol::{
     validation,
 };
 
+#[cfg(feature = "broker")]
 pub mod broker;
 pub mod callback;
 #[cfg(not(target_arch = "wasm32"))]
@@ -194,7 +195,7 @@ pub mod tasks;
 pub mod telemetry;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod test_utils;
-#[cfg(any(test, feature = "turmoil-testing"))]
+#[cfg(all(feature = "broker", any(test, feature = "turmoil-testing")))]
 pub mod testing;
 pub mod transport;
 pub mod types;

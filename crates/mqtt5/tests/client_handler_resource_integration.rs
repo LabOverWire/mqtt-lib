@@ -1,3 +1,4 @@
+#![cfg(feature = "broker")]
 //! Integration tests for `ClientHandler` with `ResourceMonitor`
 
 mod common;

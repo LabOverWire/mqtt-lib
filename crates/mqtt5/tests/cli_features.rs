@@ -1,3 +1,4 @@
+#![cfg(feature = "broker")]
 //! Comprehensive tests for CLI MQTT v5.0 features
 //!
 //! Tests all new features added to the CLI including:

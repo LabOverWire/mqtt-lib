@@ -1,3 +1,4 @@
+#![cfg(feature = "broker")]
 use mqtt5::broker::router::MessageRouter;
 use mqtt5::packet::publish::PublishPacket;
 use mqtt5::time::Duration;

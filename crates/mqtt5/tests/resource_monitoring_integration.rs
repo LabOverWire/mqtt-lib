@@ -1,3 +1,4 @@
+#![cfg(feature = "broker")]
 //! Integration tests for resource monitoring
 
 use mqtt5::broker::{BrokerConfig, MqttBroker};

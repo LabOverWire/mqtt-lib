@@ -1,3 +1,4 @@
+#![cfg(feature = "broker")]
 //! End-to-end integration test for broker bridging
 //!
 //! This test demonstrates a real bridge scenario between two brokers

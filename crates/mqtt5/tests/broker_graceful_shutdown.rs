@@ -1,3 +1,4 @@
+#![cfg(feature = "broker")]
 use mqtt5::broker::{BrokerConfig, MqttBroker};
 use mqtt5::MqttClient;
 use std::sync::atomic::{AtomicU32, Ordering};

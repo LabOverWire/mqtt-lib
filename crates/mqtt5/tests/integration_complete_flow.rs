@@ -1,3 +1,4 @@
+#![cfg(feature = "broker")]
 #![allow(clippy::implicit_clone)]
 #![allow(clippy::large_futures)]
 
