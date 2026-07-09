@@ -13,14 +13,14 @@ Platform-agnostic MQTT v5.0 and v3.1.1 protocol implementation covering packet p
 
 ```toml
 [dependencies]
-mqtt5-protocol = "0.12"
+mqtt5-protocol = "0.14"
 ```
 
 ### For Embedded (no_std)
 
 ```toml
 [dependencies]
-mqtt5-protocol = { version = "0.12", default-features = false }
+mqtt5-protocol = { version = "0.14", default-features = false }
 ```
 
 ### For Single-Core Embedded
