@@ -1,3 +1,4 @@
+#![cfg(feature = "broker")]
 #![cfg(feature = "transport-websocket")]
 
 //! Integration test for broker with all transport types

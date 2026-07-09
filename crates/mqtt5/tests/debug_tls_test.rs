@@ -1,3 +1,4 @@
+#![cfg(feature = "broker")]
 // Debug test for mqtt-v5 TLS connection
 mod common;
 use common::TestBroker;

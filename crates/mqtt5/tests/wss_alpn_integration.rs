@@ -1,3 +1,4 @@
+#![cfg(feature = "broker")]
 mod common;
 use common::{find_workspace_root, TestBroker};
 use mqtt5::broker::config::{

@@ -1,6 +1,6 @@
 pub mod propagation;
 
-#[cfg(feature = "opentelemetry")]
+#[cfg(all(feature = "opentelemetry", feature = "broker"))]
 pub mod metrics;
 
 #[cfg(feature = "opentelemetry")]

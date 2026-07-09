@@ -1,3 +1,4 @@
+#![cfg(feature = "broker")]
 mod common;
 use common::TestBroker;
 use mqtt5::MqttClient;

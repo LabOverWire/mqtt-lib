@@ -1,3 +1,4 @@
+#![cfg(feature = "broker")]
 use mqtt5::broker::auth::{AuthProvider, AuthResult, EnhancedAuthResult};
 use mqtt5::broker::config::{StorageBackend, StorageConfig};
 use mqtt5::broker::{BrokerConfig, MqttBroker};

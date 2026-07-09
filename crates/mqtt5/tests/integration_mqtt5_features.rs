@@ -1,3 +1,4 @@
+#![cfg(feature = "broker")]
 #![allow(clippy::large_futures)]
 
 mod common;
@@ -765,7 +766,7 @@ async fn test_shared_subscriptions() {
     assert_eq!(total_messages, 9);
 
     // Each client should have received some messages (roughly balanced)
-    for (_client, messages) in msgs.iter() {
+    for messages in msgs.values() {
         assert!(!messages.is_empty());
         assert!(messages.len() <= 5); // No client should get all messages
     }

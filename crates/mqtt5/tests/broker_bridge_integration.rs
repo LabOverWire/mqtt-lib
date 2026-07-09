@@ -1,3 +1,4 @@
+#![cfg(feature = "broker")]
 //! Integration tests for broker-to-broker bridging
 
 use mqtt5::broker::bridge::{BridgeConfig, BridgeDirection, BridgeManager};

@@ -1,3 +1,4 @@
+#![cfg(feature = "broker")]
 use mqtt5::broker::router::MessageRouter;
 use mqtt5::broker::storage::ChangeOnlyState;
 use mqtt5::packet::publish::PublishPacket;

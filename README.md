@@ -22,7 +22,14 @@ A production-ready MQTT v5.0 and v3.1.1 platform that ships a client library, a 
 
 ```toml
 [dependencies]
-mqtt5 = "0.31"
+mqtt5 = "0.36"
+```
+
+For a lean client-only build (no broker, drops `argon2`/`hyper`/`regex`/`toml`/...):
+
+```toml
+[dependencies]
+mqtt5 = { version = "0.36", default-features = false }
 ```
 
 ### CLI Tool

@@ -1,3 +1,4 @@
+#![cfg(feature = "broker")]
 use mqtt5::broker::bridge::{BridgeConfig, BridgeDirection};
 use mqtt5::broker::{BrokerConfig, MqttBroker, StorageConfig};
 use mqtt5::client::MqttClient;

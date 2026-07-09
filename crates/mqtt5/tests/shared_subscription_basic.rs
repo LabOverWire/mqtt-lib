@@ -1,3 +1,4 @@
+#![cfg(feature = "broker")]
 //! Basic test for shared subscriptions
 
 use bytes::Bytes;

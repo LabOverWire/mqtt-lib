@@ -1,3 +1,4 @@
+#![cfg(feature = "broker")]
 //! Comprehensive pub/sub tests using Turmoil
 //!
 //! These tests verify publish/subscribe functionality in a deterministic

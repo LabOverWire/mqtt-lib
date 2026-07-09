@@ -1,3 +1,4 @@
+#![cfg(feature = "broker")]
 //! Multi-client interaction tests using Turmoil
 //!
 //! These tests verify complex interactions between multiple clients

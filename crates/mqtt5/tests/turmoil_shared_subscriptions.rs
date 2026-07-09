@@ -1,3 +1,4 @@
+#![cfg(feature = "broker")]
 //! Shared subscription tests using Turmoil
 //!
 //! These tests verify the shared subscription functionality using

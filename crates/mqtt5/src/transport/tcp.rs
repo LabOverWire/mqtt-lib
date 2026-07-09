@@ -175,6 +175,7 @@ impl Transport for TcpTransport {
 mod tests {
     use super::*;
     use std::net::{IpAddr, Ipv4Addr};
+    #[cfg(feature = "broker")]
     use tracing::{error, info};
 
     #[test]
@@ -232,6 +233,7 @@ mod tests {
         assert!(result.is_err(), "Expected connection to 192.0.2.1 to fail");
     }
 
+    #[cfg(feature = "broker")]
     #[tokio::test]
     async fn test_tcp_connect_real_broker() {
         use crate::broker::config::{BrokerConfig, StorageBackend, StorageConfig};

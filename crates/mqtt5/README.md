@@ -12,12 +12,22 @@ Full-featured MQTT v5.0 and v3.1.1 client and broker for native platforms (Linux
 - Configurable keepalive with timeout tolerance
 - Mock client for unit testing
 - OpenTelemetry distributed tracing (optional feature)
+- Broker gated behind the `broker` feature (on by default) for lean client-only builds
 
 ## Installation
 
 ```toml
 [dependencies]
-mqtt5 = "0.31"
+mqtt5 = "0.36"
+```
+
+### Client-only builds
+
+The broker is enabled by default via the `broker` feature. If you only need the client, disable default features to drop the broker and its dependencies (`argon2`, `regex`, `toml`, `hyper`, ...):
+
+```toml
+[dependencies]
+mqtt5 = { version = "0.36", default-features = false }
 ```
 
 ## Quick Start
@@ -416,7 +426,7 @@ Distributed tracing with OpenTelemetry support:
 
 ```toml
 [dependencies]
-mqtt5 = { version = "0.31", features = ["opentelemetry"] }
+mqtt5 = { version = "0.36", features = ["opentelemetry"] }
 ```
 
 - W3C trace context propagation via MQTT user properties

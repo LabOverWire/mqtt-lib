@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [mqtt5 0.36.0] - 2026-07-08
+
+### Added
+
+- **`broker` cargo feature (enabled by default)** gating the entire broker implementation and its dependency tree (`argon2`, `regex`, `toml`, `hyper`, `hyper-rustls`, `hyper-util`, `http-body-util`). Client-only consumers can now build without the broker's dependencies via `mqtt5 = { version = "0.36", default-features = false }`.
+
+### Changed
+
+- **BREAKING (only for `default-features = false` consumers): the broker is no longer compiled unless the `broker` feature is enabled.** Default builds are unaffected because `broker` is part of the default feature set; consumers who set `default-features = false` and use `mqtt5::broker` must add `features = ["broker"]`. The `turmoil-testing` feature now implies `broker`.
+
+## [mqttv5-cli 0.28.2] - 2026-07-08
+
+### Changed
+
+- Bumped the `mqtt5` dependency requirement to 0.36.
+
+## [mqtt5-wasm 1.4.2] - 2026-07-08
+
+### Changed
+
+- Bumped the `mqtt5` dependency requirement to 0.36; the crate's `broker` feature now enables `mqtt5/broker`.
+
 ## [mqtt5 0.35.1] - 2026-07-06
 
 ### Changed
