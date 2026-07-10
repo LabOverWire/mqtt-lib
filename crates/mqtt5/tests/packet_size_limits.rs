@@ -8,13 +8,13 @@ use std::thread;
 #[test]
 fn test_packet_size_validation() {
     let config = LimitsConfig {
-        client_maximum_packet_size: 1024,      // 1KB limit
-        server_maximum_packet_size: Some(512), // Server limit lower
+        client_maximum_packet_size: 1024,
+        server_maximum_packet_size: Some(512),
         ..Default::default()
     };
     let limits = LimitsManager::new(config);
 
-    // Should use the lower limit (server's)
+    // Outbound is governed by the server's advertised limit
     assert_eq!(limits.effective_maximum_packet_size(), 512);
 
     // Within limits

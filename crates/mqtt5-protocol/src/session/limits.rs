@@ -50,6 +50,14 @@ impl LimitsManager {
         self.config.client_maximum_packet_size = size;
     }
 
+    /// The maximum packet size that may be **sent** on this connection.
+    ///
+    /// An outbound packet is bounded solely by the server's advertised Maximum
+    /// Packet Size (from CONNACK). The client's own Maximum Packet Size is the
+    /// limit on packets it will *receive*, not what it may send, so it is never
+    /// applied to outbound traffic here. When the server advertises no limit
+    /// (or zero), the client's configured maximum is used as the fallback
+    /// ceiling. A returned value of `0` means "no limit".
     #[must_use]
     pub fn effective_maximum_packet_size(&self) -> u32 {
         match self.config.server_maximum_packet_size {
@@ -58,6 +66,9 @@ impl LimitsManager {
         }
     }
 
+    /// Checks an outbound packet's encoded size against
+    /// [`effective_maximum_packet_size`](Self::effective_maximum_packet_size).
+    ///
     /// # Errors
     /// Returns `PacketTooLarge` if the size exceeds the effective maximum.
     pub fn check_packet_size(&self, size: usize) -> Result<()> {
