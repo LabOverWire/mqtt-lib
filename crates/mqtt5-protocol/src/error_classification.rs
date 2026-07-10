@@ -1,15 +1,34 @@
 use crate::error::MqttError;
 use crate::protocol::v5::reason_codes::ReasonCode;
 
+/// A transient fault for which retrying the *same* operation after a delay can
+/// succeed on its own, with no state change or user intervention.
+///
+/// This is the retry/backoff machinery's notion of "recoverable", not a general
+/// judgement about whether the failure is the caller's fault. An error is
+/// recoverable here only if the fix is "wait, then try again": the operation's
+/// preconditions still hold and something outside the caller's control is
+/// expected to clear. Faults whose remedy is a state transition (re-establishing
+/// a connection), a different request (smaller payload), or human action
+/// (fixing credentials) are deliberately *not* recoverable, because a naive
+/// backoff loop on them would spin forever.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RecoverableError {
+    /// Transient network fault (timeout, reset, unreachable). Retry after backoff.
     NetworkError,
+    /// Server temporarily cannot serve the request. Retry after backoff.
     ServerUnavailable,
+    /// Server-side quota hit. Retry after a longer backoff (see `base_delay_multiplier`).
     QuotaExceeded,
+    /// No packet identifiers currently free; one frees as in-flight messages ack.
     PacketIdExhausted,
+    /// Receive-maximum flow-control limit reached; capacity returns as acks arrive.
     FlowControlLimited,
+    /// Session was taken over by another client using the same client id.
     SessionTakenOver,
+    /// Server is shutting down; reconnect will land on a fresh instance.
     ServerShuttingDown,
+    /// Recoverable `MQoQ` flow condition (idle/cancelled/refused flow).
     MqoqFlowRecoverable,
 }
 
@@ -38,6 +57,34 @@ impl RecoverableError {
 }
 
 impl MqttError {
+    /// Classify this error for the retry/backoff layer.
+    ///
+    /// Returns `Some(kind)` when retrying the *same* operation after a delay can
+    /// succeed on its own (see [`RecoverableError`]), and `None` when it cannot.
+    ///
+    /// `None` covers three distinct cases, all of which a blind backoff loop
+    /// would handle wrong:
+    ///
+    /// - **Precondition errors** such as [`MqttError::NotConnected`]. These are
+    ///   returned whenever there is no active connection, which covers both a
+    ///   dropped link and calling `publish`/`subscribe` before `connect` or
+    ///   after `disconnect`. The remedy is re-establishing the connection, a
+    ///   state transition owned by the reconnect layer, not re-issuing the same
+    ///   packet. For a `QoS` 1 publish that failed because the link dropped, the
+    ///   intended recovery is reconnect plus resend of unacked messages on the
+    ///   next session, not treating the raw `NotConnected` as retryable here.
+    /// - **Caller/permanent errors** such as authentication failures, bad
+    ///   credentials, authorization denials, and protocol errors. Retrying is
+    ///   futile until the caller changes the request or their configuration.
+    /// - **Connection-limit signals** carried in [`MqttError::ConnectionError`]
+    ///   strings (see [`MqttError::is_aws_iot_connection_limit`]). These look
+    ///   like network resets but indicate the account/client limit was hit;
+    ///   immediate retry makes it worse, so they are excluded on purpose.
+    ///
+    /// This is intentionally conservative: a variant only classifies as
+    /// recoverable when re-issuing the identical operation is the correct
+    /// response. Anything requiring a reconnect, a different request, or human
+    /// intervention returns `None`.
     #[must_use]
     pub fn classify(&self) -> Option<RecoverableError> {
         match self {

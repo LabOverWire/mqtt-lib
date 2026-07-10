@@ -382,6 +382,12 @@ impl SessionState {
         limits.set_server_maximum_packet_size(size);
     }
 
+    /// Clears the server's maximum packet size when a CONNACK omits it
+    pub async fn reset_server_maximum_packet_size(&self) {
+        let mut limits = self.limits.write().await;
+        limits.reset_server_maximum_packet_size();
+    }
+
     /// Sets the client's maximum packet size from `ConnectOptions`
     pub async fn set_client_maximum_packet_size(&self, size: u32) {
         let mut limits = self.limits.write().await;
