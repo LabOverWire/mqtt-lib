@@ -42,6 +42,10 @@ impl LimitsManager {
         self.config.server_maximum_packet_size = Some(size);
     }
 
+    pub fn reset_server_maximum_packet_size(&mut self) {
+        self.config.server_maximum_packet_size = None;
+    }
+
     pub fn set_client_maximum_packet_size(&mut self, size: u32) {
         self.config.client_maximum_packet_size = size;
     }

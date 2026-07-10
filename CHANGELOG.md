@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [mqtt5 0.36.1] - 2026-07-09
+
+### Fixed
+
+- **The client now honors the broker's Maximum Packet Size advertised in CONNACK.** Previously the client only recorded its own inbound limit and ignored the server's, so an oversized PUBLISH was serialized and sent, the broker closed the connection per `[MQTT-3.2.2-15]`, and the failure surfaced to the application as a bare `NotConnected`. The client now records the server limit on connect and enforces the effective `min(client, server)` maximum before sending, so an oversized publish fails locally with `PacketTooLarge { size, max }` (a distinct, non-recoverable error) instead of dropping the connection. The recorded server limit is also cleared when a later CONNACK omits the property, so a stale limit cannot persist across a reconnect or server redirect.
+- A QoS 1/2 publish rejected by the packet-size check no longer consumes a packet identifier; the id is now allocated only after the size check passes, keeping the id sequence contiguous.
+
+### Added
+
+- **`SessionState::reset_server_maximum_packet_size`** clears a previously recorded server Maximum Packet Size.
+
+## [mqtt5-protocol 0.14.2] - 2026-07-09
+
+### Added
+
+- **`LimitsManager::reset_server_maximum_packet_size`** clears a previously recorded server Maximum Packet Size.
+
+### Changed
+
+- Documented the semantics of `MqttError::classify` and `RecoverableError`: what "recoverable" means for the retry/backoff layer, and why precondition errors (`NotConnected`), permanent errors (auth/protocol), and AWS IoT connection-limit signals classify as non-recoverable. No behavior change.
+
 ## [mqtt5 0.36.0] - 2026-07-08
 
 ### Added

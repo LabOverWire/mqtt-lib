@@ -48,6 +48,8 @@ use quinn::{Connection, Endpoint};
 
 pub use unified::{UnifiedReader, UnifiedWriter};
 
+const SIZE_PROBE_PACKET_ID: u16 = 1;
+
 #[cfg(feature = "transport-quic")]
 use keepalive::flow_expiration_task;
 use keepalive::{keepalive_task_with_writer, KeepaliveState};
@@ -453,13 +455,7 @@ impl DirectClientInner {
         self.writer = Some(Arc::new(tokio::sync::Mutex::new(writer)));
         self.set_connected(true);
 
-        if let Some(max_packet_size) = self.options.properties.maximum_packet_size {
-            self.session
-                .write()
-                .await
-                .set_client_maximum_packet_size(max_packet_size)
-                .await;
-        }
+        self.apply_negotiated_packet_sizes(&connack).await;
 
         tracing::debug!("Starting background tasks (packet reader and keepalive)");
         self.start_background_tasks(reader, connection_epoch)?;
@@ -468,6 +464,26 @@ impl DirectClientInner {
         Ok(ConnectResult {
             session_present: connack.session_present,
         })
+    }
+
+    async fn apply_negotiated_packet_sizes(&self, connack: &crate::packet::connack::ConnAckPacket) {
+        let session = self.session.write().await;
+
+        if let Some(max_packet_size) = self.options.properties.maximum_packet_size {
+            session
+                .set_client_maximum_packet_size(max_packet_size)
+                .await;
+        }
+
+        match connack.properties.get_maximum_packet_size() {
+            Some(server_max_packet_size) => {
+                session
+                    .set_server_maximum_packet_size(server_max_packet_size)
+                    .await;
+                tracing::debug!("Server maximum packet size: {}", server_max_packet_size);
+            }
+            None => session.reset_server_maximum_packet_size().await,
+        }
     }
 
     /// # Errors
@@ -648,15 +664,15 @@ impl DirectClientInner {
 
         let (final_payload, properties) = self.encode_payload(payload, &options)?;
 
-        let packet_id = (options.qos != QoS::AtMostOnce).then(|| self.packet_id_generator.next());
+        let needs_packet_id = options.qos != QoS::AtMostOnce;
 
-        let publish = PublishPacket {
+        let mut publish = PublishPacket {
             topic_name: topic,
             payload: final_payload,
             qos: options.qos,
             retain: options.retain,
             dup: false,
-            packet_id,
+            packet_id: needs_packet_id.then_some(SIZE_PROBE_PACKET_ID),
             properties,
             protocol_version: self.options.protocol_version.as_u8(),
             stream_id: None,
@@ -664,12 +680,14 @@ impl DirectClientInner {
 
         let mut buf = bytes::BytesMut::new();
         publish.encode(&mut buf)?;
-        let packet_size = buf.len();
         self.session
             .read()
             .await
-            .check_packet_size(packet_size)
+            .check_packet_size(buf.len())
             .await?;
+
+        let packet_id = needs_packet_id.then(|| self.packet_id_generator.next());
+        publish.packet_id = packet_id;
 
         if options.qos != QoS::AtMostOnce {
             self.session
