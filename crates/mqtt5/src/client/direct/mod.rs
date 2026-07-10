@@ -555,16 +555,22 @@ impl DirectClientInner {
         Ok(())
     }
 
-    fn queue_publish_message(
+    /// # Errors
+    ///
+    /// Returns `PacketTooLarge` when the message already exceeds the last known
+    /// negotiated maximum packet size, so a `QoS` 1/2 publish is rejected at
+    /// enqueue time instead of being acknowledged with `Ok` and then silently
+    /// dropped when the queue is flushed on reconnect. A packet identifier is
+    /// allocated only after the size check passes.
+    async fn queue_publish_message(
         &self,
         topic: String,
         payload: Vec<u8>,
         options: &PublishOptions,
-    ) -> PublishResult {
-        let packet_id = self.packet_id_generator.next();
-        let publish = PublishPacket {
+    ) -> Result<PublishResult> {
+        let mut publish = PublishPacket {
             topic_name: topic,
-            packet_id: Some(packet_id),
+            packet_id: Some(SIZE_PROBE_PACKET_ID),
             payload: payload.into(),
             qos: options.qos,
             retain: options.retain,
@@ -574,8 +580,22 @@ impl DirectClientInner {
             stream_id: None,
         };
 
+        self.check_publish_size(&publish).await?;
+
+        let packet_id = self.packet_id_generator.next();
+        publish.packet_id = Some(packet_id);
         self.queued_messages.lock().push(publish);
-        PublishResult::QoS1Or2 { packet_id }
+        Ok(PublishResult::QoS1Or2 { packet_id })
+    }
+
+    /// # Errors
+    ///
+    /// Returns `PacketTooLarge` if the encoded packet exceeds the negotiated
+    /// maximum packet size for the current connection.
+    pub(crate) async fn check_publish_size(&self, publish: &PublishPacket) -> Result<()> {
+        let mut buf = bytes::BytesMut::new();
+        publish.encode(&mut buf)?;
+        self.session.read().await.check_packet_size(buf.len()).await
     }
 
     fn setup_publish_acknowledgment(
@@ -646,7 +666,7 @@ impl DirectClientInner {
         options: PublishOptions,
     ) -> Result<PublishResult> {
         if !self.is_connected() && self.queue_on_disconnect && options.qos != QoS::AtMostOnce {
-            return Ok(self.queue_publish_message(topic, payload, &options));
+            return self.queue_publish_message(topic, payload, &options).await;
         }
 
         let options = self.resolve_effective_qos(options);
@@ -1495,6 +1515,96 @@ pub mod tests {
             .await;
 
         assert!(matches!(result, Err(MqttError::NotConnected)));
+    }
+
+    #[tokio::test]
+    async fn test_check_publish_size_enforces_negotiated_limit() {
+        let client = create_test_client();
+        client
+            .session
+            .write()
+            .await
+            .set_server_maximum_packet_size(1024)
+            .await;
+
+        let template = PublishPacket {
+            topic_name: "test/flush".to_string(),
+            payload: Vec::new().into(),
+            qos: QoS::AtLeastOnce,
+            retain: false,
+            dup: true,
+            packet_id: Some(SIZE_PROBE_PACKET_ID),
+            properties: Properties::default(),
+            protocol_version: 5,
+            stream_id: None,
+        };
+
+        let within_limit = PublishPacket {
+            payload: vec![0u8; 64].into(),
+            ..template.clone()
+        };
+        assert!(client.check_publish_size(&within_limit).await.is_ok());
+
+        let oversized = PublishPacket {
+            payload: vec![0u8; 4096].into(),
+            ..template
+        };
+        assert!(matches!(
+            client.check_publish_size(&oversized).await,
+            Err(MqttError::PacketTooLarge { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_oversized_publish_rejected_at_enqueue_while_disconnected() {
+        let mut client = create_test_client();
+        client.set_queue_on_disconnect(true);
+        client
+            .session
+            .write()
+            .await
+            .set_server_maximum_packet_size(1024)
+            .await;
+        assert!(!client.is_connected());
+
+        let oversized = client
+            .publish(
+                "test/flush".to_string(),
+                vec![0u8; 4096],
+                PublishOptions {
+                    qos: QoS::AtLeastOnce,
+                    ..Default::default()
+                },
+            )
+            .await;
+        assert!(
+            matches!(oversized, Err(MqttError::PacketTooLarge { .. })),
+            "oversized publish must be rejected at enqueue time, not silently queued: {oversized:?}"
+        );
+        assert!(
+            client.queued_messages.lock().is_empty(),
+            "a rejected publish must not be queued"
+        );
+
+        let within = client
+            .publish(
+                "test/flush".to_string(),
+                vec![0u8; 64],
+                PublishOptions {
+                    qos: QoS::AtLeastOnce,
+                    ..Default::default()
+                },
+            )
+            .await;
+        assert!(
+            matches!(within, Ok(PublishResult::QoS1Or2 { .. })),
+            "within-limit publish must queue: {within:?}"
+        );
+        assert_eq!(
+            client.queued_messages.lock().len(),
+            1,
+            "within-limit publish must be queued"
+        );
     }
 
     #[tokio::test]

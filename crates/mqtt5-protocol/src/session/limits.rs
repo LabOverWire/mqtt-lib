@@ -53,9 +53,6 @@ impl LimitsManager {
     #[must_use]
     pub fn effective_maximum_packet_size(&self) -> u32 {
         match self.config.server_maximum_packet_size {
-            Some(server_max) if server_max > 0 && self.config.client_maximum_packet_size > 0 => {
-                server_max.min(self.config.client_maximum_packet_size)
-            }
             Some(server_max) if server_max > 0 => server_max,
             _ => self.config.client_maximum_packet_size,
         }
@@ -217,7 +214,7 @@ mod tests {
         };
         let mut limits = LimitsManager::new(config);
         limits.set_server_maximum_packet_size(10_485_760);
-        assert_eq!(limits.effective_maximum_packet_size(), 1_048_576);
+        assert_eq!(limits.effective_maximum_packet_size(), 10_485_760);
     }
 
     #[test]

@@ -246,6 +246,12 @@ impl MqttClient {
         for mut msg in messages {
             msg.dup = true;
 
+            let size_check = self.inner.read().await.check_publish_size(&msg).await;
+            if let Err(e) = size_check {
+                tracing::warn!("Dropping queued message exceeding negotiated packet size: {e}");
+                continue;
+            }
+
             if let Err(e) = self.publish_packet(msg).await {
                 tracing::warn!("Failed to send queued message: {e}");
             }

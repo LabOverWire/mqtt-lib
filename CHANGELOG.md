@@ -9,14 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **The client now honors the broker's Maximum Packet Size advertised in CONNACK.** Previously the client only recorded its own inbound limit and ignored the server's, so an oversized PUBLISH was serialized and sent, the broker closed the connection per `[MQTT-3.2.2-15]`, and the failure surfaced to the application as a bare `NotConnected`. The client now records the server limit on connect and enforces the effective `min(client, server)` maximum before sending, so an oversized publish fails locally with `PacketTooLarge { size, max }` (a distinct, non-recoverable error) instead of dropping the connection. The recorded server limit is also cleared when a later CONNACK omits the property, so a stale limit cannot persist across a reconnect or server redirect.
+- **The client now honors the broker's Maximum Packet Size advertised in CONNACK.** Previously the client only recorded its own inbound limit and ignored the server's, so an oversized PUBLISH was serialized and sent, the broker closed the connection per `[MQTT-3.2.2-15]`, and the failure surfaced to the application as a bare `NotConnected`. The client now records the server limit on connect and enforces it before sending, so an oversized publish fails locally with `PacketTooLarge { size, max }` (a distinct, non-recoverable error) instead of dropping the connection. The recorded server limit is also cleared when a later CONNACK omits the property, so a stale limit cannot persist across a reconnect or server redirect.
 - A QoS 1/2 publish rejected by the packet-size check no longer consumes a packet identifier; the id is now allocated only after the size check passes, keeping the id sequence contiguous.
+- A QoS 1/2 publish queued while disconnected (`queue_on_disconnect`) is now size-checked at enqueue time against the last negotiated maximum and rejected with `PacketTooLarge` before it is queued, instead of being acknowledged with `Ok` and then silently discarded. As a last-resort safety net for the rare case where the server advertises a smaller limit on reconnect (after the caller already received `Ok`), a still-oversized queued message is dropped with a warning when the queue is flushed rather than sent raw and dropping the reconnected connection.
 
 ### Added
 
 - **`SessionState::reset_server_maximum_packet_size`** clears a previously recorded server Maximum Packet Size.
 
 ## [mqtt5-protocol 0.14.2] - 2026-07-09
+
+### Fixed
+
+- **`LimitsManager::effective_maximum_packet_size` no longer clamps outbound packets by the client's own inbound limit.** An outbound PUBLISH is governed solely by the server's advertised Maximum Packet Size; the client's Maximum Packet Size is what it will *receive*, not what it may *send*. The effective maximum is now the server's advertised limit when present (falling back to the client limit only when the server advertises none), so a client that sets a small inbound limit no longer over-restricts its own publishes.
 
 ### Added
 
