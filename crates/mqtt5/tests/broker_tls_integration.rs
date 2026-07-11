@@ -13,7 +13,7 @@ async fn test_broker_tls_creation() {
         .with_bind_address(([127, 0, 0, 1], 0)) // Use random port
         .with_tls(
             TlsConfig::new(
-                PathBuf::from("../../test_certs/server.crt"), // Using test certs from client tests
+                PathBuf::from("../../test_certs/server.pem"), // Using test certs from client tests
                 PathBuf::from("../../test_certs/server.key"),
             )
             .with_bind_address(([127, 0, 0, 1], 0)), // Use random port for TLS too
@@ -43,16 +43,54 @@ async fn test_broker_tls_creation() {
 }
 
 #[tokio::test]
+async fn test_broker_tls_only_no_plaintext() {
+    let config = BrokerConfig::default()
+        .with_bind_addresses(Vec::new())
+        .with_tls(
+            TlsConfig::new(
+                PathBuf::from("../../test_certs/server.pem"),
+                PathBuf::from("../../test_certs/server.key"),
+            )
+            .with_bind_address(([127, 0, 0, 1], 0)),
+        );
+
+    let broker = MqttBroker::with_config(config).await;
+
+    if broker.is_err() {
+        eprintln!("Skipping TLS-only test - certificates not found");
+        return;
+    }
+
+    let mut broker = broker.unwrap();
+    let broker_handle = tokio::spawn(async move { broker.run().await });
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    broker_handle.abort();
+}
+
+#[tokio::test]
+async fn test_broker_no_listeners_errors() {
+    let config = BrokerConfig::default().with_bind_addresses(Vec::new());
+
+    let broker = MqttBroker::with_config(config).await;
+
+    assert!(
+        broker.is_err(),
+        "broker with no listeners should fail to build"
+    );
+}
+
+#[tokio::test]
 async fn test_broker_tls_with_client_certs() {
     // Test broker with client certificate verification
     let config = BrokerConfig::default()
         .with_bind_address(([127, 0, 0, 1], 0))
         .with_tls(
             TlsConfig::new(
-                PathBuf::from("../../test_certs/server.crt"),
+                PathBuf::from("../../test_certs/server.pem"),
                 PathBuf::from("../../test_certs/server.key"),
             )
-            .with_ca_file(PathBuf::from("../../test_certs/ca.crt"))
+            .with_ca_file(PathBuf::from("../../test_certs/ca.pem"))
             .with_require_client_cert(true)
             .with_bind_address(([127, 0, 0, 1], 0)),
         );
@@ -80,7 +118,7 @@ async fn test_broker_default_tls_port() {
         .with_bind_address(([127, 0, 0, 1], 1883))
         .with_tls(
             TlsConfig::new(
-                PathBuf::from("../../test_certs/server.crt"),
+                PathBuf::from("../../test_certs/server.pem"),
                 PathBuf::from("../../test_certs/server.key"),
             ), // Note: not setting bind_address, should default to 8883
         );
