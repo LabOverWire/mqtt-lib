@@ -1635,9 +1635,14 @@ impl MqttBroker {
             .await?;
         self.router.initialize().await?;
 
-        let sys_provider =
-            SysTopicsProvider::new(Arc::clone(&self.router), Arc::clone(&self.stats));
-        let sys_handle = sys_provider.start();
+        let sys_handle = if self.config.sys_topics_enabled {
+            let sys_provider =
+                SysTopicsProvider::new(Arc::clone(&self.router), Arc::clone(&self.stats))
+                    .with_update_interval(self.config.sys_topics_interval);
+            Some(sys_provider.start())
+        } else {
+            None
+        };
 
         info!("Router initialized, starting resource monitor cleanup task");
 
@@ -1710,7 +1715,9 @@ impl MqttBroker {
         shutdown_rx.recv().await.ok();
         info!("Broker shutting down");
 
-        sys_handle.abort();
+        if let Some(sys_handle) = sys_handle {
+            sys_handle.abort();
+        }
 
         if let Some(ref bridge_manager) = self.bridge_manager {
             info!("Stopping all bridges");
