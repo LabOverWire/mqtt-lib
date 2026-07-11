@@ -1631,7 +1631,7 @@ impl MqttBroker {
 
         if self.client_listener_count() == 0 {
             return Err(MqttError::InvalidState(
-                "Broker already running".to_string(),
+                "broker has already been started; run() consumes its listeners and cannot be called again".to_string(),
             ));
         }
 
@@ -1821,6 +1821,11 @@ impl MqttBroker {
     #[must_use]
     pub fn local_addr(&self) -> Option<std::net::SocketAddr> {
         self.listeners.first()?.local_addr().ok()
+    }
+
+    #[must_use]
+    pub fn tls_local_addr(&self) -> Option<std::net::SocketAddr> {
+        self.tls_listeners.first()?.local_addr().ok()
     }
 
     #[cfg(feature = "transport-websocket")]
