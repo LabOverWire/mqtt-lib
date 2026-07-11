@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **`$SYS` topic publishing is now configurable via `BrokerConfig`.** Two new fields (with builders `with_sys_topics_enabled` and `with_sys_topics_interval`): `sys_topics_enabled` (default `true`) turns generation on or off entirely, and `sys_topics_interval` (default `10s`) sets the update cadence. When disabled, the broker skips starting the `$SYS` provider so no retained `$SYS` traffic is produced. Previously generation was always on with a hardcoded 10s interval, and the only lever was ACL to restrict reads.
+- **The broker can now run without a plaintext TCP listener, enabling TLS-only (or WebSocket/QUIC-only) deployments.** Previously `bind_addresses` was mandatory, so a broker always bound plaintext MQTT. Clearing `bind_addresses` (e.g. `with_bind_addresses(Vec::new())`) now skips the plaintext listener; the broker binds only the transports you configure (`tls_config`, `websocket_config`, `websocket_tls_config`, `quic_config`). `with_config` validates that at least one client-facing listener exists and errors otherwise (inter-node cluster listeners do not count), so the broker can never start listening on nothing — including the case where a configured TLS/WS/QUIC port silently failed to bind. Default behavior is unchanged: the default `bind_addresses` still binds `0.0.0.0:1883` + `[::]:1883`.
+- **`MqttBroker::tls_local_addr()`** returns the bound TLS listener address, mirroring the existing `local_addr()` and `ws_local_addr()`. Useful for connecting to a TLS-only broker bound to an ephemeral port.
 
 ## [mqtt5 0.36.1] - 2026-07-09
 

@@ -312,6 +312,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+For a TLS-only deployment with no plaintext listener, clear `bind_addresses` and configure only the encrypted transports:
+
+```rust
+let config = BrokerConfig::default()
+    .with_bind_addresses(Vec::new()) // no plaintext MQTT
+    .with_tls(
+        TlsConfig::new("certs/server.pem".into(), "certs/server.key".into())
+            .with_bind_address("0.0.0.0:8883".parse()?),
+    );
+```
+
+The broker requires at least one client-facing listener (TCP, TLS, WebSocket, WSS, or QUIC); building with none configured returns an error.
+
 #### `$SYS` Monitoring Topics
 
 The broker publishes statistics (uptime, client counts, message and byte counters) to retained `$SYS/#` topics. Generation is on by default with a 10-second update interval. Both are configurable:

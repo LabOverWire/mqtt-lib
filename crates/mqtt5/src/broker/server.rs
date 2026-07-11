@@ -319,14 +319,7 @@ impl MqttBroker {
     pub async fn with_config(config: BrokerConfig) -> Result<Self> {
         config.validate()?;
 
-        let bind_result = bind_tcp_addresses(&config.bind_addresses, "TCP").await;
-        if bind_result.is_empty() {
-            let error_msg =
-                format_binding_error("TCP", &bind_result.failures, &config.bind_addresses);
-            return Err(MqttError::Configuration(error_msg));
-        }
-        bind_result.warn_partial_failures("TCP");
-        let listeners = bind_result.successful;
+        let listeners = Self::bind_plaintext_listeners(&config).await?;
 
         #[cfg(feature = "transport-websocket")]
         let (ws_listeners, ws_config) = Self::setup_websocket(&config).await?;
@@ -381,7 +374,7 @@ impl MqttBroker {
         let (config_watch_tx, config_watch_rx) = watch::channel(Arc::clone(&config));
         let (auth_watch_tx, auth_watch_rx) = watch::channel(Arc::clone(&auth_provider));
 
-        Ok(Self {
+        let broker = Self {
             config,
             router,
             auth_provider,
@@ -418,7 +411,42 @@ impl MqttBroker {
             hot_reload_manager: None,
             reload_tx: None,
             reload_rx: None,
-        })
+        };
+
+        if broker.client_listener_count() == 0 {
+            return Err(MqttError::Configuration(
+                "broker has no listeners; configure at least one of bind_addresses, tls_config, websocket_config, websocket_tls_config, or quic_config".to_string(),
+            ));
+        }
+
+        Ok(broker)
+    }
+
+    async fn bind_plaintext_listeners(config: &BrokerConfig) -> Result<Vec<TcpListener>> {
+        if config.bind_addresses.is_empty() {
+            return Ok(Vec::new());
+        }
+        let bind_result = bind_tcp_addresses(&config.bind_addresses, "TCP").await;
+        if bind_result.is_empty() {
+            let error_msg =
+                format_binding_error("TCP", &bind_result.failures, &config.bind_addresses);
+            return Err(MqttError::Configuration(error_msg));
+        }
+        bind_result.warn_partial_failures("TCP");
+        Ok(bind_result.successful)
+    }
+
+    fn client_listener_count(&self) -> usize {
+        let tcp = self.listeners.len() + self.tls_listeners.len();
+        #[cfg(feature = "transport-websocket")]
+        let websocket = self.ws_listeners.len() + self.ws_tls_listeners.len();
+        #[cfg(not(feature = "transport-websocket"))]
+        let websocket = 0;
+        #[cfg(feature = "transport-quic")]
+        let quic = self.quic_endpoints.len();
+        #[cfg(not(feature = "transport-quic"))]
+        let quic = 0;
+        tcp + websocket + quic
     }
 
     #[cfg(feature = "transport-websocket")]
@@ -1601,9 +1629,9 @@ impl MqttBroker {
     pub async fn run(&mut self) -> Result<()> {
         info!("Starting MQTT broker");
 
-        if self.listeners.is_empty() {
+        if self.client_listener_count() == 0 {
             return Err(MqttError::InvalidState(
-                "Broker already running".to_string(),
+                "broker has already been started; run() consumes its listeners and cannot be called again".to_string(),
             ));
         }
 
@@ -1793,6 +1821,11 @@ impl MqttBroker {
     #[must_use]
     pub fn local_addr(&self) -> Option<std::net::SocketAddr> {
         self.listeners.first()?.local_addr().ok()
+    }
+
+    #[must_use]
+    pub fn tls_local_addr(&self) -> Option<std::net::SocketAddr> {
+        self.tls_listeners.first()?.local_addr().ok()
     }
 
     #[cfg(feature = "transport-websocket")]
