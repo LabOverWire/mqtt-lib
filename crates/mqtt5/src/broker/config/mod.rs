@@ -444,6 +444,12 @@ impl BrokerConfig {
             ));
         }
 
+        if self.sys_topics_enabled && self.sys_topics_interval.is_zero() {
+            return Err(crate::error::MqttError::Configuration(
+                "sys_topics_interval must be greater than zero".to_string(),
+            ));
+        }
+
         Ok(self)
     }
 }
@@ -555,6 +561,20 @@ mod tests {
         config.max_packet_size = 1024;
         config.maximum_qos = 3;
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_zero_sys_topics_interval_rejected_when_enabled() {
+        let config = BrokerConfig::default().with_sys_topics_interval(Duration::ZERO);
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_zero_sys_topics_interval_allowed_when_disabled() {
+        let config = BrokerConfig::default()
+            .with_sys_topics_enabled(false)
+            .with_sys_topics_interval(Duration::ZERO);
+        assert!(config.validate().is_ok());
     }
 
     #[test]
