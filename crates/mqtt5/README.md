@@ -312,6 +312,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+#### `$SYS` Monitoring Topics
+
+The broker publishes statistics (uptime, client counts, message and byte counters) to retained `$SYS/#` topics. Generation is on by default with a 10-second update interval. Both are configurable:
+
+```rust
+use mqtt5::broker::BrokerConfig;
+use std::time::Duration;
+
+// Slow the cadence down to once a minute
+let config = BrokerConfig::default()
+    .with_sys_topics_interval(Duration::from_secs(60));
+
+// Or disable $SYS generation entirely (no retained $SYS traffic is produced)
+let config = BrokerConfig::default()
+    .with_sys_topics_enabled(false);
+```
+
+The equivalent config-file keys are `sys_topics_enabled` (bool) and `sys_topics_interval` (duration, e.g. `"60s"`).
+
 ## Client
 
 The client library provides an async MQTT client designed for both IoT devices and cloud applications.
