@@ -345,6 +345,8 @@ fn build_example_config() -> BrokerConfig {
         },
         change_only_delivery_config: ChangeOnlyDeliveryConfig::default(),
         echo_suppression_config: mqtt5::broker::config::EchoSuppressionConfig::default(),
+        sys_topics_enabled: true,
+        sys_topics_interval: std::time::Duration::from_secs(10),
         max_outbound_rate_per_client: 0,
         max_message_rate_per_client: 0,
         max_bandwidth_per_client: 0,

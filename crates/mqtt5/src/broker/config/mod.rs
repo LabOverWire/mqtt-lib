@@ -102,6 +102,9 @@ pub struct BrokerConfig {
     pub change_only_delivery_config: ChangeOnlyDeliveryConfig,
     #[serde(default)]
     pub echo_suppression_config: EchoSuppressionConfig,
+    pub sys_topics_enabled: bool,
+    #[cfg_attr(not(target_arch = "wasm32"), serde(with = "humantime_serde"))]
+    pub sys_topics_interval: Duration,
     #[serde(default)]
     pub max_outbound_rate_per_client: u32,
     #[serde(default)]
@@ -166,6 +169,8 @@ impl std::fmt::Debug for BrokerConfig {
                 &self.change_only_delivery_config,
             )
             .field("echo_suppression_config", &self.echo_suppression_config)
+            .field("sys_topics_enabled", &self.sys_topics_enabled)
+            .field("sys_topics_interval", &self.sys_topics_interval)
             .field(
                 "max_outbound_rate_per_client",
                 &self.max_outbound_rate_per_client,
@@ -218,6 +223,8 @@ impl Default for BrokerConfig {
             storage_config: StorageConfig::default(),
             change_only_delivery_config: ChangeOnlyDeliveryConfig::default(),
             echo_suppression_config: EchoSuppressionConfig::default(),
+            sys_topics_enabled: true,
+            sys_topics_interval: Duration::from_secs(10),
             max_outbound_rate_per_client: 0,
             max_message_rate_per_client: 0,
             max_bandwidth_per_client: 0,
@@ -365,6 +372,18 @@ impl BrokerConfig {
     }
 
     #[must_use]
+    pub fn with_sys_topics_enabled(mut self, enabled: bool) -> Self {
+        self.sys_topics_enabled = enabled;
+        self
+    }
+
+    #[must_use]
+    pub fn with_sys_topics_interval(mut self, interval: Duration) -> Self {
+        self.sys_topics_interval = interval;
+        self
+    }
+
+    #[must_use]
     pub fn with_max_outbound_rate_per_client(mut self, rate: u32) -> Self {
         self.max_outbound_rate_per_client = rate;
         self
@@ -422,6 +441,12 @@ impl BrokerConfig {
         if self.maximum_qos > 2 {
             return Err(crate::error::MqttError::Configuration(
                 "maximum_qos must be 0, 1, or 2".to_string(),
+            ));
+        }
+
+        if self.sys_topics_enabled && self.sys_topics_interval.is_zero() {
+            return Err(crate::error::MqttError::Configuration(
+                "sys_topics_interval must be greater than zero".to_string(),
             ));
         }
 
@@ -499,6 +524,29 @@ mod tests {
     }
 
     #[test]
+    fn test_sys_topics_defaults() {
+        let config = BrokerConfig::default();
+        assert!(config.sys_topics_enabled);
+        assert_eq!(config.sys_topics_interval, Duration::from_secs(10));
+    }
+
+    #[test]
+    fn test_sys_topics_builder() {
+        let config = BrokerConfig::new()
+            .with_sys_topics_enabled(false)
+            .with_sys_topics_interval(Duration::from_secs(30));
+        assert!(!config.sys_topics_enabled);
+        assert_eq!(config.sys_topics_interval, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn test_partial_config_sys_topics_default() {
+        let config: BrokerConfig = serde_json::from_str("{}").unwrap();
+        assert!(config.sys_topics_enabled);
+        assert_eq!(config.sys_topics_interval, Duration::from_secs(10));
+    }
+
+    #[test]
     fn test_config_validation() {
         let mut config = BrokerConfig::default();
         assert!(config.validate().is_ok());
@@ -513,6 +561,20 @@ mod tests {
         config.max_packet_size = 1024;
         config.maximum_qos = 3;
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_zero_sys_topics_interval_rejected_when_enabled() {
+        let config = BrokerConfig::default().with_sys_topics_interval(Duration::ZERO);
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_zero_sys_topics_interval_allowed_when_disabled() {
+        let config = BrokerConfig::default()
+            .with_sys_topics_enabled(false)
+            .with_sys_topics_interval(Duration::ZERO);
+        assert!(config.validate().is_ok());
     }
 
     #[test]
