@@ -6,7 +6,7 @@ use crate::raw_client::{RawMqttClient, RawPacketBuilder};
 use crate::sut::SutHandle;
 use std::time::Duration;
 
-const TIMEOUT: Duration = Duration::from_secs(3);
+const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// [MQTT-1.5.4-1] The character data in a UTF-8 Encoded String MUST be
 /// well-formed UTF-8 as defined by the Unicode specification and restated

@@ -9,7 +9,7 @@ use mqtt5_protocol::types::{PublishOptions, QoS, SubscribeOptions};
 use std::collections::HashSet;
 use std::time::Duration;
 
-const TIMEOUT: Duration = Duration::from_secs(3);
+const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// `[MQTT-4.3.1-1]` In the `QoS` 0 delivery protocol, the Server MUST send a
 /// PUBLISH packet with DUP=0.
@@ -29,7 +29,6 @@ async fn qos0_server_outbound_publish_has_dup_zero(sut: SutHandle) {
         .await
         .unwrap();
     let _ = sub.expect_suback(TIMEOUT).await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
 
     let publisher = TestClient::connect_with_prefix(&sut, "pub").await.unwrap();
     publisher.publish(&topic, b"qos0-data").await.unwrap();
@@ -69,7 +68,6 @@ async fn qos1_server_outbound_unique_nonzero_id_and_dup_zero(sut: SutHandle) {
         .await
         .unwrap();
     let _ = sub.expect_suback(TIMEOUT).await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
 
     let mut pub_raw = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
@@ -136,7 +134,6 @@ async fn qos1_packet_id_reusable_after_puback(sut: SutHandle) {
         .await
         .unwrap();
     let _ = sub.expect_suback(TIMEOUT).await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
 
     let publisher = TestClient::connect_with_prefix(&sut, "pub").await.unwrap();
     let pub_opts = PublishOptions {
@@ -199,7 +196,6 @@ async fn server_assigns_nonzero_packet_ids(sut: SutHandle) {
         .await
         .unwrap();
     let _ = sub.expect_suback(TIMEOUT).await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
 
     let publisher = TestClient::connect_with_prefix(&sut, "pub").await.unwrap();
 
@@ -267,7 +263,6 @@ async fn qos2_server_outbound_unique_nonzero_id_and_dup_zero(sut: SutHandle) {
         .await
         .unwrap();
     let _ = sub.expect_suback(TIMEOUT).await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
 
     let publisher = TestClient::connect_with_prefix(&sut, "pub").await.unwrap();
     let pub_opts = PublishOptions {
@@ -326,7 +321,6 @@ async fn qos2_unacknowledged_until_pubrec(sut: SutHandle) {
         .await
         .unwrap();
     let _ = sub.expect_suback(TIMEOUT).await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
 
     let publisher = TestClient::connect_with_prefix(&sut, "pub").await.unwrap();
     let pub_opts = PublishOptions {
@@ -371,7 +365,6 @@ async fn qos2_server_sends_pubrel_after_pubrec_and_holds_until_pubcomp(sut: SutH
         .await
         .unwrap();
     let _ = sub.expect_suback(TIMEOUT).await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
 
     let publisher = TestClient::connect_with_prefix(&sut, "pub").await.unwrap();
     let pub_opts = PublishOptions {
@@ -644,7 +637,6 @@ async fn no_spontaneous_retransmission_on_active_connection(sut: SutHandle) {
         .await
         .unwrap();
     let _ = sub.expect_suback(TIMEOUT).await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
 
     let publisher = TestClient::connect_with_prefix(&sut, "pub").await.unwrap();
     let pub_opts = PublishOptions {
@@ -692,7 +684,6 @@ async fn puback_error_stops_retransmission(sut: SutHandle) {
         .await
         .unwrap();
     let _ = sub.expect_suback(TIMEOUT).await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
 
     let publisher = TestClient::connect_with_prefix(&sut, "pub").await.unwrap();
     let pub_opts = PublishOptions {

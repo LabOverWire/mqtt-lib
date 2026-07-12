@@ -11,7 +11,7 @@ use mqtt5_protocol::types::{
 };
 use std::time::Duration;
 
-const TIMEOUT: Duration = Duration::from_secs(3);
+const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// `[MQTT-3.3.1-4]` A PUBLISH packet MUST NOT have both `QoS` bits set to 1.
 #[conformance_test(

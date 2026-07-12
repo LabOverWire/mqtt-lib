@@ -9,7 +9,7 @@ use std::time::Duration;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
 
-const TIMEOUT: Duration = Duration::from_secs(3);
+const TIMEOUT: Duration = Duration::from_secs(10);
 
 fn ws_addr(sut: &SutHandle) -> SocketAddr {
     sut.expect_ws_addr()

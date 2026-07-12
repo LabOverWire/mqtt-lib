@@ -8,7 +8,7 @@ use crate::test_client::TestClient;
 use mqtt5_protocol::types::{PublishOptions, QoS, SubscribeOptions};
 use std::time::Duration;
 
-const TIMEOUT: Duration = Duration::from_secs(3);
+const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// `[MQTT-4.8.2-1]` A valid shared subscription filter
 /// (`$share/<name>/<filter>`) must be accepted.
@@ -471,8 +471,6 @@ async fn shared_sub_puback_error_discards(sut: SutHandle) {
         .await
         .unwrap();
     let _ = worker.expect_suback(TIMEOUT).await;
-
-    tokio::time::sleep(Duration::from_millis(100)).await;
 
     let publisher = TestClient::connect_with_prefix(&sut, "shared-err-pub")
         .await

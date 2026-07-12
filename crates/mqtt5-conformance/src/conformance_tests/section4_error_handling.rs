@@ -6,7 +6,7 @@ use crate::raw_client::{RawMqttClient, RawPacketBuilder};
 use crate::sut::SutHandle;
 use std::time::Duration;
 
-const TIMEOUT: Duration = Duration::from_secs(3);
+const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// [MQTT-4.13.1-1] When a Server detects a Malformed Packet or Protocol Error,
 /// and a Reason Code is given in the specification, it MUST close the Network

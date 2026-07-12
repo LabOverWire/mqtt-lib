@@ -8,7 +8,7 @@ use crate::test_client::TestClient;
 use mqtt5_protocol::types::{PublishOptions, QoS};
 use std::time::Duration;
 
-const TIMEOUT: Duration = Duration::from_secs(3);
+const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// `[MQTT-4.9.0-1]` / `[MQTT-4.9.0-2]` Server must not send more unACKed
 /// `QoS` 1/2 PUBLISH packets than the client's Receive Maximum. Further

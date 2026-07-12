@@ -38,6 +38,28 @@
 
 ## Diary Entries
 
+### Investigate post-SUBACK sleep(100ms) — safe to remove, but NOT the flake fix
+
+**Trigger**: CI flake on `puback_error_stops_retransmission [MQTT-4.4.0-2]` (external-broker job) — `Timeout("puback")`. Suspected the `tokio::time::sleep(Duration::from_millis(100))` placed right after each `expect_suback` was a race-guard smell.
+
+**Finding 1 — the sleep is redundant for correctness.** Broker commits the subscription to its router (`client_handler/subscribe.rs:54-68`, `router.subscribe(...).await?`) BEFORE building/sending SUBACK (`subscribe.rs:92`). So a client that has received its SUBACK is guaranteed the subscription is live; a subsequent publish from another client on the same broker will route. The 100ms sleep guarded nothing.
+
+**Finding 2 — removal is empirically safe.** Removed all 15 post-SUBACK sleeps (3 in section3_subscribe, 1 section3_unsubscribe, 9 section4_qos, 1 section3_final_conformance, 1 section4_shared_sub). Left the other 45 `sleep(100ms)` (expiry/keepalive/negative-retransmit windows) untouched. Ran against the external `mqttv5` broker:
+- unloaded: `section4_qos` 200/200 clean; full suite ~155 runs clean (1 uncaptured full-suite flake).
+- under 8-way `yes` CPU load: `section4_qos` 149/150 + ~200 more clean; with-sleep control 150/150.
+- **Zero delivery-miss failures ever** (`must receive QoS 1 PUBLISH` never fired). The ONLY failure mode observed was `Timeout("suback")`/`Timeout("puback")` — broker throughput under load, which is causally UPSTREAM of the sleep (the sleep runs after the ack arrives), so the sleep cannot affect it.
+
+**Finding 3 — the sleep removal does NOT fix the flake.** Today's red-X and the load-induced failures are TIMEOUT-tightness: `TIMEOUT=3s` (per-op) and `ACK_TIMEOUT=10s` (`test_client/raw.rs:43`) are too tight for an oversubscribed CI runner. The sleep removal is a cosmetic cleanup (~1.5s faster per full suite run, removes dead complexity) that is safe but orthogonal to the flake.
+
+**Fix — timeout hardening (the actual flake remedy).** `ACK_TIMEOUT` 10s→30s (`test_client/raw.rs`; single site, purely a positive deadline on await_ack, fixes today's `Timeout("puback")` with 3x headroom) and all 19 per-file `TIMEOUT` consts 3s→10s (headroom for expect_suback/connack/publish).
+
+Verified empirically against the external `mqttv5` broker:
+- **No delivery-miss regression** from either change (`must receive QoS 1 PUBLISH` never fired across ~700 runs).
+- **Runtime cost negligible**: full suite 8s→~11.6s (+3.6s). The conformance CI job is ~3 min (build-dominated), so +3.6s in the test phase is noise. Confirmed no passing test asserts `is_none()` after a `TIMEOUT` read; the `if let Some` sites (`final_conformance:76`, `publish_advanced:63/137`) take the fast path on success.
+- **suback timeouts cured**: at 3s under 8-way CPU saturation, `section4_qos` flaked `Timeout("suback")`; at 10s that mode disappeared across 150 saturated runs.
+- **Residual**: under pathological 8-way full-core saturation (harsher than a 2-core CI runner), `Timeout("puback")` still appears ~2/150 at 30s — a fully CPU-starved broker defeats any finite timeout. Real CI failed at 10s; 30s gives 3x margin. A bounded publish retry would be the next lever if 30s proves insufficient, but it changes QoS1 DUP semantics and is deferred.
+
+
 ### Fix 9 conformance test failures verified against Mosquitto source
 
 None of the 9 failures were broker bugs. All were test expectations beyond what the spec mandates, or test infrastructure issues.

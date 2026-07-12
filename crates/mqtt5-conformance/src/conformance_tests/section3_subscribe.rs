@@ -8,7 +8,7 @@ use crate::test_client::TestClient;
 use mqtt5_protocol::types::{PublishOptions, QoS, RetainHandling, SubscribeOptions};
 use std::time::Duration;
 
-const TIMEOUT: Duration = Duration::from_secs(3);
+const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// `[MQTT-3.8.1-1]` SUBSCRIBE fixed header flags MUST be `0x02`.
 /// A raw SUBSCRIBE with flags `0x00` (byte `0x80`) must cause disconnect.
@@ -213,7 +213,6 @@ async fn subscribe_replaces_existing(sut: SutHandle) {
         .unwrap();
     let (_, rc2) = raw_sub.expect_suback(TIMEOUT).await.expect("SUBACK 2");
     assert_eq!(rc2[0], 0x01, "second subscribe should grant QoS 1");
-    tokio::time::sleep(Duration::from_millis(100)).await;
 
     let publisher = TestClient::connect_with_prefix(&sut, "sub-replace-pub")
         .await
@@ -355,7 +354,6 @@ async fn delivered_qos_is_minimum_sub0_pub1(sut: SutHandle) {
         .unwrap();
     let (_, rc) = raw_sub.expect_suback(TIMEOUT).await.expect("SUBACK");
     assert_eq!(rc[0], 0x00, "granted QoS should be 0");
-    tokio::time::sleep(Duration::from_millis(100)).await;
 
     let mut raw_publisher = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
@@ -400,7 +398,6 @@ async fn delivered_qos_is_minimum_sub1_pub2(sut: SutHandle) {
         .unwrap();
     let (_, rc) = raw_sub.expect_suback(TIMEOUT).await.expect("SUBACK");
     assert_eq!(rc[0], 0x01, "granted QoS should be 1");
-    tokio::time::sleep(Duration::from_millis(100)).await;
 
     let publisher = TestClient::connect_with_prefix(&sut, "pub-mq12")
         .await

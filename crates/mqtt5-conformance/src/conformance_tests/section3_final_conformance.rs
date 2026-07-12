@@ -8,7 +8,7 @@ use crate::raw_client::{RawMqttClient, RawPacketBuilder};
 use crate::sut::SutHandle;
 use std::time::Duration;
 
-const TIMEOUT: Duration = Duration::from_secs(3);
+const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// `[MQTT-3.1.3-11]` The Will Topic MUST be a UTF-8 Encoded String.
 /// Sending invalid UTF-8 bytes in the Will Topic must cause disconnect.
@@ -276,7 +276,6 @@ async fn qos2_no_message_expiry_after_publish_sent(sut: SutHandle) {
         .expect_suback(TIMEOUT)
         .await
         .expect("expected SUBACK");
-    tokio::time::sleep(Duration::from_millis(100)).await;
 
     let mut pub_raw = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await

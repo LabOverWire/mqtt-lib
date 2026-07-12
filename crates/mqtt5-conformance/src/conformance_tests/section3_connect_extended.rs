@@ -8,7 +8,7 @@ use crate::test_client::TestClient;
 use mqtt5_protocol::types::{ConnectOptions, SubscribeOptions};
 use std::time::Duration;
 
-const TIMEOUT: Duration = Duration::from_secs(3);
+const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// `[MQTT-3.1.2-14]` If Will Retain is set to 0, the Server MUST publish the
 /// Will Message as a non-retained message.
