@@ -450,6 +450,20 @@ impl BrokerConfig {
             ));
         }
 
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let mut seen_names = std::collections::HashSet::with_capacity(self.bridges.len());
+            for bridge in &self.bridges {
+                bridge.validate()?;
+                if !seen_names.insert(bridge.name.as_str()) {
+                    return Err(crate::error::MqttError::Configuration(format!(
+                        "duplicate bridge name '{}'",
+                        bridge.name
+                    )));
+                }
+            }
+        }
+
         Ok(self)
     }
 }
@@ -561,6 +575,25 @@ mod tests {
         config.max_packet_size = 1024;
         config.maximum_qos = 3;
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_invalid_bridge_rejected() {
+        use crate::broker::bridge::{BridgeConfig, BridgeDirection};
+        use crate::QoS;
+
+        let mut config = BrokerConfig::default();
+        config
+            .bridges
+            .push(BridgeConfig::new("bridge", "remote.broker:1883"));
+        assert!(config.validate().is_err());
+
+        config.bridges[0] = BridgeConfig::new("bridge", "remote.broker:1883").add_topic(
+            "sensors/#",
+            BridgeDirection::Out,
+            QoS::AtLeastOnce,
+        );
+        assert!(config.validate().is_ok());
     }
 
     #[test]
