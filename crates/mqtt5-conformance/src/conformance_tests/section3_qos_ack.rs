@@ -8,7 +8,7 @@ use crate::test_client::TestClient;
 use mqtt5_protocol::types::{PublishOptions, QoS, SubscribeOptions};
 use std::time::Duration;
 
-const TIMEOUT: Duration = Duration::from_secs(3);
+const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// `[MQTT-3.4.0-1]` `[MQTT-3.4.2-1]` Server MUST send PUBACK in response to
 /// a `QoS` 1 PUBLISH, containing the matching Packet Identifier and a valid

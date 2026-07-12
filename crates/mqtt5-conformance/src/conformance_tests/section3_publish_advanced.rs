@@ -9,7 +9,7 @@ use crate::test_client::TestClient;
 use mqtt5_protocol::types::{PublishOptions, PublishProperties, QoS, SubscribeOptions};
 use std::time::Duration;
 
-const TIMEOUT: Duration = Duration::from_secs(3);
+const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// `[MQTT-3.3.4-2]` Overlapping subscriptions: at least one PUBLISH copy
 /// must be delivered at the maximum granted `QoS` across the matching

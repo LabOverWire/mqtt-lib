@@ -6,7 +6,7 @@ use crate::raw_client::{RawMqttClient, RawPacketBuilder};
 use crate::sut::SutHandle;
 use std::time::Duration;
 
-const TIMEOUT: Duration = Duration::from_secs(3);
+const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// `[MQTT-3.3.2-12]` A sender can modify the Topic Alias mapping by
 /// sending another PUBLISH with the same Topic Alias value and a

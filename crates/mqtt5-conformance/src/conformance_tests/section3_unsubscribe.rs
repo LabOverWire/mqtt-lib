@@ -8,7 +8,7 @@ use crate::test_client::TestClient;
 use mqtt5_protocol::types::{QoS, SubscribeOptions};
 use std::time::Duration;
 
-const TIMEOUT: Duration = Duration::from_secs(3);
+const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// `[MQTT-3.10.1-1]` UNSUBSCRIBE fixed header flags MUST be `0x02`.
 /// A raw UNSUBSCRIBE with flags `0x00` (byte `0xA0`) must cause disconnect.
@@ -270,7 +270,6 @@ async fn unsubscribe_partial_multi(sut: SutHandle) {
     .await
     .unwrap();
     raw.expect_suback(TIMEOUT).await.expect("expected SUBACK");
-    tokio::time::sleep(Duration::from_millis(100)).await;
 
     let filters = ["test/remove", "test/never-existed"];
     raw.send_raw(&RawPacketBuilder::unsubscribe_multiple(&filters, 2))

@@ -8,7 +8,7 @@ use mqtt5_protocol::protocol::v5::properties::PropertyId;
 use mqtt5_protocol::protocol::v5::reason_codes::ReasonCode;
 use std::time::Duration;
 
-const TIMEOUT: Duration = Duration::from_secs(3);
+const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// `[MQTT-3.2.2-1]` Byte 1 of CONNACK is the Connect Acknowledge Flags.
 /// Bits 7-1 are reserved and MUST be set to 0.

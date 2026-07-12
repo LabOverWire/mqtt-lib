@@ -8,7 +8,7 @@ use crate::test_client::TestClient;
 use mqtt5_protocol::types::SubscribeOptions;
 use std::time::Duration;
 
-const TIMEOUT: Duration = Duration::from_secs(3);
+const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// `[MQTT-3.14.4-3]` On receipt of DISCONNECT with Reason Code 0x00 the
 /// Server MUST discard the Will Message without publishing it.

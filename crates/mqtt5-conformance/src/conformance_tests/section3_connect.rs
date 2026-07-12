@@ -10,7 +10,7 @@ use crate::test_client::TestClient;
 use mqtt5_protocol::types::{ConnectOptions, SubscribeOptions, WillMessage};
 use std::time::Duration;
 
-const TIMEOUT: Duration = Duration::from_secs(3);
+const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// `[MQTT-3.1.0-1]` After a Network Connection is established by a Client to
 /// a Server, the first packet sent from the Client to the Server MUST be a

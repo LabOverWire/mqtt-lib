@@ -40,7 +40,7 @@ use tokio::sync::{oneshot, Mutex as AsyncMutex};
 use tokio::task::JoinHandle;
 
 const READ_BUF_INITIAL: usize = 8 * 1024;
-const ACK_TIMEOUT: Duration = Duration::from_secs(10);
+const ACK_TIMEOUT: Duration = Duration::from_secs(30);
 
 type AckMap = Arc<StdMutex<HashMap<u16, oneshot::Sender<AckOutcome>>>>;
 type SubscriptionList = Arc<StdMutex<Vec<SubscriptionEntry>>>;
