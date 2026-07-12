@@ -175,6 +175,32 @@ async fn one_invalid_bridge_among_valid_ones_rejects_startup() {
 }
 
 #[tokio::test]
+async fn duplicate_bridge_names_reject_startup() {
+    let first = BridgeConfig::new("edge", "127.0.0.1:1883").add_topic(
+        "sensors/#",
+        BridgeDirection::Out,
+        QoS::AtLeastOnce,
+    );
+    let second = BridgeConfig::new("edge", "127.0.0.1:1884").add_topic(
+        "commands/#",
+        BridgeDirection::In,
+        QoS::AtLeastOnce,
+    );
+
+    let mut config = base_config();
+    config.bridges.push(first);
+    config.bridges.push(second);
+
+    let Err(err) = MqttBroker::with_config(config).await else {
+        panic!("two bridges sharing a name must abort startup, not silently drop one");
+    };
+    assert!(
+        err.to_string().contains("duplicate bridge name"),
+        "unexpected error: {err}"
+    );
+}
+
+#[tokio::test]
 async fn broker_without_bridges_starts_normally() {
     let (_addr, handle) = spawn_broker(base_config()).await;
     handle.abort();

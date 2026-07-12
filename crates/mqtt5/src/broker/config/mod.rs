@@ -451,8 +451,17 @@ impl BrokerConfig {
         }
 
         #[cfg(not(target_arch = "wasm32"))]
-        for bridge in &self.bridges {
-            bridge.validate()?;
+        {
+            let mut seen_names = std::collections::HashSet::with_capacity(self.bridges.len());
+            for bridge in &self.bridges {
+                bridge.validate()?;
+                if !seen_names.insert(bridge.name.as_str()) {
+                    return Err(crate::error::MqttError::Configuration(format!(
+                        "duplicate bridge name '{}'",
+                        bridge.name
+                    )));
+                }
+            }
         }
 
         Ok(self)
