@@ -164,7 +164,7 @@ The broker stamps two user properties on every PUBLISH: **x-mqtt-sender** (authe
 
 ### Bridge Manager
 
-Bridges create broker-to-broker connections where each bridge acts as a client to a remote broker. Topic mappings with prefix transformation control which messages flow in which direction, and loop prevention via bridge headers stops message cycles. Bridges support TLS/mTLS with AWS IoT integration and reconnect with exponential backoff.
+Bridges create broker-to-broker connections where each bridge acts as a client to a remote broker. Topic mappings with prefix transformation control which messages flow in which direction, and loop prevention via bridge headers stops message cycles. Bridges support TLS/mTLS with AWS IoT integration and reconnect with exponential backoff. Bridge configuration is validated as part of `BrokerConfig::validate`, so an invalid bridge (empty name, client ID, or topic mappings) aborts startup and is rejected on hot-reload rather than being silently ignored.
 
 ### Load Balancer (Server Redirect)
 

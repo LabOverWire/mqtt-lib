@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [mqtt5 0.37.1] - 2026-07-12
+
+### Fixed
+
+- **The broker now fails startup when a configured bridge is invalid, instead of logging an error and starting anyway.** Previously an invalid bridge (for example one with no topic mappings) was reported at `ERROR` level and then silently dropped, leaving a broker that looked healthy but was not bridging. `BrokerConfig::validate` now validates every entry in `bridges`, so `MqttBroker::with_config` rejects an invalid bridge before any listener binds, consistent with how every other broker subsystem (listeners, TLS, QUIC, storage, auth, cluster) fails fast on bad config. The same validation runs on the hot-reload path, so a reload carrying an invalid bridge is rejected and the previous configuration is retained (handled gracefully, no panic). Reported in discussion #102.
+
 ## [mqtt5 0.37.0] - 2026-07-11
 
 ### Added
