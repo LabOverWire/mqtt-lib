@@ -38,6 +38,13 @@
 
 ## Diary Entries
 
+### Retained message subscription identifier fix (issue #113)
+
+- **Bug**: broker did not attach the SUBSCRIBE Subscription Identifier to retained messages delivered at subscribe time. Live publications carried it (via `router::prepare_message`), but retained-at-subscribe delivery in `client_handler::subscribe::deliver_retained_for_filter` pushed the stored `PublishPacket` straight onto the client's own `publish_tx` channel, bypassing `prepare_message`.
+- **Spec**: `[MQTT-3.3.4-3]` / §3.3.2.3.8 — a message published as the result of a subscription that carried a Subscription Identifier must be sent with that identifier; retained messages sent because a new subscription matched are no exception.
+- **Fix**: thread `subscribe.properties.get_subscription_identifier()` into `deliver_retained_for_filter` and set it on each retained `PublishPacket` before queueing.
+- **Test**: `section3_subscribe::retained_message_carries_subscription_identifier` — publish a retained message, then subscribe with subscription identifier 42, assert the delivered retained message reports `subscription_identifiers == [42]`. Confirmed the test fails (`left: []`) without the fix and passes with it.
+
 ### Investigate post-SUBACK sleep(100ms) — safe to remove, but NOT the flake fix
 
 **Trigger**: CI flake on `puback_error_stops_retransmission [MQTT-4.4.0-2]` (external-broker job) — `Timeout("puback")`. Suspected the `tokio::time::sleep(Duration::from_millis(100))` placed right after each `expect_suback` was a race-guard smell.

@@ -81,8 +81,13 @@ impl ClientHandler {
                 self.track_flow_subscription(fid, &filter.filter).await;
             }
 
-            self.deliver_retained_for_filter(&filter.filter, &filter.options, is_new)
-                .await?;
+            self.deliver_retained_for_filter(
+                &filter.filter,
+                &filter.options,
+                subscribe.properties.get_subscription_identifier(),
+                is_new,
+            )
+            .await?;
 
             reason_codes.push(crate::packet::suback::SubAckReasonCode::from_qos(
                 QoS::from(granted_qos),
@@ -216,6 +221,7 @@ impl ClientHandler {
         &self,
         topic_filter: &str,
         options: &crate::packet::subscribe::SubscriptionOptions,
+        subscription_id: Option<u32>,
         is_new: bool,
     ) -> Result<()> {
         let should_send = match options.retain_handling {
@@ -240,6 +246,9 @@ impl ClientHandler {
                     "Queuing retained message for delivery"
                 );
                 msg.retain = true;
+                if let Some(id) = subscription_id {
+                    msg.properties.set_subscription_identifier(id);
+                }
                 let routable = RoutableMessage {
                     publish: msg,
                     target_flow: None,

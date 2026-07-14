@@ -331,6 +331,54 @@ async fn retain_handling_zero_sends_on_resubscribe(sut: SutHandle) {
     assert_eq!(msgs2[0].payload, b"retained-payload");
 }
 
+/// `[MQTT-3.3.4-3]` A retained message delivered as the result of a new
+/// subscription that carries a Subscription Identifier must be sent with that
+/// Subscription Identifier, exactly as for live publications.
+#[conformance_test(
+    ids = ["MQTT-3.3.4-3"],
+    requires = ["transport.tcp", "retain_available", "subscription_identifier_available"],
+)]
+async fn retained_message_carries_subscription_identifier(sut: SutHandle) {
+    let tag = unique_client_id("retsubid");
+    let topic = format!("test/retsubid/{tag}");
+
+    let publisher = TestClient::connect_with_prefix(&sut, "retsubid-pub")
+        .await
+        .unwrap();
+    let pub_opts = PublishOptions {
+        qos: QoS::AtMostOnce,
+        retain: true,
+        ..Default::default()
+    };
+    publisher
+        .publish_with_options(&topic, b"retained-payload", pub_opts)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let subscriber = TestClient::connect_with_prefix(&sut, "retsubid-sub")
+        .await
+        .unwrap();
+    let sub_opts = SubscribeOptions {
+        qos: QoS::AtMostOnce,
+        subscription_identifier: Some(42),
+        ..Default::default()
+    };
+    let subscription = subscriber.subscribe(&topic, sub_opts).await.unwrap();
+
+    assert!(
+        subscription.wait_for_messages(1, TIMEOUT).await,
+        "subscribing to a topic with an existing retained message must deliver it"
+    );
+    let msgs = subscription.snapshot();
+    assert_eq!(msgs[0].payload, b"retained-payload");
+    assert_eq!(
+        msgs[0].subscription_identifiers,
+        vec![42],
+        "[MQTT-3.3.4-3] retained message delivered at subscribe time must carry the subscription's Subscription Identifier"
+    );
+}
+
 /// `[MQTT-3.8.4-8]` The delivered `QoS` is the minimum of the published `QoS`
 /// and the subscription's granted `QoS`. Subscribe at `QoS` 0, publish at
 /// `QoS` 1 → delivered at `QoS` 0.
