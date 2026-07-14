@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [mqtt5 0.37.2] - 2026-07-13
+
+### Fixed
+
+- **The broker now includes the Subscription Identifier on retained messages delivered at subscribe time.** Previously, when a client subscribed with a Subscription Identifier to a topic that already had a retained message, the retained message was delivered without the identifier, because the retained-at-subscribe delivery path sent the stored PUBLISH straight to the client and bypassed the routing step that attaches the identifier to live publications. A retained message sent as the result of a matching subscription is a publication of that subscription, so per `[MQTT-3.3.4-3]` / §3.3.2.3.8 it must carry the subscription's Subscription Identifier; live delivery (publish-after-subscribe) already did. The identifier is now attached to each retained message before delivery, matching the live path and other brokers. Reported in issue #113.
+- **The broker now downgrades the QoS of retained messages delivered at subscribe time to the subscription's granted QoS.** The same retained-at-subscribe delivery path that bypassed the Subscription Identifier step also skipped the QoS downgrade that live publications receive, so a retained `QoS` 1 message delivered to a `QoS` 0 subscription was sent at `QoS` 1, violating `[MQTT-3.8.4-8]` (the delivered `QoS` is the minimum of the message's `QoS` and the subscription's granted `QoS`). Retained delivery now applies the same `effective_qos` downgrade as the live path.
+
 ## [mqtt5 0.37.1] - 2026-07-11
 
 ### Fixed

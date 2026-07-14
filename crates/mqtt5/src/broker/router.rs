@@ -817,7 +817,7 @@ impl MessageRouter {
         }
     }
 
-    fn effective_qos(publish_qos: QoS, sub_qos: QoS) -> QoS {
+    pub(crate) fn effective_qos(publish_qos: QoS, sub_qos: QoS) -> QoS {
         match (publish_qos, sub_qos) {
             (QoS::AtMostOnce, _) | (_, QoS::AtMostOnce) => QoS::AtMostOnce,
             (QoS::AtLeastOnce | QoS::ExactlyOnce, QoS::AtLeastOnce)

@@ -38,6 +38,21 @@
 
 ## Diary Entries
 
+### Retained message QoS downgrade fix (`[MQTT-3.8.4-8]`)
+
+- **Bug**: the same retained-at-subscribe path (`client_handler::subscribe::deliver_retained_for_filter`) that skipped the Subscription Identifier also skipped the QoS downgrade. Live delivery applies `MessageRouter::effective_qos(publish_qos, sub_qos)` inside `router::prepare_message`, but the retained path queued the stored `PublishPacket` at its own stored QoS. A retained `QoS` 1 message delivered to a `QoS` 0 subscription was sent at `QoS` 1.
+- **Verification**: counter-test — publish retained `QoS` 1, subscribe `QoS` 0, assert delivered QoS. Failed on the unfixed branch (`left: AtLeastOnce, right: AtMostOnce`); a `QoS` 0 control (retained `QoS` 0 → sub `QoS` 0) passed, ruling out a harness artifact. The live-path analogue `delivered_qos_is_minimum_sub0_pub1` already passed, confirming the two paths diverged.
+- **Spec**: `[MQTT-3.8.4-8]` — the delivered QoS is the minimum of the message's QoS and the subscription's granted QoS; retained messages delivered at subscribe time are no exception.
+- **Fix**: made `MessageRouter::effective_qos` `pub(crate)` and applied `msg.qos = effective_qos(msg.qos, options.qos)` in `deliver_retained_for_filter` before queueing, reusing the live-path logic rather than duplicating it.
+- **Test**: `section3_subscribe::retained_message_delivered_at_minimum_qos` — retained `QoS` 1, subscribe `QoS` 0, assert delivered `qos == AtMostOnce`. Existing `retained_v5_props_qos1_*` tests confirm `QoS` 1 → `QoS` 1 delivery is preserved (min(1,1)=1).
+
+### Retained message subscription identifier fix (issue #113)
+
+- **Bug**: broker did not attach the SUBSCRIBE Subscription Identifier to retained messages delivered at subscribe time. Live publications carried it (via `router::prepare_message`), but retained-at-subscribe delivery in `client_handler::subscribe::deliver_retained_for_filter` pushed the stored `PublishPacket` straight onto the client's own `publish_tx` channel, bypassing `prepare_message`.
+- **Spec**: `[MQTT-3.3.4-3]` / §3.3.2.3.8 — a message published as the result of a subscription that carried a Subscription Identifier must be sent with that identifier; retained messages sent because a new subscription matched are no exception.
+- **Fix**: thread `subscribe.properties.get_subscription_identifier()` into `deliver_retained_for_filter` and set it on each retained `PublishPacket` before queueing.
+- **Test**: `section3_subscribe::retained_message_carries_subscription_identifier` — publish a retained message, then subscribe with subscription identifier 42, assert the delivered retained message reports `subscription_identifiers == [42]`. Confirmed the test fails (`left: []`) without the fix and passes with it.
+
 ### Investigate post-SUBACK sleep(100ms) — safe to remove, but NOT the flake fix
 
 **Trigger**: CI flake on `puback_error_stops_retransmission [MQTT-4.4.0-2]` (external-broker job) — `Timeout("puback")`. Suspected the `tokio::time::sleep(Duration::from_millis(100))` placed right after each `expect_suback` was a race-guard smell.
