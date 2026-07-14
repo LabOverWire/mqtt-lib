@@ -379,6 +379,54 @@ async fn retained_message_carries_subscription_identifier(sut: SutHandle) {
     );
 }
 
+/// `[MQTT-3.8.4-8]` A retained message delivered at subscribe time must be sent
+/// at the minimum of the retained (published) `QoS` and the subscription's
+/// granted `QoS`, exactly as for live publications. Retained at `QoS` 1,
+/// subscribe at `QoS` 0 → delivered at `QoS` 0.
+#[conformance_test(
+    ids = ["MQTT-3.8.4-8"],
+    requires = ["transport.tcp", "retain_available", "max_qos>=1"],
+)]
+async fn retained_message_delivered_at_minimum_qos(sut: SutHandle) {
+    let tag = unique_client_id("retminqos");
+    let topic = format!("test/retminqos/{tag}");
+
+    let publisher = TestClient::connect_with_prefix(&sut, "retminqos-pub")
+        .await
+        .unwrap();
+    let pub_opts = PublishOptions {
+        qos: QoS::AtLeastOnce,
+        retain: true,
+        ..Default::default()
+    };
+    publisher
+        .publish_with_options(&topic, b"retained-payload", pub_opts)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let subscriber = TestClient::connect_with_prefix(&sut, "retminqos-sub")
+        .await
+        .unwrap();
+    let sub_opts = SubscribeOptions {
+        qos: QoS::AtMostOnce,
+        ..Default::default()
+    };
+    let subscription = subscriber.subscribe(&topic, sub_opts).await.unwrap();
+
+    assert!(
+        subscription.wait_for_messages(1, TIMEOUT).await,
+        "subscribing to a topic with an existing retained message must deliver it"
+    );
+    let msgs = subscription.snapshot();
+    assert_eq!(msgs[0].payload, b"retained-payload");
+    assert_eq!(
+        msgs[0].qos,
+        QoS::AtMostOnce,
+        "[MQTT-3.8.4-8] retained message delivered at subscribe time must be downgraded to min(pub=1, sub=0) = 0"
+    );
+}
+
 /// `[MQTT-3.8.4-8]` The delivered `QoS` is the minimum of the published `QoS`
 /// and the subscription's granted `QoS`. Subscribe at `QoS` 0, publish at
 /// `QoS` 1 → delivered at `QoS` 0.

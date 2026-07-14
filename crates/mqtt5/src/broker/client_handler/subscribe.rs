@@ -246,6 +246,7 @@ impl ClientHandler {
                     "Queuing retained message for delivery"
                 );
                 msg.retain = true;
+                msg.qos = crate::broker::router::MessageRouter::effective_qos(msg.qos, options.qos);
                 if let Some(id) = subscription_id {
                     msg.properties.set_subscription_identifier(id);
                 }
