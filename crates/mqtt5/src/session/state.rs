@@ -56,6 +56,13 @@ pub struct SessionState {
     unacked_publishes: Arc<RwLock<HashMap<u16, PublishPacket>>>,
     /// Unacknowledged PUBREL packets (`packet_id` -> timestamp)
     unacked_pubrels: Arc<RwLock<HashMap<u16, Instant>>>,
+    /// Inbound `QoS` 2 packet IDs we have PUBREC'd and owe a PUBCOMP for
+    /// (`packet_id` -> timestamp).
+    ///
+    /// Kept separate from `unacked_pubrels`: inbound and outbound packet IDs are
+    /// independent namespaces that both start at 1, so sharing one map lets an
+    /// outbound flow mask an inbound packet ID and silently drop a live message.
+    inbound_pubrecs: Arc<RwLock<HashMap<u16, Instant>>>,
     #[cfg(not(target_arch = "wasm32"))]
     publish_flows: Arc<RwLock<HashMap<u16, FlowId>>>,
     /// Session creation time
@@ -98,6 +105,7 @@ impl SessionState {
             config,
             unacked_publishes: Arc::new(RwLock::new(HashMap::new())),
             unacked_pubrels: Arc::new(RwLock::new(HashMap::new())),
+            inbound_pubrecs: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(not(target_arch = "wasm32"))]
             publish_flows: Arc::new(RwLock::new(HashMap::new())),
             created_at: now,
@@ -297,6 +305,7 @@ impl SessionState {
         self.message_queue.write().await.clear();
         self.unacked_publishes.write().await.clear();
         self.unacked_pubrels.write().await.clear();
+        self.inbound_pubrecs.write().await.clear();
         #[cfg(not(target_arch = "wasm32"))]
         self.publish_flows.write().await.clear();
     }
@@ -551,29 +560,30 @@ impl SessionState {
         self.unacked_publishes.write().await.remove(&packet_id);
     }
 
-    /// Store PUBREC for `QoS` 2 flow
-    pub async fn store_pubrec(&self, packet_id: u16) {
+    /// Records that PUBREC is owed for an inbound `QoS` 2 packet ID, reporting whether this
+    /// is the first receipt.
+    ///
+    /// The check and the insert share one write lock so concurrent readers (QUIC spawns one
+    /// task per stream, all sharing this session) cannot both observe a packet ID as new and
+    /// deliver it twice.
+    pub async fn mark_pubrec_pending(&self, packet_id: u16) -> bool {
         self.touch().await;
-        // For incoming QoS 2 messages, we need to track that we've sent PUBREC
-        // and are waiting for PUBREL. Store the packet ID with the current timestamp.
-        self.unacked_pubrels
+        self.inbound_pubrecs
             .write()
             .await
-            .insert(packet_id, Instant::now());
+            .insert(packet_id, Instant::now())
+            .is_none()
     }
 
-    /// Check if we have a stored PUBREC for the given packet ID
+    /// Check if we have a stored PUBREC for the given inbound packet ID
     pub async fn has_pubrec(&self, packet_id: u16) -> bool {
-        // Check if there's an unacked PUBREL with this packet ID
-        // For received QoS 2 messages, this indicates we sent PUBREC and are waiting for PUBREL
-        self.unacked_pubrels.read().await.contains_key(&packet_id)
+        self.inbound_pubrecs.read().await.contains_key(&packet_id)
     }
 
     /// Remove PUBREC state for the given packet ID (called when handling PUBREL)
     pub async fn remove_pubrec(&self, packet_id: u16) {
         self.touch().await;
-        // Remove the stored PUBREL state as we're completing the QoS 2 flow
-        self.unacked_pubrels.write().await.remove(&packet_id);
+        self.inbound_pubrecs.write().await.remove(&packet_id);
     }
 
     /// Store PUBREL for `QoS` 2 flow
@@ -1100,8 +1110,6 @@ mod tests {
         };
 
         session.store_unacked_publish(packet).await.unwrap();
-
-        session.store_pubrec(123).await;
         assert_eq!(session.get_unacked_publishes().await.len(), 1);
 
         // Complete PUBREC (removes publish, adds to pubrel)

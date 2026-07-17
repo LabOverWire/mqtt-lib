@@ -371,33 +371,72 @@ mod unacked_message_tests {
         }
 
         #[test]
-        fn prop_qos2_state_transitions(
+        fn prop_qos2_outbound_state_transitions(
             packet_id in valid_packet_id()
         ) {
             let rt = tokio::runtime::Runtime::new().unwrap();
             rt.block_on(async {
                 let session = SessionState::new("client1".to_string(), SessionConfig::default(), true);
 
-                // QoS 2 flow: PUBLISH -> PUBREC -> PUBREL -> PUBCOMP
+                // Outbound QoS 2: we PUBLISH -> peer PUBRECs -> we PUBREL -> peer PUBCOMPs
                 let packet = publish_packet(packet_id, QoS::ExactlyOnce);
 
-                // Step 1: Store PUBLISH
                 session.store_unacked_publish(packet).await.unwrap();
                 prop_assert!(!session.get_unacked_publishes().await.is_empty());
 
-                // Step 2: Receive PUBREC, store it
-                session.store_pubrec(packet_id).await;
+                // PUBREC received: the publish is retired and we owe a PUBREL
+                session.complete_pubrec(packet_id).await;
+                session.store_pubrel(packet_id).await;
+                prop_assert!(session.get_unacked_publishes().await.is_empty());
+                prop_assert_eq!(session.get_unacked_pubrels().await.len(), 1);
+
+                // PUBCOMP received: flow complete
+                session.complete_pubrel(packet_id).await;
+                prop_assert!(session.get_unacked_pubrels().await.is_empty());
+
+                Ok(())
+            })?;
+        }
+
+        #[test]
+        fn prop_qos2_inbound_state_transitions(
+            packet_id in valid_packet_id()
+        ) {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async {
+                let session = SessionState::new("client1".to_string(), SessionConfig::default(), true);
+
+                // Inbound QoS 2: peer PUBLISHes -> we PUBREC -> peer PUBRELs -> we PUBCOMP
+                prop_assert!(session.mark_pubrec_pending(packet_id).await);
                 prop_assert!(session.has_pubrec(packet_id).await);
 
-                // Step 3: Send PUBREL, track it
-                session.complete_publish(packet_id).await;
+                // A redelivery of the same packet id is not a first receipt
+                prop_assert!(!session.mark_pubrec_pending(packet_id).await);
+
+                // PUBREL received: flow complete, id released
+                session.remove_pubrec(packet_id).await;
+                prop_assert!(!session.has_pubrec(packet_id).await);
+
+                Ok(())
+            })?;
+        }
+
+        #[test]
+        fn prop_qos2_directions_do_not_collide(
+            packet_id in valid_packet_id()
+        ) {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async {
+                let session = SessionState::new("client1".to_string(), SessionConfig::default(), true);
+
+                // Inbound and outbound packet ids are independent namespaces that both
+                // allocate from 1, so the same id may be live in each direction at once.
                 session.store_pubrel(packet_id).await;
 
-                // Step 4: Receive PUBCOMP, complete flow
-                session.complete_pubrel(packet_id).await;
-
-                // Verify cleanup
-                prop_assert!(!session.has_pubrec(packet_id).await);
+                prop_assert!(
+                    session.mark_pubrec_pending(packet_id).await,
+                    "an outbound PUBREL must not make an inbound packet id look already-seen"
+                );
 
                 Ok(())
             })?;

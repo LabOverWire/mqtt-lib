@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [mqtt5 0.38.0] - 2026-07-15
+
+### Removed
+
+- **BREAKING: removed the `mqtt5::tasks` module.** It exposed `packet_reader_task`, `keepalive_task`, and `handle_incoming_packet` — a parallel, skeletal client loop that predates `client::direct` and was never wired into the crate at any point in its history. It was public and callable, and was the crate's only public low-level packet-handling entry point, but it had drifted badly from the real implementation and was actively wrong: it delivered duplicate `QoS` 2 messages to the application, applied no inbound flow control (Receive Maximum was unenforced), never decoded payloads through the codec registry, never populated `stream_id`, and treated PINGRESP as a no-op so `keepalive_task` could never detect a dead peer. Keeping it would have meant maintaining a second copy of the crate's most delicate code with no users and no meaningful tests. Use `MqttClient`, which handles all of the above correctly.
+- **BREAKING: removed `SessionState::store_pubrec`.** It is superseded by `SessionState::mark_pubrec_pending`, which performs the same insert and additionally reports whether the packet ID was already present. Its name was also ambiguous about direction — it read as "store the PUBREC we received" (outbound) while it meant "record the PUBREC we sent" (inbound).
+
+### Fixed
+
+- **The client no longer delivers a duplicate `QoS` 2 PUBLISH to the application a second time.** On receiving a PUBLISH whose packet ID already had an outstanding PUBREC, the client re-ran the whole inbound path and dispatched the message to the application again, so the exactly-once guarantee of `[MQTT-4.3.3]` held on the wire but not at the application boundary. This surfaces whenever two PUBLISH packets for the same packet ID arrive before the handshake advances (for example a redelivery after a lost PUBREC, or a session-resume redelivery). Per §4.3.3 "Method A", the receiver must re-send PUBREC for a duplicate but must not re-deliver the Application Message; the client now records its inbound PUBREC state and delivers only on first receipt, while still re-sending PUBREC so the handshake completes. The check and the state update share a single write lock, so the guard also holds under QUIC, which runs one reader task per stream against a shared session. Reported in issue #112.
+- **An outbound `QoS` 2 flow can no longer mask an inbound message and cause it to be dropped.** Inbound and outbound `QoS` 2 state shared one map keyed by packet ID, but MQTT packet IDs are independent per direction and both sides allocate from 1. A client that both published and subscribed at `QoS` 2 could therefore have an outbound PUBREL for packet ID *n* make a genuine inbound PUBLISH for packet ID *n* look like a duplicate, silently discarding a live message. Inbound PUBREC state is now tracked separately from outbound PUBREL state, and is cleared with the rest of the session state.
+- **Inbound `QoS` 2 messages no longer leak into the outbound retransmission store.** The inbound path stored each received `QoS` 2 PUBLISH into the map used for outbound in-flight publishes, where nothing on the inbound path ever removed it, so every inbound `QoS` 2 message retained a full copy of its payload for the life of the session and was reported in `SessionStats::unacked_publish_count`. Because that map is also keyed by packet ID, an inbound message could overwrite a pending outbound publish with the same ID, and an outbound PUBACK/PUBREC could evict the inbound entry. The store served no purpose: delivery happens on first receipt, so the payload is never needed again. It has been removed.
+
+### Changed
+
+- `SessionStats::unacked_pubrel_count` now counts only outbound PUBRELs awaiting PUBCOMP. It previously also included inbound `QoS` 2 packet IDs awaiting PUBREL, because both shared one map.
+- The `test_maximum_packet_size` integration test now configures the limit on the broker instead of the client. It had asserted that a client's own Maximum Packet Size restricts what that client may publish — the behaviour deliberately removed in mqtt5-protocol 0.14.2, since a client's Maximum Packet Size governs what it will *receive*. The test had been failing since that change and went unnoticed because the CI test step runs only `--lib --bins`. It now sets the broker's `max_packet_size`, which is what actually bounds an outbound PUBLISH, and asserts the publish fails with `PacketTooLarge`.
+
 ## [mqtt5 0.37.2] - 2026-07-13
 
 ### Fixed

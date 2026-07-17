@@ -98,10 +98,16 @@ command = "cargo"
 args = ["test", "--lib", "--bins", "--verbose"]
 description = "Run only unit tests and binary tests (excludes integration tests)"
 
+[tasks.test-integration]
+dependencies = ["build-cli"]
+command = "cargo"
+args = ["test", "-p", "mqtt5", "--tests", "--verbose"]
+description = "Run every mqtt5 integration test in tests/. test-fast is --lib --bins only, so it cannot see integration regressions; this is what the gate runs."
+
 [tasks.test-quic]
 command = "cargo"
 args = ["test", "--test", "broker_quic_integration", "--features", "transport-quic", "--verbose"]
-description = "Run QUIC integration tests"
+description = "Run only the QUIC integration tests (subset of test-integration; transport-quic is a default feature)"
 
 [tasks.test-cli]
 dependencies = ["build-cli"]
@@ -133,7 +139,15 @@ command = "cargo"
 args = ["check"]
 
 [tasks.ci-verify]
-dependencies = ["fmt-check", "clippy", "wasm-clippy", "build", "test-fast", "test-cli"]
+dependencies = [
+    "fmt-check",
+    "clippy",
+    "wasm-clippy",
+    "build",
+    "test-fast",
+    "test-integration",
+    "test-cli",
+]
 description = "Run all CI checks locally - MUST pass before pushing"
 
 [tasks.pre-commit]

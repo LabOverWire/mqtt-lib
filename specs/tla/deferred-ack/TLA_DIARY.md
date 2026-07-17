@@ -110,6 +110,289 @@ Related: issue #112 (QoS2 duplicate-delivery bug, filed), author reply pasted on
 
 ## Log (newest first)
 
+### 2026-07-15 — Stage 7: Option B FIXES the wedge but RE-ARMS the reordering hazard
+`DeferredAckQuicStreams.tla` + 3 cfgs. Models inbound QoS2 over QUIC where ONE logical flow spans
+TWO independently-ordered streams: PUBLISH + PUBREC on the server-initiated DATA stream (client
+writes its ack to the stream the PUBLISH arrived on, `reader.rs:498`), PUBREL + PUBCOMP on the
+CONTROL stream (`publish.rs:515`). CONSTANT `BrokerReadsDataStream` = current code (FALSE) vs
+Option B (TRUE).
+
+**Result 1 — `_current.cfg` (FALSE): `InvHandshakeCanComplete` VIOLATED.** Client delivers the
+message and sends PUBREC; PUBREC is discarded (no reader on the server-opened stream's recv half);
+broker sits in `awaitPubrec` FOREVER. The QoS2 wedge, formally reproduced. Confirms the quorum's
+code trace.
+
+**Result 2 — `_optionb.cfg` (TRUE, MaxSends=2): `InvNoDuplicateDelivery` VIOLATED.** THIS IS THE
+IMPORTANT ONE. Option B fixes the wedge and thereby **RE-ARMS the exact cross-stream reordering
+hazard I hypothesised and the quorum refuted**. 6-step trace:
+  1-2. Broker sends PUBLISH then a DUP → two in flight on the data stream
+  3. Client delivers (deliveryCount=1), sets pubrecSent, sends PUBREC — **DUP still in flight**
+  4. Broker reads PUBREC (only possible under Option B!) → sends PUBREL on the CONTROL stream
+  5. Client processes PUBREL → **pubrecSent=FALSE** — dedup state cleared
+  6. The stranded DUP arrives → looks like a first receipt → **deliveryCount=2**
+
+**Result 3 — `_optionb_nodup.cfg` (TRUE, MaxSends=1): ok.** Cause isolated: the hazard needs an
+**in-connection DUP retransmit on the data stream**. The quorum established none exists today (the
+only DUP is `resend_inflight_messages` on session resume, and it goes over the CONTROL stream at
+`publish.rs:790`).
+
+**CONCLUSION — the quorum's refutation and my hypothesis were BOTH right, about different worlds.**
+The refutation was correct *for current code* (no in-connection retransmit ⇒ unreachable). My
+hypothesis was correct *for the design*: **delete-on-PUBREL is unsound under a two-stream topology
+whenever a DUP can traverse the data stream.** Today it is saved only by the accident that no
+retransmit timer exists AND that `publish.rs:790` bypasses `write_publish_bytes` to use the control
+stream — a line the earlier entry already flagged as looking ACCIDENTAL. Two independent accidents
+are the only thing standing between us and duplicate delivery.
+
+**DESIGN CONSEQUENCE for Option B (do NOT skip):** shipping Option B alone leaves a landmine — the
+first person to add a retransmit timer, or to "tidy" `publish.rs:790` onto the strategy-aware path,
+silently re-introduces duplicate delivery with no test to catch it. Option B must therefore be
+paired with ONE of:
+  (a) do not clear the inbound dedup marker on PUBREL — retain completed packet ids until the id is
+      provably released (costs memory; needs a bound);
+  (b) guarantee a DUP PUBLISH always travels the SAME stream as the PUBREL that releases it (i.e.
+      route retransmissions over the control stream **by contract, not by accident**, and assert it);
+  (c) carry ack routing in the model of record and add a regression test that a DUP arriving after
+      PUBREL is not re-delivered.
+Recommend (b) + (c): cheapest, matches today's de-facto behaviour, and turns an accident into an
+invariant. Re-run `_optionb.cfg` at MaxSends=2 after implementing — it must go green.
+
+Also still open from API_DESIGN §3.1: it assumes ONE writer for the AckToken's ack. Under QUIC
+there are **N writers** (one per stream) and the token must ack on the stream its PUBLISH arrived
+on. Option B is exactly the machinery that makes that possible — deferred ack and the QUIC ack-
+routing fix are coupled and must land together.
+
+### 2026-07-15 — `main` was silently RED for 6 days; CI cannot see integration tests
+Running the FULL suite (not `--lib`) surfaced `test_maximum_packet_size`
+(`integration_mqtt5_features.rs`) failing. Proved it **pre-existing** by stashing all my work and
+re-running on clean HEAD — fails identically. Then found the real story:
+
+**It is NOT a regression — it is an OBSOLETE TEST asserting behaviour that was deliberately
+removed.** The test set the *client's* `maximum_packet_size = 1024` and asserted its own 2KB
+publish failed. But **mqtt5-protocol 0.14.2 / mqtt5 0.36.1 (2026-07-09)** deliberately changed
+exactly this: "`effective_maximum_packet_size` no longer clamps outbound packets by the client's
+own inbound limit … the client's Maximum Packet Size is what it will *receive*, not what it may
+*send*". Code confirms: `effective_maximum_packet_size` returns the SERVER's limit when present,
+falling back to the client's only if the server advertises none — and the broker DOES advertise
+one (`broker/client_handler/connect.rs:394`), defaulting to 268_435_456 (`config/mod.rs:203`).
+So server 256MB wins, client's 1024 correctly ignored, 2KB publish succeeds, `assert!(is_err())`
+fails. The test should have been updated in that PR and wasn't.
+
+**Rewrote it** to test the real semantics: configure the BROKER via
+`TestBroker::start_with_config(BrokerConfig::default().with_max_packet_size(1024))`, assert an
+oversized publish fails locally with `MqttError::PacketTooLarge`. **Validated with a negative
+control**: raising the broker limit to 64KB makes it FAIL (publish succeeds); back to 1024, it
+passes. So it genuinely exercises the limit rather than passing vacuously.
+
+**RESOLVED — integration tests added to the gate.** New `test-integration` task
+(`cargo test -p mqtt5 --tests`, deps `build-cli` since `cli_functionality.rs` lives in
+`crates/mqtt5/tests/`), wired into `ci-verify` and `.github/workflows/rust.yml`. It SUBSUMES the
+old `test-quic` step (`broker_quic_integration.rs` is in the same dir and `transport-quic` is a
+default feature), so that step was replaced rather than added to.
+Measured cost, warm cache: old gate step `test-quic` = **73s**; new `test-integration` = **188s**
+⇒ **+115s (~2 min) per PR commit**. NOTE: I first told the maintainer "+30s" — WRONG. 90s was
+*test execution*; the real driver is **linking 37 test binaries**. Corrected before the decision
+was final. The 60s outlier is `broker_quic_integration` (19 tests) — already paid by today's gate.
+Maintainer's call: keep full integration on every PR commit.
+
+**THE SYSTEMIC FINDING — the CI gate could not see integration tests.**
+`.github/workflows/rust.yml:89` runs `cargo make test-fast` = `cargo test --lib --bins`
+(`Makefile.toml:98`), and `ci-verify` (`:136`) depends on the same `test-fast`. **`tests/` is
+never run by the PR gate.** Only `dependencies.yml` runs `cargo test --all-features`, and it is
+not the gate. Consequences seen in one session:
+- an obsolete test rotted red on `main` for 6 days unnoticed;
+- my own red property test (previous entry) sailed past `cargo test --lib`.
+This is why "it passes" meant nothing. **Always run the integration targets before claiming
+green.** Worth its own issue: make the PR gate run integration tests.
+
+### 2026-07-15 — `mqtt5::tasks` REMOVED (0.38.0) + verification quorum caught 6 problems in my work
+Quorum-confirmed `mqtt5::tasks` should go (2 analysts + the MQDB check), then removed it. A
+SECOND verification quorum on my own removal found **6 problems, one of them a red test I had
+already declared green**. Recording all of it.
+
+**Why removal (settled):** internally dead (zero refs workspace-wide); **never wired up in the
+crate's entire history** (`git log --all -S"tasks::"` empty across all branches; born in initial
+commit `e340249`); **MQDB — the one real downstream consumer — does not use it** (checked
+`/Volumes/SanDisk 4TB/repos/mqdb`: 0 hits; it imports broker/types/client/time/telemetry only,
+and is pinned at mqtt5 0.35.1 anyway). My premise that it was *uncallable* was **REFUTED** — both
+analysts compiled an external crate against it; all param types are public and constructible. The
+real argument is the inverse: **`mod direct;` is private (`client/mod.rs:27`), so `tasks` was the
+only public low-level packet path — and it was the broken one.** ~10 divergences incl. duplicate
+QoS2 delivery, no flow control, no codec decode, no stream_id, PINGRESP no-op (keepalive could
+never detect a dead peer), vacuous tests.
+
+**PROBLEMS THE VERIFICATION QUORUM FOUND IN MY OWN WORK (all fixed):**
+1. **RED TEST I shipped.** `tests/session_state_property_tests.rs::prop_qos2_state_transitions`
+   FAILED. It modelled the OUTBOUND flow but called the INBOUND accessor `store_pubrec`; once the
+   maps split, `complete_pubrel` no longer cleared it. **My `cargo test --lib` was a FALSE GREEN.**
+2. **`cargo make ci-verify` IS ALSO BLIND TO THIS.** `Makefile.toml:136` ci-verify → `test-fast`
+   = `cargo test --lib --bins` (`:98`) — **excludes `tests/`**. The repo's own gate would not have
+   caught it. `.github/workflows/rust.yml` runs the same. **Never trust `--lib` alone again; run
+   the integration targets.**
+3. **FALSE CHANGELOG CLAIM.** I wrote that the dedup check "previously took separate locks",
+   implying a fixed race. **There was no check in 0.37.2 at all** — it dispatched unconditionally.
+   I invented a prior bug. Reworded to state the new code's guarantee instead.
+4. **Dependent versions not bumped.** cli 0.28.3 / wasm 1.4.3 must bump (0.28.4 / 1.4.4) — 6 of 7
+   prior minor releases did so, and `.github/workflows/release.yml:35,43` uses
+   `cargo publish || echo "Version already published, skipping"`, so **the release would have
+   silently shipped nothing for them and left them pinned to mqtt5 0.37 forever.**
+5. **`ARCHITECTURE.md:46` still advertised the module** (I only fixed the `:110` diagram). It also
+   miscredited `tasks` with "reconnection" it never had.
+6. **The split was INCOMPLETE — same bug class I claimed to fix.** `ack_qos2_inbound` stored the
+   INBOUND publish into `unacked_publishes`, the OUTBOUND retransmit map: collides on packet id
+   AND **leaked a full payload per inbound QoS2 message** (nothing on the inbound path removed
+   it). Deleted the store entirely — Method A delivers on first receipt, so the payload is never
+   needed again.
+
+Also: `store_pubrec` became orphaned (zero production callers; superseded by
+`mark_pubrec_pending`) and its name was direction-ambiguous — **that ambiguity is exactly what
+caused problem 1**. Removed it (BREAKING, documented). Rewrote the property test into three:
+outbound transitions, inbound transitions, and `prop_qos2_directions_do_not_collide`.
+
+Released as **0.38.0** (breaking: `pub mod tasks` + `SessionState::store_pubrec` removed), with
+CHANGELOG Removed/Fixed/Changed entries incl. the `SessionStats::unacked_pubrel_count` semantic
+change.
+
+**LESSON (the important one):** I ran a quorum on the *investigation* and it saved me; I did NOT
+run one on my *own implementation* until told to — and it found a red test, a false changelog
+claim, and an incomplete fix. Verify your own work as adversarially as you verify code you are
+reviewing. Also: give parallel agents separate scratch dirs (two agents collided in a shared
+scratchpad during the tasks investigation).
+
+Still open (noted, not fixed): `flow_control.rs:86` checks `len() >= max` before insert with no
+`contains_key` guard, so at exactly receive_maximum a legitimate DUP of an already-tracked id
+returns `ReceiveMaximumExceeded` → connection teardown, making the duplicate path unreachable at
+capacity. Pre-existing; latent today only because `inbound_receive_maximum` is hardcoded 65535
+(`set_inbound_receive_maximum` is never called). Goes live the moment deferred-ack wires up a
+bounded window (API_DESIGN §3.3). Also `handle_pubrel`'s if/else branches are identical apart
+from `remove_pubrec`.
+
+### 2026-07-15 — Stage 6 DONE + shared-map bug FIXED (`inbound_pubrecs`)
+`DeferredAckBidir.tla` + `_shared.cfg` / `_separate.cfg`. Models BOTH QoS2 directions with
+independent packet-id spaces (MaxId=1 suffices — the collision is on the SAME id). CONSTANT
+`SharedMap` selects current-code vs fix. Key operator:
+`EffectiveInbound == IF SharedMap THEN inboundKeys \cup pubrelKeys ELSE inboundKeys` — i.e. with
+one map the inbound dedup check also sees OUTBOUND PUBREL state.
+
+Results:
+- `_shared.cfg` (current code): **invariant_violation** `InvNoSuppressedFirstDelivery` in 3
+  steps — OutboundPublish(1) → OutboundRecvPubrec(1) [pubrelKeys={1}] → InboundPublish(1) →
+  `deliveryCount` stays **0**, `wronglySuppressed={1}`. A genuine first receipt, judged a
+  duplicate, never delivered. **Silent message loss reproduced formally.**
+- `_separate.cfg` (fix): **ok**, 20 states, full space exhausted.
+
+**The model's FIRST CUT WAS WRONG and the checker caught me.** My initial `InvNoDuplicateDelivery`
+conflated "same message redelivered" with "packet id REUSED for a new message after the handshake
+completed". It reported a false violation on the FIXED variant (deliver → PUBREL → deliver again).
+Legitimate id reuse is exactly what the Rust test
+`qos2_packet_id_is_deliverable_again_after_the_handshake_completes` asserts. Fixed by adding
+`inboundCompleted` and barring re-publish after completion. LESSON: had I trusted that "failure"
+I'd have concluded the fix was broken and chased a non-bug. Always ask whether a counterexample
+is a real defect or a modelling artifact — Stage 3 avoided this only because its server state
+machine implicitly forbade the re-send.
+
+**Rust fix applied:** new `inbound_pubrecs: Arc<RwLock<HashMap<u16, Instant>>>` on `SessionState`,
+separate from `unacked_pubrels`. Repointed the four INBOUND accessors (`store_pubrec`,
+`mark_pubrec_pending`, `has_pubrec`, `remove_pubrec`) at it. Left the OUTBOUND ones
+(`store_unacked_pubrel` / `remove_unacked_pubrel` / `get_unacked_pubrels` / `store_pubrel` /
+`complete_pubrel`) on `unacked_pubrels`. Also added `inbound_pubrecs` to `clear()` — without it
+inbound dedup state would survive a session clear and suppress live messages on a fresh session
+(a bug the fix would otherwise have introduced).
+Verified caller classification: `tasks.rs:153` store_pubrec = inbound ✓, `tasks.rs:192`
+store_pubrel = outbound ✓.
+
+New Rust regression test `outbound_pubrel_does_not_mask_an_inbound_packet_id`, validated by
+reverting the fix: fails `left: 0, right: 1` (never delivered = silent loss). 437 lib tests pass,
+clippy pedantic clean.
+
+**NEW FINDING — `mqtt5::tasks` is a second inbound QoS2 path with the SAME #112 bug.**
+`crates/mqtt5/src/tasks.rs` is `pub mod` (lib.rs:194) with `pub async fn packet_reader_task`, but
+**nothing internal references it** (the mqtt5-wasm hits are its own separate modules). Its
+`handle_publish` (`tasks.rs:113`) sends PUBREC then calls `route_message` (`:164`)
+UNCONDITIONALLY — no dedup guard. So it is public-but-internally-dead API carrying the bug.
+Decide: fix the guard there too, or remove the module (breaking change — it is public API).
+NOT yet addressed.
+
+### 2026-07-15 — QUORUM ON QUIC: my reordering hypothesis REFUTED; two real bugs found instead
+Ran a 3-analyst quorum (2 independent + 1 adversarial) over the QUIC QoS2 path after the
+maintainer noted I overlook things. It refuted my central hypothesis AND found a bug in my own
+fix. Most important entry in this diary.
+
+**1. My cross-stream reordering hypothesis: REFUTED (3/3).** I claimed PUBLISH-on-data-stream +
+PUBREL-on-control-stream lets a DUP PUBLISH be processed after PUBREL, defeating
+delete-on-PUBREL dedup. Wrong, on three independent grounds:
+- The ONLY DUP PUBLISH is `resend_inflight_messages` (`publish.rs:782`), called solely from
+  `connect.rs:154` on **session resume**, and it writes via `self.transport.write`
+  (`publish.rs:790`) = **control stream** — same stream as PUBREL ⇒ ordered.
+- There is **no in-connection retransmit timer** anywhere (QUIC streams are already reliable).
+- Causality: PUBREL only follows PUBREC, which only follows the PUBLISH.
+⇒ delete-on-PUBREL is sound here. **FRAGILE CAVEAT:** this rests on `publish.rs:790` bypassing
+the strategy-aware `write_publish_bytes`, which looks ACCIDENTAL. "Tidying" that line would make
+the hazard real. Watch it.
+
+**2. Stage 3's justification was WRONG though its conclusion survives.** `DeferredAckQoS2.tla`'s
+header says `s2c` is ordered "because MQTT runs over TCP". False — this library supports QUIC
+with multiple streams. Ordering holds for a DIFFERENT reason (DUP travels the control stream).
+Right answer, wrong reason. Do not trust that header.
+
+**3. A REAL bug in my own #112 fix (independently verified): shared `unacked_pubrels`.**
+`store_pubrel` (`state.rs:595`, called from `handle_pubrec_outgoing` `handlers.rs:274` — the
+OUTBOUND direction) writes to the SAME `unacked_pubrels` map the INBOUND dedup
+(`mark_pubrec_pending`/`has_pubrec`/`remove_pubrec`) uses. MQTT packet ids are **independent per
+direction** and both allocators start at 1 (`packet_id.rs:21`, `client_handler/mod.rs:165`).
+So: we publish QoS2 id 5 → PUBREC → `store_pubrel(5)` occupies the map → an inbound QoS2 PUBLISH
+id 5 → `mark_pubrec_pending(5)` sees `insert` return `Some` → judged Duplicate → **dispatch
+suppressed → message silently LOST**. My fix would have turned a duplicate-delivery bug into a
+message-LOSS bug. Fix: the inbound dedup needs its OWN map.
+
+**MODEL BLIND SPOT:** `DeferredAckQoS2.tla` models only the INBOUND direction. No outbound flow
+⇒ no second packet-id space ⇒ the collision is structurally unrepresentable. The model COULD NOT
+have found this. ⇒ Stage 6.
+
+**4. A bigger, separate bug: QoS>0 broker→client delivery over QUIC is BROKEN by default.**
+- `ServerStreamManager` opens bi streams (`server_stream_manager.rs:80/133/174`) and drops the
+  recv half (`let (mut send, _recv) = ...open_bi()`). **No reader exists over them anywhere.**
+- quinn 0.11.11 `RecvStream::drop` → `stop(0)` (`recv_stream.rs:534`) = **STOP_SENDING(0)**, so
+  the client's PUBACK/PUBREC write actively FAILS (not silently discarded).
+- The ack is `?`-propagated BEFORE dispatch (`handlers.rs:74`/`:81` vs `:99`) ⇒ the message
+  **never reaches the application**; `reader.rs:515` then breaks the reader task. Under
+  `PerTopic` the topic stream is cached ⇒ **every later message on that topic, incl. QoS0, is
+  lost for the rest of the connection.**
+- `ServerDeliveryStrategy::PerTopic` is the **unconditional default** (`config/transport.rs:9`).
+  No QoS gate, no opt-in, no fallback except `ControlOnly`.
+- Intent is explicit: `write_on_ephemeral_stream` picks `open_uni()` for QoS0 but `open_bi()`
+  for QoS>0 — it MEANS to receive acks — then discards the read half.
+
+**TLA+ COULD NOT HAVE CAUGHT #4.** Models assume channels deliver; "opened a bi stream and threw
+away the read half" is a wiring defect below the abstraction line. Code reading found it.
+Remember this when judging what modelling buys.
+
+**5. Why nothing caught this: the test suite cannot see it.**
+- `MqttClient::subscribe()` defaults to **QoS0** (`SubscribeOptions::default()`), so every QUIC
+  test silently downgrades broker→client delivery to QoS0.
+- The only QoS>0 QUIC subscribe tests (`quic_integration.rs:123,177`) are `#[ignore]` AND target
+  an external EMQX broker — they never run, never touch our broker.
+- Many QUIC tests early-`return` on connect failure ⇒ **vacuous passes**.
+- `test_quic_mixed_qos_with_streams` asserts `received >= 2` of 3 ⇒ passes if a message is
+  dropped AND if one is delivered twice. Structurally incapable of catching this.
+
+**DECISIONS (maintainer):** fold the QUIC fix into this branch even though it is a different bug
+— not shipping an incomplete fix. QUIC fix shape = **Option B**: broker spawns a reader over the
+recv half of each server-opened stream (preserves the multi-stream / MQoQ head-of-line benefit).
+Option A (route QoS>0 over the control stream) rejected: it defeats per-topic streams for
+exactly the traffic that benefits most.
+
+Branch topology: `fix-qos2-duplicate-delivery` rebased onto `deferred-ack-spec` so the model and
+the fix it justifies travel together.
+
+**PLAN:**
+- [x] Stage 6 — DONE, see entry below.
+- [x] Fix: inbound-only dedup map (`inbound_pubrecs`) — DONE, see entry below.
+- [ ] Stage 7 — model the Option B topology: PUBLISH on data stream + ack on data stream +
+      PUBREL on control stream; re-check dedup invariants under genuine multi-stream.
+- [ ] Implement Option B in the broker.
+- [ ] Tests exercising QoS>0 over QUIC (close the coverage hole).
+
 ### 2026-07-14 — API_DESIGN.md written: model → Rust API mapping. Awaiting review.
 All modelling stages done, so derived the Rust API from the verified properties and wrote
 `API_DESIGN.md` (property → API obligation table, the API itself, implementation traps, explicit

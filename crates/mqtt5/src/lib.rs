@@ -190,8 +190,6 @@ pub mod codec;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod crypto;
 pub mod session;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod tasks;
 pub mod telemetry;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod test_utils;
