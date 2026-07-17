@@ -247,6 +247,12 @@ impl ServerStreamManager {
         Ok(())
     }
 
+    /// Delivers a PUBLISH on a fresh, uncached server flow.
+    ///
+    /// `QoS0` needs no ack, so a one-way flow suffices. `QoS>0` must be able to receive
+    /// PUBACK/PUBREC on the same flow (`MQoQ` 9.1.2), hence a bidirectional stream whose recv
+    /// half is read for the life of the flow. The reader is detached because an ephemeral
+    /// stream is not cached; it ends when the peer closes or errors.
     async fn write_on_ephemeral_stream(
         &mut self,
         topic: &str,
@@ -255,10 +261,6 @@ impl ServerStreamManager {
     ) -> Result<()> {
         let flow_id = self.flow_id_generator.next_server();
 
-        // QoS0 needs no ack, so a one-way flow suffices. QoS>0 must be able to receive
-        // PUBACK/PUBREC on the same flow (MQoQ 9.1.2), hence a bidirectional stream whose
-        // recv half is read for the life of the flow. The reader is detached because an
-        // ephemeral stream is not cached; it ends when the peer closes or errors.
         let mut send = if qos == QoS::AtMostOnce {
             self.connection.open_uni().await.map_err(|e| {
                 MqttError::ConnectionError(format!("failed to open server QUIC stream: {e}"))
