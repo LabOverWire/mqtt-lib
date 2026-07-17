@@ -1848,6 +1848,15 @@ impl MqttBroker {
         self.ws_listeners.first()?.local_addr().ok()
     }
 
+    /// Returns the address the first QUIC endpoint is bound to, if any.
+    ///
+    /// Useful when the endpoint was bound to port 0 and the assigned port must be discovered.
+    #[cfg(feature = "transport-quic")]
+    #[must_use]
+    pub fn quic_local_addr(&self) -> Option<std::net::SocketAddr> {
+        self.quic_endpoints.first()?.local_addr().ok()
+    }
+
     /// Returns a receiver that signals when the broker is ready to accept connections
     ///
     /// Call this before spawning `run()` to get a receiver. The broker sends `true`

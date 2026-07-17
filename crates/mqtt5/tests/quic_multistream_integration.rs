@@ -18,10 +18,8 @@ fn test_client_id(prefix: &str) -> String {
     format!("{}-{}", prefix, Ulid::new())
 }
 
-async fn start_quic_broker(quic_port: u16) -> (MqttBroker, SocketAddr) {
+async fn start_quic_broker() -> (MqttBroker, SocketAddr) {
     let _ = rustls::crypto::ring::default_provider().install_default();
-
-    let quic_addr: SocketAddr = format!("127.0.0.1:{quic_port}").parse().unwrap();
 
     let config = BrokerConfig::default()
         .with_bind_address(([127, 0, 0, 1], 0))
@@ -30,10 +28,13 @@ async fn start_quic_broker(quic_port: u16) -> (MqttBroker, SocketAddr) {
                 PathBuf::from("../../test_certs/server.pem"),
                 PathBuf::from("../../test_certs/server.key"),
             )
-            .with_bind_address(quic_addr),
+            .with_bind_address("127.0.0.1:0".parse::<SocketAddr>().unwrap()),
         );
 
     let broker = MqttBroker::with_config(config).await.unwrap();
+    let quic_addr = broker
+        .quic_local_addr()
+        .expect("QUIC endpoint must be bound");
     (broker, quic_addr)
 }
 
@@ -249,7 +250,7 @@ async fn test_flow_registry_touch_updates_activity() {
 async fn test_quic_data_per_publish_with_broker() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let (mut broker, quic_addr) = start_quic_broker(24680).await;
+    let (mut broker, quic_addr) = start_quic_broker().await;
 
     let broker_handle = tokio::spawn(async move { broker.run().await });
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -314,7 +315,7 @@ async fn test_quic_data_per_publish_with_broker() {
 async fn test_quic_multiple_topics_with_flow_isolation() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let (mut broker, quic_addr) = start_quic_broker(24681).await;
+    let (mut broker, quic_addr) = start_quic_broker().await;
 
     let broker_handle = tokio::spawn(async move { broker.run().await });
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -398,7 +399,7 @@ async fn test_quic_multiple_topics_with_flow_isolation() {
 async fn test_quic_control_only_strategy() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let (mut broker, quic_addr) = start_quic_broker(24682).await;
+    let (mut broker, quic_addr) = start_quic_broker().await;
 
     let broker_handle = tokio::spawn(async move { broker.run().await });
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -463,7 +464,7 @@ async fn test_quic_control_only_strategy() {
 async fn test_quic_mixed_qos_with_streams() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let (mut broker, quic_addr) = start_quic_broker(24683).await;
+    let (mut broker, quic_addr) = start_quic_broker().await;
 
     let broker_handle = tokio::spawn(async move { broker.run().await });
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -524,7 +525,7 @@ async fn test_quic_mixed_qos_with_streams() {
 async fn test_quic_concurrent_publishers() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let (mut broker, quic_addr) = start_quic_broker(24684).await;
+    let (mut broker, quic_addr) = start_quic_broker().await;
 
     let broker_handle = tokio::spawn(async move { broker.run().await });
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -594,7 +595,7 @@ async fn test_quic_concurrent_publishers() {
 async fn test_quic_large_payload_per_stream() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let (mut broker, quic_addr) = start_quic_broker(24685).await;
+    let (mut broker, quic_addr) = start_quic_broker().await;
 
     let broker_handle = tokio::spawn(async move { broker.run().await });
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -727,7 +728,7 @@ async fn test_flow_registry_register_external_flow() {
 async fn test_discard_flow_removes_peer_state() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let (mut broker, quic_addr) = start_quic_broker(24690).await;
+    let (mut broker, quic_addr) = start_quic_broker().await;
 
     let broker_handle = tokio::spawn(async move { broker.run().await });
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -774,7 +775,7 @@ async fn test_discard_flow_not_connected() {
 async fn test_discard_flow_without_flow_headers_returns_error() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let (mut broker, quic_addr) = start_quic_broker(24691).await;
+    let (mut broker, quic_addr) = start_quic_broker().await;
     let broker_handle = tokio::spawn(async move { broker.run().await });
     tokio::time::sleep(Duration::from_millis(200)).await;
 

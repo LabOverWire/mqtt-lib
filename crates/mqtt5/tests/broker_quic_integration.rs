@@ -34,10 +34,18 @@ fn ensure_test_certs(manifest_dir: &Path) {
     assert!(status.success(), "test certificate generation failed");
 }
 
-async fn start_quic_broker(quic_port: u16) -> (MqttBroker, SocketAddr) {
+async fn start_quic_broker() -> (MqttBroker, SocketAddr) {
+    start_quic_broker_at("127.0.0.1:0".parse().unwrap()).await
+}
+
+/// Binds a QUIC broker at `bind_addr` and returns it with the address actually bound.
+///
+/// Pass port 0 for a fresh broker (the OS picks a free port, avoiding collisions between
+/// parallel test processes); pass a previously assigned address to rebind it, as the
+/// reconnect tests do to simulate a broker restart at the same address.
+async fn start_quic_broker_at(bind_addr: SocketAddr) -> (MqttBroker, SocketAddr) {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let quic_addr: SocketAddr = format!("127.0.0.1:{quic_port}").parse().unwrap();
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     ensure_test_certs(manifest_dir);
     let cert_dir = manifest_dir.join("../../test_certs");
@@ -46,10 +54,13 @@ async fn start_quic_broker(quic_port: u16) -> (MqttBroker, SocketAddr) {
         .with_bind_address(([127, 0, 0, 1], 0))
         .with_quic(
             QuicConfig::new(cert_dir.join("server.pem"), cert_dir.join("server.key"))
-                .with_bind_address(quic_addr),
+                .with_bind_address(bind_addr),
         );
 
     let broker = MqttBroker::with_config(config).await.unwrap();
+    let quic_addr = broker
+        .quic_local_addr()
+        .expect("QUIC endpoint must be bound");
     (broker, quic_addr)
 }
 
@@ -169,8 +180,7 @@ async fn test_control_only_secure_clean_session_qos0_burst_after_reconnect_does_
 async fn assert_control_only_reconnect_publish_stable(clean_start: bool) {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let quic_port = if clean_start { 24602 } else { 24601 };
-    let (broker, quic_addr) = start_quic_broker(quic_port).await;
+    let (broker, quic_addr) = start_quic_broker().await;
     let mut broker_handle = spawn_broker(broker).await;
 
     let topic = format!("reconnect-control-only/{}", Ulid::new());
@@ -225,7 +235,7 @@ async fn assert_control_only_reconnect_publish_stable(clean_start: bool) {
 
     broker_handle.shutdown().await;
 
-    let (restarted_broker, restarted_addr) = start_quic_broker(quic_port).await;
+    let (restarted_broker, restarted_addr) = start_quic_broker_at(quic_addr).await;
     broker_handle = spawn_broker(restarted_broker).await;
 
     assert_eq!(restarted_addr, quic_addr);
@@ -276,8 +286,7 @@ async fn assert_control_only_reconnect_publish_stable(clean_start: bool) {
 async fn assert_control_only_reconnect_qos0_burst_stable(secure: bool) {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let quic_port = if secure { 24604 } else { 24603 };
-    let (broker, quic_addr) = start_quic_broker(quic_port).await;
+    let (broker, quic_addr) = start_quic_broker().await;
     let mut broker_handle = spawn_broker(broker).await;
 
     let topic = format!("reconnect-control-only-qos0/{}", Ulid::new());
@@ -340,7 +349,7 @@ async fn assert_control_only_reconnect_qos0_burst_stable(secure: bool) {
 
     broker_handle.shutdown().await;
 
-    let (restarted_broker, restarted_addr) = start_quic_broker(quic_port).await;
+    let (restarted_broker, restarted_addr) = start_quic_broker_at(quic_addr).await;
     broker_handle = spawn_broker(restarted_broker).await;
 
     assert_eq!(restarted_addr, quic_addr);
@@ -398,7 +407,7 @@ async fn test_broker_quic_client_connection() {
         .try_init();
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let (broker, quic_addr) = start_quic_broker(24567).await;
+    let (broker, quic_addr) = start_quic_broker().await;
     eprintln!("Broker QUIC endpoint bound to {quic_addr}");
 
     let broker_handle = spawn_broker(broker).await;
@@ -428,7 +437,7 @@ async fn test_broker_quic_client_connection() {
 async fn test_broker_quic_pubsub() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let (broker, quic_addr) = start_quic_broker(24568).await;
+    let (broker, quic_addr) = start_quic_broker().await;
 
     let broker_handle = spawn_broker(broker).await;
 
@@ -487,7 +496,7 @@ async fn test_broker_quic_pubsub() {
 async fn test_broker_quic_data_per_publish() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let (broker, quic_addr) = start_quic_broker(24569).await;
+    let (broker, quic_addr) = start_quic_broker().await;
 
     let broker_handle = spawn_broker(broker).await;
 
@@ -551,7 +560,7 @@ async fn test_broker_quic_data_per_publish() {
 async fn test_broker_quic_data_per_topic() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let (broker, quic_addr) = start_quic_broker(24570).await;
+    let (broker, quic_addr) = start_quic_broker().await;
 
     let broker_handle = spawn_broker(broker).await;
 
@@ -629,7 +638,7 @@ async fn test_broker_quic_data_per_topic() {
 async fn test_broker_quic_data_per_subscription() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let (broker, quic_addr) = start_quic_broker(24571).await;
+    let (broker, quic_addr) = start_quic_broker().await;
 
     let broker_handle = spawn_broker(broker).await;
 
@@ -702,10 +711,8 @@ async fn test_broker_quic_data_per_subscription() {
     broker_handle.abort();
 }
 
-async fn start_quic_broker_with_early_data(quic_port: u16) -> (MqttBroker, SocketAddr) {
+async fn start_quic_broker_with_early_data() -> (MqttBroker, SocketAddr) {
     let _ = rustls::crypto::ring::default_provider().install_default();
-
-    let quic_addr: SocketAddr = format!("127.0.0.1:{quic_port}").parse().unwrap();
 
     let config = BrokerConfig::default()
         .with_bind_address(([127, 0, 0, 1], 0))
@@ -714,11 +721,14 @@ async fn start_quic_broker_with_early_data(quic_port: u16) -> (MqttBroker, Socke
                 PathBuf::from("../../test_certs/server.pem"),
                 PathBuf::from("../../test_certs/server.key"),
             )
-            .with_bind_address(quic_addr)
+            .with_bind_address("127.0.0.1:0".parse::<SocketAddr>().unwrap())
             .with_early_data(true),
         );
 
     let broker = MqttBroker::with_config(config).await.unwrap();
+    let quic_addr = broker
+        .quic_local_addr()
+        .expect("QUIC endpoint must be bound");
     (broker, quic_addr)
 }
 
@@ -729,7 +739,7 @@ async fn test_quic_0rtt_first_connection_is_1rtt() {
         .with_test_writer()
         .try_init();
 
-    let (broker, quic_addr) = start_quic_broker_with_early_data(24580).await;
+    let (broker, quic_addr) = start_quic_broker_with_early_data().await;
     let broker_handle = spawn_broker(broker).await;
 
     let client = MqttClient::new(test_client_id("0rtt-first"));
@@ -755,7 +765,7 @@ async fn test_quic_0rtt_reconnection() {
         .with_test_writer()
         .try_init();
 
-    let (broker, quic_addr) = start_quic_broker_with_early_data(24581).await;
+    let (broker, quic_addr) = start_quic_broker_with_early_data().await;
     let broker_handle = spawn_broker(broker).await;
 
     let client = MqttClient::new(test_client_id("0rtt-reconnect"));
@@ -795,7 +805,7 @@ async fn test_quic_0rtt_server_without_early_data_falls_back() {
         .with_test_writer()
         .try_init();
 
-    let (broker, quic_addr) = start_quic_broker(24582).await;
+    let (broker, quic_addr) = start_quic_broker().await;
     let broker_handle = spawn_broker(broker).await;
 
     let client = MqttClient::new(test_client_id("0rtt-fallback"));
@@ -834,7 +844,7 @@ async fn test_quic_0rtt_pubsub_after_reconnect() {
         .with_test_writer()
         .try_init();
 
-    let (broker, quic_addr) = start_quic_broker_with_early_data(24583).await;
+    let (broker, quic_addr) = start_quic_broker_with_early_data().await;
     let broker_handle = spawn_broker(broker).await;
 
     let broker_url = format!("quic://{quic_addr}");
@@ -884,7 +894,7 @@ async fn test_quic_0rtt_pubsub_after_reconnect() {
 async fn test_quic_connection_close_sends_no_error() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let (broker, quic_addr) = start_quic_broker(24584).await;
+    let (broker, quic_addr) = start_quic_broker().await;
     let broker_handle = spawn_broker(broker).await;
 
     let client = MqttClient::new(test_client_id("quic-graceful"));
@@ -1008,7 +1018,6 @@ fn test_quic_error_level_consistency() {
 async fn test_subscribe_on_data_flow_delivers_on_server_stream() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let quic_addr: SocketAddr = "127.0.0.1:24605".parse().unwrap();
     let config = BrokerConfig::default()
         .with_bind_address(([127, 0, 0, 1], 0))
         .with_server_delivery_strategy(ServerDeliveryStrategy::PerTopic)
@@ -1017,10 +1026,11 @@ async fn test_subscribe_on_data_flow_delivers_on_server_stream() {
                 PathBuf::from("../../test_certs/server.pem"),
                 PathBuf::from("../../test_certs/server.key"),
             )
-            .with_bind_address(quic_addr),
+            .with_bind_address("127.0.0.1:0".parse::<SocketAddr>().unwrap()),
         );
 
     let broker = MqttBroker::with_config(config).await.unwrap();
+    let quic_addr = broker.quic_local_addr().unwrap();
     let tcp_addr = broker.local_addr().unwrap();
     let broker_handle = spawn_broker(broker).await;
 
@@ -1143,7 +1153,6 @@ async fn test_subscribe_on_data_flow_delivers_on_server_stream() {
 async fn test_qos1_subscriber_over_quic_receives_message() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let quic_addr: SocketAddr = "127.0.0.1:24607".parse().unwrap();
     let config = BrokerConfig::default()
         .with_bind_address(([127, 0, 0, 1], 0))
         .with_server_delivery_strategy(ServerDeliveryStrategy::PerTopic)
@@ -1152,10 +1161,11 @@ async fn test_qos1_subscriber_over_quic_receives_message() {
                 PathBuf::from("../../test_certs/server.pem"),
                 PathBuf::from("../../test_certs/server.key"),
             )
-            .with_bind_address(quic_addr),
+            .with_bind_address("127.0.0.1:0".parse::<SocketAddr>().unwrap()),
         );
 
     let broker = MqttBroker::with_config(config).await.unwrap();
+    let quic_addr = broker.quic_local_addr().unwrap();
     let tcp_addr = broker.local_addr().unwrap();
     let broker_handle = spawn_broker(broker).await;
 

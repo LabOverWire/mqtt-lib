@@ -15,10 +15,8 @@ fn test_client_id(prefix: &str) -> String {
     format!("{}-{}", prefix, Ulid::new())
 }
 
-async fn start_quic_broker(quic_port: u16) -> (MqttBroker, SocketAddr) {
+async fn start_quic_broker() -> (MqttBroker, SocketAddr) {
     let _ = rustls::crypto::ring::default_provider().install_default();
-
-    let quic_addr: SocketAddr = format!("127.0.0.1:{quic_port}").parse().unwrap();
 
     let config = BrokerConfig::default()
         .with_bind_address(([127, 0, 0, 1], 0))
@@ -27,10 +25,13 @@ async fn start_quic_broker(quic_port: u16) -> (MqttBroker, SocketAddr) {
                 PathBuf::from("../../test_certs/server.pem"),
                 PathBuf::from("../../test_certs/server.key"),
             )
-            .with_bind_address(quic_addr),
+            .with_bind_address("127.0.0.1:0".parse::<SocketAddr>().unwrap()),
         );
 
     let broker = MqttBroker::with_config(config).await.unwrap();
+    let quic_addr = broker
+        .quic_local_addr()
+        .expect("QUIC endpoint must be bound");
     (broker, quic_addr)
 }
 
@@ -38,7 +39,7 @@ async fn start_quic_broker(quic_port: u16) -> (MqttBroker, SocketAddr) {
 async fn test_quic_migration_detected_by_server() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let (mut broker, quic_addr) = start_quic_broker(24590).await;
+    let (mut broker, quic_addr) = start_quic_broker().await;
     let broker_handle = tokio::spawn(async move { broker.run().await });
     tokio::time::sleep(Duration::from_millis(200)).await;
 
@@ -89,7 +90,7 @@ async fn test_quic_migration_detected_by_server() {
 async fn test_quic_migration_qos1_survives() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let (mut broker, quic_addr) = start_quic_broker(24591).await;
+    let (mut broker, quic_addr) = start_quic_broker().await;
     let broker_handle = tokio::spawn(async move { broker.run().await });
     tokio::time::sleep(Duration::from_millis(200)).await;
 
@@ -147,7 +148,7 @@ async fn test_quic_migration_qos1_survives() {
 async fn test_quic_multiple_migrations() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let (mut broker, quic_addr) = start_quic_broker(24592).await;
+    let (mut broker, quic_addr) = start_quic_broker().await;
     let broker_handle = tokio::spawn(async move { broker.run().await });
     tokio::time::sleep(Duration::from_millis(200)).await;
 
