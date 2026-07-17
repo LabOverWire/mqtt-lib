@@ -585,6 +585,7 @@ impl MqttBroker {
             }
 
             let mut endpoints = Vec::new();
+            let mut failures = Vec::new();
             for addr in &quic_config.bind_addresses {
                 match acceptor_config.build_endpoint(*addr) {
                     Ok(endpoint) => {
@@ -593,12 +594,16 @@ impl MqttBroker {
                     }
                     Err(e) => {
                         warn!("Failed to bind QUIC endpoint to {}: {}", addr, e);
+                        failures.push(format!("{addr}: {e}"));
                     }
                 }
             }
 
-            if endpoints.is_empty() {
-                warn!("No QUIC endpoints could be bound, QUIC disabled");
+            if endpoints.is_empty() && !quic_config.bind_addresses.is_empty() {
+                return Err(MqttError::Configuration(format!(
+                    "QUIC listener was configured but no endpoint could be bound: {}",
+                    failures.join("; ")
+                )));
             }
 
             Ok(endpoints)
@@ -638,6 +643,7 @@ impl MqttBroker {
                     acceptor_config.with_require_client_cert(cluster_config.require_client_cert);
 
                 let mut endpoints = Vec::new();
+                let mut failures = Vec::new();
                 for addr in &cluster_config.bind_addresses {
                     match acceptor_config.build_endpoint(*addr) {
                         Ok(endpoint) => {
@@ -646,12 +652,16 @@ impl MqttBroker {
                         }
                         Err(e) => {
                             warn!("Failed to bind Cluster QUIC endpoint to {}: {}", addr, e);
+                            failures.push(format!("{addr}: {e}"));
                         }
                     }
                 }
 
-                if endpoints.is_empty() {
-                    warn!("No Cluster QUIC endpoints could be bound, Cluster listener disabled");
+                if endpoints.is_empty() && !cluster_config.bind_addresses.is_empty() {
+                    return Err(MqttError::Configuration(format!(
+                        "Cluster QUIC listener was configured but no endpoint could be bound: {}",
+                        failures.join("; ")
+                    )));
                 }
 
                 return Ok((Vec::new(), None, endpoints));
@@ -1258,6 +1268,10 @@ impl MqttBroker {
                         }
                     }
                 }
+
+                quic_endpoint.close(0u32.into(), b"broker shutdown");
+                quic_endpoint.wait_idle().await;
+                debug!("QUIC endpoint {local_addr:?} released after close and idle drain");
             }));
         }
     }
