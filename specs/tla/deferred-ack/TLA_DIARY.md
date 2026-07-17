@@ -110,6 +110,138 @@ Related: issue #112 (QoS2 duplicate-delivery bug, filed), author reply pasted on
 
 ## Log (newest first)
 
+### 2026-07-17 — QUIC was never broken: a stale 0-byte file was. Option B IMPLEMENTED + e2e GREEN.
+I reported "QUIC connect times out, possibly environmental". Maintainer: "QUIC was tested on this
+Mac. If it's not working it's because you broke it." **I had not broken it — and neither had the
+environment.** Bisect proved it: on clean `main` (8195528) the same test also "passes" in 0.01s
+(impossible — it contains a 200ms sleep) ⇒ pre-existing vacuous skip.
+
+**ROOT CAUSE (quorum, 2 analysts, independently reproduced):** a **stale, gitignored, ZERO-BYTE**
+file `crates/mqtt5/mqtt_storage/retained/%24SYS%2Fbroker%2Fversion.json`, dated **Feb 21**:
+1. empty file → deserialize error (`file_backend.rs:291`)
+2. `?`-propagates out of `get_retained_messages` (`file_backend.rs:422`)
+3. → `router.initialize()` (`server.rs:1664`) ⇒ **`run()` returns Err immediately**, dropping every
+   listener incl. the QUIC endpoint
+4. `ready` is signalled AFTER `initialize()`, so it never fires — but the test's
+   `let _ = ready_rx.wait_for(|&v| v).await` **swallows the Err and reports ready**
+5. client → dead broker → UDP into a closed socket → the exact 30s `QUIC connect failed: Timeout`
+**MY OWN MEMORY WARNED ME: "./mqtt_storage CWD footgun" in [[codebase-architecture]]. I had the note
+and did not check it.** Moving the stale dir aside: tests went 0.01s → 0.80s and actually connect.
+
+**SECOND, INDEPENDENT MECHANISM (analyst B):** `server.rs:588-602` `setup_quic` **swallows bind
+errors** (`warn!` only) ⇒ `with_config` returns Ok, `ready` fires, NO QUIC LISTENER. Reproduced
+byte-identically by squatting the port. And the tests squat their own ports: `broker_handle.abort()`
+does NOT release sockets — `run()`'s accept-task `JoinHandle`s are dropped, and **dropping a
+JoinHandle detaches rather than aborts**, so zombie accept tasks hold the hardcoded ports. Proof:
+propagate the bind error and 4 tests instantly fail with `Address already in use` — they had been
+reconnecting to the **zombie first broker**, never testing the restarted one.
+
+**⇒ The QUIC suite has NEVER verified QUIC.** `if connect().is_err() { return; }` + swallowed
+`ready` error + detached sockets = a totally dead path reporting green for months.
+
+**OPTION B IMPLEMENTED (this is the MQoQ §9.1.2 fix):**
+- `server_stream_manager.rs`: retain the recv half at all 3 `open_bi()` sites and
+  `spawn_ack_reader(recv, flow_id, packet_tx)` — reads the client's bare MQTT acks (no flow header
+  on the return path) and feeds `packet_tx` tagged with the flow id. `ServerStreamInfo` owns the
+  reader `JoinHandle` and aborts it on Drop; the PerPublish/ephemeral reader is detached since that
+  stream isn't cached.
+- **CORRECTION to a relayed claim:** analyst C said PerPublish's `send.finish()` (`ssm.rs:192`)
+  means "no ack path by construction". **WRONG** — `finish()` closes only the SEND direction of a
+  bidi stream; the recv half stays live, so PerPublish CAN receive acks. I caught this by reading
+  the file rather than trusting the relay.
+- Plumbing: `ClientHandler.quic_packet_tx` + `with_quic_packet_tx()`, wired from
+  `quic_acceptor.rs` (`packet_tx.clone()`), consumed via a new `build_server_stream_manager()`.
+
+**E2E PROVEN (what the maintainer actually asked for — not just "verified the symptom"):**
+- New test `test_qos1_subscriber_over_quic_receives_message` (uses `.expect()`, never skips;
+  subscribes with EXPLICIT QoS1 because bare `subscribe()` defaults to QoS0 and cannot exercise
+  this path at all).
+- Before fix: **left: 0, right: 1** in 2.90s (real connect, real failure).
+- After fix: **PASSES in 0.80s** — real handshake, PUBLISH on a server data stream, PUBACK back on
+  the same flow, callback fires.
+- **Negative control:** removed only `.with_quic_packet_tx(...)` ⇒ **left: 0, right: 1** again;
+  restored ⇒ green. The test genuinely exercises the fix.
+- All QUIC suites now run FOR REAL: broker_quic 20 ok/3.88s, multistream 23 ok/1.35s,
+  migration 5 ok/1.23s (previously 30-60s of timeouts). Clippy pedantic clean workspace-wide.
+
+**STILL OPEN (deliberately not folded in — separate concerns):**
+1. **A single corrupt retained file bricks broker startup** (`file_backend.rs:417-429`). This is the
+   most serious bug found today — a 0-byte file is a **production startup outage**. Should
+   warn-and-skip or quarantine, not `?`-propagate. NEEDS ITS OWN ISSUE/BRANCH.
+2. `setup_quic` swallowing bind errors (`server.rs:588-602`, and the same at ~648 for cluster).
+3. Tests using `broker_handle.abort()` instead of `shutdown()`; hardcoded ports (24567-24571,
+   24601-24605, 24607, 14567) should be port 0 + `local_addr()`.
+4. The `if connect().is_err() { return; }` green-washing across the QUIC suites → `.expect()`.
+5. `broker_quic_integration.rs:62` `let _ = ready_rx.wait_for(...)` swallows the ready error.
+
+### 2026-07-17 — THE SPEC WAS FOUND. Option B CONFIRMED. My "acks on control" reversal was WRONG.
+Maintainer challenged my confidence ("you seem to have only partial knowledge of the flow") and
+ordered a quorum. It found **the authoritative MQoQ spec**, which neither of us had been reading:
+**`publications/comnet/experiments/MQTT-over-QUIC-spec.pdf`** ("Spec MQTT-next", William Yang,
+2024-03-05). There is ALSO a project design doc at the repo root: **`QUIC_IMPLEMENTATION_SPEC.md`**.
+READ BOTH BEFORE TOUCHING QUIC AGAIN.
+
+**THE DECISIVE RULE — spec §9.1.2 (verified from the PDF text myself, not relayed):**
+> "As QoS > 1 messages track delivery states in the Flow State, the MQTT.PUBACK, MQTT.PUBREL,
+> and MQTT.PUBCOMP messages for the same MQTT.PUBLISH message **must be exchanged in the same
+> data flow**."
+
+Supporting: **§9.19** table marks PUBACK/PUBREC/PUBREL/PUBCOMP **YES** under *Server Data Flow*.
+**§9.2**: "A flow can use one QUIC bidi stream. A flow can use one QUIC unidi stream or **[TBD]** a
+pair of QUIC unidi streams." The unidi-pair is TBD/unimplemented ⇒ **a QoS>0 server data flow must
+be ONE BIDI STREAM.** `QUIC_IMPLEMENTATION_SPEC.md:35`: "broker-to-client uses **bidirectional
+(PerTopic, PerPublish QoS 1+)** or unidirectional (PerPublish QoS 0)."
+
+**CONSEQUENCES — I had this backwards:**
+1. **`open_bi()` for QoS>0 (`server_stream_manager.rs:169-178`) is a FAITHFUL SPEC IMPLEMENTATION,
+   not an accident.** I called it a "smoking gun" of confusion. Wrong. uni for QoS0 (no acks), bi
+   for QoS>0 (acks must return on the same flow). Exactly the spec.
+2. **The CLIENT IS ALREADY CORRECT.** `quic_stream_reader_task` (`reader.rs:498,504`) acking on the
+   arrival stream is spec-conformant. My proposed "client should ack via `ctx.writer` (control)"
+   would have VIOLATED §9.1.2 and broken a correct implementation.
+3. **The bug is SOLELY the broker's dropped `_recv`** (`server_stream_manager.rs:80/133/174`). The
+   `_recv` underscore-discard is the tell — hidden missing logic (cf. the no-underscore rule).
+4. **`ServerDeliveryStrategy::PerTopic` is `#[default]`**, so this is the default path.
+5. **Flow ≠ stream.** The concept I kept blurring. A *flow* is bidirectional-capable; a *stream* is
+   the transport realization of it.
+6. **The comnet paper does NOT override the spec.** `main.tex:189,231` say per-publish is
+   "unidirectional" — accurate for its QoS0 benchmark (which is what the code does for QoS0); it
+   never engages QoS>0 delivery or ack placement. Incomplete description, not competing design.
+   (The paper is arguably wrong-as-written for QoS1/2 and could be corrected.)
+7. The maintainer's memory ("user data on streams, protocol on control") is right for
+   CONNECT/SUBSCRIBE/PINGREQ but §9.1.2 carves out QoS acks, which are bound to their PUBLISH's flow.
+
+**STALE CITATIONS — do not trust the inline `[MQoQ§4.x]` tags.** They use draft numbering that does
+NOT resolve against the real spec (its §4 is "Motivation", §5 "New features"; flows are §9). Mapping:
+§4.1→9.5, §4.2→9.4, §4.4→9.8, §4.5.1→9.6.1, §4.5.2→9.6.2/9.6.3, §5→§7/§9.11. `CHANGELOG.md:338,352`
+cite "MQoQ §9.16"/"§7.4" and DO resolve — the CHANGELOG tracks the real spec, the code comments don't.
+
+**EMPIRICALLY PROVEN (two independent standalone quinn probes):** quinn 0.11.11
+`RecvStream::drop` → `stop(0)` (`recv_stream.rs:534`) ⇒ the client's PUBACK write returns
+**`Stopped(0)`**. Not a silent hang — an active, DETERMINISTIC failure (the drop happens before the
+client even receives the PUBLISH). Then `handlers.rs:74` `?` aborts BEFORE dispatch at `:98` ⇒ the
+message never reaches the subscriber callback, and `reader.rs:515` breaks the loop ⇒ **that topic's
+cached stream is dead for the rest of the connection, including QoS0**.
+
+**⇒ Stage 7's axis (`BrokerReadsDataStream` FALSE vs TRUE) WAS THE RIGHT ONE. Option B is correct.**
+
+**EXTRA FINDINGS to fold into the implementation:**
+- **PerPublish calls `send.finish()` immediately (`ssm.rs:192`)** ⇒ QoS>0 there has NO ack path by
+  construction. Retaining `_recv` alone will NOT fix PerPublish.
+- **Retaining `_recv` alone is NOT a fix** — it converts the loud `Stopped(0)` into a silent hang
+  (exactly `DeferredAckQuicStreams_current.cfg`). The broker must actually READ it.
+- **Dead code proving the unwired half:** `get_publish_flow`/`remove_publish_flow` (`state.rs:695,700`)
+  and `QuicStreamManager::send_on_flow` (`quic_stream_manager.rs:315`) have **zero callers**;
+  `store_publish_flow` (`handlers.rs:122,174`) writes a map nobody reads.
+- Broker outbound QoS state (`publish.rs:679 outbound_inflight`) is **per-session keyed by
+  packet_id**, NOT flow-scoped — so correlation of a returning ack is by packet_id.
+- The `pending_target_flow` branch (`publish.rs:728`) is checked BEFORE the `ControlOnly` branch
+  (`:742`), so a flow-bound subscription forces server-stream delivery **even under ControlOnly**.
+
+**PROCESS LESSON:** I flip-flopped three times (reorder hypothesis → Option B → acks-on-control →
+Option B) because I reasoned from code + a benchmark paper while an authoritative spec sat in the
+repo unread. The maintainer caught it from a grammar tell of low confidence. **Find the spec first.**
+
 ### 2026-07-15 — Stage 7: Option B FIXES the wedge but RE-ARMS the reordering hazard
 `DeferredAckQuicStreams.tla` + 3 cfgs. Models inbound QoS2 over QUIC where ONE logical flow spans
 TWO independently-ordered streams: PUBLISH + PUBREC on the server-initiated DATA stream (client

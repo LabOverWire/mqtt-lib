@@ -100,6 +100,10 @@ pub struct ClientHandler {
     pub(super) server_stream_manager: Option<ServerStreamManager>,
     #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
     pub(super) server_delivery_strategy: ServerDeliveryStrategy,
+    /// Feeds packets read off server-initiated QUIC data flows (the client's QoS>0 acks)
+    /// back into this handler's packet loop.
+    #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
+    pub(super) quic_packet_tx: Option<mpsc::Sender<(Packet, Option<u64>)>>,
 }
 
 impl ClientHandler {
@@ -191,6 +195,8 @@ impl ClientHandler {
             server_stream_manager: None,
             #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
             server_delivery_strategy: ServerDeliveryStrategy::default(),
+            #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
+            quic_packet_tx: None,
         }
     }
 
@@ -211,6 +217,14 @@ impl ClientHandler {
     #[must_use]
     pub fn with_server_delivery_strategy(mut self, strategy: ServerDeliveryStrategy) -> Self {
         self.server_delivery_strategy = strategy;
+        self
+    }
+
+    /// Supplies the channel that server data flows use to return the client's QoS>0 acks.
+    #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
+    #[must_use]
+    pub fn with_quic_packet_tx(mut self, tx: mpsc::Sender<(Packet, Option<u64>)>) -> Self {
+        self.quic_packet_tx = Some(tx);
         self
     }
 

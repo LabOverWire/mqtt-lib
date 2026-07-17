@@ -1,18 +1,73 @@
 use crate::broker::config::ServerDeliveryStrategy;
 use crate::error::{MqttError, Result};
+use crate::packet::Packet;
 use crate::transport::flow::{DataFlowHeader, FlowFlags, FlowId, FlowIdGenerator};
 use crate::QoS;
 use bytes::BytesMut;
-use quinn::{Connection, SendStream};
+use quinn::{Connection, RecvStream, SendStream};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tracing::{debug, trace};
+use tokio::sync::mpsc;
+use tracing::{debug, trace, warn};
+
+/// Channel carrying packets read off a QUIC stream into the client handler,
+/// tagged with the flow they arrived on.
+pub(super) type PacketSender = mpsc::Sender<(Packet, Option<u64>)>;
 
 struct ServerStreamInfo {
     stream: SendStream,
     flow_id: FlowId,
     last_used: Instant,
+    /// Kept alive so the reader task keeps running for this flow's lifetime.
+    ack_reader: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Drop for ServerStreamInfo {
+    fn drop(&mut self) {
+        if let Some(handle) = self.ack_reader.take() {
+            handle.abort();
+        }
+    }
+}
+
+/// Reads the client's acknowledgements off the recv half of a stream the broker opened.
+///
+/// `MQoQ` 9.1.2: PUBACK/PUBREL/PUBCOMP for a PUBLISH must be exchanged in the same data flow
+/// as that PUBLISH. The broker therefore opens QoS>0 data flows as bidirectional streams and
+/// must read the return direction; dropping the recv half instead makes `quinn` emit
+/// `STOP_SENDING`, so the client's ack write fails and the handshake can never complete.
+///
+/// The client writes bare MQTT packets here (no flow header), so unlike a client-initiated
+/// data stream there is no header to parse.
+fn spawn_ack_reader(
+    mut recv: RecvStream,
+    flow_id: FlowId,
+    packet_tx: PacketSender,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut buffer = BytesMut::new();
+        loop {
+            match crate::broker::quic_acceptor::read_packet_with_buffer(&mut recv, &mut buffer)
+                .await
+            {
+                Ok(packet) => {
+                    trace!(
+                        flow_id = ?flow_id,
+                        packet_type = %packet.packet_type_name(),
+                        "Read ack from server data flow"
+                    );
+                    if packet_tx.send((packet, Some(flow_id.raw()))).await.is_err() {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    trace!(flow_id = ?flow_id, "Server data flow ack reader ended: {e}");
+                    break;
+                }
+            }
+        }
+    })
 }
 
 const MAX_CACHED_STREAMS: usize = 100;
@@ -26,6 +81,8 @@ pub struct ServerStreamManager {
     flow_streams: HashMap<u64, ServerStreamInfo>,
     flow_id_generator: FlowIdGenerator,
     header_buffer: BytesMut,
+    /// Feeds acks read off server data flows back into the client handler.
+    packet_tx: Option<PacketSender>,
 }
 
 impl ServerStreamManager {
@@ -37,7 +94,33 @@ impl ServerStreamManager {
             flow_streams: HashMap::new(),
             flow_id_generator: FlowIdGenerator::new(),
             header_buffer: BytesMut::with_capacity(32),
+            packet_tx: None,
         }
+    }
+
+    /// Supplies the channel used to deliver acks read off server data flows.
+    ///
+    /// Without it, QoS>0 delivery on a data flow cannot complete its handshake.
+    #[must_use]
+    pub(super) fn with_packet_tx(mut self, packet_tx: PacketSender) -> Self {
+        self.packet_tx = Some(packet_tx);
+        self
+    }
+
+    /// Starts reading acks off a stream the broker opened, per `MQoQ` 9.1.2.
+    fn start_ack_reader(
+        &self,
+        recv: RecvStream,
+        flow_id: FlowId,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        let Some(tx) = self.packet_tx.clone() else {
+            warn!(
+                flow_id = ?flow_id,
+                "No packet channel for server data flow; QoS>0 acks on this flow cannot be read"
+            );
+            return None;
+        };
+        Some(spawn_ack_reader(recv, flow_id, tx))
     }
 
     #[must_use]
@@ -77,11 +160,12 @@ impl ServerStreamManager {
             return write_to_stream(&mut info.stream, encoded_packet).await;
         }
 
-        let (mut send, _recv) = self.connection.open_bi().await.map_err(|e| {
+        let (mut send, recv) = self.connection.open_bi().await.map_err(|e| {
             MqttError::ConnectionError(format!("failed to open server QUIC stream for flow: {e}"))
         })?;
 
         let fid = FlowId::from(flow_id);
+        let ack_reader = self.start_ack_reader(recv, fid);
 
         self.header_buffer.clear();
         let header = DataFlowHeader::server(fid, FLOW_EXPIRE_INTERVAL, FlowFlags::default());
@@ -104,6 +188,7 @@ impl ServerStreamManager {
                 stream: send,
                 flow_id: fid,
                 last_used: Instant::now(),
+                ack_reader,
             },
         );
 
@@ -130,11 +215,12 @@ impl ServerStreamManager {
             self.evict_lru_stream();
         }
 
-        let (mut send, _recv) = self.connection.open_bi().await.map_err(|e| {
+        let (mut send, recv) = self.connection.open_bi().await.map_err(|e| {
             MqttError::ConnectionError(format!("failed to open server QUIC stream: {e}"))
         })?;
 
         let flow_id = self.flow_id_generator.next_server();
+        let ack_reader = self.start_ack_reader(recv, flow_id);
 
         self.header_buffer.clear();
         let header = DataFlowHeader::server(flow_id, FLOW_EXPIRE_INTERVAL, FlowFlags::default());
@@ -154,6 +240,7 @@ impl ServerStreamManager {
                 stream: send,
                 flow_id,
                 last_used: Instant::now(),
+                ack_reader,
             },
         );
 
@@ -166,18 +253,23 @@ impl ServerStreamManager {
         encoded_packet: &[u8],
         qos: QoS,
     ) -> Result<()> {
+        let flow_id = self.flow_id_generator.next_server();
+
+        // QoS0 needs no ack, so a one-way flow suffices. QoS>0 must be able to receive
+        // PUBACK/PUBREC on the same flow (MQoQ 9.1.2), hence a bidirectional stream whose
+        // recv half is read for the life of the flow. The reader is detached because an
+        // ephemeral stream is not cached; it ends when the peer closes or errors.
         let mut send = if qos == QoS::AtMostOnce {
             self.connection.open_uni().await.map_err(|e| {
                 MqttError::ConnectionError(format!("failed to open server QUIC stream: {e}"))
             })?
         } else {
-            let (send, _recv) = self.connection.open_bi().await.map_err(|e| {
+            let (send, recv) = self.connection.open_bi().await.map_err(|e| {
                 MqttError::ConnectionError(format!("failed to open server QUIC stream: {e}"))
             })?;
+            drop(self.start_ack_reader(recv, flow_id));
             send
         };
-
-        let flow_id = self.flow_id_generator.next_server();
 
         self.header_buffer.clear();
         let header = DataFlowHeader::server(flow_id, FLOW_EXPIRE_INTERVAL, FlowFlags::default());

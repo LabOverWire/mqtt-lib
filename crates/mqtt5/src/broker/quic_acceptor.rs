@@ -427,7 +427,10 @@ fn build_flow_header_result(flow_header: FlowHeader, leftover: BytesMut) -> Flow
     }
 }
 
-async fn read_packet_with_buffer(recv: &mut RecvStream, buffer: &mut BytesMut) -> Result<Packet> {
+pub(super) async fn read_packet_with_buffer(
+    recv: &mut RecvStream,
+    buffer: &mut BytesMut,
+) -> Result<Packet> {
     while buffer.len() < 2 {
         let mut tmp = [0u8; 64];
         let n = recv
@@ -607,6 +610,7 @@ async fn run_quic_handler_inner(
     )
     .with_quic_connection(connection.clone())
     .with_server_delivery_strategy(delivery_strategy)
+    .with_quic_packet_tx(packet_tx.clone())
     .with_skip_bridge_forwarding(skip_bridge_forwarding)
     .with_flow_closed_rx(flow_closed_rx)
     .with_flow_registry(flow_registry.clone());

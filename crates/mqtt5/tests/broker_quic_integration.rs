@@ -1112,3 +1112,89 @@ async fn test_subscribe_on_data_flow_delivers_on_server_stream() {
     sub_client.disconnect().await.ok();
     broker_handle.abort();
 }
+
+/// A `QoS` 1 subscriber over QUIC must actually receive its message.
+///
+/// With `ServerDeliveryStrategy::PerTopic` (the default) the broker delivers PUBLISH on a
+/// server-initiated data stream, and per `MQoQ` spec 9.1.2 the client's PUBACK travels back on
+/// that same data flow. If the broker does not read the recv half of the stream it opened,
+/// the ack has nowhere to land and the client's write fails, aborting delivery before the
+/// subscriber callback ever runs.
+///
+/// Note this test subscribes with an explicit `QoS`: bare `subscribe()` defaults to `QoS` 0, which
+/// needs no ack and therefore cannot exercise this path.
+#[tokio::test]
+async fn test_qos1_subscriber_over_quic_receives_message() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    let quic_addr: SocketAddr = "127.0.0.1:24607".parse().unwrap();
+    let config = BrokerConfig::default()
+        .with_bind_address(([127, 0, 0, 1], 0))
+        .with_server_delivery_strategy(ServerDeliveryStrategy::PerTopic)
+        .with_quic(
+            QuicConfig::new(
+                PathBuf::from("../../test_certs/server.pem"),
+                PathBuf::from("../../test_certs/server.key"),
+            )
+            .with_bind_address(quic_addr),
+        );
+
+    let broker = MqttBroker::with_config(config).await.unwrap();
+    let tcp_addr = broker.local_addr().unwrap();
+    let broker_handle = spawn_broker(broker).await;
+
+    let topic = format!("qos1-quic/{}", Ulid::new());
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let sub_client = MqttClient::new(test_client_id("quic-qos1-sub"));
+    sub_client.set_insecure_tls(true).await;
+    sub_client
+        .connect(&format!("quic://{quic_addr}"))
+        .await
+        .expect("QUIC subscriber must connect");
+
+    let received = Arc::new(AtomicU32::new(0));
+    let received_cb = received.clone();
+    let opts = mqtt5::SubscribeOptions {
+        qos: mqtt5::QoS::AtLeastOnce,
+        ..Default::default()
+    };
+    sub_client
+        .subscribe_with_options(&topic, opts, move |_msg| {
+            received_cb.fetch_add(1, Ordering::Relaxed);
+        })
+        .await
+        .expect("QoS1 subscribe must succeed");
+
+    let pub_client = MqttClient::new(test_client_id("tcp-qos1-pub"));
+    pub_client
+        .connect(&format!("mqtt://{tcp_addr}"))
+        .await
+        .expect("TCP publisher must connect");
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    pub_client
+        .publish_qos1(&topic, b"qos1-over-quic")
+        .await
+        .expect("publish must succeed");
+
+    let mut delivered = 0;
+    for _ in 0..40 {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        delivered = received.load(Ordering::Relaxed);
+        if delivered > 0 {
+            break;
+        }
+    }
+
+    pub_client.disconnect().await.ok();
+    sub_client.disconnect().await.ok();
+    broker_handle.abort();
+
+    assert_eq!(
+        delivered, 1,
+        "a QoS1 subscriber over QUIC must receive its message; the broker must read the recv \
+         half of the server data stream so the client's PUBACK can land (MQoQ 9.1.2)"
+    );
+}
