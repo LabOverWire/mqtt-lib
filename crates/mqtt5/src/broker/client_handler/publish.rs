@@ -719,18 +719,31 @@ impl ClientHandler {
         Ok(())
     }
 
+    /// Builds the manager for server-initiated QUIC data flows.
+    ///
+    /// The packet channel is what lets the broker read the client's QoS>0 acks back off the
+    /// same data flow it delivered the PUBLISH on, as `MQoQ` 9.1.2 requires.
+    #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
+    fn build_server_stream_manager(
+        &self,
+    ) -> crate::broker::server_stream_manager::ServerStreamManager {
+        let conn = self.quic_connection.clone().unwrap();
+        let manager = crate::broker::server_stream_manager::ServerStreamManager::new(conn)
+            .with_strategy(self.server_delivery_strategy);
+        match self.quic_packet_tx.clone() {
+            Some(tx) => manager.with_packet_tx(tx),
+            None => manager,
+        }
+    }
+
     #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
     async fn write_publish_bytes(&mut self, topic: &str, qos: QoS) -> Result<()> {
         use crate::broker::config::ServerDeliveryStrategy;
-        use crate::broker::server_stream_manager::ServerStreamManager;
 
         if self.quic_connection.is_some() {
             if let Some(flow_id) = self.pending_target_flow {
                 if self.server_stream_manager.is_none() {
-                    let conn = self.quic_connection.clone().unwrap();
-                    self.server_stream_manager = Some(
-                        ServerStreamManager::new(conn).with_strategy(self.server_delivery_strategy),
-                    );
+                    self.server_stream_manager = Some(self.build_server_stream_manager());
                 }
                 return self
                     .server_stream_manager
@@ -743,10 +756,7 @@ impl ClientHandler {
                 return self.transport.write(&self.write_buffer).await;
             }
             if self.server_stream_manager.is_none() {
-                let conn = self.quic_connection.clone().unwrap();
-                self.server_stream_manager = Some(
-                    ServerStreamManager::new(conn).with_strategy(self.server_delivery_strategy),
-                );
+                self.server_stream_manager = Some(self.build_server_stream_manager());
             }
             self.server_stream_manager
                 .as_mut()

@@ -43,7 +43,7 @@ For single-core targets, use cfg: `rustflags = ["--cfg", "portable_atomic_unsafe
 
 Full-featured async client and broker for Linux, macOS, Windows. This is the primary crate for production deployments.
 
-The **client** provides `MqttClient` with automatic reconnection and exponential backoff, QoS 0/1/2 with proper flow control, and connection event callbacks. Transport options include TLS via rustls (CA and client certificate support) and QUIC multistream for parallel operations. Enhanced authentication covers SCRAM-SHA-256, JWT, and custom handlers. Supporting modules include **callback** (subscription callback dispatch), **tasks** (background packet reader, keepalive, reconnection), and **types** (ConnectOptions, ConnectionStats).
+The **client** provides `MqttClient` with automatic reconnection and exponential backoff, QoS 0/1/2 with proper flow control, and connection event callbacks. Transport options include TLS via rustls (CA and client certificate support) and QUIC multistream for parallel operations. Enhanced authentication covers SCRAM-SHA-256, JWT, and custom handlers. Supporting modules include **callback** (subscription callback dispatch), **session** (session state, QoS flow control), and **types** (ConnectOptions, ConnectionStats).
 
 The **broker** supports multi-transport operation (TCP, TLS, WebSocket, QUIC on different ports) with pluggable authentication (password with argon2, certificate, JWT, federated JWT) and ACL-based authorization with wildcard topic matching. Broker-to-broker bridging with loop prevention, file-based and in-memory storage backends, and `$SYS` topics for statistics round out the core feature set.
 
@@ -107,7 +107,7 @@ The **transport layer** provides async I/O through `read_packet()` and `write_pa
 ```mermaid
 graph LR
     subgraph Incoming
-        N1[Network] --> read["Transport.read_packet()"] --> reader["packet_reader_task"] --> handle["handle_packet()"] --> CB[Callbacks]
+        N1[Network] --> read["Transport.read_packet()"] --> reader["packet_reader_task_with_responses"] --> handle["handle_incoming_packet_with_writer()"] --> CB[Callbacks]
     end
 
     subgraph Outgoing

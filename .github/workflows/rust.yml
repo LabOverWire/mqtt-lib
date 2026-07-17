@@ -88,8 +88,8 @@ jobs:
       - name: Run unit tests
         run: cargo make test-fast
 
-      - name: Run QUIC integration tests
-        run: cargo make test-quic
+      - name: Run integration tests
+        run: cargo make test-integration
         
       - name: Build and test CLI
         run: |

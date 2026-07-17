@@ -18,6 +18,9 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
+/// Disambiguates concurrent writes to the same destination path.
+static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
 /// Storage format version
 ///
 /// IMPORTANT: Only increment this version when the storage format changes:
@@ -239,6 +242,13 @@ impl FileBackend {
         result
     }
 
+    /// Serialises `data` and replaces `path` with it atomically and durably.
+    ///
+    /// The temp file is named uniquely per write. A name derived only from the destination
+    /// would be shared by every concurrent writer of that path, letting one writer's
+    /// `create` truncate another's in-flight file; the victim would then sync and rename
+    /// zero or partial bytes into place, and a crash before its retry would make that
+    /// permanent. The temp file is removed if the write or rename fails.
     async fn write_file_atomic<T: serde::Serialize>(&self, path: PathBuf, data: &T) -> Result<()> {
         let serialized = serde_json::to_vec_pretty(data)
             .map_err(|e| MqttError::Configuration(format!("Failed to serialize data: {e}")))?;
@@ -250,32 +260,28 @@ impl FileBackend {
                 })?;
             }
 
-            let temp_path = path.with_extension("tmp");
+            let temp_path = path.with_extension(format!(
+                "tmp.{}.{}",
+                std::process::id(),
+                TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed)
+            ));
 
-            let mut file = File::create(&temp_path)
-                .await
-                .map_err(|e| MqttError::Io(format!("Failed to create temp file: {e}")))?;
-
-            file.write_all(&serialized)
-                .await
-                .map_err(|e| MqttError::Io(format!("Failed to write temp file: {e}")))?;
-
-            file.flush()
-                .await
-                .map_err(|e| MqttError::Io(format!("Failed to flush temp file: {e}")))?;
-
-            file.sync_data()
-                .await
-                .map_err(|e| MqttError::Io(format!("Failed to sync temp file: {e}")))?;
-
-            drop(file);
+            match Self::write_temp_file(&temp_path, &serialized).await {
+                Ok(()) => {}
+                Err(e) => {
+                    let _ = fs::remove_file(&temp_path).await;
+                    return Err(e);
+                }
+            }
 
             match fs::rename(&temp_path, &path).await {
                 Ok(()) => return Ok(()),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound && attempt == 0 => {
+                    let _ = fs::remove_file(&temp_path).await;
                     debug!("Atomic write race detected, retrying: {e}");
                 }
                 Err(e) => {
+                    let _ = fs::remove_file(&temp_path).await;
                     return Err(MqttError::Io(format!("Failed to rename temp file: {e}")));
                 }
             }
@@ -284,19 +290,44 @@ impl FileBackend {
         Ok(())
     }
 
-    /// Read data from file
+    /// Writes the payload to `temp_path` and makes it durable before it is renamed into place.
+    async fn write_temp_file(temp_path: &Path, serialized: &[u8]) -> Result<()> {
+        let mut file = File::create(temp_path)
+            .await
+            .map_err(|e| MqttError::Io(format!("Failed to create temp file: {e}")))?;
+
+        file.write_all(serialized)
+            .await
+            .map_err(|e| MqttError::Io(format!("Failed to write temp file: {e}")))?;
+
+        file.flush()
+            .await
+            .map_err(|e| MqttError::Io(format!("Failed to flush temp file: {e}")))?;
+
+        file.sync_data()
+            .await
+            .map_err(|e| MqttError::Io(format!("Failed to sync temp file: {e}")))?;
+
+        Ok(())
+    }
+
+    /// Reads and deserializes a stored item, reporting an unreadable one as absent.
+    ///
+    /// Persisted state is untrusted input: it can be truncated by a crash, a full disk, or a
+    /// partial write, and it may have been written by an older schema. A single unreadable
+    /// item must therefore never fail the surrounding load — that would let data the broker
+    /// wrote itself prevent the broker from starting, an outage recoverable only by manually
+    /// deleting files. The offending file is quarantined and treated as missing; callers
+    /// already skip `None`. Genuine I/O errors still propagate.
     async fn read_file<T: serde::de::DeserializeOwned>(&self, path: PathBuf) -> Result<Option<T>> {
         match fs::read(&path).await {
-            Ok(data) => {
-                let result = serde_json::from_slice(&data).map_err(|e| {
-                    MqttError::Configuration(format!(
-                        "Failed to deserialize {}: {}",
-                        path.display(),
-                        e
-                    ))
-                })?;
-                Ok(Some(result))
-            }
+            Ok(data) => match serde_json::from_slice(&data) {
+                Ok(value) => Ok(Some(value)),
+                Err(e) => {
+                    self.quarantine_unreadable(&path, &e.to_string()).await;
+                    Ok(None)
+                }
+            },
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(MqttError::Io(format!(
                 "Failed to read {}: {}",
@@ -304,6 +335,26 @@ impl FileBackend {
                 e
             ))),
         }
+    }
+
+    /// Moves an unreadable file aside, keeping it for diagnosis instead of deleting it.
+    ///
+    /// The `.corrupt` extension also takes it out of the directory listings, which filter on
+    /// the storage extension, so a bad file is reported once rather than on every load.
+    async fn quarantine_unreadable(&self, path: &Path, reason: &str) {
+        let quarantined = path.with_extension("corrupt");
+        if let Err(e) = fs::rename(path, &quarantined).await {
+            warn!(
+                "Ignoring unreadable storage file {} ({reason}); could not quarantine it: {e}",
+                path.display()
+            );
+            return;
+        }
+        warn!(
+            "Quarantined unreadable storage file {} as {} and skipped it: {reason}",
+            path.display(),
+            quarantined.display()
+        );
     }
 
     /// List all files in directory with extension
@@ -698,5 +749,122 @@ impl StorageBackend for FileBackend {
 
     async fn flush_sessions(&self) -> Result<()> {
         FileBackend::flush_sessions(self).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::broker::storage::RetainedMessage;
+    use crate::packet::publish::PublishPacket;
+    use crate::QoS;
+
+    fn retained(topic: &str, payload: Vec<u8>) -> RetainedMessage {
+        let mut packet = PublishPacket::new(topic.to_string(), payload, QoS::AtMostOnce);
+        packet.retain = true;
+        RetainedMessage::new(packet)
+    }
+
+    /// A file the broker cannot read must not stop it from loading the rest.
+    ///
+    /// This is the failure that took a broker down: an empty retained file made
+    /// `get_retained_messages` fail, which failed `router.initialize()`, which made `run()`
+    /// return before any listener was bound.
+    #[tokio::test]
+    async fn unreadable_retained_file_is_skipped_not_fatal() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = FileBackend::new(dir.path()).await.unwrap();
+
+        backend
+            .store_retained_message("good/topic", retained("good/topic", b"keep me".to_vec()))
+            .await
+            .unwrap();
+
+        let corrupt = dir.path().join("retained").join(format!(
+            "{}.json",
+            FileBackend::topic_to_filename("bad/topic")
+        ));
+        fs::write(&corrupt, b"").await.unwrap();
+
+        let messages = backend
+            .get_retained_messages("#")
+            .await
+            .expect("an unreadable file must not fail the load");
+
+        assert_eq!(messages.len(), 1, "the readable message must still load");
+        assert_eq!(messages[0].0, "good/topic");
+        assert!(!corrupt.exists(), "the bad file must be moved aside");
+        assert!(
+            corrupt.with_extension("corrupt").exists(),
+            "the bad file must be quarantined for diagnosis, not deleted"
+        );
+    }
+
+    /// Truncated (rather than empty) JSON must be tolerated the same way.
+    #[tokio::test]
+    async fn partially_written_retained_file_is_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = FileBackend::new(dir.path()).await.unwrap();
+
+        let corrupt = dir.path().join("retained").join(format!(
+            "{}.json",
+            FileBackend::topic_to_filename("bad/topic")
+        ));
+        fs::write(&corrupt, b"{\"payload\":[1,2").await.unwrap();
+
+        let messages = backend.get_retained_messages("#").await.unwrap();
+        assert!(messages.is_empty());
+        assert!(corrupt.with_extension("corrupt").exists());
+    }
+
+    /// Concurrent writers to one topic must not truncate each other's temp file.
+    ///
+    /// A temp name derived only from the destination is shared by every writer of that path,
+    /// so one writer's `create` truncates another's in-flight bytes and the victim renames a
+    /// zero-length file into place. That is how the zero-byte file was produced.
+    #[tokio::test]
+    async fn concurrent_writes_to_one_topic_never_leave_it_unreadable() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(FileBackend::new(dir.path()).await.unwrap());
+
+        for _ in 0..20 {
+            let writers: Vec<_> = (0..8)
+                .map(|i| {
+                    let backend = Arc::clone(&backend);
+                    tokio::spawn(async move {
+                        backend
+                            .store_retained_message("hot/topic", retained("hot/topic", vec![i; 64]))
+                            .await
+                    })
+                })
+                .collect();
+            for w in writers {
+                w.await.unwrap().unwrap();
+            }
+
+            let messages = backend.get_retained_messages("hot/topic").await.unwrap();
+            assert_eq!(
+                messages.len(),
+                1,
+                "a concurrently written retained message must always be readable"
+            );
+        }
+    }
+
+    /// A failed write must not leave its temp file behind now that temp names are unique.
+    #[tokio::test]
+    async fn successful_write_leaves_no_temp_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = FileBackend::new(dir.path()).await.unwrap();
+        backend
+            .store_retained_message("some/topic", retained("some/topic", b"payload".to_vec()))
+            .await
+            .unwrap();
+
+        let mut entries = fs::read_dir(dir.path().join("retained")).await.unwrap();
+        while let Some(entry) = entries.next_entry().await.unwrap() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            assert!(!name.contains(".tmp"), "temp file left behind: {name}");
+        }
     }
 }

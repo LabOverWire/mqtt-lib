@@ -34,10 +34,18 @@ fn ensure_test_certs(manifest_dir: &Path) {
     assert!(status.success(), "test certificate generation failed");
 }
 
-async fn start_quic_broker(quic_port: u16) -> (MqttBroker, SocketAddr) {
+async fn start_quic_broker() -> (MqttBroker, SocketAddr) {
+    start_quic_broker_at("127.0.0.1:0".parse().unwrap()).await
+}
+
+/// Binds a QUIC broker at `bind_addr` and returns it with the address actually bound.
+///
+/// Pass port 0 for a fresh broker (the OS picks a free port, avoiding collisions between
+/// parallel test processes); pass a previously assigned address to rebind it, as the
+/// reconnect tests do to simulate a broker restart at the same address.
+async fn start_quic_broker_at(bind_addr: SocketAddr) -> (MqttBroker, SocketAddr) {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let quic_addr: SocketAddr = format!("127.0.0.1:{quic_port}").parse().unwrap();
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     ensure_test_certs(manifest_dir);
     let cert_dir = manifest_dir.join("../../test_certs");
@@ -46,20 +54,49 @@ async fn start_quic_broker(quic_port: u16) -> (MqttBroker, SocketAddr) {
         .with_bind_address(([127, 0, 0, 1], 0))
         .with_quic(
             QuicConfig::new(cert_dir.join("server.pem"), cert_dir.join("server.key"))
-                .with_bind_address(quic_addr),
+                .with_bind_address(bind_addr),
         );
 
     let broker = MqttBroker::with_config(config).await.unwrap();
+    let quic_addr = broker
+        .quic_local_addr()
+        .expect("QUIC endpoint must be bound");
     (broker, quic_addr)
 }
 
-async fn spawn_broker(
-    mut broker: MqttBroker,
-) -> tokio::task::JoinHandle<Result<(), mqtt5::MqttError>> {
+/// A running test broker with the means to stop it two ways.
+///
+/// `abort` just kills the task (fine at end of test); it does not release bound ports, because
+/// the accept subtasks are detached. `shutdown` signals a graceful stop and waits for `run()`
+/// to return, which does release the ports — required before rebinding the same address.
+struct TestBroker {
+    task: tokio::task::JoinHandle<Result<(), mqtt5::MqttError>>,
+    shutdown: mqtt5::broker::BrokerShutdownHandle,
+}
+
+impl TestBroker {
+    fn abort(&self) {
+        self.task.abort();
+    }
+
+    async fn shutdown(&mut self) {
+        self.shutdown.shutdown();
+        let _ = tokio::time::timeout(Duration::from_secs(5), &mut self.task).await;
+    }
+}
+
+async fn spawn_broker(mut broker: MqttBroker) -> TestBroker {
     let mut ready_rx = broker.ready_receiver();
-    let handle = tokio::spawn(async move { broker.run().await });
-    let _ = ready_rx.wait_for(|&v| v).await;
-    handle
+    let shutdown = broker.shutdown_handle();
+    let mut task = tokio::spawn(async move { broker.run().await });
+    if ready_rx.wait_for(|&v| v).await.is_err() {
+        match (&mut task).await {
+            Ok(Err(e)) => panic!("broker failed to start: {e}"),
+            Ok(Ok(())) => panic!("broker exited before signalling ready"),
+            Err(e) => panic!("broker task panicked during startup: {e}"),
+        }
+    }
+    TestBroker { task, shutdown }
 }
 
 async fn wait_for_connected(client: &MqttClient, timeout: Duration) -> bool {
@@ -143,8 +180,7 @@ async fn test_control_only_secure_clean_session_qos0_burst_after_reconnect_does_
 async fn assert_control_only_reconnect_publish_stable(clean_start: bool) {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let quic_port = if clean_start { 24602 } else { 24601 };
-    let (broker, quic_addr) = start_quic_broker(quic_port).await;
+    let (broker, quic_addr) = start_quic_broker().await;
     let mut broker_handle = spawn_broker(broker).await;
 
     let topic = format!("reconnect-control-only/{}", Ulid::new());
@@ -179,14 +215,14 @@ async fn assert_control_only_reconnect_publish_stable(clean_start: bool) {
     let received_for_callback = received.clone();
 
     let broker_url = format!("quic://{quic_addr}");
-    if sub_client.connect(&broker_url).await.is_err() {
-        broker_handle.abort();
-        return;
-    }
-    if pub_client.connect(&broker_url).await.is_err() {
-        broker_handle.abort();
-        return;
-    }
+    sub_client
+        .connect(&broker_url)
+        .await
+        .expect("client must connect to the broker");
+    pub_client
+        .connect(&broker_url)
+        .await
+        .expect("client must connect to the broker");
 
     sub_client
         .subscribe(&topic, move |_| {
@@ -197,10 +233,9 @@ async fn assert_control_only_reconnect_publish_stable(clean_start: bool) {
 
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    broker_handle.abort();
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    broker_handle.shutdown().await;
 
-    let (restarted_broker, restarted_addr) = start_quic_broker(quic_port).await;
+    let (restarted_broker, restarted_addr) = start_quic_broker_at(quic_addr).await;
     broker_handle = spawn_broker(restarted_broker).await;
 
     assert_eq!(restarted_addr, quic_addr);
@@ -212,10 +247,10 @@ async fn assert_control_only_reconnect_publish_stable(clean_start: bool) {
     if pub_client.is_connected().await {
         pub_client.disconnect().await.ok();
     }
-    if pub_client.connect(&broker_url).await.is_err() {
-        broker_handle.abort();
-        return;
-    }
+    pub_client
+        .connect(&broker_url)
+        .await
+        .expect("client must connect to the broker");
 
     let disconnects_before_publish = disconnected.load(Ordering::SeqCst);
 
@@ -251,8 +286,7 @@ async fn assert_control_only_reconnect_publish_stable(clean_start: bool) {
 async fn assert_control_only_reconnect_qos0_burst_stable(secure: bool) {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let quic_port = if secure { 24604 } else { 24603 };
-    let (broker, quic_addr) = start_quic_broker(quic_port).await;
+    let (broker, quic_addr) = start_quic_broker().await;
     let mut broker_handle = spawn_broker(broker).await;
 
     let topic = format!("reconnect-control-only-qos0/{}", Ulid::new());
@@ -295,14 +329,14 @@ async fn assert_control_only_reconnect_qos0_burst_stable(secure: bool) {
     } else {
         format!("quic://{quic_addr}")
     };
-    if sub_client.connect(&broker_url).await.is_err() {
-        broker_handle.abort();
-        return;
-    }
-    if pub_client.connect(&broker_url).await.is_err() {
-        broker_handle.abort();
-        return;
-    }
+    sub_client
+        .connect(&broker_url)
+        .await
+        .expect("client must connect to the broker");
+    pub_client
+        .connect(&broker_url)
+        .await
+        .expect("client must connect to the broker");
 
     sub_client
         .subscribe(&topic, move |_| {
@@ -313,10 +347,9 @@ async fn assert_control_only_reconnect_qos0_burst_stable(secure: bool) {
 
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    broker_handle.abort();
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    broker_handle.shutdown().await;
 
-    let (restarted_broker, restarted_addr) = start_quic_broker(quic_port).await;
+    let (restarted_broker, restarted_addr) = start_quic_broker_at(quic_addr).await;
     broker_handle = spawn_broker(restarted_broker).await;
 
     assert_eq!(restarted_addr, quic_addr);
@@ -328,10 +361,10 @@ async fn assert_control_only_reconnect_qos0_burst_stable(secure: bool) {
     if pub_client.is_connected().await {
         pub_client.disconnect().await.ok();
     }
-    if pub_client.connect(&broker_url).await.is_err() {
-        broker_handle.abort();
-        return;
-    }
+    pub_client
+        .connect(&broker_url)
+        .await
+        .expect("client must connect to the broker");
 
     let disconnects_before_publish = disconnected.load(Ordering::SeqCst);
 
@@ -374,7 +407,7 @@ async fn test_broker_quic_client_connection() {
         .try_init();
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let (broker, quic_addr) = start_quic_broker(24567).await;
+    let (broker, quic_addr) = start_quic_broker().await;
     eprintln!("Broker QUIC endpoint bound to {quic_addr}");
 
     let broker_handle = spawn_broker(broker).await;
@@ -404,7 +437,7 @@ async fn test_broker_quic_client_connection() {
 async fn test_broker_quic_pubsub() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let (broker, quic_addr) = start_quic_broker(24568).await;
+    let (broker, quic_addr) = start_quic_broker().await;
 
     let broker_handle = spawn_broker(broker).await;
 
@@ -420,14 +453,14 @@ async fn test_broker_quic_pubsub() {
 
     let broker_url = format!("quic://{quic_addr}");
 
-    if pub_client.connect(&broker_url).await.is_err() {
-        broker_handle.abort();
-        return;
-    }
-    if sub_client.connect(&broker_url).await.is_err() {
-        broker_handle.abort();
-        return;
-    }
+    pub_client
+        .connect(&broker_url)
+        .await
+        .expect("client must connect to the broker");
+    sub_client
+        .connect(&broker_url)
+        .await
+        .expect("client must connect to the broker");
 
     let received = Arc::new(AtomicU32::new(0));
     let received_clone = received.clone();
@@ -463,7 +496,7 @@ async fn test_broker_quic_pubsub() {
 async fn test_broker_quic_data_per_publish() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let (broker, quic_addr) = start_quic_broker(24569).await;
+    let (broker, quic_addr) = start_quic_broker().await;
 
     let broker_handle = spawn_broker(broker).await;
 
@@ -482,14 +515,14 @@ async fn test_broker_quic_data_per_publish() {
 
     let broker_url = format!("quic://{quic_addr}");
 
-    if pub_client.connect(&broker_url).await.is_err() {
-        broker_handle.abort();
-        return;
-    }
-    if sub_client.connect(&broker_url).await.is_err() {
-        broker_handle.abort();
-        return;
-    }
+    pub_client
+        .connect(&broker_url)
+        .await
+        .expect("client must connect to the broker");
+    sub_client
+        .connect(&broker_url)
+        .await
+        .expect("client must connect to the broker");
 
     let received = Arc::new(AtomicU32::new(0));
     let received_clone = received.clone();
@@ -527,7 +560,7 @@ async fn test_broker_quic_data_per_publish() {
 async fn test_broker_quic_data_per_topic() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let (broker, quic_addr) = start_quic_broker(24570).await;
+    let (broker, quic_addr) = start_quic_broker().await;
 
     let broker_handle = spawn_broker(broker).await;
 
@@ -547,14 +580,14 @@ async fn test_broker_quic_data_per_topic() {
 
     let broker_url = format!("quic://{quic_addr}");
 
-    if pub_client.connect(&broker_url).await.is_err() {
-        broker_handle.abort();
-        return;
-    }
-    if sub_client.connect(&broker_url).await.is_err() {
-        broker_handle.abort();
-        return;
-    }
+    pub_client
+        .connect(&broker_url)
+        .await
+        .expect("client must connect to the broker");
+    sub_client
+        .connect(&broker_url)
+        .await
+        .expect("client must connect to the broker");
 
     let received = Arc::new(AtomicU32::new(0));
     let received_clone1 = received.clone();
@@ -605,7 +638,7 @@ async fn test_broker_quic_data_per_topic() {
 async fn test_broker_quic_data_per_subscription() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let (broker, quic_addr) = start_quic_broker(24571).await;
+    let (broker, quic_addr) = start_quic_broker().await;
 
     let broker_handle = spawn_broker(broker).await;
 
@@ -625,14 +658,14 @@ async fn test_broker_quic_data_per_subscription() {
 
     let broker_url = format!("quic://{quic_addr}");
 
-    if pub_client.connect(&broker_url).await.is_err() {
-        broker_handle.abort();
-        return;
-    }
-    if sub_client.connect(&broker_url).await.is_err() {
-        broker_handle.abort();
-        return;
-    }
+    pub_client
+        .connect(&broker_url)
+        .await
+        .expect("client must connect to the broker");
+    sub_client
+        .connect(&broker_url)
+        .await
+        .expect("client must connect to the broker");
 
     let received = Arc::new(AtomicU32::new(0));
     let received_clone1 = received.clone();
@@ -678,10 +711,8 @@ async fn test_broker_quic_data_per_subscription() {
     broker_handle.abort();
 }
 
-async fn start_quic_broker_with_early_data(quic_port: u16) -> (MqttBroker, SocketAddr) {
+async fn start_quic_broker_with_early_data() -> (MqttBroker, SocketAddr) {
     let _ = rustls::crypto::ring::default_provider().install_default();
-
-    let quic_addr: SocketAddr = format!("127.0.0.1:{quic_port}").parse().unwrap();
 
     let config = BrokerConfig::default()
         .with_bind_address(([127, 0, 0, 1], 0))
@@ -690,11 +721,14 @@ async fn start_quic_broker_with_early_data(quic_port: u16) -> (MqttBroker, Socke
                 PathBuf::from("../../test_certs/server.pem"),
                 PathBuf::from("../../test_certs/server.key"),
             )
-            .with_bind_address(quic_addr)
+            .with_bind_address("127.0.0.1:0".parse::<SocketAddr>().unwrap())
             .with_early_data(true),
         );
 
     let broker = MqttBroker::with_config(config).await.unwrap();
+    let quic_addr = broker
+        .quic_local_addr()
+        .expect("QUIC endpoint must be bound");
     (broker, quic_addr)
 }
 
@@ -705,7 +739,7 @@ async fn test_quic_0rtt_first_connection_is_1rtt() {
         .with_test_writer()
         .try_init();
 
-    let (broker, quic_addr) = start_quic_broker_with_early_data(24580).await;
+    let (broker, quic_addr) = start_quic_broker_with_early_data().await;
     let broker_handle = spawn_broker(broker).await;
 
     let client = MqttClient::new(test_client_id("0rtt-first"));
@@ -713,11 +747,10 @@ async fn test_quic_0rtt_first_connection_is_1rtt() {
     client.set_quic_early_data(true).await;
 
     let broker_url = format!("quic://{quic_addr}");
-    if client.connect(&broker_url).await.is_err() {
-        eprintln!("Skipping 0-RTT test - QUIC connection failed");
-        broker_handle.abort();
-        return;
-    }
+    client
+        .connect(&broker_url)
+        .await
+        .expect("client must connect to the broker");
     assert!(client.is_connected().await);
     assert!(!client.was_zero_rtt().await);
 
@@ -732,7 +765,7 @@ async fn test_quic_0rtt_reconnection() {
         .with_test_writer()
         .try_init();
 
-    let (broker, quic_addr) = start_quic_broker_with_early_data(24581).await;
+    let (broker, quic_addr) = start_quic_broker_with_early_data().await;
     let broker_handle = spawn_broker(broker).await;
 
     let client = MqttClient::new(test_client_id("0rtt-reconnect"));
@@ -741,22 +774,20 @@ async fn test_quic_0rtt_reconnection() {
 
     let broker_url = format!("quic://{quic_addr}");
 
-    if client.connect(&broker_url).await.is_err() {
-        eprintln!("Skipping 0-RTT reconnection test - QUIC connection failed");
-        broker_handle.abort();
-        return;
-    }
+    client
+        .connect(&broker_url)
+        .await
+        .expect("client must connect to the broker");
     assert!(client.is_connected().await);
     assert!(!client.was_zero_rtt().await);
     client.disconnect().await.unwrap();
 
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    if client.connect(&broker_url).await.is_err() {
-        eprintln!("Skipping 0-RTT reconnection test - second QUIC connection failed");
-        broker_handle.abort();
-        return;
-    }
+    client
+        .connect(&broker_url)
+        .await
+        .expect("client must connect to the broker");
     assert!(client.is_connected().await);
     assert!(
         client.was_zero_rtt().await,
@@ -774,7 +805,7 @@ async fn test_quic_0rtt_server_without_early_data_falls_back() {
         .with_test_writer()
         .try_init();
 
-    let (broker, quic_addr) = start_quic_broker(24582).await;
+    let (broker, quic_addr) = start_quic_broker().await;
     let broker_handle = spawn_broker(broker).await;
 
     let client = MqttClient::new(test_client_id("0rtt-fallback"));
@@ -783,21 +814,19 @@ async fn test_quic_0rtt_server_without_early_data_falls_back() {
 
     let broker_url = format!("quic://{quic_addr}");
 
-    if client.connect(&broker_url).await.is_err() {
-        eprintln!("Skipping 0-RTT fallback test - QUIC connection failed");
-        broker_handle.abort();
-        return;
-    }
+    client
+        .connect(&broker_url)
+        .await
+        .expect("client must connect to the broker");
     assert!(client.is_connected().await);
     client.disconnect().await.unwrap();
 
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    if client.connect(&broker_url).await.is_err() {
-        eprintln!("Skipping 0-RTT fallback test - second QUIC connection failed");
-        broker_handle.abort();
-        return;
-    }
+    client
+        .connect(&broker_url)
+        .await
+        .expect("client must connect to the broker");
     assert!(client.is_connected().await);
     assert!(
         !client.was_zero_rtt().await,
@@ -815,7 +844,7 @@ async fn test_quic_0rtt_pubsub_after_reconnect() {
         .with_test_writer()
         .try_init();
 
-    let (broker, quic_addr) = start_quic_broker_with_early_data(24583).await;
+    let (broker, quic_addr) = start_quic_broker_with_early_data().await;
     let broker_handle = spawn_broker(broker).await;
 
     let broker_url = format!("quic://{quic_addr}");
@@ -824,19 +853,17 @@ async fn test_quic_0rtt_pubsub_after_reconnect() {
     client.set_insecure_tls(true).await;
     client.set_quic_early_data(true).await;
 
-    if client.connect(&broker_url).await.is_err() {
-        eprintln!("Skipping 0-RTT pubsub test - QUIC connection failed");
-        broker_handle.abort();
-        return;
-    }
+    client
+        .connect(&broker_url)
+        .await
+        .expect("client must connect to the broker");
     client.disconnect().await.unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    if client.connect(&broker_url).await.is_err() {
-        eprintln!("Skipping 0-RTT pubsub test - second QUIC connection failed");
-        broker_handle.abort();
-        return;
-    }
+    client
+        .connect(&broker_url)
+        .await
+        .expect("client must connect to the broker");
     assert!(client.is_connected().await);
 
     let received = Arc::new(AtomicU32::new(0));
@@ -867,17 +894,17 @@ async fn test_quic_0rtt_pubsub_after_reconnect() {
 async fn test_quic_connection_close_sends_no_error() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let (broker, quic_addr) = start_quic_broker(24584).await;
+    let (broker, quic_addr) = start_quic_broker().await;
     let broker_handle = spawn_broker(broker).await;
 
     let client = MqttClient::new(test_client_id("quic-graceful"));
     client.set_insecure_tls(true).await;
 
     let broker_url = format!("quic://{quic_addr}");
-    if client.connect(&broker_url).await.is_err() {
-        broker_handle.abort();
-        return;
-    }
+    client
+        .connect(&broker_url)
+        .await
+        .expect("client must connect to the broker");
 
     assert!(client.is_connected().await);
     client.disconnect().await.unwrap();
@@ -886,10 +913,10 @@ async fn test_quic_connection_close_sends_no_error() {
 
     let client2 = MqttClient::new(test_client_id("quic-after-graceful"));
     client2.set_insecure_tls(true).await;
-    if client2.connect(&broker_url).await.is_err() {
-        broker_handle.abort();
-        return;
-    }
+    client2
+        .connect(&broker_url)
+        .await
+        .expect("client must connect to the broker");
     assert!(
         client2.is_connected().await,
         "broker should still accept connections after graceful disconnect"
@@ -991,7 +1018,6 @@ fn test_quic_error_level_consistency() {
 async fn test_subscribe_on_data_flow_delivers_on_server_stream() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let quic_addr: SocketAddr = "127.0.0.1:24605".parse().unwrap();
     let config = BrokerConfig::default()
         .with_bind_address(([127, 0, 0, 1], 0))
         .with_server_delivery_strategy(ServerDeliveryStrategy::PerTopic)
@@ -1000,10 +1026,11 @@ async fn test_subscribe_on_data_flow_delivers_on_server_stream() {
                 PathBuf::from("../../test_certs/server.pem"),
                 PathBuf::from("../../test_certs/server.key"),
             )
-            .with_bind_address(quic_addr),
+            .with_bind_address("127.0.0.1:0".parse::<SocketAddr>().unwrap()),
         );
 
     let broker = MqttBroker::with_config(config).await.unwrap();
+    let quic_addr = broker.quic_local_addr().unwrap();
     let tcp_addr = broker.local_addr().unwrap();
     let broker_handle = spawn_broker(broker).await;
 
@@ -1012,10 +1039,10 @@ async fn test_subscribe_on_data_flow_delivers_on_server_stream() {
 
     let pub_client = MqttClient::new(test_client_id("tcp-pub"));
     let tcp_url = format!("mqtt://{tcp_addr}");
-    if pub_client.connect(&tcp_url).await.is_err() {
-        broker_handle.abort();
-        return;
-    }
+    pub_client
+        .connect(&tcp_url)
+        .await
+        .expect("client must connect to the broker");
 
     let sub_client = MqttClient::new(test_client_id("quic-flow-sub"));
     sub_client.set_insecure_tls(true).await;
@@ -1025,11 +1052,10 @@ async fn test_subscribe_on_data_flow_delivers_on_server_stream() {
     sub_client.set_quic_flow_headers(true).await;
 
     let quic_url = format!("quic://{quic_addr}");
-    if sub_client.connect(&quic_url).await.is_err() {
-        pub_client.disconnect().await.ok();
-        broker_handle.abort();
-        return;
-    }
+    sub_client
+        .connect(&quic_url)
+        .await
+        .expect("client must connect to the broker");
 
     let stream_ids_1 = Arc::new(std::sync::Mutex::new(Vec::new()));
     let stream_ids_2 = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -1111,4 +1137,90 @@ async fn test_subscribe_on_data_flow_delivers_on_server_stream() {
     pub_client.disconnect().await.ok();
     sub_client.disconnect().await.ok();
     broker_handle.abort();
+}
+
+/// A `QoS` 1 subscriber over QUIC must actually receive its message.
+///
+/// With `ServerDeliveryStrategy::PerTopic` (the default) the broker delivers PUBLISH on a
+/// server-initiated data stream, and per `MQoQ` spec 9.1.2 the client's PUBACK travels back on
+/// that same data flow. If the broker does not read the recv half of the stream it opened,
+/// the ack has nowhere to land and the client's write fails, aborting delivery before the
+/// subscriber callback ever runs.
+///
+/// Note this test subscribes with an explicit `QoS`: bare `subscribe()` defaults to `QoS` 0, which
+/// needs no ack and therefore cannot exercise this path.
+#[tokio::test]
+async fn test_qos1_subscriber_over_quic_receives_message() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    let config = BrokerConfig::default()
+        .with_bind_address(([127, 0, 0, 1], 0))
+        .with_server_delivery_strategy(ServerDeliveryStrategy::PerTopic)
+        .with_quic(
+            QuicConfig::new(
+                PathBuf::from("../../test_certs/server.pem"),
+                PathBuf::from("../../test_certs/server.key"),
+            )
+            .with_bind_address("127.0.0.1:0".parse::<SocketAddr>().unwrap()),
+        );
+
+    let broker = MqttBroker::with_config(config).await.unwrap();
+    let quic_addr = broker.quic_local_addr().unwrap();
+    let tcp_addr = broker.local_addr().unwrap();
+    let broker_handle = spawn_broker(broker).await;
+
+    let topic = format!("qos1-quic/{}", Ulid::new());
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let sub_client = MqttClient::new(test_client_id("quic-qos1-sub"));
+    sub_client.set_insecure_tls(true).await;
+    sub_client
+        .connect(&format!("quic://{quic_addr}"))
+        .await
+        .expect("QUIC subscriber must connect");
+
+    let received = Arc::new(AtomicU32::new(0));
+    let received_cb = received.clone();
+    let opts = mqtt5::SubscribeOptions {
+        qos: mqtt5::QoS::AtLeastOnce,
+        ..Default::default()
+    };
+    sub_client
+        .subscribe_with_options(&topic, opts, move |_msg| {
+            received_cb.fetch_add(1, Ordering::Relaxed);
+        })
+        .await
+        .expect("QoS1 subscribe must succeed");
+
+    let pub_client = MqttClient::new(test_client_id("tcp-qos1-pub"));
+    pub_client
+        .connect(&format!("mqtt://{tcp_addr}"))
+        .await
+        .expect("TCP publisher must connect");
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    pub_client
+        .publish_qos1(&topic, b"qos1-over-quic")
+        .await
+        .expect("publish must succeed");
+
+    let mut delivered = 0;
+    for _ in 0..40 {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        delivered = received.load(Ordering::Relaxed);
+        if delivered > 0 {
+            break;
+        }
+    }
+
+    pub_client.disconnect().await.ok();
+    sub_client.disconnect().await.ok();
+    broker_handle.abort();
+
+    assert_eq!(
+        delivered, 1,
+        "a QoS1 subscriber over QUIC must receive its message; the broker must read the recv \
+         half of the server data stream so the client's PUBACK can land (MQoQ 9.1.2)"
+    );
 }

@@ -781,33 +781,47 @@ async fn test_shared_subscriptions() {
         .expect("Failed to disconnect publisher");
 }
 
+/// An outbound PUBLISH is bounded by the Maximum Packet Size the *broker* advertises in
+/// CONNACK, not by the client's own Maximum Packet Size (which governs what the client is
+/// willing to receive). The broker here advertises 1KB, so a 2KB publish must fail locally
+/// with `PacketTooLarge` rather than being sent and having the connection closed.
 #[tokio::test]
 async fn test_maximum_packet_size() {
-    // Start test broker
-    let broker = TestBroker::start().await;
+    use mqtt5::broker::config::{BrokerConfig, StorageBackend, StorageConfig};
+
+    let storage_config = StorageConfig {
+        backend: StorageBackend::Memory,
+        enable_persistence: true,
+        ..Default::default()
+    };
+    let config = BrokerConfig::default()
+        .with_bind_address("127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap())
+        .with_storage(storage_config)
+        .with_max_packet_size(1024);
+    let broker = TestBroker::start_with_config(config).await;
 
     let client = MqttClient::new(test_client_id("max-packet"));
-
-    // Connect with maximum packet size limit
-    let mut opts = ConnectOptions::new(test_client_id("max-packet"));
-    opts.properties.maximum_packet_size = Some(1024); // 1KB limit
-
     client
-        .connect_with_options(broker.address(), opts)
+        .connect(broker.address())
         .await
         .expect("Failed to connect");
 
-    // Try to publish within limit
-    let small_payload = vec![0x42; 512]; // 512 bytes
-    let result = client.publish("test/size", small_payload).await;
-    assert!(result.is_ok());
+    let small_payload = vec![0x42; 512];
+    client
+        .publish("test/size", small_payload)
+        .await
+        .expect("a publish within the broker's limit must succeed");
 
-    // Try to publish exceeding limit
-    let large_payload = vec![0x42; 2048]; // 2KB
-    let result = client.publish("test/size", large_payload).await;
+    let large_payload = vec![0x42; 2048];
+    let err = client
+        .publish("test/size", large_payload)
+        .await
+        .expect_err("a publish exceeding the broker's advertised limit must fail locally");
 
-    // Should fail due to packet size limit
-    assert!(result.is_err());
+    assert!(
+        matches!(err, mqtt5::error::MqttError::PacketTooLarge { .. }),
+        "expected PacketTooLarge, got {err:?}"
+    );
 
     client.disconnect().await.expect("Failed to disconnect");
 }

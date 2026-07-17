@@ -25,10 +25,8 @@ fn storage_config() -> StorageConfig {
     }
 }
 
-async fn start_quic_broker(quic_port: u16) -> (MqttBroker, SocketAddr) {
+async fn start_quic_broker() -> (MqttBroker, SocketAddr) {
     let _ = rustls::crypto::ring::default_provider().install_default();
-
-    let quic_addr: SocketAddr = format!("127.0.0.1:{quic_port}").parse().unwrap();
 
     let config = BrokerConfig::default()
         .with_bind_address(([127, 0, 0, 1], 0))
@@ -38,10 +36,13 @@ async fn start_quic_broker(quic_port: u16) -> (MqttBroker, SocketAddr) {
                 PathBuf::from("../../test_certs/server.pem"),
                 PathBuf::from("../../test_certs/server.key"),
             )
-            .with_bind_address(quic_addr),
+            .with_bind_address("127.0.0.1:0".parse::<SocketAddr>().unwrap()),
         );
 
     let broker = MqttBroker::with_config(config).await.unwrap();
+    let quic_addr = broker
+        .quic_local_addr()
+        .expect("QUIC endpoint must be bound");
     (broker, quic_addr)
 }
 
@@ -79,7 +80,7 @@ async fn test_quic_bridge_outbound() {
         .try_init();
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let (mut remote_broker, quic_addr) = start_quic_broker(34567).await;
+    let (mut remote_broker, quic_addr) = start_quic_broker().await;
     let remote_handle = tokio::spawn(async move { remote_broker.run().await });
     tokio::time::sleep(Duration::from_millis(200)).await;
 
@@ -155,7 +156,7 @@ async fn test_quic_bridge_inbound() {
         .try_init();
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let (mut remote_broker, quic_addr) = start_quic_broker(34568).await;
+    let (mut remote_broker, quic_addr) = start_quic_broker().await;
     let remote_handle = tokio::spawn(async move { remote_broker.run().await });
     tokio::time::sleep(Duration::from_millis(200)).await;
 
@@ -232,7 +233,7 @@ async fn test_quic_bridge_bidirectional() {
         .try_init();
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let (mut remote_broker, quic_addr) = start_quic_broker(34569).await;
+    let (mut remote_broker, quic_addr) = start_quic_broker().await;
     let remote_handle = tokio::spawn(async move { remote_broker.run().await });
     tokio::time::sleep(Duration::from_millis(200)).await;
 
