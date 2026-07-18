@@ -204,3 +204,44 @@ with `dup=true` **only on session-resume reconnect** (`resend_inflight_messages`
   transport reconnect and is lost together with the token on a crash, landing in the two safe
   regimes and never the wedge. This corrects the earlier "`delivered` MUST survive the reconnect"
   note, which was wrong: unconditional survival is exactly the wedge.
+
+---
+
+## 6. Implementation status and remaining follow-ups
+
+**Implemented (branch `deferred-ack-token`, commit `implement deferred-ack AckToken and subscribe_with_ack`):**
+the `AckToken` (move-only; `ack`/`reject` consume; `Drop` auto-acks reason-coded + `warn!`), the
+connection-stable `AckDispatcher` with a swappable writer slot, the two-bit dedup split in
+`SessionState` (`inbound_delivered` vs `inbound_pubrecs`, in-memory only), the `ConnectOptions`
+gating (`with_deferred_ack` + `validate_deferred_ack`), `MqttClient::subscribe_with_ack`, the
+deferred delivery branch (PUBREC withheld until `ack()`), the reconnect DUP re-ack matching the
+recorded resolution, and the Receive-Maximum slot wiring. Unit-tested (deferred delivery withholds
+PUBREC until ack; `Drop` emits a reason-coded PUBREC; config gating) and clippy-pedantic clean.
+
+**Remaining follow-ups (edge hardening; none block the core feature):**
+
+1. **Surface `session_present = 0` on reconnect (§3.5).** Deferred ack requires a persistent session
+   (gated at connect). If the broker nonetheless reports no session on a resume, every outstanding
+   token is stale — the message it referred to is gone, and acking it is meaningless. The client must
+   surface this (error/event) and clear the in-memory inbound maps (`SessionState::clear_inbound_state`
+   / the delivered+resolution+pubrec maps), not silently continue. Hook: the connect-result handling in
+   `client/inner.rs` where `session_present` is known, guarded on `options.deferred_ack` and non-empty
+   inbound maps.
+
+2. **End-to-end reconnect integration test against a live broker.** Exercise the two model regimes
+   from `DeferredAckQoS2Reconnect.tla` in real code: (a) `_transport` — a transport reconnect with the
+   in-memory session retained delivers exactly once and completes the withheld handshake on the new
+   connection; (b) `_crash` — a fresh client on a resumed broker session re-delivers (at-least-once
+   processing, no wedge). Current coverage is unit-level only (`handlers.rs` tests); there is no
+   broker-loop reconnect test for the deferred path.
+
+3. **Re-subscribe ack subscriptions on a clean reconnect.** `subscribe_with_ack` registers into the
+   in-memory `AckCallbackManager` (which survives disconnect) and sends the SUBSCRIBE with
+   `SubscriptionPersistence::Skip`. This is correct for the required `session_present = true` path (the
+   broker retains the subscription; the ack callback is still registered). On a *clean* reconnect
+   (`session_present = false`) the SUBSCRIBE is not auto-resent for ack subscriptions, unlike regular
+   ones. Once follow-up 1 lands (which treats a clean resume as an error for deferred ack), decide
+   whether clean-reconnect re-subscription is even desirable or whether the surfaced error is the
+   correct terminal behaviour. If desired, route ack subscriptions through a restoration path that
+   targets `AckCallbackManager` rather than `CallbackManager::restore_callback` (whose `CallbackId`
+   space is distinct — do not reuse it, to avoid an id collision).

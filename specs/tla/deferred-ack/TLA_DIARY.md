@@ -110,6 +110,28 @@ Related: issue #112 (QoS2 duplicate-delivery bug, filed), author reply pasted on
 
 ## Log (newest first)
 
+### 2026-07-18 — Rust `AckToken` implementation landed (branch `deferred-ack-token`). 3 follow-ups documented in API_DESIGN.md §6.
+
+Implemented the deferred-ack feature against the verified `DeferredAckQoS2Reconnect.tla` model, in 7
+steps: (1) two-bit dedup split in `SessionState` (`inbound_delivered` vs `inbound_pubrecs`, in-memory
+ONLY — the model's safe regime); (2) `AckToken` (move-only; `ack`/`reject` consume; `Drop` auto-acks
+reason-coded + `warn!`) + connection-stable `AckDispatcher` with a swappable writer slot so tokens
+survive a transport reconnect; (3) `ConnectOptions` gating (`validate_deferred_ack` hard-errors clean
+session / zero expiry / zero receive-max); (4) wired dispatcher + inbound receive-max + gating into
+the client; (5) single-owner `AckCallbackManager` + the delivery branch that withholds PUBREC until
+`ack()` and re-acks a reconnect DUP to match the recorded resolution; (6) `MqttClient::subscribe_with_ack`
++ `AckToken` re-exported at crate root; (7) reconnect DUP re-ack. All 437 lib tests green, clippy
+pedantic clean, full CI verify passed. New: `crates/mqtt5/src/client/direct/ack.rs`.
+
+**3 follow-ups (edge hardening, NOT blocking) — full detail in API_DESIGN.md §6:**
+1. Surface `session_present = 0` on a deferred-ack reconnect (§3.5): stale tokens, clear inbound maps,
+   don't silently continue. Hook: connect-result handling in `client/inner.rs`.
+2. End-to-end reconnect integration test against a live broker exercising the `_transport` (exactly-once)
+   and `_crash` (at-least-once, no wedge) regimes. Current coverage is unit-level only.
+3. Decide clean-reconnect re-subscribe policy for ack subscriptions (currently `SubscriptionPersistence::Skip`;
+   correct for the required `session_present=true` path). If re-subscribing is wanted, target
+   `AckCallbackManager`, not `CallbackManager::restore_callback` (distinct `CallbackId` space — id-collision risk).
+
 ### 2026-07-18 — Stage 5 v2: a focused confirmation quorum found the rebuild still hid the real post-crash case (F1) + a latch bug (F2). Refined; all 4 configs now behave correctly.
 
 Ran a 2-reviewer confirmation quorum on the rebuilt `DeferredAckQoS2Reconnect.tla`. Reviewer 1
