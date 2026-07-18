@@ -129,20 +129,78 @@ inbound QoS2 state is ever rebuilt across a reconnect, re-check that assumption.
 
 ---
 
-## 5. Open questions for review
+## 5. Resolved decisions
 
-1. **`Drop` = ack-success or ack-with-reason-code?** Auto-ack-success silently claims a message
-   was processed when it was abandoned. Acking with a non-success reason frees the slot *and*
-   signals intent. MQTT-5 allows PUBACK reason codes, but they are terminal either way (no
-   redelivery), so this is about honesty/observability, not semantics. Leaning: reason code +
-   a `warn!`.
-2. **Gate hard or warn?** Refuse `deferred_ack` on a clean session (a hard error at connect), or
-   allow with a loud warning? The model says clean-session deferred ack is *worse than useless*
-   — it degrades at-most-once into silent loss. Leaning: hard error.
-3. **Per-subscription or per-connection?** `with_deferred_ack(true)` is connection-wide; a
-   per-subscription opt-in is finer but complicates the shared inbound window (the window is
-   per-connection, not per-subscription). Leaning: connection-wide.
-4. **QoS2 deferral point.** Defer the PUBREC (true at-least-once processing, holds the slot for
-   the whole handshake) or defer only the PUBCOMP? Stage 3 models PUBREC-at-delivery. Deferring
-   PUBREC is the semantically useful one but needs `store_pubrec` to happen only when the PUBREC
-   is actually written, or `has_pubrec` will lie.
+Decided 2026-07-17. Each was resolved to its leaning.
+
+1. **`Drop` emits an ack with a non-success reason code and a `warn!`.** Auto-ack-success would
+   silently claim a message was processed when it was abandoned. The reason-coded ack frees the
+   slot *and* records intent. Both outcomes are terminal (MQTT-5 PUBACK/PUBCOMP reason codes do
+   not trigger redelivery), so this is honesty/observability, not semantics.
+2. **Clean session is a hard error at connect.** `deferred_ack` with `clean_start=true` or a
+   zero session-expiry is rejected before connecting. Clean-session deferred ack degrades
+   at-most-once into silent loss (`DeferredAckSession.tla`); it is unrepresentable at runtime.
+3. **Opt-in is connection-wide.** `with_deferred_ack(true)` on `ConnectOptions` applies to every
+   subscription. This matches the per-connection Receive-Maximum window; a per-subscription
+   opt-in would fragment slot accounting across one shared window.
+4. **QoS2 defers the PUBREC.** The token withholds PUBREC and holds the slot for the whole
+   handshake — true at-least-once *processing*. See §3.7 for the dedup consequence.
+
+## 3.7 Deferring PUBREC decouples the dedup guard from PUBREC emission
+
+The #112 fix (landed, `handlers.rs`) sends PUBREC at delivery and uses one `inbound_pubrecs`
+entry to mean both "already delivered to the app" (dedup) and "PUBREC owed" (handshake). Decision
+5.4 splits those two meanings apart, because PUBREC is now emitted at `ack()` time, not at
+delivery:
+
+- **At first inbound PUBLISH id `n`:** mark `n` delivered, hand the app a token, **do not send
+  PUBREC**. The dedup guard is set here, exactly as today.
+- **At `token.ack()`:** send a success PUBREC, record `pubrec-sent`.
+- **At `token.reject(reason)` / Drop:** send an **error** PUBREC (reason ≥ 0x80). This is
+  **terminal** — MQTT-5 discards the exchange, no PUBREL follows — so it must **not** set
+  `pubrec-sent`, and it frees the slot.
+- **At PUBREL:** clear `pubrec-sent`, send PUBCOMP.
+
+So the guard needs two bits per inbound id — *delivered* and *pubrec-sent* — where today
+`mark_pubrec_pending` collapses them into one. `has_pubrec` (used by `handle_pubrel`) must key off
+*pubrec-sent*. **Model reference: `DeferredAckQoS2Reconnect.tla`** (`InvDeferralHeld`,
+`InvNoPubrecOnWireBeforeResolve`, `InvDoneImpliesNoPubrec`).
+
+**Where DUPs actually come from (corrected by the Stage 5 quorum — this is load-bearing).** MQTT-5
+`[MQTT-4.4.0-1]` forbids resending on a live connection; this repo enforces it
+(`no_spontaneous_retransmission_on_active_connection`). The broker resends an unacked QoS2 PUBLISH
+with `dup=true` **only on session-resume reconnect** (`resend_inflight_messages`,
+`broker/client_handler/publish.rs`, gated by `session_present` in `connect.rs`). Consequences:
+
+- **The backpressure is the Receive-Maximum slot, not a retransmit timer.** A held (unresolved)
+  token keeps its id outstanding in the broker's window; once the window fills, the broker stops
+  sending *new* messages. Withholding PUBREC produces silence on a live link, not a stream of DUPs.
+  The slot is taken at `register_inbound_publish` and freed at PUBREL (`acknowledge_inbound`) —
+  deferral **widens how long the slot is held**; it does **not** move the free point to `ack()`.
+- **A DUP only ever arrives after a reconnect**, and only for an id the broker never got a PUBREC
+  for (i.e. an unresolved or resolve-lost token). On that DUP: suppress delivery (guard), and
+  re-send the ack **matching the recorded decision** — success if acked, the **same error** if
+  rejected, and **nothing** if still unresolved. Re-sending a fabricated success PUBREC for a
+  rejected id would resurrect it (a real trap the quorum caught).
+- **What the reconnect guarantees depends on WHAT the client keeps — and the dedup guard and the
+  token must be kept together.** Two independent pieces of client state can be lost on a resume: the
+  `SessionState` dedup bits (`delivered`/`resolution`/`pubrecSent`, in-memory `inbound_pubrecs`
+  today) and the app's in-memory `AckToken`. `DeferredAckQoS2Reconnect.tla` models both axes and
+  proves three regimes:
+  - **Transport reconnect** (both survive in memory): exactly-once DELIVERY holds — the replayed
+    PUBLISH is suppressed and the still-held token resolves on the new connection. (`_transport`
+    config, `InvNoDoubleDelivery` holds.)
+  - **Process crash** (both lost — `inbound_pubrecs` is not persisted): the replay re-delivers and
+    re-mints a token → at-least-once PROCESSING, the documented contract (decision 5.2 / Stage 4a).
+    Double delivery is expected here and NO wedge occurs. (`_crash` config, `InvNoWedge` holds,
+    `InvNoDoubleDelivery` intentionally not asserted.)
+  - **The forbidden middle** — persisting `delivered` to disk while the token is lost on crash:
+    the replay is suppressed (guard survives) yet no token is minted, so the message can NEVER be
+    resolved and the broker's Receive-Maximum slot wedges permanently. (`_persistmistake` config,
+    `InvNoWedge` VIOLATED.)
+  **Design rule this pins:** do NOT persist the dedup guard `delivered` unless you ALSO restore the
+  resolve capability on the replayed message (re-mint a token on a DUP of a delivered-but-unresolved
+  id). The simplest safe implementation keeps inbound QoS2 dedup state in memory only — it survives a
+  transport reconnect and is lost together with the token on a crash, landing in the two safe
+  regimes and never the wedge. This corrects the earlier "`delivered` MUST survive the reconnect"
+  note, which was wrong: unconditional survival is exactly the wedge.

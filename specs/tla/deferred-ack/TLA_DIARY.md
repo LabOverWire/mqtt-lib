@@ -110,6 +110,134 @@ Related: issue #112 (QoS2 duplicate-delivery bug, filed), author reply pasted on
 
 ## Log (newest first)
 
+### 2026-07-18 — Stage 5 v2: a focused confirmation quorum found the rebuild still hid the real post-crash case (F1) + a latch bug (F2). Refined; all 4 configs now behave correctly.
+
+Ran a 2-reviewer confirmation quorum on the rebuilt `DeferredAckQoS2Reconnect.tla`. Reviewer 1
+verified all 6 original quorum findings are genuinely fixed (line-cited). Reviewer 2 (adversarial)
+found:
+- **F1 (HIGH, real):** `ClientDedupPersists` was all-or-nothing, so it could not represent the state
+  a CORRECTLY-persisting impl hits on a process crash — `delivered` persisted to disk, in-memory
+  `AckToken` lost. There the replay is suppressed (guard) yet no token is minted → the message can
+  never be resolved → the broker's Receive-Maximum slot **wedges permanently**. The model both hid
+  this and mis-framed crash re-delivery as a "bug" when it is the at-least-once-processing contract.
+  This also means my API_DESIGN §3.7 note ("`delivered` MUST survive reconnect") was WRONG —
+  unconditional survival is exactly the wedge.
+- **F2 (MED, model bug):** the `pendingResend` latch could fire a second PUBREL on a LIVE connection
+  (AppAck→RecvPubrecOk advances the phase before the resend drains), contradicting the model's own
+  no-live-retransmit premise.
+- F3/F4/F6 (lower): `InvWindowBound` enforced-by-construction; `InvPubrelAfterResolve` never the sole
+  failure; small constants. Reviewer 1 + a hand-check confirmed the `ackedEver` phrasing is SOUND
+  (not a whitewash).
+
+**v2 fixes.** Split persistence into two axes: `PersistDelivered` (SessionState dedup bits) and
+`PersistToken` (app AckToken, new `hasToken` var). Added `InvNoWedge`. Reframed exactly-once DELIVERY
+as transport-only; crash gives at-least-once PROCESSING (double delivery expected, not asserted).
+F2 fixed by clearing `pendingResend[m]` on every server phase transition. Bumped default constants to
+ReceiveMax=2, MaxReconnects=2 (F3/F6 coverage).
+
+Results (MaxMsgs=2, ReceiveMax=2, MaxReconnects=2; CHECK_DEADLOCK FALSE):
+- `_transport` (persist both): **ok** — 9 invariants incl InvNoDoubleDelivery + InvNoWedge (2219 st).
+- `_crash` (persist neither): **ok** — InvNoWedge + all safety hold; InvNoDoubleDelivery NOT asserted
+  (re-delivery is the at-least-once contract) (3144 st).
+- `_persistmistake` (delivered persisted, token lost): **InvNoWedge VIOLATED** — the F1 wedge, now a
+  formal negative control proving "don't persist `delivered` without re-minting the token."
+- `_buggydup` (BuggyDupPubrec): **InvDeferralHeld VIOLATED** via reconnect DUP.
+Also spot-checked earlier at ReceiveMax=2/MaxReconnects=2 and MaxMsgs=3/ReceiveMax=2 — green.
+
+**Design rule pinned for the Rust impl:** keep inbound QoS2 dedup state IN MEMORY only (survives a
+transport reconnect, lost with the token on a crash → the two safe regimes), OR if persisting it,
+re-mint a token on a DUP of a delivered-but-unresolved id. Never persist `delivered` alone. API_DESIGN
+§3.7 corrected accordingly.
+
+### 2026-07-17 — Stage 5 REBUILT faithfully (`DeferredAckQoS2Reconnect.tla`): GREEN, all negative controls fire on the RIGHT invariant via the RIGHT (reconnect) DUP mechanism.
+
+Rebuilt per the quorum + the maintainer's "combined reconnect+slot+QoS2" choice. The old in-connection
+model (`DeferredAckQoS2Deferred.tla`) was deleted. The faithful model composes Stage 4a's session
+machinery (Receive-Maximum slot, reconnect-driven redelivery, persistent/clean) with the QoS2
+four-way handshake and the deferred PUBREC:
+- LIVE connection = reliable + ordered; NO in-connection DUP (MQTT-4.4.0-1). s2c/c2s cleared on
+  Disconnect.
+- ALL redelivery via Disconnect→Reconnect replay of still-`awaitPubrec`/`awaitPubcomp` packets
+  (`pendingResend`), mirroring `resend_inflight_messages`.
+- Receive-Maximum slot: `Outstanding` = awaitPubrec∪awaitPubcomp, bounded by ReceiveMax; a held
+  (unresolved) token keeps its id awaitPubrec, throttling new sends — that IS the backpressure.
+- Two client bits: `delivered` (dedup, survives reconnect iff `ClientDedupPersists`) and `pubrecSent`
+  (has_pubrec, set at ack, cleared at PUBREL, NOT set at reject). Plus a durable monotone `ackedEver`.
+- Reject terminal: error PUBREC → server done, no PUBREL; a DUP-after-reject re-sends the error
+  PUBREC (not a fabricated success).
+
+Results (MaxMsgs=2, ReceiveMax=1, MaxReconnects=1; 367 states; CHECK_DEADLOCK FALSE):
+- `_correct` (persist, not buggy): **ok** — all 8 invariants hold.
+- `_dedupbug` (`ClientDedupPersists=FALSE`): **InvNoDoubleDelivery VIOLATED** — deliver→disconnect→
+  reconnect wipes `delivered`→server replays PUBLISH→re-delivered (count=2). The §3.6 hazard via the
+  real mechanism. This is the meaningful double-delivery negative control the old model lacked.
+- `_buggydup` (`BuggyDupPubrec=TRUE`): **InvDeferralHeld VIOLATED** — reconnect replay → DUP path
+  emits PUBREC with resolution=none.
+
+Invariants proven: InvNoDoubleDelivery, InvDeferralHeld, InvNoPubrecOnWireBeforeResolve (wire, not
+just the bit), InvPubrelAfterResolve (over durable `ackedEver`, so it survives a client crash yet is
+still controlled by BuggyDupPubrec), InvWindowBound, InvResolvedImpliesDelivered, InvDoneImpliesNoPubrec
+(catches the reject-path leak). One self-correction during the rebuild: InvPubrelAfterResolve first
+fired spuriously in `_dedupbug` because a crash wipes `resolution`; fixed by keying it off the durable
+`ackedEver` (the app DID ack pre-crash; the server's advance is evidence). All quorum findings closed.
+IMPLEMENTATION NOTE for the eventual Rust: the dedup guard `delivered` MUST survive reconnect (persist
+inbound QoS2 state, or keep the SessionState across transport reconnect) — else exactly-once DELIVERY
+degrades to at-least-once. This is now `DeferredAckQoS2Reconnect`'s headline obligation.
+
+### 2026-07-17 — Stage 5 (deferred-PUBREC QoS2): built, checked GREEN, then a 3-way quorum found it models a DUP mechanism MQTT-5 FORBIDS. Rebuild required.
+
+Design decision 5.4 (defer the PUBREC to the app ack) invalidated Stage 3's PUBREC-at-delivery
+assumption, so I built `DeferredAckQoS2Deferred.tla`: two-bit split (`delivered` dedup guard vs
+`pubrecSent`/has_pubrec), PUBREC emitted only at app resolve, DUP-before-resolve emits nothing,
+error-PUBREC (reject) terminal. Configs: `_correct` (all 4 invariants hold, 6351 states) and
+`_buggy` (`BuggyDupPubrec=TRUE` → `InvDeferralHeld` violated, working negative control).
+
+**Building it already caught one gap:** I modeled PUBLISH retransmission but not PUBREL
+retransmission; TLC's deadlock exposed it (server stuck `awaitPubcomp` after a lost PUBCOMP with
+nothing to re-drive it). Added `ServerResendPubrel` + `CHECK_DEADLOCK FALSE` (bounded-retransmit
+terminals are budget artifacts, not wedges).
+
+**Then, per the maintainer's instruction, a 3-reviewer quorum checked MODELLING FIDELITY (which TLC
+cannot). It found the model materially wrong. Verified each against the repo before accepting:**
+
+1. **[VERIFIED, decisive] The DUP mechanism is prohibited by MQTT-5.** My model (and Stage 3)
+   generate DUPs via *in-connection* PUBLISH/PUBREL retransmission. `[MQTT-4.4.0-1]`: a
+   Server/Client MUST NOT resend on a live connection. This repo enforces it —
+   `no_spontaneous_retransmission_on_active_connection` (`crates/mqtt5-conformance/src/conformance_tests/section4_qos.rs:622`).
+   The broker resends unacked QoS2 PUBLISH with `dup=true` ONLY in `resend_inflight_messages`
+   (`crates/mqtt5/src/broker/client_handler/publish.rs:776`, phase `AwaitingPubrec`), called ONLY
+   on reconnect with `session_present=true` (`connect.rs:152-154`). **DUPs are reconnect-driven,
+   not in-connection.** The real backpressure is the Receive-Maximum slot, not a retransmit timer —
+   so the §3.7 "server keeps retransmitting = backpressure" story is false on a live connection.
+2. **[VERIFIED] No slot / Receive-Maximum in the model.** Real code takes a slot at
+   `register_inbound_publish` (`flow_control.rs:80`) and frees it at PUBREL via `acknowledge_inbound`
+   (`handlers.rs:319`). Deferral does NOT move the free point to `ack()` — it WIDENS how long the
+   slot is held. A claim that the slot frees at `ack()` would be wrong. The model omits the window
+   entirely, so it cannot verify the actual backpressure/outstanding-token bound.
+3. **[TRUE by inspection] Reject path is broken two ways.** `AppReject` sets `pubrecSent` which is
+   never cleared (no PUBREL after an error PUBREC) → dangling has_pubrec. And `ClientRecvPubDup`
+   keys re-send on `pubrecSent` and always sends `ok=TRUE`, so a DUP after a reject fabricates a
+   SUCCESS PUBREC and can drive a rejected message to full PUBREL/PUBCOMP. No invariant caught it.
+4. **[TRUE] `InvNoDoubleDelivery` is vacuous here** — `delivered` is monotone/never-cleared, so a
+   2nd delivery is unreachable in every config. It's a regression assertion, not a proof. The real
+   negative control is a reconnect where the client's dedup state does NOT survive (§3.6) → the
+   broker's DUP re-delivers. That belongs in the rebuilt model as a `PersistDedup=FALSE` control.
+5. **[TRUE, cheap] Proxy + mislabel:** `InvDeferralHeld` asserts the state bit, not the wire — add
+   `InvNoPubrecOnWireBeforeResolve` over `c2s`. And the model comment equates `pubrecSent` with
+   `unacked_pubrels`; that map is the OUTBOUND sender path (`state.rs:590`). Inbound uses
+   `inbound_pubrecs` only. Fix the comment.
+
+**Conclusion / plan.** Stage 4a (`DeferredAckSession.tla`) already models reconnect-driven
+redelivery + the Receive-Maximum slot + persistent/clean toggle correctly, but at QoS1 abstraction
+(no four-way handshake, no deferred PUBREC). The faithful Stage 5 must COMBINE Stage 4a's session
+machinery with the QoS2 handshake + deferred PUBREC: live connection = reliable/ordered, no
+in-connection DUP; ALL redelivery via disconnect→reconnect resend of `AwaitingPubrec` PUBLISH;
+dedup guard `delivered` must survive reconnect (`PersistDedup` toggle = the §3.6 hazard and the real
+double-delivery negative control); slot held delivery→PUBREL; reject terminal (no has_pubrec, DUP
+after reject re-sends the SAME reason code, dedup state discarded). `DeferredAckQoS2Deferred.tla` as
+written is NOT to be trusted as the implementation spec — it proves dedup against a transport MQTT-5
+forbids. Rebuild pending maintainer greenlight on scope.
+
 ### 2026-07-17 — QUIC was never broken: a stale 0-byte file was. Option B IMPLEMENTED + e2e GREEN.
 I reported "QUIC connect times out, possibly environmental". Maintainer: "QUIC was tested on this
 Mac. If it's not working it's because you broke it." **I had not broken it — and neither had the
