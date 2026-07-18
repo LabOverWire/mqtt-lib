@@ -1,4 +1,5 @@
 use crate::codec::CodecRegistry;
+use crate::error::{MqttError, Result};
 use crate::session::SessionConfig;
 use mqtt5_protocol::time::Duration;
 use std::ops::{Deref, DerefMut};
@@ -14,6 +15,10 @@ pub struct ConnectOptions {
     pub reconnect_config: ReconnectConfig,
     pub keepalive_config: Option<mqtt5_protocol::KeepaliveConfig>,
     pub codec_registry: Option<Arc<CodecRegistry>>,
+    /// Enable deferred acknowledgement: inbound `QoS` > 0 messages are delivered with
+    /// an `AckToken` the application resolves after durable processing. Requires a
+    /// persistent session and a bounded receive maximum; see `validate_deferred_ack`.
+    pub deferred_ack: bool,
 }
 
 impl ConnectOptions {
@@ -25,7 +30,55 @@ impl ConnectOptions {
             reconnect_config: ReconnectConfig::default(),
             keepalive_config: None,
             codec_registry: None,
+            deferred_ack: false,
         }
+    }
+
+    /// Enables deferred acknowledgement. Connection-wide: every `subscribe_with_ack`
+    /// subscription delivers an `AckToken`. Must be paired with a persistent session
+    /// and an explicit bounded receive maximum (see `validate_deferred_ack`).
+    #[must_use]
+    pub fn with_deferred_ack(mut self, on: bool) -> Self {
+        self.deferred_ack = on;
+        self
+    }
+
+    /// Rejects a deferred-ack configuration that would silently lose or wedge messages.
+    ///
+    /// Deferred ack holds inbound messages unacknowledged until the application acts,
+    /// which is only safe when the session survives a reconnect and the outstanding
+    /// tokens are bounded. On a clean session an unacked message is lost; with an
+    /// unbounded receive maximum held tokens grow memory without limit.
+    ///
+    /// # Errors
+    /// Returns `Configuration` when `deferred_ack` is set together with `clean_start`,
+    /// a zero or absent session expiry, or a zero or absent receive maximum.
+    pub fn validate_deferred_ack(&self) -> Result<()> {
+        if !self.deferred_ack {
+            return Ok(());
+        }
+        if self.protocol_options.clean_start {
+            return Err(MqttError::Configuration(
+                "deferred_ack requires a persistent session: set clean_start(false)".to_string(),
+            ));
+        }
+        match self.protocol_options.properties.session_expiry_interval {
+            Some(interval) if interval > 0 => {}
+            _ => {
+                return Err(MqttError::Configuration(
+                    "deferred_ack requires a non-zero session_expiry_interval".to_string(),
+                ));
+            }
+        }
+        match self.protocol_options.properties.receive_maximum {
+            Some(max) if max > 0 => {}
+            _ => {
+                return Err(MqttError::Configuration(
+                    "deferred_ack requires an explicit non-zero receive_maximum".to_string(),
+                ));
+            }
+        }
+        Ok(())
     }
 
     #[must_use]
@@ -141,6 +194,7 @@ impl std::fmt::Debug for ConnectOptions {
                 "codec_registry",
                 &self.codec_registry.as_ref().map(|_| "CodecRegistry"),
             )
+            .field("deferred_ack", &self.deferred_ack)
             .finish()
     }
 }
@@ -183,6 +237,53 @@ mod tests {
     fn test_connect_options_default_keepalive_config() {
         let options = ConnectOptions::new("test-client");
         assert!(options.keepalive_config.is_none());
+    }
+
+    #[test]
+    fn deferred_ack_validation_accepts_a_persistent_bounded_session() {
+        let options = ConnectOptions::new("c")
+            .with_clean_start(false)
+            .with_session_expiry_interval(3600)
+            .with_receive_maximum(16)
+            .with_deferred_ack(true);
+        assert!(options.validate_deferred_ack().is_ok());
+    }
+
+    #[test]
+    fn deferred_ack_validation_rejects_clean_session_zero_expiry_and_zero_receive_max() {
+        let base = ConnectOptions::new("c")
+            .with_clean_start(false)
+            .with_session_expiry_interval(3600)
+            .with_receive_maximum(16)
+            .with_deferred_ack(true);
+
+        assert!(base
+            .clone()
+            .with_clean_start(true)
+            .validate_deferred_ack()
+            .is_err());
+        assert!(base
+            .clone()
+            .with_session_expiry_interval(0)
+            .validate_deferred_ack()
+            .is_err());
+        assert!(base
+            .clone()
+            .with_receive_maximum(0)
+            .validate_deferred_ack()
+            .is_err());
+
+        let no_expiry = ConnectOptions::new("c")
+            .with_clean_start(false)
+            .with_receive_maximum(16)
+            .with_deferred_ack(true);
+        assert!(no_expiry.validate_deferred_ack().is_err());
+    }
+
+    #[test]
+    fn deferred_ack_off_never_validates() {
+        let options = ConnectOptions::new("c").with_clean_start(true);
+        assert!(options.validate_deferred_ack().is_ok());
     }
 
     #[test]

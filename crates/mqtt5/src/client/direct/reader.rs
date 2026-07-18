@@ -52,6 +52,35 @@ pub(super) struct PacketReaderContext {
     pub(super) auth_method: Option<String>,
     pub(super) keepalive_state: Arc<Mutex<KeepaliveState>>,
     pub(super) codec_registry: Option<Arc<CodecRegistry>>,
+    pub(super) deferred_ack: bool,
+    pub(super) ack_callbacks: Arc<super::ack::AckCallbackManager>,
+    pub(super) ack_dispatcher: Arc<super::ack::AckDispatcher>,
+}
+
+impl PacketReaderContext {
+    fn ack_delivery(&self) -> Option<super::handlers::AckDelivery<'_>> {
+        if self.deferred_ack {
+            Some(super::handlers::AckDelivery {
+                callbacks: &self.ack_callbacks,
+                dispatcher: &self.ack_dispatcher,
+            })
+        } else {
+            None
+        }
+    }
+
+    fn incoming_handlers<'a>(
+        &'a self,
+        ack_delivery: Option<&'a super::handlers::AckDelivery<'a>>,
+    ) -> super::handlers::IncomingHandlers<'a> {
+        super::handlers::IncomingHandlers {
+            session: &self.session,
+            callback_manager: &self.callback_manager,
+            keepalive_state: &self.keepalive_state,
+            codec_registry: self.codec_registry.as_ref(),
+            ack_delivery,
+        }
+    }
 }
 
 impl PacketReaderContext {
@@ -140,16 +169,10 @@ pub(super) async fn packet_reader_task_with_responses(
                     _ => {}
                 }
 
-                if let Err(e) = handle_incoming_packet_with_writer(
-                    packet,
-                    &ctx.writer,
-                    &ctx.session,
-                    &ctx.callback_manager,
-                    None,
-                    &ctx.keepalive_state,
-                    ctx.codec_registry.as_ref(),
-                )
-                .await
+                let ack_delivery = ctx.ack_delivery();
+                let handlers = ctx.incoming_handlers(ack_delivery.as_ref());
+                if let Err(e) =
+                    handle_incoming_packet_with_writer(packet, &ctx.writer, None, &handlers).await
                 {
                     tracing::error!("Error handling packet: {e}");
                     ctx.mark_disconnected_if_current();
@@ -501,16 +524,11 @@ async fn quic_stream_reader_task(
         match read_packet_with_buffer(&mut recv, &mut buffer, ctx.protocol_version).await {
             Ok(packet) => {
                 tracing::trace!(flow_id = ?flow_id, "Received packet on server-initiated QUIC stream: {:?}", packet);
-                if let Err(e) = handle_incoming_packet_with_writer(
-                    packet,
-                    &stream_writer,
-                    &ctx.session,
-                    &ctx.callback_manager,
-                    flow_id,
-                    &ctx.keepalive_state,
-                    ctx.codec_registry.as_ref(),
-                )
-                .await
+                let ack_delivery = ctx.ack_delivery();
+                let handlers = ctx.incoming_handlers(ack_delivery.as_ref());
+                if let Err(e) =
+                    handle_incoming_packet_with_writer(packet, &stream_writer, flow_id, &handlers)
+                        .await
                 {
                     tracing::error!(flow_id = ?flow_id, "Error handling packet from server stream: {e}");
                     break;

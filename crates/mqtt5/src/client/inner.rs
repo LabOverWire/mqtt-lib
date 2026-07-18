@@ -453,6 +453,7 @@ impl MqttClient {
 
     pub(crate) async fn connect_internal(&self, address: &str) -> Result<ConnectResult> {
         const MAX_REDIRECTS: u8 = 3;
+        self.inner.read().await.options.validate_deferred_ack()?;
         let mut current_address = address.to_string();
         let mut redirect_count: u8 = 0;
 

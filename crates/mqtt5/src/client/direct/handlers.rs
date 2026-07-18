@@ -3,41 +3,61 @@
 use crate::callback::CallbackManager;
 use crate::codec::CodecRegistry;
 use crate::error::{MqttError, Result};
+use crate::packet::publish::PublishPacket;
 use crate::packet::Packet;
 use crate::protocol::v5::properties::Properties;
+use crate::session::state::AckResolution;
 use crate::session::SessionState;
 use crate::transport::PacketWriter;
+use crate::QoS;
 use parking_lot::Mutex;
 use std::sync::Arc;
 
+use super::ack::{AckCallbackManager, AckDispatcher, AckKind, AckPublishCallback};
 use super::keepalive::KeepaliveState;
 use super::unified::UnifiedWriter;
 #[cfg(feature = "transport-quic")]
 use crate::transport::flow::FlowId;
 
+/// Borrowed handles for deferred-acknowledgement delivery, threaded from the reader
+/// context. Present only when `deferred_ack` is enabled connection-wide.
+pub(super) struct AckDelivery<'a> {
+    pub(super) callbacks: &'a Arc<AckCallbackManager>,
+    pub(super) dispatcher: &'a Arc<AckDispatcher>,
+}
+
+/// Connection-scoped handles the incoming-packet handler needs, bundled from the
+/// reader context so the entry point stays a small number of arguments.
+pub(super) struct IncomingHandlers<'a> {
+    pub(super) session: &'a Arc<tokio::sync::RwLock<SessionState>>,
+    pub(super) callback_manager: &'a Arc<CallbackManager>,
+    pub(super) keepalive_state: &'a Arc<Mutex<KeepaliveState>>,
+    pub(super) codec_registry: Option<&'a Arc<CodecRegistry>>,
+    pub(super) ack_delivery: Option<&'a AckDelivery<'a>>,
+}
+
 pub(super) async fn handle_incoming_packet_with_writer(
     packet: Packet,
     writer: &Arc<tokio::sync::Mutex<UnifiedWriter>>,
-    session: &Arc<tokio::sync::RwLock<SessionState>>,
-    callback_manager: &Arc<CallbackManager>,
     flow_id: Option<crate::transport::flow::FlowId>,
-    keepalive_state: &Arc<Mutex<KeepaliveState>>,
-    codec_registry: Option<&Arc<CodecRegistry>>,
+    handlers: &IncomingHandlers<'_>,
 ) -> Result<()> {
+    let session = handlers.session;
     match packet {
         Packet::Publish(publish) => {
             handle_publish_with_ack(
                 publish,
                 writer,
                 session,
-                callback_manager,
+                handlers.callback_manager,
                 flow_id,
-                codec_registry,
+                handlers.codec_registry,
+                handlers.ack_delivery,
             )
             .await
         }
         Packet::PingResp => {
-            keepalive_state.lock().record_pong_received();
+            handlers.keepalive_state.lock().record_pong_received();
             Ok(())
         }
         Packet::PubRec(pubrec) => handle_pubrec_outgoing(pubrec, writer, session).await,
@@ -60,11 +80,18 @@ pub(super) async fn handle_publish_with_ack(
     callback_manager: &Arc<CallbackManager>,
     flow_id: Option<crate::transport::flow::FlowId>,
     codec_registry: Option<&Arc<CodecRegistry>>,
+    ack_delivery: Option<&AckDelivery<'_>>,
 ) -> Result<()> {
     if let Some(registry) = codec_registry {
         let content_type = publish.properties.get_content_type();
         let decoded = registry.decode_if_needed(&publish.payload, content_type.as_deref())?;
         publish.payload = decoded;
+    }
+
+    if let Some(ack) = ack_delivery {
+        if let Some(callback) = ack.callbacks.find_one(&publish.topic_name) {
+            return deliver_deferred(publish, session, flow_id, ack, callback).await;
+        }
     }
 
     let already_delivered = match publish.qos {
@@ -98,6 +125,84 @@ pub(super) async fn handle_publish_with_ack(
     let _ = callback_manager.dispatch(&publish);
 
     Ok(())
+}
+
+/// Delivers an inbound message to a `subscribe_with_ack` callback, deferring the
+/// acknowledgement to the token the application resolves.
+///
+/// The `QoS` acknowledgement is NOT written here: the dedup guard (`delivered`) is
+/// set at delivery, but the PUBREC/PUBACK is emitted only when the token is resolved
+/// (`DeferredAckQoS2Reconnect.tla`). A duplicate replayed after a reconnect is
+/// suppressed and re-acknowledged to match the decision already recorded.
+async fn deliver_deferred(
+    mut publish: PublishPacket,
+    session: &Arc<tokio::sync::RwLock<SessionState>>,
+    flow_id: Option<crate::transport::flow::FlowId>,
+    ack: &AckDelivery<'_>,
+    callback: AckPublishCallback,
+) -> Result<()> {
+    let qos = publish.qos;
+    publish.stream_id = flow_id.map(|f| f.raw());
+
+    if qos == QoS::AtMostOnce {
+        let token = ack.dispatcher.token(0, QoS::AtMostOnce);
+        ack.callbacks.dispatch(callback, publish, token);
+        return Ok(());
+    }
+
+    let Some(packet_id) = publish.packet_id else {
+        return Ok(());
+    };
+
+    session.read().await.register_inbound(packet_id).await?;
+    if let Some(fid) = flow_id {
+        session
+            .read()
+            .await
+            .store_publish_flow(packet_id, fid)
+            .await;
+    }
+
+    let first_receipt = session.write().await.mark_delivered(packet_id).await;
+    if !first_receipt {
+        resend_matching_ack(packet_id, qos, session, ack).await;
+        tracing::debug!(
+            packet_id = packet_id,
+            topic = %publish.topic_name,
+            "Suppressing duplicate deferred delivery; matching ack re-sent"
+        );
+        return Ok(());
+    }
+
+    session
+        .write()
+        .await
+        .set_resolution(packet_id, AckResolution::Unresolved)
+        .await;
+
+    let token = ack.dispatcher.token(packet_id, qos);
+    ack.callbacks.dispatch(callback, publish, token);
+    Ok(())
+}
+
+/// Re-sends the acknowledgement matching the application's recorded decision for a
+/// duplicate PUBLISH replayed after a reconnect. An unresolved message sends nothing:
+/// the application still holds its token (transport reconnect), or the whole in-memory
+/// state was lost with the token (process crash), which re-delivers as a first receipt.
+async fn resend_matching_ack(
+    packet_id: u16,
+    qos: QoS,
+    session: &Arc<tokio::sync::RwLock<SessionState>>,
+    ack: &AckDelivery<'_>,
+) {
+    match session.read().await.get_resolution(packet_id).await {
+        AckResolution::Acked => ack.dispatcher.enqueue(packet_id, qos, AckKind::Ack),
+        AckResolution::Rejected(reason) => {
+            ack.dispatcher
+                .enqueue(packet_id, qos, AckKind::Reject(reason));
+        }
+        AckResolution::Unresolved => {}
+    }
 }
 
 async fn ack_qos1_inbound(
@@ -420,13 +525,14 @@ mod tests {
             &callbacks,
             None,
             None,
+            None,
         )
         .await
         .expect("first QoS2 publish must be handled");
 
         let mut duplicate = qos2_publish(1, topic);
         duplicate.dup = true;
-        handle_publish_with_ack(duplicate, &writer, &session, &callbacks, None, None)
+        handle_publish_with_ack(duplicate, &writer, &session, &callbacks, None, None, None)
             .await
             .expect("duplicate QoS2 publish must be handled, not error");
 
@@ -458,6 +564,7 @@ mod tests {
             &callbacks,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -466,6 +573,7 @@ mod tests {
             &writer,
             &session,
             &callbacks,
+            None,
             None,
             None,
         )
@@ -497,6 +605,7 @@ mod tests {
                     &callbacks,
                     None,
                     None,
+                    None,
                 )
                 .await
             })
@@ -509,6 +618,7 @@ mod tests {
                     &writer_b,
                     &session,
                     &callbacks,
+                    None,
                     None,
                     None,
                 )
@@ -542,6 +652,7 @@ mod tests {
             &callbacks,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -568,6 +679,7 @@ mod tests {
             &callbacks,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -579,6 +691,7 @@ mod tests {
             &callbacks,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -587,6 +700,120 @@ mod tests {
             delivery_count(&mut rx).await,
             2,
             "once PUBCOMP completes the packet id is released and a reuse is a new message"
+        );
+    }
+
+    use super::AckDelivery;
+    use crate::client::direct::ack::{AckCallbackManager, AckDispatcher, AckToken};
+
+    async fn expect_no_packet(server: &mut TcpStream) {
+        let mut buf = [0u8; 1];
+        match tokio::time::timeout(Duration::from_millis(300), server.read(&mut buf)).await {
+            Ok(Ok(n)) if n > 0 => {
+                panic!("a packet was written before the token was resolved")
+            }
+            _ => {}
+        }
+    }
+
+    fn ack_setup(
+        topic: &str,
+        session: &Arc<tokio::sync::RwLock<SessionState>>,
+    ) -> (
+        Arc<AckCallbackManager>,
+        Arc<AckDispatcher>,
+        mpsc::UnboundedReceiver<AckToken>,
+    ) {
+        let dispatcher = Arc::new(AckDispatcher::new(Arc::clone(session)));
+        let callbacks = Arc::new(AckCallbackManager::new());
+        let (tx, rx) = mpsc::unbounded_channel();
+        callbacks.register(
+            topic,
+            Arc::new(move |_publish: PublishPacket, token: AckToken| {
+                let _ = tx.send(token);
+            }),
+        );
+        (callbacks, dispatcher, rx)
+    }
+
+    #[tokio::test]
+    async fn deferred_qos2_withholds_pubrec_until_the_token_is_acked() {
+        let topic = "sensors/temp";
+        let (writer, mut server) = loopback_writer().await;
+        let session = session();
+        let plain = Arc::new(CallbackManager::new());
+        let (callbacks, dispatcher, mut rx) = ack_setup(topic, &session);
+        dispatcher.set_writer(Arc::clone(&writer)).await;
+        let ack = AckDelivery {
+            callbacks: &callbacks,
+            dispatcher: &dispatcher,
+        };
+
+        handle_publish_with_ack(
+            qos2_publish(1, topic),
+            &writer,
+            &session,
+            &plain,
+            None,
+            None,
+            Some(&ack),
+        )
+        .await
+        .expect("deferred QoS2 publish must be handled");
+
+        let token = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("callback must receive a token")
+            .expect("token channel open");
+        assert_eq!(token.packet_id(), 1);
+        assert_eq!(token.qos(), QoS::ExactlyOnce);
+
+        expect_no_packet(&mut server).await;
+
+        token.ack();
+        assert_eq!(
+            read_packet_header(&mut server).await,
+            PUBREC_HEADER,
+            "PUBREC must be written only after the token is acked"
+        );
+        assert!(session.read().await.has_pubrec(1).await);
+    }
+
+    #[tokio::test]
+    async fn deferred_qos2_token_drop_emits_a_reason_coded_pubrec() {
+        let topic = "sensors/temp";
+        let (writer, mut server) = loopback_writer().await;
+        let session = session();
+        let plain = Arc::new(CallbackManager::new());
+        let (callbacks, dispatcher, mut rx) = ack_setup(topic, &session);
+        dispatcher.set_writer(Arc::clone(&writer)).await;
+        let ack = AckDelivery {
+            callbacks: &callbacks,
+            dispatcher: &dispatcher,
+        };
+
+        handle_publish_with_ack(
+            qos2_publish(1, topic),
+            &writer,
+            &session,
+            &plain,
+            None,
+            None,
+            Some(&ack),
+        )
+        .await
+        .unwrap();
+
+        let token = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        expect_no_packet(&mut server).await;
+        drop(token);
+        assert_eq!(
+            read_packet_header(&mut server).await,
+            PUBREC_HEADER,
+            "dropping a token must emit a (reason-coded) PUBREC so the handshake never wedges"
         );
     }
 }

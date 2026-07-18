@@ -200,8 +200,9 @@ pub mod types;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use client::{
-    AuthHandler, AuthResponse, ConnectionEvent, DisconnectReason, JwtAuthHandler, MockCall,
-    MockMqttClient, MqttClient, MqttClientTrait, PlainAuthHandler, ScramSha256AuthHandler,
+    AckToken, AuthHandler, AuthResponse, ConnectionEvent, DisconnectReason, JwtAuthHandler,
+    MockCall, MockMqttClient, MqttClient, MqttClientTrait, PlainAuthHandler,
+    ScramSha256AuthHandler,
 };
 #[cfg(feature = "codec-deflate")]
 pub use codec::DeflateCodec;
