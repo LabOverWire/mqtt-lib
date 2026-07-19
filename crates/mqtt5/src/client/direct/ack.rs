@@ -144,6 +144,16 @@ impl AckDispatcher {
         *self.writer_slot.lock().await = Some(writer);
     }
 
+    /// Releases the current connection's writer so its socket can close on disconnect.
+    ///
+    /// The dispatcher outlives reconnects, but it must NOT keep the writer half alive
+    /// across a teardown: a retained clone would hold the socket open and mask an
+    /// abnormal disconnect from the broker. Acks enqueued while cleared are recorded
+    /// as a resolution and re-sent on the next connection.
+    pub(crate) async fn clear_writer(&self) {
+        *self.writer_slot.lock().await = None;
+    }
+
     /// Re-sends an acknowledgement for a duplicate that was already resolved,
     /// without a token (used on a post-reconnect replay).
     pub(crate) fn enqueue(&self, packet_id: u16, qos: QoS, kind: AckKind) {

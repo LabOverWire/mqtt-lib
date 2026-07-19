@@ -505,7 +505,7 @@ impl MqttClient {
     }
 
     /// Subscribes to a topic, delivering each inbound message with an
-    /// [`AckToken`](crate::AckToken) the application resolves after durable processing.
+    /// [`AckToken`] the application resolves after durable processing.
     ///
     /// The acknowledgement (PUBACK/PUBREC) is withheld until the token is acked,
     /// applying Receive-Maximum backpressure. Requires connection-wide deferred ack

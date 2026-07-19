@@ -252,6 +252,7 @@ impl DirectClientInner {
         }
 
         self.writer = None;
+        self.ack_dispatcher.clear_writer().await;
         self.set_connected(false);
 
         #[cfg(feature = "transport-quic")]
