@@ -112,27 +112,43 @@ impl Drop for AckToken {
 
 /// Owns the single background task that writes deferred acknowledgements.
 ///
-/// The task is connection-stable: it is created once with the client and outlives
-/// reconnects, targeting whichever writer is current via a swappable slot. This is
-/// what lets a token minted on one connection resolve on the next (the transport
-/// reconnect regime of `DeferredAckQoS2Reconnect.tla`). `Drop` is synchronous and
-/// cannot await the writer, so tokens only ever enqueue an `AckRequest` here.
+/// The task is connection-stable: it is spawned on the first connection (never in the
+/// constructor, so building a client needs no running runtime) and outlives reconnects,
+/// targeting whichever writer is current via a swappable slot. This is what lets a token
+/// minted on one connection resolve on the next (the transport reconnect regime of
+/// `DeferredAckQoS2Reconnect.tla`). `Drop` is synchronous and cannot await the writer, so
+/// tokens only ever enqueue an `AckRequest` here.
 pub(crate) struct AckDispatcher {
     tx: mpsc::UnboundedSender<AckRequest>,
     writer_slot: WriterSlot,
+    session: Arc<tokio::sync::RwLock<SessionState>>,
+    pending_rx: tokio::sync::Mutex<Option<mpsc::UnboundedReceiver<AckRequest>>>,
 }
 
 impl AckDispatcher {
     pub(crate) fn new(session: Arc<tokio::sync::RwLock<SessionState>>) -> Self {
-        let (tx, mut rx) = mpsc::unbounded_channel::<AckRequest>();
-        let writer_slot: WriterSlot = Arc::new(tokio::sync::Mutex::new(None));
-        let slot = Arc::clone(&writer_slot);
+        let (tx, rx) = mpsc::unbounded_channel::<AckRequest>();
+        Self {
+            tx,
+            writer_slot: Arc::new(tokio::sync::Mutex::new(None)),
+            session,
+            pending_rx: tokio::sync::Mutex::new(Some(rx)),
+        }
+    }
+
+    /// Spawns the drain task on the first call, in async context. Subsequent calls are
+    /// no-ops, so the task is created once (on the first connection) and outlives reconnects.
+    async fn ensure_started(&self) {
+        let Some(mut rx) = self.pending_rx.lock().await.take() else {
+            return;
+        };
+        let slot = Arc::clone(&self.writer_slot);
+        let session = Arc::clone(&self.session);
         tokio::spawn(async move {
             while let Some(request) = rx.recv().await {
                 Self::handle(&request, &slot, &session).await;
             }
         });
-        Self { tx, writer_slot }
     }
 
     /// Mints a token for a delivered inbound message.
@@ -145,8 +161,10 @@ impl AckDispatcher {
         }
     }
 
-    /// Points the drain task at the writer for the current connection.
+    /// Points the drain task at the writer for the current connection, starting the task
+    /// on the first call.
     pub(crate) async fn set_writer(&self, writer: WriterHandle) {
+        self.ensure_started().await;
         *self.writer_slot.lock().await = Some(writer);
     }
 

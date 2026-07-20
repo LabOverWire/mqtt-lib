@@ -352,6 +352,10 @@ The client library provides an async MQTT client designed for both IoT devices a
 
 The client speaks both **MQTT v5.0 and v3.1.1**, with **callback-based message handling** that automatically routes messages to registered handlers. Subscribe returns a `(packet_id, qos)` tuple for **cloud SDK compatibility** (AWS IoT, Azure IoT Hub). **Automatic reconnection** with exponential backoff keeps connections alive through network disruptions, while **client-side message queuing** buffers publishes during offline periods. The client validates broker responses and surfaces **reason code validation** for publish rejections (ACL denials, quota limits).
 
+### Deferred acknowledgement
+
+`subscribe_with_ack` delivers each inbound message with a move-only `AckToken` and withholds the acknowledgement (PUBACK for `QoS` 1, PUBREC for `QoS` 2) until the application calls `token.ack()`. The acknowledgement then means "processed" rather than "received", and the inbound Receive Maximum window becomes end-to-end backpressure: the broker stops sending once the application's unacknowledged messages fill the window. `token.reject(reason)` sends an error acknowledgement, and dropping the token auto-acknowledges with a reason code. The feature is opt-in through `ConnectOptions::with_deferred_ack(true)` and requires a persistent session (clean start off, non-zero session expiry and Receive Maximum). Acknowledged messages are processed exactly once on a surviving session; rejected messages are at-least-once (per `[MQTT-4.3.3-9]`), so callbacks must be idempotent. See `examples/deferred_ack.rs`.
+
 ### QUIC Transport
 
 ```rust

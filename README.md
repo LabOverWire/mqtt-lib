@@ -119,6 +119,8 @@ See the [mqtt5 Crate Reference](crates/mqtt5/README.md) for detailed broker capa
 
 The client supports automatic reconnection with exponential backoff, cloud MQTT broker compatibility (AWS IoT, Azure IoT Hub), QUIC multistream with connection migration, mockable client interface for unit testing, and callback-based message handling.
 
+It also supports **deferred acknowledgement**: `subscribe_with_ack` delivers each message with a move-only `AckToken` and withholds the PUBACK/PUBREC until the application calls `token.ack()`, so the acknowledgement means "processed" and the inbound Receive Maximum window becomes end-to-end backpressure. See `crates/mqtt5/examples/deferred_ack.rs`.
+
 See the [mqtt5 Crate Reference](crates/mqtt5/README.md) for detailed client capabilities, AWS IoT examples, and mock testing patterns.
 
 ### QUIC Transport
