@@ -245,3 +245,52 @@ PUBREC until ack; `Drop` emits a reason-coded PUBREC; config gating) and clippy-
    correct terminal behaviour. If desired, route ack subscriptions through a restoration path that
    targets `AckCallbackManager` rather than `CallbackManager::restore_callback` (whose `CallbackId`
    space is distinct — do not reuse it, to avoid an id collision).
+
+4. **[CLOSED 2026-07-20] Extend the TLA model to cover packet-id reuse and reject-clears.**
+   Done — `DeferredAckQoS2Reconnect.tla` v3 now models reject-clears-state (`[MQTT-4.3.3-9]`), packet-id
+   reuse (`ReArm`), scopes the exactly-once invariants to `~wasRejected`, and adds broker self-heal
+   actions. Verified across five configs (transport/crash/window pass; persistmistake/buggydup are the
+   negative controls) and audited by a 3-way fidelity quorum against the real client + broker code. See
+   TLA_DIARY 2026-07-20 (later). Original text kept below for context.
+
+   A post-implementation code review found two bugs (both fixed): the deferred dedup guard
+   `inbound_delivered` was not cleared when a QoS2 handshake completed (`handle_pubrel`) or when a
+   message was rejected, so a packet id the broker reused for a NEW message was suppressed as a
+   duplicate. The fix clears the deferred state at both terminal events. This means the shipped code
+   now:
+   - gives **at-least-once delivery for REJECTED messages** (a reconnect replay of a rejected PUBLISH
+     re-delivers and the app rejects again), whereas the model keeps `resolution="reject"` and
+     re-sends the error PUBREC (exactly-once even for rejected); and
+   - relies on **packet-id reuse**, which the model does not represent (each id is used once).
+   `DeferredAckQoS2Reconnect.tla` therefore proves a *stronger* property than the code delivers for
+   rejected messages. Update the model to (a) let a `done` id be re-armed as a fresh instance
+   (`toSend`), (b) clear resolution on reject, and (c) scope `InvNoDoubleDelivery` to *acked*
+   messages (or a per-instance delivery count that resets on reuse), then re-verify. Exactly-once
+   delivery for *acked* messages is preserved and still holds; this is a spec-fidelity gap, not a
+   code defect. Regression coverage exists: `deferred_qos2_reused_packet_id_after_completion_is_delivered_again`
+   and `deferred_qos2_reused_packet_id_after_reject_is_delivered_again` in `handlers.rs`.
+
+5. **Harden broker `next_packet_id` id-reuse (surfaced by the v3 fidelity quorum).** The live-send
+   allocator `next_packet_id` (`broker/client_handler/lifecycle.rs`) is a bare monotonic `u16` counter
+   with `MAX -> 1` wrap that never consults `outbound_inflight`; only `advance_packet_id_past_inflight`
+   skips in-use ids, and it runs only after a `session_present` reconnect (`publish.rs`), not on the
+   steady-state send path. On a long-lived connection where one id stays stuck awaiting PUBCOMP (slow or
+   dead-but-connected subscriber) while ~65534 other messages complete, the counter wraps back and
+   `outbound_inflight.insert(id, ...)` silently clobbers the stuck entry — losing exactly-once for the
+   stuck message. Flow control (`client_receive_maximum`) caps *concurrent* inflight but does not reset
+   the counter, so this is reachable, if low-probability. The TLA model's `ReArm` assumes reuse only
+   after the id is drained in both directions — a guarantee the code does not enforce here. Fix: have the
+   live send path skip ids currently in `outbound_inflight` (reuse the `advance_packet_id_past_inflight`
+   logic), or reject the send when the window is genuinely exhausted rather than wrapping onto a live id.
+
+6. **Clear dedup state in both `handle_pubrel` branches.** `handle_pubrel` calls `clear_inbound_state`
+   only in the `has_pubrec == true` branch; the `else` branch sends PUBCOMP but clears nothing. Against a
+   compliant broker (no PUBREL before a PUBREC) the differing case is unreachable, but a spurious/early
+   PUBREL while the client is `delivered /\ ~has_pubrec` leaves `inbound_delivered` set forever, which
+   later suppresses a reused id (silent loss). Defensive hardening: clear the dedup guard in both branches.
+
+7. **Validate the reason in `AckToken::reject`.** `reject(ReasonCode::Success)` (and any non-error
+   reason) currently takes the ACK path — `is_success` is true, so it sets `has_pubrec` + `Acked` and
+   writes a success PUBREC WITHOUT clearing the dedup guard — contradicting the reject contract
+   (error PUBREC + clear). Normalize a non-error reason to a default error code, or reject the call, so
+   `reject` cannot silently behave as `ack`.

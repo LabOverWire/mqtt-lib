@@ -511,6 +511,12 @@ impl MqttClient {
     /// applying Receive-Maximum backpressure. Requires connection-wide deferred ack
     /// (`ConnectOptions::with_deferred_ack(true)` plus a persistent session).
     ///
+    /// Delivery is **at-least-once**: the callback must be idempotent. A message can be
+    /// delivered more than once across a reconnect — both when it was acked (a crash
+    /// before the session's ack durably reached the broker) and when it was rejected (a
+    /// lost error acknowledgement; see [`AckToken::reject`]). Exactly-once applies only
+    /// to a message whose ack completes on a session that survives in memory.
+    ///
     /// # Errors
     /// Returns an error if `deferred_ack` was not enabled on the connection, or if the
     /// subscription fails.

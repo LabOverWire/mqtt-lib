@@ -1,6 +1,5 @@
 use crate::error::{MqttError, Result};
 use crate::packet::publish::PublishPacket;
-use crate::protocol::v5::reason_codes::ReasonCode;
 use crate::session::flow_control::{FlowControlManager, TopicAliasManager};
 use crate::session::limits::LimitsManager;
 use crate::session::queue::{MessageQueue, QueuedMessage};
@@ -101,19 +100,19 @@ pub struct SessionState {
     flow_registry: Arc<RwLock<FlowRegistry>>,
 }
 
-/// The application's terminal decision for a deferred inbound `QoS` 2 message.
+/// The application's decision for a deferred inbound `QoS` 2 message while its handshake
+/// is still in flight.
 ///
-/// Recorded per inbound packet ID so that a duplicate PUBLISH replayed after a
-/// session-resume reconnect re-sends the acknowledgement that matches the decision
-/// already made, never a fabricated success for a rejected message.
+/// Only the not-yet-completed states are tracked: a duplicate PUBLISH replayed after a
+/// reconnect while the message is `Acked` re-sends the success PUBREC. A rejected or
+/// fully completed exchange clears its state entirely (the packet id is then free for
+/// reuse), so those are not represented here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AckResolution {
     /// The application still holds the token; no PUBREC has been written.
     Unresolved,
     /// The application acked; a success PUBREC was (or must be re-)written.
     Acked,
-    /// The application rejected; an error PUBREC with this reason terminated the exchange.
-    Rejected(ReasonCode),
 }
 
 impl SessionState {

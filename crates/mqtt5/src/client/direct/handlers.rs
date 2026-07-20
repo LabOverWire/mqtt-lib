@@ -185,10 +185,12 @@ async fn deliver_deferred(
     Ok(())
 }
 
-/// Re-sends the acknowledgement matching the application's recorded decision for a
-/// duplicate PUBLISH replayed after a reconnect. An unresolved message sends nothing:
-/// the application still holds its token (transport reconnect), or the whole in-memory
-/// state was lost with the token (process crash), which re-delivers as a first receipt.
+/// Re-sends the success PUBREC for a duplicate PUBLISH replayed after a reconnect when
+/// the application had already acked but the PUBREC was lost. Sends nothing while the
+/// message is unresolved: the application still holds its token (transport reconnect), or
+/// the whole in-memory state was lost with the token (process crash) and it re-delivers
+/// as a first receipt. A rejected or completed exchange clears its state, so a later
+/// PUBLISH on that packet id is a fresh delivery, not a duplicate seen here.
 async fn resend_matching_ack(
     packet_id: u16,
     qos: QoS,
@@ -197,10 +199,6 @@ async fn resend_matching_ack(
 ) {
     match session.read().await.get_resolution(packet_id).await {
         AckResolution::Acked => ack.dispatcher.enqueue(packet_id, qos, AckKind::Ack),
-        AckResolution::Rejected(reason) => {
-            ack.dispatcher
-                .enqueue(packet_id, qos, AckKind::Reject(reason));
-        }
         AckResolution::Unresolved => {}
     }
 }
@@ -394,7 +392,11 @@ pub(super) async fn handle_pubrel(
     let has_pubrec = session.read().await.has_pubrec(pubrel.packet_id).await;
 
     if has_pubrec {
-        session.write().await.remove_pubrec(pubrel.packet_id).await;
+        session
+            .write()
+            .await
+            .clear_inbound_state(pubrel.packet_id)
+            .await;
 
         let pubcomp = crate::packet::pubcomp::PubCompPacket {
             packet_id: pubrel.packet_id,
@@ -814,6 +816,133 @@ mod tests {
             read_packet_header(&mut server).await,
             PUBREC_HEADER,
             "dropping a token must emit a (reason-coded) PUBREC so the handshake never wedges"
+        );
+    }
+
+    const PUBCOMP_HEADER: u8 = 0x70;
+
+    async fn wait_for<F, Fut>(mut cond: F)
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = bool>,
+    {
+        for _ in 0..100 {
+            if cond().await {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("condition never became true");
+    }
+
+    /// After a deferred `QoS` 2 handshake completes (PUBREL -> PUBCOMP), the broker may reuse
+    /// the packet id for a new message, which must be delivered, not suppressed as a duplicate.
+    #[tokio::test]
+    async fn deferred_qos2_reused_packet_id_after_completion_is_delivered_again() {
+        let topic = "sensors/temp";
+        let (writer, mut server) = loopback_writer().await;
+        let session = session();
+        let plain = Arc::new(CallbackManager::new());
+        let (callbacks, dispatcher, mut rx) = ack_setup(topic, &session);
+        dispatcher.set_writer(Arc::clone(&writer)).await;
+        let ack = AckDelivery {
+            callbacks: &callbacks,
+            dispatcher: &dispatcher,
+        };
+
+        handle_publish_with_ack(
+            qos2_publish(1, topic),
+            &writer,
+            &session,
+            &plain,
+            None,
+            None,
+            Some(&ack),
+        )
+        .await
+        .unwrap();
+        let token1 = rx.recv().await.expect("first delivery");
+        token1.ack();
+        assert_eq!(read_packet_header(&mut server).await, PUBREC_HEADER);
+        wait_for(|| async { session.read().await.has_pubrec(1).await }).await;
+
+        super::handle_pubrel(
+            crate::packet::pubrel::PubRelPacket::new(1),
+            &writer,
+            &session,
+        )
+        .await
+        .expect("PUBREL completes the handshake");
+        assert_eq!(read_packet_header(&mut server).await, PUBCOMP_HEADER);
+
+        handle_publish_with_ack(
+            qos2_publish(1, topic),
+            &writer,
+            &session,
+            &plain,
+            None,
+            None,
+            Some(&ack),
+        )
+        .await
+        .unwrap();
+
+        let token2 = tokio::time::timeout(Duration::from_secs(1), rx.recv()).await;
+        assert!(
+            matches!(token2, Ok(Some(_))),
+            "a message reusing a packet id whose handshake already completed must be \
+             delivered, not suppressed as a duplicate"
+        );
+    }
+
+    /// After a deferred `QoS` 2 message is rejected (terminal error PUBREC, no PUBREL), the broker
+    /// releases and may reuse the id; a new message on that id must be delivered, not re-rejected.
+    #[tokio::test]
+    async fn deferred_qos2_reused_packet_id_after_reject_is_delivered_again() {
+        let topic = "sensors/temp";
+        let (writer, mut server) = loopback_writer().await;
+        let session = session();
+        let plain = Arc::new(CallbackManager::new());
+        let (callbacks, dispatcher, mut rx) = ack_setup(topic, &session);
+        dispatcher.set_writer(Arc::clone(&writer)).await;
+        let ack = AckDelivery {
+            callbacks: &callbacks,
+            dispatcher: &dispatcher,
+        };
+
+        handle_publish_with_ack(
+            qos2_publish(1, topic),
+            &writer,
+            &session,
+            &plain,
+            None,
+            None,
+            Some(&ack),
+        )
+        .await
+        .unwrap();
+        let token1 = rx.recv().await.expect("first delivery");
+        token1.reject(crate::protocol::v5::reason_codes::ReasonCode::UnspecifiedError);
+        assert_eq!(read_packet_header(&mut server).await, PUBREC_HEADER);
+        wait_for(|| async { !session.read().await.is_delivered(1).await }).await;
+
+        handle_publish_with_ack(
+            qos2_publish(1, topic),
+            &writer,
+            &session,
+            &plain,
+            None,
+            None,
+            Some(&ack),
+        )
+        .await
+        .unwrap();
+
+        let token2 = tokio::time::timeout(Duration::from_secs(1), rx.recv()).await;
+        assert!(
+            matches!(token2, Ok(Some(_))),
+            "a message reusing a packet id whose exchange was rejected must be delivered, \
+             not suppressed and re-rejected"
         );
     }
 }

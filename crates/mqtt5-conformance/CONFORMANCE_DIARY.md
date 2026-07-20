@@ -38,6 +38,13 @@
 
 ## Diary Entries
 
+### Error PUBREC from a subscriber must terminate QoS2 with NO PUBREL (`[MQTT-4.3.3-4]`)
+
+- **Bug**: `client_handler::publish::handle_pubrec` ignored the PUBREC Reason Code and always stored `AwaitingPubcomp` and wrote `PubRel{reason: Success}`. A subscriber that rejected an outbound QoS2 PUBLISH with a PUBREC reason ≥ 0x80 still received a PUBREL, and the broker kept the id in a half-open handshake. This violates `[MQTT-4.3.3-4]` (the sender sends PUBREL only for a PUBREC reason < 0x80).
+- **Spec**: `[MQTT-4.3.3-4]` — on a PUBREC with reason ≥ 0x80 the sender MUST NOT send PUBREL; it discards the message and releases the Packet Identifier. (Related: `[MQTT-4.3.3-9]` — a rejected id is treated as a new Application Message if reused.)
+- **Fix**: `handle_pubrec` now checks `pubrec.reason_code.is_error()` first; on an error reason it removes the `outbound_inflight` entry, removes the persisted inflight, drains queued messages, and returns WITHOUT writing a PUBREL. The success path (store `AwaitingPubcomp`, send `PubRel`) is unchanged.
+- **Test**: `section4_qos::error_pubrec_from_subscriber_terminates_qos2_no_pubrel` (`[MQTT-4.3.3-4]`) — a raw subscriber at QoS2 receives the PUBLISH, replies `pubrec_with_reason(id, 0x80)`, and asserts `read_packet_bytes(2s).is_none()` (no PUBREL follows). Verified: passes with the fix, fails without. Surfaced during the deferred-ack TLA v3 fidelity quorum (see `specs/tla/deferred-ack/TLA_DIARY.md`, 2026-07-20 later).
+
 ### Retained message QoS downgrade fix (`[MQTT-3.8.4-8]`)
 
 - **Bug**: the same retained-at-subscribe path (`client_handler::subscribe::deliver_retained_for_filter`) that skipped the Subscription Identifier also skipped the QoS downgrade. Live delivery applies `MessageRouter::effective_qos(publish_qos, sub_qos)` inside `router::prepare_message`, but the retained path queued the stored `PublishPacket` at its own stored QoS. A retained `QoS` 1 message delivered to a `QoS` 0 subscription was sent at `QoS` 1.

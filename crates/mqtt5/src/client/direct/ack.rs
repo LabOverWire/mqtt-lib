@@ -72,8 +72,14 @@ impl AckToken {
         self.emit(AckKind::Ack);
     }
 
-    /// Frees the message's slot while signalling it was not processed successfully.
-    /// Terminal: the message is not redelivered. Consumes the token.
+    /// Rejects the message after failing to process it, sending an error
+    /// acknowledgement (an error PUBREC for `QoS` 2). Consumes the token.
+    ///
+    /// Rejecting is **not at-most-once**: per MQTT-5 `[MQTT-4.3.3-9]`, once the receiver
+    /// has sent an error acknowledgement it must treat any later PUBLISH with the same
+    /// Packet Identifier as a new message. So if the acknowledgement is lost and the
+    /// broker replays the message on reconnect, your callback will see it again. Reject
+    /// must therefore be idempotent, like the rest of deferred delivery.
     pub fn reject(mut self, reason: ReasonCode) {
         self.emit(AckKind::Reject(reason));
     }
@@ -164,6 +170,13 @@ impl AckDispatcher {
         });
     }
 
+    /// Applies one acknowledgement: records the session state, then writes the ack packet.
+    ///
+    /// The session is updated **before** the ack reaches the wire, so a packet id the broker
+    /// reuses after receiving this ack cannot race an in-flight write and be seen as a stale
+    /// duplicate. The write is best-effort; if the connection is gone the recorded state drives
+    /// the correct replay on reconnect. For a `QoS` 2 error acknowledgement the per-id deferred
+    /// state is cleared, per `[MQTT-4.3.3-9]` (a later same-id PUBLISH is a new message).
     async fn handle(
         request: &AckRequest,
         slot: &WriterSlot,
@@ -188,6 +201,24 @@ impl AckDispatcher {
             }),
         };
 
+        let is_success = reason == ReasonCode::Success;
+        {
+            let session = session.read().await;
+            match request.qos {
+                QoS::AtMostOnce => {}
+                QoS::ExactlyOnce if is_success => {
+                    session.mark_pubrec_sent(request.packet_id).await;
+                    session
+                        .set_resolution(request.packet_id, AckResolution::Acked)
+                        .await;
+                }
+                QoS::AtLeastOnce | QoS::ExactlyOnce => {
+                    session.acknowledge_inbound(request.packet_id).await;
+                    session.clear_inbound_state(request.packet_id).await;
+                }
+            }
+        }
+
         let writer = slot.lock().await.clone();
         let written = match &writer {
             Some(handle) => handle.lock().await.write_packet(packet).await.is_ok(),
@@ -198,28 +229,6 @@ impl AckDispatcher {
                 packet_id = request.packet_id,
                 "Deferred ack not written (disconnected); resolution recorded for replay"
             );
-        }
-
-        let session = session.read().await;
-        let is_success = reason == ReasonCode::Success;
-        match request.qos {
-            QoS::AtMostOnce => {}
-            QoS::AtLeastOnce => {
-                session.acknowledge_inbound(request.packet_id).await;
-                session.clear_inbound_state(request.packet_id).await;
-            }
-            QoS::ExactlyOnce if is_success => {
-                session.mark_pubrec_sent(request.packet_id).await;
-                session
-                    .set_resolution(request.packet_id, AckResolution::Acked)
-                    .await;
-            }
-            QoS::ExactlyOnce => {
-                session
-                    .set_resolution(request.packet_id, AckResolution::Rejected(reason))
-                    .await;
-                session.acknowledge_inbound(request.packet_id).await;
-            }
         }
     }
 }

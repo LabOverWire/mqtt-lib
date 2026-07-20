@@ -110,6 +110,89 @@ Related: issue #112 (QoS2 duplicate-delivery bug, filed), author reply pasted on
 
 ## Log (newest first)
 
+### 2026-07-20 (later) — Model v3 made spec-faithful (follow-up #4 CLOSED); broker error-PUBREC conformance fixed; 3-way fidelity quorum ran; two invariants added.
+
+Closes the follow-up #4 fidelity gap from the entry below. The model was rebuilt to match the shipped
+code + MQTT-5 on the REJECT and packet-id-REUSE paths, and a fidelity quorum audited it against the
+real Rust before it was treated as verified.
+
+**Spec finding that drove the rebuild (quorum-confirmed, load-bearing):** `[MQTT-4.3.3-9]` — after a
+receiver sends a PUBREC with reason >= 0x80 it MUST treat any later PUBLISH with that Packet Identifier
+as a NEW Application Message. So clear-on-reject is SPEC-REQUIRED, not a design choice, and at-least-once
+for rejected messages is unavoidable while conformant. The old model's "keep reject, re-send error PUBREC,
+never re-deliver" over-claimed exactly-once for rejected messages — a guarantee the spec does not make.
+
+**Broker conformance fix (separate, real):** `handle_pubrec` ignored the PUBREC reason code and sent
+`PUBREL(Success)` unconditionally — violating `[MQTT-4.3.3-4]` (PUBREL only for reason < 0x80). Fixed:
+on an error PUBREC the broker discards the inflight, frees the id, drains queued, sends NO PUBREL.
+Negative-control conformance test added: `error_pubrec_from_subscriber_terminates_qos2_no_pubrel`
+(`section4_qos.rs`, labeled `[MQTT-4.3.3-4]`) — passes with the fix, fails without. See CONFORMANCE_DIARY.
+
+**Model v3 changes:** `AppReject` clears `delivered` + sets `wasRejected`; `ClientRecvPubrel` clears
+`delivered`+`resolution`+`pubrecSent` (mirrors `handle_pubrel -> clear_inbound_state`); new `ReArm(m)`
+re-issues a `done` id as a fresh instance; `InvNoDoubleDelivery` / `InvDoneImpliesNoPubrec` scoped to
+`~wasRejected`; wire invariant uses `EverActed == ackedEver \/ wasRejected`. Three transport
+counterexamples were resolved (each a MODEL artifact, not a code bug): (1) scope the exactly-once
+invariants; (2) de-power `ReArm` — reuse now gated on BOTH wire directions being drained of that id,
+faithful to how the real broker only reuses an id after the old handshake completes (TCP-ordered +
+~65k-allocation u16 wraparound gap); (3) add broker self-heal actions `ServerRecvPubrecReleased`
+(success PUBREC on a released id -> PUBREL) and `ServerDiscardStaleErrPubrec` (stale error PUBREC ->
+discard), both code-confirmed against `publish.rs`.
+
+**3-way fidelity quorum (model vs client code / broker code+spec / invariants):** verdict — proof core
+is SOUND, all actions faithful, both controls fire for the right reason, reuse machinery genuinely
+exercised. Acted-on findings: (a) **`InvWindowBound` was VACUOUS** at MaxMsgs=ReceiveMax=2 — added
+`_window.cfg` (3/2, MaxReconnects=1/MaxReuse=1) that exhausts at 326,880 states with the backpressure
+guard binding; (b) **added `InvFreshIdNoStaleState`** (`serverState="toSend" => no stale
+delivered/pubrecSent/resolution`) — the independent under-delivery guard that would have caught the two
+review-117 reuse bugs (`InvNoDoubleDelivery` only sees over-delivery); (c) fixed the
+`ServerRecvPubrecReleased` comment (self-heal PUBREL carries reason Success, not 0x92). Documented SCOPE
+LIMITS in the model header (session_present=TRUE assumed; safety only, no liveness; sticky `~wasRejected`
+exclusion).
+
+**Final checker state (all green as intended):** _transport ok (73.6k states, 10 invariants), _crash ok
+(23.9k), _window ok (326.9k, InvWindowBound binding), _persistmistake -> InvNoWedge violated (control),
+_buggydup -> InvDeferralHeld violated (control).
+
+**New code follow-ups surfaced by the quorum (added to API_DESIGN.md §6 — edge-hardening, NOT blocking):**
+5. **`next_packet_id` id-reuse safety:** the live-send allocator (`broker/.../lifecycle.rs`) is a bare
+   wrapping u16 counter that never consults `outbound_inflight`; on a long-lived connection with one id
+   stuck awaiting PUBCOMP while ~65k others complete, the counter wraps and `insert` clobbers the stuck
+   entry. Low-probability, but the model assumes drain-before-reuse the code does not enforce. Fix:
+   skip in-use ids on the live path (as `advance_packet_id_past_inflight` already does post-reconnect).
+6. **`handle_pubrel` conditional clear:** clears dedup state only in the `has_pubrec` branch; a spurious
+   PUBREL (non-compliant broker) while `delivered /\ ~has_pubrec` leaves `delivered` set forever ->
+   latent suppression of a reused id. Harden to clear in both branches.
+7. **`reject(ReasonCode::Success)` foot-gun:** `reject` with a success reason takes the ACK path (no
+   clear, success PUBREC). Validate/normalize the reason in `AckToken::reject`.
+Also: follow-up #1 (session_present=0) was independently CONFIRMED by the quorum as the most significant
+model/code gap — it is message LOSS, caught by NO current invariant.
+
+### 2026-07-20 — Post-implementation review found 2 packet-id-reuse bugs (both FIXED, counter-tested, quorum-verified). Model now over-claims — follow-up #4 added.
+
+A code review of PR #117 found the deferred dedup guard `inbound_delivered` was never cleared when a
+QoS2 handshake completed (`handle_pubrel` cleared only `inbound_pubrecs`) or when a message was
+rejected. So a packet id the broker RE-USED for a new message was suppressed as a duplicate (and for
+acked ids, a spurious success PUBREC re-sent; for rejected ids, re-rejected). Both confirmed by
+counter-tests that FAIL on the unfixed code:
+`deferred_qos2_reused_packet_id_after_completion_is_delivered_again` and `..._after_reject_...`.
+
+**Fixes:** `handle_pubrel` now calls `clear_inbound_state` (superset of `remove_pubrec`; no-op on the
+non-deferred path); the drain's QoS2 reject arm clears state instead of recording `Rejected`;
+`AckResolution::Rejected` removed (enum is now `Unresolved`/`Acked`). Also hardened the drain to do
+session bookkeeping BEFORE the wire write, closing a (broker-ordering-prevented) reuse race.
+
+**Two-reviewer quorum** double-checked the counter-tests (both PROVE-THE-BUG, non-vacuous, correctly
+synchronized against the spawned drain, no false-pass) and the fixes (both correct + safe; fix #2 is a
+deliberate relaxation to at-least-once delivery for REJECTED messages, staying on the safe side of
+`InvNoWedge`). 439 lib tests green, clippy pedantic clean.
+
+**MODEL FIDELITY GAP (follow-up #4 in API_DESIGN.md §6):** the code now (a) gives at-least-once
+delivery for rejected messages and (b) relies on packet-id reuse — neither modeled.
+`DeferredAckQoS2Reconnect.tla` proves a STRONGER property than the code delivers for rejected
+messages. Extend the model (re-arm `done` ids, clear-on-reject, scope `InvNoDoubleDelivery` to acked)
+and re-verify. Exactly-once delivery for ACKED messages is preserved and still holds.
+
 ### 2026-07-18 — Rust `AckToken` implementation landed (branch `deferred-ack-token`). 3 follow-ups documented in API_DESIGN.md §6.
 
 Implemented the deferred-ack feature against the verified `DeferredAckQoS2Reconnect.tla` model, in 7
