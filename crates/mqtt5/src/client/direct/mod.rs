@@ -2,10 +2,14 @@
 //!
 //! This module implements the MQTT client using direct async calls.
 
+pub(crate) mod ack;
 mod handlers;
 mod keepalive;
 mod reader;
 mod unified;
+
+pub use ack::AckToken;
+pub(crate) use ack::{AckCallbackManager, AckDispatcher};
 
 use parking_lot::Mutex;
 use std::collections::HashMap;
@@ -89,6 +93,10 @@ pub struct DirectClientInner {
     pub connected: Arc<AtomicBool>,
     pub connection_epoch: ConnectionEpoch,
     pub callback_manager: Arc<CallbackManager>,
+    /// Registry of `subscribe_with_ack` callbacks (single-owner, token-bearing).
+    pub ack_callbacks: Arc<AckCallbackManager>,
+    /// Connection-stable writer of deferred acknowledgements. Outlives reconnects.
+    pub ack_dispatcher: Arc<AckDispatcher>,
     pub packet_reader_handle: Option<JoinHandle<()>>,
     pub keepalive_handle: Option<JoinHandle<()>>,
     #[cfg(feature = "transport-quic")]
@@ -130,6 +138,8 @@ impl DirectClientInner {
         let queue_on_disconnect = !options.clean_start;
         let auth_method = options.properties.authentication_method.clone();
         let initial_keep_alive_secs = options.keep_alive.as_secs();
+        let ack_dispatcher = Arc::new(AckDispatcher::new(Arc::clone(&session)));
+        let ack_callbacks = Arc::new(AckCallbackManager::new());
 
         Self {
             writer: None,
@@ -147,6 +157,8 @@ impl DirectClientInner {
             connected: Arc::new(AtomicBool::new(false)),
             connection_epoch: Arc::new(AtomicU64::new(0)),
             callback_manager: Arc::new(CallbackManager::new()),
+            ack_callbacks,
+            ack_dispatcher,
             packet_reader_handle: None,
             keepalive_handle: None,
             #[cfg(feature = "transport-quic")]
@@ -240,6 +252,7 @@ impl DirectClientInner {
         }
 
         self.writer = None;
+        self.ack_dispatcher.clear_writer().await;
         self.set_connected(false);
 
         #[cfg(feature = "transport-quic")]
@@ -452,7 +465,11 @@ impl DirectClientInner {
         };
 
         let connection_epoch = self.advance_connection_epoch();
-        self.writer = Some(Arc::new(tokio::sync::Mutex::new(writer)));
+        let writer_arc = Arc::new(tokio::sync::Mutex::new(writer));
+        self.ack_dispatcher
+            .set_writer(Arc::clone(&writer_arc))
+            .await;
+        self.writer = Some(writer_arc);
         self.set_connected(true);
 
         self.apply_negotiated_packet_sizes(&connack).await;
@@ -468,6 +485,12 @@ impl DirectClientInner {
 
     async fn apply_negotiated_packet_sizes(&self, connack: &crate::packet::connack::ConnAckPacket) {
         let session = self.session.write().await;
+
+        if self.options.deferred_ack {
+            if let Some(receive_maximum) = self.options.properties.receive_maximum {
+                session.set_inbound_receive_maximum(receive_maximum).await;
+            }
+        }
 
         if let Some(max_packet_size) = self.options.properties.maximum_packet_size {
             session
@@ -1266,6 +1289,9 @@ impl DirectClientInner {
             auth_method: self.auth_method.clone(),
             keepalive_state: keepalive_state.clone(),
             codec_registry: self.options.codec_registry.clone(),
+            deferred_ack: self.options.deferred_ack,
+            ack_callbacks: Arc::clone(&self.ack_callbacks),
+            ack_dispatcher: Arc::clone(&self.ack_dispatcher),
         };
 
         let ctx_for_packet_reader = ctx.clone();

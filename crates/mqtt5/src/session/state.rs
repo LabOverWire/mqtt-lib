@@ -63,6 +63,16 @@ pub struct SessionState {
     /// independent namespaces that both start at 1, so sharing one map lets an
     /// outbound flow mask an inbound packet ID and silently drop a live message.
     inbound_pubrecs: Arc<RwLock<HashMap<u16, Instant>>>,
+    /// Deferred-ack dedup guard: inbound `QoS` 1/2 packet IDs already handed to the
+    /// application. Distinct from `inbound_pubrecs` (which now means only "PUBREC
+    /// written, awaiting PUBREL"): with deferred acknowledgement the PUBREC is not
+    /// written until the app resolves its token, so delivery and PUBREC-owed are
+    /// separate facts. In-memory only, never persisted: it must survive a transport
+    /// reconnect but be lost with the token on a process crash.
+    inbound_delivered: Arc<RwLock<HashMap<u16, Instant>>>,
+    /// The application's terminal decision per deferred inbound `QoS` 2 packet ID,
+    /// used to re-send the matching acknowledgement on a post-reconnect duplicate.
+    inbound_resolution: Arc<RwLock<HashMap<u16, AckResolution>>>,
     #[cfg(not(target_arch = "wasm32"))]
     publish_flows: Arc<RwLock<HashMap<u16, FlowId>>>,
     /// Session creation time
@@ -90,6 +100,21 @@ pub struct SessionState {
     flow_registry: Arc<RwLock<FlowRegistry>>,
 }
 
+/// The application's decision for a deferred inbound `QoS` 2 message while its handshake
+/// is still in flight.
+///
+/// Only the not-yet-completed states are tracked: a duplicate PUBLISH replayed after a
+/// reconnect while the message is `Acked` re-sends the success PUBREC. A rejected or
+/// fully completed exchange clears its state entirely (the packet id is then free for
+/// reuse), so those are not represented here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AckResolution {
+    /// The application still holds the token; no PUBREC has been written.
+    Unresolved,
+    /// The application acked; a success PUBREC was (or must be re-)written.
+    Acked,
+}
+
 impl SessionState {
     /// Creates a new session state
     #[must_use]
@@ -106,6 +131,8 @@ impl SessionState {
             unacked_publishes: Arc::new(RwLock::new(HashMap::new())),
             unacked_pubrels: Arc::new(RwLock::new(HashMap::new())),
             inbound_pubrecs: Arc::new(RwLock::new(HashMap::new())),
+            inbound_delivered: Arc::new(RwLock::new(HashMap::new())),
+            inbound_resolution: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(not(target_arch = "wasm32"))]
             publish_flows: Arc::new(RwLock::new(HashMap::new())),
             created_at: now,
@@ -306,6 +333,8 @@ impl SessionState {
         self.unacked_publishes.write().await.clear();
         self.unacked_pubrels.write().await.clear();
         self.inbound_pubrecs.write().await.clear();
+        self.inbound_delivered.write().await.clear();
+        self.inbound_resolution.write().await.clear();
         #[cfg(not(target_arch = "wasm32"))]
         self.publish_flows.write().await.clear();
     }
@@ -573,6 +602,87 @@ impl SessionState {
             .await
             .insert(packet_id, Instant::now())
             .is_none()
+    }
+
+    /// Records that PUBREC has actually been written for a deferred inbound `QoS` 2
+    /// packet ID (`has_pubrec` becomes true only at ack time, not at delivery).
+    pub async fn mark_pubrec_sent(&self, packet_id: u16) {
+        self.touch().await;
+        self.inbound_pubrecs
+            .write()
+            .await
+            .insert(packet_id, Instant::now());
+    }
+
+    /// Marks an inbound packet ID as delivered to the application, reporting whether
+    /// this is the first receipt. The check and insert share one write lock so a
+    /// duplicate racing on a shared session cannot be delivered twice.
+    pub async fn mark_delivered(&self, packet_id: u16) -> bool {
+        self.touch().await;
+        self.inbound_delivered
+            .write()
+            .await
+            .insert(packet_id, Instant::now())
+            .is_none()
+    }
+
+    /// Check whether an inbound packet ID has already been delivered.
+    pub async fn is_delivered(&self, packet_id: u16) -> bool {
+        self.inbound_delivered.read().await.contains_key(&packet_id)
+    }
+
+    /// Records the application's terminal decision for a deferred inbound `QoS` 2 id.
+    pub async fn set_resolution(&self, packet_id: u16, resolution: AckResolution) {
+        self.inbound_resolution
+            .write()
+            .await
+            .insert(packet_id, resolution);
+    }
+
+    /// Returns the application's decision for a deferred inbound id, or `Unresolved`.
+    pub async fn get_resolution(&self, packet_id: u16) -> AckResolution {
+        self.inbound_resolution
+            .read()
+            .await
+            .get(&packet_id)
+            .copied()
+            .unwrap_or(AckResolution::Unresolved)
+    }
+
+    /// Drops all deferred inbound state for a completed packet ID.
+    pub async fn clear_inbound_state(&self, packet_id: u16) {
+        self.inbound_delivered.write().await.remove(&packet_id);
+        self.inbound_resolution.write().await.remove(&packet_id);
+        self.inbound_pubrecs.write().await.remove(&packet_id);
+    }
+
+    /// Frees the inbound receive-maximum slot for a completed inbound packet ID.
+    pub async fn acknowledge_inbound(&self, packet_id: u16) {
+        self.flow_control
+            .read()
+            .await
+            .acknowledge_inbound(packet_id)
+            .await;
+    }
+
+    /// Reserves an inbound receive-maximum slot for a newly received packet ID.
+    ///
+    /// # Errors
+    /// Returns `ReceiveMaximumExceeded` if the inbound window is full.
+    pub async fn register_inbound(&self, packet_id: u16) -> Result<()> {
+        self.flow_control
+            .read()
+            .await
+            .register_inbound_publish(packet_id)
+            .await
+    }
+
+    /// Sets the inbound receive maximum so held tokens actually bound the window.
+    pub async fn set_inbound_receive_maximum(&self, value: u16) {
+        self.flow_control
+            .write()
+            .await
+            .set_inbound_receive_maximum(value);
     }
 
     /// Check if we have a stored PUBREC for the given inbound packet ID

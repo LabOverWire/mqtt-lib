@@ -44,6 +44,7 @@ pub use self::r#trait::MqttClientTrait;
 
 pub use builders::ConnectionEventCallback;
 
+pub use self::direct::AckToken;
 use self::direct::AutomaticReconnectLifecycle;
 #[cfg(not(target_arch = "wasm32"))]
 use self::direct::DirectClientInner;
@@ -503,6 +504,75 @@ impl MqttClient {
         }
     }
 
+    /// Subscribes to a topic, delivering each inbound message with an
+    /// [`AckToken`] the application resolves after durable processing.
+    ///
+    /// The acknowledgement (PUBACK/PUBREC) is withheld until the token is acked,
+    /// applying Receive-Maximum backpressure. Requires connection-wide deferred ack
+    /// (`ConnectOptions::with_deferred_ack(true)` plus a persistent session).
+    ///
+    /// Delivery is **at-least-once**: the callback must be idempotent. A message can be
+    /// delivered more than once across a reconnect — both when it was acked (a crash
+    /// before the session's ack durably reached the broker) and when it was rejected (a
+    /// lost error acknowledgement; see [`AckToken::reject`]). Exactly-once applies only
+    /// to a message whose ack completes on a session that survives in memory.
+    ///
+    /// # Errors
+    /// Returns an error if `deferred_ack` was not enabled on the connection, or if the
+    /// subscription fails.
+    pub async fn subscribe_with_ack<F>(
+        &self,
+        topic_filter: impl Into<String>,
+        options: SubscribeOptions,
+        callback: F,
+    ) -> Result<(u16, QoS)>
+    where
+        F: Fn(PublishPacket, AckToken) + Send + Sync + 'static,
+    {
+        let topic_filter = topic_filter.into();
+        let inner = self.inner.read().await;
+
+        if !inner.options.deferred_ack {
+            return Err(MqttError::Configuration(
+                "subscribe_with_ack requires ConnectOptions::with_deferred_ack(true)".to_string(),
+            ));
+        }
+
+        let callback: crate::client::direct::ack::AckPublishCallback = Arc::new(callback);
+        let callback_id = inner.ack_callbacks.register(&topic_filter, callback);
+
+        let packet = build_subscribe_packet(
+            &topic_filter,
+            &options,
+            inner.options.protocol_version.as_u8(),
+        );
+
+        match inner
+            .subscribe_with_callback_internal(
+                packet,
+                callback_id,
+                crate::client::direct::SubscriptionPersistence::Skip,
+            )
+            .await
+        {
+            Ok(results) => {
+                if let Some(&(packet_id, qos)) = results.first() {
+                    Ok((packet_id, qos))
+                } else {
+                    let _ = inner.ack_callbacks.unregister(&topic_filter);
+                    Err(MqttError::ProtocolError(
+                        "No results returned for subscription".to_string(),
+                    ))
+                }
+            }
+            Err(e) => {
+                let _ = inner.ack_callbacks.unregister(&topic_filter);
+                Err(e)
+            }
+        }
+    }
+
+    #[doc(hidden)]
     async fn subscribe_with_options_raw<F>(
         &self,
         topic_filter: impl Into<String>,
@@ -957,6 +1027,45 @@ impl MqttClientTrait for MqttClient {
     fn set_queue_on_disconnect(&self, enabled: bool) -> impl Future<Output = ()> + Send + '_ {
         async move { self.set_queue_on_disconnect(enabled).await }
     }
+}
+
+fn build_subscribe_packet(
+    topic_filter: &str,
+    options: &SubscribeOptions,
+    protocol_version: u8,
+) -> SubscribePacket {
+    let filter = TopicFilter {
+        filter: topic_filter.to_string(),
+        options: SubscriptionOptions {
+            qos: options.qos,
+            no_local: options.no_local,
+            retain_as_published: options.retain_as_published,
+            retain_handling: match options.retain_handling {
+                crate::types::RetainHandling::SendAtSubscribe => {
+                    crate::packet::subscribe::RetainHandling::SendAtSubscribe
+                }
+                crate::types::RetainHandling::SendIfNew => {
+                    crate::packet::subscribe::RetainHandling::SendAtSubscribeIfNew
+                }
+                crate::types::RetainHandling::DontSend => {
+                    crate::packet::subscribe::RetainHandling::DoNotSend
+                }
+            },
+        },
+    };
+
+    let mut packet = SubscribePacket {
+        packet_id: 0,
+        filters: vec![filter],
+        properties: Properties::default(),
+        protocol_version,
+    };
+
+    if let Some(sub_id) = options.subscription_identifier {
+        packet = packet.with_subscription_identifier(sub_id);
+    }
+
+    packet
 }
 
 #[cfg(test)]

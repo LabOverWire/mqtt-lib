@@ -24,6 +24,7 @@ Start with these examples:
 
 - **simple_client.rs** - Basic publish/subscribe operations
 - **shared_subscription_demo.rs** - Load balancing with shared subscriptions
+- **deferred_ack.rs** - Withhold the PUBACK/PUBREC until the application has processed each message (end-to-end backpressure)
 
 ## Broker Examples
 

@@ -173,6 +173,47 @@
 //!     Ok(())
 //! }
 //! ```
+//!
+//! ## Deferred acknowledgement
+//!
+//! A normal subscription acknowledges each message as soon as the client hands it to the
+//! application, so the acknowledgement means only "received". [`MqttClient::subscribe_with_ack`]
+//! instead delivers each message with a move-only [`AckToken`] and withholds the acknowledgement
+//! — the PUBACK for `QoS` 1, the PUBREC for `QoS` 2 — until the application calls `token.ack()`.
+//! The acknowledgement then means "processed", and the inbound Receive Maximum window becomes
+//! real end-to-end backpressure: the broker stops sending once the application's unacknowledged
+//! messages fill the window. `token.reject(reason)` sends an error acknowledgement, and dropping
+//! the token auto-acknowledges with a reason code so a forgotten token cannot wedge the flow.
+//!
+//! The feature is opt-in through [`ConnectOptions::with_deferred_ack`] and requires a persistent
+//! session (clean start off, a non-zero session expiry, a non-zero Receive Maximum), because its
+//! guarantees depend on the session surviving a reconnect. On such a session an acknowledged
+//! message is processed exactly once; a rejected message is at-least-once (per `[MQTT-4.3.3-9]`),
+//! so delivery and reject callbacks must be idempotent. See `examples/deferred_ack.rs`.
+//!
+//! ```rust,no_run
+//! use mqtt5::{ConnectOptions, MqttClient, QoS, SubscribeOptions};
+//!
+//! #[tokio::main]
+//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     let options = ConnectOptions::new("worker")
+//!         .with_deferred_ack(true)
+//!         .with_clean_start(false)
+//!         .with_session_expiry_interval(3600)
+//!         .with_receive_maximum(16);
+//!
+//!     let client = MqttClient::with_options(options);
+//!     client.connect("mqtt://localhost:1883").await?;
+//!
+//!     let subscribe_options = SubscribeOptions { qos: QoS::ExactlyOnce, ..Default::default() };
+//!     client.subscribe_with_ack("jobs/#", subscribe_options, |publish, token| {
+//!         let _ = &publish.payload;
+//!         token.ack();
+//!     }).await?;
+//!
+//!     Ok(())
+//! }
+//! ```
 
 #![warn(clippy::pedantic)]
 
@@ -200,8 +241,9 @@ pub mod types;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use client::{
-    AuthHandler, AuthResponse, ConnectionEvent, DisconnectReason, JwtAuthHandler, MockCall,
-    MockMqttClient, MqttClient, MqttClientTrait, PlainAuthHandler, ScramSha256AuthHandler,
+    AckToken, AuthHandler, AuthResponse, ConnectionEvent, DisconnectReason, JwtAuthHandler,
+    MockCall, MockMqttClient, MqttClient, MqttClientTrait, PlainAuthHandler,
+    ScramSha256AuthHandler,
 };
 #[cfg(feature = "codec-deflate")]
 pub use codec::DeflateCodec;

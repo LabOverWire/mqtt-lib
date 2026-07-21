@@ -476,6 +476,53 @@ async fn qos2_pubrec_error_allows_packet_id_reuse(sut: SutHandle) {
     let _ = pub_raw.expect_pubcomp(TIMEOUT).await;
 }
 
+/// `[MQTT-4.3.3-4]` A sender sends a PUBREL only in response to a PUBREC with a
+/// Reason Code below 0x80. When a subscriber rejects an outbound `QoS` 2 PUBLISH with
+/// a PUBREC whose Reason Code is 0x80 or greater, the exchange terminates: the Server
+/// MUST NOT send a PUBREL, and it releases the Packet Identifier.
+#[conformance_test(
+    ids = ["MQTT-4.3.3-4"],
+    requires = ["transport.tcp", "max_qos>=2"],
+)]
+async fn error_pubrec_from_subscriber_terminates_qos2_no_pubrel(sut: SutHandle) {
+    let topic = format!("qos2-reject/{}", unique_client_id("t"));
+
+    let mut sub = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
+        .await
+        .unwrap();
+    let sub_id = unique_client_id("sub");
+    sub.connect_and_establish(&sub_id, TIMEOUT).await;
+    sub.send_raw(&RawPacketBuilder::subscribe(&topic, 2))
+        .await
+        .unwrap();
+    let _ = sub.expect_suback(TIMEOUT).await;
+
+    let publisher = TestClient::connect_with_prefix(&sut, "pub").await.unwrap();
+    let pub_opts = PublishOptions {
+        qos: QoS::ExactlyOnce,
+        ..Default::default()
+    };
+    publisher
+        .publish_with_options(&topic, b"reject-me", pub_opts)
+        .await
+        .unwrap();
+
+    let packet_id = sub
+        .expect_publish_qos2(TIMEOUT)
+        .await
+        .expect("subscriber must receive the QoS 2 PUBLISH");
+
+    sub.send_raw(&RawPacketBuilder::pubrec_with_reason(packet_id, 0x80))
+        .await
+        .unwrap();
+
+    let follow_up = sub.read_packet_bytes(Duration::from_secs(2)).await;
+    assert!(
+        follow_up.is_none(),
+        "[MQTT-4.3.3-4] Server MUST NOT send PUBREL after a PUBREC with Reason Code >= 0x80; got {follow_up:?}"
+    );
+}
+
 /// `[MQTT-4.3.3-10]` A `QoS` 2 PUBLISH with DUP=1 (retransmission) MUST NOT
 /// cause the message to be duplicated to subscribers.
 #[conformance_test(

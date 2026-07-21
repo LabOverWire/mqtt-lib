@@ -493,7 +493,34 @@ impl ClientHandler {
         }
     }
 
+    /// Handles a PUBREC from a subscriber for an outbound `QoS` 2 message.
+    ///
+    /// Per `[MQTT-4.3.3-4]` a PUBREL is sent only for a Reason Code below `0x80`. A PUBREC
+    /// with a Reason Code of `0x80` or greater terminates the exchange: the in-flight entry
+    /// is dropped, the outbound quota freed, queued messages drained, and no PUBREL is sent.
     pub(super) async fn handle_pubrec(&mut self, pubrec: PubRecPacket) -> Result<()> {
+        if pubrec.reason_code.is_error() {
+            if self.outbound_inflight.remove(&pubrec.packet_id).is_some() {
+                if let Some(ref storage) = self.storage {
+                    if let Err(e) = storage
+                        .remove_inflight_message(
+                            self.client_id.as_ref().unwrap(),
+                            pubrec.packet_id,
+                            InflightDirection::Outbound,
+                        )
+                        .await
+                    {
+                        debug!(
+                            "failed to remove rejected outbound inflight {}: {e}",
+                            pubrec.packet_id
+                        );
+                    }
+                }
+                self.drain_queued_messages().await;
+            }
+            return Ok(());
+        }
+
         if let Some(ref storage) = self.storage {
             if let Some(publish) = self.outbound_inflight.get(&pubrec.packet_id) {
                 let inflight = InflightMessage::from_publish(
