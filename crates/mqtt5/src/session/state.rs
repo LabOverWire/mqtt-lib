@@ -656,6 +656,32 @@ impl SessionState {
         self.inbound_pubrecs.write().await.remove(&packet_id);
     }
 
+    /// Drops all inbound `QoS` 2 de-duplication state (the delivered guard, the deferred
+    /// resolution, and the sent-PUBREC tracking), returning whether any was present.
+    ///
+    /// Used when the broker reports no session on reconnect (`session_present = 0`): the
+    /// retained dedup state is stale against the broker's fresh session and would otherwise
+    /// suppress a genuinely new PUBLISH that reuses a packet ID as a duplicate.
+    pub async fn clear_all_inbound_state(&self) -> bool {
+        let mut had_state = false;
+        {
+            let mut delivered = self.inbound_delivered.write().await;
+            had_state |= !delivered.is_empty();
+            delivered.clear();
+        }
+        {
+            let mut resolution = self.inbound_resolution.write().await;
+            had_state |= !resolution.is_empty();
+            resolution.clear();
+        }
+        {
+            let mut pubrecs = self.inbound_pubrecs.write().await;
+            had_state |= !pubrecs.is_empty();
+            pubrecs.clear();
+        }
+        had_state
+    }
+
     /// Frees the inbound receive-maximum slot for a completed inbound packet ID.
     pub async fn acknowledge_inbound(&self, packet_id: u16) {
         self.flow_control
@@ -1470,5 +1496,25 @@ mod tests {
 
         session.complete_publish(100).await;
         assert_eq!(session.get_unacked_publishes().await.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn clear_all_inbound_state_wipes_dedup_and_reports_presence() {
+        let session = SessionState::new("test-client".to_string(), SessionConfig::default(), true);
+
+        assert!(session.mark_delivered(7).await);
+        session.set_resolution(7, AckResolution::Acked).await;
+        session.mark_pubrec_sent(7).await;
+        assert!(session.is_delivered(7).await);
+        assert!(session.has_pubrec(7).await);
+
+        assert!(session.clear_all_inbound_state().await);
+        assert!(!session.is_delivered(7).await);
+        assert!(!session.has_pubrec(7).await);
+        assert_eq!(session.get_resolution(7).await, AckResolution::Unresolved);
+        assert!(session.mark_delivered(7).await);
+
+        session.clear_inbound_state(7).await;
+        assert!(!session.clear_all_inbound_state().await);
     }
 }

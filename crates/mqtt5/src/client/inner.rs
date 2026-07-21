@@ -30,6 +30,9 @@ impl MqttClient {
         session_present: bool,
         keep_alive: std::time::Duration,
     ) {
+        if !session_present {
+            self.reset_inbound_state_for_lost_session().await;
+        }
         self.trigger_connection_event(ConnectionEvent::Connected {
             session_present,
             keep_alive,
@@ -38,6 +41,30 @@ impl MqttClient {
         self.recover_quic_flows().await;
         self.restore_subscriptions_after_connect(stored_subs, session_present)
             .await;
+    }
+
+    /// Clears stale inbound `QoS` 2 de-duplication state after the broker reports no session.
+    ///
+    /// Without a resumed session the broker's packet-ID space starts fresh, so any retained
+    /// `inbound_delivered` guard would suppress a genuinely new PUBLISH that reuses the ID.
+    /// With deferred ack any outstanding [`AckToken`](crate::AckToken) is also stale — the
+    /// message it referred to is gone — so this is surfaced as a warning.
+    async fn reset_inbound_state_for_lost_session(&self) {
+        let inner = self.inner.read().await;
+        let cleared = inner.session.read().await.clear_all_inbound_state().await;
+        if cleared {
+            if inner.options.deferred_ack {
+                tracing::warn!(
+                    "Reconnected with session_present=0; cleared stale inbound QoS 2 \
+                     de-duplication state. Any outstanding AckTokens are now stale because the \
+                     broker no longer holds the session that delivered their messages."
+                );
+            } else {
+                tracing::debug!(
+                    "Reconnected with session_present=0; cleared stale inbound QoS 2 de-duplication state"
+                );
+            }
+        }
     }
 
     #[cfg(any(not(feature = "transport-websocket"), not(feature = "transport-quic")))]

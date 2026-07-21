@@ -389,39 +389,23 @@ pub(super) async fn handle_pubrel(
     writer: &Arc<tokio::sync::Mutex<UnifiedWriter>>,
     session: &Arc<tokio::sync::RwLock<SessionState>>,
 ) -> Result<()> {
-    let has_pubrec = session.read().await.has_pubrec(pubrel.packet_id).await;
+    session
+        .write()
+        .await
+        .clear_inbound_state(pubrel.packet_id)
+        .await;
 
-    if has_pubrec {
-        session
-            .write()
-            .await
-            .clear_inbound_state(pubrel.packet_id)
-            .await;
+    let pubcomp = crate::packet::pubcomp::PubCompPacket {
+        packet_id: pubrel.packet_id,
+        reason_code: crate::protocol::v5::reason_codes::ReasonCode::Success,
+        properties: Properties::default(),
+    };
 
-        let pubcomp = crate::packet::pubcomp::PubCompPacket {
-            packet_id: pubrel.packet_id,
-            reason_code: crate::protocol::v5::reason_codes::ReasonCode::Success,
-            properties: Properties::default(),
-        };
-
-        writer
-            .lock()
-            .await
-            .write_packet(Packet::PubComp(pubcomp))
-            .await?;
-    } else {
-        let pubcomp = crate::packet::pubcomp::PubCompPacket {
-            packet_id: pubrel.packet_id,
-            reason_code: crate::protocol::v5::reason_codes::ReasonCode::Success,
-            properties: Properties::default(),
-        };
-
-        writer
-            .lock()
-            .await
-            .write_packet(Packet::PubComp(pubcomp))
-            .await?;
-    }
+    writer
+        .lock()
+        .await
+        .write_packet(Packet::PubComp(pubcomp))
+        .await?;
 
     session
         .read()
@@ -943,6 +927,68 @@ mod tests {
             matches!(token2, Ok(Some(_))),
             "a message reusing a packet id whose exchange was rejected must be delivered, \
              not suppressed and re-rejected"
+        );
+    }
+
+    /// A PUBREL clears the inbound dedup guard even when no PUBREC was recorded (a spurious or
+    /// early PUBREL); a lingering guard would suppress a later reused packet id.
+    #[tokio::test]
+    async fn deferred_qos2_pubrel_clears_dedup_without_pubrec() {
+        let (writer, mut server) = loopback_writer().await;
+        let session = session();
+
+        assert!(session.read().await.mark_delivered(1).await);
+        assert!(!session.read().await.has_pubrec(1).await);
+
+        super::handle_pubrel(
+            crate::packet::pubrel::PubRelPacket::new(1),
+            &writer,
+            &session,
+        )
+        .await
+        .expect("PUBREL is answered with PUBCOMP");
+        assert_eq!(read_packet_header(&mut server).await, PUBCOMP_HEADER);
+
+        assert!(
+            !session.read().await.is_delivered(1).await,
+            "a PUBREL must clear the dedup guard even without a recorded PUBREC"
+        );
+    }
+
+    /// `reject()` with a non-error reason (e.g. `Success`) is normalized to an error and still
+    /// takes the reject path: it clears the dedup state rather than behaving like ack.
+    #[tokio::test]
+    async fn deferred_qos2_reject_with_success_reason_still_clears_state() {
+        let topic = "sensors/temp";
+        let (writer, mut server) = loopback_writer().await;
+        let session = session();
+        let plain = Arc::new(CallbackManager::new());
+        let (callbacks, dispatcher, mut rx) = ack_setup(topic, &session);
+        dispatcher.set_writer(Arc::clone(&writer)).await;
+        let ack = AckDelivery {
+            callbacks: &callbacks,
+            dispatcher: &dispatcher,
+        };
+
+        handle_publish_with_ack(
+            qos2_publish(1, topic),
+            &writer,
+            &session,
+            &plain,
+            None,
+            None,
+            Some(&ack),
+        )
+        .await
+        .unwrap();
+        let token1 = rx.recv().await.expect("first delivery");
+        token1.reject(crate::protocol::v5::reason_codes::ReasonCode::Success);
+        assert_eq!(read_packet_header(&mut server).await, PUBREC_HEADER);
+        wait_for(|| async { !session.read().await.is_delivered(1).await }).await;
+        assert_eq!(
+            session.read().await.get_resolution(1).await,
+            crate::session::state::AckResolution::Unresolved,
+            "reject(Success) must clear state (reject path), not record an Acked resolution"
         );
     }
 }

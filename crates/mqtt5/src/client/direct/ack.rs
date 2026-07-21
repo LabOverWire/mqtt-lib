@@ -80,7 +80,15 @@ impl AckToken {
     /// Packet Identifier as a new message. So if the acknowledgement is lost and the
     /// broker replays the message on reconnect, your callback will see it again. Reject
     /// must therefore be idempotent, like the rest of deferred delivery.
+    ///
+    /// A non-error `reason` (Reason Code below `0x80`, e.g. `Success`) is normalized to
+    /// [`ReasonCode::UnspecifiedError`], so `reject` can never behave as an [`ack`](Self::ack).
     pub fn reject(mut self, reason: ReasonCode) {
+        let reason = if reason.is_error() {
+            reason
+        } else {
+            ReasonCode::UnspecifiedError
+        };
         self.emit(AckKind::Reject(reason));
     }
 
