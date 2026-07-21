@@ -236,19 +236,19 @@ PUBREC until ack; `Drop` emits a reason-coded PUBREC; config gating) and clippy-
    processing, no wedge). Current coverage is unit-level only (`handlers.rs` tests); there is no
    broker-loop reconnect test for the deferred path.
 
-3. **Re-subscribe ack subscriptions on a clean reconnect.** `subscribe_with_ack` registers into the
-   in-memory `AckCallbackManager` (which survives disconnect) and sends the SUBSCRIBE with
-   `SubscriptionPersistence::Skip`. This is correct for the required `session_present = true` path (the
-   broker retains the subscription; the ack callback is still registered). On a *clean* reconnect
-   (`session_present = false`) the SUBSCRIBE is not auto-resent for ack subscriptions, unlike regular
-   ones. **Follow-up 1 landed as clear-and-continue (a `warn!`, not a hard error)**, so the connection
-   keeps running after a clean resume — which means the client is now silently no longer subscribed to
-   its ack topics. Re-subscription is therefore the desirable behaviour and this is now a real gap, not
-   just a decision. DECISION NEEDED: auto-resend ack SUBSCRIBEs on `session_present = 0`, or make a clean
-   resume a surfaced terminal error for deferred-ack sessions? If auto-resending, route ack subscriptions
-   through a restoration path that targets `AckCallbackManager` rather than
-   `CallbackManager::restore_callback` (whose `CallbackId` space is distinct — do not reuse it, to avoid
-   an id collision).
+3. **[CLOSED 2026-07-21] Re-subscribe ack subscriptions on a clean reconnect.** Resolved on spec
+   grounds, not preference: `session_present = 0` on a Clean Start = 0 connect means the broker holds no
+   session state, and per §4.1 that state includes the subscriptions ([MQTT-3.2.2-2/-3]). The only
+   conformant way to make a subscription active again when the broker has none is to send SUBSCRIBE
+   again — exactly what regular subscriptions already do on `session_present = false`. A terminal error
+   would be strictly worse and inconsistent. Done — `subscribe_with_ack` now records each ack
+   subscription in a new `stored_ack_subscriptions` (topic, options, `CallbackId`), and
+   `on_successful_connect` calls `restore_ack_subscriptions_after_lost_session` on `session_present = 0`,
+   which re-sends the SUBSCRIBE via `resubscribe_ack_internal` **without** touching the regular
+   `CallbackManager` (distinct `CallbackId` space) — the ack callback is already registered in
+   `AckCallbackManager` and survives the disconnect. `unsubscribe` now also unregisters the ack callback
+   and drops the stored ack subscription, closing a pre-existing gap where `unsubscribe` ignored ack
+   subscriptions entirely. Runtime behaviour is verified by the follow-up #2 end-to-end reconnect test.
 
 4. **[CLOSED 2026-07-20] Extend the TLA model to cover packet-id reuse and reject-clears.**
    Done — `DeferredAckQoS2Reconnect.tla` v3 now models reject-clears-state (`[MQTT-4.3.3-9]`), packet-id

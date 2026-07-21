@@ -41,6 +41,9 @@ impl MqttClient {
         self.recover_quic_flows().await;
         self.restore_subscriptions_after_connect(stored_subs, session_present)
             .await;
+        if !session_present {
+            self.restore_ack_subscriptions_after_lost_session().await;
+        }
     }
 
     /// Clears stale inbound `QoS` 2 de-duplication state after the broker reports no session.

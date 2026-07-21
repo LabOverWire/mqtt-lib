@@ -546,6 +546,7 @@ impl MqttClient {
             &options,
             inner.options.protocol_version.as_u8(),
         );
+        let stored_options = packet.filters.first().map(|f| f.options);
 
         match inner
             .subscribe_with_callback_internal(
@@ -557,6 +558,13 @@ impl MqttClient {
         {
             Ok(results) => {
                 if let Some(&(packet_id, qos)) = results.first() {
+                    if let Some(options) = stored_options {
+                        inner.stored_ack_subscriptions.lock().push((
+                            topic_filter.clone(),
+                            options,
+                            callback_id,
+                        ));
+                    }
                     Ok((packet_id, qos))
                 } else {
                     let _ = inner.ack_callbacks.unregister(&topic_filter);
@@ -657,6 +665,11 @@ impl MqttClient {
 
         let inner = self.inner.read().await;
         let _ = inner.callback_manager.unregister(&topic_filter);
+        let _ = inner.ack_callbacks.unregister(&topic_filter);
+        inner
+            .stored_ack_subscriptions
+            .lock()
+            .retain(|(topic, _, _)| topic != &topic_filter);
 
         let packet = UnsubscribePacket {
             packet_id: 0,
