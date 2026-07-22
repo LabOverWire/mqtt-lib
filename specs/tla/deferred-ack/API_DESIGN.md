@@ -229,12 +229,18 @@ PUBREC until ack; `Drop` emits a reason-coded PUBREC; config gating) and clippy-
    dedup), not gated on `deferred_ack`; only the warning is deferred-ack-specific. Test:
    `session::state::clear_all_inbound_state_wipes_dedup_and_reports_presence`.
 
-2. **End-to-end reconnect integration test against a live broker.** Exercise the two model regimes
-   from `DeferredAckQoS2Reconnect.tla` in real code: (a) `_transport` — a transport reconnect with the
-   in-memory session retained delivers exactly once and completes the withheld handshake on the new
-   connection; (b) `_crash` — a fresh client on a resumed broker session re-delivers (at-least-once
-   processing, no wedge). Current coverage is unit-level only (`handlers.rs` tests); there is no
-   broker-loop reconnect test for the deferred path.
+2. **[CLOSED 2026-07-21] End-to-end reconnect integration test against a live broker.** Done —
+   `tests/deferred_ack_reconnect.rs` runs three `TestBroker`-backed scenarios: (a) the basic deferred
+   flow (`QoS` 2 delivered once, `ack()` completes the handshake, no duplicate); (b) the `_transport`
+   regime — the same client disconnects with the token withheld and reconnects to the still-running
+   broker (asserts `session_present = true`), and the replayed dup PUBLISH does NOT re-deliver
+   (exactly-once), then `ack()` completes on the new connection; (c) the `session_present = 0`
+   re-subscribe path from follow-up #3 — the broker is stopped and restarted (memory backend, session
+   lost; asserts `session_present = false`) and a subsequent publish is still delivered, proving the ack
+   subscription was re-established. The model's `_crash` regime (a *fresh* client process resuming a
+   retained session) is intentionally not asserted here: a fresh client has no local callbacks until it
+   re-subscribes on startup — the general app-restart re-registration pattern, independent of deferred
+   ack — and the broker resends on CONNACK before that can happen.
 
 3. **[CLOSED 2026-07-21] Re-subscribe ack subscriptions on a clean reconnect.** Resolved on spec
    grounds, not preference: `session_present = 0` on a Clean Start = 0 connect means the broker holds no
