@@ -121,12 +121,10 @@ impl ClientHandler {
     }
 
     pub(super) fn next_packet_id(&mut self) -> u16 {
-        let id = self.next_packet_id;
-        self.next_packet_id = if self.next_packet_id == u16::MAX {
-            1
-        } else {
-            self.next_packet_id + 1
-        };
+        let (id, next) = next_free_packet_id(self.next_packet_id, |id| {
+            self.outbound_inflight.contains_key(&id) || self.inflight_publishes.contains_key(&id)
+        });
+        self.next_packet_id = next;
         id
     }
 
@@ -145,5 +143,70 @@ impl ClientHandler {
                 candidate + 1
             };
         }
+    }
+}
+
+/// Returns the next unused packet id and the counter to store for the next allocation.
+///
+/// Advances a `1..=u16::MAX` counter (wrapping `MAX -> 1`, never 0), skipping any id the
+/// `in_use` predicate reports as still in flight, so a `u16` wraparound cannot reissue an id
+/// whose message is still outstanding and clobber it. If every id is in use (unreachable while
+/// Receive Maximum bounds concurrent inflight well below 65535) it falls back to the current id.
+fn next_free_packet_id(start: u16, in_use: impl Fn(u16) -> bool) -> (u16, u16) {
+    let advance = |id: u16| if id == u16::MAX { 1 } else { id + 1 };
+    let mut current = start;
+    for _ in 0..u16::MAX {
+        let id = current;
+        current = advance(current);
+        if !in_use(id) {
+            return (id, current);
+        }
+    }
+    (current, advance(current))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::next_free_packet_id;
+    use std::collections::HashSet;
+
+    #[test]
+    fn allocates_sequentially_when_nothing_is_in_use() {
+        let (id, next) = next_free_packet_id(1, |_| false);
+        assert_eq!(id, 1);
+        assert_eq!(next, 2);
+    }
+
+    #[test]
+    fn wraps_from_max_to_one_never_zero() {
+        let (id, next) = next_free_packet_id(u16::MAX, |_| false);
+        assert_eq!(id, u16::MAX);
+        assert_eq!(next, 1);
+    }
+
+    #[test]
+    fn skips_ids_still_in_use() {
+        let in_use: HashSet<u16> = [1, 2, 3].into_iter().collect();
+        let (id, next) = next_free_packet_id(1, |id| in_use.contains(&id));
+        assert_eq!(id, 4);
+        assert_eq!(next, 5);
+    }
+
+    #[test]
+    fn does_not_clobber_a_stuck_id_on_wraparound() {
+        let stuck = 9u16;
+        let (id, _) = next_free_packet_id(stuck, |id| id == stuck);
+        assert_ne!(id, stuck);
+        assert_eq!(id, stuck + 1);
+    }
+
+    #[test]
+    fn all_ids_in_use_falls_back_to_reissuing_start() {
+        let start = 42u16;
+        let (id, _next) = next_free_packet_id(start, |_| true);
+        assert_eq!(
+            id, start,
+            "when every id is in use the fallback reissues start"
+        );
     }
 }

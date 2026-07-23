@@ -80,7 +80,15 @@ impl AckToken {
     /// Packet Identifier as a new message. So if the acknowledgement is lost and the
     /// broker replays the message on reconnect, your callback will see it again. Reject
     /// must therefore be idempotent, like the rest of deferred delivery.
+    ///
+    /// A non-error `reason` (Reason Code below `0x80`, e.g. `Success`) is normalized to
+    /// [`ReasonCode::UnspecifiedError`], so `reject` can never behave as an [`ack`](Self::ack).
     pub fn reject(mut self, reason: ReasonCode) {
+        let reason = if reason.is_error() {
+            reason
+        } else {
+            ReasonCode::UnspecifiedError
+        };
         self.emit(AckKind::Reject(reason));
     }
 
@@ -354,5 +362,57 @@ impl AckCallbackManager {
             message,
             token,
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AckCallbackManager, AckDispatcher, AckPublishCallback};
+    use crate::packet::publish::PublishPacket;
+    use crate::session::state::{SessionConfig, SessionState};
+    use crate::QoS;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn duplicate_wildcard_subscription_dispatches_to_a_single_callback() {
+        let mgr = AckCallbackManager::new();
+        let hits_first = Arc::new(AtomicU32::new(0));
+        let hits_second = Arc::new(AtomicU32::new(0));
+        let f = Arc::clone(&hits_first);
+        let s = Arc::clone(&hits_second);
+        let cb_first: AckPublishCallback = Arc::new(move |_p, _t| {
+            f.fetch_add(1, Ordering::SeqCst);
+        });
+        let cb_second: AckPublishCallback = Arc::new(move |_p, _t| {
+            s.fetch_add(1, Ordering::SeqCst);
+        });
+        mgr.register("jobs/#", cb_first);
+        mgr.register("jobs/#", cb_second);
+
+        let dispatcher = AckDispatcher::new(Arc::new(tokio::sync::RwLock::new(SessionState::new(
+            "t".to_string(),
+            SessionConfig::default(),
+            true,
+        ))));
+        let callback = mgr
+            .find_one("jobs/build")
+            .expect("a wildcard entry matches jobs/build");
+        let token = dispatcher.token(1, QoS::ExactlyOnce);
+        callback(
+            PublishPacket::new("jobs/build", b"x".to_vec(), QoS::ExactlyOnce),
+            token,
+        );
+
+        assert_eq!(
+            hits_first.load(Ordering::SeqCst) + hits_second.load(Ordering::SeqCst),
+            1,
+            "a matching publish invokes exactly one ack callback, never both"
+        );
+        assert_eq!(
+            hits_second.load(Ordering::SeqCst),
+            0,
+            "the duplicate registration is shadowed and never fires"
+        );
     }
 }

@@ -81,6 +81,57 @@ impl MqttClient {
         }
     }
 
+    /// Re-sends the SUBSCRIBE for every deferred-ack subscription after the broker reports no
+    /// session. `subscribe_with_ack` uses `SubscriptionPersistence::Skip`, so ack subscriptions
+    /// are not in `stored_subscriptions` and the regular restore path never touches them; without
+    /// this, a `session_present = 0` reconnect would leave the client silently unsubscribed from
+    /// its ack topics (the broker discarded the subscription with the session). The ack callback
+    /// is already registered in `AckCallbackManager` and survives the disconnect, so only the
+    /// SUBSCRIBE is resent — the regular `CallbackManager` (a distinct `CallbackId` space) is not
+    /// touched.
+    pub(crate) async fn restore_ack_subscriptions_after_lost_session(&self) {
+        let inner = self.inner.read().await;
+        let subs = inner.stored_ack_subscriptions.lock().clone();
+        drop(inner);
+        if subs.is_empty() {
+            return;
+        }
+        tracing::info!(
+            "Session not resumed, re-subscribing {} deferred-ack subscription(s)",
+            subs.len()
+        );
+        for (topic, options, callback_id) in subs {
+            if let Err(e) = self
+                .resubscribe_ack_internal(&topic, options, callback_id)
+                .await
+            {
+                tracing::warn!("Failed to re-subscribe deferred-ack topic {topic}: {e}");
+            }
+        }
+    }
+
+    async fn resubscribe_ack_internal(
+        &self,
+        topic: &str,
+        options: SubscriptionOptions,
+        callback_id: CallbackId,
+    ) -> Result<()> {
+        let inner = self.inner.read().await;
+        let packet = SubscribePacket {
+            packet_id: inner.packet_id_generator.next(),
+            filters: vec![crate::packet::subscribe::TopicFilter {
+                filter: topic.to_string(),
+                options,
+            }],
+            properties: Properties::new(),
+            protocol_version: inner.options.protocol_version.as_u8(),
+        };
+        inner
+            .subscribe_with_callback_internal(packet, callback_id, SubscriptionPersistence::Skip)
+            .await?;
+        Ok(())
+    }
+
     async fn is_reconnect_stopped(&self) -> bool {
         let inner = self.inner.read().await;
         inner.automatic_reconnect_lifecycle == AutomaticReconnectLifecycle::Stopped

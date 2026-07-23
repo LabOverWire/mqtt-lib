@@ -220,31 +220,41 @@ PUBREC until ack; `Drop` emits a reason-coded PUBREC; config gating) and clippy-
 
 **Remaining follow-ups (edge hardening; none block the core feature):**
 
-1. **Surface `session_present = 0` on reconnect (§3.5).** Deferred ack requires a persistent session
-   (gated at connect). If the broker nonetheless reports no session on a resume, every outstanding
-   token is stale — the message it referred to is gone, and acking it is meaningless. The client must
-   surface this (error/event) and clear the in-memory inbound maps (`SessionState::clear_inbound_state`
-   / the delivered+resolution+pubrec maps), not silently continue. Hook: the connect-result handling in
-   `client/inner.rs` where `session_present` is known, guarded on `options.deferred_ack` and non-empty
-   inbound maps.
+1. **[CLOSED 2026-07-21] Surface `session_present = 0` on reconnect (§3.5).** Done —
+   `on_successful_connect` (`client/inner.rs`) now calls `reset_inbound_state_for_lost_session` when the
+   broker reports no session, clearing all inbound `QoS` 2 dedup state via the new
+   `SessionState::clear_all_inbound_state` (returns whether anything was present) and emitting a `warn!`
+   (deferred ack on) / `debug!` noting outstanding tokens are stale. This runs before the reconnect can
+   deliver anything. The clear is unconditional on `session_present = 0` (it also protects plain `QoS` 2
+   dedup), not gated on `deferred_ack`; only the warning is deferred-ack-specific. Test:
+   `session::state::clear_all_inbound_state_wipes_dedup_and_reports_presence`.
 
-2. **End-to-end reconnect integration test against a live broker.** Exercise the two model regimes
-   from `DeferredAckQoS2Reconnect.tla` in real code: (a) `_transport` — a transport reconnect with the
-   in-memory session retained delivers exactly once and completes the withheld handshake on the new
-   connection; (b) `_crash` — a fresh client on a resumed broker session re-delivers (at-least-once
-   processing, no wedge). Current coverage is unit-level only (`handlers.rs` tests); there is no
-   broker-loop reconnect test for the deferred path.
+2. **[CLOSED 2026-07-21] End-to-end reconnect integration test against a live broker.** Done —
+   `tests/deferred_ack_reconnect.rs` runs three `TestBroker`-backed scenarios: (a) the basic deferred
+   flow (`QoS` 2 delivered once, `ack()` completes the handshake, no duplicate); (b) the `_transport`
+   regime — the same client disconnects with the token withheld and reconnects to the still-running
+   broker (asserts `session_present = true`), and the replayed dup PUBLISH does NOT re-deliver
+   (exactly-once), then `ack()` completes on the new connection; (c) the `session_present = 0`
+   re-subscribe path from follow-up #3 — the broker is stopped and restarted (memory backend, session
+   lost; asserts `session_present = false`) and a subsequent publish is still delivered, proving the ack
+   subscription was re-established. The model's `_crash` regime (a *fresh* client process resuming a
+   retained session) is intentionally not asserted here: a fresh client has no local callbacks until it
+   re-subscribes on startup — the general app-restart re-registration pattern, independent of deferred
+   ack — and the broker resends on CONNACK before that can happen.
 
-3. **Re-subscribe ack subscriptions on a clean reconnect.** `subscribe_with_ack` registers into the
-   in-memory `AckCallbackManager` (which survives disconnect) and sends the SUBSCRIBE with
-   `SubscriptionPersistence::Skip`. This is correct for the required `session_present = true` path (the
-   broker retains the subscription; the ack callback is still registered). On a *clean* reconnect
-   (`session_present = false`) the SUBSCRIBE is not auto-resent for ack subscriptions, unlike regular
-   ones. Once follow-up 1 lands (which treats a clean resume as an error for deferred ack), decide
-   whether clean-reconnect re-subscription is even desirable or whether the surfaced error is the
-   correct terminal behaviour. If desired, route ack subscriptions through a restoration path that
-   targets `AckCallbackManager` rather than `CallbackManager::restore_callback` (whose `CallbackId`
-   space is distinct — do not reuse it, to avoid an id collision).
+3. **[CLOSED 2026-07-21] Re-subscribe ack subscriptions on a clean reconnect.** Resolved on spec
+   grounds, not preference: `session_present = 0` on a Clean Start = 0 connect means the broker holds no
+   session state, and per §4.1 that state includes the subscriptions ([MQTT-3.2.2-2/-3]). The only
+   conformant way to make a subscription active again when the broker has none is to send SUBSCRIBE
+   again — exactly what regular subscriptions already do on `session_present = false`. A terminal error
+   would be strictly worse and inconsistent. Done — `subscribe_with_ack` now records each ack
+   subscription in a new `stored_ack_subscriptions` (topic, options, `CallbackId`), and
+   `on_successful_connect` calls `restore_ack_subscriptions_after_lost_session` on `session_present = 0`,
+   which re-sends the SUBSCRIBE via `resubscribe_ack_internal` **without** touching the regular
+   `CallbackManager` (distinct `CallbackId` space) — the ack callback is already registered in
+   `AckCallbackManager` and survives the disconnect. `unsubscribe` now also unregisters the ack callback
+   and drops the stored ack subscription, closing a pre-existing gap where `unsubscribe` ignored ack
+   subscriptions entirely. Runtime behaviour is verified by the follow-up #2 end-to-end reconnect test.
 
 4. **[CLOSED 2026-07-20] Extend the TLA model to cover packet-id reuse and reject-clears.**
    Done — `DeferredAckQoS2Reconnect.tla` v3 now models reject-clears-state (`[MQTT-4.3.3-9]`), packet-id
@@ -270,27 +280,18 @@ PUBREC until ack; `Drop` emits a reason-coded PUBREC; config gating) and clippy-
    code defect. Regression coverage exists: `deferred_qos2_reused_packet_id_after_completion_is_delivered_again`
    and `deferred_qos2_reused_packet_id_after_reject_is_delivered_again` in `handlers.rs`.
 
-5. **Harden broker `next_packet_id` id-reuse (surfaced by the v3 fidelity quorum).** The live-send
-   allocator `next_packet_id` (`broker/client_handler/lifecycle.rs`) is a bare monotonic `u16` counter
-   with `MAX -> 1` wrap that never consults `outbound_inflight`; only `advance_packet_id_past_inflight`
-   skips in-use ids, and it runs only after a `session_present` reconnect (`publish.rs`), not on the
-   steady-state send path. On a long-lived connection where one id stays stuck awaiting PUBCOMP (slow or
-   dead-but-connected subscriber) while ~65534 other messages complete, the counter wraps back and
-   `outbound_inflight.insert(id, ...)` silently clobbers the stuck entry — losing exactly-once for the
-   stuck message. Flow control (`client_receive_maximum`) caps *concurrent* inflight but does not reset
-   the counter, so this is reachable, if low-probability. The TLA model's `ReArm` assumes reuse only
-   after the id is drained in both directions — a guarantee the code does not enforce here. Fix: have the
-   live send path skip ids currently in `outbound_inflight` (reuse the `advance_packet_id_past_inflight`
-   logic), or reject the send when the window is genuinely exhausted rather than wrapping onto a live id.
+5. **[CLOSED 2026-07-21] Harden broker `next_packet_id` id-reuse (surfaced by the v3 fidelity quorum).**
+   Done — `next_packet_id` (`broker/client_handler/lifecycle.rs`) now delegates to a pure
+   `next_free_packet_id(start, in_use)` helper that advances the `1..=u16::MAX` counter (wrap `MAX -> 1`,
+   never 0) skipping any id present in `outbound_inflight` or `inflight_publishes`, so a `u16` wraparound
+   can no longer reissue and clobber a still-outstanding id. Unit-tested in
+   `broker::client_handler::lifecycle::tests` (sequential alloc, wrap, skip-in-use, no-clobber-on-wraparound).
 
-6. **Clear dedup state in both `handle_pubrel` branches.** `handle_pubrel` calls `clear_inbound_state`
-   only in the `has_pubrec == true` branch; the `else` branch sends PUBCOMP but clears nothing. Against a
-   compliant broker (no PUBREL before a PUBREC) the differing case is unreachable, but a spurious/early
-   PUBREL while the client is `delivered /\ ~has_pubrec` leaves `inbound_delivered` set forever, which
-   later suppresses a reused id (silent loss). Defensive hardening: clear the dedup guard in both branches.
+6. **[CLOSED 2026-07-21] Clear dedup state in both `handle_pubrel` branches.** Done —
+   `handle_pubrel` now clears the inbound dedup state and sends the PUBCOMP unconditionally (the two
+   near-identical branches were merged), so a spurious/early PUBREL cannot leave `inbound_delivered` set.
+   Test: `deferred_qos2_pubrel_clears_dedup_without_pubrec`.
 
-7. **Validate the reason in `AckToken::reject`.** `reject(ReasonCode::Success)` (and any non-error
-   reason) currently takes the ACK path — `is_success` is true, so it sets `has_pubrec` + `Acked` and
-   writes a success PUBREC WITHOUT clearing the dedup guard — contradicting the reject contract
-   (error PUBREC + clear). Normalize a non-error reason to a default error code, or reject the call, so
-   `reject` cannot silently behave as `ack`.
+7. **[CLOSED 2026-07-21] Validate the reason in `AckToken::reject`.** Done — `reject` normalizes any
+   non-error reason (Reason Code below `0x80`, e.g. `Success`) to `ReasonCode::UnspecifiedError` before
+   emitting, so it can never take the ack path. Test: `deferred_qos2_reject_with_success_reason_still_clears_state`.
