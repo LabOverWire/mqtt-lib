@@ -199,4 +199,14 @@ mod tests {
         assert_ne!(id, stuck);
         assert_eq!(id, stuck + 1);
     }
+
+    #[test]
+    fn all_ids_in_use_falls_back_to_reissuing_start() {
+        let start = 42u16;
+        let (id, _next) = next_free_packet_id(start, |_| true);
+        assert_eq!(
+            id, start,
+            "when every id is in use the fallback reissues start"
+        );
+    }
 }
