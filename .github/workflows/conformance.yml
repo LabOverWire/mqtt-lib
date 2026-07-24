@@ -98,6 +98,52 @@ jobs:
           path: conformance-report.json
           if-no-files-found: error
 
+  mosquitto-interop:
+    name: Conformance (Mosquitto interop)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build conformance CLI
+        run: cargo build --profile conformance -p mqtt5-conformance-cli
+
+      - name: Start Mosquitto
+        run: |
+          mkdir -p mosquitto-config
+          printf 'listener 1883 0.0.0.0\nallow_anonymous true\n' > mosquitto-config/mosquitto.conf
+          docker run -d --name mosquitto-interop -p 1883:1883 \
+            -v "$PWD/mosquitto-config:/mosquitto/config" \
+            eclipse-mosquitto:2
+          sleep 3
+
+      - name: Run deferred-ack conformance against Mosquitto
+        run: |
+          ./target/conformance/mqtt5-conformance \
+            --sut crates/mqtt5-conformance/tests/fixtures/mosquitto-2.x.toml \
+            --report conformance-report-mosquitto.json \
+            deferred_qos2
+
+      - name: Mosquitto log
+        if: always()
+        run: docker logs mosquitto-interop || true
+
+      - name: Stop Mosquitto
+        if: always()
+        run: docker rm -f mosquitto-interop || true
+
+      - name: Upload report
+        uses: actions/upload-artifact@v4
+        with:
+          name: conformance-report-mosquitto
+          path: conformance-report-mosquitto.json
+          if-no-files-found: error
+
   fixtures:
     name: Validate fixtures and profiles
     runs-on: ubuntu-latest

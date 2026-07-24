@@ -16,6 +16,7 @@
 //! broader migration pulls the rest of the existing `tests/section*.rs`
 //! files in alongside it.
 
+pub mod deferred_ack;
 pub mod section1_data_repr;
 pub mod section3_connack;
 pub mod section3_connect;
