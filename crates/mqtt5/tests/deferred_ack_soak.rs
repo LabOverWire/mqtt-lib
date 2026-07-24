@@ -82,7 +82,6 @@ async fn deferred_ack_backpressure_soak_holds_bounded_then_drains_without_loss()
         .await
         .unwrap();
 
-    // Burst well beyond the window; every delivered token is held (never acked yet).
     let publisher = MqttClient::new(client_id("soak-pub"));
     publisher.connect(broker.address()).await.unwrap();
     for i in 0..BURST {
@@ -92,13 +91,11 @@ async fn deferred_ack_backpressure_soak_holds_bounded_then_drains_without_loss()
             .unwrap();
     }
 
-    // The window fills to exactly receive_maximum and stops.
     assert!(
         wait_until(|| received.load(Ordering::SeqCst) == u32::from(RECEIVE_MAXIMUM)).await,
         "broker fills the window to receive_maximum held tokens"
     );
 
-    // Sustained hold: it must stay pinned at the window and never grow (bounded memory).
     for _ in 0..12 {
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert_eq!(
@@ -112,8 +109,6 @@ async fn deferred_ack_backpressure_soak_holds_bounded_then_drains_without_loss()
         );
     }
 
-    // Control plane is not blocked while saturated: a fresh client can still connect and subscribe,
-    // and the saturated subscriber stays connected.
     let probe = MqttClient::with_options(deferred_options(&client_id("soak-probe")));
     probe.connect(broker.address()).await.unwrap();
     probe
@@ -125,7 +120,6 @@ async fn deferred_ack_backpressure_soak_holds_bounded_then_drains_without_loss()
         "the saturated subscriber stays connected (reader not blocked)"
     );
 
-    // Drain: keep acking held tokens; each freed slot lets the next message flow, 1-for-1.
     let drainer_received = Arc::clone(&received);
     let drainer_held = Arc::clone(&held);
     let drain = tokio::spawn(async move {
@@ -136,7 +130,6 @@ async fn deferred_ack_backpressure_soak_holds_bounded_then_drains_without_loss()
             }
             tokio::time::sleep(Duration::from_millis(2)).await;
         }
-        // Drain any tokens delivered after the final increment.
         while let Some(token) = drainer_held.lock().unwrap().pop() {
             token.ack();
         }
@@ -148,7 +141,6 @@ async fn deferred_ack_backpressure_soak_holds_bounded_then_drains_without_loss()
     );
     drain.await.unwrap();
 
-    // No duplicate storm after the full drain.
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(
         received.load(Ordering::SeqCst),

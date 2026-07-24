@@ -98,8 +98,6 @@ async fn subscribe_collecting(client: &MqttClient, filter: &str, qos: QoS, rec: 
         .unwrap();
 }
 
-// Q1 (the untested gap): QoS1 deferred ack. Holding the token withholds the PUBACK, which
-// keeps the Receive-Maximum slot full and throttles the broker; acking frees the slot.
 #[tokio::test]
 async fn qos1_deferred_puback_withheld_throttles_then_ack_frees_slot() {
     let broker = TestBroker::start().await;
@@ -132,7 +130,6 @@ async fn qos1_deferred_puback_withheld_throttles_then_ack_frees_slot() {
     subscriber.disconnect().await.ok();
 }
 
-// Q2 + B1/B2: QoS2 deferred PUBREC withheld throttles the window; ack frees it.
 #[tokio::test]
 async fn qos2_deferred_pubrec_withheld_throttles_then_ack_frees_slot() {
     let broker = TestBroker::start().await;
@@ -165,7 +162,6 @@ async fn qos2_deferred_pubrec_withheld_throttles_then_ack_frees_slot() {
     subscriber.disconnect().await.ok();
 }
 
-// Q3: rejecting a QoS2 message is terminal and frees the slot (next message flows).
 #[tokio::test]
 async fn qos2_reject_frees_the_slot() {
     let broker = TestBroker::start().await;
@@ -188,7 +184,6 @@ async fn qos2_reject_frees_the_slot() {
     subscriber.disconnect().await.ok();
 }
 
-// Q5 + obligation 7: dropping an armed token auto-acks, freeing the slot (no wedge).
 #[tokio::test]
 async fn qos2_dropped_token_auto_acks_and_frees_the_slot() {
     let broker = TestBroker::start().await;
@@ -211,8 +206,6 @@ async fn qos2_dropped_token_auto_acks_and_frees_the_slot() {
     subscriber.disconnect().await.ok();
 }
 
-// R1 (obligation 4): with the window saturated by held tokens, the reader is not blocked —
-// the control plane still services a fresh SUBSCRIBE and the connection stays alive.
 #[tokio::test]
 async fn saturated_window_does_not_block_the_control_plane() {
     let broker = TestBroker::start().await;
@@ -230,6 +223,19 @@ async fn saturated_window_does_not_block_the_control_plane() {
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert_eq!(rec.received(), 2, "no further delivery while saturated");
 
+    let own_subscribe = tokio::time::timeout(
+        Duration::from_secs(5),
+        subscriber.subscribe_with_ack("control-probe/#", subscribe(QoS::AtLeastOnce), |_p, _t| {}),
+    )
+    .await;
+    assert!(
+        own_subscribe.is_ok(),
+        "the saturated subscriber's own SUBSCRIBE must complete (its reader is not blocked)"
+    );
+    own_subscribe
+        .unwrap()
+        .expect("the saturated subscriber's own SUBSCRIBE succeeds while its window is full");
+
     let ping = MqttClient::with_options(deferred_options(&client_id("r1-probe"), 2));
     ping.connect(broker.address()).await.unwrap();
     ping.subscribe_with_ack("other/#", subscribe(QoS::AtLeastOnce), |_p, _t| {})
@@ -244,8 +250,6 @@ async fn saturated_window_does_not_block_the_control_plane() {
     subscriber.disconnect().await.ok();
 }
 
-// RC2 (_crash regime): a fresh client process resumes the session on a still-running broker;
-// the unacked QoS2 message is re-delivered (at-least-once processing) with no wedge.
 #[tokio::test]
 async fn crash_regime_fresh_client_resumes_and_redelivers() {
     let broker = TestBroker::start().await;
@@ -262,13 +266,11 @@ async fn crash_regime_fresh_client_resumes_and_redelivers() {
         "the first client receives the message"
     );
 
-    // Simulate a crash: drop the client without acking and without a graceful DISCONNECT.
     drop(rec1);
     drop(first);
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    // A fresh client with the same id resumes the persistent session.
-    let second = MqttClient::with_options(deferred_options(&id, 8));
+    let second = MqttClient::new(&id);
     let result = second
         .connect_with_options(broker.address(), deferred_options(&id, 8))
         .await
@@ -313,7 +315,6 @@ async fn connect_tls(
         .expect("tls connect")
 }
 
-// TLS smoke: the deferred QoS2 path (deliver, backpressure, ack) works under encryption.
 #[tokio::test]
 async fn tls_deferred_qos2_delivers_backpressures_and_acks() {
     let broker = TestBroker::start_with_tls().await;
@@ -355,7 +356,6 @@ async fn tls_deferred_qos2_delivers_backpressures_and_acks() {
     subscriber.disconnect().await.ok();
 }
 
-// WebSocket smoke: the deferred QoS2 path works over the WebSocket framing layer.
 #[cfg(feature = "transport-websocket")]
 #[tokio::test]
 async fn websocket_deferred_qos2_delivers_backpressures_and_acks() {

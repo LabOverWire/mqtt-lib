@@ -77,7 +77,6 @@ async fn deferred_qos2_slot_held_until_pubcomp(sut: SutHandle) {
         "[MQTT-4.9.0-2] the second message must be withheld while the PUBREC is deferred (quota=1)"
     );
 
-    // Complete the deferred handshake; the slot frees only at PUBCOMP.
     sub.send_raw(&RawPacketBuilder::pubrec(first_pid))
         .await
         .unwrap();
@@ -141,7 +140,6 @@ async fn deferred_qos2_zero_quota_still_serves_control_plane(sut: SutHandle) {
         .await
         .expect("broker delivers the first QoS 2 PUBLISH");
     assert_eq!(qos, 2, "delivered message must be QoS 2");
-    // Deliberately do NOT send PUBREC — the quota stays at zero.
 
     sub.send_raw(&RawPacketBuilder::pingreq()).await.unwrap();
     assert!(
