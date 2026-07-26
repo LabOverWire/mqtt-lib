@@ -131,6 +131,8 @@ mqttv5 broker generate-config [--output FILE] [--format json|toml]
 | `--response-information <STR>` | Response information sent to clients that request it | None |
 | `--no-retain` | Disable retained messages | `false` |
 | `--no-wildcards` | Disable wildcard subscriptions | `false` |
+| `--no-sys-topics` | Disable `$SYS` topic publishing (broker statistics) | `false` |
+| `--sys-interval <DUR>` | `$SYS` topic publish interval (e.g., `10`, `10s`, `1m`) | `10` |
 | `--non-interactive` | Skip interactive prompts | `false` |
 
 ##### Broker JWT Auth Flags
@@ -256,6 +258,16 @@ mqttv5 broker \
   --quic-host 0.0.0.0:14567 \
   --tls-cert server.pem \
   --tls-key server-key.pem
+```
+
+Broker with adjusted `$SYS` statistics publishing:
+
+```bash
+# Publish $SYS topics every 30 seconds instead of the default 10
+mqttv5 broker --allow-anonymous --sys-interval 30s
+
+# Disable $SYS statistics entirely
+mqttv5 broker --allow-anonymous --no-sys-topics
 ```
 
 Broker with OpenTelemetry tracing:
@@ -556,6 +568,7 @@ Subscribe to one or more MQTT topics and print received messages. The subscriber
 | `--port, -p <PORT>` | Broker port | `1883` |
 | `--qos, -q <0\|1\|2>` | Subscription QoS level | `0` |
 | `--verbose, -v` | Include topic names in output | `false` |
+| `--show-properties, -s` | Print MQTT v5 message properties (QoS, retain, expiry, content type, response topic, user properties, subscription IDs) | `false` |
 | `--count, -n <N>` | Exit after receiving N messages | `0` (infinite) |
 | `--no-local` | Don't receive own published messages | `false` |
 | `--retain-handling <0\|1\|2>` | Retain handling: 0=send, 1=send if new, 2=don't send | `0` |
@@ -611,12 +624,6 @@ Basic subscribe:
 mqttv5 sub -t test/topic
 ```
 
-Multiple topics:
-
-```bash
-mqttv5 sub -t sensors/# -t status/#
-```
-
 Subscribe with QoS 1:
 
 ```bash
@@ -627,6 +634,12 @@ Verbose output:
 
 ```bash
 mqttv5 sub -t test/# -v
+```
+
+Show MQTT v5 message properties:
+
+```bash
+mqttv5 sub -t test/# --show-properties
 ```
 
 No-local subscription:

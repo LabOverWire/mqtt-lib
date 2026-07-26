@@ -267,3 +267,90 @@ async fn test_cli_flag_formats() {
 
     println!("✅ CLI ergonomics verified - all flag formats work");
 }
+
+/// Test `sub --show-properties` renders MQTT v5 message properties
+#[tokio::test]
+async fn test_cli_sub_show_properties() {
+    let broker = TestBroker::start().await;
+    let broker_url = broker.address();
+
+    let sub_handle = run_cli_sub_async(
+        broker_url,
+        "test/props",
+        1,
+        &["--show-properties", "--qos", "1"],
+    );
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let pub_result = run_cli_command(&[
+        "pub",
+        "--url",
+        broker_url,
+        "--topic",
+        "test/props",
+        "--message",
+        "payload-body",
+        "--qos",
+        "1",
+        "--message-expiry-interval",
+        "3600",
+        "--response-topic",
+        "reply/here",
+        "--non-interactive",
+    ])
+    .await;
+    assert!(pub_result.success, "Publish with properties should succeed");
+
+    let sub_result = tokio::time::timeout(Duration::from_secs(3), sub_handle)
+        .await
+        .expect("Timeout")
+        .expect("Subscribe failed");
+
+    assert!(
+        sub_result.stdout_contains("qos: 1"),
+        "Should show QoS. Stdout: {}",
+        sub_result.stdout
+    );
+    assert!(
+        sub_result.stdout_contains("message-expiry-interval: 3600"),
+        "Should show message expiry. Stdout: {}",
+        sub_result.stdout
+    );
+    assert!(
+        sub_result.stdout_contains("response-topic: reply/here"),
+        "Should show response topic. Stdout: {}",
+        sub_result.stdout
+    );
+    assert!(
+        sub_result.stdout_contains("payload: payload-body"),
+        "Should show payload. Stdout: {}",
+        sub_result.stdout
+    );
+
+    println!("✅ CLI sub --show-properties verified");
+}
+
+/// Test broker $SYS control flags are exposed on the command line
+#[tokio::test]
+async fn test_cli_broker_sys_flags() {
+    let help_result = run_cli_command(&["broker", "--help"]).await;
+    assert!(help_result.success, "Broker help should succeed");
+    assert!(
+        help_result.stdout_contains("--no-sys-topics"),
+        "Should expose --no-sys-topics"
+    );
+    assert!(
+        help_result.stdout_contains("--sys-interval"),
+        "Should expose --sys-interval"
+    );
+
+    let sub_help = run_cli_command(&["sub", "--help"]).await;
+    assert!(sub_help.success, "Sub help should succeed");
+    assert!(
+        sub_help.stdout_contains("--show-properties"),
+        "Should expose --show-properties"
+    );
+
+    println!("✅ CLI broker $SYS and sub property flags verified");
+}
