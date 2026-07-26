@@ -64,6 +64,10 @@ pub struct SubCommand {
     #[arg(long, short)]
     pub verbose: bool,
 
+    /// Print message properties (`QoS`, retain, expiry, content type, response topic, user properties, subscription IDs)
+    #[arg(long = "show-properties", short = 's', env = "MQTT5_SHOW_PROPERTIES")]
+    pub show_properties: bool,
+
     /// Skip prompts and use defaults/fail if required args missing
     #[arg(long, env = "MQTT5_NON_INTERACTIVE")]
     pub non_interactive: bool,
@@ -432,6 +436,49 @@ fn configure_codec(options: &mut ConnectOptions, cmd: &SubCommand) -> Result<()>
     Ok(())
 }
 
+fn print_message(message: &mqtt5::Message, verbose: bool, show_properties: bool) {
+    let payload = String::from_utf8_lossy(&message.payload);
+
+    if !show_properties {
+        if verbose {
+            println!("{}: {payload}", message.topic);
+        } else {
+            println!("{payload}");
+        }
+        return;
+    }
+
+    let props = &message.properties;
+    println!("topic: {}", message.topic);
+    println!("  qos: {}", message.qos as u8);
+    println!("  retain: {}", message.retain);
+    if let Some(format) = props.payload_format_indicator {
+        println!(
+            "  payload-format: {}",
+            if format { "utf-8" } else { "bytes" }
+        );
+    }
+    if let Some(expiry) = props.message_expiry_interval {
+        println!("  message-expiry-interval: {expiry}");
+    }
+    if let Some(ref content_type) = props.content_type {
+        println!("  content-type: {content_type}");
+    }
+    if let Some(ref response_topic) = props.response_topic {
+        println!("  response-topic: {response_topic}");
+    }
+    if let Some(ref correlation_data) = props.correlation_data {
+        println!("  correlation-data: {}", hex::encode(correlation_data));
+    }
+    for id in &props.subscription_identifiers {
+        println!("  subscription-identifier: {id}");
+    }
+    for (key, value) in &props.user_properties {
+        println!("  user-property: {key}={value}");
+    }
+    println!("  payload: {payload}");
+}
+
 async fn subscribe_and_print(
     client: &MqttClient,
     topic: &str,
@@ -440,6 +487,7 @@ async fn subscribe_and_print(
 ) -> Result<Arc<Notify>> {
     let target_count = cmd.count;
     let verbose = cmd.verbose;
+    let show_properties = cmd.show_properties;
 
     info!("Subscribing to '{}' (QoS {})...", topic, qos as u8);
 
@@ -467,15 +515,7 @@ async fn subscribe_and_print(
         .subscribe_with_options(topic, subscribe_options.clone(), move |message| {
             let count = message_count_clone.fetch_add(1, Ordering::Relaxed) + 1;
 
-            if verbose {
-                println!(
-                    "{}: {}",
-                    message.topic,
-                    String::from_utf8_lossy(&message.payload)
-                );
-            } else {
-                println!("{}", String::from_utf8_lossy(&message.payload));
-            }
+            print_message(&message, verbose, show_properties);
 
             if target_count > 0 && count >= target_count {
                 println!("✓ Received {target_count} messages, exiting");

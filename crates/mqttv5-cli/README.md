@@ -45,6 +45,9 @@ mqttv5 sub --topic "sensors/+"
 # Verbose mode shows topic names
 mqttv5 sub -t "sensors/#" --verbose
 
+# Show MQTT v5 message properties (QoS, expiry, content type, user properties, ...)
+mqttv5 sub -t "sensors/#" --show-properties
+
 # Subscribe for specific message count
 mqttv5 sub -t "test/topic" --count 5
 
@@ -93,6 +96,10 @@ mqttv5 broker --auth-password-file passwd.txt --acl-file acl.txt
 
 # In-memory storage (no persistence)
 mqttv5 broker --allow-anonymous --storage-backend memory
+
+# Adjust $SYS statistics publishing (default: enabled, every 10s)
+mqttv5 broker --allow-anonymous --sys-interval 30s
+mqttv5 broker --allow-anonymous --no-sys-topics
 ```
 
 ### Managing Passwords

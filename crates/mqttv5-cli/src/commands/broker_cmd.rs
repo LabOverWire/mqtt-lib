@@ -231,6 +231,14 @@ pub struct RunArgs {
     #[arg(long, env = "MQTT5_NO_WILDCARDS")]
     pub no_wildcards: bool,
 
+    /// Disable $SYS topic publishing (broker statistics)
+    #[arg(long, env = "MQTT5_NO_SYS_TOPICS")]
+    pub no_sys_topics: bool,
+
+    /// $SYS topic publish interval (e.g., 10, 10s, 1m)
+    #[arg(long, default_value = "10", value_parser = parse_duration_secs, env = "MQTT5_SYS_INTERVAL")]
+    pub sys_interval: u64,
+
     /// Skip prompts and use defaults
     #[arg(long, env = "MQTT5_NON_INTERACTIVE")]
     pub non_interactive: bool,
@@ -1030,6 +1038,8 @@ async fn create_interactive_config(cmd: &mut RunArgs) -> Result<BrokerConfig> {
     config.maximum_qos = cmd.max_qos;
     config.retain_available = !cmd.no_retain;
     config.wildcard_subscription_available = !cmd.no_wildcards;
+    config.sys_topics_enabled = !cmd.no_sys_topics;
+    config.sys_topics_interval = std::time::Duration::from_secs(cmd.sys_interval);
 
     if let Some(keep_alive) = cmd.keep_alive {
         config.server_keep_alive = Some(std::time::Duration::from_secs(keep_alive));
