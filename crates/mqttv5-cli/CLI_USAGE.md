@@ -660,7 +660,7 @@ mqttv5 sub -t sensors/# \
 Subscribe over QUIC with per-subscription streams:
 
 ```bash
-mqttv5 sub -t sensors/# -t commands/# \
+mqttv5 sub -t sensors/# \
   --url quic://broker.example.com:14567 \
   --ca-cert ca.pem \
   --quic-stream-strategy per-subscription \

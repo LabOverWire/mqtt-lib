@@ -436,15 +436,6 @@ fn configure_codec(options: &mut ConnectOptions, cmd: &SubCommand) -> Result<()>
     Ok(())
 }
 
-fn hex_encode(data: &[u8]) -> String {
-    use std::fmt::Write;
-    data.iter()
-        .fold(String::with_capacity(data.len() * 2), |mut acc, byte| {
-            let _ = write!(acc, "{byte:02x}");
-            acc
-        })
-}
-
 fn print_message(message: &mqtt5::Message, verbose: bool, show_properties: bool) {
     let payload = String::from_utf8_lossy(&message.payload);
 
@@ -477,7 +468,7 @@ fn print_message(message: &mqtt5::Message, verbose: bool, show_properties: bool)
         println!("  response-topic: {response_topic}");
     }
     if let Some(ref correlation_data) = props.correlation_data {
-        println!("  correlation-data: {}", hex_encode(correlation_data));
+        println!("  correlation-data: {}", hex::encode(correlation_data));
     }
     for id in &props.subscription_identifiers {
         println!("  subscription-identifier: {id}");
