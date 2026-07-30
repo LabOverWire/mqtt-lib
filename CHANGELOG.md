@@ -12,6 +12,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`mqttv5 sub --show-properties` (`-s`)** prints the MQTT v5 properties of each received message alongside its payload, not just the payload. When set, the subscriber renders the delivered `QoS`, the retain flag, and every present property — payload format indicator, message expiry interval, content type, response topic, correlation data (hex), subscription identifiers, and user properties — one per line, followed by the payload. Without the flag the output is unchanged (payload only, or `topic: payload` under `--verbose`).
 - **`mqttv5 broker --no-sys-topics` and `--sys-interval <DUR>`** expose the broker's `$SYS` statistics publishing on the command line. `--no-sys-topics` disables `$SYS` publishing (enabled by default); `--sys-interval` sets the publish interval and accepts a bare number of seconds or a duration such as `10s` or `1m` (default `10`). Both map to the existing `BrokerConfig` fields, so an interval of zero while `$SYS` is enabled is still rejected at config validation. Addresses issue #115.
 
+## [mqtt5 0.38.1] - 2026-07-29
+
+### Fixed
+
+- **`ConnectOptions::validate_deferred_ack` now rejects deferred acknowledgement on an MQTT v3.1.1 connection.** Deferred ack depends on two preconditions — a non-zero Session Expiry Interval and a non-zero Receive Maximum — that are carried by CONNECT properties which exist only in MQTT 5.0. On a v3.1.1 connection those properties never reach the wire, so validation passed while the Receive Maximum window stayed unbounded and the broker had no knowledge of the client's intent; a rejected or dropped token then also emitted a v5-shaped PUBACK/PUBREC, malformed on v3.1.1 whose acknowledgements carry no reason code or properties. `validate_deferred_ack` now fails fast with a `Configuration` error when `deferred_ack` is set on any protocol version other than v5, before the session checks. Reported in issue #121.
+
 ## [mqtt5 0.38.0] - 2026-07-20
 
 ### Added

@@ -50,12 +50,25 @@ impl ConnectOptions {
     /// tokens are bounded. On a clean session an unacked message is lost; with an
     /// unbounded receive maximum held tokens grow memory without limit.
     ///
+    /// Both preconditions are carried by CONNECT properties that exist only in
+    /// MQTT 5.0, so the whole mechanism is v5-only: on v3.1.1 the session expiry
+    /// and receive maximum never reach the wire, leaving the window unbounded
+    /// and the broker unaware of the client's intent.
+    ///
     /// # Errors
-    /// Returns `Configuration` when `deferred_ack` is set together with `clean_start`,
-    /// a zero or absent session expiry, or a zero or absent receive maximum.
+    /// Returns `Configuration` when `deferred_ack` is set together with
+    /// `ProtocolVersion::V311`, `clean_start`, a zero or absent session expiry,
+    /// or a zero or absent receive maximum.
     pub fn validate_deferred_ack(&self) -> Result<()> {
         if !self.deferred_ack {
             return Ok(());
+        }
+        if self.protocol_options.protocol_version != ProtocolVersion::V5 {
+            return Err(MqttError::Configuration(
+                "deferred_ack requires MQTT 5.0: its session expiry and receive maximum \
+                 preconditions cannot be signalled on v3.1.1"
+                    .to_string(),
+            ));
         }
         if self.protocol_options.clean_start {
             return Err(MqttError::Configuration(
@@ -278,6 +291,23 @@ mod tests {
             .with_receive_maximum(16)
             .with_deferred_ack(true);
         assert!(no_expiry.validate_deferred_ack().is_err());
+    }
+
+    #[test]
+    fn deferred_ack_validation_rejects_v311() {
+        let options = ConnectOptions::new("c")
+            .with_clean_start(false)
+            .with_session_expiry_interval(3600)
+            .with_receive_maximum(16)
+            .with_protocol_version(ProtocolVersion::V311)
+            .with_deferred_ack(true);
+        assert!(options.validate_deferred_ack().is_err());
+    }
+
+    #[test]
+    fn deferred_ack_off_is_accepted_on_v311() {
+        let options = ConnectOptions::new("c").with_protocol_version(ProtocolVersion::V311);
+        assert!(options.validate_deferred_ack().is_ok());
     }
 
     #[test]
