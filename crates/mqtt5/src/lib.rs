@@ -185,11 +185,13 @@
 //! messages fill the window. `token.reject(reason)` sends an error acknowledgement, and dropping
 //! the token auto-acknowledges with a reason code so a forgotten token cannot wedge the flow.
 //!
-//! The feature is opt-in through [`ConnectOptions::with_deferred_ack`] and requires a persistent
-//! session (clean start off, a non-zero session expiry, a non-zero Receive Maximum), because its
-//! guarantees depend on the session surviving a reconnect. On such a session an acknowledged
-//! message is processed exactly once; a rejected message is at-least-once (per `[MQTT-4.3.3-9]`),
-//! so delivery and reject callbacks must be idempotent. See `examples/deferred_ack.rs`.
+//! The feature is MQTT 5.0 only — its session expiry and Receive Maximum preconditions cannot be
+//! signalled on v3.1.1 — and is opt-in through [`ConnectOptions::with_deferred_ack`], requiring a
+//! persistent session (clean start off, a non-zero session expiry, a non-zero Receive Maximum),
+//! because its guarantees depend on the session surviving a reconnect. On such a session an
+//! acknowledged message is processed exactly once; a rejected message is at-least-once (per
+//! `[MQTT-4.3.3-9]`), so delivery and reject callbacks must be idempotent. See
+//! `examples/deferred_ack.rs`.
 //!
 //! ```rust,no_run
 //! use mqtt5::{ConnectOptions, MqttClient, QoS, SubscribeOptions};
