@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [mqtt5 0.38.3] - 2026-08-04
+
+### Fixed
+
+- **The broker now sets `TCP_NODELAY` on every accepted TCP connection.** None of the broker's accept paths — plain TCP, TLS, WebSocket, WebSocket over TLS, and cluster — disabled Nagle's algorithm on the socket returned by `accept()`, so broker-to-subscriber delivery ran with Nagle enabled while the client side already set the option. Interacting with the peer's delayed-ACK timer, this added roughly 5 ms to median delivery latency and pinned the tail at the Linux 40 ms delayed-ACK boundary; QUIC was unaffected because it does not run over TCP. MQTT delivery is a stream of small, latency-sensitive writes, which is exactly the case Nagle harms, so the broker now disables it on each accepted socket before wrapping it in a transport. Reported in issue #128.
+
 ## [mqtt5 0.38.2] - 2026-08-04
 
 ### Fixed
