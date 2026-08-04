@@ -10,11 +10,11 @@ use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
-/// `[MQTT-3.4.0-1]` `[MQTT-3.4.2-1]` Server MUST send PUBACK in response to
+/// `[MQTT-4.3.2-4]` `[MQTT-3.4.2-1]` Server MUST send PUBACK in response to
 /// a `QoS` 1 PUBLISH, containing the matching Packet Identifier and a valid
 /// reason code.
 #[conformance_test(
-    ids = ["MQTT-3.4.0-1", "MQTT-3.4.2-1"],
+    ids = ["MQTT-4.3.2-4", "MQTT-3.4.2-1"],
     requires = ["transport.tcp", "max_qos>=1"],
 )]
 async fn puback_correct_packet_id_and_reason(sut: SutHandle) {
@@ -48,9 +48,9 @@ async fn puback_correct_packet_id_and_reason(sut: SutHandle) {
     );
 }
 
-/// `[MQTT-3.4.0-1]` `QoS` 1 PUBLISH results in message delivery to subscriber.
+/// `[MQTT-4.3.2-4]` `QoS` 1 PUBLISH results in message delivery to subscriber.
 #[conformance_test(
-    ids = ["MQTT-3.4.0-1"],
+    ids = ["MQTT-4.3.2-4"],
     requires = ["transport.tcp", "max_qos>=1"],
 )]
 async fn puback_message_delivered_on_qos1(sut: SutHandle) {
@@ -83,11 +83,11 @@ async fn puback_message_delivered_on_qos1(sut: SutHandle) {
     assert_eq!(msg.payload, b"qos1-payload");
 }
 
-/// `[MQTT-3.5.0-1]` `[MQTT-3.5.2-1]` Server MUST send PUBREC in response to
+/// `[MQTT-4.3.3-8]` `[MQTT-3.5.2-1]` Server MUST send PUBREC in response to
 /// a `QoS` 2 PUBLISH, containing the matching Packet Identifier and a valid
 /// reason code.
 #[conformance_test(
-    ids = ["MQTT-3.5.0-1", "MQTT-3.5.2-1"],
+    ids = ["MQTT-4.3.3-8", "MQTT-3.5.2-1"],
     requires = ["transport.tcp", "max_qos>=2"],
 )]
 async fn pubrec_correct_packet_id_and_reason(sut: SutHandle) {
@@ -118,54 +118,6 @@ async fn pubrec_correct_packet_id_and_reason(sut: SutHandle) {
     assert!(
         reason == 0x00 || reason == 0x10,
         "PUBREC reason code must be Success (0x00) or NoMatchingSubscribers (0x10), got {reason:#04x}"
-    );
-}
-
-/// `[MQTT-3.7.4-1]` `QoS` 2 message MUST NOT be delivered to subscribers
-/// until PUBREL is received.
-#[conformance_test(
-    ids = ["MQTT-3.7.4-1"],
-    requires = ["transport.tcp", "max_qos>=2"],
-)]
-async fn pubrec_no_delivery_before_pubrel(sut: SutHandle) {
-    let subscriber = TestClient::connect_with_prefix(&sut, "pubrec-nosub")
-        .await
-        .unwrap();
-    let subscription = subscriber
-        .subscribe(
-            "test/nodelay",
-            SubscribeOptions {
-                qos: QoS::ExactlyOnce,
-                ..SubscribeOptions::default()
-            },
-        )
-        .await
-        .unwrap();
-
-    let mut raw = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
-        .await
-        .unwrap();
-    let client_id = unique_client_id("pubrec-raw");
-    raw.connect_and_establish(&client_id, TIMEOUT).await;
-
-    raw.send_raw(&RawPacketBuilder::publish_qos2(
-        "test/nodelay",
-        b"held-back",
-        1,
-    ))
-    .await
-    .unwrap();
-
-    let _ = raw
-        .expect_pubrec(TIMEOUT)
-        .await
-        .expect("expected PUBREC from broker");
-
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    assert_eq!(
-        subscription.count(),
-        0,
-        "message must NOT be delivered before PUBREL"
     );
 }
 
@@ -229,11 +181,11 @@ async fn pubrel_unknown_packet_id(sut: SutHandle) {
     );
 }
 
-/// `[MQTT-3.6.4-1]` `[MQTT-3.7.2-1]` Full inbound `QoS` 2 flow: PUBLISH →
+/// `[MQTT-4.3.3-11]` `[MQTT-3.7.2-1]` Full inbound `QoS` 2 flow: PUBLISH →
 /// PUBREC → PUBREL → PUBCOMP. Verifies PUBCOMP has matching packet ID and
 /// reason=Success.
 #[conformance_test(
-    ids = ["MQTT-3.6.4-1", "MQTT-3.7.2-1"],
+    ids = ["MQTT-4.3.3-11", "MQTT-3.7.2-1"],
     requires = ["transport.tcp", "max_qos>=2"],
 )]
 async fn pubcomp_correct_packet_id_and_reason(sut: SutHandle) {
@@ -271,10 +223,10 @@ async fn pubcomp_correct_packet_id_and_reason(sut: SutHandle) {
     assert_eq!(reason, 0x00, "PUBCOMP reason code should be Success (0x00)");
 }
 
-/// `[MQTT-3.7.4-1]` Full `QoS` 2 exchange delivers the message to a
+/// `[MQTT-4.3.3-8]` Full `QoS` 2 exchange delivers the message to a
 /// subscriber.
 #[conformance_test(
-    ids = ["MQTT-3.7.4-1"],
+    ids = ["MQTT-4.3.3-8"],
     requires = ["transport.tcp", "max_qos>=2"],
 )]
 async fn pubcomp_message_delivered_after_exchange(sut: SutHandle) {

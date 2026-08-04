@@ -1,0 +1,43 @@
+Registered tests whose #[conformance_test(ids = ...)] is not cited back by the statement's
+test_names in conformance.toml. Pre-existing drift between the code and the manifest.
+tests/manifest_load.rs fails on any pair not listed here, and on any listed pair that has
+been reconciled - so this file can only shrink.
+
+connect_clean_start_false_session_present_one MQTT-3.1.4-4
+connect_clean_start_session_present_zero MQTT-3.1.4-3
+connect_duplicate_property_rejected MQTT-3.1.4-2
+connect_success_connack MQTT-3.1.4-6
+connect_will_not_published_on_normal_disconnect MQTT-3.1.4-5
+connect_will_published_on_abnormal_disconnect MQTT-3.1.4-5
+connect_will_qos_3_is_malformed MQTT-3.1.2-9
+deferred_qos2_slot_held_until_pubcomp MQTT-4.9.0-1
+deferred_qos2_slot_held_until_pubcomp MQTT-4.9.0-2
+deferred_qos2_zero_quota_still_serves_control_plane MQTT-4.9.0-3
+disconnect_with_will_message_publishes_will MQTT-3.1.4-5
+dollar_topics_matched_by_explicit_prefix MQTT-4.7.2-1
+error_pubrec_from_subscriber_terminates_qos2_no_pubrel MQTT-4.3.3-4
+multi_level_wildcard_matches_all_descendants MQTT-4.7.1-1
+overlapping_subs_no_local_prevents_echo MQTT-3.8.3-3
+pubcomp_message_delivered_after_exchange MQTT-4.3.3-8
+retained_message_carries_subscription_identifier MQTT-3.3.4-3
+retained_message_delivered_at_minimum_qos MQTT-3.8.4-8
+server_disconnect_on_protocol_error MQTT-4.13.2-1
+server_disconnect_uses_valid_reason_code MQTT-3.14.2-1
+shared_sub_mixed_with_regular MQTT-4.8.2-4
+shared_sub_multiple_groups_independent MQTT-4.8.2-4
+shared_sub_no_retained_on_subscribe MQTT-4.8.2-5
+shared_sub_round_robin_delivery MQTT-4.8.2-4
+shared_sub_unsubscribe_stops_delivery MQTT-4.8.2-4
+single_level_wildcard_matches_one_level MQTT-4.7.1-2
+suback_packet_id_matches MQTT-3.9.2-1
+subscribe_replaces_existing MQTT-3.8.4-3
+tcp_drop_publishes_will MQTT-3.1.4-5
+topic_alias_cleared_on_reconnect MQTT-3.3.2-11
+topic_alias_not_shared_across_connections MQTT-3.3.2-11
+topic_alias_stripped_before_delivery MQTT-3.3.2-8
+unsuback_no_subscription_existed MQTT-3.11.3-2
+unsuback_success_for_existing MQTT-3.11.3-2
+unsubscribe_idempotent MQTT-3.11.3-2
+unsubscribe_partial_multi MQTT-3.11.3-2
+valid_wildcard_filters_accepted MQTT-4.7.1-1
+valid_wildcard_filters_accepted MQTT-4.7.1-2

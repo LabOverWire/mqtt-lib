@@ -12,6 +12,60 @@ use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
+/// `[MQTT-3.1.4-3]` If the `ClientID` represents a Client already connected to
+/// the Server, the Server sends a DISCONNECT packet to the existing Client
+/// with Reason Code of 0x8E (Session taken over) and MUST close the Network
+/// Connection of the existing Client.
+#[conformance_test(
+    ids = ["MQTT-3.1.4-3"],
+    requires = ["transport.tcp"],
+)]
+async fn session_takeover_disconnects_existing_client(sut: SutHandle) {
+    let client_id = unique_client_id("takeover");
+
+    let mut existing = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
+        .await
+        .unwrap();
+    existing
+        .send_raw(&RawPacketBuilder::valid_connect(&client_id))
+        .await
+        .unwrap();
+    let (_, reason) = existing
+        .expect_connack(TIMEOUT)
+        .await
+        .expect("[MQTT-3.1.4-3] first connection must be accepted");
+    assert_eq!(reason, 0x00, "[MQTT-3.1.4-3] first CONNECT must succeed");
+
+    let mut taking_over = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
+        .await
+        .unwrap();
+    taking_over
+        .send_raw(&RawPacketBuilder::valid_connect(&client_id))
+        .await
+        .unwrap();
+    let (_, reason) = taking_over
+        .expect_connack(TIMEOUT)
+        .await
+        .expect("[MQTT-3.1.4-3] second connection with the same ClientID must be accepted");
+    assert_eq!(
+        reason, 0x00,
+        "[MQTT-3.1.4-3] taking-over CONNECT must succeed"
+    );
+
+    if let Some(reason) = existing.expect_disconnect_packet(TIMEOUT).await {
+        assert_eq!(
+            reason, 0x8E,
+            "[MQTT-3.1.4-3] a DISCONNECT sent to the superseded client must carry 0x8E (Session taken over)"
+        );
+    }
+
+    assert!(
+        existing.read_packet_bytes(TIMEOUT).await.is_none(),
+        "[MQTT-3.1.4-3] Server must close the Network Connection of the client whose session was taken over; \
+         it is still open and readable"
+    );
+}
+
 /// `[MQTT-3.1.0-1]` After a Network Connection is established by a Client to
 /// a Server, the first packet sent from the Client to the Server MUST be a
 /// CONNECT packet.
@@ -99,20 +153,21 @@ async fn connect_unsupported_protocol_version(sut: SutHandle) {
         .await
         .unwrap();
 
-    let response = raw.read_packet_bytes(Duration::from_secs(2)).await;
+    if let Some(data) = raw.read_packet_bytes(Duration::from_secs(2)).await {
+        assert_eq!(
+            data[0], 0x20,
+            "[MQTT-3.1.2-2] the only packet permitted before closing is a CONNACK"
+        );
+        let reason_idx = find_connack_reason_code_index(&data);
+        assert_eq!(
+            data[reason_idx], 0x84,
+            "[MQTT-3.1.2-2] a CONNACK sent here must carry Reason Code 0x84 (Unsupported Protocol Version)"
+        );
+    }
+
     assert!(
-        response.is_some(),
-        "[MQTT-3.1.2-2] Server should send CONNACK before closing"
-    );
-    let data = response.unwrap();
-    assert_eq!(
-        data[0], 0x20,
-        "[MQTT-3.1.2-2] Response must be CONNACK packet"
-    );
-    let reason_idx = find_connack_reason_code_index(&data);
-    assert_eq!(
-        data[reason_idx], 0x84,
-        "[MQTT-3.1.2-2] Reason code must be 0x84 (Unsupported Protocol Version)"
+        raw.expect_disconnect(TIMEOUT).await,
+        "[MQTT-3.1.2-2] Server MUST close the Network Connection; sending the CONNACK first is only a MAY"
     );
 }
 

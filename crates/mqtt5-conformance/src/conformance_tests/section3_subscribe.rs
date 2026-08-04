@@ -142,10 +142,10 @@ async fn suback_reason_codes_per_filter(sut: SutHandle) {
     );
 }
 
-/// `[MQTT-3.9.3-3]` SUBACK grants the exact `QoS` requested on a default
+/// `[MQTT-3.8.4-7]` SUBACK grants the exact `QoS` requested on a default
 /// broker (max `QoS` 2).
 #[conformance_test(
-    ids = ["MQTT-3.9.3-3"],
+    ids = ["MQTT-3.8.4-7"],
     requires = ["transport.tcp", "max_qos>=2"],
 )]
 async fn suback_grants_requested_qos(sut: SutHandle) {

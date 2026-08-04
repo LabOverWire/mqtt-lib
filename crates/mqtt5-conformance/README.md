@@ -4,8 +4,15 @@ Vendor-neutral MQTT v5.0 conformance test suite that validates any broker agains
 
 ## Features
 
-- **183 conformance tests** covering MQTT v5.0 sections 1, 3, 4, and 6
-- **247 normative statements** tracked in `conformance.toml` with per-statement coverage status
+- **186 conformance tests** covering MQTT v5.0 sections 1, 3, 4, and 6
+- **All 251 normative statements** of OASIS MQTT v5.0 tracked in `conformance.toml` with
+  per-statement coverage status, currently 159 (63.3%) exercised by a registered test
+- **Manifest guards** in `tests/manifest_load.rs` assert that every tracked ID is a real v5.0
+  statement, that no statement is missing, that every cited test resolves in the registry, and that
+  each statement's recorded text corresponds to the OASIS statement of that ID. Known pre-existing
+  drift is baselined in `known-text-drift.txt` and `known-citation-drift.txt`; the guards fail on
+  any new drift and on any listed entry that is repaired without being delisted, so both files can
+  only shrink
 - **Two execution modes**: in-process via `cargo test` or against any external broker via the CLI
 - **Capability-based skipping**: tests declare requirements; the runner skips tests the SUT cannot support
 - **Raw TCP packet builder** for malformed and edge-case protocol testing

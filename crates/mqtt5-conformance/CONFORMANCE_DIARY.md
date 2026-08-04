@@ -38,6 +38,283 @@
 
 ## Diary Entries
 
+### Bulk heuristic corrections REVERTED after adversarial review (2026-08-03)
+
+A four-reviewer adversarial quorum audited the same day's rework. It found that the bulk corrections,
+which used text-similarity matching, introduced real damage alongside real fixes. The heuristic work
+has been reverted; only individually-verified changes were re-applied on top of `HEAD`.
+
+**Damage the reviewers found (all reproduced before reverting):**
+
+- **`MQTT-4.8.2-2` was correct before it was "fixed".** Its text was a *truncation* of the real
+  statement ("The ShareName MUST NOT contain the characters /, + or #"), not another statement's
+  text. A 0.70 similarity collision with `MQTT-3.3.2-14` ("The Response Topic MUST NOT contain
+  wildcard characters") demoted a passing entry to `Untested` and grafted its ShareName test onto
+  the Response Topic statement, which then claimed coverage from an unrelated test.
+- **`MQTT-3.1.3-1` regressed.** The original text was body-correct ("Will Properties, Will Topic,
+  Will Payload"); it was overwritten with Appendix B's erratum ("Will Topic, Will Message" — v3.1.1
+  naming). A second Appendix B erratum, missed because the "truncated" bucket was replaced from the
+  appendix without body cross-check.
+- **12 `note` values landed on `[sections."X"]` tables instead of statements.** `Section` has a
+  `pub note` field, so it parsed silently; `[sections."3.5"]` (PUBREC) ended up annotated "Broker
+  never includes User Property in PUBACK packets". Twelve statements lost their notes.
+- Further bad re-points: `puback_message_delivered_on_qos1` filed under a PUBACK-packet-identifier
+  statement while publishing at QoS 0 (`PublishOptions::default()` is `AtMostOnce`);
+  `unsuback_packet_id_matches` filed under a SUBACK statement; tests moved onto `MQTT-3.10.4-2`
+  while it remained `NotApplicable`/`Client`, so they counted toward nothing.
+- The session-takeover test could **false-pass**: `expect_disconnect` (`raw_client.rs:702`) returns
+  `true` on first byte `0xE0` without checking the socket closed, so a broker that sends DISCONNECT
+  and holds the connection open — the exact violation — passed. Now fixed: the test checks the
+  reason code if a DISCONNECT arrives, then asserts the socket is genuinely closed.
+
+**What was re-applied** (each independently verified by at least two reviewers): the 5 fabricated-ID
+deletions and the three `CrossRef` → `Tested` promotions that inherit their tests; the 9 missing
+statements (`4.6.0-6` taken from the body, not Appendix B's "every, Topic" typo); the §3.1.4 rewrite;
+three body-verified divergence fixes (`3.1.2-9`, `3.9.3-2`, `4.12.0-2`); the exclusion re-review;
+and the removal of 13 citations to tests that are not in the registry.
+
+**Two exemptions were false and are now `Untested`, both reproduced on the wire by a reviewer:**
+the five Reason String statements (the broker does emit them and never checks the client's Maximum
+Packet Size) and `MQTT-3.1.2-26`/`-27` (`resolve_topic_alias` never strips the Topic Alias property,
+so it propagates to subscribers). Both are library bugs, tracked separately.
+
+**Guards rebuilt as ratchets.** Reviewer mutation-testing showed 3 of 4 seeded defects passed all
+nine previous guards — critically, **no guard read `text` at all**, so the exact defect class this
+work existed to fix could be reintroduced invisibly. Two new guards close that:
+`statement_text_drift_only_shrinks` compares every statement against
+`mqtt-v5.0-statement-texts.txt` (Appendix B with body overrides where they diverge), and
+`manifest_and_test_attributes_agree_or_shrink` checks the manifest and `#[conformance_test(ids)]`
+cite each other. Both are baselined against `known-text-drift.txt` (79 entries) and
+`known-citation-drift.txt` (35 pairs): they fail on any NEW drift and also fail when a listed entry
+is repaired without being removed, so the debt can only shrink. `section_totals_match_statement_counts`
+now also fails if `total_statements` is absent, which previously disabled it silently.
+
+**The honest scope.** 79 statements carry text that does not correspond to their ID — larger than the
+61 claimed fixed earlier, and the earlier count was itself partly wrong. That backlog is now
+explicit, machine-checked, and monotonically decreasing, which is the durable outcome. Each entry
+must be corrected **against the normative body**, one at a time; similarity matching is what caused
+the damage and must not be used again.
+
+State: 251 statements, Tested 159 (63.3%), Untested 37, CrossRef 19, NotApplicable 36, Skipped 0.
+Conformance CLI 183 passed / 0 failed / 3 ignored; guards 11/11; clippy pedantic clean.
+
+### Re-review of the exclusions — one false premise, one mis-excused Server obligation (2026-08-03)
+
+The mis-numbering audit corrected statement *text*. It did not revisit the `NotApplicable` /
+`Skipped` *judgements*, which were made under the same regime and, in several cases, about
+statements whose text has since changed. This pass re-read every exclusion that binds the Server
+(`applies_to` = Server or Both): 23 entries.
+
+**The important finding: 5 exclusions rested on a factually false premise.**
+
+Sixteen entries were excused with "Broker never includes Reason String / User Property in X;
+constraint trivially satisfied". The User Property and Topic Alias halves check out — the broker
+genuinely never emits those. **The Reason String half is false.** The broker sets a Reason String on:
+
+| Packet | Site |
+|---|---|
+| CONNACK | `broker/client_handler/connect.rs:285, 297, 322` |
+| SUBACK | `broker/client_handler/subscribe.rs:281, 286` |
+| PUBACK | `broker/client_handler/publish.rs:259, 291, 370` |
+| PUBREC | `broker/client_handler/publish.rs:271, 302` |
+| AUTH | `broker/client_handler/auth.rs:134` |
+
+So `MQTT-3.2.2-19`, `3.9.2-2`, `3.4.2-2`, `3.5.2-2` and `3.15.2-2` are live requirements, not
+vacuous ones. All five moved `NotApplicable` → `Untested`.
+
+**This may be an actual non-conformance.** Each of those statements says the sender MUST NOT send
+the property if it would push the packet beyond the receiver's Maximum Packet Size. The broker
+captures `client_max_packet_size` at `connect.rs:110` but consults it only for outbound PUBLISH
+(`publish.rs:734`). Nothing checks it before appending a Reason String to an ack. A client
+advertising a small Maximum Packet Size and triggering a long failure reason looks capable of
+receiving an oversized packet. Not yet reproduced — flagged for investigation.
+
+**`MQTT-3.3.1-1` was mis-excused.** Noted as "Client-side re-delivery behavior", but the statement
+reads "MUST be set to 1 by the Client **or Server** when it attempts to re-deliver a PUBLISH
+packet", and this broker re-delivers unacknowledged QoS 1/2 messages on reconnect. A genuine Server
+obligation with no test → `Untested`.
+
+**`MQTT-4.8.2-4` and `4.8.2-5` un-skipped.** Both are Server obligations governing shared-subscription
+redelivery; `4.8.2-5` carried no justification note at all. Both → `Untested`. The `Skipped` status
+is now unused.
+
+**Confirmed correct after re-reading the corrected text:** `MQTT-3.1.3-1`, `3.2.2-4`, `3.2.2-21`,
+`4.12.1-1` — in each the MUST binds the Client, so a broker has no obligation.
+
+**Remaining implementation-dependent exemptions re-noted.** The 14 surviving "trivially satisfied"
+entries had their premises verified against the code, and their notes now say explicitly that the
+exemption is *implementation-dependent, not a spec exemption* — it holds only while this broker
+never emits the property, and **is invalid for an external SUT that does**. That is a latent flaw in
+a vendor-neutral suite: a third-party broker which does send Reason Strings would be silently
+exempted from a rule that binds it. Properly these should be decided at runtime from SUT
+capabilities rather than baked into the manifest.
+
+Status distribution after this pass: Tested 155, Untested 50, NotApplicable 34, CrossRef 12,
+Skipped 0 (of 251). Coverage unchanged at 61.8% — this pass moved statements out of exemption into
+honest untested, it did not change what is verified.
+
+### Manifest statement IDs do not reliably denote the OASIS statements they name (2026-08-03)
+
+Found while verifying a spec citation for the ComNet paper, then audited by a five-agent quorum
+against a locally-decoded copy of the OASIS MQTT v5.0 standard.
+
+**Two independent failure modes, both of which inflate reported coverage.**
+
+**1. Statement text is assigned to the wrong ID.** Verified authoritative diff over all 247
+entries: 180 faithful, 61 mismatched, 6 IDs that do not exist in MQTT v5.0. The damage is not
+scattered — it comes in contiguous runs (`3.1.2-6…-12`, `3.1.3-3…-5`, `3.1.4-2…-6`, Topic Alias
+`3.3.2-7…-12`, Receive Maximum `3.3.4-7…-10` with Client/Server roles swapped).
+
+Mechanism: the table has two strata. Entries bulk-imported from
+`rfc-extract/mqtt-v5.0-compliance.toml` (diary, 2026-02-19) reproduce the spec faithfully; the
+older hand-written cohort was never reconciled and roughly half of it is wrong. Diagnostic tells:
+`MQTT-3.1.4-2` carried "non-zero **return code**" (v3.1.1 vocabulary — v5.0 says Reason Code), and
+`MQTT-3.10.3-1`/`3.1.3-11` cite "section 1.5.4" where v3.1.1 says 1.5.3, i.e. a v3.1.1 table
+hand-renumbered in place. It is NOT a clean version offset — the mapping is irregular, so every ID
+must be checked individually. No bulk offset fix is valid.
+
+**2. `status = "Tested"` did not imply a test runs.** 16 statements cited 13 test names absent from
+the `linkme` registry. 12 of those exist in `tests/` as plain `#[tokio::test]` functions that the
+conformance CLI never executes; `subscribe_replaces_existing_qos` does not exist at all.
+`tests/manifest_load.rs` validates none of this.
+
+**The consequence that matters: `[MQTT-3.1.4-3]` (session takeover) had no test.** `0x8E` appears
+exactly once in the crate, as a byte in a list of valid DISCONNECT reason codes. No test opens a
+second connection on a live ClientID, so a broker that silently accepts duplicate ClientIDs passes
+the entire suite. The entry under that ID actually held `MQTT-3.2.2-2`'s text.
+
+**Applied in this pass**
+
+- Corrected `MQTT-3.1.4-2` … `-6` to their authoritative v5.0 text, with `level` corrected
+  (`-2` Must→May, `-6` Must→MustNot) and `status` set to `Untested`, since each entry's test
+  demonstrably exercises a different statement. Orphaned tests are named in each `note`.
+- Promoted `MQTT-3.2.2-2`, `MQTT-3.2.2-3`, `MQTT-3.2.0-1` from `CrossRef` to `Tested`. These are the
+  correct homes for the displaced texts and already carried the same tests; their `note` fields had
+  pointed *back* at the wrong IDs, papering over the duplication.
+- Downgraded the 16 statements citing unregistered tests to `Untested`, naming the tests to register.
+
+Reported coverage falls 174/247 (70.4%) → 158/247 (64.0%). The drop is the point: the previous
+figure counted tests that never ran and statements that named requirements they did not contain.
+
+**Method note — do not blanket-replace from Appendix B.** The spec's Appendix B is a verbatim
+ID→text table for all 251 statements and is far better than heuristic extraction, but it is
+explicitly non-normative and contains at least one erratum: `MQTT-3.3.1-10` is rendered there with
+its Retain Handling logic **inverted** relative to the normative body ("did already exist" vs "did
+not already exist"). Our entry matches the body and is correct. Eleven appendix entries diverge from
+the body under a phrase check. Always cross-read the body before correcting an entry.
+
+**Completed in the second pass (same day)**
+
+- **50 further text corrections**, split by evidence rather than applied blindly. 18 *displaced*
+  entries (text provably belonged to another ID, so the attached test was exercising a different
+  statement) were corrected and set `Untested`, with the real owner named in each `note`. 32
+  *truncated/paraphrased* entries (same statement, lossy wording) were corrected with status
+  retained, since their tests do exercise the statement.
+- **All 5 fabricated IDs deleted.** `MQTT-4.3.2-4`, `MQTT-4.3.3-8`, `MQTT-4.3.3-11` promoted from
+  `CrossRef` to `Tested` and given the tests the fake entries held. `MQTT-4.3.3-11`'s note had
+  pointed at `MQTT-3.7.4-1` — a 3.6/3.7 copy-paste swap layered on top of a fabricated ID.
+  `MQTT-3.7.4-1` deleted outright: §3.7.4 carries no normative statement, and its text contradicted
+  Figure 4.3.
+- **9 statements added** (`1.5.4-2`, `3.8.4-7`, `3.14.1-1`, `4.3.2-3`, `4.6.0-1…-4`, `4.6.0-6`).
+- **Section `total_statements` re-synced** — 10 sections were stale, inflated where fabricated IDs
+  lived and short where statements were missing.
+- **`MQTT-4.2-1` retained deliberately** and documented: the OASIS body labels it `MQTT-4.2-1`
+  while Appendix B says `MQTT-4.2.0-1`. We follow the body.
+- **Dangling test citations cleared** from the 15 statements that named unregistered tests. Each is
+  `Untested` with the test named in its `note`, so nothing is lost and the manifest no longer claims
+  a test it cannot run.
+- **New guard suite in `tests/manifest_load.rs`** (6 tests), backed by a generated
+  `mqtt-v5.0-statement-ids.txt` holding the 251 authoritative IDs:
+  every manifest ID is a real v5.0 statement; every v5.0 statement is present; no duplicate IDs;
+  every cited test resolves in the `linkme` registry; no statement is `Tested` with no test; section
+  totals match. **This is the durable fix — both defect classes were silent because nothing checked.**
+  All 8 tests in the file pass; `cargo clippy --all-targets -- -D warnings -W clippy::pedantic` clean.
+
+The manifest now holds exactly 251 statements, matching the spec one-for-one. Reported coverage
+settles at **144/251 (57.4%)**, down from the 174/247 (70.4%) claimed at the start of the day. The
+engineering was never the problem — the index over it was.
+
+**Third pass (same day)**
+
+- **`MQTT-3.1.4-3` session takeover now has a test.**
+  `section3_connect::session_takeover_disconnects_existing_client` connects two raw clients with the
+  same ClientID and asserts the first one's Network Connection is closed. **It passes** — the broker
+  implements takeover correctly; the requirement was untested, not unimplemented. The assertion
+  deliberately targets only the normative MUST (closing the connection) and does *not* require the
+  DISCONNECT 0x8E packet, which the statement describes without a MUST. Over-asserting there would
+  have created a third test capable of failing a conformant third-party broker.
+- Full suite re-run: **184 passed, 0 failed, 3 ignored.** Manifest guards 8/8. Clippy pedantic clean.
+- `README.md` coverage claims corrected (183 tests/247 statements → 187 tests/251 statements,
+  145 tested = 57.8%).
+
+**Why the 12 unregistered tests CANNOT be ported — corrected analysis**
+
+An earlier entry proposed giving the shared in-process fixture a challenge-response `AuthProvider`
+and advertising `enhanced_auth.CHALLENGE-RESPONSE`, so the 4 auth tests could register and be
+auto-skipped against external SUTs. **That proposal was wrong and has been withdrawn.** It would
+have served only 4 of the 12, and it misread the problem.
+
+The 12 tests require *mutually contradictory* broker configurations:
+
+| test | needs |
+|---|---|
+| `connack_will_retain_rejected_when_unsupported` | `with_retain_available(false)` |
+| `connack_maximum_qos_advertised`, `connack_accepts_subscribe_any_qos_with_limited_max`, `suback_downgrades_to_max_qos` | a reduced maximum QoS |
+| `server_keep_alive_override` | `server_keep_alive = Some(30s)` |
+| `inbound_receive_maximum_exceeded_disconnects_with_0x93` | `with_server_receive_maximum(2)` |
+| the 4 enhanced-auth tests | a custom `AuthProvider` |
+
+No single broker can have retain both available and unavailable, or maximum QoS both limited and
+unlimited. The shared-`SutHandle` model cannot express this at all, for any fixture configuration.
+
+Two further points stand: a vendor-neutral CLI aimed at mosquitto could never install a Rust
+`AuthProvider` or reconfigure a third-party broker's retain support, so marking these statements
+`Tested` in a vendor-neutral manifest was always wrong; and the behaviour *is* verified today —
+these run under `cargo test` as ordinary tokio tests. The gap is bookkeeping and architecture, not
+verification.
+
+A real fix means per-test fixture construction: extend `#[conformance_test]` so a test can declare
+the fixture it needs, and have the runner build it. That is a macro plus runner change and belongs
+in its own pass. Recorded here so the withdrawn proposal is not retried.
+
+**Fourth pass (same day)**
+
+- **Four appendix/body divergences resolved** by reading the normative body. `MQTT-3.1.2-9` held the
+  text of `3.1.2-12`; `MQTT-3.9.3-2` held the ordering rule that belongs to `3.9.3-1`;
+  `MQTT-4.12.0-2` kept only its trailing clause (body says "authentication" where Appendix B says
+  "authorization"); `MQTT-3.7.2-1` was a correct but non-normative paraphrase, so its test was kept.
+- **14 orphaned tests re-pointed** from the displaced entries to the statements they actually
+  exercise, promoting each target to `Tested` (e.g. `connect_will_qos_3_is_malformed` →
+  `MQTT-3.1.2-12`, `unsubscribe_stops_delivery` → `MQTT-3.10.4-2`). `MQTT-3.9.3-1` was `Untested`
+  while already citing a registered test; promoted.
+- **`connect_unsupported_protocol_version` no longer over-asserts.** `MQTT-3.1.2-2` makes the
+  CONNACK a **MAY** and only closing the Network Connection a **MUST**; the test demanded the
+  CONNACK. It now asserts the close, and checks Reason Code 0x84 only if a CONNACK is actually sent.
+- **`pubrec_no_delivery_before_pubrel` removed from the conformance suite.** It asserted that QoS 2
+  messages are withheld until PUBREL, which v5.0 does not require — the receiver may deliver at
+  PUBLISH receipt. It was the last test citing the fabricated `MQTT-3.7.4-1`. Moved to
+  `tests/section3_publish_flow.rs` as `qos2_message_not_delivered_before_pubrel`, an implementation
+  guarantee of this broker rather than a conformance requirement.
+- **New guard `every_registered_test_targets_a_known_statement`** (registry → manifest). The
+  existing guard only checked manifest → registry. It caught 6 tests still declaring deleted
+  fabricated IDs in their `#[conformance_test]` attributes; all re-pointed to the real statements
+  (`MQTT-4.3.2-4`, `MQTT-4.3.3-8`, `MQTT-4.3.3-11`, `MQTT-3.8.4-7`), doc comments included.
+
+Coverage: **155/251 (61.8%)**, recovered from 57.4% by legitimate re-pointing rather than by
+relaxing anything. Verification: conformance CLI 183 passed / 0 failed / 3 ignored; lib tests 223
+passed; manifest guards 9/9; every `tests/` binary green; clippy pedantic clean.
+
+**Still outstanding**
+- Re-point the orphaned tests named in the `note` fields of the 18 displaced entries.
+- 4 entries skipped as appendix/body divergences needing manual reading: `3.1.2-9`, `3.7.2-1`,
+  `3.9.3-2`, `4.12.0-2`.
+- Two tests would falsely fail a *conformant* third-party broker — material because the CLI is
+  offered as vendor-neutral: `connect_unsupported_protocol_version` hard-asserts a CONNACK the spec
+  makes a MAY, and `pubrec_no_delivery_before_pubrel` asserts a non-requirement.
+- `README.md` and `profiles.toml` still quote the old coverage figures.
+
+Per-slice audit reports and the decoded spec are in the session scratchpad (`AUDIT_A…E.md`).
+
 ### Error PUBREC from a subscriber must terminate QoS2 with NO PUBREL (`[MQTT-4.3.3-4]`)
 
 - **Bug**: `client_handler::publish::handle_pubrec` ignored the PUBREC Reason Code and always stored `AwaitingPubcomp` and wrote `PubRel{reason: Success}`. A subscriber that rejected an outbound QoS2 PUBLISH with a PUBREC reason ≥ 0x80 still received a PUBREL, and the broker kept the id in a half-open handshake. This violates `[MQTT-4.3.3-4]` (the sender sends PUBREL only for a PUBREC reason < 0x80).
