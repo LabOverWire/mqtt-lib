@@ -5,17 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [mqtt5 0.38.3] - 2026-08-04
-
-### Fixed
-
-- **The broker now sets `TCP_NODELAY` on every accepted TCP connection.** None of the broker's accept paths — plain TCP, TLS, WebSocket, WebSocket over TLS, and cluster — disabled Nagle's algorithm on the socket returned by `accept()`, so broker-to-subscriber delivery ran with Nagle enabled while the client side already set the option. Interacting with the peer's delayed-ACK timer, this added roughly 5 ms to median delivery latency and pinned the tail at the Linux 40 ms delayed-ACK boundary; QUIC was unaffected because it does not run over TCP. MQTT delivery is a stream of small, latency-sensitive writes, which is exactly the case Nagle harms, so the broker now disables it on each accepted socket before wrapping it in a transport. Reported in issue #128.
-
 ## [mqtt5 0.38.2] - 2026-08-04
 
 ### Fixed
 
 - **The broker no longer forwards a publisher's Topic Alias to subscribers.** When a PUBLISH carried a Topic Alias, the broker resolved it to a topic name but left the Topic Alias property on the packet, so live delivery carried it through to subscribers — including subscribers that advertised no Topic Alias Maximum, whose value is therefore zero. This violates `[MQTT-3.1.2-26]`, `[MQTT-3.1.2-27]` and `[MQTT-3.3.2-11]`: a Topic Alias mapping is scoped to a single Network Connection and to the server-to-client direction, so a publisher's alias has no meaning on a subscriber's connection and must not be sent to a client that did not offer to receive one. A subscriber advertising Topic Alias Maximum 2 could receive a delivered PUBLISH carrying Topic Alias 9. Retained, queued and inflight deliveries were unaffected because they rebuild the packet from an explicit field list; only live delivery leaked. `resolve_topic_alias` now strips the Topic Alias property once the topic name is resolved. Reported in issue #130.
+- **The broker now sets `TCP_NODELAY` on every accepted TCP connection.** None of the broker's accept paths — plain TCP, TLS, WebSocket, WebSocket over TLS, and cluster — disabled Nagle's algorithm on the socket returned by `accept()`, so broker-to-subscriber delivery ran with Nagle enabled while the client side already set the option. Interacting with the peer's delayed-ACK timer, this added roughly 5 ms to median delivery latency and pinned the tail at the Linux 40 ms delayed-ACK boundary; QUIC was unaffected because it does not run over TCP. MQTT delivery is a stream of small, latency-sensitive writes, which is exactly the case Nagle harms, so the broker now disables it on each accepted socket before wrapping it in a transport. Reported in issue #128.
 
 ## [mqtt5-protocol 0.14.3] - 2026-08-04
 
