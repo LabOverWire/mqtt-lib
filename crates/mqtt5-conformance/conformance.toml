@@ -431,18 +431,18 @@ id = "MQTT-3.1.2-26"
 level = "MustNot"
 applies_to = "Both"
 text = "The Server MUST NOT send a Topic Alias in a PUBLISH packet to the Client greater than Topic Alias Maximum"
-status = "Untested"
-test_names = []
-note = "Re-reviewed: the previous NotApplicable rested on a FALSE premise. resolve_topic_alias (publish.rs:139) never strips the Topic Alias property, so it propagates to subscribers. Reproduced"
+status = "Tested"
+test_names = ["topic_alias_stripped_before_delivery"]
+note = "Fixed (#130): resolve_topic_alias now strips the inbound Topic Alias once the topic name is resolved, so a publisher's alias no longer propagates to subscribers"
 
 [[sections."3.1".statements]]
 id = "MQTT-3.1.2-27"
 level = "MustNot"
 applies_to = "Both"
 text = "If Topic Alias Maximum is absent or zero, the Server MUST NOT send any Topic Aliases to the Client"
-status = "Untested"
-test_names = []
-note = "Re-reviewed: the previous NotApplicable rested on a FALSE premise. resolve_topic_alias (publish.rs:139) never strips the Topic Alias property, so it propagates to subscribers. Reproduced"
+status = "Tested"
+test_names = ["topic_alias_stripped_before_delivery"]
+note = "Fixed (#130): a subscriber advertising no Topic Alias Maximum now receives no Topic Alias property, since resolve_topic_alias strips the inbound alias before delivery"
 
 [[sections."3.1".statements]]
 id = "MQTT-3.1.2-28"
@@ -957,9 +957,9 @@ id = "MQTT-3.3.2-11"
 level = "Must"
 applies_to = "Server"
 text = "A Server MUST NOT send a PUBLISH packet with a Topic Alias greater than the Topic Alias Maximum value sent by the Client in the CONNECT packet."
-status = "Untested"
-test_names = []
-note = "Corrected: previously carried connection-scoped-mapping text. REPRODUCED AS VIOLATED - a subscriber advertising Topic Alias Maximum 2 received a delivered PUBLISH carrying Topic Alias 9, because resolve_topic_alias never strips the publisher's alias. Its former tests exercise connection-scoped mapping, a different requirement"
+status = "Tested"
+test_names = ["topic_alias_stripped_before_delivery"]
+note = "Fixed (#130): resolve_topic_alias strips the publisher's inbound alias before delivery, so no Topic Alias reaches a subscriber. topic_alias_not_shared_across_connections and topic_alias_cleared_on_reconnect additionally exercise connection-scoped mapping"
 
 [[sections."3.3".statements]]
 id = "MQTT-3.3.2-12"

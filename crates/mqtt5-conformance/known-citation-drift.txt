@@ -34,7 +34,6 @@ subscribe_replaces_existing MQTT-3.8.4-3
 tcp_drop_publishes_will MQTT-3.1.4-5
 topic_alias_cleared_on_reconnect MQTT-3.3.2-11
 topic_alias_not_shared_across_connections MQTT-3.3.2-11
-topic_alias_stripped_before_delivery MQTT-3.3.2-8
 unsuback_no_subscription_existed MQTT-3.11.3-2
 unsuback_success_for_existing MQTT-3.11.3-2
 unsubscribe_idempotent MQTT-3.11.3-2

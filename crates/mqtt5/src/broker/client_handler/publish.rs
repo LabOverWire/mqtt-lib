@@ -156,6 +156,7 @@ impl ClientHandler {
             } else {
                 self.topic_aliases.insert(alias, publish.topic_name.clone());
             }
+            publish.properties.remove_topic_alias();
         } else if publish.topic_name.is_empty() {
             return Err(MqttError::ProtocolError(
                 "Empty topic name without topic alias".to_string(),

@@ -38,6 +38,24 @@
 
 ## Diary Entries
 
+### Fix #130 — publisher Topic Alias stripped before delivery (2026-08-04)
+
+`resolve_topic_alias` (`broker/client_handler/publish.rs`) resolved an inbound Topic Alias to a topic
+name but never removed the `0x23` property, so it propagated to subscribers — including subscribers
+that advertised no Topic Alias Maximum. Violates `[MQTT-3.1.2-26]`, `[MQTT-3.1.2-27]` and
+`[MQTT-3.3.2-11]`.
+
+Fix: added `Properties::remove_topic_alias` (the `mqtt5-protocol` HashMap is `pub(crate)`, so the
+broker needs a public accessor) and call it once the topic name is resolved.
+
+Manifest: `MQTT-3.1.2-26`, `MQTT-3.1.2-27`, `MQTT-3.3.2-11` moved Untested→Tested. The existing
+`topic_alias_stripped_before_delivery` test only checked the delivered topic *name* (which was always
+correct — the leak was the surviving property), and was mis-tagged `[MQTT-3.3.2-8]` (the audit
+retargeted that ID to the alias-value-0 rule). Retargeted it to the three real IDs and strengthened it
+to parse the delivered PUBLISH with `ParsedPublish` and assert `topic_alias.is_none()`. Verified it
+fails without the fix (`found Some(2)`) and passes with it. Removed the now-reconciled
+`topic_alias_stripped_before_delivery MQTT-3.3.2-8` line from `known-citation-drift.txt`.
+
 ### Bulk heuristic corrections REVERTED after adversarial review (2026-08-03)
 
 A four-reviewer adversarial quorum audited the same day's rework. It found that the bulk corrections,
