@@ -2,6 +2,7 @@
 
 use crate::conformance_test;
 use crate::harness::unique_client_id;
+use crate::packet_parser::ParsedPublish;
 use crate::raw_client::{RawMqttClient, RawPacketBuilder};
 use crate::sut::SutHandle;
 use std::time::Duration;
@@ -211,9 +212,13 @@ async fn topic_alias_cleared_on_reconnect(sut: SutHandle) {
     );
 }
 
-/// `[MQTT-3.3.2-8]` Topic Alias is stripped before delivery to subscribers.
+/// `[MQTT-3.1.2-26]` `[MQTT-3.1.2-27]` `[MQTT-3.3.2-11]` A publisher's Topic
+/// Alias is an inbound, per-connection encoding detail. Once resolved to a topic
+/// name it must be stripped: the subscriber here advertises no Topic Alias
+/// Maximum, so its value is zero and the delivered PUBLISH must carry no Topic
+/// Alias property at all.
 #[conformance_test(
-    ids = ["MQTT-3.3.2-8"],
+    ids = ["MQTT-3.1.2-26", "MQTT-3.1.2-27", "MQTT-3.3.2-11"],
     requires = ["transport.tcp"],
 )]
 async fn topic_alias_stripped_before_delivery(sut: SutHandle) {
@@ -241,16 +246,20 @@ async fn topic_alias_stripped_before_delivery(sut: SutHandle) {
         .await
         .unwrap();
 
-    let msg = sub.expect_publish(TIMEOUT).await;
-    assert!(msg.is_some(), "Subscriber must receive the message");
-    let (_, recv_topic, _) = msg.unwrap();
-    assert!(
-        !recv_topic.is_empty(),
-        "Subscriber must receive non-empty topic name, not alias reference"
-    );
+    let data = sub
+        .read_packet_bytes(TIMEOUT)
+        .await
+        .expect("subscriber must receive the forwarded PUBLISH");
+    let parsed = ParsedPublish::parse(&data).expect("delivered packet must be a PUBLISH");
     assert_eq!(
-        recv_topic, topic,
-        "Subscriber must receive the full topic name"
+        parsed.topic, topic,
+        "Subscriber must receive the full topic name, not an alias reference"
+    );
+    assert!(
+        parsed.properties.topic_alias.is_none(),
+        "[MQTT-3.1.2-27] Subscriber advertised no Topic Alias Maximum, so the delivered PUBLISH \
+         must not carry a Topic Alias property (found {:?})",
+        parsed.properties.topic_alias
     );
 }
 

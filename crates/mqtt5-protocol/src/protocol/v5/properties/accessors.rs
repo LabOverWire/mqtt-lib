@@ -52,6 +52,10 @@ impl Properties {
             })
     }
 
+    pub fn remove_topic_alias(&mut self) {
+        self.properties.remove(&PropertyId::TopicAlias);
+    }
+
     pub fn set_response_topic(&mut self, topic: String) {
         self.properties
             .entry(PropertyId::ResponseTopic)
