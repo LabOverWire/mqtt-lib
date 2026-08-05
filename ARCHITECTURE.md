@@ -123,7 +123,7 @@ The client validates acknowledgment reason codes: PUBACK (QoS 1) returns `MqttEr
 
 ### Core Components
 
-**MqttBroker** manages configuration and lifecycle, spawning one listening task per transport. **Server listeners** accept connections over TCP (direct `accept()` loop), TLS (rustls with certificate validation), WebSocket (HTTP upgrade with tokio-tungstenite, path enforcement, Origin validation), and QUIC (quinn endpoint with multistream).
+**MqttBroker** manages configuration and lifecycle, spawning one listening task per transport. **Server listeners** accept connections over TCP (direct `accept()` loop), TLS (rustls with certificate validation), WebSocket (HTTP upgrade with tokio-tungstenite, path enforcement, Origin validation), and QUIC (quinn endpoint with multistream). Every TCP-based accept path (TCP, TLS, WebSocket, WebSocket-over-TLS, cluster) sets `TCP_NODELAY` on the accepted socket, disabling Nagle's algorithm so latency-sensitive MQTT delivery is not held by the peer's delayed-ACK timer; QUIC is unaffected.
 
 Each accepted connection spawns a **ClientHandler** that directly reads and writes packets, manages client session state, and handles the MQTT protocol. The **MessageRouter** performs subscription matching using MQTT-compliant topic wildcards (`+`, `#`), protects system topics (`$SYS/#` excluded from `#`), and supports shared subscriptions (`$share/group/topic`).
 

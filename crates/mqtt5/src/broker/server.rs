@@ -17,7 +17,7 @@ use crate::broker::websocket_server::{accept_websocket_connection, WebSocketServ
 use crate::error::{MqttError, Result};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, watch};
 use tokio_rustls::TlsAcceptor;
 use tracing::{debug, error, info, warn};
@@ -32,6 +32,12 @@ use crate::telemetry;
 use opentelemetry::metrics::MeterProvider;
 #[cfg(feature = "transport-quic")]
 use quinn::Endpoint;
+
+fn disable_nagle(stream: &TcpStream, addr: std::net::SocketAddr) {
+    if let Err(e) = stream.set_nodelay(true) {
+        warn!(addr = %addr, "failed to set TCP_NODELAY on accepted socket: {e}");
+    }
+}
 
 #[derive(Clone)]
 struct AcceptLoopState {
@@ -986,6 +992,8 @@ impl MqttBroker {
                                         continue;
                                     }
 
+                                    disable_nagle(&tcp_stream, addr);
+
                                     match accept_websocket_connection(tcp_stream, &ws_cfg, addr).await {
                                         Ok(ws_stream) => {
                                             let transport = BrokerTransport::websocket(ws_stream);
@@ -1063,6 +1071,8 @@ impl MqttBroker {
                                         warn!("WebSocket TLS connection rejected from {}: resource limits exceeded", addr);
                                         continue;
                                     }
+
+                                    disable_nagle(&tcp_stream, addr);
 
                                     let acc_clone = acceptor.clone();
                                     let cfg_clone = ws_cfg.clone();
@@ -1151,6 +1161,8 @@ impl MqttBroker {
                                         warn!("TLS connection rejected from {}: resource limits exceeded", addr);
                                         continue;
                                     }
+
+                                    disable_nagle(&tcp_stream, addr);
 
                                     match accept_tls_connection(&acceptor, tcp_stream, addr).await {
                                         Ok(tls_stream) => {
@@ -1307,6 +1319,8 @@ impl MqttBroker {
                                         warn!("Cluster connection rejected from {}: resource limits exceeded", addr);
                                         continue;
                                     }
+
+                                    disable_nagle(&tcp_stream, addr);
 
                                     if let Some(ref tls_acceptor) = acceptor {
                                         let acc_clone = Arc::clone(tls_acceptor);
@@ -1489,6 +1503,8 @@ impl MqttBroker {
                                         warn!("Connection rejected from {}: resource limits exceeded", addr);
                                         continue;
                                     }
+
+                                    disable_nagle(&stream, addr);
 
                                     let transport = BrokerTransport::tcp(stream);
 
@@ -1900,6 +1916,28 @@ mod tests {
         // Use random port to avoid conflicts
         let broker = MqttBroker::bind("127.0.0.1:0").await;
         assert!(broker.is_ok());
+    }
+
+    #[tokio::test]
+    async fn disable_nagle_sets_tcp_nodelay_on_accepted_socket() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = TcpStream::connect(addr).await.unwrap();
+        let (server, peer) = listener.accept().await.unwrap();
+
+        server.set_nodelay(false).unwrap();
+        assert!(
+            !server.nodelay().unwrap(),
+            "precondition: accepted socket starts with Nagle enabled"
+        );
+
+        disable_nagle(&server, peer);
+
+        assert!(
+            server.nodelay().unwrap(),
+            "disable_nagle must enable TCP_NODELAY on the accepted socket"
+        );
+        drop(client);
     }
 
     #[tokio::test]
