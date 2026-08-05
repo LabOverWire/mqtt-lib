@@ -73,6 +73,15 @@ audit note describes a SUBACK Reason String / Maximum Packet Size violation — 
 misattributed. This fix does route SUBACK through the choke point, but it does not touch packet
 identifiers, so `[MQTT-3.9.2-1]` was left untouched rather than relitigated here.
 
+Follow-up caught by an adversarial quorum before merge: routing the CONNACK through the choke point
+turned a previously-benign `Maximum Packet Size = 0` into a connection wedge — with the limit at 0
+every encoded packet (≥ 1 byte) exceeds it, so even the success CONNACK was discarded and the client
+hung forever. MQTT v5.0 3.1.2.11.4 makes a Maximum Packet Size of 0 a Protocol Error, so `handle_connect`
+now rejects such a CONNECT with a Protocol Error (0x82) CONNACK before the limit is armed. Confirmed
+with a counter-test (`zero_max_packet_size_rejected`) that hangs on the unfixed code and passes after.
+Also hardened the PUBACK lib test: a length guard before indexing the reason-code byte, and the client
+limit raised 30→35 to give the success-CONNACK handshake headroom (it was a 7-byte margin).
+
 ### Fix #130 — publisher Topic Alias stripped before delivery (2026-08-04)
 
 `resolve_topic_alias` (`broker/client_handler/publish.rs`) resolved an inbound Topic Alias to a topic

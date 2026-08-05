@@ -75,14 +75,14 @@ async fn puback_reason_string_omitted_over_max_packet_size() {
     let client_id = unique_client_id("mpsp");
     client
         .send_raw(&RawPacketBuilder::connect_with_max_packet_size(
-            &client_id, 30,
+            &client_id, 35,
         ))
         .await
         .unwrap();
     client
         .expect_connack(TIMEOUT)
         .await
-        .expect("CONNACK must fit the 30-byte limit and be delivered");
+        .expect("CONNACK must fit the 35-byte limit and be delivered");
 
     let topic = format!("mps/{}", unique_client_id("t"));
     client
@@ -94,6 +94,10 @@ async fn puback_reason_string_omitted_over_max_packet_size() {
         .read_packet_bytes(TIMEOUT)
         .await
         .expect("broker must send a PUBACK");
+    assert!(
+        data.len() >= 5,
+        "PUBACK truncated, cannot read reason code: {data:02x?}"
+    );
     assert_eq!(
         data[0] & 0xF0,
         0x40,
@@ -106,9 +110,39 @@ async fn puback_reason_string_omitted_over_max_packet_size() {
         data[4]
     );
     assert!(
-        data.len() <= 30,
-        "[MQTT-3.4.2-2] PUBACK is {} bytes, exceeding the client's Maximum Packet Size (30) — the \
+        data.len() <= 35,
+        "[MQTT-3.4.2-2] PUBACK is {} bytes, exceeding the client's Maximum Packet Size (35) — the \
          Reason String was not omitted",
         data.len()
+    );
+}
+
+/// MQTT v5.0 3.1.2.11.4: a Maximum Packet Size of 0 is a Protocol Error. The
+/// broker must reject the connection rather than accept a zero limit, which
+/// would otherwise make every outbound packet — including the CONNACK itself —
+/// exceed the limit and be discarded.
+#[cfg(all(test, feature = "inprocess-fixture"))]
+#[tokio::test]
+async fn zero_max_packet_size_rejected() {
+    let sut = crate::sut::inprocess_sut().await;
+    let mut client = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
+        .await
+        .unwrap();
+    client
+        .send_raw(&RawPacketBuilder::connect_with_max_packet_size(
+            "zero-mps", 0,
+        ))
+        .await
+        .unwrap();
+
+    let data = client
+        .read_packet_bytes(TIMEOUT)
+        .await
+        .expect("broker must send a CONNACK rejecting the zero Maximum Packet Size");
+    let connack = ParsedConnAck::parse(&data).expect("delivered packet must be a CONNACK");
+    assert_eq!(
+        connack.reason_code, 0x82,
+        "expected Protocol Error (0x82) for a Maximum Packet Size of 0, got {:#04x}",
+        connack.reason_code
     );
 }

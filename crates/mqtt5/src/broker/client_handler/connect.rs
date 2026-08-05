@@ -85,7 +85,19 @@ impl ClientHandler {
             .properties
             .get_request_response_information()
             .unwrap_or(false);
-        self.client_max_packet_size = connect.properties.get_maximum_packet_size();
+        let client_max_packet_size = connect.properties.get_maximum_packet_size();
+        if client_max_packet_size == Some(0) {
+            warn!(
+                addr = %self.client_addr,
+                "Rejecting connection: Maximum Packet Size of 0 is a Protocol Error"
+            );
+            let connack = ConnAckPacket::new(false, ReasonCode::ProtocolError);
+            self.write_to_client(Packet::ConnAck(connack)).await?;
+            return Err(MqttError::ProtocolError(
+                "Maximum Packet Size must not be zero".to_string(),
+            ));
+        }
+        self.client_max_packet_size = client_max_packet_size;
 
         let assigned_client_id = Self::assign_client_id_if_empty(&mut connect);
         self.validate_client_id(&connect).await?;
