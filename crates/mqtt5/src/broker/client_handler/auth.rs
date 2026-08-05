@@ -5,7 +5,6 @@ use crate::packet::connack::ConnAckPacket;
 use crate::packet::disconnect::DisconnectPacket;
 use crate::packet::Packet;
 use crate::protocol::v5::reason_codes::ReasonCode;
-use crate::transport::PacketIo;
 
 use super::{AuthState, ClientHandler};
 
@@ -31,9 +30,7 @@ impl ClientHandler {
             if auth_method != *expected_method {
                 if self.protocol_version == 5 {
                     let disconnect = DisconnectPacket::new(ReasonCode::BadAuthenticationMethod);
-                    self.transport
-                        .write_packet(Packet::Disconnect(disconnect))
-                        .await?;
+                    self.write_to_client(Packet::Disconnect(disconnect)).await?;
                 }
                 return Err(MqttError::ProtocolError(
                     "Authentication method mismatch".to_string(),
@@ -53,9 +50,7 @@ impl ClientHandler {
             _ => {
                 if self.protocol_version == 5 {
                     let disconnect = DisconnectPacket::new(ReasonCode::ProtocolError);
-                    self.transport
-                        .write_packet(Packet::Disconnect(disconnect))
-                        .await?;
+                    self.write_to_client(Packet::Disconnect(disconnect)).await?;
                 }
                 Err(MqttError::ProtocolError(format!(
                     "Unexpected AUTH reason code: {:?}",
@@ -108,9 +103,7 @@ impl ClientHandler {
                         );
                     }
 
-                    self.transport
-                        .write_packet(Packet::ConnAck(connack))
-                        .await?;
+                    self.write_to_client(Packet::ConnAck(connack)).await?;
 
                     if session_present {
                         self.deliver_queued_messages(&pending.connect.client_id)
@@ -118,23 +111,22 @@ impl ClientHandler {
                     }
                 } else {
                     let success_auth = AuthPacket::success(result.auth_method)?;
-                    self.transport
-                        .write_packet(Packet::Auth(success_auth))
-                        .await?;
+                    self.write_to_client(Packet::Auth(success_auth)).await?;
                 }
             }
             EnhancedAuthStatus::Continue => {
                 let continue_auth =
                     AuthPacket::continue_authentication(result.auth_method, result.auth_data)?;
-                self.transport
-                    .write_packet(Packet::Auth(continue_auth))
-                    .await?;
+                self.write_to_client(Packet::Auth(continue_auth)).await?;
             }
             EnhancedAuthStatus::Failed => {
-                let failure_auth = AuthPacket::failure(result.reason_code, result.reason_string)?;
-                self.transport
-                    .write_packet(Packet::Auth(failure_auth))
-                    .await?;
+                let reason_string = if self.request_problem_information {
+                    result.reason_string
+                } else {
+                    None
+                };
+                let failure_auth = AuthPacket::failure(result.reason_code, reason_string)?;
+                self.write_to_client(Packet::Auth(failure_auth)).await?;
                 return Err(MqttError::AuthenticationFailed);
             }
         }
@@ -167,23 +159,17 @@ impl ClientHandler {
             EnhancedAuthStatus::Success => {
                 self.user_id = result.user_id;
                 let success_auth = AuthPacket::success(result.auth_method)?;
-                self.transport
-                    .write_packet(Packet::Auth(success_auth))
-                    .await?;
+                self.write_to_client(Packet::Auth(success_auth)).await?;
             }
             EnhancedAuthStatus::Continue => {
                 let continue_auth =
                     AuthPacket::continue_authentication(result.auth_method, result.auth_data)?;
-                self.transport
-                    .write_packet(Packet::Auth(continue_auth))
-                    .await?;
+                self.write_to_client(Packet::Auth(continue_auth)).await?;
             }
             EnhancedAuthStatus::Failed => {
                 if self.protocol_version == 5 {
                     let disconnect = DisconnectPacket::new(result.reason_code);
-                    self.transport
-                        .write_packet(Packet::Disconnect(disconnect))
-                        .await?;
+                    self.write_to_client(Packet::Disconnect(disconnect)).await?;
                 }
                 return Err(MqttError::AuthenticationFailed);
             }

@@ -7,7 +7,6 @@ use crate::packet::connect::ConnectPacket;
 use crate::packet::Packet;
 use crate::protocol::v5::reason_codes::ReasonCode;
 use crate::time::Duration;
-use crate::transport::PacketIo;
 use crate::types::ProtocolVersion;
 use crate::QoS;
 use std::sync::Arc;
@@ -55,9 +54,7 @@ impl ClientHandler {
                     "Rejecting connection: unsupported protocol version"
                 );
                 let connack = ConnAckPacket::new(false, ReasonCode::UnsupportedProtocolVersion);
-                self.transport
-                    .write_packet(Packet::ConnAck(connack))
-                    .await?;
+                self.write_to_client(Packet::ConnAck(connack)).await?;
                 Err(MqttError::UnsupportedProtocolVersion)
             }
         }
@@ -88,6 +85,19 @@ impl ClientHandler {
             .properties
             .get_request_response_information()
             .unwrap_or(false);
+        let client_max_packet_size = connect.properties.get_maximum_packet_size();
+        if client_max_packet_size == Some(0) {
+            warn!(
+                addr = %self.client_addr,
+                "Rejecting connection: Maximum Packet Size of 0 is a Protocol Error"
+            );
+            let connack = ConnAckPacket::new(false, ReasonCode::ProtocolError);
+            self.write_to_client(Packet::ConnAck(connack)).await?;
+            return Err(MqttError::ProtocolError(
+                "Maximum Packet Size must not be zero".to_string(),
+            ));
+        }
+        self.client_max_packet_size = client_max_packet_size;
 
         let assigned_client_id = Self::assign_client_id_if_empty(&mut connect);
         self.validate_client_id(&connect).await?;
@@ -107,7 +117,6 @@ impl ClientHandler {
         self.keep_alive = Duration::from_secs(u64::from(connect.keep_alive));
 
         self.client_receive_maximum = connect.properties.get_receive_maximum().unwrap_or(65535);
-        self.client_max_packet_size = connect.properties.get_maximum_packet_size();
         debug!(
             client_id = %connect.client_id,
             receive_maximum = self.client_receive_maximum,
@@ -144,9 +153,7 @@ impl ClientHandler {
             "Sending CONNACK"
         );
         trace!("CONNACK properties: {:?}", connack.properties);
-        self.transport
-            .write_packet(Packet::ConnAck(connack))
-            .await?;
+        self.write_to_client(Packet::ConnAck(connack)).await?;
         debug!("CONNACK sent successfully");
 
         if session_present {
@@ -183,9 +190,7 @@ impl ClientHandler {
             );
             let connack = ConnAckPacket::new(false, ReasonCode::UseAnotherServer)
                 .with_server_reference(backend);
-            self.transport
-                .write_packet(Packet::ConnAck(connack))
-                .await?;
+            self.write_to_client(Packet::ConnAck(connack)).await?;
             return Ok(Some(Err(MqttError::UseAnotherServer)));
         }
         Ok(None)
@@ -212,9 +217,7 @@ impl ClientHandler {
                 "Rejecting connection: invalid client identifier"
             );
             let connack = ConnAckPacket::new(false, ReasonCode::ClientIdentifierNotValid);
-            self.transport
-                .write_packet(Packet::ConnAck(connack))
-                .await?;
+            self.write_to_client(Packet::ConnAck(connack)).await?;
             return Err(MqttError::InvalidClientId(connect.client_id.clone()));
         }
 
@@ -226,9 +229,7 @@ impl ClientHandler {
                 "Rejecting cert: client ID on connection without verified client certificate"
             );
             let connack = ConnAckPacket::new(false, ReasonCode::NotAuthorized);
-            self.transport
-                .write_packet(Packet::ConnAck(connack))
-                .await?;
+            self.write_to_client(Packet::ConnAck(connack)).await?;
             return Err(MqttError::AuthenticationFailed);
         }
 
@@ -267,9 +268,7 @@ impl ClientHandler {
                             result.auth_method,
                             result.auth_data,
                         )?;
-                        self.transport
-                            .write_packet(Packet::Auth(auth_packet))
-                            .await?;
+                        self.write_to_client(Packet::Auth(auth_packet)).await?;
 
                         self.pending_connect = Some(PendingConnect {
                             connect,
@@ -285,9 +284,7 @@ impl ClientHandler {
                                 connack.properties.set_reason_string(reason);
                             }
                         }
-                        self.transport
-                            .write_packet(Packet::ConnAck(connack))
-                            .await?;
+                        self.write_to_client(Packet::ConnAck(connack)).await?;
                         return Ok(AuthOutcome::Failed(MqttError::AuthenticationFailed));
                     }
                 }
@@ -298,9 +295,7 @@ impl ClientHandler {
                         "Server does not support enhanced authentication".to_string(),
                     );
                 }
-                self.transport
-                    .write_packet(Packet::ConnAck(connack))
-                    .await?;
+                self.write_to_client(Packet::ConnAck(connack)).await?;
                 return Ok(AuthOutcome::Failed(MqttError::AuthenticationFailed));
             }
         } else {
@@ -321,9 +316,7 @@ impl ClientHandler {
                         .properties
                         .set_reason_string("Authentication failed".to_string());
                 }
-                self.transport
-                    .write_packet(Packet::ConnAck(connack))
-                    .await?;
+                self.write_to_client(Packet::ConnAck(connack)).await?;
                 return Ok(AuthOutcome::Failed(MqttError::AuthenticationFailed));
             }
 
@@ -351,9 +344,7 @@ impl ClientHandler {
                     "Rejecting connection: Will QoS exceeds server maximum"
                 );
                 let connack = self.new_connack(false, ReasonCode::QoSNotSupported);
-                self.transport
-                    .write_packet(Packet::ConnAck(connack))
-                    .await?;
+                self.write_to_client(Packet::ConnAck(connack)).await?;
                 return Err(MqttError::ProtocolError(
                     "Will QoS exceeds server maximum".into(),
                 ));
@@ -364,9 +355,7 @@ impl ClientHandler {
                     "Rejecting connection: Will Retain not supported"
                 );
                 let connack = self.new_connack(false, ReasonCode::RetainNotSupported);
-                self.transport
-                    .write_packet(Packet::ConnAck(connack))
-                    .await?;
+                self.write_to_client(Packet::ConnAck(connack)).await?;
                 return Err(MqttError::ProtocolError("Retain not supported".into()));
             }
         }
@@ -497,9 +486,7 @@ impl ClientHandler {
                 "Session user mismatch, rejecting connection"
             );
             let connack = ConnAckPacket::new(false, ReasonCode::NotAuthorized);
-            self.transport
-                .write_packet(Packet::ConnAck(connack))
-                .await?;
+            self.write_to_client(Packet::ConnAck(connack)).await?;
             return Err(MqttError::AuthenticationFailed);
         }
 

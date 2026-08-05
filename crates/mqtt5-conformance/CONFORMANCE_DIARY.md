@@ -38,6 +38,50 @@
 
 ## Diary Entries
 
+### Fix #129 — broker honours the client's Maximum Packet Size for Reason Strings (2026-08-05)
+
+The broker attached a Reason String to CONNACK/SUBACK/PUBACK/PUBREC/AUTH without consulting the
+client's Maximum Packet Size, violating `[MQTT-3.2.2-19]`, `[MQTT-3.4.2-2]`, `[MQTT-3.5.2-2]`,
+`[MQTT-3.9.2-2]` and `[MQTT-3.15.2-2]`. The AUTH-failure path also ignored Request Problem Information
+(`[MQTT-3.1.2-29]`), and the "not authorized" PUBACK/PUBREC interpolated the peer's own topic name
+into the Reason String (peer-controlled overrun up to ~65 KB, plus a u16 UTF-8 length overflow at a
+topic length of 65 500).
+
+Fix:
+- Added `Properties::remove_reason_string` (mqtt5-protocol).
+- Added a single write-path choke point `ClientHandler::write_to_client`: if the encoded packet
+  exceeds the client's Maximum Packet Size it omits the Reason String and re-encodes; if it still does
+  not fit it is discarded per `[MQTT-3.1.2-24]`. Every CONNACK/SUBACK/UNSUBACK/PUBACK/PUBREC/AUTH/
+  DISCONNECT write now routes through it (PUBLISH keeps its own discard path).
+- Hoisted the `client_max_packet_size` capture in `connect.rs` to before `handle_authentication`, so
+  the auth-failure CONNACK actually honours it — the "trap" the issue describes. Verified: with the
+  hoist reverted, the CONNACK test fails with the full Reason String present.
+- Gated the AUTH-failure Reason String on Request Problem Information.
+- Replaced the two peer-controlled "Not authorized to publish to topic: {topic}" Reason Strings with a
+  static "Not authorized to publish", removing the overrun and the u16 overflow at the source.
+
+Tests: `connack_reason_string_omitted_over_max_packet_size` (registered conformance test, `[MQTT-3.2.2-19]`,
+proven to fail without the hoist) and `puback_reason_string_omitted_over_max_packet_size` (a lib test,
+`maximum_qos = 0`, not registered because it needs a non-default config). Manifest: `[MQTT-3.2.2-19]`
+Untested→Tested; `[MQTT-3.4.2-2]`/`[MQTT-3.5.2-2]`/`[MQTT-3.15.2-2]` notes corrected from "reproduced as
+a live violation" to the fix (kept Untested — no registered conformance test reaches them on a default
+broker). All 225 registered conformance tests still pass, confirming the rerouting did not disturb
+normal control-packet delivery.
+
+Note left for the manifest owner: `[MQTT-3.9.2-1]`'s text is the SUBACK packet-identifier rule, but its
+audit note describes a SUBACK Reason String / Maximum Packet Size violation — the note looks
+misattributed. This fix does route SUBACK through the choke point, but it does not touch packet
+identifiers, so `[MQTT-3.9.2-1]` was left untouched rather than relitigated here.
+
+Follow-up caught by an adversarial quorum before merge: routing the CONNACK through the choke point
+turned a previously-benign `Maximum Packet Size = 0` into a connection wedge — with the limit at 0
+every encoded packet (≥ 1 byte) exceeds it, so even the success CONNACK was discarded and the client
+hung forever. MQTT v5.0 3.1.2.11.4 makes a Maximum Packet Size of 0 a Protocol Error, so `handle_connect`
+now rejects such a CONNECT with a Protocol Error (0x82) CONNACK before the limit is armed. Confirmed
+with a counter-test (`zero_max_packet_size_rejected`) that hangs on the unfixed code and passes after.
+Also hardened the PUBACK lib test: a length guard before indexing the reason-code byte, and the client
+limit raised 30→35 to give the success-CONNACK handshake headroom (it was a 7-byte margin).
+
 ### Fix #130 — publisher Topic Alias stripped before delivery (2026-08-04)
 
 `resolve_topic_alias` (`broker/client_handler/publish.rs`) resolved an inbound Topic Alias to a topic
