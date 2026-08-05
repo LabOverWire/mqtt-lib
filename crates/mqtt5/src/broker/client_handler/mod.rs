@@ -17,9 +17,10 @@ use crate::packet::connect::ConnectPacket;
 use crate::packet::disconnect::DisconnectPacket;
 use crate::packet::publish::PublishPacket;
 use crate::packet::Packet;
+use crate::protocol::v5::properties::Properties;
 use crate::protocol::v5::reason_codes::ReasonCode;
 use crate::time::Duration;
-use crate::transport::packet_io::read_packet_reusing_buffer;
+use crate::transport::packet_io::{encode_packet_to_buffer, read_packet_reusing_buffer};
 use crate::transport::PacketIo;
 use bytes::{Bytes, BytesMut};
 use mqtt5_protocol::KeepaliveConfig;
@@ -516,6 +517,46 @@ impl ClientHandler {
         self.config.max_packet_size
     }
 
+    async fn write_to_client(&mut self, mut packet: Packet) -> Result<()> {
+        if let Some(max) = self.client_max_packet_size {
+            let max = max as usize;
+            self.write_buffer.clear();
+            encode_packet_to_buffer(&packet, &mut self.write_buffer)?;
+            if self.write_buffer.len() > max {
+                if let Some(properties) = Self::packet_properties_mut(&mut packet) {
+                    properties.remove_reason_string();
+                    self.write_buffer.clear();
+                    encode_packet_to_buffer(&packet, &mut self.write_buffer)?;
+                }
+                if self.write_buffer.len() > max {
+                    debug!(
+                        packet = packet.packet_type_name(),
+                        packet_size = self.write_buffer.len(),
+                        max_packet_size = max,
+                        "Discarding outbound packet exceeding client Maximum Packet Size"
+                    );
+                    return Ok(());
+                }
+            }
+        }
+        self.transport.write_packet(packet).await
+    }
+
+    fn packet_properties_mut(packet: &mut Packet) -> Option<&mut Properties> {
+        match packet {
+            Packet::ConnAck(p) => Some(&mut p.properties),
+            Packet::PubAck(p) => Some(&mut p.properties),
+            Packet::PubRec(p) => Some(&mut p.properties),
+            Packet::PubRel(p) => Some(&mut p.properties),
+            Packet::PubComp(p) => Some(&mut p.properties),
+            Packet::SubAck(p) => Some(&mut p.properties),
+            Packet::UnsubAck(p) => Some(&mut p.properties),
+            Packet::Auth(p) => Some(&mut p.properties),
+            Packet::Disconnect(p) => Some(&mut p.properties),
+            _ => None,
+        }
+    }
+
     async fn wait_for_connect(&mut self) -> Result<()> {
         let max_size = self.max_packet_size();
         let packet =
@@ -711,7 +752,7 @@ impl ClientHandler {
                     debug!("Shutdown signal received");
                     if self.protocol_version == 5 {
                         let disconnect = DisconnectPacket::new(ReasonCode::ServerShuttingDown);
-                        let _ = self.transport.write_packet(Packet::Disconnect(disconnect)).await;
+                        let _ = self.write_to_client(Packet::Disconnect(disconnect)).await;
                     }
                     return Ok(false);
                 }
@@ -814,9 +855,7 @@ impl ClientHandler {
             Packet::Connect(_) => {
                 if self.protocol_version == 5 {
                     let disconnect = DisconnectPacket::new(ReasonCode::ProtocolError);
-                    self.transport
-                        .write_packet(Packet::Disconnect(disconnect))
-                        .await?;
+                    self.write_to_client(Packet::Disconnect(disconnect)).await?;
                 }
                 Err(MqttError::ProtocolError("Duplicate CONNECT".to_string()))
             }

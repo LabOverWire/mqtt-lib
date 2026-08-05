@@ -1986,6 +1986,34 @@ impl RawPacketBuilder {
         wrap_fixed_header(0x10, &body)
     }
 
+    /// Builds a CONNECT with an Authentication Method property and a Maximum
+    /// Packet Size property (`0x27`, `u32`).
+    #[must_use]
+    pub fn connect_with_auth_method_and_max_packet_size(
+        client_id: &str,
+        auth_method: &str,
+        max_packet_size: u32,
+    ) -> Vec<u8> {
+        let mut body = BytesMut::new();
+        body.put_u16(4);
+        body.put_slice(b"MQTT");
+        body.put_u8(5);
+        body.put_u8(0x02);
+        body.put_u16(60);
+
+        let mut props = BytesMut::new();
+        props.put_u8(0x27);
+        props.put_u32(max_packet_size);
+        props.put_u8(0x15);
+        put_mqtt_string(&mut props, auth_method);
+        encode_variable_int(&mut body, props.len() as u32);
+        body.put(props);
+
+        put_mqtt_string(&mut body, client_id);
+
+        wrap_fixed_header(0x10, &body)
+    }
+
     /// Builds a CONNECT with Authentication Method and Authentication Data properties.
     #[must_use]
     pub fn connect_with_auth_method_and_data(

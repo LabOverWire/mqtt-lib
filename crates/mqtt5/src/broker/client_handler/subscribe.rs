@@ -109,9 +109,7 @@ impl ClientHandler {
             );
             if self.protocol_version == 5 {
                 let disconnect = DisconnectPacket::new(ReasonCode::ProtocolError);
-                self.transport
-                    .write_packet(Packet::Disconnect(disconnect))
-                    .await?;
+                self.write_to_client(Packet::Disconnect(disconnect)).await?;
             }
             return Err(MqttError::ProtocolError(
                 "NoLocal on shared subscription".to_string(),
@@ -267,7 +265,7 @@ impl ClientHandler {
         subscribe: &SubscribePacket,
         reason_codes: &[crate::packet::suback::SubAckReasonCode],
     ) -> Result<()> {
-        let client_id = self.client_id.as_ref().unwrap();
+        let client_id = self.client_id.clone().unwrap();
         let mut suback = if self.protocol_version == 4 {
             SubAckPacket::new_v311(subscribe.packet_id)
         } else {
@@ -286,7 +284,7 @@ impl ClientHandler {
                     .set_reason_string("Subscription quota exceeded".to_string());
             }
         }
-        let result = self.transport.write_packet(Packet::SubAck(suback)).await;
+        let result = self.write_to_client(Packet::SubAck(suback)).await;
 
         if let Some(ref handler) = self.config.event_handler {
             let subscriptions: Vec<SubscriptionInfo> = reason_codes

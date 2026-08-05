@@ -3,7 +3,6 @@ use crate::packet::disconnect::DisconnectPacket;
 use crate::packet::publish::PublishPacket;
 use crate::protocol::v5::reason_codes::ReasonCode;
 use crate::time::Duration;
-use crate::transport::PacketIo;
 use std::sync::Arc;
 use tracing::{debug, warn};
 
@@ -27,9 +26,7 @@ impl ClientHandler {
     }
 
     pub(super) async fn handle_pingreq(&mut self) -> Result<()> {
-        self.transport
-            .write_packet(crate::packet::Packet::PingResp)
-            .await
+        self.write_to_client(crate::packet::Packet::PingResp).await
     }
 
     pub(super) async fn publish_will_message(&self, client_id: &str) {

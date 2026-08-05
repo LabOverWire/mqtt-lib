@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [mqtt5 0.38.3] - 2026-08-05
+
+### Fixed
+
+- **The broker no longer exceeds the client's Maximum Packet Size when attaching a Reason String.** CONNACK, SUBACK, PUBACK, PUBREC and AUTH could carry a Reason String without consulting the Maximum Packet Size the client advertised in CONNECT, which MQTT v5.0 forbids (`[MQTT-3.2.2-19]`, `[MQTT-3.4.2-2]`, `[MQTT-3.5.2-2]`, `[MQTT-3.15.2-2]`). The overrun could be driven by the peer: the "not authorized" PUBACK/PUBREC interpolated the client's own topic name into the Reason String, so a large topic produced a correspondingly large acknowledgement, and a topic of 65 500 bytes overflowed the u16 Reason-String length and dropped the connection with no DISCONNECT. Outbound control packets now pass through a single write-path choke point that omits the Reason String and re-encodes when the packet would exceed the client's limit, and discards the packet only if it still does not fit (`[MQTT-3.1.2-24]`). The capture of the client's Maximum Packet Size was hoisted to before authentication so the enhanced-authentication failure CONNACK — reachable by any peer on a default broker — also honours it. The AUTH-failure Reason String now additionally respects Request Problem Information (`[MQTT-3.1.2-29]`), and the peer's topic name is no longer interpolated into any Reason String. Reported in issue #129.
+
+## [mqtt5-protocol 0.14.4] - 2026-08-05
+
+### Added
+
+- **`Properties::remove_reason_string`** removes the Reason String property from a property set. The broker uses it to omit the Reason String from an outbound control packet that would otherwise exceed the client's Maximum Packet Size (see mqtt5 0.38.3).
+
 ## [mqtt5 0.38.2] - 2026-08-04
 
 ### Fixed

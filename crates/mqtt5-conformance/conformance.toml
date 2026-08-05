@@ -729,9 +729,9 @@ id = "MQTT-3.2.2-19"
 level = "Must"
 applies_to = "Server"
 text = "The Server MUST NOT send this property (Reason String) if it would increase the size of the CONNACK packet beyond the Maximum Packet Size specified by the Client."
-status = "Untested"
-test_names = []
-note = "Re-reviewed: the previous NotApplicable rested on a FALSE premise. This broker does set a Reason String on CONNACK, and nothing checks the client's Maximum Packet Size before appending it. Reproduced as a live violation"
+status = "Tested"
+test_names = ["connack_reason_string_omitted_over_max_packet_size"]
+note = "Fixed (#129): outbound control packets go through the write_to_client choke point, which omits the Reason String and re-encodes when the packet would exceed the client's Maximum Packet Size. The capture of that limit was hoisted before authentication so the enhanced-auth failure CONNACK also honours it"
 
 [[sections."3.2".statements]]
 id = "MQTT-3.2.2-20"
@@ -1151,7 +1151,7 @@ applies_to = "Both"
 text = "The sender MUST NOT send this property if it would increase the size of the PUBACK packet beyond the Maximum Packet Size specified by the receiver . It is a Protocol Error to include the Reason String more than once"
 status = "Untested"
 test_names = []
-note = "Re-reviewed: the previous NotApplicable rested on a FALSE premise. This broker does set a Reason String on PUBACK, and nothing checks the client's Maximum Packet Size before appending it. Reproduced as a live violation"
+note = "Fixed (#129): PUBACK is routed through the write_to_client choke point, which omits the Reason String when it would exceed the client's Maximum Packet Size. Exercised by the puback_reason_string_omitted_over_max_packet_size lib test, which is not a registered conformance test because it requires a non-default maximum_qos"
 
 [[sections."3.4".statements]]
 id = "MQTT-3.4.2-3"
@@ -1191,7 +1191,7 @@ applies_to = "Both"
 text = "The sender MUST NOT send this property if it would increase the size of the PUBREC packet beyond the Maximum Packet Size specified by the receiver . It is a Protocol Error to include the Reason String more than once"
 status = "Untested"
 test_names = []
-note = "Re-reviewed: the previous NotApplicable rested on a FALSE premise. This broker does set a Reason String on PUBREC, and nothing checks the client's Maximum Packet Size before appending it. Reproduced as a live violation"
+note = "Fixed (#129): PUBREC is routed through the write_to_client choke point, which omits the Reason String when it would exceed the client's Maximum Packet Size. No registered conformance test covers this specific packet, which requires a non-default maximum_qos"
 
 [[sections."3.5".statements]]
 id = "MQTT-3.5.2-3"
@@ -1762,7 +1762,7 @@ applies_to = "Both"
 text = "The sender MUST NOT send this property if it would increase the size of the AUTH packet beyond the Maximum Packet Size specified by the receiver . It is a Protocol Error to include the Reason String more than once"
 status = "Untested"
 test_names = []
-note = "Re-reviewed: the previous NotApplicable rested on a FALSE premise. This broker does set a Reason String on AUTH, and nothing checks the client's Maximum Packet Size before appending it. Reproduced as a live violation"
+note = "Fixed (#129): AUTH is routed through the write_to_client choke point, which omits the Reason String when it would exceed the client's Maximum Packet Size; the AUTH-failure path additionally now honours Request Problem Information [MQTT-3.1.2-29]. No registered conformance test covers this path, which requires a failing enhanced-auth provider"
 
 [[sections."3.15".statements]]
 id = "MQTT-3.15.2-3"

@@ -13,7 +13,6 @@ use crate::packet::Packet;
 use crate::protocol::v5::properties::{PropertyId, PropertyValue};
 use crate::protocol::v5::reason_codes::ReasonCode;
 use crate::transport::packet_io::encode_packet_to_buffer;
-use crate::transport::PacketIo;
 use crate::QoS;
 use crate::Transport;
 use std::sync::Arc;
@@ -126,9 +125,7 @@ impl ClientHandler {
                 "Receive maximum exceeded"
             );
             let disconnect = DisconnectPacket::new(ReasonCode::ReceiveMaximumExceeded);
-            self.transport
-                .write_packet(Packet::Disconnect(disconnect))
-                .await?;
+            self.write_to_client(Packet::Disconnect(disconnect)).await?;
             return Err(MqttError::ProtocolError(
                 "Client exceeded server receive maximum".to_string(),
             ));
@@ -203,7 +200,7 @@ impl ClientHandler {
 
                 let mut puback = PubAckPacket::new(publish.packet_id.unwrap());
                 puback.reason_code = ReasonCode::Success;
-                self.transport.write_packet(Packet::PubAck(puback)).await?;
+                self.write_to_client(Packet::PubAck(puback)).await?;
             }
             QoS::ExactlyOnce => {
                 let packet_id = publish.packet_id.unwrap();
@@ -222,7 +219,7 @@ impl ClientHandler {
                     .insert(packet_id, InflightPublish::Pending(publish));
                 let mut pubrec = PubRecPacket::new(packet_id);
                 pubrec.reason_code = ReasonCode::Success;
-                self.transport.write_packet(Packet::PubRec(pubrec)).await?;
+                self.write_to_client(Packet::PubRec(pubrec)).await?;
             }
         }
         Ok(())
@@ -234,7 +231,7 @@ impl ClientHandler {
             QoS::AtLeastOnce => {
                 let mut puback = PubAckPacket::new(publish.packet_id.unwrap());
                 puback.reason_code = ReasonCode::Success;
-                self.transport.write_packet(Packet::PubAck(puback)).await?;
+                self.write_to_client(Packet::PubAck(puback)).await?;
             }
             QoS::ExactlyOnce => {
                 let packet_id = publish.packet_id.unwrap();
@@ -242,7 +239,7 @@ impl ClientHandler {
                     .insert(packet_id, InflightPublish::Handled);
                 let mut pubrec = PubRecPacket::new(packet_id);
                 pubrec.reason_code = ReasonCode::Success;
-                self.transport.write_packet(Packet::PubRec(pubrec)).await?;
+                self.write_to_client(Packet::PubRec(pubrec)).await?;
             }
         }
         Ok(())
@@ -257,25 +254,23 @@ impl ClientHandler {
                 let mut puback = PubAckPacket::new(publish.packet_id.unwrap());
                 puback.reason_code = ReasonCode::NotAuthorized;
                 if self.request_problem_information {
-                    puback.properties.set_reason_string(format!(
-                        "Not authorized to publish to topic: {}",
-                        publish.topic_name
-                    ));
+                    puback
+                        .properties
+                        .set_reason_string("Not authorized to publish".to_string());
                 }
                 debug!("Sending PUBACK with NotAuthorized");
-                self.transport.write_packet(Packet::PubAck(puback)).await?;
+                self.write_to_client(Packet::PubAck(puback)).await?;
             }
             QoS::ExactlyOnce => {
                 let mut pubrec = PubRecPacket::new(publish.packet_id.unwrap());
                 pubrec.reason_code = ReasonCode::NotAuthorized;
                 if self.request_problem_information {
-                    pubrec.properties.set_reason_string(format!(
-                        "Not authorized to publish to topic: {}",
-                        publish.topic_name
-                    ));
+                    pubrec
+                        .properties
+                        .set_reason_string("Not authorized to publish".to_string());
                 }
                 debug!("Sending PUBREC with NotAuthorized");
-                self.transport.write_packet(Packet::PubRec(pubrec)).await?;
+                self.write_to_client(Packet::PubRec(pubrec)).await?;
             }
             QoS::AtMostOnce => {}
         }
@@ -294,7 +289,7 @@ impl ClientHandler {
                             publish.qos as u8, self.config.maximum_qos
                         ));
                     }
-                    self.transport.write_packet(Packet::PubAck(puback)).await?;
+                    self.write_to_client(Packet::PubAck(puback)).await?;
                 }
                 QoS::ExactlyOnce => {
                     let mut pubrec = PubRecPacket::new(packet_id);
@@ -305,7 +300,7 @@ impl ClientHandler {
                             publish.qos as u8, self.config.maximum_qos
                         ));
                     }
-                    self.transport.write_packet(Packet::PubRec(pubrec)).await?;
+                    self.write_to_client(Packet::PubRec(pubrec)).await?;
                 }
                 QoS::AtMostOnce => {}
             }
@@ -370,7 +365,7 @@ impl ClientHandler {
                 if self.request_problem_information {
                     puback.properties.set_reason_string(reason.to_string());
                 }
-                self.transport.write_packet(Packet::PubAck(puback)).await?;
+                self.write_to_client(Packet::PubAck(puback)).await?;
             }
             QoS::ExactlyOnce => {
                 let mut pubrec = PubRecPacket::new(publish.packet_id.unwrap());
@@ -378,7 +373,7 @@ impl ClientHandler {
                 if self.request_problem_information {
                     pubrec.properties.set_reason_string(reason.to_string());
                 }
-                self.transport.write_packet(Packet::PubRec(pubrec)).await?;
+                self.write_to_client(Packet::PubRec(pubrec)).await?;
             }
             QoS::AtMostOnce => {}
         }
@@ -398,7 +393,7 @@ impl ClientHandler {
                         .properties
                         .set_reason_string("Rate limit exceeded".to_string());
                 }
-                self.transport.write_packet(Packet::PubAck(puback)).await?;
+                self.write_to_client(Packet::PubAck(puback)).await?;
             }
             QoS::ExactlyOnce => {
                 let mut pubrec = PubRecPacket::new(publish.packet_id.unwrap());
@@ -408,7 +403,7 @@ impl ClientHandler {
                         .properties
                         .set_reason_string("Rate limit exceeded".to_string());
                 }
-                self.transport.write_packet(Packet::PubRec(pubrec)).await?;
+                self.write_to_client(Packet::PubRec(pubrec)).await?;
             }
             QoS::AtMostOnce => {}
         }
@@ -540,7 +535,7 @@ impl ClientHandler {
         }
         let mut pub_rel = PubRelPacket::new(pubrec.packet_id);
         pub_rel.reason_code = ReasonCode::Success;
-        self.transport.write_packet(Packet::PubRel(pub_rel)).await
+        self.write_to_client(Packet::PubRel(pub_rel)).await
     }
 
     pub(super) async fn handle_pubrel(&mut self, pubrel: PubRelPacket) -> Result<()> {
@@ -576,7 +571,7 @@ impl ClientHandler {
         };
 
         let pubcomp = PubCompPacket::new_with_reason(pubrel.packet_id, reason_code);
-        self.transport.write_packet(Packet::PubComp(pubcomp)).await
+        self.write_to_client(Packet::PubComp(pubcomp)).await
     }
 
     pub(super) async fn handle_pubcomp(&mut self, pubcomp: &PubCompPacket) {
@@ -832,7 +827,7 @@ impl ClientHandler {
                             self.outbound_inflight.insert(msg.packet_id, publish);
                             let mut pubrel = PubRelPacket::new(msg.packet_id);
                             pubrel.reason_code = ReasonCode::Success;
-                            self.transport.write_packet(Packet::PubRel(pubrel)).await?;
+                            self.write_to_client(Packet::PubRel(pubrel)).await?;
                         }
                         InflightPhase::AwaitingPubrel => {}
                     },

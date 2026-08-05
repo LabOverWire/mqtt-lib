@@ -314,6 +314,10 @@ impl Properties {
             .push(PropertyValue::Utf8String(reason));
     }
 
+    pub fn remove_reason_string(&mut self) {
+        self.properties.remove(&PropertyId::ReasonString);
+    }
+
     pub fn set_receive_maximum(&mut self, max: u16) {
         self.properties
             .entry(PropertyId::ReceiveMaximum)

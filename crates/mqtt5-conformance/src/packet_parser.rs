@@ -18,6 +18,7 @@ const PROP_CONTENT_TYPE: u8 = 0x03;
 const PROP_RESPONSE_TOPIC: u8 = 0x08;
 const PROP_CORRELATION_DATA: u8 = 0x09;
 const PROP_SUBSCRIPTION_IDENTIFIER: u8 = 0x0B;
+const PROP_REASON_STRING: u8 = 0x1F;
 const PROP_TOPIC_ALIAS: u8 = 0x23;
 const PROP_USER_PROPERTY: u8 = 0x26;
 
@@ -83,6 +84,7 @@ pub struct ParsedProperties {
     pub correlation_data: Option<Vec<u8>>,
     pub payload_format_indicator: Option<u8>,
     pub message_expiry_interval: Option<u32>,
+    pub reason_string: Option<String>,
 }
 
 impl ParsedProperties {
@@ -146,6 +148,11 @@ impl ParsedProperties {
                 PROP_SUBSCRIPTION_IDENTIFIER => {
                     let (val, next) = decode_variable_int(data, idx)?;
                     props.subscription_identifiers.push(val);
+                    idx = next;
+                }
+                PROP_REASON_STRING => {
+                    let (s, next) = decode_string(data, idx)?;
+                    props.reason_string = Some(s);
                     idx = next;
                 }
                 PROP_TOPIC_ALIAS => {

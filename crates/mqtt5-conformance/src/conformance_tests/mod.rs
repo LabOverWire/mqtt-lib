@@ -23,6 +23,7 @@ pub mod section3_connect;
 pub mod section3_connect_extended;
 pub mod section3_disconnect;
 pub mod section3_final_conformance;
+pub mod section3_max_packet_size;
 pub mod section3_ping;
 pub mod section3_publish;
 pub mod section3_publish_advanced;
