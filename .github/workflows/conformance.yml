@@ -66,6 +66,7 @@ jobs:
           ./target/release/mqttv5 broker \
             --host 127.0.0.1:1883 \
             --allow-anonymous true \
+            --storage-backend memory \
             > broker.log 2>&1 &
           echo $! > broker.pid
           sleep 2

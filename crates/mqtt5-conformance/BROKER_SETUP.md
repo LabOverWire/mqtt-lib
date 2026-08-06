@@ -207,8 +207,11 @@ cargo build --release -p mqttv5-cli
 ### Start
 
 ```bash
-./target/release/mqttv5 broker --host 0.0.0.0:1883
+./target/release/mqttv5 broker --host 0.0.0.0:1883 --storage-backend memory
 ```
+
+`--storage-backend memory` keeps the run stateless. Without it the broker persists sessions to
+`./mqtt_storage` in the current directory, which accumulates across restarts and slows later runs.
 
 ### Run
 

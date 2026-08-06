@@ -38,6 +38,45 @@
 
 ## Diary Entries
 
+### External-broker CI flake investigation — concurrency ruled out, backend switched to memory (2026-08-06)
+
+**Trigger**: `puback_error_stops_retransmission [MQTT-4.4.0-2]` failed once on the external-mqtt5 CI
+job with `Timeout("puback")`, on the post-merge run of commit `c44c42a`. It passed on the PR and on
+the very next main commit (`6bea100`) — a classic non-deterministic transient.
+
+**Hypothesis (WRONG, overturned by evidence)**: the ~187-test suite runs at libtest-mimic default
+parallelism against one shared broker, so on a 2-core runner the broker gets CPU-starved and the
+client's ack times out. Reducing `--test-threads` was the proposed fix.
+
+**The confound I introduced.** A first local sweep seemed to confirm it (threads=1: 0 fail →
+threads=12: 19 fail). It was an artifact: the `mqttv5` broker defaults to the **file** storage
+backend at `./mqtt_storage`, and across ~25 broker restarts during the sweep the store grew to
+**169,302 session files**. Each fresh broker reloaded that growing store at startup, and the slow
+reload — not concurrency — caused the CONNACK/PUBACK timeouts. Higher parallelism merely hit the slow
+broker harder, mimicking a concurrency curve.
+
+**Controlled result (fresh empty storage per run — faithful to CI's clean runner):**
+
+| condition (fresh storage) | result |
+|---|---|
+| threads = 1 / 2 / 12, unloaded | 0 / 0 / 0 failures (×2 each); threads=12 fastest at ~12s |
+| threads = 2, ~2 cores (10 CPU hogs) | 0/3 runs failed |
+| threads = 1, ~2 cores (10 CPU hogs) | 0/3 runs failed |
+
+The same 10-hog load that produced 3–6 failures per run **with** the polluted store produced **zero**
+with a clean store. Concurrency and CPU starvation are both ruled out. The original CI failure was on
+a fresh runner (empty store, one broker start) and could not be reproduced across ~16 controlled clean
+runs — it is the rare timing transient the 30s `ACK_TIMEOUT` already exists to absorb.
+
+**Action taken**: `--test-threads=1` was NOT applied (it fixes a non-existent cause and would slow
+the job). Instead the CI broker now runs with `--storage-backend memory` (`conformance.yml`): verified
+184/184 pass, lossless (no test restarts the broker mid-run), ~12s, and it creates no `mqtt_storage`.
+This is the correct backend for an ephemeral single-run test broker — it removes disk I/O from the
+broker's per-connect/QoS hot path (a plausible transient-stall contributor on a shared runner) and
+eliminates the persistence footgun that derailed this very investigation. Not claimed as a proven fix
+for the specific transient, which was not reproducible; a job-level retry was considered and
+deliberately left out.
+
 ### Fix #129 — broker honours the client's Maximum Packet Size for Reason Strings (2026-08-05)
 
 The broker attached a Reason String to CONNACK/SUBACK/PUBACK/PUBREC/AUTH without consulting the
