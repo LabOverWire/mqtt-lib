@@ -624,6 +624,9 @@ fn spawn_publishers(
     running: &Arc<std::sync::atomic::AtomicBool>,
     published: &Arc<AtomicU64>,
 ) -> Vec<tokio::task::JoinHandle<()>> {
+    if pub_clients.is_empty() {
+        return Vec::new();
+    }
     let mut handles = Vec::with_capacity(cfg.num_topics);
     for topic_idx in 0..cfg.num_topics {
         let client = pub_clients[topic_idx % pub_clients.len()].clone();
@@ -656,9 +659,10 @@ async fn run_throughput(cmd: BenchCommand) -> Result<()> {
     let base_id = base_client_id(&cmd, "bench");
 
     let num_topics = resolved_topics(&cmd);
+    let active_pub_conns = num_topics.min(cmd.publishers);
     eprintln!(
-        "connecting {} publisher(s) and {} subscriber(s) to {url} ({num_topics} topics across {} publisher connection(s))...",
-        cmd.publishers, cmd.subscribers, cmd.publishers
+        "connecting {} publisher(s) and {} subscriber(s) to {url} ({num_topics} topics round-robin across {active_pub_conns} publisher connection(s))...",
+        cmd.publishers, cmd.subscribers
     );
 
     let mut pub_clients = Vec::with_capacity(cmd.publishers);
