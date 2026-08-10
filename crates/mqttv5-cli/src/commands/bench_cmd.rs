@@ -129,6 +129,20 @@ pub struct BenchCommand {
     #[arg(long, default_value = "4")]
     pub topics: usize,
 
+    #[arg(
+        long,
+        default_value = "1",
+        help = "HOL mode: number of publisher connections; topics are distributed round-robin across them (1 = single-connection baseline, topics == pub-connections = one connection per topic)"
+    )]
+    pub pub_connections: usize,
+
+    #[arg(
+        long,
+        default_value = "1",
+        help = "HOL mode: number of subscriber connections; topics are distributed round-robin across them"
+    )]
+    pub sub_connections: usize,
+
     #[arg(long, default_value = "0")]
     pub rate: u64,
 
@@ -304,6 +318,8 @@ struct BenchConfig {
     quic_datagrams: bool,
     quic_flow_headers: bool,
     rate: u64,
+    hol_pub_connections: usize,
+    hol_sub_connections: usize,
     payload_format: String,
     actual_payload_bytes: usize,
 }
@@ -385,6 +401,7 @@ struct TraceRecord {
     receive_ns: u64,
     latency_us: u64,
     stream_id: u64,
+    conn_idx: u16,
 }
 
 struct StatsRecord {
@@ -462,6 +479,8 @@ fn bench_config(cmd: &BenchCommand, url: &str) -> BenchConfig {
         quic_datagrams: cmd.quic_datagrams,
         quic_flow_headers: cmd.quic_flow_headers,
         rate: cmd.rate,
+        hol_pub_connections: cmd.pub_connections,
+        hol_sub_connections: cmd.sub_connections,
         payload_format: format_name(cmd.payload_format),
         actual_payload_bytes: sample.len(),
     }
@@ -1129,7 +1148,7 @@ fn spawn_connection_workers(
 }
 
 async fn subscribe_hol_topics(
-    sub_client: &MqttClient,
+    sub_clients: &[MqttClient],
     num_topics: usize,
     format: PayloadFormat,
     topic_samples: &[Arc<std::sync::Mutex<Vec<TimestampedSample>>>],
@@ -1137,12 +1156,16 @@ async fn subscribe_hol_topics(
     trace_records: Option<&Arc<std::sync::Mutex<Vec<TraceRecord>>>>,
 ) -> Result<()> {
     for (i, samples_vec) in topic_samples.iter().enumerate() {
+        let conn = i % sub_clients.len();
+        let sub_client = &sub_clients[conn];
         let topic_filter = format!("bench/hol/{i}");
         let samples_clone = Arc::clone(samples_vec);
         let start_nanos = Arc::clone(measure_start_nanos);
         let trace_clone = trace_records.map(Arc::clone);
         #[allow(clippy::cast_possible_truncation)]
         let topic_idx = i as u16;
+        #[allow(clippy::cast_possible_truncation)]
+        let conn_idx = conn as u16;
         sub_client
             .subscribe(&topic_filter, move |msg| {
                 let sent_nanos = decode_timestamp(format, &msg.payload);
@@ -1168,6 +1191,7 @@ async fn subscribe_hol_topics(
                             receive_ns: now_nanos,
                             latency_us,
                             stream_id: msg.stream_id.unwrap_or(0),
+                            conn_idx,
                         });
                     }
                 }
@@ -1212,13 +1236,13 @@ fn write_trace_csv(dir: &std::path::Path, records: &[TraceRecord]) -> Result<()>
     let mut out = std::io::BufWriter::new(std::fs::File::create(&path)?);
     writeln!(
         out,
-        "topic_idx,seq,publish_ns,receive_ns,latency_us,stream_id"
+        "topic_idx,seq,publish_ns,receive_ns,latency_us,stream_id,conn_idx"
     )?;
     for r in records {
         writeln!(
             out,
-            "{},{},{},{},{},{}",
-            r.topic_idx, r.seq, r.publish_ns, r.receive_ns, r.latency_us, r.stream_id
+            "{},{},{},{},{},{},{}",
+            r.topic_idx, r.seq, r.publish_ns, r.receive_ns, r.latency_us, r.stream_id, r.conn_idx
         )?;
     }
     eprintln!(
@@ -1406,6 +1430,25 @@ fn finalize_hol_traces(
     Ok(())
 }
 
+async fn connect_hol_clients(
+    cmd: &BenchCommand,
+    base_id: &str,
+    pub_url: &str,
+    url: &str,
+    pub_conns: usize,
+    sub_conns: usize,
+) -> Result<(Vec<MqttClient>, Vec<MqttClient>)> {
+    let mut pub_clients = Vec::with_capacity(pub_conns);
+    for i in 0..pub_conns {
+        pub_clients.push(connect_client(format!("{base_id}-pub-{i}"), pub_url, cmd).await?);
+    }
+    let mut sub_clients = Vec::with_capacity(sub_conns);
+    for i in 0..sub_conns {
+        sub_clients.push(connect_client(format!("{base_id}-sub-{i}"), url, cmd).await?);
+    }
+    Ok((pub_clients, sub_clients))
+}
+
 async fn run_hol_blocking(cmd: BenchCommand) -> Result<()> {
     use std::sync::Mutex;
 
@@ -1415,10 +1458,14 @@ async fn run_hol_blocking(cmd: BenchCommand) -> Result<()> {
     let num_topics = cmd.topics;
     let payload_size = cmd.payload_size.max(12);
     let trace_dir = cmd.trace_dir.clone();
+    let pub_conns = cmd.pub_connections.max(1);
+    let sub_conns = cmd.sub_connections.max(1);
 
-    eprintln!("connecting pub to {pub_url}, sub to {url} for HOL blocking test with {num_topics} topics...");
-    let pub_client = connect_client(format!("{base_id}-pub"), &pub_url, &cmd).await?;
-    let sub_client = connect_client(format!("{base_id}-sub"), &url, &cmd).await?;
+    eprintln!(
+        "connecting {pub_conns} pub / {sub_conns} sub connection(s) (pub -> {pub_url}, sub -> {url}) for HOL blocking test with {num_topics} topics...",
+    );
+    let (pub_clients, sub_clients) =
+        connect_hol_clients(&cmd, &base_id, &pub_url, &url, pub_conns, sub_conns).await?;
 
     let topic_samples: Vec<Arc<Mutex<Vec<TimestampedSample>>>> = (0..num_topics)
         .map(|_| Arc::new(Mutex::new(Vec::with_capacity(100_000))))
@@ -1430,7 +1477,7 @@ async fn run_hol_blocking(cmd: BenchCommand) -> Result<()> {
     let format = cmd.payload_format;
     let measure_start_nanos = Arc::new(AtomicU64::new(0));
     subscribe_hol_topics(
-        &sub_client,
+        &sub_clients,
         num_topics,
         format,
         &topic_samples,
@@ -1459,7 +1506,7 @@ async fn run_hol_blocking(cmd: BenchCommand) -> Result<()> {
 
     eprintln!("warming up for {}s at {rate_label}...", cmd.warmup);
     run_hol_warmup(
-        &pub_client,
+        &pub_clients,
         &pub_cfg,
         &running,
         &published,
@@ -1476,8 +1523,8 @@ async fn run_hol_blocking(cmd: BenchCommand) -> Result<()> {
     });
 
     let (elapsed, total_published) = run_hol_measure_phase(
-        &sub_client,
-        &pub_client,
+        &sub_clients,
+        &pub_clients,
         &pub_cfg,
         &running,
         &published,
@@ -1505,8 +1552,12 @@ async fn run_hol_blocking(cmd: BenchCommand) -> Result<()> {
     };
     println!("{}", serde_json::to_string_pretty(&output)?);
 
-    pub_client.disconnect().await.ok();
-    sub_client.disconnect().await.ok();
+    for client in &pub_clients {
+        client.disconnect().await.ok();
+    }
+    for client in &sub_clients {
+        client.disconnect().await.ok();
+    }
     Ok(())
 }
 
@@ -1552,8 +1603,8 @@ fn finalize_and_report_hol(
 
 #[allow(clippy::too_many_arguments)]
 async fn run_hol_measure_phase(
-    sub_client: &MqttClient,
-    pub_client: &MqttClient,
+    sub_clients: &[MqttClient],
+    pub_clients: &[MqttClient],
     pub_cfg: &HolPublishConfig,
     running: &Arc<std::sync::atomic::AtomicBool>,
     published: &Arc<AtomicU64>,
@@ -1564,7 +1615,7 @@ async fn run_hol_measure_phase(
 ) -> (f64, u64) {
     running.store(true, Ordering::SeqCst);
     let stats_handle = if let Some(stats) = stats_records {
-        sub_client.quic_connection().await.map(|conn| {
+        sub_clients[0].quic_connection().await.map(|conn| {
             eprintln!("  quinn stats sampler active (100ms interval)");
             spawn_quinn_stats_sampler(conn, Arc::clone(stats), Arc::clone(running))
         })
@@ -1575,7 +1626,7 @@ async fn run_hol_measure_phase(
     eprintln!("measuring for {duration}s at {rate_label}...");
     measure_start_nanos.store(nanos_as_u64(), Ordering::SeqCst);
     let measure_wall = Instant::now();
-    let measure_handles = spawn_hol_publishers(pub_client, pub_cfg, running, published);
+    let measure_handles = spawn_hol_publishers(pub_clients, pub_cfg, running, published);
     tokio::time::sleep(Duration::from_secs(duration)).await;
     running.store(false, Ordering::SeqCst);
     for handle in measure_handles {
@@ -1592,7 +1643,7 @@ async fn run_hol_measure_phase(
 }
 
 async fn run_hol_warmup(
-    pub_client: &MqttClient,
+    pub_clients: &[MqttClient],
     pub_cfg: &HolPublishConfig,
     running: &Arc<std::sync::atomic::AtomicBool>,
     published: &Arc<AtomicU64>,
@@ -1600,7 +1651,7 @@ async fn run_hol_warmup(
     trace_records: Option<&Arc<std::sync::Mutex<Vec<TraceRecord>>>>,
     warmup_secs: u64,
 ) {
-    let warmup_handles = spawn_hol_publishers(pub_client, pub_cfg, running, published);
+    let warmup_handles = spawn_hol_publishers(pub_clients, pub_cfg, running, published);
     tokio::time::sleep(Duration::from_secs(warmup_secs)).await;
     running.store(false, Ordering::SeqCst);
     for handle in warmup_handles {
@@ -1624,14 +1675,14 @@ struct HolPublishConfig {
 }
 
 fn spawn_hol_publishers(
-    pub_client: &MqttClient,
+    pub_clients: &[MqttClient],
     cfg: &HolPublishConfig,
     running: &Arc<std::sync::atomic::AtomicBool>,
     published: &Arc<AtomicU64>,
 ) -> Vec<tokio::task::JoinHandle<()>> {
     let mut handles = Vec::with_capacity(cfg.num_topics);
     for topic_idx in 0..cfg.num_topics {
-        let client = pub_client.clone();
+        let client = pub_clients[topic_idx % pub_clients.len()].clone();
         let running = Arc::clone(running);
         let published = Arc::clone(published);
         let format = cfg.format;
