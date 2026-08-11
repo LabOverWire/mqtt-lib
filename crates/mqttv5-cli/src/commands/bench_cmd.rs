@@ -729,22 +729,23 @@ async fn run_throughput(cmd: BenchCommand) -> Result<()> {
         &received,
     )
     .await;
+    let elapsed = measure_start.elapsed().as_secs_f64();
 
     running.store(false, Ordering::SeqCst);
     for handle in handles {
         handle.await.ok();
     }
 
-    let total_published: u64 = offered_samples.iter().sum();
-    let total_received: u64 = delivered_samples.iter().sum();
-    let elapsed = usize_as_f64_lossy(delivered_samples.len());
+    let total_published = published.load(Ordering::Relaxed);
+    let total_received = drain_until_stable(&received).await;
     let offered_rate = rate_mean(&offered_samples);
     let throughput_avg = rate_mean(&delivered_samples);
     let throughput_steady = steady_state_mean(&delivered_samples, cmd.steady_trim);
-    let delivered_ratio = if total_published == 0 {
+    let expected = as_f64_lossy(total_published) * usize_as_f64_lossy(cmd.subscribers);
+    let delivered_ratio = if expected == 0.0 {
         0.0
     } else {
-        as_f64_lossy(total_received) / as_f64_lossy(total_published)
+        as_f64_lossy(total_received) / expected
     };
 
     let output = BenchOutput {
@@ -803,6 +804,19 @@ async fn sample_rates_per_second(
         }
     }
     (offered_samples, delivered_samples)
+}
+
+async fn drain_until_stable(counter: &AtomicU64) -> u64 {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut last = counter.load(Ordering::Relaxed);
+    loop {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let current = counter.load(Ordering::Relaxed);
+        if current == last || Instant::now() >= deadline {
+            return current;
+        }
+        last = current;
+    }
 }
 
 fn rate_mean(samples: &[u64]) -> f64 {
