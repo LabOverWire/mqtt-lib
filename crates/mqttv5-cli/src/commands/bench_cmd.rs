@@ -149,6 +149,13 @@ pub struct BenchCommand {
     #[arg(long, default_value = "0")]
     pub rate: u64,
 
+    #[arg(
+        long,
+        default_value = "0.1",
+        help = "Throughput mode: fraction of per-second samples dropped from each end (ramp-up/tail) before computing steady-state throughput"
+    )]
+    pub steady_trim: f64,
+
     #[arg(long, value_enum, default_value = "raw")]
     pub payload_format: PayloadFormat,
 
@@ -322,6 +329,7 @@ struct BenchConfig {
     quic_datagrams: bool,
     quic_flow_headers: bool,
     rate: u64,
+    steady_trim: f64,
     hol_pub_connections: usize,
     hol_sub_connections: usize,
     payload_format: String,
@@ -333,8 +341,12 @@ struct ThroughputResults {
     published: u64,
     received: u64,
     elapsed_secs: f64,
+    offered_rate: f64,
     throughput_avg: f64,
+    throughput_steady: f64,
+    delivered_ratio: f64,
     samples: Vec<u64>,
+    offered_samples: Vec<u64>,
 }
 
 #[derive(Serialize)]
@@ -491,6 +503,7 @@ fn bench_config(cmd: &BenchCommand, url: &str) -> BenchConfig {
         quic_datagrams: cmd.quic_datagrams,
         quic_flow_headers: cmd.quic_flow_headers,
         rate: cmd.rate,
+        steady_trim: cmd.steady_trim,
         hol_pub_connections: cmd.pub_connections,
         hol_sub_connections: cmd.sub_connections,
         payload_format: format_name(cmd.payload_format),
@@ -709,20 +722,30 @@ async fn run_throughput(cmd: BenchCommand) -> Result<()> {
 
     eprintln!("measuring for {}s...", cmd.duration);
     let measure_start = Instant::now();
-    let samples =
-        sample_counter_per_second(measure_start, Duration::from_secs(cmd.duration), &received)
-            .await;
+    let (offered_samples, delivered_samples) = sample_rates_per_second(
+        measure_start,
+        Duration::from_secs(cmd.duration),
+        &published,
+        &received,
+    )
+    .await;
 
     running.store(false, Ordering::SeqCst);
     for handle in handles {
         handle.await.ok();
     }
-    tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let total_published = published.load(Ordering::Relaxed);
-    let total_received = received.load(Ordering::Relaxed);
-    let elapsed = measure_start.elapsed().as_secs_f64();
-    let throughput_avg = as_f64_lossy(total_received) / elapsed;
+    let total_published: u64 = offered_samples.iter().sum();
+    let total_received: u64 = delivered_samples.iter().sum();
+    let elapsed = usize_as_f64_lossy(delivered_samples.len());
+    let offered_rate = rate_mean(&offered_samples);
+    let throughput_avg = rate_mean(&delivered_samples);
+    let throughput_steady = steady_state_mean(&delivered_samples, cmd.steady_trim);
+    let delivered_ratio = if total_published == 0 {
+        0.0
+    } else {
+        as_f64_lossy(total_received) / as_f64_lossy(total_published)
+    };
 
     let output = BenchOutput {
         mode: "throughput".to_string(),
@@ -731,8 +754,12 @@ async fn run_throughput(cmd: BenchCommand) -> Result<()> {
             published: total_published,
             received: total_received,
             elapsed_secs: elapsed,
+            offered_rate,
             throughput_avg,
-            samples,
+            throughput_steady,
+            delivered_ratio,
+            samples: delivered_samples,
+            offered_samples,
         }),
     };
 
@@ -745,6 +772,67 @@ async fn run_throughput(cmd: BenchCommand) -> Result<()> {
         sub_client.disconnect().await.ok();
     }
     Ok(())
+}
+
+async fn sample_rates_per_second(
+    start: Instant,
+    duration: Duration,
+    offered: &AtomicU64,
+    delivered: &AtomicU64,
+) -> (Vec<u64>, Vec<u64>) {
+    let end = start + duration;
+    let mut next_sample = start + Duration::from_secs(1);
+    let mut last_offered = 0u64;
+    let mut last_delivered = 0u64;
+    let mut offered_samples = Vec::new();
+    let mut delivered_samples = Vec::new();
+
+    while Instant::now() < end {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        if Instant::now() >= next_sample {
+            let cur_offered = offered.load(Ordering::Relaxed);
+            let cur_delivered = delivered.load(Ordering::Relaxed);
+            let d_offered = cur_offered - last_offered;
+            let d_delivered = cur_delivered - last_delivered;
+            offered_samples.push(d_offered);
+            delivered_samples.push(d_delivered);
+            eprintln!("  offered {d_offered} msg/s | delivered {d_delivered} msg/s");
+            last_offered = cur_offered;
+            last_delivered = cur_delivered;
+            next_sample += Duration::from_secs(1);
+        }
+    }
+    (offered_samples, delivered_samples)
+}
+
+fn rate_mean(samples: &[u64]) -> f64 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    as_f64_lossy(samples.iter().sum::<u64>()) / usize_as_f64_lossy(samples.len())
+}
+
+fn steady_state_mean(samples: &[u64], trim_frac: f64) -> f64 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    let n = usize_as_f64_lossy(samples.len());
+    let drop = (n * trim_frac.clamp(0.0, 0.49)).floor();
+    let hi = n - drop;
+    let kept: Vec<u64> = samples
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| {
+            let idx = usize_as_f64_lossy(*i);
+            idx >= drop && idx < hi
+        })
+        .map(|(_, &v)| v)
+        .collect();
+    if kept.is_empty() {
+        rate_mean(samples)
+    } else {
+        rate_mean(&kept)
+    }
 }
 
 async fn sample_counter_per_second(
