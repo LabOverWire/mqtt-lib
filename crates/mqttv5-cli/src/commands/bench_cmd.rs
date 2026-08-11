@@ -126,8 +126,11 @@ pub struct BenchCommand {
     )]
     pub pub_url: Option<String>,
 
-    #[arg(long, default_value = "4")]
-    pub topics: usize,
+    #[arg(
+        long,
+        help = "Number of distinct topics. Throughput mode: topics are distributed round-robin across --publishers connections (unset = one topic per publisher connection, the original behaviour); --publishers 1 --topics N puts N topics on a single connection. HOL mode: number of topics distributed across --pub-connections (unset = 4)"
+    )]
+    pub topics: Option<usize>,
 
     #[arg(
         long,
@@ -312,6 +315,7 @@ struct BenchConfig {
     filter: String,
     publishers: usize,
     subscribers: usize,
+    topics: usize,
     transport: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     quic_stream_strategy: Option<String>,
@@ -462,6 +466,13 @@ fn strategy_display(s: mqtt5::transport::StreamStrategy) -> String {
     }
 }
 
+fn resolved_topics(cmd: &BenchCommand) -> usize {
+    match cmd.mode {
+        BenchMode::HolBlocking => cmd.topics.unwrap_or(4),
+        _ => cmd.topics.unwrap_or(cmd.publishers),
+    }
+}
+
 fn bench_config(cmd: &BenchCommand, url: &str) -> BenchConfig {
     let filter = cmd.filter.clone().unwrap_or_else(|| cmd.topic.clone());
     let sample = encode_payload(cmd.payload_format, cmd.payload_size, 0);
@@ -474,6 +485,7 @@ fn bench_config(cmd: &BenchCommand, url: &str) -> BenchConfig {
         filter,
         publishers: cmd.publishers,
         subscribers: cmd.subscribers,
+        topics: resolved_topics(cmd),
         transport: transport_from_url(url),
         quic_stream_strategy: cmd.quic_stream_strategy.map(strategy_display),
         quic_datagrams: cmd.quic_datagrams,
@@ -598,26 +610,38 @@ fn percentile_stats(sorted: &[u64]) -> (f64, u64, u64, u64) {
     (avg, p50, p95, p99)
 }
 
-fn spawn_publishers(
-    pub_clients: Vec<MqttClient>,
-    topic_base: &str,
+struct PublishConfig {
+    num_topics: usize,
     format: PayloadFormat,
     payload_size: usize,
     qos: QoS,
+}
+
+fn spawn_publishers(
+    pub_clients: &[MqttClient],
+    topic_base: &str,
+    cfg: &PublishConfig,
     running: &Arc<std::sync::atomic::AtomicBool>,
     published: &Arc<AtomicU64>,
 ) -> Vec<tokio::task::JoinHandle<()>> {
-    let mut handles = Vec::with_capacity(pub_clients.len());
-    for (i, pub_client) in pub_clients.into_iter().enumerate() {
-        let topic = format!("{topic_base}/{i}");
+    if pub_clients.is_empty() {
+        return Vec::new();
+    }
+    let mut handles = Vec::with_capacity(cfg.num_topics);
+    for topic_idx in 0..cfg.num_topics {
+        let client = pub_clients[topic_idx % pub_clients.len()].clone();
+        let topic = format!("{topic_base}/{topic_idx}");
         let running = Arc::clone(running);
         let published = Arc::clone(published);
+        let format = cfg.format;
+        let payload_size = cfg.payload_size;
+        let qos = cfg.qos;
 
         handles.push(tokio::spawn(async move {
             let mut seq = 0u32;
             while running.load(Ordering::Relaxed) {
                 let payload = encode_payload(format, payload_size, seq);
-                if publish_message(&pub_client, &topic, &payload, qos)
+                if publish_message(&client, &topic, &payload, qos)
                     .await
                     .is_ok()
                 {
@@ -625,7 +649,6 @@ fn spawn_publishers(
                 }
                 seq = seq.wrapping_add(1);
             }
-            pub_client.disconnect().await.ok();
         }));
     }
     handles
@@ -635,8 +658,10 @@ async fn run_throughput(cmd: BenchCommand) -> Result<()> {
     let url = broker_url(&cmd);
     let base_id = base_client_id(&cmd, "bench");
 
+    let num_topics = resolved_topics(&cmd);
+    let active_pub_conns = num_topics.min(cmd.publishers);
     eprintln!(
-        "connecting {} publisher(s) and {} subscriber(s) to {url}...",
+        "connecting {} publisher(s) and {} subscriber(s) to {url} ({num_topics} topics round-robin across {active_pub_conns} publisher connection(s))...",
         cmd.publishers, cmd.subscribers
     );
 
@@ -670,15 +695,13 @@ async fn run_throughput(cmd: BenchCommand) -> Result<()> {
     let published = Arc::new(AtomicU64::new(0));
 
     eprintln!("warming up for {}s...", cmd.warmup);
-    let handles = spawn_publishers(
-        pub_clients,
-        &topic,
+    let pub_cfg = PublishConfig {
+        num_topics,
         format,
-        cmd.payload_size,
-        cmd.qos,
-        &running,
-        &published,
-    );
+        payload_size: cmd.payload_size,
+        qos: cmd.qos,
+    };
+    let handles = spawn_publishers(&pub_clients, &topic, &pub_cfg, &running, &published);
 
     tokio::time::sleep(Duration::from_secs(cmd.warmup)).await;
     received.store(0, Ordering::SeqCst);
@@ -715,6 +738,9 @@ async fn run_throughput(cmd: BenchCommand) -> Result<()> {
 
     println!("{}", serde_json::to_string_pretty(&output)?);
 
+    for pub_client in &pub_clients {
+        pub_client.disconnect().await.ok();
+    }
     for sub_client in sub_clients {
         sub_client.disconnect().await.ok();
     }
@@ -1455,7 +1481,7 @@ async fn run_hol_blocking(cmd: BenchCommand) -> Result<()> {
     let url = broker_url(&cmd);
     let pub_url = cmd.pub_url.clone().unwrap_or_else(|| url.clone());
     let base_id = base_client_id(&cmd, "hol");
-    let num_topics = cmd.topics;
+    let num_topics = resolved_topics(&cmd);
     let payload_size = cmd.payload_size.max(12);
     let trace_dir = cmd.trace_dir.clone();
     let pub_conns = cmd.pub_connections.max(1);
