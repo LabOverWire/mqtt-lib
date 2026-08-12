@@ -27,27 +27,36 @@ BROKER_FRESH=0
 start_broker() {
     local extra_flags="${1:-}"
     BROKER_FLAGS="$extra_flags"
-    echo "starting broker on ${BROKER_IP}..."
-    BROKER_PID=$(ssh_broker "ulimit -n 65536; nohup mqttv5 broker --allow-anonymous --host 0.0.0.0:1883 --storage-backend memory --max-clients 50000 \
-        ${extra_flags} > /tmp/broker.log 2>&1 & echo \$!")
-    sleep 2
-    if ssh_broker "kill -0 ${BROKER_PID}" 2>/dev/null; then
-        echo "broker pid: ${BROKER_PID}"
-    else
-        echo "ERROR: broker ${BROKER_PID} not running after start (see /tmp/broker.log on ${BROKER_IP})" >&2
-    fi
-    BROKER_FRESH=1
+    local attempt
+    for attempt in 1 2 3; do
+        echo "starting broker on ${BROKER_IP} [attempt ${attempt}]..."
+        BROKER_PID=$(ssh_broker "ulimit -n 65536; nohup mqttv5 broker --allow-anonymous --host 0.0.0.0:1883 --storage-backend memory --max-clients 50000 \
+            ${extra_flags} > /tmp/broker.log 2>&1 & echo \$!") || BROKER_PID=""
+        sleep 2
+        if [ -n "${BROKER_PID}" ] && ssh_broker "kill -0 ${BROKER_PID}" 2>/dev/null; then
+            echo "broker pid: ${BROKER_PID}"
+            BROKER_FRESH=1
+            return 0
+        fi
+        echo "WARN: broker not running after start attempt ${attempt} (see /tmp/broker.log on ${BROKER_IP})" >&2
+        ssh_broker "pkill -f '[m]qttv5 broker'" 2>/dev/null || true
+        sleep 1
+    done
+    echo "ERROR: broker failed to start after 3 attempts on ${BROKER_IP}" >&2
+    return 1
 }
 
 stop_broker() {
     echo "stopping broker..."
-    ssh_broker "pkill -f 'mqttv5 broker' 2>/dev/null; for _ in \$(seq 1 20); do pgrep -f 'mqttv5 broker' >/dev/null 2>&1 || break; sleep 0.5; done" || true
+    ssh_broker "pkill -f '[m]qttv5 broker' 2>/dev/null; for _ in \$(seq 1 20); do pgrep -f '[m]qttv5 broker' >/dev/null 2>&1 || break; sleep 0.5; done" || true
     BROKER_PID=""
 }
 
 restart_broker() {
     stop_broker
-    start_broker "$BROKER_FLAGS"
+    if ! start_broker "$BROKER_FLAGS"; then
+        return 1
+    fi
     BROKER_FRESH=0
 }
 
@@ -73,7 +82,7 @@ start_monitor() {
 stop_monitor() {
     local output_file="$1"
     ssh_broker "kill ${MONITOR_PID}" 2>/dev/null || true
-    scp -i "$SSH_KEY_PATH" "${SSH_USER}@${BROKER_SSH_IP}:/tmp/monitor.csv" "$output_file"
+    scp -i "$SSH_KEY_PATH" "${SSH_USER}@${BROKER_SSH_IP}:/tmp/monitor.csv" "$output_file" || true
     MONITOR_PID=""
 }
 
@@ -88,8 +97,14 @@ start_client_monitor() {
 stop_client_monitor() {
     local output_file="$1"
     ssh_client "kill ${CLIENT_MONITOR_PID}" 2>/dev/null || true
-    scp -i "$SSH_KEY_PATH" "${SSH_USER}@${CLIENT_IP}:/tmp/client_monitor.csv" "$output_file"
+    scp -i "$SSH_KEY_PATH" "${SSH_USER}@${CLIENT_IP}:/tmp/client_monitor.csv" "$output_file" || true
     CLIENT_MONITOR_PID=""
+}
+
+warn_if_empty() {
+    if [ ! -s "$1" ]; then
+        echo "WARN: empty result $1 (broker down or bench failed)" >&2
+    fi
 }
 
 run_bench() {
@@ -102,7 +117,8 @@ run_bench() {
     local output_file="${output_dir}/${label}.json"
 
     echo "  running: mqttv5 bench ${bench_args}"
-    ssh_client "ulimit -n 65536; mqttv5 bench ${bench_args}" > "$output_file" 2>/dev/null
+    ssh_client "ulimit -n 65536; mqttv5 bench ${bench_args}" > "$output_file" 2>/dev/null || true
+    warn_if_empty "$output_file"
     echo "  saved: ${output_file}"
 }
 
@@ -130,8 +146,9 @@ run_monitored() {
         local run_label="${label}_run${run}"
         if [ "$BROKER_FRESH" = "1" ]; then
             BROKER_FRESH=0
-        else
-            restart_broker
+        elif ! restart_broker; then
+            echo "WARN: broker restart failed, skipping ${run_label}" >&2
+            continue
         fi
         start_monitor "${output_dir}/${run_label}_broker_resources.csv"
         start_client_monitor

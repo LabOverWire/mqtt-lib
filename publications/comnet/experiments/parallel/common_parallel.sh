@@ -45,27 +45,36 @@ BROKER_FRESH=0
 start_broker() {
     local extra_flags="${1:-}"
     BROKER_FLAGS="$extra_flags"
-    echo "starting broker on ${BROKER_IP} (group ${GROUP})..."
-    BROKER_PID=$(ssh_broker "ulimit -n 65536; nohup mqttv5 broker --allow-anonymous --host 0.0.0.0:1883 --storage-backend memory --max-clients 50000 \
-        ${extra_flags} > /tmp/broker.log 2>&1 & echo \$!")
-    sleep 2
-    if ssh_broker "kill -0 ${BROKER_PID}" 2>/dev/null; then
-        echo "broker pid: ${BROKER_PID}"
-    else
-        echo "ERROR: broker ${BROKER_PID} not running after start (see /tmp/broker.log on ${BROKER_IP})" >&2
-    fi
-    BROKER_FRESH=1
+    local attempt
+    for attempt in 1 2 3; do
+        echo "starting broker on ${BROKER_IP} (group ${GROUP}) [attempt ${attempt}]..."
+        BROKER_PID=$(ssh_broker "ulimit -n 65536; nohup mqttv5 broker --allow-anonymous --host 0.0.0.0:1883 --storage-backend memory --max-clients 50000 \
+            ${extra_flags} > /tmp/broker.log 2>&1 & echo \$!") || BROKER_PID=""
+        sleep 2
+        if [ -n "${BROKER_PID}" ] && ssh_broker "kill -0 ${BROKER_PID}" 2>/dev/null; then
+            echo "broker pid: ${BROKER_PID}"
+            BROKER_FRESH=1
+            return 0
+        fi
+        echo "WARN: broker not running after start attempt ${attempt} (see /tmp/broker.log on ${BROKER_IP})" >&2
+        ssh_broker "pkill -f '[m]qttv5 broker'" 2>/dev/null || true
+        sleep 1
+    done
+    echo "ERROR: broker failed to start after 3 attempts on ${BROKER_IP}" >&2
+    return 1
 }
 
 stop_broker() {
     echo "stopping broker (group ${GROUP})..."
-    ssh_broker "pkill -f 'mqttv5 broker' 2>/dev/null; for _ in \$(seq 1 20); do pgrep -f 'mqttv5 broker' >/dev/null 2>&1 || break; sleep 0.5; done" || true
+    ssh_broker "pkill -f '[m]qttv5 broker' 2>/dev/null; for _ in \$(seq 1 20); do pgrep -f '[m]qttv5 broker' >/dev/null 2>&1 || break; sleep 0.5; done" || true
     BROKER_PID=""
 }
 
 restart_broker() {
     stop_broker
-    start_broker "$BROKER_FLAGS"
+    if ! start_broker "$BROKER_FLAGS"; then
+        return 1
+    fi
     BROKER_FRESH=0
 }
 
@@ -101,14 +110,20 @@ stop_monitors() {
     ssh_sub "kill ${SUB_MONITOR_PID}" 2>/dev/null || true
 
     scp -i "$SSH_KEY_PATH" "${SSH_USER}@${BROKER_SSH_IP}:/tmp/monitor.csv" \
-        "${output_dir}/${run_label}_broker_resources.csv"
+        "${output_dir}/${run_label}_broker_resources.csv" || true
     scp -i "$SSH_KEY_PATH" "${SSH_USER}@${PUB_IP}:/tmp/client_monitor.csv" \
-        "${output_dir}/${run_label}_pub_resources.csv"
-    scp_from_sub "/tmp/client_monitor.csv" "${output_dir}/${run_label}_sub_resources.csv"
+        "${output_dir}/${run_label}_pub_resources.csv" || true
+    scp_from_sub "/tmp/client_monitor.csv" "${output_dir}/${run_label}_sub_resources.csv" || true
 
     BROKER_MONITOR_PID=""
     PUB_MONITOR_PID=""
     SUB_MONITOR_PID=""
+}
+
+warn_if_empty() {
+    if [ ! -s "$1" ]; then
+        echo "WARN: empty result $1 (broker down or bench failed)" >&2
+    fi
 }
 
 run_bench_pub_only() {
@@ -121,6 +136,7 @@ run_bench_pub_only() {
 
     echo "  running (pub-only): mqttv5 bench ${bench_args}"
     ssh_pub "ulimit -n 65536; mqttv5 bench ${bench_args}" > "${output_dir}/${label}.json" 2>/dev/null || true
+    warn_if_empty "${output_dir}/${label}.json"
     echo "  saved: ${output_dir}/${label}.json"
 }
 
@@ -169,7 +185,8 @@ run_bench_split() {
         waited=$((waited + 2))
     done
 
-    scp_from_sub "/tmp/sub_bench.json" "${output_dir}/${label}.json"
+    scp_from_sub "/tmp/sub_bench.json" "${output_dir}/${label}.json" || true
+    warn_if_empty "${output_dir}/${label}.json"
     echo "  saved: ${output_dir}/${label}.json"
 }
 
@@ -185,8 +202,9 @@ run_monitored_pub_only() {
         local run_label="${label}_run${run}"
         if [ "$BROKER_FRESH" = "1" ]; then
             BROKER_FRESH=0
-        else
-            restart_broker
+        elif ! restart_broker; then
+            echo "WARN: broker restart failed, skipping ${run_label}" >&2
+            continue
         fi
         start_monitors
         run_bench_pub_only "$experiment" "$run_label" "$bench_args"
@@ -207,8 +225,9 @@ run_monitored_split() {
         local run_label="${label}_run${run}"
         if [ "$BROKER_FRESH" = "1" ]; then
             BROKER_FRESH=0
-        else
-            restart_broker
+        elif ! restart_broker; then
+            echo "WARN: broker restart failed, skipping ${run_label}" >&2
+            continue
         fi
         start_monitors
         run_bench_split "$experiment" "$run_label" "$bench_args"

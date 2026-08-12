@@ -96,6 +96,12 @@ for tname in "${TRANSPORTS[@]}"; do
 
     for run in $(seq 1 "$RUNS_PER_DATAPOINT"); do
         run_label="${label}_run${run}"
+        if [ "$BROKER_FRESH" = "1" ]; then
+            BROKER_FRESH=0
+        elif ! restart_broker; then
+            echo "WARN: broker restart failed, skipping ${run_label}" >&2
+            continue
+        fi
         start_monitors
         run_hol_colocated "$EXPERIMENT" "$run_label" "$bench_args"
         stop_monitors "$output_dir" "$run_label"
