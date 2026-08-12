@@ -80,9 +80,9 @@ def main(results_dir: Path, output_dir: Path):
                 p50_cis.append(p50_ci)
                 p95_tops.append(max(0, p95_mean - p50_mean))
             else:
-                p50_means.append(0)
-                p50_cis.append(0)
-                p95_tops.append(0)
+                p50_means.append(np.nan)
+                p50_cis.append(np.nan)
+                p95_tops.append(np.nan)
 
         offset = (tidx - (num_transports - 1) / 2) * bar_width
         positions = group_positions + offset

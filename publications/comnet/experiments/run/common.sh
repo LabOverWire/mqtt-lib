@@ -21,9 +21,11 @@ ssh_broker() { ssh -i "$SSH_KEY_PATH" $SSH_OPTS "${SSH_USER}@${BROKER_SSH_IP}" "
 ssh_client() { ssh -i "$SSH_KEY_PATH" $SSH_OPTS "${SSH_USER}@${CLIENT_IP}" "$@"; }
 
 BROKER_PID=""
+BROKER_FLAGS=""
 
 start_broker() {
     local extra_flags="${1:-}"
+    BROKER_FLAGS="$extra_flags"
     echo "starting broker on ${BROKER_IP}..."
     BROKER_PID=$(ssh_broker "ulimit -n 65536; nohup mqttv5 broker --allow-anonymous --host 0.0.0.0:1883 --storage-backend memory --max-clients 50000 \
         ${extra_flags} > /tmp/broker.log 2>&1 & echo \$!")
@@ -36,6 +38,11 @@ stop_broker() {
     ssh_broker "pkill -f 'mqttv5 broker'" 2>/dev/null || true
     BROKER_PID=""
     sleep 1
+}
+
+restart_broker() {
+    stop_broker
+    start_broker "$BROKER_FLAGS"
 }
 
 apply_netem() {
@@ -115,6 +122,7 @@ run_monitored() {
 
     for run in $(seq 1 "$RUNS_PER_DATAPOINT"); do
         local run_label="${label}_run${run}"
+        restart_broker
         start_monitor "${output_dir}/${run_label}_broker_resources.csv"
         start_client_monitor
         run_bench "$experiment" "$run_label" "$bench_args"
