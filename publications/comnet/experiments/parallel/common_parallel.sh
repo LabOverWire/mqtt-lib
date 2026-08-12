@@ -39,21 +39,34 @@ scp_from_sub() {
 }
 
 BROKER_PID=""
+BROKER_FLAGS=""
+BROKER_FRESH=0
 
 start_broker() {
     local extra_flags="${1:-}"
+    BROKER_FLAGS="$extra_flags"
     echo "starting broker on ${BROKER_IP} (group ${GROUP})..."
     BROKER_PID=$(ssh_broker "ulimit -n 65536; nohup mqttv5 broker --allow-anonymous --host 0.0.0.0:1883 --storage-backend memory --max-clients 50000 \
         ${extra_flags} > /tmp/broker.log 2>&1 & echo \$!")
     sleep 2
-    echo "broker pid: ${BROKER_PID}"
+    if ssh_broker "kill -0 ${BROKER_PID}" 2>/dev/null; then
+        echo "broker pid: ${BROKER_PID}"
+    else
+        echo "ERROR: broker ${BROKER_PID} not running after start (see /tmp/broker.log on ${BROKER_IP})" >&2
+    fi
+    BROKER_FRESH=1
 }
 
 stop_broker() {
     echo "stopping broker (group ${GROUP})..."
-    ssh_broker "pkill -f 'mqttv5 broker'" 2>/dev/null || true
+    ssh_broker "pkill -f 'mqttv5 broker' 2>/dev/null; for _ in \$(seq 1 20); do pgrep -f 'mqttv5 broker' >/dev/null 2>&1 || break; sleep 0.5; done" || true
     BROKER_PID=""
-    sleep 1
+}
+
+restart_broker() {
+    stop_broker
+    start_broker "$BROKER_FLAGS"
+    BROKER_FRESH=0
 }
 
 apply_netem() {
@@ -170,6 +183,11 @@ run_monitored_pub_only() {
 
     for run in $(seq 1 "$RUNS_PER_DATAPOINT"); do
         local run_label="${label}_run${run}"
+        if [ "$BROKER_FRESH" = "1" ]; then
+            BROKER_FRESH=0
+        else
+            restart_broker
+        fi
         start_monitors
         run_bench_pub_only "$experiment" "$run_label" "$bench_args"
         stop_monitors "$output_dir" "$run_label"
@@ -187,6 +205,11 @@ run_monitored_split() {
 
     for run in $(seq 1 "$RUNS_PER_DATAPOINT"); do
         local run_label="${label}_run${run}"
+        if [ "$BROKER_FRESH" = "1" ]; then
+            BROKER_FRESH=0
+        else
+            restart_broker
+        fi
         start_monitors
         run_bench_split "$experiment" "$run_label" "$bench_args"
         stop_monitors "$output_dir" "$run_label"
