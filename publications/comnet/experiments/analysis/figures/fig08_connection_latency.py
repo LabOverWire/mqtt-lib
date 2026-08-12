@@ -70,19 +70,16 @@ def main(results_dir: Path, output_dir: Path):
 
     for tidx, transport in enumerate(CONN_TRANSPORT_ORDER):
         p50_means = []
-        p50_cis = []
         p95_tops = []
         for delay in DELAYS_MS:
             if delay in data[transport]:
-                p50_mean, p50_ci = compute_ci(data[transport][delay]["p50"])
+                p50_mean, _ = compute_ci(data[transport][delay]["p50"])
                 p95_mean, _ = compute_ci(data[transport][delay]["p95"])
                 p50_means.append(p50_mean)
-                p50_cis.append(p50_ci)
                 p95_tops.append(max(0, p95_mean - p50_mean))
             else:
-                p50_means.append(0)
-                p50_cis.append(0)
-                p95_tops.append(0)
+                p50_means.append(np.nan)
+                p95_tops.append(np.nan)
 
         offset = (tidx - (num_transports - 1) / 2) * bar_width
         positions = group_positions + offset
