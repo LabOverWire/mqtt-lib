@@ -70,22 +70,40 @@ stop_broker() {
     BROKER_PID=""
 }
 
-restart_broker() {
-    stop_broker
-    if ! start_broker "$BROKER_FLAGS"; then
-        return 1
-    fi
-    BROKER_FRESH=0
-}
+CUR_NETEM_DELAY=""
+CUR_NETEM_LOSS=""
 
 apply_netem() {
     local delay_ms="$1"
     local loss_pct="${2:-0}"
+    CUR_NETEM_DELAY="$delay_ms"
+    CUR_NETEM_LOSS="$loss_pct"
     ssh_broker "sudo bash /opt/mqtt-lib/experiments/netem/apply.sh ${delay_ms} ${loss_pct}"
 }
 
 clear_netem() {
+    CUR_NETEM_DELAY=""
+    CUR_NETEM_LOSS=""
     ssh_broker "sudo bash /opt/mqtt-lib/experiments/netem/clear.sh"
+}
+
+restore_netem() {
+    if [ -n "$CUR_NETEM_DELAY" ]; then
+        ssh_broker "sudo bash /opt/mqtt-lib/experiments/netem/apply.sh ${CUR_NETEM_DELAY} ${CUR_NETEM_LOSS}" 2>/dev/null || true
+    fi
+}
+
+restart_broker() {
+    if [ -n "$CUR_NETEM_DELAY" ]; then
+        ssh_broker "sudo bash /opt/mqtt-lib/experiments/netem/clear.sh" 2>/dev/null || true
+    fi
+    stop_broker
+    if ! start_broker "$BROKER_FLAGS"; then
+        restore_netem
+        return 1
+    fi
+    restore_netem
+    BROKER_FRESH=0
 }
 
 BROKER_MONITOR_PID=""
