@@ -24,11 +24,13 @@ prev_jiffies=$(read_cpu_jiffies)
 prev_time=$(date +%s.%N)
 
 while kill -0 "$PID" 2>/dev/null; do
-    ts=$(date +%s)
+    sleep "$INTERVAL"
+    kill -0 "$PID" 2>/dev/null || break
     now=$(date +%s.%N)
+    ts="${now%.*}"
     cur_jiffies=$(read_cpu_jiffies)
     cpu=$(awk -v cj="$cur_jiffies" -v pj="$prev_jiffies" -v t1="$prev_time" -v t2="$now" -v hz="$CLK_TCK" \
-        'BEGIN { dt = t2 - t1; if (dt <= 0) { print "0.0" } else { printf "%.1f", 100 * ((cj - pj) / hz) / dt } }')
+        'BEGIN { dt = t2 - t1; if (dt <= 0 || cj < pj) { print "0.0" } else { printf "%.1f", 100 * ((cj - pj) / hz) / dt } }')
     prev_jiffies=$cur_jiffies
     prev_time=$now
     rss=$(awk '/^VmRSS:/ {print $2}' "/proc/${PID}/status" 2>/dev/null || echo 0)
@@ -40,5 +42,4 @@ while kill -0 "$PID" 2>/dev/null; do
     tx_packets=$(echo "$net" | awk '{print $4}')
     : "${rx_bytes:=0}" "${rx_packets:=0}" "${tx_bytes:=0}" "${tx_packets:=0}"
     echo "${ts},${rss},${cpu},${threads},${rx_bytes},${tx_bytes},${rx_packets},${tx_packets}"
-    sleep "$INTERVAL"
 done
