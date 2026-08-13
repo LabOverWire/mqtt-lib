@@ -38,25 +38,16 @@ def load_data(results_dir: Path):
 
     data = {}
     for strategy in STRATEGY_ORDER:
-        data[strategy] = {"latency": {}, "throughput": {}}
+        data[strategy] = {"throughput": {}}
         for topics in TOPIC_COUNTS:
-            lat_values = []
             tp_values = []
             for run in RUNS:
-                lat_path = exp_dir / f"{strategy}_{topics}topics_latency_run{run}.json"
-                if lat_path.exists():
-                    with open(lat_path) as f:
-                        d = json.load(f)
-                    lat_values.append(d["results"]["p50_us"])
-
                 tp_path = exp_dir / f"{strategy}_{topics}topics_throughput_run{run}.json"
                 if tp_path.exists():
                     with open(tp_path) as f:
                         d = json.load(f)
                     tp_values.append(d["results"]["throughput_avg"])
 
-            if lat_values:
-                data[strategy]["latency"][topics] = lat_values
             if tp_values:
                 data[strategy]["throughput"][topics] = tp_values
     return data
@@ -68,39 +59,8 @@ def main(results_dir: Path, output_dir: Path):
     if data is None:
         return
 
-    fig, axes = plt.subplots(1, 2, figsize=(7, 3.5))
+    fig, ax_tp = plt.subplots(1, 1, figsize=(4.5, 3.5))
 
-    ax_lat = axes[0]
-    for strategy in STRATEGY_ORDER:
-        x_vals = []
-        y_means = []
-        y_errs = []
-        for topics in TOPIC_COUNTS:
-            lat_data = data[strategy]["latency"].get(topics)
-            if lat_data:
-                m, e = compute_ci(lat_data)
-                x_vals.append(topics)
-                y_means.append(m / 1000.0)
-                y_errs.append(e / 1000.0)
-
-        if not x_vals:
-            continue
-
-        ax_lat.errorbar(
-            x_vals, y_means, yerr=y_errs,
-            marker=STRATEGY_MARKERS[strategy],
-            color=STRATEGY_COLORS[strategy],
-            label=STRATEGY_LABELS[strategy],
-            linewidth=1.5, markersize=6, capsize=4,
-        )
-
-    ax_lat.set_xlabel("Topic Count")
-    ax_lat.set_ylabel("p50 Latency (ms)")
-    ax_lat.set_title("(a) Latency vs. Topic Count")
-    ax_lat.set_xticks(TOPIC_COUNTS)
-    ax_lat.legend(loc="best", fontsize=8)
-
-    ax_tp = axes[1]
     for strategy in STRATEGY_ORDER:
         x_vals = []
         y_means = []
@@ -126,7 +86,7 @@ def main(results_dir: Path, output_dir: Path):
 
     ax_tp.set_xlabel("Topic Count")
     ax_tp.set_ylabel("Throughput (K msgs/sec)")
-    ax_tp.set_title("(b) Throughput vs. Topic Count")
+    ax_tp.set_title("Throughput vs. Topic Count")
     ax_tp.set_xticks(TOPIC_COUNTS)
     ax_tp.legend(loc="best", fontsize=8)
 

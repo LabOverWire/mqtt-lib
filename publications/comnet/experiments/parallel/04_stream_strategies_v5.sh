@@ -12,10 +12,14 @@ RUNS_PER_DATAPOINT=15
 RESULTS_DIR="${ROOT_DIR}/results-v5"
 mkdir -p "$RESULTS_DIR"
 
-start_broker "--tls-cert /opt/mqtt-certs/server.pem --tls-key /opt/mqtt-certs/server.key --quic-host 0.0.0.0:14567"
 apply_netem "$DELAY" "$LOSS"
 
 for strategy in "${STRATEGIES[@]}"; do
+    stop_broker 2>/dev/null || true
+    if ! start_broker "--tls-cert /opt/mqtt-certs/server.pem --tls-key /opt/mqtt-certs/server.key --quic-host 0.0.0.0:14567 --quic-delivery-strategy ${strategy}"; then
+        echo "WARN: broker start failed for strategy ${strategy}, skipping" >&2
+        continue
+    fi
     for ntopics in "${TOPIC_COUNTS[@]}"; do
         label="${strategy}_${ntopics}topics_throughput"
         echo "[${EXPERIMENT}] ${label}"

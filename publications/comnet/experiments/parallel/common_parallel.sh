@@ -112,11 +112,11 @@ SUB_MONITOR_PID=""
 
 start_monitors() {
     BROKER_MONITOR_PID=$(ssh_broker "nohup bash /opt/mqtt-lib/experiments/monitor/resource_monitor.sh ${BROKER_PID} \
-        > /tmp/monitor.csv 2>&1 & echo \$!")
+        > /tmp/monitor.csv 2>&1 & echo \$!") || BROKER_MONITOR_PID=""
     PUB_MONITOR_PID=$(ssh_pub "nohup bash /opt/mqtt-lib/experiments/monitor/client_monitor.sh \
-        > /tmp/client_monitor.csv 2>&1 & echo \$!")
+        > /tmp/client_monitor.csv 2>&1 & echo \$!") || PUB_MONITOR_PID=""
     SUB_MONITOR_PID=$(ssh_sub "nohup bash /opt/mqtt-lib/experiments/monitor/client_monitor.sh \
-        > /tmp/client_monitor.csv 2>&1 & echo \$!")
+        > /tmp/client_monitor.csv 2>&1 & echo \$!") || SUB_MONITOR_PID=""
 }
 
 stop_monitors() {

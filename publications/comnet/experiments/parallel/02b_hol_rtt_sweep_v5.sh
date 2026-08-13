@@ -82,6 +82,7 @@ run_hol_colocated() {
     echo "  running (co-located): ${label}"
     ssh_pub "ulimit -n 65536; mqttv5 bench ${bench_args}" \
         > "${output_dir}/${label}.json" 2>/dev/null || true
+    warn_if_empty "${output_dir}/${label}.json"
     echo "  saved: ${output_dir}/${label}.json"
 }
 

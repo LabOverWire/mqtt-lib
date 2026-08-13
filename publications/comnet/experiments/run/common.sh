@@ -75,7 +75,7 @@ MONITOR_PID=""
 start_monitor() {
     local output_file="$1"
     MONITOR_PID=$(ssh_broker "nohup bash /opt/mqtt-lib/experiments/monitor/resource_monitor.sh ${BROKER_PID} \
-        > /tmp/monitor.csv 2>&1 & echo \$!")
+        > /tmp/monitor.csv 2>&1 & echo \$!") || MONITOR_PID=""
     echo "monitor pid: ${MONITOR_PID}"
 }
 
@@ -90,7 +90,7 @@ CLIENT_MONITOR_PID=""
 
 start_client_monitor() {
     CLIENT_MONITOR_PID=$(ssh_client "nohup bash /opt/mqtt-lib/experiments/monitor/client_monitor.sh \
-        > /tmp/client_monitor.csv 2>&1 & echo \$!")
+        > /tmp/client_monitor.csv 2>&1 & echo \$!") || CLIENT_MONITOR_PID=""
     echo "client monitor pid: ${CLIENT_MONITOR_PID}"
 }
 

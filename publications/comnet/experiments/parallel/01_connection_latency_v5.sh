@@ -49,8 +49,10 @@ for tidx in "${!TRANSPORTS[@]}"; do
 
         if [ "$tname" = "quic" ]; then
             for run in $(seq 1 "$RUNS_PER_DATAPOINT"); do
-                stop_broker
-                start_broker "$flags"
+                if ! restart_broker; then
+                    echo "WARN: broker restart failed, skipping ${label}_run${run}" >&2
+                    continue
+                fi
                 run_monitored_single "$EXPERIMENT" "${label}_run${run}" \
                     "--url ${url} --ca-cert /opt/mqtt-certs/ca.pem --mode connections --concurrency 1 --duration 30"
             done
