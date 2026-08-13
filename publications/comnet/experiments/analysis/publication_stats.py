@@ -197,7 +197,7 @@ RESOURCE_PARSERS = {
 
 STRATEGY_PARSERS = {
     "04_stream_strategies": (
-        re.compile(r"(.+?)_(\d+)topics_(latency|throughput)_run(\d+)\.json"),
+        re.compile(r"(.+?)_(\d+)topics_(throughput)_run(\d+)\.json"),
         lambda m: (m.group(1), f"{m.group(2)}topics_{m.group(3)}"),
     ),
 }
@@ -313,7 +313,7 @@ def build_stats_table_generic(
             key = (transport, condition)
             if key not in grouped:
                 continue
-            entry = {"transport": transport, "condition": condition}
+            entry: dict[str, object] = {"transport": transport, "condition": condition}
             for field in fields:
                 stat = compute_stats(grouped[key], field)
                 if stat:
@@ -333,7 +333,7 @@ def build_stats_table(
             key = (transport, condition)
             if key not in grouped:
                 continue
-            entry = {"transport": transport, "condition": condition}
+            entry: dict[str, object] = {"transport": transport, "condition": condition}
             for field in fields:
                 stat = compute_stats(grouped[key], field)
                 if stat:
@@ -506,20 +506,9 @@ def aggregate_strategy_experiment(base_dir: Path, experiment: str) -> dict[tuple
             data = load_json(jf)
         except (json.JSONDecodeError, ValueError):
             continue
-        mode = data["mode"]
-        if mode == "latency":
-            metrics = {
-                "p50_us": data["results"]["p50_us"],
-                "p95_us": data["results"]["p95_us"],
-                "throughput_avg": None,
-            }
-        else:
-            metrics = {
-                "p50_us": None,
-                "p95_us": None,
-                "throughput_avg": data["results"]["throughput_avg"],
-            }
-        grouped[(strategy, condition)].append(metrics)
+        grouped[(strategy, condition)].append(
+            {"throughput_avg": data["results"]["throughput_avg"]}
+        )
 
     return grouped
 
@@ -850,7 +839,7 @@ def main():
     if exp04:
         strat_order = ["control-only", "per-publish", "per-topic"]
         strat_conditions = sorted({k[1] for k in exp04})
-        strat_fields = ["p50_us", "p95_us", "throughput_avg"]
+        strat_fields = ["throughput_avg"]
         all_stats["exp04"] = build_stats_table_generic(exp04, strat_order, strat_conditions, strat_fields)
         print(f"Exp 04 (stream strategies): processed ({len(strat_conditions)} conditions)")
 

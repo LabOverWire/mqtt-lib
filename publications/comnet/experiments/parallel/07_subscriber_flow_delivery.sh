@@ -30,9 +30,9 @@ read -ra MODES <<< "$SUB_MODES"
 
 start_monitors() {
     BROKER_MONITOR_PID=$(ssh_broker "nohup bash /opt/mqtt-lib/experiments/monitor/resource_monitor.sh ${BROKER_PID} \
-        > /tmp/monitor.csv 2>&1 & echo \$!")
+        > /tmp/monitor.csv 2>&1 & echo \$!") || BROKER_MONITOR_PID=""
     PUB_MONITOR_PID=$(ssh_pub "nohup bash /opt/mqtt-lib/experiments/monitor/client_monitor.sh \
-        > /tmp/client_monitor.csv 2>&1 & echo \$!")
+        > /tmp/client_monitor.csv 2>&1 & echo \$!") || PUB_MONITOR_PID=""
 }
 
 stop_monitors() {
@@ -82,7 +82,10 @@ for mode in "${MODES[@]}"; do
     delivery="${BROKER_DELIVERY[$mode]}"
 
     stop_broker 2>/dev/null || true
-    start_broker "${BROKER_TLS} ${BROKER_QUIC} ${delivery}"
+    if ! start_broker "${BROKER_TLS} ${BROKER_QUIC} ${delivery}"; then
+        echo "WARN: broker start failed for ${mode}, skipping" >&2
+        continue
+    fi
 
     for loss in "${LOSSES[@]}"; do
         apply_netem "$DELAY" "$loss"

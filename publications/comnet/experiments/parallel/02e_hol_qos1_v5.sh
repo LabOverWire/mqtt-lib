@@ -30,9 +30,9 @@ TRANSPORTS=(tcp quic-pertopic)
 
 start_monitors() {
     BROKER_MONITOR_PID=$(ssh_broker "nohup bash /opt/mqtt-lib/experiments/monitor/resource_monitor.sh ${BROKER_PID} \
-        > /tmp/monitor.csv 2>&1 & echo \$!")
+        > /tmp/monitor.csv 2>&1 & echo \$!") || BROKER_MONITOR_PID=""
     PUB_MONITOR_PID=$(ssh_pub "nohup bash /opt/mqtt-lib/experiments/monitor/client_monitor.sh \
-        > /tmp/client_monitor.csv 2>&1 & echo \$!")
+        > /tmp/client_monitor.csv 2>&1 & echo \$!") || PUB_MONITOR_PID=""
 }
 
 stop_monitors() {
@@ -85,7 +85,10 @@ for tname in "${TRANSPORTS[@]}"; do
     delivery="${BROKER_DELIVERY[$tname]}"
 
     stop_broker 2>/dev/null || true
-    start_broker "${BROKER_TLS} ${BROKER_QUIC} ${delivery}"
+    if ! start_broker "${BROKER_TLS} ${BROKER_QUIC} ${delivery}"; then
+        echo "WARN: broker start failed for ${tname}, skipping transport" >&2
+        continue
+    fi
 
     apply_netem "$DELAY" "$LOSS"
     label="${tname}_qos1"

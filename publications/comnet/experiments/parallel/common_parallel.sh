@@ -89,8 +89,12 @@ clear_netem() {
 
 restore_netem() {
     if [ -n "$CUR_NETEM_DELAY" ]; then
-        ssh_broker "sudo bash /opt/mqtt-lib/experiments/netem/apply.sh ${CUR_NETEM_DELAY} ${CUR_NETEM_LOSS}" 2>/dev/null || true
+        if ! ssh_broker "sudo bash /opt/mqtt-lib/experiments/netem/apply.sh ${CUR_NETEM_DELAY} ${CUR_NETEM_LOSS}" 2>/dev/null; then
+            echo "WARN: failed to restore netem (delay=${CUR_NETEM_DELAY}ms loss=${CUR_NETEM_LOSS}%)" >&2
+            return 1
+        fi
     fi
+    return 0
 }
 
 restart_broker() {
@@ -99,10 +103,12 @@ restart_broker() {
     fi
     stop_broker
     if ! start_broker "$BROKER_FLAGS"; then
-        restore_netem
+        restore_netem || true
         return 1
     fi
-    restore_netem
+    if ! restore_netem; then
+        return 1
+    fi
     BROKER_FRESH=0
 }
 
