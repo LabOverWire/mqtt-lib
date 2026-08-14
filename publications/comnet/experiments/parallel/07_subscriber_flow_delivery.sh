@@ -30,9 +30,9 @@ read -ra MODES <<< "$SUB_MODES"
 
 start_monitors() {
     BROKER_MONITOR_PID=$(ssh_broker "nohup bash /opt/mqtt-lib/experiments/monitor/resource_monitor.sh ${BROKER_PID} \
-        > /tmp/monitor.csv 2>&1 & echo \$!")
+        > /tmp/monitor.csv 2>&1 & echo \$!") || BROKER_MONITOR_PID=""
     PUB_MONITOR_PID=$(ssh_pub "nohup bash /opt/mqtt-lib/experiments/monitor/client_monitor.sh \
-        > /tmp/client_monitor.csv 2>&1 & echo \$!")
+        > /tmp/client_monitor.csv 2>&1 & echo \$!") || PUB_MONITOR_PID=""
 }
 
 stop_monitors() {
@@ -73,6 +73,7 @@ run_hol_colocated() {
     echo "  running (co-located): ${label}"
     ssh_pub "ulimit -n 65536; mqttv5 bench ${bench_args}" \
         > "${output_dir}/${label}.json" 2>/dev/null || true
+    warn_if_empty "${output_dir}/${label}.json"
     echo "  saved: ${output_dir}/${label}.json"
 }
 
@@ -81,7 +82,10 @@ for mode in "${MODES[@]}"; do
     delivery="${BROKER_DELIVERY[$mode]}"
 
     stop_broker 2>/dev/null || true
-    start_broker "${BROKER_TLS} ${BROKER_QUIC} ${delivery}"
+    if ! start_broker "${BROKER_TLS} ${BROKER_QUIC} ${delivery}"; then
+        echo "WARN: broker start failed for ${mode}, skipping" >&2
+        continue
+    fi
 
     for loss in "${LOSSES[@]}"; do
         apply_netem "$DELAY" "$loss"
@@ -94,6 +98,12 @@ for mode in "${MODES[@]}"; do
 
         for run in $(seq 1 "$RUNS_PER_DATAPOINT"); do
             run_label="${label}_run${run}"
+            if [ "$BROKER_FRESH" = "1" ]; then
+                BROKER_FRESH=0
+            elif ! restart_broker; then
+                echo "WARN: broker restart failed, skipping ${run_label}" >&2
+                continue
+            fi
             start_monitors
             run_hol_colocated "$run_label" "$bench_args"
             stop_monitors "$output_dir" "$run_label"

@@ -39,31 +39,77 @@ scp_from_sub() {
 }
 
 BROKER_PID=""
+BROKER_FLAGS=""
+BROKER_FRESH=0
 
 start_broker() {
     local extra_flags="${1:-}"
-    echo "starting broker on ${BROKER_IP} (group ${GROUP})..."
-    BROKER_PID=$(ssh_broker "ulimit -n 65536; nohup mqttv5 broker --allow-anonymous --host 0.0.0.0:1883 --storage-backend memory --max-clients 50000 \
-        ${extra_flags} > /tmp/broker.log 2>&1 & echo \$!")
-    sleep 2
-    echo "broker pid: ${BROKER_PID}"
+    BROKER_FLAGS="$extra_flags"
+    local attempt
+    for attempt in 1 2 3; do
+        echo "starting broker on ${BROKER_IP} (group ${GROUP}) [attempt ${attempt}]..."
+        BROKER_PID=$(ssh_broker "ulimit -n 65536; nohup mqttv5 broker --allow-anonymous --host 0.0.0.0:1883 --storage-backend memory --max-clients 50000 \
+            ${extra_flags} > /tmp/broker.log 2>&1 & echo \$!") || BROKER_PID=""
+        sleep 2
+        if [ -n "${BROKER_PID}" ] && ssh_broker "kill -0 ${BROKER_PID}" 2>/dev/null; then
+            echo "broker pid: ${BROKER_PID}"
+            BROKER_FRESH=1
+            return 0
+        fi
+        echo "WARN: broker not running after start attempt ${attempt} (see /tmp/broker.log on ${BROKER_IP})" >&2
+        ssh_broker "pkill -f '[m]qttv5 broker'" 2>/dev/null || true
+        sleep 1
+    done
+    echo "ERROR: broker failed to start after 3 attempts on ${BROKER_IP}" >&2
+    return 1
 }
 
 stop_broker() {
     echo "stopping broker (group ${GROUP})..."
-    ssh_broker "pkill -f 'mqttv5 broker'" 2>/dev/null || true
+    ssh_broker "pkill -f '[m]qttv5 broker' 2>/dev/null; for _ in \$(seq 1 20); do pgrep -f '[m]qttv5 broker' >/dev/null 2>&1 || break; sleep 0.5; done" || true
     BROKER_PID=""
-    sleep 1
 }
+
+CUR_NETEM_DELAY=""
+CUR_NETEM_LOSS=""
 
 apply_netem() {
     local delay_ms="$1"
     local loss_pct="${2:-0}"
+    CUR_NETEM_DELAY="$delay_ms"
+    CUR_NETEM_LOSS="$loss_pct"
     ssh_broker "sudo bash /opt/mqtt-lib/experiments/netem/apply.sh ${delay_ms} ${loss_pct}"
 }
 
 clear_netem() {
+    CUR_NETEM_DELAY=""
+    CUR_NETEM_LOSS=""
     ssh_broker "sudo bash /opt/mqtt-lib/experiments/netem/clear.sh"
+}
+
+restore_netem() {
+    if [ -n "$CUR_NETEM_DELAY" ]; then
+        if ! ssh_broker "sudo bash /opt/mqtt-lib/experiments/netem/apply.sh ${CUR_NETEM_DELAY} ${CUR_NETEM_LOSS}" 2>/dev/null; then
+            echo "WARN: failed to restore netem (delay=${CUR_NETEM_DELAY}ms loss=${CUR_NETEM_LOSS}%)" >&2
+            return 1
+        fi
+    fi
+    return 0
+}
+
+restart_broker() {
+    if [ -n "$CUR_NETEM_DELAY" ]; then
+        ssh_broker "sudo bash /opt/mqtt-lib/experiments/netem/clear.sh" 2>/dev/null || true
+    fi
+    stop_broker
+    if ! start_broker "$BROKER_FLAGS"; then
+        restore_netem || true
+        return 1
+    fi
+    if ! restore_netem; then
+        return 1
+    fi
+    BROKER_FRESH=0
 }
 
 BROKER_MONITOR_PID=""
@@ -72,11 +118,11 @@ SUB_MONITOR_PID=""
 
 start_monitors() {
     BROKER_MONITOR_PID=$(ssh_broker "nohup bash /opt/mqtt-lib/experiments/monitor/resource_monitor.sh ${BROKER_PID} \
-        > /tmp/monitor.csv 2>&1 & echo \$!")
+        > /tmp/monitor.csv 2>&1 & echo \$!") || BROKER_MONITOR_PID=""
     PUB_MONITOR_PID=$(ssh_pub "nohup bash /opt/mqtt-lib/experiments/monitor/client_monitor.sh \
-        > /tmp/client_monitor.csv 2>&1 & echo \$!")
+        > /tmp/client_monitor.csv 2>&1 & echo \$!") || PUB_MONITOR_PID=""
     SUB_MONITOR_PID=$(ssh_sub "nohup bash /opt/mqtt-lib/experiments/monitor/client_monitor.sh \
-        > /tmp/client_monitor.csv 2>&1 & echo \$!")
+        > /tmp/client_monitor.csv 2>&1 & echo \$!") || SUB_MONITOR_PID=""
 }
 
 stop_monitors() {
@@ -88,14 +134,20 @@ stop_monitors() {
     ssh_sub "kill ${SUB_MONITOR_PID}" 2>/dev/null || true
 
     scp -i "$SSH_KEY_PATH" "${SSH_USER}@${BROKER_SSH_IP}:/tmp/monitor.csv" \
-        "${output_dir}/${run_label}_broker_resources.csv"
+        "${output_dir}/${run_label}_broker_resources.csv" || true
     scp -i "$SSH_KEY_PATH" "${SSH_USER}@${PUB_IP}:/tmp/client_monitor.csv" \
-        "${output_dir}/${run_label}_pub_resources.csv"
-    scp_from_sub "/tmp/client_monitor.csv" "${output_dir}/${run_label}_sub_resources.csv"
+        "${output_dir}/${run_label}_pub_resources.csv" || true
+    scp_from_sub "/tmp/client_monitor.csv" "${output_dir}/${run_label}_sub_resources.csv" || true
 
     BROKER_MONITOR_PID=""
     PUB_MONITOR_PID=""
     SUB_MONITOR_PID=""
+}
+
+warn_if_empty() {
+    if [ ! -s "$1" ]; then
+        echo "WARN: empty result $1 (broker down or bench failed)" >&2
+    fi
 }
 
 run_bench_pub_only() {
@@ -108,6 +160,7 @@ run_bench_pub_only() {
 
     echo "  running (pub-only): mqttv5 bench ${bench_args}"
     ssh_pub "ulimit -n 65536; mqttv5 bench ${bench_args}" > "${output_dir}/${label}.json" 2>/dev/null || true
+    warn_if_empty "${output_dir}/${label}.json"
     echo "  saved: ${output_dir}/${label}.json"
 }
 
@@ -156,7 +209,8 @@ run_bench_split() {
         waited=$((waited + 2))
     done
 
-    scp_from_sub "/tmp/sub_bench.json" "${output_dir}/${label}.json"
+    scp_from_sub "/tmp/sub_bench.json" "${output_dir}/${label}.json" || true
+    warn_if_empty "${output_dir}/${label}.json"
     echo "  saved: ${output_dir}/${label}.json"
 }
 
@@ -170,6 +224,12 @@ run_monitored_pub_only() {
 
     for run in $(seq 1 "$RUNS_PER_DATAPOINT"); do
         local run_label="${label}_run${run}"
+        if [ "$BROKER_FRESH" = "1" ]; then
+            BROKER_FRESH=0
+        elif ! restart_broker; then
+            echo "WARN: broker restart failed, skipping ${run_label}" >&2
+            continue
+        fi
         start_monitors
         run_bench_pub_only "$experiment" "$run_label" "$bench_args"
         stop_monitors "$output_dir" "$run_label"
@@ -187,6 +247,12 @@ run_monitored_split() {
 
     for run in $(seq 1 "$RUNS_PER_DATAPOINT"); do
         local run_label="${label}_run${run}"
+        if [ "$BROKER_FRESH" = "1" ]; then
+            BROKER_FRESH=0
+        elif ! restart_broker; then
+            echo "WARN: broker restart failed, skipping ${run_label}" >&2
+            continue
+        fi
         start_monitors
         run_bench_split "$experiment" "$run_label" "$bench_args"
         stop_monitors "$output_dir" "$run_label"
