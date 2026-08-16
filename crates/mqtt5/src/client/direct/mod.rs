@@ -417,6 +417,8 @@ impl DirectClientInner {
 
         self.apply_negotiated_keep_alive(connack.properties.get_server_keep_alive());
 
+        self.apply_negotiated_packet_sizes(&connack).await?;
+
         let protocol_version = self.options.protocol_version.as_u8();
         let (reader, writer) = match transport {
             TransportType::Tcp(tcp) => {
@@ -473,8 +475,6 @@ impl DirectClientInner {
             .await;
         self.writer = Some(writer_arc);
         self.set_connected(true);
-
-        self.apply_negotiated_packet_sizes(&connack).await?;
 
         tracing::debug!("Starting background tasks (packet reader and keepalive)");
         self.start_background_tasks(reader, connection_epoch)?;
@@ -802,7 +802,9 @@ impl DirectClientInner {
                 .wait_for_acknowledgment(rx, options.qos, packet_id)
                 .await
             {
-                Self::release_outbound_quota(&self.session, packet_id).await;
+                if !matches!(e, MqttError::Timeout) {
+                    Self::release_outbound_quota(&self.session, packet_id).await;
+                }
                 return Err(e);
             }
         }

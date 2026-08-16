@@ -3,6 +3,7 @@ mod common;
 
 use common::{MessageCollector, TestBroker};
 use mqtt5::broker::config::{BrokerConfig, StorageBackend, StorageConfig};
+use mqtt5::error::MqttError;
 use mqtt5::MqttClient;
 use mqtt5_protocol::packet::connack::ConnAckPacket;
 use mqtt5_protocol::packet::MqttPacket;
@@ -123,6 +124,55 @@ async fn client_rejects_zero_receive_maximum() {
         result.is_err(),
         "client must reject a CONNACK advertising a Receive Maximum of 0"
     );
+    assert!(
+        !client.is_connected().await,
+        "a rejected CONNACK must leave the client disconnected, not half-connected"
+    );
+
+    let publish = client.publish_qos1("t/zero", b"nope".to_vec()).await;
+    assert!(
+        matches!(publish, Err(MqttError::NotConnected)),
+        "publishing after a rejected connect must fail fast with NotConnected, not hang"
+    );
+}
+
+#[tokio::test]
+async fn ack_timeout_holds_quota_and_does_not_exceed_window() {
+    let publish_count = std::sync::Arc::new(AtomicUsize::new(0));
+    let addr = stub_server(1, publish_count.clone()).await;
+
+    let client = MqttClient::new("outbound-timeout-hold");
+    client.connect(&format!("mqtt://{addr}")).await.unwrap();
+
+    let first = client.clone();
+    let first_handle =
+        tokio::spawn(async move { first.publish_qos1("t/timeout", b"first".to_vec()).await });
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        publish_count.load(Ordering::SeqCst),
+        1,
+        "the first publish must consume the only window slot and reach the wire"
+    );
+
+    let first_result = first_handle.await.unwrap();
+    assert!(
+        matches!(first_result, Err(MqttError::Timeout)),
+        "an unacknowledged publish must eventually time out"
+    );
+
+    let second = client.clone();
+    let second_handle =
+        tokio::spawn(async move { second.publish_qos1("t/timeout", b"second".to_vec()).await });
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        publish_count.load(Ordering::SeqCst),
+        1,
+        "the ack timeout must not release the quota while the message is still unacknowledged"
+    );
+
+    second_handle.abort();
 }
 
 fn broker_config(receive_maximum: u16) -> BrokerConfig {
