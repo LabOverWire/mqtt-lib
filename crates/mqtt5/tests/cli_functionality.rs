@@ -208,6 +208,60 @@ async fn test_cli_message_throughput() {
     println!("   Throughput: {msgs_per_sec:.1} messages/second");
 }
 
+/// Bench throughput mode emits a valid flat schema and, at QoS1, the open-loop
+/// generator plus real flow control delivers ~everything offered (no coordinated-omission
+/// collapse and no overshoot) — the property the saturation rework must preserve.
+#[tokio::test]
+async fn test_cli_bench_throughput_schema_and_ratio() {
+    let broker = TestBroker::start().await;
+    let broker_url = broker.address();
+
+    let result = run_cli_command(&[
+        "bench",
+        "--url",
+        broker_url,
+        "--mode",
+        "throughput",
+        "--qos",
+        "1",
+        "--duration",
+        "3",
+        "--warmup",
+        "1",
+        "--payload-size",
+        "128",
+        "--publishers",
+        "2",
+        "--subscribers",
+        "1",
+        "--inflight",
+        "16",
+    ])
+    .await;
+
+    assert!(result.success, "bench failed: {}", result.stderr);
+    let json: serde_json::Value = serde_json::from_str(result.stdout.trim())
+        .unwrap_or_else(|e| panic!("bench stdout is not JSON ({e}): {}", result.stdout));
+
+    assert_eq!(json["mode"], "throughput");
+    let r = &json["results"];
+    let throughput = r["throughput_avg"]
+        .as_f64()
+        .expect("throughput_avg must be a number");
+    let ratio = r["delivered_ratio"]
+        .as_f64()
+        .expect("delivered_ratio must be a number");
+
+    assert!(
+        throughput > 0.0,
+        "throughput_avg must be positive: {throughput}"
+    );
+    assert!(
+        (0.9..1.2).contains(&ratio),
+        "QoS1 delivered_ratio must be ~1.0 (flow-controlled, no drop/overshoot), got {ratio}"
+    );
+}
+
 /// Test CLI with both long and short flags
 #[tokio::test]
 async fn test_cli_flag_formats() {
