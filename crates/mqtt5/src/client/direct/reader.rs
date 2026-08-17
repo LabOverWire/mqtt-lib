@@ -132,6 +132,11 @@ pub(super) async fn packet_reader_task_with_responses(
                         }
                     }
                     Packet::PubAck(puback) => {
+                        super::DirectClientInner::release_outbound_quota(
+                            &ctx.session,
+                            Some(puback.packet_id),
+                        )
+                        .await;
                         if let Some(tx) = ctx.puback_channels.lock().remove(&puback.packet_id) {
                             let _ = tx.send(puback.reason_code);
                             continue;
@@ -151,9 +156,19 @@ pub(super) async fn packet_reader_task_with_responses(
                             .await
                             .remove_unacked_publish(pubrec.packet_id)
                             .await;
+                        super::DirectClientInner::release_outbound_quota(
+                            &ctx.session,
+                            Some(pubrec.packet_id),
+                        )
+                        .await;
                         continue;
                     }
                     Packet::PubComp(pubcomp) => {
+                        super::DirectClientInner::release_outbound_quota(
+                            &ctx.session,
+                            Some(pubcomp.packet_id),
+                        )
+                        .await;
                         if let Some(tx) = ctx.pubcomp_channels.lock().remove(&pubcomp.packet_id) {
                             let _ = tx.send(pubcomp.reason_code);
                         }

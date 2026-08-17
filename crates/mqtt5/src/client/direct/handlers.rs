@@ -381,6 +381,8 @@ pub(super) async fn handle_pubcomp_outgoing(
         .complete_pubrel(pubcomp.packet_id)
         .await;
 
+    super::DirectClientInner::release_outbound_quota(session, Some(pubcomp.packet_id)).await;
+
     Ok(())
 }
 

@@ -417,6 +417,8 @@ impl DirectClientInner {
 
         self.apply_negotiated_keep_alive(connack.properties.get_server_keep_alive());
 
+        self.apply_negotiated_packet_sizes(&connack).await?;
+
         let protocol_version = self.options.protocol_version.as_u8();
         let (reader, writer) = match transport {
             TransportType::Tcp(tcp) => {
@@ -474,8 +476,6 @@ impl DirectClientInner {
         self.writer = Some(writer_arc);
         self.set_connected(true);
 
-        self.apply_negotiated_packet_sizes(&connack).await;
-
         tracing::debug!("Starting background tasks (packet reader and keepalive)");
         self.start_background_tasks(reader, connection_epoch)?;
         tracing::debug!("Background tasks started successfully");
@@ -485,8 +485,24 @@ impl DirectClientInner {
         })
     }
 
-    async fn apply_negotiated_packet_sizes(&self, connack: &crate::packet::connack::ConnAckPacket) {
+    async fn apply_negotiated_packet_sizes(
+        &self,
+        connack: &crate::packet::connack::ConnAckPacket,
+    ) -> Result<()> {
         let session = self.session.write().await;
+
+        match connack.properties.get_receive_maximum() {
+            Some(0) => {
+                return Err(MqttError::ProtocolError(
+                    "server advertised a Receive Maximum of 0".to_string(),
+                ));
+            }
+            Some(server_receive_maximum) => {
+                session.set_receive_maximum(server_receive_maximum).await;
+                tracing::debug!("Server Receive Maximum: {}", server_receive_maximum);
+            }
+            None => session.set_receive_maximum(65535).await,
+        }
 
         if self.options.deferred_ack {
             if let Some(receive_maximum) = self.options.properties.receive_maximum {
@@ -509,6 +525,8 @@ impl DirectClientInner {
             }
             None => session.reset_server_maximum_packet_size().await,
         }
+
+        Ok(())
     }
 
     /// # Errors
@@ -681,6 +699,16 @@ impl DirectClientInner {
         }
     }
 
+    pub(super) async fn release_outbound_quota(
+        session: &Arc<tokio::sync::RwLock<SessionState>>,
+        packet_id: Option<u16>,
+    ) {
+        if let Some(pid) = packet_id {
+            let flow = session.read().await.flow_control().clone();
+            let _ = flow.read().await.acknowledge(pid).await;
+        }
+    }
+
     /// # Errors
     ///
     /// Returns an error if the operation fails
@@ -734,12 +762,22 @@ impl DirectClientInner {
         let packet_id = needs_packet_id.then(|| self.packet_id_generator.next());
         publish.packet_id = packet_id;
 
+        if let Some(pid) = packet_id {
+            let flow = self.session.read().await.flow_control().clone();
+            flow.read().await.acquire_send_quota(pid).await?;
+        }
+
         if options.qos != QoS::AtMostOnce {
-            self.session
+            if let Err(e) = self
+                .session
                 .write()
                 .await
                 .store_unacked_publish(publish.clone())
-                .await?;
+                .await
+            {
+                Self::release_outbound_quota(&self.session, packet_id).await;
+                return Err(e);
+            }
         }
 
         let rx = self.setup_publish_acknowledgment(options.qos, packet_id);
@@ -754,11 +792,21 @@ impl DirectClientInner {
             );
         }
 
-        self.send_publish_packet(publish, options.qos).await?;
+        if let Err(e) = self.send_publish_packet(publish, options.qos).await {
+            Self::release_outbound_quota(&self.session, packet_id).await;
+            return Err(e);
+        }
 
         if let Some(rx) = rx {
-            self.wait_for_acknowledgment(rx, options.qos, packet_id)
-                .await?;
+            if let Err(e) = self
+                .wait_for_acknowledgment(rx, options.qos, packet_id)
+                .await
+            {
+                if !matches!(e, MqttError::Timeout) {
+                    Self::release_outbound_quota(&self.session, packet_id).await;
+                }
+                return Err(e);
+            }
         }
 
         Ok(match packet_id {

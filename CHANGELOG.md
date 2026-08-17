@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [mqtt5 0.38.3] - 2026-08-16
+
+### Fixed
+
+- **The client now enforces the broker's advertised Receive Maximum on outbound QoS 1 and QoS 2 publishes.** MQTT v5.0 §4.9 requires that a Client MUST NOT send more than the Server's Receive Maximum count of unacknowledged QoS 1 and QoS 2 PUBLISH packets, yet the client publish path never captured the value from the CONNACK and never acquired a send-quota permit before sending: the outbound `FlowControlManager` was constructed once with the default window (65 535) and never reprogrammed, and its `acquire_send_quota`/`acknowledge` API had no callers on the publish path. The only bound on concurrent in-flight publishes was the application's own concurrency. Against a broker advertising a small Receive Maximum (for example mosquitto's default of 20), the client would burst past the window, and a strict peer is entitled to respond with a `ReceiveMaximumExceeded` DISCONNECT. The in-tree broker masked the defect because its own default `server_receive_maximum` is also 65 535 and its inbound check populated no in-flight entry on the immediate-PUBACK QoS 1 path. The client now captures the CONNACK Receive Maximum (absent ⇒ 65 535), rejects a CONNACK advertising a Receive Maximum of 0 as a Protocol Error (`[MQTT-3.2.2-4]`), acquires a send-quota permit before each outbound QoS 1/2 PUBLISH (blocking with backpressure once the window is full), and releases it on PUBACK for QoS 1, on PUBCOMP for QoS 2, and early on an error PUBREC (reason ≥ 0x80). The QoS 2 release point was verified in TLA+ (`specs/tla/outbound-receive-max/`): releasing on a success PUBREC rather than on PUBCOMP lets a fresh PUBLISH exceed the window while the PUBREL/PUBCOMP exchange is still outstanding, which the model refutes as a window-bound violation.
+
 ## [mqtt5 0.38.2] - 2026-08-05
 
 ### Fixed
