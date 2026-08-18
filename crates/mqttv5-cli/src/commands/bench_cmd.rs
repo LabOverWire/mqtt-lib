@@ -648,14 +648,6 @@ struct LoadConfig {
     inflight: usize,
 }
 
-/// Closed-loop, persistent-worker generator: a pool of `inflight` worker tasks per
-/// publisher connection, each looping `encode -> publish().await -> count`. Aggregate
-/// concurrency is `num_conns * min(inflight, receive_maximum)`; the delivered rate
-/// converges to the broker's service rate only when that concurrency is driven wide
-/// enough. For `QoS0` (no ack window) that means many CONNECTIONS — extra workers on one
-/// connection merely contend on its single writer mutex, they do not pipeline. For
-/// `QoS1`/`QoS2` a worker blocks in the client's send-quota once the broker's Receive
-/// Maximum window is full. No task is spawned per message.
 fn spawn_load(
     pub_clients: &[MqttClient],
     topic_base: &str,
@@ -823,8 +815,6 @@ async fn run_throughput(cmd: BenchCommand) -> Result<()> {
 
     let total_completed = completed.load(Ordering::Relaxed);
     let total_received = drain_until_stable(&received).await;
-    // Same estimator (steady-state trimmed mean) for offered and delivered so the
-    // two are directly comparable; throughput_avg is the reported capacity.
     let offered_rate = steady_state_mean(&offered_samples, cmd.steady_trim);
     let throughput_avg = steady_state_mean(&delivered_samples, cmd.steady_trim);
     let throughput_steady = throughput_avg;
@@ -980,12 +970,6 @@ struct PayloadSpec {
     qos: QoS,
 }
 
-/// Open-loop paced publisher for latency mode. Each publish is stamped with its
-/// *intended* send instant and fired on an absolute schedule, so latency is measured
-/// against when the message was due, not when it actually left (coordinated-omission
-/// free). On a full in-flight window the schedule BLOCKS rather than dropping the
-/// message, so the slow samples a stall produces are preserved, not silently discarded.
-/// Returns the next sequence number.
 async fn paced_latency_pump(
     client: &MqttClient,
     topic: &str,
@@ -995,7 +979,9 @@ async fn paced_latency_pump(
     inflight: usize,
     seq_start: u32,
 ) -> u32 {
+    let permits = u32::try_from(inflight.max(1)).unwrap_or(u32::MAX);
     let sem = Arc::new(tokio::sync::Semaphore::new(inflight.max(1)));
+    let topic: Arc<str> = Arc::from(topic);
     let epoch_wall = nanos_as_u64();
     let start = Instant::now();
     let mut next = start;
@@ -1014,13 +1000,14 @@ async fn paced_latency_pump(
             break;
         };
         let client = client.clone();
-        let topic = topic.to_string();
+        let topic = Arc::clone(&topic);
         let qos = spec.qos;
         tokio::spawn(async move {
             let _ = publish_message(&client, &topic, payload, qos).await;
             drop(permit);
         });
     }
+    let _ = sem.acquire_many(permits).await;
     seq
 }
 
@@ -1073,6 +1060,7 @@ async fn run_latency(cmd: BenchCommand) -> Result<()> {
         0,
     )
     .await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
     latencies.lock().unwrap().clear();
 
     eprintln!("measuring for {}s at {message_rate} msg/s...", cmd.duration);
@@ -1908,6 +1896,7 @@ async fn run_hol_warmup(
     for handle in warmup_handles {
         handle.await.ok();
     }
+    tokio::time::sleep(Duration::from_millis(500)).await;
     for sv in topic_samples {
         sv.lock().unwrap().clear();
     }
@@ -1926,12 +1915,6 @@ struct HolPublishConfig {
     inflight: usize,
 }
 
-/// Open-loop HOL generator: each topic is paced to an absolute schedule and stamps every
-/// publish with its *intended* send instant, so per-topic latency is measured against when
-/// the message was due (coordinated-omission free) and the configured `--rate` is achieved
-/// regardless of QoS/RTT. On a full in-flight window the schedule BLOCKS on the permit
-/// rather than dropping the message, so the slow samples HOL blocking produces — the very
-/// thing the experiment measures — are preserved rather than silently discarded.
 fn spawn_hol_publishers(
     pub_clients: &[MqttClient],
     cfg: &HolPublishConfig,
@@ -1939,6 +1922,7 @@ fn spawn_hol_publishers(
     published: &Arc<AtomicU64>,
 ) -> Vec<tokio::task::JoinHandle<()>> {
     let mut handles = Vec::with_capacity(cfg.num_topics);
+    let permits = u32::try_from(cfg.inflight.max(1)).unwrap_or(u32::MAX);
     for topic_idx in 0..cfg.num_topics {
         let client = pub_clients[topic_idx % pub_clients.len()].clone();
         let running = Arc::clone(running);
@@ -1950,7 +1934,7 @@ fn spawn_hol_publishers(
         let sem = Arc::new(tokio::sync::Semaphore::new(cfg.inflight.max(1)));
 
         handles.push(tokio::spawn(async move {
-            let topic = format!("bench/hol/{topic_idx}");
+            let topic: Arc<str> = Arc::from(format!("bench/hol/{topic_idx}"));
             let mut seq = 0u32;
             let epoch_wall = nanos_as_u64();
             let start = Instant::now();
@@ -1975,7 +1959,7 @@ fn spawn_hol_publishers(
                 seq = seq.wrapping_add(1);
                 let client = client.clone();
                 let published = Arc::clone(&published);
-                let topic = topic.clone();
+                let topic = Arc::clone(&topic);
                 tokio::spawn(async move {
                     if publish_message(&client, &topic, payload, qos).await.is_ok() {
                         published.fetch_add(1, Ordering::Relaxed);
@@ -1983,6 +1967,7 @@ fn spawn_hol_publishers(
                     drop(permit);
                 });
             }
+            let _ = sem.acquire_many(permits).await;
         }));
     }
     handles
