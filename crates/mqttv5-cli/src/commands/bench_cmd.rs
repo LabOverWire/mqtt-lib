@@ -151,6 +151,20 @@ pub struct BenchCommand {
 
     #[arg(
         long,
+        default_value = "1024",
+        help = "Max concurrent in-flight publishes per publisher connection (open-loop window). The client's flow-control quota (broker Receive Maximum) throttles QoS1/2 within this; this bounds QoS0 memory."
+    )]
+    pub inflight: usize,
+
+    #[arg(
+        long,
+        value_delimiter = ',',
+        help = "Throughput mode: offered-load sweep as comma-separated target msg/s (e.g. 50000,100000,200000). Each point runs open-loop paced for --duration. Without it, a single saturating run at --inflight depth."
+    )]
+    pub sweep: Vec<u64>,
+
+    #[arg(
+        long,
         default_value = "0.1",
         help = "Throughput mode: fraction of per-second samples dropped from each end (ramp-up/tail) before computing steady-state throughput"
     )]
@@ -329,6 +343,7 @@ struct BenchConfig {
     quic_datagrams: bool,
     quic_flow_headers: bool,
     rate: u64,
+    inflight: usize,
     steady_trim: f64,
     hol_pub_connections: usize,
     hol_sub_connections: usize,
@@ -337,21 +352,35 @@ struct BenchConfig {
 }
 
 #[derive(Serialize)]
-struct ThroughputResults {
-    published: u64,
-    received: u64,
-    elapsed_secs: f64,
+struct SweepPoint {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target_rate: Option<u64>,
+    offered: u64,
+    delivered: u64,
     offered_rate: f64,
-    throughput_avg: f64,
-    throughput_steady: f64,
+    completed_rate: f64,
+    delivered_rate: f64,
     delivered_ratio: f64,
+    blocked_rate: f64,
+    p50_latency_us: u64,
+    p99_latency_us: u64,
+    elapsed_secs: f64,
     samples: Vec<u64>,
-    offered_samples: Vec<u64>,
+}
+
+#[derive(Serialize)]
+struct ThroughputResults {
+    inflight: usize,
+    subscribers: usize,
+    sweep: Vec<SweepPoint>,
 }
 
 #[derive(Serialize)]
 struct LatencyResults {
     messages: u64,
+    target_rate: u64,
+    achieved_rate: f64,
+    blocked: u64,
     min_us: u64,
     max_us: u64,
     avg_us: f64,
@@ -503,6 +532,7 @@ fn bench_config(cmd: &BenchCommand, url: &str) -> BenchConfig {
         quic_datagrams: cmd.quic_datagrams,
         quic_flow_headers: cmd.quic_flow_headers,
         rate: cmd.rate,
+        inflight: cmd.inflight,
         steady_trim: cmd.steady_trim,
         hol_pub_connections: cmd.pub_connections,
         hol_sub_connections: cmd.sub_connections,
@@ -623,48 +653,216 @@ fn percentile_stats(sorted: &[u64]) -> (f64, u64, u64, u64) {
     (avg, p50, p95, p99)
 }
 
-struct PublishConfig {
+struct LoadGenConfig {
     num_topics: usize,
     format: PayloadFormat,
     payload_size: usize,
     qos: QoS,
+    inflight: usize,
+    rate: Option<u64>,
 }
 
-fn spawn_publishers(
+struct LoadCounters {
+    offered: Arc<AtomicU64>,
+    completed: Arc<AtomicU64>,
+    blocked: Arc<AtomicU64>,
+}
+
+// Open-loop pipelined publisher: each topic is driven by one task that keeps up to
+// `inflight` publishes outstanding concurrently (via a per-connection semaphore), so the
+// broker's flow-control window / transport backpressure — not per-message ack latency —
+// determines the achieved rate. `offered` is counted before the send is issued; `completed`
+// after the ack. When `rate` is set the task paces to an absolute schedule (open-loop); if
+// the in-flight window is full at a tick, that tick is counted as `blocked` (saturation) and
+// skipped rather than serializing.
+fn spawn_load(
     pub_clients: &[MqttClient],
     topic_base: &str,
-    cfg: &PublishConfig,
+    cfg: &LoadGenConfig,
     running: &Arc<std::sync::atomic::AtomicBool>,
-    published: &Arc<AtomicU64>,
+    counters: &LoadCounters,
 ) -> Vec<tokio::task::JoinHandle<()>> {
     if pub_clients.is_empty() {
         return Vec::new();
     }
+    let per_topic_interval = cfg
+        .rate
+        .filter(|r| *r > 0)
+        .and_then(|r| (1_000_000u64 * cfg.num_topics as u64).checked_div(r))
+        .map(Duration::from_micros);
+
+    // One in-flight window per publisher CONNECTION, shared by every topic mapped to it, so
+    // the concurrent-in-flight bound is `inflight` per connection regardless of topic count.
+    let conn_sems: Vec<Arc<tokio::sync::Semaphore>> = pub_clients
+        .iter()
+        .map(|_| Arc::new(tokio::sync::Semaphore::new(cfg.inflight.max(1))))
+        .collect();
+
     let mut handles = Vec::with_capacity(cfg.num_topics);
     for topic_idx in 0..cfg.num_topics {
-        let client = pub_clients[topic_idx % pub_clients.len()].clone();
+        let conn_idx = topic_idx % pub_clients.len();
+        let client = pub_clients[conn_idx].clone();
         let topic = format!("{topic_base}/{topic_idx}");
         let running = Arc::clone(running);
-        let published = Arc::clone(published);
+        let offered = Arc::clone(&counters.offered);
+        let completed = Arc::clone(&counters.completed);
+        let blocked = Arc::clone(&counters.blocked);
         let format = cfg.format;
         let payload_size = cfg.payload_size;
         let qos = cfg.qos;
+        let sem = Arc::clone(&conn_sems[conn_idx]);
+        let interval = per_topic_interval;
 
         handles.push(tokio::spawn(async move {
             let mut seq = 0u32;
+            let mut next = Instant::now();
             while running.load(Ordering::Relaxed) {
+                let permit = if let Some(iv) = interval {
+                    next += iv;
+                    let now = Instant::now();
+                    if next > now {
+                        tokio::time::sleep(next - now).await;
+                    }
+                    let Ok(p) = Arc::clone(&sem).try_acquire_owned() else {
+                        blocked.fetch_add(1, Ordering::Relaxed);
+                        seq = seq.wrapping_add(1);
+                        continue;
+                    };
+                    p
+                } else {
+                    let Ok(p) = Arc::clone(&sem).acquire_owned().await else {
+                        break;
+                    };
+                    p
+                };
+
                 let payload = encode_payload(format, payload_size, seq);
-                if publish_message(&client, &topic, &payload, qos)
-                    .await
-                    .is_ok()
-                {
-                    published.fetch_add(1, Ordering::Relaxed);
-                }
+                offered.fetch_add(1, Ordering::Relaxed);
+                let client = client.clone();
+                let topic = topic.clone();
+                let completed = Arc::clone(&completed);
+                tokio::spawn(async move {
+                    if publish_message(&client, &topic, &payload, qos)
+                        .await
+                        .is_ok()
+                    {
+                        completed.fetch_add(1, Ordering::Relaxed);
+                    }
+                    drop(permit);
+                });
                 seq = seq.wrapping_add(1);
             }
         }));
     }
     handles
+}
+
+// Throughput-mode delivery latency is sampled (1-in-LAT_STRIDE) into a fixed-capacity buffer so
+// the delivery hot path is not serialized by a per-message lock and memory stays bounded. NOTE:
+// this is publisher-clock vs subscriber-clock; across hosts it requires synchronized clocks (NTP).
+const LAT_STRIDE: u64 = 32;
+const LAT_CAP: usize = 200_000;
+
+struct SweepCtx<'a> {
+    pub_clients: &'a [MqttClient],
+    topic: &'a str,
+    received: &'a Arc<AtomicU64>,
+    latencies: &'a Arc<std::sync::Mutex<Vec<u64>>>,
+    num_topics: usize,
+    format: PayloadFormat,
+    payload_size: usize,
+    qos: QoS,
+    inflight: usize,
+    warmup: u64,
+    duration: u64,
+    subscribers: usize,
+    steady_trim: f64,
+}
+
+async fn measure_sweep_point(ctx: &SweepCtx<'_>, target: Option<u64>) -> SweepPoint {
+    let counters = LoadCounters {
+        offered: Arc::new(AtomicU64::new(0)),
+        completed: Arc::new(AtomicU64::new(0)),
+        blocked: Arc::new(AtomicU64::new(0)),
+    };
+    let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let cfg = LoadGenConfig {
+        num_topics: ctx.num_topics,
+        format: ctx.format,
+        payload_size: ctx.payload_size,
+        qos: ctx.qos,
+        inflight: ctx.inflight,
+        rate: target,
+    };
+    match target {
+        Some(r) => eprintln!("sweep point: offered {r} msg/s (warmup {}s)...", ctx.warmup),
+        None => eprintln!(
+            "saturating run (inflight {}, warmup {}s)...",
+            ctx.inflight, ctx.warmup
+        ),
+    }
+    let handles = spawn_load(ctx.pub_clients, ctx.topic, &cfg, &running, &counters);
+
+    tokio::time::sleep(Duration::from_secs(ctx.warmup)).await;
+    counters.offered.store(0, Ordering::SeqCst);
+    counters.completed.store(0, Ordering::SeqCst);
+    counters.blocked.store(0, Ordering::SeqCst);
+    ctx.received.store(0, Ordering::SeqCst);
+    ctx.latencies.lock().unwrap().clear();
+
+    eprintln!("measuring for {}s...", ctx.duration);
+    let measure_start = Instant::now();
+    let (offered_samples, delivered_samples) = sample_rates_per_second(
+        measure_start,
+        Duration::from_secs(ctx.duration),
+        &counters.offered,
+        ctx.received,
+    )
+    .await;
+    let elapsed = measure_start.elapsed().as_secs_f64();
+
+    running.store(false, Ordering::SeqCst);
+    for handle in handles {
+        handle.await.ok();
+    }
+
+    let total_completed = counters.completed.load(Ordering::Relaxed);
+    let total_blocked = counters.blocked.load(Ordering::Relaxed);
+    let total_offered = counters.offered.load(Ordering::Relaxed);
+    let total_received = drain_until_stable(ctx.received).await;
+
+    let mut lat = ctx.latencies.lock().unwrap().clone();
+    lat.sort_unstable();
+    let (_, p50, _, p99) = percentile_stats(&lat);
+
+    let expected = as_f64_lossy(total_offered) * usize_as_f64_lossy(ctx.subscribers);
+    let delivered_ratio = if expected == 0.0 {
+        0.0
+    } else {
+        as_f64_lossy(total_received) / expected
+    };
+    let per_sec = |n: u64| {
+        if elapsed > 0.0 {
+            as_f64_lossy(n) / elapsed
+        } else {
+            0.0
+        }
+    };
+
+    SweepPoint {
+        target_rate: target,
+        offered: total_offered,
+        delivered: total_received,
+        offered_rate: rate_mean(&offered_samples),
+        completed_rate: per_sec(total_completed),
+        delivered_rate: steady_state_mean(&delivered_samples, ctx.steady_trim),
+        delivered_ratio,
+        blocked_rate: per_sec(total_blocked),
+        p50_latency_us: p50,
+        p99_latency_us: p99,
+        elapsed_secs: elapsed,
+        samples: delivered_samples,
+    }
 }
 
 async fn run_throughput(cmd: BenchCommand) -> Result<()> {
@@ -684,6 +882,8 @@ async fn run_throughput(cmd: BenchCommand) -> Result<()> {
     }
 
     let received = Arc::new(AtomicU64::new(0));
+    let latencies = Arc::new(std::sync::Mutex::new(Vec::<u64>::with_capacity(LAT_CAP)));
+    let lat_seen = Arc::new(AtomicU64::new(0));
     let topic = cmd.topic.clone();
     let filter = cmd.filter.clone().unwrap_or_else(|| format!("{topic}/#"));
 
@@ -692,78 +892,66 @@ async fn run_throughput(cmd: BenchCommand) -> Result<()> {
     for i in 0..cmd.subscribers {
         let sub_client = connect_client(format!("{base_id}-sub-{i}"), &url, &cmd).await?;
         let received_clone = Arc::clone(&received);
+        let lat_clone = Arc::clone(&latencies);
+        let seen_clone = Arc::clone(&lat_seen);
         sub_client
             .subscribe(&filter, move |msg| {
-                std::hint::black_box(decode_timestamp(format, &msg.payload));
+                let sent = decode_timestamp(format, &msg.payload);
+                if sent > 0
+                    && seen_clone
+                        .fetch_add(1, Ordering::Relaxed)
+                        .is_multiple_of(LAT_STRIDE)
+                {
+                    let now = nanos_as_u64();
+                    let mut v = lat_clone.lock().unwrap();
+                    if v.len() < LAT_CAP {
+                        v.push(now.saturating_sub(sent) / 1000);
+                    }
+                }
                 received_clone.fetch_add(1, Ordering::Relaxed);
             })
             .await
             .context("failed to subscribe")?;
         sub_clients.push(sub_client);
     }
-
     eprintln!("subscribed {} client(s) to {filter}", cmd.subscribers);
 
-    let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
-    let published = Arc::new(AtomicU64::new(0));
+    let targets: Vec<Option<u64>> = if cmd.sweep.is_empty() {
+        vec![None]
+    } else {
+        cmd.sweep.iter().map(|&r| Some(r)).collect()
+    };
 
-    eprintln!("warming up for {}s...", cmd.warmup);
-    let pub_cfg = PublishConfig {
+    let ctx = SweepCtx {
+        pub_clients: &pub_clients,
+        topic: &topic,
+        received: &received,
+        latencies: &latencies,
         num_topics,
         format,
         payload_size: cmd.payload_size,
         qos: cmd.qos,
+        inflight: cmd.inflight,
+        warmup: cmd.warmup,
+        duration: cmd.duration,
+        subscribers: cmd.subscribers,
+        steady_trim: cmd.steady_trim,
     };
-    let handles = spawn_publishers(&pub_clients, &topic, &pub_cfg, &running, &published);
-
-    tokio::time::sleep(Duration::from_secs(cmd.warmup)).await;
-    received.store(0, Ordering::SeqCst);
-    published.store(0, Ordering::SeqCst);
-
-    eprintln!("measuring for {}s...", cmd.duration);
-    let measure_start = Instant::now();
-    let (offered_samples, delivered_samples) = sample_rates_per_second(
-        measure_start,
-        Duration::from_secs(cmd.duration),
-        &published,
-        &received,
-    )
-    .await;
-    let elapsed = measure_start.elapsed().as_secs_f64();
-
-    running.store(false, Ordering::SeqCst);
-    for handle in handles {
-        handle.await.ok();
+    let mut points = Vec::with_capacity(targets.len());
+    for target in targets {
+        points.push(measure_sweep_point(&ctx, target).await);
+        tokio::time::sleep(Duration::from_millis(500)).await;
     }
-
-    let total_published = published.load(Ordering::Relaxed);
-    let total_received = drain_until_stable(&received).await;
-    let offered_rate = rate_mean(&offered_samples);
-    let throughput_avg = rate_mean(&delivered_samples);
-    let throughput_steady = steady_state_mean(&delivered_samples, cmd.steady_trim);
-    let expected = as_f64_lossy(total_published) * usize_as_f64_lossy(cmd.subscribers);
-    let delivered_ratio = if expected == 0.0 {
-        0.0
-    } else {
-        as_f64_lossy(total_received) / expected
-    };
 
     let output = BenchOutput {
         mode: "throughput".to_string(),
         config: bench_config(&cmd, &url),
         results: BenchResults::Throughput(ThroughputResults {
-            published: total_published,
-            received: total_received,
-            elapsed_secs: elapsed,
-            offered_rate,
-            throughput_avg,
-            throughput_steady,
-            delivered_ratio,
-            samples: delivered_samples,
-            offered_samples,
+            inflight: cmd.inflight,
+            subscribers: cmd.subscribers,
+            sweep: points,
         }),
     };
-
     println!("{}", serde_json::to_string_pretty(&output)?);
 
     for pub_client in &pub_clients {
@@ -911,37 +1099,49 @@ async fn run_latency(cmd: BenchCommand) -> Result<()> {
         .await
         .context("failed to subscribe")?;
 
-    let message_rate = 1000;
-    let interval_us = 1_000_000 / message_rate;
+    let message_rate = if cmd.rate > 0 { cmd.rate } else { 1000 };
+    let interval = Duration::from_micros((1_000_000 / message_rate).max(1));
+    let inflight = Arc::new(tokio::sync::Semaphore::new(cmd.inflight.max(1)));
+    let spec = PayloadSpec {
+        format,
+        payload_size: cmd.payload_size,
+        qos: cmd.qos,
+    };
 
     eprintln!("warming up for {}s...", cmd.warmup);
-    send_timed_messages_formatted(
+    let _ = paced_open_loop(
         &pub_client,
         &topic,
-        format,
-        cmd.payload_size,
-        cmd.qos,
-        cmd.warmup * message_rate,
-        interval_us,
+        spec,
+        interval,
+        &inflight,
+        Duration::from_secs(cmd.warmup),
     )
-    .await?;
+    .await;
     latencies.lock().unwrap().clear();
 
-    eprintln!("measuring for {}s at {message_rate} msg/s...", cmd.duration);
-    let measure_start = Instant::now();
-    let measure_duration = Duration::from_secs(cmd.duration);
-    let mut seq = 0u32;
-    while measure_start.elapsed() < measure_duration {
-        let payload = encode_payload(format, cmd.payload_size, seq);
-        if publish_message(&pub_client, &topic, &payload, cmd.qos)
-            .await
-            .is_err()
-        {
-            eprintln!("connection lost after {seq} messages, reporting partial results");
-            break;
-        }
-        seq = seq.wrapping_add(1);
-        tokio::time::sleep(Duration::from_micros(interval_us)).await;
+    eprintln!(
+        "measuring for {}s at {message_rate} msg/s (open-loop)...",
+        cmd.duration
+    );
+    let (offered, blocked) = paced_open_loop(
+        &pub_client,
+        &topic,
+        spec,
+        interval,
+        &inflight,
+        Duration::from_secs(cmd.duration),
+    )
+    .await;
+    let achieved_rate = if cmd.duration > 0 {
+        as_f64_lossy(offered) / as_f64_lossy(cmd.duration)
+    } else {
+        0.0
+    };
+    if blocked > 0 {
+        eprintln!(
+            "WARN: in-flight window full on {blocked} ticks; achieved ~{achieved_rate:.0}/s vs target {message_rate}/s (raise --inflight or lower --rate)"
+        );
     }
 
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -965,6 +1165,9 @@ async fn run_latency(cmd: BenchCommand) -> Result<()> {
         config: bench_config(&cmd, &url),
         results: BenchResults::Latency(LatencyResults {
             messages: samples.len() as u64,
+            target_rate: message_rate,
+            achieved_rate,
+            blocked,
             min_us,
             max_us,
             avg_us,
@@ -993,25 +1196,50 @@ fn downsample(sorted: &[u64], target: usize) -> Vec<u64> {
         .collect()
 }
 
-async fn send_timed_messages_formatted(
-    client: &MqttClient,
-    topic: &str,
+#[derive(Clone, Copy)]
+struct PayloadSpec {
     format: PayloadFormat,
     payload_size: usize,
     qos: QoS,
-    count: u64,
-    interval_us: u64,
-) -> Result<()> {
-    for seq in 0..count {
-        #[allow(clippy::cast_possible_truncation)]
-        let payload = encode_payload(format, payload_size, seq as u32);
-        if publish_message(client, topic, &payload, qos).await.is_err() {
-            eprintln!("connection lost during warmup after {seq} messages");
-            break;
+}
+
+// Returns (offered, blocked): messages actually issued vs paced ticks skipped because the
+// in-flight window was full (i.e. the offered rate could not be sustained).
+async fn paced_open_loop(
+    client: &MqttClient,
+    topic: &str,
+    spec: PayloadSpec,
+    interval: Duration,
+    inflight: &Arc<tokio::sync::Semaphore>,
+    window: Duration,
+) -> (u64, u64) {
+    let start = Instant::now();
+    let mut seq = 0u32;
+    let mut next = start;
+    let mut offered = 0u64;
+    let mut blocked = 0u64;
+    while start.elapsed() < window {
+        next += interval;
+        let now = Instant::now();
+        if next > now {
+            tokio::time::sleep(next - now).await;
         }
-        tokio::time::sleep(Duration::from_micros(interval_us)).await;
+        if let Ok(permit) = Arc::clone(inflight).try_acquire_owned() {
+            let payload = encode_payload(spec.format, spec.payload_size, seq);
+            let client = client.clone();
+            let topic = topic.to_string();
+            let qos = spec.qos;
+            tokio::spawn(async move {
+                publish_message(&client, &topic, &payload, qos).await.ok();
+                drop(permit);
+            });
+            offered += 1;
+        } else {
+            blocked += 1;
+        }
+        seq = seq.wrapping_add(1);
     }
-    Ok(())
+    (offered, blocked)
 }
 
 fn load_tls_certs(cmd: &BenchCommand) -> Result<TlsCerts> {
@@ -1630,6 +1858,7 @@ async fn run_hol_blocking(cmd: BenchCommand) -> Result<()> {
         payload_size,
         per_topic_interval_us,
         qos: cmd.qos,
+        inflight: cmd.inflight,
     };
 
     eprintln!("warming up for {}s at {rate_label}...", cmd.warmup);
@@ -1800,6 +2029,7 @@ struct HolPublishConfig {
     payload_size: usize,
     per_topic_interval_us: Option<u64>,
     qos: QoS,
+    inflight: usize,
 }
 
 fn spawn_hol_publishers(
@@ -1808,31 +2038,53 @@ fn spawn_hol_publishers(
     running: &Arc<std::sync::atomic::AtomicBool>,
     published: &Arc<AtomicU64>,
 ) -> Vec<tokio::task::JoinHandle<()>> {
+    let conn_sems: Vec<Arc<tokio::sync::Semaphore>> = pub_clients
+        .iter()
+        .map(|_| Arc::new(tokio::sync::Semaphore::new(cfg.inflight.max(1))))
+        .collect();
     let mut handles = Vec::with_capacity(cfg.num_topics);
     for topic_idx in 0..cfg.num_topics {
-        let client = pub_clients[topic_idx % pub_clients.len()].clone();
+        let conn_idx = topic_idx % pub_clients.len();
+        let client = pub_clients[conn_idx].clone();
         let running = Arc::clone(running);
         let published = Arc::clone(published);
         let format = cfg.format;
         let payload_size = cfg.payload_size;
         let per_topic_interval_us = cfg.per_topic_interval_us;
         let qos = cfg.qos;
+        let sem = Arc::clone(&conn_sems[conn_idx]);
 
         handles.push(tokio::spawn(async move {
             let topic = format!("bench/hol/{topic_idx}");
             let mut seq = 0u32;
+            let mut next = Instant::now();
             while running.load(Ordering::Relaxed) {
+                let permit = if let Some(iv) = per_topic_interval_us {
+                    next += Duration::from_micros(iv);
+                    let now = Instant::now();
+                    if next > now {
+                        tokio::time::sleep(next - now).await;
+                    }
+                    let Ok(p) = Arc::clone(&sem).try_acquire_owned() else {
+                        seq = seq.wrapping_add(1);
+                        continue;
+                    };
+                    p
+                } else {
+                    let Ok(p) = Arc::clone(&sem).acquire_owned().await else {
+                        break;
+                    };
+                    p
+                };
                 let payload = encode_payload(format, payload_size, seq);
-                if publish_message(&client, &topic, &payload, qos)
-                    .await
-                    .is_ok()
-                {
-                    published.fetch_add(1, Ordering::Relaxed);
-                }
+                published.fetch_add(1, Ordering::Relaxed);
+                let client = client.clone();
+                let topic = topic.clone();
+                tokio::spawn(async move {
+                    publish_message(&client, &topic, &payload, qos).await.ok();
+                    drop(permit);
+                });
                 seq = seq.wrapping_add(1);
-                if let Some(interval) = per_topic_interval_us {
-                    tokio::time::sleep(Duration::from_micros(interval)).await;
-                }
             }
         }));
     }
