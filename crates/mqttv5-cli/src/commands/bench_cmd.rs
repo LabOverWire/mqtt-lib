@@ -151,6 +151,13 @@ pub struct BenchCommand {
 
     #[arg(
         long,
+        default_value = "32",
+        help = "Throughput/HOL mode: concurrent in-flight publishes per publisher connection. For QoS1/2 this is the pipelining depth (raise toward the broker's Receive Maximum). For QoS0 it does NOT pipeline (one writer per connection) — scale --publishers instead. To measure broker capacity, raise concurrency until delivered rate plateaus while the load host keeps CPU headroom"
+    )]
+    pub inflight: usize,
+
+    #[arg(
+        long,
         default_value = "0.1",
         help = "Throughput mode: fraction of per-second samples dropped from each end (ramp-up/tail) before computing steady-state throughput"
     )]
@@ -204,7 +211,15 @@ fn readings_count(payload_size: usize) -> usize {
 }
 
 fn encode_payload(format: PayloadFormat, payload_size: usize, sequence: u32) -> Vec<u8> {
-    let ts = nanos_as_u64();
+    encode_payload_at(format, payload_size, sequence, nanos_as_u64())
+}
+
+fn encode_payload_at(
+    format: PayloadFormat,
+    payload_size: usize,
+    sequence: u32,
+    ts: u64,
+) -> Vec<u8> {
     match format {
         PayloadFormat::Raw => {
             let size = payload_size.max(12);
@@ -329,6 +344,7 @@ struct BenchConfig {
     quic_datagrams: bool,
     quic_flow_headers: bool,
     rate: u64,
+    inflight: usize,
     steady_trim: f64,
     hol_pub_connections: usize,
     hol_sub_connections: usize,
@@ -503,6 +519,7 @@ fn bench_config(cmd: &BenchCommand, url: &str) -> BenchConfig {
         quic_datagrams: cmd.quic_datagrams,
         quic_flow_headers: cmd.quic_flow_headers,
         rate: cmd.rate,
+        inflight: cmd.inflight,
         steady_trim: cmd.steady_trim,
         hol_pub_connections: cmd.pub_connections,
         hol_sub_connections: cmd.sub_connections,
@@ -623,55 +640,116 @@ fn percentile_stats(sorted: &[u64]) -> (f64, u64, u64, u64) {
     (avg, p50, p95, p99)
 }
 
-struct PublishConfig {
+struct LoadConfig {
     num_topics: usize,
     format: PayloadFormat,
     payload_size: usize,
     qos: QoS,
+    inflight: usize,
 }
 
-fn spawn_publishers(
+fn spawn_load(
     pub_clients: &[MqttClient],
     topic_base: &str,
-    cfg: &PublishConfig,
+    cfg: &LoadConfig,
     running: &Arc<std::sync::atomic::AtomicBool>,
-    published: &Arc<AtomicU64>,
+    offered: &Arc<AtomicU64>,
+    completed: &Arc<AtomicU64>,
 ) -> Vec<tokio::task::JoinHandle<()>> {
-    if pub_clients.is_empty() {
+    let num_conns = pub_clients.len();
+    if num_conns == 0 || cfg.num_topics == 0 {
         return Vec::new();
     }
-    let mut handles = Vec::with_capacity(cfg.num_topics);
-    for topic_idx in 0..cfg.num_topics {
-        let client = pub_clients[topic_idx % pub_clients.len()].clone();
-        let topic = format!("{topic_base}/{topic_idx}");
-        let running = Arc::clone(running);
-        let published = Arc::clone(published);
-        let format = cfg.format;
-        let payload_size = cfg.payload_size;
-        let qos = cfg.qos;
-
-        handles.push(tokio::spawn(async move {
-            let mut seq = 0u32;
-            while running.load(Ordering::Relaxed) {
-                let payload = encode_payload(format, payload_size, seq);
-                if publish_message(&client, &topic, &payload, qos)
-                    .await
-                    .is_ok()
-                {
-                    published.fetch_add(1, Ordering::Relaxed);
+    let workers_per_conn = cfg.inflight.max(1);
+    let mut handles = Vec::with_capacity(num_conns * workers_per_conn);
+    for (conn_idx, client) in pub_clients.iter().enumerate() {
+        let conn_topics: Vec<String> = (0..cfg.num_topics)
+            .filter(|t| t % num_conns == conn_idx)
+            .map(|t| format!("{topic_base}/{t}"))
+            .collect();
+        if conn_topics.is_empty() {
+            continue;
+        }
+        for worker_idx in 0..workers_per_conn {
+            let client = client.clone();
+            let topics = conn_topics.clone();
+            let running = Arc::clone(running);
+            let offered = Arc::clone(offered);
+            let completed = Arc::clone(completed);
+            let format = cfg.format;
+            let payload_size = cfg.payload_size;
+            let qos = cfg.qos;
+            let stride = u32::try_from(workers_per_conn).unwrap_or(1).max(1);
+            handles.push(tokio::spawn(async move {
+                let mut seq = u32::try_from(worker_idx).unwrap_or(0);
+                let mut cursor = worker_idx % topics.len();
+                while running.load(Ordering::Relaxed) {
+                    let topic = &topics[cursor % topics.len()];
+                    cursor = cursor.wrapping_add(1);
+                    let payload = encode_payload(format, payload_size, seq);
+                    seq = seq.wrapping_add(stride);
+                    offered.fetch_add(1, Ordering::Relaxed);
+                    if publish_message(&client, topic, payload, qos).await.is_ok() {
+                        completed.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
-                seq = seq.wrapping_add(1);
-            }
-        }));
+            }));
+        }
     }
     handles
 }
 
+async fn connect_counting_subscribers(
+    cmd: &BenchCommand,
+    base_id: &str,
+    url: &str,
+    filter: &str,
+    received: &Arc<AtomicU64>,
+) -> Result<Vec<MqttClient>> {
+    let mut sub_clients = Vec::with_capacity(cmd.subscribers);
+    for i in 0..cmd.subscribers {
+        let sub_client = connect_client(format!("{base_id}-sub-{i}"), url, cmd).await?;
+        let received_clone = Arc::clone(received);
+        sub_client
+            .subscribe(filter, move |_msg| {
+                received_clone.fetch_add(1, Ordering::Relaxed);
+            })
+            .await
+            .context("failed to subscribe")?;
+        sub_clients.push(sub_client);
+    }
+    Ok(sub_clients)
+}
+
+fn validate_throughput_args(cmd: &BenchCommand) -> Result<usize> {
+    if cmd.duration == 0 {
+        anyhow::bail!("--duration must be greater than 0");
+    }
+    if cmd.inflight == 0 {
+        anyhow::bail!("--inflight must be greater than 0");
+    }
+    if cmd.publishers == 0 && cmd.subscribers == 0 {
+        anyhow::bail!("--publishers and --subscribers cannot both be 0");
+    }
+    let num_topics = resolved_topics(cmd);
+    if cmd.publishers > 0 && num_topics == 0 {
+        anyhow::bail!("--topics must be greater than 0 when publishing");
+    }
+    let active_pub_conns = num_topics.min(cmd.publishers);
+    if cmd.qos == QoS::AtMostOnce && cmd.publishers > 0 && active_pub_conns < 2 {
+        eprintln!(
+            "warning: QoS0 with a single active publisher connection is serialized by the client writer; \
+             delivered rate reflects one connection, not broker capacity. Use --publishers N (and --topics >= N) to measure capacity."
+        );
+    }
+    Ok(num_topics)
+}
+
 async fn run_throughput(cmd: BenchCommand) -> Result<()> {
+    let num_topics = validate_throughput_args(&cmd)?;
     let url = broker_url(&cmd);
     let base_id = base_client_id(&cmd, "bench");
 
-    let num_topics = resolved_topics(&cmd);
     let active_pub_conns = num_topics.min(cmd.publishers);
     eprintln!(
         "connecting {} publisher(s) and {} subscriber(s) to {url} ({num_topics} topics round-robin across {active_pub_conns} publisher connection(s))...",
@@ -686,46 +764,45 @@ async fn run_throughput(cmd: BenchCommand) -> Result<()> {
     let received = Arc::new(AtomicU64::new(0));
     let topic = cmd.topic.clone();
     let filter = cmd.filter.clone().unwrap_or_else(|| format!("{topic}/#"));
-
-    let format = cmd.payload_format;
-    let mut sub_clients = Vec::with_capacity(cmd.subscribers);
-    for i in 0..cmd.subscribers {
-        let sub_client = connect_client(format!("{base_id}-sub-{i}"), &url, &cmd).await?;
-        let received_clone = Arc::clone(&received);
-        sub_client
-            .subscribe(&filter, move |msg| {
-                std::hint::black_box(decode_timestamp(format, &msg.payload));
-                received_clone.fetch_add(1, Ordering::Relaxed);
-            })
-            .await
-            .context("failed to subscribe")?;
-        sub_clients.push(sub_client);
-    }
-
+    let sub_clients =
+        connect_counting_subscribers(&cmd, &base_id, &url, &filter, &received).await?;
     eprintln!("subscribed {} client(s) to {filter}", cmd.subscribers);
 
     let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
-    let published = Arc::new(AtomicU64::new(0));
+    let offered = Arc::new(AtomicU64::new(0));
+    let completed = Arc::new(AtomicU64::new(0));
 
-    eprintln!("warming up for {}s...", cmd.warmup);
-    let pub_cfg = PublishConfig {
+    eprintln!(
+        "warming up for {}s ({} in-flight per connection)...",
+        cmd.warmup, cmd.inflight
+    );
+    let load_cfg = LoadConfig {
         num_topics,
-        format,
+        format: cmd.payload_format,
         payload_size: cmd.payload_size,
         qos: cmd.qos,
+        inflight: cmd.inflight,
     };
-    let handles = spawn_publishers(&pub_clients, &topic, &pub_cfg, &running, &published);
+    let handles = spawn_load(
+        &pub_clients,
+        &topic,
+        &load_cfg,
+        &running,
+        &offered,
+        &completed,
+    );
 
     tokio::time::sleep(Duration::from_secs(cmd.warmup)).await;
+    offered.store(0, Ordering::SeqCst);
+    completed.store(0, Ordering::SeqCst);
     received.store(0, Ordering::SeqCst);
-    published.store(0, Ordering::SeqCst);
 
     eprintln!("measuring for {}s...", cmd.duration);
     let measure_start = Instant::now();
     let (offered_samples, delivered_samples) = sample_rates_per_second(
         measure_start,
         Duration::from_secs(cmd.duration),
-        &published,
+        &offered,
         &received,
     )
     .await;
@@ -736,12 +813,12 @@ async fn run_throughput(cmd: BenchCommand) -> Result<()> {
         handle.await.ok();
     }
 
-    let total_published = published.load(Ordering::Relaxed);
+    let total_completed = completed.load(Ordering::Relaxed);
     let total_received = drain_until_stable(&received).await;
-    let offered_rate = rate_mean(&offered_samples);
-    let throughput_avg = rate_mean(&delivered_samples);
-    let throughput_steady = steady_state_mean(&delivered_samples, cmd.steady_trim);
-    let expected = as_f64_lossy(total_published) * usize_as_f64_lossy(cmd.subscribers);
+    let offered_rate = steady_state_mean(&offered_samples, cmd.steady_trim);
+    let throughput_avg = steady_state_mean(&delivered_samples, cmd.steady_trim);
+    let throughput_steady = throughput_avg;
+    let expected = as_f64_lossy(total_completed) * usize_as_f64_lossy(cmd.subscribers);
     let delivered_ratio = if expected == 0.0 {
         0.0
     } else {
@@ -752,7 +829,7 @@ async fn run_throughput(cmd: BenchCommand) -> Result<()> {
         mode: "throughput".to_string(),
         config: bench_config(&cmd, &url),
         results: BenchResults::Throughput(ThroughputResults {
-            published: total_published,
+            published: total_completed,
             received: total_received,
             elapsed_secs: elapsed,
             offered_rate,
@@ -873,13 +950,65 @@ async fn sample_counter_per_second(
     samples
 }
 
-async fn publish_message(client: &MqttClient, topic: &str, payload: &[u8], qos: QoS) -> Result<()> {
+async fn publish_message(
+    client: &MqttClient,
+    topic: &str,
+    payload: Vec<u8>,
+    qos: QoS,
+) -> Result<()> {
     match qos {
-        QoS::AtMostOnce => client.publish(topic, payload.to_vec()).await?,
-        QoS::AtLeastOnce => client.publish_qos1(topic, payload.to_vec()).await?,
-        QoS::ExactlyOnce => client.publish_qos2(topic, payload.to_vec()).await?,
+        QoS::AtMostOnce => client.publish(topic, payload).await?,
+        QoS::AtLeastOnce => client.publish_qos1(topic, payload).await?,
+        QoS::ExactlyOnce => client.publish_qos2(topic, payload).await?,
     };
     Ok(())
+}
+
+struct PayloadSpec {
+    format: PayloadFormat,
+    payload_size: usize,
+    qos: QoS,
+}
+
+async fn paced_latency_pump(
+    client: &MqttClient,
+    topic: &str,
+    spec: &PayloadSpec,
+    duration: Duration,
+    interval_us: u64,
+    inflight: usize,
+    seq_start: u32,
+) -> u32 {
+    let permits = u32::try_from(inflight.max(1)).unwrap_or(u32::MAX);
+    let sem = Arc::new(tokio::sync::Semaphore::new(inflight.max(1)));
+    let topic: Arc<str> = Arc::from(topic);
+    let epoch_wall = nanos_as_u64();
+    let start = Instant::now();
+    let mut next = start;
+    let mut seq = seq_start;
+    while start.elapsed() < duration {
+        next += Duration::from_micros(interval_us);
+        let now = Instant::now();
+        if next > now {
+            tokio::time::sleep(next - now).await;
+        }
+        let intended_wall =
+            epoch_wall + u64::try_from((next - start).as_nanos()).unwrap_or(u64::MAX);
+        let payload = encode_payload_at(spec.format, spec.payload_size, seq, intended_wall);
+        seq = seq.wrapping_add(1);
+        let Ok(permit) = Arc::clone(&sem).acquire_owned().await else {
+            break;
+        };
+        let client = client.clone();
+        let topic = Arc::clone(&topic);
+        let qos = spec.qos;
+        tokio::spawn(async move {
+            let _ = publish_message(&client, &topic, payload, qos).await;
+            drop(permit);
+        });
+    }
+    let _ = sem.acquire_many(permits).await;
+    seq
 }
 
 async fn run_latency(cmd: BenchCommand) -> Result<()> {
@@ -911,38 +1040,40 @@ async fn run_latency(cmd: BenchCommand) -> Result<()> {
         .await
         .context("failed to subscribe")?;
 
-    let message_rate = 1000;
-    let interval_us = 1_000_000 / message_rate;
+    let message_rate = if cmd.rate == 0 { 1000 } else { cmd.rate };
+    let interval_us = (1_000_000 / message_rate).max(1);
 
-    eprintln!("warming up for {}s...", cmd.warmup);
-    send_timed_messages_formatted(
+    let spec = PayloadSpec {
+        format,
+        payload_size: cmd.payload_size,
+        qos: cmd.qos,
+    };
+
+    eprintln!("warming up for {}s at {message_rate} msg/s...", cmd.warmup);
+    let seq = paced_latency_pump(
         &pub_client,
         &topic,
-        format,
-        cmd.payload_size,
-        cmd.qos,
-        cmd.warmup * message_rate,
+        &spec,
+        Duration::from_secs(cmd.warmup),
         interval_us,
+        cmd.inflight,
+        0,
     )
-    .await?;
+    .await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
     latencies.lock().unwrap().clear();
 
     eprintln!("measuring for {}s at {message_rate} msg/s...", cmd.duration);
-    let measure_start = Instant::now();
-    let measure_duration = Duration::from_secs(cmd.duration);
-    let mut seq = 0u32;
-    while measure_start.elapsed() < measure_duration {
-        let payload = encode_payload(format, cmd.payload_size, seq);
-        if publish_message(&pub_client, &topic, &payload, cmd.qos)
-            .await
-            .is_err()
-        {
-            eprintln!("connection lost after {seq} messages, reporting partial results");
-            break;
-        }
-        seq = seq.wrapping_add(1);
-        tokio::time::sleep(Duration::from_micros(interval_us)).await;
-    }
+    paced_latency_pump(
+        &pub_client,
+        &topic,
+        &spec,
+        Duration::from_secs(cmd.duration),
+        interval_us,
+        cmd.inflight,
+        seq,
+    )
+    .await;
 
     tokio::time::sleep(Duration::from_millis(500)).await;
 
@@ -991,27 +1122,6 @@ fn downsample(sorted: &[u64], target: usize) -> Vec<u64> {
         .step_by(sorted.len() / target)
         .copied()
         .collect()
-}
-
-async fn send_timed_messages_formatted(
-    client: &MqttClient,
-    topic: &str,
-    format: PayloadFormat,
-    payload_size: usize,
-    qos: QoS,
-    count: u64,
-    interval_us: u64,
-) -> Result<()> {
-    for seq in 0..count {
-        #[allow(clippy::cast_possible_truncation)]
-        let payload = encode_payload(format, payload_size, seq as u32);
-        if publish_message(client, topic, &payload, qos).await.is_err() {
-            eprintln!("connection lost during warmup after {seq} messages");
-            break;
-        }
-        tokio::time::sleep(Duration::from_micros(interval_us)).await;
-    }
-    Ok(())
 }
 
 fn load_tls_certs(cmd: &BenchCommand) -> Result<TlsCerts> {
@@ -1630,6 +1740,7 @@ async fn run_hol_blocking(cmd: BenchCommand) -> Result<()> {
         payload_size,
         per_topic_interval_us,
         qos: cmd.qos,
+        inflight: cmd.inflight,
     };
 
     eprintln!("warming up for {}s at {rate_label}...", cmd.warmup);
@@ -1785,6 +1896,7 @@ async fn run_hol_warmup(
     for handle in warmup_handles {
         handle.await.ok();
     }
+    tokio::time::sleep(Duration::from_millis(500)).await;
     for sv in topic_samples {
         sv.lock().unwrap().clear();
     }
@@ -1800,6 +1912,7 @@ struct HolPublishConfig {
     payload_size: usize,
     per_topic_interval_us: Option<u64>,
     qos: QoS,
+    inflight: usize,
 }
 
 fn spawn_hol_publishers(
@@ -1809,6 +1922,7 @@ fn spawn_hol_publishers(
     published: &Arc<AtomicU64>,
 ) -> Vec<tokio::task::JoinHandle<()>> {
     let mut handles = Vec::with_capacity(cfg.num_topics);
+    let permits = u32::try_from(cfg.inflight.max(1)).unwrap_or(u32::MAX);
     for topic_idx in 0..cfg.num_topics {
         let client = pub_clients[topic_idx % pub_clients.len()].clone();
         let running = Arc::clone(running);
@@ -1817,23 +1931,43 @@ fn spawn_hol_publishers(
         let payload_size = cfg.payload_size;
         let per_topic_interval_us = cfg.per_topic_interval_us;
         let qos = cfg.qos;
+        let sem = Arc::new(tokio::sync::Semaphore::new(cfg.inflight.max(1)));
 
         handles.push(tokio::spawn(async move {
-            let topic = format!("bench/hol/{topic_idx}");
+            let topic: Arc<str> = Arc::from(format!("bench/hol/{topic_idx}"));
             let mut seq = 0u32;
+            let epoch_wall = nanos_as_u64();
+            let start = Instant::now();
+            let mut next = start;
             while running.load(Ordering::Relaxed) {
-                let payload = encode_payload(format, payload_size, seq);
-                if publish_message(&client, &topic, &payload, qos)
-                    .await
-                    .is_ok()
-                {
-                    published.fetch_add(1, Ordering::Relaxed);
-                }
-                seq = seq.wrapping_add(1);
                 if let Some(interval) = per_topic_interval_us {
-                    tokio::time::sleep(Duration::from_micros(interval)).await;
+                    next += Duration::from_micros(interval);
+                    let now = Instant::now();
+                    if next > now {
+                        tokio::time::sleep(next - now).await;
+                    }
                 }
+                let Ok(permit) = Arc::clone(&sem).acquire_owned().await else {
+                    break;
+                };
+                let intended_wall = if per_topic_interval_us.is_some() {
+                    epoch_wall + u64::try_from((next - start).as_nanos()).unwrap_or(u64::MAX)
+                } else {
+                    nanos_as_u64()
+                };
+                let payload = encode_payload_at(format, payload_size, seq, intended_wall);
+                seq = seq.wrapping_add(1);
+                let client = client.clone();
+                let published = Arc::clone(&published);
+                let topic = Arc::clone(&topic);
+                tokio::spawn(async move {
+                    if publish_message(&client, &topic, payload, qos).await.is_ok() {
+                        published.fetch_add(1, Ordering::Relaxed);
+                    }
+                    drop(permit);
+                });
             }
+            let _ = sem.acquire_many(permits).await;
         }));
     }
     handles
