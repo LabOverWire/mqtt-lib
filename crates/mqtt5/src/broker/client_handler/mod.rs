@@ -352,6 +352,7 @@ impl ClientHandler {
         if let Some(ref handler) = self.config.event_handler {
             let event = ClientConnectEvent {
                 client_id: client_id.to_string().into(),
+                user_id: self.user_id.as_deref().map(Arc::from),
                 clean_start: self
                     .pending_connect
                     .as_ref()
@@ -502,6 +503,7 @@ impl ClientHandler {
         if let Some(ref handler) = self.config.event_handler {
             let event = ClientDisconnectEvent {
                 client_id: client_id.to_string().into(),
+                user_id: self.user_id.as_deref().map(Arc::from),
                 reason: self.disconnect_reason.unwrap_or(if self.normal_disconnect {
                     ReasonCode::Success
                 } else {

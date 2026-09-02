@@ -16,6 +16,7 @@ pub enum PublishAction {
 #[derive(Debug, Clone)]
 pub struct ClientConnectEvent {
     pub client_id: Arc<str>,
+    pub user_id: Option<Arc<str>>,
     pub clean_start: bool,
     pub session_expiry_interval: u32,
     pub will_topic: Option<Arc<str>>,
@@ -102,6 +103,7 @@ pub struct ClientPublishEvent {
 #[derive(Debug, Clone)]
 pub struct ClientDisconnectEvent {
     pub client_id: Arc<str>,
+    pub user_id: Option<Arc<str>>,
     pub reason: ReasonCode,
     pub unexpected: bool,
 }

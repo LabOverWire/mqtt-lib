@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [mqtt5 0.38.4] - 2026-09-01
+
+### Added
+
+- **`ClientConnectEvent` and `ClientDisconnectEvent` now carry the authenticated `user_id`.** Both broker event structs gain a `user_id: Option<Arc<str>>` field, populated from the client handler's authenticated identity at the connect and disconnect emission sites, mirroring the existing `ClientPublishEvent::user_id`. These are in-process broker→handler callback structs, not wire packets, so this is not an MQTT protocol change and is rolling-upgrade neutral. The field is additive and `None` for unauthenticated connections; default `BrokerEventHandler` implementations are unaffected. This lets a downstream handler emit per-user presence events (client connect/disconnect keyed by authenticated user) without threading identity through a side channel.
+
 ## [mqtt5 0.38.3] - 2026-08-16
 
 ### Fixed
