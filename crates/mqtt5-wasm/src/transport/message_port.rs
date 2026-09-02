@@ -176,7 +176,7 @@ impl MessagePortTransport {
 }
 
 impl Transport for MessagePortTransport {
-    async fn connect(&mut self) -> Result<()> {
+    fn connect(&mut self) -> impl std::future::Future<Output = Result<()>> {
         let (msg_tx, msg_rx) = mpsc::unbounded();
 
         let msg_tx_clone = msg_tx.clone();
@@ -199,7 +199,7 @@ impl Transport for MessagePortTransport {
         self.closure = Some(onmessage);
         self.connected.store(true, Ordering::SeqCst);
 
-        Ok(())
+        std::future::ready(Ok(()))
     }
 
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
@@ -228,24 +228,27 @@ impl Transport for MessagePortTransport {
         Ok(len)
     }
 
-    async fn write(&mut self, buf: &[u8]) -> Result<()> {
-        if !self.is_connected() {
-            return Err(MqttError::NotConnected);
-        }
+    fn write(&mut self, buf: &[u8]) -> impl std::future::Future<Output = Result<()>> {
+        let result = (|| {
+            if !self.is_connected() {
+                return Err(MqttError::NotConnected);
+            }
 
-        let array = js_sys::Uint8Array::from(buf);
-        self.port
-            .post_message(&array.buffer())
-            .map_err(|e| MqttError::Io(format!("MessagePort send failed: {e:?}")))?;
+            let array = js_sys::Uint8Array::from(buf);
+            self.port
+                .post_message(&array.buffer())
+                .map_err(|e| MqttError::Io(format!("MessagePort send failed: {e:?}")))?;
 
-        Ok(())
+            Ok(())
+        })();
+        std::future::ready(result)
     }
 
-    async fn close(&mut self) -> Result<()> {
+    fn close(&mut self) -> impl std::future::Future<Output = Result<()>> {
         self.port.close();
         self.connected.store(false, Ordering::SeqCst);
         self.closure = None;
-        Ok(())
+        std::future::ready(Ok(()))
     }
 
     fn is_connected(&self) -> bool {

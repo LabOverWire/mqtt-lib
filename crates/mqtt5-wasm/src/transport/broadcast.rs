@@ -123,31 +123,34 @@ impl BroadcastChannelTransport {
 }
 
 impl Transport for BroadcastChannelTransport {
-    async fn connect(&mut self) -> Result<()> {
-        let channel = BroadcastChannel::new(&self.channel_name).map_err(|e| {
-            MqttError::ConnectionError(format!("Failed to create BroadcastChannel: {e:?}"))
-        })?;
+    fn connect(&mut self) -> impl std::future::Future<Output = Result<()>> {
+        let result = (|| {
+            let channel = BroadcastChannel::new(&self.channel_name).map_err(|e| {
+                MqttError::ConnectionError(format!("Failed to create BroadcastChannel: {e:?}"))
+            })?;
 
-        let (msg_tx, msg_rx) = mpsc::unbounded();
+            let (msg_tx, msg_rx) = mpsc::unbounded();
 
-        let msg_tx_clone = msg_tx.clone();
-        let onmessage = Closure::new(move |e: MessageEvent| {
-            if let Ok(abuf) = e.data().dyn_into::<js_sys::ArrayBuffer>() {
-                let array = js_sys::Uint8Array::new(&abuf);
-                let vec = array.to_vec();
-                let _ = msg_tx_clone.unbounded_send(vec);
-            }
-        });
+            let msg_tx_clone = msg_tx.clone();
+            let onmessage = Closure::new(move |e: MessageEvent| {
+                if let Ok(abuf) = e.data().dyn_into::<js_sys::ArrayBuffer>() {
+                    let array = js_sys::Uint8Array::new(&abuf);
+                    let vec = array.to_vec();
+                    let _ = msg_tx_clone.unbounded_send(vec);
+                }
+            });
 
-        channel.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
+            channel.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
 
-        self.channel = Some(channel);
-        self.rx = Some(msg_rx);
-        self.tx = Some(msg_tx);
-        self.closure = Some(onmessage);
-        self.connected.store(true, Ordering::SeqCst);
+            self.channel = Some(channel);
+            self.rx = Some(msg_rx);
+            self.tx = Some(msg_tx);
+            self.closure = Some(onmessage);
+            self.connected.store(true, Ordering::SeqCst);
 
-        Ok(())
+            Ok(())
+        })();
+        std::future::ready(result)
     }
 
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
@@ -164,24 +167,27 @@ impl Transport for BroadcastChannelTransport {
         Ok(len)
     }
 
-    async fn write(&mut self, buf: &[u8]) -> Result<()> {
-        let channel = self.channel.as_ref().ok_or(MqttError::NotConnected)?;
+    fn write(&mut self, buf: &[u8]) -> impl std::future::Future<Output = Result<()>> {
+        let result = (|| {
+            let channel = self.channel.as_ref().ok_or(MqttError::NotConnected)?;
 
-        let array = js_sys::Uint8Array::from(buf);
-        channel
-            .post_message(&array.buffer())
-            .map_err(|e| MqttError::Io(format!("BroadcastChannel send failed: {e:?}")))?;
+            let array = js_sys::Uint8Array::from(buf);
+            channel
+                .post_message(&array.buffer())
+                .map_err(|e| MqttError::Io(format!("BroadcastChannel send failed: {e:?}")))?;
 
-        Ok(())
+            Ok(())
+        })();
+        std::future::ready(result)
     }
 
-    async fn close(&mut self) -> Result<()> {
+    fn close(&mut self) -> impl std::future::Future<Output = Result<()>> {
         if let Some(channel) = self.channel.take() {
             channel.close();
         }
         self.connected.store(false, Ordering::SeqCst);
         self.closure = None;
-        Ok(())
+        std::future::ready(Ok(()))
     }
 
     fn is_connected(&self) -> bool {

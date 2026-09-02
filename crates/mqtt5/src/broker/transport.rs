@@ -191,8 +191,8 @@ impl AsyncWrite for BrokerTransport {
 }
 
 impl Transport for BrokerTransport {
-    async fn connect(&mut self) -> Result<()> {
-        Ok(())
+    fn connect(&mut self) -> impl std::future::Future<Output = Result<()>> + Send {
+        std::future::ready(Ok(()))
     }
 
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize> {

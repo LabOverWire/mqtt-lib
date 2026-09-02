@@ -266,22 +266,25 @@ impl Transport for WasmWebSocketTransport {
         Ok(len)
     }
 
-    async fn write(&mut self, buf: &[u8]) -> Result<()> {
-        let ws = self.ws.as_ref().ok_or(MqttError::NotConnected)?;
+    fn write(&mut self, buf: &[u8]) -> impl std::future::Future<Output = Result<()>> {
+        let result = (|| {
+            let ws = self.ws.as_ref().ok_or(MqttError::NotConnected)?;
 
-        ws.send_with_u8_array(buf)
-            .map_err(|e| MqttError::Io(format!("WebSocket send failed: {e:?}")))?;
+            ws.send_with_u8_array(buf)
+                .map_err(|e| MqttError::Io(format!("WebSocket send failed: {e:?}")))?;
 
-        Ok(())
+            Ok(())
+        })();
+        std::future::ready(result)
     }
 
-    async fn close(&mut self) -> Result<()> {
+    fn close(&mut self) -> impl std::future::Future<Output = Result<()>> {
         if let Some(ws) = self.ws.take() {
             ws.close().ok();
         }
         self.connected.store(false, Ordering::SeqCst);
         self.closures = None;
-        Ok(())
+        std::future::ready(Ok(()))
     }
 
     fn is_connected(&self) -> bool {

@@ -481,7 +481,7 @@ impl WasmMqttClient {
 
     /// # Errors
     /// Returns an error if not connected or subscribe fails.
-    #[allow(clippy::unused_async)]
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
     pub async fn subscribe(&self, topic: &str) -> Result<u16, JsValue> {
         if !self.state.borrow().connected {
             return Err(JsValue::from_str("Not connected"));
@@ -592,7 +592,7 @@ impl WasmMqttClient {
 
     /// # Errors
     /// Returns an error if not connected or subscribe fails.
-    #[allow(clippy::unused_async)]
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
     #[wasm_bindgen(js_name = "subscribeWithCallback")]
     pub async fn subscribe_with_callback(
         &self,
@@ -627,7 +627,7 @@ impl WasmMqttClient {
 
     /// # Errors
     /// Returns an error if not connected or unsubscribe fails.
-    #[allow(clippy::unused_async)]
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
     pub async fn unsubscribe(&self, topic: &str) -> Result<u16, JsValue> {
         if !self.state.borrow().connected {
             return Err(JsValue::from_str("Not connected"));
@@ -888,7 +888,7 @@ impl WasmMqttClient {
 
     /// # Errors
     /// Returns an error if not connected or subscribe fails.
-    #[allow(clippy::unused_async)]
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
     pub async fn subscribe_with_callback_internal_opts(
         &self,
         topic: &str,

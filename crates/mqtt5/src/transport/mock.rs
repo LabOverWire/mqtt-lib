@@ -192,9 +192,9 @@ impl Transport for MockTransport {
         Ok(())
     }
 
-    async fn close(&mut self) -> Result<()> {
+    fn close(&mut self) -> impl std::future::Future<Output = Result<()>> + Send {
         self.connected = false;
-        Ok(())
+        std::future::ready(Ok(()))
     }
 }
 

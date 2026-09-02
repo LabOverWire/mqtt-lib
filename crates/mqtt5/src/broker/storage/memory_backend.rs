@@ -43,11 +43,15 @@ impl Default for MemoryBackend {
 }
 
 impl StorageBackend for MemoryBackend {
-    async fn store_retained_message(&self, topic: &str, message: RetainedMessage) -> Result<()> {
+    fn store_retained_message(
+        &self,
+        topic: &str,
+        message: RetainedMessage,
+    ) -> impl std::future::Future<Output = Result<()>> + Send {
         let mut retained = self.retained.lock();
         retained.insert(topic.to_string(), message);
         debug!("Stored retained message for topic: {}", topic);
-        Ok(())
+        std::future::ready(Ok(()))
     }
 
     async fn get_retained_message(&self, topic: &str) -> Result<Option<RetainedMessage>> {
@@ -66,17 +70,20 @@ impl StorageBackend for MemoryBackend {
         Ok(message)
     }
 
-    async fn remove_retained_message(&self, topic: &str) -> Result<()> {
+    fn remove_retained_message(
+        &self,
+        topic: &str,
+    ) -> impl std::future::Future<Output = Result<()>> + Send {
         let mut retained = self.retained.lock();
         retained.remove(topic);
         debug!("Removed retained message for topic: {}", topic);
-        Ok(())
+        std::future::ready(Ok(()))
     }
 
-    async fn get_retained_messages(
+    fn get_retained_messages(
         &self,
         topic_filter: &str,
-    ) -> Result<Vec<(String, RetainedMessage)>> {
+    ) -> impl std::future::Future<Output = Result<Vec<(String, RetainedMessage)>>> + Send {
         let retained = self.retained.lock();
         let mut messages = Vec::new();
 
@@ -86,15 +93,18 @@ impl StorageBackend for MemoryBackend {
             }
         }
 
-        Ok(messages)
+        std::future::ready(Ok(messages))
     }
 
-    async fn store_session(&self, session: ClientSession) -> Result<()> {
+    fn store_session(
+        &self,
+        session: ClientSession,
+    ) -> impl std::future::Future<Output = Result<()>> + Send {
         let client_id = session.client_id.clone();
         let mut sessions = self.sessions.lock();
         sessions.insert(client_id.clone(), session);
         debug!("Stored session for client: {}", client_id);
-        Ok(())
+        std::future::ready(Ok(()))
     }
 
     async fn get_session(&self, client_id: &str) -> Result<Option<ClientSession>> {
@@ -113,54 +123,73 @@ impl StorageBackend for MemoryBackend {
         Ok(session)
     }
 
-    async fn remove_session(&self, client_id: &str) -> Result<()> {
+    fn remove_session(
+        &self,
+        client_id: &str,
+    ) -> impl std::future::Future<Output = Result<()>> + Send {
         let mut sessions = self.sessions.lock();
         sessions.remove(client_id);
         debug!("Removed session for client: {}", client_id);
-        Ok(())
+        std::future::ready(Ok(()))
     }
 
-    async fn queue_message(&self, message: QueuedMessage) -> Result<()> {
+    fn queue_message(
+        &self,
+        message: QueuedMessage,
+    ) -> impl std::future::Future<Output = Result<()>> + Send {
         let mut queues = self.queues.lock();
         let queue = queues.entry(message.client_id.clone()).or_default();
         queue.push(message.clone());
         debug!("Queued message for client: {}", message.client_id);
-        Ok(())
+        std::future::ready(Ok(()))
     }
 
-    async fn get_queued_messages(&self, client_id: &str) -> Result<Vec<QueuedMessage>> {
+    fn get_queued_messages(
+        &self,
+        client_id: &str,
+    ) -> impl std::future::Future<Output = Result<Vec<QueuedMessage>>> + Send {
         let queues = self.queues.lock();
-        if let Some(messages) = queues.get(client_id) {
+        let messages = if let Some(messages) = queues.get(client_id) {
             let mut valid_messages = Vec::new();
             for message in messages {
                 if !message.is_expired() {
                     valid_messages.push(message.clone());
                 }
             }
-            Ok(valid_messages)
+            valid_messages
         } else {
-            Ok(Vec::new())
-        }
+            Vec::new()
+        };
+        std::future::ready(Ok(messages))
     }
 
-    async fn remove_queued_messages(&self, client_id: &str) -> Result<()> {
+    fn remove_queued_messages(
+        &self,
+        client_id: &str,
+    ) -> impl std::future::Future<Output = Result<()>> + Send {
         let mut queues = self.queues.lock();
         queues.remove(client_id);
         debug!("Removed all queued messages for client: {}", client_id);
-        Ok(())
+        std::future::ready(Ok(()))
     }
 
-    async fn store_inflight_message(&self, message: InflightMessage) -> Result<()> {
+    fn store_inflight_message(
+        &self,
+        message: InflightMessage,
+    ) -> impl std::future::Future<Output = Result<()>> + Send {
         let mut inflight = self.inflight.lock();
         let entries = inflight.entry(message.client_id.clone()).or_default();
         let key = (message.packet_id, message.direction);
         entries.insert(key, message);
-        Ok(())
+        std::future::ready(Ok(()))
     }
 
-    async fn get_inflight_messages(&self, client_id: &str) -> Result<Vec<InflightMessage>> {
+    fn get_inflight_messages(
+        &self,
+        client_id: &str,
+    ) -> impl std::future::Future<Output = Result<Vec<InflightMessage>>> + Send {
         let inflight = self.inflight.lock();
-        Ok(inflight
+        let messages = inflight
             .get(client_id)
             .map(|entries| {
                 entries
@@ -169,15 +198,16 @@ impl StorageBackend for MemoryBackend {
                     .cloned()
                     .collect()
             })
-            .unwrap_or_default())
+            .unwrap_or_default();
+        std::future::ready(Ok(messages))
     }
 
-    async fn remove_inflight_message(
+    fn remove_inflight_message(
         &self,
         client_id: &str,
         packet_id: u16,
         direction: InflightDirection,
-    ) -> Result<()> {
+    ) -> impl std::future::Future<Output = Result<()>> + Send {
         let mut inflight = self.inflight.lock();
         if let Some(entries) = inflight.get_mut(client_id) {
             entries.remove(&(packet_id, direction));
@@ -185,16 +215,19 @@ impl StorageBackend for MemoryBackend {
                 inflight.remove(client_id);
             }
         }
-        Ok(())
+        std::future::ready(Ok(()))
     }
 
-    async fn remove_all_inflight_messages(&self, client_id: &str) -> Result<()> {
+    fn remove_all_inflight_messages(
+        &self,
+        client_id: &str,
+    ) -> impl std::future::Future<Output = Result<()>> + Send {
         let mut inflight = self.inflight.lock();
         inflight.remove(client_id);
-        Ok(())
+        std::future::ready(Ok(()))
     }
 
-    async fn cleanup_expired(&self) -> Result<()> {
+    fn cleanup_expired(&self) -> impl std::future::Future<Output = Result<()>> + Send {
         let mut removed_count = 0;
 
         {
@@ -245,6 +278,6 @@ impl StorageBackend for MemoryBackend {
             debug!("Cleaned up {} expired storage entries", removed_count);
         }
 
-        Ok(())
+        std::future::ready(Ok(()))
     }
 }

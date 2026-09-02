@@ -1198,7 +1198,10 @@ impl StorageBackend for DynamicStorage {
 impl DynamicStorage {
     /// # Errors
     /// Returns an error if any session fails to persist.
-    #[cfg_attr(target_arch = "wasm32", allow(clippy::unused_async))]
+    #[cfg_attr(
+        target_arch = "wasm32",
+        allow(clippy::unused_async, clippy::unused_async_trait_impl)
+    )]
     pub async fn flush_sessions(&self) -> Result<()> {
         match self {
             #[cfg(not(target_arch = "wasm32"))]
@@ -1209,7 +1212,10 @@ impl DynamicStorage {
 
     /// # Errors
     /// Returns an error if flushing sessions fails.
-    #[cfg_attr(target_arch = "wasm32", allow(clippy::unused_async))]
+    #[cfg_attr(
+        target_arch = "wasm32",
+        allow(clippy::unused_async, clippy::unused_async_trait_impl)
+    )]
     pub async fn shutdown(&self) -> Result<()> {
         match self {
             #[cfg(not(target_arch = "wasm32"))]
