@@ -7,6 +7,7 @@ use crate::broker::config::BrokerConfig;
 use crate::error::{MqttError, Result};
 use crate::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::fs;
@@ -66,6 +67,8 @@ pub struct HotReloadManager {
     watcher_handle: Option<tokio::task::JoinHandle<()>>,
     /// Last known file modification time
     last_modified: Arc<RwLock<Option<crate::time::SystemTime>>>,
+    /// Last known modification times of linked auth files (ACL, password, SCRAM)
+    linked_mtimes: Arc<RwLock<HashMap<PathBuf, crate::time::SystemTime>>>,
     /// Configuration hash for change detection
     config_hash: Arc<RwLock<u64>>,
 }
@@ -86,6 +89,7 @@ impl HotReloadManager {
             change_sender,
             watcher_handle: None,
             last_modified: Arc::new(RwLock::new(None)),
+            linked_mtimes: Arc::new(RwLock::new(HashMap::new())),
             config_hash: Arc::new(RwLock::new(initial_hash)),
         };
 
@@ -121,6 +125,7 @@ impl HotReloadManager {
     fn start_file_watcher(&self) -> tokio::task::JoinHandle<()> {
         let config_path = self.config_path.clone();
         let last_modified = self.last_modified.clone();
+        let linked_mtimes = self.linked_mtimes.clone();
         let config_hash = self.config_hash.clone();
         let current_config = self.current_config.clone();
         let change_sender = self.change_sender.clone();
@@ -184,10 +189,70 @@ impl HotReloadManager {
                         warn!("Error checking configuration file: {e}");
                     }
                 }
+
+                if let Some(changed) =
+                    Self::check_linked_files_changed(&current_config, &linked_mtimes).await
+                {
+                    info!("Linked auth file changed, reloading: {:?}", changed);
+                    let hash = *config_hash.read().await;
+                    let event = ConfigChangeEvent {
+                        timestamp: unix_timestamp_secs(),
+                        change_type: ConfigChangeType::AuthConfig,
+                        config_path: changed,
+                        previous_hash: hash,
+                        new_hash: hash,
+                    };
+                    if let Err(e) = change_sender.send(event) {
+                        warn!("Failed to send auth file change notification: {e}");
+                    }
+                }
             }
         });
 
         handle
+    }
+
+    fn linked_auth_files(config: &BrokerConfig) -> [Option<PathBuf>; 3] {
+        [
+            config.auth_config.acl_file.clone(),
+            config.auth_config.password_file.clone(),
+            config.auth_config.scram_file.clone(),
+        ]
+    }
+
+    async fn check_linked_files_changed(
+        current_config: &Arc<RwLock<BrokerConfig>>,
+        linked_mtimes: &Arc<RwLock<HashMap<PathBuf, crate::time::SystemTime>>>,
+    ) -> Option<PathBuf> {
+        let paths = {
+            let config = current_config.read().await;
+            Self::linked_auth_files(&config)
+        };
+
+        let mut mtimes = linked_mtimes.write().await;
+        let mut changed = None;
+
+        for path in paths.into_iter().flatten() {
+            let Ok(metadata) = fs::metadata(&path).await else {
+                continue;
+            };
+            let Ok(modified) = metadata.modified() else {
+                continue;
+            };
+
+            match mtimes.get(&path) {
+                Some(&last) if modified > last => {
+                    mtimes.insert(path.clone(), modified);
+                    changed = Some(path);
+                }
+                Some(_) => {}
+                None => {
+                    mtimes.insert(path, modified);
+                }
+            }
+        }
+
+        changed
     }
 
     /// Checks if the configuration file has been modified
@@ -577,5 +642,62 @@ mod tests {
             event.change_type,
             ConfigChangeType::ResourceLimits
         ));
+    }
+
+    #[tokio::test]
+    async fn test_linked_auth_file_first_sight_is_not_a_change() {
+        let acl = NamedTempFile::new().unwrap();
+        tokio::fs::write(acl.path(), "topic readwrite #\n")
+            .await
+            .unwrap();
+
+        let mut config = BrokerConfig::default();
+        config.auth_config.acl_file = Some(acl.path().to_path_buf());
+        let current = Arc::new(RwLock::new(config));
+        let mtimes = Arc::new(RwLock::new(HashMap::new()));
+
+        assert!(
+            HotReloadManager::check_linked_files_changed(&current, &mtimes)
+                .await
+                .is_none()
+        );
+        assert!(mtimes.read().await.contains_key(acl.path()));
+    }
+
+    #[tokio::test]
+    async fn test_linked_auth_file_change_detected() {
+        let acl = NamedTempFile::new().unwrap();
+        tokio::fs::write(acl.path(), "topic readwrite #\n")
+            .await
+            .unwrap();
+
+        let mut config = BrokerConfig::default();
+        config.auth_config.acl_file = Some(acl.path().to_path_buf());
+        let current = Arc::new(RwLock::new(config));
+        let mtimes = Arc::new(RwLock::new(HashMap::new()));
+        mtimes
+            .write()
+            .await
+            .insert(acl.path().to_path_buf(), UNIX_EPOCH);
+
+        let changed = HotReloadManager::check_linked_files_changed(&current, &mtimes).await;
+        assert_eq!(changed.as_deref(), Some(acl.path()));
+
+        let changed_again = HotReloadManager::check_linked_files_changed(&current, &mtimes).await;
+        assert!(changed_again.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_linked_auth_file_absent_is_ignored() {
+        let mut config = BrokerConfig::default();
+        config.auth_config.acl_file = Some(PathBuf::from("/nonexistent/acl.txt"));
+        let current = Arc::new(RwLock::new(config));
+        let mtimes = Arc::new(RwLock::new(HashMap::new()));
+
+        assert!(
+            HotReloadManager::check_linked_files_changed(&current, &mtimes)
+                .await
+                .is_none()
+        );
     }
 }
