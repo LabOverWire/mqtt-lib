@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [mqtt5 0.38.5] - 2026-09-05
+
+### Fixed
+
+- **The broker configuration hot-reload now watches the linked authentication files, not just the main config file.** `HotReloadManager` previously polled only the config file's modification time, so editing an ACL, password, or SCRAM file referenced by the running config (for example via `mqttv5 acl ...`) was not applied until the config file itself changed or the broker received `SIGHUP`. The watcher now also checks `auth_config.acl_file`, `auth_config.password_file`, and `auth_config.scram_file` by content hash and reloads the authentication provider when any of them changes, so ACL and credential edits take effect automatically within the watch interval. Hot-reload still requires the broker to be started with a config file. Reported in discussion #139.
+
 ## [mqtt5 0.38.4] - 2026-09-01
 
 ### Added
