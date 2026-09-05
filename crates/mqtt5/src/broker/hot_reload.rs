@@ -67,8 +67,8 @@ pub struct HotReloadManager {
     watcher_handle: Option<tokio::task::JoinHandle<()>>,
     /// Last known file modification time
     last_modified: Arc<RwLock<Option<crate::time::SystemTime>>>,
-    /// Last known modification times of linked auth files (ACL, password, SCRAM)
-    linked_mtimes: Arc<RwLock<HashMap<PathBuf, crate::time::SystemTime>>>,
+    /// Last known content hashes of linked auth files (ACL, password, SCRAM)
+    linked_hashes: Arc<RwLock<HashMap<PathBuf, u64>>>,
     /// Configuration hash for change detection
     config_hash: Arc<RwLock<u64>>,
 }
@@ -89,7 +89,7 @@ impl HotReloadManager {
             change_sender,
             watcher_handle: None,
             last_modified: Arc::new(RwLock::new(None)),
-            linked_mtimes: Arc::new(RwLock::new(HashMap::new())),
+            linked_hashes: Arc::new(RwLock::new(HashMap::new())),
             config_hash: Arc::new(RwLock::new(initial_hash)),
         };
 
@@ -110,6 +110,16 @@ impl HotReloadManager {
             }
         }
 
+        let linked_paths = Self::linked_auth_files(&*self.current_config.read().await);
+        {
+            let mut hashes = self.linked_hashes.write().await;
+            for path in linked_paths.into_iter().flatten() {
+                if let Some(hash) = Self::hash_file(&path).await {
+                    hashes.insert(path, hash);
+                }
+            }
+        }
+
         // Start file system monitoring
         let watcher = self.start_file_watcher();
         self.watcher_handle = Some(watcher);
@@ -125,7 +135,7 @@ impl HotReloadManager {
     fn start_file_watcher(&self) -> tokio::task::JoinHandle<()> {
         let config_path = self.config_path.clone();
         let last_modified = self.last_modified.clone();
-        let linked_mtimes = self.linked_mtimes.clone();
+        let linked_hashes = self.linked_hashes.clone();
         let config_hash = self.config_hash.clone();
         let current_config = self.current_config.clone();
         let change_sender = self.change_sender.clone();
@@ -190,15 +200,12 @@ impl HotReloadManager {
                     }
                 }
 
-                if let Some(changed) =
-                    Self::check_linked_files_changed(&current_config, &linked_mtimes).await
-                {
-                    info!("Linked auth file changed, reloading: {:?}", changed);
+                if Self::check_linked_files_changed(&current_config, &linked_hashes).await {
                     let hash = *config_hash.read().await;
                     let event = ConfigChangeEvent {
                         timestamp: unix_timestamp_secs(),
                         change_type: ConfigChangeType::AuthConfig,
-                        config_path: changed,
+                        config_path: config_path.clone(),
                         previous_hash: hash,
                         new_hash: hash,
                     };
@@ -220,34 +227,40 @@ impl HotReloadManager {
         ]
     }
 
+    async fn hash_file(path: &Path) -> Option<u64> {
+        use std::hash::{Hash, Hasher};
+        let bytes = fs::read(path).await.ok()?;
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        bytes.hash(&mut hasher);
+        Some(hasher.finish())
+    }
+
     async fn check_linked_files_changed(
         current_config: &Arc<RwLock<BrokerConfig>>,
-        linked_mtimes: &Arc<RwLock<HashMap<PathBuf, crate::time::SystemTime>>>,
-    ) -> Option<PathBuf> {
+        linked_hashes: &Arc<RwLock<HashMap<PathBuf, u64>>>,
+    ) -> bool {
         let paths = {
             let config = current_config.read().await;
             Self::linked_auth_files(&config)
         };
 
-        let mut mtimes = linked_mtimes.write().await;
-        let mut changed = None;
+        let mut hashes = linked_hashes.write().await;
+        let mut changed = false;
 
         for path in paths.into_iter().flatten() {
-            let Ok(metadata) = fs::metadata(&path).await else {
-                continue;
-            };
-            let Ok(modified) = metadata.modified() else {
+            let Some(hash) = Self::hash_file(&path).await else {
                 continue;
             };
 
-            match mtimes.get(&path) {
-                Some(&last) if modified > last => {
-                    mtimes.insert(path.clone(), modified);
-                    changed = Some(path);
+            match hashes.get(&path) {
+                Some(&last) if hash != last => {
+                    info!("Linked auth file changed, reloading: {path:?}");
+                    hashes.insert(path, hash);
+                    changed = true;
                 }
                 Some(_) => {}
                 None => {
-                    mtimes.insert(path, modified);
+                    hashes.insert(path, hash);
                 }
             }
         }
@@ -654,14 +667,10 @@ mod tests {
         let mut config = BrokerConfig::default();
         config.auth_config.acl_file = Some(acl.path().to_path_buf());
         let current = Arc::new(RwLock::new(config));
-        let mtimes = Arc::new(RwLock::new(HashMap::new()));
+        let hashes = Arc::new(RwLock::new(HashMap::new()));
 
-        assert!(
-            HotReloadManager::check_linked_files_changed(&current, &mtimes)
-                .await
-                .is_none()
-        );
-        assert!(mtimes.read().await.contains_key(acl.path()));
+        assert!(!HotReloadManager::check_linked_files_changed(&current, &hashes).await);
+        assert!(hashes.read().await.contains_key(acl.path()));
     }
 
     #[tokio::test]
@@ -674,17 +683,16 @@ mod tests {
         let mut config = BrokerConfig::default();
         config.auth_config.acl_file = Some(acl.path().to_path_buf());
         let current = Arc::new(RwLock::new(config));
-        let mtimes = Arc::new(RwLock::new(HashMap::new()));
-        mtimes
-            .write()
+        let hashes = Arc::new(RwLock::new(HashMap::new()));
+
+        assert!(!HotReloadManager::check_linked_files_changed(&current, &hashes).await);
+
+        tokio::fs::write(acl.path(), "topic readwrite #\ntopic read $SYS/#\n")
             .await
-            .insert(acl.path().to_path_buf(), UNIX_EPOCH);
+            .unwrap();
 
-        let changed = HotReloadManager::check_linked_files_changed(&current, &mtimes).await;
-        assert_eq!(changed.as_deref(), Some(acl.path()));
-
-        let changed_again = HotReloadManager::check_linked_files_changed(&current, &mtimes).await;
-        assert!(changed_again.is_none());
+        assert!(HotReloadManager::check_linked_files_changed(&current, &hashes).await);
+        assert!(!HotReloadManager::check_linked_files_changed(&current, &hashes).await);
     }
 
     #[tokio::test]
@@ -692,12 +700,8 @@ mod tests {
         let mut config = BrokerConfig::default();
         config.auth_config.acl_file = Some(PathBuf::from("/nonexistent/acl.txt"));
         let current = Arc::new(RwLock::new(config));
-        let mtimes = Arc::new(RwLock::new(HashMap::new()));
+        let hashes = Arc::new(RwLock::new(HashMap::new()));
 
-        assert!(
-            HotReloadManager::check_linked_files_changed(&current, &mtimes)
-                .await
-                .is_none()
-        );
+        assert!(!HotReloadManager::check_linked_files_changed(&current, &hashes).await);
     }
 }
