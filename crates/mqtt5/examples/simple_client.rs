@@ -89,6 +89,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ConnectionEvent::ReconnectFailed { error } => {
                 println!("💥 Reconnection failed: {error}");
             }
+            _ => {}
         })
         .await?;
 

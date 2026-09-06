@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [mqtt5 0.39.0] - 2026-09-05
+
+### Breaking
+
+- **`ConnectionEvent`, `DisconnectReason`, and `ReasonCode` are now `#[non_exhaustive]`.** New reason codes and event variants stay additive from here on, so a `match` on any of these enums outside the crate needs a wildcard arm. `DisconnectReason::ServerClosed`, which nothing ever produced, is removed; a broker-initiated disconnect is now reported as `DisconnectReason::ServerDisconnect(ReasonCode)` carrying the broker's reason code.
+- **`MqttClient::on_error` and `MqttClient::clear_error_callbacks` are removed, along with the `ErrorCallback` type.** The registered callbacks were never invoked: the only place they could have been hooked is the reader error path, which now feeds `ConnectionEvent::Disconnected` with a reason, so wiring them would have reported the same failure twice. Use `on_connection_event` instead. Reported in issue #125.
+
+### Fixed
+
+- **The client now reports that a connection was lost, and why.** `ConnectionEvent::Disconnected` previously fired only for an application-initiated `disconnect()` and one custom-TLS connect-failure path; a dropped TCP connection, a broker `DISCONNECT`, or a keepalive timeout only flipped an internal flag, so a subscriber saw `Connected`, later another `Connected`, and never learned anything was lost in between. The packet reader now emits `Disconnected` when it terminates, with the reason derived from the cause: `ServerDisconnect(reason_code)` for a broker `DISCONNECT`, whose reason code was previously logged and discarded; `NetworkError` for a transport drop; `AuthFailure` for a failed re-authentication; `ProtocolError` otherwise. The keepalive task emits `Disconnected { KeepAliveTimeout }` on a missed `PINGRESP` and `NetworkError` when a `PINGREQ` cannot be written. Each connection emits at most one `Disconnected`: the transition is a compare-and-swap on the connection flag guarded by the connection epoch, so a client-initiated `disconnect()` reports only `ClientInitiated` and a stale task from a previous connection reports nothing. Reported in issue #123.
+- **`ConnectionEvent::Connecting` and `ConnectionEvent::ReconnectFailed` now fire.** Both were declared, documented, and matched in the examples, but the client never produced them. `Connecting` fires on the initial `connect` / `connect_with_options` (plain and TLS), `Reconnecting { attempt }` on each automatic retry, and `ReconnectFailed { error }` when the reconnection loop gives up for good, either because `max_attempts` was exhausted or because no address was recorded to reconnect to. Previously the monitor task exited silently in both cases and the client stayed offline with no signal. Reported in issue #123.
+- **A failed connect no longer emits `Disconnected` on the custom-TLS path.** `connect_with_tls_and_options` emitted `Disconnected { NetworkError }` when the initial connection failed, while the plain TCP path (correctly) emitted nothing, since the client was never connected. The two paths now agree.
+
+## [mqttv5-cli 0.28.6] - 2026-09-05
+
+### Changed
+
+- Depends on `mqtt5` 0.39, so the CLI's connection-event logging now sees `Connecting`, a reasoned `Disconnected`, and `ReconnectFailed`.
+
+## [mqtt5-wasm 1.4.5] - 2026-09-05
+
+### Changed
+
+- Depends on `mqtt5` 0.39 and `mqtt5-protocol` 0.15.
+
+## [mqtt5-protocol 0.15.0] - 2026-09-05
+
+### Breaking
+
+- **`ConnectionEvent`, `DisconnectReason`, and `ReasonCode` are `#[non_exhaustive]`; `DisconnectReason::ServerClosed` is replaced by `ServerDisconnect(ReasonCode)`.** See mqtt5 0.39.0.
+- **`MqttError::ServerDisconnect(ReasonCode)` is added.** The client's packet handlers return it for a broker-sent `DISCONNECT` instead of a `ConnectionError` built from a fixed string, so the reason code survives to the application.
+
 ## [mqtt5 0.38.5] - 2026-09-05
 
 ### Fixed

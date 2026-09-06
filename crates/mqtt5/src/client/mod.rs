@@ -37,7 +37,7 @@ pub use auth_handlers::{JwtAuthHandler, PlainAuthHandler, ScramSha256AuthHandler
 
 pub use self::connection::{ConnectionEvent, DisconnectReason, ReconnectConfig};
 pub use self::error_recovery::{
-    is_recoverable, retry_delay, ErrorCallback, ErrorRecoveryConfig, RecoverableError, RetryState,
+    is_recoverable, retry_delay, ErrorRecoveryConfig, RecoverableError, RetryState,
 };
 pub use self::mock::{MockCall, MockMqttClient};
 pub use self::r#trait::MqttClientTrait;
@@ -111,7 +111,6 @@ use self::direct::DirectClientInner;
 pub struct MqttClient {
     pub(crate) inner: Arc<RwLock<DirectClientInner>>,
     pub(crate) connection_event_callbacks: Arc<RwLock<Vec<ConnectionEventCallback>>>,
-    pub(crate) error_callbacks: Arc<RwLock<Vec<error_recovery::ErrorCallback>>>,
     pub(crate) error_recovery_config: Arc<RwLock<error_recovery::ErrorRecoveryConfig>>,
     pub(crate) connection_mutex: Arc<tokio::sync::Mutex<()>>,
     pub(crate) tls_config: Arc<RwLock<Option<TlsConfig>>>,
@@ -184,6 +183,7 @@ impl MqttClient {
     ///         ConnectionEvent::ReconnectFailed { error } => {
     ///             println!("Reconnection failed: {error}");
     ///         }
+    ///         _ => {}
     ///     }
     /// }).await?;
     /// # Ok(())
@@ -199,20 +199,6 @@ impl MqttClient {
     {
         let mut callbacks = self.connection_event_callbacks.write().await;
         callbacks.push(Arc::new(callback));
-        Ok(())
-    }
-
-    /// Sets an error callback
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the operation fails
-    pub async fn on_error<F>(&self, callback: F) -> Result<()>
-    where
-        F: Fn(&MqttError) + Send + Sync + 'static,
-    {
-        let mut callbacks = self.error_callbacks.write().await;
-        callbacks.push(Box::new(callback));
         Ok(())
     }
 
@@ -819,11 +805,6 @@ impl MqttClient {
     /// Set error recovery configuration
     pub async fn set_error_recovery_config(&self, config: error_recovery::ErrorRecoveryConfig) {
         *self.error_recovery_config.write().await = config;
-    }
-
-    /// Clear all error callbacks
-    pub async fn clear_error_callbacks(&self) {
-        self.error_callbacks.write().await.clear();
     }
 
     /// Clear all connection event callbacks

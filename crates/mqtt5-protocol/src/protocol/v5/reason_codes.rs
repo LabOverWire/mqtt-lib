@@ -1,4 +1,5 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ReasonCode {
     // Success codes (0x00 - 0x7F)
     Success = 0x00, // Also used for NormalDisconnection and GrantedQoS0

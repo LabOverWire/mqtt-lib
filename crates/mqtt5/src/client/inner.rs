@@ -18,7 +18,7 @@ use crate::transport::QuicTransport;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::transport::{TcpTransport, TlsTransport, TransportType};
 
-use super::connection::{ConnectionEvent, DisconnectReason};
+use super::connection::ConnectionEvent;
 use super::direct::{AutomaticReconnectLifecycle, StoredSubscription};
 use super::state::ClientTransportType;
 use super::MqttClient;
@@ -613,6 +613,8 @@ impl MqttClient {
             inner.automatic_reconnect_lifecycle = AutomaticReconnectLifecycle::Armed;
         }
 
+        self.trigger_connection_event(ConnectionEvent::Connecting)
+            .await;
         let result = self.connect_internal(address).await;
 
         if let Err(ref error) = result {
@@ -674,19 +676,12 @@ impl MqttClient {
             inner.automatic_reconnect_lifecycle = AutomaticReconnectLifecycle::Armed;
         }
 
+        self.trigger_connection_event(ConnectionEvent::Connecting)
+            .await;
         let result = self.connect_internal_with_tls(tls_config).await;
 
-        if let Err(ref error) = result {
-            if options.reconnect_config.enabled {
-                self.trigger_connection_event(ConnectionEvent::Disconnected {
-                    reason: DisconnectReason::NetworkError(error.to_string()),
-                })
-                .await;
-
-                tracing::warn!(
-                    "Automatic reconnection with custom TLS config is not yet supported"
-                );
-            }
+        if result.is_err() && options.reconnect_config.enabled {
+            tracing::warn!("Automatic reconnection with custom TLS config is not yet supported");
         }
 
         result

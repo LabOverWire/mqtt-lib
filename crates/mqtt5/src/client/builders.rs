@@ -51,11 +51,11 @@ impl MqttClient {
     pub fn with_options(options: ConnectOptions) -> Self {
         tracing::trace!(client_id = %options.client_id, "MQTT CLIENT - with_options() method called");
         let inner = DirectClientInner::new(options);
+        let connection_event_callbacks = Arc::clone(&inner.connection_event_callbacks);
 
         Self {
             inner: Arc::new(RwLock::new(inner)),
-            connection_event_callbacks: Arc::new(RwLock::new(Vec::new())),
-            error_callbacks: Arc::new(RwLock::new(Vec::new())),
+            connection_event_callbacks,
             error_recovery_config: Arc::new(RwLock::new(ErrorRecoveryConfig::default())),
             connection_mutex: Arc::new(tokio::sync::Mutex::new(())),
             tls_config: Arc::new(RwLock::new(None)),

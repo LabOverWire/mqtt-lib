@@ -1,6 +1,7 @@
 use crate::error::MqttError;
 use crate::numeric::u128_to_u64_saturating;
 use crate::prelude::*;
+use crate::protocol::v5::reason_codes::ReasonCode;
 use crate::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -40,9 +41,10 @@ impl ConnectionState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DisconnectReason {
     ClientInitiated,
-    ServerClosed,
+    ServerDisconnect(ReasonCode),
     NetworkError(String),
     ProtocolError(String),
     KeepAliveTimeout,
@@ -50,6 +52,7 @@ pub enum DisconnectReason {
 }
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum ConnectionEvent {
     Connecting,
     Connected {

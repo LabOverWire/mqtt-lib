@@ -77,7 +77,7 @@ async fn test_automatic_reconnection() {
             ConnectionEvent::Reconnecting { attempt } => {
                 println!("Reconnecting event, attempt {attempt}");
             }
-            ConnectionEvent::ReconnectFailed { .. } => {}
+            _ => {}
         })
         .await
         .expect("Failed to register connection event handler");
@@ -175,7 +175,7 @@ async fn test_client_initiated_disconnect_stops_automatic_reconnection() {
             ConnectionEvent::Reconnecting { .. } => {
                 reconnecting_clone.fetch_add(1, Ordering::SeqCst);
             }
-            ConnectionEvent::Connecting | ConnectionEvent::ReconnectFailed { .. } => {}
+            _ => {}
         })
         .await
         .expect("Failed to register connection event handler");

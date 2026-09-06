@@ -64,10 +64,9 @@ pub(super) async fn handle_incoming_packet_with_writer(
         Packet::PubRel(pubrel) => handle_pubrel(pubrel, writer, session).await,
         Packet::PubComp(pubcomp) => handle_pubcomp_outgoing(pubcomp, session).await,
         Packet::Disconnect(disconnect) => {
-            tracing::info!("Server sent DISCONNECT: {:?}", disconnect.reason_code);
-            Err(MqttError::ConnectionError(
-                "Server disconnected".to_string(),
-            ))
+            let reason_code = disconnect.reason_code;
+            tracing::info!("Server sent DISCONNECT: {reason_code:?}");
+            Err(MqttError::ServerDisconnect(reason_code))
         }
         _ => Ok(()),
     }
@@ -334,10 +333,9 @@ pub(super) async fn handle_incoming_packet_no_writer(
             Ok(())
         }
         Packet::Disconnect(disconnect) => {
-            tracing::info!("Server sent DISCONNECT: {:?}", disconnect.reason_code);
-            Err(MqttError::ConnectionError(
-                "Server disconnected".to_string(),
-            ))
+            let reason_code = disconnect.reason_code;
+            tracing::info!("Server sent DISCONNECT: {reason_code:?}");
+            Err(MqttError::ServerDisconnect(reason_code))
         }
         _ => Ok(()),
     }

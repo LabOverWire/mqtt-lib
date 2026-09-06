@@ -171,10 +171,20 @@ impl MqttClient {
 
                     if let Err(e) = self.attempt_reconnection(&address, &reconnect_config).await {
                         tracing::error!("Reconnection failed: {e}");
+                        self.trigger_connection_event(ConnectionEvent::ReconnectFailed {
+                            error: e,
+                        })
+                        .await;
                         break;
                     }
                 } else {
                     tracing::info!("No last address available for reconnection");
+                    self.trigger_connection_event(ConnectionEvent::ReconnectFailed {
+                        error: MqttError::ConnectionError(
+                            "no address recorded for reconnection".to_string(),
+                        ),
+                    })
+                    .await;
                     break;
                 }
             }

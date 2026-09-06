@@ -733,6 +733,7 @@ async fn keep_alive_loop(client: &MqttClient, auto_reconnect: bool) -> Result<()
                 ConnectionEvent::ReconnectFailed { error } => {
                     warn!("⚠ Reconnection failed: {error}");
                 }
+                _ => {}
             })
             .await?;
     }

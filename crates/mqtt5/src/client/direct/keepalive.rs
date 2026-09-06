@@ -1,5 +1,7 @@
 //! Keepalive management and background tasks
 
+use crate::client::connection::{ConnectionEvent, DisconnectReason};
+use crate::client::ConnectionEventCallback;
 use crate::error::Result;
 use crate::packet::Packet;
 use crate::transport::PacketWriter;
@@ -58,13 +60,49 @@ pub(crate) fn owns_current_connection(
     current_connection_epoch.load(Ordering::SeqCst) == connection_epoch
 }
 
+#[must_use]
 pub(crate) fn mark_disconnected_if_current(
     connected: &AtomicBool,
     connection_epoch: u64,
     current_connection_epoch: &AtomicU64,
+) -> bool {
+    owns_current_connection(connection_epoch, current_connection_epoch)
+        && connected
+            .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+}
+
+pub(crate) async fn fire_connection_event(
+    callbacks: &tokio::sync::RwLock<Vec<ConnectionEventCallback>>,
+    event: ConnectionEvent,
 ) {
-    if owns_current_connection(connection_epoch, current_connection_epoch) {
-        connected.store(false, Ordering::SeqCst);
+    let callbacks = callbacks.read().await.clone();
+    for callback in callbacks {
+        callback(event.clone());
+    }
+}
+
+#[derive(Clone)]
+pub(super) struct ConnectionLifecycle {
+    pub(super) connected: Arc<AtomicBool>,
+    pub(super) connection_epoch: u64,
+    pub(super) current_connection_epoch: Arc<AtomicU64>,
+    pub(super) callbacks: Arc<tokio::sync::RwLock<Vec<ConnectionEventCallback>>>,
+}
+
+impl ConnectionLifecycle {
+    pub(super) fn owns_current_connection(&self) -> bool {
+        owns_current_connection(self.connection_epoch, &self.current_connection_epoch)
+    }
+
+    pub(super) async fn end(&self, reason: DisconnectReason) {
+        if mark_disconnected_if_current(
+            &self.connected,
+            self.connection_epoch,
+            &self.current_connection_epoch,
+        ) {
+            fire_connection_event(&self.callbacks, ConnectionEvent::Disconnected { reason }).await;
+        }
     }
 }
 
@@ -104,9 +142,7 @@ pub(super) async fn keepalive_task_with_writer(
     writer: Arc<tokio::sync::Mutex<UnifiedWriter>>,
     keepalive_interval: Duration,
     keepalive_state: Arc<Mutex<KeepaliveState>>,
-    connected: Arc<AtomicBool>,
-    connection_epoch: u64,
-    current_connection_epoch: Arc<AtomicU64>,
+    lifecycle: ConnectionLifecycle,
     keepalive_config: Option<mqtt5_protocol::KeepaliveConfig>,
 ) {
     let config = keepalive_config.unwrap_or_default();
@@ -120,17 +156,11 @@ pub(super) async fn keepalive_task_with_writer(
     loop {
         interval.tick().await;
 
-        {
-            let state = keepalive_state.lock();
-            if state.is_timeout(timeout_duration) {
-                tracing::error!("Keepalive timeout - no PINGRESP received");
-                mark_disconnected_if_current(
-                    &connected,
-                    connection_epoch,
-                    &current_connection_epoch,
-                );
-                break;
-            }
+        let timed_out = keepalive_state.lock().is_timeout(timeout_duration);
+        if timed_out {
+            tracing::error!("Keepalive timeout - no PINGRESP received");
+            lifecycle.end(DisconnectReason::KeepAliveTimeout).await;
+            break;
         }
 
         let should_send_ping = {
@@ -155,20 +185,18 @@ pub(super) async fn keepalive_task_with_writer(
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
                 tracing::error!("Error sending PINGREQ: {e}");
-                mark_disconnected_if_current(
-                    &connected,
-                    connection_epoch,
-                    &current_connection_epoch,
-                );
+                lifecycle
+                    .end(DisconnectReason::NetworkError(e.to_string()))
+                    .await;
                 break;
             }
             Err(_) => {
                 tracing::error!("PINGREQ send timed out");
-                mark_disconnected_if_current(
-                    &connected,
-                    connection_epoch,
-                    &current_connection_epoch,
-                );
+                lifecycle
+                    .end(DisconnectReason::NetworkError(
+                        "PINGREQ send timed out".to_string(),
+                    ))
+                    .await;
                 break;
             }
         }
@@ -214,7 +242,7 @@ mod tests {
         let connected = AtomicBool::new(true);
         let current_epoch = AtomicU64::new(2);
 
-        mark_disconnected_if_current(&connected, 1, &current_epoch);
+        assert!(!mark_disconnected_if_current(&connected, 1, &current_epoch));
 
         assert!(connected.load(Ordering::SeqCst));
     }
@@ -224,7 +252,8 @@ mod tests {
         let connected = AtomicBool::new(true);
         let current_epoch = AtomicU64::new(2);
 
-        mark_disconnected_if_current(&connected, 2, &current_epoch);
+        assert!(mark_disconnected_if_current(&connected, 2, &current_epoch));
+        assert!(!mark_disconnected_if_current(&connected, 2, &current_epoch));
 
         assert!(!connected.load(Ordering::SeqCst));
     }
