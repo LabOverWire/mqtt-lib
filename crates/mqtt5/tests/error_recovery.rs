@@ -2,37 +2,6 @@ use mqtt5::client::{is_recoverable, retry_delay, ErrorRecoveryConfig, Recoverabl
 use mqtt5::time::Duration;
 use mqtt5::types::ReasonCode;
 use mqtt5::{MqttClient, MqttError};
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Arc;
-
-#[tokio::test]
-async fn test_error_callback_registration() {
-    let client = MqttClient::new("test-client");
-
-    let error_count = Arc::new(AtomicU32::new(0));
-    let error_count_clone = Arc::clone(&error_count);
-
-    // Register error callback
-    client
-        .on_error(move |error| {
-            println!("Error occurred: {error}");
-            error_count_clone.fetch_add(1, Ordering::Relaxed);
-        })
-        .await
-        .unwrap();
-
-    // Trigger an error by trying to publish while disconnected with auto_retry disabled
-    let mut config = client.error_recovery_config().await;
-    config.auto_retry = false;
-    client.set_error_recovery_config(config).await;
-
-    // This should fail and trigger the error callback
-    let result = client.publish("test/topic", "message").await;
-    assert!(result.is_err());
-
-    // Note: In a real implementation, the error callback would be triggered
-    // by the internal error handling mechanism
-}
 
 #[tokio::test]
 async fn test_error_recovery_config() {
@@ -178,35 +147,6 @@ async fn test_retry_delay_calculation() {
         retry_delay(RecoverableError::FlowControlLimited, 20, &config),
         Duration::from_secs(10)
     );
-}
-
-#[tokio::test]
-async fn test_multiple_error_callbacks() {
-    let client = MqttClient::new("test-client");
-
-    let callback1_count = Arc::new(AtomicU32::new(0));
-    let callback2_count = Arc::new(AtomicU32::new(0));
-
-    let count1 = Arc::clone(&callback1_count);
-    client
-        .on_error(move |_error| {
-            count1.fetch_add(1, Ordering::Relaxed);
-        })
-        .await
-        .unwrap();
-
-    let count2 = Arc::clone(&callback2_count);
-    client
-        .on_error(move |_error| {
-            count2.fetch_add(1, Ordering::Relaxed);
-        })
-        .await
-        .unwrap();
-
-    // Clear callbacks
-    client.clear_error_callbacks().await;
-
-    // New callbacks should not be triggered after clearing
 }
 
 #[tokio::test]

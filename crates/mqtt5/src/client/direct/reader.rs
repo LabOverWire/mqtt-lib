@@ -2,6 +2,7 @@
 
 use crate::callback::CallbackManager;
 use crate::client::auth_handler::{AuthHandler, AuthResponse};
+use crate::client::connection::DisconnectReason;
 use crate::codec::CodecRegistry;
 use crate::error::{MqttError, Result};
 use crate::packet::auth::AuthPacket;
@@ -13,12 +14,11 @@ use crate::session::SessionState;
 use crate::transport::PacketWriter;
 use parking_lot::Mutex;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::Arc;
 use tokio::sync::oneshot;
 
 use super::handlers::handle_incoming_packet_with_writer;
-use super::keepalive::{mark_disconnected_if_current, owns_current_connection, KeepaliveState};
+use super::keepalive::{ConnectionLifecycle, KeepaliveState};
 use super::unified::{UnifiedReader, UnifiedWriter};
 
 #[cfg(feature = "transport-quic")]
@@ -43,9 +43,7 @@ pub(super) struct PacketReaderContext {
     pub(super) puback_channels: Arc<Mutex<HashMap<u16, oneshot::Sender<ReasonCode>>>>,
     pub(super) pubcomp_channels: Arc<Mutex<HashMap<u16, oneshot::Sender<ReasonCode>>>>,
     pub(super) writer: Arc<tokio::sync::Mutex<UnifiedWriter>>,
-    pub(super) connected: Arc<AtomicBool>,
-    pub(super) connection_epoch: u64,
-    pub(super) current_connection_epoch: Arc<AtomicU64>,
+    pub(super) lifecycle: ConnectionLifecycle,
     #[cfg(feature = "transport-quic")]
     pub(super) protocol_version: u8,
     pub(super) auth_handler: Option<Arc<dyn AuthHandler>>,
@@ -84,20 +82,8 @@ impl PacketReaderContext {
 }
 
 impl PacketReaderContext {
-    fn owns_current_connection(&self) -> bool {
-        owns_current_connection(self.connection_epoch, &self.current_connection_epoch)
-    }
-
-    fn mark_disconnected_if_current(&self) {
-        mark_disconnected_if_current(
-            &self.connected,
-            self.connection_epoch,
-            &self.current_connection_epoch,
-        );
-    }
-
     fn clear_pending_if_current(&self) {
-        if !self.owns_current_connection() {
+        if !self.lifecycle.owns_current_connection() {
             return;
         }
         self.puback_channels.lock().drain();
@@ -107,12 +93,27 @@ impl PacketReaderContext {
     }
 }
 
+fn disconnect_reason_for(error: &MqttError) -> DisconnectReason {
+    match error {
+        MqttError::ServerDisconnect(reason_code) => {
+            DisconnectReason::ServerDisconnect(*reason_code)
+        }
+        MqttError::AuthenticationFailed | MqttError::NotAuthorized => DisconnectReason::AuthFailure,
+        MqttError::KeepAliveTimeout => DisconnectReason::KeepAliveTimeout,
+        MqttError::Io(_)
+        | MqttError::ConnectionError(_)
+        | MqttError::ConnectionClosedByPeer
+        | MqttError::ClientClosed => DisconnectReason::NetworkError(error.to_string()),
+        _ => DisconnectReason::ProtocolError(error.to_string()),
+    }
+}
+
 pub(super) async fn packet_reader_task_with_responses(
     mut reader: UnifiedReader,
     ctx: PacketReaderContext,
 ) {
     tracing::debug!("Packet reader task started and ready to process incoming packets");
-    loop {
+    let disconnect_reason = loop {
         let packet = reader.read_packet().await;
 
         match packet {
@@ -176,8 +177,7 @@ pub(super) async fn packet_reader_task_with_responses(
                     Packet::Auth(ref auth) => {
                         if let Err(e) = handle_auth_packet(auth.clone(), &ctx).await {
                             tracing::error!("Error handling AUTH packet: {e}");
-                            ctx.mark_disconnected_if_current();
-                            break;
+                            break disconnect_reason_for(&e);
                         }
                         continue;
                     }
@@ -190,19 +190,17 @@ pub(super) async fn packet_reader_task_with_responses(
                     handle_incoming_packet_with_writer(packet, &ctx.writer, None, &handlers).await
                 {
                     tracing::error!("Error handling packet: {e}");
-                    ctx.mark_disconnected_if_current();
-                    break;
+                    break disconnect_reason_for(&e);
                 }
             }
             Err(e) => {
                 tracing::error!("Error reading packet: {e}");
-                ctx.mark_disconnected_if_current();
-                break;
+                break DisconnectReason::NetworkError(e.to_string());
             }
         }
-    }
+    };
 
-    ctx.mark_disconnected_if_current();
+    ctx.lifecycle.end(disconnect_reason).await;
     ctx.clear_pending_if_current();
 }
 
@@ -277,7 +275,9 @@ pub(super) async fn quic_stream_acceptor_task(
                     Err(e) => {
                         let reason = crate::transport::quic_error::parse_connection_error(&e);
                         tracing::error!("QUIC uni stream accept ended: {reason}");
-                        ctx.mark_disconnected_if_current();
+                        ctx.lifecycle
+                            .end(DisconnectReason::NetworkError(reason.to_string()))
+                            .await;
                         break;
                     }
                 }
@@ -294,7 +294,9 @@ pub(super) async fn quic_stream_acceptor_task(
                     Err(e) => {
                         let reason = crate::transport::quic_error::parse_connection_error(&e);
                         tracing::error!("QUIC bi stream accept ended: {reason}");
-                        ctx.mark_disconnected_if_current();
+                        ctx.lifecycle
+                            .end(DisconnectReason::NetworkError(reason.to_string()))
+                            .await;
                         break;
                     }
                 }
@@ -546,6 +548,11 @@ async fn quic_stream_reader_task(
                         .await
                 {
                     tracing::error!(flow_id = ?flow_id, "Error handling packet from server stream: {e}");
+                    if let MqttError::ServerDisconnect(reason_code) = e {
+                        ctx.lifecycle
+                            .end(DisconnectReason::ServerDisconnect(reason_code))
+                            .await;
+                    }
                     break;
                 }
             }
@@ -595,6 +602,11 @@ async fn quic_uni_stream_reader_task(mut recv: quinn::RecvStream, ctx: PacketRea
                 .await
                 {
                     tracing::error!(flow_id = ?flow_id, "Error handling packet from uni stream: {e}");
+                    if let MqttError::ServerDisconnect(reason_code) = e {
+                        ctx.lifecycle
+                            .end(DisconnectReason::ServerDisconnect(reason_code))
+                            .await;
+                    }
                     break;
                 }
             }
@@ -608,11 +620,39 @@ async fn quic_uni_stream_reader_task(mut recv: quinn::RecvStream, ctx: PacketRea
 
 #[cfg(test)]
 mod tests {
-    use super::owns_current_connection;
+    use super::super::keepalive::owns_current_connection;
+    use super::disconnect_reason_for;
+    use crate::client::connection::DisconnectReason;
+    use crate::error::MqttError;
+    use crate::protocol::v5::reason_codes::ReasonCode;
     use std::sync::atomic::AtomicU64;
 
     #[test]
     fn stale_epoch_does_not_own_current_connection() {
         assert!(!owns_current_connection(1, &AtomicU64::new(2)));
+    }
+
+    #[test]
+    fn disconnect_reason_carries_server_reason_code() {
+        assert_eq!(
+            disconnect_reason_for(&MqttError::ServerDisconnect(ReasonCode::SessionTakenOver)),
+            DisconnectReason::ServerDisconnect(ReasonCode::SessionTakenOver)
+        );
+        assert_eq!(
+            disconnect_reason_for(&MqttError::AuthenticationFailed),
+            DisconnectReason::AuthFailure
+        );
+        assert_eq!(
+            disconnect_reason_for(&MqttError::KeepAliveTimeout),
+            DisconnectReason::KeepAliveTimeout
+        );
+        assert!(matches!(
+            disconnect_reason_for(&MqttError::ConnectionClosedByPeer),
+            DisconnectReason::NetworkError(_)
+        ));
+        assert!(matches!(
+            disconnect_reason_for(&MqttError::MalformedPacket("bad".to_string())),
+            DisconnectReason::ProtocolError(_)
+        ));
     }
 }

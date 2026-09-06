@@ -73,6 +73,7 @@
 //!             ConnectionEvent::ReconnectFailed { error } => {
 //!                 println!("Reconnection failed: {error}");
 //!             }
+//!             _ => {}
 //!         }
 //!     }).await?;
 //!     

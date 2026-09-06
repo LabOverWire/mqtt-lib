@@ -35,6 +35,9 @@ pub enum MqttError {
     #[cfg_attr(feature = "std", error("Connection refused: {0:?}"))]
     ConnectionRefused(ReasonCode),
 
+    #[cfg_attr(feature = "std", error("Server disconnected: {0:?}"))]
+    ServerDisconnect(ReasonCode),
+
     #[cfg_attr(feature = "std", error("Protocol error: {0}"))]
     ProtocolError(String),
 
@@ -208,6 +211,7 @@ impl fmt::Display for MqttError {
             Self::InvalidClientId(s) => write!(f, "Invalid client ID: {s}"),
             Self::ConnectionError(s) => write!(f, "Connection error: {s}"),
             Self::ConnectionRefused(r) => write!(f, "Connection refused: {r:?}"),
+            Self::ServerDisconnect(r) => write!(f, "Server disconnected: {r:?}"),
             Self::ProtocolError(s) => write!(f, "Protocol error: {s}"),
             Self::MalformedPacket(s) => write!(f, "Malformed packet: {s}"),
             Self::PacketTooLarge { size, max } => {

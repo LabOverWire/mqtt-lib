@@ -96,8 +96,6 @@ impl RetryState {
     }
 }
 
-pub type ErrorCallback = Box<dyn Fn(&MqttError) + Send + Sync>;
-
 #[cfg(test)]
 mod tests {
     use super::*;

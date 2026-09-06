@@ -91,6 +91,8 @@ pub struct DirectClientInner {
     pub quic_stream_manager: Option<Arc<QuicStreamManager>>,
     pub session: Arc<tokio::sync::RwLock<SessionState>>,
     pub connected: Arc<AtomicBool>,
+    pub connection_event_callbacks:
+        Arc<tokio::sync::RwLock<Vec<crate::client::ConnectionEventCallback>>>,
     pub connection_epoch: ConnectionEpoch,
     pub callback_manager: Arc<CallbackManager>,
     /// Registry of `subscribe_with_ack` callbacks (single-owner, token-bearing).
@@ -156,6 +158,7 @@ impl DirectClientInner {
             quic_stream_manager: None,
             session,
             connected: Arc::new(AtomicBool::new(false)),
+            connection_event_callbacks: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             connection_epoch: Arc::new(AtomicU64::new(0)),
             callback_manager: Arc::new(CallbackManager::new()),
             ack_callbacks,
@@ -245,6 +248,7 @@ impl DirectClientInner {
             reason = %String::from_utf8_lossy(reason),
             "resetting connection runtime"
         );
+        self.set_connected(false);
         self.stop_background_tasks().await;
         self.keepalive_state.lock().reset();
 
@@ -255,7 +259,6 @@ impl DirectClientInner {
 
         self.writer = None;
         self.ack_dispatcher.clear_writer().await;
-        self.set_connected(false);
 
         #[cfg(feature = "transport-quic")]
         if let Some(conn) = self.quic_connection.take() {
@@ -1317,7 +1320,12 @@ impl DirectClientInner {
         let puback_channels = self.pending_pubacks.clone();
         let pubcomp_channels = self.pending_pubcomps.clone();
         let writer_for_keepalive = self.writer.as_ref().ok_or(MqttError::NotConnected)?.clone();
-        let connected = self.connected.clone();
+        let lifecycle = keepalive::ConnectionLifecycle {
+            connected: self.connected.clone(),
+            connection_epoch,
+            current_connection_epoch: self.connection_epoch.clone(),
+            callbacks: Arc::clone(&self.connection_event_callbacks),
+        };
 
         let writer_for_reader = writer_for_keepalive.clone();
         let keepalive_state = self.keepalive_state.clone();
@@ -1330,9 +1338,7 @@ impl DirectClientInner {
             puback_channels,
             pubcomp_channels,
             writer: writer_for_reader,
-            connected,
-            connection_epoch,
-            current_connection_epoch: self.connection_epoch.clone(),
+            lifecycle: lifecycle.clone(),
             #[cfg(feature = "transport-quic")]
             protocol_version: self.options.protocol_version.as_u8(),
             auth_handler: self.auth_handler.clone(),
@@ -1356,18 +1362,14 @@ impl DirectClientInner {
             tracing::debug!("💓 KEEPALIVE - Disabled (interval is zero)");
         } else {
             let keepalive_writer = writer_for_keepalive;
-            let keepalive_connected = self.connected.clone();
             let keepalive_config = self.options.keepalive_config;
-            let current_connection_epoch = self.connection_epoch.clone();
             self.keepalive_handle = Some(tokio::spawn(async move {
                 tracing::debug!("💓 KEEPALIVE - Task starting");
                 keepalive_task_with_writer(
                     keepalive_writer,
                     keepalive_interval,
                     keepalive_state,
-                    keepalive_connected,
-                    connection_epoch,
-                    current_connection_epoch,
+                    lifecycle,
                     keepalive_config,
                 )
                 .await;
