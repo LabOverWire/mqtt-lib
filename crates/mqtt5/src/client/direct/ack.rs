@@ -1,4 +1,6 @@
+use crate::callback::panic_message;
 use std::collections::HashMap;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
@@ -301,7 +303,21 @@ impl AckCallbackManager {
             let (tx, mut rx) = mpsc::unbounded_channel::<AckDispatchItem>();
             tokio::spawn(async move {
                 while let Some(item) = rx.recv().await {
-                    (item.callback)(item.message, item.token);
+                    let topic = item.message.topic_name.clone();
+                    let AckDispatchItem {
+                        callback,
+                        message,
+                        token,
+                    } = item;
+                    if let Err(payload) =
+                        catch_unwind(AssertUnwindSafe(|| callback(message, token)))
+                    {
+                        tracing::error!(
+                            topic = %topic,
+                            "ack subscription callback panicked: {}",
+                            panic_message(&*payload)
+                        );
+                    }
                 }
             });
             tx
@@ -357,11 +373,16 @@ impl AckCallbackManager {
         message: PublishPacket,
         token: AckToken,
     ) {
-        let _ = self.dispatch_sender().send(AckDispatchItem {
+        if let Err(dropped) = self.dispatch_sender().send(AckDispatchItem {
             callback,
             message,
             token,
-        });
+        }) {
+            tracing::error!(
+                topic = %dropped.0.message.topic_name,
+                "ack dispatch worker is gone; message dropped"
+            );
+        }
     }
 }
 
@@ -373,6 +394,49 @@ mod tests {
     use crate::QoS;
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
+
+    #[tokio::test]
+    async fn panicking_ack_callback_does_not_stop_later_delivery() {
+        let mgr = AckCallbackManager::new();
+        let delivered = Arc::new(AtomicU32::new(0));
+        let counter = Arc::clone(&delivered);
+        let panicking: AckPublishCallback = Arc::new(|_p, _t| panic!("callback bug"));
+        let counting: AckPublishCallback = Arc::new(move |_p, _t| {
+            counter.fetch_add(1, Ordering::SeqCst);
+        });
+        mgr.register("a/1", panicking);
+        mgr.register("a/2", counting);
+
+        let dispatcher = AckDispatcher::new(Arc::new(tokio::sync::RwLock::new(SessionState::new(
+            "t".to_string(),
+            SessionConfig::default(),
+            true,
+        ))));
+
+        let first = mgr.find_one("a/1").expect("a/1 registered");
+        mgr.dispatch(
+            first,
+            PublishPacket::new("a/1", b"x".to_vec(), QoS::AtLeastOnce),
+            dispatcher.token(1, QoS::AtLeastOnce),
+        );
+        tokio::task::yield_now().await;
+        let second = mgr.find_one("a/2").expect("a/2 registered");
+        mgr.dispatch(
+            second,
+            PublishPacket::new("a/2", b"x".to_vec(), QoS::AtLeastOnce),
+            dispatcher.token(2, QoS::AtLeastOnce),
+        );
+
+        let mut delivered_ok = false;
+        for _ in 0..40 {
+            if delivered.load(Ordering::SeqCst) == 1 {
+                delivered_ok = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert!(delivered_ok, "ack delivery stopped after a callback panic");
+    }
 
     #[tokio::test]
     async fn duplicate_wildcard_subscription_dispatches_to_a_single_callback() {

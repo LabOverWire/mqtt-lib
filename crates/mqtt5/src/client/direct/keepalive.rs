@@ -1,7 +1,7 @@
 //! Keepalive management and background tasks
 
 use crate::client::connection::{ConnectionEvent, DisconnectReason};
-use crate::client::ConnectionEventCallback;
+use crate::client::{fire_connection_event, ConnectionEventCallback};
 use crate::error::Result;
 use crate::packet::Packet;
 use crate::transport::PacketWriter;
@@ -70,16 +70,6 @@ pub(crate) fn mark_disconnected_if_current(
         && connected
             .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
             .is_ok()
-}
-
-pub(crate) async fn fire_connection_event(
-    callbacks: &tokio::sync::RwLock<Vec<ConnectionEventCallback>>,
-    event: ConnectionEvent,
-) {
-    let callbacks = callbacks.read().await.clone();
-    for callback in callbacks {
-        callback(event.clone());
-    }
 }
 
 #[derive(Clone)]

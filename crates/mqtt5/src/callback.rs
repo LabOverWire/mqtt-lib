@@ -1,10 +1,11 @@
-use crate::error::Result;
+use crate::error::{MqttError, Result};
 use crate::packet::publish::PublishPacket;
 #[cfg(feature = "opentelemetry")]
 use crate::telemetry::propagation::UserProperty;
 use crate::validation::strip_shared_subscription_prefix;
 use parking_lot::Mutex;
 use std::collections::HashMap;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use tokio::sync::mpsc;
@@ -62,7 +63,7 @@ impl CallbackManager {
             let (tx, mut rx) = mpsc::unbounded_channel::<DispatchItem>();
             tokio::spawn(async move {
                 while let Some(item) = rx.recv().await {
-                    Self::run_dispatch_item(item);
+                    Self::run_dispatch_item(&item);
                 }
             });
             tx
@@ -70,7 +71,7 @@ impl CallbackManager {
     }
 
     #[cfg(feature = "opentelemetry")]
-    fn run_dispatch_item(item: DispatchItem) {
+    fn run_dispatch_item(item: &DispatchItem) {
         use crate::telemetry::propagation;
         propagation::with_remote_context(&item.user_props, || {
             let span = tracing::info_span!(
@@ -81,16 +82,16 @@ impl CallbackManager {
                 retain = item.message.retain,
             );
             let _enter = span.enter();
-            for callback in item.callbacks {
-                callback(item.message.clone());
+            for callback in &item.callbacks {
+                invoke_callback(callback, &item.message);
             }
         });
     }
 
     #[cfg(not(feature = "opentelemetry"))]
-    fn run_dispatch_item(item: DispatchItem) {
-        for callback in item.callbacks {
-            callback(item.message.clone());
+    fn run_dispatch_item(item: &DispatchItem) {
+        for callback in &item.callbacks {
+            invoke_callback(callback, &item.message);
         }
     }
 
@@ -191,7 +192,7 @@ impl CallbackManager {
 
     /// # Errors
     ///
-    /// Currently infallible but returns Result for API stability.
+    /// Returns an error if the dispatch worker is no longer running; the message is dropped.
     pub fn dispatch(&self, message: &PublishPacket) -> Result<()> {
         let mut callbacks_to_call = Vec::new();
 
@@ -231,7 +232,15 @@ impl CallbackManager {
             user_props,
         };
 
-        let _ = self.dispatch_sender().send(item);
+        if self.dispatch_sender().send(item).is_err() {
+            tracing::error!(
+                topic = %message.topic_name,
+                "callback dispatch worker is gone; message dropped"
+            );
+            return Err(MqttError::InvalidState(
+                "callback dispatch worker is gone".to_string(),
+            ));
+        }
 
         Ok(())
     }
@@ -252,6 +261,24 @@ impl Default for CallbackManager {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn invoke_callback(callback: &PublishCallback, message: &PublishPacket) {
+    if let Err(payload) = catch_unwind(AssertUnwindSafe(|| callback(message.clone()))) {
+        tracing::error!(
+            topic = %message.topic_name,
+            "subscription callback panicked: {}",
+            panic_message(&*payload)
+        );
+    }
+}
+
+pub(crate) fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
+    payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("non-string panic payload")
 }
 
 #[cfg(test)]
@@ -488,6 +515,64 @@ mod tests {
         manager.dispatch(&message3).unwrap();
         tokio::task::yield_now().await;
         assert_eq!(counter.load(Ordering::Relaxed), 2);
+    }
+
+    async fn wait_for(counter: &AtomicU32, expected: u32) -> bool {
+        for _ in 0..40 {
+            if counter.load(Ordering::SeqCst) == expected {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        counter.load(Ordering::SeqCst) == expected
+    }
+
+    #[tokio::test]
+    async fn panicking_callback_does_not_stop_later_delivery() {
+        let manager = CallbackManager::new();
+        let delivered = Arc::new(AtomicU32::new(0));
+        let counter = Arc::clone(&delivered);
+        let panicking: PublishCallback = Arc::new(|_msg| panic!("callback bug"));
+        let counting: PublishCallback = Arc::new(move |_msg| {
+            counter.fetch_add(1, Ordering::SeqCst);
+        });
+        manager.register("a/1", panicking).unwrap();
+        manager.register("a/2", counting).unwrap();
+
+        manager
+            .dispatch(&PublishPacket::new("a/1", b"x".to_vec(), QoS::AtMostOnce))
+            .unwrap();
+        tokio::task::yield_now().await;
+        manager
+            .dispatch(&PublishPacket::new("a/2", b"x".to_vec(), QoS::AtMostOnce))
+            .unwrap();
+
+        assert!(
+            wait_for(&delivered, 1).await,
+            "delivery stopped after a callback panic"
+        );
+    }
+
+    #[tokio::test]
+    async fn panicking_callback_does_not_skip_sibling_callbacks() {
+        let manager = CallbackManager::new();
+        let delivered = Arc::new(AtomicU32::new(0));
+        let counter = Arc::clone(&delivered);
+        let panicking: PublishCallback = Arc::new(|_msg| panic!("callback bug"));
+        let counting: PublishCallback = Arc::new(move |_msg| {
+            counter.fetch_add(1, Ordering::SeqCst);
+        });
+        manager.register("a/1", panicking).unwrap();
+        manager.register("a/1", counting).unwrap();
+
+        manager
+            .dispatch(&PublishPacket::new("a/1", b"x".to_vec(), QoS::AtMostOnce))
+            .unwrap();
+
+        assert!(
+            wait_for(&delivered, 1).await,
+            "sibling callback skipped after a panic"
+        );
     }
 
     #[tokio::test]

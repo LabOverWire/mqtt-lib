@@ -44,6 +44,24 @@ pub use self::r#trait::MqttClientTrait;
 
 pub use builders::ConnectionEventCallback;
 
+pub(crate) async fn fire_connection_event(
+    callbacks: &tokio::sync::RwLock<Vec<ConnectionEventCallback>>,
+    event: ConnectionEvent,
+) {
+    let callbacks = callbacks.read().await.clone();
+    for callback in callbacks {
+        let outcome =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| callback(event.clone())));
+        if let Err(payload) = outcome {
+            tracing::error!(
+                ?event,
+                "connection event callback panicked: {}",
+                crate::callback::panic_message(&*payload)
+            );
+        }
+    }
+}
+
 pub use self::direct::AckToken;
 use self::direct::AutomaticReconnectLifecycle;
 #[cfg(not(target_arch = "wasm32"))]
