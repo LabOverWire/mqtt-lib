@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [mqtt5 0.39.1] - 2026-09-06
+
+### Fixed
+
+- **A panicking subscription callback no longer stops message delivery for the whole client.** Every delivered message ran through a single lazily-spawned worker task that invoked the user callback with no panic isolation. A callback panic unwound the worker, the `OnceLock` kept handing out the dead channel's sender, and `dispatch` discarded the send error, so from then on every message routed through that manager was silently dropped while the connection stayed up and `is_connected()` kept returning `true`. It survived reconnects, since the manager is built once per client. The `subscribe_with_ack` worker had the same defect. Both workers now run each callback under `catch_unwind`, log the panic at `error` level with the topic, and keep going, so one panicking callback loses one message instead of the client. If a worker is ever gone, `CallbackManager::dispatch` now logs and returns an error rather than dropping the message silently, and the ack worker logs the drop. Connection event callbacks run under the same isolation. Reported in issue #124.
+
 ## [mqtt5 0.39.0] - 2026-09-05
 
 ### Breaking

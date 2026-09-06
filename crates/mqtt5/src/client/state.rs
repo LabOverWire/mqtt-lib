@@ -28,10 +28,7 @@ pub(crate) enum ClientTransportType {
 
 impl MqttClient {
     pub(crate) async fn trigger_connection_event(&self, event: ConnectionEvent) {
-        let callbacks = self.connection_event_callbacks.read().await.clone();
-        for callback in callbacks {
-            callback(event.clone());
-        }
+        super::fire_connection_event(&self.connection_event_callbacks, event).await;
     }
 
     pub(crate) async fn reset_reconnect_counter(&self) {
