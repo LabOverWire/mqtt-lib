@@ -40,21 +40,34 @@ impl ConnectionState {
     }
 }
 
+/// Why a connection ended, carried by [`ConnectionEvent::Disconnected`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum DisconnectReason {
+    /// The application called `disconnect()`.
     ClientInitiated,
+    /// The broker sent a `DISCONNECT` packet; carries its reason code.
     ServerDisconnect(ReasonCode),
+    /// The transport dropped: a read or write failed, or the peer closed the connection.
     NetworkError(String),
+    /// Handling an incoming packet failed with a protocol error.
     ProtocolError(String),
+    /// No `PINGRESP` arrived within the keep-alive timeout.
     KeepAliveTimeout,
+    /// Re-authentication failed after the connection was established.
     AuthFailure,
 }
 
+/// Connection lifecycle events delivered to `on_connection_event` callbacks.
+///
+/// Each connection emits at most one [`Disconnected`](Self::Disconnected).
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum ConnectionEvent {
+    /// The initial connect is starting. Automatic retries emit
+    /// [`Reconnecting`](Self::Reconnecting) instead.
     Connecting,
+    /// A `CONNACK` accepted the connection, on the initial connect and on every reconnect.
     Connected {
         session_present: bool,
         /// Effective keep-alive interval after MQTT v5 `ServerKeepAlive` negotiation.
@@ -62,15 +75,13 @@ pub enum ConnectionEvent {
         /// Equals `Duration::ZERO` if keep-alive is disabled.
         keep_alive: Duration,
     },
-    Disconnected {
-        reason: DisconnectReason,
-    },
-    Reconnecting {
-        attempt: u32,
-    },
-    ReconnectFailed {
-        error: MqttError,
-    },
+    /// The connection ended; `reason` says why.
+    Disconnected { reason: DisconnectReason },
+    /// An automatic reconnection attempt is about to run.
+    Reconnecting { attempt: u32 },
+    /// Automatic reconnection gave up: `max_attempts` was exhausted or no address was
+    /// recorded to reconnect to.
+    ReconnectFailed { error: MqttError },
 }
 
 #[derive(Debug, Clone, Default)]

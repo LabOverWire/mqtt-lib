@@ -158,6 +158,12 @@ impl MqttClient {
 
     /// Sets a callback for connection events
     ///
+    /// The callback receives every [`ConnectionEvent`]: `Connecting` on the initial connect,
+    /// `Connected` on each accepted `CONNACK`, `Reconnecting` before each automatic retry,
+    /// `ReconnectFailed` when automatic reconnection gives up, and `Disconnected` with the
+    /// cause whenever the connection ends. Each connection emits at most one `Disconnected`.
+    /// Callbacks run inline on the client's tasks, so keep them short and non-blocking.
+    ///
     /// # Examples
     ///
     /// ```rust,no_run
