@@ -38,6 +38,37 @@
 
 ## Diary Entries
 
+### [MQTT-3.1.4-3] takeover DISCONNECT is now required by the test, and sent by the broker (2026-09-07)
+
+**Trigger**: issue #147. The in-tree broker closed the displaced client's socket on session takeover
+without sending `DISCONNECT` 0x8E, yet `session_takeover_disconnects_existing_client` was green on
+every SUT. Found while writing the 0.39.0 client tests, where a takeover against the in-tree broker
+surfaced as `NetworkError("Client closed connection")` instead of `ServerDisconnect(SessionTakenOver)`.
+
+**Why the test passed anyway**: it read the superseded connection with
+`if let Some(reason) = expect_disconnect_packet(..)` and asserted the reason code only inside the
+`if let`. `expect_disconnect_packet` returns `None` on a bare close, so the body was skipped and the
+test fell through to the close assertion, which the broker did satisfy. The first half of a MUST was
+never checked.
+
+**Test change**: the DISCONNECT is now required (`.expect(..)`), then its reason must be 0x8E, then
+the close must follow. Against the unfixed broker it fails at the first step. Mosquitto sends 0x8E.
+
+**Broker fix (same PR)**: both `disconnect_rx` arms in `client_handler/mod.rs` (`handle_packets`
+and `handle_packets_no_keepalive`) write `DisconnectPacket { reason_code: SessionTakenOver }` via
+`write_to_client` before returning, ignoring a write error since the peer may already be gone. The
+takeover signal itself, a oneshot fired from `MessageRouter::register_client`, already existed; only
+the packet was missing. One handler serves TCP, TLS, WebSocket and QUIC, so all transports get it.
+
+**Swept for the same shape**: one other `if let Some(..) = expect_disconnect_packet(..)` exists, in
+`server_disconnect_uses_valid_reason_code` for `[MQTT-3.14.2-1]`. That one is legitimately
+conditional: the statement constrains the reason code only when a DISCONNECT is sent, and sending
+one for a second CONNECT is not required by it. Left as is.
+
+**Client side**: `connection_lifecycle_events::session_takeover_via_broker_carries_reason_code`
+now proves the whole path end to end against the in-process `TestBroker`; for 0.39.0 it had to use
+a fake broker.
+
 ### External-broker CI flake investigation — concurrency ruled out, backend switched to memory (2026-08-06)
 
 **Trigger**: `puback_error_stops_retransmission [MQTT-4.4.0-2]` failed once on the external-mqtt5 CI

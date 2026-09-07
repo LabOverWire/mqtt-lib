@@ -142,6 +142,47 @@ async fn server_disconnect_carries_reason_code() {
 }
 
 #[tokio::test]
+async fn session_takeover_via_broker_carries_reason_code() {
+    let broker = TestBroker::start().await;
+    let client_id = test_client_id("takeover-broker");
+
+    let first = MqttClient::new(client_id.clone());
+    let events = record_events(&first).await;
+    first
+        .connect_with_options(
+            broker.address(),
+            ConnectOptions::new(client_id.clone()).with_automatic_reconnect(false),
+        )
+        .await
+        .expect("first connect");
+
+    let second = MqttClient::new(client_id.clone());
+    second
+        .connect_with_options(
+            broker.address(),
+            ConnectOptions::new(client_id).with_automatic_reconnect(false),
+        )
+        .await
+        .expect("second connect");
+
+    assert!(
+        wait_until(Duration::from_secs(3), || !disconnect_reasons(&events)
+            .is_empty())
+        .await,
+        "first client never observed the session takeover"
+    );
+    assert_eq!(
+        disconnect_reasons(&events),
+        vec![DisconnectReason::ServerDisconnect(
+            ReasonCode::SessionTakenOver
+        )]
+    );
+    assert!(!first.is_connected().await);
+
+    second.disconnect().await.expect("disconnect second");
+}
+
+#[tokio::test]
 async fn lost_connection_fires_network_error() {
     let address = fake_broker(AfterConnack::Close).await;
     let client = MqttClient::new(test_client_id("lost"));
