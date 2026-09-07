@@ -657,6 +657,13 @@ impl ClientHandler {
 
                 _ = &mut *disconnect_rx => {
                     info!("Session taken over by another client");
+                    let disconnect = Packet::Disconnect(DisconnectPacket {
+                        reason_code: ReasonCode::SessionTakenOver,
+                        properties: Properties::default(),
+                    });
+                    if let Err(e) = self.write_to_client(disconnect).await {
+                        debug!("Failed to send session-taken-over DISCONNECT: {e}");
+                    }
                     return Ok(true);
                 }
             }
@@ -747,6 +754,13 @@ impl ClientHandler {
 
                 _ = &mut *disconnect_rx => {
                     info!("Session taken over by another client");
+                    let disconnect = Packet::Disconnect(DisconnectPacket {
+                        reason_code: ReasonCode::SessionTakenOver,
+                        properties: Properties::default(),
+                    });
+                    if let Err(e) = self.write_to_client(disconnect).await {
+                        debug!("Failed to send session-taken-over DISCONNECT: {e}");
+                    }
                     return Ok(true);
                 }
 

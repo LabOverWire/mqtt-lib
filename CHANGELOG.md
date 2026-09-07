@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [mqtt5 0.39.2] - 2026-09-07
+
+### Fixed
+
+- **The broker now sends `DISCONNECT` with reason code 0x8E (Session taken over) to the displaced client on session takeover**, as `[MQTT-3.1.4-3]` requires, before closing its connection. Previously it only closed the socket, so the superseded client saw a plain network drop and could not tell a takeover from any other loss. A client that reports disconnect reasons (mqtt5 0.39.0 and later) now receives `DisconnectReason::ServerDisconnect(SessionTakenOver)` and can decide not to reconnect into a takeover flap. The conformance test for `[MQTT-3.1.4-3]` previously accepted a bare close; it now requires the `DISCONNECT`. Reported in issue #147.
+
 ## [mqtt5 0.39.1] - 2026-09-06
 
 ### Fixed

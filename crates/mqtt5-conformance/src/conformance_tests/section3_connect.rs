@@ -52,12 +52,14 @@ async fn session_takeover_disconnects_existing_client(sut: SutHandle) {
         "[MQTT-3.1.4-3] taking-over CONNECT must succeed"
     );
 
-    if let Some(reason) = existing.expect_disconnect_packet(TIMEOUT).await {
-        assert_eq!(
-            reason, 0x8E,
-            "[MQTT-3.1.4-3] a DISCONNECT sent to the superseded client must carry 0x8E (Session taken over)"
-        );
-    }
+    let reason = existing
+        .expect_disconnect_packet(TIMEOUT)
+        .await
+        .expect("[MQTT-3.1.4-3] the superseded client must receive a DISCONNECT before the connection closes");
+    assert_eq!(
+        reason, 0x8E,
+        "[MQTT-3.1.4-3] the DISCONNECT sent to the superseded client must carry 0x8E (Session taken over)"
+    );
 
     assert!(
         existing.read_packet_bytes(TIMEOUT).await.is_none(),
