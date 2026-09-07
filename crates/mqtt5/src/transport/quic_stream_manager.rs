@@ -12,9 +12,9 @@ use tokio::sync::Mutex;
 use tracing::{debug, instrument, trace, warn};
 
 struct StreamInfo {
-    stream: SendStream,
+    stream: Mutex<SendStream>,
     flow_id: FlowId,
-    last_used: Instant,
+    last_used: std::sync::Mutex<Instant>,
 }
 
 struct FlowStreamInfo {
@@ -28,7 +28,7 @@ const DEFAULT_FLOW_EXPIRE_INTERVAL: u64 = 300;
 pub struct QuicStreamManager {
     connection: Arc<Connection>,
     strategy: StreamStrategy,
-    topic_streams: Arc<Mutex<HashMap<String, StreamInfo>>>,
+    topic_streams: Arc<Mutex<HashMap<String, Arc<StreamInfo>>>>,
     flow_streams: Arc<Mutex<HashMap<FlowId, FlowStreamInfo>>>,
     max_cached_streams: usize,
     stream_idle_timeout: Duration,
@@ -190,37 +190,40 @@ impl QuicStreamManager {
     }
 
     // [MQoQ§5.3] Per-topic stream caching
-    async fn get_or_create_topic_stream(&self, topic: &str) -> Result<(SendStream, FlowId)> {
+    async fn get_or_create_topic_stream(&self, topic: &str) -> Result<Arc<StreamInfo>> {
         let mut streams = self.topic_streams.lock().await;
         let now = Instant::now();
 
         let idle_topics: Vec<String> = streams
             .iter()
-            .filter(|(_, info)| now.duration_since(info.last_used) > self.stream_idle_timeout)
+            .filter(|(_, info)| {
+                now.duration_since(info.last_used.lock().map_or(now, |used| *used))
+                    > self.stream_idle_timeout
+            })
             .map(|(topic, _)| topic.clone())
             .collect();
 
         for idle_topic in &idle_topics {
-            if let Some(mut info) = streams.remove(idle_topic) {
-                let _ = info.stream.finish();
+            if let Some(info) = streams.remove(idle_topic) {
+                let _ = info.stream.lock().await.finish();
                 debug!(topic = %idle_topic, flow_id = ?info.flow_id, "Closed idle stream");
             }
         }
 
-        if let Some(info) = streams.remove(topic) {
+        if let Some(info) = streams.get(topic) {
             trace!(topic = %topic, flow_id = ?info.flow_id, "Reusing existing stream for topic");
-            return Ok((info.stream, info.flow_id));
+            return Ok(Arc::clone(info));
         }
 
         if streams.len() >= self.max_cached_streams {
             let oldest = streams
                 .iter()
-                .min_by_key(|(_, info)| info.last_used)
+                .min_by_key(|(_, info)| info.last_used.lock().map_or(now, |used| *used))
                 .map(|(k, _)| k.clone());
 
             if let Some(oldest_topic) = oldest {
-                if let Some(mut info) = streams.remove(&oldest_topic) {
-                    let _ = info.stream.finish();
+                if let Some(info) = streams.remove(&oldest_topic) {
+                    let _ = info.stream.lock().await.finish();
                     debug!(
                         topic = %oldest_topic,
                         flow_id = ?info.flow_id,
@@ -229,8 +232,6 @@ impl QuicStreamManager {
                 }
             }
         }
-        drop(streams);
-
         debug!(topic = %topic, "Opening new stream for topic");
         let mut send = self.connection.open_uni().await.map_err(|e| {
             MqttError::ConnectionError(format!("Failed to open QUIC stream for topic: {e}"))
@@ -257,7 +258,13 @@ impl QuicStreamManager {
             FlowId::client(0)
         };
 
-        Ok((send, flow_id))
+        let info = Arc::new(StreamInfo {
+            stream: Mutex::new(send),
+            flow_id,
+            last_used: std::sync::Mutex::new(Instant::now()),
+        });
+        streams.insert(topic.to_string(), Arc::clone(&info));
+        Ok(info)
     }
 
     /// Sends a packet on a topic-specific stream.
@@ -265,26 +272,23 @@ impl QuicStreamManager {
     /// # Errors
     /// Returns an error if the stream operation or packet encoding fails.
     pub async fn send_on_topic_stream(&self, topic: String, packet: Packet) -> Result<()> {
-        let (mut stream, flow_id) = self.get_or_create_topic_stream(&topic).await?;
+        let info = self.get_or_create_topic_stream(&topic).await?;
 
         let mut buf = BytesMut::with_capacity(1024);
         encode_packet_to_buffer(&packet, &mut buf)?;
 
-        stream
+        info.stream
+            .lock()
+            .await
             .write_all(&buf)
             .await
             .map_err(|e| MqttError::ConnectionError(format!("QUIC write error: {e}")))?;
 
-        debug!(topic = %topic, flow_id = ?flow_id, "Sent packet on topic-specific stream");
+        if let Ok(mut last_used) = info.last_used.lock() {
+            *last_used = Instant::now();
+        }
 
-        self.topic_streams.lock().await.insert(
-            topic,
-            StreamInfo {
-                stream,
-                flow_id,
-                last_used: Instant::now(),
-            },
-        );
+        debug!(topic = %topic, flow_id = ?info.flow_id, "Sent packet on topic-specific stream");
 
         Ok(())
     }
@@ -433,8 +437,8 @@ impl QuicStreamManager {
 
     pub async fn close_all_streams(&self) {
         let mut streams = self.topic_streams.lock().await;
-        for (topic, mut info) in streams.drain() {
-            let _ = info.stream.finish();
+        for (topic, info) in streams.drain() {
+            let _ = info.stream.lock().await.finish();
             trace!(topic = %topic, flow_id = ?info.flow_id, "Closed topic stream");
         }
         drop(streams);

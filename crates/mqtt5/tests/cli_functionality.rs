@@ -208,7 +208,7 @@ async fn test_cli_message_throughput() {
     println!("   Throughput: {msgs_per_sec:.1} messages/second");
 }
 
-/// Bench throughput mode emits a valid flat schema and, at QoS1, the open-loop
+/// Bench throughput mode emits a valid flat schema and, at `QoS1`, the open-loop
 /// generator plus real flow control delivers ~everything offered (no coordinated-omission
 /// collapse and no overshoot) — the property the saturation rework must preserve.
 #[tokio::test]
