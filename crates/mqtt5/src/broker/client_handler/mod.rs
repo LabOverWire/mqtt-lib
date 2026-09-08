@@ -100,7 +100,6 @@ pub struct ClientHandler {
     pub(super) handoff_deadline: Option<Instant>,
     pub(super) handoff_waived: bool,
     pub(super) handoff_baseline: usize,
-    pub(super) cutoff: Option<u64>,
     pub(super) clean_start: bool,
     pub(super) held: Vec<QueuedMessage>,
     pub(super) awaiting_pubcomp: HashSet<u16>,
@@ -213,7 +212,6 @@ impl ClientHandler {
             handoff_deadline: None,
             handoff_waived: false,
             handoff_baseline: 0,
-            cutoff: None,
             clean_start: true,
             held: Vec::new(),
             awaiting_pubcomp: HashSet::new(),
@@ -349,7 +347,6 @@ impl ClientHandler {
             )
             .await;
         self.generation = registration.generation;
-        self.cutoff = registration.cutoff;
         self.handoff_deadline = registration
             .released
             .as_ref()
@@ -443,7 +440,10 @@ impl ClientHandler {
         };
         self.handoff_baseline = queue.handoffs();
         if self.clean_start {
-            let discarded = queue.clear(self.cutoff);
+            // A clean start begins with no session state, so discard the whole queue rather
+            // than a seq cutoff: a stale delivery routed to the prior session during the
+            // hand-off must not survive into the fresh session.
+            let discarded = queue.clear(None);
             if discarded > 0 {
                 debug!(count = discarded, "Clean start discarded queued messages");
             }
@@ -452,7 +452,10 @@ impl ClientHandler {
                     debug!("failed to clear inflight messages on clean start: {e}");
                 }
             }
-        } else {
+        } else if !self.handoff_waived {
+            // Only reload persisted inflight when no live predecessor still owns it. On a
+            // waived hand-off the old handler is still running and will re-queue its inflight
+            // from memory when it exits; reloading here would deliver those messages twice.
             self.load_persisted_inflight(&queue).await?;
         }
         queue.notify();
@@ -919,6 +922,14 @@ impl ClientHandler {
         true
     }
 
+    /// `(delivering, window_open)` for the current loop turn. `delivering` gates the drain;
+    /// `window_open` additionally requires free outbound window before the gated lane yields.
+    fn delivery_gates(&self) -> (bool, bool) {
+        let delivering = self.bound && (self.handoff_waived || !self.handing_off());
+        let window_open = delivering && self.outbound_inflight.len() < usize::from(self.window);
+        (delivering, window_open)
+    }
+
     async fn handle_packets(
         &mut self,
         mut keep_alive_interval: Option<&mut Interval>,
@@ -930,8 +941,7 @@ impl ClientHandler {
         let queue = self.queue.clone();
 
         loop {
-            let delivering = self.bound && (self.handoff_waived || !self.handing_off());
-            let window_open = delivering && self.outbound_inflight.len() < usize::from(self.window);
+            let (delivering, window_open) = self.delivery_gates();
             tokio::select! {
                 quiesced = Self::await_handoff_quiesce(
                     &mut self.released_rx,

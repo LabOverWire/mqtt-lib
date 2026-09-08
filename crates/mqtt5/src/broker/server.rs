@@ -809,7 +809,11 @@ impl MqttBroker {
             MessageRouter::with_storage(Arc::clone(storage))
         } else {
             MessageRouter::new()
-        };
+        }
+        .with_fallback_queue_limits(QueueLimits {
+            max_messages: config.storage_config.max_queued_messages_per_client,
+            max_bytes: config.storage_config.max_queued_bytes_per_client,
+        });
         let with_handler = if let Some(ref handler) = config.event_handler {
             base.with_event_handler(Arc::clone(handler))
         } else {
@@ -899,10 +903,14 @@ impl MqttBroker {
         shutdown_tx: &tokio::sync::broadcast::Sender<()>,
         task_handles: &mut Vec<tokio::task::JoinHandle<()>>,
     ) -> Result<()> {
-        if let Some(ref storage) = self.storage {
-            storage.cleanup_expired().await?;
-
-            let storage_clone = Arc::clone(storage);
+        // The periodic cleanup runs whether or not persistence is on: it also evicts the
+        // router's in-memory fallback queues, which otherwise leak one entry per distinct
+        // client id when storage is off.
+        {
+            if let Some(ref storage) = self.storage {
+                storage.cleanup_expired().await?;
+            }
+            let storage_clone = self.storage.clone();
             let router_clone = Arc::clone(&self.router);
             let cleanup_interval = self.config.storage_config.cleanup_interval;
             let mut shutdown_rx = shutdown_tx.subscribe();
@@ -912,8 +920,10 @@ impl MqttBroker {
                 loop {
                     tokio::select! {
                         _ = interval.tick() => {
-                            if let Err(e) = storage_clone.cleanup_expired().await {
-                                error!("Storage cleanup error: {e}");
+                            if let Some(ref storage) = storage_clone {
+                                if let Err(e) = storage.cleanup_expired().await {
+                                    error!("Storage cleanup error: {e}");
+                                }
                             }
                             router_clone.cleanup_stale_subscriptions().await;
                         }
@@ -924,7 +934,9 @@ impl MqttBroker {
                     }
                 }
             }));
+        }
 
+        if let Some(ref storage) = self.storage {
             let storage_clone = Arc::clone(storage);
             let mut shutdown_rx = shutdown_tx.subscribe();
             let flush_interval = std::time::Duration::from_secs(5);

@@ -150,7 +150,6 @@ pub struct TakeoverNotice {
 pub struct Registration {
     pub generation: u64,
     pub released: Option<oneshot::Receiver<()>>,
-    pub cutoff: Option<u64>,
 }
 
 /// Whether the releasing handler still owned the router entry.
@@ -300,6 +299,14 @@ impl MessageRouter {
         }
     }
 
+    /// Sets the per-client limits for the in-memory fallback queues used when persistence is
+    /// off, so a persistence-less broker honours the configured caps instead of the defaults.
+    #[must_use]
+    pub fn with_fallback_queue_limits(mut self, limits: QueueLimits) -> Self {
+        self.fallback_queues = QueueRegistry::new(limits, None);
+        self
+    }
+
     #[must_use]
     pub fn with_event_handler(mut self, handler: Arc<dyn BrokerEventHandler>) -> Self {
         self.event_handler = Some(handler);
@@ -389,8 +396,8 @@ impl MessageRouter {
     ///
     /// While a displaced handler is still handing its deliveries back, the queue's hand-off
     /// flag keeps routers queueing behind it; the returned `released` receiver fires when the
-    /// old handler is done. `cutoff` is the first queue sequence a clean start must keep.
-    /// A clean start also drops every subscription the client id still holds.
+    /// old handler is done. A clean start also drops every subscription the client id still
+    /// holds; its handler discards the whole queue when it binds.
     pub async fn register_session(
         &self,
         client_id: String,
@@ -414,10 +421,9 @@ impl MessageRouter {
             .next_generation
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             + 1;
-        let (released, cutoff) = match clients.remove(&client_id) {
+        let released = match clients.remove(&client_id) {
             Some(old_client) => {
                 info!("Client ID takeover: {}", client_id);
-                let cutoff = queue.next_seq();
                 let (released_tx, released_rx) = oneshot::channel();
                 let notice = TakeoverNotice {
                     discard: clean_start,
@@ -425,12 +431,12 @@ impl MessageRouter {
                     guard: HandoffGuard::new(Arc::clone(&queue)),
                 };
                 if old_client.disconnect_tx.send(notice).is_ok() {
-                    (Some(released_rx), Some(cutoff))
+                    Some(released_rx)
                 } else {
-                    (None, None)
+                    None
                 }
             }
-            None => (None, None),
+            None => None,
         };
 
         clients.insert(
@@ -455,7 +461,6 @@ impl MessageRouter {
         Registration {
             generation,
             released,
-            cutoff,
         }
     }
 

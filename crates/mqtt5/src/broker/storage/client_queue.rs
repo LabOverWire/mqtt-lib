@@ -216,7 +216,7 @@ impl ClientQueue {
         self.notify.notified().await;
     }
 
-    /// The next sequence number that will be assigned; used as the clean-start cutoff.
+    /// The next sequence number that will be assigned.
     #[must_use]
     pub fn next_seq(&self) -> u64 {
         self.seq.load(Ordering::Acquire)
@@ -409,34 +409,6 @@ impl ClientQueue {
         removed.len()
     }
 
-    /// Entries whose expiry is unknown in memory (found by the startup scan), with their files.
-    #[must_use]
-    pub fn scanned_entries(&self) -> Vec<(u64, PathBuf)> {
-        let inner = self.inner.lock();
-        inner
-            .entries
-            .iter()
-            .filter(|entry| entry.body.is_none())
-            .filter_map(|entry| entry.path.clone().map(|path| (entry.seq, path)))
-            .collect()
-    }
-
-    /// Removes one entry by sequence number, e.g. after its file turned out to be expired.
-    pub fn remove_seq(&self, seq: u64) -> bool {
-        let removed = {
-            let mut inner = self.inner.lock();
-            let before = inner.entries.len();
-            inner.entries.retain(|entry| entry.seq != seq);
-            inner.bytes = inner.entries.iter().map(|entry| entry.bytes).sum();
-            self.count.store(inner.entries.len(), Ordering::Release);
-            before != inner.entries.len()
-        };
-        if removed {
-            self.enqueue_delete(seq);
-        }
-        removed
-    }
-
     /// Non-destructive snapshot of the live messages, in order.
     pub async fn peek_all(&self) -> Vec<QueuedMessage> {
         let entries: Vec<QueueEntry> = {
@@ -467,16 +439,23 @@ impl ClientQueue {
         messages
     }
 
-    /// Adds an entry discovered on disk at startup; its body is read on take. Only the file
+    /// Adds an entry discovered on disk at startup; its body is read on take, but its byte
+    /// size (payload length, matching `push`) and expiry are recorded now. Only the file
     /// backend scans a directory, so this is unused on wasm.
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn push_scanned(&self, seq: u64, path: PathBuf, bytes: usize) {
+    pub(crate) fn push_scanned(
+        &self,
+        seq: u64,
+        path: PathBuf,
+        bytes: usize,
+        expires_at: Option<SystemTime>,
+    ) {
         let mut inner = self.inner.lock();
         inner.bytes += bytes;
         inner.entries.push_back(QueueEntry {
             seq,
             bytes,
-            expires_at: None,
+            expires_at,
             body: None,
             path: Some(path),
         });

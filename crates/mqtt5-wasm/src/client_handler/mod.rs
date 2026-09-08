@@ -61,6 +61,7 @@ pub struct WasmClientHandler {
     qos0_rx: tokio::sync::mpsc::Receiver<RoutableMessage>,
     qos0_tx: tokio::sync::mpsc::Sender<RoutableMessage>,
     queue: Option<QueueHandle>,
+    generation: u64,
     pub(super) inflight_publishes: HashMap<u16, PublishPacket>,
     pub(super) outbound_inflight: Rc<RefCell<HashMap<u16, PublishPacket>>>,
     pub(super) next_packet_id: Rc<Cell<u16>>,
@@ -183,6 +184,7 @@ impl WasmClientHandler {
             qos0_rx,
             qos0_tx,
             queue: None,
+            generation: 0,
             inflight_publishes: HashMap::new(),
             outbound_inflight: Rc::new(RefCell::new(HashMap::new())),
             next_packet_id: Rc::new(Cell::new(1)),
@@ -217,7 +219,8 @@ impl WasmClientHandler {
 
         let queue = self.router.queue_handle(&client_id);
         self.queue = Some(queue.clone());
-        self.router
+        let registration = self
+            .router
             .register_client(
                 client_id.clone(),
                 DeliveryLanes {
@@ -228,6 +231,7 @@ impl WasmClientHandler {
                 disconnect_tx,
             )
             .await;
+        self.generation = registration.generation;
 
         self.stats.client_connected();
 
@@ -237,7 +241,7 @@ impl WasmClientHandler {
             self.publish_will_message(&client_id).await;
         }
 
-        self.router.unregister_client(&client_id).await;
+        self.release_router_entry(&client_id).await;
         self.stats.client_disconnected();
 
         result
@@ -266,7 +270,8 @@ impl WasmClientHandler {
 
         let queue = self.router.queue_handle(&client_id);
         self.queue = Some(queue.clone());
-        self.router
+        let registration = self
+            .router
             .register_client(
                 client_id.clone(),
                 DeliveryLanes {
@@ -277,6 +282,7 @@ impl WasmClientHandler {
                 disconnect_tx,
             )
             .await;
+        self.generation = registration.generation;
 
         self.stats.client_connected();
 
@@ -291,10 +297,24 @@ impl WasmClientHandler {
 
         self.fire_client_disconnect(&client_id, reason, unexpected);
 
-        self.router.unregister_client(&client_id).await;
+        self.release_router_entry(&client_id).await;
         self.stats.client_disconnected();
 
         result
+    }
+
+    /// Releases this connection's router entry, but only if it still owns it. A newer
+    /// connection with the same client id takes over the entry (a higher generation); an
+    /// unconditional unregister here would evict that live successor and strip its
+    /// subscriptions.
+    async fn release_router_entry(&self, client_id: &str) {
+        let preserve_session = self
+            .session
+            .as_ref()
+            .is_some_and(|session| session.expiry_interval != Some(0));
+        self.router
+            .release_client(client_id, self.generation, preserve_session)
+            .await;
     }
 
     fn spawn_disconnect_watcher(
@@ -399,7 +419,8 @@ impl WasmClientHandler {
                         }
                     } => {
                         if let Some(queue) = &queue {
-                            for message in queue.take(64).await {
+                            let mut pending = queue.take(64).await.into_iter();
+                            while let Some(message) = pending.next() {
                                 if !Self::forward_one(
                                     message.to_publish_packet(),
                                     &writer_for_forward,
@@ -411,6 +432,13 @@ impl WasmClientHandler {
                                 )
                                 .await
                                 {
+                                    // A write error must not drop the drained batch: put the
+                                    // failed message and the untried remainder back at the
+                                    // front so they survive for redelivery.
+                                    let mut rest = vec![message];
+                                    rest.extend(pending);
+                                    queue.requeue_front(rest);
+                                    queue.finish_drain();
                                     break 'outer;
                                 }
                             }

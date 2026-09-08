@@ -334,10 +334,22 @@ impl FileBackend {
             new_format.sort_by_key(|(seq, _)| *seq);
             let queue = self.queues.handle(client_id);
             for (seq, path) in new_format {
-                let bytes = fs::metadata(&path)
-                    .await
-                    .map_or(0, |m| usize::try_from(m.len()).unwrap_or(usize::MAX));
-                queue.push_scanned(seq, path, bytes);
+                // Parse each file once so the entry is accounted by payload length (matching
+                // push) and carries its expiry in memory. Metadata length would count the
+                // pretty-printed JSON (~6-9x the payload) and wrongly evict most of a
+                // within-cap backlog on the first push after restart.
+                let (bytes, expires_at) = match self.read_file::<QueuedMessage>(path.clone()).await
+                {
+                    Ok(Some(mut message)) => {
+                        message.recompute_expiry();
+                        (message.payload.len(), message.expires_at)
+                    }
+                    _ => {
+                        // Unreadable/corrupt: quarantined by read_file; skip the entry.
+                        continue;
+                    }
+                };
+                queue.push_scanned(seq, path, bytes, expires_at);
                 max_seq = max_seq.max(seq);
             }
         }
@@ -1028,20 +1040,9 @@ impl StorageBackend for FileBackend {
         }
 
         for queue in self.queues.handles() {
+            // Scanned entries carry their expiry in memory (recorded during scan_queues), so
+            // purge_expired covers them too; no per-tick re-read of every queued file.
             removed_count += queue.purge_expired();
-            for (seq, path) in queue.scanned_entries() {
-                match self.read_file::<QueuedMessage>(path).await? {
-                    Some(mut message) => {
-                        message.recompute_expiry();
-                        if message.is_expired() && queue.remove_seq(seq) {
-                            removed_count += 1;
-                        }
-                    }
-                    None => {
-                        queue.remove_seq(seq);
-                    }
-                }
-            }
         }
         self.queues.evict_idle();
 
@@ -1132,6 +1133,50 @@ mod tests {
         assert_eq!(topics(&taken), ["q/r1", "q/r2", "q/c", "q/d", "q/e"]);
         queue.push(queued("persist", "after"));
         assert!(queue.next_seq() > SEQ_FLOOR);
+    }
+
+    #[tokio::test]
+    async fn restart_accounts_scanned_bytes_by_payload_not_file_size() {
+        // Payloads total 1000 bytes, well under the 4000-byte cap, but each pretty-JSON file
+        // is several times its payload. If the scan counted file size the whole backlog would
+        // be evicted on the first push after restart.
+        let limits = QueueLimits {
+            max_messages: 1000,
+            max_bytes: 4000,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let backend = FileBackend::with_queue_limits(dir.path(), limits)
+                .await
+                .unwrap();
+            let queue = backend.queue_handle("c");
+            for tag in ["a", "b", "c", "d", "e"] {
+                queue.push(QueuedMessage::new(
+                    PublishPacket::new(format!("q/{tag}"), vec![b'x'; 200], QoS::AtLeastOnce),
+                    "c".to_string(),
+                    QoS::AtLeastOnce,
+                    None,
+                ));
+            }
+            assert_eq!(queue.count(), 5);
+            backend.flush_queue_writes().await;
+        }
+        let reopened = FileBackend::with_queue_limits(dir.path(), limits)
+            .await
+            .unwrap();
+        let queue = reopened.queue_handle("c");
+        assert_eq!(
+            queue.count(),
+            5,
+            "restart must not evict a within-cap backlog"
+        );
+        queue.push(QueuedMessage::new(
+            PublishPacket::new("q/f", vec![b'x'; 200], QoS::AtLeastOnce),
+            "c".to_string(),
+            QoS::AtLeastOnce,
+            None,
+        ));
+        assert_eq!(queue.count(), 6, "one more within-cap push evicts nothing");
     }
 
     #[tokio::test]
