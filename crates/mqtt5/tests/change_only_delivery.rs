@@ -12,11 +12,16 @@ use tokio::time::timeout;
 async fn test_change_only_filters_duplicate_payloads() {
     let router = Arc::new(MessageRouter::new());
 
-    let (tx, rx) = flume::bounded(10);
+    let (lanes, mut rx) = mqtt5::broker::router::DeliveryLanes::channel(10);
     let (dtx, _drx) = tokio::sync::oneshot::channel();
 
     router
-        .register_client("change_only_client".to_string(), tx, dtx)
+        .register_client(
+            "change_only_client".to_string(),
+            lanes.clone(),
+            router.queue_handle("change_only_client"),
+            dtx,
+        )
         .await;
 
     router
@@ -42,7 +47,7 @@ async fn test_change_only_filters_duplicate_payloads() {
     );
     router.route_message(&packet1, None).await;
 
-    let result1 = timeout(Duration::from_millis(100), rx.recv_async()).await;
+    let result1 = timeout(Duration::from_millis(100), rx.recv()).await;
     assert!(result1.is_ok(), "First message should be delivered");
 
     let packet2 = PublishPacket::new(
@@ -52,7 +57,7 @@ async fn test_change_only_filters_duplicate_payloads() {
     );
     router.route_message(&packet2, None).await;
 
-    let result2 = timeout(Duration::from_millis(100), rx.recv_async()).await;
+    let result2 = timeout(Duration::from_millis(100), rx.recv()).await;
     assert!(
         result2.is_err(),
         "Duplicate payload should not be delivered in change-only mode"
@@ -63,11 +68,16 @@ async fn test_change_only_filters_duplicate_payloads() {
 async fn test_change_only_allows_different_payloads() {
     let router = Arc::new(MessageRouter::new());
 
-    let (tx, rx) = flume::bounded(10);
+    let (lanes, mut rx) = mqtt5::broker::router::DeliveryLanes::channel(10);
     let (dtx, _drx) = tokio::sync::oneshot::channel();
 
     router
-        .register_client("change_only_client".to_string(), tx, dtx)
+        .register_client(
+            "change_only_client".to_string(),
+            lanes.clone(),
+            router.queue_handle("change_only_client"),
+            dtx,
+        )
         .await;
 
     router
@@ -93,7 +103,7 @@ async fn test_change_only_allows_different_payloads() {
     );
     router.route_message(&packet1, None).await;
 
-    let result1 = timeout(Duration::from_millis(100), rx.recv_async()).await;
+    let result1 = timeout(Duration::from_millis(100), rx.recv()).await;
     assert!(result1.is_ok(), "First message should be delivered");
     let received1 = result1.unwrap().unwrap();
     assert_eq!(&received1.publish.payload[..], b"25.5");
@@ -105,7 +115,7 @@ async fn test_change_only_allows_different_payloads() {
     );
     router.route_message(&packet2, None).await;
 
-    let result2 = timeout(Duration::from_millis(100), rx.recv_async()).await;
+    let result2 = timeout(Duration::from_millis(100), rx.recv()).await;
     assert!(result2.is_ok(), "Different payload should be delivered");
     let received2 = result2.unwrap().unwrap();
     assert_eq!(&received2.publish.payload[..], b"26.0");
@@ -115,11 +125,16 @@ async fn test_change_only_allows_different_payloads() {
 async fn test_change_only_disabled_allows_duplicates() {
     let router = Arc::new(MessageRouter::new());
 
-    let (tx, rx) = flume::bounded(10);
+    let (lanes, mut rx) = mqtt5::broker::router::DeliveryLanes::channel(10);
     let (dtx, _drx) = tokio::sync::oneshot::channel();
 
     router
-        .register_client("regular_client".to_string(), tx, dtx)
+        .register_client(
+            "regular_client".to_string(),
+            lanes.clone(),
+            router.queue_handle("regular_client"),
+            dtx,
+        )
         .await;
 
     router
@@ -145,7 +160,7 @@ async fn test_change_only_disabled_allows_duplicates() {
     );
     router.route_message(&packet1, None).await;
 
-    let result1 = timeout(Duration::from_millis(100), rx.recv_async()).await;
+    let result1 = timeout(Duration::from_millis(100), rx.recv()).await;
     assert!(result1.is_ok(), "First message should be delivered");
 
     let packet2 = PublishPacket::new(
@@ -155,7 +170,7 @@ async fn test_change_only_disabled_allows_duplicates() {
     );
     router.route_message(&packet2, None).await;
 
-    let result2 = timeout(Duration::from_millis(100), rx.recv_async()).await;
+    let result2 = timeout(Duration::from_millis(100), rx.recv()).await;
     assert!(
         result2.is_ok(),
         "Duplicate payload should be delivered when change_only=false"
@@ -166,11 +181,16 @@ async fn test_change_only_disabled_allows_duplicates() {
 async fn test_change_only_per_topic_tracking() {
     let router = Arc::new(MessageRouter::new());
 
-    let (tx, rx) = flume::bounded(10);
+    let (lanes, mut rx) = mqtt5::broker::router::DeliveryLanes::channel(10);
     let (dtx, _drx) = tokio::sync::oneshot::channel();
 
     router
-        .register_client("change_only_client".to_string(), tx, dtx)
+        .register_client(
+            "change_only_client".to_string(),
+            lanes.clone(),
+            router.queue_handle("change_only_client"),
+            dtx,
+        )
         .await;
 
     router
@@ -196,7 +216,7 @@ async fn test_change_only_per_topic_tracking() {
     );
     router.route_message(&packet_temp, None).await;
 
-    let result1 = timeout(Duration::from_millis(100), rx.recv_async()).await;
+    let result1 = timeout(Duration::from_millis(100), rx.recv()).await;
     assert!(result1.is_ok(), "Temperature message should be delivered");
 
     let packet_humidity = PublishPacket::new(
@@ -206,7 +226,7 @@ async fn test_change_only_per_topic_tracking() {
     );
     router.route_message(&packet_humidity, None).await;
 
-    let result2 = timeout(Duration::from_millis(100), rx.recv_async()).await;
+    let result2 = timeout(Duration::from_millis(100), rx.recv()).await;
     assert!(
         result2.is_ok(),
         "Same payload on different topic should be delivered"
@@ -217,11 +237,16 @@ async fn test_change_only_per_topic_tracking() {
 async fn test_change_only_state_persistence() {
     let router = Arc::new(MessageRouter::new());
 
-    let (tx, rx) = flume::bounded(10);
+    let (lanes, mut rx) = mqtt5::broker::router::DeliveryLanes::channel(10);
     let (dtx, _drx) = tokio::sync::oneshot::channel();
 
     router
-        .register_client("persistent_client".to_string(), tx.clone(), dtx)
+        .register_client(
+            "persistent_client".to_string(),
+            lanes.clone(),
+            router.queue_handle("persistent_client"),
+            dtx,
+        )
         .await;
 
     router
@@ -243,7 +268,7 @@ async fn test_change_only_state_persistence() {
     let packet1 = PublishPacket::new("test/topic".to_string(), &b"data1"[..], QoS::AtMostOnce);
     router.route_message(&packet1, None).await;
 
-    let _ = timeout(Duration::from_millis(100), rx.recv_async()).await;
+    let _ = timeout(Duration::from_millis(100), rx.recv()).await;
 
     let state = router.get_change_only_state("persistent_client").await;
     assert!(
@@ -269,11 +294,16 @@ async fn test_change_only_state_load_on_reconnect() {
         .load_change_only_state("reconnect_client", state)
         .await;
 
-    let (tx, rx) = flume::bounded(10);
+    let (lanes, mut rx) = mqtt5::broker::router::DeliveryLanes::channel(10);
     let (dtx, _drx) = tokio::sync::oneshot::channel();
 
     router
-        .register_client("reconnect_client".to_string(), tx, dtx)
+        .register_client(
+            "reconnect_client".to_string(),
+            lanes.clone(),
+            router.queue_handle("reconnect_client"),
+            dtx,
+        )
         .await;
 
     router
@@ -295,7 +325,7 @@ async fn test_change_only_state_load_on_reconnect() {
     let packet_same = PublishPacket::new("test/topic".to_string(), &b"data1"[..], QoS::AtMostOnce);
     router.route_message(&packet_same, None).await;
 
-    let result = timeout(Duration::from_millis(100), rx.recv_async()).await;
+    let result = timeout(Duration::from_millis(100), rx.recv()).await;
     assert!(
         result.is_err(),
         "Same payload should be blocked after state restore"
@@ -304,7 +334,7 @@ async fn test_change_only_state_load_on_reconnect() {
     let packet_new = PublishPacket::new("test/topic".to_string(), &b"data2"[..], QoS::AtMostOnce);
     router.route_message(&packet_new, None).await;
 
-    let result2 = timeout(Duration::from_millis(100), rx.recv_async()).await;
+    let result2 = timeout(Duration::from_millis(100), rx.recv()).await;
     assert!(
         result2.is_ok(),
         "New payload should be delivered after state restore"
@@ -355,11 +385,16 @@ async fn test_change_only_state_should_deliver() {
 async fn test_change_only_with_qos_levels() {
     let router = Arc::new(MessageRouter::new());
 
-    let (tx, rx) = flume::bounded(10);
+    let (lanes, mut rx) = mqtt5::broker::router::DeliveryLanes::channel(10);
     let (dtx, _drx) = tokio::sync::oneshot::channel();
 
     router
-        .register_client("qos_client".to_string(), tx, dtx)
+        .register_client(
+            "qos_client".to_string(),
+            lanes.clone(),
+            router.queue_handle("qos_client"),
+            dtx,
+        )
         .await;
 
     router
@@ -385,7 +420,7 @@ async fn test_change_only_with_qos_levels() {
     );
     router.route_message(&packet1, None).await;
 
-    let result1 = timeout(Duration::from_millis(100), rx.recv_async()).await;
+    let result1 = timeout(Duration::from_millis(100), rx.recv()).await;
     assert!(result1.is_ok(), "QoS1 message should be delivered");
 
     let packet2 = PublishPacket::new(
@@ -395,7 +430,7 @@ async fn test_change_only_with_qos_levels() {
     );
     router.route_message(&packet2, None).await;
 
-    let result2 = timeout(Duration::from_millis(100), rx.recv_async()).await;
+    let result2 = timeout(Duration::from_millis(100), rx.recv()).await;
     assert!(
         result2.is_err(),
         "Duplicate QoS1 message should be filtered in change-only mode"
@@ -406,17 +441,27 @@ async fn test_change_only_with_qos_levels() {
 async fn test_change_only_multiple_clients_independent() {
     let router = Arc::new(MessageRouter::new());
 
-    let (tx1, rx1) = flume::bounded(10);
-    let (tx2, rx2) = flume::bounded(10);
+    let (lanes1, mut rx1) = mqtt5::broker::router::DeliveryLanes::channel(10);
+    let (lanes2, mut rx2) = mqtt5::broker::router::DeliveryLanes::channel(10);
 
     let (dtx1, _drx1) = tokio::sync::oneshot::channel();
     let (dtx2, _drx2) = tokio::sync::oneshot::channel();
 
     router
-        .register_client("client1".to_string(), tx1, dtx1)
+        .register_client(
+            "client1".to_string(),
+            lanes1.clone(),
+            router.queue_handle("client1"),
+            dtx1,
+        )
         .await;
     router
-        .register_client("client2".to_string(), tx2, dtx2)
+        .register_client(
+            "client2".to_string(),
+            lanes2.clone(),
+            router.queue_handle("client2"),
+            dtx2,
+        )
         .await;
 
     router
@@ -454,16 +499,16 @@ async fn test_change_only_multiple_clients_independent() {
     let packet = PublishPacket::new("test/topic".to_string(), &b"data"[..], QoS::AtMostOnce);
     router.route_message(&packet, None).await;
 
-    let result1 = timeout(Duration::from_millis(100), rx1.recv_async()).await;
-    let result2 = timeout(Duration::from_millis(100), rx2.recv_async()).await;
+    let result1 = timeout(Duration::from_millis(100), rx1.recv()).await;
+    let result2 = timeout(Duration::from_millis(100), rx2.recv()).await;
 
     assert!(result1.is_ok(), "Client1 should receive first message");
     assert!(result2.is_ok(), "Client2 should receive first message");
 
     router.route_message(&packet, None).await;
 
-    let result1_dup = timeout(Duration::from_millis(100), rx1.recv_async()).await;
-    let result2_dup = timeout(Duration::from_millis(100), rx2.recv_async()).await;
+    let result1_dup = timeout(Duration::from_millis(100), rx1.recv()).await;
+    let result2_dup = timeout(Duration::from_millis(100), rx2.recv()).await;
 
     assert!(result1_dup.is_err(), "Client1 should not receive duplicate");
     assert!(result2_dup.is_err(), "Client2 should not receive duplicate");

@@ -333,7 +333,9 @@ impl AckCallbackManager {
         };
         let actual = strip_shared_subscription_prefix(topic_filter).to_string();
         if actual.contains('+') || actual.contains('#') {
-            self.wildcard.lock().push(entry);
+            let mut wildcard = self.wildcard.lock();
+            wildcard.retain(|existing| existing.topic_filter != topic_filter);
+            wildcard.push(entry);
         } else {
             self.exact.lock().insert(actual, entry);
         }
@@ -474,9 +476,9 @@ mod tests {
             "a matching publish invokes exactly one ack callback, never both"
         );
         assert_eq!(
-            hits_second.load(Ordering::SeqCst),
+            hits_first.load(Ordering::SeqCst),
             0,
-            "the duplicate registration is shadowed and never fires"
+            "re-registering a filter replaces the earlier callback, as it does for exact filters"
         );
     }
 }

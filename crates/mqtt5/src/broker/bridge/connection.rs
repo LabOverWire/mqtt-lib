@@ -7,18 +7,75 @@ use crate::broker::bridge::{BridgeConfig, BridgeError, BridgeProtocol, BridgeSta
 use crate::broker::router::MessageRouter;
 use crate::client::MqttClient;
 use crate::packet::publish::PublishPacket;
+use crate::protocol::v5::reason_codes::ReasonCode;
 use crate::time::{Duration, Instant};
 use crate::transport::tls::TlsConfig;
 use crate::types::ConnectOptions;
+use crate::validation::topic_matches_filter;
+use crate::{AckToken, QoS, SubscribeOptions};
 use mqtt5_protocol::bridge::{evaluate_forwarding, TopicMappingCore};
 use rand::RngExt;
 use std::collections::VecDeque;
 use std::net::ToSocketAddrs;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
-use tokio::sync::{broadcast, RwLock};
+use std::sync::{Arc, Mutex, OnceLock};
+use tokio::sync::{broadcast, mpsc, RwLock};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
+
+/// Bound on remote deliveries a bridge holds unacknowledged; also its Receive Maximum.
+const INGRESS_LANE_CAPACITY: usize = 1024;
+/// How long the remote keeps the bridge's session (and its unacknowledged messages)
+/// across a reconnect.
+const BRIDGE_SESSION_EXPIRY_SECS: u32 = 3600;
+
+/// One incoming delivery from the remote: every local copy it maps to, plus the token
+/// that acknowledges the remote once all of them are routed.
+type IngressItem = (Vec<PublishPacket>, AckToken);
+
+/// Delivery lanes from the remote-facing client into the local router, mirroring the
+/// client handler's gated and ungated lanes.
+struct Ingress {
+    qos1_tx: mpsc::Sender<IngressItem>,
+    qos0_tx: mpsc::Sender<Vec<PublishPacket>>,
+}
+
+/// All incoming mappings that share one remote filter, subscribed once with a
+/// subscription identifier so overlapping filters route each copy exactly once.
+struct IngressFilter {
+    remote_filter: String,
+    qos: QoS,
+    mappings: Vec<TopicMappingCore>,
+}
+
+/// Connect options for the remote-facing client: a persistent deferred-ack session whose
+/// receive maximum equals the ingress lane, so the remote never sends more than the bridge
+/// can hold unacknowledged.
+fn connect_options(config: &BridgeConfig) -> ConnectOptions {
+    let receive_maximum = u16::try_from(INGRESS_LANE_CAPACITY).unwrap_or(u16::MAX);
+    let mut options = ConnectOptions::new(&config.client_id)
+        .with_deferred_ack(true)
+        .with_clean_start(false)
+        .with_session_expiry_interval(BRIDGE_SESSION_EXPIRY_SECS)
+        .with_receive_maximum(receive_maximum);
+    options.keep_alive = Duration::from_secs(u64::from(config.keepalive));
+
+    if let Some(ref username) = config.username {
+        options.username = Some(username.clone());
+    }
+    if let Some(ref password) = config.password {
+        options.password = Some(password.clone().into_bytes());
+    }
+
+    if config.try_private {
+        options
+            .properties
+            .user_properties
+            .push(("bridge".to_string(), config.name.clone()));
+    }
+
+    options
+}
 
 fn apply_jitter(delay: Duration, enable: bool) -> Duration {
     if !enable {
@@ -64,6 +121,10 @@ pub struct BridgeConnection {
     health_check_handle: Arc<RwLock<Option<JoinHandle<()>>>>,
     /// Pending messages to forward when connection is established
     pending_messages: Arc<Mutex<VecDeque<PublishPacket>>>,
+    /// Lanes from the remote-facing client into the local router, created on first use
+    ingress: OnceLock<Ingress>,
+    /// Whether the remote subscriptions have been registered for this connection's lifetime
+    subscribed: AtomicBool,
 }
 
 impl BridgeConnection {
@@ -77,8 +138,7 @@ impl BridgeConnection {
             .validate()
             .map_err(|e| BridgeError::ConfigurationError(e.to_string()))?;
 
-        // Create MQTT client for bridge
-        let client = Arc::new(MqttClient::new(&config.client_id));
+        let client = Arc::new(MqttClient::with_options(connect_options(&config)));
 
         // Create shutdown channel
         let (shutdown_tx, _) = broadcast::channel(1);
@@ -97,6 +157,8 @@ impl BridgeConnection {
             current_broker: Arc::new(RwLock::new(None)),
             health_check_handle: Arc::new(RwLock::new(None)),
             pending_messages: Arc::new(Mutex::new(VecDeque::new())),
+            ingress: OnceLock::new(),
+            subscribed: AtomicBool::new(false),
         })
     }
 
@@ -239,25 +301,7 @@ impl BridgeConnection {
 
     /// Builds connection options from config
     fn build_connect_options(&self) -> ConnectOptions {
-        let mut options = ConnectOptions::new(&self.config.client_id);
-        options.clean_start = self.config.clean_start;
-        options.keep_alive = Duration::from_secs(u64::from(self.config.keepalive));
-
-        if let Some(ref username) = self.config.username {
-            options.username = Some(username.clone());
-        }
-        if let Some(ref password) = self.config.password {
-            options.password = Some(password.clone().into_bytes());
-        }
-
-        if self.config.try_private {
-            options
-                .properties
-                .user_properties
-                .push(("bridge".to_string(), self.config.name.clone()));
-        }
-
-        options
+        connect_options(&self.config)
     }
 
     /// Attempts to connect using TLS to primary and backup brokers
@@ -671,57 +715,192 @@ impl BridgeConnection {
         }
     }
 
-    /// Sets up subscriptions for incoming topics
-    async fn setup_subscriptions(&self) -> Result<()> {
+    /// Groups the incoming mappings by remote filter, in configuration order.
+    fn ingress_filters(&self) -> Vec<IngressFilter> {
+        let mut filters: Vec<IngressFilter> = Vec::new();
         for mapping in &self.config.topics {
-            let core_mapping = TopicMappingCore::from(mapping);
-            if !core_mapping.direction.allows_incoming() {
+            let core = TopicMappingCore::from(mapping);
+            if !core.direction.allows_incoming() {
                 continue;
             }
+            let remote_filter = core.apply_remote_prefix(&core.pattern);
+            match filters
+                .iter_mut()
+                .find(|filter| filter.remote_filter == remote_filter)
+            {
+                Some(filter) => {
+                    if core.qos as u8 > filter.qos as u8 {
+                        filter.qos = core.qos;
+                    }
+                    filter.mappings.push(core);
+                }
+                None => filters.push(IngressFilter {
+                    remote_filter,
+                    qos: core.qos,
+                    mappings: vec![core],
+                }),
+            }
+        }
+        filters
+    }
 
-            let remote_topic = core_mapping.apply_remote_prefix(&core_mapping.pattern);
-            let local_prefix = core_mapping.local_prefix.clone();
-            let qos = core_mapping.qos;
+    fn ingress(&self) -> &Ingress {
+        self.ingress.get_or_init(|| {
+            let (qos1_tx, mut qos1_rx) = mpsc::channel::<IngressItem>(INGRESS_LANE_CAPACITY);
+            let (qos0_tx, mut qos0_rx) = mpsc::channel::<Vec<PublishPacket>>(INGRESS_LANE_CAPACITY);
+            let router = Arc::clone(&self.router);
+            tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        biased;
+                        item = qos1_rx.recv() => {
+                            let Some((packets, token)) = item else { break };
+                            for packet in &packets {
+                                router.route_message_local_only(packet, None).await;
+                            }
+                            token.ack();
+                        }
+                        item = qos0_rx.recv() => {
+                            let Some(packets) = item else { break };
+                            for packet in &packets {
+                                router.route_message_local_only(packet, None).await;
+                            }
+                        }
+                    }
+                }
+            });
+            Ingress { qos1_tx, qos0_tx }
+        })
+    }
 
-            let router = self.router.clone();
-            let stats_received = self.messages_received.clone();
-            let stats_bytes = self.bytes_received.clone();
-
+    /// Registers the ingress callback for every remote filter before the first connect, so a
+    /// backlog the remote flushes right after CONNACK (it may still hold this bridge's
+    /// session) is routed instead of being auto-acknowledged and lost.
+    async fn register_ingress_callbacks(&self) -> Result<()> {
+        let filters = Arc::new(self.ingress_filters());
+        let ingress = self.ingress();
+        for filter in filters.iter() {
+            let callback = self.ingress_callback(
+                Arc::clone(&filters),
+                ingress.qos1_tx.clone(),
+                ingress.qos0_tx.clone(),
+            );
             self.client
-                .subscribe(&remote_topic, move |msg| {
-                    let router = router.clone();
-                    let local_prefix = local_prefix.clone();
-                    let stats_received = stats_received.clone();
-                    let stats_bytes = stats_bytes.clone();
-
-                    stats_received.fetch_add(1, Ordering::Relaxed);
-                    stats_bytes.fetch_add(msg.payload.len() as u64, Ordering::Relaxed);
-
-                    let local_topic = match &local_prefix {
-                        Some(prefix) => format!("{prefix}{}", msg.topic),
-                        None => msg.topic.clone(),
-                    };
-
-                    let mut packet = PublishPacket::new(local_topic, msg.payload.clone(), msg.qos);
-                    let pub_props: crate::types::PublishProperties = msg.properties.into();
-                    packet.properties = pub_props.into();
-                    packet.retain = msg.retain;
-                    packet.properties.inject_sender(None);
-                    packet.properties.inject_client_id(None);
-
-                    tokio::spawn(async move {
-                        router.route_message_local_only(&packet, None).await;
-                    });
-                })
+                .register_ack_callback(filter.remote_filter.clone(), callback)
                 .await?;
+        }
+        Ok(())
+    }
 
+    /// Subscribes once per distinct remote filter for the bridge's lifetime; the client
+    /// restores them itself after a lost session.
+    async fn setup_subscriptions(&self) -> Result<()> {
+        if self.subscribed.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let filters = Arc::new(self.ingress_filters());
+        let ingress = self.ingress();
+
+        for (index, filter) in filters.iter().enumerate() {
+            let subscription_id = u32::try_from(index + 1).unwrap_or(u32::MAX);
+            let callback = self.ingress_callback(
+                Arc::clone(&filters),
+                ingress.qos1_tx.clone(),
+                ingress.qos0_tx.clone(),
+            );
+            let options = SubscribeOptions {
+                qos: filter.qos,
+                subscription_identifier: Some(subscription_id),
+                ..SubscribeOptions::default()
+            };
+            self.client
+                .subscribe_with_ack(filter.remote_filter.clone(), options, callback)
+                .await?;
             info!(
-                "Bridge '{}' subscribed to remote topic: {} (QoS: {:?})",
-                self.config.name, remote_topic, qos
+                "Bridge '{}' subscribed to remote topic: {} (QoS: {:?}, {} mapping(s))",
+                self.config.name,
+                filter.remote_filter,
+                filter.qos,
+                filter.mappings.len()
             );
         }
+        self.subscribed.store(true, Ordering::Release);
 
         Ok(())
+    }
+
+    /// The callback every remote filter shares: maps one remote delivery to its local
+    /// copies, then hands them (with the token) to the routing task.
+    fn ingress_callback(
+        &self,
+        filters: Arc<Vec<IngressFilter>>,
+        qos1_tx: mpsc::Sender<IngressItem>,
+        qos0_tx: mpsc::Sender<Vec<PublishPacket>>,
+    ) -> impl Fn(PublishPacket, AckToken) + Send + Sync + 'static {
+        let bridge_name = self.config.name.clone();
+        let stats_received = Arc::clone(&self.messages_received);
+        let stats_bytes = Arc::clone(&self.bytes_received);
+        let warned_missing_ids = Arc::new(AtomicBool::new(false));
+
+        move |mut publish, token| {
+            stats_received.fetch_add(1, Ordering::Relaxed);
+            stats_bytes.fetch_add(publish.payload.len() as u64, Ordering::Relaxed);
+
+            let ids = publish.properties.subscription_identifiers();
+            publish.properties.remove_subscription_identifiers();
+            publish.properties.inject_sender(None);
+            publish.properties.inject_client_id(None);
+
+            let mappings: Vec<&TopicMappingCore> = if ids.is_empty() {
+                if !warned_missing_ids.swap(true, Ordering::Relaxed) {
+                    warn!(
+                        bridge = %bridge_name,
+                        "Remote sends no subscription identifiers; overlapping mappings may deliver copies"
+                    );
+                }
+                filters
+                    .iter()
+                    .filter(|filter| {
+                        topic_matches_filter(&publish.topic_name, &filter.remote_filter)
+                    })
+                    .flat_map(|filter| filter.mappings.iter())
+                    .collect()
+            } else {
+                ids.iter()
+                    .filter_map(|id| usize::try_from(*id).ok())
+                    .filter_map(|id| id.checked_sub(1))
+                    .filter_map(|index| filters.get(index))
+                    .flat_map(|filter| filter.mappings.iter())
+                    .collect()
+            };
+
+            let packets: Vec<PublishPacket> = mappings
+                .into_iter()
+                .map(|mapping| {
+                    let mut packet = publish.clone();
+                    packet.topic_name = mapping.apply_local_prefix(&publish.topic_name);
+                    packet
+                })
+                .collect();
+
+            if publish.qos == QoS::AtMostOnce {
+                if qos0_tx.try_send(packets).is_err() {
+                    debug!(bridge = %bridge_name, "Dropping QoS 0 remote delivery: ingress lane full");
+                }
+                token.ack();
+                return;
+            }
+            match qos1_tx.try_send((packets, token)) {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Full((_, token))) => {
+                    warn!(bridge = %bridge_name, "Ingress lane full; rejecting remote delivery");
+                    token.reject(ReasonCode::QuotaExceeded);
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    debug!(bridge = %bridge_name, "Bridge stopping; remote delivery dropped");
+                }
+            }
+        }
     }
 
     /// Forwards a message to the remote broker.
@@ -935,6 +1114,7 @@ impl BridgeConnection {
     /// Runs a single connection until disconnected
     async fn run_connection(&self) -> Result<()> {
         if !self.client.is_connected().await {
+            self.register_ingress_callbacks().await?;
             let _ = Box::pin(self.connect()).await?;
             self.setup_subscriptions().await?;
         }

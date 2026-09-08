@@ -73,7 +73,7 @@ pub(crate) enum SubscriptionPersistence {
     Skip,
 }
 
-pub(crate) type StoredSubscription = (String, SubscriptionOptions, CallbackId);
+pub(crate) type StoredSubscription = (String, SubscriptionOptions, Option<u32>, CallbackId);
 pub(crate) type StoredSubscriptions = Arc<Mutex<Vec<StoredSubscription>>>;
 pub(crate) type ConnectionEpoch = Arc<AtomicU64>;
 
@@ -1100,6 +1100,7 @@ impl DirectClientInner {
         maybe_store_subscriptions(
             &self.stored_subscriptions,
             &packet.filters,
+            packet.properties.get_subscription_identifier(),
             callback_id,
             persistence,
         );
@@ -1173,7 +1174,7 @@ impl DirectClientInner {
         {
             let mut stored = self.stored_subscriptions.lock();
             for topic in &packet.filters {
-                stored.retain(|(stored_topic, _, _)| stored_topic != topic);
+                stored.retain(|(stored_topic, _, _, _)| stored_topic != topic);
             }
         }
 
@@ -1503,6 +1504,7 @@ impl DirectClientInner {
 fn maybe_store_subscriptions(
     stored_subscriptions: &StoredSubscriptions,
     filters: &[TopicFilter],
+    subscription_identifier: Option<u32>,
     callback_id: CallbackId,
     persistence: SubscriptionPersistence,
 ) {
@@ -1512,7 +1514,12 @@ fn maybe_store_subscriptions(
 
     let mut stored = stored_subscriptions.lock();
     for filter in filters {
-        stored.push((filter.filter.clone(), filter.options, callback_id));
+        stored.push((
+            filter.filter.clone(),
+            filter.options,
+            subscription_identifier,
+            callback_id,
+        ));
     }
 }
 
@@ -1721,14 +1728,14 @@ pub mod tests {
             },
         }];
 
-        maybe_store_subscriptions(&stored, &filters, 7, SubscriptionPersistence::Skip);
+        maybe_store_subscriptions(&stored, &filters, None, 7, SubscriptionPersistence::Skip);
         assert!(stored.lock().is_empty());
 
-        maybe_store_subscriptions(&stored, &filters, 7, SubscriptionPersistence::Persist);
+        maybe_store_subscriptions(&stored, &filters, None, 7, SubscriptionPersistence::Persist);
         let stored = stored.lock();
         assert_eq!(stored.len(), 1);
         assert_eq!(stored[0].0, "test/topic");
-        assert_eq!(stored[0].2, 7);
+        assert_eq!(stored[0].3, 7);
     }
 
     #[tokio::test]

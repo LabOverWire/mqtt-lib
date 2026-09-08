@@ -104,11 +104,6 @@ impl ClientHandler {
                     }
 
                     self.write_to_client(Packet::ConnAck(connack)).await?;
-
-                    if session_present {
-                        self.deliver_queued_messages(&pending.connect.client_id)
-                            .await?;
-                    }
                 } else {
                     let success_auth = AuthPacket::success(result.auth_method)?;
                     self.write_to_client(Packet::Auth(success_auth)).await?;

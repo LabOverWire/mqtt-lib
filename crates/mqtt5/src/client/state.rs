@@ -57,7 +57,7 @@ impl MqttClient {
         if session_present {
             tracing::info!("Session resumed, restoring {} callbacks", stored_subs.len());
             let inner = self.inner.read().await;
-            for (topic, _, callback_id) in stored_subs {
+            for (topic, _, _, callback_id) in stored_subs {
                 if !inner.callback_manager.restore_callback(callback_id) {
                     tracing::warn!("Failed to restore callback for {topic}: not found in registry");
                 }
@@ -67,9 +67,9 @@ impl MqttClient {
                 "Session not resumed, restoring {} subscriptions",
                 stored_subs.len()
             );
-            for (topic, options, callback_id) in stored_subs {
+            for (topic, options, subscription_identifier, callback_id) in stored_subs {
                 if let Err(e) = self
-                    .resubscribe_internal(&topic, options, callback_id)
+                    .resubscribe_internal(&topic, options, subscription_identifier, callback_id)
                     .await
                 {
                     tracing::warn!("Failed to restore subscription to {}: {}", topic, e);
@@ -97,9 +97,9 @@ impl MqttClient {
             "Session not resumed, re-subscribing {} deferred-ack subscription(s)",
             subs.len()
         );
-        for (topic, options, callback_id) in subs {
+        for (topic, options, subscription_identifier, callback_id) in subs {
             if let Err(e) = self
-                .resubscribe_ack_internal(&topic, options, callback_id)
+                .resubscribe_ack_internal(&topic, options, subscription_identifier, callback_id)
                 .await
             {
                 tracing::warn!("Failed to re-subscribe deferred-ack topic {topic}: {e}");
@@ -111,16 +111,21 @@ impl MqttClient {
         &self,
         topic: &str,
         options: SubscriptionOptions,
+        subscription_identifier: Option<u32>,
         callback_id: CallbackId,
     ) -> Result<()> {
         let inner = self.inner.read().await;
+        let mut properties = Properties::new();
+        if let Some(id) = subscription_identifier {
+            properties.set_subscription_identifier(id);
+        }
         let packet = SubscribePacket {
             packet_id: inner.packet_id_generator.next(),
             filters: vec![crate::packet::subscribe::TopicFilter {
                 filter: topic.to_string(),
                 options,
             }],
-            properties: Properties::new(),
+            properties,
             protocol_version: inner.options.protocol_version.as_u8(),
         };
         inner
@@ -325,6 +330,7 @@ impl MqttClient {
         &self,
         topic: &str,
         options: SubscriptionOptions,
+        subscription_identifier: Option<u32>,
         callback_id: CallbackId,
     ) -> Result<()> {
         let inner = self.inner.read().await;
@@ -332,13 +338,17 @@ impl MqttClient {
         drop(inner);
 
         let inner = self.inner.read().await;
+        let mut properties = Properties::new();
+        if let Some(id) = subscription_identifier {
+            properties.set_subscription_identifier(id);
+        }
         let packet = SubscribePacket {
             packet_id: inner.packet_id_generator.next(),
             filters: vec![crate::packet::subscribe::TopicFilter {
                 filter: topic.to_string(),
                 options,
             }],
-            properties: Properties::new(),
+            properties,
             protocol_version: inner.options.protocol_version.as_u8(),
         };
         inner

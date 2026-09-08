@@ -28,6 +28,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         backend: StorageBackendType::Memory,
         base_dir: std::path::PathBuf::from("/tmp/mqtt-broker"),
         cleanup_interval: Duration::from_secs(60),
+        ..StorageConfig::default()
     };
 
     let config = BrokerConfig::default()

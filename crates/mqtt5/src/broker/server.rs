@@ -8,7 +8,9 @@ use crate::broker::config::{BrokerConfig, StorageBackend as StorageBackendType};
 use crate::broker::hot_reload::HotReloadManager;
 use crate::broker::resource_monitor::{ResourceLimits, ResourceMonitor};
 use crate::broker::router::MessageRouter;
-use crate::broker::storage::{DynamicStorage, FileBackend, MemoryBackend, StorageBackend};
+use crate::broker::storage::{
+    DynamicStorage, FileBackend, MemoryBackend, QueueLimits, StorageBackend,
+};
 use crate::broker::sys_topics::{BrokerStats, SysTopicsProvider};
 use crate::broker::tls_acceptor::{accept_tls_connection, TlsAcceptorConfig};
 use crate::broker::transport::BrokerTransport;
@@ -844,11 +846,21 @@ impl MqttBroker {
     ) -> Result<Arc<DynamicStorage>> {
         match storage_config.backend {
             StorageBackendType::File => {
-                let backend = FileBackend::new(&storage_config.base_dir).await?;
+                let backend = FileBackend::with_queue_limits(
+                    &storage_config.base_dir,
+                    QueueLimits {
+                        max_messages: storage_config.max_queued_messages_per_client,
+                        max_bytes: storage_config.max_queued_bytes_per_client,
+                    },
+                )
+                .await?;
                 Ok(Arc::new(DynamicStorage::File(backend)))
             }
             StorageBackendType::Memory => {
-                let backend = MemoryBackend::new();
+                let backend = MemoryBackend::with_queue_limits(QueueLimits {
+                    max_messages: storage_config.max_queued_messages_per_client,
+                    max_bytes: storage_config.max_queued_bytes_per_client,
+                });
                 Ok(Arc::new(DynamicStorage::Memory(backend)))
             }
         }

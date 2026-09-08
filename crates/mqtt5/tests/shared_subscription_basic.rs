@@ -2,80 +2,56 @@
 //! Basic test for shared subscriptions
 
 use bytes::Bytes;
-use mqtt5::broker::router::MessageRouter;
+use mqtt5::broker::router::{DeliveryLanes, LaneReceivers, MessageRouter};
 use mqtt5::packet::publish::PublishPacket;
 use mqtt5::types::ProtocolVersion;
 use mqtt5::QoS;
 use std::sync::Arc;
 
+async fn register(router: &MessageRouter, client_id: &str, filter: &str) -> LaneReceivers {
+    let (lanes, rx) = DeliveryLanes::channel(100);
+    let (dtx, _drx) = tokio::sync::oneshot::channel();
+    router
+        .register_client(
+            client_id.to_string(),
+            lanes,
+            router.queue_handle(client_id),
+            dtx,
+        )
+        .await;
+    router
+        .subscribe(
+            client_id.to_string(),
+            filter.to_string(),
+            QoS::AtMostOnce,
+            None,
+            false,
+            false,
+            0,
+            ProtocolVersion::V5,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+    rx
+}
+
+fn drain_count(rx: &mut LaneReceivers) -> usize {
+    let mut count = 0;
+    while rx.try_recv().is_ok() {
+        count += 1;
+    }
+    count
+}
+
 #[tokio::test]
 async fn test_shared_subscription_distribution() {
     let router = Arc::new(MessageRouter::new());
 
-    let (tx1, rx1) = flume::bounded(100);
-    let (tx2, rx2) = flume::bounded(100);
-    let (tx3, rx3) = flume::bounded(100);
-
-    let (dtx1, _drx1) = tokio::sync::oneshot::channel();
-    router
-        .register_client("worker1".to_string(), tx1, dtx1)
-        .await;
-    let (dtx2, _drx2) = tokio::sync::oneshot::channel();
-    router
-        .register_client("worker2".to_string(), tx2, dtx2)
-        .await;
-    let (dtx3, _drx3) = tokio::sync::oneshot::channel();
-    router
-        .register_client("worker3".to_string(), tx3, dtx3)
-        .await;
-
-    router
-        .subscribe(
-            "worker1".to_string(),
-            "$share/workers/tasks/+".to_string(),
-            QoS::AtMostOnce,
-            None,
-            false,
-            false,
-            0,
-            ProtocolVersion::V5,
-            false,
-            None,
-        )
-        .await
-        .unwrap();
-
-    router
-        .subscribe(
-            "worker2".to_string(),
-            "$share/workers/tasks/+".to_string(),
-            QoS::AtMostOnce,
-            None,
-            false,
-            false,
-            0,
-            ProtocolVersion::V5,
-            false,
-            None,
-        )
-        .await
-        .unwrap();
-
-    router
-        .subscribe(
-            "worker3".to_string(),
-            "$share/workers/tasks/+".to_string(),
-            QoS::AtMostOnce,
-            None,
-            false,
-            false,
-            0,
-            ProtocolVersion::V5,
-            false,
-            None,
-        )
-        .await
-        .unwrap();
+    let mut rx1 = register(&router, "worker1", "$share/workers/tasks/+").await;
+    let mut rx2 = register(&router, "worker2", "$share/workers/tasks/+").await;
+    let mut rx3 = register(&router, "worker3", "$share/workers/tasks/+").await;
 
     for i in 0..9 {
         let publish = PublishPacket::new(
@@ -86,24 +62,9 @@ async fn test_shared_subscription_distribution() {
         router.route_message(&publish, None).await;
     }
 
-    let mut count1 = 0;
-    let mut count2 = 0;
-    let mut count3 = 0;
-
-    while rx1.try_recv().is_ok() {
-        count1 += 1;
-    }
-    while rx2.try_recv().is_ok() {
-        count2 += 1;
-    }
-    while rx3.try_recv().is_ok() {
-        count3 += 1;
-    }
-
-    println!("Worker 1 received: {count1} messages");
-    println!("Worker 2 received: {count2} messages");
-    println!("Worker 3 received: {count3} messages");
-    println!("Total: {} messages", count1 + count2 + count3);
+    let count1 = drain_count(&mut rx1);
+    let count2 = drain_count(&mut rx2);
+    let count3 = drain_count(&mut rx3);
 
     assert_eq!(count1, 3);
     assert_eq!(count2, 3);
@@ -115,70 +76,9 @@ async fn test_shared_subscription_distribution() {
 async fn test_mixed_shared_and_regular_subscriptions() {
     let router = Arc::new(MessageRouter::new());
 
-    let (tx_shared1, rx_shared1) = flume::bounded(100);
-    let (tx_shared2, rx_shared2) = flume::bounded(100);
-    let (tx_regular, rx_regular) = flume::bounded(100);
-
-    let (dtx1, _drx1) = tokio::sync::oneshot::channel();
-    router
-        .register_client("shared1".to_string(), tx_shared1, dtx1)
-        .await;
-    let (dtx2, _drx2) = tokio::sync::oneshot::channel();
-    router
-        .register_client("shared2".to_string(), tx_shared2, dtx2)
-        .await;
-    let (dtx3, _drx3) = tokio::sync::oneshot::channel();
-    router
-        .register_client("regular".to_string(), tx_regular, dtx3)
-        .await;
-
-    router
-        .subscribe(
-            "shared1".to_string(),
-            "$share/team/alerts/+".to_string(),
-            QoS::AtMostOnce,
-            None,
-            false,
-            false,
-            0,
-            ProtocolVersion::V5,
-            false,
-            None,
-        )
-        .await
-        .unwrap();
-
-    router
-        .subscribe(
-            "shared2".to_string(),
-            "$share/team/alerts/+".to_string(),
-            QoS::AtMostOnce,
-            None,
-            false,
-            false,
-            0,
-            ProtocolVersion::V5,
-            false,
-            None,
-        )
-        .await
-        .unwrap();
-
-    router
-        .subscribe(
-            "regular".to_string(),
-            "alerts/+".to_string(),
-            QoS::AtMostOnce,
-            None,
-            false,
-            false,
-            0,
-            ProtocolVersion::V5,
-            false,
-            None,
-        )
-        .await
-        .unwrap();
+    let mut rx_shared1 = register(&router, "shared1", "$share/team/alerts/+").await;
+    let mut rx_shared2 = register(&router, "shared2", "$share/team/alerts/+").await;
+    let mut rx_regular = register(&router, "regular", "alerts/+").await;
 
     for i in 0..4 {
         let publish = PublishPacket::new(
@@ -189,24 +89,9 @@ async fn test_mixed_shared_and_regular_subscriptions() {
         router.route_message(&publish, None).await;
     }
 
-    let mut shared1_count = 0;
-    let mut shared2_count = 0;
-    let mut regular_count = 0;
-
-    while rx_shared1.try_recv().is_ok() {
-        shared1_count += 1;
-    }
-    while rx_shared2.try_recv().is_ok() {
-        shared2_count += 1;
-    }
-    while rx_regular.try_recv().is_ok() {
-        regular_count += 1;
-    }
-
-    println!("\nMixed subscription test:");
-    println!("Shared1 received: {shared1_count} messages");
-    println!("Shared2 received: {shared2_count} messages");
-    println!("Regular received: {regular_count} messages");
+    let shared1_count = drain_count(&mut rx_shared1);
+    let shared2_count = drain_count(&mut rx_shared2);
+    let regular_count = drain_count(&mut rx_regular);
 
     assert_eq!(regular_count, 4);
     assert_eq!(shared1_count + shared2_count, 4);

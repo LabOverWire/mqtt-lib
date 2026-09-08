@@ -1241,9 +1241,9 @@ The backend URL scheme must match the transport the client should use for the ba
   "insecure": boolean | null,
   "alpn_protocols": ["string"] | null,
   "try_private": boolean,
-  "clean_start": boolean,
+  "clean_start": false,
   "keepalive": number,
-  "protocol_version": "mqttv50" | "mqttv311" | "mqttv31",
+  "protocol_version": "mqttv50",
   "reconnect_delay": duration,
   "initial_reconnect_delay": duration,
   "max_reconnect_delay": duration,
@@ -1269,9 +1269,9 @@ The backend URL scheme must match the transport the client should use for the ba
 | `insecure` | `boolean\|null` | Disable TLS certificate verification | `false` |
 | `alpn_protocols` | `string[]\|null` | ALPN protocols (e.g., `["x-amzn-mqtt-ca"]` for AWS IoT) | `null` |
 | `try_private` | `boolean` | Send bridge user property (Mosquitto compatible) | `true` |
-| `clean_start` | `boolean` | Start with clean session | `false` |
+| `clean_start` | `boolean` | Must be `false`: the bridge acknowledges a remote message only after routing it locally, which needs a persistent session | `false` |
 | `keepalive` | `number` | Keep-alive interval in seconds | `60` |
-| `protocol_version` | `string` | MQTT protocol version | `"mqttv50"` |
+| `protocol_version` | `string` | Must be `"mqttv50"`: bridge flow control uses MQTT 5.0 session expiry and receive maximum | `"mqttv50"` |
 | `reconnect_delay` | `duration` | Reconnection delay (deprecated) | `"5s"` |
 | `initial_reconnect_delay` | `duration` | Initial reconnection delay | `"5s"` |
 | `max_reconnect_delay` | `duration` | Maximum reconnection delay | `"5m"` |

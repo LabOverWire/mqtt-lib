@@ -8,11 +8,8 @@ use crate::packet::Packet;
 use crate::protocol::v5::reason_codes::ReasonCode;
 use crate::time::Duration;
 use crate::types::ProtocolVersion;
-use crate::QoS;
 use std::sync::Arc;
 use tracing::{debug, info, trace, warn};
-
-use crate::broker::router::RoutableMessage;
 
 use super::{AuthState, ClientHandler, PendingConnect};
 
@@ -155,11 +152,6 @@ impl ClientHandler {
         trace!("CONNACK properties: {:?}", connack.properties);
         self.write_to_client(Packet::ConnAck(connack)).await?;
         debug!("CONNACK sent successfully");
-
-        if session_present {
-            self.deliver_queued_messages(&connect.client_id).await?;
-            self.resend_inflight_messages().await?;
-        }
 
         Ok(())
     }
@@ -421,17 +413,31 @@ impl ClientHandler {
         }
     }
 
+    /// Decides whether the connection resumes a session; a session that only lives as long
+    /// as its connection (expiry 0) cannot be resumed from a live connection, so taking one
+    /// over is a clean start.
     pub(super) async fn handle_session(&mut self, connect: &ConnectPacket) -> Result<bool> {
         let mut session_present = false;
+        self.clean_start = connect.clean_start;
         if let Some(storage) = self.storage.clone() {
             let existing_session = storage.get_session(&connect.client_id).await?;
+            let connection_bound = existing_session
+                .as_ref()
+                .is_some_and(|session| session.expiry_interval == Some(0));
+            if connection_bound && self.router.is_connected(&connect.client_id).await {
+                self.clean_start = true;
+            }
 
-            if connect.clean_start || existing_session.is_none() {
-                self.create_new_session(connect, &storage).await?;
-            } else if let Some(session) = existing_session {
-                session_present = true;
-                self.restore_existing_session(connect, session, &storage)
-                    .await?;
+            match existing_session {
+                Some(session) if !self.clean_start => {
+                    session_present = true;
+                    self.restore_existing_session(connect, session, &storage)
+                        .await?;
+                }
+                _ => {
+                    self.clean_start = true;
+                    self.create_new_session(connect, &storage).await?;
+                }
             }
         }
         Ok(session_present)
@@ -540,40 +546,6 @@ impl ClientHandler {
         session.touch();
         storage.store_session(session.clone()).await?;
         self.session = Some(session);
-        Ok(())
-    }
-
-    pub(super) async fn deliver_queued_messages(&mut self, client_id: &str) -> Result<()> {
-        let queued_messages = if let Some(ref storage) = self.storage {
-            let messages = storage.get_queued_messages(client_id).await?;
-            storage.remove_queued_messages(client_id).await?;
-            messages
-        } else {
-            Vec::new()
-        };
-
-        if !queued_messages.is_empty() {
-            info!(
-                "Delivering {} queued messages to {}",
-                queued_messages.len(),
-                client_id
-            );
-
-            for msg in queued_messages {
-                let mut publish = msg.to_publish_packet();
-                if publish.qos != QoS::AtMostOnce && publish.packet_id.is_none() {
-                    publish.packet_id = Some(self.next_packet_id());
-                }
-                let routable = RoutableMessage {
-                    publish,
-                    target_flow: None,
-                };
-                if let Err(e) = self.publish_tx.try_send(routable) {
-                    warn!("Failed to deliver queued message to {}: {:?}", client_id, e);
-                }
-            }
-        }
-
         Ok(())
     }
 }
