@@ -192,22 +192,22 @@ impl RawTestClient {
         Ok(())
     }
 
-    async fn await_ack(
+    async fn send_and_await_ack<P: MqttPacket>(
         &self,
+        packet: &P,
         packet_id: u16,
         op: &'static str,
     ) -> Result<AckOutcome, TestClientError> {
-        let (tx, rx) = oneshot::channel();
-        {
-            let mut acks = self.shared.pending_acks.lock().unwrap();
-            acks.insert(packet_id, tx);
+        let ack = register_ack(&self.shared.pending_acks, packet_id);
+        if let Err(e) = self.write_packet(packet).await {
+            self.shared.pending_acks.lock().unwrap().remove(&packet_id);
+            return Err(e);
         }
-        match tokio::time::timeout(ACK_TIMEOUT, rx).await {
+        match tokio::time::timeout(ACK_TIMEOUT, ack).await {
             Ok(Ok(outcome)) => Ok(outcome),
             Ok(Err(_)) => Err(TestClientError::Disconnected),
             Err(_) => {
-                let mut acks = self.shared.pending_acks.lock().unwrap();
-                acks.remove(&packet_id);
+                self.shared.pending_acks.lock().unwrap().remove(&packet_id);
                 Err(TestClientError::Timeout(op))
             }
         }
@@ -272,11 +272,12 @@ impl RawTestClient {
             publish.properties.set_subscription_identifier(sub_id);
         }
 
-        self.write_packet(&publish).await?;
-
         match qos {
-            QoS::AtMostOnce => Ok(()),
-            QoS::AtLeastOnce => match self.await_ack(packet_id, "puback").await? {
+            QoS::AtMostOnce => self.write_packet(&publish).await,
+            QoS::AtLeastOnce => match self
+                .send_and_await_ack(&publish, packet_id, "puback")
+                .await?
+            {
                 AckOutcome::PubAck(rc) => {
                     if rc.is_success() {
                         Ok(())
@@ -291,7 +292,10 @@ impl RawTestClient {
                 ))),
             },
             QoS::ExactlyOnce => {
-                match self.await_ack(packet_id, "pubrec").await? {
+                match self
+                    .send_and_await_ack(&publish, packet_id, "pubrec")
+                    .await?
+                {
                     AckOutcome::PubRec(rc) if rc.is_success() => {}
                     AckOutcome::PubRec(rc) => {
                         return Err(TestClientError::Unexpected(format!(
@@ -305,8 +309,10 @@ impl RawTestClient {
                     }
                 }
                 let pubrel = PubRelPacket::new(packet_id);
-                self.write_packet(&pubrel).await?;
-                match self.await_ack(packet_id, "pubcomp").await? {
+                match self
+                    .send_and_await_ack(&pubrel, packet_id, "pubcomp")
+                    .await?
+                {
                     AckOutcome::PubComp(rc) if rc.is_success() => Ok(()),
                     AckOutcome::PubComp(rc) => Err(TestClientError::Unexpected(format!(
                         "PUBCOMP reason code {rc:?}"
@@ -355,9 +361,9 @@ impl RawTestClient {
             subscribe = subscribe.with_subscription_identifier(sub_id);
         }
 
-        self.write_packet(&subscribe).await?;
-
-        let outcome = self.await_ack(packet_id, "suback").await?;
+        let outcome = self
+            .send_and_await_ack(&subscribe, packet_id, "suback")
+            .await?;
         let granted_qos = match outcome {
             AckOutcome::SubAck(codes) => {
                 let first = codes.first().copied().ok_or_else(|| {
@@ -393,9 +399,11 @@ impl RawTestClient {
 
         let packet_id = self.allocate_packet_id();
         let unsubscribe = UnsubscribePacket::new(packet_id).add_filter(filter.to_string());
-        self.write_packet(&unsubscribe).await?;
 
-        match self.await_ack(packet_id, "unsuback").await? {
+        match self
+            .send_and_await_ack(&unsubscribe, packet_id, "unsuback")
+            .await?
+        {
             AckOutcome::UnsubAck(codes) => {
                 if codes
                     .iter()
@@ -645,6 +653,12 @@ async fn send_raw<P: MqttPacket>(shared: &SharedState, packet: &P) -> Result<(),
     Ok(())
 }
 
+fn register_ack(acks: &AckMap, packet_id: u16) -> oneshot::Receiver<AckOutcome> {
+    let (tx, rx) = oneshot::channel();
+    acks.lock().unwrap().insert(packet_id, tx);
+    rx
+}
+
 fn complete_ack(acks: &AckMap, packet_id: u16, outcome: AckOutcome) {
     if let Some(tx) = acks.lock().unwrap().remove(&packet_id) {
         let _ = tx.send(outcome);
@@ -654,6 +668,38 @@ fn complete_ack(acks: &AckMap, packet_id: u16, outcome: AckOutcome) {
 fn drop_pending_acks(acks: &AckMap) {
     let mut guard = acks.lock().unwrap();
     guard.clear();
+}
+
+#[cfg(test)]
+mod ack_map_tests {
+    use super::{complete_ack, register_ack, AckMap, AckOutcome};
+    use mqtt5_protocol::types::ReasonCode;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    #[tokio::test]
+    async fn ack_completed_after_registration_is_delivered() {
+        let acks: AckMap = Arc::new(Mutex::new(HashMap::new()));
+        let rx = register_ack(&acks, 7);
+        complete_ack(&acks, 7, AckOutcome::PubRec(ReasonCode::Success));
+        assert!(matches!(
+            rx.await,
+            Ok(AckOutcome::PubRec(ReasonCode::Success))
+        ));
+    }
+
+    #[tokio::test]
+    async fn ack_completed_before_registration_is_lost() {
+        let acks: AckMap = Arc::new(Mutex::new(HashMap::new()));
+        complete_ack(&acks, 7, AckOutcome::PubRec(ReasonCode::Success));
+        let rx = register_ack(&acks, 7);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), rx)
+                .await
+                .is_err(),
+            "an ack that arrives before the waiter is registered is dropped; register before sending"
+        );
+    }
 }
 
 #[cfg(all(test, feature = "inprocess-fixture"))]

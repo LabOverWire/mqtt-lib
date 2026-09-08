@@ -711,9 +711,16 @@ async fn connect_counting_subscribers(
         let sub_client = connect_client(format!("{base_id}-sub-{i}"), url, cmd).await?;
         let received_clone = Arc::clone(received);
         sub_client
-            .subscribe(filter, move |_msg| {
-                received_clone.fetch_add(1, Ordering::Relaxed);
-            })
+            .subscribe_with_options(
+                filter,
+                mqtt5::SubscribeOptions {
+                    qos: cmd.qos,
+                    ..Default::default()
+                },
+                move |_msg| {
+                    received_clone.fetch_add(1, Ordering::Relaxed);
+                },
+            )
             .await
             .context("failed to subscribe")?;
         sub_clients.push(sub_client);
@@ -1029,14 +1036,21 @@ async fn run_latency(cmd: BenchCommand) -> Result<()> {
     let format = cmd.payload_format;
 
     sub_client
-        .subscribe(&filter, move |msg| {
-            let sent_nanos = decode_timestamp(format, &msg.payload);
-            if sent_nanos > 0 {
-                let now_nanos = nanos_as_u64();
-                let latency_us = (now_nanos.saturating_sub(sent_nanos)) / 1000;
-                latencies_clone.lock().unwrap().push(latency_us);
-            }
-        })
+        .subscribe_with_options(
+            &filter,
+            mqtt5::SubscribeOptions {
+                qos: cmd.qos,
+                ..Default::default()
+            },
+            move |msg| {
+                let sent_nanos = decode_timestamp(format, &msg.payload);
+                if sent_nanos > 0 {
+                    let now_nanos = nanos_as_u64();
+                    let latency_us = (now_nanos.saturating_sub(sent_nanos)) / 1000;
+                    latencies_clone.lock().unwrap().push(latency_us);
+                }
+            },
+        )
         .await
         .context("failed to subscribe")?;
 
