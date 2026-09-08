@@ -38,6 +38,38 @@
 
 ## Diary Entries
 
+### External-broker ack timeouts were a lost-wakeup race in the test client, not broker timing (2026-09-07)
+
+**Trigger**: issue #146. `deferred_qos2_zero_quota_still_serves_control_plane [MQTT-4.9.0-3]` failed
+twice on `main` in the external-mqtt5 job (`8791b58` 2026-08-12, `a8c791a` 2026-09-06), both times
+`Timeout("pubrec")` from the test's QoS 2 publisher. Identical code passed on neighbouring commits.
+
+**Root cause**: `TestClient::publish_with_options`, `subscribe` and `unsubscribe` all wrote the packet
+first and only then called `await_ack`, which is where the `oneshot` waiter was inserted into
+`pending_acks`. The reader task resolves an incoming ack by `remove`-ing the packet id from that map
+and drops it if nothing is registered. If the broker's reply was read in the gap between the flush
+returning and the insert, the ack was gone and the waiter expired after `ACK_TIMEOUT`. The window is
+microseconds of synchronous code, so it needs the test thread to be preempted at that instant; a
+loaded two-core runner with a separate broker process does that occasionally, which is why only the
+external-broker job ever failed and why re-runs pass.
+
+**This corrects the 2026-08-06 entry below.** That investigation saw `Timeout("puback")` on the same
+job, correctly ruled out concurrency and CPU starvation, could not reproduce it, and concluded it was
+"the rare timing transient the 30s `ACK_TIMEOUT` already exists to absorb". A 30-second timeout
+expiring is not a slow broker. It is an ack that was consumed with no one waiting. Same race, QoS 1
+flavour. The memory-backend change made there was still sound; it just did not touch this.
+
+**Fix**: one `send_and_await_ack(packet, id, op)` helper registers the waiter, then writes, then
+waits, removing the waiter if the write fails. All five sites use it (PUBACK, PUBREC, PUBCOMP after
+PUBREL, SUBACK, UNSUBACK), so the ordering can no longer be gotten wrong per call site.
+
+**Tests**: `ack_map_tests` (not fixture-gated) pin the map semantics: an ack completed after
+registration is delivered; one completed before registration is lost. The race itself is not
+reproducible on demand; the proof is structural, plus CI history from here.
+
+**Lesson**: a send-then-register pattern around a oneshot map is a lost-wakeup bug, however small the
+window. Register first, always.
+
 ### [MQTT-3.1.4-3] takeover DISCONNECT is now required by the test, and sent by the broker (2026-09-07)
 
 **Trigger**: issue #147. The in-tree broker closed the displaced client's socket on session takeover
