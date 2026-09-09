@@ -12,11 +12,16 @@ use tokio::time::timeout;
 async fn test_no_local_true_filters_own_messages() {
     let router = Arc::new(MessageRouter::new());
 
-    let (tx, rx) = flume::bounded(10);
+    let (lanes, mut rx) = mqtt5::broker::router::DeliveryLanes::channel(10);
     let (dtx, _drx) = tokio::sync::oneshot::channel();
 
     router
-        .register_client("test_client".to_string(), tx, dtx)
+        .register_client(
+            "test_client".to_string(),
+            lanes.clone(),
+            router.queue_handle("test_client"),
+            dtx,
+        )
         .await;
 
     router
@@ -42,7 +47,7 @@ async fn test_no_local_true_filters_own_messages() {
     );
     router.route_message(&packet, Some("test_client")).await;
 
-    let result = timeout(Duration::from_millis(100), rx.recv_async()).await;
+    let result = timeout(Duration::from_millis(100), rx.recv()).await;
     assert!(
         result.is_err(),
         "Client should not receive its own message when no_local=true"
@@ -53,11 +58,16 @@ async fn test_no_local_true_filters_own_messages() {
 async fn test_no_local_false_allows_own_messages() {
     let router = Arc::new(MessageRouter::new());
 
-    let (tx, rx) = flume::bounded(10);
+    let (lanes, mut rx) = mqtt5::broker::router::DeliveryLanes::channel(10);
     let (dtx, _drx) = tokio::sync::oneshot::channel();
 
     router
-        .register_client("test_client".to_string(), tx, dtx)
+        .register_client(
+            "test_client".to_string(),
+            lanes.clone(),
+            router.queue_handle("test_client"),
+            dtx,
+        )
         .await;
 
     router
@@ -83,7 +93,7 @@ async fn test_no_local_false_allows_own_messages() {
     );
     router.route_message(&packet, Some("test_client")).await;
 
-    let result = timeout(Duration::from_millis(100), rx.recv_async()).await;
+    let result = timeout(Duration::from_millis(100), rx.recv()).await;
     assert!(
         result.is_ok(),
         "Client should receive its own message when no_local=false"
@@ -98,17 +108,27 @@ async fn test_no_local_false_allows_own_messages() {
 async fn test_no_local_other_clients_receive_messages() {
     let router = Arc::new(MessageRouter::new());
 
-    let (tx1, rx1) = flume::bounded(10);
-    let (tx2, rx2) = flume::bounded(10);
+    let (lanes1, mut rx1) = mqtt5::broker::router::DeliveryLanes::channel(10);
+    let (lanes2, mut rx2) = mqtt5::broker::router::DeliveryLanes::channel(10);
 
     let (dtx1, _drx1) = tokio::sync::oneshot::channel();
     router
-        .register_client("publisher".to_string(), tx1, dtx1)
+        .register_client(
+            "publisher".to_string(),
+            lanes1.clone(),
+            router.queue_handle("publisher"),
+            dtx1,
+        )
         .await;
 
     let (dtx2, _drx2) = tokio::sync::oneshot::channel();
     router
-        .register_client("subscriber".to_string(), tx2, dtx2)
+        .register_client(
+            "subscriber".to_string(),
+            lanes2.clone(),
+            router.queue_handle("subscriber"),
+            dtx2,
+        )
         .await;
 
     router
@@ -150,13 +170,13 @@ async fn test_no_local_other_clients_receive_messages() {
     );
     router.route_message(&packet, Some("publisher")).await;
 
-    let pub_result = timeout(Duration::from_millis(100), rx1.recv_async()).await;
+    let pub_result = timeout(Duration::from_millis(100), rx1.recv()).await;
     assert!(
         pub_result.is_err(),
         "Publisher should not receive its own message with no_local=true"
     );
 
-    let sub_result = timeout(Duration::from_millis(100), rx2.recv_async()).await;
+    let sub_result = timeout(Duration::from_millis(100), rx2.recv()).await;
     assert!(
         sub_result.is_ok(),
         "Subscriber should receive message from publisher"
@@ -171,11 +191,16 @@ async fn test_no_local_other_clients_receive_messages() {
 async fn test_no_local_with_wildcards() {
     let router = Arc::new(MessageRouter::new());
 
-    let (tx, rx) = flume::bounded(10);
+    let (lanes, mut rx) = mqtt5::broker::router::DeliveryLanes::channel(10);
     let (dtx, _drx) = tokio::sync::oneshot::channel();
 
     router
-        .register_client("test_client".to_string(), tx, dtx)
+        .register_client(
+            "test_client".to_string(),
+            lanes.clone(),
+            router.queue_handle("test_client"),
+            dtx,
+        )
         .await;
 
     router
@@ -208,7 +233,7 @@ async fn test_no_local_with_wildcards() {
     );
     router.route_message(&packet2, Some("test_client")).await;
 
-    let result = timeout(Duration::from_millis(100), rx.recv_async()).await;
+    let result = timeout(Duration::from_millis(100), rx.recv()).await;
     assert!(
         result.is_err(),
         "Client should not receive any messages matching wildcard from itself when no_local=true"
@@ -219,11 +244,16 @@ async fn test_no_local_with_wildcards() {
 async fn test_no_local_with_multilevel_wildcard() {
     let router = Arc::new(MessageRouter::new());
 
-    let (tx, rx) = flume::bounded(10);
+    let (lanes, mut rx) = mqtt5::broker::router::DeliveryLanes::channel(10);
     let (dtx, _drx) = tokio::sync::oneshot::channel();
 
     router
-        .register_client("test_client".to_string(), tx, dtx)
+        .register_client(
+            "test_client".to_string(),
+            lanes.clone(),
+            router.queue_handle("test_client"),
+            dtx,
+        )
         .await;
 
     router
@@ -249,7 +279,7 @@ async fn test_no_local_with_multilevel_wildcard() {
     );
     router.route_message(&packet, Some("test_client")).await;
 
-    let result = timeout(Duration::from_millis(100), rx.recv_async()).await;
+    let result = timeout(Duration::from_millis(100), rx.recv()).await;
     assert!(result.is_err(), "Client should not receive messages matching multilevel wildcard from itself when no_local=true");
 }
 
@@ -257,11 +287,16 @@ async fn test_no_local_with_multilevel_wildcard() {
 async fn test_no_local_server_generated_messages() {
     let router = Arc::new(MessageRouter::new());
 
-    let (tx, rx) = flume::bounded(10);
+    let (lanes, mut rx) = mqtt5::broker::router::DeliveryLanes::channel(10);
     let (dtx, _drx) = tokio::sync::oneshot::channel();
 
     router
-        .register_client("test_client".to_string(), tx, dtx)
+        .register_client(
+            "test_client".to_string(),
+            lanes.clone(),
+            router.queue_handle("test_client"),
+            dtx,
+        )
         .await;
 
     router
@@ -287,7 +322,7 @@ async fn test_no_local_server_generated_messages() {
     );
     router.route_message(&packet, None).await;
 
-    let result = timeout(Duration::from_millis(100), rx.recv_async()).await;
+    let result = timeout(Duration::from_millis(100), rx.recv()).await;
     assert!(
         result.is_ok(),
         "Client should receive server-generated messages even with no_local=true"
@@ -302,11 +337,16 @@ async fn test_no_local_server_generated_messages() {
 async fn test_no_local_multiple_subscriptions_same_client() {
     let router = Arc::new(MessageRouter::new());
 
-    let (tx, rx) = flume::bounded(10);
+    let (lanes, mut rx) = mqtt5::broker::router::DeliveryLanes::channel(10);
     let (dtx, _drx) = tokio::sync::oneshot::channel();
 
     router
-        .register_client("test_client".to_string(), tx, dtx)
+        .register_client(
+            "test_client".to_string(),
+            lanes.clone(),
+            router.queue_handle("test_client"),
+            dtx,
+        )
         .await;
 
     router
@@ -355,7 +395,7 @@ async fn test_no_local_multiple_subscriptions_same_client() {
     );
     router.route_message(&packet2, Some("test_client")).await;
 
-    let result1 = timeout(Duration::from_millis(100), rx.recv_async()).await;
+    let result1 = timeout(Duration::from_millis(100), rx.recv()).await;
     assert!(
         result1.is_ok(),
         "Client should receive message from topic2 with no_local=false"
@@ -365,7 +405,7 @@ async fn test_no_local_multiple_subscriptions_same_client() {
     assert_eq!(received.publish.topic_name, "test/topic2");
     assert_eq!(&received.publish.payload[..], b"message 2");
 
-    let result2 = timeout(Duration::from_millis(100), rx.recv_async()).await;
+    let result2 = timeout(Duration::from_millis(100), rx.recv()).await;
     assert!(
         result2.is_err(),
         "Client should not receive second message from topic1 with no_local=true"
@@ -376,11 +416,16 @@ async fn test_no_local_multiple_subscriptions_same_client() {
 async fn test_no_local_with_qos_levels() {
     let router = Arc::new(MessageRouter::new());
 
-    let (tx, rx) = flume::bounded(10);
+    let (lanes, mut rx) = mqtt5::broker::router::DeliveryLanes::channel(10);
     let (dtx, _drx) = tokio::sync::oneshot::channel();
 
     router
-        .register_client("test_client".to_string(), tx, dtx)
+        .register_client(
+            "test_client".to_string(),
+            lanes.clone(),
+            router.queue_handle("test_client"),
+            dtx,
+        )
         .await;
 
     router
@@ -406,7 +451,7 @@ async fn test_no_local_with_qos_levels() {
     );
     router.route_message(&packet, Some("test_client")).await;
 
-    let result = timeout(Duration::from_millis(100), rx.recv_async()).await;
+    let result = timeout(Duration::from_millis(100), rx.recv()).await;
     assert!(
         result.is_err(),
         "Client should not receive its own QoS 1 message when no_local=true"

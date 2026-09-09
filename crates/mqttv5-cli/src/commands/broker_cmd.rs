@@ -291,6 +291,8 @@ fn build_example_config() -> BrokerConfig {
         max_retained_messages: 0,
         max_retained_message_size: 0,
         client_channel_capacity: 10000,
+        max_outbound_inflight: 64,
+        drain_batch: 64,
         server_keep_alive: None,
         server_receive_maximum: None,
         response_information: None,
@@ -350,6 +352,7 @@ fn build_example_config() -> BrokerConfig {
             base_dir: PathBuf::from("./mqtt_storage"),
             cleanup_interval: std::time::Duration::from_secs(3600),
             enable_persistence: true,
+            ..StorageConfig::default()
         },
         change_only_delivery_config: ChangeOnlyDeliveryConfig::default(),
         echo_suppression_config: mqtt5::broker::config::EchoSuppressionConfig::default(),
@@ -1103,6 +1106,7 @@ async fn create_interactive_config(cmd: &mut RunArgs) -> Result<BrokerConfig> {
         base_dir: cmd.storage_dir.clone(),
         backend: cmd.storage_backend,
         cleanup_interval: std::time::Duration::from_secs(300),
+        ..StorageConfig::default()
     };
     config.storage_config = storage_config;
 

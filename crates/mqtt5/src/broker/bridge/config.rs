@@ -388,6 +388,18 @@ impl BridgeConfig {
             ));
         }
 
+        if self.clean_start {
+            return Err(MqttError::Configuration(
+                "Bridge sessions must persist (clean_start = false) so remote deliveries are acknowledged only once routed locally".into(),
+            ));
+        }
+
+        if self.protocol_version != MqttVersion::V50 {
+            return Err(MqttError::Configuration(
+                "Bridge connections require MQTT 5.0 (session expiry and receive maximum)".into(),
+            ));
+        }
+
         // Validate topic patterns
         for topic in &self.topics {
             if topic.pattern.is_empty() {

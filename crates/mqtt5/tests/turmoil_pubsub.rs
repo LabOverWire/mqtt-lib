@@ -27,11 +27,16 @@ fn test_basic_publish_subscribe() {
         let router = Arc::new(MessageRouter::new());
 
         // Create publisher and subscriber
-        let (sub_tx, sub_rx) = flume::bounded(100);
+        let (sub_lanes, mut sub_rx) = mqtt5::broker::router::DeliveryLanes::channel(100);
 
         let (dtx, _drx) = tokio::sync::oneshot::channel();
         router
-            .register_client("subscriber".to_string(), sub_tx, dtx)
+            .register_client(
+                "subscriber".to_string(),
+                sub_lanes.clone(),
+                router.queue_handle("subscriber"),
+                dtx,
+            )
             .await;
         router
             .subscribe(
@@ -86,16 +91,26 @@ fn test_wildcard_subscriptions() {
         let router = Arc::new(MessageRouter::new());
 
         // Create subscribers with different wildcard patterns
-        let (single_tx, single_rx) = flume::bounded(100);
-        let (multi_tx, multi_rx) = flume::bounded(100);
+        let (single_lanes, mut single_rx) = mqtt5::broker::router::DeliveryLanes::channel(100);
+        let (multi_lanes, mut multi_rx) = mqtt5::broker::router::DeliveryLanes::channel(100);
 
         let (dtx1, _drx1) = tokio::sync::oneshot::channel();
         router
-            .register_client("single_wildcard".to_string(), single_tx, dtx1)
+            .register_client(
+                "single_wildcard".to_string(),
+                single_lanes.clone(),
+                router.queue_handle("single_wildcard"),
+                dtx1,
+            )
             .await;
         let (dtx2, _drx2) = tokio::sync::oneshot::channel();
         router
-            .register_client("multi_wildcard".to_string(), multi_tx, dtx2)
+            .register_client(
+                "multi_wildcard".to_string(),
+                multi_lanes.clone(),
+                router.queue_handle("multi_wildcard"),
+                dtx2,
+            )
             .await;
 
         // Single-level wildcard subscription
@@ -197,21 +212,36 @@ fn test_multiple_subscribers_same_topic() {
         let router = Arc::new(MessageRouter::new());
 
         // Create multiple subscribers to the same topic
-        let (sub1_tx, mut sub1_rx) = flume::bounded(100);
-        let (sub2_tx, mut sub2_rx) = flume::bounded(100);
-        let (sub3_tx, mut sub3_rx) = flume::bounded(100);
+        let (sub1_lanes, mut sub1_rx) = mqtt5::broker::router::DeliveryLanes::channel(100);
+        let (sub2_lanes, mut sub2_rx) = mqtt5::broker::router::DeliveryLanes::channel(100);
+        let (sub3_lanes, mut sub3_rx) = mqtt5::broker::router::DeliveryLanes::channel(100);
 
         let (dtx1, _drx1) = tokio::sync::oneshot::channel();
         router
-            .register_client("subscriber1".to_string(), sub1_tx, dtx1)
+            .register_client(
+                "subscriber1".to_string(),
+                sub1_lanes.clone(),
+                router.queue_handle("subscriber1"),
+                dtx1,
+            )
             .await;
         let (dtx2, _drx2) = tokio::sync::oneshot::channel();
         router
-            .register_client("subscriber2".to_string(), sub2_tx, dtx2)
+            .register_client(
+                "subscriber2".to_string(),
+                sub2_lanes.clone(),
+                router.queue_handle("subscriber2"),
+                dtx2,
+            )
             .await;
         let (dtx3, _drx3) = tokio::sync::oneshot::channel();
         router
-            .register_client("subscriber3".to_string(), sub3_tx, dtx3)
+            .register_client(
+                "subscriber3".to_string(),
+                sub3_lanes.clone(),
+                router.queue_handle("subscriber3"),
+                dtx3,
+            )
             .await;
 
         // All subscribe to the same topic
@@ -282,16 +312,26 @@ fn test_qos_levels() {
         let router = Arc::new(MessageRouter::new());
 
         // Create subscribers for different QoS levels
-        let (qos0_tx, qos0_rx) = flume::bounded(100);
-        let (qos1_tx, qos1_rx) = flume::bounded(100);
+        let (qos0_lanes, mut qos0_rx) = mqtt5::broker::router::DeliveryLanes::channel(100);
+        let (qos1_lanes, mut qos1_rx) = mqtt5::broker::router::DeliveryLanes::channel(100);
 
         let (dtx1, _drx1) = tokio::sync::oneshot::channel();
         router
-            .register_client("qos0_client".to_string(), qos0_tx, dtx1)
+            .register_client(
+                "qos0_client".to_string(),
+                qos0_lanes.clone(),
+                router.queue_handle("qos0_client"),
+                dtx1,
+            )
             .await;
         let (dtx2, _drx2) = tokio::sync::oneshot::channel();
         router
-            .register_client("qos1_client".to_string(), qos1_tx, dtx2)
+            .register_client(
+                "qos1_client".to_string(),
+                qos1_lanes.clone(),
+                router.queue_handle("qos1_client"),
+                dtx2,
+            )
             .await;
 
         // Subscribe with different QoS levels
@@ -374,10 +414,15 @@ fn test_unsubscribe_functionality() {
     sim.host("unsubscribe-test", || async {
         let router = Arc::new(MessageRouter::new());
 
-        let (sub_tx, sub_rx) = flume::bounded(100);
+        let (sub_lanes, mut sub_rx) = mqtt5::broker::router::DeliveryLanes::channel(100);
         let (dtx, _drx) = tokio::sync::oneshot::channel();
         router
-            .register_client("test_client".to_string(), sub_tx, dtx)
+            .register_client(
+                "test_client".to_string(),
+                sub_lanes.clone(),
+                router.queue_handle("test_client"),
+                dtx,
+            )
             .await;
 
         // Subscribe to topic

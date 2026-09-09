@@ -1,22 +1,53 @@
-#![cfg(feature = "broker")]
+#![cfg(all(feature = "broker", feature = "turmoil-testing"))]
 //! Shared subscription tests using Turmoil
 //!
 //! These tests verify the shared subscription functionality using
 //! the existing `MessageRouter` directly, which we know works.
 
-#[cfg(feature = "turmoil-testing")]
-use mqtt5::broker::router::MessageRouter;
-#[cfg(feature = "turmoil-testing")]
+use mqtt5::broker::router::{DeliveryLanes, LaneReceivers, MessageRouter};
 use mqtt5::packet::publish::PublishPacket;
-#[cfg(feature = "turmoil-testing")]
 use mqtt5::time::Duration;
-#[cfg(feature = "turmoil-testing")]
 use mqtt5::types::ProtocolVersion;
-#[cfg(feature = "turmoil-testing")]
 use mqtt5::QoS;
-#[cfg(feature = "turmoil-testing")]
 use std::sync::Arc;
-#[cfg(feature = "turmoil-testing")]
+
+async fn register_worker(router: &MessageRouter, client_id: &str) -> LaneReceivers {
+    let (lanes, rx) = DeliveryLanes::channel(100);
+    let (dtx, _drx) = tokio::sync::oneshot::channel();
+    router
+        .register_client(
+            client_id.to_string(),
+            lanes,
+            router.queue_handle(client_id),
+            dtx,
+        )
+        .await;
+    router
+        .subscribe(
+            client_id.to_string(),
+            "$share/workers/tasks/+".to_string(),
+            QoS::AtMostOnce,
+            None,
+            false,
+            false,
+            0,
+            ProtocolVersion::V5,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+    rx
+}
+
+fn drain_count(rx: &mut LaneReceivers) -> usize {
+    let mut count = 0;
+    while rx.try_recv().is_ok() {
+        count += 1;
+    }
+    count
+}
+
 #[test]
 fn test_shared_subscriptions_in_turmoil() {
     let mut sim = turmoil::Builder::new()
@@ -24,77 +55,12 @@ fn test_shared_subscriptions_in_turmoil() {
         .build();
 
     sim.host("test", || async {
-        // This test uses the known-working MessageRouter directly
         let router = Arc::new(MessageRouter::new());
 
-        // Create channels for three workers
-        let (tx1, rx1) = flume::bounded(100);
-        let (tx2, rx2) = flume::bounded(100);
-        let (tx3, rx3) = flume::bounded(100);
+        let mut rx1 = register_worker(&router, "worker1").await;
+        let mut rx2 = register_worker(&router, "worker2").await;
+        let mut rx3 = register_worker(&router, "worker3").await;
 
-        // Register workers
-        let (dtx1, _drx1) = tokio::sync::oneshot::channel();
-        router
-            .register_client("worker1".to_string(), tx1, dtx1)
-            .await;
-        let (dtx2, _drx2) = tokio::sync::oneshot::channel();
-        router
-            .register_client("worker2".to_string(), tx2, dtx2)
-            .await;
-        let (dtx3, _drx3) = tokio::sync::oneshot::channel();
-        router
-            .register_client("worker3".to_string(), tx3, dtx3)
-            .await;
-
-        router
-            .subscribe(
-                "worker1".to_string(),
-                "$share/workers/tasks/+".to_string(),
-                QoS::AtMostOnce,
-                None,
-                false,
-                false,
-                0,
-                ProtocolVersion::V5,
-                false,
-                None,
-            )
-            .await
-            .unwrap();
-
-        router
-            .subscribe(
-                "worker2".to_string(),
-                "$share/workers/tasks/+".to_string(),
-                QoS::AtMostOnce,
-                None,
-                false,
-                false,
-                0,
-                ProtocolVersion::V5,
-                false,
-                None,
-            )
-            .await
-            .unwrap();
-
-        router
-            .subscribe(
-                "worker3".to_string(),
-                "$share/workers/tasks/+".to_string(),
-                QoS::AtMostOnce,
-                None,
-                false,
-                false,
-                0,
-                ProtocolVersion::V5,
-                false,
-                None,
-            )
-            .await
-            .unwrap();
-
-        // Publish 9 messages
         for i in 0..9 {
             let publish = PublishPacket::new(
                 format!("tasks/job{}", i % 3),
@@ -104,23 +70,10 @@ fn test_shared_subscriptions_in_turmoil() {
             router.route_message(&publish, None).await;
         }
 
-        // Count messages received by each worker
-        let mut count1 = 0;
-        let mut count2 = 0;
-        let mut count3 = 0;
+        let count1 = drain_count(&mut rx1);
+        let count2 = drain_count(&mut rx2);
+        let count3 = drain_count(&mut rx3);
 
-        // Drain all channels
-        while rx1.try_recv().is_ok() {
-            count1 += 1;
-        }
-        while rx2.try_recv().is_ok() {
-            count2 += 1;
-        }
-        while rx3.try_recv().is_ok() {
-            count3 += 1;
-        }
-
-        // Verify distribution
         assert_eq!(count1 + count2 + count3, 9);
         assert!((2..=4).contains(&count1));
         assert!((2..=4).contains(&count2));

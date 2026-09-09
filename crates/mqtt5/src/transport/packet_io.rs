@@ -7,7 +7,7 @@ use crate::error::{MqttError, Result};
 use crate::packet::{FixedHeader, MqttPacket, Packet, PacketType};
 use crate::transport::tls::{TlsReadHalf, TlsWriteHalf};
 use crate::Transport;
-use bytes::{BufMut, BytesMut};
+use bytes::{Buf, BufMut, BytesMut};
 use std::future::Future;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
@@ -300,74 +300,67 @@ pub fn encode_packet_to_buffer(packet: &Packet, buf: &mut BytesMut) -> Result<()
     Ok(())
 }
 
+const READ_CHUNK: usize = 4096;
+
+/// Reads one packet, keeping every byte received so far in `read_buffer`.
+///
+/// The future is cancel-safe: all progress lives in `read_buffer`, the only
+/// await is a single transport read into a stack chunk, and bytes belonging to
+/// the next packet stay in the buffer for the next call.
+///
 /// # Errors
 /// Returns error if reading from transport fails or packet is malformed
 pub async fn read_packet_reusing_buffer<T: Transport>(
     transport: &mut T,
     protocol_version: u8,
-    payload_buffer: &mut BytesMut,
+    read_buffer: &mut BytesMut,
     max_packet_size: usize,
 ) -> Result<Packet> {
-    let mut header_bytes = [0u8; 5];
-    let mut header_len = 0usize;
-
-    let mut byte = [0u8; 1];
-    let n = transport.read(&mut byte).await?;
-    if n == 0 {
-        return Err(MqttError::ClientClosed);
-    }
-    header_bytes[header_len] = byte[0];
-    header_len += 1;
-
     loop {
-        let n = transport.read(&mut byte).await?;
+        if let Some(header_len) = fixed_header_len(read_buffer)? {
+            let mut header_slice: &[u8] = &read_buffer[..header_len];
+            let fixed_header = FixedHeader::decode(&mut header_slice)?;
+            let remaining = fixed_header.remaining_length as usize;
+            if remaining > max_packet_size {
+                return Err(MqttError::PacketTooLarge {
+                    size: remaining,
+                    max: max_packet_size,
+                });
+            }
+            let frame_len = header_len + remaining;
+            if read_buffer.len() >= frame_len {
+                let mut frame = read_buffer.split_to(frame_len);
+                frame.advance(header_len);
+                return Packet::decode_from_body_with_version(
+                    fixed_header.packet_type,
+                    &fixed_header,
+                    &mut frame,
+                    protocol_version,
+                );
+            }
+            read_buffer.reserve(frame_len - read_buffer.len());
+        }
+        let mut chunk = [0u8; READ_CHUNK];
+        let n = transport.read(&mut chunk).await?;
         if n == 0 {
             return Err(MqttError::ClientClosed);
         }
-        header_bytes[header_len] = byte[0];
-        header_len += 1;
+        read_buffer.extend_from_slice(&chunk[..n]);
+    }
+}
 
-        if (byte[0] & crate::constants::masks::CONTINUATION_BIT) == 0 {
-            break;
+fn fixed_header_len(buf: &[u8]) -> Result<Option<usize>> {
+    for (index, byte) in buf.iter().enumerate().skip(1) {
+        if (byte & crate::constants::masks::CONTINUATION_BIT) == 0 {
+            return Ok(Some(index + 1));
         }
-
-        if header_len > 4 {
+        if index == 4 {
             return Err(MqttError::MalformedPacket(
                 "Invalid remaining length encoding".to_string(),
             ));
         }
     }
-
-    let mut header_slice: &[u8] = &header_bytes[..header_len];
-    let fixed_header = FixedHeader::decode(&mut header_slice)?;
-
-    let remaining = fixed_header.remaining_length as usize;
-    if remaining > max_packet_size {
-        return Err(MqttError::PacketTooLarge {
-            size: remaining,
-            max: max_packet_size,
-        });
-    }
-
-    payload_buffer.clear();
-    payload_buffer.reserve(remaining);
-    payload_buffer.resize(remaining, 0);
-
-    let mut bytes_read = 0;
-    while bytes_read < remaining {
-        let n = transport.read(&mut payload_buffer[bytes_read..]).await?;
-        if n == 0 {
-            return Err(MqttError::ClientClosed);
-        }
-        bytes_read += n;
-    }
-
-    Packet::decode_from_body_with_version(
-        fixed_header.packet_type,
-        &fixed_header,
-        payload_buffer,
-        protocol_version,
-    )
+    Ok(None)
 }
 
 /// Implementation for TCP write half
@@ -461,6 +454,158 @@ mod tests {
     use crate::protocol::v5::reason_codes::ReasonCode;
     use crate::transport::mock::MockTransport;
     use crate::QoS;
+    use std::collections::VecDeque;
+    use tokio::sync::mpsc;
+
+    struct ChunkTransport {
+        chunks: mpsc::UnboundedReceiver<Vec<u8>>,
+        pending: VecDeque<u8>,
+    }
+
+    impl ChunkTransport {
+        fn new() -> (mpsc::UnboundedSender<Vec<u8>>, Self) {
+            let (tx, chunks) = mpsc::unbounded_channel();
+            (
+                tx,
+                Self {
+                    chunks,
+                    pending: VecDeque::new(),
+                },
+            )
+        }
+    }
+
+    impl Transport for ChunkTransport {
+        fn connect(&mut self) -> impl Future<Output = Result<()>> + Send {
+            std::future::ready(Ok(()))
+        }
+
+        async fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
+            if self.pending.is_empty() {
+                match self.chunks.recv().await {
+                    Some(chunk) => self.pending.extend(chunk),
+                    None => return Ok(0),
+                }
+            }
+            let mut copied = 0;
+            while copied < buf.len() {
+                match self.pending.pop_front() {
+                    Some(byte) => {
+                        buf[copied] = byte;
+                        copied += 1;
+                    }
+                    None => break,
+                }
+            }
+            Ok(copied)
+        }
+
+        fn write(&mut self, _buf: &[u8]) -> impl Future<Output = Result<()>> + Send {
+            std::future::ready(Ok(()))
+        }
+
+        fn close(&mut self) -> impl Future<Output = Result<()>> + Send {
+            std::future::ready(Ok(()))
+        }
+    }
+
+    fn encoded_publish(topic: &str, payload: &[u8]) -> Vec<u8> {
+        let mut publish = PublishPacket::new(topic, payload.to_vec(), QoS::AtLeastOnce);
+        publish.packet_id = Some(7);
+        let mut buf = BytesMut::new();
+        encode_packet_to_buffer(&Packet::Publish(publish), &mut buf).unwrap();
+        buf.to_vec()
+    }
+
+    #[tokio::test]
+    async fn read_survives_cancellation_mid_packet() {
+        let (tx, mut transport) = ChunkTransport::new();
+        let bytes = encoded_publish("cancel/safe", b"hello world");
+        let (first, second) = bytes.split_at(3);
+        tx.send(first.to_vec()).unwrap();
+        let mut read_buffer = BytesMut::with_capacity(64);
+
+        tokio::select! {
+            biased;
+            result = read_packet_reusing_buffer(&mut transport, 5, &mut read_buffer, 1024) => {
+                panic!("packet completed from a partial frame: {result:?}");
+            }
+            () = tokio::time::sleep(std::time::Duration::from_millis(20)) => {}
+        }
+        assert_eq!(read_buffer.len(), first.len());
+
+        tx.send(second.to_vec()).unwrap();
+        let packet = read_packet_reusing_buffer(&mut transport, 5, &mut read_buffer, 1024)
+            .await
+            .unwrap();
+        match packet {
+            Packet::Publish(publish) => {
+                assert_eq!(publish.topic_name, "cancel/safe");
+                assert_eq!(publish.payload.as_ref(), b"hello world");
+                assert_eq!(publish.packet_id, Some(7));
+            }
+            other => panic!("unexpected packet {other:?}"),
+        }
+        assert!(read_buffer.is_empty());
+    }
+
+    #[tokio::test]
+    async fn read_keeps_next_packet_bytes_in_buffer() {
+        let (tx, mut transport) = ChunkTransport::new();
+        let mut bytes = encoded_publish("first", b"1");
+        bytes.extend(encoded_publish("second", b"22"));
+        bytes.extend(crate::constants::packets::PINGREQ_BYTES);
+        tx.send(bytes).unwrap();
+        let mut read_buffer = BytesMut::with_capacity(8);
+
+        let first = read_packet_reusing_buffer(&mut transport, 5, &mut read_buffer, 1024)
+            .await
+            .unwrap();
+        let second = read_packet_reusing_buffer(&mut transport, 5, &mut read_buffer, 1024)
+            .await
+            .unwrap();
+        let third = read_packet_reusing_buffer(&mut transport, 5, &mut read_buffer, 1024)
+            .await
+            .unwrap();
+        assert!(matches!(first, Packet::Publish(p) if p.topic_name == "first"));
+        assert!(matches!(second, Packet::Publish(p) if p.topic_name == "second"));
+        assert!(matches!(third, Packet::PingReq));
+        assert!(read_buffer.is_empty());
+    }
+
+    #[tokio::test]
+    async fn read_rejects_oversized_packet_before_reading_body() {
+        let (tx, mut transport) = ChunkTransport::new();
+        tx.send(encoded_publish("big", &[0u8; 300])).unwrap();
+        let mut read_buffer = BytesMut::new();
+        let err = read_packet_reusing_buffer(&mut transport, 5, &mut read_buffer, 100)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, MqttError::PacketTooLarge { .. }));
+    }
+
+    #[tokio::test]
+    async fn read_rejects_invalid_remaining_length_encoding() {
+        let (tx, mut transport) = ChunkTransport::new();
+        tx.send(vec![0x30, 0x80, 0x80, 0x80, 0x80, 0x01]).unwrap();
+        let mut read_buffer = BytesMut::new();
+        let err = read_packet_reusing_buffer(&mut transport, 5, &mut read_buffer, 1024)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, MqttError::MalformedPacket(_)));
+    }
+
+    #[tokio::test]
+    async fn read_reports_closed_transport() {
+        let (tx, mut transport) = ChunkTransport::new();
+        tx.send(vec![0x30]).unwrap();
+        drop(tx);
+        let mut read_buffer = BytesMut::new();
+        let err = read_packet_reusing_buffer(&mut transport, 5, &mut read_buffer, 1024)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, MqttError::ClientClosed));
+    }
 
     #[tokio::test]
     async fn test_read_packet_pingresp() {

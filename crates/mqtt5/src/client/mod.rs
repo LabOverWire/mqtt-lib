@@ -568,10 +568,11 @@ impl MqttClient {
         {
             Ok(results) => {
                 if let Some(&(packet_id, qos)) = results.first() {
-                    if let Some(options) = stored_options {
+                    if let Some(stored) = stored_options {
                         inner.stored_ack_subscriptions.lock().push((
                             topic_filter.clone(),
-                            options,
+                            stored,
+                            options.subscription_identifier,
                             callback_id,
                         ));
                     }
@@ -588,6 +589,36 @@ impl MqttClient {
                 Err(e)
             }
         }
+    }
+
+    /// Registers a deferred-ack callback for `topic_filter` without sending a SUBSCRIBE.
+    ///
+    /// Use it before connecting when the broker may hold a persistent session for this client:
+    /// messages the broker flushes right after CONNACK then reach the callback instead of
+    /// being auto-acknowledged and dropped. A later `subscribe_with_ack` for the same filter
+    /// replaces the callback.
+    ///
+    /// # Errors
+    /// Returns `Configuration` when deferred ack is not enabled in the connect options.
+    pub async fn register_ack_callback<F>(
+        &self,
+        topic_filter: impl Into<String>,
+        callback: F,
+    ) -> Result<()>
+    where
+        F: Fn(PublishPacket, AckToken) + Send + Sync + 'static,
+    {
+        let topic_filter = topic_filter.into();
+        let inner = self.inner.read().await;
+        if !inner.options.deferred_ack {
+            return Err(MqttError::Configuration(
+                "register_ack_callback requires ConnectOptions::with_deferred_ack(true)"
+                    .to_string(),
+            ));
+        }
+        let callback: crate::client::direct::ack::AckPublishCallback = Arc::new(callback);
+        inner.ack_callbacks.register(&topic_filter, callback);
+        Ok(())
     }
 
     #[doc(hidden)]
@@ -679,7 +710,7 @@ impl MqttClient {
         inner
             .stored_ack_subscriptions
             .lock()
-            .retain(|(topic, _, _)| topic != &topic_filter);
+            .retain(|(topic, _, _, _)| topic != &topic_filter);
 
         let packet = UnsubscribePacket {
             packet_id: 0,

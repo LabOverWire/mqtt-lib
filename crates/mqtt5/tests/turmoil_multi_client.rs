@@ -35,14 +35,15 @@ fn test_multi_client_message_routing() {
         let mut receivers = HashMap::new();
 
         // Client 1: Subscribes to temperature sensors
-        let (tx1, rx1) = flume::bounded(100);
-        clients.insert("temp_monitor", tx1);
+        let (lanes1, rx1) = mqtt5::broker::router::DeliveryLanes::channel(100);
+        clients.insert("temp_monitor", lanes1);
         receivers.insert("temp_monitor", rx1);
         let (dtx1, _drx1) = tokio::sync::oneshot::channel();
         router
             .register_client(
                 "temp_monitor".to_string(),
                 clients["temp_monitor"].clone(),
+                router.queue_handle("temp_monitor"),
                 dtx1,
             )
             .await;
@@ -63,14 +64,15 @@ fn test_multi_client_message_routing() {
             .unwrap();
 
         // Client 2: Subscribes to humidity sensors
-        let (tx2, rx2) = flume::bounded(100);
-        clients.insert("humidity_monitor", tx2);
+        let (lanes2, rx2) = mqtt5::broker::router::DeliveryLanes::channel(100);
+        clients.insert("humidity_monitor", lanes2);
         receivers.insert("humidity_monitor", rx2);
         let (dtx2, _drx2) = tokio::sync::oneshot::channel();
         router
             .register_client(
                 "humidity_monitor".to_string(),
                 clients["humidity_monitor"].clone(),
+                router.queue_handle("humidity_monitor"),
                 dtx2,
             )
             .await;
@@ -91,14 +93,15 @@ fn test_multi_client_message_routing() {
             .unwrap();
 
         // Client 3: Subscribes to all sensors (wildcard)
-        let (tx3, rx3) = flume::bounded(100);
-        clients.insert("all_monitor", tx3);
+        let (lanes3, rx3) = mqtt5::broker::router::DeliveryLanes::channel(100);
+        clients.insert("all_monitor", lanes3);
         receivers.insert("all_monitor", rx3);
         let (dtx3, _drx3) = tokio::sync::oneshot::channel();
         router
             .register_client(
                 "all_monitor".to_string(),
                 clients["all_monitor"].clone(),
+                router.queue_handle("all_monitor"),
                 dtx3,
             )
             .await;
@@ -119,14 +122,15 @@ fn test_multi_client_message_routing() {
             .unwrap();
 
         // Client 4: Subscribes to specific room only
-        let (tx4, rx4) = flume::bounded(100);
-        clients.insert("room1_monitor", tx4);
+        let (lanes4, rx4) = mqtt5::broker::router::DeliveryLanes::channel(100);
+        clients.insert("room1_monitor", lanes4);
         receivers.insert("room1_monitor", rx4);
         let (dtx4, _drx4) = tokio::sync::oneshot::channel();
         router
             .register_client(
                 "room1_monitor".to_string(),
                 clients["room1_monitor"].clone(),
+                router.queue_handle("room1_monitor"),
                 dtx4,
             )
             .await;
@@ -223,10 +227,15 @@ fn test_client_subscription_changes() {
         let router = Arc::new(MessageRouter::new());
 
         // Create a client
-        let (tx, rx) = flume::bounded(100);
+        let (lanes, mut rx) = mqtt5::broker::router::DeliveryLanes::channel(100);
         let (dtx, _drx) = tokio::sync::oneshot::channel();
         router
-            .register_client("dynamic_client".to_string(), tx, dtx)
+            .register_client(
+                "dynamic_client".to_string(),
+                lanes.clone(),
+                router.queue_handle("dynamic_client"),
+                dtx,
+            )
             .await;
 
         // Initial subscription
@@ -318,16 +327,26 @@ fn test_message_ordering_with_multiple_clients() {
         let router = Arc::new(MessageRouter::new());
 
         // Create two clients subscribing to the same topic
-        let (tx1, rx1) = flume::bounded(100);
-        let (tx2, rx2) = flume::bounded(100);
+        let (lanes1, mut rx1) = mqtt5::broker::router::DeliveryLanes::channel(100);
+        let (lanes2, mut rx2) = mqtt5::broker::router::DeliveryLanes::channel(100);
 
         let (dtx1, _drx1) = tokio::sync::oneshot::channel();
         router
-            .register_client("client1".to_string(), tx1, dtx1)
+            .register_client(
+                "client1".to_string(),
+                lanes1.clone(),
+                router.queue_handle("client1"),
+                dtx1,
+            )
             .await;
         let (dtx2, _drx2) = tokio::sync::oneshot::channel();
         router
-            .register_client("client2".to_string(), tx2, dtx2)
+            .register_client(
+                "client2".to_string(),
+                lanes2.clone(),
+                router.queue_handle("client2"),
+                dtx2,
+            )
             .await;
 
         router

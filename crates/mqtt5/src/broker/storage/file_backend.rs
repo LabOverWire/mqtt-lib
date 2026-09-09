@@ -3,8 +3,8 @@
 //! Provides durable storage using organized file structure with atomic operations.
 
 use super::{
-    ClientSession, InflightDirection, InflightMessage, QueuedMessage, RetainedMessage,
-    StorageBackend,
+    ClientSession, InflightDirection, InflightMessage, QueueHandle, QueueLimits, QueueOp,
+    QueueRegistry, QueueWriter, QueuedMessage, RetainedMessage, StorageBackend, SEQ_FLOOR,
 };
 use crate::error::{MqttError, Result};
 use crate::validation::topic_matches_filter;
@@ -15,8 +15,151 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::fs::{self, File};
 use tokio::io::AsyncWriteExt;
-use tokio::sync::RwLock;
+use tokio::sync::{mpsc, oneshot, RwLock};
 use tracing::{debug, info, warn};
+
+/// How long an inflight or queued row may sit unwritten so that its remove can cancel it.
+const INFLIGHT_SETTLE: std::time::Duration = std::time::Duration::from_millis(250);
+/// Total pending rows (queue + inflight) that force a write-out before the settle window ends.
+const INFLIGHT_SETTLE_MAX: usize = 8192;
+
+type InflightKey = (String, u16, InflightDirection);
+type QueueKey = (String, u64);
+
+/// Queued-message writes waiting for the settle window, coalesced so a write immediately
+/// followed by its delete never touches the disk. Applying an op only mutates this map, so the
+/// writer drains its unbounded channel at memory speed and the map stays bounded by the number
+/// of distinct live sequence numbers (already capped per client).
+#[derive(Default)]
+struct PendingQueue {
+    pending: HashMap<QueueKey, Option<Arc<QueuedMessage>>>,
+    on_disk: HashSet<QueueKey>,
+}
+
+impl PendingQueue {
+    fn store(&mut self, client_id: String, seq: u64, body: Arc<QueuedMessage>) {
+        self.pending.insert((client_id, seq), Some(body));
+    }
+
+    fn remove(&mut self, client_id: String, seq: u64) {
+        let key = (client_id, seq);
+        if matches!(self.pending.get(&key), Some(Some(_))) && !self.on_disk.contains(&key) {
+            self.pending.remove(&key);
+        } else {
+            self.pending.insert(key, None);
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.pending.len()
+    }
+
+    async fn write_out(&mut self, queues_dir: &Path) {
+        for (key, op) in self.pending.drain() {
+            let path = queues_dir.join(&key.0).join(format!("{:020}.json", key.1));
+            if let Some(body) = op {
+                if let Err(e) = FileBackend::write_atomic(path, &*body, false).await {
+                    warn!(
+                        client_id = key.0,
+                        seq = key.1,
+                        "Failed to persist queued message: {e}"
+                    );
+                } else {
+                    self.on_disk.insert(key);
+                }
+            } else {
+                FileBackend::remove_if_present(&path, || {
+                    warn!(
+                        client_id = key.0,
+                        seq = key.1,
+                        "Failed to delete queued message file"
+                    );
+                })
+                .await;
+                self.on_disk.remove(&key);
+            }
+        }
+    }
+}
+
+/// Inflight rows waiting for the settle window: `Some` is a store that has not reached the
+/// disk, `None` a remove that must delete whatever an earlier write-out (or boot) left there.
+///
+/// A remove may cancel a pending store only when nothing for that key has ever reached the
+/// disk; once a row is written out (or was found on disk at boot) its remove must always
+/// produce a delete, otherwise a stale row survives and is redelivered on restart.
+#[derive(Default)]
+struct PendingInflight {
+    pending: HashMap<InflightKey, Option<Box<InflightMessage>>>,
+    on_disk: HashSet<InflightKey>,
+}
+
+impl PendingInflight {
+    fn store(&mut self, message: Box<InflightMessage>) {
+        let key = (
+            message.client_id.clone(),
+            message.packet_id,
+            message.direction,
+        );
+        self.pending.insert(key, Some(message));
+    }
+
+    fn remove(&mut self, client_id: String, packet_id: u16, direction: InflightDirection) {
+        let key = (client_id, packet_id, direction);
+        if matches!(self.pending.get(&key), Some(Some(_))) && !self.on_disk.contains(&key) {
+            self.pending.remove(&key);
+        } else {
+            self.pending.insert(key, None);
+        }
+    }
+
+    fn forget_client(&mut self, client_id: &str) {
+        self.pending.retain(|key, _| key.0 != client_id);
+        self.on_disk.retain(|key| key.0 != client_id);
+    }
+
+    async fn write_out(&mut self, inflight_dir: &Path) {
+        for (key, op) in self.pending.drain() {
+            let path = FileBackend::inflight_path(inflight_dir, &key);
+            if let Some(message) = op {
+                if let Err(e) = FileBackend::write_atomic(path, &*message, false).await {
+                    warn!(
+                        client_id = key.0,
+                        packet_id = key.1,
+                        "Failed to persist inflight message: {e}"
+                    );
+                } else {
+                    self.on_disk.insert(key);
+                }
+            } else {
+                FileBackend::remove_if_present(&path, || {
+                    warn!(
+                        client_id = key.0,
+                        packet_id = key.1,
+                        "Failed to delete inflight file"
+                    );
+                })
+                .await;
+                self.on_disk.remove(&key);
+            }
+        }
+    }
+}
+
+enum QueueFileName {
+    Seq(u64),
+    Legacy { ts: u64, seq: u64 },
+}
+
+fn parse_queue_file_stem(stem: &str) -> Option<QueueFileName> {
+    match stem.split_once('_') {
+        Some((ts, seq)) => Some(QueueFileName::Legacy {
+            ts: ts.parse().ok()?,
+            seq: seq.parse().ok()?,
+        }),
+        None => stem.parse().ok().map(QueueFileName::Seq),
+    }
+}
 
 /// Disambiguates concurrent writes to the same destination path.
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -42,7 +185,9 @@ pub struct FileBackend {
     sessions_cache: Arc<RwLock<HashMap<String, ClientSession>>>,
     dirty_sessions: Arc<RwLock<HashSet<String>>>,
     shutdown: Arc<AtomicBool>,
-    queue_seq: AtomicU64,
+    queues: QueueRegistry,
+    queue_writer: QueueWriter,
+    queue_flush: mpsc::Sender<oneshot::Sender<()>>,
 }
 
 impl FileBackend {
@@ -52,6 +197,16 @@ impl FileBackend {
     ///
     /// Returns error if directories cannot be created or version mismatch detected
     pub async fn new(base_dir: impl AsRef<Path>) -> Result<Self> {
+        Self::with_queue_limits(base_dir, QueueLimits::default()).await
+    }
+
+    /// # Errors
+    ///
+    /// Returns error if directories cannot be created or version mismatch detected
+    pub async fn with_queue_limits(
+        base_dir: impl AsRef<Path>,
+        limits: QueueLimits,
+    ) -> Result<Self> {
         let base_dir = base_dir.as_ref().to_path_buf();
         let retained_dir = base_dir.join("retained");
         let sessions_dir = base_dir.join("sessions");
@@ -66,13 +221,17 @@ impl FileBackend {
             })?;
         }
 
-        info!(
-            "Initialized file storage backend at: {}",
-            base_dir.display()
-        );
+        let (writer_tx, writer_rx) = mpsc::unbounded_channel();
+        let (flush_tx, flush_rx) = mpsc::channel(4);
+        tokio::spawn(Self::run_queue_writer(
+            queues_dir.clone(),
+            inflight_dir.clone(),
+            writer_rx,
+            flush_rx,
+        ));
 
-        Ok(Self {
-            _base_dir: base_dir,
+        let backend = Self {
+            _base_dir: base_dir.clone(),
             retained_dir,
             sessions_dir,
             queues_dir,
@@ -80,8 +239,215 @@ impl FileBackend {
             sessions_cache: Arc::new(RwLock::new(HashMap::new())),
             dirty_sessions: Arc::new(RwLock::new(HashSet::new())),
             shutdown: Arc::new(AtomicBool::new(false)),
-            queue_seq: AtomicU64::new(0),
-        })
+            queues: QueueRegistry::new(limits, Some(writer_tx.clone())),
+            queue_writer: writer_tx,
+            queue_flush: flush_tx,
+        };
+        backend.scan_queues().await?;
+
+        info!(
+            "Initialized file storage backend at: {}",
+            base_dir.display()
+        );
+
+        Ok(backend)
+    }
+
+    /// Rebuilds every client's queue index from disk, migrating legacy `{ts}_{seq}` names to
+    /// `{seq:020}` so directory order is sequence order, and raises the sequence counter above
+    /// everything found.
+    async fn scan_queues(&self) -> Result<()> {
+        let mut max_seq = 0u64;
+        let mut client_dirs = match fs::read_dir(&self.queues_dir).await {
+            Ok(dirs) => dirs,
+            Err(e) => {
+                warn!(
+                    "Queues directory {} is unreadable ({e}); starting with empty queues",
+                    self.queues_dir.display()
+                );
+                return Ok(());
+            }
+        };
+        loop {
+            let entry = match client_dirs.next_entry().await {
+                Ok(Some(entry)) => entry,
+                Ok(None) => break,
+                Err(e) => {
+                    warn!("Stopped scanning queue directories: {e}");
+                    break;
+                }
+            };
+            let client_dir = entry.path();
+            if !fs::metadata(&client_dir).await.is_ok_and(|m| m.is_dir()) {
+                continue;
+            }
+            let Some(client_id) = client_dir.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            let files = match self.list_files(&client_dir, "json").await {
+                Ok(files) => files,
+                Err(e) => {
+                    warn!(client_id, "Skipping unreadable queue directory: {e}");
+                    continue;
+                }
+            };
+            let mut new_format: Vec<(u64, PathBuf)> = Vec::new();
+            let mut legacy: Vec<(u64, u64, PathBuf)> = Vec::new();
+            for path in files {
+                let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                    continue;
+                };
+                match parse_queue_file_stem(stem) {
+                    Some(QueueFileName::Seq(seq)) => new_format.push((seq, path)),
+                    Some(QueueFileName::Legacy { ts, seq }) => legacy.push((ts, seq, path)),
+                    None => warn!("Ignoring unrecognised queue file {}", path.display()),
+                }
+            }
+            if !legacy.is_empty() {
+                let floor = new_format
+                    .iter()
+                    .map(|(seq, _)| *seq)
+                    .min()
+                    .unwrap_or(SEQ_FLOOR)
+                    .min(SEQ_FLOOR);
+                legacy.sort_by_key(|(ts, seq, _)| (*ts, *seq));
+                let count = legacy.len() as u64;
+                let first = floor.checked_sub(count).unwrap_or(SEQ_FLOOR);
+                for (index, (_, _, path)) in legacy.into_iter().enumerate() {
+                    let seq = first + index as u64;
+                    let target = client_dir.join(format!("{seq:020}.json"));
+                    match fs::rename(&path, &target).await {
+                        Ok(()) => new_format.push((seq, target)),
+                        Err(e) => warn!(
+                            "Could not migrate queue file {} to {}: {e}",
+                            path.display(),
+                            target.display()
+                        ),
+                    }
+                }
+                info!(
+                    client_id,
+                    migrated = count,
+                    "Migrated legacy queue file names"
+                );
+            }
+            new_format.sort_by_key(|(seq, _)| *seq);
+            let queue = self.queues.handle(client_id);
+            for (seq, path) in new_format {
+                // Parse each file once so the entry is accounted by payload length (matching
+                // push) and carries its expiry in memory. Metadata length would count the
+                // pretty-printed JSON (~6-9x the payload) and wrongly evict most of a
+                // within-cap backlog on the first push after restart.
+                let (bytes, expires_at) = match self.read_file::<QueuedMessage>(path.clone()).await
+                {
+                    Ok(Some(mut message)) => {
+                        message.recompute_expiry();
+                        (message.payload.len(), message.expires_at)
+                    }
+                    _ => {
+                        // Unreadable/corrupt: quarantined by read_file; skip the entry.
+                        continue;
+                    }
+                };
+                queue.push_scanned(seq, path, bytes, expires_at);
+                max_seq = max_seq.max(seq);
+            }
+        }
+        self.queues.seed_seq(max_seq);
+        Ok(())
+    }
+
+    /// Applies queue writes and deletes as they arrive, and batches inflight rows: a store
+    /// followed by its remove within one settle window never touches the disk, which is the
+    /// normal life of an at-least-once message, so only rows that stay open long enough are
+    /// written.
+    async fn run_queue_writer(
+        queues_dir: PathBuf,
+        inflight_dir: PathBuf,
+        mut ops: mpsc::UnboundedReceiver<QueueOp>,
+        mut flushes: mpsc::Receiver<oneshot::Sender<()>>,
+    ) {
+        let mut inflight = PendingInflight::default();
+        let mut queue = PendingQueue::default();
+        let mut settle = tokio::time::interval(INFLIGHT_SETTLE);
+        settle.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                op = ops.recv() => {
+                    let Some(op) = op else { break };
+                    Self::apply_queue_op(&inflight_dir, &mut inflight, &mut queue, op).await;
+                    if inflight.pending.len() + queue.len() >= INFLIGHT_SETTLE_MAX {
+                        queue.write_out(&queues_dir).await;
+                        inflight.write_out(&inflight_dir).await;
+                    }
+                }
+                flush = flushes.recv() => {
+                    let Some(done) = flush else { break };
+                    while let Ok(op) = ops.try_recv() {
+                        Self::apply_queue_op(&inflight_dir, &mut inflight, &mut queue, op).await;
+                    }
+                    queue.write_out(&queues_dir).await;
+                    inflight.write_out(&inflight_dir).await;
+                    let _ = done.send(());
+                }
+                _ = settle.tick() => {
+                    queue.write_out(&queues_dir).await;
+                    inflight.write_out(&inflight_dir).await;
+                }
+            }
+        }
+        queue.write_out(&queues_dir).await;
+        inflight.write_out(&inflight_dir).await;
+    }
+
+    async fn apply_queue_op(
+        inflight_dir: &Path,
+        inflight: &mut PendingInflight,
+        queue: &mut PendingQueue,
+        op: QueueOp,
+    ) {
+        match op {
+            QueueOp::Write {
+                client_id,
+                seq,
+                body,
+            } => queue.store(client_id, seq, body),
+            QueueOp::Delete { client_id, seq } => queue.remove(client_id, seq),
+            QueueOp::StoreInflight(message) => inflight.store(message),
+            QueueOp::RemoveInflight {
+                client_id,
+                packet_id,
+                direction,
+            } => inflight.remove(client_id, packet_id, direction),
+            QueueOp::RemoveAllInflight { client_id } => {
+                inflight.forget_client(&client_id);
+                let client_dir = inflight_dir.join(&client_id);
+                match fs::remove_dir_all(&client_dir).await {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => warn!(client_id, "Failed to remove inflight directory: {e}"),
+                }
+            }
+        }
+    }
+
+    /// Deletes `path`, ignoring a missing file and reporting any other error via `on_error`.
+    async fn remove_if_present(path: &Path, on_error: impl FnOnce()) {
+        match fs::remove_file(path).await {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => on_error(),
+        }
+    }
+
+    fn inflight_path(inflight_dir: &Path, key: &InflightKey) -> PathBuf {
+        let direction_tag = match key.2 {
+            InflightDirection::Inbound => "inbound",
+            InflightDirection::Outbound => "outbound",
+        };
+        inflight_dir
+            .join(&key.0)
+            .join(format!("{direction_tag}_{}.json", key.1))
     }
 
     /// # Errors
@@ -148,7 +514,22 @@ impl FileBackend {
     /// Returns an error if flushing sessions fails.
     pub async fn shutdown(&self) -> Result<()> {
         self.shutdown.store(true, Ordering::Relaxed);
+        self.flush_queue_writes().await;
         self.flush_sessions().await
+    }
+
+    fn send_queue_op(&self, op: QueueOp) -> Result<()> {
+        self.queue_writer
+            .send(op)
+            .map_err(|_| MqttError::Io("storage writer task is no longer running".to_string()))
+    }
+
+    /// Waits until every queued-message write and delete issued so far has reached disk.
+    pub async fn flush_queue_writes(&self) {
+        let (done_tx, done_rx) = oneshot::channel();
+        if self.queue_flush.send(done_tx).await.is_ok() {
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), done_rx).await;
+        }
     }
 
     async fn check_storage_version(base_dir: &Path) -> Result<()> {
@@ -250,6 +631,16 @@ impl FileBackend {
     /// zero or partial bytes into place, and a crash before its retry would make that
     /// permanent. The temp file is removed if the write or rename fails.
     async fn write_file_atomic<T: serde::Serialize>(&self, path: PathBuf, data: &T) -> Result<()> {
+        Self::write_atomic(path, data, true).await
+    }
+
+    /// Serializes and atomically installs `data` at `path`; `durable` adds an fsync before the
+    /// rename, which queue files skip because their loss is tolerated and their rate is high.
+    async fn write_atomic<T: serde::Serialize>(
+        path: PathBuf,
+        data: &T,
+        durable: bool,
+    ) -> Result<()> {
         let serialized = serde_json::to_vec_pretty(data)
             .map_err(|e| MqttError::Configuration(format!("Failed to serialize data: {e}")))?;
 
@@ -266,7 +657,7 @@ impl FileBackend {
                 TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed)
             ));
 
-            match Self::write_temp_file(&temp_path, &serialized).await {
+            match Self::write_temp_file(&temp_path, &serialized, durable).await {
                 Ok(()) => {}
                 Err(e) => {
                     let _ = fs::remove_file(&temp_path).await;
@@ -291,7 +682,7 @@ impl FileBackend {
     }
 
     /// Writes the payload to `temp_path` and makes it durable before it is renamed into place.
-    async fn write_temp_file(temp_path: &Path, serialized: &[u8]) -> Result<()> {
+    async fn write_temp_file(temp_path: &Path, serialized: &[u8], durable: bool) -> Result<()> {
         let mut file = File::create(temp_path)
             .await
             .map_err(|e| MqttError::Io(format!("Failed to create temp file: {e}")))?;
@@ -304,9 +695,11 @@ impl FileBackend {
             .await
             .map_err(|e| MqttError::Io(format!("Failed to flush temp file: {e}")))?;
 
-        file.sync_data()
-            .await
-            .map_err(|e| MqttError::Io(format!("Failed to sync temp file: {e}")))?;
+        if durable {
+            file.sync_data()
+                .await
+                .map_err(|e| MqttError::Io(format!("Failed to sync temp file: {e}")))?;
+        }
 
         Ok(())
     }
@@ -536,76 +929,42 @@ impl StorageBackend for FileBackend {
         Ok(())
     }
 
-    async fn queue_message(&self, message: QueuedMessage) -> Result<()> {
-        let client_dir = self.queues_dir.join(&message.client_id);
-        fs::create_dir_all(&client_dir).await.map_err(|e| {
-            MqttError::Configuration(format!(
-                "Failed to create queue dir for {}: {}",
-                message.client_id, e
-            ))
-        })?;
+    fn queue_handle(&self, client_id: &str) -> QueueHandle {
+        self.queues.handle(client_id)
+    }
 
-        let timestamp = message.queued_at_secs * 1000;
-        let seq = self.queue_seq.fetch_add(1, Ordering::Relaxed);
-        let filename = format!("{timestamp}_{seq}.json");
-        let path = client_dir.join(filename);
-
-        debug!("Queuing message for client: {}", message.client_id);
-        self.write_file_atomic(path, &message).await?;
-
-        Ok(())
+    fn queue_message(
+        &self,
+        message: QueuedMessage,
+    ) -> impl std::future::Future<Output = Result<()>> + Send {
+        let client_id = message.client_id.clone();
+        self.queues.handle(&client_id).push(message);
+        debug!("Queued message for client: {}", client_id);
+        std::future::ready(Ok(()))
     }
 
     async fn get_queued_messages(&self, client_id: &str) -> Result<Vec<QueuedMessage>> {
-        let client_dir = self.queues_dir.join(client_id);
-        if !client_dir.exists() {
-            return Ok(Vec::new());
-        }
-
-        let files = self.list_files(&client_dir, "json").await?;
-        let mut messages = Vec::new();
-
-        for file_path in files {
-            if let Some(mut message) = self.read_file::<QueuedMessage>(file_path.clone()).await? {
-                message.recompute_expiry();
-                if !message.is_expired() {
-                    messages.push(message);
-                } else if let Err(e) = fs::remove_file(&file_path).await {
-                    warn!("Failed to remove expired queued message: {e}");
-                }
-            }
-        }
-
-        messages.sort_by_key(|msg| msg.queued_at_secs);
-
-        Ok(messages)
+        Ok(self.queues.handle(client_id).peek_all().await)
     }
 
-    async fn remove_queued_messages(&self, client_id: &str) -> Result<()> {
-        let client_dir = self.queues_dir.join(client_id);
-        if client_dir.exists() {
-            fs::remove_dir_all(&client_dir).await.map_err(|e| {
-                MqttError::Io(format!("Failed to remove queue dir for {client_id}: {e}"))
-            })?;
-            debug!("Removed all queued messages for client: {}", client_id);
-        }
-
-        Ok(())
+    fn remove_queued_messages(
+        &self,
+        client_id: &str,
+    ) -> impl std::future::Future<Output = Result<()>> + Send {
+        self.queues.handle(client_id).clear(None);
+        debug!("Removed all queued messages for client: {}", client_id);
+        std::future::ready(Ok(()))
     }
 
-    async fn store_inflight_message(&self, message: InflightMessage) -> Result<()> {
-        let client_dir = self.inflight_dir.join(&message.client_id);
-        let direction_tag = match message.direction {
-            InflightDirection::Inbound => "inbound",
-            InflightDirection::Outbound => "outbound",
-        };
-        let filename = format!("{direction_tag}_{}.json", message.packet_id);
-        let path = client_dir.join(filename);
-
-        self.write_file_atomic(path, &message).await
+    fn store_inflight_message(
+        &self,
+        message: InflightMessage,
+    ) -> impl std::future::Future<Output = Result<()>> + Send {
+        std::future::ready(self.send_queue_op(QueueOp::StoreInflight(Box::new(message))))
     }
 
     async fn get_inflight_messages(&self, client_id: &str) -> Result<Vec<InflightMessage>> {
+        self.flush_queue_writes().await;
         let client_dir = self.inflight_dir.join(client_id);
         if !client_dir.exists() {
             return Ok(Vec::new());
@@ -627,45 +986,26 @@ impl StorageBackend for FileBackend {
         Ok(messages)
     }
 
-    async fn remove_inflight_message(
+    fn remove_inflight_message(
         &self,
         client_id: &str,
         packet_id: u16,
         direction: InflightDirection,
-    ) -> Result<()> {
-        let client_dir = self.inflight_dir.join(client_id);
-        let direction_tag = match direction {
-            InflightDirection::Inbound => "inbound",
-            InflightDirection::Outbound => "outbound",
-        };
-        let filename = format!("{direction_tag}_{packet_id}.json");
-        let path = client_dir.join(filename);
-
-        if path.exists() {
-            fs::remove_file(&path)
-                .await
-                .map_err(|e| MqttError::Io(format!("failed to remove inflight file: {e}")))?;
-        }
-
-        if client_dir.exists() {
-            if let Ok(mut dir) = fs::read_dir(&client_dir).await {
-                if dir.next_entry().await.ok().flatten().is_none() {
-                    let _ = fs::remove_dir(&client_dir).await;
-                }
-            }
-        }
-
-        Ok(())
+    ) -> impl std::future::Future<Output = Result<()>> + Send {
+        std::future::ready(self.send_queue_op(QueueOp::RemoveInflight {
+            client_id: client_id.to_string(),
+            packet_id,
+            direction,
+        }))
     }
 
-    async fn remove_all_inflight_messages(&self, client_id: &str) -> Result<()> {
-        let client_dir = self.inflight_dir.join(client_id);
-        if client_dir.exists() {
-            fs::remove_dir_all(&client_dir)
-                .await
-                .map_err(|e| MqttError::Io(format!("failed to remove inflight dir: {e}")))?;
-        }
-        Ok(())
+    fn remove_all_inflight_messages(
+        &self,
+        client_id: &str,
+    ) -> impl std::future::Future<Output = Result<()>> + Send {
+        std::future::ready(self.send_queue_op(QueueOp::RemoveAllInflight {
+            client_id: client_id.to_string(),
+        }))
     }
 
     async fn cleanup_expired(&self) -> Result<()> {
@@ -699,44 +1039,12 @@ impl StorageBackend for FileBackend {
             }
         }
 
-        // Clean expired queued messages
-        let mut queue_entries = fs::read_dir(&self.queues_dir)
-            .await
-            .map_err(|e| MqttError::Io(format!("Failed to read queues directory: {e}")))?;
-
-        while let Some(entry) = queue_entries
-            .next_entry()
-            .await
-            .map_err(|e| MqttError::Io(format!("Failed to read queue entry: {e}")))?
-        {
-            let client_dir = entry.path();
-            let is_dir = fs::metadata(&client_dir).await.is_ok_and(|m| m.is_dir());
-            if is_dir {
-                let queue_files = self.list_files(&client_dir, "json").await?;
-                for file_path in queue_files {
-                    if let Some(message) =
-                        self.read_file::<QueuedMessage>(file_path.clone()).await?
-                    {
-                        if message.is_expired() {
-                            if let Err(e) = fs::remove_file(&file_path).await {
-                                warn!("Failed to remove expired queued message: {e}");
-                            } else {
-                                removed_count += 1;
-                            }
-                        }
-                    }
-                }
-
-                // Remove empty client directories
-                if let Ok(mut dir) = fs::read_dir(&client_dir).await {
-                    if dir.next_entry().await.ok().flatten().is_none() {
-                        if let Err(e) = fs::remove_dir(&client_dir).await {
-                            warn!("Failed to remove empty queue directory: {e}");
-                        }
-                    }
-                }
-            }
+        for queue in self.queues.handles() {
+            // Scanned entries carry their expiry in memory (recorded during scan_queues), so
+            // purge_expired covers them too; no per-tick re-read of every queued file.
+            removed_count += queue.purge_expired();
         }
+        self.queues.evict_idle();
 
         removed_count += self.cleanup_expired_inflight().await?;
 
@@ -763,6 +1071,139 @@ mod tests {
         let mut packet = PublishPacket::new(topic.to_string(), payload, QoS::AtMostOnce);
         packet.retain = true;
         RetainedMessage::new(packet)
+    }
+
+    fn queued(client: &str, tag: &str) -> QueuedMessage {
+        QueuedMessage::new(
+            PublishPacket::new(
+                format!("q/{tag}"),
+                tag.as_bytes().to_vec(),
+                QoS::AtLeastOnce,
+            ),
+            client.to_string(),
+            QoS::AtLeastOnce,
+            None,
+        )
+    }
+
+    fn topics(messages: &[QueuedMessage]) -> Vec<&str> {
+        messages.iter().map(|m| m.topic.as_str()).collect()
+    }
+
+    #[tokio::test]
+    async fn take_before_the_writer_persists_still_returns_the_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = FileBackend::new(dir.path()).await.unwrap();
+        let queue = backend.queue_handle("fast");
+        queue.push(queued("fast", "m1"));
+        let taken = queue.take(1).await;
+        assert_eq!(topics(&taken), ["q/m1"]);
+        assert_eq!(queue.count(), 0);
+        backend.flush_queue_writes().await;
+        let client_dir = backend.queues_dir.join("fast");
+        let files = if client_dir.exists() {
+            backend.list_files(&client_dir, "json").await.unwrap()
+        } else {
+            Vec::new()
+        };
+        assert!(
+            files.is_empty(),
+            "a taken message must leave no file behind"
+        );
+    }
+
+    #[tokio::test]
+    async fn restart_rebuilds_count_and_order_from_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let backend = FileBackend::new(dir.path()).await.unwrap();
+            let queue = backend.queue_handle("persist");
+            for tag in ["a", "b", "c", "d", "e"] {
+                queue.push(queued("persist", tag));
+            }
+            let taken = queue.take(2).await;
+            assert_eq!(topics(&taken), ["q/a", "q/b"]);
+            queue.requeue_front(vec![queued("persist", "r1"), queued("persist", "r2")]);
+            backend.flush_queue_writes().await;
+        }
+        let reopened = FileBackend::new(dir.path()).await.unwrap();
+        let queue = reopened.queue_handle("persist");
+        assert_eq!(queue.count(), 5);
+        let taken = queue.take(10).await;
+        assert_eq!(topics(&taken), ["q/r1", "q/r2", "q/c", "q/d", "q/e"]);
+        queue.push(queued("persist", "after"));
+        assert!(queue.next_seq() > SEQ_FLOOR);
+    }
+
+    #[tokio::test]
+    async fn restart_accounts_scanned_bytes_by_payload_not_file_size() {
+        // Payloads total 1000 bytes, well under the 4000-byte cap, but each pretty-JSON file
+        // is several times its payload. If the scan counted file size the whole backlog would
+        // be evicted on the first push after restart.
+        let limits = QueueLimits {
+            max_messages: 1000,
+            max_bytes: 4000,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let backend = FileBackend::with_queue_limits(dir.path(), limits)
+                .await
+                .unwrap();
+            let queue = backend.queue_handle("c");
+            for tag in ["a", "b", "c", "d", "e"] {
+                queue.push(QueuedMessage::new(
+                    PublishPacket::new(format!("q/{tag}"), vec![b'x'; 200], QoS::AtLeastOnce),
+                    "c".to_string(),
+                    QoS::AtLeastOnce,
+                    None,
+                ));
+            }
+            assert_eq!(queue.count(), 5);
+            backend.flush_queue_writes().await;
+        }
+        let reopened = FileBackend::with_queue_limits(dir.path(), limits)
+            .await
+            .unwrap();
+        let queue = reopened.queue_handle("c");
+        assert_eq!(
+            queue.count(),
+            5,
+            "restart must not evict a within-cap backlog"
+        );
+        queue.push(QueuedMessage::new(
+            PublishPacket::new("q/f", vec![b'x'; 200], QoS::AtLeastOnce),
+            "c".to_string(),
+            QoS::AtLeastOnce,
+            None,
+        ));
+        assert_eq!(queue.count(), 6, "one more within-cap push evicts nothing");
+    }
+
+    #[tokio::test]
+    async fn legacy_queue_files_are_migrated_and_ordered_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let client_dir = dir.path().join("queues").join("legacy");
+        tokio::fs::create_dir_all(&client_dir).await.unwrap();
+        for (index, tag) in ["old0", "old1", "old2"].iter().enumerate() {
+            let message = queued("legacy", tag);
+            let path = client_dir.join(format!("1700000000000_{index}.json"));
+            tokio::fs::write(&path, serde_json::to_vec(&message).unwrap())
+                .await
+                .unwrap();
+        }
+        let backend = FileBackend::new(dir.path()).await.unwrap();
+        let queue = backend.queue_handle("legacy");
+        assert_eq!(queue.count(), 3);
+        queue.push(queued("legacy", "new"));
+        let taken = queue.take(10).await;
+        assert_eq!(topics(&taken), ["q/old0", "q/old1", "q/old2", "q/new"]);
+        let remaining = backend.list_files(&client_dir, "json").await.unwrap();
+        assert!(
+            remaining
+                .iter()
+                .all(|p| !p.file_name().unwrap().to_str().unwrap().contains('_')),
+            "legacy names must be gone after migration"
+        );
     }
 
     /// A file the broker cannot read must not stop it from loading the rest.

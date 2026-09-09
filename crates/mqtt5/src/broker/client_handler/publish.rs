@@ -1,6 +1,6 @@
 use crate::broker::events::{ClientPublishEvent, MessageDeliveredEvent, PublishAction};
 use crate::broker::storage::{
-    InflightDirection, InflightMessage, InflightPhase, QueuedMessage, StorageBackend,
+    InflightDirection, InflightMessage, InflightPhase, QueueHandle, QueuedMessage, StorageBackend,
 };
 use crate::error::{MqttError, Result};
 use crate::packet::disconnect::DisconnectPacket;
@@ -485,7 +485,8 @@ impl ClientHandler {
                 }
             }
 
-            self.drain_queued_messages().await;
+            self.inflight_order.retain(|id| *id != puback.packet_id);
+            self.notify_queue();
         }
     }
 
@@ -512,13 +513,16 @@ impl ClientHandler {
                         );
                     }
                 }
-                self.drain_queued_messages().await;
+                self.inflight_order.retain(|id| *id != pubrec.packet_id);
+                self.awaiting_pubcomp.remove(&pubrec.packet_id);
+                self.notify_queue();
             }
             return Ok(());
         }
 
-        if let Some(ref storage) = self.storage {
-            if let Some(publish) = self.outbound_inflight.get(&pubrec.packet_id) {
+        if let Some(publish) = self.outbound_inflight.get(&pubrec.packet_id) {
+            self.awaiting_pubcomp.insert(pubrec.packet_id);
+            if let Some(ref storage) = self.storage {
                 let inflight = InflightMessage::from_publish(
                     publish,
                     self.client_id.as_ref().unwrap().clone(),
@@ -608,62 +612,9 @@ impl ClientHandler {
                 }
             }
 
-            self.drain_queued_messages().await;
-        }
-    }
-
-    async fn drain_queued_messages(&mut self) {
-        let Some(storage) = self.storage.clone() else {
-            return;
-        };
-        let Some(client_id) = self.client_id.clone() else {
-            return;
-        };
-
-        let available_slots =
-            usize::from(self.client_receive_maximum).saturating_sub(self.outbound_inflight.len());
-        if available_slots == 0 {
-            return;
-        }
-
-        let queued = match storage.get_queued_messages(&client_id).await {
-            Ok(msgs) => msgs,
-            Err(e) => {
-                debug!("failed to load queued messages for {client_id}: {e}");
-                return;
-            }
-        };
-
-        if queued.is_empty() {
-            return;
-        }
-
-        let send_count = available_slots.min(queued.len());
-        let mut sent = 0;
-        for msg in queued.iter().take(send_count) {
-            let publish = msg.to_publish_packet();
-            if let Err(e) = self.send_publish(publish).await {
-                debug!("failed to send queued message to {client_id}: {e}");
-                break;
-            }
-            sent += 1;
-        }
-
-        if sent == queued.len() {
-            if let Err(e) = storage.remove_queued_messages(&client_id).await {
-                debug!("failed to remove queued messages for {client_id}: {e}");
-            }
-        } else {
-            if let Err(e) = storage.remove_queued_messages(&client_id).await {
-                debug!("failed to remove queued messages for {client_id}: {e}");
-                return;
-            }
-            for msg in queued.into_iter().skip(sent) {
-                if let Err(e) = storage.queue_message(msg).await {
-                    debug!("failed to re-queue unsent message for {client_id}: {e}");
-                    break;
-                }
-            }
+            self.inflight_order.retain(|id| *id != pubcomp.packet_id);
+            self.awaiting_pubcomp.remove(&pubcomp.packet_id);
+            self.notify_queue();
         }
     }
 
@@ -676,41 +627,17 @@ impl ClientHandler {
 
     pub(super) async fn send_publish(&mut self, mut publish: PublishPacket) -> Result<()> {
         if publish.qos != QoS::AtMostOnce {
-            if self.outbound_inflight.len() >= usize::from(self.client_receive_maximum) {
-                if let Some(ref storage) = self.storage {
-                    let client_id = self.client_id.as_ref().unwrap();
-                    let queued_msg =
-                        QueuedMessage::new(publish.clone(), client_id.clone(), publish.qos, None);
-                    storage.queue_message(queued_msg).await?;
-                    debug!(
-                        client_id = %client_id,
-                        inflight = self.outbound_inflight.len(),
-                        max = self.client_receive_maximum,
-                        "Message queued due to receive maximum limit"
-                    );
-                }
-                return Ok(());
-            }
-
-            if publish.packet_id.is_none() {
+            debug_assert!(
+                self.outbound_inflight.len() < usize::from(self.window),
+                "QoS>0 send outside the outbound window"
+            );
+            let reusable = publish.packet_id.is_some_and(|id| {
+                id != 0
+                    && !self.outbound_inflight.contains_key(&id)
+                    && !self.inflight_publishes.contains_key(&id)
+            });
+            if !reusable {
                 publish.packet_id = Some(self.next_packet_id());
-            }
-
-            if let Some(packet_id) = publish.packet_id {
-                self.outbound_inflight.insert(packet_id, publish.clone());
-                if publish.qos == QoS::ExactlyOnce {
-                    if let Some(ref storage) = self.storage {
-                        let inflight = InflightMessage::from_publish(
-                            &publish,
-                            self.client_id.as_ref().unwrap().clone(),
-                            InflightDirection::Outbound,
-                            InflightPhase::AwaitingPubrec,
-                        );
-                        if let Err(e) = storage.store_inflight_message(inflight).await {
-                            debug!("failed to persist outbound inflight {packet_id}: {e}");
-                        }
-                    }
-                }
             }
         }
 
@@ -726,7 +653,8 @@ impl ClientHandler {
         );
         let qos = publish.qos;
         self.write_buffer.clear();
-        encode_packet_to_buffer(&Packet::Publish(publish), &mut self.write_buffer)?;
+        let packet = Packet::Publish(publish);
+        encode_packet_to_buffer(&packet, &mut self.write_buffer)?;
         if let Some(max) = self.client_max_packet_size {
             if self.write_buffer.len() > max as usize {
                 debug!(
@@ -737,8 +665,88 @@ impl ClientHandler {
                 return Ok(());
             }
         }
-        self.write_publish_bytes(&topic_name, qos).await?;
+        if let Packet::Publish(publish) = packet {
+            if let (Some(packet_id), true) = (publish.packet_id, qos != QoS::AtMostOnce) {
+                if let Some(ref storage) = self.storage {
+                    let inflight = InflightMessage::from_publish(
+                        &publish,
+                        self.client_id.as_ref().unwrap().clone(),
+                        InflightDirection::Outbound,
+                        InflightPhase::AwaitingPubrec,
+                    );
+                    if let Err(e) = storage.store_inflight_message(inflight).await {
+                        debug!("failed to persist outbound inflight {packet_id}: {e}");
+                    }
+                }
+                self.inflight_order.retain(|id| *id != packet_id);
+                self.inflight_order.push_back(packet_id);
+                self.outbound_inflight.insert(packet_id, publish);
+            }
+        }
+        let write_timeout = self.write_timeout();
+        tokio::time::timeout(write_timeout, self.write_publish_bytes(&topic_name, qos))
+            .await
+            .map_err(|_| {
+                warn!(
+                    topic = %topic_name,
+                    timeout = ?write_timeout,
+                    "Transport write stalled; treating the client as gone"
+                );
+                MqttError::Timeout
+            })??;
         self.stats.publish_sent(payload_size);
+        Ok(())
+    }
+
+    /// Wakes this handler's drain; every trigger goes through the queue's Notify.
+    pub(super) fn notify_queue(&self) {
+        if let Some(queue) = &self.queue {
+            queue.notify();
+        }
+    }
+
+    /// One drain batch: at most `min(free window, drain_batch)` messages from the front of
+    /// the session queue, only when the QoS>0 lane is empty (it is older than the queue).
+    /// Re-arms itself through the Notify when anything is left, so the socket is serviced in
+    /// between batches.
+    pub(super) async fn drain_backlog(&mut self) -> Result<()> {
+        let Some(queue) = self.queue.clone() else {
+            return Ok(());
+        };
+        if queue.count() == 0 || !self.qos1_rx.is_empty() {
+            return Ok(());
+        }
+        let free = usize::from(self.window).saturating_sub(self.outbound_inflight.len());
+        if free == 0 {
+            return Ok(());
+        }
+        let batch = queue.take(free.min(self.config.drain_batch.max(1))).await;
+        let started = tokio::time::Instant::now();
+        let budget = self.batch_time_budget();
+        let mut pending = batch.into_iter();
+        while let Some(message) = pending.next() {
+            if self.being_displaced() {
+                self.held.push(message);
+                self.held.extend(pending);
+                return Ok(());
+            }
+            let routable = RoutableMessage {
+                target_flow: message.target_flow,
+                publish: message.to_publish_packet(),
+            };
+            if let Err(e) = self.send_routable(routable).await {
+                self.held.extend(pending);
+                return Err(e);
+            }
+            if started.elapsed() > budget {
+                queue.requeue_front(pending.collect());
+                break;
+            }
+        }
+        queue.finish_drain();
+        if queue.count() > 0 {
+            queue.notify();
+        }
         Ok(())
     }
 
@@ -796,50 +804,75 @@ impl ClientHandler {
         self.transport.write(&self.write_buffer).await
     }
 
-    pub(super) async fn resend_inflight_messages(&mut self) -> Result<()> {
-        if let Some(ref storage) = self.storage {
-            let client_id = self.client_id.as_ref().unwrap();
-            let inflights = match storage.get_inflight_messages(client_id).await {
-                Ok(msgs) => msgs,
-                Err(e) => {
-                    warn!("failed to load inflight messages for {client_id}: {e}");
-                    return Ok(());
-                }
-            };
+    /// Reloads the session's persisted inflight state after a restart: unacknowledged
+    /// publishes go back to the front of the queue and are re-sent as duplicates through the
+    /// normal window, outbound exactly-once messages awaiting completion get their release
+    /// packet again, and inbound exactly-once state is restored so a repeated publish is not
+    /// delivered twice.
+    pub(super) async fn load_persisted_inflight(&mut self, queue: &QueueHandle) -> Result<()> {
+        let (Some(storage), Some(client_id)) = (self.storage.clone(), self.client_id.clone())
+        else {
+            return Ok(());
+        };
+        let mut inflights = match storage.get_inflight_messages(&client_id).await {
+            Ok(msgs) => msgs,
+            Err(e) => {
+                warn!("failed to load inflight messages for {client_id}: {e}");
+                return Ok(());
+            }
+        };
+        inflights.sort_by_key(|msg| (msg.stored_at_secs, msg.packet_id));
 
-            for msg in inflights {
-                match msg.direction {
-                    InflightDirection::Outbound => match msg.phase {
-                        InflightPhase::AwaitingPubrec => {
-                            let mut publish = msg.to_publish_packet();
-                            publish.dup = true;
-                            self.outbound_inflight
-                                .insert(msg.packet_id, publish.clone());
-                            self.write_buffer.clear();
-                            encode_packet_to_buffer(
-                                &Packet::Publish(publish),
-                                &mut self.write_buffer,
-                            )?;
-                            self.transport.write(&self.write_buffer).await?;
-                        }
-                        InflightPhase::AwaitingPubcomp => {
-                            let publish = msg.to_publish_packet();
-                            self.outbound_inflight.insert(msg.packet_id, publish);
-                            let mut pubrel = PubRelPacket::new(msg.packet_id);
-                            pubrel.reason_code = ReasonCode::Success;
-                            self.write_to_client(Packet::PubRel(pubrel)).await?;
-                        }
-                        InflightPhase::AwaitingPubrel => {}
-                    },
-                    InflightDirection::Inbound => {
-                        let publish = msg.to_publish_packet();
-                        self.inflight_publishes
-                            .insert(msg.packet_id, InflightPublish::Pending(publish));
+        let mut requeue = Vec::new();
+        for msg in inflights {
+            match msg.direction {
+                InflightDirection::Outbound => match msg.phase {
+                    InflightPhase::AwaitingPubrec => {
+                        let mut queued = QueuedMessage::new(
+                            msg.to_publish_packet(),
+                            client_id.clone(),
+                            msg.qos,
+                            Some(msg.packet_id),
+                        );
+                        queued.dup = true;
+                        requeue.push(queued);
                     }
+                    InflightPhase::AwaitingPubcomp => {
+                        let publish = msg.to_publish_packet();
+                        self.inflight_order.push_back(msg.packet_id);
+                        self.outbound_inflight.insert(msg.packet_id, publish);
+                        self.awaiting_pubcomp.insert(msg.packet_id);
+                        let mut pubrel = PubRelPacket::new(msg.packet_id);
+                        pubrel.reason_code = ReasonCode::Success;
+                        self.write_to_client(Packet::PubRel(pubrel)).await?;
+                    }
+                    InflightPhase::AwaitingPubrel => {}
+                },
+                InflightDirection::Inbound => {
+                    let publish = msg.to_publish_packet();
+                    self.inflight_publishes
+                        .insert(msg.packet_id, InflightPublish::Pending(publish));
                 }
             }
-            self.advance_packet_id_past_inflight();
         }
+        if !requeue.is_empty() {
+            let packet_ids: Vec<u16> = requeue.iter().filter_map(|m| m.packet_id).collect();
+            debug!(
+                client_id = %client_id,
+                count = requeue.len(),
+                "Re-queued persisted inflight messages for redelivery"
+            );
+            queue.requeue_front(requeue);
+            for packet_id in packet_ids {
+                if let Err(e) = storage
+                    .remove_inflight_message(&client_id, packet_id, InflightDirection::Outbound)
+                    .await
+                {
+                    debug!("failed to remove reloaded inflight {packet_id}: {e}");
+                }
+            }
+        }
+        self.advance_packet_id_past_inflight();
         Ok(())
     }
 }

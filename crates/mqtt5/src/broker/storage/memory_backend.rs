@@ -3,8 +3,8 @@
 //! Provides volatile storage for development and testing scenarios.
 
 use super::{
-    ClientSession, InflightDirection, InflightMessage, QueuedMessage, RetainedMessage,
-    StorageBackend,
+    ClientSession, InflightDirection, InflightMessage, QueueHandle, QueueLimits, QueueRegistry,
+    QueuedMessage, RetainedMessage, StorageBackend,
 };
 use crate::error::Result;
 use crate::validation::topic_matches_filter;
@@ -19,7 +19,7 @@ type InflightMap = HashMap<String, HashMap<(u16, InflightDirection), InflightMes
 pub struct MemoryBackend {
     retained: Arc<Mutex<HashMap<String, RetainedMessage>>>,
     sessions: Arc<Mutex<HashMap<String, ClientSession>>>,
-    queues: Arc<Mutex<HashMap<String, Vec<QueuedMessage>>>>,
+    queues: QueueRegistry,
     inflight: Arc<Mutex<InflightMap>>,
 }
 
@@ -27,10 +27,15 @@ impl MemoryBackend {
     /// Create new memory storage backend
     #[must_use]
     pub fn new() -> Self {
+        Self::with_queue_limits(QueueLimits::default())
+    }
+
+    #[must_use]
+    pub fn with_queue_limits(limits: QueueLimits) -> Self {
         Self {
             retained: Arc::new(Mutex::new(HashMap::new())),
             sessions: Arc::new(Mutex::new(HashMap::new())),
-            queues: Arc::new(Mutex::new(HashMap::new())),
+            queues: QueueRegistry::new(limits, None),
             inflight: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -133,42 +138,29 @@ impl StorageBackend for MemoryBackend {
         std::future::ready(Ok(()))
     }
 
+    fn queue_handle(&self, client_id: &str) -> QueueHandle {
+        self.queues.handle(client_id)
+    }
+
     fn queue_message(
         &self,
         message: QueuedMessage,
     ) -> impl std::future::Future<Output = Result<()>> + Send {
-        let mut queues = self.queues.lock();
-        let queue = queues.entry(message.client_id.clone()).or_default();
-        queue.push(message.clone());
-        debug!("Queued message for client: {}", message.client_id);
+        let client_id = message.client_id.clone();
+        self.queues.handle(&client_id).push(message);
+        debug!("Queued message for client: {}", client_id);
         std::future::ready(Ok(()))
     }
 
-    fn get_queued_messages(
-        &self,
-        client_id: &str,
-    ) -> impl std::future::Future<Output = Result<Vec<QueuedMessage>>> + Send {
-        let queues = self.queues.lock();
-        let messages = if let Some(messages) = queues.get(client_id) {
-            let mut valid_messages = Vec::new();
-            for message in messages {
-                if !message.is_expired() {
-                    valid_messages.push(message.clone());
-                }
-            }
-            valid_messages
-        } else {
-            Vec::new()
-        };
-        std::future::ready(Ok(messages))
+    async fn get_queued_messages(&self, client_id: &str) -> Result<Vec<QueuedMessage>> {
+        Ok(self.queues.handle(client_id).peek_all().await)
     }
 
     fn remove_queued_messages(
         &self,
         client_id: &str,
     ) -> impl std::future::Future<Output = Result<()>> + Send {
-        let mut queues = self.queues.lock();
-        queues.remove(client_id);
+        self.queues.handle(client_id).clear(None);
         debug!("Removed all queued messages for client: {}", client_id);
         std::future::ready(Ok(()))
     }
@@ -254,15 +246,10 @@ impl StorageBackend for MemoryBackend {
             });
         }
 
-        {
-            let mut queues = self.queues.lock();
-            for queue in queues.values_mut() {
-                let original_len = queue.len();
-                queue.retain(|message| !message.is_expired());
-                removed_count += original_len - queue.len();
-            }
-            queues.retain(|_, queue| !queue.is_empty());
+        for queue in self.queues.handles() {
+            removed_count += queue.purge_expired();
         }
+        self.queues.evict_idle();
 
         {
             let mut inflight = self.inflight.lock();

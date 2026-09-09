@@ -1,5 +1,5 @@
 use super::{Properties, PropertyId, PropertyValue};
-use crate::prelude::String;
+use crate::prelude::{String, Vec};
 use bytes::Bytes;
 
 impl Properties {
@@ -126,6 +126,27 @@ impl Properties {
             .entry(PropertyId::SubscriptionIdentifier)
             .or_default()
             .push(PropertyValue::VariableByteInteger(id));
+    }
+
+    /// Every Subscription Identifier carried by the packet, in wire order.
+    #[must_use]
+    pub fn subscription_identifiers(&self) -> Vec<u32> {
+        self.properties
+            .get(&PropertyId::SubscriptionIdentifier)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(|value| match value {
+                        PropertyValue::VariableByteInteger(id) => Some(*id),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn remove_subscription_identifiers(&mut self) {
+        self.properties.remove(&PropertyId::SubscriptionIdentifier);
     }
 
     #[must_use]

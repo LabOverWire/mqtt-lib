@@ -3,6 +3,7 @@
 //! Provides durable storage for retained messages, client sessions, and message queues.
 //! Designed for production use with atomic operations and efficient file-based storage.
 
+pub mod client_queue;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod file_backend;
 pub mod memory_backend;
@@ -10,6 +11,10 @@ pub mod queue;
 pub mod retained;
 pub mod sessions;
 
+pub use client_queue::{
+    ClientQueue, PushOutcome, QueueHandle, QueueLimits, QueueOp, QueueRegistry, QueueWriter,
+    SEQ_FLOOR,
+};
 #[cfg(not(target_arch = "wasm32"))]
 pub use file_backend::FileBackend;
 pub use memory_backend::MemoryBackend;
@@ -297,10 +302,33 @@ pub struct QueuedMessage {
     pub expires_at: Option<SystemTime>,
     /// Packet ID for `QoS` 1/2 delivery
     pub packet_id: Option<u16>,
+    /// Re-delivery of a message the client may already have seen
+    #[serde(default)]
+    pub dup: bool,
+    #[serde(default)]
+    pub retain: bool,
+    /// Server data flow the delivery was bound to, when the subscription came in on one
+    #[serde(default)]
+    pub target_flow: Option<u64>,
+    #[serde(default)]
+    pub subscription_identifiers: Vec<u32>,
+    #[serde(default)]
+    pub user_properties: Vec<(String, String)>,
+    #[serde(default)]
+    pub content_type: Option<String>,
+    #[serde(default)]
+    pub response_topic: Option<String>,
+    #[serde(default)]
+    pub correlation_data: Option<Vec<u8>>,
+    #[serde(default)]
+    pub payload_format_indicator: Option<bool>,
 }
 
 /// Storage backend trait for broker persistence
 pub trait StorageBackend: Send + Sync {
+    /// The client's queue, created on first touch; the only path for queued-message state.
+    fn queue_handle(&self, client_id: &str) -> QueueHandle;
+
     /// Store a retained message
     fn store_retained_message(
         &self,
@@ -871,6 +899,7 @@ impl QueuedMessage {
         let expires_at =
             message_expiry_interval.map(|interval| now + Duration::from_secs(u64::from(interval)));
 
+        let props = V5PublishProps::from_packet(&packet);
         Self {
             topic: packet.topic_name,
             payload: packet.payload.to_vec(),
@@ -880,7 +909,22 @@ impl QueuedMessage {
             message_expiry_interval,
             expires_at,
             packet_id,
+            dup: packet.dup,
+            retain: packet.retain,
+            target_flow: None,
+            subscription_identifiers: packet.properties.subscription_identifiers(),
+            user_properties: props.user_properties,
+            content_type: props.content_type,
+            response_topic: props.response_topic,
+            correlation_data: props.correlation_data,
+            payload_format_indicator: props.payload_format_indicator,
         }
+    }
+
+    #[must_use]
+    pub fn with_target_flow(mut self, target_flow: Option<u64>) -> Self {
+        self.target_flow = target_flow;
+        self
     }
 
     /// Recompute `expires_at` from stored fields (call after deserialization)
@@ -896,10 +940,23 @@ impl QueuedMessage {
     pub fn to_publish_packet(&self) -> PublishPacket {
         let mut packet = PublishPacket::new(&self.topic, self.payload.clone(), self.qos);
         packet.packet_id = self.packet_id;
+        packet.dup = self.dup;
+        packet.retain = self.retain;
 
         if let Some(remaining) = self.remaining_expiry_interval() {
             packet.properties.set_message_expiry_interval(remaining);
         }
+        for id in &self.subscription_identifiers {
+            packet.properties.set_subscription_identifier(*id);
+        }
+        apply_v5_props(
+            &mut packet,
+            &self.user_properties,
+            self.content_type.as_deref(),
+            self.response_topic.as_deref(),
+            self.correlation_data.as_deref(),
+            self.payload_format_indicator,
+        );
 
         packet
     }
@@ -1055,6 +1112,14 @@ pub enum DynamicStorage {
 }
 
 impl StorageBackend for DynamicStorage {
+    fn queue_handle(&self, client_id: &str) -> QueueHandle {
+        match self {
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::File(backend) => backend.queue_handle(client_id),
+            Self::Memory(backend) => backend.queue_handle(client_id),
+        }
+    }
+
     async fn store_retained_message(&self, topic: &str, message: RetainedMessage) -> Result<()> {
         match self {
             #[cfg(not(target_arch = "wasm32"))]

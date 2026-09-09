@@ -13,8 +13,8 @@ use mqtt5::broker::auth::AuthProvider;
 use mqtt5::broker::config::BrokerConfig;
 use mqtt5::broker::resource_monitor::ResourceMonitor;
 use mqtt5::broker::router::MessageRouter;
-use mqtt5::broker::router::RoutableMessage;
-use mqtt5::broker::storage::{ClientSession, DynamicStorage};
+use mqtt5::broker::router::{DeliveryLanes, RoutableMessage};
+use mqtt5::broker::storage::{ClientSession, DynamicStorage, QueueHandle};
 use mqtt5::broker::sys_topics::BrokerStats;
 use mqtt5_protocol::error::{MqttError, Result};
 use mqtt5_protocol::packet::publish::PublishPacket;
@@ -56,8 +56,12 @@ pub struct WasmClientHandler {
     pub(super) stats: Arc<BrokerStats>,
     pub(super) resource_monitor: Arc<ResourceMonitor>,
     pub(super) session: Option<ClientSession>,
-    publish_rx: flume::Receiver<RoutableMessage>,
-    publish_tx: flume::Sender<RoutableMessage>,
+    qos1_rx: tokio::sync::mpsc::Receiver<RoutableMessage>,
+    qos1_tx: tokio::sync::mpsc::Sender<RoutableMessage>,
+    qos0_rx: tokio::sync::mpsc::Receiver<RoutableMessage>,
+    qos0_tx: tokio::sync::mpsc::Sender<RoutableMessage>,
+    queue: Option<QueueHandle>,
+    generation: u64,
     pub(super) inflight_publishes: HashMap<u16, PublishPacket>,
     pub(super) outbound_inflight: Rc<RefCell<HashMap<u16, PublishPacket>>>,
     pub(super) next_packet_id: Rc<Cell<u16>>,
@@ -143,7 +147,8 @@ impl WasmClientHandler {
         use futures::channel::mpsc;
         use wasm_bindgen::JsCast;
 
-        let (publish_tx, publish_rx) = flume::bounded(100);
+        let (qos1_tx, qos1_rx) = tokio::sync::mpsc::channel(100);
+        let (qos0_tx, qos0_rx) = tokio::sync::mpsc::channel(100);
         let handler_id = HANDLER_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
         let (msg_tx, msg_rx) = mpsc::unbounded();
@@ -174,8 +179,12 @@ impl WasmClientHandler {
             stats,
             resource_monitor,
             session: None,
-            publish_rx,
-            publish_tx,
+            qos1_rx,
+            qos1_tx,
+            qos0_rx,
+            qos0_tx,
+            queue: None,
+            generation: 0,
             inflight_publishes: HashMap::new(),
             outbound_inflight: Rc::new(RefCell::new(HashMap::new())),
             next_packet_id: Rc::new(Cell::new(1)),
@@ -208,9 +217,22 @@ impl WasmClientHandler {
         let client_id = self.client_id.clone().unwrap();
         let (disconnect_tx, disconnect_rx) = tokio::sync::oneshot::channel();
 
-        self.router
-            .register_client(client_id.clone(), self.publish_tx.clone(), disconnect_tx)
+        let queue = self.router.queue_handle(&client_id);
+        self.queue = Some(queue.clone());
+        let registration = self
+            .router
+            .register_client(
+                client_id.clone(),
+                DeliveryLanes {
+                    qos1_tx: self.qos1_tx.clone(),
+                    qos0_tx: self.qos0_tx.clone(),
+                },
+                queue.clone(),
+                disconnect_tx,
+            )
             .await;
+        self.generation = registration.generation;
+        queue.notify();
 
         self.stats.client_connected();
 
@@ -220,7 +242,7 @@ impl WasmClientHandler {
             self.publish_will_message(&client_id).await;
         }
 
-        self.router.unregister_client(&client_id).await;
+        self.release_router_entry(&client_id).await;
         self.stats.client_disconnected();
 
         result
@@ -247,9 +269,22 @@ impl WasmClientHandler {
         let client_id = self.client_id.clone().unwrap();
         let (disconnect_tx, disconnect_rx) = tokio::sync::oneshot::channel();
 
-        self.router
-            .register_client(client_id.clone(), self.publish_tx.clone(), disconnect_tx)
+        let queue = self.router.queue_handle(&client_id);
+        self.queue = Some(queue.clone());
+        let registration = self
+            .router
+            .register_client(
+                client_id.clone(),
+                DeliveryLanes {
+                    qos1_tx: self.qos1_tx.clone(),
+                    qos0_tx: self.qos0_tx.clone(),
+                },
+                queue.clone(),
+                disconnect_tx,
+            )
             .await;
+        self.generation = registration.generation;
+        queue.notify();
 
         self.stats.client_connected();
 
@@ -264,20 +299,34 @@ impl WasmClientHandler {
 
         self.fire_client_disconnect(&client_id, reason, unexpected);
 
-        self.router.unregister_client(&client_id).await;
+        self.release_router_entry(&client_id).await;
         self.stats.client_disconnected();
 
         result
     }
 
+    /// Releases this connection's router entry, but only if it still owns it. A newer
+    /// connection with the same client id takes over the entry (a higher generation); an
+    /// unconditional unregister here would evict that live successor and strip its
+    /// subscriptions.
+    async fn release_router_entry(&self, client_id: &str) {
+        let preserve_session = self
+            .session
+            .as_ref()
+            .is_some_and(|session| session.expiry_interval != Some(0));
+        self.router
+            .release_client(client_id, self.generation, preserve_session)
+            .await;
+    }
+
     fn spawn_disconnect_watcher(
         running: &Rc<RefCell<bool>>,
-        disconnect_rx: tokio::sync::oneshot::Receiver<()>,
+        disconnect_rx: tokio::sync::oneshot::Receiver<mqtt5::broker::router::TakeoverNotice>,
     ) {
         let running_clone = Rc::clone(running);
         spawn_local(async move {
             match disconnect_rx.await {
-                Ok(()) => {
+                Ok(_notice) => {
                     info!("Session takeover signal received");
                     *running_clone.borrow_mut() = false;
                 }
@@ -288,13 +337,61 @@ impl WasmClientHandler {
         });
     }
 
+    /// Writes one outbound publish to the client, assigning a packet id and persisting the
+    /// exactly-once inflight record. Returns `false` on a fatal write error so the forwarder
+    /// stops. Shared by the two delivery lanes and the drained session queue.
+    async fn forward_one(
+        mut publish: PublishPacket,
+        writer: &Rc<RefCell<WasmWriter>>,
+        outbound_inflight: &Rc<RefCell<HashMap<u16, PublishPacket>>>,
+        next_pid: &Rc<Cell<u16>>,
+        storage: &Arc<DynamicStorage>,
+        client_id: &str,
+        handler_id: u32,
+    ) -> bool {
+        use mqtt5::broker::storage::{
+            InflightDirection, InflightMessage, InflightPhase, StorageBackend,
+        };
+
+        if publish.qos != QoS::AtMostOnce {
+            let pid = next_pid.get();
+            next_pid.set(if pid == u16::MAX { 1 } else { pid + 1 });
+            publish.packet_id = Some(pid);
+
+            if publish.qos == QoS::ExactlyOnce {
+                outbound_inflight.borrow_mut().insert(pid, publish.clone());
+                let inflight = InflightMessage::from_publish(
+                    &publish,
+                    client_id.to_string(),
+                    InflightDirection::Outbound,
+                    InflightPhase::AwaitingPubrec,
+                );
+                if let Err(e) = storage.store_inflight_message(inflight).await {
+                    tracing::debug!("failed to persist outbound inflight {pid}: {e}");
+                }
+            }
+        }
+
+        if let Ok(mut writer_guard) = writer.try_borrow_mut() {
+            if let Err(e) = Self::write_publish_packet(&publish, &mut writer_guard) {
+                error!("Handler #{handler_id} error forwarding publish: {e}");
+                return false;
+            }
+        } else {
+            error!("Handler #{handler_id} writer busy, cannot forward");
+        }
+        true
+    }
+
     fn spawn_publish_forwarder(
         &mut self,
         running: &Rc<RefCell<bool>>,
         writer_shared: &Rc<RefCell<WasmWriter>>,
     ) {
         let running_forward = Rc::clone(running);
-        let publish_rx = std::mem::replace(&mut self.publish_rx, flume::bounded(1).1);
+        let mut qos1_rx = std::mem::replace(&mut self.qos1_rx, tokio::sync::mpsc::channel(1).1);
+        let mut qos0_rx = std::mem::replace(&mut self.qos0_rx, tokio::sync::mpsc::channel(1).1);
+        let queue = self.queue.clone();
         let writer_for_forward = Rc::clone(writer_shared);
         let outbound_inflight_fwd = Rc::clone(&self.outbound_inflight);
         let next_pid_fwd = Rc::clone(&self.next_packet_id);
@@ -303,52 +400,71 @@ impl WasmClientHandler {
         let handler_id = self.handler_id;
 
         spawn_local(async move {
-            use mqtt5::broker::storage::{
-                InflightDirection, InflightMessage, InflightPhase, StorageBackend,
-            };
-
-            loop {
+            'outer: loop {
                 if !*running_forward.borrow() {
                     break;
                 }
 
-                match publish_rx.recv_async().await {
-                    Ok(routable) => {
-                        let mut publish = routable.publish;
-                        if publish.qos != QoS::AtMostOnce {
-                            let pid = next_pid_fwd.get();
-                            next_pid_fwd.set(if pid == u16::MAX { 1 } else { pid + 1 });
-                            publish.packet_id = Some(pid);
-
-                            if publish.qos == QoS::ExactlyOnce {
-                                outbound_inflight_fwd
-                                    .borrow_mut()
-                                    .insert(pid, publish.clone());
-                                let inflight = InflightMessage::from_publish(
-                                    &publish,
-                                    client_id_fwd.clone(),
-                                    InflightDirection::Outbound,
-                                    InflightPhase::AwaitingPubrec,
-                                );
-                                if let Err(e) = storage_fwd.store_inflight_message(inflight).await {
-                                    tracing::debug!(
-                                        "failed to persist outbound inflight {pid}: {e}"
-                                    );
+                let publish = tokio::select! {
+                    lane = qos1_rx.recv() => match lane {
+                        Some(routable) => routable.publish,
+                        None => break,
+                    },
+                    lane = qos0_rx.recv() => match lane {
+                        Some(routable) => routable.publish,
+                        None => break,
+                    },
+                    () = async {
+                        match &queue {
+                            Some(queue) => queue.notified().await,
+                            None => std::future::pending().await,
+                        }
+                    } => {
+                        if let Some(queue) = &queue {
+                            let mut pending = queue.take(64).await.into_iter();
+                            while let Some(message) = pending.next() {
+                                if !Self::forward_one(
+                                    message.to_publish_packet(),
+                                    &writer_for_forward,
+                                    &outbound_inflight_fwd,
+                                    &next_pid_fwd,
+                                    &storage_fwd,
+                                    &client_id_fwd,
+                                    handler_id,
+                                )
+                                .await
+                                {
+                                    // A write error must not drop the drained batch: put the
+                                    // failed message and the untried remainder back at the
+                                    // front so they survive for redelivery.
+                                    let mut rest = vec![message];
+                                    rest.extend(pending);
+                                    queue.requeue_front(rest);
+                                    queue.finish_drain();
+                                    break 'outer;
                                 }
                             }
-                        }
-
-                        if let Ok(mut writer_guard) = writer_for_forward.try_borrow_mut() {
-                            let result = Self::write_publish_packet(&publish, &mut writer_guard);
-                            if let Err(e) = result {
-                                error!("Handler #{handler_id} error forwarding publish: {e}");
-                                break;
+                            queue.finish_drain();
+                            if queue.count() > 0 {
+                                queue.notify();
                             }
-                        } else {
-                            error!("Handler #{handler_id} writer busy, cannot forward");
                         }
+                        continue;
                     }
-                    Err(_) => break,
+                };
+
+                if !Self::forward_one(
+                    publish,
+                    &writer_for_forward,
+                    &outbound_inflight_fwd,
+                    &next_pid_fwd,
+                    &storage_fwd,
+                    &client_id_fwd,
+                    handler_id,
+                )
+                .await
+                {
+                    break;
                 }
             }
         });
@@ -388,7 +504,7 @@ impl WasmClientHandler {
         &mut self,
         reader: &mut WasmReader,
         writer: WasmWriter,
-        disconnect_rx: tokio::sync::oneshot::Receiver<()>,
+        disconnect_rx: tokio::sync::oneshot::Receiver<mqtt5::broker::router::TakeoverNotice>,
     ) -> Result<()> {
         use crate::decoder::read_packet;
 

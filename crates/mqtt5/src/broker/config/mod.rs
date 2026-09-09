@@ -35,6 +35,14 @@ fn default_client_channel_capacity() -> usize {
     10000
 }
 
+fn default_max_outbound_inflight() -> u16 {
+    64
+}
+
+fn default_drain_batch() -> usize {
+    64
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoadBalancerConfig {
     pub backends: Vec<String>,
@@ -86,6 +94,10 @@ pub struct BrokerConfig {
     pub max_retained_message_size: usize,
     #[serde(default = "default_client_channel_capacity")]
     pub client_channel_capacity: usize,
+    #[serde(default = "default_max_outbound_inflight")]
+    pub max_outbound_inflight: u16,
+    #[serde(default = "default_drain_batch")]
+    pub drain_batch: usize,
     #[cfg_attr(not(target_arch = "wasm32"), serde(with = "humantime_serde"))]
     pub server_keep_alive: Option<Duration>,
     #[serde(default)]
@@ -154,6 +166,8 @@ impl std::fmt::Debug for BrokerConfig {
             .field("max_retained_messages", &self.max_retained_messages)
             .field("max_retained_message_size", &self.max_retained_message_size)
             .field("client_channel_capacity", &self.client_channel_capacity)
+            .field("max_outbound_inflight", &self.max_outbound_inflight)
+            .field("drain_batch", &self.drain_batch)
             .field("server_keep_alive", &self.server_keep_alive)
             .field("server_receive_maximum", &self.server_receive_maximum)
             .field("response_information", &self.response_information)
@@ -211,6 +225,8 @@ impl Default for BrokerConfig {
             max_retained_messages: 0,
             max_retained_message_size: 0,
             client_channel_capacity: default_client_channel_capacity(),
+            max_outbound_inflight: default_max_outbound_inflight(),
+            drain_batch: default_drain_batch(),
             server_keep_alive: None,
             server_receive_maximum: None,
             response_information: None,
@@ -314,6 +330,18 @@ impl BrokerConfig {
     #[must_use]
     pub fn with_client_channel_capacity(mut self, capacity: usize) -> Self {
         self.client_channel_capacity = capacity;
+        self
+    }
+
+    #[must_use]
+    pub fn with_max_outbound_inflight(mut self, window: u16) -> Self {
+        self.max_outbound_inflight = window;
+        self
+    }
+
+    #[must_use]
+    pub fn with_drain_batch(mut self, batch: usize) -> Self {
+        self.drain_batch = batch;
         self
     }
 

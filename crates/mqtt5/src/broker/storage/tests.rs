@@ -621,6 +621,7 @@ async fn test_file_backend_inflight_persistence() {
             InflightPhase::AwaitingPubrel,
         );
         backend.store_inflight_message(msg2).await.unwrap();
+        backend.shutdown().await.unwrap();
     }
 
     {

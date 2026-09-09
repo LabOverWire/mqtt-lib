@@ -12,11 +12,17 @@ use tokio::time::timeout;
 async fn test_retain_as_published_false_clears_retain_flag() {
     let router = Arc::new(MessageRouter::new());
 
-    let (tx, rx) = flume::bounded(10);
+    let (qos1_tx, _qos1_rx) = tokio::sync::mpsc::channel(10);
+    let (qos0_tx, mut rx) = tokio::sync::mpsc::channel(10);
     let (dtx, _drx) = tokio::sync::oneshot::channel();
 
     router
-        .register_client("subscriber".to_string(), tx, dtx)
+        .register_client(
+            "subscriber".to_string(),
+            mqtt5::broker::router::DeliveryLanes { qos1_tx, qos0_tx },
+            router.queue_handle("subscriber"),
+            dtx,
+        )
         .await;
 
     router
@@ -43,7 +49,7 @@ async fn test_retain_as_published_false_clears_retain_flag() {
     packet.retain = true;
     router.route_message(&packet, Some("publisher")).await;
 
-    let received = timeout(Duration::from_millis(100), rx.recv_async())
+    let received = timeout(Duration::from_millis(100), rx.recv())
         .await
         .expect("timeout")
         .expect("message");
@@ -54,11 +60,17 @@ async fn test_retain_as_published_false_clears_retain_flag() {
 async fn test_retain_as_published_true_preserves_retain_flag() {
     let router = Arc::new(MessageRouter::new());
 
-    let (tx, rx) = flume::bounded(10);
+    let (qos1_tx, _qos1_rx) = tokio::sync::mpsc::channel(10);
+    let (qos0_tx, mut rx) = tokio::sync::mpsc::channel(10);
     let (dtx, _drx) = tokio::sync::oneshot::channel();
 
     router
-        .register_client("subscriber".to_string(), tx, dtx)
+        .register_client(
+            "subscriber".to_string(),
+            mqtt5::broker::router::DeliveryLanes { qos1_tx, qos0_tx },
+            router.queue_handle("subscriber"),
+            dtx,
+        )
         .await;
 
     router
@@ -85,7 +97,7 @@ async fn test_retain_as_published_true_preserves_retain_flag() {
     packet.retain = true;
     router.route_message(&packet, Some("publisher")).await;
 
-    let received = timeout(Duration::from_millis(100), rx.recv_async())
+    let received = timeout(Duration::from_millis(100), rx.recv())
         .await
         .expect("timeout")
         .expect("message");

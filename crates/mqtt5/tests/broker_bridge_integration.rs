@@ -84,10 +84,16 @@ async fn test_bridge_message_routing() {
     let router = Arc::new(MessageRouter::new());
 
     // Register a test client to receive messages
-    let (tx, rx) = flume::bounded(10);
+    let (qos1_tx, _qos1_rx) = tokio::sync::mpsc::channel(10);
+    let (qos0_tx, mut rx) = tokio::sync::mpsc::channel(10);
     let (dtx, _drx) = tokio::sync::oneshot::channel();
     router
-        .register_client("test-client".to_string(), tx, dtx)
+        .register_client(
+            "test-client".to_string(),
+            mqtt5::broker::router::DeliveryLanes { qos1_tx, qos0_tx },
+            router.queue_handle("test-client"),
+            dtx,
+        )
         .await;
     router
         .subscribe(
@@ -114,7 +120,7 @@ async fn test_bridge_message_routing() {
     router.route_message(&packet, None).await;
 
     // Verify message was routed locally
-    let received = timeout(Duration::from_millis(500), rx.recv_async())
+    let received = timeout(Duration::from_millis(500), rx.recv())
         .await
         .expect("Timeout waiting for message")
         .expect("Should receive message");

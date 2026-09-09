@@ -2,7 +2,8 @@
 use crate::broker::bridge::BridgeManager;
 use crate::broker::events::{BrokerEventHandler, RetainedSetEvent};
 use crate::broker::storage::{
-    ChangeOnlyState, DynamicStorage, QueuedMessage, RetainedMessage, StorageBackend,
+    ChangeOnlyState, DynamicStorage, QueueHandle, QueueLimits, QueueRegistry, QueuedMessage,
+    RetainedMessage, StorageBackend,
 };
 use crate::packet::publish::PublishPacket;
 use crate::types::ProtocolVersion;
@@ -14,8 +15,12 @@ use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::Weak;
-use tokio::sync::RwLock;
-use tracing::{debug, error, info, trace, warn};
+use tokio::sync::{mpsc, oneshot, RwLock};
+use tokio::time::{Duration, Instant};
+use tracing::{debug, error, info, trace};
+
+/// Upper bound on how long one publish may wait for slow subscribers' delivery channels.
+pub const ROUTE_BUDGET_MAX: Duration = Duration::from_secs(2);
 
 struct OutboundRateState {
     count: AtomicU32,
@@ -92,13 +97,146 @@ pub struct MessageRouter {
     echo_suppression_key: Arc<RwLock<Option<String>>>,
     outbound_rates: parking_lot::RwLock<HashMap<String, OutboundRateState>>,
     max_outbound_rate: AtomicU32,
+    fallback_queues: QueueRegistry,
+    next_generation: std::sync::atomic::AtomicU64,
 }
 
 /// Information about a connected client
 #[derive(Debug)]
 pub struct ClientInfo {
-    pub sender: flume::Sender<RoutableMessage>,
-    pub disconnect_tx: tokio::sync::oneshot::Sender<()>,
+    pub generation: u64,
+    pub qos1_tx: mpsc::Sender<RoutableMessage>,
+    pub qos0_tx: mpsc::Sender<RoutableMessage>,
+    pub queue: QueueHandle,
+    pub disconnect_tx: oneshot::Sender<TakeoverNotice>,
+}
+
+/// Balances one `begin_handoff`: whoever ends up holding the `TakeoverNotice` decrements the
+/// count when it completes the hand-off or is dropped, so a displaced handler that panics
+/// before handing off (its `disconnect_rx`, and the notice inside it, unwind with the task)
+/// can never leave the count stuck above zero and wedge the client id forever.
+#[derive(Debug)]
+pub struct HandoffGuard {
+    queue: QueueHandle,
+}
+
+impl HandoffGuard {
+    fn new(queue: QueueHandle) -> Self {
+        queue.begin_handoff();
+        Self { queue }
+    }
+}
+
+impl Drop for HandoffGuard {
+    fn drop(&mut self) {
+        self.queue.end_handoff();
+    }
+}
+
+/// Delivered to the handler a newer connection with the same client id displaces.
+///
+/// The displaced handler hands its unfinished deliveries back to the session queue (or drops
+/// them when `discard` is set), then signals `released` so the new handler may start delivering.
+/// The `guard` decrements the queue's hand-off count when the notice is completed or dropped.
+#[derive(Debug)]
+pub struct TakeoverNotice {
+    pub discard: bool,
+    pub released: oneshot::Sender<()>,
+    pub guard: HandoffGuard,
+}
+
+/// What a handler learns when it registers its connection.
+#[derive(Debug)]
+pub struct Registration {
+    pub generation: u64,
+    pub released: Option<oneshot::Receiver<()>>,
+}
+
+/// Whether the releasing handler still owned the router entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Release {
+    Owned,
+    Displaced,
+}
+
+/// Outcome of a generation-fenced subscribe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Subscribed {
+    New,
+    Updated,
+    Fenced,
+}
+
+/// Outcome of a generation-fenced unsubscribe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unsubscribed {
+    Removed,
+    Absent,
+    Fenced,
+}
+
+/// Senders for one client's two delivery lanes.
+#[derive(Debug, Clone)]
+pub struct DeliveryLanes {
+    pub qos1_tx: mpsc::Sender<RoutableMessage>,
+    pub qos0_tx: mpsc::Sender<RoutableMessage>,
+}
+
+impl DeliveryLanes {
+    /// Creates both lanes with the given capacity each.
+    #[must_use]
+    pub fn channel(capacity: usize) -> (Self, LaneReceivers) {
+        let (qos1_tx, qos1_rx) = mpsc::channel(capacity);
+        let (qos0_tx, qos0_rx) = mpsc::channel(capacity);
+        (
+            Self { qos1_tx, qos0_tx },
+            LaneReceivers {
+                qos1: qos1_rx,
+                qos0: qos0_rx,
+            },
+        )
+    }
+}
+
+/// Receivers for one client's two delivery lanes, with helpers that read either lane.
+#[derive(Debug)]
+pub struct LaneReceivers {
+    pub qos1: mpsc::Receiver<RoutableMessage>,
+    pub qos0: mpsc::Receiver<RoutableMessage>,
+}
+
+impl LaneReceivers {
+    /// Takes the next message from the gated lane, then the ungated lane, without waiting.
+    ///
+    /// # Errors
+    /// Returns the ungated lane's error when both lanes are empty or closed.
+    pub fn try_recv(&mut self) -> std::result::Result<RoutableMessage, mpsc::error::TryRecvError> {
+        self.qos1.try_recv().or_else(|_| self.qos0.try_recv())
+    }
+
+    /// Waits for the next message on either lane.
+    pub async fn recv(&mut self) -> Option<RoutableMessage> {
+        tokio::select! {
+            message = self.qos1.recv() => message,
+            message = self.qos0.recv() => message,
+        }
+    }
+}
+
+enum DeliveryPlan {
+    Online {
+        client_id: String,
+        message: PublishPacket,
+        target_flow: Option<u64>,
+        lanes: DeliveryLanes,
+        queue: QueueHandle,
+    },
+    Behind {
+        client_id: String,
+        message: PublishPacket,
+        target_flow: Option<u64>,
+        queue: QueueHandle,
+    },
 }
 
 impl MessageRouter {
@@ -122,7 +260,18 @@ impl MessageRouter {
             echo_suppression_key: Arc::new(RwLock::new(None)),
             outbound_rates: parking_lot::RwLock::new(HashMap::new()),
             max_outbound_rate: AtomicU32::new(0),
+            fallback_queues: QueueRegistry::new(QueueLimits::default(), None),
+            next_generation: std::sync::atomic::AtomicU64::new(0),
         }
+    }
+
+    /// The client's queue: from storage when persistence is on, else an in-memory one.
+    #[must_use]
+    pub fn queue_handle(&self, client_id: &str) -> QueueHandle {
+        self.storage.as_ref().map_or_else(
+            || self.fallback_queues.handle(client_id),
+            |storage| storage.queue_handle(client_id),
+        )
     }
 
     /// Creates a new message router with storage backend
@@ -145,7 +294,17 @@ impl MessageRouter {
             echo_suppression_key: Arc::new(RwLock::new(None)),
             outbound_rates: parking_lot::RwLock::new(HashMap::new()),
             max_outbound_rate: AtomicU32::new(0),
+            fallback_queues: QueueRegistry::new(QueueLimits::default(), None),
+            next_generation: std::sync::atomic::AtomicU64::new(0),
         }
+    }
+
+    /// Sets the per-client limits for the in-memory fallback queues used when persistence is
+    /// off, so a persistence-less broker honours the configured caps instead of the defaults.
+    #[must_use]
+    pub fn with_fallback_queue_limits(mut self, limits: QueueLimits) -> Self {
+        self.fallback_queues = QueueRegistry::new(limits, None);
+        self
     }
 
     #[must_use]
@@ -221,30 +380,120 @@ impl MessageRouter {
         Ok(())
     }
 
+    /// Registers a connection that resumes (or starts) a session without a clean start.
     pub async fn register_client(
         &self,
         client_id: String,
-        sender: flume::Sender<RoutableMessage>,
-        new_disconnect_tx: tokio::sync::oneshot::Sender<()>,
-    ) {
-        let mut clients = self.clients.write().await;
+        lanes: DeliveryLanes,
+        queue: QueueHandle,
+        disconnect_tx: oneshot::Sender<TakeoverNotice>,
+    ) -> Registration {
+        self.register_session(client_id, lanes, queue, disconnect_tx, false)
+            .await
+    }
 
-        if let Some(old_client) = clients.remove(&client_id) {
-            info!("Client ID takeover: {}", client_id);
-            let _ = old_client.disconnect_tx.send(());
-        }
+    /// Registers a connection, displacing any live handler for the same client id.
+    ///
+    /// While a displaced handler is still handing its deliveries back, the queue's hand-off
+    /// flag keeps routers queueing behind it; the returned `released` receiver fires when the
+    /// old handler is done. A clean start also drops every subscription the client id still
+    /// holds; its handler discards the whole queue when it binds.
+    pub async fn register_session(
+        &self,
+        client_id: String,
+        lanes: DeliveryLanes,
+        queue: QueueHandle,
+        disconnect_tx: oneshot::Sender<TakeoverNotice>,
+        clean_start: bool,
+    ) -> Registration {
+        let subscription_maps = if clean_start {
+            let mut exact = self.exact_subscriptions.write().await;
+            let mut wildcard = self.wildcard_subscriptions.write().await;
+            Self::strip_client(&mut exact, &client_id);
+            Self::strip_client(&mut wildcard, &client_id);
+            Some((exact, wildcard))
+        } else {
+            None
+        };
+
+        let mut clients = self.clients.write().await;
+        let generation = self
+            .next_generation
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+        let released = match clients.remove(&client_id) {
+            Some(old_client) => {
+                info!("Client ID takeover: {}", client_id);
+                let (released_tx, released_rx) = oneshot::channel();
+                let notice = TakeoverNotice {
+                    discard: clean_start,
+                    released: released_tx,
+                    guard: HandoffGuard::new(Arc::clone(&queue)),
+                };
+                if old_client.disconnect_tx.send(notice).is_ok() {
+                    Some(released_rx)
+                } else {
+                    None
+                }
+            }
+            None => None,
+        };
 
         clients.insert(
             client_id.clone(),
             ClientInfo {
-                sender,
-                disconnect_tx: new_disconnect_tx,
+                generation,
+                qos1_tx: lanes.qos1_tx,
+                qos0_tx: lanes.qos0_tx,
+                queue,
+                disconnect_tx,
             },
         );
+        drop(clients);
+        drop(subscription_maps);
+        if clean_start {
+            self.change_only_states.write().await.remove(&client_id);
+        }
         self.outbound_rates
             .write()
             .insert(client_id.clone(), OutboundRateState::new());
         info!("Registered client: {}", client_id);
+        Registration {
+            generation,
+            released,
+        }
+    }
+
+    /// Removes the handler's router entry if it still owns it; a displaced handler's entry
+    /// already belongs to its successor and is left alone.
+    pub async fn release_client(
+        &self,
+        client_id: &str,
+        generation: u64,
+        preserve_session: bool,
+    ) -> Release {
+        {
+            let mut clients = self.clients.write().await;
+            match clients.get(client_id) {
+                Some(info) if info.generation == generation => {
+                    clients.remove(client_id);
+                }
+                Some(_) => return Release::Displaced,
+                None => {}
+            }
+        }
+        self.outbound_rates.write().remove(client_id);
+        if preserve_session {
+            debug!("Disconnected client (keeping subscriptions): {}", client_id);
+        } else {
+            self.remove_client_subscriptions(client_id).await;
+            debug!("Unregistered client: {}", client_id);
+        }
+        Release::Owned
+    }
+
+    pub async fn is_connected(&self, client_id: &str) -> bool {
+        self.clients.read().await.contains_key(client_id)
     }
 
     pub async fn disconnect_client(&self, client_id: &str) {
@@ -255,32 +504,41 @@ impl MessageRouter {
     }
 
     pub async fn unregister_client(&self, client_id: &str) {
-        let mut clients = self.clients.write().await;
-        clients.remove(client_id);
+        {
+            let mut clients = self.clients.write().await;
+            clients.remove(client_id);
+        }
         self.outbound_rates.write().remove(client_id);
-
-        {
-            let mut exact = self.exact_subscriptions.write().await;
-            for subs in exact.values_mut() {
-                subs.retain(|sub| sub.client_id != client_id);
-            }
-            exact.retain(|_, subs| !subs.is_empty());
-        }
-
-        {
-            let mut wildcard = self.wildcard_subscriptions.write().await;
-            for subs in wildcard.values_mut() {
-                subs.retain(|sub| sub.client_id != client_id);
-            }
-            wildcard.retain(|_, subs| !subs.is_empty());
-        }
-
+        self.remove_client_subscriptions(client_id).await;
         debug!("Unregistered client: {}", client_id);
     }
 
-    pub async fn cleanup_stale_subscriptions(&self) {
-        let clients = self.clients.read().await;
+    async fn remove_client_subscriptions(&self, client_id: &str) {
+        {
+            let mut exact = self.exact_subscriptions.write().await;
+            Self::strip_client(&mut exact, client_id);
+        }
+        {
+            let mut wildcard = self.wildcard_subscriptions.write().await;
+            Self::strip_client(&mut wildcard, client_id);
+        }
+    }
 
+    fn strip_client(map: &mut HashMap<String, Vec<Subscription>>, client_id: &str) {
+        for subs in map.values_mut() {
+            subs.retain(|sub| sub.client_id != client_id);
+        }
+        map.retain(|_, subs| !subs.is_empty());
+    }
+
+    pub async fn cleanup_stale_subscriptions(&self) {
+        // Purge expired entries first (the storage backends do this for their own queues in
+        // cleanup_expired, but the router's fallback queues, used when persistence is off, have
+        // no backend sweep), then reclaim the now-empty ones.
+        for queue in self.fallback_queues.handles() {
+            queue.purge_expired();
+        }
+        self.fallback_queues.evict_idle();
         let subscribed_ids: HashSet<String> = {
             let exact = self.exact_subscriptions.read().await;
             let wildcard = self.wildcard_subscriptions.read().await;
@@ -292,11 +550,13 @@ impl MessageRouter {
                 .collect()
         };
 
+        let connected: HashSet<String> = self.clients.read().await.keys().cloned().collect();
+
         let mut stale: Vec<String> = Vec::new();
         let storage = self.storage.as_ref();
 
         for client_id in &subscribed_ids {
-            if clients.contains_key(client_id) {
+            if connected.contains(client_id) {
                 continue;
             }
             let has_session = if let Some(storage) = storage {
@@ -308,8 +568,6 @@ impl MessageRouter {
                 stale.push(client_id.clone());
             }
         }
-
-        drop(clients);
 
         if stale.is_empty() {
             return;
@@ -338,12 +596,8 @@ impl MessageRouter {
             }
         }
 
-        if let Some(storage) = storage {
-            for client_id in &stale {
-                if let Err(e) = storage.remove_queued_messages(client_id).await {
-                    debug!("failed to remove queued messages for stale client {client_id}: {e}");
-                }
-            }
+        for client_id in &stale {
+            self.queue_handle(client_id).clear(None);
         }
 
         info!(
@@ -370,6 +624,44 @@ impl MessageRouter {
         change_only: bool,
         flow_id: Option<u64>,
     ) -> Result<bool> {
+        let outcome = self
+            .subscribe_as(
+                None,
+                client_id,
+                topic_filter,
+                qos,
+                subscription_id,
+                no_local,
+                retain_as_published,
+                retain_handling,
+                protocol_version,
+                change_only,
+                flow_id,
+            )
+            .await?;
+        Ok(outcome == Subscribed::New)
+    }
+
+    /// Adds a subscription on behalf of the handler holding `generation`; a handler whose
+    /// registration has been displaced gets `Fenced` and changes nothing.
+    ///
+    /// # Errors
+    /// Returns an error when `retain_handling` is invalid.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn subscribe_as(
+        &self,
+        generation: Option<u64>,
+        client_id: String,
+        topic_filter: String,
+        qos: QoS,
+        subscription_id: Option<u32>,
+        no_local: bool,
+        retain_as_published: bool,
+        retain_handling: u8,
+        protocol_version: ProtocolVersion,
+        change_only: bool,
+        flow_id: Option<u64>,
+    ) -> Result<Subscribed> {
         if retain_handling > 2 {
             return Err(crate::MqttError::ProtocolError(format!(
                 "Invalid retain_handling value: {retain_handling} (must be 0, 1, or 2)"
@@ -392,46 +684,32 @@ impl MessageRouter {
             flow_id,
         };
 
-        let is_new = if Self::has_wildcards(actual_filter) {
-            let mut wildcard = self.wildcard_subscriptions.write().await;
-            let subs = wildcard.entry(actual_filter.to_string()).or_default();
-            let existing_pos = subs
-                .iter()
-                .position(|s| s.client_id == client_id && s.flow_id == flow_id);
-            if let Some(pos) = existing_pos {
-                subs[pos] = subscription;
-                debug!(
-                    "Client {} updated wildcard subscription to {}",
-                    client_id, topic_filter
-                );
-                false
-            } else {
-                subs.push(subscription);
-                debug!(
-                    "Client {} subscribed to wildcard {}",
-                    client_id, topic_filter
-                );
-                true
-            }
+        let subscriptions = if Self::has_wildcards(actual_filter) {
+            &self.wildcard_subscriptions
         } else {
-            let mut exact = self.exact_subscriptions.write().await;
-            let subs = exact.entry(actual_filter.to_string()).or_default();
-            let existing_pos = subs
-                .iter()
-                .position(|s| s.client_id == client_id && s.flow_id == flow_id);
-            if let Some(pos) = existing_pos {
-                subs[pos] = subscription;
-                debug!(
-                    "Client {} updated subscription to {}",
-                    client_id, topic_filter
-                );
-                false
-            } else {
-                subs.push(subscription);
-                debug!("Client {} subscribed to {}", client_id, topic_filter);
-                true
-            }
+            &self.exact_subscriptions
         };
+        let mut subs_map = subscriptions.write().await;
+        if !self.generation_is_current(generation, &client_id).await {
+            return Ok(Subscribed::Fenced);
+        }
+        let subs = subs_map.entry(actual_filter.to_string()).or_default();
+        let existing_pos = subs
+            .iter()
+            .position(|s| s.client_id == client_id && s.flow_id == flow_id);
+        let outcome = if let Some(pos) = existing_pos {
+            subs[pos] = subscription;
+            debug!(
+                "Client {} updated subscription to {}",
+                client_id, topic_filter
+            );
+            Subscribed::Updated
+        } else {
+            subs.push(subscription);
+            debug!("Client {} subscribed to {}", client_id, topic_filter);
+            Subscribed::New
+        };
+        drop(subs_map);
 
         if let Some(group) = share_group {
             let mut counters = self.share_group_counters.write().await;
@@ -440,7 +718,19 @@ impl MessageRouter {
                 .or_insert_with(|| Arc::new(AtomicUsize::new(0)));
         }
 
-        Ok(is_new)
+        Ok(outcome)
+    }
+
+    async fn generation_is_current(&self, generation: Option<u64>, client_id: &str) -> bool {
+        match generation {
+            None => true,
+            Some(generation) => self
+                .clients
+                .read()
+                .await
+                .get(client_id)
+                .is_some_and(|info| info.generation == generation),
+        }
     }
 
     pub async fn unsubscribe(
@@ -449,6 +739,20 @@ impl MessageRouter {
         topic_filter: &str,
         flow_id: Option<u64>,
     ) -> bool {
+        self.unsubscribe_as(None, client_id, topic_filter, flow_id)
+            .await
+            == Unsubscribed::Removed
+    }
+
+    /// Removes a subscription on behalf of the handler holding `generation`; a displaced
+    /// handler gets `Fenced` and changes nothing.
+    pub async fn unsubscribe_as(
+        &self,
+        generation: Option<u64>,
+        client_id: &str,
+        topic_filter: &str,
+        flow_id: Option<u64>,
+    ) -> Unsubscribed {
         let (actual_filter, _) = parse_shared_subscription(topic_filter);
 
         let subscriptions = if Self::has_wildcards(actual_filter) {
@@ -458,6 +762,9 @@ impl MessageRouter {
         };
 
         let mut subs_map = subscriptions.write().await;
+        if !self.generation_is_current(generation, client_id).await {
+            return Unsubscribed::Fenced;
+        }
 
         if let Some(subs) = subs_map.get_mut(actual_filter) {
             let initial_len = subs.len();
@@ -470,39 +777,42 @@ impl MessageRouter {
             }
             if removed {
                 debug!("Client {} unsubscribed from {}", client_id, topic_filter);
+                Unsubscribed::Removed
+            } else {
+                Unsubscribed::Absent
             }
-            removed
         } else {
-            false
+            Unsubscribed::Absent
         }
     }
 
-    pub async fn unsubscribe_by_flow(&self, client_id: &str, flow_id: u64) -> Vec<String> {
+    /// Removes every subscription the handler holding `generation` bound to `flow_id`;
+    /// a displaced handler removes nothing.
+    pub async fn unsubscribe_by_flow(
+        &self,
+        generation: Option<u64>,
+        client_id: &str,
+        flow_id: u64,
+    ) -> Vec<String> {
         let mut removed_filters = Vec::new();
 
-        {
-            let mut exact = self.exact_subscriptions.write().await;
-            for (filter, subs) in exact.iter_mut() {
+        let mut exact = self.exact_subscriptions.write().await;
+        let mut wildcard = self.wildcard_subscriptions.write().await;
+        if !self.generation_is_current(generation, client_id).await {
+            return removed_filters;
+        }
+        for map in [&mut *exact, &mut *wildcard] {
+            for (filter, subs) in map.iter_mut() {
                 let before = subs.len();
                 subs.retain(|sub| !(sub.client_id == client_id && sub.flow_id == Some(flow_id)));
                 if subs.len() < before {
                     removed_filters.push(filter.clone());
                 }
             }
-            exact.retain(|_, subs| !subs.is_empty());
+            map.retain(|_, subs| !subs.is_empty());
         }
-
-        {
-            let mut wildcard = self.wildcard_subscriptions.write().await;
-            for (filter, subs) in wildcard.iter_mut() {
-                let before = subs.len();
-                subs.retain(|sub| !(sub.client_id == client_id && sub.flow_id == Some(flow_id)));
-                if subs.len() < before {
-                    removed_filters.push(filter.clone());
-                }
-            }
-            wildcard.retain(|_, subs| !subs.is_empty());
-        }
+        drop(wildcard);
+        drop(exact);
 
         if !removed_filters.is_empty() {
             debug!(
@@ -517,6 +827,22 @@ impl MessageRouter {
 
     /// Routes a publish message to all matching subscribers and forwards to bridges.
     pub async fn route_message(&self, publish: &PublishPacket, publishing_client_id: Option<&str>) {
+        self.route_message_with_deadline(
+            publish,
+            publishing_client_id,
+            Instant::now() + ROUTE_BUDGET_MAX,
+        )
+        .await;
+    }
+
+    /// Routes a publish message; `deadline` bounds the total time spent waiting on slow
+    /// subscribers' delivery channels for this one publish.
+    pub async fn route_message_with_deadline(
+        &self,
+        publish: &PublishPacket,
+        publishing_client_id: Option<&str>,
+        deadline: Instant,
+    ) {
         #[cfg(feature = "opentelemetry")]
         {
             use tracing::Instrument;
@@ -526,12 +852,12 @@ impl MessageRouter {
                 mqtt.qos = publish.qos as u8,
                 mqtt.retain = publish.retain,
             );
-            self.route_message_internal(publish, publishing_client_id, true)
+            self.route_message_internal(publish, publishing_client_id, true, deadline)
                 .instrument(span)
                 .await;
         }
         #[cfg(not(feature = "opentelemetry"))]
-        self.route_message_internal(publish, publishing_client_id, true)
+        self.route_message_internal(publish, publishing_client_id, true, deadline)
             .await;
     }
 
@@ -544,6 +870,7 @@ impl MessageRouter {
         publish: &PublishPacket,
         publishing_client_id: Option<&str>,
     ) {
+        let deadline = Instant::now() + ROUTE_BUDGET_MAX;
         #[cfg(feature = "opentelemetry")]
         {
             use tracing::Instrument;
@@ -554,12 +881,12 @@ impl MessageRouter {
                 mqtt.retain = publish.retain,
                 mqtt.bridge_forward = false,
             );
-            self.route_message_internal(publish, publishing_client_id, false)
+            self.route_message_internal(publish, publishing_client_id, false, deadline)
                 .instrument(span)
                 .await;
         }
         #[cfg(not(feature = "opentelemetry"))]
-        self.route_message_internal(publish, publishing_client_id, false)
+        self.route_message_internal(publish, publishing_client_id, false, deadline)
             .await;
     }
 
@@ -568,6 +895,7 @@ impl MessageRouter {
         publish: &PublishPacket,
         publishing_client_id: Option<&str>,
         forward_to_bridges: bool,
+        deadline: Instant,
     ) {
         if forward_to_bridges {
             trace!("Routing message to topic: {}", publish.topic_name);
@@ -582,49 +910,31 @@ impl MessageRouter {
             self.handle_retain_storage(publish).await;
         }
 
-        let exact = self.exact_subscriptions.read().await;
-        let wildcard = self.wildcard_subscriptions.read().await;
-        let clients = self.clients.read().await;
+        let plans = {
+            let exact = self.exact_subscriptions.read().await;
+            let wildcard = self.wildcard_subscriptions.read().await;
+            let clients = self.clients.read().await;
 
-        let (share_groups, regular_subs) =
-            Self::collect_matching_subscriptions(&exact, &wildcard, &publish.topic_name);
+            let (share_groups, regular_subs) =
+                Self::collect_matching_subscriptions(&exact, &wildcard, &publish.topic_name);
 
-        self.deliver_share_groups(&share_groups, publish, &clients, publishing_client_id)
-            .await;
-
-        for sub in &regular_subs {
-            #[cfg(feature = "opentelemetry")]
-            {
-                use tracing::Instrument;
-                let span = tracing::info_span!(
-                    "mqtt.deliver",
-                    mqtt.subscriber = %sub.client_id,
-                    mqtt.topic = %publish.topic_name,
-                );
-                self.deliver_to_subscriber(
-                    sub,
-                    publish,
-                    &clients,
-                    self.storage.as_ref(),
-                    publishing_client_id,
-                )
-                .instrument(span)
+            let mut plans = self
+                .plan_share_groups(&share_groups, publish, &clients, publishing_client_id)
                 .await;
+            for sub in &regular_subs {
+                if let Some(plan) = self
+                    .plan_delivery(sub, publish, &clients, publishing_client_id)
+                    .await
+                {
+                    plans.push(plan);
+                }
             }
-            #[cfg(not(feature = "opentelemetry"))]
-            self.deliver_to_subscriber(
-                sub,
-                publish,
-                &clients,
-                self.storage.as_ref(),
-                publishing_client_id,
-            )
-            .await;
-        }
+            plans
+        };
 
-        drop(exact);
-        drop(wildcard);
-        drop(clients);
+        for plan in plans {
+            Self::execute_plan(plan, publishing_client_id, deadline).await;
+        }
 
         if forward_to_bridges {
             #[cfg(feature = "opentelemetry")]
@@ -721,13 +1031,14 @@ impl MessageRouter {
         (share_groups, regular_subs)
     }
 
-    async fn deliver_share_groups(
+    async fn plan_share_groups(
         &self,
         share_groups: &HashMap<String, Vec<&Subscription>>,
         publish: &PublishPacket,
         clients: &HashMap<String, ClientInfo>,
         publishing_client_id: Option<&str>,
-    ) {
+    ) -> Vec<DeliveryPlan> {
+        let mut plans = Vec::new();
         for (group_name, group_subs) in share_groups {
             let online_subs: Vec<&&Subscription> = group_subs
                 .iter()
@@ -742,57 +1053,37 @@ impl MessageRouter {
                     .get(group_name)
                     .cloned();
                 if let Some(counter) = counter {
-                    let index = counter.fetch_add(1, Ordering::Relaxed) % online_subs.len();
-                    let chosen_sub = online_subs[index];
-
-                    #[cfg(feature = "opentelemetry")]
+                    let start = counter.fetch_add(1, Ordering::Relaxed) % online_subs.len();
+                    let chosen_sub = (0..online_subs.len())
+                        .map(|offset| online_subs[(start + offset) % online_subs.len()])
+                        .find(|sub| {
+                            clients
+                                .get(&sub.client_id)
+                                .is_some_and(|info| !info.queue.behind())
+                        })
+                        .unwrap_or(online_subs[start]);
+                    if let Some(plan) = self
+                        .plan_delivery(chosen_sub, publish, clients, publishing_client_id)
+                        .await
                     {
-                        use tracing::Instrument;
-                        let span = tracing::info_span!(
-                            "mqtt.deliver",
-                            mqtt.subscriber = %chosen_sub.client_id,
-                            mqtt.topic = %publish.topic_name,
-                            mqtt.shared_group = %group_name,
-                        );
-                        self.deliver_to_subscriber(
-                            chosen_sub,
-                            publish,
-                            clients,
-                            self.storage.as_ref(),
-                            publishing_client_id,
-                        )
-                        .instrument(span)
-                        .await;
+                        plans.push(plan);
                     }
-                    #[cfg(not(feature = "opentelemetry"))]
-                    self.deliver_to_subscriber(
-                        chosen_sub,
-                        publish,
-                        clients,
-                        self.storage.as_ref(),
-                        publishing_client_id,
-                    )
-                    .await;
                 }
             } else if !group_subs.is_empty() {
                 let sub = group_subs[0];
                 if self.storage.is_some() && sub.qos != QoS::AtMostOnce {
-                    if let Some(ref storage) = self.storage {
-                        let mut message = publish.clone();
-                        message.qos = sub.qos;
-
-                        let queued_msg =
-                            QueuedMessage::new(message, sub.client_id.clone(), sub.qos, None);
-                        if let Err(e) = storage.queue_message(queued_msg).await {
-                            error!(
-                                "Failed to queue message for offline shared subscriber {}: {}",
-                                sub.client_id, e
-                            );
-                        }
-                    }
+                    let mut message = publish.clone();
+                    message.qos = sub.qos;
+                    plans.push(DeliveryPlan::Behind {
+                        client_id: sub.client_id.clone(),
+                        message,
+                        target_flow: sub.flow_id,
+                        queue: self.queue_handle(&sub.client_id),
+                    });
                 }
             }
         }
+        plans
     }
 
     async fn forward_to_bridges(&self, publish: &PublishPacket) {
@@ -828,6 +1119,7 @@ impl MessageRouter {
 
     fn prepare_message(publish: &PublishPacket, sub: &Subscription, qos: QoS) -> PublishPacket {
         let mut message = publish.clone();
+        message.packet_id = None;
         message.qos = qos;
         message.dup = false;
         message.protocol_version = sub.protocol_version.as_u8();
@@ -840,34 +1132,102 @@ impl MessageRouter {
         message
     }
 
-    async fn queue_message(
-        storage: &Arc<DynamicStorage>,
+    fn queue_behind(
+        queue: &QueueHandle,
         message: PublishPacket,
         client_id: &str,
-        qos: QoS,
+        target_flow: Option<u64>,
     ) {
-        let queued_msg = QueuedMessage::new(message, client_id.to_string(), qos, None);
-        if let Err(e) = storage.queue_message(queued_msg).await {
-            error!("Failed to queue message for offline client {client_id}: {e}");
-        } else {
-            debug!("Queued message for client {client_id}");
+        let qos = message.qos;
+        let outcome = queue.push(
+            QueuedMessage::new(message, client_id.to_string(), qos, None)
+                .with_target_flow(target_flow),
+        );
+        queue.notify();
+        trace!(
+            client_id,
+            seq = outcome.seq,
+            dropped = outcome.dropped_oldest,
+            "Queued message behind the client's backlog"
+        );
+    }
+
+    async fn execute_plan(
+        plan: DeliveryPlan,
+        publishing_client_id: Option<&str>,
+        deadline: Instant,
+    ) {
+        match plan {
+            DeliveryPlan::Behind {
+                client_id,
+                message,
+                target_flow,
+                queue,
+            } => Self::queue_behind(&queue, message, &client_id, target_flow),
+            DeliveryPlan::Online {
+                client_id,
+                message,
+                target_flow,
+                lanes,
+                queue,
+            } => {
+                let routable = RoutableMessage {
+                    publish: message,
+                    target_flow,
+                };
+                if routable.publish.qos == QoS::AtMostOnce {
+                    if lanes.qos0_tx.try_send(routable).is_err() {
+                        trace!(client_id, "Dropped QoS 0 message: delivery lane full");
+                    }
+                    return;
+                }
+                if queue.behind() {
+                    Self::queue_behind(&queue, routable.publish, &client_id, routable.target_flow);
+                    return;
+                }
+                let routable = match lanes.qos1_tx.try_send(routable) {
+                    Ok(()) => return,
+                    Err(mpsc::error::TrySendError::Closed(rejected)) => {
+                        Self::queue_behind(
+                            &queue,
+                            rejected.publish,
+                            &client_id,
+                            rejected.target_flow,
+                        );
+                        return;
+                    }
+                    Err(mpsc::error::TrySendError::Full(rejected)) => rejected,
+                };
+                if publishing_client_id == Some(client_id.as_str()) {
+                    Self::queue_behind(&queue, routable.publish, &client_id, routable.target_flow);
+                    return;
+                }
+                match tokio::time::timeout_at(deadline, lanes.qos1_tx.reserve()).await {
+                    Ok(Ok(permit)) => permit.send(routable),
+                    Ok(Err(_)) | Err(_) => Self::queue_behind(
+                        &queue,
+                        routable.publish,
+                        &client_id,
+                        routable.target_flow,
+                    ),
+                }
+            }
         }
     }
 
-    async fn deliver_to_subscriber(
+    async fn plan_delivery(
         &self,
         sub: &Subscription,
         publish: &PublishPacket,
         clients: &HashMap<String, ClientInfo>,
-        storage: Option<&Arc<DynamicStorage>>,
         publishing_client_id: Option<&str>,
-    ) {
+    ) -> Option<DeliveryPlan> {
         if sub.no_local && publishing_client_id == Some(&sub.client_id) {
             trace!(
                 "Skipping delivery to {} due to No Local flag",
                 sub.client_id
             );
-            return;
+            return None;
         }
 
         {
@@ -876,7 +1236,7 @@ impl MessageRouter {
                 if let Some(origin) = publish.properties.get_user_property_value(key) {
                     if origin == sub.client_id {
                         trace!("Skipping echo delivery to {}", sub.client_id);
-                        return;
+                        return None;
                     }
                 }
             }
@@ -891,7 +1251,7 @@ impl MessageRouter {
                         sub.client_id,
                         publish.topic_name
                     );
-                    return;
+                    return None;
                 }
             }
             drop(change_only_states);
@@ -907,54 +1267,56 @@ impl MessageRouter {
             };
             if rate_exceeded {
                 let qos = Self::effective_qos(publish.qos, sub.qos);
-                if qos != QoS::AtMostOnce {
-                    if let Some(storage) = storage {
-                        let message = Self::prepare_message(publish, sub, qos);
-                        Self::queue_message(storage, message, &sub.client_id, qos).await;
-                    }
+                if qos == QoS::AtMostOnce || self.storage.is_none() {
+                    return None;
                 }
-                return;
+                return Some(DeliveryPlan::Behind {
+                    client_id: sub.client_id.clone(),
+                    message: Self::prepare_message(publish, sub, qos),
+                    target_flow: sub.flow_id,
+                    queue: self.queue_handle(&sub.client_id),
+                });
             }
         }
 
         if let Some(client_info) = clients.get(&sub.client_id) {
             let qos = Self::effective_qos(publish.qos, sub.qos);
             let message = Self::prepare_message(publish, sub, qos);
-
-            let routable = RoutableMessage {
-                publish: message,
-                target_flow: sub.flow_id,
-            };
-            if let Err(e) = client_info.sender.try_send(routable) {
-                warn!(
-                    client_id = %sub.client_id,
-                    topic = %publish.topic_name,
-                    "Channel send failed - message may be dropped"
-                );
-                if let Some(storage) = storage {
-                    if qos != QoS::AtMostOnce {
-                        Self::queue_message(storage, e.into_inner().publish, &sub.client_id, qos)
-                            .await;
-                    }
-                }
-            } else if sub.change_only {
+            if sub.change_only {
                 let mut change_only_states = self.change_only_states.write().await;
                 change_only_states
                     .entry(sub.client_id.clone())
                     .or_default()
                     .update_hash(&publish.topic_name, &publish.payload);
             }
-        } else if let Some(storage) = storage {
-            if sub.qos != QoS::AtMostOnce {
-                let message = Self::prepare_message(publish, sub, sub.qos);
-                Self::queue_message(storage, message, &sub.client_id, sub.qos).await;
-            }
-        } else {
+            return Some(DeliveryPlan::Online {
+                client_id: sub.client_id.clone(),
+                message,
+                target_flow: sub.flow_id,
+                lanes: DeliveryLanes {
+                    qos1_tx: client_info.qos1_tx.clone(),
+                    qos0_tx: client_info.qos0_tx.clone(),
+                },
+                queue: Arc::clone(&client_info.queue),
+            });
+        }
+
+        if sub.qos == QoS::AtMostOnce {
+            return None;
+        }
+        if self.storage.is_none() {
             debug!(
                 "No storage configured, cannot queue message for offline client {}",
                 sub.client_id
             );
+            return None;
         }
+        Some(DeliveryPlan::Behind {
+            client_id: sub.client_id.clone(),
+            message: Self::prepare_message(publish, sub, sub.qos),
+            target_flow: sub.flow_id,
+            queue: self.queue_handle(&sub.client_id),
+        })
     }
 
     pub async fn get_retained_messages(&self, topic_filter: &str) -> Vec<PublishPacket> {
@@ -1041,13 +1403,56 @@ mod tests {
     use super::*;
     use bytes::Bytes;
 
+    struct TestLanes {
+        qos1_rx: mpsc::Receiver<RoutableMessage>,
+        qos0_rx: mpsc::Receiver<RoutableMessage>,
+        lanes: DeliveryLanes,
+    }
+
+    impl TestLanes {
+        fn new(capacity: usize) -> Self {
+            let (qos1_tx, qos1_rx) = mpsc::channel(capacity);
+            let (qos0_tx, qos0_rx) = mpsc::channel(capacity);
+            Self {
+                qos1_rx,
+                qos0_rx,
+                lanes: DeliveryLanes { qos1_tx, qos0_tx },
+            }
+        }
+
+        fn lanes(&self) -> DeliveryLanes {
+            self.lanes.clone()
+        }
+
+        fn try_recv(&mut self) -> std::result::Result<RoutableMessage, ()> {
+            self.qos1_rx
+                .try_recv()
+                .or_else(|_| self.qos0_rx.try_recv())
+                .map_err(|_| ())
+        }
+
+        async fn recv_async(&mut self) -> std::result::Result<RoutableMessage, ()> {
+            tokio::select! {
+                message = self.qos1_rx.recv() => message.ok_or(()),
+                message = self.qos0_rx.recv() => message.ok_or(()),
+            }
+        }
+    }
+
     #[tokio::test]
     async fn test_client_registration() {
         let router = MessageRouter::new();
-        let (tx, _rx) = flume::bounded(100);
+        let rx = TestLanes::new(100);
 
         let (dtx, _drx) = tokio::sync::oneshot::channel();
-        router.register_client("client1".to_string(), tx, dtx).await;
+        router
+            .register_client(
+                "client1".to_string(),
+                rx.lanes(),
+                router.queue_handle("client1"),
+                dtx,
+            )
+            .await;
         assert_eq!(router.client_count().await, 1);
 
         router.unregister_client("client1").await;
@@ -1057,10 +1462,17 @@ mod tests {
     #[tokio::test]
     async fn test_subscription_management() {
         let router = MessageRouter::new();
-        let (tx, _rx) = flume::bounded(100);
+        let rx = TestLanes::new(100);
 
         let (dtx, _drx) = tokio::sync::oneshot::channel();
-        router.register_client("client1".to_string(), tx, dtx).await;
+        router
+            .register_client(
+                "client1".to_string(),
+                rx.lanes(),
+                router.queue_handle("client1"),
+                dtx,
+            )
+            .await;
         router
             .subscribe(
                 "client1".to_string(),
@@ -1087,17 +1499,27 @@ mod tests {
     #[tokio::test]
     async fn test_message_routing() {
         let router = MessageRouter::new();
-        let (tx1, rx1) = flume::bounded(100);
-        let (tx2, rx2) = flume::bounded(100);
+        let mut rx1 = TestLanes::new(100);
+        let mut rx2 = TestLanes::new(100);
 
         // Register clients
         let (dtx1, _drx1) = tokio::sync::oneshot::channel();
         let (dtx2, _drx2) = tokio::sync::oneshot::channel();
         router
-            .register_client("client1".to_string(), tx1, dtx1)
+            .register_client(
+                "client1".to_string(),
+                rx1.lanes(),
+                router.queue_handle("client1"),
+                dtx1,
+            )
             .await;
         router
-            .register_client("client2".to_string(), tx2, dtx2)
+            .register_client(
+                "client2".to_string(),
+                rx2.lanes(),
+                router.queue_handle("client2"),
+                dtx2,
+            )
             .await;
 
         router
@@ -1147,6 +1569,130 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn routed_publish_never_carries_the_publisher_packet_id() {
+        let router = MessageRouter::new();
+        let mut rx = TestLanes::new(100);
+        let (dtx, _drx) = tokio::sync::oneshot::channel();
+        router
+            .register_client(
+                "sub".to_string(),
+                rx.lanes(),
+                router.queue_handle("sub"),
+                dtx,
+            )
+            .await;
+        router
+            .subscribe(
+                "sub".to_string(),
+                "ids/#".to_string(),
+                QoS::AtLeastOnce,
+                None,
+                false,
+                false,
+                0,
+                ProtocolVersion::V5,
+                false,
+                None,
+            )
+            .await
+            .unwrap();
+
+        for publisher_packet_id in [7u16, 7, 9] {
+            let mut publish = PublishPacket::new("ids/a", &b"x"[..], QoS::AtLeastOnce);
+            publish.packet_id = Some(publisher_packet_id);
+            router.route_message(&publish, Some("pub")).await;
+            let delivered = rx.try_recv().unwrap();
+            assert_eq!(delivered.publish.packet_id, None);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn routing_and_unregistration_never_deadlock() {
+        let router = Arc::new(MessageRouter::new());
+        let sub_rx = TestLanes::new(10_000);
+        let (dtx, _drx) = tokio::sync::oneshot::channel();
+        router
+            .register_client(
+                "subscriber".to_string(),
+                sub_rx.lanes(),
+                router.queue_handle("subscriber"),
+                dtx,
+            )
+            .await;
+        router
+            .subscribe(
+                "subscriber".to_string(),
+                "lock/#".to_string(),
+                QoS::AtLeastOnce,
+                None,
+                false,
+                false,
+                0,
+                ProtocolVersion::V5,
+                false,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let publisher = {
+            let router = Arc::clone(&router);
+            tokio::spawn(async move {
+                let publish = PublishPacket::new("lock/step", &b"m"[..], QoS::AtLeastOnce);
+                for _ in 0..2_000 {
+                    router.route_message(&publish, Some("publisher")).await;
+                }
+            })
+        };
+        let churn = {
+            let router = Arc::clone(&router);
+            tokio::spawn(async move {
+                for round in 0..2_000 {
+                    let id = format!("churn-{}", round % 8);
+                    let rx = TestLanes::new(1);
+                    let (dtx, _drx) = tokio::sync::oneshot::channel();
+                    router
+                        .register_client(id.clone(), rx.lanes(), router.queue_handle(&id), dtx)
+                        .await;
+                    router
+                        .subscribe(
+                            id.clone(),
+                            "lock/#".to_string(),
+                            QoS::AtLeastOnce,
+                            None,
+                            false,
+                            false,
+                            0,
+                            ProtocolVersion::V5,
+                            false,
+                            None,
+                        )
+                        .await
+                        .unwrap();
+                    router.unregister_client(&id).await;
+                }
+            })
+        };
+        let cleanup = {
+            let router = Arc::clone(&router);
+            tokio::spawn(async move {
+                for _ in 0..500 {
+                    router.cleanup_stale_subscriptions().await;
+                    tokio::task::yield_now().await;
+                }
+            })
+        };
+
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            publisher.await.unwrap();
+            churn.await.unwrap();
+            cleanup.await.unwrap();
+        })
+        .await
+        .expect("router lock order must not deadlock");
+    }
+
+    #[tokio::test]
     async fn test_retained_messages() {
         let router = MessageRouter::new();
 
@@ -1173,22 +1719,37 @@ mod tests {
     #[tokio::test]
     async fn test_shared_subscription_round_robin() {
         let router = MessageRouter::new();
-        let (tx1, rx1) = flume::bounded(100);
-        let (tx2, rx2) = flume::bounded(100);
-        let (tx3, rx3) = flume::bounded(100);
+        let mut rx1 = TestLanes::new(100);
+        let mut rx2 = TestLanes::new(100);
+        let mut rx3 = TestLanes::new(100);
 
         // Register three clients
         let (dtx1, _drx1) = tokio::sync::oneshot::channel();
         let (dtx2, _drx2) = tokio::sync::oneshot::channel();
         router
-            .register_client("client1".to_string(), tx1, dtx1)
+            .register_client(
+                "client1".to_string(),
+                rx1.lanes(),
+                router.queue_handle("client1"),
+                dtx1,
+            )
             .await;
         router
-            .register_client("client2".to_string(), tx2, dtx2)
+            .register_client(
+                "client2".to_string(),
+                rx2.lanes(),
+                router.queue_handle("client2"),
+                dtx2,
+            )
             .await;
         let (dtx3, _drx3) = tokio::sync::oneshot::channel();
         router
-            .register_client("client3".to_string(), tx3, dtx3)
+            .register_client(
+                "client3".to_string(),
+                rx3.lanes(),
+                router.queue_handle("client3"),
+                dtx3,
+            )
             .await;
 
         router
@@ -1270,22 +1831,37 @@ mod tests {
     #[tokio::test]
     async fn test_shared_and_regular_subscriptions() {
         let router = MessageRouter::new();
-        let (tx1, rx1) = flume::bounded(100);
-        let (tx2, rx2) = flume::bounded(100);
-        let (tx3, rx3) = flume::bounded(100);
+        let mut rx1 = TestLanes::new(100);
+        let mut rx2 = TestLanes::new(100);
+        let mut rx3 = TestLanes::new(100);
 
         // Register clients
         let (dtx1, _drx1) = tokio::sync::oneshot::channel();
         router
-            .register_client("shared1".to_string(), tx1, dtx1)
+            .register_client(
+                "shared1".to_string(),
+                rx1.lanes(),
+                router.queue_handle("shared1"),
+                dtx1,
+            )
             .await;
         let (dtx2, _drx2) = tokio::sync::oneshot::channel();
         router
-            .register_client("shared2".to_string(), tx2, dtx2)
+            .register_client(
+                "shared2".to_string(),
+                rx2.lanes(),
+                router.queue_handle("shared2"),
+                dtx2,
+            )
             .await;
         let (dtx3, _drx3) = tokio::sync::oneshot::channel();
         router
-            .register_client("regular".to_string(), tx3, dtx3)
+            .register_client(
+                "regular".to_string(),
+                rx3.lanes(),
+                router.queue_handle("regular"),
+                dtx3,
+            )
             .await;
 
         router
@@ -1353,16 +1929,26 @@ mod tests {
     #[tokio::test]
     async fn test_route_message_local_only_delivers_to_subscribers() {
         let router = MessageRouter::new();
-        let (tx1, rx1) = flume::bounded(100);
-        let (tx2, rx2) = flume::bounded(100);
+        let mut rx1 = TestLanes::new(100);
+        let mut rx2 = TestLanes::new(100);
 
         let (dtx1, _drx1) = tokio::sync::oneshot::channel();
         let (dtx2, _drx2) = tokio::sync::oneshot::channel();
         router
-            .register_client("client1".to_string(), tx1, dtx1)
+            .register_client(
+                "client1".to_string(),
+                rx1.lanes(),
+                router.queue_handle("client1"),
+                dtx1,
+            )
             .await;
         router
-            .register_client("client2".to_string(), tx2, dtx2)
+            .register_client(
+                "client2".to_string(),
+                rx2.lanes(),
+                router.queue_handle("client2"),
+                dtx2,
+            )
             .await;
 
         router
@@ -1414,16 +2000,26 @@ mod tests {
     #[tokio::test]
     async fn test_echo_suppression_skips_matching_client() {
         let router = MessageRouter::new().with_echo_suppression_key("x-origin".to_string());
-        let (tx1, rx1) = flume::bounded(100);
-        let (tx2, rx2) = flume::bounded(100);
+        let mut rx1 = TestLanes::new(100);
+        let mut rx2 = TestLanes::new(100);
 
         let (dtx1, _drx1) = tokio::sync::oneshot::channel();
         let (dtx2, _drx2) = tokio::sync::oneshot::channel();
         router
-            .register_client("client1".to_string(), tx1, dtx1)
+            .register_client(
+                "client1".to_string(),
+                rx1.lanes(),
+                router.queue_handle("client1"),
+                dtx1,
+            )
             .await;
         router
-            .register_client("client2".to_string(), tx2, dtx2)
+            .register_client(
+                "client2".to_string(),
+                rx2.lanes(),
+                router.queue_handle("client2"),
+                dtx2,
+            )
             .await;
 
         router
@@ -1473,16 +2069,26 @@ mod tests {
     #[tokio::test]
     async fn test_echo_suppression_disabled_delivers_all() {
         let router = MessageRouter::new();
-        let (tx1, rx1) = flume::bounded(100);
-        let (tx2, rx2) = flume::bounded(100);
+        let mut rx1 = TestLanes::new(100);
+        let mut rx2 = TestLanes::new(100);
 
         let (dtx1, _drx1) = tokio::sync::oneshot::channel();
         let (dtx2, _drx2) = tokio::sync::oneshot::channel();
         router
-            .register_client("client1".to_string(), tx1, dtx1)
+            .register_client(
+                "client1".to_string(),
+                rx1.lanes(),
+                router.queue_handle("client1"),
+                dtx1,
+            )
             .await;
         router
-            .register_client("client2".to_string(), tx2, dtx2)
+            .register_client(
+                "client2".to_string(),
+                rx2.lanes(),
+                router.queue_handle("client2"),
+                dtx2,
+            )
             .await;
 
         router
@@ -1546,9 +2152,16 @@ mod tests {
     #[tokio::test]
     async fn test_outbound_rate_qos0_dropped_when_exceeded() {
         let router = MessageRouter::new().with_max_outbound_rate(5);
-        let (tx, rx) = flume::bounded(100);
+        let mut rx = TestLanes::new(100);
         let (dtx, _drx) = tokio::sync::oneshot::channel();
-        router.register_client("sub1".to_string(), tx, dtx).await;
+        router
+            .register_client(
+                "sub1".to_string(),
+                rx.lanes(),
+                router.queue_handle("sub1"),
+                dtx,
+            )
+            .await;
         router
             .subscribe(
                 "sub1".to_string(),
@@ -1585,9 +2198,16 @@ mod tests {
             crate::broker::storage::MemoryBackend::new(),
         ));
         let router = MessageRouter::with_storage(Arc::clone(&storage)).with_max_outbound_rate(3);
-        let (tx, rx) = flume::bounded(100);
+        let mut rx = TestLanes::new(100);
         let (dtx, _drx) = tokio::sync::oneshot::channel();
-        router.register_client("sub1".to_string(), tx, dtx).await;
+        router
+            .register_client(
+                "sub1".to_string(),
+                rx.lanes(),
+                router.queue_handle("sub1"),
+                dtx,
+            )
+            .await;
         router
             .subscribe(
                 "sub1".to_string(),
@@ -1634,9 +2254,16 @@ mod tests {
     #[tokio::test]
     async fn test_outbound_rate_zero_means_unlimited() {
         let router = MessageRouter::new().with_max_outbound_rate(0);
-        let (tx, rx) = flume::bounded(1000);
+        let mut rx = TestLanes::new(1000);
         let (dtx, _drx) = tokio::sync::oneshot::channel();
-        router.register_client("sub1".to_string(), tx, dtx).await;
+        router
+            .register_client(
+                "sub1".to_string(),
+                rx.lanes(),
+                router.queue_handle("sub1"),
+                dtx,
+            )
+            .await;
         router
             .subscribe(
                 "sub1".to_string(),
@@ -1669,9 +2296,16 @@ mod tests {
     #[tokio::test]
     async fn test_outbound_rate_cleanup_on_unregister() {
         let router = MessageRouter::new().with_max_outbound_rate(10);
-        let (tx, _rx) = flume::bounded(100);
+        let rx = TestLanes::new(100);
         let (dtx, _drx) = tokio::sync::oneshot::channel();
-        router.register_client("sub1".to_string(), tx, dtx).await;
+        router
+            .register_client(
+                "sub1".to_string(),
+                rx.lanes(),
+                router.queue_handle("sub1"),
+                dtx,
+            )
+            .await;
         assert!(router.outbound_rates.read().contains_key("sub1"));
 
         router.unregister_client("sub1").await;
@@ -1681,9 +2315,11 @@ mod tests {
     #[tokio::test]
     async fn test_flow_bound_subscription_delivers_with_target_flow() {
         let router = MessageRouter::new();
-        let (tx, rx) = flume::bounded(100);
+        let mut rx = TestLanes::new(100);
         let (dtx, _drx) = tokio::sync::oneshot::channel();
-        router.register_client("c1".to_string(), tx, dtx).await;
+        router
+            .register_client("c1".to_string(), rx.lanes(), router.queue_handle("c1"), dtx)
+            .await;
 
         router
             .subscribe(
@@ -1712,9 +2348,11 @@ mod tests {
     #[tokio::test]
     async fn test_flow_and_control_subscriptions_coexist() {
         let router = MessageRouter::new();
-        let (tx, rx) = flume::bounded(100);
+        let mut rx = TestLanes::new(100);
         let (dtx, _drx) = tokio::sync::oneshot::channel();
-        router.register_client("c1".to_string(), tx, dtx).await;
+        router
+            .register_client("c1".to_string(), rx.lanes(), router.queue_handle("c1"), dtx)
+            .await;
 
         router
             .subscribe(
@@ -1761,9 +2399,11 @@ mod tests {
     #[tokio::test]
     async fn test_unsubscribe_by_flow_removes_only_flow_subs() {
         let router = MessageRouter::new();
-        let (tx, rx) = flume::bounded(100);
+        let mut rx = TestLanes::new(100);
         let (dtx, _drx) = tokio::sync::oneshot::channel();
-        router.register_client("c1".to_string(), tx, dtx).await;
+        router
+            .register_client("c1".to_string(), rx.lanes(), router.queue_handle("c1"), dtx)
+            .await;
 
         router
             .subscribe(
@@ -1813,7 +2453,7 @@ mod tests {
             .await
             .unwrap();
 
-        let removed = router.unsubscribe_by_flow("c1", 10).await;
+        let removed = router.unsubscribe_by_flow(None, "c1", 10).await;
         assert_eq!(removed.len(), 2);
         assert!(removed.contains(&"topic/a".to_string()));
         assert!(removed.contains(&"topic/b".to_string()));
@@ -1829,9 +2469,11 @@ mod tests {
     #[tokio::test]
     async fn test_flow_dedup_same_topic_same_flow() {
         let router = MessageRouter::new();
-        let (tx, rx) = flume::bounded(100);
+        let mut rx = TestLanes::new(100);
         let (dtx, _drx) = tokio::sync::oneshot::channel();
-        router.register_client("c1".to_string(), tx, dtx).await;
+        router
+            .register_client("c1".to_string(), rx.lanes(), router.queue_handle("c1"), dtx)
+            .await;
 
         router
             .subscribe(

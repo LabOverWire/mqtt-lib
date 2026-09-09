@@ -1,7 +1,7 @@
 use crate::broker::events::{
     ClientSubscribeEvent, ClientUnsubscribeEvent, SubAckReasonCode, SubscriptionInfo,
 };
-use crate::broker::storage::{StorageBackend, StoredSubscription};
+use crate::broker::storage::{QueuedMessage, StorageBackend, StoredSubscription};
 use crate::error::{MqttError, Result};
 use crate::packet::disconnect::DisconnectPacket;
 use crate::packet::suback::SubAckPacket;
@@ -10,13 +10,12 @@ use crate::packet::unsuback::UnsubAckPacket;
 use crate::packet::unsubscribe::UnsubscribePacket;
 use crate::packet::Packet;
 use crate::protocol::v5::reason_codes::ReasonCode;
-use crate::transport::PacketIo;
 use crate::types::ProtocolVersion;
 use crate::validation::{parse_shared_subscription, topic_matches_filter, validate_topic_filter};
 use crate::QoS;
 use tracing::{debug, warn};
 
-use crate::broker::router::RoutableMessage;
+use crate::broker::router::{RoutableMessage, Subscribed, Unsubscribed};
 
 use super::ClientHandler;
 
@@ -51,9 +50,10 @@ impl ClientHandler {
                     .any(|pattern| topic_matches_filter(&filter.filter, pattern));
 
             let flow_id = self.pending_external_flow_id;
-            let is_new = self
+            let outcome = self
                 .router
-                .subscribe(
+                .subscribe_as(
+                    Some(self.generation),
                     client_id.clone(),
                     filter.filter.clone(),
                     QoS::from(granted_qos),
@@ -66,6 +66,14 @@ impl ClientHandler {
                     flow_id,
                 )
                 .await?;
+            let is_new = match outcome {
+                Subscribed::New => true,
+                Subscribed::Updated => false,
+                Subscribed::Fenced => {
+                    debug!("Ignoring SUBSCRIBE from a connection whose session was taken over");
+                    return Ok(());
+                }
+            };
 
             self.persist_subscription(
                 &filter.filter,
@@ -252,12 +260,40 @@ impl ClientHandler {
                     publish: msg,
                     target_flow: None,
                 };
-                self.publish_tx.send_async(routable).await.map_err(|_| {
-                    MqttError::InvalidState("Failed to queue retained message".to_string())
-                })?;
+                self.offer_retained(routable);
             }
         }
         Ok(())
+    }
+
+    /// Hands a retained message to this client's own delivery lanes without ever awaiting
+    /// them: the handler task is their only consumer, so an await here would never complete.
+    fn offer_retained(&self, routable: RoutableMessage) {
+        let Some(client_id) = self.client_id.as_ref() else {
+            return;
+        };
+        if routable.publish.qos == QoS::AtMostOnce {
+            if self.qos0_tx.try_send(routable).is_err() {
+                debug!(client_id = %client_id, "Dropping QoS 0 retained message: lane full");
+            }
+            return;
+        }
+        let queue_behind = |publish: crate::packet::publish::PublishPacket| {
+            if let Some(queue) = self.queue.as_ref() {
+                let qos = publish.qos;
+                queue.push(QueuedMessage::new(publish, client_id.clone(), qos, None));
+                queue.notify();
+            } else {
+                warn!(client_id = %client_id, "Dropping retained message: no session queue");
+            }
+        };
+        if self.queue.as_ref().is_some_and(|queue| queue.behind()) {
+            queue_behind(routable.publish);
+            return;
+        }
+        if let Err(rejected) = self.qos1_tx.try_send(routable) {
+            queue_behind(rejected.into_inner().publish);
+        }
     }
 
     async fn build_and_send_suback(
@@ -311,7 +347,10 @@ impl ClientHandler {
             return;
         };
 
-        let removed_filters = self.router.unsubscribe_by_flow(client_id, flow_id).await;
+        let removed_filters = self
+            .router
+            .unsubscribe_by_flow(Some(self.generation), client_id, flow_id)
+            .await;
         if removed_filters.is_empty() {
             return;
         }
@@ -366,14 +405,27 @@ impl ClientHandler {
         &mut self,
         unsubscribe: UnsubscribePacket,
     ) -> Result<()> {
-        let client_id = self.client_id.as_ref().unwrap();
+        let client_id = self.client_id.clone().unwrap();
         let mut reason_codes = Vec::new();
 
         for topic_filter in &unsubscribe.filters {
-            let removed = self
+            let removed = match self
                 .router
-                .unsubscribe(client_id, topic_filter, self.pending_external_flow_id)
-                .await;
+                .unsubscribe_as(
+                    Some(self.generation),
+                    &client_id,
+                    topic_filter,
+                    self.pending_external_flow_id,
+                )
+                .await
+            {
+                Unsubscribed::Removed => true,
+                Unsubscribed::Absent => false,
+                Unsubscribed::Fenced => {
+                    debug!("Ignoring UNSUBSCRIBE from a connection whose session was taken over");
+                    return Ok(());
+                }
+            };
 
             if removed {
                 if let Some(ref mut session) = self.session {
@@ -404,10 +456,7 @@ impl ClientHandler {
             UnsubAckPacket::new(unsubscribe.packet_id)
         };
         unsuback.reason_codes = reason_codes;
-        let result = self
-            .transport
-            .write_packet(Packet::UnsubAck(unsuback))
-            .await;
+        let result = self.write_to_client(Packet::UnsubAck(unsuback)).await;
 
         if let Some(ref handler) = self.config.event_handler {
             let event = ClientUnsubscribeEvent {
