@@ -227,11 +227,12 @@ impl WasmClientHandler {
                     qos1_tx: self.qos1_tx.clone(),
                     qos0_tx: self.qos0_tx.clone(),
                 },
-                queue,
+                queue.clone(),
                 disconnect_tx,
             )
             .await;
         self.generation = registration.generation;
+        queue.notify();
 
         self.stats.client_connected();
 
@@ -278,11 +279,12 @@ impl WasmClientHandler {
                     qos1_tx: self.qos1_tx.clone(),
                     qos0_tx: self.qos0_tx.clone(),
                 },
-                queue,
+                queue.clone(),
                 disconnect_tx,
             )
             .await;
         self.generation = registration.generation;
+        queue.notify();
 
         self.stats.client_connected();
 

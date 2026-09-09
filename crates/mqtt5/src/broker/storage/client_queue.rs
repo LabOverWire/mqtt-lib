@@ -307,6 +307,11 @@ impl ClientQueue {
                 }
             }
         }
+        // Everything popped turned out to be expired: nothing is being delivered, so this
+        // take must not leave the client marked "draining".
+        if messages.is_empty() {
+            self.draining.store(false, Ordering::Release);
+        }
         messages
     }
 
@@ -346,7 +351,7 @@ impl ClientQueue {
                 inner.bytes += entry.bytes;
                 inner.entries.push_front(entry.clone());
             }
-            let evicted = self.enforce_limits(&mut inner);
+            let evicted = self.enforce_limits_dir(&mut inner, true);
             self.count.store(inner.entries.len(), Ordering::Release);
             let evicted_seqs: Vec<u64> = evicted.iter().map(|old| old.seq).collect();
             let batch_seqs: Vec<u64> = entries.iter().map(|entry| entry.seq).collect();
@@ -468,15 +473,27 @@ impl ClientQueue {
     }
 
     fn enforce_limits(&self, inner: &mut QueueInner) -> Vec<QueueEntry> {
+        self.enforce_limits_dir(inner, false)
+    }
+
+    /// Drops entries until the queue is within its limits. `keep_front` drops from the back
+    /// (the newest messages) instead of the front, so a `requeue_front` of unacknowledged
+    /// in-flight messages keeps those and sheds newer overflow rather than the reverse.
+    fn enforce_limits_dir(&self, inner: &mut QueueInner, keep_front: bool) -> Vec<QueueEntry> {
         let mut evicted = Vec::new();
         while inner.entries.len() > self.limits.max_messages
             || (inner.bytes > self.limits.max_bytes && inner.entries.len() > 1)
         {
-            let Some(oldest) = inner.entries.pop_front() else {
+            let dropped = if keep_front {
+                inner.entries.pop_back()
+            } else {
+                inner.entries.pop_front()
+            };
+            let Some(dropped) = dropped else {
                 break;
             };
-            inner.bytes -= oldest.bytes;
-            evicted.push(oldest);
+            inner.bytes -= dropped.bytes;
+            evicted.push(dropped);
         }
         evicted
     }
@@ -628,6 +645,28 @@ mod tests {
 
     fn registry(limits: QueueLimits) -> QueueRegistry {
         QueueRegistry::new(limits, None)
+    }
+
+    #[tokio::test]
+    async fn requeue_front_over_capacity_keeps_the_requeued_and_drops_newest() {
+        let registry = registry(QueueLimits {
+            max_messages: 3,
+            max_bytes: usize::MAX,
+        });
+        let queue = registry.handle("c");
+        for tag in ["n1", "n2", "n3"] {
+            queue.push(message("c", tag));
+        }
+        // Re-queue two unacked in-flight messages to the front of a full queue: the queue is
+        // now over its 3-message cap, and the newest (n2, n3) must be shed, not the just
+        // re-queued in-flight (old1, old2).
+        queue.requeue_front(vec![message("c", "old1"), message("c", "old2")]);
+        assert_eq!(queue.count(), 3);
+        let taken = queue.take(10).await;
+        assert_eq!(
+            taken.iter().map(|m| m.topic.as_str()).collect::<Vec<_>>(),
+            ["t/old1", "t/old2", "t/n1"]
+        );
     }
 
     #[tokio::test]

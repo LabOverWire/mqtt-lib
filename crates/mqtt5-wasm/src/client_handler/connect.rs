@@ -138,8 +138,8 @@ impl WasmClientHandler {
         self.fire_client_connect(&connect.client_id, connect.clean_start);
 
         if session_present {
-            self.deliver_queued_messages(&connect.client_id, writer)
-                .await?;
+            // Offline-queued messages are drained by the publish forwarder from the shared
+            // per-client queue; delivering them here too would double-deliver.
             self.resend_inflight_messages(writer).await?;
             self.advance_packet_id_past_inflight();
         }
@@ -297,8 +297,8 @@ impl WasmClientHandler {
                     );
 
                     if session_present {
-                        self.deliver_queued_messages(&pending.connect.client_id, writer)
-                            .await?;
+                        // Offline-queued messages are drained by the publish forwarder; see
+                        // handle_session above.
                         self.resend_inflight_messages(writer).await?;
                         self.advance_packet_id_past_inflight();
                     }

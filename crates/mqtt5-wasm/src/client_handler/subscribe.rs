@@ -228,26 +228,4 @@ impl WasmClientHandler {
 
         Ok(())
     }
-
-    pub(super) async fn deliver_queued_messages(
-        &mut self,
-        client_id: &str,
-        writer: &mut WasmWriter,
-    ) -> Result<()> {
-        let queued_messages = self.storage.get_queued_messages(client_id).await?;
-        self.storage.remove_queued_messages(client_id).await?;
-
-        if !queued_messages.is_empty() {
-            debug!(
-                "Delivering {} queued messages to {}",
-                queued_messages.len(),
-                client_id
-            );
-            for msg in queued_messages {
-                let publish = msg.to_publish_packet();
-                self.send_publish(publish, writer)?;
-            }
-        }
-        Ok(())
-    }
 }

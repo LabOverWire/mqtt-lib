@@ -532,6 +532,12 @@ impl MessageRouter {
     }
 
     pub async fn cleanup_stale_subscriptions(&self) {
+        // Purge expired entries first (the storage backends do this for their own queues in
+        // cleanup_expired, but the router's fallback queues, used when persistence is off, have
+        // no backend sweep), then reclaim the now-empty ones.
+        for queue in self.fallback_queues.handles() {
+            queue.purge_expired();
+        }
         self.fallback_queues.evict_idle();
         let subscribed_ids: HashSet<String> = {
             let exact = self.exact_subscriptions.read().await;
