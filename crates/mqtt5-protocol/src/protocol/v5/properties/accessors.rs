@@ -1,5 +1,5 @@
 use super::{Properties, PropertyId, PropertyValue};
-use crate::prelude::String;
+use crate::prelude::{String, Vec};
 use bytes::Bytes;
 
 impl Properties {
