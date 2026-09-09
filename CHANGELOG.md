@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [mqtt5 0.39.3] - 2026-09-08
+
+### Fixed
+
+- **Concurrent publishes to the same topic no longer race to open duplicate per-topic QUIC streams.** Under the per-topic delivery strategy the broker caches one server-initiated QUIC stream per topic in `topic_streams`. To send, `send_on_topic_stream` **removed** the stream's `StreamInfo` (owning the `SendStream`) from the map, wrote to it, then re-inserted it. Two publishes to the same topic that overlapped in that window found the entry absent and each opened a fresh stream, so a hot topic accumulated redundant streams, evicted other topics' cached streams under `max_cached_streams`, and reported an inflated per-topic stream count. The cache now holds each stream as an `Arc<StreamInfo>` whose `SendStream` sits behind its own `Mutex` (and `last_used` behind a `std::sync::Mutex`); `get_or_create_topic_stream` keeps the entry in the map and returns a shared handle, and a send locks only that stream's mutex. Concurrent sends to one topic now share the single cached stream, serialized by its mutex, instead of racing to create duplicates. Landed in #152, which lacked a changelog note for this broker change.
+
 ## [mqtt5 0.39.2] - 2026-09-07
 
 ### Fixed
