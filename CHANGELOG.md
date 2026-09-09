@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [mqtt5 0.40.0] - 2026-09-08
+
+### Breaking
+
+- **`MessageRouter::register_client` now takes a `DeliveryLanes` (two per-client lane senders) and a `QueueHandle` instead of a single delivery-channel sender, and new public types back the per-client delivery queue** (`ClientQueue`, `QueueHandle`, `QueueLimits`, `QueueRegistry`, `DeliveryLanes`, `Registration`, `Release`, and related). Code that drives the router directly — a custom broker front-end, as `mqtt5-wasm` does — must build the two lanes and obtain the client's queue handle; in-process broker use through `MqttBroker` is unaffected.
+
+### Fixed
+
+- **A saturating QoS 1 flood to a slow but still-connected subscriber no longer stalls delivery or grows broker memory without bound.** When a subscriber's bounded delivery channel filled, QoS >= 1 messages were diverted into the offline queue — the structure meant for *disconnected* clients — which was unbounded and never drained while the client stayed connected, so delivery to that subscriber stalled and broker RSS grew from ~9 MB to ~15 GB in a single run. The offline and live paths are now one ordered, bounded, back-pressured path: a per-client `ClientQueue` (bounded, drop-oldest) drained in bounded batches; two delivery lanes with a real Receive-Maximum window; the PUBACK/PUBREC withheld until the message is placed; and session takeover, clean-start discard, and bridge ingress reworked to keep it correct under the new model. The in-browser `mqtt5-wasm` broker moves to the same path. Reported in issue #148; two narrow residual edge cases are tracked as #150 and #151.
+
+## [mqttv5-cli 0.28.7] - 2026-09-08
+
+### Changed
+
+- Depends on `mqtt5` 0.40.
+
+## [mqtt5-wasm 1.4.6] - 2026-09-08
+
+### Changed
+
+- Depends on `mqtt5` 0.40 and `mqtt5-protocol` 0.15.1. The wasm broker's delivery path moves to the same bounded per-client delivery queue as the native broker (see mqtt5 0.40.0).
+
+## [mqtt5-protocol 0.15.1] - 2026-09-08
+
+### Added
+
+- **`Properties::subscription_identifiers()` and `Properties::remove_subscription_identifiers()`** — read every Subscription Identifier on a packet, or strip them all. Used by the broker's bridge ingress to deliver each overlapping topic mapping exactly once.
+
 ## [mqtt5 0.39.3] - 2026-09-08
 
 ### Fixed
