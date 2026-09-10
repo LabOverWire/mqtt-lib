@@ -749,6 +749,12 @@ fn validate_throughput_args(cmd: &BenchCommand) -> Result<usize> {
              delivered rate reflects one connection, not broker capacity. Use --publishers N (and --topics >= N) to measure capacity."
         );
     }
+    if cmd.subscribers == 1 {
+        eprintln!(
+            "warning: a single subscriber connection receives all delivered traffic through one read loop and one dispatch worker; \
+             the reported delivered rate can reflect the subscriber, not broker capacity. Use --subscribers N to measure capacity."
+        );
+    }
     Ok(num_topics)
 }
 
@@ -915,7 +921,11 @@ fn steady_state_mean(samples: &[u64], trim_frac: f64) -> f64 {
         return 0.0;
     }
     let n = usize_as_f64_lossy(samples.len());
-    let drop = (n * trim_frac.clamp(0.0, 0.49)).floor();
+    let trim = trim_frac.clamp(0.0, 0.49);
+    let mut drop = (n * trim).floor();
+    if trim > 0.0 && drop < 1.0 && n >= 3.0 {
+        drop = 1.0;
+    }
     let hi = n - drop;
     let kept: Vec<u64> = samples
         .iter()
@@ -2244,4 +2254,33 @@ fn inter_topic_spread(topic_samples: &[Vec<TimestampedSample>], window_ms: u64) 
     let max = spreads.last().copied().unwrap_or(0.0);
 
     (mean, p95, max)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::steady_state_mean;
+
+    #[test]
+    fn no_trim_is_plain_mean() {
+        assert!((steady_state_mean(&[10, 20, 30], 0.0) - 20.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn trim_drops_at_least_one_each_end_when_requested() {
+        assert!((steady_state_mean(&[100, 10, 100], 0.1) - 10.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn trim_leaves_at_least_one_sample_for_tiny_input() {
+        assert!((steady_state_mean(&[100, 10], 0.1) - 55.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn large_input_trims_the_documented_fraction() {
+        let mut samples = vec![0u64; 59];
+        for (i, s) in samples.iter_mut().enumerate() {
+            *s = if (5..54).contains(&i) { 100 } else { 1 };
+        }
+        assert!((steady_state_mean(&samples, 0.1) - 100.0).abs() < f64::EPSILON);
+    }
 }
