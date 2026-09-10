@@ -70,7 +70,11 @@ def extract_metric(data: dict) -> dict[str, float]:
             "p50_connect_us": results.get("p50_connect_us", 0),
         }
     elif mode == "hol-blocking":
-        return {"correlation": results.get("correlation", 0)}
+        return {
+            "windowed_correlation": results.get("windowed_correlation", 0),
+            "raw_correlation": results.get("raw_correlation", 0),
+            "spike_isolation_ratio": results.get("spike_isolation_ratio", 0),
+        }
     return {}
 
 
