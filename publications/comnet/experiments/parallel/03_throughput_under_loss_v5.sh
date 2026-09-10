@@ -5,7 +5,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/common_parallel.sh"
 EXPERIMENT="03_throughput_under_loss"
 LOSSES=(${LOSSES_OVERRIDE:-0 1 2 5 10})
 DELAY=10
-QOS_LEVELS=(0 1)
+QOS_LEVELS=(${QOS_OVERRIDE:-0})
 STRATEGIES=("control-only" "per-publish" "per-topic")
 RUNS_PER_DATAPOINT=15
 
