@@ -222,6 +222,11 @@ run_monitored_pub_only() {
     local output_dir="${RESULTS_DIR}/${experiment}"
     mkdir -p "$output_dir"
 
+    if [ -f "${output_dir}/${label}_run${RUNS_PER_DATAPOINT}.json" ]; then
+        echo "  skip (already complete): ${label}"
+        return 0
+    fi
+
     for run in $(seq 1 "$RUNS_PER_DATAPOINT"); do
         local run_label="${label}_run${run}"
         if [ "$BROKER_FRESH" = "1" ]; then
@@ -244,6 +249,11 @@ run_monitored_split() {
     local bench_args="$*"
     local output_dir="${RESULTS_DIR}/${experiment}"
     mkdir -p "$output_dir"
+
+    if [ -f "${output_dir}/${label}_run${RUNS_PER_DATAPOINT}.json" ]; then
+        echo "  skip (already complete): ${label}"
+        return 0
+    fi
 
     for run in $(seq 1 "$RUNS_PER_DATAPOINT"); do
         local run_label="${label}_run${run}"

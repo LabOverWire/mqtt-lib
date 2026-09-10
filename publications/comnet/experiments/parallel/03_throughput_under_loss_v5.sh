@@ -3,7 +3,7 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/common_parallel.sh"
 
 EXPERIMENT="03_throughput_under_loss"
-LOSSES=(0 1 2 5 10)
+LOSSES=(${LOSSES_OVERRIDE:-0 1 2 5 10})
 DELAY=10
 QOS_LEVELS=(0 1)
 STRATEGIES=("control-only" "per-publish" "per-topic")
@@ -21,13 +21,13 @@ for qos in "${QOS_LEVELS[@]}"; do
         label="tcp_qos${qos}_loss${loss}pct"
         echo "[${EXPERIMENT}] ${label}"
         run_monitored_split "$EXPERIMENT" "$label" \
-            "--url mqtt://${BROKER_IP}:1883 --mode throughput --duration 60 --warmup 5 --payload-size 256 --qos ${qos} --publishers 4 --subscribers 4"
+            "--url mqtt://${BROKER_IP}:1883 --mode throughput --duration 60 --warmup 5 --payload-size 256 --qos ${qos} --publishers 16 --subscribers 8 --inflight 64"
 
         for strategy in "${STRATEGIES[@]}"; do
             label="quic-${strategy}_qos${qos}_loss${loss}pct"
             echo "[${EXPERIMENT}] ${label}"
             run_monitored_split "$EXPERIMENT" "$label" \
-                "--url quic://${BROKER_IP}:14567 --ca-cert /opt/mqtt-certs/ca.pem --quic-stream-strategy ${strategy} --mode throughput --duration 60 --warmup 5 --payload-size 256 --qos ${qos} --publishers 4 --subscribers 4"
+                "--url quic://${BROKER_IP}:14567 --ca-cert /opt/mqtt-certs/ca.pem --quic-stream-strategy ${strategy} --mode throughput --duration 60 --warmup 5 --payload-size 256 --qos ${qos} --publishers 16 --subscribers 8 --inflight 64"
         done
 
         clear_netem
