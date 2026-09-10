@@ -146,7 +146,11 @@ pub struct BenchCommand {
     )]
     pub sub_connections: usize,
 
-    #[arg(long, default_value = "0")]
+    #[arg(
+        long,
+        default_value = "0",
+        help = "Target offered rate in msg/s. Throughput mode: 0 saturates (offer as fast as the window allows); a positive value paces the publishers to that aggregate rate on an absolute-deadline schedule, which is how you measure a steady state without building a broker backlog. Latency/HOL modes: per-pump send rate"
+    )]
     pub rate: u64,
 
     #[arg(
@@ -646,6 +650,7 @@ struct LoadConfig {
     payload_size: usize,
     qos: QoS,
     inflight: usize,
+    rate: u64,
 }
 
 fn spawn_load(
@@ -661,6 +666,12 @@ fn spawn_load(
         return Vec::new();
     }
     let workers_per_conn = cfg.inflight.max(1);
+    let active_conns = cfg.num_topics.min(num_conns).max(1);
+    let total_workers = active_conns.saturating_mul(workers_per_conn).max(1);
+    let worker_count = u64::try_from(total_workers).unwrap_or(u64::MAX).max(1);
+    let worker_interval_ns = 1_000_000_000u64
+        .saturating_mul(worker_count)
+        .checked_div(cfg.rate);
     let mut handles = Vec::with_capacity(num_conns * workers_per_conn);
     for (conn_idx, client) in pub_clients.iter().enumerate() {
         let conn_topics: Vec<String> = (0..cfg.num_topics)
@@ -680,10 +691,28 @@ fn spawn_load(
             let payload_size = cfg.payload_size;
             let qos = cfg.qos;
             let stride = u32::try_from(workers_per_conn).unwrap_or(1).max(1);
+            let global_worker = conn_idx.saturating_mul(workers_per_conn) + worker_idx;
             handles.push(tokio::spawn(async move {
                 let mut seq = u32::try_from(worker_idx).unwrap_or(0);
                 let mut cursor = worker_idx % topics.len();
+                let schedule_start = worker_interval_ns.map(|interval_ns| {
+                    let idx = u64::try_from(global_worker).unwrap_or(0);
+                    let stagger_ns = (interval_ns / worker_count).saturating_mul(idx);
+                    (
+                        Instant::now() + Duration::from_nanos(stagger_ns),
+                        interval_ns,
+                    )
+                });
+                let mut tick: u64 = 0;
                 while running.load(Ordering::Relaxed) {
+                    if let Some((start, interval_ns)) = schedule_start {
+                        let target = start + Duration::from_nanos(interval_ns.saturating_mul(tick));
+                        tick = tick.saturating_add(1);
+                        let now = Instant::now();
+                        if target > now {
+                            tokio::time::sleep(target - now).await;
+                        }
+                    }
                     let topic = &topics[cursor % topics.len()];
                     cursor = cursor.wrapping_add(1);
                     let payload = encode_payload(format, payload_size, seq);
@@ -795,6 +824,7 @@ async fn run_throughput(cmd: BenchCommand) -> Result<()> {
         payload_size: cmd.payload_size,
         qos: cmd.qos,
         inflight: cmd.inflight,
+        rate: cmd.rate,
     };
     let handles = spawn_load(
         &pub_clients,
