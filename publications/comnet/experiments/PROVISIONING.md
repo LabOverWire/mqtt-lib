@@ -30,9 +30,13 @@ experiments in parallel. So a single experiment needs only 3 VMs.
 
 ## Run order
 
-1. **Exp 3 — throughput under loss** (contaminated by broker decay; single group).
-2. **Exp 1 — connection latency** (the empty QUIC 0 ms cell).
-3. Remaining (HOL family, Exp 5/6) per `run_all_v5.sh`.
+Exp 3 (throughput under loss) is **complete** and needs no re-run: the QoS 0 data in
+`results-v5/03_throughput_under_loss/` was collected under the current methodology. Experiment 3 is QoS 0
+only, so the QoS 1 half of the sweep described below no longer applies. The Exp 3 walkthrough is kept as the
+worked example for bringing the fleet up — the same steps apply to any experiment.
+
+1. **Exp 1 — connection latency** (the empty QUIC 0 ms cell).
+2. Remaining (HOL family, Exp 5/6) per `run_all_v5.sh`.
 
 ---
 
