@@ -16,13 +16,13 @@ for conc in "${CONCURRENCIES[@]}"; do
     label="tcp_${conc}conn"
     echo "[${EXPERIMENT}] ${label}"
     run_monitored_split "$EXPERIMENT" "$label" \
-        "--url mqtt://${BROKER_IP}:1883 --mode throughput --duration 60 --warmup 5 --payload-size 256 --publishers ${conc} --subscribers ${conc}"
+        "--url mqtt://${BROKER_IP}:1883 --mode throughput --duration 60 --warmup 5 --payload-size 256 --publishers ${conc} --subscribers ${conc} --inflight 64"
 
     for strategy in "${STRATEGIES[@]}"; do
         label="quic-${strategy}_${conc}conn"
         echo "[${EXPERIMENT}] ${label}"
         run_monitored_split "$EXPERIMENT" "$label" \
-            "--url quic://${BROKER_IP}:14567 --ca-cert /opt/mqtt-certs/ca.pem --quic-stream-strategy ${strategy} --mode throughput --duration 60 --warmup 5 --payload-size 256 --publishers ${conc} --subscribers ${conc}"
+            "--url quic://${BROKER_IP}:14567 --ca-cert /opt/mqtt-certs/ca.pem --quic-stream-strategy ${strategy} --mode throughput --duration 60 --warmup 5 --payload-size 256 --publishers ${conc} --subscribers ${conc} --inflight 64"
     done
 done
 

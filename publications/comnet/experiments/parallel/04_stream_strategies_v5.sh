@@ -24,7 +24,7 @@ for strategy in "${STRATEGIES[@]}"; do
         label="${strategy}_${ntopics}topics_throughput"
         echo "[${EXPERIMENT}] ${label}"
         run_monitored_split "$EXPERIMENT" "$label" \
-            "--url quic://${BROKER_IP}:14567 --ca-cert /opt/mqtt-certs/ca.pem --quic-stream-strategy ${strategy} --mode throughput --duration 60 --warmup 5 --payload-size 256 --publishers 1 --topics ${ntopics} --subscribers 1"
+            "--url quic://${BROKER_IP}:14567 --ca-cert /opt/mqtt-certs/ca.pem --quic-stream-strategy ${strategy} --mode throughput --duration 60 --warmup 5 --payload-size 256 --publishers 1 --topics ${ntopics} --subscribers 1 --inflight 64"
     done
 done
 
