@@ -3,7 +3,24 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+# config.env supplies defaults, but a value already set in the environment wins,
+# so `RUNS_PER_DATAPOINT=1 bash run/foo.sh` behaves as written.
+_cfg_keys="GCP_PROJECT_ID BROKER_IP BROKER_SSH_IP CLIENT_IP REPO_URL REPO_BRANCH SSH_USER SSH_KEY_PATH RUNS_PER_DATAPOINT"
+for _k in $_cfg_keys; do
+    if [ -n "${!_k+set}" ]; then
+        eval "_preset_${_k}=\${${_k}}"
+    fi
+done
 source "${ROOT_DIR}/setup/config.env"
+for _k in $_cfg_keys; do
+    _p="_preset_${_k}"
+    if [ -n "${!_p+set}" ]; then
+        eval "${_k}=\${${_p}}"
+        unset "${_p}"
+    fi
+done
+unset _cfg_keys _k _p
 
 : "${BROKER_IP:?Set BROKER_IP in config.env}"
 : "${BROKER_SSH_IP:=${BROKER_IP}}"
@@ -63,11 +80,11 @@ restart_broker() {
 apply_netem() {
     local delay_ms="$1"
     local loss_pct="${2:-0}"
-    ssh_client "sudo bash /opt/mqtt-lib/experiments/netem/apply.sh ${delay_ms} ${loss_pct}"
+    ssh_broker "sudo bash /opt/mqtt-lib/experiments/netem/apply.sh ${delay_ms} ${loss_pct}"
 }
 
 clear_netem() {
-    ssh_client "sudo bash /opt/mqtt-lib/experiments/netem/clear.sh"
+    ssh_broker "sudo bash /opt/mqtt-lib/experiments/netem/clear.sh"
 }
 
 MONITOR_PID=""

@@ -44,8 +44,12 @@ def load_data(results_dir: Path):
             for run in RUNS:
                 tp_path = exp_dir / f"{strategy}_{topics}topics_throughput_run{run}.json"
                 if tp_path.exists():
-                    with open(tp_path) as f:
-                        d = json.load(f)
+                    try:
+                        with open(tp_path) as f:
+                            d = json.load(f)
+                    except json.JSONDecodeError:
+                        print(f"  warning: skipping invalid JSON: {tp_path.name}")
+                        continue
                     tp_values.append(d["results"]["throughput_avg"])
 
             if tp_values:

@@ -30,9 +30,13 @@ def load_topic_scaling_data(results_dir: Path):
             for run in RUNS:
                 filepath = exp02_dir / f"{transport}_loss1pct_run{run}.json"
                 if filepath.exists():
+                    try:
+                        with open(filepath) as f:
+                            result = json.load(f)
+                    except json.JSONDecodeError:
+                        print(f"  warning: skipping invalid JSON: {filepath.name}")
+                        continue
                     sources.setdefault(transport, {}).setdefault(8, [])
-                    with open(filepath) as f:
-                        result = json.load(f)
                     sources[transport][8].append(
                         result["results"]["windowed_correlation"]
                     )
@@ -46,11 +50,15 @@ def load_topic_scaling_data(results_dir: Path):
                         / f"{transport}_{topic_count}topics_run{run}.json"
                     )
                     if filepath.exists():
+                        try:
+                            with open(filepath) as f:
+                                result = json.load(f)
+                        except json.JSONDecodeError:
+                            print(f"  warning: skipping invalid JSON: {filepath.name}")
+                            continue
                         sources.setdefault(transport, {}).setdefault(
                             topic_count, []
                         )
-                        with open(filepath) as f:
-                            result = json.load(f)
                         sources[transport][topic_count].append(
                             result["results"]["windowed_correlation"]
                         )
