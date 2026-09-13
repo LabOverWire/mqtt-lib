@@ -5,7 +5,24 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 : "${GROUP:?Set GROUP=1|2|3 before sourcing common_parallel.sh}"
+
+# The group env supplies defaults, but a value already set in the environment wins,
+# so `RUNS_PER_DATAPOINT=1 GROUP=1 bash parallel/foo.sh` behaves as written.
+_cfg_keys="BROKER_IP BROKER_SSH_IP PUB_IP PUB_INTERNAL_IP SUB_IP SUB_PROXY SSH_USER SSH_KEY_PATH RUNS_PER_DATAPOINT"
+for _k in $_cfg_keys; do
+    if [ -n "${!_k+set}" ]; then
+        eval "_preset_${_k}=\${${_k}}"
+    fi
+done
 source "${SCRIPT_DIR}/group${GROUP}.env"
+for _k in $_cfg_keys; do
+    _p="_preset_${_k}"
+    if [ -n "${!_p+set}" ]; then
+        eval "${_k}=\${${_p}}"
+        unset "${_p}"
+    fi
+done
+unset _cfg_keys _k _p
 
 : "${BROKER_IP:?Set BROKER_IP in group${GROUP}.env}"
 : "${BROKER_SSH_IP:=${BROKER_IP}}"
