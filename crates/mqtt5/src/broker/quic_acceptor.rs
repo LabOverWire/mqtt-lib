@@ -628,6 +628,7 @@ async fn run_quic_handler_inner(
 
     spawn_datagram_reader(connection.clone(), packet_tx.clone(), peer_addr, label);
     spawn_bi_accept_loop(connection.clone(), flow_registry.clone(), peer_addr, label);
+    spawn_quic_stats_sampler(connection.clone(), peer_addr);
     spawn_uni_accept_loop(
         connection,
         packet_tx,
@@ -636,6 +637,62 @@ async fn run_quic_handler_inner(
         flow_closed_tx,
         label,
     );
+}
+
+/// Samples this connection's QUIC path statistics to CSV, one row every 100 ms.
+///
+/// Enabled only when `MQTT5_QUIC_STATS_DIR` names a directory. The broker is the
+/// sender on the delivery path, so unlike a client's counters these describe loss
+/// and congestion on the broker-to-subscriber direction.
+fn spawn_quic_stats_sampler(connection: Arc<Connection>, peer_addr: SocketAddr) {
+    let Ok(dir) = std::env::var("MQTT5_QUIC_STATS_DIR") else {
+        return;
+    };
+    if dir.is_empty() {
+        return;
+    }
+    tokio::spawn(async move {
+        use std::io::Write as _;
+        if std::fs::create_dir_all(&dir).is_err() {
+            return;
+        }
+        let name = peer_addr.to_string().replace([':', '.'], "-");
+        let path = std::path::Path::new(&dir).join(format!("broker_quic_{name}.csv"));
+        let Ok(mut out) = std::fs::File::create(&path) else {
+            return;
+        };
+        if writeln!(
+            out,
+            "timestamp_ns,rtt_us,cwnd,lost_packets,congestion_events,sent_packets,stream_data_blocked,data_blocked"
+        )
+        .is_err()
+        {
+            return;
+        }
+        let mut ticker = tokio::time::interval(Duration::from_millis(100));
+        while connection.close_reason().is_none() {
+            ticker.tick().await;
+            let stats = connection.stats();
+            let timestamp_ns = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX));
+            let rtt_us = u64::try_from(connection.rtt().as_micros()).unwrap_or(u64::MAX);
+            if writeln!(
+                out,
+                "{timestamp_ns},{rtt_us},{},{},{},{},{},{}",
+                stats.path.cwnd,
+                stats.path.lost_packets,
+                stats.path.congestion_events,
+                stats.path.sent_packets,
+                stats.frame_rx.stream_data_blocked,
+                stats.frame_rx.data_blocked
+            )
+            .is_err()
+            {
+                return;
+            }
+        }
+    });
 }
 
 fn spawn_datagram_reader(
