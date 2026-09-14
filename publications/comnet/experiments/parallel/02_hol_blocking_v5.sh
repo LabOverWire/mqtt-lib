@@ -3,9 +3,9 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/common_parallel.sh"
 
 EXPERIMENT="02_hol_blocking"
-LOSSES=(0 1 2 5)
+LOSSES=(${LOSSES_OVERRIDE:-0 1 2 5})
 DELAY=25
-RUNS_PER_DATAPOINT=15
+RUNS_PER_DATAPOINT=${RUNS_OVERRIDE:-15}
 
 RESULTS_DIR="${ROOT_DIR}/results-v5"
 mkdir -p "$RESULTS_DIR"
@@ -68,6 +68,14 @@ collect_traces() {
         scp -i "$SSH_KEY_PATH" "${SSH_USER}@${PUB_IP}:${remote_dir}/${csv}" \
             "${output_dir}/${run_label}_${csv}" 2>/dev/null || true
     done
+    if [ "${COLLECT_QUIC_STATS:-0}" = "1" ]; then
+        local idx=0
+        for bcsv in $(ssh_broker "ls /tmp/quic-stats/*.csv 2>/dev/null" 2>/dev/null); do
+            idx=$((idx + 1))
+            scp -i "$SSH_KEY_PATH" $SSH_OPTS "${SSH_USER}@${BROKER_SSH_IP}:${bcsv}" \
+                "${output_dir}/${run_label}_broker_quic_${idx}.csv" 2>/dev/null || true
+        done
+    fi
     ssh_pub "rm -rf ${remote_dir}" 2>/dev/null || true
 }
 

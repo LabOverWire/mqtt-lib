@@ -48,7 +48,12 @@ start_broker() {
     local attempt
     for attempt in 1 2 3; do
         echo "starting broker on ${BROKER_IP} (group ${GROUP}) [attempt ${attempt}]..."
-        BROKER_PID=$(ssh_broker "ulimit -n 65536; nohup mqttv5 broker --allow-anonymous --host 0.0.0.0:1883 --storage-backend memory --max-clients 50000 \
+        local quic_stats_env=""
+        if [ "${COLLECT_QUIC_STATS:-0}" = "1" ]; then
+            ssh_broker "rm -rf /tmp/quic-stats; mkdir -p /tmp/quic-stats" 2>/dev/null || true
+            quic_stats_env="MQTT5_QUIC_STATS_DIR=/tmp/quic-stats "
+        fi
+        BROKER_PID=$(ssh_broker "ulimit -n 65536; ${quic_stats_env}nohup mqttv5 broker --allow-anonymous --host 0.0.0.0:1883 --storage-backend memory --max-clients 50000 \
             ${extra_flags} > /tmp/broker.log 2>&1 & echo \$!") || BROKER_PID=""
         sleep 2
         if [ -n "${BROKER_PID}" ] && ssh_broker "kill -0 ${BROKER_PID}" 2>/dev/null; then
