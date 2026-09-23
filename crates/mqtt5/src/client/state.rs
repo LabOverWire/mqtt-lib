@@ -36,6 +36,7 @@ impl MqttClient {
         inner.reconnect_attempt = 0;
     }
 
+    #[cfg(feature = "transport-quic")]
     pub(crate) async fn recover_quic_flows(&self) {
         let inner = self.inner.read().await;
         match inner.recover_flows().await {
@@ -120,7 +121,7 @@ impl MqttClient {
             properties.set_subscription_identifier(id);
         }
         let packet = SubscribePacket {
-            packet_id: inner.packet_id_generator.next(),
+            packet_id: 0,
             filters: vec![crate::packet::subscribe::TopicFilter {
                 filter: topic.to_string(),
                 options,
@@ -279,44 +280,15 @@ impl MqttClient {
             match reconnection_result {
                 Ok(_) => {
                     tracing::info!("Reconnected successfully after {} attempts", attempt);
-
-                    self.send_queued_messages().await;
-
                     return Ok(());
                 }
                 Err(e) => {
                     tracing::warn!("Reconnection attempt {} failed: {}", attempt, e);
 
-                    #[allow(clippy::cast_possible_truncation)]
-                    {
-                        delay = std::cmp::min(
-                            Duration::from_secs_f64(delay.as_secs_f64() * config.backoff_factor()),
-                            config.max_delay,
-                        );
-                    }
+                    delay =
+                        Duration::try_from_secs_f64(delay.as_secs_f64() * config.backoff_factor())
+                            .map_or(config.max_delay, |next| next.min(config.max_delay));
                 }
-            }
-        }
-    }
-
-    pub(crate) async fn send_queued_messages(&self) {
-        let messages = {
-            let inner = self.inner.read().await;
-            let mut queued = inner.queued_messages.lock();
-            std::mem::take(&mut *queued)
-        };
-
-        for mut msg in messages {
-            msg.dup = true;
-
-            let size_check = self.inner.read().await.check_publish_size(&msg).await;
-            if let Err(e) = size_check {
-                tracing::warn!("Dropping queued message exceeding negotiated packet size: {e}");
-                continue;
-            }
-
-            if let Err(e) = self.publish_packet(msg).await {
-                tracing::warn!("Failed to send queued message: {e}");
             }
         }
     }
@@ -343,7 +315,7 @@ impl MqttClient {
             properties.set_subscription_identifier(id);
         }
         let packet = SubscribePacket {
-            packet_id: inner.packet_id_generator.next(),
+            packet_id: 0,
             filters: vec![crate::packet::subscribe::TopicFilter {
                 filter: topic.to_string(),
                 options,
@@ -355,20 +327,5 @@ impl MqttClient {
             .subscribe_with_callback_internal(packet, callback_id, SubscriptionPersistence::Skip)
             .await?;
         Ok(())
-    }
-
-    /// Internal method to publish a packet
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if publish fails
-    pub(crate) async fn publish_packet(
-        &self,
-        packet: crate::packet::publish::PublishPacket,
-    ) -> Result<()> {
-        let mut inner = self.inner.write().await;
-        inner
-            .send_packet(crate::packet::Packet::Publish(packet))
-            .await
     }
 }

@@ -1,6 +1,8 @@
 use crate::error::{MqttError, Result};
 use crate::time::{Duration, Instant};
+use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::{Notify, RwLock, Semaphore};
 
@@ -25,6 +27,8 @@ pub struct FlowControlManager {
     inbound_receive_maximum: u16,
     /// Currently in-flight inbound messages from server (`packet_id` -> timestamp)
     inbound_in_flight: Arc<RwLock<HashMap<u16, Instant>>>,
+    quota_debt: Arc<AtomicUsize>,
+    replay_slots: Arc<Mutex<Option<Arc<Semaphore>>>>,
 }
 
 /// A pending publish request waiting for quota
@@ -63,6 +67,8 @@ impl FlowControlManager {
             config,
             inbound_receive_maximum: 65535,
             inbound_in_flight: Arc::new(RwLock::new(HashMap::new())),
+            quota_debt: Arc::new(AtomicUsize::new(0)),
+            replay_slots: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -83,6 +89,9 @@ impl FlowControlManager {
         }
 
         let mut inbound = self.inbound_in_flight.write().await;
+        if inbound.contains_key(&packet_id) {
+            return Ok(());
+        }
         if inbound.len() >= usize::from(self.inbound_receive_maximum) {
             return Err(MqttError::ReceiveMaximumExceeded);
         }
@@ -100,14 +109,140 @@ impl FlowControlManager {
         self.inbound_in_flight.read().await.len()
     }
 
+    pub async fn clear_inbound(&self) {
+        self.inbound_in_flight.write().await.clear();
+    }
+
+    pub async fn reset_for_connection(
+        &mut self,
+        receive_maximum: u16,
+        retained_in_flight: &[u16],
+        replay: bool,
+    ) -> Option<Arc<Semaphore>> {
+        let now = Instant::now();
+        let mut in_flight = self.in_flight.write().await;
+        in_flight.clear();
+        in_flight.extend(retained_in_flight.iter().map(|id| (*id, now)));
+        let held = in_flight.len();
+        drop(in_flight);
+
+        self.receive_maximum = receive_maximum;
+        let capacity = if receive_maximum == 0 {
+            Semaphore::MAX_PERMITS
+        } else {
+            usize::from(receive_maximum).saturating_sub(held)
+        };
+        let debt = if receive_maximum == 0 {
+            0
+        } else {
+            held.saturating_sub(usize::from(receive_maximum))
+        };
+        self.quota_debt.store(debt, Ordering::SeqCst);
+
+        let (main_permits, replay_slots) = if replay {
+            (0, Some(Arc::new(Semaphore::new(capacity))))
+        } else {
+            (capacity, None)
+        };
+        let previous_slots =
+            std::mem::replace(&mut *self.replay_slots.lock(), replay_slots.clone());
+        if let Some(slots) = previous_slots {
+            slots.close();
+        }
+        let previous = std::mem::replace(
+            &mut self.quota_semaphore,
+            Arc::new(Semaphore::new(main_permits)),
+        );
+        previous.close();
+        self.quota_available.notify_waiters();
+        replay_slots
+    }
+
+    pub async fn finish_replay(&self, slots: &Arc<Semaphore>) {
+        let in_flight = self.in_flight.write().await;
+        let mut current = self.replay_slots.lock();
+        if current
+            .as_ref()
+            .is_some_and(|active| Arc::ptr_eq(active, slots))
+        {
+            *current = None;
+            let free = slots.available_permits();
+            slots.close();
+            self.quota_semaphore.add_permits(free);
+            self.quota_available.notify_waiters();
+        }
+        drop(current);
+        drop(in_flight);
+    }
+
+    pub async fn claim_send_quota(&self, semaphore: &Arc<Semaphore>, packet_id: u16) -> bool {
+        let issued_by_current = Arc::ptr_eq(semaphore, &self.quota_semaphore)
+            || self
+                .replay_slots
+                .lock()
+                .as_ref()
+                .is_some_and(|slots| Arc::ptr_eq(slots, semaphore));
+        if issued_by_current {
+            self.in_flight
+                .write()
+                .await
+                .insert(packet_id, Instant::now());
+        }
+        issued_by_current
+    }
+
+    /// # Errors
+    ///
+    /// Returns `FlowControlExceeded` when the backpressure timeout elapses and
+    /// `NotConnected` when the quota was closed by a disconnect.
+    pub async fn acquire_shared_send_quota(flow: &Arc<RwLock<Self>>, packet_id: u16) -> Result<()> {
+        loop {
+            let (semaphore, timeout) = {
+                let manager = flow.read().await;
+                if manager.receive_maximum == 0 {
+                    return Ok(());
+                }
+                (
+                    Arc::clone(&manager.quota_semaphore),
+                    manager.config.backpressure_timeout,
+                )
+            };
+            let acquired = match timeout {
+                Some(limit) => tokio::time::timeout(limit, semaphore.acquire())
+                    .await
+                    .map_err(|_| MqttError::FlowControlExceeded)?,
+                None => semaphore.acquire().await,
+            };
+            if let Ok(permit) = acquired {
+                permit.forget();
+                if flow
+                    .read()
+                    .await
+                    .claim_send_quota(&semaphore, packet_id)
+                    .await
+                {
+                    return Ok(());
+                }
+            } else if Arc::ptr_eq(&semaphore, &flow.read().await.quota_semaphore) {
+                return Err(MqttError::NotConnected);
+            }
+        }
+    }
+
+    pub fn close_send_quota(&self) {
+        self.quota_semaphore.close();
+        if let Some(slots) = self.replay_slots.lock().take() {
+            slots.close();
+        }
+    }
+
     /// Checks if we can send a new `QoS` 1/2 message
     #[must_use]
     pub fn can_send(&self) -> bool {
         if self.receive_maximum == 0 {
-            return true; // 0 means unlimited
+            return true;
         }
 
-        // Check if we have available permits
         self.quota_semaphore.available_permits() > 0
     }
 
@@ -118,10 +253,9 @@ impl FlowControlManager {
     /// Returns an error if the operation fails
     pub async fn acquire_send_quota(&self, packet_id: u16) -> Result<()> {
         if self.receive_maximum == 0 {
-            return Ok(()); // Unlimited
+            return Ok(());
         }
 
-        // Try to acquire a permit
         let permit_result = if let Some(timeout) = self.config.backpressure_timeout {
             tokio::time::timeout(timeout, self.quota_semaphore.acquire())
                 .await
@@ -132,13 +266,11 @@ impl FlowControlManager {
 
         let permit = permit_result.map_err(|_| MqttError::FlowControlExceeded)?;
 
-        // Record the in-flight message
         {
             let mut in_flight = self.in_flight.write().await;
             in_flight.insert(packet_id, Instant::now());
         }
 
-        // Forget the permit (keep it acquired)
         permit.forget();
 
         Ok(())
@@ -151,22 +283,19 @@ impl FlowControlManager {
     /// Returns an error if the operation fails
     pub async fn try_acquire_send_quota(&self, packet_id: u16) -> Result<()> {
         if self.receive_maximum == 0 {
-            return Ok(()); // Unlimited
+            return Ok(());
         }
 
-        // Try to acquire a permit without waiting
         let permit = self
             .quota_semaphore
             .try_acquire()
             .map_err(|_| MqttError::FlowControlExceeded)?;
 
-        // Record the in-flight message
         {
             let mut in_flight = self.in_flight.write().await;
             in_flight.insert(packet_id, Instant::now());
         }
 
-        // Forget the permit (keep it acquired)
         permit.forget();
 
         Ok(())
@@ -194,10 +323,19 @@ impl FlowControlManager {
                 return Err(MqttError::PacketIdNotFound(packet_id));
             }
 
-            // Release the quota by adding a permit back to the semaphore
-            self.quota_semaphore.add_permits(1);
+            let paid_debt = self
+                .quota_debt
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |debt| {
+                    debt.checked_sub(1)
+                })
+                .is_ok();
+            if !paid_debt {
+                match self.replay_slots.lock().as_ref() {
+                    Some(slots) => slots.add_permits(1),
+                    None => self.quota_semaphore.add_permits(1),
+                }
+            }
 
-            // Notify waiting requests
             self.quota_available.notify_one();
         }
 
@@ -220,9 +358,7 @@ impl FlowControlManager {
         let old_value = self.receive_maximum;
         self.receive_maximum = value;
 
-        // Adjust semaphore permits based on the change
         if value == 0 {
-            // Unlimited - give maximum permits
             let current_permits = self.quota_semaphore.available_permits();
             let max_permits = tokio::sync::Semaphore::MAX_PERMITS;
             if current_permits < max_permits {
@@ -230,8 +366,6 @@ impl FlowControlManager {
                     .add_permits(max_permits - current_permits);
             }
         } else if old_value == 0 {
-            // Was unlimited, now limited
-            // Close the semaphore and create new one with proper permits
             let in_flight_count = self.in_flight.read().await.len();
             let available_permits = if usize::from(value) > in_flight_count {
                 usize::from(value) - in_flight_count
@@ -240,7 +374,6 @@ impl FlowControlManager {
             };
             self.quota_semaphore = Arc::new(Semaphore::new(available_permits));
         } else {
-            // Both were limited, adjust the difference
             let current_permits = self.quota_semaphore.available_permits();
             let in_flight_count = self.in_flight.read().await.len();
             let target_permits = if usize::from(value) > in_flight_count {
@@ -255,7 +388,6 @@ impl FlowControlManager {
                         .add_permits(target_permits - current_permits);
                 }
                 std::cmp::Ordering::Less => {
-                    // Need to reduce permits - acquire the difference and forget them
                     let to_remove = current_permits - target_permits;
                     for _ in 0..to_remove {
                         if let Ok(permit) = self.quota_semaphore.try_acquire() {
@@ -263,13 +395,10 @@ impl FlowControlManager {
                         }
                     }
                 }
-                std::cmp::Ordering::Equal => {
-                    // No change needed
-                }
+                std::cmp::Ordering::Equal => {}
             }
         }
 
-        // Notify waiting requests about quota changes
         self.quota_available.notify_waiters();
     }
 
@@ -319,7 +448,6 @@ impl FlowControlManager {
                 }
             }
 
-            // Release quota for expired messages
             if released_count > 0 && self.receive_maximum > 0 {
                 self.quota_semaphore.add_permits(released_count);
                 self.quota_available.notify_waiters();
@@ -352,7 +480,6 @@ mod tests {
 
         assert!(fc.can_send());
 
-        // Register some messages
         fc.register_send(1).await.unwrap();
         fc.register_send(2).await.unwrap();
         fc.register_send(3).await.unwrap();
@@ -360,10 +487,8 @@ mod tests {
         assert_eq!(fc.in_flight_count().await, 3);
         assert!(!fc.can_send());
 
-        // Try to register another
         assert!(fc.register_send(4).await.is_err());
 
-        // Acknowledge one
         fc.acknowledge(2).await.unwrap();
         assert_eq!(fc.in_flight_count().await, 2);
         assert!(fc.can_send());
@@ -371,16 +496,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_flow_control_unlimited() {
-        let fc = FlowControlManager::new(0); // 0 means unlimited
+        let fc = FlowControlManager::new(0);
 
-        // Should always be able to send
         assert!(fc.can_send());
 
-        // Registration should be no-op
         fc.register_send(1).await.unwrap();
         fc.register_send(2).await.unwrap();
 
-        assert_eq!(fc.in_flight_count().await, 0); // Not tracked when unlimited
+        assert_eq!(fc.in_flight_count().await, 0);
     }
 
     #[tokio::test]
@@ -390,12 +513,10 @@ mod tests {
         fc.register_send(1).await.unwrap();
         fc.register_send(2).await.unwrap();
 
-        // Sleep a bit
         tokio::time::sleep(crate::time::Duration::from_millis(10)).await;
 
         fc.register_send(3).await.unwrap();
 
-        // Check expired with very short timeout
         let expired = fc.get_expired(crate::time::Duration::from_millis(5)).await;
         assert_eq!(expired.len(), 2);
         assert!(expired.contains(&1));
@@ -403,22 +524,116 @@ mod tests {
         assert!(!expired.contains(&3));
     }
 
+    #[tokio::test]
+    async fn reset_for_connection_reclaims_quota_held_by_the_previous_connection() {
+        let flow = Arc::new(RwLock::new(FlowControlManager::new(1)));
+        flow.read().await.acquire_send_quota(1).await.unwrap();
+        assert!(!flow.read().await.can_send());
+
+        let replay = flow.write().await.reset_for_connection(1, &[], false).await;
+        assert!(replay.is_none());
+        assert_eq!(flow.read().await.in_flight_count().await, 0);
+        FlowControlManager::acquire_shared_send_quota(&flow, 2)
+            .await
+            .unwrap();
+        assert_eq!(flow.read().await.in_flight_count().await, 1);
+    }
+
+    #[tokio::test]
+    async fn replay_slots_take_released_quota_until_replay_finishes() {
+        let flow = Arc::new(RwLock::new(FlowControlManager::new(10)));
+        let slots = flow
+            .write()
+            .await
+            .reset_for_connection(1, &[], true)
+            .await
+            .unwrap();
+        assert_eq!(flow.read().await.available_permits(), 0);
+        assert_eq!(slots.available_permits(), 1);
+
+        slots.acquire().await.unwrap().forget();
+        assert!(flow.read().await.claim_send_quota(&slots, 7).await);
+        flow.read().await.acknowledge(7).await.unwrap();
+        assert_eq!(slots.available_permits(), 1);
+        assert_eq!(flow.read().await.available_permits(), 0);
+
+        flow.read().await.finish_replay(&slots).await;
+        assert!(slots.is_closed());
+        assert_eq!(flow.read().await.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn retained_in_flight_above_receive_maximum_is_repaid_before_quota_returns() {
+        let flow = Arc::new(RwLock::new(FlowControlManager::new(10)));
+        flow.write()
+            .await
+            .reset_for_connection(1, &[1, 2], false)
+            .await;
+        assert_eq!(flow.read().await.available_permits(), 0);
+
+        flow.read().await.acknowledge(1).await.unwrap();
+        assert_eq!(flow.read().await.available_permits(), 0);
+        flow.read().await.acknowledge(2).await.unwrap();
+        assert_eq!(flow.read().await.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn stale_permit_from_a_reset_quota_is_not_claimed() {
+        let flow = Arc::new(RwLock::new(FlowControlManager::new(2)));
+        let stale = Arc::clone(&flow.read().await.quota_semaphore);
+        flow.write().await.reset_for_connection(2, &[], false).await;
+        assert!(stale.is_closed());
+        assert!(!flow.read().await.claim_send_quota(&stale, 1).await);
+    }
+
+    #[tokio::test]
+    async fn closed_send_quota_fails_waiting_publishers() {
+        let flow = Arc::new(RwLock::new(FlowControlManager::new(1)));
+        FlowControlManager::acquire_shared_send_quota(&flow, 1)
+            .await
+            .unwrap();
+        let waiter = {
+            let flow = Arc::clone(&flow);
+            tokio::spawn(
+                async move { FlowControlManager::acquire_shared_send_quota(&flow, 2).await },
+            )
+        };
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        flow.read().await.close_send_quota();
+        assert!(matches!(
+            waiter.await.unwrap(),
+            Err(MqttError::NotConnected)
+        ));
+    }
+
+    #[tokio::test]
+    async fn duplicate_inbound_packet_id_is_not_counted_twice() {
+        let mut fc = FlowControlManager::new(10);
+        fc.set_inbound_receive_maximum(1);
+        fc.register_inbound_publish(1).await.unwrap();
+        fc.register_inbound_publish(1).await.unwrap();
+        assert_eq!(fc.inbound_in_flight_count().await, 1);
+        assert!(matches!(
+            fc.register_inbound_publish(2).await,
+            Err(MqttError::ReceiveMaximumExceeded)
+        ));
+        fc.clear_inbound().await;
+        fc.register_inbound_publish(2).await.unwrap();
+    }
+
     #[test]
     fn test_topic_alias_basic() {
         let mut ta = TopicAliasManager::new(10);
 
-        // Get or create alias
         let alias1 = ta.get_or_create_alias("topic/1").unwrap();
         assert_eq!(alias1, 1);
 
         let alias2 = ta.get_or_create_alias("topic/2").unwrap();
         assert_eq!(alias2, 2);
 
-        // Same topic should return same alias
         let alias1_again = ta.get_or_create_alias("topic/1").unwrap();
         assert_eq!(alias1_again, 1);
 
-        // Check lookups
         assert_eq!(ta.get_topic(1), Some("topic/1"));
         assert_eq!(ta.get_alias("topic/1"), Some(1));
     }
@@ -427,15 +642,12 @@ mod tests {
     fn test_topic_alias_register() {
         let mut ta = TopicAliasManager::new(5);
 
-        // Register alias from peer
         ta.register_alias(3, "remote/topic").unwrap();
         assert_eq!(ta.get_topic(3), Some("remote/topic"));
 
-        // Invalid alias
         assert!(ta.register_alias(0, "topic").is_err());
         assert!(ta.register_alias(6, "topic").is_err());
 
-        // Overwrite existing alias
         ta.register_alias(3, "new/topic").unwrap();
         assert_eq!(ta.get_topic(3), Some("new/topic"));
         assert!(ta.get_alias("remote/topic").is_none());
@@ -451,7 +663,7 @@ mod tests {
 
         assert!(alias1.is_some());
         assert!(alias2.is_some());
-        assert!(alias3.is_none()); // Limit reached
+        assert!(alias3.is_none());
     }
 
     #[test]

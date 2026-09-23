@@ -1,46 +1,85 @@
+use mqtt5_protocol::packet::disconnect::DisconnectPacket;
+use mqtt5_protocol::packet::Packet;
 use std::cell::RefCell;
 use std::rc::Rc;
 use wasm_bindgen::prelude::*;
 
+use super::handlers::Violation;
+use super::packet::write_packet;
+use super::qos::wake_quota_waiters;
 use super::reconnect::spawn_reconnection_task;
 use super::state::ClientState;
 
-pub fn drain_pending_callbacks(state: &mut ClientState) {
-    let pubacks: Vec<_> = state.pending_pubacks.drain().collect();
-    let pubcomps: Vec<_> = state.pending_pubcomps.drain().collect();
-    let subacks: Vec<_> = state.pending_subacks.drain().collect();
+const SESSION_DISCARDED_REASON: u8 = 0x80;
 
-    let error_val = JsValue::from_f64(f64::from(0x80_u8));
-    for (_, callback) in pubacks {
-        let _ = callback.call1(&JsValue::NULL, &error_val);
+fn reject_callbacks(callbacks: Vec<js_sys::Function>) {
+    let error_val = JsValue::from_f64(f64::from(SESSION_DISCARDED_REASON));
+    for callback in callbacks {
+        if let Err(e) = callback.call1(&JsValue::NULL, &error_val) {
+            tracing::warn!(error = ?e, "acknowledgement callback failed");
+        }
     }
-    for (_, (callback, _)) in pubcomps {
-        let _ = callback.call1(&JsValue::NULL, &error_val);
+}
+
+pub fn discard_session(state: &Rc<RefCell<ClientState>>) {
+    let callbacks = state.borrow_mut().discard_session();
+    reject_callbacks(callbacks);
+}
+
+pub fn close_network_connection(state: &Rc<RefCell<ClientState>>) {
+    let writer = {
+        let mut state_mut = state.borrow_mut();
+        state_mut.connected = false;
+        state_mut.connection_generation = state_mut.connection_generation.wrapping_add(1);
+        state_mut.writer.take()
+    };
+    if let Some(writer) = writer {
+        if let Err(e) = writer.borrow_mut().close() {
+            tracing::warn!(error = %e, "closing the network connection failed");
+        }
     }
-    for (_, resolve) in subacks {
-        let arr = js_sys::Array::new();
-        arr.push(&JsValue::from_f64(f64::from(0x80_u8)));
-        let _ = resolve.call1(&JsValue::NULL, &arr.into());
+}
+
+pub fn end_connection_state(state: &Rc<RefCell<ClientState>>) {
+    let (subacks, session_ends) = {
+        let mut state_mut = state.borrow_mut();
+        state_mut.pending_unsubacks.clear();
+        let subacks: Vec<js_sys::Function> = state_mut
+            .pending_subacks
+            .drain()
+            .filter_map(|(_, callback)| callback)
+            .collect();
+        (subacks, state_mut.session_expiry_interval == 0)
+    };
+    for resolve in subacks {
+        let codes = js_sys::Array::new();
+        codes.push(&JsValue::from_f64(f64::from(SESSION_DISCARDED_REASON)));
+        if let Err(e) = resolve.call1(&JsValue::NULL, &codes.into()) {
+            tracing::warn!(error = ?e, "SUBACK callback failed");
+        }
     }
+    if session_ends {
+        discard_session(state);
+    }
+    wake_quota_waiters(state);
 }
 
 pub fn handle_connection_lost(state: &Rc<RefCell<ClientState>>, reason: &str) {
     let should_reconnect = {
-        let mut state_ref = state.borrow_mut();
+        let state_ref = state.borrow();
         if !state_ref.connected {
             return;
         }
-        state_ref.connected = false;
-
-        drain_pending_callbacks(&mut state_ref);
-
         state_ref.reconnect_config.enabled
             && !state_ref.user_initiated_disconnect
             && !state_ref.reconnecting
             && state_ref.last_url.is_some()
     };
 
-    web_sys::console::error_1(&reason.into());
+    close_network_connection(state);
+    end_connection_state(state);
+
+    tracing::warn!(reason, "connection lost");
     trigger_error_callback(state, reason);
     trigger_disconnect_callback(state);
 
@@ -49,11 +88,28 @@ pub fn handle_connection_lost(state: &Rc<RefCell<ClientState>>, reason: &str) {
     }
 }
 
+pub fn fail_connection(state: &Rc<RefCell<ClientState>>, violation: &Violation) {
+    if !state.borrow().connected {
+        return;
+    }
+    if state.borrow().protocol_version == 5 {
+        let disconnect = DisconnectPacket::new(violation.reason_code);
+        if let Err(e) = write_packet(state, &Packet::Disconnect(disconnect)) {
+            tracing::warn!(error = %e, "DISCONNECT not sent");
+        }
+    }
+    let message = format!(
+        "Protocol violation ({:?}): {}",
+        violation.reason_code, violation.message
+    );
+    handle_connection_lost(state, &message);
+}
+
 pub fn trigger_disconnect_callback(state: &Rc<RefCell<ClientState>>) {
     let callback = state.borrow().on_disconnect.clone();
     if let Some(callback) = callback {
         if let Err(e) = callback.call0(&JsValue::NULL) {
-            web_sys::console::error_1(&format!("onDisconnect callback error: {e:?}").into());
+            tracing::warn!(error = ?e, "onDisconnect callback failed");
         }
     }
 }
@@ -63,7 +119,7 @@ pub fn trigger_error_callback(state: &Rc<RefCell<ClientState>>, error_msg: &str)
     if let Some(callback) = callback {
         let error_js = JsValue::from_str(error_msg);
         if let Err(e) = callback.call1(&JsValue::NULL, &error_js) {
-            web_sys::console::error_1(&format!("onError callback error: {e:?}").into());
+            tracing::warn!(error = ?e, "onError callback failed");
         }
     }
 }
@@ -78,7 +134,7 @@ pub fn trigger_reconnecting_callback(
         let attempt_js = JsValue::from_f64(f64::from(attempt));
         let delay_js = JsValue::from_f64(f64::from(delay_millis));
         if let Err(e) = callback.call2(&JsValue::NULL, &attempt_js, &delay_js) {
-            web_sys::console::error_1(&format!("onReconnecting callback error: {e:?}").into());
+            tracing::warn!(error = ?e, "onReconnecting callback failed");
         }
     }
 }
@@ -88,9 +144,7 @@ pub fn trigger_connectivity_change_callback(state: &Rc<RefCell<ClientState>>, on
     if let Some(callback) = callback {
         let online_js = JsValue::from_bool(online);
         if let Err(e) = callback.call1(&JsValue::NULL, &online_js) {
-            web_sys::console::error_1(
-                &format!("onConnectivityChange callback error: {e:?}").into(),
-            );
+            tracing::warn!(error = ?e, "onConnectivityChange callback failed");
         }
     }
 }
@@ -100,7 +154,7 @@ pub fn trigger_reconnect_failed_callback(state: &Rc<RefCell<ClientState>>, error
     if let Some(callback) = callback {
         let error_js = JsValue::from_str(error_msg);
         if let Err(e) = callback.call1(&JsValue::NULL, &error_js) {
-            web_sys::console::error_1(&format!("onReconnectFailed callback error: {e:?}").into());
+            tracing::warn!(error = ?e, "onReconnectFailed callback failed");
         }
     }
 }

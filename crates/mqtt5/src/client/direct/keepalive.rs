@@ -149,6 +149,8 @@ pub(super) async fn keepalive_task_with_writer(
         let timed_out = keepalive_state.lock().is_timeout(timeout_duration);
         if timed_out {
             tracing::error!("Keepalive timeout - no PINGRESP received");
+            super::reader::close_connection(&writer, &crate::error::MqttError::KeepAliveTimeout)
+                .await;
             lifecycle.end(DisconnectReason::KeepAliveTimeout).await;
             break;
         }

@@ -7,7 +7,7 @@ use super::{MessageQueue, ReceivedMessage, Subscription, TestClientError};
 use crate::sut::SutHandle;
 use mqtt5::MqttClient;
 use mqtt5_protocol::types::{ConnectOptions, PublishOptions, SubscribeOptions};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 
 /// In-process backing for [`crate::test_client::TestClient`].
 pub struct InProcessTestClient {
@@ -35,6 +35,7 @@ impl InProcessTestClient {
 
         let wrapper = mqtt5::ConnectOptions {
             protocol_options: options.clone(),
+            resume_existing_session: true,
             ..mqtt5::ConnectOptions::default()
         };
         let client = MqttClient::with_options(wrapper.clone());
@@ -79,10 +80,6 @@ impl InProcessTestClient {
     ///
     /// # Errors
     /// Returns an error if the broker rejects the subscription.
-    ///
-    /// # Panics
-    /// Panics from the delivery callback if the internal mutex has been
-    /// poisoned.
     pub async fn subscribe(
         &self,
         filter: &str,
@@ -95,7 +92,7 @@ impl InProcessTestClient {
             .subscribe_with_options(filter, options, move |msg| {
                 messages_cb
                     .lock()
-                    .unwrap()
+                    .unwrap_or_else(PoisonError::into_inner)
                     .push(ReceivedMessage::from_message(msg));
             })
             .await?;

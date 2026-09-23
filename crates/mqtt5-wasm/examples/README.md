@@ -32,7 +32,7 @@ Demonstrates QoS 2 (exactly once) message delivery with full acknowledgment flow
 
 ### QoS 2 Recovery (qos2-recovery/)
 
-Demonstrates QoS 2 mid-flight recovery after client disconnection. Subscriber disconnects during a QoS 2 exchange, then reconnects with cleanStart=false to receive the in-flight message from persistent session state.
+Demonstrates QoS 2 mid-flight recovery after client disconnection. Subscriber disconnects during a QoS 2 exchange, then reconnects with a fresh client instance using cleanStart=false and resumeExistingSession=true to receive the in-flight message from persistent session state.
 
 ### Will Message (will-message/)
 
@@ -56,7 +56,7 @@ Demonstrates bandwidth optimization using topic aliases to reduce packet size fo
 
 ### Session Recovery (session-recovery/)
 
-Shows session persistence across reconnections with cleanStart=false and sessionExpiryInterval.
+Shows session persistence across reconnections with cleanStart=false, resumeExistingSession and sessionExpiryInterval.
 
 ### $SYS Monitoring (sys-monitoring/)
 

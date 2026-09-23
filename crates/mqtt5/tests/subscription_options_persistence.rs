@@ -1,5 +1,4 @@
 #![cfg(feature = "broker")]
-#![allow(clippy::large_futures)]
 
 mod common;
 use common::TestBroker;
@@ -37,13 +36,16 @@ async fn test_no_local_persists_after_reconnect() {
     let received_clone = received.clone();
 
     let client2 = MqttClient::new(client_id);
-    let session = client2
-        .connect_with_options(
+    let session = Box::pin(
+        client2.connect_with_options(
             broker.address(),
-            ConnectOptions::new(client_id).with_clean_start(false),
-        )
-        .await
-        .unwrap();
+            ConnectOptions::new(client_id)
+                .with_clean_start(false)
+                .with_resume_existing_session(true),
+        ),
+    )
+    .await
+    .unwrap();
 
     if !session.session_present {
         println!("Session not preserved, skipping test");
@@ -140,13 +142,16 @@ async fn test_retain_as_published_persists_after_reconnect() {
     let retain_clone = retain_flag_seen.clone();
 
     let client2 = MqttClient::new(client_id);
-    let session = client2
-        .connect_with_options(
+    let session = Box::pin(
+        client2.connect_with_options(
             broker.address(),
-            ConnectOptions::new(client_id).with_clean_start(false),
-        )
-        .await
-        .unwrap();
+            ConnectOptions::new(client_id)
+                .with_clean_start(false)
+                .with_resume_existing_session(true),
+        ),
+    )
+    .await
+    .unwrap();
 
     if !session.session_present {
         println!("Session not preserved, skipping test");
@@ -227,13 +232,16 @@ async fn test_subscription_options_all_preserved() {
     let received_clone = received.clone();
 
     let client2 = MqttClient::new(client_id);
-    let session = client2
-        .connect_with_options(
+    let session = Box::pin(
+        client2.connect_with_options(
             broker.address(),
-            ConnectOptions::new(client_id).with_clean_start(false),
-        )
-        .await
-        .unwrap();
+            ConnectOptions::new(client_id)
+                .with_clean_start(false)
+                .with_resume_existing_session(true),
+        ),
+    )
+    .await
+    .unwrap();
 
     if !session.session_present {
         println!("Session not preserved, skipping test");

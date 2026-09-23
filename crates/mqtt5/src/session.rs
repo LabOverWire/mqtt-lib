@@ -3,7 +3,6 @@ pub mod limits;
 pub mod queue;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod quic_flow;
-pub mod retained;
 pub mod state;
 pub mod subscription;
 
@@ -14,7 +13,5 @@ pub use limits::{ExpiringMessage, LimitsConfig, LimitsManager};
 pub use queue::{MessageQueue, QueueResult, QueueStats, QueuedMessage};
 #[cfg(not(target_arch = "wasm32"))]
 pub use quic_flow::{FlowRegistry, FlowState, FlowType};
-#[allow(deprecated)]
-pub use retained::{RetainedMessage, RetainedMessageStore};
 pub use state::{SessionConfig, SessionState, SessionStats};
 pub use subscription::{Subscription, SubscriptionManager};

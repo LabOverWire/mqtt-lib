@@ -21,10 +21,19 @@ pub struct WasmWebSocketTransport {
 }
 
 struct ClosureBundle {
-    _onmessage: Closure<dyn FnMut(MessageEvent)>,
-    _onopen: Closure<dyn FnMut(JsValue)>,
-    _onerror: Closure<dyn FnMut(ErrorEvent)>,
-    _onclose: Closure<dyn FnMut(CloseEvent)>,
+    onmessage: Closure<dyn FnMut(MessageEvent)>,
+    onopen: Closure<dyn FnMut(JsValue)>,
+    onerror: Closure<dyn FnMut(ErrorEvent)>,
+    onclose: Closure<dyn FnMut(CloseEvent)>,
+}
+
+impl ClosureBundle {
+    fn attach(&self, ws: &WebSocket) {
+        ws.set_onmessage(Some(self.onmessage.as_ref().unchecked_ref()));
+        ws.set_onopen(Some(self.onopen.as_ref().unchecked_ref()));
+        ws.set_onerror(Some(self.onerror.as_ref().unchecked_ref()));
+        ws.set_onclose(Some(self.onclose.as_ref().unchecked_ref()));
+    }
 }
 
 pub struct WasmReader {
@@ -37,7 +46,7 @@ pub struct WasmWriter {
     ws: WebSocket,
     connected: Arc<AtomicBool>,
     msg_tx: mpsc::UnboundedSender<Vec<u8>>,
-    _closures: ClosureBundle,
+    closures: Option<ClosureBundle>,
 }
 
 impl WasmReader {
@@ -77,6 +86,9 @@ impl WasmWriter {
     /// # Errors
     /// Returns an error if the WebSocket send operation fails.
     pub fn write(&mut self, buf: &[u8]) -> Result<()> {
+        if !self.is_connected() {
+            return Err(MqttError::NotConnected);
+        }
         self.ws
             .send_with_u8_array(buf)
             .map_err(|e| MqttError::Io(format!("WebSocket send failed: {e:?}")))?;
@@ -86,14 +98,20 @@ impl WasmWriter {
     /// # Errors
     /// This method does not currently return errors but uses Result for API consistency.
     pub fn close(&mut self) -> Result<()> {
-        self.msg_tx.close_channel();
-        self.ws.set_onmessage(None);
-        self.ws.set_onopen(None);
-        self.ws.set_onerror(None);
-        self.ws.set_onclose(None);
-        self.ws.close().ok();
-        self.connected.store(false, Ordering::SeqCst);
+        self.shutdown();
         Ok(())
+    }
+
+    fn shutdown(&mut self) {
+        self.msg_tx.close_channel();
+        self.connected.store(false, Ordering::SeqCst);
+        if self.closures.take().is_some() {
+            self.ws.set_onmessage(None);
+            self.ws.set_onopen(None);
+            self.ws.set_onerror(None);
+            self.ws.set_onclose(None);
+        }
+        self.ws.close().ok();
     }
 
     #[must_use]
@@ -104,18 +122,12 @@ impl WasmWriter {
 
 impl Drop for WasmWriter {
     fn drop(&mut self) {
-        self.msg_tx.close_channel();
-        self.connected.store(false, Ordering::SeqCst);
-        self.ws.set_onmessage(None);
-        self.ws.set_onopen(None);
-        self.ws.set_onerror(None);
-        self.ws.set_onclose(None);
-        self.ws.close().ok();
+        self.shutdown();
     }
 }
 
 impl WasmWebSocketTransport {
-    #[allow(clippy::must_use_candidate)]
+    #[must_use]
     pub fn new(url: impl Into<String>) -> Self {
         Self {
             url: url.into(),
@@ -146,7 +158,7 @@ impl WasmWebSocketTransport {
             ws,
             connected: self.connected,
             msg_tx,
-            _closures: closures,
+            closures: Some(closures),
         };
 
         Ok((reader, writer))
@@ -165,13 +177,18 @@ impl Transport for WasmWebSocketTransport {
         let (result_tx, result_rx) = oneshot::channel();
 
         let msg_tx_message = msg_tx.clone();
+        let connected_message = self.connected.clone();
+        let ws_message = ws.clone();
         let onmessage = Closure::new(move |e: MessageEvent| {
             if let Ok(abuf) = e.data().dyn_into::<js_sys::ArrayBuffer>() {
                 let array = js_sys::Uint8Array::new(&abuf);
                 let vec = array.to_vec();
                 let _ = msg_tx_message.unbounded_send(vec);
             } else {
-                web_sys::console::warn_1(&"WebSocket received non-ArrayBuffer message".into());
+                tracing::warn!("WebSocket received a non-binary data frame, closing connection");
+                connected_message.store(false, Ordering::SeqCst);
+                msg_tx_message.close_channel();
+                ws_message.close().ok();
             }
         });
 
@@ -206,20 +223,18 @@ impl Transport for WasmWebSocketTransport {
             msg_tx_close.close_channel();
         });
 
-        ws.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
-        ws.set_onopen(Some(onopen.as_ref().unchecked_ref()));
-        ws.set_onerror(Some(onerror.as_ref().unchecked_ref()));
-        ws.set_onclose(Some(onclose.as_ref().unchecked_ref()));
+        let closures = ClosureBundle {
+            onmessage,
+            onopen,
+            onerror,
+            onclose,
+        };
+        closures.attach(&ws);
 
         self.ws = Some(ws.clone());
         self.rx = Some(msg_rx);
         self.tx = Some(msg_tx);
-        self.closures = Some(ClosureBundle {
-            _onmessage: onmessage,
-            _onopen: onopen,
-            _onerror: onerror,
-            _onclose: onclose,
-        });
+        self.closures = Some(closures);
 
         let result = result_rx
             .await

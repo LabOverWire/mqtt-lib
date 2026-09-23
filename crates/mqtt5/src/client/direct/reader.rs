@@ -6,11 +6,13 @@ use crate::client::connection::DisconnectReason;
 use crate::codec::CodecRegistry;
 use crate::error::{MqttError, Result};
 use crate::packet::auth::AuthPacket;
+use crate::packet::disconnect::DisconnectPacket;
 use crate::packet::suback::SubAckPacket;
 use crate::packet::unsuback::UnsubAckPacket;
 use crate::packet::Packet;
+use crate::protocol::v5::properties::{Properties, PropertyId};
 use crate::protocol::v5::reason_codes::ReasonCode;
-use crate::session::SessionState;
+use crate::session::{SessionState, TopicAliasManager};
 use crate::transport::PacketWriter;
 use parking_lot::Mutex;
 use std::collections::HashMap;
@@ -34,6 +36,8 @@ use quinn::Connection;
 #[cfg(feature = "transport-quic")]
 use std::time::Duration as StdDuration;
 
+const CLOSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 #[derive(Clone)]
 pub(super) struct PacketReaderContext {
     pub(super) session: Arc<tokio::sync::RwLock<SessionState>>,
@@ -53,6 +57,8 @@ pub(super) struct PacketReaderContext {
     pub(super) deferred_ack: bool,
     pub(super) ack_callbacks: Arc<super::ack::AckCallbackManager>,
     pub(super) ack_dispatcher: Arc<super::ack::AckDispatcher>,
+    pub(super) topic_aliases: Arc<Mutex<TopicAliasManager>>,
+    pub(super) request_problem_information: bool,
 }
 
 impl PacketReaderContext {
@@ -73,6 +79,7 @@ impl PacketReaderContext {
     ) -> super::handlers::IncomingHandlers<'a> {
         super::handlers::IncomingHandlers {
             session: &self.session,
+            topic_aliases: &self.topic_aliases,
             callback_manager: &self.callback_manager,
             keepalive_state: &self.keepalive_state,
             codec_registry: self.codec_registry.as_ref(),
@@ -108,99 +115,155 @@ fn disconnect_reason_for(error: &MqttError) -> DisconnectReason {
     }
 }
 
+fn disconnect_code_for(error: &MqttError) -> Option<ReasonCode> {
+    match error {
+        MqttError::Io(_)
+        | MqttError::ConnectionError(_)
+        | MqttError::ConnectionClosedByPeer
+        | MqttError::ClientClosed
+        | MqttError::NotConnected
+        | MqttError::ServerDisconnect(_)
+        | MqttError::KeepAliveTimeout => None,
+        MqttError::MalformedPacket(_)
+        | MqttError::InvalidQoS(_)
+        | MqttError::InvalidPacketType(_)
+        | MqttError::InvalidReasonCode(_)
+        | MqttError::InvalidPropertyId(_)
+        | MqttError::InvalidTopicName(_)
+        | MqttError::StringTooLong(_) => Some(ReasonCode::MalformedPacket),
+        MqttError::ProtocolError(_) | MqttError::DuplicatePropertyId(_) => {
+            Some(ReasonCode::ProtocolError)
+        }
+        MqttError::PacketTooLarge { .. } => Some(ReasonCode::PacketTooLarge),
+        MqttError::ReceiveMaximumExceeded => Some(ReasonCode::ReceiveMaximumExceeded),
+        MqttError::TopicAliasInvalid(_) => Some(ReasonCode::TopicAliasInvalid),
+        MqttError::AuthenticationFailed | MqttError::NotAuthorized => {
+            Some(ReasonCode::NotAuthorized)
+        }
+        _ => Some(ReasonCode::UnspecifiedError),
+    }
+}
+
+fn problem_information_properties(packet: &Packet) -> Option<&Properties> {
+    match packet {
+        Packet::PubAck(p) => Some(&p.properties),
+        Packet::PubRec(p) => Some(&p.properties),
+        Packet::PubRel(p) => Some(&p.properties),
+        Packet::PubComp(p) => Some(&p.properties),
+        Packet::SubAck(p) => Some(&p.properties),
+        Packet::UnsubAck(p) => Some(&p.properties),
+        Packet::Auth(p) => Some(&p.properties),
+        _ => None,
+    }
+}
+
+fn check_problem_information(packet: &Packet, requested: bool) -> Result<()> {
+    let Some(properties) = problem_information_properties(packet).filter(|_| !requested) else {
+        return Ok(());
+    };
+    if properties.contains(PropertyId::ReasonString)
+        || properties.contains(PropertyId::UserProperty)
+    {
+        return Err(MqttError::ProtocolError(format!(
+            "{} carries a Reason String or User Property although Request Problem Information is 0 [MQTT-3.1.2-29]",
+            packet.packet_type_name()
+        )));
+    }
+    Ok(())
+}
+
+pub(super) async fn close_connection(
+    writer: &Arc<tokio::sync::Mutex<UnifiedWriter>>,
+    error: &MqttError,
+) {
+    let disconnect = disconnect_code_for(error)
+        .map(|reason_code| Packet::Disconnect(DisconnectPacket::new(reason_code)));
+    let closing = async { writer.lock().await.close(disconnect).await };
+    match tokio::time::timeout(CLOSE_TIMEOUT, closing).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::debug!("Closing network connection: {e}"),
+        Err(_) => tracing::warn!("Timed out closing network connection"),
+    }
+}
+
+async fn process_packet(packet: Packet, ctx: &PacketReaderContext) -> Result<()> {
+    tracing::trace!("Received packet: {:?}", packet);
+    check_problem_information(&packet, ctx.request_problem_information)?;
+    match &packet {
+        Packet::SubAck(suback) => {
+            if let Some(tx) = ctx.suback_channels.lock().remove(&suback.packet_id) {
+                let _ = tx.send(suback.clone());
+                return Ok(());
+            }
+        }
+        Packet::UnsubAck(unsuback) => {
+            if let Some(tx) = ctx.unsuback_channels.lock().remove(&unsuback.packet_id) {
+                let _ = tx.send(unsuback.clone());
+                return Ok(());
+            }
+        }
+        Packet::PubAck(puback) => {
+            super::DirectClientInner::release_outbound_quota(&ctx.session, Some(puback.packet_id))
+                .await;
+            if let Some(tx) = ctx.puback_channels.lock().remove(&puback.packet_id) {
+                let _ = tx.send(puback.reason_code);
+                return Ok(());
+            }
+        }
+        Packet::PubRec(pubrec) if pubrec.reason_code.is_error() => {
+            tracing::debug!(
+                packet_id = pubrec.packet_id,
+                reason_code = ?pubrec.reason_code,
+                "QoS 2 PUBREC rejected"
+            );
+            if let Some(tx) = ctx.pubcomp_channels.lock().remove(&pubrec.packet_id) {
+                let _ = tx.send(pubrec.reason_code);
+            }
+            ctx.session
+                .write()
+                .await
+                .remove_unacked_publish(pubrec.packet_id)
+                .await;
+            super::DirectClientInner::release_outbound_quota(&ctx.session, Some(pubrec.packet_id))
+                .await;
+            return Ok(());
+        }
+        Packet::PubComp(pubcomp) => {
+            super::DirectClientInner::release_outbound_quota(&ctx.session, Some(pubcomp.packet_id))
+                .await;
+            if let Some(tx) = ctx.pubcomp_channels.lock().remove(&pubcomp.packet_id) {
+                let _ = tx.send(pubcomp.reason_code);
+            }
+            return Ok(());
+        }
+        Packet::Auth(auth) => return handle_auth_packet(auth.clone(), ctx).await,
+        _ => {}
+    }
+
+    let ack_delivery = ctx.ack_delivery();
+    let handlers = ctx.incoming_handlers(ack_delivery.as_ref());
+    handle_incoming_packet_with_writer(packet, &ctx.writer, None, &handlers).await
+}
+
 pub(super) async fn packet_reader_task_with_responses(
     mut reader: UnifiedReader,
     ctx: PacketReaderContext,
 ) {
     tracing::debug!("Packet reader task started and ready to process incoming packets");
-    let disconnect_reason = loop {
-        let packet = reader.read_packet().await;
-
-        match packet {
-            Ok(packet) => {
-                tracing::trace!("Received packet: {:?}", packet);
-                match &packet {
-                    Packet::SubAck(suback) => {
-                        if let Some(tx) = ctx.suback_channels.lock().remove(&suback.packet_id) {
-                            let _ = tx.send(suback.clone());
-                            continue;
-                        }
-                    }
-                    Packet::UnsubAck(unsuback) => {
-                        if let Some(tx) = ctx.unsuback_channels.lock().remove(&unsuback.packet_id) {
-                            let _ = tx.send(unsuback.clone());
-                            continue;
-                        }
-                    }
-                    Packet::PubAck(puback) => {
-                        super::DirectClientInner::release_outbound_quota(
-                            &ctx.session,
-                            Some(puback.packet_id),
-                        )
-                        .await;
-                        if let Some(tx) = ctx.puback_channels.lock().remove(&puback.packet_id) {
-                            let _ = tx.send(puback.reason_code);
-                            continue;
-                        }
-                    }
-                    Packet::PubRec(pubrec) if pubrec.reason_code.is_error() => {
-                        tracing::debug!(
-                            packet_id = pubrec.packet_id,
-                            reason_code = ?pubrec.reason_code,
-                            "QoS 2 PUBREC rejected"
-                        );
-                        if let Some(tx) = ctx.pubcomp_channels.lock().remove(&pubrec.packet_id) {
-                            let _ = tx.send(pubrec.reason_code);
-                        }
-                        ctx.session
-                            .write()
-                            .await
-                            .remove_unacked_publish(pubrec.packet_id)
-                            .await;
-                        super::DirectClientInner::release_outbound_quota(
-                            &ctx.session,
-                            Some(pubrec.packet_id),
-                        )
-                        .await;
-                        continue;
-                    }
-                    Packet::PubComp(pubcomp) => {
-                        super::DirectClientInner::release_outbound_quota(
-                            &ctx.session,
-                            Some(pubcomp.packet_id),
-                        )
-                        .await;
-                        if let Some(tx) = ctx.pubcomp_channels.lock().remove(&pubcomp.packet_id) {
-                            let _ = tx.send(pubcomp.reason_code);
-                        }
-                    }
-                    Packet::Auth(ref auth) => {
-                        if let Err(e) = handle_auth_packet(auth.clone(), &ctx).await {
-                            tracing::error!("Error handling AUTH packet: {e}");
-                            break disconnect_reason_for(&e);
-                        }
-                        continue;
-                    }
-                    _ => {}
-                }
-
-                let ack_delivery = ctx.ack_delivery();
-                let handlers = ctx.incoming_handlers(ack_delivery.as_ref());
-                if let Err(e) =
-                    handle_incoming_packet_with_writer(packet, &ctx.writer, None, &handlers).await
-                {
-                    tracing::error!("Error handling packet: {e}");
-                    break disconnect_reason_for(&e);
-                }
-            }
-            Err(e) => {
-                tracing::error!("Error reading packet: {e}");
-                break DisconnectReason::NetworkError(e.to_string());
-            }
+    let failure = loop {
+        let outcome = match reader.read_packet().await {
+            Ok(packet) => process_packet(packet, &ctx).await,
+            Err(e) => Err(e),
+        };
+        if let Err(e) = outcome {
+            break e;
         }
     };
 
-    ctx.lifecycle.end(disconnect_reason).await;
+    tracing::error!("Packet reader stopping: {failure}");
+    close_connection(&ctx.writer, &failure).await;
+    drop(reader);
+    ctx.lifecycle.end(disconnect_reason_for(&failure)).await;
     ctx.clear_pending_if_current();
 }
 
@@ -212,6 +275,11 @@ async fn handle_auth_packet(auth: AuthPacket, ctx: &PacketReaderContext) -> Resu
 
     match auth.reason_code {
         ReasonCode::ContinueAuthentication => {
+            let method = ctx.auth_method.clone().ok_or_else(|| {
+                MqttError::ProtocolError(
+                    "AUTH received but CONNECT carried no Authentication Method".to_string(),
+                )
+            })?;
             let handler = ctx
                 .auth_handler
                 .as_ref()
@@ -224,7 +292,6 @@ async fn handle_auth_packet(auth: AuthPacket, ctx: &PacketReaderContext) -> Resu
 
             match response {
                 AuthResponse::Continue(data) => {
-                    let method = ctx.auth_method.clone().unwrap_or_default();
                     let auth_packet = AuthPacket::continue_authentication(method, Some(data))?;
                     ctx.writer
                         .lock()
@@ -549,6 +616,7 @@ async fn quic_stream_reader_task(
                 {
                     tracing::error!(flow_id = ?flow_id, "Error handling packet from server stream: {e}");
                     if let MqttError::ServerDisconnect(reason_code) = e {
+                        close_connection(&ctx.writer, &e).await;
                         ctx.lifecycle
                             .end(DisconnectReason::ServerDisconnect(reason_code))
                             .await;
@@ -603,6 +671,7 @@ async fn quic_uni_stream_reader_task(mut recv: quinn::RecvStream, ctx: PacketRea
                 {
                     tracing::error!(flow_id = ?flow_id, "Error handling packet from uni stream: {e}");
                     if let MqttError::ServerDisconnect(reason_code) = e {
+                        close_connection(&ctx.writer, &e).await;
                         ctx.lifecycle
                             .end(DisconnectReason::ServerDisconnect(reason_code))
                             .await;

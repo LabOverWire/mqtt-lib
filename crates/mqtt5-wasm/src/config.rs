@@ -26,10 +26,9 @@ pub struct WasmReconnectOptions {
 }
 
 #[wasm_bindgen(js_class = "ReconnectOptions")]
-#[allow(non_snake_case)]
 impl WasmReconnectOptions {
     #[wasm_bindgen(constructor)]
-    #[allow(clippy::must_use_candidate)]
+    #[must_use]
     pub fn new() -> Self {
         Self {
             enabled: true,
@@ -59,47 +58,47 @@ impl WasmReconnectOptions {
         self.enabled = value;
     }
 
-    #[wasm_bindgen(getter)]
+    #[wasm_bindgen(getter = initialDelayMs)]
     #[must_use]
-    pub fn initialDelayMs(&self) -> u32 {
+    pub fn initial_delay_ms(&self) -> u32 {
         self.initial_delay_ms
     }
 
-    #[wasm_bindgen(setter)]
-    pub fn set_initialDelayMs(&mut self, value: u32) {
+    #[wasm_bindgen(setter = initialDelayMs)]
+    pub fn set_initial_delay_ms(&mut self, value: u32) {
         self.initial_delay_ms = value;
     }
 
-    #[wasm_bindgen(getter)]
+    #[wasm_bindgen(getter = maxDelayMs)]
     #[must_use]
-    pub fn maxDelayMs(&self) -> u32 {
+    pub fn max_delay_ms(&self) -> u32 {
         self.max_delay_ms
     }
 
-    #[wasm_bindgen(setter)]
-    pub fn set_maxDelayMs(&mut self, value: u32) {
+    #[wasm_bindgen(setter = maxDelayMs)]
+    pub fn set_max_delay_ms(&mut self, value: u32) {
         self.max_delay_ms = value;
     }
 
-    #[wasm_bindgen(getter)]
+    #[wasm_bindgen(getter = backoffFactor)]
     #[must_use]
-    pub fn backoffFactor(&self) -> f64 {
+    pub fn backoff_factor(&self) -> f64 {
         self.backoff_factor
     }
 
-    #[wasm_bindgen(setter)]
-    pub fn set_backoffFactor(&mut self, value: f64) {
+    #[wasm_bindgen(setter = backoffFactor)]
+    pub fn set_backoff_factor(&mut self, value: f64) {
         self.backoff_factor = value;
     }
 
-    #[wasm_bindgen(getter)]
+    #[wasm_bindgen(getter = maxAttempts)]
     #[must_use]
-    pub fn maxAttempts(&self) -> Option<u32> {
+    pub fn max_attempts(&self) -> Option<u32> {
         self.max_attempts
     }
 
-    #[wasm_bindgen(setter)]
-    pub fn set_maxAttempts(&mut self, value: Option<u32>) {
+    #[wasm_bindgen(setter = maxAttempts)]
+    pub fn set_max_attempts(&mut self, value: Option<u32>) {
         self.max_attempts = value;
     }
 
@@ -139,6 +138,7 @@ impl Clone for WasmReconnectOptions {
 pub struct WasmConnectOptions {
     pub(crate) keep_alive: u16,
     pub(crate) clean_start: bool,
+    pub(crate) resume_existing_session: bool,
     pub(crate) username: Option<String>,
     pub(crate) password: Option<Vec<u8>>,
     pub(crate) will: Option<WasmWillMessage>,
@@ -158,14 +158,14 @@ pub struct WasmConnectOptions {
 }
 
 #[wasm_bindgen(js_class = "ConnectOptions")]
-#[allow(non_snake_case)]
 impl WasmConnectOptions {
     #[wasm_bindgen(constructor)]
-    #[allow(clippy::must_use_candidate)]
+    #[must_use]
     pub fn new() -> Self {
         Self {
             keep_alive: 60,
             clean_start: true,
+            resume_existing_session: false,
             username: None,
             password: None,
             will: None,
@@ -185,26 +185,47 @@ impl WasmConnectOptions {
         }
     }
 
-    #[wasm_bindgen(getter)]
+    #[wasm_bindgen(getter = keepAlive)]
     #[must_use]
-    pub fn keepAlive(&self) -> u16 {
+    pub fn keep_alive(&self) -> u16 {
         self.keep_alive
     }
 
-    #[wasm_bindgen(setter)]
-    pub fn set_keepAlive(&mut self, value: u16) {
+    #[wasm_bindgen(setter = keepAlive)]
+    pub fn set_keep_alive(&mut self, value: u16) {
         self.keep_alive = value;
     }
 
-    #[wasm_bindgen(getter)]
+    #[wasm_bindgen(getter = cleanStart)]
     #[must_use]
-    pub fn cleanStart(&self) -> bool {
+    pub fn clean_start(&self) -> bool {
         self.clean_start
     }
 
-    #[wasm_bindgen(setter)]
-    pub fn set_cleanStart(&mut self, value: bool) {
+    #[wasm_bindgen(setter = cleanStart)]
+    pub fn set_clean_start(&mut self, value: bool) {
         self.clean_start = value;
+    }
+
+    /// Accept `Session Present = 1` on a client that holds no local session state.
+    ///
+    /// By default a client that has not yet established a session in this instance
+    /// rejects a CONNACK with Session Present set to 1, sends DISCONNECT 0x82 and closes
+    /// the connection (MQTT-3.2.2-4). Set this to `true` (together with
+    /// `cleanStart = false`) to deliberately resume a session the broker still holds,
+    /// for example after a page reload or crash. The client has nothing to resend in
+    /// that case; the broker resumes delivery of the messages it holds. A CONNACK with
+    /// Session Present set to 1 in reply to `cleanStart = true` is always rejected.
+    #[wasm_bindgen(getter = resumeExistingSession)]
+    #[must_use]
+    pub fn resume_existing_session(&self) -> bool {
+        self.resume_existing_session
+    }
+
+    /// Sets [`Self::resume_existing_session`].
+    #[wasm_bindgen(setter = resumeExistingSession)]
+    pub fn set_resume_existing_session(&mut self, value: bool) {
+        self.resume_existing_session = value;
     }
 
     #[wasm_bindgen(getter)]
@@ -233,96 +254,96 @@ impl WasmConnectOptions {
         self.will = None;
     }
 
-    #[wasm_bindgen(getter)]
+    #[wasm_bindgen(getter = sessionExpiryInterval)]
     #[must_use]
-    pub fn sessionExpiryInterval(&self) -> Option<u32> {
+    pub fn session_expiry_interval(&self) -> Option<u32> {
         self.session_expiry_interval
     }
 
-    #[wasm_bindgen(setter)]
-    pub fn set_sessionExpiryInterval(&mut self, value: Option<u32>) {
+    #[wasm_bindgen(setter = sessionExpiryInterval)]
+    pub fn set_session_expiry_interval(&mut self, value: Option<u32>) {
         self.session_expiry_interval = value;
     }
 
-    #[wasm_bindgen(getter)]
+    #[wasm_bindgen(getter = receiveMaximum)]
     #[must_use]
-    pub fn receiveMaximum(&self) -> Option<u16> {
+    pub fn receive_maximum(&self) -> Option<u16> {
         self.receive_maximum
     }
 
-    #[wasm_bindgen(setter)]
-    pub fn set_receiveMaximum(&mut self, value: Option<u16>) {
+    #[wasm_bindgen(setter = receiveMaximum)]
+    pub fn set_receive_maximum(&mut self, value: Option<u16>) {
         self.receive_maximum = value;
     }
 
-    #[wasm_bindgen(getter)]
+    #[wasm_bindgen(getter = maximumPacketSize)]
     #[must_use]
-    pub fn maximumPacketSize(&self) -> Option<u32> {
+    pub fn maximum_packet_size(&self) -> Option<u32> {
         self.maximum_packet_size
     }
 
-    #[wasm_bindgen(setter)]
-    pub fn set_maximumPacketSize(&mut self, value: Option<u32>) {
+    #[wasm_bindgen(setter = maximumPacketSize)]
+    pub fn set_maximum_packet_size(&mut self, value: Option<u32>) {
         self.maximum_packet_size = value;
     }
 
-    #[wasm_bindgen(getter)]
+    #[wasm_bindgen(getter = topicAliasMaximum)]
     #[must_use]
-    pub fn topicAliasMaximum(&self) -> Option<u16> {
+    pub fn topic_alias_maximum(&self) -> Option<u16> {
         self.topic_alias_maximum
     }
 
-    #[wasm_bindgen(setter)]
-    pub fn set_topicAliasMaximum(&mut self, value: Option<u16>) {
+    #[wasm_bindgen(setter = topicAliasMaximum)]
+    pub fn set_topic_alias_maximum(&mut self, value: Option<u16>) {
         self.topic_alias_maximum = value;
     }
 
-    #[wasm_bindgen(getter)]
+    #[wasm_bindgen(getter = requestResponseInformation)]
     #[must_use]
-    pub fn requestResponseInformation(&self) -> Option<bool> {
+    pub fn request_response_information(&self) -> Option<bool> {
         self.request_response_information
     }
 
-    #[wasm_bindgen(setter)]
-    pub fn set_requestResponseInformation(&mut self, value: Option<bool>) {
+    #[wasm_bindgen(setter = requestResponseInformation)]
+    pub fn set_request_response_information(&mut self, value: Option<bool>) {
         self.request_response_information = value;
     }
 
-    #[wasm_bindgen(getter)]
+    #[wasm_bindgen(getter = requestProblemInformation)]
     #[must_use]
-    pub fn requestProblemInformation(&self) -> Option<bool> {
+    pub fn request_problem_information(&self) -> Option<bool> {
         self.request_problem_information
     }
 
-    #[wasm_bindgen(setter)]
-    pub fn set_requestProblemInformation(&mut self, value: Option<bool>) {
+    #[wasm_bindgen(setter = requestProblemInformation)]
+    pub fn set_request_problem_information(&mut self, value: Option<bool>) {
         self.request_problem_information = value;
     }
 
-    #[wasm_bindgen(getter)]
+    #[wasm_bindgen(getter = authenticationMethod)]
     #[must_use]
-    pub fn authenticationMethod(&self) -> Option<String> {
+    pub fn authentication_method(&self) -> Option<String> {
         self.authentication_method.clone()
     }
 
-    #[wasm_bindgen(setter)]
-    pub fn set_authenticationMethod(&mut self, value: Option<String>) {
+    #[wasm_bindgen(setter = authenticationMethod)]
+    pub fn set_authentication_method(&mut self, value: Option<String>) {
         self.authentication_method = value;
     }
 
-    #[wasm_bindgen(setter)]
-    pub fn set_authenticationData(&mut self, value: &[u8]) {
+    #[wasm_bindgen(setter = authenticationData)]
+    pub fn set_authentication_data(&mut self, value: &[u8]) {
         self.authentication_data = Some(value.to_vec());
     }
 
-    #[wasm_bindgen(getter)]
+    #[wasm_bindgen(getter = protocolVersion)]
     #[must_use]
-    pub fn protocolVersion(&self) -> u8 {
+    pub fn protocol_version(&self) -> u8 {
         self.protocol_version
     }
 
-    #[wasm_bindgen(setter)]
-    pub fn set_protocolVersion(&mut self, value: u8) {
+    #[wasm_bindgen(setter = protocolVersion)]
+    pub fn set_protocol_version(&mut self, value: u8) {
         if value == 4 || value == 5 {
             self.protocol_version = value;
         } else {
@@ -333,24 +354,29 @@ impl WasmConnectOptions {
         }
     }
 
-    pub fn addUserProperty(&mut self, key: String, value: String) {
+    #[wasm_bindgen(js_name = addUserProperty)]
+    pub fn add_user_property(&mut self, key: String, value: String) {
         self.user_properties.push((key, value));
     }
 
-    pub fn clearUserProperties(&mut self) {
+    #[wasm_bindgen(js_name = clearUserProperties)]
+    pub fn clear_user_properties(&mut self) {
         self.user_properties.clear();
     }
 
-    pub fn addBackupUrl(&mut self, url: String) {
+    #[wasm_bindgen(js_name = addBackupUrl)]
+    pub fn add_backup_url(&mut self, url: String) {
         self.backup_urls.push(url);
     }
 
-    pub fn clearBackupUrls(&mut self) {
+    #[wasm_bindgen(js_name = clearBackupUrls)]
+    pub fn clear_backup_urls(&mut self) {
         self.backup_urls.clear();
     }
 
     #[must_use]
-    pub fn getBackupUrls(&self) -> Vec<String> {
+    #[wasm_bindgen(js_name = getBackupUrls)]
+    pub fn get_backup_urls(&self) -> Vec<String> {
         self.backup_urls.clone()
     }
 
@@ -465,10 +491,9 @@ pub struct WasmPublishOptions {
 }
 
 #[wasm_bindgen(js_class = "PublishOptions")]
-#[allow(non_snake_case)]
 impl WasmPublishOptions {
     #[wasm_bindgen(constructor)]
-    #[allow(clippy::must_use_candidate)]
+    #[must_use]
     pub fn new() -> Self {
         Self {
             qos: 0,
@@ -510,71 +535,73 @@ impl WasmPublishOptions {
         self.retain = value;
     }
 
-    #[wasm_bindgen(getter)]
+    #[wasm_bindgen(getter = payloadFormatIndicator)]
     #[must_use]
-    pub fn payloadFormatIndicator(&self) -> Option<bool> {
+    pub fn payload_format_indicator(&self) -> Option<bool> {
         self.payload_format_indicator
     }
 
-    #[wasm_bindgen(setter)]
-    pub fn set_payloadFormatIndicator(&mut self, value: Option<bool>) {
+    #[wasm_bindgen(setter = payloadFormatIndicator)]
+    pub fn set_payload_format_indicator(&mut self, value: Option<bool>) {
         self.payload_format_indicator = value;
     }
 
-    #[wasm_bindgen(getter)]
+    #[wasm_bindgen(getter = messageExpiryInterval)]
     #[must_use]
-    pub fn messageExpiryInterval(&self) -> Option<u32> {
+    pub fn message_expiry_interval(&self) -> Option<u32> {
         self.message_expiry_interval
     }
 
-    #[wasm_bindgen(setter)]
-    pub fn set_messageExpiryInterval(&mut self, value: Option<u32>) {
+    #[wasm_bindgen(setter = messageExpiryInterval)]
+    pub fn set_message_expiry_interval(&mut self, value: Option<u32>) {
         self.message_expiry_interval = value;
     }
 
-    #[wasm_bindgen(getter)]
+    #[wasm_bindgen(getter = topicAlias)]
     #[must_use]
-    pub fn topicAlias(&self) -> Option<u16> {
+    pub fn topic_alias(&self) -> Option<u16> {
         self.topic_alias
     }
 
-    #[wasm_bindgen(setter)]
-    pub fn set_topicAlias(&mut self, value: Option<u16>) {
+    #[wasm_bindgen(setter = topicAlias)]
+    pub fn set_topic_alias(&mut self, value: Option<u16>) {
         self.topic_alias = value;
     }
 
-    #[wasm_bindgen(getter)]
+    #[wasm_bindgen(getter = responseTopic)]
     #[must_use]
-    pub fn responseTopic(&self) -> Option<String> {
+    pub fn response_topic(&self) -> Option<String> {
         self.response_topic.clone()
     }
 
-    #[wasm_bindgen(setter)]
-    pub fn set_responseTopic(&mut self, value: Option<String>) {
+    #[wasm_bindgen(setter = responseTopic)]
+    pub fn set_response_topic(&mut self, value: Option<String>) {
         self.response_topic = value;
     }
 
-    #[wasm_bindgen(setter)]
-    pub fn set_correlationData(&mut self, value: &[u8]) {
+    #[wasm_bindgen(setter = correlationData)]
+    pub fn set_correlation_data(&mut self, value: &[u8]) {
         self.correlation_data = Some(value.to_vec());
     }
 
-    #[wasm_bindgen(getter)]
+    #[wasm_bindgen(getter = contentType)]
     #[must_use]
-    pub fn contentType(&self) -> Option<String> {
+    pub fn content_type(&self) -> Option<String> {
         self.content_type.clone()
     }
 
-    #[wasm_bindgen(setter)]
-    pub fn set_contentType(&mut self, value: Option<String>) {
+    #[wasm_bindgen(setter = contentType)]
+    pub fn set_content_type(&mut self, value: Option<String>) {
         self.content_type = value;
     }
 
-    pub fn addUserProperty(&mut self, key: String, value: String) {
+    #[wasm_bindgen(js_name = addUserProperty)]
+    pub fn add_user_property(&mut self, key: String, value: String) {
         self.user_properties.push((key, value));
     }
 
-    pub fn clearUserProperties(&mut self) {
+    #[wasm_bindgen(js_name = clearUserProperties)]
+    pub fn clear_user_properties(&mut self) {
         self.user_properties.clear();
     }
 
@@ -690,10 +717,9 @@ pub struct WasmSubscribeOptions {
 }
 
 #[wasm_bindgen(js_class = "SubscribeOptions")]
-#[allow(non_snake_case)]
 impl WasmSubscribeOptions {
     #[wasm_bindgen(constructor)]
-    #[allow(clippy::must_use_candidate)]
+    #[must_use]
     pub fn new() -> Self {
         Self {
             qos: 0,
@@ -720,36 +746,36 @@ impl WasmSubscribeOptions {
         }
     }
 
-    #[wasm_bindgen(getter)]
+    #[wasm_bindgen(getter = noLocal)]
     #[must_use]
-    pub fn noLocal(&self) -> bool {
+    pub fn no_local(&self) -> bool {
         self.no_local
     }
 
-    #[wasm_bindgen(setter)]
-    pub fn set_noLocal(&mut self, value: bool) {
+    #[wasm_bindgen(setter = noLocal)]
+    pub fn set_no_local(&mut self, value: bool) {
         self.no_local = value;
     }
 
-    #[wasm_bindgen(getter)]
+    #[wasm_bindgen(getter = retainAsPublished)]
     #[must_use]
-    pub fn retainAsPublished(&self) -> bool {
+    pub fn retain_as_published(&self) -> bool {
         self.retain_as_published
     }
 
-    #[wasm_bindgen(setter)]
-    pub fn set_retainAsPublished(&mut self, value: bool) {
+    #[wasm_bindgen(setter = retainAsPublished)]
+    pub fn set_retain_as_published(&mut self, value: bool) {
         self.retain_as_published = value;
     }
 
-    #[wasm_bindgen(getter)]
+    #[wasm_bindgen(getter = retainHandling)]
     #[must_use]
-    pub fn retainHandling(&self) -> u8 {
+    pub fn retain_handling(&self) -> u8 {
         self.retain_handling
     }
 
-    #[wasm_bindgen(setter)]
-    pub fn set_retainHandling(&mut self, value: u8) {
+    #[wasm_bindgen(setter = retainHandling)]
+    pub fn set_retain_handling(&mut self, value: u8) {
         if value > 2 {
             web_sys::console::warn_1(&"Retain handling must be 0, 1, or 2. Using 0.".into());
             self.retain_handling = 0;
@@ -758,14 +784,14 @@ impl WasmSubscribeOptions {
         }
     }
 
-    #[wasm_bindgen(getter)]
+    #[wasm_bindgen(getter = subscriptionIdentifier)]
     #[must_use]
-    pub fn subscriptionIdentifier(&self) -> Option<u32> {
+    pub fn subscription_identifier(&self) -> Option<u32> {
         self.subscription_identifier
     }
 
-    #[wasm_bindgen(setter)]
-    pub fn set_subscriptionIdentifier(&mut self, value: Option<u32>) {
+    #[wasm_bindgen(setter = subscriptionIdentifier)]
+    pub fn set_subscription_identifier(&mut self, value: Option<u32>) {
         self.subscription_identifier = value;
     }
 
@@ -797,10 +823,9 @@ pub struct WasmWillMessage {
 }
 
 #[wasm_bindgen(js_class = "WillMessage")]
-#[allow(non_snake_case)]
 impl WasmWillMessage {
     #[wasm_bindgen(constructor)]
-    #[allow(clippy::must_use_candidate)]
+    #[must_use]
     pub fn new(topic: String, payload: Vec<u8>) -> Self {
         Self {
             topic,
@@ -852,47 +877,47 @@ impl WasmWillMessage {
         self.retain = value;
     }
 
-    #[wasm_bindgen(getter)]
+    #[wasm_bindgen(getter = willDelayInterval)]
     #[must_use]
-    pub fn willDelayInterval(&self) -> Option<u32> {
+    pub fn will_delay_interval(&self) -> Option<u32> {
         self.will_delay_interval
     }
 
-    #[wasm_bindgen(setter)]
-    pub fn set_willDelayInterval(&mut self, value: Option<u32>) {
+    #[wasm_bindgen(setter = willDelayInterval)]
+    pub fn set_will_delay_interval(&mut self, value: Option<u32>) {
         self.will_delay_interval = value;
     }
 
-    #[wasm_bindgen(getter)]
+    #[wasm_bindgen(getter = messageExpiryInterval)]
     #[must_use]
-    pub fn messageExpiryInterval(&self) -> Option<u32> {
+    pub fn message_expiry_interval(&self) -> Option<u32> {
         self.message_expiry_interval
     }
 
-    #[wasm_bindgen(setter)]
-    pub fn set_messageExpiryInterval(&mut self, value: Option<u32>) {
+    #[wasm_bindgen(setter = messageExpiryInterval)]
+    pub fn set_message_expiry_interval(&mut self, value: Option<u32>) {
         self.message_expiry_interval = value;
     }
 
-    #[wasm_bindgen(getter)]
+    #[wasm_bindgen(getter = contentType)]
     #[must_use]
-    pub fn contentType(&self) -> Option<String> {
+    pub fn content_type(&self) -> Option<String> {
         self.content_type.clone()
     }
 
-    #[wasm_bindgen(setter)]
-    pub fn set_contentType(&mut self, value: Option<String>) {
+    #[wasm_bindgen(setter = contentType)]
+    pub fn set_content_type(&mut self, value: Option<String>) {
         self.content_type = value;
     }
 
-    #[wasm_bindgen(getter)]
+    #[wasm_bindgen(getter = responseTopic)]
     #[must_use]
-    pub fn responseTopic(&self) -> Option<String> {
+    pub fn response_topic(&self) -> Option<String> {
         self.response_topic.clone()
     }
 
-    #[wasm_bindgen(setter)]
-    pub fn set_responseTopic(&mut self, value: Option<String>) {
+    #[wasm_bindgen(setter = responseTopic)]
+    pub fn set_response_topic(&mut self, value: Option<String>) {
         self.response_topic = value;
     }
 
@@ -932,46 +957,46 @@ pub struct WasmMessageProperties {
 }
 
 #[wasm_bindgen(js_class = "MessageProperties")]
-#[allow(non_snake_case)]
 impl WasmMessageProperties {
-    #[wasm_bindgen(getter)]
+    #[wasm_bindgen(getter = responseTopic)]
     #[must_use]
-    pub fn responseTopic(&self) -> Option<String> {
+    pub fn response_topic(&self) -> Option<String> {
         self.response_topic.clone()
     }
 
-    #[wasm_bindgen(getter)]
+    #[wasm_bindgen(getter = correlationData)]
     #[must_use]
-    pub fn correlationData(&self) -> Option<Vec<u8>> {
+    pub fn correlation_data(&self) -> Option<Vec<u8>> {
         self.correlation_data.clone()
     }
 
-    #[wasm_bindgen(getter)]
+    #[wasm_bindgen(getter = contentType)]
     #[must_use]
-    pub fn contentType(&self) -> Option<String> {
+    pub fn content_type(&self) -> Option<String> {
         self.content_type.clone()
     }
 
-    #[wasm_bindgen(getter)]
+    #[wasm_bindgen(getter = payloadFormatIndicator)]
     #[must_use]
-    pub fn payloadFormatIndicator(&self) -> Option<bool> {
+    pub fn payload_format_indicator(&self) -> Option<bool> {
         self.payload_format_indicator
     }
 
-    #[wasm_bindgen(getter)]
+    #[wasm_bindgen(getter = messageExpiryInterval)]
     #[must_use]
-    pub fn messageExpiryInterval(&self) -> Option<u32> {
+    pub fn message_expiry_interval(&self) -> Option<u32> {
         self.message_expiry_interval
     }
 
-    #[wasm_bindgen(getter)]
+    #[wasm_bindgen(getter = subscriptionIdentifiers)]
     #[must_use]
-    pub fn subscriptionIdentifiers(&self) -> Vec<u32> {
+    pub fn subscription_identifiers(&self) -> Vec<u32> {
         self.subscription_identifiers.clone()
     }
 
     #[must_use]
-    pub fn getUserProperties(&self) -> js_sys::Array {
+    #[wasm_bindgen(js_name = getUserProperties)]
+    pub fn get_user_properties(&self) -> js_sys::Array {
         let arr = js_sys::Array::new();
         for (key, value) in &self.user_properties {
             let pair = js_sys::Array::new();

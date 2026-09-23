@@ -5,14 +5,16 @@
 pub(crate) mod ack;
 mod handlers;
 mod keepalive;
+mod outbound;
 mod reader;
+mod replay;
 mod unified;
 
 pub use ack::AckToken;
 pub(crate) use ack::{AckCallbackManager, AckDispatcher};
 
 use parking_lot::Mutex;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::oneshot;
@@ -31,8 +33,10 @@ use crate::packet::unsuback::UnsubAckPacket;
 use crate::packet::unsubscribe::UnsubscribePacket;
 use crate::packet::{MqttPacket, Packet};
 use crate::packet_id::PacketIdGenerator;
-use crate::protocol::v5::properties::Properties;
+use crate::protocol::v5::properties::{Properties, PropertyId, PropertyValue};
 use crate::protocol::v5::reason_codes::ReasonCode;
+use crate::session::flow_control::FlowControlManager;
+use crate::session::state::OutboundReplay;
 use crate::session::subscription::Subscription;
 use crate::session::SessionState;
 use crate::transport::{PacketIo, PacketWriter, TransportType};
@@ -60,6 +64,7 @@ use keepalive::{keepalive_task_with_writer, KeepaliveState};
 #[cfg(feature = "transport-quic")]
 use reader::quic_stream_acceptor_task;
 use reader::{packet_reader_task_with_responses, PacketReaderContext};
+use replay::{PublishPolicy, SessionReplay};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AutomaticReconnectLifecycle {
@@ -76,6 +81,37 @@ pub(crate) enum SubscriptionPersistence {
 pub(crate) type StoredSubscription = (String, SubscriptionOptions, Option<u32>, CallbackId);
 pub(crate) type StoredSubscriptions = Arc<Mutex<Vec<StoredSubscription>>>;
 pub(crate) type ConnectionEpoch = Arc<AtomicU64>;
+pub(crate) type PendingAcks = Arc<Mutex<HashMap<u16, oneshot::Sender<ReasonCode>>>>;
+
+#[derive(Debug)]
+pub(crate) enum StagedPublish {
+    Queued(PublishResult),
+    Ready(PublishPacket),
+}
+
+pub(crate) struct PublishAck {
+    rx: oneshot::Receiver<ReasonCode>,
+    packet_id: u16,
+    pending: PendingAcks,
+}
+
+impl PublishAck {
+    pub(crate) async fn wait(self) -> Result<()> {
+        match tokio::time::timeout(Duration::from_secs(10), self.rx).await {
+            Ok(Ok(reason_code)) if reason_code.is_error() => {
+                Err(MqttError::PublishFailed(reason_code))
+            }
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(_)) => Err(MqttError::ProtocolError(
+                "Acknowledgment channel closed".to_string(),
+            )),
+            Err(_) => {
+                self.pending.lock().remove(&self.packet_id);
+                Err(MqttError::Timeout)
+            }
+        }
+    }
+}
 
 pub struct DirectClientInner {
     pub writer: Option<Arc<tokio::sync::Mutex<UnifiedWriter>>>,
@@ -109,21 +145,23 @@ pub struct DirectClientInner {
     pub packet_id_generator: PacketIdGenerator,
     pub pending_subacks: Arc<Mutex<HashMap<u16, oneshot::Sender<SubAckPacket>>>>,
     pub pending_unsubacks: Arc<Mutex<HashMap<u16, oneshot::Sender<UnsubAckPacket>>>>,
-    pub pending_pubacks: Arc<Mutex<HashMap<u16, oneshot::Sender<ReasonCode>>>>,
-    pub pending_pubcomps: Arc<Mutex<HashMap<u16, oneshot::Sender<ReasonCode>>>>,
+    pub pending_pubacks: PendingAcks,
+    pub pending_pubcomps: PendingAcks,
     pub reconnect_attempt: u32,
     pub last_address: Option<String>,
     pub automatic_reconnect_lifecycle: AutomaticReconnectLifecycle,
     pub server_redirect: Option<String>,
-    pub queued_messages: Arc<Mutex<Vec<PublishPacket>>>,
+    pub queued_messages: Arc<Mutex<VecDeque<PublishPacket>>>,
     pub stored_subscriptions: StoredSubscriptions,
     pub stored_ack_subscriptions: StoredSubscriptions,
     pub queue_on_disconnect: bool,
     pub server_max_qos: Arc<Mutex<Option<u8>>>,
+    pub server_retain_available: Arc<AtomicBool>,
     pub auth_handler: Option<Arc<dyn AuthHandler>>,
     pub auth_method: Option<String>,
     pub keepalive_state: Arc<Mutex<KeepaliveState>>,
     pub negotiated_keep_alive_secs: AtomicU64,
+    server_capabilities: outbound::ServerCapabilities,
     #[cfg(feature = "transport-quic")]
     pub cached_quic_client_config: Option<quinn::ClientConfig>,
     #[cfg(feature = "transport-quic")]
@@ -179,15 +217,17 @@ impl DirectClientInner {
             last_address: None,
             automatic_reconnect_lifecycle: AutomaticReconnectLifecycle::Armed,
             server_redirect: None,
-            queued_messages: Arc::new(Mutex::new(Vec::new())),
+            queued_messages: Arc::new(Mutex::new(VecDeque::new())),
             stored_subscriptions: Arc::new(Mutex::new(Vec::new())),
             stored_ack_subscriptions: Arc::new(Mutex::new(Vec::new())),
             queue_on_disconnect,
             server_max_qos: Arc::new(Mutex::new(None)),
+            server_retain_available: Arc::new(AtomicBool::new(true)),
             auth_handler: None,
             auth_method,
             keepalive_state: Arc::new(Mutex::new(KeepaliveState::default())),
             negotiated_keep_alive_secs: AtomicU64::new(initial_keep_alive_secs),
+            server_capabilities: outbound::ServerCapabilities::default(),
             #[cfg(feature = "transport-quic")]
             cached_quic_client_config: None,
             #[cfg(feature = "transport-quic")]
@@ -289,19 +329,6 @@ impl DirectClientInner {
     pub fn set_queue_on_disconnect(&mut self, enabled: bool) {
         self.queue_on_disconnect = enabled;
     }
-
-    /// # Errors
-    ///
-    /// Returns an error if the operation fails
-    pub async fn send_packet(&mut self, packet: Packet) -> Result<()> {
-        if let Some(writer) = &self.writer {
-            let mut writer_guard = writer.lock().await;
-            writer_guard.write_packet(packet).await?;
-            Ok(())
-        } else {
-            Err(MqttError::NotConnected)
-        }
-    }
 }
 
 impl DirectClientInner {
@@ -314,6 +341,11 @@ impl DirectClientInner {
 
         match auth.reason_code {
             ReasonCode::ContinueAuthentication => {
+                let method = self.auth_method.clone().ok_or_else(|| {
+                    MqttError::ProtocolError(
+                        "AUTH received but CONNECT carried no Authentication Method".to_string(),
+                    )
+                })?;
                 let handler = self
                     .auth_handler
                     .as_ref()
@@ -326,7 +358,6 @@ impl DirectClientInner {
 
                 match response {
                     AuthResponse::Continue(data) => {
-                        let method = self.auth_method.clone().unwrap_or_default();
                         let auth_packet = AuthPacket::continue_authentication(method, Some(data))?;
                         transport.write_packet(Packet::Auth(auth_packet)).await?;
                     }
@@ -411,16 +442,14 @@ impl DirectClientInner {
             return Err(MqttError::ConnectionRefused(connack.reason_code));
         }
 
-        if let Some(max_qos) = connack.properties.get_maximum_qos() {
-            *self.server_max_qos.lock() = Some(max_qos);
-            tracing::debug!("Server maximum QoS: {}", max_qos);
-        } else {
-            *self.server_max_qos.lock() = None;
+        if connack.session_present && !self.holds_session_state() {
+            return Err(Self::reject_unexpected_session_present(&mut transport).await);
         }
 
-        self.apply_negotiated_keep_alive(connack.properties.get_server_keep_alive());
-
-        self.apply_negotiated_packet_sizes(&connack).await?;
+        let receive_maximum = self.apply_server_capabilities(&connack).await?;
+        self.apply_negotiated_capabilities(&connack).await;
+        let replay_items = self.session.read().await.outbound_replay().await;
+        let replay_slots = self.reset_send_quota(receive_maximum, &replay_items).await;
 
         let protocol_version = self.options.protocol_version.as_u8();
         let (reader, writer) = match transport {
@@ -471,11 +500,13 @@ impl DirectClientInner {
             }
         };
 
+        let reader = reader.with_maximum_packet_size(self.options.properties.maximum_packet_size);
         let connection_epoch = self.advance_connection_epoch();
         let writer_arc = Arc::new(tokio::sync::Mutex::new(writer));
         self.ack_dispatcher
             .set_writer(Arc::clone(&writer_arc))
             .await;
+        let replay_writer = Arc::downgrade(&writer_arc);
         self.writer = Some(writer_arc);
         self.set_connected(true);
 
@@ -483,34 +514,153 @@ impl DirectClientInner {
         self.start_background_tasks(reader, connection_epoch)?;
         tracing::debug!("Background tasks started successfully");
 
+        if let Some(slots) = replay_slots {
+            let replay = SessionReplay {
+                items: replay_items,
+                slots,
+                session: Arc::clone(&self.session),
+                writer: replay_writer,
+                queued: Arc::clone(&self.queued_messages),
+                policy: self.publish_policy(),
+            };
+            tokio::spawn(replay.run());
+        }
+
         Ok(ConnectResult {
             session_present: connack.session_present,
         })
     }
 
+    fn holds_session_state(&self) -> bool {
+        !self.options.clean_start
+            && (self.connection_epoch.load(Ordering::SeqCst) > 0
+                || self.options.resume_existing_session)
+    }
+
+    async fn apply_server_capabilities(
+        &mut self,
+        connack: &crate::packet::connack::ConnAckPacket,
+    ) -> Result<u16> {
+        if !connack.session_present {
+            self.discard_session_state().await;
+        }
+        self.adopt_assigned_client_identifier(connack).await;
+
+        if let Some(max_qos) = connack.properties.get_maximum_qos() {
+            *self.server_max_qos.lock() = Some(max_qos);
+            tracing::debug!("Server maximum QoS: {}", max_qos);
+        } else {
+            *self.server_max_qos.lock() = None;
+        }
+        self.server_retain_available.store(
+            !matches!(
+                connack.properties.get(PropertyId::RetainAvailable),
+                Some(PropertyValue::Byte(0))
+            ),
+            Ordering::SeqCst,
+        );
+
+        self.apply_negotiated_keep_alive(connack.properties.get_server_keep_alive());
+
+        self.apply_negotiated_packet_sizes(connack).await
+    }
+
+    async fn reject_unexpected_session_present(transport: &mut TransportType) -> MqttError {
+        tracing::warn!(
+            "CONNACK reported Session Present=1 but the client holds no session state; closing the connection"
+        );
+        let disconnect = crate::packet::disconnect::DisconnectPacket {
+            reason_code: ReasonCode::ProtocolError,
+            properties: Properties::default(),
+        };
+        if let Err(e) = transport.write_packet(Packet::Disconnect(disconnect)).await {
+            tracing::debug!("Failed to send DISCONNECT for unexpected Session Present: {e}");
+        }
+        MqttError::ProtocolError(
+            "CONNACK Session Present=1 but the client holds no session state".to_string(),
+        )
+    }
+
+    async fn discard_session_state(&self) {
+        self.ack_dispatcher.discard_pending();
+        let session = self.session.read().await;
+        session.discard_outbound_state().await;
+        session.flow_control().read().await.clear_inbound().await;
+        if session.clear_all_inbound_state().await {
+            if self.options.deferred_ack {
+                tracing::warn!(
+                    "Reconnected with session_present=0; cleared stale inbound QoS 2 \
+                     de-duplication state. Any outstanding AckTokens are now stale because the \
+                     broker no longer holds the session that delivered their messages."
+                );
+            } else {
+                tracing::debug!(
+                    "Reconnected with session_present=0; cleared stale inbound QoS 2 de-duplication state"
+                );
+            }
+        }
+    }
+
+    async fn adopt_assigned_client_identifier(
+        &mut self,
+        connack: &crate::packet::connack::ConnAckPacket,
+    ) {
+        if let Some(PropertyValue::Utf8String(assigned)) =
+            connack.properties.get(PropertyId::AssignedClientIdentifier)
+        {
+            tracing::debug!(client_id = %assigned, "Adopting server assigned client identifier");
+            self.session.write().await.set_client_id(assigned.clone());
+            self.options.client_id.clone_from(assigned);
+        }
+    }
+
+    async fn reset_send_quota(
+        &self,
+        receive_maximum: u16,
+        replay_items: &[OutboundReplay],
+    ) -> Option<Arc<tokio::sync::Semaphore>> {
+        let retained_in_flight: Vec<u16> = replay_items
+            .iter()
+            .filter_map(|item| match item {
+                OutboundReplay::PubRel(packet_id) => Some(*packet_id),
+                OutboundReplay::Publish(_) => None,
+            })
+            .collect();
+        let replay = !replay_items.is_empty() || !self.queued_messages.lock().is_empty();
+        let flow = Arc::clone(self.session.read().await.flow_control());
+        let mut flow = flow.write().await;
+        flow.reset_for_connection(receive_maximum, &retained_in_flight, replay)
+            .await
+    }
+
+    fn publish_policy(&self) -> PublishPolicy {
+        PublishPolicy {
+            maximum_qos: *self.server_max_qos.lock(),
+            retain_available: self.server_retain_available.load(Ordering::SeqCst),
+        }
+    }
+
     async fn apply_negotiated_packet_sizes(
         &self,
         connack: &crate::packet::connack::ConnAckPacket,
-    ) -> Result<()> {
+    ) -> Result<u16> {
         let session = self.session.write().await;
 
-        match connack.properties.get_receive_maximum() {
+        let receive_maximum = match connack.properties.get_receive_maximum() {
             Some(0) => {
                 return Err(MqttError::ProtocolError(
                     "server advertised a Receive Maximum of 0".to_string(),
                 ));
             }
             Some(server_receive_maximum) => {
-                session.set_receive_maximum(server_receive_maximum).await;
                 tracing::debug!("Server Receive Maximum: {}", server_receive_maximum);
+                server_receive_maximum
             }
-            None => session.set_receive_maximum(65535).await,
-        }
+            None => 65535,
+        };
 
-        if self.options.deferred_ack {
-            if let Some(receive_maximum) = self.options.properties.receive_maximum {
-                session.set_inbound_receive_maximum(receive_maximum).await;
-            }
+        if let Some(receive_maximum) = self.options.properties.receive_maximum {
+            session.set_inbound_receive_maximum(receive_maximum).await;
         }
 
         if let Some(max_packet_size) = self.options.properties.maximum_packet_size {
@@ -529,7 +679,19 @@ impl DirectClientInner {
             None => session.reset_server_maximum_packet_size().await,
         }
 
-        Ok(())
+        Ok(receive_maximum)
+    }
+
+    async fn apply_negotiated_capabilities(
+        &mut self,
+        connack: &crate::packet::connack::ConnAckPacket,
+    ) {
+        self.server_capabilities = outbound::ServerCapabilities::from_connack(connack);
+        self.session
+            .read()
+            .await
+            .set_topic_alias_maximum_out(connack.topic_alias_maximum().unwrap_or(0))
+            .await;
     }
 
     /// # Errors
@@ -582,21 +744,26 @@ impl DirectClientInner {
             return Err(MqttError::NotConnected);
         }
 
-        if send_disconnect {
-            if let Some(ref writer) = self.writer {
-                let disconnect = crate::packet::disconnect::DisconnectPacket {
-                    reason_code: crate::protocol::v5::reason_codes::ReasonCode::Success,
-                    properties: crate::protocol::v5::properties::Properties::default(),
-                };
-                let _ = writer
-                    .lock()
-                    .await
-                    .write_packet(Packet::Disconnect(disconnect))
-                    .await;
+        self.set_connected(false);
+        if let Some(ref writer) = self.writer {
+            let disconnect = send_disconnect.then(|| {
+                Packet::Disconnect(crate::packet::disconnect::DisconnectPacket::new(
+                    ReasonCode::Success,
+                ))
+            });
+            if let Err(e) = writer.lock().await.close(disconnect).await {
+                tracing::debug!("Closing network connection on disconnect: {e}");
             }
         }
 
         self.reset_connection_runtime(b"disconnect").await;
+        self.session
+            .read()
+            .await
+            .flow_control()
+            .read()
+            .await
+            .close_send_quota();
 
         Ok(())
     }
@@ -614,24 +781,58 @@ impl DirectClientInner {
         payload: Vec<u8>,
         options: &PublishOptions,
     ) -> Result<PublishResult> {
-        let mut publish = PublishPacket {
-            topic_name: topic,
-            packet_id: Some(SIZE_PROBE_PACKET_ID),
-            payload: payload.into(),
-            qos: options.qos,
-            retain: options.retain,
-            dup: false,
-            properties: options.properties.clone().into(),
-            protocol_version: self.options.protocol_version.as_u8(),
-            stream_id: None,
-        };
+        let mut publish = self
+            .with_aliased_topic(PublishPacket {
+                topic_name: topic,
+                packet_id: Some(SIZE_PROBE_PACKET_ID),
+                payload: payload.into(),
+                qos: options.qos,
+                retain: options.retain,
+                dup: false,
+                properties: options.properties.clone().into(),
+                protocol_version: self.options.protocol_version.as_u8(),
+                stream_id: None,
+            })
+            .await?;
 
         self.check_publish_size(&publish).await?;
 
-        let packet_id = self.packet_id_generator.next();
+        let packet_id = self.allocate_packet_id().await?;
         publish.packet_id = Some(packet_id);
-        self.queued_messages.lock().push(publish);
+        self.queued_messages.lock().push_back(publish);
         Ok(PublishResult::QoS1Or2 { packet_id })
+    }
+
+    async fn with_aliased_topic(&self, mut publish: PublishPacket) -> Result<PublishPacket> {
+        if let Some(alias) = publish
+            .topic_alias()
+            .filter(|_| publish.topic_name.is_empty())
+        {
+            let session = self.session.read().await;
+            let aliases = session.topic_alias_out().read().await;
+            publish.topic_name = aliases
+                .get_topic(alias)
+                .map(str::to_string)
+                .ok_or(MqttError::TopicAliasInvalid(alias))?;
+        }
+        Ok(publish)
+    }
+
+    async fn allocate_packet_id(&self) -> Result<u16> {
+        self.session
+            .read()
+            .await
+            .allocate_packet_id(&self.packet_id_generator, |packet_id| {
+                self.pending_subacks.lock().contains_key(&packet_id)
+                    || self.pending_unsubacks.lock().contains_key(&packet_id)
+                    || self
+                        .queued_messages
+                        .lock()
+                        .iter()
+                        .any(|queued| queued.packet_id == Some(packet_id))
+            })
+            .await
+            .ok_or(MqttError::PacketIdExhausted)
     }
 
     /// # Errors
@@ -644,62 +845,31 @@ impl DirectClientInner {
         self.session.read().await.check_packet_size(buf.len()).await
     }
 
-    fn setup_publish_acknowledgment(
-        &self,
-        qos: QoS,
-        packet_id: Option<u16>,
-    ) -> Option<oneshot::Receiver<ReasonCode>> {
-        match qos {
-            QoS::AtMostOnce => None,
-            QoS::AtLeastOnce => {
-                let (tx, rx) = oneshot::channel();
-                if let Some(pid) = packet_id {
-                    self.pending_pubacks.lock().insert(pid, tx);
-                }
-                Some(rx)
-            }
-            QoS::ExactlyOnce => {
-                let (tx, rx) = oneshot::channel();
-                if let Some(pid) = packet_id {
-                    self.pending_pubcomps.lock().insert(pid, tx);
-                }
-                Some(rx)
-            }
-        }
+    async fn check_packet_fits(&self, packet: &impl MqttPacket) -> Result<()> {
+        let mut buf = bytes::BytesMut::new();
+        packet.encode(&mut buf)?;
+        self.session.read().await.check_packet_size(buf.len()).await
     }
 
-    async fn wait_for_acknowledgment(
-        &self,
-        rx: oneshot::Receiver<ReasonCode>,
-        qos: QoS,
-        packet_id: Option<u16>,
-    ) -> Result<()> {
-        let timeout = Duration::from_secs(10);
-        match tokio::time::timeout(timeout, rx).await {
-            Ok(Ok(reason_code)) => {
-                if reason_code.is_error() {
-                    return Err(MqttError::PublishFailed(reason_code));
-                }
-                Ok(())
-            }
-            Ok(Err(_)) => Err(MqttError::ProtocolError(
-                "Acknowledgment channel closed".to_string(),
-            )),
-            Err(_) => {
-                if let Some(pid) = packet_id {
-                    match qos {
-                        QoS::AtLeastOnce => {
-                            self.pending_pubacks.lock().remove(&pid);
-                        }
-                        QoS::ExactlyOnce => {
-                            self.pending_pubcomps.lock().remove(&pid);
-                        }
-                        QoS::AtMostOnce => {}
-                    }
-                }
-                Err(MqttError::Timeout)
-            }
-        }
+    pub(crate) async fn check_unsubscribe(&self, packet: &UnsubscribePacket) -> Result<()> {
+        outbound::check_unsubscribe(packet)?;
+        self.check_packet_fits(packet).await
+    }
+
+    fn setup_publish_acknowledgment(&self, qos: QoS, packet_id: Option<u16>) -> Option<PublishAck> {
+        let pending = match qos {
+            QoS::AtMostOnce => return None,
+            QoS::AtLeastOnce => &self.pending_pubacks,
+            QoS::ExactlyOnce => &self.pending_pubcomps,
+        };
+        let packet_id = packet_id?;
+        let (tx, rx) = oneshot::channel();
+        pending.lock().insert(packet_id, tx);
+        Some(PublishAck {
+            rx,
+            packet_id,
+            pending: Arc::clone(pending),
+        })
     }
 
     pub(super) async fn release_outbound_quota(
@@ -707,25 +877,37 @@ impl DirectClientInner {
         packet_id: Option<u16>,
     ) {
         if let Some(pid) = packet_id {
-            let flow = session.read().await.flow_control().clone();
-            let _ = flow.read().await.acknowledge(pid).await;
+            let session = session.read().await;
+            session.complete_outbound(pid).await;
+            let flow = Arc::clone(session.flow_control());
+            drop(session);
+            Self::release_send_quota(&flow, pid).await;
         }
     }
 
-    /// # Errors
-    ///
-    /// Returns an error if the operation fails
-    pub async fn publish(
+    async fn release_send_quota(
+        flow: &Arc<tokio::sync::RwLock<FlowControlManager>>,
+        packet_id: u16,
+    ) {
+        if let Err(e) = flow.read().await.acknowledge(packet_id).await {
+            tracing::trace!(packet_id, "No send quota held: {e}");
+        }
+    }
+
+    pub(crate) async fn stage_publish(
         &self,
         topic: String,
         payload: Vec<u8>,
         options: PublishOptions,
-    ) -> Result<PublishResult> {
-        if !self.is_connected() && self.queue_on_disconnect && options.qos != QoS::AtMostOnce {
-            return self.queue_publish_message(topic, payload, &options).await;
-        }
+    ) -> Result<StagedPublish> {
+        outbound::check_publish(&topic, &options)?;
 
-        let options = self.resolve_effective_qos(options);
+        if !self.is_connected() && self.queue_on_disconnect && options.qos != QoS::AtMostOnce {
+            return self
+                .queue_publish_message(topic, payload, &options)
+                .await
+                .map(StagedPublish::Queued);
+        }
 
         #[cfg(feature = "opentelemetry")]
         let options = {
@@ -738,115 +920,96 @@ impl DirectClientInner {
             return Err(MqttError::NotConnected);
         }
 
+        if let Some(alias) = options.properties.topic_alias {
+            let session = self.session.read().await;
+            let aliases = session.topic_alias_out().read().await;
+            outbound::check_topic_alias(&aliases, &topic, alias)?;
+        }
         let (final_payload, properties) = self.encode_payload(payload, &options)?;
 
-        let needs_packet_id = options.qos != QoS::AtMostOnce;
-
-        let mut publish = PublishPacket {
+        let mut publish = self.publish_policy().conform(PublishPacket {
             topic_name: topic,
             payload: final_payload,
             qos: options.qos,
             retain: options.retain,
             dup: false,
-            packet_id: needs_packet_id.then_some(SIZE_PROBE_PACKET_ID),
+            packet_id: (options.qos != QoS::AtMostOnce).then_some(SIZE_PROBE_PACKET_ID),
             properties,
             protocol_version: self.options.protocol_version.as_u8(),
             stream_id: None,
-        };
+        })?;
 
-        let mut buf = bytes::BytesMut::new();
-        publish.encode(&mut buf)?;
-        self.session
-            .read()
-            .await
-            .check_packet_size(buf.len())
-            .await?;
+        self.check_publish_size(&publish).await?;
 
-        let packet_id = needs_packet_id.then(|| self.packet_id_generator.next());
-        publish.packet_id = packet_id;
-
-        if let Some(pid) = packet_id {
-            let flow = self.session.read().await.flow_control().clone();
-            flow.read().await.acquire_send_quota(pid).await?;
+        if publish.qos != QoS::AtMostOnce {
+            publish.packet_id = Some(self.allocate_packet_id().await?);
         }
 
-        if options.qos != QoS::AtMostOnce {
-            if let Err(e) = self
-                .session
-                .write()
-                .await
-                .store_unacked_publish(publish.clone())
-                .await
-            {
-                Self::release_outbound_quota(&self.session, packet_id).await;
+        Ok(StagedPublish::Ready(publish))
+    }
+
+    pub(crate) async fn transmit_publish(
+        &self,
+        publish: PublishPacket,
+    ) -> Result<Option<PublishAck>> {
+        let qos = publish.qos;
+        let packet_id = publish.packet_id;
+        let flow = Arc::clone(self.session.read().await.flow_control());
+
+        if !self.is_connected() {
+            if let Some(pid) = packet_id {
+                Self::release_send_quota(&flow, pid).await;
+            }
+            return Err(MqttError::NotConnected);
+        }
+
+        if qos != QoS::AtMostOnce {
+            let stored = match self.with_aliased_topic(publish.clone()).await {
+                Ok(stored) => {
+                    self.session
+                        .read()
+                        .await
+                        .store_unacked_publish(stored)
+                        .await
+                }
+                Err(e) => Err(e),
+            };
+            if let Err(e) = stored {
+                if let Some(pid) = packet_id {
+                    Self::release_send_quota(&flow, pid).await;
+                }
                 return Err(e);
             }
         }
 
-        let rx = self.setup_publish_acknowledgment(options.qos, packet_id);
+        let ack = self.setup_publish_acknowledgment(qos, packet_id);
 
         if publish.payload.len() > 10000 {
             tracing::debug!(
                 topic = %publish.topic_name,
                 payload_len = publish.payload.len(),
                 packet_id = ?packet_id,
-                qos = ?options.qos,
+                qos = ?qos,
                 "Sending large PUBLISH packet"
             );
         }
 
-        if let Err(e) = self.send_publish_packet(publish, options.qos).await {
-            Self::release_outbound_quota(&self.session, packet_id).await;
-            return Err(e);
+        let alias_mapping = publish
+            .topic_alias()
+            .filter(|_| !publish.topic_name.is_empty())
+            .map(|alias| (alias, publish.topic_name.clone()));
+        self.send_publish_packet(publish).await?;
+        if let Some((alias, alias_topic)) = alias_mapping {
+            self.record_outbound_topic_alias(alias, &alias_topic).await;
         }
-
-        if let Some(rx) = rx {
-            if let Err(e) = self
-                .wait_for_acknowledgment(rx, options.qos, packet_id)
-                .await
-            {
-                if !matches!(e, MqttError::Timeout) {
-                    Self::release_outbound_quota(&self.session, packet_id).await;
-                }
-                return Err(e);
-            }
-        }
-
-        Ok(match packet_id {
-            None => PublishResult::QoS0,
-            Some(id) => PublishResult::QoS1Or2 { packet_id: id },
-        })
+        Ok(ack)
     }
 
-    fn resolve_effective_qos(&self, options: PublishOptions) -> PublishOptions {
-        let effective_qos = if let Some(max_qos) = *self.server_max_qos.lock() {
-            let qos_value = match options.qos {
-                QoS::AtMostOnce => 0,
-                QoS::AtLeastOnce => 1,
-                QoS::ExactlyOnce => 2,
-            };
-            if qos_value > max_qos {
-                tracing::warn!(
-                    "Requested QoS {} exceeds server maximum {}, using QoS {}",
-                    qos_value,
-                    max_qos,
-                    max_qos
-                );
-                match max_qos {
-                    0 => QoS::AtMostOnce,
-                    1 => QoS::AtLeastOnce,
-                    _ => QoS::ExactlyOnce,
-                }
-            } else {
-                options.qos
-            }
-        } else {
-            options.qos
-        };
-
-        PublishOptions {
-            qos: effective_qos,
-            ..options
+    async fn record_outbound_topic_alias(&self, alias: u16, topic: &str) {
+        let session = self.session.read().await;
+        let mut aliases = session.topic_alias_out().write().await;
+        if let Err(e) = aliases.register_alias(alias, topic) {
+            tracing::warn!(alias, topic, error = %e, "outbound Topic Alias not recorded");
         }
     }
 
@@ -864,19 +1027,16 @@ impl DirectClientInner {
         };
 
         let mut properties: Properties = options.properties.clone().into();
-        if let Some(ct) = codec_content_type {
-            use crate::protocol::v5::properties::{PropertyId, PropertyValue};
-            let _ = properties.add(PropertyId::ContentType, PropertyValue::Utf8String(ct));
+        if let Some(ct) = codec_content_type.filter(|_| properties.get_content_type().is_none()) {
+            properties.set_content_type(ct);
         }
         Ok((final_payload, properties))
     }
 
-    async fn send_publish_packet(&self, publish: PublishPacket, qos: QoS) -> Result<()> {
-        #[cfg(not(feature = "transport-quic"))]
-        let _ = qos;
-
+    async fn send_publish_packet(&self, publish: PublishPacket) -> Result<()> {
         #[cfg(feature = "transport-quic")]
         {
+            let qos = publish.qos;
             if qos == QoS::AtMostOnce && self.datagrams_available() {
                 if let Some(max_size) = self.max_datagram_size() {
                     let overhead = 5 + publish.topic_name.len();
@@ -911,12 +1071,12 @@ impl DirectClientInner {
                             .await?;
                         return Ok(());
                     }
-                    #[allow(deprecated)]
-                    StreamStrategy::DataPerTopic | StreamStrategy::DataPerSubscription => {
+                    StreamStrategy::ControlOnly => {}
+                    topic_strategy => {
                         tracing::debug!(
                             topic = %publish.topic_name,
                             qos = ?qos,
-                            strategy = ?manager.strategy(),
+                            strategy = ?topic_strategy,
                             "Using topic-specific QUIC stream for PUBLISH"
                         );
                         manager
@@ -927,7 +1087,6 @@ impl DirectClientInner {
                             .await?;
                         return Ok(());
                     }
-                    StreamStrategy::ControlOnly => {}
                 }
             }
         }
@@ -942,41 +1101,36 @@ impl DirectClientInner {
     }
 
     #[cfg(feature = "transport-quic")]
-    #[allow(deprecated)]
-    async fn should_unsubscribe_on_data_flow(&self, packet: &UnsubscribePacket) -> bool {
-        if packet.filters.len() != 1 {
-            return false;
-        }
-        if let Some(manager) = &self.quic_stream_manager {
-            if !matches!(
+    fn topic_stream_manager(&self) -> Option<&Arc<QuicStreamManager>> {
+        self.quic_stream_manager.as_ref().filter(|manager| {
+            !matches!(
                 manager.strategy(),
-                StreamStrategy::DataPerTopic | StreamStrategy::DataPerSubscription
-            ) {
-                return false;
-            }
-            manager
-                .get_flow_id_for_topic(&packet.filters[0])
-                .await
-                .is_some()
-        } else {
-            false
-        }
+                StreamStrategy::ControlOnly | StreamStrategy::DataPerPublish
+            )
+        })
     }
 
     #[cfg(feature = "transport-quic")]
-    #[allow(deprecated)]
-    fn should_subscribe_on_data_flow(&self, packet: &SubscribePacket) -> bool {
+    async fn unsubscribe_data_flow_manager(
+        &self,
+        packet: &UnsubscribePacket,
+    ) -> Option<&Arc<QuicStreamManager>> {
+        let [filter] = packet.filters.as_slice() else {
+            return None;
+        };
+        let manager = self.topic_stream_manager()?;
+        manager.get_flow_id_for_topic(filter).await.map(|_| manager)
+    }
+
+    #[cfg(feature = "transport-quic")]
+    fn subscribe_data_flow_manager(
+        &self,
+        packet: &SubscribePacket,
+    ) -> Option<&Arc<QuicStreamManager>> {
         if packet.filters.len() != 1 {
-            return false;
+            return None;
         }
-        if let Some(manager) = &self.quic_stream_manager {
-            matches!(
-                manager.strategy(),
-                StreamStrategy::DataPerTopic | StreamStrategy::DataPerSubscription
-            )
-        } else {
-            false
-        }
+        self.topic_stream_manager()
     }
 
     #[cfg(feature = "transport-quic")]
@@ -1088,9 +1242,12 @@ impl DirectClientInner {
             return Err(MqttError::NotConnected);
         }
 
+        self.server_capabilities.check_subscribe(&packet)?;
+        self.check_packet_fits(&packet).await?;
+
         let writer = self.writer.as_ref().ok_or(MqttError::NotConnected)?;
 
-        let packet_id = self.packet_id_generator.next();
+        let packet_id = self.allocate_packet_id().await?;
         let mut packet = packet;
         packet.packet_id = packet_id;
 
@@ -1106,8 +1263,7 @@ impl DirectClientInner {
         );
 
         #[cfg(feature = "transport-quic")]
-        let sent_on_flow = if self.should_subscribe_on_data_flow(&packet) {
-            let manager = self.quic_stream_manager.as_ref().unwrap();
+        let sent_on_flow = if let Some(manager) = self.subscribe_data_flow_manager(&packet) {
             let topic = packet.filters[0].filter.clone();
             manager
                 .send_on_topic_stream(topic, Packet::Subscribe(packet.clone()))
@@ -1132,12 +1288,15 @@ impl DirectClientInner {
         for (filter, reason_code) in packet.filters.iter().zip(suback.reason_codes.iter()) {
             if let Some(subscription) = Self::create_subscription_from_filter(filter, *reason_code)
             {
-                self.session
+                let recorded = self
+                    .session
                     .write()
                     .await
                     .add_subscription(filter.filter.clone(), subscription)
-                    .await
-                    .ok();
+                    .await;
+                if let Err(e) = recorded {
+                    tracing::warn!(filter = %filter.filter, error = %e, "subscription not recorded in session");
+                }
             }
         }
 
@@ -1162,9 +1321,11 @@ impl DirectClientInner {
             return Err(MqttError::NotConnected);
         }
 
+        self.check_unsubscribe(&packet).await?;
+
         let writer = self.writer.as_ref().ok_or(MqttError::NotConnected)?;
 
-        let packet_id = self.packet_id_generator.next();
+        let packet_id = self.allocate_packet_id().await?;
         let mut packet = packet;
         packet.packet_id = packet_id;
 
@@ -1179,8 +1340,8 @@ impl DirectClientInner {
         }
 
         #[cfg(feature = "transport-quic")]
-        let sent_on_flow = if self.should_unsubscribe_on_data_flow(&packet).await {
-            let manager = self.quic_stream_manager.as_ref().unwrap();
+        let sent_on_flow = if let Some(manager) = self.unsubscribe_data_flow_manager(&packet).await
+        {
             let topic = packet.filters[0].clone();
             manager
                 .send_on_topic_stream(topic, Packet::Unsubscribe(packet.clone()))
@@ -1222,53 +1383,48 @@ impl DirectClientInner {
         }
 
         for filter in packet.filters {
-            let _ = self
+            let removed = self
                 .session
                 .write()
                 .await
                 .remove_subscription(&filter)
                 .await;
+            if let Err(e) = removed {
+                tracing::warn!(filter = %filter, error = %e, "subscription not removed from session");
+            }
         }
 
         Ok(())
     }
 
     pub(crate) async fn build_connect_packet(&self) -> ConnectPacket {
-        use crate::protocol::v5::properties::{PropertyId, PropertyValue};
-
         let session = self.session.read().await;
 
         let mut properties = Properties::default();
 
         if let Some(val) = self.options.properties.session_expiry_interval {
-            let _ = properties.add(
-                PropertyId::SessionExpiryInterval,
-                PropertyValue::FourByteInteger(val),
-            );
+            properties.set_session_expiry_interval(val);
         }
         if let Some(val) = self.options.properties.receive_maximum {
-            let _ = properties.add(
-                PropertyId::ReceiveMaximum,
-                PropertyValue::TwoByteInteger(val),
-            );
+            properties.set_receive_maximum(val);
         }
         if let Some(val) = self.options.properties.maximum_packet_size {
-            let _ = properties.add(
-                PropertyId::MaximumPacketSize,
-                PropertyValue::FourByteInteger(val),
-            );
+            properties.set_maximum_packet_size(val);
         }
         if let Some(val) = self.options.properties.topic_alias_maximum {
-            let _ = properties.add(
-                PropertyId::TopicAliasMaximum,
-                PropertyValue::TwoByteInteger(val),
-            );
+            properties.set_topic_alias_maximum(val);
+        }
+        if let Some(val) = self.options.properties.request_response_information {
+            properties.set_request_response_information(val);
+        }
+        if let Some(val) = self.options.properties.request_problem_information {
+            properties.set_request_problem_information(val);
+        }
+        for (key, value) in &self.options.properties.user_properties {
+            properties.add_user_property(key.clone(), value.clone());
         }
         if let Some(ref method) = self.options.properties.authentication_method {
-            let _ = properties.add(
-                PropertyId::AuthenticationMethod,
-                PropertyValue::Utf8String(method.clone()),
-            );
+            properties.set_authentication_method(method.clone());
 
             let auth_data = if let Some(ref handler) = self.auth_handler {
                 match handler.initial_response(method).await {
@@ -1283,10 +1439,7 @@ impl DirectClientInner {
             };
 
             if let Some(data) = auth_data {
-                let _ = properties.add(
-                    PropertyId::AuthenticationData,
-                    PropertyValue::BinaryData(bytes::Bytes::from(data)),
-                );
+                properties.set_authentication_data(bytes::Bytes::from(data));
             }
         }
 
@@ -1349,6 +1502,14 @@ impl DirectClientInner {
             deferred_ack: self.options.deferred_ack,
             ack_callbacks: Arc::clone(&self.ack_callbacks),
             ack_dispatcher: Arc::clone(&self.ack_dispatcher),
+            topic_aliases: Arc::new(Mutex::new(crate::session::TopicAliasManager::new(
+                self.options.properties.topic_alias_maximum.unwrap_or(0),
+            ))),
+            request_problem_information: self
+                .options
+                .properties
+                .request_problem_information
+                .unwrap_or(true),
         };
 
         let ctx_for_packet_reader = ctx.clone();
@@ -1440,12 +1601,6 @@ impl DirectClientInner {
         tracing::info!(recovered = recovered, "Flow recovery completed");
 
         Ok(recovered)
-    }
-
-    #[cfg(not(feature = "transport-quic"))]
-    #[allow(clippy::unused_async)]
-    pub(crate) async fn recover_flows(&self) -> crate::error::Result<usize> {
-        Ok(0)
     }
 
     #[cfg(feature = "transport-quic")]
@@ -1592,7 +1747,7 @@ pub mod tests {
         let client = create_test_client();
 
         let result = client
-            .publish(
+            .stage_publish(
                 "test/topic".to_string(),
                 b"test payload".to_vec(),
                 PublishOptions::default(),
@@ -1653,7 +1808,7 @@ pub mod tests {
         assert!(!client.is_connected());
 
         let oversized = client
-            .publish(
+            .stage_publish(
                 "test/flush".to_string(),
                 vec![0u8; 4096],
                 PublishOptions {
@@ -1672,7 +1827,7 @@ pub mod tests {
         );
 
         let within = client
-            .publish(
+            .stage_publish(
                 "test/flush".to_string(),
                 vec![0u8; 64],
                 PublishOptions {
@@ -1682,7 +1837,10 @@ pub mod tests {
             )
             .await;
         assert!(
-            matches!(within, Ok(PublishResult::QoS1Or2 { .. })),
+            matches!(
+                within,
+                Ok(StagedPublish::Queued(PublishResult::QoS1Or2 { .. }))
+            ),
             "within-limit publish must queue: {within:?}"
         );
         assert_eq!(

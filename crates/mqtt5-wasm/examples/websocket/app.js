@@ -288,7 +288,7 @@ async function handleSubscribe(e) {
         subOpts.noLocal = false;
         subOpts.retainAsPublished = true;
         subOpts.retainHandling = 0;
-        subOpts.subscriptionIdentifier = Math.floor(Math.random() * 1000000);
+        subOpts.subscriptionIdentifier = Math.floor(Math.random() * 1000000) + 1;
 
         console.log('handleSubscribe: Calling subscribeWithOptions for topic:', topic);
         const packetId = await client.subscribeWithOptions(topic, (receivedTopic, payload) => {

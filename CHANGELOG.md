@@ -5,6 +5,69 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [mqtt5 0.41.0] - 2026-09-23
+
+A client-side conformance audit drove the real `MqttClient` against a raw-byte fake broker for each of the 149 normative statements in MQTT v5.0 that apply to a client. About 40 MUST statements failed. All are fixed here, and each is pinned by a test named after its OASIS statement ID in `crates/mqtt5/tests/conf_client_{a,b,c,d}.rs`.
+
+### Breaking
+
+- **A fresh client that receives Session Present=1 now closes the connection** with DISCONNECT 0x82 and `connect` returns an error, as `[MQTT-3.2.2-4]` requires. A client instance counts as holding session state once it has connected before. To resume a broker-held session from a freshly started process on purpose (the deferred-ack crash-recovery pattern), set the new `ConnectOptions::resume_existing_session` / `with_resume_existing_session(true)`. Session Present=1 in answer to Clean Start=1 is always rejected.
+- **`ConnectOptions` has a new public field, `resume_existing_session`.** Code that builds `ConnectOptions` with a struct literal must add it.
+- **Invalid outbound requests are now rejected before anything is sent.** This covers topic names with wildcards, empty topics without a Topic Alias, malformed topic filters and `$share` filters, wildcard Response Topics, Subscription Identifiers on PUBLISH or 0 on SUBSCRIBE, and Topic Alias 0 or above the server maximum. It also covers RETAIN when the server reports Retain Available=0, wildcard, shared or subscription-identifier subscriptions the server reports unavailable, and SUBSCRIBE/UNSUBSCRIBE over the server Maximum Packet Size. Previously all of these were sent and left for the broker to reject.
+- **Removed the deprecated session-level retained message store.** It was scheduled for removal in 0.32.0 and nothing in the client or broker used it. The broker's retained messages (`broker::storage::RetainedMessage`, `MessageRouter::get_retained_messages`) are unaffected. Removed:
+  - the `mqtt5::session::retained` module
+  - `RetainedMessageStore` and `RetainedMessage`, and their `mqtt5::session` re-exports
+  - `SessionState::store_retained_message`, `get_retained_messages` and `retained_messages`
+  - `test_utils::test_retained_message`
+  - `test_utils::TestMessageBuilder::build_retained_batch`
+- **Removed the deprecated `WebSocketConfig::with_tls_verification` and `WebSocketConfig::verify_tls`.** Nothing read `verify_tls`. Use `tls_config`.
+
+### Fixed
+
+- **Unacknowledged QoS 1/2 PUBLISH and PUBREL are resent when a session resumes** (`[MQTT-4.4.0-1]`), with DUP=1, their original packet identifiers and in their original order (`[MQTT-4.6.0-1]`, `[MQTT-4.6.0-4]`), and within the new connection's Receive Maximum. Before, they were stored and never resent, so QoS 1/2 delivery did not survive a reconnect. QoS 1 entries are now also removed on PUBACK. They used to accumulate forever.
+- **Packet identifiers are no longer reused while in flight** (`[MQTT-2.2.1-3]`, `[MQTT-4.3.2-1]`). Allocation skips identifiers held by unacknowledged PUBLISH, outstanding PUBREL and pending SUBSCRIBE/UNSUBSCRIBE.
+- **The offline queue goes through the normal publish path.** It used to bypass the send quota, unacknowledged-message tracking, Maximum QoS and Retain Available, and it set DUP=1 on a message's first transmission (`[MQTT-4.3.2-2]`, `[MQTT-3.3.4-7]`, `[MQTT-3.2.2-11]`, `[MQTT-3.2.2-14]`).
+- **Send quota is reset on every connection** (`[MQTT-4.9.0-1]`). A publish that timed out waiting for its ack no longer leaks its Receive Maximum slot across reconnects. `disconnect()` is no longer delayed while publishes wait for quota (`[MQTT-3.3.4-8]`).
+- **Topic Alias Maximum is enforced and reset on each CONNACK** (`[MQTT-3.2.2-17]`, `[MQTT-3.2.2-18]`). Inbound Topic Aliases are resolved per connection (`[MQTT-3.3.2-10]`). An inbound alias of 0 or above the client maximum is a protocol error. Before, an aliased PUBLISH with an empty topic was acknowledged and then dropped.
+- **Protocol errors close the connection properly.** On a malformed packet or protocol violation the client sends DISCONNECT with the matching reason code (0x81, 0x82, 0x93, 0x94, 0x95), flushes it, and closes the network connection. Previously it only marked itself disconnected, kept the socket open, and kept sending PINGREQ. A server DISCONNECT now closes the connection too (`[MQTT-4.13.2-1]`). Nothing is written after the client's own DISCONNECT (`[MQTT-3.14.4-1]`).
+- **Inbound checks added:**
+  - reserved flags on SUBACK, PUBLISH, SUBSCRIBE and UNSUBSCRIBE (`[MQTT-2.1.3-1]`)
+  - the client's advertised Receive Maximum (0x93) and Maximum Packet Size (0x95)
+  - Subscription Identifier 0
+  - Request Problem Information=0: a Reason String or User Property on a packet other than PUBLISH, CONNACK or DISCONNECT is a protocol error
+- **Acknowledgements go out in PUBLISH arrival order when deferred ack is enabled** (`[MQTT-4.6.0-2]`, `[MQTT-4.6.0-3]`). Automatic acks and `AckToken` acks now share one ordered release, so a later ack waits for earlier pending ones. `AckToken::reject` maps reason codes that are invalid for PUBACK/PUBREC to 0x80. Acks still queued when the connection drops are discarded if the new connection reports Session Present=0.
+- **WebSocket reads reassemble MQTT packets from the byte stream** (`[MQTT-6.0.0-2]`). Several packets in one frame, or one packet split across frames, used to corrupt payloads or drop the session. A text frame closes the connection (`[MQTT-6.0.0-1]`), and a WebSocket Ping no longer ends the session.
+- **CONNECT carries `request_problem_information`, `request_response_information` and user properties**, which were silently dropped. The client never sends AUTH when CONNECT had no Authentication Method (`[MQTT-4.12.0-7]`). The Assigned Client Identifier is adopted for later reconnects (`[MQTT-3.1.3-2]`).
+
+## [mqttv5-cli 0.28.8] - 2026-09-23
+
+### Changed
+
+- Depends on `mqtt5` 0.41. `pub` and `sub` with `--no-clean-start` set `resume_existing_session`, so they resume the broker-held session as before.
+
+## [mqtt5-wasm 1.5.0] - 2026-09-23
+
+### Added
+
+- **`ConnectOptions.resumeExistingSession`.** It lets a freshly created client accept Session Present=1 from a broker-held session. The `session-recovery` and `qos2-recovery` examples use it.
+
+### Changed
+
+- **The browser client now follows the same client-side conformance rules as the native client.** This release fixes the missing PUBACK for inbound QoS 1 messages, byte loss when several packets arrived in one frame, packet identifier reuse, and the missing resend on session resume. It also adds topic and filter validation, and enforcement of the server's Receive Maximum, Topic Alias Maximum, Maximum QoS, Retain Available and Maximum Packet Size. Protocol errors now send DISCONNECT with a reason code and close the transport. With `keepAlive=0`, the client no longer sends PINGREQs. A fresh client now rejects Session Present=1 unless `resumeExistingSession` is set. Invalid requests are rejected before sending, and QoS 1/2 publishes wait while the server's Receive Maximum is exhausted. Tests: `crates/mqtt5-wasm/tests/conformance_client.rs`.
+- Depends on `mqtt5` 0.41 and `mqtt5-protocol` 0.15.2.
+
+## [mqtt5-protocol 0.15.2] - 2026-09-23
+
+### Added
+
+- **`PacketIdGenerator::next_available(in_use)`** returns the next identifier that isn't in use, or `None` when all are taken.
+- **`validation::is_valid_subscription_filter` / `validate_subscription_filter`** validate topic filters, including the `$share/{ShareName}/{filter}` rules (`[MQTT-4.8.2-1]`, `[MQTT-4.8.2-2]`).
+
+### Fixed
+
+- Packet decoding now checks fixed-header reserved flags for every packet type (`[MQTT-2.1.3-1]`).
+- `TopicAliasManager` no longer overflows when the alias maximum is 65535.
+
 ## [mqtt5 0.40.0] - 2026-09-08
 
 ### Breaking

@@ -28,11 +28,11 @@ pub struct MessagePortWriter {
     port: MessagePort,
     connected: Arc<AtomicBool>,
     msg_tx: Option<mpsc::UnboundedSender<Vec<u8>>>,
-    _closure: Option<Closure<dyn FnMut(MessageEvent)>>,
+    on_message: Option<Closure<dyn FnMut(MessageEvent)>>,
 }
 
 impl MessagePortReader {
-    #[allow(clippy::must_use_candidate)]
+    #[must_use]
     pub fn new(rx: mpsc::UnboundedReceiver<Vec<u8>>, connected: Arc<AtomicBool>) -> Self {
         Self {
             rx,
@@ -84,7 +84,7 @@ impl MessagePortReader {
 }
 
 impl MessagePortWriter {
-    #[allow(clippy::must_use_candidate)]
+    #[must_use]
     pub fn new(
         port: MessagePort,
         connected: Arc<AtomicBool>,
@@ -94,13 +94,16 @@ impl MessagePortWriter {
             port,
             connected,
             msg_tx,
-            _closure: None,
+            on_message: None,
         }
     }
 
     /// # Errors
     /// Returns an error if writing to the port fails.
     pub fn write(&mut self, buf: &[u8]) -> Result<()> {
+        if !self.is_connected() {
+            return Err(MqttError::NotConnected);
+        }
         let array = js_sys::Uint8Array::from(buf);
         self.port
             .post_message(&array.buffer())
@@ -131,13 +134,15 @@ impl Drop for MessagePortWriter {
             tx.close_channel();
         }
         self.connected.store(false, Ordering::SeqCst);
-        self.port.set_onmessage(None);
+        if self.on_message.take().is_some() {
+            self.port.set_onmessage(None);
+        }
         self.port.close();
     }
 }
 
 impl MessagePortTransport {
-    #[allow(clippy::must_use_candidate)]
+    #[must_use]
     pub fn new(port: MessagePort) -> Self {
         Self {
             port,
@@ -168,7 +173,7 @@ impl MessagePortTransport {
             port,
             connected: self.connected,
             msg_tx: Some(msg_tx),
-            _closure: Some(closure),
+            on_message: Some(closure),
         };
 
         Ok((reader, writer))

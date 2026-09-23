@@ -49,6 +49,7 @@
 //!     // Configure connection options
 //!     let options = ConnectOptions::new("weather-station")
 //!         .with_clean_start(false)  // Resume previous session
+//!         .with_resume_existing_session(true)
 //!         .with_keep_alive(Duration::from_secs(30))
 //!         .with_automatic_reconnect(true)
 //!         .with_reconnect_delay(Duration::from_secs(5), Duration::from_secs(60));
@@ -202,6 +203,7 @@
 //!     let options = ConnectOptions::new("worker")
 //!         .with_deferred_ack(true)
 //!         .with_clean_start(false)
+//!         .with_resume_existing_session(true)
 //!         .with_session_expiry_interval(3600)
 //!         .with_receive_maximum(16);
 //!

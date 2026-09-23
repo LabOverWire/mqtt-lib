@@ -32,25 +32,24 @@ impl TopicAliasManager {
             return None;
         }
 
-        while self.alias_to_topic.contains_key(&self.next_alias)
-            && self.next_alias <= self.topic_alias_maximum
-        {
-            self.next_alias += 1;
-            if self.next_alias > self.topic_alias_maximum {
-                self.next_alias = 1;
-            }
+        while self.alias_to_topic.contains_key(&self.next_alias) {
+            self.next_alias = self.alias_after(self.next_alias);
         }
 
         let alias = self.next_alias;
         self.alias_to_topic.insert(alias, topic.to_string());
         self.topic_to_alias.insert(topic.to_string(), alias);
-
-        self.next_alias += 1;
-        if self.next_alias > self.topic_alias_maximum {
-            self.next_alias = 1;
-        }
+        self.next_alias = self.alias_after(alias);
 
         Some(alias)
+    }
+
+    fn alias_after(&self, alias: u16) -> u16 {
+        if alias >= self.topic_alias_maximum {
+            1
+        } else {
+            alias + 1
+        }
     }
 
     /// # Errors
@@ -139,6 +138,24 @@ mod tests {
         assert!(alias1.is_some());
         assert!(alias2.is_some());
         assert!(alias3.is_none());
+    }
+
+    #[test]
+    fn test_topic_alias_assigns_maximum_u16_without_overflow() {
+        let mut ta = TopicAliasManager::new(u16::MAX);
+        let mut last = None;
+        for i in 0..u32::from(u16::MAX) {
+            last = ta.get_or_create_alias(&format!("t/{i}"));
+        }
+        assert_eq!(last, Some(u16::MAX));
+        assert_eq!(ta.get_or_create_alias("t/overflow"), None);
+    }
+
+    #[test]
+    fn test_topic_alias_skips_registered_alias() {
+        let mut ta = TopicAliasManager::new(2);
+        ta.register_alias(1, "t/1").unwrap();
+        assert_eq!(ta.get_or_create_alias("t/2"), Some(2));
     }
 
     #[test]

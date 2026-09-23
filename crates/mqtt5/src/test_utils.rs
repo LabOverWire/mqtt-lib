@@ -9,8 +9,6 @@ use crate::packet::Packet;
 use crate::protocol::v5::properties::Properties;
 use crate::protocol::v5::reason_codes::ReasonCode;
 use crate::session::limits::{ExpiringMessage, LimitsManager};
-#[allow(deprecated)]
-use crate::session::retained::RetainedMessage;
 use crate::time::Duration;
 use crate::{MqttClient, QoS, Result};
 use bytes::BytesMut;
@@ -216,8 +214,6 @@ macro_rules! test_timeout {
     };
 }
 
-// ===== Client Test Utilities =====
-
 /// Generates a unique client ID for testing
 #[must_use]
 pub fn test_client_id(base: &str) -> String {
@@ -295,18 +291,6 @@ pub fn test_expiring_message(index: u8) -> ExpiringMessage {
     )
 }
 
-/// Creates a test retained message with standard defaults
-#[must_use]
-#[allow(deprecated)]
-pub fn test_retained_message(index: u8) -> RetainedMessage {
-    RetainedMessage {
-        topic: format!("topic/{index}"),
-        payload: vec![index],
-        qos: QoS::AtMostOnce,
-        properties: Properties::default(),
-    }
-}
-
 /// Builder for creating batches of test messages
 pub struct TestMessageBuilder {
     topic_prefix: String,
@@ -360,20 +344,6 @@ impl TestMessageBuilder {
                     None,
                     &LimitsManager::with_defaults(),
                 )
-            })
-            .collect()
-    }
-
-    /// Builds a batch of retained messages
-    #[must_use]
-    #[allow(deprecated)]
-    pub fn build_retained_batch(self, count: u8) -> Vec<RetainedMessage> {
-        (0..count)
-            .map(|i| RetainedMessage {
-                topic: format!("{}/{i}", self.topic_prefix),
-                payload: vec![i],
-                qos: self.qos,
-                properties: Properties::default(),
             })
             .collect()
     }
@@ -464,13 +434,11 @@ mod tests {
         let encoded = encode_packet(&original).unwrap();
         assert!(!encoded.is_empty());
 
-        // Verify fixed header - CONNECT is packet type 1
         assert_eq!(encoded[0] >> 4, 1);
     }
 
     #[tokio::test]
     async fn test_timeout_helper() {
-        // Should complete
         let result = run_with_timeout(Duration::from_millis(100), async {
             tokio::time::sleep(Duration::from_millis(10)).await;
             42
@@ -478,7 +446,6 @@ mod tests {
         .await;
         assert_eq!(result, 42);
 
-        // Should timeout
         let result = std::panic::catch_unwind(|| {
             tokio::runtime::Runtime::new().unwrap().block_on(async {
                 run_with_timeout(Duration::from_millis(10), async {
