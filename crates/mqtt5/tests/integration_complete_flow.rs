@@ -4,7 +4,9 @@ mod common;
 
 use common::{create_test_client_with_broker, test_client_id, TestBroker};
 use mqtt5::time::Duration;
-use mqtt5::{ConnectOptions, MqttClient, PublishOptions, PublishResult, QoS, SubscribeOptions};
+use mqtt5::{
+    ConnectOptions, Delivery, MqttClient, PublishOptions, PublishResult, QoS, SubscribeOptions,
+};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
@@ -74,8 +76,10 @@ async fn test_complete_mqtt_flow() {
         .expect("Failed to publish");
 
     match result {
-        PublishResult::QoS1Or2 { packet_id } => assert!(packet_id > 0),
-        PublishResult::QoS0 => panic!("Expected QoS1Or2 result, got QoS0"),
+        PublishResult::Sent(
+            Delivery::AtLeastOnce { packet_id } | Delivery::ExactlyOnce { packet_id },
+        ) => assert!(packet_id > 0),
+        other => panic!("expected an acknowledged publish, got {other:?}"),
     }
 
     assert!(
@@ -224,15 +228,17 @@ async fn test_qos_levels_and_acknowledgments() {
         .publish("test/qos0", b"QoS 0 message")
         .await
         .expect("Failed to publish QoS 0");
-    assert!(matches!(result, PublishResult::QoS0));
+    assert!(matches!(result, PublishResult::Sent(Delivery::Unconfirmed)));
 
     let result = client
         .publish_qos1("test/qos1", b"QoS 1 message")
         .await
         .expect("Failed to publish QoS 1");
     match result {
-        PublishResult::QoS1Or2 { packet_id } => assert!(packet_id > 0),
-        PublishResult::QoS0 => panic!("Expected QoS1Or2 result, got QoS0"),
+        PublishResult::Sent(
+            Delivery::AtLeastOnce { packet_id } | Delivery::ExactlyOnce { packet_id },
+        ) => assert!(packet_id > 0),
+        other => panic!("expected an acknowledged publish, got {other:?}"),
     }
 
     let result = client
@@ -240,8 +246,10 @@ async fn test_qos_levels_and_acknowledgments() {
         .await
         .expect("Failed to publish QoS 2");
     match result {
-        PublishResult::QoS1Or2 { packet_id } => assert!(packet_id > 0),
-        PublishResult::QoS0 => panic!("Expected QoS1Or2 result, got QoS0"),
+        PublishResult::Sent(
+            Delivery::AtLeastOnce { packet_id } | Delivery::ExactlyOnce { packet_id },
+        ) => assert!(packet_id > 0),
+        other => panic!("expected an acknowledged publish, got {other:?}"),
     }
 
     let received_qos = Arc::new(Mutex::new(Vec::new()));

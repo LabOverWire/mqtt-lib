@@ -262,14 +262,22 @@ client.destroy();
 ```javascript
 await client.publish(topic, payloadBytes);
 
-await client.publishWithOptions(topic, payloadBytes, publishOptions);
+const qosUsed = await client.publishWithOptions(topic, payloadBytes, publishOptions);
+// resolves with the QoS the message was sent at (0, 1 or 2)
 
 const packetId = await client.publishQos1(topic, payloadBytes, callback);
-// callback(reasonCode) called when PUBACK received
+// callback(reasonCode, qosUsed) called when PUBACK received
 
 const packetId = await client.publishQos2(topic, payloadBytes, callback);
-// callback(reasonCode) called when PUBCOMP received
+// callback(reasonCode, qosUsed) called when PUBCOMP received
 ```
+
+A publish never goes out above the server's Maximum QoS (from CONNACK). A higher requested QoS is downgraded to the server maximum and the QoS actually used is reported: `publishWithOptions` resolves with it, and the `publishQos1`/`publishQos2` callback receives it as the second argument. When the server maximum is 0, the message is sent at QoS 0, `publishQos1`/`publishQos2` resolve with packet identifier `0` (none) and the callback is called immediately with `(0, 0)`. Retain Available and Maximum Packet Size are not adjusted: a publish that violates them is rejected before anything is sent.
+
+`disconnect()` ends this instance's use of the connection and never leaves an acknowledgement pending:
+
+- If the session ends with the connection (see [Session Lifetime](#session-lifetime)), the session state is discarded: pending `publishWithOptions` promises reject with `Publish not acknowledged: indeterminate: session ended with the connection; may have been delivered` and `publishQos1`/`publishQos2` callbacks receive that `indeterminate: ...` string.
+- If the session outlives the connection, the session state is kept. Pending `publishWithOptions` promises reject with `Publish not acknowledged: disconnected; message remains in session and will be resent on resume by this client instance`, and `publishQos1`/`publishQos2` callbacks receive that `disconnected; ...` string. A later `connect*()` with `cleanStart = false` on the same `MqttClient` instance resumes the session (when the server reports Session Present = 1) and resends those messages; their acknowledgements are then handled silently.
 
 #### Subscribing
 
@@ -572,6 +580,8 @@ const opts = new ConnectOptions();
 
 opts.keepAlive = 60;                       // default: 60 seconds
 opts.cleanStart = true;                    // default: true
+opts.resumeExistingSession = false;        // default: false; with cleanStart = false, accept
+                                           // Session Present = 1 without local session state
 opts.username = 'alice';                   // default: null
 opts.set_password(encoder.encode('pw'));   // accepts Uint8Array
 opts.protocolVersion = 5;                  // 4 (v3.1.1) or 5 (v5.0), default: 5
@@ -604,6 +614,30 @@ opts.clearCodecRegistry();
 
 await client.connectWithOptions('ws://broker:8000/mqtt', opts);
 ```
+
+#### Session Lifetime
+
+The client keeps its session state (unacknowledged QoS 1/2 publishes and QoS 2 releases) for as long as the session outlives the network connection:
+
+- MQTT v5.0: while the Session Expiry Interval is greater than 0. The value the server returns in CONNACK replaces the requested `sessionExpiryInterval`.
+- MQTT v3.1.1 (`protocolVersion = 4`): while `cleanStart = false` (CleanSession = 0). With `cleanStart = true` the session ends with the connection.
+
+When the session ends with the connection, pending publishes are settled on connection loss or `disconnect()` with `indeterminate: session ended with the connection; may have been delivered`. A `connect*()` with `cleanStart = true` discards any session state the instance still holds before sending CONNECT (MQTT-3.1.2-4): nothing is resent, pending publishes settle with `indeterminate: session discarded by clean start; may have been delivered`, and quarantined packet identifiers are released. When it outlives the connection, a connection loss leaves them pending and they are resent when the session resumes (automatic reconnect, or a later `connect*()` with `cleanStart = false` on the same `MqttClient` instance). Automatic reconnects send `cleanStart = false` only while the client holds session state (or `resumeExistingSession` is set), so a v3.1.1 `cleanStart = true` client never turns into a persistent session.
+
+On the next CONNACK after a `cleanStart = false` CONNECT on the same `MqttClient` instance, the unacknowledged messages are handled according to Session Present and the limits of the new connection (Retain Available, Maximum Packet Size, Maximum QoS):
+
+| CONNACK | Unacknowledged message | Outcome |
+|---|---|---|
+| Session Present = 1 | QoS 1/2 PUBLISH within the new limits | Resent with the same packet identifier, in the original order (DUP = 1 when it was already sent on this session) |
+| Session Present = 1 | QoS 1/2 PUBLISH outside the new limits | Not resent and removed from the session; settled with `indeterminate: may have been delivered; not resent because the new connection's limits do not allow it (<reason>)`. A QoS 2 packet identifier abandoned this way is not reused for new messages until a connection reports Session Present = 0 |
+| Session Present = 1 | QoS 2 awaiting PUBCOMP | PUBREL resent |
+| Session Present = 0 (server lost the session) | QoS 1 PUBLISH within the new limits | Sent again as a new message (DUP = 0), in the original order; its promise or callback settles normally when acknowledged |
+| Session Present = 0 | QoS 1 PUBLISH outside the new limits | Not sent; settled with `indeterminate: session lost; may have been delivered; not resent because the new connection's limits do not allow it (<reason>)` |
+| Session Present = 0 | QoS 2 PUBLISH or PUBREL | Not sent; settled with `indeterminate: session lost; may have been delivered` |
+
+`publishWithOptions` promises reject with `Publish not acknowledged: ` followed by that text, and `publishQos1`/`publishQos2` callbacks receive the text as their only argument. Messages whose promise or callback was already settled by `disconnect()` are handled the same way without a further notification.
+
+A CONNACK with Session Present = 1 is rejected (the client sends DISCONNECT 0x82 on v5.0 and closes the connection) unless the client holds session state or `resumeExistingSession` is set.
 
 ### PublishOptions API
 

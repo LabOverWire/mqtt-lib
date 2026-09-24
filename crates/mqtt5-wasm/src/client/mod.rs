@@ -29,9 +29,12 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::MessagePort;
 
-use callbacks::{close_network_connection, end_connection_state, trigger_disconnect_callback};
+use callbacks::{
+    close_network_connection, end_connection_state, settle_acks_on_disconnect,
+    trigger_disconnect_callback,
+};
 use connection::establish;
-use outbound::{check_publish, check_subscribe, check_unsubscribe};
+use outbound::{check_publish, check_subscribe, check_unsubscribe, downgrade_to_server_maximum};
 use packet::write_packet;
 use qos::{abandon_flight, await_ack_promises, create_ack_promises, reserve_flight};
 use state::{ClientState, StoredConnectOptions};
@@ -215,7 +218,7 @@ impl WasmMqttClient {
         topic: &str,
         payload: &[u8],
         options: &WasmPublishOptions,
-    ) -> Result<(), JsValue> {
+    ) -> Result<u8, JsValue> {
         let qos = options.to_qos();
 
         #[cfg(feature = "codec")]
@@ -263,11 +266,13 @@ impl WasmMqttClient {
             stream_id: None,
         };
 
-        let packet_id = self
+        let (packet_id, qos_used) = self
             .dispatch_publish(publish_packet, AckSink::Promise)
             .await?;
-        let (puback_promise, pubcomp_promise) = create_ack_promises(&self.state, qos, packet_id);
-        await_ack_promises(puback_promise, pubcomp_promise).await
+        let (puback_promise, pubcomp_promise) =
+            create_ack_promises(&self.state, qos_used, packet_id);
+        await_ack_promises(puback_promise, pubcomp_promise).await?;
+        Ok(qos_used as u8)
     }
 
     /// # Errors
@@ -419,6 +424,7 @@ impl WasmMqttClient {
         }
         close_network_connection(&self.state);
         end_connection_state(&self.state);
+        settle_acks_on_disconnect(&self.state);
         trigger_disconnect_callback(&self.state);
         Ok(())
     }
@@ -563,41 +569,49 @@ impl WasmMqttClient {
             protocol_version,
             stream_id: None,
         };
-        self.dispatch_publish(publish_packet, AckSink::Callback(callback))
-            .await?
-            .ok_or_else(|| js_error("QoS 0 publish has no packet identifier"))
+        let (packet_id, _) = self
+            .dispatch_publish(publish_packet, AckSink::Callback(callback))
+            .await?;
+        Ok(packet_id.unwrap_or(0))
     }
 
     async fn dispatch_publish(
         &self,
         mut publish: PublishPacket,
         sink: AckSink,
-    ) -> Result<Option<u16>, JsValue> {
+    ) -> Result<(Option<u16>, QoS), JsValue> {
         self.ensure_connected().await?;
-        check_publish(&self.state.borrow(), &publish).map_err(js_error)?;
+        let generation = {
+            let state = self.state.borrow();
+            publish.protocol_version = state.protocol_version;
+            downgrade_to_server_maximum(&state.server, &mut publish);
+            check_publish(&state, &publish).map_err(js_error)?;
+            state.connection_generation
+        };
+        let qos = publish.qos;
 
-        let packet_id = if publish.qos == QoS::AtMostOnce {
+        let packet_id = if qos == QoS::AtMostOnce {
             None
         } else {
-            let packet_id = reserve_flight(&self.state, &publish).await?;
-            if let Err(e) = check_publish(&self.state.borrow(), &publish) {
-                abandon_flight(&self.state, packet_id);
-                return Err(js_error(e));
-            }
-            Some(packet_id)
+            Some(reserve_flight(&self.state, &publish, generation).await?)
         };
         publish.packet_id = packet_id;
 
-        if let (Some(packet_id), AckSink::Callback(callback)) = (packet_id, sink) {
-            let mut state = self.state.borrow_mut();
-            if publish.qos == QoS::ExactlyOnce {
-                state
-                    .pending_pubcomps
-                    .insert(packet_id, (callback, js_sys::Date::now()));
-            } else {
-                state.pending_pubacks.insert(packet_id, callback);
+        let immediate_callback = match (packet_id, sink) {
+            (Some(packet_id), AckSink::Callback(callback)) => {
+                let mut state = self.state.borrow_mut();
+                if qos == QoS::ExactlyOnce {
+                    state
+                        .pending_pubcomps
+                        .insert(packet_id, (callback, js_sys::Date::now()));
+                } else {
+                    state.pending_pubacks.insert(packet_id, callback);
+                }
+                None
             }
-        }
+            (None, AckSink::Callback(callback)) => Some(callback),
+            (_, AckSink::Promise) => None,
+        };
 
         let alias_mapping = publish
             .topic_alias()
@@ -627,7 +641,15 @@ impl WasmMqttClient {
             }
         }
 
-        Ok(packet_id)
+        if let Some(callback) = immediate_callback {
+            let reason_code = JsValue::from_f64(0.0);
+            let qos_used = JsValue::from_f64(f64::from(qos as u8));
+            if let Err(e) = callback.call2(&JsValue::NULL, &reason_code, &qos_used) {
+                tracing::warn!(error = ?e, "publish completion callback failed");
+            }
+        }
+
+        Ok((packet_id, qos))
     }
 
     async fn send_subscribe(
@@ -747,12 +769,14 @@ impl WasmMqttClient {
         topic: &str,
         payload: &[u8],
         qos: QoS,
-    ) -> Result<(), JsValue> {
+    ) -> Result<QoS, JsValue> {
         let publish_packet = PublishPacket::new(topic.to_string(), payload.to_vec(), qos);
-        let packet_id = self
+        let (packet_id, qos_used) = self
             .dispatch_publish(publish_packet, AckSink::Promise)
             .await?;
-        let (puback_promise, pubcomp_promise) = create_ack_promises(&self.state, qos, packet_id);
-        await_ack_promises(puback_promise, pubcomp_promise).await
+        let (puback_promise, pubcomp_promise) =
+            create_ack_promises(&self.state, qos_used, packet_id);
+        await_ack_promises(puback_promise, pubcomp_promise).await?;
+        Ok(qos_used)
     }
 }

@@ -15,6 +15,7 @@ use std::rc::Rc;
 use crate::codec::WasmCodecRegistry;
 
 const DEFAULT_RECEIVE_MAXIMUM: u16 = u16::MAX;
+const SESSION_NEVER_EXPIRES: u32 = u32::MAX;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ServerLimits {
@@ -118,6 +119,7 @@ pub struct OutboundFlight {
     pub sequence: u64,
     pub publish: PublishPacket,
     pub released: bool,
+    pub transmitted: bool,
 }
 
 pub struct ClientState {
@@ -135,9 +137,11 @@ pub struct ClientState {
     pub outbound: HashMap<u16, OutboundFlight>,
     pub next_flight_sequence: u64,
     pub send_quota: u16,
+    pub quota_debt: u16,
     pub quota_waiters: VecDeque<js_sys::Function>,
     pub pending_resends: VecDeque<u16>,
     pub awaiting_pubrel: HashSet<u16>,
+    pub quarantined: HashSet<u16>,
     pub server: ServerLimits,
     pub client_limits: ClientLimits,
     pub outbound_aliases: TopicAliasManager,
@@ -186,9 +190,11 @@ impl ClientState {
             outbound: HashMap::new(),
             next_flight_sequence: 0,
             send_quota: DEFAULT_RECEIVE_MAXIMUM,
+            quota_debt: 0,
             quota_waiters: VecDeque::new(),
             pending_resends: VecDeque::new(),
             awaiting_pubrel: HashSet::new(),
+            quarantined: HashSet::new(),
             server: ServerLimits::default(),
             client_limits: ClientLimits::default(),
             outbound_aliases: TopicAliasManager::new(0),
@@ -225,6 +231,7 @@ impl ClientState {
         self.outbound.contains_key(&packet_id)
             || self.pending_subacks.contains_key(&packet_id)
             || self.pending_unsubacks.contains(&packet_id)
+            || self.quarantined.contains(&packet_id)
     }
 
     pub fn allocate_packet_id(&self) -> Option<u16> {
@@ -243,15 +250,39 @@ impl ClientState {
                 sequence,
                 publish,
                 released: false,
+                transmitted: true,
             },
         );
+    }
+
+    pub fn flights_in_order(&self) -> Vec<u16> {
+        let mut order: Vec<(u64, u16)> = self
+            .outbound
+            .iter()
+            .map(|(packet_id, flight)| (flight.sequence, *packet_id))
+            .collect();
+        order.sort_unstable();
+        order.into_iter().map(|(_, packet_id)| packet_id).collect()
+    }
+
+    pub fn take_ack_callback(&mut self, packet_id: u16) -> Option<js_sys::Function> {
+        self.pending_pubacks.remove(&packet_id).or_else(|| {
+            self.pending_pubcomps
+                .remove(&packet_id)
+                .map(|(callback, _)| callback)
+        })
     }
 
     pub fn discard_session(&mut self) -> Vec<js_sys::Function> {
         self.outbound.clear();
         self.pending_resends.clear();
         self.awaiting_pubrel.clear();
+        self.quota_debt = 0;
         self.session = SessionState::Absent;
+        self.take_ack_callbacks()
+    }
+
+    pub fn take_ack_callbacks(&mut self) -> Vec<js_sys::Function> {
         self.pending_pubacks
             .drain()
             .map(|(_, callback)| callback)
@@ -263,10 +294,18 @@ impl ClientState {
             .collect()
     }
 
-    pub fn apply_connect_options(&mut self, options: &StoredConnectOptions) {
+    pub fn session_outlives_connection(&self) -> bool {
+        self.session_expiry_interval > 0
+    }
+
+    pub fn apply_connect_options(&mut self, options: &StoredConnectOptions, clean_start: bool) {
         self.keep_alive = options.keep_alive;
         self.protocol_version = options.protocol_version;
-        self.session_expiry_interval = options.session_expiry_interval.unwrap_or(0);
+        self.session_expiry_interval = match (options.protocol_version, clean_start) {
+            (5, _) => options.session_expiry_interval.unwrap_or(0),
+            (_, true) => 0,
+            (_, false) => SESSION_NEVER_EXPIRES,
+        };
         self.client_limits = ClientLimits::from(options);
         self.auth_method.clone_from(&options.authentication_method);
         #[cfg(feature = "codec")]
@@ -278,6 +317,10 @@ impl ClientState {
     pub fn apply_connack(&mut self, connack: &ConnAckPacket) {
         self.server = ServerLimits::from_connack(connack);
         self.send_quota = self.server.receive_maximum;
+        self.quota_debt = 0;
+        if let Some(interval) = connack.properties.get_session_expiry_interval() {
+            self.session_expiry_interval = interval;
+        }
         self.outbound_aliases = TopicAliasManager::new(self.server.topic_alias_maximum);
         self.inbound_aliases = TopicAliasManager::new(self.client_limits.topic_alias_maximum);
         self.pending_resends.clear();

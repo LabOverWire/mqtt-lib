@@ -12,11 +12,11 @@ use wasm_bindgen::JsValue;
 
 use crate::transport::{WasmReader, WasmTransportType};
 
-use super::callbacks::discard_session;
+use super::callbacks::{discard_session, SESSION_DISCARDED_BY_CLEAN_START};
 use super::handlers::handle_auth;
 use super::keepalive::spawn_keepalive_task;
 use super::packet::{encode_packet, write_packet};
-use super::qos::{resend_session, spawn_qos2_cleanup_task};
+use super::qos::{resume_session, spawn_qos2_cleanup_task};
 use super::reader::{read_connect_response, spawn_packet_reader};
 use super::state::{ClientState, SessionState, StoredConnectOptions};
 
@@ -66,9 +66,12 @@ pub async fn establish(
         .map_err(|e| ConnectFailure::Failed(format!("Transport connection failed: {e}")))?;
 
     if connect.clean_start {
-        discard_session(state);
+        state.borrow_mut().quarantined.clear();
+        discard_session(state, SESSION_DISCARDED_BY_CLEAN_START);
     }
-    state.borrow_mut().apply_connect_options(options);
+    state
+        .borrow_mut()
+        .apply_connect_options(options, connect.clean_start);
 
     let mut buf = BytesMut::new();
     encode_packet(&Packet::Connect(Box::new(connect.clone())), &mut buf)
@@ -177,10 +180,6 @@ fn accept_connack(
         ));
     }
 
-    if !connack.session_present {
-        discard_session(state);
-    }
-
     {
         let mut state_mut = state.borrow_mut();
         state_mut.apply_connack(&connack);
@@ -189,9 +188,7 @@ fn accept_connack(
         state_mut.connection_generation = state_mut.connection_generation.wrapping_add(1);
     }
 
-    if connack.session_present {
-        resend_session(state);
-    }
+    resume_session(state, connack.session_present);
 
     spawn_packet_reader(Rc::clone(state), reader);
     spawn_keepalive_task(Rc::clone(state));

@@ -96,6 +96,17 @@ pub struct SessionState {
     flow_registry: Arc<RwLock<FlowRegistry>>,
 }
 
+/// Which acknowledgement an outbound packet identifier is waiting for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutboundStage {
+    /// A `QoS` 1 PUBLISH waiting for PUBACK.
+    AwaitingPubAck,
+    /// A `QoS` 2 PUBLISH waiting for PUBREC.
+    AwaitingPubRec,
+    /// A `QoS` 2 PUBREL waiting for PUBCOMP.
+    AwaitingPubComp,
+}
+
 #[derive(Debug, Clone)]
 pub enum OutboundReplay {
     Publish(PublishPacket),
@@ -353,6 +364,26 @@ impl SessionState {
         drop(publishes);
         ordered.sort_by_key(|(order, _)| *order);
         ordered.into_iter().map(|(_, item)| item).collect()
+    }
+
+    /// Reports which acknowledgement the outbound packet identifier is waiting for.
+    pub async fn outbound_stage(&self, packet_id: u16) -> Option<OutboundStage> {
+        let publish_qos = self
+            .unacked_publishes
+            .read()
+            .await
+            .get(&packet_id)
+            .map(|(_, publish)| publish.qos);
+        match publish_qos {
+            Some(crate::QoS::ExactlyOnce) => Some(OutboundStage::AwaitingPubRec),
+            Some(_) => Some(OutboundStage::AwaitingPubAck),
+            None => self
+                .unacked_pubrels
+                .read()
+                .await
+                .contains_key(&packet_id)
+                .then_some(OutboundStage::AwaitingPubComp),
+        }
     }
 
     pub async fn discard_outbound_state(&self) {

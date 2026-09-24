@@ -8,21 +8,25 @@ mod keepalive;
 mod outbound;
 mod reader;
 mod replay;
+mod tracking;
 mod unified;
 
 pub use ack::AckToken;
 pub(crate) use ack::{AckCallbackManager, AckDispatcher};
 
 use parking_lot::Mutex;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Duration;
 
 use crate::callback::{CallbackId, CallbackManager};
 use crate::client::auth_handler::{AuthHandler, AuthResponse};
+use crate::client::publish_outcome::{
+    Delivery, IndeterminateReason, PublishHandle, PublishOutcome, PublishRejection, PublishResult,
+};
 use crate::error::{MqttError, Result};
 use crate::packet::auth::AuthPacket;
 use crate::packet::connect::ConnectPacket;
@@ -40,7 +44,7 @@ use crate::session::state::OutboundReplay;
 use crate::session::subscription::Subscription;
 use crate::session::SessionState;
 use crate::transport::{PacketIo, PacketWriter, TransportType};
-use crate::types::{ConnectOptions, ConnectResult, PublishOptions, PublishResult};
+use crate::types::{ConnectOptions, ConnectResult, PublishOptions};
 use crate::QoS;
 
 #[cfg(feature = "opentelemetry")]
@@ -64,7 +68,8 @@ use keepalive::{keepalive_task_with_writer, KeepaliveState};
 #[cfg(feature = "transport-quic")]
 use reader::quic_stream_acceptor_task;
 use reader::{packet_reader_task_with_responses, PacketReaderContext};
-use replay::{PublishPolicy, SessionReplay};
+use replay::{ConnectionLink, OfflineQueue, PublishPolicy, QueuedPublish, SessionReplay};
+use tracking::{Completion, IdReservation, OutboundIds, OutcomeTracker, SharedIds, SharedOutcomes};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AutomaticReconnectLifecycle {
@@ -81,33 +86,62 @@ pub(crate) enum SubscriptionPersistence {
 pub(crate) type StoredSubscription = (String, SubscriptionOptions, Option<u32>, CallbackId);
 pub(crate) type StoredSubscriptions = Arc<Mutex<Vec<StoredSubscription>>>;
 pub(crate) type ConnectionEpoch = Arc<AtomicU64>;
-pub(crate) type PendingAcks = Arc<Mutex<HashMap<u16, oneshot::Sender<ReasonCode>>>>;
+const ACKNOWLEDGEMENT_WAIT: Duration = Duration::from_secs(10);
+
+#[derive(Debug)]
+pub(crate) struct ReadyPublish {
+    request: PublishPacket,
+    packet: PublishPacket,
+    reservation: Option<IdReservation>,
+    epoch: u64,
+}
+
+impl ReadyPublish {
+    pub(crate) fn packet_id(&self) -> Option<u16> {
+        self.packet.packet_id
+    }
+}
 
 #[derive(Debug)]
 pub(crate) enum StagedPublish {
-    Queued(PublishResult),
-    Ready(PublishPacket),
+    Queued(PublishHandle),
+    Ready(Box<ReadyPublish>),
 }
 
-pub(crate) struct PublishAck {
-    rx: oneshot::Receiver<ReasonCode>,
-    packet_id: u16,
-    pending: PendingAcks,
+pub(crate) enum Transmitted {
+    Sent(Delivery),
+    InFlight(InFlight),
+    Detached(PublishHandle),
+    Restaged(Box<ReadyPublish>),
 }
 
-impl PublishAck {
-    pub(crate) async fn wait(self) -> Result<()> {
-        match tokio::time::timeout(Duration::from_secs(10), self.rx).await {
-            Ok(Ok(reason_code)) if reason_code.is_error() => {
-                Err(MqttError::PublishFailed(reason_code))
+pub(crate) struct InFlight {
+    handle: PublishHandle,
+    link: watch::Receiver<bool>,
+}
+
+impl InFlight {
+    pub(crate) async fn settle(self) -> Result<PublishResult> {
+        let Self { handle, mut link } = self;
+        let outcome = handle.clone().outcome();
+        tokio::select! {
+            biased;
+            outcome = outcome => match outcome {
+                PublishOutcome::Delivered(delivery) => Ok(PublishResult::Sent(delivery)),
+                PublishOutcome::Rejected(PublishRejection::Refused(reason_code)) => {
+                    Err(MqttError::PublishFailed(reason_code))
+                }
+                PublishOutcome::Rejected(_) | PublishOutcome::Indeterminate(_) => {
+                    Ok(PublishResult::Queued(handle))
+                }
+            },
+            _ = link.wait_for(|alive| !*alive) => {
+                tracing::debug!("Connection ended before the acknowledgement; publish stays in flight");
+                Ok(PublishResult::Queued(handle))
             }
-            Ok(Ok(_)) => Ok(()),
-            Ok(Err(_)) => Err(MqttError::ProtocolError(
-                "Acknowledgment channel closed".to_string(),
-            )),
-            Err(_) => {
-                self.pending.lock().remove(&self.packet_id);
-                Err(MqttError::Timeout)
+            () = tokio::time::sleep(ACKNOWLEDGEMENT_WAIT) => {
+                tracing::debug!("Acknowledgement not received in time; publish stays in flight");
+                Ok(PublishResult::Queued(handle))
             }
         }
     }
@@ -145,13 +179,16 @@ pub struct DirectClientInner {
     pub packet_id_generator: PacketIdGenerator,
     pub pending_subacks: Arc<Mutex<HashMap<u16, oneshot::Sender<SubAckPacket>>>>,
     pub pending_unsubacks: Arc<Mutex<HashMap<u16, oneshot::Sender<UnsubAckPacket>>>>,
-    pub pending_pubacks: PendingAcks,
-    pub pending_pubcomps: PendingAcks,
     pub reconnect_attempt: u32,
     pub last_address: Option<String>,
     pub automatic_reconnect_lifecycle: AutomaticReconnectLifecycle,
     pub server_redirect: Option<String>,
-    pub queued_messages: Arc<Mutex<VecDeque<PublishPacket>>>,
+    pub queued_messages: Arc<Mutex<OfflineQueue>>,
+    outbound_ids: SharedIds,
+    publish_outcomes: SharedOutcomes,
+    outbound_transfer: Arc<tokio::sync::Mutex<()>>,
+    connection_alive: Option<Arc<watch::Sender<bool>>>,
+    send_flow: Arc<tokio::sync::RwLock<FlowControlManager>>,
     pub stored_subscriptions: StoredSubscriptions,
     pub stored_ack_subscriptions: StoredSubscriptions,
     pub queue_on_disconnect: bool,
@@ -170,11 +207,13 @@ pub struct DirectClientInner {
 
 impl DirectClientInner {
     pub fn new(options: ConnectOptions) -> Self {
-        let session = Arc::new(tokio::sync::RwLock::new(SessionState::new(
+        let session_state = SessionState::new(
             options.client_id.clone(),
             options.session_config.clone(),
             options.clean_start,
-        )));
+        );
+        let send_flow = Arc::clone(session_state.flow_control());
+        let session = Arc::new(tokio::sync::RwLock::new(session_state));
 
         let queue_on_disconnect = !options.clean_start;
         let auth_method = options.properties.authentication_method.clone();
@@ -211,13 +250,16 @@ impl DirectClientInner {
             packet_id_generator: PacketIdGenerator::new(),
             pending_subacks: Arc::new(Mutex::new(HashMap::new())),
             pending_unsubacks: Arc::new(Mutex::new(HashMap::new())),
-            pending_pubacks: Arc::new(Mutex::new(HashMap::new())),
-            pending_pubcomps: Arc::new(Mutex::new(HashMap::new())),
             reconnect_attempt: 0,
             last_address: None,
             automatic_reconnect_lifecycle: AutomaticReconnectLifecycle::Armed,
             server_redirect: None,
-            queued_messages: Arc::new(Mutex::new(VecDeque::new())),
+            queued_messages: Arc::new(Mutex::new(OfflineQueue::default())),
+            outbound_ids: Arc::new(Mutex::new(OutboundIds::default())),
+            publish_outcomes: Arc::new(Mutex::new(OutcomeTracker::default())),
+            outbound_transfer: Arc::new(tokio::sync::Mutex::new(())),
+            connection_alive: None,
+            send_flow,
             stored_subscriptions: Arc::new(Mutex::new(Vec::new())),
             stored_ack_subscriptions: Arc::new(Mutex::new(Vec::new())),
             queue_on_disconnect,
@@ -289,6 +331,10 @@ impl DirectClientInner {
             "resetting connection runtime"
         );
         self.set_connected(false);
+        if let Some(alive) = self.connection_alive.take() {
+            alive.send_replace(false);
+        }
+        drop(self.outbound_transfer.lock().await);
         self.stop_background_tasks().await;
         self.keepalive_state.lock().reset();
 
@@ -488,14 +534,14 @@ impl DirectClientInner {
                 let effective_flow_headers =
                     split.flow_headers_enabled && split.negotiated_mqtt_next;
                 self.quic_stream_manager = Some(Arc::new(
-                    QuicStreamManager::new(conn_arc, split.strategy)
+                    QuicStreamManager::new(Arc::clone(&conn_arc), split.strategy)
                         .with_flow_headers(effective_flow_headers)
                         .with_flow_expire_interval(split.flow_expire_interval)
                         .with_flow_flags(split.flow_flags),
                 ));
                 (
                     UnifiedReader::quic(split.recv, protocol_version),
-                    UnifiedWriter::Quic(split.send),
+                    UnifiedWriter::QuicControl(split.send, conn_arc),
                 )
             }
         };
@@ -508,6 +554,7 @@ impl DirectClientInner {
             .await;
         let replay_writer = Arc::downgrade(&writer_arc);
         self.writer = Some(writer_arc);
+        self.connection_alive = Some(Arc::new(watch::channel(true).0));
         self.set_connected(true);
 
         tracing::debug!("Starting background tasks (packet reader and keepalive)");
@@ -515,20 +562,44 @@ impl DirectClientInner {
         tracing::debug!("Background tasks started successfully");
 
         if let Some(slots) = replay_slots {
-            let replay = SessionReplay {
-                items: replay_items,
-                slots,
-                session: Arc::clone(&self.session),
-                writer: replay_writer,
-                queued: Arc::clone(&self.queued_messages),
-                policy: self.publish_policy(),
-            };
-            tokio::spawn(replay.run());
+            tokio::spawn(
+                self.session_replay(replay_items, slots, replay_writer, connection_epoch)
+                    .run(),
+            );
         }
 
         Ok(ConnectResult {
             session_present: connack.session_present,
         })
+    }
+
+    fn session_replay(
+        &self,
+        items: Vec<OutboundReplay>,
+        slots: Arc<tokio::sync::Semaphore>,
+        writer: std::sync::Weak<tokio::sync::Mutex<UnifiedWriter>>,
+        epoch: u64,
+    ) -> SessionReplay {
+        SessionReplay {
+            items,
+            slots,
+            session: Arc::clone(&self.session),
+            writer,
+            queued: Arc::clone(&self.queued_messages),
+            policy: self.publish_policy(),
+            outcomes: Arc::clone(&self.publish_outcomes),
+            ids: Arc::clone(&self.outbound_ids),
+            link: ConnectionLink {
+                epoch,
+                current_epoch: Arc::clone(&self.connection_epoch),
+                connected: Arc::clone(&self.connected),
+                transfer: Arc::clone(&self.outbound_transfer),
+                alive: self
+                    .connection_alive
+                    .as_ref()
+                    .map_or_else(|| watch::channel(false).1, |alive| alive.subscribe()),
+            },
+        }
     }
 
     fn holds_session_state(&self) -> bool {
@@ -582,9 +653,11 @@ impl DirectClientInner {
     }
 
     async fn discard_session_state(&self) {
+        let session = self.session.write().await;
         self.ack_dispatcher.discard_pending();
-        let session = self.session.read().await;
+        let unacknowledged = session.outbound_replay().await;
         session.discard_outbound_state().await;
+        self.requeue_lost_session(unacknowledged);
         session.flow_control().read().await.clear_inbound().await;
         if session.clear_all_inbound_state().await {
             if self.options.deferred_ack {
@@ -599,6 +672,71 @@ impl DirectClientInner {
                 );
             }
         }
+    }
+
+    fn requeue_lost_session(&self, unacknowledged: Vec<OutboundReplay>) {
+        self.outbound_ids.lock().release_quarantine();
+        let resume_requested = !self.options.clean_start;
+        let lost = if resume_requested {
+            IndeterminateReason::SessionLost
+        } else {
+            IndeterminateReason::SessionDiscarded
+        };
+        let mut outcomes = self.publish_outcomes.lock();
+        let mut resend = Vec::new();
+        for item in unacknowledged {
+            let (packet_id, requeue) = match item {
+                OutboundReplay::Publish(publish) => {
+                    let requeue = publish.qos == QoS::AtLeastOnce && resume_requested;
+                    (publish.packet_id, requeue.then_some(publish))
+                }
+                OutboundReplay::PubRel(packet_id) => {
+                    if let Some(completion) = outcomes.take(packet_id) {
+                        tracing::debug!(
+                            packet_id,
+                            "Session not resumed after PUBREC; the server owns the message"
+                        );
+                        completion.delivered(Delivery::ExactlyOnce { packet_id });
+                    }
+                    continue;
+                }
+            };
+            let Some(packet_id) = packet_id else {
+                continue;
+            };
+            let completion = outcomes.take(packet_id);
+            let reservation = requeue
+                .as_ref()
+                .and_then(|_| IdReservation::claim(&self.outbound_ids, packet_id));
+            if let (Some(publish), Some(reservation)) = (requeue, reservation) {
+                tracing::debug!(
+                    packet_id,
+                    "Session not resumed; unacknowledged QoS 1 PUBLISH re-queued"
+                );
+                let completion = completion.map(|mut completion| {
+                    completion.mark_resent();
+                    completion
+                });
+                resend.push(QueuedPublish::new(
+                    PublishPacket {
+                        dup: false,
+                        ..publish
+                    },
+                    reservation,
+                    completion,
+                ));
+            } else if let Some(completion) = completion {
+                tracing::warn!(
+                    packet_id,
+                    ?lost,
+                    "Session not resumed; unacknowledged outbound exchange dropped"
+                );
+                completion.indeterminate(lost);
+            }
+        }
+        outcomes.abandon_all(lost);
+        drop(outcomes);
+        self.queued_messages.lock().push_front_in_order(resend);
     }
 
     async fn adopt_assigned_client_identifier(
@@ -741,6 +879,14 @@ impl DirectClientInner {
     /// Returns an error if the operation fails
     pub async fn disconnect_with_packet(&mut self, send_disconnect: bool) -> Result<()> {
         if !self.is_connected() {
+            self.reset_connection_runtime(b"disconnect").await;
+            self.session
+                .read()
+                .await
+                .flow_control()
+                .read()
+                .await
+                .close_send_quota();
             return Err(MqttError::NotConnected);
         }
 
@@ -770,17 +916,21 @@ impl DirectClientInner {
 
     /// # Errors
     ///
-    /// Returns `PacketTooLarge` when the message already exceeds the last known
-    /// negotiated maximum packet size, so a `QoS` 1/2 publish is rejected at
-    /// enqueue time instead of being acknowledged with `Ok` and then silently
-    /// dropped when the queue is flushed on reconnect. A packet identifier is
-    /// allocated only after the size check passes.
+    /// Returns `RetainNotSupported` or `PacketTooLarge` when the message already
+    /// violates the last known Retain Available or negotiated maximum packet size, so
+    /// the publish is rejected at enqueue time instead of being accepted and then
+    /// rejected when the queue is flushed on reconnect. A packet identifier is
+    /// allocated only after these checks pass.
     async fn queue_publish_message(
         &self,
         topic: String,
         payload: Vec<u8>,
         options: &PublishOptions,
-    ) -> Result<PublishResult> {
+    ) -> Result<PublishHandle> {
+        if options.retain && !self.server_retain_available.load(Ordering::SeqCst) {
+            return Err(MqttError::RetainNotSupported);
+        }
+
         let mut publish = self
             .with_aliased_topic(PublishPacket {
                 topic_name: topic,
@@ -797,10 +947,15 @@ impl DirectClientInner {
 
         self.check_publish_size(&publish).await?;
 
-        let packet_id = self.allocate_packet_id().await?;
-        publish.packet_id = Some(packet_id);
-        self.queued_messages.lock().push_back(publish);
-        Ok(PublishResult::QoS1Or2 { packet_id })
+        let reservation = self.allocate_packet_id().await?;
+        publish.packet_id = Some(reservation.packet_id());
+        let (completion, handle) = Completion::new();
+        self.queued_messages.lock().push_back(QueuedPublish::new(
+            publish,
+            reservation,
+            Some(completion),
+        ));
+        Ok(handle)
     }
 
     async fn with_aliased_topic(&self, mut publish: PublishPacket) -> Result<PublishPacket> {
@@ -818,21 +973,24 @@ impl DirectClientInner {
         Ok(publish)
     }
 
-    async fn allocate_packet_id(&self) -> Result<u16> {
-        self.session
-            .read()
-            .await
-            .allocate_packet_id(&self.packet_id_generator, |packet_id| {
-                self.pending_subacks.lock().contains_key(&packet_id)
-                    || self.pending_unsubacks.lock().contains_key(&packet_id)
-                    || self
-                        .queued_messages
-                        .lock()
-                        .iter()
-                        .any(|queued| queued.packet_id == Some(packet_id))
-            })
-            .await
-            .ok_or(MqttError::PacketIdExhausted)
+    async fn allocate_packet_id(&self) -> Result<IdReservation> {
+        for _ in 0..u16::MAX {
+            let packet_id = self
+                .session
+                .read()
+                .await
+                .allocate_packet_id(&self.packet_id_generator, |packet_id| {
+                    self.pending_subacks.lock().contains_key(&packet_id)
+                        || self.pending_unsubacks.lock().contains_key(&packet_id)
+                        || self.outbound_ids.lock().holds(packet_id)
+                })
+                .await
+                .ok_or(MqttError::PacketIdExhausted)?;
+            if let Some(reservation) = IdReservation::claim(&self.outbound_ids, packet_id) {
+                return Ok(reservation);
+            }
+        }
+        Err(MqttError::PacketIdExhausted)
     }
 
     /// # Errors
@@ -854,22 +1012,6 @@ impl DirectClientInner {
     pub(crate) async fn check_unsubscribe(&self, packet: &UnsubscribePacket) -> Result<()> {
         outbound::check_unsubscribe(packet)?;
         self.check_packet_fits(packet).await
-    }
-
-    fn setup_publish_acknowledgment(&self, qos: QoS, packet_id: Option<u16>) -> Option<PublishAck> {
-        let pending = match qos {
-            QoS::AtMostOnce => return None,
-            QoS::AtLeastOnce => &self.pending_pubacks,
-            QoS::ExactlyOnce => &self.pending_pubcomps,
-        };
-        let packet_id = packet_id?;
-        let (tx, rx) = oneshot::channel();
-        pending.lock().insert(packet_id, tx);
-        Some(PublishAck {
-            rx,
-            packet_id,
-            pending: Arc::clone(pending),
-        })
     }
 
     pub(super) async fn release_outbound_quota(
@@ -900,7 +1042,8 @@ impl DirectClientInner {
         payload: Vec<u8>,
         options: PublishOptions,
     ) -> Result<StagedPublish> {
-        outbound::check_publish(&topic, &options)?;
+        let protocol_version = self.options.protocol_version.as_u8();
+        outbound::check_publish(&topic, &options, protocol_version)?;
 
         if !self.is_connected() && self.queue_on_disconnect && options.qos != QoS::AtMostOnce {
             return self
@@ -920,69 +1063,122 @@ impl DirectClientInner {
             return Err(MqttError::NotConnected);
         }
 
-        if let Some(alias) = options.properties.topic_alias {
-            let session = self.session.read().await;
-            let aliases = session.topic_alias_out().read().await;
-            outbound::check_topic_alias(&aliases, &topic, alias)?;
-        }
         let (final_payload, properties) = self.encode_payload(payload, &options)?;
-
-        let mut publish = self.publish_policy().conform(PublishPacket {
+        let request = PublishPacket {
             topic_name: topic,
             payload: final_payload,
             qos: options.qos,
             retain: options.retain,
             dup: false,
-            packet_id: (options.qos != QoS::AtMostOnce).then_some(SIZE_PROBE_PACKET_ID),
-            properties,
-            protocol_version: self.options.protocol_version.as_u8(),
+            packet_id: None,
+            properties: if protocol_version == 5 {
+                properties
+            } else {
+                Properties::default()
+            },
+            protocol_version,
             stream_id: None,
-        })?;
+        };
+        self.conform_to_connection(request)
+            .await
+            .map(StagedPublish::Ready)
+    }
 
-        self.check_publish_size(&publish).await?;
-
-        if publish.qos != QoS::AtMostOnce {
-            publish.packet_id = Some(self.allocate_packet_id().await?);
+    async fn conform_to_connection(&self, request: PublishPacket) -> Result<Box<ReadyPublish>> {
+        if !self.is_connected() {
+            return Err(MqttError::NotConnected);
         }
 
-        Ok(StagedPublish::Ready(publish))
+        if let Some(alias) = request.topic_alias() {
+            let session = self.session.read().await;
+            let aliases = session.topic_alias_out().read().await;
+            outbound::check_topic_alias(&aliases, &request.topic_name, alias)?;
+        }
+
+        let mut packet = self.publish_policy().conform(PublishPacket {
+            packet_id: (request.qos != QoS::AtMostOnce).then_some(SIZE_PROBE_PACKET_ID),
+            ..request.clone()
+        })?;
+
+        self.check_publish_size(&packet).await?;
+
+        let reservation = if packet.qos == QoS::AtMostOnce {
+            None
+        } else {
+            let reservation = self.allocate_packet_id().await?;
+            packet.packet_id = Some(reservation.packet_id());
+            Some(reservation)
+        };
+
+        Ok(Box::new(ReadyPublish {
+            request,
+            packet,
+            reservation,
+            epoch: self.connection_epoch.load(Ordering::SeqCst),
+        }))
     }
 
     pub(crate) async fn transmit_publish(
         &self,
-        publish: PublishPacket,
-    ) -> Result<Option<PublishAck>> {
-        let qos = publish.qos;
-        let packet_id = publish.packet_id;
+        ready: Box<ReadyPublish>,
+        claim: Option<u64>,
+    ) -> Result<Transmitted> {
+        let packet_id = ready.packet_id();
         let flow = Arc::clone(self.session.read().await.flow_control());
+        let quota_generation = flow.read().await.quota_generation();
+        let claimed = packet_id.filter(|_| claim == Some(quota_generation));
 
         if !self.is_connected() {
-            if let Some(pid) = packet_id {
+            if let Some(pid) = claimed {
                 Self::release_send_quota(&flow, pid).await;
             }
             return Err(MqttError::NotConnected);
         }
 
-        if qos != QoS::AtMostOnce {
-            let stored = match self.with_aliased_topic(publish.clone()).await {
-                Ok(stored) => {
-                    self.session
-                        .read()
-                        .await
-                        .store_unacked_publish(stored)
-                        .await
-                }
-                Err(e) => Err(e),
-            };
-            if let Err(e) = stored {
-                if let Some(pid) = packet_id {
-                    Self::release_send_quota(&flow, pid).await;
-                }
-                return Err(e);
+        if ready.epoch != self.connection_epoch.load(Ordering::SeqCst) {
+            if let Some(pid) = claimed {
+                Self::release_send_quota(&flow, pid).await;
             }
+            tracing::debug!(
+                packet_id = ?packet_id,
+                "Connection changed before publish was sent; conforming it to the current connection"
+            );
+            return self
+                .conform_to_connection(ready.request)
+                .await
+                .map(Transmitted::Restaged);
         }
 
-        let ack = self.setup_publish_acknowledgment(qos, packet_id);
+        let ReadyPublish {
+            packet: publish,
+            reservation,
+            ..
+        } = *ready;
+        let qos = publish.qos;
+
+        let in_flight = match packet_id {
+            Some(pid) if qos != QoS::AtMostOnce => {
+                let stored = match self.with_aliased_topic(publish.clone()).await {
+                    Ok(stored) => {
+                        self.session
+                            .read()
+                            .await
+                            .store_unacked_publish(stored)
+                            .await
+                    }
+                    Err(e) => Err(e),
+                };
+                if let Err(e) = stored {
+                    Self::release_send_quota(&flow, pid).await;
+                    return Err(e);
+                }
+                let (completion, handle) = Completion::new();
+                self.publish_outcomes.lock().track(pid, qos, completion);
+                Some(handle)
+            }
+            _ => None,
+        };
+        drop(reservation);
 
         if publish.payload.len() > 10000 {
             tracing::debug!(
@@ -998,11 +1194,27 @@ impl DirectClientInner {
             .topic_alias()
             .filter(|_| !publish.topic_name.is_empty())
             .map(|alias| (alias, publish.topic_name.clone()));
-        self.send_publish_packet(publish).await?;
-        if let Some((alias, alias_topic)) = alias_mapping {
+        let link = self
+            .connection_alive
+            .as_ref()
+            .map_or_else(|| watch::channel(false).1, |alive| alive.subscribe());
+        let written = self.send_publish_packet(publish).await;
+        if let Some((alias, alias_topic)) = alias_mapping.filter(|_| written.is_ok()) {
             self.record_outbound_topic_alias(alias, &alias_topic).await;
         }
-        Ok(ack)
+        match (written, in_flight) {
+            (Ok(()), None) => Ok(Transmitted::Sent(Delivery::of(qos, packet_id))),
+            (Ok(()), Some(handle)) => Ok(Transmitted::InFlight(InFlight { handle, link })),
+            (Err(e), None) => Err(e),
+            (Err(e), Some(handle)) => {
+                tracing::debug!(
+                    packet_id = ?packet_id,
+                    error = %e,
+                    "Stored PUBLISH could not be written; it is re-sent with the session"
+                );
+                Ok(Transmitted::Detached(handle))
+            }
+        }
     }
 
     async fn record_outbound_topic_alias(&self, alias: u16, topic: &str) {
@@ -1247,12 +1459,14 @@ impl DirectClientInner {
 
         let writer = self.writer.as_ref().ok_or(MqttError::NotConnected)?;
 
-        let packet_id = self.allocate_packet_id().await?;
+        let reservation = self.allocate_packet_id().await?;
+        let packet_id = reservation.packet_id();
         let mut packet = packet;
         packet.packet_id = packet_id;
 
         let (tx, rx) = oneshot::channel();
         self.pending_subacks.lock().insert(packet_id, tx);
+        drop(reservation);
 
         maybe_store_subscriptions(
             &self.stored_subscriptions,
@@ -1325,12 +1539,14 @@ impl DirectClientInner {
 
         let writer = self.writer.as_ref().ok_or(MqttError::NotConnected)?;
 
-        let packet_id = self.allocate_packet_id().await?;
+        let reservation = self.allocate_packet_id().await?;
+        let packet_id = reservation.packet_id();
         let mut packet = packet;
         packet.packet_id = packet_id;
 
         let (tx, rx) = oneshot::channel();
         self.pending_unsubacks.lock().insert(packet_id, tx);
+        drop(reservation);
 
         {
             let mut stored = self.stored_subscriptions.lock();
@@ -1462,6 +1678,26 @@ impl DirectClientInner {
         will.map_or_else(Properties::default, |w| w.properties.clone().into())
     }
 
+    fn connection_lifecycle(
+        &self,
+        connection_epoch: u64,
+        reader_task: Arc<Mutex<Option<tokio::task::AbortHandle>>>,
+    ) -> Result<keepalive::ConnectionLifecycle> {
+        Ok(keepalive::ConnectionLifecycle {
+            connected: self.connected.clone(),
+            connection_epoch,
+            current_connection_epoch: self.connection_epoch.clone(),
+            callbacks: Arc::clone(&self.connection_event_callbacks),
+            closing: Arc::new(AtomicBool::new(false)),
+            alive: self
+                .connection_alive
+                .clone()
+                .ok_or(MqttError::NotConnected)?,
+            flow: Arc::clone(&self.send_flow),
+            reader_task,
+        })
+    }
+
     fn start_background_tasks(
         &mut self,
         reader: UnifiedReader,
@@ -1471,15 +1707,10 @@ impl DirectClientInner {
         let reader_callbacks = self.callback_manager.clone();
         let suback_channels = self.pending_subacks.clone();
         let unsuback_channels = self.pending_unsubacks.clone();
-        let puback_channels = self.pending_pubacks.clone();
-        let pubcomp_channels = self.pending_pubcomps.clone();
+        let publish_outcomes = Arc::clone(&self.publish_outcomes);
+        let reader_task = Arc::new(Mutex::new(None));
         let writer_for_keepalive = self.writer.as_ref().ok_or(MqttError::NotConnected)?.clone();
-        let lifecycle = keepalive::ConnectionLifecycle {
-            connected: self.connected.clone(),
-            connection_epoch,
-            current_connection_epoch: self.connection_epoch.clone(),
-            callbacks: Arc::clone(&self.connection_event_callbacks),
-        };
+        let lifecycle = self.connection_lifecycle(connection_epoch, Arc::clone(&reader_task))?;
 
         let writer_for_reader = writer_for_keepalive.clone();
         let keepalive_state = self.keepalive_state.clone();
@@ -1489,12 +1720,18 @@ impl DirectClientInner {
             callback_manager: reader_callbacks,
             suback_channels,
             unsuback_channels,
-            puback_channels,
-            pubcomp_channels,
+            publish_outcomes,
             writer: writer_for_reader,
             lifecycle: lifecycle.clone(),
             #[cfg(feature = "transport-quic")]
             protocol_version: self.options.protocol_version.as_u8(),
+            #[cfg(feature = "transport-quic")]
+            maximum_packet_size: self
+                .options
+                .properties
+                .maximum_packet_size
+                .and_then(|size| usize::try_from(size).ok())
+                .unwrap_or(usize::MAX),
             auth_handler: self.auth_handler.clone(),
             auth_method: self.auth_method.clone(),
             keepalive_state: keepalive_state.clone(),
@@ -1513,11 +1750,13 @@ impl DirectClientInner {
         };
 
         let ctx_for_packet_reader = ctx.clone();
-        self.packet_reader_handle = Some(tokio::spawn(async move {
+        let packet_reader = tokio::spawn(async move {
             tracing::debug!("📦 PACKET READER - Task starting");
             packet_reader_task_with_responses(reader, ctx_for_packet_reader).await;
             tracing::debug!("📦 PACKET READER - Task exited");
-        }));
+        });
+        *reader_task.lock() = Some(packet_reader.abort_handle());
+        self.packet_reader_handle = Some(packet_reader);
 
         let keepalive_interval = self.negotiated_keep_alive();
         if keepalive_interval.is_zero() {
@@ -1836,17 +2075,17 @@ pub mod tests {
                 },
             )
             .await;
+        let Ok(StagedPublish::Queued(handle)) = within else {
+            panic!("within-limit publish must queue: {within:?}");
+        };
         assert!(
-            matches!(
-                within,
-                Ok(StagedPublish::Queued(PublishResult::QoS1Or2 { .. }))
-            ),
-            "within-limit publish must queue: {within:?}"
+            !client.queued_messages.lock().is_empty(),
+            "within-limit publish must be queued"
         );
         assert_eq!(
-            client.queued_messages.lock().len(),
-            1,
-            "within-limit publish must be queued"
+            handle.try_outcome(),
+            None,
+            "a queued publish must not report an outcome before it is flushed"
         );
     }
 
@@ -1977,5 +2216,966 @@ pub mod tests {
 
         let session = client.session.write().await;
         assert_eq!(session.client_id(), "test-client");
+    }
+
+    type SeenFrames = Arc<Mutex<Vec<(usize, u8)>>>;
+
+    async fn read_frame(stream: &mut tokio::net::TcpStream) -> Option<Vec<u8>> {
+        use tokio::io::AsyncReadExt;
+        let mut first = [0u8; 1];
+        stream.read_exact(&mut first).await.ok()?;
+        let mut len = 0usize;
+        let mut shift = 0;
+        loop {
+            let mut b = [0u8; 1];
+            stream.read_exact(&mut b).await.ok()?;
+            len |= usize::from(b[0] & 0x7f) << shift;
+            shift += 7;
+            if b[0] & 0x80 == 0 {
+                break;
+            }
+        }
+        let mut body = vec![0u8; len];
+        stream.read_exact(&mut body).await.ok()?;
+        let mut out = vec![first[0]];
+        out.extend(body);
+        Some(out)
+    }
+
+    async fn silent_broker(connacks: Vec<Vec<u8>>) -> (std::net::SocketAddr, SeenFrames) {
+        use tokio::io::AsyncWriteExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen: SeenFrames = Arc::new(Mutex::new(Vec::new()));
+        let seen_broker = Arc::clone(&seen);
+        tokio::spawn(async move {
+            for (conn, connack) in connacks.into_iter().enumerate() {
+                let (mut s, _) = listener.accept().await.unwrap();
+                read_frame(&mut s).await.unwrap();
+                s.write_all(&connack).await.unwrap();
+                let seen_conn = Arc::clone(&seen_broker);
+                tokio::spawn(async move {
+                    while let Some(f) = read_frame(&mut s).await {
+                        seen_conn.lock().push((conn, f[0]));
+                    }
+                });
+            }
+        });
+        (addr, seen)
+    }
+
+    async fn connect_to(client: &mut DirectClientInner, addr: std::net::SocketAddr) -> bool {
+        use mqtt5_protocol::Transport;
+        let mut transport = crate::transport::tcp::TcpTransport::from_addr(addr);
+        transport.connect().await.unwrap();
+        client
+            .connect(TransportType::Tcp(transport))
+            .await
+            .unwrap()
+            .session_present
+    }
+
+    fn publishes_on(seen: &SeenFrames, conn: usize) -> Vec<u8> {
+        seen.lock()
+            .iter()
+            .filter(|(c, first)| *c == conn && first >> 4 == 3)
+            .map(|(_, first)| *first)
+            .collect()
+    }
+
+    fn qos(level: QoS) -> PublishOptions {
+        PublishOptions {
+            qos: level,
+            ..Default::default()
+        }
+    }
+
+    async fn claim_quota(client: &DirectClientInner, ready: &ReadyPublish) -> Option<u64> {
+        let flow = Arc::clone(client.session.read().await.flow_control());
+        match ready.packet_id() {
+            Some(packet_id) => Some(
+                FlowControlManager::acquire_shared_send_quota(&flow, packet_id)
+                    .await
+                    .unwrap(),
+            ),
+            None => None,
+        }
+    }
+
+    async fn send_with_claim(
+        client: &DirectClientInner,
+        mut ready: Box<ReadyPublish>,
+        mut claim: Option<u64>,
+    ) -> usize {
+        let mut restages = 0;
+        loop {
+            match client.transmit_publish(ready, claim).await.unwrap() {
+                Transmitted::Sent(_) | Transmitted::InFlight(_) | Transmitted::Detached(_) => {
+                    return restages;
+                }
+                Transmitted::Restaged(next) => {
+                    restages += 1;
+                    claim = claim_quota(client, &next).await;
+                    ready = next;
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn stale_quota_claim_does_not_exceed_receive_maximum_after_reconnect() {
+        let receive_maximum_one =
+            |session_present: u8| vec![0x20, 0x06, session_present, 0x00, 0x03, 0x21, 0x00, 0x01];
+        let (addr, seen) =
+            silent_broker(vec![receive_maximum_one(0), receive_maximum_one(1)]).await;
+        let mut client =
+            DirectClientInner::new(ConnectOptions::new("stale-quota").with_clean_start(false));
+        connect_to(&mut client, addr).await;
+
+        let Ok(StagedPublish::Ready(b)) = client
+            .stage_publish("t/b".into(), b"b".to_vec(), qos(QoS::AtLeastOnce))
+            .await
+        else {
+            panic!("publish b must stage while connected");
+        };
+        let flow = Arc::clone(client.session.read().await.flow_control());
+        let stale_claim = claim_quota(&client, &b).await;
+
+        assert!(connect_to(&mut client, addr).await);
+
+        assert_eq!(send_with_claim(&client, b, stale_claim).await, 1);
+        assert_eq!(flow.read().await.in_flight_count().await, 1);
+
+        let Ok(StagedPublish::Ready(c)) = client
+            .stage_publish("t/c".into(), b"c".to_vec(), qos(QoS::AtLeastOnce))
+            .await
+        else {
+            panic!("publish c must stage while connected");
+        };
+        let c_quota = tokio::time::timeout(
+            Duration::from_millis(500),
+            FlowControlManager::acquire_shared_send_quota(&flow, c.packet_id().unwrap()),
+        )
+        .await;
+        if let Ok(Ok(generation)) = c_quota {
+            send_with_claim(&client, c, Some(generation)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let conn2 = publishes_on(&seen, 1);
+        assert!(
+            conn2.len() <= 1,
+            "client exceeded server Receive Maximum 1 on the new connection: {conn2:x?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn publish_waiting_across_reconnect_conforms_to_new_connection() {
+        let first = vec![0x20, 0x06, 0x00, 0x00, 0x03, 0x21, 0x00, 0x01];
+        let maximum_qos_one = vec![0x20, 0x05, 0x01, 0x00, 0x02, 0x24, 0x01];
+        let (addr, seen) = silent_broker(vec![first, maximum_qos_one]).await;
+        let mut client =
+            DirectClientInner::new(ConnectOptions::new("reconform").with_clean_start(false));
+        connect_to(&mut client, addr).await;
+        let flow = Arc::clone(client.session.read().await.flow_control());
+
+        let Ok(StagedPublish::Ready(a)) = client
+            .stage_publish("t/a".into(), b"a".to_vec(), qos(QoS::AtLeastOnce))
+            .await
+        else {
+            panic!("publish a must stage while connected");
+        };
+        let a_claim = claim_quota(&client, &a).await;
+        assert_eq!(send_with_claim(&client, a, a_claim).await, 0);
+
+        let Ok(StagedPublish::Ready(b)) = client
+            .stage_publish("t/b".into(), b"b".to_vec(), qos(QoS::ExactlyOnce))
+            .await
+        else {
+            panic!("publish b must stage while connected");
+        };
+        let b_id = b.packet_id().unwrap();
+        let waiting_flow = Arc::clone(&flow);
+        let waiting = tokio::spawn(async move {
+            FlowControlManager::acquire_shared_send_quota(&waiting_flow, b_id).await
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!waiting.is_finished(), "b must wait for Receive Maximum 1");
+
+        assert!(connect_to(&mut client, addr).await);
+        let b_claim = waiting.await.unwrap().unwrap();
+        assert_eq!(send_with_claim(&client, b, Some(b_claim)).await, 1);
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(
+            publishes_on(&seen, 1),
+            vec![0x3A, 0x32],
+            "the replayed QoS 1 publish goes first, then b downgraded to the new Maximum QoS 1"
+        );
+    }
+
+    async fn unacked_packet_ids(client: &DirectClientInner) -> Vec<u16> {
+        client
+            .session
+            .read()
+            .await
+            .get_unacked_publishes()
+            .await
+            .iter()
+            .filter_map(|publish| publish.packet_id)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn stale_flush_task_does_not_write_after_reconnect() {
+        let resume_receive_maximum_one = vec![0x20, 0x06, 0x01, 0x00, 0x03, 0x21, 0x00, 0x01];
+        let resume = vec![0x20, 0x03, 0x01, 0x00, 0x00];
+        let (addr, seen) = silent_broker(vec![
+            vec![0x20, 0x03, 0x00, 0x00, 0x00],
+            resume_receive_maximum_one,
+            resume,
+        ])
+        .await;
+        let mut client =
+            DirectClientInner::new(ConnectOptions::new("stale-flush").with_clean_start(false));
+        connect_to(&mut client, addr).await;
+        client.set_connected(false);
+        for topic in ["t/a", "t/b"] {
+            let queued = client
+                .stage_publish(topic.into(), b"x".to_vec(), qos(QoS::AtLeastOnce))
+                .await;
+            assert!(matches!(queued, Ok(StagedPublish::Queued(_))));
+        }
+
+        assert!(connect_to(&mut client, addr).await);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            publishes_on(&seen, 1).len(),
+            1,
+            "setup: a flushed, b waits for quota"
+        );
+        let stale_writer = Arc::clone(client.writer.as_ref().unwrap());
+        let held = stale_writer.lock().await;
+        let flow = Arc::clone(client.session.read().await.flow_control());
+        let a = unacked_packet_ids(&client).await[0];
+        flow.read().await.acknowledge(a).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        assert!(connect_to(&mut client, addr).await);
+        drop(held);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        assert_eq!(
+            publishes_on(&seen, 1).len(),
+            1,
+            "the flush task of the replaced connection wrote after the reconnect"
+        );
+    }
+
+    #[tokio::test]
+    async fn abandoned_qos2_replay_id_is_quarantined_until_session_is_lost() {
+        let first = vec![0x20, 0x03, 0x00, 0x00, 0x00];
+        let resume = vec![0x20, 0x03, 0x01, 0x00, 0x00];
+        let resume_maximum_qos_one = vec![0x20, 0x05, 0x01, 0x00, 0x02, 0x24, 0x01];
+        let lost = vec![0x20, 0x03, 0x00, 0x00, 0x00];
+        let (addr, seen) = silent_broker(vec![first, resume, resume_maximum_qos_one, lost]).await;
+        let mut client =
+            DirectClientInner::new(ConnectOptions::new("quarantine").with_clean_start(false));
+        connect_to(&mut client, addr).await;
+        client.set_connected(false);
+        let queued = client
+            .stage_publish("t/two".into(), b"x".to_vec(), qos(QoS::ExactlyOnce))
+            .await;
+        assert!(matches!(queued, Ok(StagedPublish::Queued(_))));
+
+        assert!(connect_to(&mut client, addr).await);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let abandoned = unacked_packet_ids(&client).await[0];
+        assert_eq!(publishes_on(&seen, 1), vec![0x34]);
+
+        assert!(connect_to(&mut client, addr).await);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            publishes_on(&seen, 2).is_empty(),
+            "QoS 2 replay after Maximum QoS 1"
+        );
+        assert!(unacked_packet_ids(&client).await.is_empty());
+
+        let mut handed_out = false;
+        for _ in 0..u16::MAX {
+            let reservation = client.allocate_packet_id().await.unwrap();
+            handed_out |= reservation.packet_id() == abandoned;
+        }
+        assert!(
+            !handed_out,
+            "a quarantined QoS 2 identifier was reallocated"
+        );
+
+        assert!(!connect_to(&mut client, addr).await);
+        let mut released = false;
+        for _ in 0..u16::MAX {
+            let reservation = client.allocate_packet_id().await.unwrap();
+            released |= reservation.packet_id() == abandoned;
+        }
+        assert!(released, "Session Present 0 must release the quarantine");
+    }
+
+    #[derive(Clone, Copy)]
+    enum AckScript {
+        Acknowledged,
+        ReceiptRefused,
+        Completed,
+    }
+
+    async fn ack_processed_while_disconnecting(script: AckScript) -> Option<PublishOutcome> {
+        use tokio::io::AsyncWriteExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (pid_tx, mut pid_rx) = tokio::sync::mpsc::unbounded_channel::<u16>();
+        let (ack_tx, ack_rx) = oneshot::channel::<()>();
+        tokio::spawn(async move {
+            let (mut s0, _) = listener.accept().await.unwrap();
+            read_frame(&mut s0).await.unwrap();
+            s0.write_all(&[0x20, 0x03, 0x00, 0x00, 0x00]).await.unwrap();
+            tokio::spawn(async move { while read_frame(&mut s0).await.is_some() {} });
+            let (mut s1, _) = listener.accept().await.unwrap();
+            read_frame(&mut s1).await.unwrap();
+            s1.write_all(&[0x20, 0x03, 0x01, 0x00, 0x00]).await.unwrap();
+            let pid = loop {
+                let f = read_frame(&mut s1).await.unwrap();
+                if f[0] >> 4 == 3 {
+                    let tlen = usize::from(u16::from_be_bytes([f[1], f[2]]));
+                    break u16::from_be_bytes([f[3 + tlen], f[4 + tlen]]);
+                }
+            };
+            let [hi, lo] = pid.to_be_bytes();
+            if matches!(script, AckScript::Completed) {
+                s1.write_all(&[0x50, 0x02, hi, lo]).await.unwrap();
+                while read_frame(&mut s1).await.unwrap()[0] != 0x62 {}
+            }
+            pid_tx.send(pid).unwrap();
+            ack_rx.await.unwrap();
+            let ack: &[u8] = match script {
+                AckScript::Acknowledged => &[0x40, 0x02, hi, lo],
+                AckScript::ReceiptRefused => &[0x50, 0x03, hi, lo, 0x80],
+                AckScript::Completed => &[0x70, 0x02, hi, lo],
+            };
+            s1.write_all(ack).await.unwrap();
+            tokio::spawn(async move { while read_frame(&mut s1).await.is_some() {} });
+            let (mut s2, _) = listener.accept().await.unwrap();
+            read_frame(&mut s2).await.unwrap();
+            s2.write_all(&[0x20, 0x03, 0x01, 0x00, 0x00]).await.unwrap();
+            while read_frame(&mut s2).await.is_some() {}
+        });
+
+        let level = match script {
+            AckScript::Acknowledged => QoS::AtLeastOnce,
+            AckScript::ReceiptRefused | AckScript::Completed => QoS::ExactlyOnce,
+        };
+        let mut client =
+            DirectClientInner::new(ConnectOptions::new("ack-abort").with_clean_start(false));
+        connect_to(&mut client, addr).await;
+        client.set_connected(false);
+        let Ok(StagedPublish::Queued(handle)) = client
+            .stage_publish("t/a".into(), b"a".to_vec(), qos(level))
+            .await
+        else {
+            panic!("setup: offline publish must queue");
+        };
+        assert!(connect_to(&mut client, addr).await);
+        pid_rx.recv().await.unwrap();
+
+        let flow = Arc::clone(client.session.read().await.flow_control());
+        let guard = Arc::clone(&flow).write_owned().await;
+        ack_tx.send(()).unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            drop(guard);
+        });
+        client.disconnect().await.unwrap();
+
+        assert!(connect_to(&mut client, addr).await);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        handle.try_outcome()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn puback_processed_while_disconnecting_settles_the_handle() {
+        assert!(matches!(
+            ack_processed_while_disconnecting(AckScript::Acknowledged).await,
+            Some(PublishOutcome::Delivered(Delivery::AtLeastOnce { .. }))
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn refused_pubrec_processed_while_disconnecting_settles_the_handle() {
+        assert_eq!(
+            ack_processed_while_disconnecting(AckScript::ReceiptRefused).await,
+            Some(PublishOutcome::Rejected(PublishRejection::Refused(
+                ReasonCode::UnspecifiedError
+            )))
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn pubcomp_processed_while_disconnecting_settles_the_handle() {
+        assert!(matches!(
+            ack_processed_while_disconnecting(AckScript::Completed).await,
+            Some(PublishOutcome::Delivered(Delivery::ExactlyOnce { .. }))
+        ));
+    }
+
+    #[tokio::test]
+    async fn publish_staged_before_reconnect_is_restaged_even_with_a_current_quota_claim() {
+        let first = vec![0x20, 0x03, 0x00, 0x00, 0x00];
+        let maximum_qos_one = vec![0x20, 0x05, 0x01, 0x00, 0x02, 0x24, 0x01];
+        let (addr, seen) = silent_broker(vec![first, maximum_qos_one]).await;
+        let mut client =
+            DirectClientInner::new(ConnectOptions::new("epoch-only").with_clean_start(false));
+        connect_to(&mut client, addr).await;
+        let Ok(StagedPublish::Ready(staged)) = client
+            .stage_publish("t/e".into(), b"e".to_vec(), qos(QoS::ExactlyOnce))
+            .await
+        else {
+            panic!("publish must stage while connected");
+        };
+
+        assert!(connect_to(&mut client, addr).await);
+        let current_claim = claim_quota(&client, &staged).await;
+        assert_eq!(send_with_claim(&client, staged, current_claim).await, 1);
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(
+            publishes_on(&seen, 1),
+            vec![0x32],
+            "a publish staged on the previous connection must be conformed to the new Maximum QoS 1"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn abandoned_qos2_id_is_quarantined_before_it_leaves_the_session_store() {
+        let first = vec![0x20, 0x03, 0x00, 0x00, 0x00];
+        let resume = vec![0x20, 0x03, 0x01, 0x00, 0x00];
+        let resume_maximum_qos_one = vec![0x20, 0x05, 0x01, 0x00, 0x02, 0x24, 0x01];
+        let (addr, _seen) = silent_broker(vec![first, resume, resume_maximum_qos_one]).await;
+        let mut client =
+            DirectClientInner::new(ConnectOptions::new("quarantine-order").with_clean_start(false));
+        connect_to(&mut client, addr).await;
+        client.set_connected(false);
+        let queued = client
+            .stage_publish("t/two".into(), b"x".to_vec(), qos(QoS::ExactlyOnce))
+            .await;
+        assert!(matches!(queued, Ok(StagedPublish::Queued(_))));
+        assert!(connect_to(&mut client, addr).await);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let abandoned = unacked_packet_ids(&client).await[0];
+
+        let ids = Arc::clone(&client.outbound_ids);
+        let (locked_tx, locked_rx) = oneshot::channel::<()>();
+        let (inspect_tx, inspect_rx) = std::sync::mpsc::channel::<()>();
+        let (state_tx, state_rx) = oneshot::channel::<bool>();
+        let holder = std::thread::spawn(move || {
+            let held = ids.lock();
+            let _ = locked_tx.send(());
+            let _ = inspect_rx.recv();
+            let _ = state_tx.send(held.holds(abandoned));
+        });
+        locked_rx.await.unwrap();
+        assert!(connect_to(&mut client, addr).await);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let in_store = unacked_packet_ids(&client).await.contains(&abandoned);
+        inspect_tx.send(()).unwrap();
+        let quarantined = state_rx.await.unwrap();
+        holder.join().unwrap();
+
+        assert!(
+            in_store || quarantined,
+            "packet id {abandoned} left the session store before it was quarantined; an allocation in that window could reuse it"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(client.outbound_ids.lock().holds(abandoned));
+    }
+
+    #[tokio::test]
+    async fn downgraded_message_is_requeued_when_the_connection_ends_before_it_is_written() {
+        let first = vec![0x20, 0x03, 0x00, 0x00, 0x00];
+        let resume_maximum_qos_zero = vec![0x20, 0x05, 0x01, 0x00, 0x02, 0x24, 0x00];
+        let resume = vec![0x20, 0x03, 0x01, 0x00, 0x00];
+        let (addr, seen) = silent_broker(vec![first, resume_maximum_qos_zero, resume]).await;
+        let mut client = DirectClientInner::new(
+            ConnectOptions::new("downgrade-requeue").with_clean_start(false),
+        );
+        connect_to(&mut client, addr).await;
+        client.set_connected(false);
+        let Ok(StagedPublish::Queued(handle)) = client
+            .stage_publish("t/one".into(), b"x".to_vec(), qos(QoS::AtLeastOnce))
+            .await
+        else {
+            panic!("setup: offline publish must queue");
+        };
+
+        assert!(connect_to(&mut client, addr).await);
+        let replaced_writer = Arc::clone(client.writer.as_ref().unwrap());
+        let held = replaced_writer.lock().await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(connect_to(&mut client, addr).await);
+        drop(held);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        assert!(
+            publishes_on(&seen, 1).is_empty(),
+            "nothing reaches the replaced connection"
+        );
+        assert_eq!(
+            publishes_on(&seen, 2),
+            vec![0x32],
+            "the message that never reached the wire is re-queued and sent on the next connection"
+        );
+        assert_eq!(handle.try_outcome(), None);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn stuck_replay_on_replaced_connection_does_not_starve_the_new_one() {
+        use tokio::io::AsyncWriteExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen: SeenFrames = Arc::new(Mutex::new(Vec::new()));
+        let seen_broker = Arc::clone(&seen);
+        let (hold_tx, mut hold_rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            let connacks = [
+                vec![0x20, 0x03, 0x00, 0x00, 0x00],
+                vec![0x20, 0x03, 0x01, 0x00, 0x00],
+                vec![0x20, 0x03, 0x01, 0x00, 0x00],
+            ];
+            for (conn, connack) in connacks.into_iter().enumerate() {
+                let (mut s, _) = listener.accept().await.unwrap();
+                read_frame(&mut s).await.unwrap();
+                s.write_all(&connack).await.unwrap();
+                if conn == 1 {
+                    let _ = hold_tx.send(s);
+                    continue;
+                }
+                let seen_conn = Arc::clone(&seen_broker);
+                tokio::spawn(async move {
+                    while let Some(f) = read_frame(&mut s).await {
+                        seen_conn.lock().push((conn, f[0]));
+                    }
+                });
+            }
+        });
+        let mut client =
+            DirectClientInner::new(ConnectOptions::new("stuck-replay").with_clean_start(false));
+        connect_to(&mut client, addr).await;
+        client.set_connected(false);
+        for i in 0..64 {
+            let queued = client
+                .stage_publish(
+                    format!("t/{i}"),
+                    vec![0u8; 256 * 1024],
+                    qos(QoS::AtLeastOnce),
+                )
+                .await;
+            assert!(matches!(queued, Ok(StagedPublish::Queued(_))));
+        }
+        assert!(connect_to(&mut client, addr).await);
+        let _held = hold_rx.recv().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        assert!(connect_to(&mut client, addr).await);
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        let on_new = publishes_on(&seen, 2).len();
+        let Ok(StagedPublish::Ready(live)) = client
+            .stage_publish("t/live".into(), b"x".to_vec(), qos(QoS::AtLeastOnce))
+            .await
+        else {
+            panic!("live publish must stage");
+        };
+        let flow = Arc::clone(client.session.read().await.flow_control());
+        let quota = tokio::time::timeout(
+            Duration::from_secs(3),
+            FlowControlManager::acquire_shared_send_quota(&flow, live.packet_id().unwrap()),
+        )
+        .await;
+        assert!(
+            on_new > 0 && quota.is_ok(),
+            "new healthy connection is starved by a replay stuck on the replaced connection: resent on new={on_new}, live quota={quota:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn stored_publish_whose_write_fails_is_returned_detached() {
+        let (addr, _seen) = silent_broker(vec![vec![0x20, 0x03, 0x00, 0x00, 0x00]]).await;
+        let mut client =
+            DirectClientInner::new(ConnectOptions::new("detached").with_clean_start(false));
+        connect_to(&mut client, addr).await;
+        let Ok(StagedPublish::Ready(ready)) = client
+            .stage_publish("t/d".into(), b"d".to_vec(), qos(QoS::AtLeastOnce))
+            .await
+        else {
+            panic!("publish must stage while connected");
+        };
+        let packet_id = ready.packet_id().unwrap();
+        let claim = claim_quota(&client, &ready).await;
+        client
+            .writer
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .close(None)
+            .await
+            .unwrap();
+
+        let transmitted = client.transmit_publish(ready, claim).await;
+        let Ok(Transmitted::Detached(handle)) = transmitted else {
+            panic!("a stored publish whose write failed must come back as a pending handle");
+        };
+        assert_eq!(handle.try_outcome(), None);
+        assert_eq!(unacked_packet_ids(&client).await, vec![packet_id]);
+    }
+
+    #[tokio::test]
+    async fn disconnect_while_already_disconnected_closes_send_quota() {
+        let receive_maximum_one = vec![0x20, 0x06, 0x00, 0x00, 0x03, 0x21, 0x00, 0x01];
+        let (addr, _seen) = silent_broker(vec![receive_maximum_one]).await;
+        let mut client =
+            DirectClientInner::new(ConnectOptions::new("disconnect-quota").with_clean_start(false));
+        connect_to(&mut client, addr).await;
+        let Ok(StagedPublish::Ready(first)) = client
+            .stage_publish("t/1".into(), b"1".to_vec(), qos(QoS::AtLeastOnce))
+            .await
+        else {
+            panic!("publish must stage while connected");
+        };
+        let claim = claim_quota(&client, &first).await;
+        send_with_claim(&client, first, claim).await;
+        let flow = Arc::clone(client.session.read().await.flow_control());
+        let waiting = tokio::spawn(async move {
+            FlowControlManager::acquire_shared_send_quota(&flow, 4242).await
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!waiting.is_finished(), "setup: the send quota is exhausted");
+
+        client.set_connected(false);
+        assert!(matches!(
+            client.disconnect().await,
+            Err(MqttError::NotConnected)
+        ));
+        let waited = tokio::time::timeout(Duration::from_secs(2), waiting).await;
+        assert!(
+            matches!(waited, Ok(Ok(Err(MqttError::NotConnected)))),
+            "disconnect must release publishes waiting for send quota: {waited:?}"
+        );
+    }
+
+    async fn mismatched_acknowledgement(level: QoS, ack_type: u8) -> (Vec<u8>, bool) {
+        use tokio::io::AsyncWriteExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (frames_tx, frames_rx) = oneshot::channel::<Vec<Vec<u8>>>();
+        tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            read_frame(&mut s).await.unwrap();
+            s.write_all(&[0x20, 0x03, 0x00, 0x00, 0x00]).await.unwrap();
+            let pid = loop {
+                let f = read_frame(&mut s).await.unwrap();
+                if f[0] >> 4 == 3 {
+                    let tlen = usize::from(u16::from_be_bytes([f[1], f[2]]));
+                    break u16::from_be_bytes([f[3 + tlen], f[4 + tlen]]);
+                }
+            };
+            let [hi, lo] = pid.to_be_bytes();
+            s.write_all(&[ack_type, 0x02, hi, lo]).await.unwrap();
+            let mut after = Vec::new();
+            while let Ok(Some(f)) =
+                tokio::time::timeout(Duration::from_millis(500), read_frame(&mut s)).await
+            {
+                after.push(f);
+            }
+            let _ = frames_tx.send(after);
+        });
+        let mut client =
+            DirectClientInner::new(ConnectOptions::new("ack-mismatch").with_clean_start(false));
+        connect_to(&mut client, addr).await;
+        let Ok(StagedPublish::Ready(ready)) = client
+            .stage_publish("t/m".into(), b"m".to_vec(), qos(level))
+            .await
+        else {
+            panic!("publish must stage while connected");
+        };
+        let packet_id = ready.packet_id().unwrap();
+        let claim = claim_quota(&client, &ready).await;
+        send_with_claim(&client, ready, claim).await;
+        let after = frames_rx.await.unwrap();
+        let disconnect = after
+            .into_iter()
+            .find(|f| f[0] == 0xE0)
+            .map(|f| f[1..].to_vec())
+            .unwrap_or_default();
+        let still_held = unacked_packet_ids(&client).await.contains(&packet_id);
+        (disconnect, still_held)
+    }
+
+    #[tokio::test]
+    async fn puback_for_qos2_publish_is_a_protocol_error() {
+        let (disconnect, still_held) = mismatched_acknowledgement(QoS::ExactlyOnce, 0x40).await;
+        assert_eq!(disconnect.first(), Some(&0x82));
+        assert!(
+            still_held,
+            "a mismatched PUBACK must not release the QoS 2 state"
+        );
+    }
+
+    #[tokio::test]
+    async fn pubcomp_for_qos1_publish_is_a_protocol_error() {
+        let (disconnect, still_held) = mismatched_acknowledgement(QoS::AtLeastOnce, 0x70).await;
+        assert_eq!(disconnect.first(), Some(&0x82));
+        assert!(
+            still_held,
+            "a mismatched PUBCOMP must not release the QoS 1 state"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn refused_pubrec_aborted_before_removal_keeps_the_publish_unsettled() {
+        use tokio::io::AsyncWriteExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (pid_tx, mut pid_rx) = tokio::sync::mpsc::unbounded_channel::<u16>();
+        let (ack_tx, ack_rx) = oneshot::channel::<()>();
+        let later: SeenFrames = Arc::new(Mutex::new(Vec::new()));
+        let later_broker = Arc::clone(&later);
+        tokio::spawn(async move {
+            let (mut s1, _) = listener.accept().await.unwrap();
+            read_frame(&mut s1).await.unwrap();
+            s1.write_all(&[0x20, 0x03, 0x00, 0x00, 0x00]).await.unwrap();
+            let pid = loop {
+                let f = read_frame(&mut s1).await.unwrap();
+                if f[0] >> 4 == 3 {
+                    let tlen = usize::from(u16::from_be_bytes([f[1], f[2]]));
+                    break u16::from_be_bytes([f[3 + tlen], f[4 + tlen]]);
+                }
+            };
+            let [hi, lo] = pid.to_be_bytes();
+            pid_tx.send(pid).unwrap();
+            ack_rx.await.unwrap();
+            s1.write_all(&[0x50, 0x03, hi, lo, 0x80]).await.unwrap();
+            tokio::spawn(async move { while read_frame(&mut s1).await.is_some() {} });
+            let (mut s2, _) = listener.accept().await.unwrap();
+            read_frame(&mut s2).await.unwrap();
+            s2.write_all(&[0x20, 0x03, 0x01, 0x00, 0x00]).await.unwrap();
+            while let Some(f) = read_frame(&mut s2).await {
+                later_broker.lock().push((1, f[0]));
+            }
+        });
+        let mut client =
+            DirectClientInner::new(ConnectOptions::new("pubrec-abort").with_clean_start(false));
+        connect_to(&mut client, addr).await;
+        let Ok(StagedPublish::Ready(ready)) = client
+            .stage_publish("t/a".into(), b"a".to_vec(), qos(QoS::ExactlyOnce))
+            .await
+        else {
+            panic!("publish must stage");
+        };
+        let claim = claim_quota(&client, &ready).await;
+        let Ok(Transmitted::InFlight(in_flight)) = client.transmit_publish(ready, claim).await
+        else {
+            panic!("live publish must be in flight");
+        };
+        let handle = in_flight.handle.clone();
+        pid_rx.recv().await.unwrap();
+        let session = Arc::clone(&client.session);
+        let guard = session.read_owned().await;
+        ack_tx.send(()).unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let outcome_at_abort = handle.try_outcome();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            drop(guard);
+        });
+        client.disconnect().await.unwrap();
+        assert!(connect_to(&mut client, addr).await);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let resent = publishes_on(&later, 1);
+        assert_eq!(
+            outcome_at_abort, None,
+            "a PUBREC refusal that was not applied to the session must not settle the publish"
+        );
+        assert!(
+            !resent.is_empty(),
+            "the still-stored PUBLISH is replayed on resume"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn stuck_downgraded_write_does_not_block_reconnect() {
+        use tokio::io::AsyncWriteExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen: SeenFrames = Arc::new(Mutex::new(Vec::new()));
+        let seen_broker = Arc::clone(&seen);
+        let (hold_tx, mut hold_rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            let connacks = [
+                vec![0x20, 0x03, 0x00, 0x00, 0x00],
+                vec![0x20, 0x05, 0x01, 0x00, 0x02, 0x24, 0x00],
+                vec![0x20, 0x03, 0x01, 0x00, 0x00],
+            ];
+            for (conn, connack) in connacks.into_iter().enumerate() {
+                let (mut s, _) = listener.accept().await.unwrap();
+                read_frame(&mut s).await.unwrap();
+                s.write_all(&connack).await.unwrap();
+                if conn == 1 {
+                    let _ = hold_tx.send(s);
+                    continue;
+                }
+                let seen_conn = Arc::clone(&seen_broker);
+                tokio::spawn(async move {
+                    while let Some(f) = read_frame(&mut s).await {
+                        seen_conn.lock().push((conn, f[0]));
+                    }
+                });
+            }
+        });
+        let mut client =
+            DirectClientInner::new(ConnectOptions::new("stuck-downgrade").with_clean_start(false));
+        connect_to(&mut client, addr).await;
+        client.set_connected(false);
+        let mut handles = Vec::new();
+        for i in 0..64 {
+            let Ok(StagedPublish::Queued(h)) = client
+                .stage_publish(
+                    format!("t/{i}"),
+                    vec![0u8; 256 * 1024],
+                    qos(QoS::AtLeastOnce),
+                )
+                .await
+            else {
+                panic!("queue");
+            };
+            handles.push(h);
+        }
+        assert!(connect_to(&mut client, addr).await);
+        let _held = hold_rx.recv().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let reconnected =
+            tokio::time::timeout(Duration::from_secs(3), connect_to(&mut client, addr)).await;
+        assert!(
+            reconnected.is_ok(),
+            "reconnect blocked behind a stuck downgraded write"
+        );
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        let on_new = publishes_on(&seen, 2).len();
+        assert!(
+            on_new > 0,
+            "remaining queued messages flushed on the new connection"
+        );
+    }
+
+    #[tokio::test]
+    async fn refused_pubrec_after_pubrel_is_a_protocol_error() {
+        use tokio::io::AsyncWriteExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (frames_tx, frames_rx) = oneshot::channel::<Vec<Vec<u8>>>();
+        tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            read_frame(&mut s).await.unwrap();
+            s.write_all(&[0x20, 0x03, 0x00, 0x00, 0x00]).await.unwrap();
+            let pid = loop {
+                let f = read_frame(&mut s).await.unwrap();
+                if f[0] >> 4 == 3 {
+                    let tlen = usize::from(u16::from_be_bytes([f[1], f[2]]));
+                    break u16::from_be_bytes([f[3 + tlen], f[4 + tlen]]);
+                }
+            };
+            let [hi, lo] = pid.to_be_bytes();
+            s.write_all(&[0x50, 0x02, hi, lo]).await.unwrap();
+            while read_frame(&mut s).await.unwrap()[0] != 0x62 {}
+            s.write_all(&[0x50, 0x03, hi, lo, 0x80]).await.unwrap();
+            let mut after = Vec::new();
+            while let Ok(Some(f)) =
+                tokio::time::timeout(Duration::from_millis(500), read_frame(&mut s)).await
+            {
+                after.push(f);
+            }
+            let _ = frames_tx.send(after);
+        });
+        let mut client = DirectClientInner::new(
+            ConnectOptions::new("pubrec-after-pubrel").with_clean_start(false),
+        );
+        connect_to(&mut client, addr).await;
+        let Ok(StagedPublish::Ready(ready)) = client
+            .stage_publish("t/r".into(), b"r".to_vec(), qos(QoS::ExactlyOnce))
+            .await
+        else {
+            panic!("publish must stage while connected");
+        };
+        let packet_id = ready.packet_id().unwrap();
+        let claim = claim_quota(&client, &ready).await;
+        send_with_claim(&client, ready, claim).await;
+        let after = frames_rx.await.unwrap();
+        let disconnect = after.into_iter().find(|f| f[0] == 0xE0);
+        assert_eq!(
+            disconnect.and_then(|f| f.get(1).copied()),
+            Some(0x82),
+            "an error PUBREC for an identifier already released with PUBREL is a protocol error"
+        );
+        assert_eq!(
+            client.session.read().await.outbound_stage(packet_id).await,
+            Some(crate::session::state::OutboundStage::AwaitingPubComp),
+            "the PUBREL state must be left untouched"
+        );
+    }
+
+    #[tokio::test]
+    async fn acknowledgement_settled_before_loss_is_reported_as_sent() {
+        let (completion, handle) = Completion::new();
+        completion.delivered(Delivery::AtLeastOnce { packet_id: 9 });
+        let (alive, link) = watch::channel(false);
+        drop(alive);
+        let settled = InFlight { handle, link }.settle().await;
+        assert!(
+            matches!(
+                settled,
+                Ok(PublishResult::Sent(Delivery::AtLeastOnce { packet_id: 9 }))
+            ),
+            "an acknowledgement that settled before the connection ended must win: {settled:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn packet_id_allocation_does_not_scan_the_offline_queue() {
+        let client = DirectClientInner::new(ConnectOptions::new("offline").with_clean_start(false));
+        let mut held: Vec<IdReservation> = (1..u16::MAX)
+            .filter_map(|packet_id| IdReservation::claim(&client.outbound_ids, packet_id))
+            .collect();
+        assert_eq!(held.len(), usize::from(u16::MAX - 1));
+
+        let start = std::time::Instant::now();
+        let last = client.allocate_packet_id().await;
+        let exhausted = client.allocate_packet_id().await;
+        let elapsed = start.elapsed();
+
+        assert_eq!(
+            last.as_ref().ok().map(IdReservation::packet_id),
+            Some(u16::MAX)
+        );
+        assert!(matches!(exhausted, Err(MqttError::PacketIdExhausted)));
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "allocating against a full set of reserved ids took {elapsed:?}"
+        );
+
+        held.remove(0);
+        assert_eq!(
+            client
+                .allocate_packet_id()
+                .await
+                .ok()
+                .map(|r| r.packet_id()),
+            Some(1)
+        );
     }
 }

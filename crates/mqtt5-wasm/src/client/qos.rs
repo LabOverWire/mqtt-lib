@@ -7,11 +7,14 @@ use std::rc::Rc;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 
+use super::outbound::check_server_limits;
 use super::packet::write_packet;
 use super::sleep_ms;
 use super::state::ClientState;
 
 const QOS2_CALLBACK_TIMEOUT_MS: f64 = 10_000.0;
+const INDETERMINATE: &str = "indeterminate: may have been delivered";
+const SESSION_LOST: &str = "indeterminate: session lost; may have been delivered";
 
 pub fn create_ack_promises(
     state: &Rc<RefCell<ClientState>>,
@@ -87,12 +90,18 @@ fn stored_copy(state: &ClientState, publish: &PublishPacket) -> PublishPacket {
 pub async fn reserve_flight(
     state: &Rc<RefCell<ClientState>>,
     publish: &PublishPacket,
+    generation: u32,
 ) -> Result<u16, JsValue> {
     loop {
         {
             let mut state_mut = state.borrow_mut();
             if !state_mut.connected {
                 return Err(JsValue::from_str("Not connected"));
+            }
+            if state_mut.connection_generation != generation {
+                return Err(JsValue::from_str(
+                    "Connection changed before the message was sent",
+                ));
             }
             if state_mut.send_quota > 0 {
                 let packet_id = state_mut
@@ -123,14 +132,19 @@ pub fn abandon_flight(state: &Rc<RefCell<ClientState>>, packet_id: u16) {
 pub fn release_quota(state: &Rc<RefCell<ClientState>>) {
     let (resend, waiter) = {
         let mut state_mut = state.borrow_mut();
+        if state_mut.quota_debt > 0 {
+            state_mut.quota_debt -= 1;
+            return;
+        }
         state_mut.send_quota = state_mut
             .send_quota
             .saturating_add(1)
             .min(state_mut.server.receive_maximum);
         let mut resend = None;
         while let Some(packet_id) = state_mut.pending_resends.pop_front() {
-            if let Some(flight) = state_mut.outbound.get(&packet_id) {
-                resend = Some(flight.publish.clone().with_dup(true));
+            if let Some(flight) = state_mut.outbound.get_mut(&packet_id) {
+                resend = Some(flight.publish.clone().with_dup(flight.transmitted));
+                flight.transmitted = true;
                 break;
             }
         }
@@ -163,29 +177,103 @@ pub fn wake_quota_waiters(state: &Rc<RefCell<ClientState>>) {
     }
 }
 
-pub fn resend_session(state: &Rc<RefCell<ClientState>>) {
+pub fn resume_session(state: &Rc<RefCell<ClientState>>, session_present: bool) {
+    let settlements = {
+        let mut state_mut = state.borrow_mut();
+        if !session_present {
+            state_mut.awaiting_pubrel.clear();
+            state_mut.quarantined.clear();
+        }
+        let mut settlements = Vec::new();
+        for packet_id in state_mut.flights_in_order() {
+            let Some(verdict) = session_verdict(&mut state_mut, packet_id, session_present) else {
+                continue;
+            };
+            state_mut.outbound.remove(&packet_id);
+            if verdict.quarantine {
+                state_mut.quarantined.insert(packet_id);
+            }
+            tracing::warn!(packet_id, reason = %verdict.message, "unacknowledged PUBLISH abandoned");
+            if let Some(callback) = state_mut.take_ack_callback(packet_id) {
+                settlements.push((callback, verdict.message));
+            }
+        }
+        settlements
+    };
+    resend_session(state);
+    for (callback, message) in settlements {
+        if let Err(e) = callback.call1(&JsValue::NULL, &JsValue::from_str(&message)) {
+            tracing::warn!(error = ?e, "acknowledgement callback failed");
+        }
+    }
+}
+
+struct Abandon {
+    message: String,
+    quarantine: bool,
+}
+
+fn session_verdict(
+    state: &mut ClientState,
+    packet_id: u16,
+    session_present: bool,
+) -> Option<Abandon> {
+    let flight = state.outbound.get_mut(&packet_id)?;
+    let not_resent = |reason: String, prefix: &str| {
+        format!(
+            "{prefix}; not resent because the new connection's limits do not allow it ({reason})"
+        )
+    };
+    match (session_present, flight.publish.qos, flight.released) {
+        (true, _, true) => None,
+        (true, qos, false) => check_server_limits(&state.server, &flight.publish)
+            .err()
+            .map(|reason| Abandon {
+                message: not_resent(reason, INDETERMINATE),
+                quarantine: qos == QoS::ExactlyOnce,
+            }),
+        (false, QoS::ExactlyOnce, _) => Some(Abandon {
+            message: SESSION_LOST.to_string(),
+            quarantine: false,
+        }),
+        (false, _, _) => {
+            flight.transmitted = false;
+            check_server_limits(&state.server, &flight.publish)
+                .err()
+                .map(|reason| Abandon {
+                    message: not_resent(reason, SESSION_LOST),
+                    quarantine: false,
+                })
+        }
+    }
+}
+
+fn resend_session(state: &Rc<RefCell<ClientState>>) {
     let packets = {
         let mut state_mut = state.borrow_mut();
-        let mut order: Vec<(u64, u16)> = state_mut
-            .outbound
-            .iter()
-            .map(|(packet_id, flight)| (flight.sequence, *packet_id))
-            .collect();
-        order.sort_unstable();
-        let mut packets = Vec::with_capacity(order.len());
-        for (_, packet_id) in order {
-            let Some(flight) = state_mut.outbound.get(&packet_id) else {
+        let mut packets = Vec::with_capacity(state_mut.outbound.len());
+        for packet_id in state_mut.flights_in_order() {
+            let mut quota = state_mut.send_quota;
+            let Some(flight) = state_mut.outbound.get_mut(&packet_id) else {
                 continue;
             };
             if flight.released {
                 packets.push(Packet::PubRel(PubRelPacket::new(packet_id)));
-                state_mut.send_quota = state_mut.send_quota.saturating_sub(1);
-            } else if state_mut.send_quota > 0 {
-                packets.push(Packet::Publish(flight.publish.clone().with_dup(true)));
-                state_mut.send_quota -= 1;
+                if quota > 0 {
+                    quota -= 1;
+                } else {
+                    state_mut.quota_debt = state_mut.quota_debt.saturating_add(1);
+                }
+            } else if quota > 0 {
+                packets.push(Packet::Publish(
+                    flight.publish.clone().with_dup(flight.transmitted),
+                ));
+                flight.transmitted = true;
+                quota -= 1;
             } else {
                 state_mut.pending_resends.push_back(packet_id);
             }
+            state_mut.send_quota = quota;
         }
         packets
     };

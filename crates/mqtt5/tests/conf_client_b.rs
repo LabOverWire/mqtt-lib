@@ -6,8 +6,8 @@ use mqtt5::packet::{FixedHeader, MqttPacket, Packet, PacketType};
 use mqtt5::protocol::v5::reason_codes::ReasonCode;
 use mqtt5::session::TopicAliasManager;
 use mqtt5::{
-    AckToken, ConnectOptions, Message, MqttClient, MqttError, PublishOptions, PublishProperties,
-    QoS, SubscribeOptions,
+    AckToken, ConnectOptions, Message, MqttClient, MqttError, ProtocolVersion, PublishOptions,
+    PublishProperties, QoS, SubscribeOptions,
 };
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -867,6 +867,14 @@ async fn mqtt_3_3_2_10_client_accepts_topic_alias_within_its_maximum() {
 }
 
 async fn alias_violation(alias: u16, client_id: &str) -> (usize, Termination) {
+    alias_violation_on_topic("t/a", alias, client_id).await
+}
+
+async fn alias_violation_on_topic(
+    topic: &str,
+    alias: u16,
+    client_id: &str,
+) -> (usize, Termination) {
     let (client, mut stream, _listener) =
         connect_client(alias_client_options(client_id), &plain_connack()).await;
     let mut rx = subscribe(&client, &mut stream, "t/a", qos_options(QoS::AtMostOnce)).await;
@@ -874,7 +882,7 @@ async fn alias_violation(alias: u16, client_id: &str) -> (usize, Termination) {
         .write_all(&raw_publish(
             0,
             false,
-            "t/a",
+            topic,
             None,
             &topic_alias_prop(alias),
             b"x",
@@ -900,6 +908,24 @@ async fn mqtt_3_3_2_11_receiver_treats_topic_alias_above_its_maximum_as_protocol
     assert!(
         delivered == 0 && end == Termination::Disconnect(0x94),
         "[MQTT-3.3.2-11 / §3.3.2.3.4] inbound Topic Alias 3 > client maximum 2 must be a Protocol Error (DISCONNECT 0x94); delivered={delivered} termination={end:?}"
+    );
+}
+
+#[tokio::test]
+async fn mqtt_3_3_2_8_inbound_topic_alias_zero_with_empty_topic_is_topic_alias_invalid() {
+    let (delivered, end) = alias_violation_on_topic("", 0, "conf-b-alias0-empty").await;
+    assert!(
+        delivered == 0 && end == Termination::Disconnect(0x94),
+        "[MQTT-3.3.2-8 / §3.3.2.3.4] inbound Topic Alias 0 with a zero-length Topic Name must draw DISCONNECT 0x94 (Topic Alias invalid), not 0x82; delivered={delivered} termination={end:?}"
+    );
+}
+
+#[tokio::test]
+async fn mqtt_3_3_2_11_inbound_topic_alias_above_maximum_with_empty_topic_is_topic_alias_invalid() {
+    let (delivered, end) = alias_violation_on_topic("", 3, "conf-b-alias3-empty").await;
+    assert!(
+        delivered == 0 && end == Termination::Disconnect(0x94),
+        "[MQTT-3.3.2-11 / §3.3.2.3.4] inbound Topic Alias 3 > client maximum 2 with a zero-length Topic Name must draw DISCONNECT 0x94 (Topic Alias invalid), not 0x82; delivered={delivered} termination={end:?}"
     );
 }
 
@@ -1130,8 +1156,8 @@ async fn mqtt_4_9_0_1_send_quota_reinitialized_on_new_connection() {
         .publish_qos1("t/quota", b"never-acked".to_vec())
         .await;
     assert!(
-        matches!(timed_out, Err(MqttError::Timeout)),
-        "unacknowledged publish times out: {timed_out:?}"
+        matches!(&timed_out, Ok(mqtt5::PublishResult::Queued(handle)) if handle.try_outcome().is_none()),
+        "unacknowledged publish returns a pending handle after the ack wait: {timed_out:?}"
     );
     let _ = collect_frames(&mut first, Duration::from_millis(50)).await;
     drop(first);
@@ -1179,7 +1205,7 @@ async fn queued_flush(client_id: &str) -> Vec<Frame> {
             .publish_qos1("t/queued", vec![i])
             .await
             .expect("publish while disconnected is queued");
-        assert!(queued.packet_id().is_some());
+        assert!(matches!(queued, mqtt5::PublishResult::Queued(_)));
     }
 
     let (mut second, _) = accept_session(
@@ -1505,5 +1531,46 @@ async fn mqtt_3_2_2_5_queued_acks_discarded_when_session_not_present() {
     assert!(
         pubacks.is_empty(),
         "[MQTT-3.2.2-5] acknowledgements from the discarded session were sent on a Session Present=0 connection: {pubacks:?}"
+    );
+}
+
+#[tokio::test]
+async fn mqtt_3_1_1_publish_ignores_v5_only_properties_and_sends_none() {
+    let (listener, url) = bind().await;
+    let client = MqttClient::with_options(
+        base_options("conf-b-v311-props").with_protocol_version(ProtocolVersion::V311),
+    );
+    let connecting = client.clone();
+    let task = tokio::spawn(async move { connecting.connect(&url).await });
+    let (mut stream, _) = tokio::time::timeout(Duration::from_secs(10), listener.accept())
+        .await
+        .expect("client connected within 10s")
+        .expect("accept");
+    let connect = expect_kind(&mut stream, CONNECT, MEDIUM).await;
+    assert_eq!(
+        connect.body[6], 4,
+        "CONNECT protocol level must be 4 (3.1.1)"
+    );
+    stream
+        .write_all(&[0x20, 0x02, 0x00, 0x00])
+        .await
+        .expect("write CONNACK");
+    task.await.unwrap().expect("3.1.1 connect");
+
+    let properties = PublishProperties {
+        topic_alias: Some(1),
+        response_topic: Some("r/#".to_string()),
+        subscription_identifiers: vec![1],
+        ..Default::default()
+    };
+    client
+        .publish_with_options("a/b", b"x".to_vec(), qos0_with(properties))
+        .await
+        .expect("3.1.1 publish must not be failed by v5-only property checks");
+    let frame = expect_kind(&mut stream, PUBLISH, MEDIUM).await;
+    assert_eq!(
+        frame.body,
+        vec![0x00, 0x03, b'a', b'/', b'b', b'x'],
+        "3.1.1 PUBLISH must carry only Topic Name and payload, no v5 properties"
     );
 }

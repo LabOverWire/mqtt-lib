@@ -14,7 +14,10 @@ use mqtt5_protocol::packet::{FixedHeader, MqttPacket, Packet};
 use mqtt5_protocol::protocol::v5::properties::{PropertyId, PropertyValue};
 use mqtt5_protocol::protocol::v5::reason_codes::ReasonCode;
 use mqtt5_protocol::QoS;
-use mqtt5_wasm::{WasmConnectOptions, WasmMqttClient, WasmPublishOptions, WasmSubscribeOptions};
+use mqtt5_wasm::{
+    WasmConnectOptions, WasmMqttClient, WasmPublishOptions, WasmReconnectOptions,
+    WasmSubscribeOptions,
+};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use wasm_bindgen::prelude::*;
@@ -46,7 +49,7 @@ struct Frame {
     packet: Packet,
 }
 
-fn take_frame(inbox: &mut Vec<u8>) -> Option<Frame> {
+fn take_frame(inbox: &mut Vec<u8>, protocol_version: &Cell<u8>) -> Option<Frame> {
     let mut cursor = &inbox[..];
     let header = FixedHeader::decode(&mut cursor).ok()?;
     let header_len = inbox.len() - cursor.len();
@@ -56,7 +59,16 @@ fn take_frame(inbox: &mut Vec<u8>) -> Option<Frame> {
     }
     let first_byte = inbox[0];
     let mut body = &inbox[header_len..total];
-    let packet = Packet::decode_from_body(header.packet_type, &header, &mut body).unwrap();
+    let packet = Packet::decode_from_body_with_version(
+        header.packet_type,
+        &header,
+        &mut body,
+        protocol_version.get(),
+    )
+    .unwrap();
+    if let Packet::Connect(connect) = &packet {
+        protocol_version.set(connect.protocol_version);
+    }
     inbox.drain(..total);
     Some(Frame { first_byte, packet })
 }
@@ -64,6 +76,7 @@ fn take_frame(inbox: &mut Vec<u8>) -> Option<Frame> {
 struct FakeBroker {
     port: MessagePort,
     inbox: Rc<RefCell<Vec<u8>>>,
+    protocol_version: Cell<u8>,
     closed: Rc<Cell<bool>>,
     on_message: Closure<dyn FnMut(MessageEvent)>,
     on_close: Closure<dyn FnMut(Event)>,
@@ -91,6 +104,7 @@ impl FakeBroker {
             Self {
                 port,
                 inbox,
+                protocol_version: Cell::new(5),
                 closed,
                 on_message,
                 on_close,
@@ -109,7 +123,7 @@ impl FakeBroker {
     }
 
     fn take_frame(&self) -> Option<Frame> {
-        take_frame(&mut self.inbox.borrow_mut())
+        take_frame(&mut self.inbox.borrow_mut(), &self.protocol_version)
     }
 
     async fn next_frame(&self) -> Frame {
@@ -256,6 +270,17 @@ fn value_recorder() -> (js_sys::Function, Rc<RefCell<Vec<JsValue>>>) {
     (callback.into_js_value().unchecked_into(), values)
 }
 
+type PairLog = Rc<RefCell<Vec<(JsValue, JsValue)>>>;
+
+fn pair_recorder() -> (js_sys::Function, PairLog) {
+    let values = Rc::new(RefCell::new(Vec::new()));
+    let sink = Rc::clone(&values);
+    let callback = Closure::<dyn FnMut(JsValue, JsValue)>::new(move |first, second| {
+        sink.borrow_mut().push((first, second));
+    });
+    (callback.into_js_value().unchecked_into(), values)
+}
+
 fn success() -> ConnAckPacket {
     ConnAckPacket::new(false, ReasonCode::Success)
 }
@@ -309,7 +334,7 @@ fn publish_with(
     topic: &str,
     payload: &[u8],
     options: WasmPublishOptions,
-) -> Outcome<()> {
+) -> Outcome<u8> {
     let client = Rc::clone(client);
     let topic = topic.to_string();
     let payload = payload.to_vec();
@@ -621,21 +646,60 @@ async fn mqtt_3_2_2_14_capabilities_refreshed_on_reconnect() {
 }
 
 #[wasm_bindgen_test]
-async fn mqtt_3_2_2_11_maximum_qos_honoured() {
+async fn mqtt_3_2_2_11_maximum_qos_zero_downgrades_and_reports() {
     let (client, broker) =
         connect_with(WasmConnectOptions::new(), success().with_maximum_qos(0)).await;
     let outcome = publish_with(&client, "a", b"x", publish_options(1));
-    let qos1 = client.publish_qos1("a", b"x", noop()).await;
-    let qos2 = client.publish_qos2("a", b"x", noop()).await;
-    sleep(60).await;
-    while let Some(frame) = broker.take_frame() {
-        if let Packet::Publish(publish) = frame.packet {
-            assert_eq!(publish.qos, QoS::AtMostOnce, "PUBLISH exceeds Maximum QoS");
-        }
+    let (qos1_callback, qos1_values) = pair_recorder();
+    let (qos2_callback, qos2_values) = pair_recorder();
+    let qos1 = client.publish_qos1("b", b"x", qos1_callback).await;
+    let qos2 = client.publish_qos2("c", b"x", qos2_callback).await;
+    let mut topics = Vec::new();
+    for _ in 0..3 {
+        let publish = expect_publish(&broker).await;
+        assert_eq!(publish.qos, QoS::AtMostOnce, "PUBLISH exceeds Maximum QoS");
+        topics.push(publish.topic_name);
     }
-    assert!(settle(&outcome).await.is_err());
-    assert!(qos1.is_err());
-    assert!(qos2.is_err());
+    topics.sort();
+    assert_eq!(topics, ["a", "b", "c"]);
+    assert_eq!(
+        settle(&outcome).await.unwrap(),
+        0,
+        "QoS used must be reported"
+    );
+    assert_eq!(qos1.unwrap(), 0, "a QoS 0 publish has no packet identifier");
+    assert_eq!(qos2.unwrap(), 0, "a QoS 0 publish has no packet identifier");
+    for values in [&qos1_values, &qos2_values] {
+        let values = values.borrow();
+        assert_eq!(values.len(), 1);
+        assert_eq!(values[0].0.as_f64(), Some(0.0));
+        assert_eq!(values[0].1.as_f64(), Some(0.0), "QoS used must be reported");
+    }
+}
+
+#[wasm_bindgen_test]
+async fn mqtt_3_2_2_11_maximum_qos_one_downgrades_and_reports() {
+    let (client, broker) =
+        connect_with(WasmConnectOptions::new(), success().with_maximum_qos(1)).await;
+    let outcome = publish_with(&client, "a", b"x", publish_options(2));
+    let first = expect_publish(&broker).await;
+    assert_eq!(first.qos, QoS::AtLeastOnce, "PUBLISH exceeds Maximum QoS");
+    let (callback, values) = pair_recorder();
+    let packet_id = client.publish_qos2("b", b"x", callback).await.unwrap();
+    let second = expect_publish(&broker).await;
+    assert_eq!(second.qos, QoS::AtLeastOnce, "PUBLISH exceeds Maximum QoS");
+    assert_eq!(second.packet_id, Some(packet_id));
+    broker.send(&PubAckPacket::new(first.packet_id.unwrap()));
+    broker.send(&PubAckPacket::new(packet_id));
+    assert_eq!(
+        settle(&outcome).await.unwrap(),
+        1,
+        "QoS used must be reported"
+    );
+    wait_for_count(&values, 1).await;
+    let values = values.borrow();
+    assert_eq!(values[0].0.as_f64(), Some(0.0));
+    assert_eq!(values[0].1.as_f64(), Some(1.0), "QoS used must be reported");
 }
 
 #[wasm_bindgen_test]
@@ -976,29 +1040,245 @@ async fn mqtt_3_2_2_4_resume_existing_session_still_rejects_clean_start() {
     );
 }
 
-#[wasm_bindgen_test]
-async fn mqtt_3_2_2_5_session_state_discarded_on_session_present_zero() {
-    let client = Rc::new(WasmMqttClient::new("discard".to_string()));
-    let mut options = WasmConnectOptions::new();
-    options.set_clean_start(false);
-    options.set_session_expiry_interval(Some(3600));
-    let (broker, result, _) = open_session(&client, options, success()).await;
-    result.unwrap();
-    let pending = publish_with(&client, "a", b"1", publish_options(1));
-    assert!(matches!(
-        broker.next_non_ping().await.packet,
-        Packet::Publish(_)
-    ));
+const NOT_RESENT: &str = "indeterminate: may have been delivered; not resent because the new connection's limits do not allow it";
+const SESSION_LOST: &str = "indeterminate: session lost; may have been delivered";
+const CLEAN_START_DISCARD: &str =
+    "indeterminate: session discarded by clean start; may have been delivered";
+const SESSION_ENDED: &str =
+    "indeterminate: session ended with the connection; may have been delivered";
+
+fn rejection_text<T: std::fmt::Debug>(result: Result<T, JsValue>) -> String {
+    result
+        .expect_err("publish must be settled with an error")
+        .as_string()
+        .unwrap_or_default()
+}
+
+async fn lose_connection(client: &WasmMqttClient, broker: &FakeBroker) {
     broker.send(&DisconnectPacket::new(ReasonCode::ServerShuttingDown));
     sleep(50).await;
+    assert!(!client.is_connected());
+}
 
-    let mut options = WasmConnectOptions::new();
-    options.set_clean_start(false);
-    options.set_session_expiry_interval(Some(3600));
-    let (broker, result, _) = open_session(&client, options, success()).await;
+async fn cycle_packet_ids(client: &WasmMqttClient, broker: &FakeBroker) -> Vec<u16> {
+    let mut issued = Vec::with_capacity(66_000);
+    while issued.len() < 65_600 {
+        let mut ids = Vec::with_capacity(2000);
+        for _ in 0..2000 {
+            ids.push(client.publish_qos1("t", b"", noop()).await.unwrap());
+        }
+        let mut acks = Vec::with_capacity(ids.len() * 4);
+        for _ in &ids {
+            let publish = expect_publish(broker).await;
+            acks.extend(encode(&PubAckPacket::new(publish.packet_id.unwrap())));
+        }
+        broker.send_raw(&acks);
+        sleep(20).await;
+        issued.extend(ids);
+    }
+    issued
+}
+
+#[wasm_bindgen_test]
+async fn mqtt_4_4_0_1_replay_skips_messages_the_new_limits_forbid_and_quarantines_qos2() {
+    let client = Rc::new(WasmMqttClient::new("replay-limits".to_string()));
+    let (broker, result, _) = open_session(&client, persistent_session_options(), success()).await;
+    result.unwrap();
+    let mut retained = publish_options(1);
+    retained.set_retain(true);
+    let mut sent = Vec::new();
+    let retained = publish_with(&client, "ret", b"r", retained);
+    sent.push(expect_publish(&broker).await);
+    let oversized = publish_with(&client, "big", &[0u8; 200], publish_options(1));
+    sent.push(expect_publish(&broker).await);
+    let (qos2_callback, qos2_values) = pair_recorder();
+    let quarantined = client
+        .publish_qos2("q2", b"q", qos2_callback)
+        .await
+        .unwrap();
+    sent.push(expect_publish(&broker).await);
+    let conforming = publish_with(&client, "ok", b"1", publish_options(1));
+    sent.push(expect_publish(&broker).await);
+    let released = publish_with(&client, "rel", b"2", publish_options(2));
+    sent.push(expect_publish(&broker).await);
+    assert_eq!(sent[2].packet_id, Some(quarantined));
+    let released_id = sent[4].packet_id.unwrap();
+    broker.send(&PubRecPacket::new(released_id));
+    assert!(matches!(
+        broker.next_non_ping().await.packet,
+        Packet::PubRel(_)
+    ));
+    lose_connection(&client, &broker).await;
+
+    let (broker, result, _) = open_session(
+        &client,
+        persistent_session_options(),
+        ConnAckPacket::new(true, ReasonCode::Success)
+            .with_retain_available(false)
+            .with_maximum_packet_size(64)
+            .with_maximum_qos(1),
+    )
+    .await;
+    result.unwrap();
+    let resent = broker.next_non_ping().await;
+    match &resent.packet {
+        Packet::Publish(publish) => {
+            assert_eq!(publish.topic_name, "ok");
+            assert_eq!(publish.packet_id, sent[3].packet_id);
+            assert!(publish.dup);
+        }
+        other => panic!("expected the conforming PUBLISH, got {other:?}"),
+    }
+    match broker.next_non_ping().await.packet {
+        Packet::PubRel(pubrel) => assert_eq!(pubrel.packet_id, released_id),
+        other => panic!("expected the PUBREL to be resent, got {other:?}"),
+    }
+    broker.expect_silence(60).await;
+
+    for outcome in [&retained, &oversized] {
+        let text = rejection_text(settle(outcome).await);
+        assert!(text.contains(NOT_RESENT), "rejection: {text}");
+    }
+    wait_for_count(&qos2_values, 1).await;
+    let text = qos2_values.borrow()[0].0.as_string().unwrap_or_default();
+    assert!(text.contains(NOT_RESENT), "callback value: {text}");
+
+    broker.send(&PubAckPacket::new(sent[3].packet_id.unwrap()));
+    broker.send(&PubCompPacket::new(released_id));
+    assert_eq!(settle(&conforming).await.unwrap(), 1);
+    assert_eq!(settle(&released).await.unwrap(), 2);
+
+    let issued = cycle_packet_ids(&client, &broker).await;
+    assert!(
+        !issued.contains(&quarantined),
+        "abandoned QoS 2 packet identifier {quarantined} reused while the session lasts"
+    );
+    lose_connection(&client, &broker).await;
+
+    let (broker, result, _) = open_session(&client, persistent_session_options(), success()).await;
+    result.unwrap();
+    let issued = cycle_packet_ids(&client, &broker).await;
+    assert!(
+        issued.contains(&quarantined),
+        "Session Present=0 must release quarantined packet identifier {quarantined}"
+    );
+}
+
+#[wasm_bindgen_test]
+async fn mqtt_3_2_2_5_session_present_zero_resends_qos1_as_new_messages() {
+    let client = Rc::new(WasmMqttClient::new("requeue".to_string()));
+    let (broker, result, _) = open_session(&client, persistent_session_options(), success()).await;
+    result.unwrap();
+    let first = publish_with(&client, "a", b"1", publish_options(1));
+    expect_publish(&broker).await;
+    let mut retained = publish_options(1);
+    retained.set_retain(true);
+    let retained = publish_with(&client, "r", b"2", retained);
+    expect_publish(&broker).await;
+    let (callback, values) = pair_recorder();
+    client.publish_qos1("b", b"3", callback).await.unwrap();
+    expect_publish(&broker).await;
+    lose_connection(&client, &broker).await;
+
+    let (broker, result, _) = open_session(
+        &client,
+        persistent_session_options(),
+        success().with_retain_available(false),
+    )
+    .await;
+    result.unwrap();
+    let mut resent = Vec::new();
+    for expected in ["a", "b"] {
+        let frame = broker.next_non_ping().await;
+        assert_eq!(
+            frame.first_byte & 0x08,
+            0,
+            "a message sent on a new session has DUP=0"
+        );
+        match frame.packet {
+            Packet::Publish(publish) => {
+                assert_eq!(publish.topic_name, expected);
+                assert!(!publish.dup);
+                resent.push(publish.packet_id.unwrap());
+            }
+            other => panic!("expected PUBLISH {expected}, got {other:?}"),
+        }
+    }
+    broker.expect_silence(60).await;
+    let text = rejection_text(settle(&retained).await);
+    assert!(text.contains(SESSION_LOST), "rejection: {text}");
+    assert!(text.contains("not resent"), "rejection: {text}");
+
+    for packet_id in &resent {
+        broker.send(&PubAckPacket::new(*packet_id));
+    }
+    assert_eq!(settle(&first).await.unwrap(), 1);
+    wait_for_count(&values, 1).await;
+    let values = values.borrow();
+    assert_eq!(values[0].0.as_f64(), Some(0.0));
+    assert_eq!(values[0].1.as_f64(), Some(1.0));
+}
+
+#[wasm_bindgen_test]
+async fn mqtt_3_1_2_4_clean_start_discards_kept_session_as_indeterminate() {
+    let client = Rc::new(WasmMqttClient::new("clean-discard".to_string()));
+    let (broker, result, _) = open_session(&client, persistent_session_options(), success()).await;
+    result.unwrap();
+    let qos1 = publish_with(&client, "a", b"1", publish_options(1));
+    expect_publish(&broker).await;
+    let (callback, values) = pair_recorder();
+    client.publish_qos2("b", b"2", callback).await.unwrap();
+    expect_publish(&broker).await;
+    lose_connection(&client, &broker).await;
+    assert!(is_pending(&qos1));
+
+    let (broker, result, connect) =
+        open_session(&client, WasmConnectOptions::new(), success()).await;
+    result.unwrap();
+    assert!(matches!(connect, Packet::Connect(connect) if connect.clean_start));
+    broker.expect_silence(60).await;
+    let text = rejection_text(settle(&qos1).await);
+    assert!(text.contains(CLEAN_START_DISCARD), "rejection: {text}");
+    wait_for_count(&values, 1).await;
+    let text = values.borrow()[0].0.as_string().unwrap_or_default();
+    assert!(text.contains(CLEAN_START_DISCARD), "callback value: {text}");
+}
+
+#[wasm_bindgen_test]
+async fn session_expiry_zero_connection_loss_settles_flights_as_indeterminate() {
+    let (client, broker) = connect_default().await;
+    let pending = publish_with(&client, "a", b"1", publish_options(1));
+    expect_publish(&broker).await;
+    lose_connection(&client, &broker).await;
+    let text = rejection_text(settle(&pending).await);
+    assert!(text.contains(SESSION_ENDED), "rejection: {text}");
+}
+
+#[wasm_bindgen_test]
+async fn mqtt_3_2_2_5_session_present_zero_settles_qos2_as_indeterminate() {
+    let client = Rc::new(WasmMqttClient::new("qos2-lost".to_string()));
+    let (broker, result, _) = open_session(&client, persistent_session_options(), success()).await;
+    result.unwrap();
+    let unreleased = publish_with(&client, "q", b"1", publish_options(2));
+    let (callback, values) = pair_recorder();
+    client.publish_qos2("r", b"2", callback).await.unwrap();
+    expect_publish(&broker).await;
+    let released_id = expect_publish(&broker).await.packet_id.unwrap();
+    broker.send(&PubRecPacket::new(released_id));
+    assert!(matches!(
+        broker.next_non_ping().await.packet,
+        Packet::PubRel(_)
+    ));
+    lose_connection(&client, &broker).await;
+
+    let (broker, result, _) = open_session(&client, persistent_session_options(), success()).await;
     result.unwrap();
     broker.expect_silence(60).await;
-    assert!(settle(&pending).await.is_err());
+    let text = rejection_text(settle(&unreleased).await);
+    assert!(text.contains(SESSION_LOST), "rejection: {text}");
+    wait_for_count(&values, 1).await;
+    let text = values.borrow()[0].0.as_string().unwrap_or_default();
+    assert!(text.contains(SESSION_LOST), "callback value: {text}");
 }
 
 #[wasm_bindgen_test]
@@ -1415,6 +1695,8 @@ export class WsFake {
   }
   onConn(sock) {
     this.sock = sock;
+    this.closed = false;
+    this.buf = Buffer.alloc(0);
     let handshaken = false;
     sock.on('data', (chunk) => {
       this.buf = Buffer.concat([this.buf, chunk]);
@@ -1432,7 +1714,7 @@ export class WsFake {
       }
       this.parse();
     });
-    sock.on('close', () => { this.closed = true; });
+    sock.on('close', () => { if (this.sock === sock) this.closed = true; });
     sock.on('error', () => {});
   }
   parse() {
@@ -1467,6 +1749,7 @@ export class WsFake {
   opcodeList() { return Uint8Array.from(this.opcodes); }
   protocolHeader() { return this.protocols; }
   isClosed() { return this.closed || !!this.closeReceived; }
+  dropClient() { if (this.sock) this.sock.destroy(); }
   stop() { try { if (this.sock) this.sock.destroy(); } catch (e) {} this.server.close(); }
 }
 "#)]
@@ -1488,6 +1771,8 @@ extern "C" {
     fn protocol_header(this: &WsFake) -> String;
     #[wasm_bindgen(method, js_name = isClosed)]
     fn is_closed(this: &WsFake) -> bool;
+    #[wasm_bindgen(method, js_name = dropClient)]
+    fn drop_client(this: &WsFake);
     #[wasm_bindgen(method)]
     fn stop(this: &WsFake);
 }
@@ -1495,13 +1780,14 @@ extern "C" {
 struct WsBroker {
     server: WsFake,
     inbox: RefCell<Vec<u8>>,
+    protocol_version: Cell<u8>,
 }
 
 impl WsBroker {
     async fn next_packet(&self) -> Packet {
         for _ in 0..400 {
             self.inbox.borrow_mut().extend(self.server.take_data());
-            if let Some(frame) = take_frame(&mut self.inbox.borrow_mut()) {
+            if let Some(frame) = take_frame(&mut self.inbox.borrow_mut(), &self.protocol_version) {
                 return frame.packet;
             }
             sleep(5).await;
@@ -1530,6 +1816,7 @@ async fn connect_ws() -> (Rc<WasmMqttClient>, WsBroker) {
     let broker = WsBroker {
         server,
         inbox: RefCell::new(Vec::new()),
+        protocol_version: Cell::new(5),
     };
     let client = Rc::new(WasmMqttClient::new("ws-client".to_string()));
     let url = format!("ws://127.0.0.1:{port}/mqtt");
@@ -1603,4 +1890,331 @@ async fn mqtt_6_0_0_2_websocket_coalesced_and_split_packets() {
     assert_eq!(topics.borrow().as_slice(), ["one", "two"]);
     client.disconnect().await.unwrap();
     broker.server.stop();
+}
+
+fn persistent_session_options() -> WasmConnectOptions {
+    let mut options = WasmConnectOptions::new();
+    options.set_clean_start(false);
+    options.set_session_expiry_interval(Some(3600));
+    options
+}
+
+fn resumable_without_expiry() -> WasmConnectOptions {
+    let mut options = WasmConnectOptions::new();
+    options.set_clean_start(false);
+    options
+}
+
+fn v311_options(clean_session: bool) -> WasmConnectOptions {
+    let mut options = WasmConnectOptions::new();
+    options.set_protocol_version(4);
+    options.set_clean_start(clean_session);
+    options
+}
+
+fn v311_connack(session_present: bool) -> ConnAckPacket {
+    ConnAckPacket::new_v311(session_present, ReasonCode::Success)
+}
+
+async fn expect_publish(broker: &FakeBroker) -> PublishPacket {
+    match broker.next_non_ping().await.packet {
+        Packet::Publish(publish) => publish,
+        other => panic!("expected PUBLISH, got {other:?}"),
+    }
+}
+
+async fn wait_until_connected(client: &WasmMqttClient) -> bool {
+    for _ in 0..400 {
+        if client.is_connected() {
+            return true;
+        }
+        sleep(5).await;
+    }
+    false
+}
+
+#[wasm_bindgen_test]
+async fn mqtt_3_1_2_4_v311_persistent_session_survives_connection_loss() {
+    let client = Rc::new(WasmMqttClient::new("v311-persistent".to_string()));
+    let (broker, result, _) = open_session(&client, v311_options(false), v311_connack(false)).await;
+    result.unwrap();
+    let held = publish_with(&client, "a", b"1", publish_options(1));
+    let first = expect_publish(&broker).await;
+    broker.send_raw(&[0xE0, 0x00]);
+    sleep(50).await;
+    assert!(!client.is_connected());
+    assert!(
+        is_pending(&held),
+        "in-flight QoS 1 publish must stay in the session"
+    );
+
+    let (broker, result, connect) =
+        open_session(&client, v311_options(false), v311_connack(true)).await;
+    match connect {
+        Packet::Connect(connect) => {
+            assert_eq!(connect.protocol_version, 4);
+            assert!(!connect.clean_start);
+        }
+        other => panic!("expected CONNECT, got {other:?}"),
+    }
+    result.expect("CleanSession=0 reconnect to a persistent v3.1.1 session must succeed");
+    let resent = expect_publish(&broker).await;
+    assert_eq!(resent.packet_id, first.packet_id);
+    assert!(resent.dup);
+    assert_eq!(resent.payload.as_ref(), b"1");
+    broker.send(&PubAckPacket::new(resent.packet_id.unwrap()));
+    settle(&held).await.unwrap();
+}
+
+async fn ws_reconnect_clean_start(clean_session: bool) -> (bool, bool) {
+    let server = WsFake::new();
+    let port = JsFuture::from(server.start())
+        .await
+        .unwrap()
+        .as_f64()
+        .unwrap();
+    let broker = WsBroker {
+        server,
+        inbox: RefCell::new(Vec::new()),
+        protocol_version: Cell::new(5),
+    };
+    let client = Rc::new(WasmMqttClient::new("ws-v311".to_string()));
+    let mut reconnect = WasmReconnectOptions::new();
+    reconnect.set_initial_delay_ms(10);
+    client.set_reconnect_options(&reconnect);
+    let url = format!("ws://127.0.0.1:{port}/mqtt");
+    let connecting = {
+        let client = Rc::clone(&client);
+        spawn_outcome(async move {
+            client
+                .connect_with_options(&url, &v311_options(clean_session))
+                .await
+        })
+    };
+    let first = match broker.next_packet().await {
+        Packet::Connect(connect) => connect.clean_start,
+        other => panic!("expected CONNECT, got {other:?}"),
+    };
+    broker.server.send_binary(&encode(&v311_connack(false)));
+    settle(&connecting).await.unwrap();
+
+    broker.server.drop_client();
+    let second = match broker.next_packet().await {
+        Packet::Connect(connect) => connect.clean_start,
+        other => panic!("expected reconnect CONNECT, got {other:?}"),
+    };
+    broker.server.send_binary(&encode(&v311_connack(!second)));
+    assert!(wait_until_connected(&client).await, "reconnect failed");
+    client.disconnect().await.unwrap();
+    broker.server.stop();
+    (first, second)
+}
+
+#[wasm_bindgen_test]
+async fn mqtt_3_1_2_4_v311_reconnect_keeps_clean_session_one() {
+    let (first, second) = ws_reconnect_clean_start(true).await;
+    assert!(first);
+    assert!(
+        second,
+        "reconnect must not turn a CleanSession=1 client into a persistent session"
+    );
+}
+
+#[wasm_bindgen_test]
+async fn mqtt_3_1_2_4_v311_reconnect_keeps_clean_session_zero() {
+    let (first, second) = ws_reconnect_clean_start(false).await;
+    assert!(!first);
+    assert!(!second);
+}
+
+#[wasm_bindgen_test]
+async fn mqtt_3_2_2_3_2_server_session_expiry_extends_session() {
+    let client = Rc::new(WasmMqttClient::new("server-expiry-longer".to_string()));
+    let (broker, result, _) = open_session(
+        &client,
+        resumable_without_expiry(),
+        success().with_session_expiry_interval(300),
+    )
+    .await;
+    result.unwrap();
+    let held = publish_with(&client, "a", b"1", publish_options(1));
+    let first = expect_publish(&broker).await;
+    broker.send(&DisconnectPacket::new(ReasonCode::ServerShuttingDown));
+    sleep(50).await;
+    assert!(
+        is_pending(&held),
+        "session kept by the server's expiry must hold the flight"
+    );
+
+    let (broker, result, _) = open_session(
+        &client,
+        resumable_without_expiry(),
+        ConnAckPacket::new(true, ReasonCode::Success).with_session_expiry_interval(300),
+    )
+    .await;
+    result.expect("the server's Session Expiry Interval keeps the session");
+    let resent = expect_publish(&broker).await;
+    assert_eq!(resent.packet_id, first.packet_id);
+    assert!(resent.dup);
+    broker.send(&PubAckPacket::new(resent.packet_id.unwrap()));
+    settle(&held).await.unwrap();
+}
+
+#[wasm_bindgen_test]
+async fn mqtt_3_2_2_3_2_server_session_expiry_zero_ends_session() {
+    let client = Rc::new(WasmMqttClient::new("server-expiry-zero".to_string()));
+    let (broker, result, _) = open_session(
+        &client,
+        persistent_session_options(),
+        success().with_session_expiry_interval(0),
+    )
+    .await;
+    result.unwrap();
+    let held = publish_with(&client, "a", b"1", publish_options(1));
+    expect_publish(&broker).await;
+    broker.send(&DisconnectPacket::new(ReasonCode::ServerShuttingDown));
+    let outcome = settle(&held).await;
+    assert!(
+        outcome.is_err(),
+        "a session the server ends with the connection must fail its flights"
+    );
+
+    let (broker, result, _) = open_session(
+        &client,
+        persistent_session_options(),
+        ConnAckPacket::new(true, ReasonCode::Success),
+    )
+    .await;
+    assert!(result.is_err(), "client holds no session after expiry 0");
+    assert!(broker.wait_closed().await);
+}
+
+#[wasm_bindgen_test]
+async fn disconnect_settles_pending_acknowledgements_and_keeps_session() {
+    let client = Rc::new(WasmMqttClient::new("disconnect-settles".to_string()));
+    let (broker, result, _) = open_session(&client, persistent_session_options(), success()).await;
+    result.unwrap();
+    let pending = publish_with(&client, "a", b"1", publish_options(1));
+    let (qos1_callback, qos1_values) = value_recorder();
+    let (qos2_callback, qos2_values) = value_recorder();
+    client.publish_qos1("b", b"2", qos1_callback).await.unwrap();
+    client.publish_qos2("c", b"3", qos2_callback).await.unwrap();
+    let mut sent = Vec::new();
+    for _ in 0..3 {
+        sent.push(expect_publish(&broker).await);
+    }
+
+    client.disconnect().await.unwrap();
+    let outcome = settle(&pending).await;
+    let message = outcome
+        .expect_err("pending publish must be rejected by disconnect()")
+        .as_string()
+        .unwrap_or_default();
+    assert!(message.contains("disconnected"), "rejection: {message}");
+    wait_for_count(&qos1_values, 1).await;
+    wait_for_count(&qos2_values, 1).await;
+    for values in [&qos1_values, &qos2_values] {
+        let values = values.borrow();
+        assert_eq!(values.len(), 1);
+        let text = values[0].as_string().unwrap_or_default();
+        assert!(text.contains("disconnected"), "callback value: {text}");
+    }
+
+    let (broker, result, _) = open_session(
+        &client,
+        persistent_session_options(),
+        ConnAckPacket::new(true, ReasonCode::Success),
+    )
+    .await;
+    result.expect("the kept session must resume on the same client instance");
+    for original in &sent {
+        let resent = expect_publish(&broker).await;
+        assert_eq!(resent.packet_id, original.packet_id);
+        assert_eq!(resent.topic_name, original.topic_name);
+        assert!(resent.dup);
+    }
+    broker.send(&PubAckPacket::new(sent[0].packet_id.unwrap()));
+    broker.send(&PubAckPacket::new(sent[1].packet_id.unwrap()));
+    broker.send(&PubRecPacket::new(sent[2].packet_id.unwrap()));
+    match broker.next_non_ping().await.packet {
+        Packet::PubRel(pubrel) => assert_eq!(Some(pubrel.packet_id), sent[2].packet_id),
+        other => panic!("expected PUBREL, got {other:?}"),
+    }
+    broker.send(&PubCompPacket::new(sent[2].packet_id.unwrap()));
+    broker.expect_silence(50).await;
+    assert_eq!(qos1_values.borrow().len(), 1);
+    assert_eq!(qos2_values.borrow().len(), 1);
+}
+
+#[wasm_bindgen_test]
+async fn mqtt_3_3_4_7_resent_pubrels_above_lowered_receive_maximum_incur_quota_debt() {
+    let client = Rc::new(WasmMqttClient::new("quota-debt".to_string()));
+    let (broker, result, _) = open_session(&client, persistent_session_options(), success()).await;
+    result.unwrap();
+    let first = publish_with(&client, "q2a", b"1", publish_options(2));
+    let second = publish_with(&client, "q2b", b"2", publish_options(2));
+    let third = publish_with(&client, "q1c", b"3", publish_options(1));
+    let mut ids = Vec::new();
+    for _ in 0..3 {
+        ids.push(expect_publish(&broker).await.packet_id.unwrap());
+    }
+    broker.send(&PubRecPacket::new(ids[0]));
+    broker.send(&PubRecPacket::new(ids[1]));
+    for _ in 0..2 {
+        assert!(matches!(
+            broker.next_non_ping().await.packet,
+            Packet::PubRel(_)
+        ));
+    }
+    broker.send(&DisconnectPacket::new(ReasonCode::ServerShuttingDown));
+    sleep(50).await;
+
+    let (broker, result, _) = open_session(
+        &client,
+        persistent_session_options(),
+        ConnAckPacket::new(true, ReasonCode::Success).with_receive_maximum(1),
+    )
+    .await;
+    result.unwrap();
+    for expected in &ids[..2] {
+        match broker.next_non_ping().await.packet {
+            Packet::PubRel(pubrel) => assert_eq!(pubrel.packet_id, *expected),
+            other => panic!("expected PUBREL, got {other:?}"),
+        }
+    }
+    broker.expect_silence(50).await;
+    broker.send(&PubCompPacket::new(ids[0]));
+    broker.expect_silence(50).await;
+    broker.send(&PubCompPacket::new(ids[1]));
+    let resent = expect_publish(&broker).await;
+    assert_eq!(resent.packet_id, Some(ids[2]));
+    assert!(resent.dup);
+    broker.send(&PubAckPacket::new(ids[2]));
+    for outcome in [first, second, third] {
+        settle(&outcome).await.unwrap();
+    }
+}
+
+#[wasm_bindgen_test]
+async fn v311_publish_internal_encoded_as_v311() {
+    let client = Rc::new(WasmMqttClient::new("v311-publish".to_string()));
+    let (broker, result, _) = open_session(&client, v311_options(true), v311_connack(false)).await;
+    result.unwrap();
+    let publishing = {
+        let client = Rc::clone(&client);
+        spawn_outcome(async move {
+            client
+                .publish_internal("v311/topic", b"payload", QoS::AtLeastOnce)
+                .await
+        })
+    };
+    let frame = broker.next_non_ping().await;
+    let publish = match frame.packet {
+        Packet::Publish(publish) => publish,
+        other => panic!("expected PUBLISH, got {other:?}"),
+    };
+    assert_eq!(publish.topic_name, "v311/topic");
+    assert_eq!(publish.payload.as_ref(), b"payload");
+    broker.send(&PubAckPacket::new(publish.packet_id.unwrap()));
+    settle(&publishing).await.unwrap();
 }

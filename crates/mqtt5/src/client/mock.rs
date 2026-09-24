@@ -9,11 +9,10 @@ use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 
-use crate::client::MqttClientTrait;
+use crate::client::{Delivery, MqttClientTrait, PublishResult};
 use crate::error::{MqttError, Result};
 use crate::types::{
-    ConnectOptions, ConnectResult, Message, MessageProperties, PublishOptions, PublishResult,
-    SubscribeOptions,
+    ConnectOptions, ConnectResult, Message, MessageProperties, PublishOptions, SubscribeOptions,
 };
 use crate::QoS;
 
@@ -173,7 +172,6 @@ impl MockMqttClient {
     pub async fn simulate_message(&self, topic: &str, payload: Vec<u8>, qos: QoS) -> Result<()> {
         let subscriptions = self.state.subscriptions.read().await;
 
-        // Find matching subscription
         for (topic_filter, callback) in subscriptions.iter() {
             if Self::topic_matches(topic_filter, topic) {
                 let message = Message {
@@ -200,9 +198,7 @@ impl MockMqttClient {
             return true;
         }
 
-        // Simple wildcard support for testing
         if filter.contains('+') || filter.contains('#') {
-            // Basic implementation - could be enhanced for full MQTT topic matching
             if filter == "#" {
                 return true;
             }
@@ -210,7 +206,6 @@ impl MockMqttClient {
                 return topic.starts_with(prefix);
             }
             if filter.contains('+') {
-                // Simple single-level wildcard matching
                 let filter_parts: Vec<&str> = filter.split('/').collect();
                 let topic_parts: Vec<&str> = topic.split('/').collect();
 
@@ -268,7 +263,6 @@ impl MqttClientTrait for MockMqttClient {
                 }
                 result
             } else {
-                // Default behavior: succeed and set connected
                 self.set_connected(true);
                 Ok(())
             }
@@ -297,7 +291,6 @@ impl MqttClientTrait for MockMqttClient {
                 }
                 result
             } else {
-                // Default behavior: succeed and set connected
                 self.set_connected(true);
                 Ok(ConnectResult {
                     session_present: false,
@@ -320,7 +313,6 @@ impl MqttClientTrait for MockMqttClient {
                 }
                 result
             } else {
-                // Default behavior: succeed and set disconnected
                 self.set_connected(false);
                 Ok(())
             }
@@ -346,8 +338,7 @@ impl MqttClientTrait for MockMqttClient {
             if let Some(response) = &responses.publish_response {
                 response.clone()
             } else {
-                // Default behavior: succeed with QoS 0
-                Ok(PublishResult::QoS0)
+                Ok(PublishResult::Sent(Delivery::Unconfirmed))
             }
         }
     }
@@ -388,14 +379,16 @@ impl MqttClientTrait for MockMqttClient {
             if let Some(response) = &responses.publish_response {
                 response.clone()
             } else {
-                // Default behavior based on QoS
-                match options.qos {
-                    QoS::AtMostOnce => Ok(PublishResult::QoS0),
-                    QoS::AtLeastOnce | QoS::ExactlyOnce => {
-                        let packet_id = self.next_packet_id();
-                        Ok(PublishResult::QoS1Or2 { packet_id })
-                    }
-                }
+                let delivery = match options.qos {
+                    QoS::AtMostOnce => Delivery::Unconfirmed,
+                    QoS::AtLeastOnce => Delivery::AtLeastOnce {
+                        packet_id: self.next_packet_id(),
+                    },
+                    QoS::ExactlyOnce => Delivery::ExactlyOnce {
+                        packet_id: self.next_packet_id(),
+                    },
+                };
+                Ok(PublishResult::Sent(delivery))
             }
         }
     }
@@ -416,7 +409,6 @@ impl MqttClientTrait for MockMqttClient {
             })
             .await;
 
-            // Store the callback
             self.state
                 .subscriptions
                 .write()
@@ -427,7 +419,6 @@ impl MqttClientTrait for MockMqttClient {
             if let Some(response) = &responses.subscribe_response {
                 response.clone()
             } else {
-                // Default behavior: succeed with packet ID and QoS 0
                 let packet_id = self.next_packet_id();
                 Ok((packet_id, QoS::AtMostOnce))
             }
@@ -452,7 +443,6 @@ impl MqttClientTrait for MockMqttClient {
             })
             .await;
 
-            // Store the callback
             self.state
                 .subscriptions
                 .write()
@@ -463,7 +453,6 @@ impl MqttClientTrait for MockMqttClient {
             if let Some(response) = &responses.subscribe_response {
                 response.clone()
             } else {
-                // Default behavior: succeed with packet ID and requested QoS
                 let packet_id = self.next_packet_id();
                 Ok((packet_id, options.qos))
             }
@@ -482,14 +471,12 @@ impl MqttClientTrait for MockMqttClient {
             })
             .await;
 
-            // Remove the subscription
             self.state.subscriptions.write().await.remove(&topic_str);
 
             let responses = self.state.responses.read().await;
             if let Some(response) = &responses.unsubscribe_response {
                 response.clone()
             } else {
-                // Default behavior: succeed
                 Ok(())
             }
         }

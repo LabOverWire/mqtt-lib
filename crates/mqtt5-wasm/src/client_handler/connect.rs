@@ -1,4 +1,5 @@
 use mqtt5::broker::auth::{EnhancedAuthResult, EnhancedAuthStatus};
+use mqtt5::broker::router::SubscriptionRequest;
 use mqtt5::broker::storage::{ClientSession, StorageBackend};
 use mqtt5_protocol::error::{MqttError, Result};
 use mqtt5_protocol::packet::auth::AuthPacket;
@@ -227,16 +228,16 @@ impl WasmClientHandler {
             }
             self.router
                 .subscribe(
-                    client_id.clone(),
-                    topic_filter.clone(),
-                    stored.qos,
-                    stored.subscription_id,
-                    stored.no_local,
-                    stored.retain_as_published,
-                    stored.retain_handling,
-                    ProtocolVersion::try_from(self.protocol_version).unwrap_or_default(),
-                    stored.change_only,
-                    stored.flow_id,
+                    SubscriptionRequest::new(client_id.clone(), topic_filter.clone(), stored.qos)
+                        .with_subscription_id(stored.subscription_id)
+                        .with_no_local(stored.no_local)
+                        .with_retain_as_published(stored.retain_as_published)
+                        .with_retain_handling(stored.retain_handling)
+                        .with_protocol_version(
+                            ProtocolVersion::try_from(self.protocol_version).unwrap_or_default(),
+                        )
+                        .with_change_only(stored.change_only)
+                        .with_flow_id(stored.flow_id),
                 )
                 .await?;
         }

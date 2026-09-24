@@ -43,7 +43,7 @@ echo ""
 echo "🌐 WASM BUILD (mqtt5-wasm crate)"
 echo "  cargo make wasm-check         Check WASM compilation"
 echo "  cargo make wasm-clippy        Run clippy for WASM target"
-echo "  cargo make wasm-test          Run WASM crate tests (native)"
+echo "  cargo make wasm-test          Run WASM crate tests under Node"
 echo "  cargo make wasm-build         Build WASM package with wasm-pack"
 echo "  cargo make wasm-verify        Run all WASM checks"
 echo "  cargo make wasm-examples      Build WASM and copy to examples"
@@ -252,10 +252,32 @@ command = "cargo"
 args = ["clippy", "--target", "wasm32-unknown-unknown", "-p", "mqtt5-wasm", "--features", "broker", "--", "-D", "warnings", "-W", "clippy::pedantic"]
 description = "Run clippy for WASM target (strict, pedantic)"
 
+[tasks.wasm-test-runner]
+script = '''
+#!/usr/bin/env bash
+set -euo pipefail
+version=$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/"/, "", $3); print $3; exit }' Cargo.lock)
+if [ -z "$version" ]; then
+  echo "wasm-bindgen not found in Cargo.lock" >&2
+  exit 1
+fi
+installed=$(wasm-bindgen-test-runner --version 2>/dev/null || true)
+if [ "$installed" != "wasm-bindgen-test-runner $version" ]; then
+  cargo install wasm-bindgen-cli --version "$version" --locked
+fi
+'''
+description = "Install the wasm-bindgen-test-runner matching the Cargo.lock wasm-bindgen version"
+
 [tasks.wasm-test]
-command = "cargo"
-args = ["test", "-p", "mqtt5-wasm"]
-description = "Run WASM crate tests (native)"
+dependencies = ["wasm-test-runner"]
+env = { CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER = "wasm-bindgen-test-runner", WASM_BINDGEN_TEST_TIMEOUT = "120" }
+script = '''
+#!/usr/bin/env bash
+set -euo pipefail
+cargo test -p mqtt5-wasm --target wasm32-unknown-unknown
+cargo test -p mqtt5-wasm --target wasm32-unknown-unknown --features broker
+'''
+description = "Run WASM crate tests under Node with wasm-bindgen-test-runner"
 
 [tasks.wasm-verify]
 dependencies = ["wasm-check", "wasm-clippy", "wasm-test"]

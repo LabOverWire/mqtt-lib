@@ -1,9 +1,8 @@
 #![cfg(feature = "broker")]
-use mqtt5::broker::router::MessageRouter;
+use mqtt5::broker::router::{MessageRouter, SubscriptionRequest};
 use mqtt5::broker::storage::ChangeOnlyState;
 use mqtt5::packet::publish::PublishPacket;
 use mqtt5::time::Duration;
-use mqtt5::types::ProtocolVersion;
 use mqtt5::QoS;
 use std::sync::Arc;
 use tokio::time::timeout;
@@ -26,16 +25,8 @@ async fn test_change_only_filters_duplicate_payloads() {
 
     router
         .subscribe(
-            "change_only_client".to_string(),
-            "sensors/temperature".to_string(),
-            QoS::AtMostOnce,
-            None,
-            false,
-            false,
-            0,
-            ProtocolVersion::V5,
-            true,
-            None,
+            SubscriptionRequest::new("change_only_client", "sensors/temperature", QoS::AtMostOnce)
+                .with_change_only(true),
         )
         .await
         .unwrap();
@@ -82,16 +73,8 @@ async fn test_change_only_allows_different_payloads() {
 
     router
         .subscribe(
-            "change_only_client".to_string(),
-            "sensors/temperature".to_string(),
-            QoS::AtMostOnce,
-            None,
-            false,
-            false,
-            0,
-            ProtocolVersion::V5,
-            true,
-            None,
+            SubscriptionRequest::new("change_only_client", "sensors/temperature", QoS::AtMostOnce)
+                .with_change_only(true),
         )
         .await
         .unwrap();
@@ -138,18 +121,11 @@ async fn test_change_only_disabled_allows_duplicates() {
         .await;
 
     router
-        .subscribe(
-            "regular_client".to_string(),
-            "sensors/temperature".to_string(),
+        .subscribe(SubscriptionRequest::new(
+            "regular_client",
+            "sensors/temperature",
             QoS::AtMostOnce,
-            None,
-            false,
-            false,
-            0,
-            ProtocolVersion::V5,
-            false,
-            None,
-        )
+        ))
         .await
         .unwrap();
 
@@ -195,16 +171,8 @@ async fn test_change_only_per_topic_tracking() {
 
     router
         .subscribe(
-            "change_only_client".to_string(),
-            "sensors/+".to_string(),
-            QoS::AtMostOnce,
-            None,
-            false,
-            false,
-            0,
-            ProtocolVersion::V5,
-            true,
-            None,
+            SubscriptionRequest::new("change_only_client", "sensors/+", QoS::AtMostOnce)
+                .with_change_only(true),
         )
         .await
         .unwrap();
@@ -251,16 +219,8 @@ async fn test_change_only_state_persistence() {
 
     router
         .subscribe(
-            "persistent_client".to_string(),
-            "test/topic".to_string(),
-            QoS::AtMostOnce,
-            None,
-            false,
-            false,
-            0,
-            ProtocolVersion::V5,
-            true,
-            None,
+            SubscriptionRequest::new("persistent_client", "test/topic", QoS::AtMostOnce)
+                .with_change_only(true),
         )
         .await
         .unwrap();
@@ -308,16 +268,8 @@ async fn test_change_only_state_load_on_reconnect() {
 
     router
         .subscribe(
-            "reconnect_client".to_string(),
-            "test/topic".to_string(),
-            QoS::AtMostOnce,
-            None,
-            false,
-            false,
-            0,
-            ProtocolVersion::V5,
-            true,
-            None,
+            SubscriptionRequest::new("reconnect_client", "test/topic", QoS::AtMostOnce)
+                .with_change_only(true),
         )
         .await
         .unwrap();
@@ -399,16 +351,8 @@ async fn test_change_only_with_qos_levels() {
 
     router
         .subscribe(
-            "qos_client".to_string(),
-            "test/topic".to_string(),
-            QoS::AtLeastOnce,
-            None,
-            false,
-            false,
-            0,
-            ProtocolVersion::V5,
-            true,
-            None,
+            SubscriptionRequest::new("qos_client", "test/topic", QoS::AtLeastOnce)
+                .with_change_only(true),
         )
         .await
         .unwrap();
@@ -466,32 +410,16 @@ async fn test_change_only_multiple_clients_independent() {
 
     router
         .subscribe(
-            "client1".to_string(),
-            "test/topic".to_string(),
-            QoS::AtMostOnce,
-            None,
-            false,
-            false,
-            0,
-            ProtocolVersion::V5,
-            true,
-            None,
+            SubscriptionRequest::new("client1", "test/topic", QoS::AtMostOnce)
+                .with_change_only(true),
         )
         .await
         .unwrap();
 
     router
         .subscribe(
-            "client2".to_string(),
-            "test/topic".to_string(),
-            QoS::AtMostOnce,
-            None,
-            false,
-            false,
-            0,
-            ProtocolVersion::V5,
-            true,
-            None,
+            SubscriptionRequest::new("client2", "test/topic", QoS::AtMostOnce)
+                .with_change_only(true),
         )
         .await
         .unwrap();

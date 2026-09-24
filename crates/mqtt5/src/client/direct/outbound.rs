@@ -45,7 +45,11 @@ impl ServerCapabilities {
     }
 
     pub(crate) fn check_subscribe(self, packet: &SubscribePacket) -> Result<()> {
-        let identifiers = packet.properties.subscription_identifiers();
+        let identifiers = if packet.protocol_version == 5 {
+            packet.properties.subscription_identifiers()
+        } else {
+            Vec::new()
+        };
         if let Some(invalid) = identifiers
             .iter()
             .find(|id| !(1..=MAX_SUBSCRIPTION_IDENTIFIER).contains(*id))
@@ -83,7 +87,14 @@ pub(crate) fn check_unsubscribe(packet: &UnsubscribePacket) -> Result<()> {
         .try_for_each(validate_subscription_filter)
 }
 
-pub(crate) fn check_publish(topic: &str, options: &PublishOptions) -> Result<()> {
+pub(crate) fn check_publish(
+    topic: &str,
+    options: &PublishOptions,
+    protocol_version: u8,
+) -> Result<()> {
+    if protocol_version != 5 {
+        return validate_topic_name(topic);
+    }
     let properties = &options.properties;
     match (topic.is_empty(), properties.topic_alias) {
         (true, None) => {
@@ -200,15 +211,16 @@ mod tests {
     #[test]
     fn publish_validation() {
         let plain = PublishOptions::default();
-        assert!(check_publish("a/b", &plain).is_ok());
-        assert!(check_publish("a/+", &plain).is_err());
-        assert!(check_publish("", &plain).is_err());
+        assert!(check_publish("a/b", &plain, 5).is_ok());
+        assert!(check_publish("a/+", &plain, 5).is_err());
+        assert!(check_publish("", &plain, 5).is_err());
         assert!(check_publish(
             "",
             &publish_with(PublishProperties {
                 topic_alias: Some(1),
                 ..Default::default()
-            })
+            }),
+            5
         )
         .is_ok());
         assert!(check_publish(
@@ -216,7 +228,8 @@ mod tests {
             &publish_with(PublishProperties {
                 topic_alias: Some(0),
                 ..Default::default()
-            })
+            }),
+            5
         )
         .is_err());
         assert!(check_publish(
@@ -224,7 +237,8 @@ mod tests {
             &publish_with(PublishProperties {
                 response_topic: Some("r/#".to_string()),
                 ..Default::default()
-            })
+            }),
+            5
         )
         .is_err());
         assert!(check_publish(
@@ -232,9 +246,33 @@ mod tests {
             &publish_with(PublishProperties {
                 subscription_identifiers: vec![1],
                 ..Default::default()
-            })
+            }),
+            5
         )
         .is_err());
+    }
+
+    #[test]
+    fn v311_publish_skips_v5_property_checks_but_validates_topic() {
+        let v5_only = publish_with(PublishProperties {
+            topic_alias: Some(0),
+            response_topic: Some("r/#".to_string()),
+            subscription_identifiers: vec![0],
+            ..Default::default()
+        });
+        assert!(check_publish("a/b", &v5_only, 4).is_ok());
+        assert!(check_publish("a/+", &v5_only, 4).is_err());
+        assert!(check_publish("", &v5_only, 4).is_err());
+    }
+
+    #[test]
+    fn v311_subscribe_skips_subscription_identifier_checks() {
+        let mut packet = subscribe("a", Some(0));
+        packet.protocol_version = 4;
+        let no_ids = capabilities(PropertyId::SubscriptionIdentifierAvailable);
+        assert!(no_ids.check_subscribe(&packet).is_ok());
+        packet.filters[0].filter = "a/#/b".to_string();
+        assert!(no_ids.check_subscribe(&packet).is_err());
     }
 
     #[test]

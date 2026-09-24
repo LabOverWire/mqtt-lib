@@ -366,6 +366,10 @@ async fn mqtt_3_14_1_1_disconnect_reserved_bits_client_sends_0x81_then_closes() 
             packets.iter().any(|p| p.kind() == 14 && p.reason() == 0x81),
             "MQTT-3.14.1-1 violated: no DISCONNECT 0x81 after DISCONNECT with reserved flags 0x1; saw {seen:?}, socket closed={eof}"
         );
+        assert!(
+            eof,
+            "MQTT-3.14.4-2 violated: network connection not closed after DISCONNECT 0x81; saw {seen:?}"
+        );
     }))
     .await;
 }

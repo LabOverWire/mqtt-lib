@@ -18,6 +18,11 @@ pub struct ConnectOptions {
     /// Enable deferred acknowledgement: inbound `QoS` > 0 messages are delivered with
     /// an `AckToken` the application resolves after durable processing. Requires a
     /// persistent session and a bounded receive maximum; see `validate_deferred_ack`.
+    ///
+    /// Acknowledgements are sent in arrival order (`[MQTT-4.6.0-2]`/`[MQTT-4.6.0-3]`), so
+    /// an unresolved `AckToken` also holds back the automatic PUBACK/PUBREC of every later
+    /// message, including those for plain `subscribe` callbacks, and can stall the
+    /// broker's in-flight window. See the `AckToken` head-of-line blocking notes.
     pub deferred_ack: bool,
     /// Accept a broker-held session that this client instance has no local state for.
     ///
@@ -63,6 +68,12 @@ impl ConnectOptions {
     /// Enables deferred acknowledgement. Connection-wide: every `subscribe_with_ack`
     /// subscription delivers an `AckToken`. Must be paired with a persistent session
     /// and an explicit bounded receive maximum (see `validate_deferred_ack`).
+    ///
+    /// Once enabled, an unresolved `AckToken` blocks all later PUBACK/PUBREC on the
+    /// connection, including automatic acknowledgements for plain `subscribe`
+    /// callbacks, because acknowledgements must follow arrival order
+    /// (`[MQTT-4.6.0-2]`/`[MQTT-4.6.0-3]`). A long-held token can therefore exhaust the
+    /// Receive Maximum window and stall all inbound `QoS` 1/2 delivery.
     #[must_use]
     pub fn with_deferred_ack(mut self, on: bool) -> Self {
         self.deferred_ack = on;
@@ -255,8 +266,8 @@ impl DerefMut for ConnectOptions {
 
 pub use mqtt5_protocol::{
     ConnectProperties, ConnectResult, KeepaliveConfig, Message, MessageProperties, ProtocolVersion,
-    PublishOptions, PublishProperties, PublishResult, RetainHandling, SubscribeOptions,
-    WillMessage, WillProperties,
+    PublishOptions, PublishProperties, RetainHandling, SubscribeOptions, WillMessage,
+    WillProperties,
 };
 
 #[derive(Debug, Clone, Default)]

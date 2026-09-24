@@ -978,7 +978,7 @@ impl BridgeConnection {
                 .publish_with_options(&remote_topic, payload, options)
                 .await
             {
-                Ok(_) => {
+                Ok(crate::client::PublishResult::Sent(_)) => {
                     debug!(
                         bridge = %bridge_name_clone,
                         topic = %remote_topic,
@@ -986,6 +986,13 @@ impl BridgeConnection {
                     );
                     messages_sent.fetch_add(1, Ordering::Relaxed);
                     bytes_sent.fetch_add(payload_len as u64, Ordering::Relaxed);
+                }
+                Ok(crate::client::PublishResult::Queued(_)) => {
+                    debug!(
+                        bridge = %bridge_name_clone,
+                        topic = %remote_topic,
+                        "publish not yet acknowledged; it stays in flight with the session"
+                    );
                 }
                 Err(e) => {
                     error!(

@@ -399,10 +399,8 @@ async fn ack_qos2_inbound(
 #[cfg(feature = "transport-quic")]
 pub(super) async fn handle_incoming_packet_no_writer(
     packet: Packet,
-    callback_manager: &Arc<CallbackManager>,
     flow_id: Option<FlowId>,
-    keepalive_state: &Arc<Mutex<KeepaliveState>>,
-    codec_registry: Option<&Arc<CodecRegistry>>,
+    handlers: &IncomingHandlers<'_>,
 ) -> Result<()> {
     match packet {
         Packet::Publish(mut publish) => {
@@ -411,18 +409,19 @@ pub(super) async fn handle_incoming_packet_no_writer(
                     "QoS > 0 publish received on unidirectional stream".to_string(),
                 ));
             }
-            if let Some(registry) = codec_registry {
+            validate_inbound_publish(&mut publish, handlers.topic_aliases)?;
+            if let Some(registry) = handlers.codec_registry {
                 let content_type = publish.properties.get_content_type();
                 let decoded =
                     registry.decode_if_needed(&publish.payload, content_type.as_deref())?;
                 publish.payload = decoded;
             }
             publish.stream_id = flow_id.map(|f| f.raw());
-            let _ = callback_manager.dispatch(&publish);
+            let _ = handlers.callback_manager.dispatch(&publish);
             Ok(())
         }
         Packet::PingResp => {
-            keepalive_state.lock().record_pong_received();
+            handlers.keepalive_state.lock().record_pong_received();
             Ok(())
         }
         Packet::Disconnect(disconnect) => {

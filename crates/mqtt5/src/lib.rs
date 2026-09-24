@@ -246,8 +246,9 @@ pub mod types;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use client::{
-    AckToken, AuthHandler, AuthResponse, ConnectionEvent, DisconnectReason, JwtAuthHandler,
-    MockCall, MockMqttClient, MqttClient, MqttClientTrait, PlainAuthHandler,
+    AckToken, AuthHandler, AuthResponse, ConnectionEvent, Delivery, DisconnectReason,
+    IndeterminateReason, JwtAuthHandler, MockCall, MockMqttClient, MqttClient, MqttClientTrait,
+    PlainAuthHandler, PublishHandle, PublishOutcome, PublishRejection, PublishResult,
     ScramSha256AuthHandler,
 };
 #[cfg(feature = "codec-deflate")]
@@ -261,7 +262,7 @@ pub use mqtt5_protocol::{
     validate_client_id, validate_topic_filter, validate_topic_name, ConnectProperties,
     ConnectResult, FixedHeader, Message, MessageProperties, MqttError, Packet, PacketType,
     Properties, PropertyId, PropertyValue, PropertyValueType, ProtocolVersion, PublishOptions,
-    PublishProperties, PublishResult, QoS, RestrictiveValidator, Result, RetainHandling,
-    StandardValidator, SubscribeOptions, TopicValidator, Transport, WillMessage, WillProperties,
+    PublishProperties, QoS, RestrictiveValidator, Result, RetainHandling, StandardValidator,
+    SubscribeOptions, TopicValidator, Transport, WillMessage, WillProperties,
 };
 pub use types::{ConnectOptions, ConnectionStats};

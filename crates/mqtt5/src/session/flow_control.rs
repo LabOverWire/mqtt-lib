@@ -29,6 +29,7 @@ pub struct FlowControlManager {
     inbound_in_flight: Arc<RwLock<HashMap<u16, Instant>>>,
     quota_debt: Arc<AtomicUsize>,
     replay_slots: Arc<Mutex<Option<Arc<Semaphore>>>>,
+    quota_generation: u64,
 }
 
 /// A pending publish request waiting for quota
@@ -69,6 +70,7 @@ impl FlowControlManager {
             inbound_in_flight: Arc::new(RwLock::new(HashMap::new())),
             quota_debt: Arc::new(AtomicUsize::new(0)),
             replay_slots: Arc::new(Mutex::new(None)),
+            quota_generation: 0,
         }
     }
 
@@ -127,6 +129,7 @@ impl FlowControlManager {
         drop(in_flight);
 
         self.receive_maximum = receive_maximum;
+        self.quota_generation = self.quota_generation.wrapping_add(1);
         let capacity = if receive_maximum == 0 {
             Semaphore::MAX_PERMITS
         } else {
@@ -175,7 +178,16 @@ impl FlowControlManager {
         drop(in_flight);
     }
 
-    pub async fn claim_send_quota(&self, semaphore: &Arc<Semaphore>, packet_id: u16) -> bool {
+    #[must_use]
+    pub fn quota_generation(&self) -> u64 {
+        self.quota_generation
+    }
+
+    pub async fn claim_send_quota(
+        &self,
+        semaphore: &Arc<Semaphore>,
+        packet_id: u16,
+    ) -> Option<u64> {
         let issued_by_current = Arc::ptr_eq(semaphore, &self.quota_semaphore)
             || self
                 .replay_slots
@@ -188,19 +200,22 @@ impl FlowControlManager {
                 .await
                 .insert(packet_id, Instant::now());
         }
-        issued_by_current
+        issued_by_current.then_some(self.quota_generation)
     }
 
     /// # Errors
     ///
     /// Returns `FlowControlExceeded` when the backpressure timeout elapses and
     /// `NotConnected` when the quota was closed by a disconnect.
-    pub async fn acquire_shared_send_quota(flow: &Arc<RwLock<Self>>, packet_id: u16) -> Result<()> {
+    pub async fn acquire_shared_send_quota(
+        flow: &Arc<RwLock<Self>>,
+        packet_id: u16,
+    ) -> Result<u64> {
         loop {
             let (semaphore, timeout) = {
                 let manager = flow.read().await;
                 if manager.receive_maximum == 0 {
-                    return Ok(());
+                    return Ok(manager.quota_generation);
                 }
                 (
                     Arc::clone(&manager.quota_semaphore),
@@ -215,13 +230,13 @@ impl FlowControlManager {
             };
             if let Ok(permit) = acquired {
                 permit.forget();
-                if flow
+                if let Some(generation) = flow
                     .read()
                     .await
                     .claim_send_quota(&semaphore, packet_id)
                     .await
                 {
-                    return Ok(());
+                    return Ok(generation);
                 }
             } else if Arc::ptr_eq(&semaphore, &flow.read().await.quota_semaphore) {
                 return Err(MqttError::NotConnected);
@@ -552,7 +567,12 @@ mod tests {
         assert_eq!(slots.available_permits(), 1);
 
         slots.acquire().await.unwrap().forget();
-        assert!(flow.read().await.claim_send_quota(&slots, 7).await);
+        assert!(flow
+            .read()
+            .await
+            .claim_send_quota(&slots, 7)
+            .await
+            .is_some());
         flow.read().await.acknowledge(7).await.unwrap();
         assert_eq!(slots.available_permits(), 1);
         assert_eq!(flow.read().await.available_permits(), 0);
@@ -583,7 +603,12 @@ mod tests {
         let stale = Arc::clone(&flow.read().await.quota_semaphore);
         flow.write().await.reset_for_connection(2, &[], false).await;
         assert!(stale.is_closed());
-        assert!(!flow.read().await.claim_send_quota(&stale, 1).await);
+        assert!(flow
+            .read()
+            .await
+            .claim_send_quota(&stale, 1)
+            .await
+            .is_none());
     }
 
     #[tokio::test]

@@ -12,9 +12,14 @@ use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 #[cfg(feature = "transport-websocket")]
 use crate::transport::websocket::{WebSocketReadHandle, WebSocketWriteHandle};
 #[cfg(feature = "transport-quic")]
-use crate::transport::PacketReader;
+use quinn::{Connection, RecvStream, SendStream};
 #[cfg(feature = "transport-quic")]
-use quinn::{RecvStream, SendStream};
+use std::sync::Arc;
+#[cfg(feature = "transport-quic")]
+use std::time::Duration;
+
+#[cfg(feature = "transport-quic")]
+const QUIC_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 
 enum UnifiedReaderInner {
     Tcp(OwnedReadHalf),
@@ -106,7 +111,15 @@ impl UnifiedReader {
                     .await
             }
             #[cfg(feature = "transport-quic")]
-            UnifiedReaderInner::Quic(reader) => reader.read_packet(self.protocol_version).await,
+            UnifiedReaderInner::Quic(reader) => {
+                read_packet_from_stream(
+                    reader,
+                    self.protocol_version,
+                    &mut self.read_buffer,
+                    self.max_packet_size,
+                )
+                .await
+            }
         }
     }
 }
@@ -118,33 +131,64 @@ pub enum UnifiedWriter {
     WebSocket(WebSocketWriteHandle),
     #[cfg(feature = "transport-quic")]
     Quic(SendStream),
+    #[cfg(feature = "transport-quic")]
+    QuicControl(SendStream, Arc<Connection>),
     Closed,
 }
 
 impl UnifiedWriter {
     pub async fn close(&mut self, final_packet: Option<Packet>) -> Result<()> {
         let mut current = std::mem::replace(self, Self::Closed);
+        let failed = final_packet.as_ref().is_some_and(is_error_disconnect);
         let written = match final_packet {
             Some(packet) => current.write_packet(packet).await,
             None => Ok(()),
         };
-        let shutdown = current.shutdown().await;
+        let shutdown = current.shutdown(failed).await;
         written.and(shutdown)
     }
 
-    async fn shutdown(&mut self) -> Result<()> {
+    async fn shutdown(&mut self, failed: bool) -> Result<()> {
+        tracing::debug!(failed, "Shutting down network connection");
         match self {
             Self::Tcp(writer) => Ok(writer.shutdown().await?),
             Self::Tls(writer) => Ok(writer.shutdown().await?),
             #[cfg(feature = "transport-websocket")]
             Self::WebSocket(writer) => writer.close().await,
             #[cfg(feature = "transport-quic")]
-            Self::Quic(writer) => writer
-                .finish()
-                .map_err(|e| MqttError::ConnectionError(format!("QUIC stream finish: {e}"))),
+            Self::Quic(writer) => finish_quic_stream(writer),
+            #[cfg(feature = "transport-quic")]
+            Self::QuicControl(writer, connection) => {
+                let finished = finish_quic_stream(writer);
+                if finished.is_ok()
+                    && tokio::time::timeout(QUIC_DRAIN_TIMEOUT, writer.stopped())
+                        .await
+                        .is_err()
+                {
+                    tracing::debug!("QUIC control stream not acknowledged before close");
+                }
+                let code = if failed {
+                    mqtt5_protocol::QuicConnectionCode::Unspecified
+                } else {
+                    mqtt5_protocol::QuicConnectionCode::NoError
+                };
+                connection.close(quinn::VarInt::from_u32(code.code()), b"disconnect");
+                finished
+            }
             Self::Closed => Ok(()),
         }
     }
+}
+
+fn is_error_disconnect(packet: &Packet) -> bool {
+    matches!(packet, Packet::Disconnect(disconnect) if disconnect.reason_code.is_error())
+}
+
+#[cfg(feature = "transport-quic")]
+fn finish_quic_stream(writer: &mut SendStream) -> Result<()> {
+    writer
+        .finish()
+        .map_err(|e| MqttError::ConnectionError(format!("QUIC stream finish: {e}")))
 }
 
 impl PacketWriter for UnifiedWriter {
@@ -155,7 +199,7 @@ impl PacketWriter for UnifiedWriter {
             #[cfg(feature = "transport-websocket")]
             Self::WebSocket(writer) => writer.write_packet(packet).await,
             #[cfg(feature = "transport-quic")]
-            Self::Quic(writer) => writer.write_packet(packet).await,
+            Self::Quic(writer) | Self::QuicControl(writer, _) => writer.write_packet(packet).await,
             Self::Closed => Err(MqttError::NotConnected),
         }
     }

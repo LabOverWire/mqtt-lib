@@ -1,8 +1,7 @@
 #![cfg(feature = "broker")]
-use mqtt5::broker::router::MessageRouter;
+use mqtt5::broker::router::{MessageRouter, SubscriptionRequest};
 use mqtt5::packet::publish::PublishPacket;
 use mqtt5::time::Duration;
-use mqtt5::types::ProtocolVersion;
 use mqtt5::QoS;
 use std::sync::Arc;
 
@@ -26,16 +25,8 @@ async fn test_no_local_true_filters_own_messages() {
 
     router
         .subscribe(
-            "test_client".to_string(),
-            "test/topic".to_string(),
-            QoS::AtMostOnce,
-            None,
-            true,
-            false,
-            0,
-            ProtocolVersion::V5,
-            false,
-            None,
+            SubscriptionRequest::new("test_client", "test/topic", QoS::AtMostOnce)
+                .with_no_local(true),
         )
         .await
         .unwrap();
@@ -71,18 +62,11 @@ async fn test_no_local_false_allows_own_messages() {
         .await;
 
     router
-        .subscribe(
-            "test_client".to_string(),
-            "test/topic".to_string(),
+        .subscribe(SubscriptionRequest::new(
+            "test_client",
+            "test/topic",
             QoS::AtMostOnce,
-            None,
-            false,
-            false,
-            0,
-            ProtocolVersion::V5,
-            false,
-            None,
-        )
+        ))
         .await
         .unwrap();
 
@@ -133,33 +117,18 @@ async fn test_no_local_other_clients_receive_messages() {
 
     router
         .subscribe(
-            "publisher".to_string(),
-            "test/topic".to_string(),
-            QoS::AtMostOnce,
-            None,
-            true,
-            false,
-            0,
-            ProtocolVersion::V5,
-            false,
-            None,
+            SubscriptionRequest::new("publisher", "test/topic", QoS::AtMostOnce)
+                .with_no_local(true),
         )
         .await
         .unwrap();
 
     router
-        .subscribe(
-            "subscriber".to_string(),
-            "test/topic".to_string(),
+        .subscribe(SubscriptionRequest::new(
+            "subscriber",
+            "test/topic",
             QoS::AtMostOnce,
-            None,
-            false,
-            false,
-            0,
-            ProtocolVersion::V5,
-            false,
-            None,
-        )
+        ))
         .await
         .unwrap();
 
@@ -205,16 +174,7 @@ async fn test_no_local_with_wildcards() {
 
     router
         .subscribe(
-            "test_client".to_string(),
-            "test/+".to_string(),
-            QoS::AtMostOnce,
-            None,
-            true,
-            false,
-            0,
-            ProtocolVersion::V5,
-            false,
-            None,
+            SubscriptionRequest::new("test_client", "test/+", QoS::AtMostOnce).with_no_local(true),
         )
         .await
         .unwrap();
@@ -258,16 +218,7 @@ async fn test_no_local_with_multilevel_wildcard() {
 
     router
         .subscribe(
-            "test_client".to_string(),
-            "test/#".to_string(),
-            QoS::AtMostOnce,
-            None,
-            true,
-            false,
-            0,
-            ProtocolVersion::V5,
-            false,
-            None,
+            SubscriptionRequest::new("test_client", "test/#", QoS::AtMostOnce).with_no_local(true),
         )
         .await
         .unwrap();
@@ -301,16 +252,8 @@ async fn test_no_local_server_generated_messages() {
 
     router
         .subscribe(
-            "test_client".to_string(),
-            "test/topic".to_string(),
-            QoS::AtMostOnce,
-            None,
-            true,
-            false,
-            0,
-            ProtocolVersion::V5,
-            false,
-            None,
+            SubscriptionRequest::new("test_client", "test/topic", QoS::AtMostOnce)
+                .with_no_local(true),
         )
         .await
         .unwrap();
@@ -351,33 +294,18 @@ async fn test_no_local_multiple_subscriptions_same_client() {
 
     router
         .subscribe(
-            "test_client".to_string(),
-            "test/topic1".to_string(),
-            QoS::AtMostOnce,
-            None,
-            true,
-            false,
-            0,
-            ProtocolVersion::V5,
-            false,
-            None,
+            SubscriptionRequest::new("test_client", "test/topic1", QoS::AtMostOnce)
+                .with_no_local(true),
         )
         .await
         .unwrap();
 
     router
-        .subscribe(
-            "test_client".to_string(),
-            "test/topic2".to_string(),
+        .subscribe(SubscriptionRequest::new(
+            "test_client",
+            "test/topic2",
             QoS::AtMostOnce,
-            None,
-            false,
-            false,
-            0,
-            ProtocolVersion::V5,
-            false,
-            None,
-        )
+        ))
         .await
         .unwrap();
 
@@ -430,16 +358,8 @@ async fn test_no_local_with_qos_levels() {
 
     router
         .subscribe(
-            "test_client".to_string(),
-            "test/topic".to_string(),
-            QoS::AtLeastOnce,
-            None,
-            true,
-            false,
-            0,
-            ProtocolVersion::V5,
-            false,
-            None,
+            SubscriptionRequest::new("test_client", "test/topic", QoS::AtLeastOnce)
+                .with_no_local(true),
         )
         .await
         .unwrap();

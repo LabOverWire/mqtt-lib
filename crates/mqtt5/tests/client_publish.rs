@@ -1,4 +1,4 @@
-use mqtt5::{MqttClient, MqttError, PublishOptions, PublishResult, QoS};
+use mqtt5::{Delivery, MqttClient, MqttError, PublishOptions, PublishResult, QoS};
 use ulid::Ulid;
 
 /// Generate a lexicographically sortable client ID using ULID
@@ -18,16 +18,16 @@ async fn test_publish_not_connected() {
 async fn test_publish_qos0() {
     let client = MqttClient::new(test_client_id("publish-qos0"));
 
-    // Try connecting
     match client.connect("mqtt://127.0.0.1:1883").await {
         Ok(()) => {
-            // Test QoS 0 publish
             let result = client.publish_qos0("test/topic", b"QoS 0 message").await;
             assert!(result.is_ok());
 
-            // QoS 0 doesn't return a packet ID
             let result = client.publish("test/topic", b"Another QoS 0").await;
-            assert!(matches!(result, Ok(PublishResult::QoS0)));
+            assert!(matches!(
+                result,
+                Ok(PublishResult::Sent(Delivery::Unconfirmed))
+            ));
 
             client.disconnect().await.unwrap();
         }
@@ -43,12 +43,13 @@ async fn test_publish_qos1() {
 
     match client.connect("mqtt://127.0.0.1:1883").await {
         Ok(()) => {
-            // Test QoS 1 publish - should return packet ID
             let result = client.publish_qos1("test/qos1", b"QoS 1 message").await;
             assert!(result.is_ok());
             match result.unwrap() {
-                PublishResult::QoS1Or2 { packet_id } => assert!(packet_id > 0),
-                PublishResult::QoS0 => panic!("Expected QoS1Or2 result, got QoS0"),
+                PublishResult::Sent(
+                    Delivery::AtLeastOnce { packet_id } | Delivery::ExactlyOnce { packet_id },
+                ) => assert!(packet_id > 0),
+                other => panic!("expected an acknowledged publish, got {other:?}"),
             }
 
             client.disconnect().await.unwrap();
@@ -65,12 +66,13 @@ async fn test_publish_qos2() {
 
     match client.connect("mqtt://127.0.0.1:1883").await {
         Ok(()) => {
-            // Test QoS 2 publish - should return packet ID
             let result = client.publish_qos2("test/qos2", b"QoS 2 message").await;
             assert!(result.is_ok());
             match result.unwrap() {
-                PublishResult::QoS1Or2 { packet_id } => assert!(packet_id > 0),
-                PublishResult::QoS0 => panic!("Expected QoS1Or2 result, got QoS0"),
+                PublishResult::Sent(
+                    Delivery::AtLeastOnce { packet_id } | Delivery::ExactlyOnce { packet_id },
+                ) => assert!(packet_id > 0),
+                other => panic!("expected an acknowledged publish, got {other:?}"),
             }
 
             client.disconnect().await.unwrap();
@@ -87,7 +89,6 @@ async fn test_publish_retain() {
 
     match client.connect("mqtt://127.0.0.1:1883").await {
         Ok(()) => {
-            // Test retained message
             let result = client
                 .publish_retain("test/retained", b"Retained message")
                 .await;
@@ -107,7 +108,6 @@ async fn test_publish_with_options() {
 
     match client.connect("mqtt://127.0.0.1:1883").await {
         Ok(()) => {
-            // Test publish with custom options
             let mut options = PublishOptions {
                 qos: QoS::AtLeastOnce,
                 retain: true,
@@ -125,8 +125,10 @@ async fn test_publish_with_options() {
 
             assert!(result.is_ok());
             match result.unwrap() {
-                PublishResult::QoS1Or2 { packet_id } => assert!(packet_id > 0),
-                PublishResult::QoS0 => panic!("Expected QoS1Or2 result for QoS 1 publish"),
+                PublishResult::Sent(
+                    Delivery::AtLeastOnce { packet_id } | Delivery::ExactlyOnce { packet_id },
+                ) => assert!(packet_id > 0),
+                other => panic!("expected an acknowledged publish, got {other:?}"),
             }
 
             client.disconnect().await.unwrap();
@@ -143,7 +145,6 @@ async fn test_publish_empty_payload() {
 
     match client.connect("mqtt://127.0.0.1:1883").await {
         Ok(()) => {
-            // Empty payload is valid
             let result = client.publish("test/empty", b"").await;
             assert!(result.is_ok());
 
@@ -161,7 +162,6 @@ async fn test_publish_string_conversion() {
 
     match client.connect("mqtt://127.0.0.1:1883").await {
         Ok(()) => {
-            // Test string conversions
             let result = client.publish("test/string", "String payload").await;
             assert!(result.is_ok());
 

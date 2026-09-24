@@ -167,6 +167,28 @@ jobs:
       - name: Check WASM compilation
         run: cargo check --target wasm32-unknown-unknown --all-features -p mqtt5-wasm
 
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install wasm-bindgen-test-runner
+        run: |
+          version=$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/"/, "", $3); print $3; exit }' Cargo.lock)
+          test -n "$version"
+          installed=$(wasm-bindgen-test-runner --version 2>/dev/null || true)
+          if [ "$installed" != "wasm-bindgen-test-runner $version" ]; then
+            cargo install wasm-bindgen-cli --version "$version" --locked
+          fi
+
+      - name: Run WASM tests
+        env:
+          CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER: wasm-bindgen-test-runner
+          WASM_BINDGEN_TEST_TIMEOUT: "120"
+        run: |
+          cargo test -p mqtt5-wasm --target wasm32-unknown-unknown
+          cargo test -p mqtt5-wasm --target wasm32-unknown-unknown --features broker
+
       - name: Build WASM package
         run: |
           cd crates/mqtt5-wasm

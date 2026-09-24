@@ -4,10 +4,9 @@
 //! These tests verify the shared subscription functionality using
 //! the existing `MessageRouter` directly, which we know works.
 
-use mqtt5::broker::router::{DeliveryLanes, LaneReceivers, MessageRouter};
+use mqtt5::broker::router::{DeliveryLanes, LaneReceivers, MessageRouter, SubscriptionRequest};
 use mqtt5::packet::publish::PublishPacket;
 use mqtt5::time::Duration;
-use mqtt5::types::ProtocolVersion;
 use mqtt5::QoS;
 use std::sync::Arc;
 
@@ -23,18 +22,11 @@ async fn register_worker(router: &MessageRouter, client_id: &str) -> LaneReceive
         )
         .await;
     router
-        .subscribe(
+        .subscribe(SubscriptionRequest::new(
             client_id.to_string(),
-            "$share/workers/tasks/+".to_string(),
+            "$share/workers/tasks/+",
             QoS::AtMostOnce,
-            None,
-            false,
-            false,
-            0,
-            ProtocolVersion::V5,
-            false,
-            None,
-        )
+        ))
         .await
         .unwrap();
     rx

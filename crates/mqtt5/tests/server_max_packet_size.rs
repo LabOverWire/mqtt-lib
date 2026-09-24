@@ -4,7 +4,7 @@ mod common;
 use common::{MessageCollector, TestBroker, DEFAULT_TIMEOUT};
 use mqtt5::broker::config::{BrokerConfig, StorageBackend, StorageConfig};
 use mqtt5::error::MqttError;
-use mqtt5::{MqttClient, PublishResult, QoS};
+use mqtt5::{Delivery, MqttClient, PublishResult, QoS};
 use std::net::SocketAddr;
 
 const BROKER_MAX: usize = 1024;
@@ -89,8 +89,10 @@ async fn publish_qos1_packet_id(client: &MqttClient) -> u16 {
         .await
         .expect("within-limit QoS1 publish should succeed")
     {
-        PublishResult::QoS1Or2 { packet_id } => packet_id,
-        PublishResult::QoS0 => panic!("expected QoS1Or2 result, got QoS0"),
+        PublishResult::Sent(
+            Delivery::AtLeastOnce { packet_id } | Delivery::ExactlyOnce { packet_id },
+        ) => packet_id,
+        other => panic!("expected an acknowledged publish, got {other:?}"),
     }
 }
 

@@ -10,9 +10,7 @@ use crate::packet::unsubscribe::UnsubscribePacket;
 use crate::protocol::v5::properties::Properties;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::transport::tls::TlsConfig;
-use crate::types::{
-    ConnectOptions, ConnectResult, PublishOptions, PublishResult, SubscribeOptions,
-};
+use crate::types::{ConnectOptions, ConnectResult, PublishOptions, SubscribeOptions};
 use crate::QoS;
 use std::future::Future;
 use std::sync::Arc;
@@ -28,6 +26,7 @@ mod direct;
 mod error_recovery;
 mod inner;
 pub mod mock;
+mod publish_outcome;
 mod retry;
 mod state;
 pub mod r#trait;
@@ -40,6 +39,9 @@ pub use self::error_recovery::{
     is_recoverable, retry_delay, ErrorRecoveryConfig, RecoverableError, RetryState,
 };
 pub use self::mock::{MockCall, MockMqttClient};
+pub use self::publish_outcome::{
+    Delivery, IndeterminateReason, PublishHandle, PublishOutcome, PublishRejection, PublishResult,
+};
 pub use self::r#trait::MqttClientTrait;
 
 pub use builders::ConnectionEventCallback;
@@ -65,7 +67,7 @@ pub(crate) async fn fire_connection_event(
 pub use self::direct::AckToken;
 use self::direct::AutomaticReconnectLifecycle;
 #[cfg(not(target_arch = "wasm32"))]
-use self::direct::{DirectClientInner, StagedPublish};
+use self::direct::{DirectClientInner, ReadyPublish, StagedPublish, Transmitted};
 use crate::session::flow_control::FlowControlManager;
 
 /// Thread-safe MQTT v5.0 client
@@ -397,9 +399,18 @@ impl MqttClient {
 
     /// Publishes a message with custom options
     ///
+    /// Returns [`PublishResult::Sent`] once a live publish is written (`QoS` 0) or
+    /// acknowledged (`QoS` 1/2). Returns [`PublishResult::Queued`] when a `QoS` 1/2
+    /// publish is queued while disconnected, or when it was sent but the connection
+    /// ended, the client disconnected or the acknowledgement did not arrive in time;
+    /// await its handle for the eventual [`crate::PublishOutcome`].
+    ///
     /// # Errors
     ///
-    /// Returns an error if the operation fails
+    /// Returns an error when the publish is definitely not delivered: invalid topic or
+    /// options, not connected without offline queueing, a capability violation, a
+    /// failed write before the message was stored, or an error reason code in PUBACK or
+    /// PUBREC (`PublishFailed`).
     #[instrument(skip(self, topic, payload, options), fields(qos = ?options.qos, retain = %options.retain))]
     pub async fn publish_with_options(
         &self,
@@ -427,18 +438,18 @@ impl MqttClient {
             .stage_publish(topic_str.clone(), payload_vec, options)
             .await;
         let outcome = match staged {
-            Ok(StagedPublish::Queued(result)) => Ok(result),
+            Ok(StagedPublish::Queued(handle)) => Ok(PublishResult::Queued(handle)),
             Ok(StagedPublish::Ready(publish)) => self.send_staged_publish(publish).await,
             Err(e) => Err(e),
         };
         match outcome {
             Ok(result) => {
                 match &result {
-                    PublishResult::QoS0 => {
-                        tracing::debug!(client_id = %client_id, topic = %topic_str, "Published QoS0 message");
+                    PublishResult::Sent(delivery) => {
+                        tracing::debug!(client_id = %client_id, topic = %topic_str, ?delivery, "Published message");
                     }
-                    PublishResult::QoS1Or2 { packet_id } => {
-                        tracing::debug!(client_id = %client_id, topic = %topic_str, packet_id = %packet_id, "Published QoS1/2 message");
+                    PublishResult::Queued(_) => {
+                        tracing::debug!(client_id = %client_id, topic = %topic_str, "Queued message while disconnected");
                     }
                 }
                 Ok(result)
@@ -450,21 +461,29 @@ impl MqttClient {
         }
     }
 
-    async fn send_staged_publish(&self, publish: PublishPacket) -> Result<PublishResult> {
-        let packet_id = publish.packet_id;
-        if let Some(pid) = packet_id {
-            let flow = Arc::clone(self.inner.read().await.session.read().await.flow_control());
-            FlowControlManager::acquire_shared_send_quota(&flow, pid).await?;
+    async fn send_staged_publish(&self, mut ready: Box<ReadyPublish>) -> Result<PublishResult> {
+        loop {
+            let claim = match ready.packet_id() {
+                Some(pid) => {
+                    let flow =
+                        Arc::clone(self.inner.read().await.session.read().await.flow_control());
+                    Some(FlowControlManager::acquire_shared_send_quota(&flow, pid).await?)
+                }
+                None => None,
+            };
+            let transmitted = self
+                .inner
+                .read()
+                .await
+                .transmit_publish(ready, claim)
+                .await?;
+            match transmitted {
+                Transmitted::Sent(delivery) => return Ok(PublishResult::Sent(delivery)),
+                Transmitted::InFlight(in_flight) => return in_flight.settle().await,
+                Transmitted::Detached(handle) => return Ok(PublishResult::Queued(handle)),
+                Transmitted::Restaged(next) => ready = next,
+            }
         }
-        let ack = self.inner.read().await.transmit_publish(publish).await?;
-        if let Some(ack) = ack {
-            ack.wait().await?;
-        }
-        Ok(
-            packet_id.map_or(PublishResult::QoS0, |packet_id| PublishResult::QoS1Or2 {
-                packet_id,
-            }),
-        )
     }
 
     /// Subscribes to a topic with a callback
@@ -554,6 +573,12 @@ impl MqttClient {
     /// before the session's ack durably reached the broker) and when it was rejected (a
     /// lost error acknowledgement; see [`AckToken::reject`]). Exactly-once applies only
     /// to a message whose ack completes on a session that survives in memory.
+    ///
+    /// Acknowledgements leave in arrival order (`[MQTT-4.6.0-2]`/`[MQTT-4.6.0-3]`), so an
+    /// unresolved token blocks every later PUBACK/PUBREC on the connection, including the
+    /// automatic ones for plain [`subscribe`](Self::subscribe) callbacks, and holding it
+    /// keeps those messages in the broker's in-flight window. Resolve tokens promptly;
+    /// see [`AckToken`] for details.
     ///
     /// # Errors
     /// Returns an error if `deferred_ack` was not enabled on the connection, or if the

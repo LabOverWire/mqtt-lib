@@ -2,9 +2,8 @@
 //! Basic test for shared subscriptions
 
 use bytes::Bytes;
-use mqtt5::broker::router::{DeliveryLanes, LaneReceivers, MessageRouter};
+use mqtt5::broker::router::{DeliveryLanes, LaneReceivers, MessageRouter, SubscriptionRequest};
 use mqtt5::packet::publish::PublishPacket;
-use mqtt5::types::ProtocolVersion;
 use mqtt5::QoS;
 use std::sync::Arc;
 
@@ -20,18 +19,11 @@ async fn register(router: &MessageRouter, client_id: &str, filter: &str) -> Lane
         )
         .await;
     router
-        .subscribe(
+        .subscribe(SubscriptionRequest::new(
             client_id.to_string(),
             filter.to_string(),
             QoS::AtMostOnce,
-            None,
-            false,
-            false,
-            0,
-            ProtocolVersion::V5,
-            false,
-            None,
-        )
+        ))
         .await
         .unwrap();
     rx

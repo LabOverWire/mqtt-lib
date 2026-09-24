@@ -21,6 +21,19 @@ A client-side conformance audit drove the real `MqttClient` against a raw-byte f
   - `test_utils::test_retained_message`
   - `test_utils::TestMessageBuilder::build_retained_batch`
 - **Removed the deprecated `WebSocketConfig::with_tls_verification` and `WebSocketConfig::verify_tls`.** Nothing read `verify_tls`. Use `tls_config`.
+- **`PublishResult` now reports the real outcome of a publish.**
+  - It is `Sent(Delivery)` for an acknowledged publish, or `Queued(PublishHandle)` for a QoS 1/2 publish whose outcome is still open. That covers one queued while offline, and a live publish whose connection ended, whose client disconnected, or whose 10 s acknowledgement wait elapsed before the ack arrived. Such a publish used to return `Err` even though the message stayed in the session and was resent. `publish()` now returns an error only when the message definitely was not delivered. `QoS0` and `QoS1Or2 { packet_id }` are removed.
+  - `Delivery` says which QoS was actually used: `Unconfirmed`, `AtLeastOnce { packet_id }` or `ExactlyOnce { packet_id }`.
+  - A `PublishHandle` can be awaited. It settles exactly once to a `PublishOutcome`:
+    - `Delivered(Delivery)`
+    - `Rejected(PublishRejection)`: definitely not delivered
+    - `Indeterminate(IndeterminateReason)`: may have been delivered
+  - `PublishResult::outcome()` gives the outcome on either path.
+  - `mqtt5` no longer re-exports `mqtt5_protocol::PublishResult`.
+  - The design is verified in TLA+ in `specs/tla/offline-queue/`.
+- **`MessageRouter::subscribe` and `subscribe_as` now take a `SubscriptionRequest`** instead of 10 or 11 separate arguments. Build one with `SubscriptionRequest::new(client_id, topic_filter, qos)` and the `with_*` setters. The defaults match the values callers passed before.
+- **The broker rejects packets with non-zero reserved fixed-header flags on every packet type** (`[MQTT-2.1.3-1]`). This covers CONNECT, PINGREQ, DISCONNECT and AUTH, which were previously accepted; SUBSCRIBE, UNSUBSCRIBE, PUBREL and the acks were already checked. The check comes from `mqtt5-protocol` 0.15.2, so an `mqtt5` 0.40 broker picks it up through `cargo update`.
+- **With deferred ack enabled, an unresolved `AckToken` holds back every later PUBACK/PUBREC on that connection**, including automatic acks for plain subscriptions, because acks must go out in arrival order (`[MQTT-4.6.0-2]`, `[MQTT-4.6.0-3]`). An application that holds a token until some later message arrives can stall itself once the broker's in-flight window fills.
 
 ### Fixed
 
@@ -37,6 +50,30 @@ A client-side conformance audit drove the real `MqttClient` against a raw-byte f
   - Request Problem Information=0: a Reason String or User Property on a packet other than PUBLISH, CONNACK or DISCONNECT is a protocol error
 - **Acknowledgements go out in PUBLISH arrival order when deferred ack is enabled** (`[MQTT-4.6.0-2]`, `[MQTT-4.6.0-3]`). Automatic acks and `AckToken` acks now share one ordered release, so a later ack waits for earlier pending ones. `AckToken::reject` maps reason codes that are invalid for PUBACK/PUBREC to 0x80. Acks still queued when the connection drops are discarded if the new connection reports Session Present=0.
 - **WebSocket reads reassemble MQTT packets from the byte stream** (`[MQTT-6.0.0-2]`). Several packets in one frame, or one packet split across frames, used to corrupt payloads or drop the session. A text frame closes the connection (`[MQTT-6.0.0-1]`), and a WebSocket Ping no longer ends the session.
+- **QUIC connections close on protocol errors too.** After sending DISCONNECT the client closes the QUIC connection with an application close code and stops its stream readers. Before, it kept accepting server streams and acknowledging messages after its own DISCONNECT. The client's Maximum Packet Size is enforced on QUIC control and data streams (0x95). Topic Aliases are resolved on unidirectional streams. A malformed or oversized packet on a data stream now fails the connection instead of silently dropping that stream. The same goes for a QoS 1/2 PUBLISH on a unidirectional stream, which cannot carry its acknowledgement (DISCONNECT 0x82). Before, it was dropped silently.
+- **A publish that waits for send quota across a reconnect is checked again against the new connection** before it is sent: Maximum QoS, Retain Available, Maximum Packet Size and Topic Alias range. Its quota claim is bound to the connection it was taken on, so it can no longer go out uncounted and exceed Receive Maximum (`[MQTT-3.3.4-7]`).
+- **Acks released before a Session Present=0 reconnect are dropped** instead of being applied to the new session. Before, a later QoS 2 message reusing that packet identifier could be suppressed as a duplicate.
+- **Offline-queued messages are no longer lost silently.**
+  - An offline RETAIN publish is rejected immediately if the last CONNACK reported Retain Available=0.
+  - At flush, a queued message that no longer fits the new connection (RETAIN not available, larger than Maximum Packet Size) is reported `Rejected` and the flush continues. It used to be dropped with only a log line after `publish()` had returned success.
+  - A message above the new Maximum QoS is downgraded, and its outcome reports the QoS actually used.
+- **Session resume no longer resends messages the new connection does not allow.** Before resending, each stored PUBLISH is checked against the new Retain Available, Maximum Packet Size and Maximum QoS. One that fails is not sent and is reported `Indeterminate`. A QoS 2 packet identifier abandoned this way is kept out of reuse until the session is lost, so the broker cannot treat a new message as a duplicate. PUBRELs are always resent.
+- **Unacknowledged messages are handled explicitly when the session is lost or discarded.** When a Clean Start=0 reconnect gets Session Present=0, unacknowledged QoS 1 messages are sent again first, in order. A QoS 2 message still waiting for PUBREC is reported `Indeterminate`. One that already received PUBREC Success is reported `Delivered`, because the receiver owns it from that point. A Clean Start=1 connect discards unacknowledged session state and reports it (`[MQTT-3.1.2-4]`). Queued messages that were never sent are kept.
+- **Races in the offline flush are closed:**
+  - A flush or replay task from a replaced connection can no longer write to that connection or store after reconnect.
+  - The packet identifiers of queued, in-flush and staged messages cannot be reallocated.
+  - Send quota is released when storing a flushed message fails.
+- **Connection loss closes the send quota.** Publishes waiting for quota fail immediately with `NotConnected`, instead of waiting out the 30 s backpressure timeout. An interrupted offline flush no longer keeps handles pending after the client is dropped; they resolve `Indeterminate(Abandoned)`.
+- **Acknowledgements settle the publish outcome before session state is released**, so a disconnect while an ack is being processed cannot leave a delivered publish unsettled or misreported.
+- **A QoS 2 packet identifier abandoned during replay is quarantined before it leaves the session store**, and a queued message downgraded to QoS 0 stays queued if the connection ends before it is written.
+- **A replay stuck on a dead, replaced connection can no longer block the next connection's replay and flush or starve its send quota.** A replay task stops writing as soon as its connection ends.
+- **Connection loss detected by keepalive fully ends the connection.** It closes the send quota, releases in-flight publish waiters, and stops the packet reader.
+- **A PUBACK, PUBREC or PUBCOMP that does not match the QoS stage of its packet identifier is a protocol error** (DISCONNECT 0x82). Before, it released the outbound state. New: `session::state::OutboundStage` and `SessionState::outbound_stage`.
+- **PUBACK, PUBREC and PUBCOMP received on a QUIC server-opened data stream settle the publish outcome and are stage-checked** exactly as on the control stream.
+- **A PUBREC with an error reason code reports the publish as rejected only after its stored state has been removed.** If processing is interrupted before that, the publish stays pending and is resent on session resume. An error-code PUBREC for a packet identifier already at the PUBREL stage is a protocol error (DISCONNECT 0x82).
+- **The broker bridge counts a publish as sent only once it is acknowledged.**
+- **Packet identifier allocation no longer scans the offline queue.** With tens of thousands of queued messages, each `publish` used to spend over a second of CPU without yielding.
+- **On MQTT 3.1.1 connections, v5-only publish properties are ignored instead of rejected.** They were never encoded anyway. This covers Topic Alias, Response Topic and Subscription Identifier. Topic names are still validated.
 - **CONNECT carries `request_problem_information`, `request_response_information` and user properties**, which were silently dropped. The client never sends AUTH when CONNECT had no Authentication Method (`[MQTT-4.12.0-7]`). The Assigned Client Identifier is adopted for later reconnects (`[MQTT-3.1.3-2]`).
 
 ## [mqttv5-cli 0.28.8] - 2026-09-23
@@ -44,16 +81,36 @@ A client-side conformance audit drove the real `MqttClient` against a raw-byte f
 ### Changed
 
 - Depends on `mqtt5` 0.41. `pub` and `sub` with `--no-clean-start` set `resume_existing_session`, so they resume the broker-held session as before.
+- `pub` and `bench` report an error when a QoS 1/2 publish is not acknowledged, instead of printing success.
 
-## [mqtt5-wasm 1.5.0] - 2026-09-23
+## [mqtt5-wasm 2.0.0] - 2026-09-23
+
+### Breaking
+
+- **The Rust option methods are now snake_case.** On `WasmConnectOptions`, `WasmReconnectOptions`, `WasmPublishOptions`, `WasmSubscribeOptions`, `WasmWillMessage` and `MessageProperties`, `set_keepAlive` is now `set_keep_alive`, `cleanStart` is now `clean_start`, and so on. Rust code that calls these methods must be updated. **The JavaScript/TypeScript API is unchanged**: every property and method keeps its camelCase JS name. Only the raw wasm export symbols in the generated `InitOutput` interface are renamed (for example `connectoptions_cleanStart` is now `connectoptions_clean_start`). That affects only code that calls the raw exports directly.
+- **A freshly created client now rejects Session Present=1** with DISCONNECT 0x82, and `connect` fails, as `[MQTT-3.2.2-4]` requires. Set `resumeExistingSession` to resume a broker-held session from a new client instance on purpose. A client instance that has connected before, including one that auto-reconnects, resumes normally.
+- **Invalid requests are rejected before anything is sent**, and QoS 1/2 publishes wait while the server's Receive Maximum is exhausted.
+- **A publish above the server's Maximum QoS is downgraded and the QoS used is reported.** `publishWithOptions` now resolves with the QoS used (`Promise<number>`, previously `Promise<void>`), and `publishQos1`/`publishQos2` callbacks receive it as a second argument. At Maximum QoS 0 they resolve with packet id 0 and call the callback with `(0, 0)`.
+- **Pending publishes settle with an `indeterminate: ...` error, not reason code 128, when their outcome is unknown.** This happens when the session is discarded by Clean Start, lost (Session Present=0), ends with the connection, or holds a message that no longer fits the new connection's limits. The message says the publish may have been delivered.
 
 ### Added
 
 - **`ConnectOptions.resumeExistingSession`.** It lets a freshly created client accept Session Present=1 from a broker-held session. The `session-recovery` and `qos2-recovery` examples use it.
 
+### Fixed
+
+- **The browser client now follows the same client-side conformance rules as the native client.** This release fixes the missing PUBACK for inbound QoS 1 messages, byte loss when several packets arrived in one frame, packet identifier reuse, and the missing resend on session resume. It also adds topic and filter validation, and enforcement of the server's Receive Maximum, Topic Alias Maximum, Maximum QoS, Retain Available and Maximum Packet Size. Protocol errors now send DISCONNECT with a reason code and close the transport. With `keepAlive=0`, the client no longer sends PINGREQs. Tests: `crates/mqtt5-wasm/tests/conformance_client.rs`, now run in CI under Node.
+- **Session lifetime follows the protocol.** With MQTT 3.1.1 and `cleanStart=false`, the session now survives connection loss. Before, it was discarded, and the reconnect was then rejected forever. With MQTT v5, the Session Expiry Interval from the server's CONNACK takes precedence over the requested one. Automatic reconnects send Clean Start=0 only while the client still holds session state (or `resumeExistingSession` is set), and Clean Start=1 otherwise. The native client instead always reconnects with the configured Clean Start.
+- **`disconnect()` settles pending publish promises and QoS callbacks** with a "message remains in session" error when the session outlives the connection. Before, they could hang forever. A later `connect` on the same instance resumes the session and resends.
+- **Resent PUBRELs are counted against a lowered Receive Maximum** after a resume (`[MQTT-3.3.4-7]`).
+- **Session resume re-checks each unacknowledged PUBLISH against the new CONNACK** (Retain Available, Maximum Packet Size, Maximum QoS). A message that no longer fits is not resent, and its promise or callback settles as indeterminate. A QoS 2 packet identifier abandoned this way is not reused until the session is discarded, so the broker cannot mistake a new message for a duplicate. PUBRELs are still resent.
+- **When a Clean Start=0 reconnect gets Session Present=0**, unacknowledged QoS 1 publishes are sent again as new messages (DUP=0, original order) and resolve on acknowledgement. Unacknowledged QoS 2 publishes settle as indeterminate. A connect with Clean Start=1 discards the client's session state before CONNECT (`[MQTT-3.1.2-4]`).
+- **A publish waiting for send quota fails instead of going out on a different connection** if the connection changed while it waited.
+- **Publishes on MQTT 3.1.1 connections are encoded as 3.1.1.** They used to be encoded as v5, which corrupted the payload. v5-only properties are ignored on 3.1.1.
+- **The in-browser broker no longer panics on the first routed PUBLISH.** Before, `tokio::time::Instant` was called on wasm32.
+
 ### Changed
 
-- **The browser client now follows the same client-side conformance rules as the native client.** This release fixes the missing PUBACK for inbound QoS 1 messages, byte loss when several packets arrived in one frame, packet identifier reuse, and the missing resend on session resume. It also adds topic and filter validation, and enforcement of the server's Receive Maximum, Topic Alias Maximum, Maximum QoS, Retain Available and Maximum Packet Size. Protocol errors now send DISCONNECT with a reason code and close the transport. With `keepAlive=0`, the client no longer sends PINGREQs. A fresh client now rejects Session Present=1 unless `resumeExistingSession` is set. Invalid requests are rejected before sending, and QoS 1/2 publishes wait while the server's Receive Maximum is exhausted. Tests: `crates/mqtt5-wasm/tests/conformance_client.rs`.
 - Depends on `mqtt5` 0.41 and `mqtt5-protocol` 0.15.2.
 
 ## [mqtt5-protocol 0.15.2] - 2026-09-23

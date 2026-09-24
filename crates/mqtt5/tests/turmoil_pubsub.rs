@@ -5,13 +5,12 @@
 //! environment, testing various `QoS` levels, topic patterns, and edge cases.
 
 #[cfg(feature = "turmoil-testing")]
-use mqtt5::broker::router::MessageRouter;
+use mqtt5::broker::router::{MessageRouter, SubscriptionRequest};
 #[cfg(feature = "turmoil-testing")]
 use mqtt5::packet::publish::PublishPacket;
 #[cfg(feature = "turmoil-testing")]
 use mqtt5::time::Duration;
 #[cfg(feature = "turmoil-testing")]
-use mqtt5::types::ProtocolVersion;
 #[cfg(feature = "turmoil-testing")]
 use mqtt5::QoS;
 #[cfg(feature = "turmoil-testing")]
@@ -39,18 +38,11 @@ fn test_basic_publish_subscribe() {
             )
             .await;
         router
-            .subscribe(
-                "subscriber".to_string(),
-                "test/topic".to_string(),
+            .subscribe(SubscriptionRequest::new(
+                "subscriber",
+                "test/topic",
                 QoS::AtMostOnce,
-                None,
-                false,
-                false,
-                0,
-                ProtocolVersion::V5,
-                false,
-                None,
-            )
+            ))
             .await
             .unwrap();
 
@@ -115,35 +107,21 @@ fn test_wildcard_subscriptions() {
 
         // Single-level wildcard subscription
         router
-            .subscribe(
-                "single_wildcard".to_string(),
-                "sensors/+/temperature".to_string(),
+            .subscribe(SubscriptionRequest::new(
+                "single_wildcard",
+                "sensors/+/temperature",
                 QoS::AtMostOnce,
-                None,
-                false,
-                false,
-                0,
-                ProtocolVersion::V5,
-                false,
-                None,
-            )
+            ))
             .await
             .unwrap();
 
         // Multi-level wildcard subscription
         router
-            .subscribe(
-                "multi_wildcard".to_string(),
-                "sensors/#".to_string(),
+            .subscribe(SubscriptionRequest::new(
+                "multi_wildcard",
+                "sensors/#",
                 QoS::AtMostOnce,
-                None,
-                false,
-                false,
-                0,
-                ProtocolVersion::V5,
-                false,
-                None,
-            )
+            ))
             .await
             .unwrap();
 
@@ -248,18 +226,11 @@ fn test_multiple_subscribers_same_topic() {
         let topic = "broadcast/announcement";
         for client in ["subscriber1", "subscriber2", "subscriber3"] {
             router
-                .subscribe(
+                .subscribe(SubscriptionRequest::new(
                     client.to_string(),
                     topic.to_string(),
                     QoS::AtMostOnce,
-                    None,
-                    false,
-                    false,
-                    0,
-                    ProtocolVersion::V5,
-                    false,
-                    None,
-                )
+                ))
                 .await
                 .unwrap();
         }
@@ -336,34 +307,20 @@ fn test_qos_levels() {
 
         // Subscribe with different QoS levels
         router
-            .subscribe(
-                "qos0_client".to_string(),
-                "data/qos0".to_string(),
+            .subscribe(SubscriptionRequest::new(
+                "qos0_client",
+                "data/qos0",
                 QoS::AtMostOnce,
-                None,
-                false,
-                false,
-                0,
-                ProtocolVersion::V5,
-                false,
-                None,
-            )
+            ))
             .await
             .unwrap();
 
         router
-            .subscribe(
-                "qos1_client".to_string(),
-                "data/qos1".to_string(),
+            .subscribe(SubscriptionRequest::new(
+                "qos1_client",
+                "data/qos1",
                 QoS::AtLeastOnce,
-                None,
-                false,
-                false,
-                0,
-                ProtocolVersion::V5,
-                false,
-                None,
-            )
+            ))
             .await
             .unwrap();
 
@@ -427,18 +384,11 @@ fn test_unsubscribe_functionality() {
 
         // Subscribe to topic
         router
-            .subscribe(
-                "test_client".to_string(),
-                "test/unsubscribe".to_string(),
+            .subscribe(SubscriptionRequest::new(
+                "test_client",
+                "test/unsubscribe",
                 QoS::AtMostOnce,
-                None,
-                false,
-                false,
-                0,
-                ProtocolVersion::V5,
-                false,
-                None,
-            )
+            ))
             .await
             .unwrap();
 

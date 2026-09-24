@@ -51,6 +51,7 @@ pub(crate) struct AckRequest {
 #[derive(Default)]
 struct AckOrder {
     head: u64,
+    generation: u64,
     slots: VecDeque<Option<AckRequest>>,
 }
 
@@ -62,6 +63,7 @@ impl AckOrder {
 
     fn discard(&mut self) {
         self.head += self.slots.len() as u64;
+        self.generation += 1;
         self.slots.clear();
     }
 
@@ -96,6 +98,19 @@ impl AckOrder {
 /// [`AckToken::reject`] consume it, making a double-acknowledgement a compile error.
 /// Dropping it without resolving emits a non-success acknowledgement and warns, so a
 /// forgotten token never wedges the window (`DeferredAckToken.tla`, obligation 7).
+///
+/// # Head-of-line blocking
+///
+/// PUBACK and PUBREC must leave the client in the order the PUBLISH packets arrived
+/// (`[MQTT-4.6.0-2]`, `[MQTT-4.6.0-3]`). While deferred acknowledgement is enabled, an
+/// unresolved token therefore holds back **every** later PUBACK/PUBREC on the connection,
+/// not only those of other `subscribe_with_ack` deliveries: the automatic acknowledgements
+/// of plain `subscribe` callbacks queue behind it too. Only `QoS` 1/2 messages received on a
+/// QUIC data flow are acknowledged on their own stream and are not held back. Each held
+/// acknowledgement keeps its message in the broker's in-flight window, so a token kept
+/// for long can exhaust the client's Receive Maximum and stall all inbound `QoS` 1/2
+/// delivery. Resolve tokens promptly, in any order; the acknowledgements are released
+/// in arrival order as soon as the earliest outstanding token is resolved.
 pub struct AckToken {
     seq: Option<u64>,
     packet_id: u16,
@@ -210,9 +225,13 @@ impl AckDispatcher {
         let order = Arc::clone(&self.order);
         tokio::spawn(async move {
             while let Some(request) = rx.recv().await {
-                let ready = order.lock().release(request);
+                let (generation, ready) = {
+                    let mut order = order.lock();
+                    let ready = order.release(request);
+                    (order.generation, ready)
+                };
                 for next in ready {
-                    Self::handle(next, &slot, &session).await;
+                    Self::handle(next, generation, &order, &slot, &session).await;
                 }
             }
         });
@@ -274,6 +293,8 @@ impl AckDispatcher {
     /// state is cleared, per `[MQTT-4.3.3-9]` (a later same-id PUBLISH is a new message).
     async fn handle(
         request: AckRequest,
+        generation: u64,
+        order: &Mutex<AckOrder>,
         slot: &WriterSlot,
         session: &Arc<tokio::sync::RwLock<SessionState>>,
     ) {
@@ -285,13 +306,12 @@ impl AckDispatcher {
                 packet,
                 release_inbound,
             } => {
-                Self::write(request.packet_id, packet, slot, session).await;
+                Self::write(request.packet_id, packet, generation, order, slot, session).await;
                 if release_inbound {
-                    session
-                        .read()
-                        .await
-                        .acknowledge_inbound(request.packet_id)
-                        .await;
+                    let session = session.read().await;
+                    if order.lock().generation == generation {
+                        session.acknowledge_inbound(request.packet_id).await;
+                    }
                 }
                 return;
             }
@@ -313,6 +333,13 @@ impl AckDispatcher {
         let is_success = reason == ReasonCode::Success;
         {
             let session = session.read().await;
+            if order.lock().generation != generation {
+                debug!(
+                    packet_id = request.packet_id,
+                    "Dropping ack for a discarded session"
+                );
+                return;
+            }
             match request.qos {
                 QoS::AtMostOnce => {}
                 QoS::ExactlyOnce if is_success => {
@@ -328,19 +355,28 @@ impl AckDispatcher {
             }
         }
 
-        Self::write(request.packet_id, packet, slot, session).await;
+        Self::write(request.packet_id, packet, generation, order, slot, session).await;
     }
 
     async fn write(
         packet_id: u16,
         packet: Packet,
+        generation: u64,
+        order: &Mutex<AckOrder>,
         slot: &WriterSlot,
         session: &Arc<tokio::sync::RwLock<SessionState>>,
     ) {
         if !ack_fits_server_maximum(session, &packet).await {
             return;
         }
-        let writer = slot.lock().await.clone();
+        let writer = {
+            let current = slot.lock().await;
+            if order.lock().generation != generation {
+                debug!(packet_id, "Dropping ack for a discarded session");
+                return;
+            }
+            current.clone()
+        };
         let written = match &writer {
             Some(handle) => handle.lock().await.write_packet(packet).await.is_ok(),
             None => false,
@@ -622,6 +658,74 @@ mod tests {
             hits_first.load(Ordering::SeqCst),
             0,
             "re-registering a filter replaces the earlier callback, as it does for exact filters"
+        );
+    }
+
+    #[tokio::test]
+    async fn ack_released_before_session_discard_is_dropped_after_it() {
+        use crate::client::direct::unified::UnifiedWriter;
+        use crate::session::state::AckResolution;
+        use tokio::io::AsyncReadExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let stream = tokio::net::TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (mut broker_side, _) = listener.accept().await.unwrap();
+        let (_read_half, write_half) = stream.into_split();
+
+        let session = Arc::new(tokio::sync::RwLock::new(SessionState::new(
+            "t".to_string(),
+            SessionConfig::default(),
+            false,
+        )));
+        let dispatcher = AckDispatcher::new(Arc::clone(&session));
+        let seq = dispatcher.reserve(QoS::ExactlyOnce);
+        let (generation, released) = {
+            let mut order = dispatcher.order.lock();
+            let released = order.release(AckRequest {
+                seq,
+                packet_id: 7,
+                qos: QoS::ExactlyOnce,
+                kind: AckKind::Ack,
+            });
+            (order.generation, released)
+        };
+        assert_eq!(released.len(), 1);
+
+        dispatcher.discard_pending();
+        session.read().await.clear_all_inbound_state().await;
+        *dispatcher.writer_slot.lock().await = Some(Arc::new(tokio::sync::Mutex::new(
+            UnifiedWriter::Tcp(write_half),
+        )));
+
+        for request in released {
+            AckDispatcher::handle(
+                request,
+                generation,
+                &dispatcher.order,
+                &dispatcher.writer_slot,
+                &session,
+            )
+            .await;
+        }
+
+        let fresh = session.read().await;
+        assert!(
+            !fresh.has_pubrec(7).await,
+            "a stale ack must not mark PUBREC sent on the fresh session"
+        );
+        assert_eq!(fresh.get_resolution(7).await, AckResolution::Unresolved);
+        drop(fresh);
+        let mut buf = [0u8; 1];
+        let written = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            broker_side.read(&mut buf),
+        )
+        .await;
+        assert!(
+            written.is_err(),
+            "a stale ack must not be written on the new connection"
         );
     }
 }

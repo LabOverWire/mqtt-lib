@@ -62,18 +62,25 @@ impl InProcessTestClient {
     /// Publishes with the given [`PublishOptions`].
     ///
     /// # Errors
-    /// Returns an error if the broker rejects the publish or the client
-    /// is disconnected.
+    /// Returns an error if the broker rejects the publish, the client is
+    /// disconnected, or the publish was not acknowledged before the connection
+    /// ended or the acknowledgement wait elapsed.
     pub async fn publish_with_options(
         &self,
         topic: &str,
         payload: &[u8],
         options: PublishOptions,
     ) -> Result<(), TestClientError> {
-        self.client
+        match self
+            .client
             .publish_with_options(topic, payload.to_vec(), options)
-            .await?;
-        Ok(())
+            .await?
+        {
+            mqtt5::PublishResult::Sent(_) => Ok(()),
+            mqtt5::PublishResult::Queued(_) => {
+                Err(TestClientError::Timeout("publish acknowledgement"))
+            }
+        }
     }
 
     /// Subscribes to `filter` and returns a [`Subscription`] handle.

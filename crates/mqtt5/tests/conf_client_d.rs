@@ -945,8 +945,8 @@ async fn mqtt_4_9_0_1_send_quota_reinitialized_after_ack_timeout_and_reconnect()
     )
     .await;
     assert!(
-        matches!(timed_out, Ok(Err(mqtt5::MqttError::Timeout))),
-        "setup: unacked QoS1 publish must hit the client ack timeout: {timed_out:?}"
+        matches!(&timed_out, Ok(Ok(mqtt5::PublishResult::Queued(handle))) if handle.try_outcome().is_none()),
+        "setup: unacked QoS1 publish must hit the client ack wait and stay in flight: {timed_out:?}"
     );
     drop(peer);
     assert!(

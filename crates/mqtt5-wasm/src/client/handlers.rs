@@ -357,12 +357,14 @@ fn complete_flight(
     state: &Rc<RefCell<ClientState>>,
     packet_id: u16,
     reason_code: ReasonCode,
+    qos: QoS,
     callback: Option<js_sys::Function>,
 ) {
     release_quota(state);
     if let Some(callback) = callback {
         let reason_code_js = JsValue::from_f64(f64::from(u8::from(reason_code)));
-        if let Err(e) = callback.call1(&JsValue::NULL, &reason_code_js) {
+        let qos_js = JsValue::from_f64(f64::from(qos as u8));
+        if let Err(e) = callback.call2(&JsValue::NULL, &reason_code_js, &qos_js) {
             tracing::warn!(error = ?e, packet_id, "publish acknowledgement callback failed");
         }
     }
@@ -382,7 +384,7 @@ fn handle_puback(state: &Rc<RefCell<ClientState>>, packet_id: u16, reason_code: 
         state_mut.outbound.remove(&packet_id);
         state_mut.pending_pubacks.remove(&packet_id)
     };
-    complete_flight(state, packet_id, reason_code, callback);
+    complete_flight(state, packet_id, reason_code, QoS::AtLeastOnce, callback);
 }
 
 enum PubRecOutcome {
@@ -414,7 +416,9 @@ fn handle_pubrec(state: &Rc<RefCell<ClientState>>, packet_id: u16, reason_code: 
     };
     match outcome {
         PubRecOutcome::Release => send_ack(state, &Packet::PubRel(PubRelPacket::new(packet_id))),
-        PubRecOutcome::Failed(callback) => complete_flight(state, packet_id, reason_code, callback),
+        PubRecOutcome::Failed(callback) => {
+            complete_flight(state, packet_id, reason_code, QoS::ExactlyOnce, callback);
+        }
         PubRecOutcome::Unknown => send_ack(
             state,
             &Packet::PubRel(PubRelPacket::new_with_reason(
@@ -442,7 +446,7 @@ fn handle_pubcomp(state: &Rc<RefCell<ClientState>>, packet_id: u16, reason_code:
             .remove(&packet_id)
             .map(|(callback, _)| callback)
     };
-    complete_flight(state, packet_id, reason_code, callback);
+    complete_flight(state, packet_id, reason_code, QoS::ExactlyOnce, callback);
 }
 
 fn handle_pubrel(state: &Rc<RefCell<ClientState>>, packet_id: u16) {

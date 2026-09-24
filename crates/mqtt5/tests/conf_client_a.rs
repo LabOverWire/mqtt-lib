@@ -1258,7 +1258,7 @@ async fn mqtt_2_1_3_1_reserved_flags_on_inbound_puback_is_malformed() {
         .unwrap();
     let r = timeout(Duration::from_secs(2), h).await.unwrap().unwrap();
     assert!(
-        r.is_err() && !s.client.is_connected().await,
+        !matches!(r, Ok(mqtt5::PublishResult::Sent(_))) && !s.client.is_connected().await,
         "MQTT-2.1.3-1 VIOLATION: PUBACK with reserved flag bits 0x2 accepted as a valid acknowledgement ({r:?})"
     );
 }

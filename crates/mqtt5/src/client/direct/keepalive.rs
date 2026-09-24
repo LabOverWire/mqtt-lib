@@ -11,6 +11,7 @@ use std::sync::Arc;
 use tokio::time::Duration;
 
 use super::unified::UnifiedWriter;
+use crate::session::flow_control::FlowControlManager;
 #[cfg(feature = "transport-quic")]
 use crate::session::SessionState;
 
@@ -78,6 +79,10 @@ pub(super) struct ConnectionLifecycle {
     pub(super) connection_epoch: u64,
     pub(super) current_connection_epoch: Arc<AtomicU64>,
     pub(super) callbacks: Arc<tokio::sync::RwLock<Vec<ConnectionEventCallback>>>,
+    pub(super) closing: Arc<AtomicBool>,
+    pub(super) alive: Arc<tokio::sync::watch::Sender<bool>>,
+    pub(super) flow: Arc<tokio::sync::RwLock<FlowControlManager>>,
+    pub(super) reader_task: Arc<Mutex<Option<tokio::task::AbortHandle>>>,
 }
 
 impl ConnectionLifecycle {
@@ -85,13 +90,32 @@ impl ConnectionLifecycle {
         owns_current_connection(self.connection_epoch, &self.current_connection_epoch)
     }
 
+    pub(super) fn begin_close(&self) {
+        self.closing.store(true, Ordering::SeqCst);
+    }
+
+    #[cfg(feature = "transport-quic")]
+    pub(super) fn is_closing(&self) -> bool {
+        self.closing.load(Ordering::SeqCst)
+            || !self.connected.load(Ordering::SeqCst)
+            || !self.owns_current_connection()
+    }
+
     pub(super) async fn end(&self, reason: DisconnectReason) {
+        self.alive.send_replace(false);
         if mark_disconnected_if_current(
             &self.connected,
             self.connection_epoch,
             &self.current_connection_epoch,
         ) {
+            self.flow.read().await.close_send_quota();
             fire_connection_event(&self.callbacks, ConnectionEvent::Disconnected { reason }).await;
+        }
+    }
+
+    fn stop_reader(&self) {
+        if let Some(reader) = self.reader_task.lock().take() {
+            reader.abort();
         }
     }
 }
@@ -149,9 +173,14 @@ pub(super) async fn keepalive_task_with_writer(
         let timed_out = keepalive_state.lock().is_timeout(timeout_duration);
         if timed_out {
             tracing::error!("Keepalive timeout - no PINGRESP received");
-            super::reader::close_connection(&writer, &crate::error::MqttError::KeepAliveTimeout)
-                .await;
+            super::reader::close_connection(
+                &writer,
+                &lifecycle,
+                &crate::error::MqttError::KeepAliveTimeout,
+            )
+            .await;
             lifecycle.end(DisconnectReason::KeepAliveTimeout).await;
+            lifecycle.stop_reader();
             break;
         }
 
@@ -180,6 +209,7 @@ pub(super) async fn keepalive_task_with_writer(
                 lifecycle
                     .end(DisconnectReason::NetworkError(e.to_string()))
                     .await;
+                lifecycle.stop_reader();
                 break;
             }
             Err(_) => {
@@ -189,6 +219,7 @@ pub(super) async fn keepalive_task_with_writer(
                         "PINGREQ send timed out".to_string(),
                     ))
                     .await;
+                lifecycle.stop_reader();
                 break;
             }
         }

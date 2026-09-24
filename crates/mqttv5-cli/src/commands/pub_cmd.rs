@@ -6,7 +6,8 @@ use mqtt5::time::Duration;
 #[cfg(feature = "codec")]
 use mqtt5::{CodecRegistry, DeflateCodec, GzipCodec};
 use mqtt5::{
-    ConnectOptions, ConnectionEvent, Message, MqttClient, PublishOptions, QoS, WillMessage,
+    ConnectOptions, ConnectionEvent, Message, MqttClient, PublishOptions, PublishResult, QoS,
+    WillMessage,
 };
 use std::io::{self, Read};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -567,25 +568,29 @@ async fn publish_with_properties(
         .response_topic
         .clone_from(&cmd.response.response_topic);
     options.properties.correlation_data = correlation_data.cloned();
-    client
-        .publish_with_options(topic, message.as_bytes(), options)
-        .await?;
-    Ok(())
+    require_sent(
+        &client
+            .publish_with_options(topic, message.as_bytes(), options)
+            .await?,
+    )
 }
 
 async fn publish_simple(client: &MqttClient, topic: &str, message: &str, qos: QoS) -> Result<()> {
-    match qos {
-        QoS::AtMostOnce => {
-            client.publish(topic, message.as_bytes()).await?;
-        }
-        QoS::AtLeastOnce => {
-            client.publish_qos1(topic, message.as_bytes()).await?;
-        }
-        QoS::ExactlyOnce => {
-            client.publish_qos2(topic, message.as_bytes()).await?;
-        }
+    let result = match qos {
+        QoS::AtMostOnce => client.publish(topic, message.as_bytes()).await?,
+        QoS::AtLeastOnce => client.publish_qos1(topic, message.as_bytes()).await?,
+        QoS::ExactlyOnce => client.publish_qos2(topic, message.as_bytes()).await?,
+    };
+    require_sent(&result)
+}
+
+pub(crate) fn require_sent(result: &PublishResult) -> Result<()> {
+    match result {
+        PublishResult::Sent(_) => Ok(()),
+        PublishResult::Queued(_) => Err(anyhow::anyhow!(
+            "publish was not acknowledged before the connection ended or the acknowledgement wait elapsed"
+        )),
     }
-    Ok(())
 }
 
 fn print_publish_result(cmd: &PubCommand, iteration: u64, topic: &str, qos: QoS) {

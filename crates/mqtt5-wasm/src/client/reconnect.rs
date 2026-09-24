@@ -11,7 +11,7 @@ use super::callbacks::{trigger_reconnect_failed_callback, trigger_reconnecting_c
 use super::connection::establish;
 use super::connectivity::{is_browser_online, wait_for_online};
 use super::sleep_ms;
-use super::state::{ClientState, StoredConnectOptions};
+use super::state::{ClientState, SessionState, StoredConnectOptions};
 
 pub fn spawn_reconnection_task(state: Rc<RefCell<ClientState>>) {
     spawn_local(async move {
@@ -118,7 +118,13 @@ async fn attempt_reconnect(
     let transport = WasmTransportType::WebSocket(
         crate::transport::websocket::WasmWebSocketTransport::new(url),
     );
-    let client_id = state.borrow().client_id.clone();
+    let (client_id, clean_start) = {
+        let state_ref = state.borrow();
+        (
+            state_ref.client_id.clone(),
+            state_ref.session == SessionState::Absent && !options.resume_existing_session,
+        )
+    };
     let properties = if options.protocol_version == 5 {
         build_properties_from_stored(options)
     } else {
@@ -127,7 +133,7 @@ async fn attempt_reconnect(
 
     let connect_packet = ConnectPacket {
         protocol_version: options.protocol_version,
-        clean_start: false,
+        clean_start,
         keep_alive: options.keep_alive,
         client_id,
         username: options.username.clone(),

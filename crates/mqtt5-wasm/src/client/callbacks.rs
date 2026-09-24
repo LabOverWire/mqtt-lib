@@ -11,19 +11,42 @@ use super::reconnect::spawn_reconnection_task;
 use super::state::ClientState;
 
 const SESSION_DISCARDED_REASON: u8 = 0x80;
+const DISCONNECTED_WITH_SESSION: &str =
+    "disconnected; message remains in session and will be resent on resume by this client instance";
 
-fn reject_callbacks(callbacks: Vec<js_sys::Function>) {
-    let error_val = JsValue::from_f64(f64::from(SESSION_DISCARDED_REASON));
+pub const SESSION_DISCARDED_BY_CLEAN_START: &str =
+    "indeterminate: session discarded by clean start; may have been delivered";
+const SESSION_ENDED_WITH_CONNECTION: &str =
+    "indeterminate: session ended with the connection; may have been delivered";
+
+fn settle_callbacks(callbacks: Vec<js_sys::Function>, message: &str) {
+    let message = JsValue::from_str(message);
     for callback in callbacks {
-        if let Err(e) = callback.call1(&JsValue::NULL, &error_val) {
+        if let Err(e) = callback.call1(&JsValue::NULL, &message) {
             tracing::warn!(error = ?e, "acknowledgement callback failed");
         }
     }
 }
 
-pub fn discard_session(state: &Rc<RefCell<ClientState>>) {
-    let callbacks = state.borrow_mut().discard_session();
-    reject_callbacks(callbacks);
+pub fn settle_acks_on_disconnect(state: &Rc<RefCell<ClientState>>) {
+    let callbacks = state.borrow_mut().take_ack_callbacks();
+    settle_callbacks(callbacks, DISCONNECTED_WITH_SESSION);
+}
+
+pub fn discard_session(state: &Rc<RefCell<ClientState>>, message: &str) {
+    let (callbacks, abandoned) = {
+        let mut state_mut = state.borrow_mut();
+        let abandoned = state_mut.outbound.len();
+        (state_mut.discard_session(), abandoned)
+    };
+    if abandoned > 0 {
+        tracing::warn!(
+            abandoned,
+            reason = message,
+            "outbound session state discarded"
+        );
+    }
+    settle_callbacks(callbacks, message);
 }
 
 pub fn close_network_connection(state: &Rc<RefCell<ClientState>>) {
@@ -49,7 +72,7 @@ pub fn end_connection_state(state: &Rc<RefCell<ClientState>>) {
             .drain()
             .filter_map(|(_, callback)| callback)
             .collect();
-        (subacks, state_mut.session_expiry_interval == 0)
+        (subacks, !state_mut.session_outlives_connection())
     };
     for resolve in subacks {
         let codes = js_sys::Array::new();
@@ -59,7 +82,7 @@ pub fn end_connection_state(state: &Rc<RefCell<ClientState>>) {
         }
     }
     if session_ends {
-        discard_session(state);
+        discard_session(state, SESSION_ENDED_WITH_CONNECTION);
     }
     wake_quota_waiters(state);
 }
