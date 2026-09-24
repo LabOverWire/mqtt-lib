@@ -158,13 +158,26 @@ impl WasmClientHandler {
             move |e: web_sys::MessageEvent| {
                 if let Ok(abuf) = e.data().dyn_into::<js_sys::ArrayBuffer>() {
                     let array = js_sys::Uint8Array::new(&abuf);
-                    let vec = array.to_vec();
-                    let _ = msg_tx_clone.unbounded_send(vec);
+                    if msg_tx_clone.unbounded_send(array.to_vec()).is_err() {
+                        debug!("Dropping message received after the client port closed");
+                    }
                 }
             },
         );
         let js_fn: js_sys::Function = handler_fn.into_js_value().unchecked_into();
-        let _ = port.add_event_listener_with_callback("message", &js_fn);
+        if let Err(e) = port.add_event_listener_with_callback("message", &js_fn) {
+            error!("Failed to listen for client port messages: {e:?}");
+        }
+        let close_fn = wasm_bindgen::closure::Closure::<dyn FnMut(web_sys::Event)>::new(
+            move |_: web_sys::Event| {
+                debug!("Client port closed");
+                msg_tx.close_channel();
+            },
+        );
+        let close_js: js_sys::Function = close_fn.into_js_value().unchecked_into();
+        if let Err(e) = port.add_event_listener_with_callback("close", &close_js) {
+            error!("Failed to listen for client port close: {e:?}");
+        }
         port.start();
 
         let handler = Self {
@@ -238,7 +251,9 @@ impl WasmClientHandler {
 
         let result = self.packet_loop(&mut reader, writer, disconnect_rx).await;
 
-        if !self.normal_disconnect {
+        if self.normal_disconnect {
+            self.clear_owned_stored_will(&client_id).await;
+        } else {
             self.publish_will_message(&client_id).await;
         }
 
@@ -291,6 +306,7 @@ impl WasmClientHandler {
         let result = self.packet_loop(&mut reader, writer, disconnect_rx).await;
 
         let (reason, unexpected) = if self.normal_disconnect {
+            self.clear_owned_stored_will(&client_id).await;
             ("client disconnected", false)
         } else {
             self.publish_will_message(&client_id).await;

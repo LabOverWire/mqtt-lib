@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [mqtt5 0.41.1] - 2026-09-24
+
+### Fixed
+
+- **A delayed Will Message is cancelled when a new connection for the same ClientID opens before the Will Delay Interval elapses** (`[MQTT-3.1.3-9]`, `[MQTT-3.1.2-8]`). This applies whether the new connection resumes the session, starts clean, or takes over a live connection. Before, the broker always published the Will after the delay, so a client that dropped and reconnected got a spurious Will. Reported in #154.
+- **The Will is published when the Will Delay Interval elapses or the session ends, whichever comes first.** A Session Expiry Interval of 0 publishes it immediately at disconnect, and a Session Expiry shorter than the Will Delay publishes it when the session ends. Before, the full delay was always waited out.
+- **A published Will, or one deleted by DISCONNECT 0x00, is removed from the stored session state** (`[MQTT-3.1.2-10]`).
+- The conformance test for `[MQTT-3.1.3-9]` passed vacuously: it stopped watching before the Will Delay elapsed. It now waits past the delay, and a new test checks that the Will is published when nobody reconnects.
+
+### Added
+
+- `MessageRouter::arm_will`, `MessageRouter::claim_will`, `MessageRouter::clear_stored_will`, `MessageRouter::owns_client` and `ClientSession::will_publish_delay`, which back the pending-Will tracking.
+
+## [mqtt5-wasm 2.0.1] - 2026-09-24
+
+### Fixed
+
+- **The in-browser broker cancels a delayed Will when the client reconnects within the Will Delay Interval**, and publishes it no later than session end. This is the same fix as mqtt5 0.41.1.
+- **The in-browser broker detects a client closing its MessagePort** (the port's `close` event) and treats it as an abnormal disconnect, so the Will is published. Before, a closed port went unnoticed until keep-alive expiry, and never with a keep-alive of 0, which also leaked the connection handler. Environments that don't raise `close` on MessagePort still rely on keep-alive expiry.
+- **A published Will, or one deleted by DISCONNECT 0x00, is removed from the in-browser broker's stored session** (`[MQTT-3.1.2-10]`).
+
 ## [mqtt5 0.41.0] - 2026-09-23
 
 A client-side conformance audit drove the real `MqttClient` against a raw-byte fake broker for each of the 149 normative statements in MQTT v5.0 that apply to a client. About 40 MUST statements failed. All are fixed here, and each is pinned by a test named after its OASIS statement ID in `crates/mqtt5/tests/conf_client_{a,b,c,d}.rs`.

@@ -884,6 +884,13 @@ impl ClientSession {
             false
         }
     }
+
+    #[must_use]
+    pub fn will_publish_delay(&self) -> Option<u32> {
+        self.will_message.as_ref()?;
+        let will_delay = self.will_delay_interval.unwrap_or(0);
+        Some(will_delay.min(self.expiry_interval.unwrap_or(u32::MAX)))
+    }
 }
 
 impl QueuedMessage {

@@ -360,20 +360,17 @@ impl ClientHandler {
             Err(e) => (Err(e), LoopExit::Closed),
         };
 
-        let taken_over = if let LoopExit::TakenOver(notice) = exit {
+        let (taken_over, armed_will) = if let LoopExit::TakenOver(notice) = exit {
             self.hand_off(&queue, notice).await;
             self.release_router_entry(&client_id).await;
-            true
+            (true, None)
         } else {
-            // Move this connection's unfinished deliveries back to (or off) the queue BEFORE
-            // releasing the router entry, so a reconnect that races the release still sees this
-            // entry, is handed a notice, and waits for the hand-off instead of binding onto
-            // half-torn-down state and re-delivering.
             if self.session_preserved() {
                 self.requeue_unsent(&queue).await;
             } else {
                 self.drop_unsent().await;
             }
+            let armed_will = self.arm_delayed_will(&client_id).await;
             match self.release_router_entry(&client_id).await {
                 Release::Owned => {
                     queue.finish_drain();
@@ -382,29 +379,29 @@ impl ClientHandler {
                     } else {
                         queue.clear(None);
                     }
-                    false
+                    (false, armed_will)
                 }
                 Release::Displaced => {
-                    // A successor registered during the requeue above. Complete its hand-off
-                    // protocol: this connection's messages are already back on the queue, so
-                    // just release the successor and let its guard balance the count.
                     if let Ok(notice) = disconnect_rx.try_recv() {
                         queue.finish_drain();
                         let TakeoverNotice {
                             released, guard, ..
                         } = notice;
                         drop(guard);
-                        let _ = released.send(());
+                        if released.send(()).is_err() {
+                            debug!("New session handler went away before the hand-off completed");
+                        }
                         queue.notify();
                     } else {
                         queue.finish_drain();
                     }
-                    true
+                    (true, armed_will)
                 }
             }
         };
 
-        self.handle_disconnect_cleanup(&client_id, taken_over).await;
+        self.handle_disconnect_cleanup(&client_id, taken_over, armed_will)
+            .await;
 
         info!("Client {} disconnected", client_id);
 
@@ -567,7 +564,23 @@ impl ClientHandler {
         }
     }
 
-    async fn handle_disconnect_cleanup(&mut self, client_id: &str, session_taken_over: bool) {
+    async fn arm_delayed_will(&self, client_id: &str) -> Option<oneshot::Receiver<()>> {
+        if self.normal_disconnect {
+            return None;
+        }
+        let delay = self.session.as_ref()?.will_publish_delay()?;
+        if delay == 0 {
+            return None;
+        }
+        self.router.arm_will(client_id, self.generation).await
+    }
+
+    async fn handle_disconnect_cleanup(
+        &mut self,
+        client_id: &str,
+        session_taken_over: bool,
+        armed_will: Option<oneshot::Receiver<()>>,
+    ) {
         #[cfg(feature = "opentelemetry")]
         {
             use tracing::Instrument;
@@ -575,16 +588,21 @@ impl ClientHandler {
                 "mqtt.disconnect",
                 mqtt.client_id = %client_id,
             );
-            self.handle_disconnect_cleanup_inner(client_id, session_taken_over)
+            self.handle_disconnect_cleanup_inner(client_id, session_taken_over, armed_will)
                 .instrument(span)
                 .await;
         }
         #[cfg(not(feature = "opentelemetry"))]
-        self.handle_disconnect_cleanup_inner(client_id, session_taken_over)
+        self.handle_disconnect_cleanup_inner(client_id, session_taken_over, armed_will)
             .await;
     }
 
-    async fn handle_disconnect_cleanup_inner(&mut self, client_id: &str, session_taken_over: bool) {
+    async fn handle_disconnect_cleanup_inner(
+        &mut self,
+        client_id: &str,
+        session_taken_over: bool,
+        armed_will: Option<oneshot::Receiver<()>>,
+    ) {
         self.resource_monitor
             .unregister_connection(client_id, self.client_addr.ip())
             .await;
@@ -608,16 +626,21 @@ impl ClientHandler {
                             mqtt.client_id = %client_id,
                             mqtt.topic = %will.topic,
                         );
-                        self.publish_will_message(client_id).instrument(span).await;
+                        self.publish_will_message(client_id, session_taken_over, armed_will)
+                            .instrument(span)
+                            .await;
                     } else {
-                        self.publish_will_message(client_id).await;
+                        self.publish_will_message(client_id, session_taken_over, armed_will)
+                            .await;
                     }
                 } else {
-                    self.publish_will_message(client_id).await;
+                    self.publish_will_message(client_id, session_taken_over, armed_will)
+                        .await;
                 }
             }
             #[cfg(not(feature = "opentelemetry"))]
-            self.publish_will_message(client_id).await;
+            self.publish_will_message(client_id, session_taken_over, armed_will)
+                .await;
         }
 
         self.fire_disconnect_event(client_id).await;
@@ -644,6 +667,10 @@ impl ClientHandler {
                 match storage.get_session(client_id).await {
                     Ok(Some(mut stored_session)) => {
                         stored_session.touch();
+                        if self.normal_disconnect {
+                            stored_session.will_message = None;
+                            stored_session.will_delay_interval = None;
+                        }
                         if let Err(e) = storage.store_session(stored_session).await {
                             warn!("Failed to store session for {client_id}: {e}");
                         }

@@ -38,6 +38,18 @@
 
 ## Diary Entries
 
+### Delayed Will was never cancelled, and the MQTT-3.1.3-9 test could not see it (2026-09-24)
+
+**Trigger**: issue #154. With a Will Delay Interval above zero, the broker spawned a detached task that slept for the delay and then published the Will unconditionally. A client that reconnected inside the delay still had its Will published, which violates `[MQTT-3.1.3-9]` and the "new Network Connection ... before the Will Delay Interval has elapsed" clause of `[MQTT-3.1.2-8]`.
+
+**Why the suite passed anyway**: `will_delay_reconnect_suppresses_will` used a 5 s delay but stopped watching about 2.3 s after the drop, so the stale Will always arrived after the assertion. The test was vacuous. It now uses a 2 s delay and waits 4 s after the reconnect. On the unfixed broker it fails with the Will received. A positive control, `will_delay_elapsed_publishes_will`, runs the same setup without a reconnect and asserts that nothing arrives at 1.2 s and that the Will arrives once the delay has elapsed. It passes on both the old and the fixed broker, which shows the negative test fails for the right reason and not because Wills are never delivered.
+
+**Fix**: the router keeps one pending delayed Will per client id, tagged with the generation of the connection that armed it. A connection arms its Will before it releases its router entry, and only if it still owns that entry. `register_session` removes any pending Will for the client id while it holds the clients write lock, so any new connection (Clean Start 0 or 1, takeover included) cancels it. When the timer fires, the task has to claim the entry by generation before it publishes. Claim and cancel both remove the entry under one mutex, so exactly one of them wins. The Will fires at min(Will Delay Interval, Session Expiry Interval), so a Session Expiry of 0 publishes at once and a shorter expiry publishes when the session ends (`[MQTT-3.1.2-8]`, §3.1.3.2.2). A published Will, and a Will deleted by DISCONNECT 0x00, is also removed from the stored session (`[MQTT-3.1.2-10]`).
+
+**Manifest**: both tests are listed under MQTT-3.1.3-9, whose manifest text matches `mqtt-v5.0-statement-texts.txt`. The manifest entry labelled MQTT-3.1.2-8 carries the Will Retain text ("If the Will Flag is set to 0, then Will Retain MUST be set to 0"), not the Will publication statement, so neither test is cited there. That drift is left as it was.
+
+**Broker-side coverage**: `crates/mqtt5/tests/will_delay.rs` covers resume and clean-start reconnects, no reconnect, Session Expiry 0 and 2 against longer delays, reconnect-then-drop, DISCONNECT 0x00 and 0x04, and takeover with and without a delay. Six of these fail on the unfixed broker. The other four are regression guards for behaviour that was already correct.
+
 ### Quorum review of the client fixes, and a TLA+-verified outcome model for the offline queue (2026-09-23)
 
 **Trigger**: a five-reviewer quorum review of PR #164 before merge. Most findings came with a failing test. The worst was a regression in the wasm client: a v3.1.1 persistent session could never reconnect, because the session-lifetime check used Session Expiry (always 0 in 3.1.1) and the new strict `[MQTT-3.2.2-4]` check then rejected the broker's Session Present=1 forever. Other findings: QUIC teardown left the connection open after the client's own DISCONNECT; a publish waiting across a reconnect was sent under the old server's limits; and the offline queue dropped messages silently after `publish()` had returned success. All were fixed in the same PR.

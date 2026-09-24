@@ -519,7 +519,7 @@ level = "MustNot"
 applies_to = "Server"
 text = "If a new Network Connection to this Session is made before the Will Delay Interval has passed, the Server MUST NOT send the Will Message"
 status = "Tested"
-test_names = ["will_delay_reconnect_suppresses_will"]
+test_names = ["will_delay_reconnect_suppresses_will", "will_delay_elapsed_publishes_will"]
 
 [[sections."3.1".statements]]
 id = "MQTT-3.1.3-10"
