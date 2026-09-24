@@ -10,9 +10,7 @@ use crate::packet::unsubscribe::UnsubscribePacket;
 use crate::protocol::v5::properties::Properties;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::transport::tls::TlsConfig;
-use crate::types::{
-    ConnectOptions, ConnectResult, PublishOptions, PublishResult, SubscribeOptions,
-};
+use crate::types::{ConnectOptions, ConnectResult, PublishOptions, SubscribeOptions};
 use crate::QoS;
 use std::future::Future;
 use std::sync::Arc;
@@ -28,6 +26,7 @@ mod direct;
 mod error_recovery;
 mod inner;
 pub mod mock;
+mod publish_outcome;
 mod retry;
 mod state;
 pub mod r#trait;
@@ -40,6 +39,9 @@ pub use self::error_recovery::{
     is_recoverable, retry_delay, ErrorRecoveryConfig, RecoverableError, RetryState,
 };
 pub use self::mock::{MockCall, MockMqttClient};
+pub use self::publish_outcome::{
+    Delivery, IndeterminateReason, PublishHandle, PublishOutcome, PublishRejection, PublishResult,
+};
 pub use self::r#trait::MqttClientTrait;
 
 pub use builders::ConnectionEventCallback;
@@ -65,7 +67,8 @@ pub(crate) async fn fire_connection_event(
 pub use self::direct::AckToken;
 use self::direct::AutomaticReconnectLifecycle;
 #[cfg(not(target_arch = "wasm32"))]
-use self::direct::DirectClientInner;
+use self::direct::{DirectClientInner, ReadyPublish, StagedPublish, Transmitted};
+use crate::session::flow_control::FlowControlManager;
 
 /// Thread-safe MQTT v5.0 client
 ///
@@ -396,9 +399,18 @@ impl MqttClient {
 
     /// Publishes a message with custom options
     ///
+    /// Returns [`PublishResult::Sent`] once a live publish is written (`QoS` 0) or
+    /// acknowledged (`QoS` 1/2). Returns [`PublishResult::Queued`] when a `QoS` 1/2
+    /// publish is queued while disconnected, or when it was sent but the connection
+    /// ended, the client disconnected or the acknowledgement did not arrive in time;
+    /// await its handle for the eventual [`crate::PublishOutcome`].
+    ///
     /// # Errors
     ///
-    /// Returns an error if the operation fails
+    /// Returns an error when the publish is definitely not delivered: invalid topic or
+    /// options, not connected without offline queueing, a capability violation, a
+    /// failed write before the message was stored, or an error reason code in PUBACK or
+    /// PUBREC (`PublishFailed`).
     #[instrument(skip(self, topic, payload, options), fields(qos = ?options.qos, retain = %options.retain))]
     pub async fn publish_with_options(
         &self,
@@ -419,15 +431,25 @@ impl MqttClient {
             "Publishing MQTT message"
         );
 
-        let inner = self.inner.read().await;
-        match inner.publish(topic_str.clone(), payload_vec, options).await {
+        let staged = self
+            .inner
+            .read()
+            .await
+            .stage_publish(topic_str.clone(), payload_vec, options)
+            .await;
+        let outcome = match staged {
+            Ok(StagedPublish::Queued(handle)) => Ok(PublishResult::Queued(handle)),
+            Ok(StagedPublish::Ready(publish)) => self.send_staged_publish(publish).await,
+            Err(e) => Err(e),
+        };
+        match outcome {
             Ok(result) => {
                 match &result {
-                    PublishResult::QoS0 => {
-                        tracing::debug!(client_id = %client_id, topic = %topic_str, "Published QoS0 message");
+                    PublishResult::Sent(delivery) => {
+                        tracing::debug!(client_id = %client_id, topic = %topic_str, ?delivery, "Published message");
                     }
-                    PublishResult::QoS1Or2 { packet_id } => {
-                        tracing::debug!(client_id = %client_id, topic = %topic_str, packet_id = %packet_id, "Published QoS1/2 message");
+                    PublishResult::Queued(_) => {
+                        tracing::debug!(client_id = %client_id, topic = %topic_str, "Queued message while disconnected");
                     }
                 }
                 Ok(result)
@@ -435,6 +457,31 @@ impl MqttClient {
             Err(e) => {
                 tracing::error!(client_id = %client_id, topic = %topic_str, error = %e, "Failed to publish MQTT message");
                 Err(e)
+            }
+        }
+    }
+
+    async fn send_staged_publish(&self, mut ready: Box<ReadyPublish>) -> Result<PublishResult> {
+        loop {
+            let claim = match ready.packet_id() {
+                Some(pid) => {
+                    let flow =
+                        Arc::clone(self.inner.read().await.session.read().await.flow_control());
+                    Some(FlowControlManager::acquire_shared_send_quota(&flow, pid).await?)
+                }
+                None => None,
+            };
+            let transmitted = self
+                .inner
+                .read()
+                .await
+                .transmit_publish(ready, claim)
+                .await?;
+            match transmitted {
+                Transmitted::Sent(delivery) => return Ok(PublishResult::Sent(delivery)),
+                Transmitted::InFlight(in_flight) => return in_flight.settle().await,
+                Transmitted::Detached(handle) => return Ok(PublishResult::Queued(handle)),
+                Transmitted::Restaged(next) => ready = next,
             }
         }
     }
@@ -526,6 +573,12 @@ impl MqttClient {
     /// before the session's ack durably reached the broker) and when it was rejected (a
     /// lost error acknowledgement; see [`AckToken::reject`]). Exactly-once applies only
     /// to a message whose ack completes on a session that survives in memory.
+    ///
+    /// Acknowledgements leave in arrival order (`[MQTT-4.6.0-2]`/`[MQTT-4.6.0-3]`), so an
+    /// unresolved token blocks every later PUBACK/PUBREC on the connection, including the
+    /// automatic ones for plain [`subscribe`](Self::subscribe) callbacks, and holding it
+    /// keeps those messages in the broker's in-flight window. Resolve tokens promptly;
+    /// see [`AckToken`] for details.
     ///
     /// # Errors
     /// Returns an error if `deferred_ack` was not enabled on the connection, or if the
@@ -705,19 +758,20 @@ impl MqttClient {
         );
 
         let inner = self.inner.read().await;
-        let _ = inner.callback_manager.unregister(&topic_filter);
-        let _ = inner.ack_callbacks.unregister(&topic_filter);
-        inner
-            .stored_ack_subscriptions
-            .lock()
-            .retain(|(topic, _, _, _)| topic != &topic_filter);
-
         let packet = UnsubscribePacket {
             packet_id: 0,
             filters: vec![topic_filter.clone()],
             properties: Properties::default(),
             protocol_version: inner.options.protocol_version.as_u8(),
         };
+        inner.check_unsubscribe(&packet).await?;
+
+        let _ = inner.callback_manager.unregister(&topic_filter);
+        let _ = inner.ack_callbacks.unregister(&topic_filter);
+        inner
+            .stored_ack_subscriptions
+            .lock()
+            .retain(|(topic, _, _, _)| topic != &topic_filter);
 
         match inner.unsubscribe(packet).await {
             Ok(()) => {
@@ -934,18 +988,17 @@ impl MqttClient {
     }
 }
 
-#[allow(clippy::manual_async_fn)]
 impl MqttClientTrait for MqttClient {
     fn is_connected(&self) -> impl Future<Output = bool> + Send + '_ {
-        async move { self.is_connected().await }
+        self.is_connected()
     }
 
     fn client_id(&self) -> impl Future<Output = String> + Send + '_ {
-        async move { self.client_id().await }
+        self.client_id()
     }
 
     fn connect<'a>(&'a self, address: &'a str) -> impl Future<Output = Result<()>> + Send + 'a {
-        async move { self.connect(address).await }
+        self.connect(address)
     }
 
     fn connect_with_options<'a>(
@@ -953,11 +1006,11 @@ impl MqttClientTrait for MqttClient {
         address: &'a str,
         options: ConnectOptions,
     ) -> impl Future<Output = Result<ConnectResult>> + Send + 'a {
-        async move { Box::pin(self.connect_with_options(address, options)).await }
+        Box::pin(self.connect_with_options(address, options))
     }
 
     fn disconnect(&self) -> impl Future<Output = Result<()>> + Send + '_ {
-        async move { self.disconnect().await }
+        self.disconnect()
     }
 
     fn publish<'a>(
@@ -965,7 +1018,7 @@ impl MqttClientTrait for MqttClient {
         topic: impl Into<String> + Send + 'a,
         payload: impl Into<Vec<u8>> + Send + 'a,
     ) -> impl Future<Output = Result<PublishResult>> + Send + 'a {
-        async move { self.publish(topic, payload).await }
+        self.publish(topic, payload)
     }
 
     fn publish_qos<'a>(
@@ -974,7 +1027,7 @@ impl MqttClientTrait for MqttClient {
         payload: impl Into<Vec<u8>> + Send + 'a,
         qos: QoS,
     ) -> impl Future<Output = Result<PublishResult>> + Send + 'a {
-        async move { self.publish_qos(topic, payload, qos).await }
+        self.publish_qos(topic, payload, qos)
     }
 
     fn publish_with_options<'a>(
@@ -983,7 +1036,7 @@ impl MqttClientTrait for MqttClient {
         payload: impl Into<Vec<u8>> + Send + 'a,
         options: PublishOptions,
     ) -> impl Future<Output = Result<PublishResult>> + Send + 'a {
-        async move { self.publish_with_options(topic, payload, options).await }
+        self.publish_with_options(topic, payload, options)
     }
 
     fn subscribe<'a, F>(
@@ -994,7 +1047,7 @@ impl MqttClientTrait for MqttClient {
     where
         F: Fn(crate::types::Message) + Send + Sync + 'static,
     {
-        async move { self.subscribe(topic_filter, callback).await }
+        self.subscribe(topic_filter, callback)
     }
 
     fn subscribe_with_options<'a, F>(
@@ -1006,17 +1059,14 @@ impl MqttClientTrait for MqttClient {
     where
         F: Fn(crate::types::Message) + Send + Sync + 'static,
     {
-        async move {
-            self.subscribe_with_options(topic_filter, options, callback)
-                .await
-        }
+        self.subscribe_with_options(topic_filter, options, callback)
     }
 
     fn unsubscribe<'a>(
         &'a self,
         topic_filter: impl Into<String> + Send + 'a,
     ) -> impl Future<Output = Result<()>> + Send + 'a {
-        async move { self.unsubscribe(topic_filter).await }
+        self.unsubscribe(topic_filter)
     }
 
     fn subscribe_many<'a, F>(
@@ -1027,14 +1077,14 @@ impl MqttClientTrait for MqttClient {
     where
         F: Fn(crate::types::Message) + Send + Sync + 'static + Clone,
     {
-        async move { self.subscribe_many(topics, callback).await }
+        self.subscribe_many(topics, callback)
     }
 
     fn unsubscribe_many<'a>(
         &'a self,
         topics: Vec<&'a str>,
     ) -> impl Future<Output = Result<Vec<(String, Result<()>)>>> + Send + 'a {
-        async move { self.unsubscribe_many(topics).await }
+        self.unsubscribe_many(topics)
     }
 
     fn publish_retain<'a>(
@@ -1042,7 +1092,7 @@ impl MqttClientTrait for MqttClient {
         topic: impl Into<String> + Send + 'a,
         payload: impl Into<Vec<u8>> + Send + 'a,
     ) -> impl Future<Output = Result<PublishResult>> + Send + 'a {
-        async move { self.publish_retain(topic, payload).await }
+        self.publish_retain(topic, payload)
     }
 
     fn publish_qos0<'a>(
@@ -1050,7 +1100,7 @@ impl MqttClientTrait for MqttClient {
         topic: impl Into<String> + Send + 'a,
         payload: impl Into<Vec<u8>> + Send + 'a,
     ) -> impl Future<Output = Result<PublishResult>> + Send + 'a {
-        async move { self.publish_qos0(topic, payload).await }
+        self.publish_qos0(topic, payload)
     }
 
     fn publish_qos1<'a>(
@@ -1058,7 +1108,7 @@ impl MqttClientTrait for MqttClient {
         topic: impl Into<String> + Send + 'a,
         payload: impl Into<Vec<u8>> + Send + 'a,
     ) -> impl Future<Output = Result<PublishResult>> + Send + 'a {
-        async move { self.publish_qos1(topic, payload).await }
+        self.publish_qos1(topic, payload)
     }
 
     fn publish_qos2<'a>(
@@ -1066,15 +1116,15 @@ impl MqttClientTrait for MqttClient {
         topic: impl Into<String> + Send + 'a,
         payload: impl Into<Vec<u8>> + Send + 'a,
     ) -> impl Future<Output = Result<PublishResult>> + Send + 'a {
-        async move { self.publish_qos2(topic, payload).await }
+        self.publish_qos2(topic, payload)
     }
 
     fn is_queue_on_disconnect(&self) -> impl Future<Output = bool> + Send + '_ {
-        async move { self.is_queue_on_disconnect().await }
+        self.is_queue_on_disconnect()
     }
 
     fn set_queue_on_disconnect(&self, enabled: bool) -> impl Future<Output = ()> + Send + '_ {
-        async move { self.set_queue_on_disconnect(enabled).await }
+        self.set_queue_on_disconnect(enabled)
     }
 }
 

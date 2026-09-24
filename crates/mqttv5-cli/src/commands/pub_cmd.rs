@@ -1,6 +1,3 @@
-#![allow(clippy::large_futures)]
-#![allow(clippy::struct_excessive_bools)]
-
 use anyhow::{Context, Result};
 use clap::Args;
 use dialoguer::{Input, Select};
@@ -9,39 +6,25 @@ use mqtt5::time::Duration;
 #[cfg(feature = "codec")]
 use mqtt5::{CodecRegistry, DeflateCodec, GzipCodec};
 use mqtt5::{
-    ConnectOptions, ConnectionEvent, Message, MqttClient, ProtocolVersion, PublishOptions, QoS,
+    ConnectOptions, ConnectionEvent, Message, MqttClient, PublishOptions, PublishResult, QoS,
     WillMessage,
 };
 use std::io::{self, Read};
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use tokio::signal;
 use tokio::sync::Notify;
 use tracing::{debug, info, warn};
 
+use super::client_args::{parse_qos, QuicArgs, SessionArgs, TlsArgs, WillArgs};
 use super::parsers::{
     calculate_wait_until, duration_secs_to_u32, parse_duration_millis, parse_duration_secs,
-    parse_stream_strategy,
 };
 
 #[derive(Args)]
 pub struct PubCommand {
-    /// MQTT topic to publish to
-    #[arg(long, short, env = "MQTT5_TOPIC")]
-    pub topic: Option<String>,
-
-    /// Message to publish
-    #[arg(long, short, env = "MQTT5_MESSAGE")]
-    pub message: Option<String>,
-
-    /// Read message from file
-    #[arg(long, short, env = "MQTT5_FILE")]
-    pub file: Option<String>,
-
-    /// Read message from stdin
-    #[arg(long, env = "MQTT5_STDIN")]
-    pub stdin: bool,
+    #[command(flatten)]
+    pub payload: PubPayloadArgs,
 
     /// Full broker URL for TLS/WebSocket/QUIC (e.g., <mqtts://host:8883>, <wss://host/mqtt>)
     #[arg(long, short = 'U', conflicts_with_all = &["host", "port"], env = "MQTT5_URL")]
@@ -55,45 +38,11 @@ pub struct PubCommand {
     #[arg(long, short, default_value = "1883", env = "MQTT5_PORT")]
     pub port: u16,
 
-    /// Quality of Service level (0, 1, or 2)
-    #[arg(long, short, value_parser = parse_qos, env = "MQTT5_QOS")]
-    pub qos: Option<QoS>,
+    #[command(flatten)]
+    pub message_options: PubMessageOptionArgs,
 
-    /// Retain message
-    #[arg(long, short, env = "MQTT5_RETAIN")]
-    pub retain: bool,
-
-    /// Message expiry interval in seconds (0 = no expiry)
-    #[arg(long, env = "MQTT5_MESSAGE_EXPIRY_INTERVAL")]
-    pub message_expiry_interval: Option<u32>,
-
-    /// Topic alias (1-65535) for repeated publishing to same topic
-    #[arg(long, env = "MQTT5_TOPIC_ALIAS")]
-    pub topic_alias: Option<u16>,
-
-    /// Response topic for request/response pattern (MQTT 5.0)
-    #[arg(long, env = "MQTT5_RESPONSE_TOPIC")]
-    pub response_topic: Option<String>,
-
-    /// Correlation data for request/response pattern (MQTT 5.0, hex-encoded)
-    #[arg(long, env = "MQTT5_CORRELATION_DATA")]
-    pub correlation_data: Option<String>,
-
-    /// Wait for response after publishing (requires --response-topic)
-    #[arg(long, env = "MQTT5_WAIT_RESPONSE")]
-    pub wait_response: bool,
-
-    /// Timeout when waiting for response (e.g., 30s, 1m) (default: 30s)
-    #[arg(long, default_value = "30", value_parser = parse_duration_secs, env = "MQTT5_TIMEOUT")]
-    pub timeout: u64,
-
-    /// Number of responses to wait for (default: 1, 0 = unlimited until timeout)
-    #[arg(long, default_value = "1", env = "MQTT5_RESPONSE_COUNT")]
-    pub response_count: u32,
-
-    /// Output format for responses: raw, json, verbose
-    #[arg(long, default_value = "raw", value_parser = ["raw", "json", "verbose"], env = "MQTT5_OUTPUT_FORMAT")]
-    pub output_format: String,
+    #[command(flatten)]
+    pub response: PubResponseArgs,
 
     /// Username for authentication
     #[arg(long, short, env = "MQTT5_USERNAME")]
@@ -119,53 +68,14 @@ pub struct PubCommand {
     #[arg(long, env = "MQTT5_NON_INTERACTIVE")]
     pub non_interactive: bool,
 
-    /// Don't clean start (resume existing session)
-    #[arg(long = "no-clean-start", env = "MQTT5_NO_CLEAN_START")]
-    pub no_clean_start: bool,
+    #[command(flatten)]
+    pub session: SessionArgs,
 
-    /// Session expiry interval (e.g., 1h, 30m) (0 = expire on disconnect)
-    #[arg(long, value_parser = parse_duration_secs, env = "MQTT5_SESSION_EXPIRY")]
-    pub session_expiry: Option<u64>,
+    #[command(flatten)]
+    pub will: WillArgs,
 
-    /// Keep alive interval (e.g., 60s, 1m) (default: 60s)
-    #[arg(long, short = 'k', default_value = "60", value_parser = parse_duration_secs, env = "MQTT5_KEEP_ALIVE")]
-    pub keep_alive: u64,
-
-    /// MQTT protocol version (3.1.1 or 5, default: 5)
-    #[arg(long, value_parser = parse_protocol_version, env = "MQTT5_PROTOCOL_VERSION")]
-    pub protocol_version: Option<ProtocolVersion>,
-
-    /// Will topic (last will and testament)
-    #[arg(long, env = "MQTT5_WILL_TOPIC")]
-    pub will_topic: Option<String>,
-
-    /// Will message payload
-    #[arg(long, env = "MQTT5_WILL_MESSAGE")]
-    pub will_message: Option<String>,
-
-    /// Will `QoS` level (0, 1, or 2)
-    #[arg(long, value_parser = parse_qos, env = "MQTT5_WILL_QOS")]
-    pub will_qos: Option<QoS>,
-
-    /// Will retain flag
-    #[arg(long, env = "MQTT5_WILL_RETAIN")]
-    pub will_retain: bool,
-
-    /// TLS certificate file (PEM format) for secure connections
-    #[arg(long, env = "MQTT5_CERT")]
-    pub cert: Option<PathBuf>,
-
-    /// TLS private key file (PEM format) for secure connections
-    #[arg(long, env = "MQTT5_KEY")]
-    pub key: Option<PathBuf>,
-
-    /// TLS CA certificate file (PEM format) for server verification
-    #[arg(long, env = "MQTT5_CA_CERT")]
-    pub ca_cert: Option<PathBuf>,
-
-    /// Skip certificate verification for TLS/QUIC connections (insecure, for testing only)
-    #[arg(long, env = "MQTT5_INSECURE")]
-    pub insecure: bool,
+    #[command(flatten)]
+    pub tls: TlsArgs,
 
     /// Will delay interval (e.g., 5m, 1h)
     #[arg(long, value_parser = parse_duration_secs, env = "MQTT5_WILL_DELAY")]
@@ -179,33 +89,8 @@ pub struct PubCommand {
     #[arg(long, env = "MQTT5_AUTO_RECONNECT")]
     pub auto_reconnect: bool,
 
-    /// QUIC stream strategy (control-only, per-publish, per-topic, per-subscription)
-    #[arg(long, value_parser = parse_stream_strategy, env = "MQTT5_QUIC_STREAM_STRATEGY")]
-    pub quic_stream_strategy: Option<mqtt5::transport::StreamStrategy>,
-
-    /// Enable `MQoQ` flow headers for stream state tracking
-    #[arg(long, env = "MQTT5_QUIC_FLOW_HEADERS")]
-    pub quic_flow_headers: bool,
-
-    /// Flow expiration interval (e.g., 5m, 1h) (default: 5m)
-    #[arg(long, default_value = "300", value_parser = parse_duration_secs, env = "MQTT5_QUIC_FLOW_EXPIRE")]
-    pub quic_flow_expire: u64,
-
-    /// Maximum concurrent QUIC streams
-    #[arg(long, env = "MQTT5_QUIC_MAX_STREAMS")]
-    pub quic_max_streams: Option<usize>,
-
-    /// Enable QUIC datagrams for unreliable transport
-    #[arg(long, env = "MQTT5_QUIC_DATAGRAMS")]
-    pub quic_datagrams: bool,
-
-    /// QUIC connection timeout (e.g., 30s, 1m) (default: 30s)
-    #[arg(long, default_value = "30", value_parser = parse_duration_secs, env = "MQTT5_QUIC_CONNECT_TIMEOUT")]
-    pub quic_connect_timeout: u64,
-
-    /// Enable QUIC 0-RTT early data for faster reconnections
-    #[arg(long, env = "MQTT5_QUIC_EARLY_DATA")]
-    pub quic_early_data: bool,
+    #[command(flatten)]
+    pub quic: QuicArgs,
 
     /// Delay before publishing (e.g., 5s, 1m30s)
     #[arg(long, value_parser = parse_duration_secs, env = "MQTT5_DELAY")]
@@ -264,33 +149,81 @@ pub struct PubCommand {
     pub codec_min_size: usize,
 }
 
-fn parse_qos(s: &str) -> Result<QoS, String> {
-    match s {
-        "0" => Ok(QoS::AtMostOnce),
-        "1" => Ok(QoS::AtLeastOnce),
-        "2" => Ok(QoS::ExactlyOnce),
-        _ => Err(format!("QoS must be 0, 1, or 2, got: {s}")),
-    }
+#[derive(Args)]
+pub struct PubPayloadArgs {
+    /// MQTT topic to publish to
+    #[arg(long, short, env = "MQTT5_TOPIC")]
+    pub topic: Option<String>,
+
+    /// Message to publish
+    #[arg(long, short, env = "MQTT5_MESSAGE")]
+    pub message: Option<String>,
+
+    /// Read message from file
+    #[arg(long, short, env = "MQTT5_FILE")]
+    pub file: Option<String>,
+
+    /// Read message from stdin
+    #[arg(long, env = "MQTT5_STDIN")]
+    pub stdin: bool,
 }
 
-fn parse_protocol_version(s: &str) -> Result<ProtocolVersion, String> {
-    match s {
-        "3.1.1" | "311" | "4" => Ok(ProtocolVersion::V311),
-        "5" | "5.0" => Ok(ProtocolVersion::V5),
-        _ => Err(format!("Invalid protocol version: {s}. Use '3.1.1' or '5'")),
-    }
+#[derive(Args)]
+pub struct PubMessageOptionArgs {
+    /// Quality of Service level (0, 1, or 2)
+    #[arg(long, short, value_parser = parse_qos, env = "MQTT5_QOS")]
+    pub qos: Option<QoS>,
+
+    /// Retain message
+    #[arg(long, short, env = "MQTT5_RETAIN")]
+    pub retain: bool,
+
+    /// Message expiry interval in seconds (0 = no expiry)
+    #[arg(long, env = "MQTT5_MESSAGE_EXPIRY_INTERVAL")]
+    pub message_expiry_interval: Option<u32>,
+
+    /// Topic alias (1-65535) for repeated publishing to same topic
+    #[arg(long, env = "MQTT5_TOPIC_ALIAS")]
+    pub topic_alias: Option<u16>,
+}
+
+#[derive(Args)]
+pub struct PubResponseArgs {
+    /// Response topic for request/response pattern (MQTT 5.0)
+    #[arg(long, env = "MQTT5_RESPONSE_TOPIC")]
+    pub response_topic: Option<String>,
+
+    /// Correlation data for request/response pattern (MQTT 5.0, hex-encoded)
+    #[arg(long, env = "MQTT5_CORRELATION_DATA")]
+    pub correlation_data: Option<String>,
+
+    /// Wait for response after publishing (requires --response-topic)
+    #[arg(long, env = "MQTT5_WAIT_RESPONSE")]
+    pub wait_response: bool,
+
+    /// Timeout when waiting for response (e.g., 30s, 1m) (default: 30s)
+    #[arg(long, default_value = "30", value_parser = parse_duration_secs, env = "MQTT5_TIMEOUT")]
+    pub timeout: u64,
+
+    /// Number of responses to wait for (default: 1, 0 = unlimited until timeout)
+    #[arg(long, default_value = "1", env = "MQTT5_RESPONSE_COUNT")]
+    pub response_count: u32,
+
+    /// Output format for responses: raw, json, verbose
+    #[arg(long, default_value = "raw", value_parser = ["raw", "json", "verbose"], env = "MQTT5_OUTPUT_FORMAT")]
+    pub output_format: String,
 }
 
 fn prompt_topic_and_qos(cmd: &mut PubCommand) -> Result<(String, QoS)> {
-    if cmd.topic.is_none() && !cmd.non_interactive {
+    if cmd.payload.topic.is_none() && !cmd.non_interactive {
         let topic = Input::<String>::new()
             .with_prompt("MQTT topic (e.g., sensors/temperature, home/status)")
             .interact()
             .context("Failed to get topic input")?;
-        cmd.topic = Some(topic);
+        cmd.payload.topic = Some(topic);
     }
 
-    let topic = cmd.topic.take().ok_or_else(|| {
+    let topic = cmd.payload.topic.take().ok_or_else(|| {
         anyhow::anyhow!("Topic is required. Use --topic or run without --non-interactive")
     })?;
 
@@ -312,11 +245,11 @@ fn prompt_topic_and_qos(cmd: &mut PubCommand) -> Result<(String, QoS)> {
         );
     }
 
-    if cmd.wait_response && cmd.response_topic.is_none() {
+    if cmd.response.wait_response && cmd.response.response_topic.is_none() {
         anyhow::bail!("--response-topic is required when using --wait-response");
     }
 
-    let qos = if cmd.qos.is_none() && !cmd.non_interactive {
+    let qos = if cmd.message_options.qos.is_none() && !cmd.non_interactive {
         let qos_options = vec![
             "0 (At most once - fire and forget)",
             "1 (At least once - acknowledged)",
@@ -335,10 +268,10 @@ fn prompt_topic_and_qos(cmd: &mut PubCommand) -> Result<(String, QoS)> {
             _ => QoS::AtMostOnce,
         }
     } else {
-        cmd.qos.unwrap_or(QoS::AtMostOnce)
+        cmd.message_options.qos.unwrap_or(QoS::AtMostOnce)
     };
 
-    if cmd.wait_response && qos == QoS::AtMostOnce {
+    if cmd.response.wait_response && qos == QoS::AtMostOnce {
         warn!("Using --wait-response with QoS 0 may be unreliable; consider using -q 1 or -q 2");
     }
 
@@ -347,18 +280,19 @@ fn prompt_topic_and_qos(cmd: &mut PubCommand) -> Result<(String, QoS)> {
 
 fn build_connect_options(cmd: &PubCommand, client_id: &str) -> ConnectOptions {
     let mut options = ConnectOptions::new(client_id.to_owned())
-        .with_clean_start(!cmd.no_clean_start)
-        .with_keep_alive(Duration::from_secs(cmd.keep_alive));
+        .with_clean_start(!cmd.session.no_clean_start)
+        .with_resume_existing_session(cmd.session.no_clean_start)
+        .with_keep_alive(Duration::from_secs(cmd.session.keep_alive));
 
     if cmd.auto_reconnect {
         options = options.with_automatic_reconnect(true);
     }
 
-    if let Some(version) = cmd.protocol_version {
+    if let Some(version) = cmd.session.protocol_version {
         options = options.with_protocol_version(version);
     }
 
-    if let Some(expiry) = cmd.session_expiry {
+    if let Some(expiry) = cmd.session.session_expiry {
         options = options.with_session_expiry_interval(duration_secs_to_u32(expiry));
     }
 
@@ -411,11 +345,11 @@ async fn configure_auth(
 }
 
 fn configure_will(options: &mut ConnectOptions, cmd: &PubCommand) {
-    if let Some(topic) = cmd.will_topic.clone() {
-        let payload = cmd.will_message.clone().unwrap_or_default();
-        let mut will = WillMessage::new(topic, payload.into_bytes()).with_retain(cmd.will_retain);
+    if let Some(topic) = cmd.will.topic.clone() {
+        let payload = cmd.will.message.clone().unwrap_or_default();
+        let mut will = WillMessage::new(topic, payload.into_bytes()).with_retain(cmd.will.retain);
 
-        if let Some(qos) = cmd.will_qos {
+        if let Some(qos) = cmd.will.qos {
             will = will.with_qos(qos);
         }
 
@@ -428,29 +362,29 @@ fn configure_will(options: &mut ConnectOptions, cmd: &PubCommand) {
 }
 
 async fn configure_quic_transport(client: &MqttClient, cmd: &PubCommand) {
-    if let Some(strategy) = cmd.quic_stream_strategy {
+    if let Some(strategy) = cmd.quic.stream_strategy {
         client.set_quic_stream_strategy(strategy).await;
         debug!("QUIC stream strategy: {:?}", strategy);
     }
-    if cmd.quic_flow_headers {
+    if cmd.quic.flow_headers {
         client.set_quic_flow_headers(true).await;
         debug!("QUIC flow headers enabled");
     }
     client
-        .set_quic_flow_expire(std::time::Duration::from_secs(cmd.quic_flow_expire))
+        .set_quic_flow_expire(std::time::Duration::from_secs(cmd.quic.flow_expire))
         .await;
-    if let Some(max) = cmd.quic_max_streams {
+    if let Some(max) = cmd.quic.max_streams {
         client.set_quic_max_streams(Some(max)).await;
         debug!("QUIC max streams: {max}");
     }
-    if cmd.quic_datagrams {
+    if cmd.quic.datagrams {
         client.set_quic_datagrams(true).await;
         debug!("QUIC datagrams enabled");
     }
     client
-        .set_quic_connect_timeout(Duration::from_secs(cmd.quic_connect_timeout))
+        .set_quic_connect_timeout(Duration::from_secs(cmd.quic.connect_timeout))
         .await;
-    if cmd.quic_early_data {
+    if cmd.quic.early_data {
         client.set_quic_early_data(true).await;
         debug!("QUIC 0-RTT early data enabled");
     }
@@ -464,17 +398,17 @@ async fn configure_tls_certs(
     let is_secure = broker_url.starts_with("ssl://")
         || broker_url.starts_with("mqtts://")
         || broker_url.starts_with("quics://");
-    let has_certs = cmd.cert.is_some() || cmd.key.is_some() || cmd.ca_cert.is_some();
+    let has_certs = cmd.tls.cert.is_some() || cmd.tls.key.is_some() || cmd.tls.ca_cert.is_some();
 
     if is_secure && has_certs {
-        let cert_pem = if let Some(cert_path) = &cmd.cert {
+        let cert_pem = if let Some(cert_path) = &cmd.tls.cert {
             Some(std::fs::read(cert_path).with_context(|| {
                 format!("Failed to read certificate file: {}", cert_path.display())
             })?)
         } else {
             None
         };
-        let key_pem = if let Some(key_path) = &cmd.key {
+        let key_pem = if let Some(key_path) = &cmd.tls.key {
             Some(
                 std::fs::read(key_path)
                     .with_context(|| format!("Failed to read key file: {}", key_path.display()))?,
@@ -482,7 +416,7 @@ async fn configure_tls_certs(
         } else {
             None
         };
-        let ca_pem = if let Some(ca_path) = &cmd.ca_cert {
+        let ca_pem = if let Some(ca_path) = &cmd.tls.ca_cert {
             Some(std::fs::read(ca_path).with_context(|| {
                 format!("Failed to read CA certificate file: {}", ca_path.display())
             })?)
@@ -495,6 +429,13 @@ async fn configure_tls_certs(
     Ok(())
 }
 
+fn awaited_response_topic(cmd: &PubCommand) -> Option<&str> {
+    cmd.response
+        .response_topic
+        .as_deref()
+        .filter(|_| cmd.response.wait_response)
+}
+
 async fn setup_response_subscription(
     client: &MqttClient,
     cmd: &PubCommand,
@@ -503,16 +444,15 @@ async fn setup_response_subscription(
     let received_count = Arc::new(AtomicU32::new(0));
     let done_notify = Arc::new(Notify::new());
 
-    if cmd.wait_response {
-        let response_topic = cmd.response_topic.as_ref().unwrap().clone();
+    if let Some(response_topic) = awaited_response_topic(cmd) {
         let expected_correlation = correlation_data;
-        let target_count = cmd.response_count;
-        let output_format = cmd.output_format.clone();
+        let target_count = cmd.response.response_count;
+        let output_format = cmd.response.output_format.clone();
         let received_clone = received_count.clone();
         let done_clone = done_notify.clone();
 
         client
-            .subscribe(&response_topic, move |msg: Message| {
+            .subscribe(response_topic, move |msg: Message| {
                 if let Some(ref expected) = expected_correlation {
                     match &msg.properties.correlation_data {
                         Some(received) if received == expected => {}
@@ -529,10 +469,7 @@ async fn setup_response_subscription(
             })
             .await?;
 
-        debug!(
-            "SUBACK received for '{}', subscription ready before publish",
-            response_topic
-        );
+        debug!("SUBACK received for '{response_topic}', subscription ready before publish");
     }
 
     Ok((received_count, done_notify))
@@ -572,10 +509,10 @@ async fn publish_loop(
     qos: QoS,
     correlation_data: Option<&Vec<u8>>,
 ) -> Result<()> {
-    let has_properties = cmd.retain
-        || cmd.message_expiry_interval.is_some()
-        || cmd.topic_alias.is_some()
-        || cmd.response_topic.is_some()
+    let has_properties = cmd.message_options.retain
+        || cmd.message_options.message_expiry_interval.is_some()
+        || cmd.message_options.topic_alias.is_some()
+        || cmd.response.response_topic.is_some()
         || correlation_data.is_some();
 
     let repeat_count = cmd.repeat.unwrap_or(1);
@@ -621,35 +558,39 @@ async fn publish_with_properties(
 ) -> Result<()> {
     let mut options = PublishOptions {
         qos,
-        retain: cmd.retain,
+        retain: cmd.message_options.retain,
         ..Default::default()
     };
-    options.properties.message_expiry_interval = cmd.message_expiry_interval;
-    options.properties.topic_alias = cmd.topic_alias;
+    options.properties.message_expiry_interval = cmd.message_options.message_expiry_interval;
+    options.properties.topic_alias = cmd.message_options.topic_alias;
     options
         .properties
         .response_topic
-        .clone_from(&cmd.response_topic);
+        .clone_from(&cmd.response.response_topic);
     options.properties.correlation_data = correlation_data.cloned();
-    client
-        .publish_with_options(topic, message.as_bytes(), options)
-        .await?;
-    Ok(())
+    require_sent(
+        &client
+            .publish_with_options(topic, message.as_bytes(), options)
+            .await?,
+    )
 }
 
 async fn publish_simple(client: &MqttClient, topic: &str, message: &str, qos: QoS) -> Result<()> {
-    match qos {
-        QoS::AtMostOnce => {
-            client.publish(topic, message.as_bytes()).await?;
-        }
-        QoS::AtLeastOnce => {
-            client.publish_qos1(topic, message.as_bytes()).await?;
-        }
-        QoS::ExactlyOnce => {
-            client.publish_qos2(topic, message.as_bytes()).await?;
-        }
+    let result = match qos {
+        QoS::AtMostOnce => client.publish(topic, message.as_bytes()).await?,
+        QoS::AtLeastOnce => client.publish_qos1(topic, message.as_bytes()).await?,
+        QoS::ExactlyOnce => client.publish_qos2(topic, message.as_bytes()).await?,
+    };
+    require_sent(&result)
+}
+
+pub(crate) fn require_sent(result: &PublishResult) -> Result<()> {
+    match result {
+        PublishResult::Sent(_) => Ok(()),
+        PublishResult::Queued(_) => Err(anyhow::anyhow!(
+            "publish was not acknowledged before the connection ended or the acknowledgement wait elapsed"
+        )),
     }
-    Ok(())
 }
 
 fn print_publish_result(cmd: &PubCommand, iteration: u64, topic: &str, qos: QoS) {
@@ -661,7 +602,7 @@ fn print_publish_result(cmd: &PubCommand, iteration: u64, topic: &str, qos: QoS)
     } else {
         println!("✓ Published message to '{}' (QoS {})", topic, qos as u8);
     }
-    if cmd.retain {
+    if cmd.message_options.retain {
         println!("  Message retained on broker");
     }
 }
@@ -672,17 +613,14 @@ async fn wait_for_response(
     received_count: Arc<AtomicU32>,
     client: &MqttClient,
 ) -> Result<()> {
-    if !cmd.wait_response {
+    let Some(response_topic) = awaited_response_topic(cmd) else {
         return Ok(());
-    }
+    };
 
-    let timeout_secs = cmd.timeout;
-    let target_count = cmd.response_count;
+    let timeout_secs = cmd.response.timeout;
+    let target_count = cmd.response.response_count;
 
-    println!(
-        "Waiting for response on '{}'...",
-        cmd.response_topic.as_ref().unwrap()
-    );
+    println!("Waiting for response on '{response_topic}'...");
 
     tokio::select! {
         () = done_notify.notified() => {
@@ -799,7 +737,7 @@ pub async fn execute(mut cmd: PubCommand, verbose: bool, debug: bool) -> Result<
     #[cfg(feature = "codec")]
     configure_codec(&mut options, &cmd)?;
 
-    if cmd.insecure {
+    if cmd.tls.insecure {
         client.set_insecure_tls(true).await;
         info!("Insecure TLS mode enabled (certificate verification disabled)");
     }
@@ -819,17 +757,18 @@ pub async fn execute(mut cmd: PubCommand, verbose: bool, debug: bool) -> Result<
 
     info!("Publishing to topic '{}'...", topic);
 
-    if cmd.topic_alias == Some(0) {
+    if cmd.message_options.topic_alias == Some(0) {
         anyhow::bail!("Topic alias must be between 1 and 65535, got: 0");
     }
 
-    let correlation_data: Option<Vec<u8>> = if cmd.wait_response && cmd.correlation_data.is_none() {
-        Some(format!("rr-{}", rand::rng().random::<u64>()).into_bytes())
-    } else if let Some(ref hex_data) = cmd.correlation_data {
-        Some(hex::decode(hex_data).context("Invalid hex in --correlation-data")?)
-    } else {
-        None
-    };
+    let correlation_data: Option<Vec<u8>> =
+        if cmd.response.wait_response && cmd.response.correlation_data.is_none() {
+            Some(format!("rr-{}", rand::rng().random::<u64>()).into_bytes())
+        } else if let Some(ref hex_data) = cmd.response.correlation_data {
+            Some(hex::decode(hex_data).context("Invalid hex in --correlation-data")?)
+        } else {
+            None
+        };
 
     let (received_count, done_notify) =
         setup_response_subscription(&client, &cmd, correlation_data.clone()).await?;
@@ -915,7 +854,7 @@ fn configure_codec(options: &mut ConnectOptions, cmd: &PubCommand) -> Result<()>
 }
 
 async fn get_message_content(cmd: &mut PubCommand) -> Result<String> {
-    if cmd.stdin {
+    if cmd.payload.stdin {
         debug!("Reading message from stdin");
         let mut buffer = String::new();
         io::stdin()
@@ -924,7 +863,7 @@ async fn get_message_content(cmd: &mut PubCommand) -> Result<String> {
         return Ok(buffer.trim().to_string());
     }
 
-    if let Some(file_path) = &cmd.file {
+    if let Some(file_path) = &cmd.payload.file {
         debug!("Reading message from file: {}", file_path);
         let content = tokio::fs::read_to_string(file_path)
             .await
@@ -932,7 +871,7 @@ async fn get_message_content(cmd: &mut PubCommand) -> Result<String> {
         return Ok(content.trim().to_string());
     }
 
-    if let Some(message) = &cmd.message {
+    if let Some(message) = &cmd.payload.message {
         return Ok(message.clone());
     }
 

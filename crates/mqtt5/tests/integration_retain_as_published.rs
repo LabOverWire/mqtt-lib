@@ -1,8 +1,7 @@
 #![cfg(feature = "broker")]
-use mqtt5::broker::router::MessageRouter;
+use mqtt5::broker::router::{MessageRouter, SubscriptionRequest};
 use mqtt5::packet::publish::PublishPacket;
 use mqtt5::time::Duration;
-use mqtt5::types::ProtocolVersion;
 use mqtt5::QoS;
 use std::sync::Arc;
 
@@ -26,18 +25,11 @@ async fn test_retain_as_published_false_clears_retain_flag() {
         .await;
 
     router
-        .subscribe(
-            "subscriber".to_string(),
-            "test/topic".to_string(),
+        .subscribe(SubscriptionRequest::new(
+            "subscriber",
+            "test/topic",
             QoS::AtMostOnce,
-            None,
-            false,
-            false,
-            0,
-            ProtocolVersion::V5,
-            false,
-            None,
-        )
+        ))
         .await
         .unwrap();
 
@@ -75,16 +67,8 @@ async fn test_retain_as_published_true_preserves_retain_flag() {
 
     router
         .subscribe(
-            "subscriber".to_string(),
-            "test/topic".to_string(),
-            QoS::AtMostOnce,
-            None,
-            false,
-            true,
-            0,
-            ProtocolVersion::V5,
-            false,
-            None,
+            SubscriptionRequest::new("subscriber", "test/topic", QoS::AtMostOnce)
+                .with_retain_as_published(true),
         )
         .await
         .unwrap();

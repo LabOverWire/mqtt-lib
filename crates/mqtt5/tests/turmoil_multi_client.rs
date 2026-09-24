@@ -6,13 +6,12 @@
 //! subscription management.
 
 #[cfg(feature = "turmoil-testing")]
-use mqtt5::broker::router::MessageRouter;
+use mqtt5::broker::router::{MessageRouter, SubscriptionRequest};
 #[cfg(feature = "turmoil-testing")]
 use mqtt5::packet::publish::PublishPacket;
 #[cfg(feature = "turmoil-testing")]
 use mqtt5::time::Duration;
 #[cfg(feature = "turmoil-testing")]
-use mqtt5::types::ProtocolVersion;
 #[cfg(feature = "turmoil-testing")]
 use mqtt5::QoS;
 #[cfg(feature = "turmoil-testing")]
@@ -48,18 +47,11 @@ fn test_multi_client_message_routing() {
             )
             .await;
         router
-            .subscribe(
-                "temp_monitor".to_string(),
-                "sensors/+/temperature".to_string(),
+            .subscribe(SubscriptionRequest::new(
+                "temp_monitor",
+                "sensors/+/temperature",
                 QoS::AtMostOnce,
-                None,
-                false,
-                false,
-                0,
-                ProtocolVersion::V5,
-                false,
-                None,
-            )
+            ))
             .await
             .unwrap();
 
@@ -77,18 +69,11 @@ fn test_multi_client_message_routing() {
             )
             .await;
         router
-            .subscribe(
-                "humidity_monitor".to_string(),
-                "sensors/+/humidity".to_string(),
+            .subscribe(SubscriptionRequest::new(
+                "humidity_monitor",
+                "sensors/+/humidity",
                 QoS::AtMostOnce,
-                None,
-                false,
-                false,
-                0,
-                ProtocolVersion::V5,
-                false,
-                None,
-            )
+            ))
             .await
             .unwrap();
 
@@ -106,18 +91,11 @@ fn test_multi_client_message_routing() {
             )
             .await;
         router
-            .subscribe(
-                "all_monitor".to_string(),
-                "sensors/+/+".to_string(),
+            .subscribe(SubscriptionRequest::new(
+                "all_monitor",
+                "sensors/+/+",
                 QoS::AtMostOnce,
-                None,
-                false,
-                false,
-                0,
-                ProtocolVersion::V5,
-                false,
-                None,
-            )
+            ))
             .await
             .unwrap();
 
@@ -135,18 +113,11 @@ fn test_multi_client_message_routing() {
             )
             .await;
         router
-            .subscribe(
-                "room1_monitor".to_string(),
-                "sensors/room1/+".to_string(),
+            .subscribe(SubscriptionRequest::new(
+                "room1_monitor",
+                "sensors/room1/+",
                 QoS::AtMostOnce,
-                None,
-                false,
-                false,
-                0,
-                ProtocolVersion::V5,
-                false,
-                None,
-            )
+            ))
             .await
             .unwrap();
 
@@ -240,18 +211,11 @@ fn test_client_subscription_changes() {
 
         // Initial subscription
         router
-            .subscribe(
-                "dynamic_client".to_string(),
-                "alerts/error".to_string(),
+            .subscribe(SubscriptionRequest::new(
+                "dynamic_client",
+                "alerts/error",
                 QoS::AtMostOnce,
-                None,
-                false,
-                false,
-                0,
-                ProtocolVersion::V5,
-                false,
-                None,
-            )
+            ))
             .await
             .unwrap();
 
@@ -282,18 +246,11 @@ fn test_client_subscription_changes() {
 
         // Add another subscription for warnings
         router
-            .subscribe(
-                "dynamic_client".to_string(),
-                "alerts/warning".to_string(),
+            .subscribe(SubscriptionRequest::new(
+                "dynamic_client",
+                "alerts/warning",
                 QoS::AtMostOnce,
-                None,
-                false,
-                false,
-                0,
-                ProtocolVersion::V5,
-                false,
-                None,
-            )
+            ))
             .await
             .unwrap();
 
@@ -350,34 +307,20 @@ fn test_message_ordering_with_multiple_clients() {
             .await;
 
         router
-            .subscribe(
-                "client1".to_string(),
-                "sequence/test".to_string(),
+            .subscribe(SubscriptionRequest::new(
+                "client1",
+                "sequence/test",
                 QoS::AtMostOnce,
-                None,
-                false,
-                false,
-                0,
-                ProtocolVersion::V5,
-                false,
-                None,
-            )
+            ))
             .await
             .unwrap();
 
         router
-            .subscribe(
-                "client2".to_string(),
-                "sequence/test".to_string(),
+            .subscribe(SubscriptionRequest::new(
+                "client2",
+                "sequence/test",
                 QoS::AtMostOnce,
-                None,
-                false,
-                false,
-                0,
-                ProtocolVersion::V5,
-                false,
-                None,
-            )
+            ))
             .await
             .unwrap();
 

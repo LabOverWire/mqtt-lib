@@ -1,18 +1,18 @@
 use crate::error::{MqttError, Result};
 use crate::packet::publish::PublishPacket;
+use crate::packet_id::PacketIdGenerator;
 use crate::session::flow_control::{FlowControlManager, TopicAliasManager};
 use crate::session::limits::LimitsManager;
 use crate::session::queue::{MessageQueue, QueuedMessage};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::session::quic_flow::{FlowRegistry, FlowState};
-#[allow(deprecated)]
-use crate::session::retained::{RetainedMessage, RetainedMessageStore};
 use crate::session::subscription::{Subscription, SubscriptionManager};
 use crate::time::{Duration, Instant};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::transport::flow::{FlowFlags, FlowId};
 use crate::types::WillMessage;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -35,7 +35,7 @@ impl Default for SessionConfig {
             session_expiry_interval: 0,
             max_queued_messages: 1000,
             max_queued_size: crate::constants::buffer::DEFAULT_CAPACITY
-                * crate::constants::buffer::DEFAULT_CAPACITY, // 1MB
+                * crate::constants::buffer::DEFAULT_CAPACITY,
             persistent: false,
         }
     }
@@ -52,10 +52,9 @@ pub struct SessionState {
     subscriptions: Arc<RwLock<SubscriptionManager>>,
     /// `QoS` 1 and 2 message queue
     message_queue: Arc<RwLock<MessageQueue>>,
-    /// Unacknowledged PUBLISH packets (`packet_id` -> packet)
-    unacked_publishes: Arc<RwLock<HashMap<u16, PublishPacket>>>,
-    /// Unacknowledged PUBREL packets (`packet_id` -> timestamp)
-    unacked_pubrels: Arc<RwLock<HashMap<u16, Instant>>>,
+    unacked_publishes: Arc<RwLock<HashMap<u16, (u64, PublishPacket)>>>,
+    unacked_pubrels: Arc<RwLock<HashMap<u16, (u64, Instant)>>>,
+    outbound_send_order: AtomicU64,
     /// Inbound `QoS` 2 packet IDs we have PUBREC'd and owe a PUBCOMP for
     /// (`packet_id` -> timestamp).
     ///
@@ -87,9 +86,6 @@ pub struct SessionState {
     topic_alias_out: Arc<RwLock<TopicAliasManager>>,
     /// Topic alias manager for incoming messages
     topic_alias_in: Arc<RwLock<TopicAliasManager>>,
-    /// Retained message store
-    #[allow(deprecated)]
-    retained_messages: Arc<RetainedMessageStore>,
     /// Will message (to be published on abnormal disconnection)
     will_message: Arc<RwLock<Option<WillMessage>>>,
     /// Will delay timer handle
@@ -98,6 +94,23 @@ pub struct SessionState {
     limits: Arc<RwLock<LimitsManager>>,
     #[cfg(not(target_arch = "wasm32"))]
     flow_registry: Arc<RwLock<FlowRegistry>>,
+}
+
+/// Which acknowledgement an outbound packet identifier is waiting for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutboundStage {
+    /// A `QoS` 1 PUBLISH waiting for PUBACK.
+    AwaitingPubAck,
+    /// A `QoS` 2 PUBLISH waiting for PUBREC.
+    AwaitingPubRec,
+    /// A `QoS` 2 PUBREL waiting for PUBCOMP.
+    AwaitingPubComp,
+}
+
+#[derive(Debug, Clone)]
+pub enum OutboundReplay {
+    Publish(PublishPacket),
+    PubRel(u16),
 }
 
 /// The application's decision for a deferred inbound `QoS` 2 message while its handshake
@@ -130,6 +143,7 @@ impl SessionState {
             config,
             unacked_publishes: Arc::new(RwLock::new(HashMap::new())),
             unacked_pubrels: Arc::new(RwLock::new(HashMap::new())),
+            outbound_send_order: AtomicU64::new(0),
             inbound_pubrecs: Arc::new(RwLock::new(HashMap::new())),
             inbound_delivered: Arc::new(RwLock::new(HashMap::new())),
             inbound_resolution: Arc::new(RwLock::new(HashMap::new())),
@@ -138,13 +152,9 @@ impl SessionState {
             created_at: now,
             last_activity: Arc::new(RwLock::new(now)),
             clean_start,
-            flow_control: Arc::new(RwLock::new(FlowControlManager::new(65535))), // Default to max
-            topic_alias_out: Arc::new(RwLock::new(TopicAliasManager::new(0))), // Default to disabled
-            topic_alias_in: Arc::new(RwLock::new(TopicAliasManager::new(0))), // Default to disabled
-            retained_messages: Arc::new({
-                #[allow(deprecated)]
-                RetainedMessageStore::new()
-            }),
+            flow_control: Arc::new(RwLock::new(FlowControlManager::new(65535))),
+            topic_alias_out: Arc::new(RwLock::new(TopicAliasManager::new(0))),
+            topic_alias_in: Arc::new(RwLock::new(TopicAliasManager::new(0))),
             will_message: Arc::new(RwLock::new(None)),
             will_delay_handle: Arc::new(RwLock::new(None)),
             limits: Arc::new(RwLock::new(LimitsManager::with_defaults())),
@@ -157,6 +167,14 @@ impl SessionState {
     /// Gets the client ID
     pub fn client_id(&self) -> &str {
         &self.client_id
+    }
+
+    pub fn set_client_id(&mut self, client_id: String) {
+        self.client_id = client_id;
+    }
+
+    fn next_send_order(&self) -> u64 {
+        self.outbound_send_order.fetch_add(1, Ordering::SeqCst)
     }
 
     #[must_use]
@@ -173,7 +191,7 @@ impl SessionState {
     /// Checks if session has expired
     pub async fn is_expired(&self) -> bool {
         if self.config.session_expiry_interval == 0 {
-            return false; // Session doesn't expire
+            return false;
         }
 
         let last_activity = *self.last_activity.read().await;
@@ -274,10 +292,11 @@ impl SessionState {
     pub async fn store_unacked_publish(&self, packet: PublishPacket) -> Result<()> {
         if let Some(packet_id) = packet.packet_id {
             self.touch().await;
+            let order = self.next_send_order();
             self.unacked_publishes
                 .write()
                 .await
-                .insert(packet_id, packet);
+                .insert(packet_id, (order, packet));
             Ok(())
         } else {
             Err(MqttError::ProtocolError(
@@ -289,26 +308,29 @@ impl SessionState {
     /// Removes an acknowledged PUBLISH packet
     pub async fn remove_unacked_publish(&self, packet_id: u16) -> Option<PublishPacket> {
         self.touch().await;
-        self.unacked_publishes.write().await.remove(&packet_id)
+        self.unacked_publishes
+            .write()
+            .await
+            .remove(&packet_id)
+            .map(|(_, packet)| packet)
     }
 
     /// Gets all unacknowledged PUBLISH packets
     pub async fn get_unacked_publishes(&self) -> Vec<PublishPacket> {
-        self.unacked_publishes
+        let mut ordered: Vec<(u64, PublishPacket)> = self
+            .unacked_publishes
             .read()
             .await
             .values()
             .cloned()
-            .collect()
+            .collect();
+        ordered.sort_by_key(|(order, _)| *order);
+        ordered.into_iter().map(|(_, packet)| packet).collect()
     }
 
     /// Stores an unacknowledged PUBREL packet
     pub async fn store_unacked_pubrel(&self, packet_id: u16) {
-        self.touch().await;
-        self.unacked_pubrels
-            .write()
-            .await
-            .insert(packet_id, Instant::now());
+        self.store_pubrel(packet_id).await;
     }
 
     /// Removes an acknowledged PUBREL packet
@@ -324,6 +346,69 @@ impl SessionState {
     /// Gets all unacknowledged PUBREL packet IDs
     pub async fn get_unacked_pubrels(&self) -> Vec<u16> {
         self.unacked_pubrels.read().await.keys().copied().collect()
+    }
+
+    pub async fn outbound_replay(&self) -> Vec<OutboundReplay> {
+        let publishes = self.unacked_publishes.read().await;
+        let pubrels = self.unacked_pubrels.read().await;
+        let mut ordered: Vec<(u64, OutboundReplay)> = publishes
+            .values()
+            .map(|(order, packet)| (*order, OutboundReplay::Publish(packet.clone())))
+            .chain(
+                pubrels
+                    .iter()
+                    .map(|(packet_id, (order, _))| (*order, OutboundReplay::PubRel(*packet_id))),
+            )
+            .collect();
+        drop(pubrels);
+        drop(publishes);
+        ordered.sort_by_key(|(order, _)| *order);
+        ordered.into_iter().map(|(_, item)| item).collect()
+    }
+
+    /// Reports which acknowledgement the outbound packet identifier is waiting for.
+    pub async fn outbound_stage(&self, packet_id: u16) -> Option<OutboundStage> {
+        let publish_qos = self
+            .unacked_publishes
+            .read()
+            .await
+            .get(&packet_id)
+            .map(|(_, publish)| publish.qos);
+        match publish_qos {
+            Some(crate::QoS::ExactlyOnce) => Some(OutboundStage::AwaitingPubRec),
+            Some(_) => Some(OutboundStage::AwaitingPubAck),
+            None => self
+                .unacked_pubrels
+                .read()
+                .await
+                .contains_key(&packet_id)
+                .then_some(OutboundStage::AwaitingPubComp),
+        }
+    }
+
+    pub async fn discard_outbound_state(&self) {
+        self.unacked_publishes.write().await.clear();
+        self.unacked_pubrels.write().await.clear();
+    }
+
+    pub async fn complete_outbound(&self, packet_id: u16) {
+        self.touch().await;
+        self.unacked_publishes.write().await.remove(&packet_id);
+        self.unacked_pubrels.write().await.remove(&packet_id);
+    }
+
+    pub async fn allocate_packet_id(
+        &self,
+        generator: &PacketIdGenerator,
+        in_use_elsewhere: impl Fn(u16) -> bool,
+    ) -> Option<u16> {
+        let publishes = self.unacked_publishes.read().await;
+        let pubrels = self.unacked_pubrels.read().await;
+        generator.next_available(|packet_id| {
+            publishes.contains_key(&packet_id)
+                || pubrels.contains_key(&packet_id)
+                || in_use_elsewhere(packet_id)
+        })
     }
 
     /// Clears all session state
@@ -480,44 +565,6 @@ impl SessionState {
         self.message_queue.write().await.remove_expired(timeout);
     }
 
-    /// Stores or clears a retained message
-    #[deprecated(
-        since = "0.31.5",
-        note = "session-level retained store is unused by the broker; the broker uses broker::storage::RetainedMessage. Scheduled for removal in 0.32.0."
-    )]
-    #[allow(deprecated)]
-    pub async fn store_retained_message(&self, packet: &PublishPacket) {
-        let topic = packet.topic_name.clone();
-
-        if packet.payload.is_empty() {
-            self.retained_messages.store(topic, None).await;
-        } else {
-            let message = RetainedMessage::from(packet);
-            self.retained_messages.store(topic, Some(message)).await;
-        }
-    }
-
-    /// Gets retained messages matching a topic filter
-    #[deprecated(
-        since = "0.31.5",
-        note = "session-level retained store is unused by the broker; the broker uses broker::storage::RetainedMessage. Scheduled for removal in 0.32.0."
-    )]
-    #[allow(deprecated)]
-    pub async fn get_retained_messages(&self, topic_filter: &str) -> Vec<RetainedMessage> {
-        self.retained_messages.get_matching(topic_filter).await
-    }
-
-    #[must_use]
-    /// Gets the retained message store
-    #[deprecated(
-        since = "0.31.5",
-        note = "session-level retained store is unused by the broker; the broker uses broker::storage::RetainedMessage. Scheduled for removal in 0.32.0."
-    )]
-    #[allow(deprecated)]
-    pub fn retained_messages(&self) -> &Arc<RetainedMessageStore> {
-        &self.retained_messages
-    }
-
     /// Sets the Will message for this session
     pub async fn set_will_message(&self, will: Option<WillMessage>) {
         let mut will_message = self.will_message.write().await;
@@ -533,25 +580,20 @@ impl SessionState {
     /// Triggers Will message publication (called on abnormal disconnection)
     pub async fn trigger_will_message(&self) -> Option<WillMessage> {
         let mut will_message = self.will_message.write().await;
-        let will = will_message.take(); // Remove the will message so it's only sent once
+        let will = will_message.take();
 
         if let Some(ref will) = will {
-            // If there's a will delay interval, start the delay timer
             if let Some(delay_seconds) = will.properties.will_delay_interval {
                 if delay_seconds > 0 {
                     let delay_handle_clone = Arc::clone(&self.will_delay_handle);
 
-                    // Spawn a task to handle the delay
                     let handle = tokio::spawn(async move {
                         tokio::time::sleep(Duration::from_secs(u64::from(delay_seconds))).await;
-                        // The actual will message publication will be handled by the caller
-                        // This just implements the delay
                     });
 
                     let mut delay_handle = delay_handle_clone.write().await;
                     *delay_handle = Some(handle);
 
-                    // Return None to indicate the will should be delayed
                     return None;
                 }
             }
@@ -562,11 +604,9 @@ impl SessionState {
 
     /// Cancels the Will message (called on normal disconnection)
     pub async fn cancel_will_message(&self) {
-        // Clear the will message
         let mut will_message = self.will_message.write().await;
         *will_message = None;
 
-        // Cancel any pending will delay timer
         let mut delay_handle = self.will_delay_handle.write().await;
         if let Some(handle) = delay_handle.take() {
             handle.abort();
@@ -579,7 +619,7 @@ impl SessionState {
         if let Some(ref handle) = *delay_handle {
             handle.is_finished()
         } else {
-            true // No delay, so it's "complete"
+            true
         }
     }
 
@@ -725,17 +765,21 @@ impl SessionState {
     /// Store PUBREL for `QoS` 2 flow
     pub async fn store_pubrel(&self, packet_id: u16) {
         self.touch().await;
+        let order = self.next_send_order();
         self.unacked_pubrels
             .write()
             .await
-            .insert(packet_id, Instant::now());
+            .entry(packet_id)
+            .or_insert((order, Instant::now()));
     }
 
-    /// Complete PUBREC (after sending PUBREL)
     pub async fn complete_pubrec(&self, packet_id: u16) {
         self.touch().await;
-        // Remove from unacked publishes as we've moved to PUBREL phase
-        self.unacked_publishes.write().await.remove(&packet_id);
+        let mut publishes = self.unacked_publishes.write().await;
+        let mut pubrels = self.unacked_pubrels.write().await;
+        if let Some((order, _)) = publishes.remove(&packet_id) {
+            pubrels.insert(packet_id, (order, Instant::now()));
+        }
     }
 
     /// Complete PUBREL (after receiving PUBCOMP)
@@ -862,7 +906,6 @@ pub struct SessionStats {
 }
 
 #[cfg(test)]
-#[allow(deprecated)]
 mod tests {
     use super::*;
     use crate::packet::subscribe::SubscriptionOptions;
@@ -882,19 +925,16 @@ mod tests {
     #[tokio::test]
     async fn test_session_expiry() {
         let config = SessionConfig {
-            session_expiry_interval: 1, // 1 second
+            session_expiry_interval: 1,
             ..Default::default()
         };
         let session = SessionState::new("test-client".to_string(), config, false);
 
-        // Initially not expired
         assert!(!session.is_expired().await);
 
-        // Update last activity to past
         *session.last_activity.write().await =
             Instant::now().checked_sub(Duration::from_secs(2)).unwrap();
 
-        // Now should be expired
         assert!(session.is_expired().await);
     }
 
@@ -907,18 +947,15 @@ mod tests {
             options: SubscriptionOptions::default(),
         };
 
-        // Add subscription
         session
             .add_subscription("test/topic".to_string(), sub.clone())
             .await
             .unwrap();
 
-        // Check matching
         let matches = session.matching_subscriptions("test/topic").await;
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].0, "test/topic");
 
-        // Remove subscription
         session.remove_subscription("test/topic").await.unwrap();
         let matches = session.matching_subscriptions("test/topic").await;
         assert_eq!(matches.len(), 0);
@@ -928,7 +965,6 @@ mod tests {
     async fn test_message_queueing() {
         let session = SessionState::new("test-client".to_string(), SessionConfig::default(), true);
 
-        // Queue messages
         let msg1 = QueuedMessage {
             topic: "test/1".to_string(),
             payload: vec![1, 2, 3],
@@ -950,7 +986,6 @@ mod tests {
 
         assert_eq!(session.queued_message_count().await, 2);
 
-        // Dequeue messages
         let messages = session.dequeue_messages(1).await;
         assert_eq!(messages.len(), 1);
         assert_eq!(session.queued_message_count().await, 1);
@@ -978,7 +1013,6 @@ mod tests {
         assert_eq!(unacked.len(), 1);
         assert_eq!(unacked[0].packet_id, Some(123));
 
-        // Remove acknowledged publish
         let removed = session.remove_unacked_publish(123).await;
         assert!(removed.is_some());
         assert_eq!(session.get_unacked_publishes().await.len(), 0);
@@ -988,7 +1022,6 @@ mod tests {
     async fn test_unacked_pubrel_tracking() {
         let session = SessionState::new("test-client".to_string(), SessionConfig::default(), true);
 
-        // Store unacked pubrels
         session.store_unacked_pubrel(100).await;
         session.store_unacked_pubrel(101).await;
 
@@ -997,7 +1030,6 @@ mod tests {
         assert!(pubrels.contains(&100));
         assert!(pubrels.contains(&101));
 
-        // Remove acknowledged pubrel
         assert!(session.remove_unacked_pubrel(100).await);
         assert_eq!(session.get_unacked_pubrels().await.len(), 1);
     }
@@ -1006,7 +1038,6 @@ mod tests {
     async fn test_session_clear() {
         let session = SessionState::new("test-client".to_string(), SessionConfig::default(), true);
 
-        // Add some data
         let sub = Subscription {
             topic_filter: "test/#".to_string(),
             options: SubscriptionOptions::default(),
@@ -1027,10 +1058,8 @@ mod tests {
 
         session.store_unacked_pubrel(1).await;
 
-        // Clear session
         session.clear().await;
 
-        // Verify everything is cleared
         assert_eq!(session.all_subscriptions().await.len(), 0);
         assert_eq!(session.queued_message_count().await, 0);
         assert_eq!(session.get_unacked_pubrels().await.len(), 0);
@@ -1040,7 +1069,6 @@ mod tests {
     async fn test_session_stats() {
         let session = SessionState::new("test-client".to_string(), SessionConfig::default(), true);
 
-        // Add some data
         let sub = Subscription {
             topic_filter: "test/#".to_string(),
             options: SubscriptionOptions::default(),
@@ -1053,7 +1081,6 @@ mod tests {
         let stats = session.stats().await;
         assert_eq!(stats.subscription_count, 1);
         assert_eq!(stats.queued_message_count, 0);
-        // Uptime might be 0 on very fast systems, so just check it exists
         let _ = stats.uptime.as_nanos();
     }
 
@@ -1061,26 +1088,19 @@ mod tests {
     async fn test_flow_control_integration() {
         let session = SessionState::new("test-client".to_string(), SessionConfig::default(), true);
 
-        // Set receive maximum
         session.set_receive_maximum(2).await;
 
-        // Should be able to send initially
         assert!(session.can_send_qos_message().await);
 
-        // Register in-flight messages
         session.register_in_flight(1).await.unwrap();
         session.register_in_flight(2).await.unwrap();
 
-        // Should not be able to send more
         assert!(!session.can_send_qos_message().await);
 
-        // Try to register another
         assert!(session.register_in_flight(3).await.is_err());
 
-        // Acknowledge one
         session.acknowledge_in_flight(1).await.unwrap();
 
-        // Should be able to send again
         assert!(session.can_send_qos_message().await);
     }
 
@@ -1088,25 +1108,20 @@ mod tests {
     async fn test_topic_alias_integration() {
         let session = SessionState::new("test-client".to_string(), SessionConfig::default(), true);
 
-        // Set topic alias maximum
         session.set_topic_alias_maximum_out(10).await;
         session.set_topic_alias_maximum_in(10).await;
 
-        // Get or create alias for outgoing
         let alias1 = session.get_or_create_topic_alias("topic/1").await;
         assert_eq!(alias1, Some(1));
 
-        // Same topic should get same alias
         let alias1_again = session.get_or_create_topic_alias("topic/1").await;
         assert_eq!(alias1_again, Some(1));
 
-        // Register incoming alias
         session
             .register_incoming_topic_alias(5, "incoming/topic")
             .await
             .unwrap();
 
-        // Get topic for alias
         let topic = session.get_topic_for_alias(5).await;
         assert_eq!(topic, Some("incoming/topic".to_string()));
     }
@@ -1114,17 +1129,15 @@ mod tests {
     #[tokio::test]
     async fn test_session_expiry_zero_interval() {
         let config = SessionConfig {
-            session_expiry_interval: 0, // Session doesn't expire
+            session_expiry_interval: 0,
             ..Default::default()
         };
         let session = SessionState::new("test-client".to_string(), config, false);
 
-        // Update last activity to past
         *session.last_activity.write().await = Instant::now()
             .checked_sub(Duration::from_secs(100))
             .unwrap();
 
-        // Should not be expired
         assert!(!session.is_expired().await);
     }
 
@@ -1151,7 +1164,6 @@ mod tests {
             .await
             .unwrap();
 
-        // Check matching
         let matches = session.matching_subscriptions("test/foo/topic").await;
         assert_eq!(matches.len(), 2);
 
@@ -1169,7 +1181,6 @@ mod tests {
 
         let session = SessionState::new("test-client".to_string(), config, true);
 
-        // Queue messages up to limit
         let msg1 = QueuedMessage {
             topic: "test/1".to_string(),
             payload: vec![0; 40],
@@ -1197,13 +1208,10 @@ mod tests {
         session.queue_message(msg1).await.unwrap();
         session.queue_message(msg2).await.unwrap();
 
-        // Third message should succeed but drop the oldest message
         session.queue_message(msg3).await.unwrap();
 
-        // Should still have 2 messages
         assert_eq!(session.queued_message_count().await, 2);
 
-        // Dequeue all and verify oldest was dropped
         let messages = session.dequeue_messages(3).await;
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].topic, "test/2");
@@ -1248,13 +1256,11 @@ mod tests {
         session.store_unacked_publish(packet).await.unwrap();
         assert_eq!(session.get_unacked_publishes().await.len(), 1);
 
-        // Complete PUBREC (removes publish, adds to pubrel)
         session.complete_pubrec(123).await;
         session.store_pubrel(123).await;
         assert_eq!(session.get_unacked_publishes().await.len(), 0);
         assert_eq!(session.get_unacked_pubrels().await.len(), 1);
 
-        // Complete PUBREL
         session.complete_pubrel(123).await;
         assert_eq!(session.get_unacked_pubrels().await.len(), 0);
     }
@@ -1263,102 +1269,19 @@ mod tests {
     async fn test_packet_size_limits() {
         let session = SessionState::new("test-client".to_string(), SessionConfig::default(), true);
 
-        // Set server maximum packet size
         session.set_server_maximum_packet_size(1000).await;
 
-        // Check packet size within limit
         assert!(session.check_packet_size(500).await.is_ok());
 
-        // Check packet size exceeds limit
         assert!(session.check_packet_size(1001).await.is_err());
 
-        // Get effective maximum
         assert_eq!(session.effective_maximum_packet_size().await, 1000);
-    }
-
-    #[tokio::test]
-    async fn test_retained_messages() {
-        let session = SessionState::new("test-client".to_string(), SessionConfig::default(), true);
-
-        let packet1 = PublishPacket {
-            topic_name: "test/retained".to_string(),
-            packet_id: None,
-            payload: vec![1, 2, 3].into(),
-            qos: QoS::AtMostOnce,
-            retain: true,
-            dup: false,
-            properties: Properties::default(),
-            protocol_version: 5,
-            stream_id: None,
-        };
-
-        session.store_retained_message(&packet1).await;
-
-        // Get retained messages
-        let retained = session.get_retained_messages("test/retained").await;
-        assert_eq!(retained.len(), 1);
-        assert_eq!(retained[0].payload, vec![1, 2, 3]);
-
-        let packet2 = PublishPacket {
-            topic_name: "test/retained".to_string(),
-            packet_id: None,
-            payload: vec![].into(),
-            qos: QoS::AtMostOnce,
-            retain: true,
-            dup: false,
-            properties: Properties::default(),
-            protocol_version: 5,
-            stream_id: None,
-        };
-
-        session.store_retained_message(&packet2).await;
-
-        // Should be cleared
-        let retained = session.get_retained_messages("test/retained").await;
-        assert_eq!(retained.len(), 0);
-    }
-
-    #[tokio::test]
-    async fn test_retained_message_wildcard_matching() {
-        let session = SessionState::new("test-client".to_string(), SessionConfig::default(), true);
-
-        let packet1 = PublishPacket {
-            topic_name: "test/device1/status".to_string(),
-            packet_id: None,
-            payload: b"online".to_vec().into(),
-            qos: QoS::AtMostOnce,
-            retain: true,
-            dup: false,
-            properties: Properties::default(),
-            protocol_version: 5,
-            stream_id: None,
-        };
-
-        let packet2 = PublishPacket {
-            topic_name: "test/device2/status".to_string(),
-            packet_id: None,
-            payload: b"offline".to_vec().into(),
-            qos: QoS::AtMostOnce,
-            retain: true,
-            dup: false,
-            properties: Properties::default(),
-            protocol_version: 5,
-            stream_id: None,
-        };
-
-        session.store_retained_message(&packet1).await;
-        session.store_retained_message(&packet2).await;
-
-        // Get with wildcard
-        let retained = session.get_retained_messages("test/+/status").await;
-        assert_eq!(retained.len(), 2);
     }
 
     #[tokio::test]
     async fn test_will_message() {
         let session = SessionState::new("test-client".to_string(), SessionConfig::default(), true);
 
-        // Set will message
         let will = WillMessage {
             topic: "test/will".to_string(),
             payload: b"disconnected".to_vec(),
@@ -1369,16 +1292,13 @@ mod tests {
 
         session.set_will_message(Some(will.clone())).await;
 
-        // Get will message
         let stored_will = session.will_message().await;
         assert!(stored_will.is_some());
         assert_eq!(stored_will.unwrap().topic, "test/will");
 
-        // Trigger will message (abnormal disconnection)
         let triggered = session.trigger_will_message().await;
         assert!(triggered.is_some());
 
-        // Will should be cleared after triggering
         assert!(session.will_message().await.is_none());
     }
 
@@ -1386,7 +1306,6 @@ mod tests {
     async fn test_will_message_cancellation() {
         let session = SessionState::new("test-client".to_string(), SessionConfig::default(), true);
 
-        // Set will message
         let will = WillMessage {
             topic: "test/will".to_string(),
             payload: b"disconnected".to_vec(),
@@ -1397,10 +1316,8 @@ mod tests {
 
         session.set_will_message(Some(will)).await;
 
-        // Cancel will message (normal disconnection)
         session.cancel_will_message().await;
 
-        // Will should be cleared
         assert!(session.will_message().await.is_none());
     }
 
@@ -1408,9 +1325,8 @@ mod tests {
     async fn test_will_delay() {
         let session = SessionState::new("test-client".to_string(), SessionConfig::default(), true);
 
-        // Set will message with delay
         let will_props = WillProperties {
-            will_delay_interval: Some(1), // 1 second delay
+            will_delay_interval: Some(1),
             ..Default::default()
         };
 
@@ -1424,17 +1340,13 @@ mod tests {
 
         session.set_will_message(Some(will)).await;
 
-        // Trigger will with delay
         let triggered = session.trigger_will_message().await;
-        assert!(triggered.is_none()); // Should return None due to delay
+        assert!(triggered.is_none());
 
-        // Check delay is not complete yet
         assert!(!session.is_will_delay_complete().await);
 
-        // Wait for delay
         tokio::time::sleep(Duration::from_millis(1100)).await;
 
-        // Now delay should be complete
         assert!(session.is_will_delay_complete().await);
     }
 
@@ -1444,10 +1356,8 @@ mod tests {
 
         let initial_activity = *session.last_activity.read().await;
 
-        // Wait a bit
         tokio::time::sleep(Duration::from_millis(10)).await;
 
-        // Touch should update activity
         session.touch().await;
 
         let new_activity = *session.last_activity.read().await;
@@ -1461,7 +1371,6 @@ mod tests {
         let initial_activity = *session.last_activity.read().await;
         tokio::time::sleep(Duration::from_millis(10)).await;
 
-        // Various operations should update activity
         let sub = Subscription {
             topic_filter: "test".to_string(),
             options: SubscriptionOptions::default(),
@@ -1496,6 +1405,78 @@ mod tests {
 
         session.complete_publish(100).await;
         assert_eq!(session.get_unacked_publishes().await.len(), 0);
+    }
+
+    fn outbound_publish(packet_id: u16, qos: QoS) -> PublishPacket {
+        PublishPacket {
+            topic_name: "test/topic".to_string(),
+            packet_id: Some(packet_id),
+            payload: vec![1].into(),
+            qos,
+            retain: false,
+            dup: false,
+            properties: Properties::default(),
+            protocol_version: 5,
+            stream_id: None,
+        }
+    }
+
+    fn replay_ids(items: &[OutboundReplay]) -> Vec<(char, u16)> {
+        items
+            .iter()
+            .map(|item| match item {
+                OutboundReplay::Publish(p) => ('P', p.packet_id.unwrap()),
+                OutboundReplay::PubRel(id) => ('R', *id),
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn outbound_replay_keeps_original_send_order_across_pubrec() {
+        let session = SessionState::new("test-client".to_string(), SessionConfig::default(), true);
+        for (id, qos) in [
+            (30, QoS::ExactlyOnce),
+            (10, QoS::AtLeastOnce),
+            (20, QoS::ExactlyOnce),
+        ] {
+            session
+                .store_unacked_publish(outbound_publish(id, qos))
+                .await
+                .unwrap();
+        }
+        session.complete_pubrec(30).await;
+        session.store_pubrel(30).await;
+
+        assert_eq!(
+            replay_ids(&session.outbound_replay().await),
+            vec![('R', 30), ('P', 10), ('P', 20)]
+        );
+
+        session.complete_outbound(10).await;
+        session.complete_outbound(30).await;
+        assert_eq!(
+            replay_ids(&session.outbound_replay().await),
+            vec![('P', 20)]
+        );
+
+        session.discard_outbound_state().await;
+        assert!(session.outbound_replay().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn allocate_packet_id_skips_ids_held_by_outbound_exchanges() {
+        let session = SessionState::new("test-client".to_string(), SessionConfig::default(), true);
+        let generator = PacketIdGenerator::new();
+        session
+            .store_unacked_publish(outbound_publish(1, QoS::AtLeastOnce))
+            .await
+            .unwrap();
+        session.store_pubrel(2).await;
+
+        assert_eq!(
+            session.allocate_packet_id(&generator, |id| id == 3).await,
+            Some(4)
+        );
     }
 
     #[tokio::test]

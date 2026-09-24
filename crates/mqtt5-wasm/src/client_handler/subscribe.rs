@@ -1,3 +1,4 @@
+use mqtt5::broker::router::SubscriptionRequest;
 use mqtt5::broker::storage::{StorageBackend, StoredSubscription};
 use mqtt5_protocol::error::{MqttError, Result};
 use mqtt5_protocol::packet::disconnect::DisconnectPacket;
@@ -91,16 +92,15 @@ impl WasmClientHandler {
 
             self.router
                 .subscribe(
-                    client_id.clone(),
-                    filter.filter.clone(),
-                    granted_qos,
-                    subscription_id,
-                    filter.options.no_local,
-                    filter.options.retain_as_published,
-                    filter.options.retain_handling as u8,
-                    ProtocolVersion::try_from(self.protocol_version).unwrap_or_default(),
-                    change_only,
-                    None,
+                    SubscriptionRequest::new(client_id.clone(), filter.filter.clone(), granted_qos)
+                        .with_subscription_id(subscription_id)
+                        .with_no_local(filter.options.no_local)
+                        .with_retain_as_published(filter.options.retain_as_published)
+                        .with_retain_handling(filter.options.retain_handling as u8)
+                        .with_protocol_version(
+                            ProtocolVersion::try_from(self.protocol_version).unwrap_or_default(),
+                        )
+                        .with_change_only(change_only),
                 )
                 .await?;
 

@@ -42,9 +42,10 @@
 use crate::error::{MqttError, Result};
 use crate::packet::Packet;
 use crate::time::Duration;
-use crate::transport::packet_io::{PacketReader, PacketWriter};
+use crate::transport::packet_io::{decode_buffered_packet, PacketReader, PacketWriter};
 use crate::transport::tls::TlsConfig;
 use crate::Transport;
+use bytes::{Buf, Bytes, BytesMut};
 use futures_util::{stream::SplitSink, stream::SplitStream, StreamExt};
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -71,9 +72,6 @@ pub struct WebSocketConfig {
     pub user_agent: Option<String>,
     /// TLS configuration for secure WebSocket connections (wss://)
     pub tls_config: Option<TlsConfig>,
-    /// Whether to verify TLS certificates (for wss://) - deprecated, use `tls_config`
-    #[deprecated(note = "Use tls_config field instead")]
-    pub verify_tls: bool,
 }
 
 impl WebSocketConfig {
@@ -102,8 +100,6 @@ impl WebSocketConfig {
             headers: HashMap::new(),
             user_agent: Some("mqtt-v5/0.4.0".to_string()),
             tls_config: None,
-            #[allow(deprecated)]
-            verify_tls: true,
         })
     }
 
@@ -142,21 +138,6 @@ impl WebSocketConfig {
     #[must_use]
     pub fn with_user_agent(mut self, user_agent: &str) -> Self {
         self.user_agent = Some(user_agent.to_string());
-        self
-    }
-
-    /// Sets whether to verify TLS certificates for wss:// connections
-    ///
-    /// # Safety
-    ///
-    /// Disabling TLS verification is insecure and should only be used for testing
-    #[deprecated(note = "Use with_tls_config instead")]
-    #[must_use]
-    pub fn with_tls_verification(mut self, verify: bool) -> Self {
-        #[allow(deprecated)]
-        {
-            self.verify_tls = verify;
-        }
         self
     }
 
@@ -216,12 +197,10 @@ impl WebSocketConfig {
             ));
         }
 
-        // Create TLS config if it doesn't exist
         if self.tls_config.is_none() {
             self = self.with_tls_auto()?;
         }
 
-        // Add client certificate to TLS config
         if let Some(ref mut tls_config) = self.tls_config {
             tls_config.load_client_cert_pem(cert_path)?;
             tls_config.load_client_key_pem(key_path)?;
@@ -245,12 +224,10 @@ impl WebSocketConfig {
             ));
         }
 
-        // Create TLS config if it doesn't exist
         if self.tls_config.is_none() {
             self = self.with_tls_auto()?;
         }
 
-        // Add client certificate to TLS config
         if let Some(ref mut tls_config) = self.tls_config {
             tls_config.load_client_cert_pem_bytes(cert_pem)?;
             tls_config.load_client_key_pem_bytes(key_pem)?;
@@ -274,12 +251,10 @@ impl WebSocketConfig {
             ));
         }
 
-        // Create TLS config if it doesn't exist
         if self.tls_config.is_none() {
             self = self.with_tls_auto()?;
         }
 
-        // Add CA certificate to TLS config
         if let Some(ref mut tls_config) = self.tls_config {
             tls_config.load_ca_cert_pem(ca_path)?;
         }
@@ -302,12 +277,10 @@ impl WebSocketConfig {
             ));
         }
 
-        // Create TLS config if it doesn't exist
         if self.tls_config.is_none() {
             self = self.with_tls_auto()?;
         }
 
-        // Add CA certificate to TLS config
         if let Some(ref mut tls_config) = self.tls_config {
             tls_config.load_ca_cert_pem_bytes(ca_pem)?;
         }
@@ -384,7 +357,6 @@ impl WebSocketTransport {
     /// Gets the negotiated subprotocol (if any)
     #[must_use]
     pub fn subprotocol(&self) -> Option<&str> {
-        // In a real implementation, this would return the negotiated subprotocol
         self.config.subprotocols.first().map(String::as_str)
     }
 
@@ -401,7 +373,10 @@ impl WebSocketTransport {
         let connection = self.connection.ok_or(MqttError::NotConnected)?;
         let (write, read) = connection.split();
 
-        let read_handle = WebSocketReadHandle { reader: read };
+        let read_handle = WebSocketReadHandle {
+            reader: read,
+            buffer: BytesMut::from(&self.read_buffer[..]),
+        };
         let write_handle = WebSocketWriteHandle { writer: write };
 
         Ok((read_handle, write_handle))
@@ -411,6 +386,7 @@ impl WebSocketTransport {
 /// WebSocket read handle for split operations
 pub struct WebSocketReadHandle {
     reader: SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>,
+    buffer: BytesMut,
 }
 
 /// WebSocket write handle for split operations
@@ -419,29 +395,73 @@ pub struct WebSocketWriteHandle {
 }
 
 impl WebSocketReadHandle {
+    async fn next_binary(&mut self) -> Result<Bytes> {
+        loop {
+            match self.reader.next().await {
+                Some(Ok(Message::Binary(data))) => return Ok(data),
+                Some(Ok(Message::Text(_))) => {
+                    return Err(MqttError::ProtocolError(
+                        "WebSocket text frame received [MQTT-6.0.0-1]".to_string(),
+                    ))
+                }
+                Some(Ok(Message::Close(_))) | None => return Err(MqttError::ClientClosed),
+                Some(Ok(Message::Ping(_) | Message::Pong(_) | Message::Frame(_))) => {}
+                Some(Err(e)) => return Err(MqttError::Io(e.to_string())),
+            }
+        }
+    }
+
     /// Reads data from the WebSocket.
     ///
     /// # Errors
-    /// Returns an error if the connection is closed or a read error occurs.
+    /// Returns an error if the connection is closed, a text frame arrives, or a read error occurs.
     pub async fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
+        if self.buffer.is_empty() {
+            let data = self.next_binary().await?;
+            self.buffer.extend_from_slice(&data);
+        }
+        let len = self.buffer.len().min(buf.len());
+        buf[..len].copy_from_slice(&self.buffer[..len]);
+        self.buffer.advance(len);
+        Ok(len)
+    }
+
+    /// Reads one MQTT packet, reassembling it from the binary frame byte stream
+    /// regardless of frame boundaries [MQTT-6.0.0-2].
+    ///
+    /// # Errors
+    /// Returns an error if the connection fails or closes, a text frame arrives,
+    /// or the packet is oversized or malformed.
+    pub async fn read_packet_limited(
+        &mut self,
+        protocol_version: u8,
+        max_packet_size: usize,
+    ) -> Result<Packet> {
         loop {
-            match self.reader.next().await {
-                Some(Ok(Message::Binary(data))) => {
-                    let len = data.len().min(buf.len());
-                    buf[..len].copy_from_slice(&data[..len]);
-                    return Ok(len);
-                }
-                Some(Ok(Message::Close(_))) | None => return Err(MqttError::ClientClosed),
-                Some(Ok(
-                    Message::Ping(_) | Message::Pong(_) | Message::Text(_) | Message::Frame(_),
-                )) => {}
-                Some(Err(e)) => return Err(MqttError::Io(e.to_string())),
+            if let Some(packet) =
+                decode_buffered_packet(&mut self.buffer, protocol_version, max_packet_size)?
+            {
+                return Ok(packet);
             }
+            let data = self.next_binary().await?;
+            self.buffer.extend_from_slice(&data);
         }
     }
 }
 
 impl WebSocketWriteHandle {
+    /// Sends a WebSocket Close frame and closes the sink.
+    ///
+    /// # Errors
+    /// Returns an error if the close handshake cannot be written.
+    pub async fn close(&mut self) -> Result<()> {
+        use futures_util::SinkExt;
+        self.writer
+            .close()
+            .await
+            .map_err(|e| MqttError::Io(e.to_string()))
+    }
+
     /// Writes data to the WebSocket.
     ///
     /// # Errors
@@ -457,29 +477,7 @@ impl WebSocketWriteHandle {
 
 impl PacketReader for WebSocketReadHandle {
     async fn read_packet(&mut self, protocol_version: u8) -> Result<Packet> {
-        use crate::packet::FixedHeader;
-        use bytes::BytesMut;
-        use futures_util::StreamExt;
-
-        match self.reader.next().await {
-            Some(Ok(Message::Binary(data))) => {
-                let mut buf = BytesMut::from(&data[..]);
-
-                let fixed_header = FixedHeader::decode(&mut buf)?;
-
-                Packet::decode_from_body_with_version(
-                    fixed_header.packet_type,
-                    &fixed_header,
-                    &mut buf,
-                    protocol_version,
-                )
-            }
-            Some(Ok(Message::Close(_))) | None => Err(MqttError::ClientClosed),
-            Some(Ok(_)) => Err(MqttError::ProtocolError(
-                "Unexpected WebSocket message type".to_string(),
-            )),
-            Some(Err(e)) => Err(MqttError::Io(e.to_string())),
-        }
+        self.read_packet_limited(protocol_version, usize::MAX).await
     }
 }
 
@@ -491,7 +489,6 @@ impl PacketWriter for WebSocketWriteHandle {
         let mut buf = BytesMut::with_capacity(1024);
         crate::transport::packet_io::encode_packet_to_buffer(&packet, &mut buf)?;
 
-        // Send as WebSocket binary frame
         self.writer
             .send(Message::Binary(buf.to_vec().into()))
             .await
@@ -613,9 +610,13 @@ impl Transport for WebSocketTransport {
                     debug!("WebSocket connection closed by remote");
                     return Err(MqttError::ClientClosed);
                 }
-                Some(Ok(
-                    Message::Ping(_) | Message::Pong(_) | Message::Text(_) | Message::Frame(_),
-                )) => {}
+                Some(Ok(Message::Text(_))) => {
+                    self.connected = false;
+                    return Err(MqttError::ProtocolError(
+                        "WebSocket text frame received [MQTT-6.0.0-1]".to_string(),
+                    ));
+                }
+                Some(Ok(Message::Ping(_) | Message::Pong(_) | Message::Frame(_))) => {}
                 Some(Err(e)) => {
                     self.connected = false;
                     return Err(MqttError::Io(e.to_string()));
@@ -732,7 +733,7 @@ mod tests {
         assert_eq!(config.url.as_str(), "wss://broker.example.com/mqtt");
         assert!(config.is_secure());
         assert_eq!(config.host(), Some("broker.example.com"));
-        assert_eq!(config.port(), 443); // Default HTTPS port
+        assert_eq!(config.port(), 443);
     }
 
     #[test]
@@ -780,13 +781,10 @@ mod tests {
 
         assert!(!transport.is_connected());
 
-        // Connection will fail since there's no WebSocket server at localhost:59999,
-        // but this tests that the connect method works as expected
         let result = transport.connect().await;
         assert!(result.is_err());
         assert!(!transport.is_connected());
 
-        // Should fail to connect again (already failed state)
         let result = transport.connect().await;
         assert!(result.is_err());
     }
@@ -800,7 +798,6 @@ mod tests {
         assert!(transport.read(&mut buf).await.is_err());
         assert!(transport.write(b"test").await.is_err());
 
-        // Close should succeed even when not connected
         assert!(transport.close().await.is_ok());
     }
 
@@ -809,10 +806,8 @@ mod tests {
         let config = WebSocketConfig::new("ws://localhost:8080/mqtt").unwrap();
         let mut transport = WebSocketTransport::new(config);
 
-        // Connection will fail, but we can still test the close method
         let _result = transport.connect().await;
 
-        // Close should work even if not connected
         transport.close().await.unwrap();
         assert!(!transport.is_connected());
     }
@@ -831,7 +826,6 @@ mod tests {
 
     #[test]
     fn test_websocket_config_tls_auto() {
-        // Should work for wss:// with IP address
         let config = WebSocketConfig::new("wss://127.0.0.1:8443/mqtt")
             .unwrap()
             .with_tls_auto()
@@ -842,13 +836,11 @@ mod tests {
         assert_eq!(tls_config.addr.port(), 8443);
         assert_eq!(tls_config.hostname, "127.0.0.1");
 
-        // Should fail for ws://
         let result = WebSocketConfig::new("ws://127.0.0.1:8080/mqtt")
             .unwrap()
             .with_tls_auto();
         assert!(result.is_err());
 
-        // Test with default port
         let config_default = WebSocketConfig::new("wss://127.0.0.1/mqtt")
             .unwrap()
             .with_tls_auto()
@@ -873,7 +865,6 @@ mod tests {
         assert!(tls_config.client_cert.is_some());
         assert!(tls_config.client_key.is_some());
 
-        // Should fail for ws://
         let result = WebSocketConfig::new("ws://127.0.0.1/mqtt")
             .unwrap()
             .with_client_auth_from_bytes(cert_pem, key_pem);
@@ -893,7 +884,6 @@ mod tests {
         let tls_config = config.tls_config().unwrap();
         assert!(tls_config.root_certs.is_some());
 
-        // Should fail for ws://
         let result = WebSocketConfig::new("ws://127.0.0.1/mqtt")
             .unwrap()
             .with_ca_cert_from_bytes(ca_pem);
@@ -928,7 +918,7 @@ mod tests {
 
         let tls_config = config.take_tls_config();
         assert!(tls_config.is_some());
-        assert!(config.tls_config().is_none()); // Should be None after taking
+        assert!(config.tls_config().is_none());
 
         let tls_config = tls_config.unwrap();
         assert_eq!(tls_config.hostname, "127.0.0.1");

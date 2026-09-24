@@ -7,7 +7,8 @@ use crate::packet::publish::PublishPacket;
 use crate::packet::Packet;
 use crate::protocol::v5::properties::Properties;
 use crate::session::state::AckResolution;
-use crate::session::SessionState;
+use crate::session::{SessionState, TopicAliasManager};
+use crate::transport::packet_io::encode_packet_to_buffer;
 use crate::transport::PacketWriter;
 use crate::QoS;
 use parking_lot::Mutex;
@@ -30,6 +31,7 @@ pub(super) struct AckDelivery<'a> {
 /// reader context so the entry point stays a small number of arguments.
 pub(super) struct IncomingHandlers<'a> {
     pub(super) session: &'a Arc<tokio::sync::RwLock<SessionState>>,
+    pub(super) topic_aliases: &'a Mutex<TopicAliasManager>,
     pub(super) callback_manager: &'a Arc<CallbackManager>,
     pub(super) keepalive_state: &'a Arc<Mutex<KeepaliveState>>,
     pub(super) codec_registry: Option<&'a Arc<CodecRegistry>>,
@@ -44,7 +46,8 @@ pub(super) async fn handle_incoming_packet_with_writer(
 ) -> Result<()> {
     let session = handlers.session;
     match packet {
-        Packet::Publish(publish) => {
+        Packet::Publish(mut publish) => {
+            validate_inbound_publish(&mut publish, handlers.topic_aliases)?;
             handle_publish_with_ack(
                 publish,
                 writer,
@@ -72,6 +75,74 @@ pub(super) async fn handle_incoming_packet_with_writer(
     }
 }
 
+enum AckRoute<'a> {
+    Direct(&'a Arc<tokio::sync::Mutex<UnifiedWriter>>),
+    Ordered(&'a Arc<AckDispatcher>),
+}
+
+fn validate_inbound_publish(
+    publish: &mut PublishPacket,
+    topic_aliases: &Mutex<TopicAliasManager>,
+) -> Result<()> {
+    if publish.properties.subscription_identifiers().contains(&0) {
+        return Err(MqttError::ProtocolError(
+            "inbound PUBLISH carries Subscription Identifier 0".to_string(),
+        ));
+    }
+    let mut aliases = topic_aliases.lock();
+    match publish.properties.get_topic_alias() {
+        Some(alias) if alias == 0 || alias > aliases.topic_alias_maximum() => {
+            Err(MqttError::TopicAliasInvalid(alias))
+        }
+        Some(alias) if publish.topic_name.is_empty() => {
+            let topic = aliases.get_topic(alias).ok_or_else(|| {
+                MqttError::ProtocolError(format!("Topic Alias {alias} has no mapping"))
+            })?;
+            publish.topic_name = topic.to_string();
+            Ok(())
+        }
+        Some(alias) => aliases.register_alias(alias, &publish.topic_name),
+        None if publish.topic_name.is_empty() => Err(MqttError::ProtocolError(
+            "zero-length Topic Name without a Topic Alias".to_string(),
+        )),
+        None => Ok(()),
+    }
+}
+
+pub(super) async fn ack_fits_server_maximum(
+    session: &Arc<tokio::sync::RwLock<SessionState>>,
+    packet: &Packet,
+) -> bool {
+    let mut buf = bytes::BytesMut::new();
+    let fits = encode_packet_to_buffer(packet, &mut buf).is_ok()
+        && session
+            .read()
+            .await
+            .check_packet_size(buf.len())
+            .await
+            .is_ok();
+    if !fits {
+        tracing::warn!(
+            packet = packet.packet_type_name(),
+            size = buf.len(),
+            "Acknowledgement exceeds the server Maximum Packet Size; discarded [MQTT-3.2.2-15]"
+        );
+    }
+    fits
+}
+
+async fn write_ack(
+    writer: &Arc<tokio::sync::Mutex<UnifiedWriter>>,
+    session: &Arc<tokio::sync::RwLock<SessionState>>,
+    packet: Packet,
+) -> Result<()> {
+    if ack_fits_server_maximum(session, &packet).await {
+        writer.lock().await.write_packet(packet).await
+    } else {
+        Ok(())
+    }
+}
+
 pub(super) async fn handle_publish_with_ack(
     mut publish: crate::packet::publish::PublishPacket,
     writer: &Arc<tokio::sync::Mutex<UnifiedWriter>>,
@@ -93,17 +164,22 @@ pub(super) async fn handle_publish_with_ack(
         }
     }
 
+    let route = match ack_delivery {
+        Some(ack) if flow_id.is_none() => AckRoute::Ordered(ack.dispatcher),
+        _ => AckRoute::Direct(writer),
+    };
+
     let already_delivered = match publish.qos {
         crate::QoS::AtMostOnce => false,
         crate::QoS::AtLeastOnce => {
             if let Some(packet_id) = publish.packet_id {
-                ack_qos1_inbound(packet_id, writer, session, flow_id).await?;
+                ack_qos1_inbound(packet_id, &route, session, flow_id).await?;
             }
             false
         }
         crate::QoS::ExactlyOnce => {
             if let Some(packet_id) = publish.packet_id {
-                let receipt = ack_qos2_inbound(packet_id, writer, session, flow_id).await?;
+                let receipt = ack_qos2_inbound(packet_id, &route, session, flow_id).await?;
                 receipt == Qos2Receipt::Duplicate
             } else {
                 false
@@ -204,7 +280,7 @@ async fn resend_matching_ack(
 
 async fn ack_qos1_inbound(
     packet_id: u16,
-    writer: &Arc<tokio::sync::Mutex<UnifiedWriter>>,
+    route: &AckRoute<'_>,
     session: &Arc<tokio::sync::RwLock<SessionState>>,
     flow_id: Option<crate::transport::flow::FlowId>,
 ) -> Result<()> {
@@ -225,16 +301,26 @@ async fn ack_qos1_inbound(
             .await;
     }
 
-    let puback = crate::packet::puback::PubAckPacket {
+    let puback = Packet::PubAck(crate::packet::puback::PubAckPacket {
         packet_id,
         reason_code: crate::protocol::v5::reason_codes::ReasonCode::Success,
         properties: Properties::default(),
+    });
+    let writer = match route {
+        AckRoute::Direct(writer) => writer,
+        AckRoute::Ordered(dispatcher) => {
+            dispatcher.enqueue(
+                packet_id,
+                QoS::AtLeastOnce,
+                AckKind::Automatic {
+                    packet: puback,
+                    release_inbound: true,
+                },
+            );
+            return Ok(());
+        }
     };
-    writer
-        .lock()
-        .await
-        .write_packet(Packet::PubAck(puback))
-        .await?;
+    write_ack(writer, session, puback).await?;
 
     session
         .read()
@@ -256,7 +342,7 @@ enum Qos2Receipt {
 
 async fn ack_qos2_inbound(
     packet_id: u16,
-    writer: &Arc<tokio::sync::Mutex<UnifiedWriter>>,
+    route: &AckRoute<'_>,
     session: &Arc<tokio::sync::RwLock<SessionState>>,
     flow_id: Option<crate::transport::flow::FlowId>,
 ) -> Result<Qos2Receipt> {
@@ -279,21 +365,28 @@ async fn ack_qos2_inbound(
 
     let first_receipt = session.write().await.mark_pubrec_pending(packet_id).await;
 
-    let pubrec = crate::packet::pubrec::PubRecPacket {
+    let pubrec = Packet::PubRec(crate::packet::pubrec::PubRecPacket {
         packet_id,
         reason_code: crate::protocol::v5::reason_codes::ReasonCode::Success,
         properties: Properties::default(),
-    };
-    if let Err(e) = writer
-        .lock()
-        .await
-        .write_packet(Packet::PubRec(pubrec))
-        .await
-    {
-        if first_receipt {
-            session.write().await.remove_pubrec(packet_id).await;
+    });
+    match route {
+        AckRoute::Direct(writer) => {
+            if let Err(e) = write_ack(writer, session, pubrec).await {
+                if first_receipt {
+                    session.write().await.remove_pubrec(packet_id).await;
+                }
+                return Err(e);
+            }
         }
-        return Err(e);
+        AckRoute::Ordered(dispatcher) => dispatcher.enqueue(
+            packet_id,
+            QoS::ExactlyOnce,
+            AckKind::Automatic {
+                packet: pubrec,
+                release_inbound: false,
+            },
+        ),
     }
 
     if first_receipt {
@@ -306,10 +399,8 @@ async fn ack_qos2_inbound(
 #[cfg(feature = "transport-quic")]
 pub(super) async fn handle_incoming_packet_no_writer(
     packet: Packet,
-    callback_manager: &Arc<CallbackManager>,
     flow_id: Option<FlowId>,
-    keepalive_state: &Arc<Mutex<KeepaliveState>>,
-    codec_registry: Option<&Arc<CodecRegistry>>,
+    handlers: &IncomingHandlers<'_>,
 ) -> Result<()> {
     match packet {
         Packet::Publish(mut publish) => {
@@ -318,18 +409,19 @@ pub(super) async fn handle_incoming_packet_no_writer(
                     "QoS > 0 publish received on unidirectional stream".to_string(),
                 ));
             }
-            if let Some(registry) = codec_registry {
+            validate_inbound_publish(&mut publish, handlers.topic_aliases)?;
+            if let Some(registry) = handlers.codec_registry {
                 let content_type = publish.properties.get_content_type();
                 let decoded =
                     registry.decode_if_needed(&publish.payload, content_type.as_deref())?;
                 publish.payload = decoded;
             }
             publish.stream_id = flow_id.map(|f| f.raw());
-            let _ = callback_manager.dispatch(&publish);
+            let _ = handlers.callback_manager.dispatch(&publish);
             Ok(())
         }
         Packet::PingResp => {
-            keepalive_state.lock().record_pong_received();
+            handlers.keepalive_state.lock().record_pong_received();
             Ok(())
         }
         Packet::Disconnect(disconnect) => {
@@ -401,11 +493,7 @@ pub(super) async fn handle_pubrel(
         properties: Properties::default(),
     };
 
-    writer
-        .lock()
-        .await
-        .write_packet(Packet::PubComp(pubcomp))
-        .await?;
+    write_ack(writer, session, Packet::PubComp(pubcomp)).await?;
 
     session
         .read()

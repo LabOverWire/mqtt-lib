@@ -22,6 +22,10 @@ use tracing::{debug, error, info, trace};
 /// Upper bound on how long one publish may wait for slow subscribers' delivery channels.
 pub const ROUTE_BUDGET_MAX: Duration = Duration::from_secs(2);
 
+fn default_route_deadline() -> Option<Instant> {
+    cfg!(not(target_arch = "wasm32")).then(|| Instant::now() + ROUTE_BUDGET_MAX)
+}
+
 struct OutboundRateState {
     count: AtomicU32,
     window_start: parking_lot::Mutex<crate::time::Instant>,
@@ -65,6 +69,83 @@ pub struct RoutableMessage {
     pub target_flow: Option<u64>,
 }
 
+/// Parameters of one subscription registration passed to [`MessageRouter::subscribe`].
+#[derive(Debug, Clone)]
+pub struct SubscriptionRequest {
+    pub client_id: String,
+    pub topic_filter: String,
+    pub qos: QoS,
+    pub subscription_id: Option<u32>,
+    pub no_local: bool,
+    pub retain_as_published: bool,
+    pub retain_handling: u8,
+    pub protocol_version: ProtocolVersion,
+    pub change_only: bool,
+    pub flow_id: Option<u64>,
+}
+
+impl SubscriptionRequest {
+    /// Creates a request with no subscription identifier, all subscription options cleared,
+    /// `retain_handling` 0, MQTT v5.0, no change-only delivery and no flow.
+    #[must_use]
+    pub fn new(client_id: impl Into<String>, topic_filter: impl Into<String>, qos: QoS) -> Self {
+        Self {
+            client_id: client_id.into(),
+            topic_filter: topic_filter.into(),
+            qos,
+            subscription_id: None,
+            no_local: false,
+            retain_as_published: false,
+            retain_handling: 0,
+            protocol_version: ProtocolVersion::default(),
+            change_only: false,
+            flow_id: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_subscription_id(mut self, subscription_id: Option<u32>) -> Self {
+        self.subscription_id = subscription_id;
+        self
+    }
+
+    #[must_use]
+    pub fn with_no_local(mut self, no_local: bool) -> Self {
+        self.no_local = no_local;
+        self
+    }
+
+    #[must_use]
+    pub fn with_retain_as_published(mut self, retain_as_published: bool) -> Self {
+        self.retain_as_published = retain_as_published;
+        self
+    }
+
+    #[must_use]
+    pub fn with_retain_handling(mut self, retain_handling: u8) -> Self {
+        self.retain_handling = retain_handling;
+        self
+    }
+
+    #[must_use]
+    pub fn with_protocol_version(mut self, protocol_version: ProtocolVersion) -> Self {
+        self.protocol_version = protocol_version;
+        self
+    }
+
+    #[must_use]
+    pub fn with_change_only(mut self, change_only: bool) -> Self {
+        self.change_only = change_only;
+        self
+    }
+
+    #[must_use]
+    pub fn with_flow_id(mut self, flow_id: Option<u64>) -> Self {
+        self.flow_id = flow_id;
+        self
+    }
+}
+
 /// Client subscription information
 #[derive(Debug, Clone)]
 pub struct Subscription {
@@ -93,7 +174,7 @@ pub struct MessageRouter {
     #[cfg(not(target_arch = "wasm32"))]
     bridge_manager: Arc<RwLock<Option<Weak<BridgeManager>>>>,
     #[cfg(target_arch = "wasm32")]
-    wasm_bridge_callback: Arc<RwLock<Option<WasmBridgeCallback>>>,
+    wasm_bridge_callback: RwLock<Option<WasmBridgeCallback>>,
     echo_suppression_key: Arc<RwLock<Option<String>>>,
     outbound_rates: parking_lot::RwLock<HashMap<String, OutboundRateState>>,
     max_outbound_rate: AtomicU32,
@@ -255,8 +336,7 @@ impl MessageRouter {
             #[cfg(not(target_arch = "wasm32"))]
             bridge_manager: Arc::new(RwLock::new(None)),
             #[cfg(target_arch = "wasm32")]
-            #[allow(clippy::arc_with_non_send_sync)]
-            wasm_bridge_callback: Arc::new(RwLock::new(None)),
+            wasm_bridge_callback: RwLock::new(None),
             echo_suppression_key: Arc::new(RwLock::new(None)),
             outbound_rates: parking_lot::RwLock::new(HashMap::new()),
             max_outbound_rate: AtomicU32::new(0),
@@ -289,8 +369,7 @@ impl MessageRouter {
             #[cfg(not(target_arch = "wasm32"))]
             bridge_manager: Arc::new(RwLock::new(None)),
             #[cfg(target_arch = "wasm32")]
-            #[allow(clippy::arc_with_non_send_sync)]
-            wasm_bridge_callback: Arc::new(RwLock::new(None)),
+            wasm_bridge_callback: RwLock::new(None),
             echo_suppression_key: Arc::new(RwLock::new(None)),
             outbound_rates: parking_lot::RwLock::new(HashMap::new()),
             max_outbound_rate: AtomicU32::new(0),
@@ -532,9 +611,6 @@ impl MessageRouter {
     }
 
     pub async fn cleanup_stale_subscriptions(&self) {
-        // Purge expired entries first (the storage backends do this for their own queues in
-        // cleanup_expired, but the router's fallback queues, used when persistence is off, have
-        // no backend sweep), then reclaim the now-empty ones.
         for queue in self.fallback_queues.handles() {
             queue.purge_expired();
         }
@@ -610,35 +686,8 @@ impl MessageRouter {
     ///
     /// # Errors
     /// Returns an error if subscription registration fails or `retain_handling` is invalid.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn subscribe(
-        &self,
-        client_id: String,
-        topic_filter: String,
-        qos: QoS,
-        subscription_id: Option<u32>,
-        no_local: bool,
-        retain_as_published: bool,
-        retain_handling: u8,
-        protocol_version: ProtocolVersion,
-        change_only: bool,
-        flow_id: Option<u64>,
-    ) -> Result<bool> {
-        let outcome = self
-            .subscribe_as(
-                None,
-                client_id,
-                topic_filter,
-                qos,
-                subscription_id,
-                no_local,
-                retain_as_published,
-                retain_handling,
-                protocol_version,
-                change_only,
-                flow_id,
-            )
-            .await?;
+    pub async fn subscribe(&self, request: SubscriptionRequest) -> Result<bool> {
+        let outcome = self.subscribe_as(None, request).await?;
         Ok(outcome == Subscribed::New)
     }
 
@@ -647,21 +696,23 @@ impl MessageRouter {
     ///
     /// # Errors
     /// Returns an error when `retain_handling` is invalid.
-    #[allow(clippy::too_many_arguments)]
     pub async fn subscribe_as(
         &self,
         generation: Option<u64>,
-        client_id: String,
-        topic_filter: String,
-        qos: QoS,
-        subscription_id: Option<u32>,
-        no_local: bool,
-        retain_as_published: bool,
-        retain_handling: u8,
-        protocol_version: ProtocolVersion,
-        change_only: bool,
-        flow_id: Option<u64>,
+        request: SubscriptionRequest,
     ) -> Result<Subscribed> {
+        let SubscriptionRequest {
+            client_id,
+            topic_filter,
+            qos,
+            subscription_id,
+            no_local,
+            retain_as_published,
+            retain_handling,
+            protocol_version,
+            change_only,
+            flow_id,
+        } = request;
         if retain_handling > 2 {
             return Err(crate::MqttError::ProtocolError(format!(
                 "Invalid retain_handling value: {retain_handling} (must be 0, 1, or 2)"
@@ -827,12 +878,8 @@ impl MessageRouter {
 
     /// Routes a publish message to all matching subscribers and forwards to bridges.
     pub async fn route_message(&self, publish: &PublishPacket, publishing_client_id: Option<&str>) {
-        self.route_message_with_deadline(
-            publish,
-            publishing_client_id,
-            Instant::now() + ROUTE_BUDGET_MAX,
-        )
-        .await;
+        self.route_message_bounded(publish, publishing_client_id, default_route_deadline())
+            .await;
     }
 
     /// Routes a publish message; `deadline` bounds the total time spent waiting on slow
@@ -842,6 +889,16 @@ impl MessageRouter {
         publish: &PublishPacket,
         publishing_client_id: Option<&str>,
         deadline: Instant,
+    ) {
+        self.route_message_bounded(publish, publishing_client_id, Some(deadline))
+            .await;
+    }
+
+    async fn route_message_bounded(
+        &self,
+        publish: &PublishPacket,
+        publishing_client_id: Option<&str>,
+        deadline: Option<Instant>,
     ) {
         #[cfg(feature = "opentelemetry")]
         {
@@ -870,7 +927,7 @@ impl MessageRouter {
         publish: &PublishPacket,
         publishing_client_id: Option<&str>,
     ) {
-        let deadline = Instant::now() + ROUTE_BUDGET_MAX;
+        let deadline = default_route_deadline();
         #[cfg(feature = "opentelemetry")]
         {
             use tracing::Instrument;
@@ -895,7 +952,7 @@ impl MessageRouter {
         publish: &PublishPacket,
         publishing_client_id: Option<&str>,
         forward_to_bridges: bool,
-        deadline: Instant,
+        deadline: Option<Instant>,
     ) {
         if forward_to_bridges {
             trace!("Routing message to topic: {}", publish.topic_name);
@@ -1155,7 +1212,7 @@ impl MessageRouter {
     async fn execute_plan(
         plan: DeliveryPlan,
         publishing_client_id: Option<&str>,
-        deadline: Instant,
+        deadline: Option<Instant>,
     ) {
         match plan {
             DeliveryPlan::Behind {
@@ -1202,9 +1259,16 @@ impl MessageRouter {
                     Self::queue_behind(&queue, routable.publish, &client_id, routable.target_flow);
                     return;
                 }
-                match tokio::time::timeout_at(deadline, lanes.qos1_tx.reserve()).await {
-                    Ok(Ok(permit)) => permit.send(routable),
-                    Ok(Err(_)) | Err(_) => Self::queue_behind(
+                let permit = match deadline {
+                    Some(deadline) => tokio::time::timeout_at(deadline, lanes.qos1_tx.reserve())
+                        .await
+                        .ok()
+                        .and_then(std::result::Result::ok),
+                    None => None,
+                };
+                match permit {
+                    Some(permit) => permit.send(routable),
+                    None => Self::queue_behind(
                         &queue,
                         routable.publish,
                         &client_id,
@@ -1474,18 +1538,11 @@ mod tests {
             )
             .await;
         router
-            .subscribe(
-                "client1".to_string(),
-                "test/+".to_string(),
+            .subscribe(SubscriptionRequest::new(
+                "client1",
+                "test/+",
                 QoS::AtLeastOnce,
-                None,
-                false,
-                false,
-                0,
-                ProtocolVersion::V5,
-                false,
-                None,
-            )
+            ))
             .await
             .unwrap();
 
@@ -1502,7 +1559,6 @@ mod tests {
         let mut rx1 = TestLanes::new(100);
         let mut rx2 = TestLanes::new(100);
 
-        // Register clients
         let (dtx1, _drx1) = tokio::sync::oneshot::channel();
         let (dtx2, _drx2) = tokio::sync::oneshot::channel();
         router
@@ -1523,42 +1579,26 @@ mod tests {
             .await;
 
         router
-            .subscribe(
-                "client1".to_string(),
-                "test/+".to_string(),
+            .subscribe(SubscriptionRequest::new(
+                "client1",
+                "test/+",
                 QoS::AtLeastOnce,
-                None,
-                false,
-                false,
-                0,
-                ProtocolVersion::V5,
-                false,
-                None,
-            )
+            ))
             .await
             .unwrap();
         router
-            .subscribe(
-                "client2".to_string(),
-                "test/data".to_string(),
+            .subscribe(SubscriptionRequest::new(
+                "client2",
+                "test/data",
                 QoS::ExactlyOnce,
-                None,
-                false,
-                false,
-                0,
-                ProtocolVersion::V5,
-                false,
-                None,
-            )
+            ))
             .await
             .unwrap();
 
-        // Publish message
         let publish = PublishPacket::new("test/data", &b"hello"[..], QoS::ExactlyOnce);
 
         router.route_message(&publish, None).await;
 
-        // Client 1 should receive with QoS 1 (downgraded)
         let rm1 = rx1.try_recv().unwrap();
         assert_eq!(rm1.publish.topic_name, "test/data");
         assert_eq!(rm1.publish.qos, QoS::AtLeastOnce);
@@ -1582,18 +1622,7 @@ mod tests {
             )
             .await;
         router
-            .subscribe(
-                "sub".to_string(),
-                "ids/#".to_string(),
-                QoS::AtLeastOnce,
-                None,
-                false,
-                false,
-                0,
-                ProtocolVersion::V5,
-                false,
-                None,
-            )
+            .subscribe(SubscriptionRequest::new("sub", "ids/#", QoS::AtLeastOnce))
             .await
             .unwrap();
 
@@ -1620,18 +1649,11 @@ mod tests {
             )
             .await;
         router
-            .subscribe(
-                "subscriber".to_string(),
-                "lock/#".to_string(),
+            .subscribe(SubscriptionRequest::new(
+                "subscriber",
+                "lock/#",
                 QoS::AtLeastOnce,
-                None,
-                false,
-                false,
-                0,
-                ProtocolVersion::V5,
-                false,
-                None,
-            )
+            ))
             .await
             .unwrap();
 
@@ -1655,18 +1677,11 @@ mod tests {
                         .register_client(id.clone(), rx.lanes(), router.queue_handle(&id), dtx)
                         .await;
                     router
-                        .subscribe(
+                        .subscribe(SubscriptionRequest::new(
                             id.clone(),
-                            "lock/#".to_string(),
+                            "lock/#",
                             QoS::AtLeastOnce,
-                            None,
-                            false,
-                            false,
-                            0,
-                            ProtocolVersion::V5,
-                            false,
-                            None,
-                        )
+                        ))
                         .await
                         .unwrap();
                     router.unregister_client(&id).await;
@@ -1696,19 +1711,16 @@ mod tests {
     async fn test_retained_messages() {
         let router = MessageRouter::new();
 
-        // Store retained message
         let mut publish = PublishPacket::new("test/status", &b"online"[..], QoS::AtMostOnce);
         publish.retain = true;
         router.route_message(&publish, None).await;
 
         assert_eq!(router.retained_count().await, 1);
 
-        // Get retained messages
         let retained = router.get_retained_messages("test/+").await;
         assert_eq!(retained.len(), 1);
         assert_eq!(retained[0].topic_name, "test/status");
 
-        // Delete retained message
         let mut delete = PublishPacket::new("test/status", &b""[..], QoS::AtMostOnce);
         delete.retain = true;
         router.route_message(&delete, None).await;
@@ -1723,7 +1735,6 @@ mod tests {
         let mut rx2 = TestLanes::new(100);
         let mut rx3 = TestLanes::new(100);
 
-        // Register three clients
         let (dtx1, _drx1) = tokio::sync::oneshot::channel();
         let (dtx2, _drx2) = tokio::sync::oneshot::channel();
         router
@@ -1753,52 +1764,30 @@ mod tests {
             .await;
 
         router
-            .subscribe(
-                "client1".to_string(),
-                "$share/workers/test/data".to_string(),
+            .subscribe(SubscriptionRequest::new(
+                "client1",
+                "$share/workers/test/data",
                 QoS::AtMostOnce,
-                None,
-                false,
-                false,
-                0,
-                ProtocolVersion::V5,
-                false,
-                None,
-            )
+            ))
             .await
             .unwrap();
         router
-            .subscribe(
-                "client2".to_string(),
-                "$share/workers/test/data".to_string(),
+            .subscribe(SubscriptionRequest::new(
+                "client2",
+                "$share/workers/test/data",
                 QoS::AtMostOnce,
-                None,
-                false,
-                false,
-                0,
-                ProtocolVersion::V5,
-                false,
-                None,
-            )
+            ))
             .await
             .unwrap();
         router
-            .subscribe(
-                "client3".to_string(),
-                "$share/workers/test/data".to_string(),
+            .subscribe(SubscriptionRequest::new(
+                "client3",
+                "$share/workers/test/data",
                 QoS::AtMostOnce,
-                None,
-                false,
-                false,
-                0,
-                ProtocolVersion::V5,
-                false,
-                None,
-            )
+            ))
             .await
             .unwrap();
 
-        // Publish 6 messages
         for i in 0..6 {
             let publish = PublishPacket::new(
                 "test/data",
@@ -1808,7 +1797,6 @@ mod tests {
             router.route_message(&publish, None).await;
         }
 
-        // Each client should receive exactly 2 messages
         let mut count1 = 0;
         let mut count2 = 0;
         let mut count3 = 0;
@@ -1835,7 +1823,6 @@ mod tests {
         let mut rx2 = TestLanes::new(100);
         let mut rx3 = TestLanes::new(100);
 
-        // Register clients
         let (dtx1, _drx1) = tokio::sync::oneshot::channel();
         router
             .register_client(
@@ -1865,65 +1852,41 @@ mod tests {
             .await;
 
         router
-            .subscribe(
-                "shared1".to_string(),
-                "$share/group/test/+".to_string(),
+            .subscribe(SubscriptionRequest::new(
+                "shared1",
+                "$share/group/test/+",
                 QoS::AtMostOnce,
-                None,
-                false,
-                false,
-                0,
-                ProtocolVersion::V5,
-                false,
-                None,
-            )
+            ))
             .await
             .unwrap();
         router
-            .subscribe(
-                "shared2".to_string(),
-                "$share/group/test/+".to_string(),
+            .subscribe(SubscriptionRequest::new(
+                "shared2",
+                "$share/group/test/+",
                 QoS::AtMostOnce,
-                None,
-                false,
-                false,
-                0,
-                ProtocolVersion::V5,
-                false,
-                None,
-            )
+            ))
             .await
             .unwrap();
 
         router
-            .subscribe(
-                "regular".to_string(),
-                "test/+".to_string(),
+            .subscribe(SubscriptionRequest::new(
+                "regular",
+                "test/+",
                 QoS::AtMostOnce,
-                None,
-                false,
-                false,
-                0,
-                ProtocolVersion::V5,
-                false,
-                None,
-            )
+            ))
             .await
             .unwrap();
 
-        // Publish message
         let publish = PublishPacket::new("test/data", &b"hello"[..], QoS::AtMostOnce);
         router.route_message(&publish, None).await;
 
-        // Regular subscriber should receive the message
         let regular_rm = rx3.try_recv().unwrap();
         assert_eq!(&regular_rm.publish.payload[..], b"hello");
 
-        // Only one of the shared subscribers should receive it
         let shared1_received = rx1.try_recv().is_ok();
         let shared2_received = rx2.try_recv().is_ok();
 
-        assert!(shared1_received ^ shared2_received); // XOR - exactly one should be true
+        assert!(shared1_received ^ shared2_received);
     }
 
     #[tokio::test]
@@ -1952,33 +1915,19 @@ mod tests {
             .await;
 
         router
-            .subscribe(
-                "client1".to_string(),
-                "test/+".to_string(),
+            .subscribe(SubscriptionRequest::new(
+                "client1",
+                "test/+",
                 QoS::AtLeastOnce,
-                None,
-                false,
-                false,
-                0,
-                ProtocolVersion::V5,
-                false,
-                None,
-            )
+            ))
             .await
             .unwrap();
         router
-            .subscribe(
-                "client2".to_string(),
-                "test/data".to_string(),
+            .subscribe(SubscriptionRequest::new(
+                "client2",
+                "test/data",
                 QoS::ExactlyOnce,
-                None,
-                false,
-                false,
-                0,
-                ProtocolVersion::V5,
-                false,
-                None,
-            )
+            ))
             .await
             .unwrap();
 
@@ -2023,33 +1972,19 @@ mod tests {
             .await;
 
         router
-            .subscribe(
-                "client1".to_string(),
-                "test/echo".to_string(),
+            .subscribe(SubscriptionRequest::new(
+                "client1",
+                "test/echo",
                 QoS::AtMostOnce,
-                None,
-                false,
-                false,
-                0,
-                ProtocolVersion::V5,
-                false,
-                None,
-            )
+            ))
             .await
             .unwrap();
         router
-            .subscribe(
-                "client2".to_string(),
-                "test/echo".to_string(),
+            .subscribe(SubscriptionRequest::new(
+                "client2",
+                "test/echo",
                 QoS::AtMostOnce,
-                None,
-                false,
-                false,
-                0,
-                ProtocolVersion::V5,
-                false,
-                None,
-            )
+            ))
             .await
             .unwrap();
 
@@ -2092,33 +2027,19 @@ mod tests {
             .await;
 
         router
-            .subscribe(
-                "client1".to_string(),
-                "test/echo".to_string(),
+            .subscribe(SubscriptionRequest::new(
+                "client1",
+                "test/echo",
                 QoS::AtMostOnce,
-                None,
-                false,
-                false,
-                0,
-                ProtocolVersion::V5,
-                false,
-                None,
-            )
+            ))
             .await
             .unwrap();
         router
-            .subscribe(
-                "client2".to_string(),
-                "test/echo".to_string(),
+            .subscribe(SubscriptionRequest::new(
+                "client2",
+                "test/echo",
                 QoS::AtMostOnce,
-                None,
-                false,
-                false,
-                0,
-                ProtocolVersion::V5,
-                false,
-                None,
-            )
+            ))
             .await
             .unwrap();
 
@@ -2163,18 +2084,11 @@ mod tests {
             )
             .await;
         router
-            .subscribe(
-                "sub1".to_string(),
-                "test/rate".to_string(),
+            .subscribe(SubscriptionRequest::new(
+                "sub1",
+                "test/rate",
                 QoS::AtMostOnce,
-                None,
-                false,
-                false,
-                0,
-                ProtocolVersion::V5,
-                false,
-                None,
-            )
+            ))
             .await
             .unwrap();
 
@@ -2209,18 +2123,11 @@ mod tests {
             )
             .await;
         router
-            .subscribe(
-                "sub1".to_string(),
-                "test/rate".to_string(),
+            .subscribe(SubscriptionRequest::new(
+                "sub1",
+                "test/rate",
                 QoS::AtLeastOnce,
-                None,
-                false,
-                false,
-                0,
-                ProtocolVersion::V5,
-                false,
-                None,
-            )
+            ))
             .await
             .unwrap();
 
@@ -2265,18 +2172,11 @@ mod tests {
             )
             .await;
         router
-            .subscribe(
-                "sub1".to_string(),
-                "test/rate".to_string(),
+            .subscribe(SubscriptionRequest::new(
+                "sub1",
+                "test/rate",
                 QoS::AtMostOnce,
-                None,
-                false,
-                false,
-                0,
-                ProtocolVersion::V5,
-                false,
-                None,
-            )
+            ))
             .await
             .unwrap();
 
@@ -2323,16 +2223,7 @@ mod tests {
 
         router
             .subscribe(
-                "c1".to_string(),
-                "sensor/#".to_string(),
-                QoS::AtLeastOnce,
-                None,
-                false,
-                false,
-                0,
-                ProtocolVersion::V5,
-                false,
-                Some(42),
+                SubscriptionRequest::new("c1", "sensor/#", QoS::AtLeastOnce).with_flow_id(Some(42)),
             )
             .await
             .unwrap();
@@ -2355,33 +2246,13 @@ mod tests {
             .await;
 
         router
-            .subscribe(
-                "c1".to_string(),
-                "data/#".to_string(),
-                QoS::AtMostOnce,
-                None,
-                false,
-                false,
-                0,
-                ProtocolVersion::V5,
-                false,
-                None,
-            )
+            .subscribe(SubscriptionRequest::new("c1", "data/#", QoS::AtMostOnce))
             .await
             .unwrap();
 
         router
             .subscribe(
-                "c1".to_string(),
-                "data/#".to_string(),
-                QoS::AtMostOnce,
-                None,
-                false,
-                false,
-                0,
-                ProtocolVersion::V5,
-                false,
-                Some(7),
+                SubscriptionRequest::new("c1", "data/#", QoS::AtMostOnce).with_flow_id(Some(7)),
             )
             .await
             .unwrap();
@@ -2406,49 +2277,20 @@ mod tests {
             .await;
 
         router
+            .subscribe(SubscriptionRequest::new("c1", "topic/a", QoS::AtMostOnce))
+            .await
+            .unwrap();
+
+        router
             .subscribe(
-                "c1".to_string(),
-                "topic/a".to_string(),
-                QoS::AtMostOnce,
-                None,
-                false,
-                false,
-                0,
-                ProtocolVersion::V5,
-                false,
-                None,
+                SubscriptionRequest::new("c1", "topic/a", QoS::AtMostOnce).with_flow_id(Some(10)),
             )
             .await
             .unwrap();
 
         router
             .subscribe(
-                "c1".to_string(),
-                "topic/a".to_string(),
-                QoS::AtMostOnce,
-                None,
-                false,
-                false,
-                0,
-                ProtocolVersion::V5,
-                false,
-                Some(10),
-            )
-            .await
-            .unwrap();
-
-        router
-            .subscribe(
-                "c1".to_string(),
-                "topic/b".to_string(),
-                QoS::AtMostOnce,
-                None,
-                false,
-                false,
-                0,
-                ProtocolVersion::V5,
-                false,
-                Some(10),
+                SubscriptionRequest::new("c1", "topic/b", QoS::AtMostOnce).with_flow_id(Some(10)),
             )
             .await
             .unwrap();
@@ -2477,32 +2319,14 @@ mod tests {
 
         router
             .subscribe(
-                "c1".to_string(),
-                "dup/test".to_string(),
-                QoS::AtMostOnce,
-                None,
-                false,
-                false,
-                0,
-                ProtocolVersion::V5,
-                false,
-                Some(5),
+                SubscriptionRequest::new("c1", "dup/test", QoS::AtMostOnce).with_flow_id(Some(5)),
             )
             .await
             .unwrap();
 
         router
             .subscribe(
-                "c1".to_string(),
-                "dup/test".to_string(),
-                QoS::AtLeastOnce,
-                None,
-                false,
-                false,
-                0,
-                ProtocolVersion::V5,
-                false,
-                Some(5),
+                SubscriptionRequest::new("c1", "dup/test", QoS::AtLeastOnce).with_flow_id(Some(5)),
             )
             .await
             .unwrap();

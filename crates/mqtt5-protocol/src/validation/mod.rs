@@ -28,7 +28,6 @@ pub fn is_valid_topic_name(topic: &str) -> bool {
         return false;
     }
 
-    // Topic names should not contain wildcards
     if topic.contains('+') || topic.contains('#') {
         return false;
     }
@@ -60,28 +59,50 @@ pub fn is_valid_topic_filter(filter: &str) -> bool {
     let parts: Vec<&str> = filter.split('/').collect();
 
     for (i, part) in parts.iter().enumerate() {
-        // Multi-level wildcard rules
         if part.contains('#') {
-            // # must be the last character in the filter
             if i != parts.len() - 1 {
                 return false;
             }
-            // # must occupy the entire level
             if *part != "#" {
                 return false;
             }
         }
 
-        // Single-level wildcard rules
-        if part.contains('+') {
-            // + must occupy the entire level
-            if *part != "+" {
-                return false;
-            }
+        if part.contains('+') && *part != "+" {
+            return false;
         }
     }
 
     true
+}
+
+#[must_use]
+pub fn is_valid_subscription_filter(filter: &str) -> bool {
+    let first_level = filter.split('/').next().unwrap_or(filter);
+    if first_level != "$share" {
+        return is_valid_topic_filter(filter);
+    }
+    if filter.len() > crate::constants::limits::MAX_STRING_LENGTH as usize {
+        return false;
+    }
+    filter
+        .strip_prefix("$share/")
+        .and_then(|rest| rest.split_once('/'))
+        .is_some_and(|(share_name, topic_filter)| {
+            !share_name.is_empty()
+                && !share_name.contains(['+', '#'])
+                && is_valid_topic_filter(topic_filter)
+        })
+}
+
+/// # Errors
+///
+/// Returns `MqttError::InvalidTopicFilter` if [`is_valid_subscription_filter`] rejects it
+pub fn validate_subscription_filter(filter: &str) -> Result<()> {
+    if !is_valid_subscription_filter(filter) {
+        return Err(MqttError::InvalidTopicFilter(filter.to_string()));
+    }
+    Ok(())
 }
 
 /// Validates an MQTT client identifier according to MQTT v5.0 specification
@@ -94,18 +115,13 @@ pub fn is_valid_topic_filter(filter: &str) -> bool {
 #[must_use]
 pub fn is_valid_client_id(client_id: &str) -> bool {
     if client_id.is_empty() {
-        return true; // Empty client ID is allowed
+        return true;
     }
 
-    if client_id.len() > 23 {
-        // Most servers support longer, but 23 is the spec minimum
-        // We'll allow longer and let the server reject if needed
-        if client_id.len() > crate::constants::limits::MAX_CLIENT_ID_LENGTH {
-            return false; // Reasonable upper limit
-        }
+    if client_id.len() > crate::constants::limits::MAX_CLIENT_ID_LENGTH {
+        return false;
     }
 
-    // Check for valid characters (alphanumeric)
     client_id.chars().all(|c| c.is_ascii_alphanumeric())
 }
 
@@ -190,7 +206,6 @@ pub fn validate_client_id(client_id: &str) -> Result<()> {
 /// - Topics starting with '$' do NOT match root-level wildcards (MQTT spec)
 #[must_use]
 pub fn topic_matches_filter(topic: &str, filter: &str) -> bool {
-    // MQTT spec: topics starting with $ do not match wildcards at root level
     if topic.starts_with('$') && (filter.starts_with('#') || filter.starts_with('+')) {
         return false;
     }
@@ -207,23 +222,21 @@ pub fn topic_matches_filter(topic: &str, filter: &str) -> bool {
 
     while t_idx < topic_parts.len() && f_idx < filter_parts.len() {
         if filter_parts[f_idx] == "#" {
-            return true; // Multi-level wildcard matches everything remaining
+            return true;
         }
 
         if filter_parts[f_idx] != "+" && filter_parts[f_idx] != topic_parts[t_idx] {
-            return false; // Not a match
+            return false;
         }
 
         t_idx += 1;
         f_idx += 1;
     }
 
-    // Check if we've consumed both topic and filter
     if t_idx == topic_parts.len() && f_idx == filter_parts.len() {
         return true;
     }
 
-    // Check if filter ends with # and we've consumed the topic
     if t_idx == topic_parts.len() && f_idx == filter_parts.len() - 1 && filter_parts[f_idx] == "#" {
         return true;
     }
@@ -289,7 +302,6 @@ impl TopicValidator for StandardValidator {
     }
 
     fn is_reserved_topic(&self, _topic: &str) -> bool {
-        // Standard MQTT has no reserved topics
         false
     }
 
@@ -351,7 +363,6 @@ impl RestrictiveValidator {
 
     /// Checks if topic violates additional restrictions
     fn check_additional_restrictions(&self, topic: &str) -> Result<()> {
-        // Check reserved prefixes
         for prefix in &self.reserved_prefixes {
             if topic.starts_with(prefix) {
                 return Err(MqttError::InvalidTopicName(format!(
@@ -360,7 +371,6 @@ impl RestrictiveValidator {
             }
         }
 
-        // Check maximum levels
         if let Some(max_levels) = self.max_levels {
             let level_count = topic.split('/').count();
             if level_count > max_levels {
@@ -370,7 +380,6 @@ impl RestrictiveValidator {
             }
         }
 
-        // Check maximum length
         if let Some(max_length) = self.max_topic_length {
             if topic.len() > max_length {
                 return Err(MqttError::InvalidTopicName(format!(
@@ -382,7 +391,6 @@ impl RestrictiveValidator {
             }
         }
 
-        // Check prohibited characters
         for &prohibited_char in &self.prohibited_chars {
             if topic.contains(prohibited_char) {
                 return Err(MqttError::InvalidTopicName(format!(
@@ -397,19 +405,13 @@ impl RestrictiveValidator {
 
 impl TopicValidator for RestrictiveValidator {
     fn validate_topic_name(&self, topic: &str) -> Result<()> {
-        // First apply standard validation
         validate_topic_name(topic)?;
-        // Then apply additional restrictions
         self.check_additional_restrictions(topic)
     }
 
     fn validate_topic_filter(&self, filter: &str) -> Result<()> {
-        // First apply standard validation
         validate_topic_filter(filter)?;
-        // Then apply additional restrictions (but allow wildcards)
-        // Note: We don't apply all restrictions to filters since they may contain wildcards
 
-        // Check reserved prefixes
         for prefix in &self.reserved_prefixes {
             if filter.starts_with(prefix) && !filter.contains('+') && !filter.contains('#') {
                 return Err(MqttError::InvalidTopicFilter(format!(
@@ -478,6 +480,49 @@ mod tests {
     }
 
     #[test]
+    fn test_valid_subscription_filters() {
+        for filter in [
+            "$shared/x",
+            "$sharex",
+            "$share/g/a/+",
+            "$share/g/#",
+            "$share/g//",
+            "/",
+            "+/+",
+            "a/+/b/#",
+            "+",
+            "#",
+            "$SYS/#",
+            "a//b",
+        ] {
+            assert!(is_valid_subscription_filter(filter), "{filter}");
+        }
+    }
+
+    #[test]
+    fn test_invalid_subscription_filters() {
+        for filter in [
+            "",
+            "a/#/b",
+            "a+",
+            "$share",
+            "$share/",
+            "$share//x",
+            "$share/g",
+            "$share/g/",
+            "$share/g/a/#/b",
+            "$share/g+/x",
+            "$share/g#/x",
+            "$share/+/x",
+            "$share/#/x",
+            "$share/g/a\0",
+        ] {
+            assert!(!is_valid_subscription_filter(filter), "{filter:?}");
+            assert!(validate_subscription_filter(filter).is_err());
+        }
+    }
+
+    #[test]
     fn test_valid_client_ids() {
         assert!(is_valid_client_id(""));
         assert!(is_valid_client_id("client123"));
@@ -526,10 +571,8 @@ mod tests {
 
     #[test]
     fn test_topic_matches_filter() {
-        // Exact matches
         assert!(topic_matches_filter("sport/tennis", "sport/tennis"));
 
-        // Single-level wildcard
         assert!(topic_matches_filter("sport/tennis", "sport/+"));
         assert!(topic_matches_filter(
             "sport/tennis/player1",
@@ -541,7 +584,6 @@ mod tests {
         ));
         assert!(!topic_matches_filter("sport/tennis/player1", "sport/+"));
 
-        // Multi-level wildcard
         assert!(topic_matches_filter("sport/tennis", "sport/#"));
         assert!(topic_matches_filter("sport/tennis/player1", "sport/#"));
         assert!(topic_matches_filter(
@@ -552,7 +594,6 @@ mod tests {
         assert!(topic_matches_filter("anything", "#"));
         assert!(topic_matches_filter("sport/tennis", "#"));
 
-        // $ prefix topics - MQTT spec compliant behavior
         assert!(!topic_matches_filter("$SYS/broker/uptime", "#"));
         assert!(!topic_matches_filter(
             "$SYS/broker/uptime",
@@ -562,7 +603,6 @@ mod tests {
         assert!(topic_matches_filter("$SYS/broker/uptime", "$SYS/#"));
         assert!(topic_matches_filter("$SYS/broker/uptime", "$SYS/+/uptime"));
 
-        // Non-matches
         assert!(!topic_matches_filter("sport/tennis", "sport/football"));
         assert!(!topic_matches_filter("sport", "sport/tennis"));
         assert!(!topic_matches_filter(

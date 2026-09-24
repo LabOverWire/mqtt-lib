@@ -56,6 +56,7 @@ fn connect_options(config: &BridgeConfig) -> ConnectOptions {
     let mut options = ConnectOptions::new(&config.client_id)
         .with_deferred_ack(true)
         .with_clean_start(false)
+        .with_resume_existing_session(true)
         .with_session_expiry_interval(BRIDGE_SESSION_EXPIRY_SECS)
         .with_receive_maximum(receive_maximum);
     options.keep_alive = Duration::from_secs(u64::from(config.keepalive));
@@ -133,14 +134,12 @@ impl BridgeConnection {
     /// # Errors
     /// Returns an error if the configuration is invalid.
     pub fn new(config: BridgeConfig, router: Arc<MessageRouter>) -> Result<Self> {
-        // Validate configuration
         config
             .validate()
             .map_err(|e| BridgeError::ConfigurationError(e.to_string()))?;
 
         let client = Arc::new(MqttClient::with_options(connect_options(&config)));
 
-        // Create shutdown channel
         let (shutdown_tx, _) = broadcast::channel(1);
 
         Ok(Self {
@@ -188,7 +187,9 @@ impl BridgeConnection {
 
         let _ = self.shutdown_tx.send(());
 
-        let _ = self.client.disconnect().await;
+        if let Err(e) = self.client.disconnect().await {
+            debug!(bridge = %self.config.name, error = %e, "bridge client disconnect failed during stop");
+        }
 
         let mut stats = self.stats.write().await;
         stats.connected = false;
@@ -977,7 +978,7 @@ impl BridgeConnection {
                 .publish_with_options(&remote_topic, payload, options)
                 .await
             {
-                Ok(_) => {
+                Ok(crate::client::PublishResult::Sent(_)) => {
                     debug!(
                         bridge = %bridge_name_clone,
                         topic = %remote_topic,
@@ -985,6 +986,13 @@ impl BridgeConnection {
                     );
                     messages_sent.fetch_add(1, Ordering::Relaxed);
                     bytes_sent.fetch_add(payload_len as u64, Ordering::Relaxed);
+                }
+                Ok(crate::client::PublishResult::Queued(_)) => {
+                    debug!(
+                        bridge = %bridge_name_clone,
+                        topic = %remote_topic,
+                        "publish not yet acknowledged; it stays in flight with the session"
+                    );
                 }
                 Err(e) => {
                     error!(
@@ -1009,10 +1017,8 @@ impl BridgeConnection {
         stats.current_broker = Some(address.to_string());
         stats.on_primary = matches!(broker, ConnectedBroker::Primary);
 
-        // Store which broker we're connected to
         *self.current_broker.write().await = Some(broker);
 
-        // Flush any pending messages that were queued while disconnected
         self.flush_pending_messages().await;
     }
 
@@ -1115,7 +1121,7 @@ impl BridgeConnection {
     async fn run_connection(&self) -> Result<()> {
         if !self.client.is_connected().await {
             self.register_ingress_callbacks().await?;
-            let _ = Box::pin(self.connect()).await?;
+            Box::pin(self.connect()).await?;
             self.setup_subscriptions().await?;
         }
 

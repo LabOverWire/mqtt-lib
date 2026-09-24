@@ -204,6 +204,7 @@
             <strong>How Session Persistence Works:</strong>
             <ul style="margin: 10px 0 0 0; padding-left: 20px;">
                 <li><code>cleanStart=false</code>: Resume existing session, keep subscriptions and queued messages</li>
+                <li><code>resumeExistingSession=true</code>: Lets a fresh client instance (e.g. after a page reload or crash) accept the session the broker still holds</li>
                 <li><code>cleanStart=true</code>: Start fresh, discard any existing session state</li>
                 <li><code>sessionExpiryInterval</code>: How long the broker keeps the session after disconnect</li>
             </ul>
@@ -437,6 +438,7 @@
 
             const options = new ConnectOptions();
             options.cleanStart = cleanStart;
+            options.resumeExistingSession = !cleanStart;
             options.sessionExpiryInterval = 3600;
 
             await mobileClient.connectMessagePortWithOptions(mobilePort, options);

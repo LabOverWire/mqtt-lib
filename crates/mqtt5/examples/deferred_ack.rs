@@ -34,6 +34,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let options = ConnectOptions::new("deferred-ack-demo")
         .with_deferred_ack(true)
         .with_clean_start(false)
+        .with_resume_existing_session(true)
         .with_session_expiry_interval(3600)
         .with_receive_maximum(16);
 

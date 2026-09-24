@@ -9,7 +9,7 @@ use crate::transport::tls::{TlsReadHalf, TlsWriteHalf};
 use crate::Transport;
 use bytes::{Buf, BufMut, BytesMut};
 use std::future::Future;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 
 /// Extension trait for Transport to add packet I/O methods
@@ -141,22 +141,18 @@ fn encode_packet<F>(
 where
     F: FnOnce(&mut BytesMut) -> Result<()>,
 {
-    // Encode body first to get remaining length
     let mut body_buf = BytesMut::new();
     encode_body(&mut body_buf)?;
 
-    // Write fixed header
     let byte1 = (u8::from(packet_type) << 4) | (flags & crate::constants::masks::FLAGS);
     buf.put_u8(byte1);
     encode_variable_int(buf, u32::try_from(body_buf.len()).unwrap_or(u32::MAX))?;
 
-    // Write body
     buf.put(body_buf);
 
     Ok(())
 }
 
-// Implement PacketIo for all types that implement Transport
 impl<T: Transport> PacketIo for T {}
 
 /// Packet reader trait for split read halves
@@ -349,6 +345,68 @@ pub async fn read_packet_reusing_buffer<T: Transport>(
     }
 }
 
+/// Decodes the next complete packet in `read_buffer`, or `None` while it is incomplete.
+///
+/// # Errors
+/// Returns `PacketTooLarge` if the packet exceeds `max_packet_size`, or a decode
+/// error if the packet is malformed.
+pub fn decode_buffered_packet(
+    read_buffer: &mut BytesMut,
+    protocol_version: u8,
+    max_packet_size: usize,
+) -> Result<Option<Packet>> {
+    let Some(header_len) = fixed_header_len(read_buffer)? else {
+        return Ok(None);
+    };
+    let mut header_slice: &[u8] = &read_buffer[..header_len];
+    let fixed_header = FixedHeader::decode(&mut header_slice)?;
+    let frame_len = header_len + fixed_header.remaining_length as usize;
+    if frame_len > max_packet_size {
+        return Err(MqttError::PacketTooLarge {
+            size: frame_len,
+            max: max_packet_size,
+        });
+    }
+    if read_buffer.len() < frame_len {
+        read_buffer.reserve(frame_len - read_buffer.len());
+        return Ok(None);
+    }
+    let mut frame = read_buffer.split_to(frame_len);
+    frame.advance(header_len);
+    Packet::decode_from_body_with_version(
+        fixed_header.packet_type,
+        &fixed_header,
+        &mut frame,
+        protocol_version,
+    )
+    .map(Some)
+}
+
+/// Reads one packet from a byte stream, buffering partial reads in `read_buffer`.
+///
+/// # Errors
+/// Returns an error if the stream fails or closes, or the packet is oversized or malformed.
+pub async fn read_packet_from_stream<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    protocol_version: u8,
+    read_buffer: &mut BytesMut,
+    max_packet_size: usize,
+) -> Result<Packet> {
+    loop {
+        if let Some(packet) =
+            decode_buffered_packet(read_buffer, protocol_version, max_packet_size)?
+        {
+            return Ok(packet);
+        }
+        if read_buffer.capacity() - read_buffer.len() < READ_CHUNK {
+            read_buffer.reserve(READ_CHUNK);
+        }
+        if reader.read_buf(read_buffer).await? == 0 {
+            return Err(MqttError::ClientClosed);
+        }
+    }
+}
+
 fn fixed_header_len(buf: &[u8]) -> Result<Option<usize>> {
     for (index, byte) in buf.iter().enumerate().skip(1) {
         if (byte & crate::constants::masks::CONTINUATION_BIT) == 0 {
@@ -517,6 +575,27 @@ mod tests {
         buf.to_vec()
     }
 
+    #[test]
+    fn buffered_decode_reassembles_split_packet_and_enforces_maximum() {
+        let bytes = encoded_publish("split", b"payload");
+        let mut buffer = BytesMut::from(&bytes[..4]);
+        assert!(decode_buffered_packet(&mut buffer, 5, 1024)
+            .unwrap()
+            .is_none());
+        buffer.extend_from_slice(&bytes[4..]);
+        assert!(matches!(
+            decode_buffered_packet(&mut buffer, 5, 1024).unwrap(),
+            Some(Packet::Publish(p)) if p.topic_name == "split"
+        ));
+        assert!(buffer.is_empty());
+
+        let mut oversized = BytesMut::from(&bytes[..3]);
+        assert!(matches!(
+            decode_buffered_packet(&mut oversized, 5, bytes.len() - 1),
+            Err(MqttError::PacketTooLarge { .. })
+        ));
+    }
+
     #[tokio::test]
     async fn read_survives_cancellation_mid_packet() {
         let (tx, mut transport) = ChunkTransport::new();
@@ -612,7 +691,6 @@ mod tests {
         let mut transport = MockTransport::new();
         transport.connect().await.unwrap();
 
-        // Inject a PINGRESP packet
         transport
             .add_incoming_data(&crate::constants::packets::PINGRESP_BYTES)
             .await;
@@ -626,7 +704,6 @@ mod tests {
         let mut transport = MockTransport::new();
         transport.connect().await.unwrap();
 
-        // Inject a PINGREQ packet
         transport
             .add_incoming_data(&crate::constants::packets::PINGREQ_BYTES)
             .await;
@@ -642,7 +719,6 @@ mod tests {
         let mut transport = MockTransport::new();
         transport.connect().await.unwrap();
 
-        // Create a CONNACK packet using proper encoding
         let connack = ConnAckPacket {
             protocol_version: 5,
             session_present: false,
@@ -669,25 +745,19 @@ mod tests {
         let mut transport = MockTransport::new();
         transport.connect().await.unwrap();
 
-        // Create a PUBLISH packet with QoS 0
         let topic = "test/topic";
         let payload = b"Hello MQTT";
 
-        // Use proper encoding
         let mut buf = BytesMut::new();
 
-        // Encode topic string using the proper function
         crate::encoding::encode_string(&mut buf, topic).unwrap();
 
-        // Properties length (0 for no properties)
         buf.put_u8(0x00);
 
-        // Payload
         buf.extend_from_slice(payload);
 
-        // Now create the full packet with fixed header
         let mut data = BytesMut::new();
-        data.put_u8(0x30); // PUBLISH with QoS 0
+        data.put_u8(0x30);
         crate::encoding::encode_variable_int(&mut data, u32::try_from(buf.len()).unwrap()).unwrap();
         data.extend_from_slice(&buf);
 
@@ -710,11 +780,8 @@ mod tests {
         let mut transport = MockTransport::new();
         transport.connect().await.unwrap();
 
-        // Create packet with invalid remaining length (5 bytes with continuation bit)
-        // This must be manually constructed as it's testing invalid encoding
         let mut data = BytesMut::new();
         data.put_u8(crate::constants::fixed_header::PUBLISH_BASE);
-        // Invalid variable byte integer - 5 bytes all with continuation bit
         data.extend_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF, 0xFF]);
         transport.add_incoming_data(&data).await;
 
@@ -732,7 +799,6 @@ mod tests {
     async fn test_read_packet_connection_closed() {
         let mut transport = MockTransport::new();
 
-        // Don't add any data - read should return 0
         let result = transport.read_packet(5).await;
         assert!(result.is_err());
     }
@@ -745,7 +811,7 @@ mod tests {
         transport.write_packet(Packet::PingReq).await.unwrap();
 
         let written = transport.get_written_data().await;
-        assert_eq!(written, crate::constants::packets::PINGREQ_BYTES.to_vec()); // PINGREQ packet
+        assert_eq!(written, crate::constants::packets::PINGREQ_BYTES.to_vec());
     }
 
     #[tokio::test]
@@ -772,12 +838,10 @@ mod tests {
 
         let written = transport.get_written_data().await;
 
-        // Verify fixed header
         assert_eq!(written[0] >> 4, u8::from(PacketType::Publish));
-        assert_eq!(written[0] & crate::constants::masks::FLAGS, 0x02); // QoS 1 flag
+        assert_eq!(written[0] & crate::constants::masks::FLAGS, 0x02);
 
-        // Should contain topic, packet ID, and payload
-        assert!(written.len() > 2 + 4 + 2 + 3); // header + topic + packet_id + payload
+        assert!(written.len() > 2 + 4 + 2 + 3);
     }
 
     #[tokio::test]
@@ -807,14 +871,12 @@ mod tests {
 
         let written = transport.get_written_data().await;
 
-        // Verify fixed header
-        assert_eq!(written[0], 0x82); // SUBSCRIBE with required flags
-        assert!(written.len() > 2); // Has content
+        assert_eq!(written[0], 0x82);
+        assert!(written.len() > 2);
     }
 
     #[tokio::test]
     async fn test_roundtrip_packets() {
-        // Test that we can write and read back various packet types
         let test_packets = vec![
             Packet::PingReq,
             Packet::PingResp,
@@ -839,7 +901,6 @@ mod tests {
 
             let read_packet = read_transport.read_packet(5).await.unwrap();
 
-            // Basic type check
             match (&packet, &read_packet) {
                 (Packet::PingReq, Packet::PingReq) | (Packet::PingResp, Packet::PingResp) => {}
                 (Packet::ConnAck(a), Packet::ConnAck(b)) => {
@@ -855,12 +916,11 @@ mod tests {
     async fn test_encode_packet_helper() {
         let mut buf = BytesMut::new();
 
-        // Test encoding a simple packet
         encode_packet(&mut buf, PacketType::PingReq, 0, |_| Ok(())).unwrap();
 
         assert_eq!(buf.len(), 2);
-        assert_eq!(buf[0], crate::constants::fixed_header::PINGREQ); // PINGREQ type
-        assert_eq!(buf[1], 0x00); // Zero length
+        assert_eq!(buf[0], crate::constants::fixed_header::PINGREQ);
+        assert_eq!(buf[1], 0x00);
     }
 
     #[tokio::test]
@@ -868,7 +928,6 @@ mod tests {
         let mut transport = MockTransport::new();
         transport.connect().await.unwrap();
 
-        // Create a publish with large payload to test variable length encoding
         let mut large_payload = vec![0u8; 200];
         for (i, byte) in large_payload.iter_mut().enumerate() {
             *byte = u8::try_from(i % 256).expect("modulo 256 always fits in u8");
@@ -893,8 +952,7 @@ mod tests {
 
         let written = transport.get_written_data().await;
 
-        // Verify the remaining length uses 2 bytes (since payload > 127)
-        assert!(written[1] & crate::constants::masks::CONTINUATION_BIT != 0); // Continuation bit set
-        assert!(written.len() > 200); // Contains the large payload
+        assert!(written[1] & crate::constants::masks::CONTINUATION_BIT != 0);
+        assert!(written.len() > 200);
     }
 }

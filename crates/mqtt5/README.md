@@ -415,17 +415,45 @@ AWS IoT features:
 - Client certificate loading from bytes (PEM/DER formats)
 - SDK compatibility: Subscribe method returns `(packet_id, qos)` tuple
 
+### Publish Outcomes and the Offline Queue
+
+A publish on a live connection returns `PublishResult::Sent(Delivery)` once it is written (`QoS` 0) or acknowledged (`QoS` 1/2). `Delivery::qos_used()` reports the `QoS` actually used, which is lower than requested when the server's Maximum `QoS` forced a downgrade.
+
+A `QoS` 1/2 publish made while disconnected (with `queue_on_disconnect` enabled) returns `PublishResult::Queued(PublishHandle)`. The same happens when a `QoS` 1/2 publish was sent but the connection ended, the client disconnected, or no acknowledgement arrived within the acknowledgement wait: the message stays in flight with the session and is re-sent on the next connection. Either way it has not settled yet. The handle stays pending until the client reconnects (then it settles) or is dropped (then it resolves `Indeterminate(Abandoned)`); awaiting it yields exactly one `PublishOutcome`:
+
+- `Delivered(Delivery)`: acknowledged, or written unconfirmed when downgraded to `QoS` 0
+- `Rejected(PublishRejection)`: definitely not delivered (for example Retain Available 0 or Maximum Packet Size on the new connection)
+- `Indeterminate(IndeterminateReason)`: may have been delivered (for example the session was lost before a `QoS` 2 PUBLISH was acknowledged with PUBREC, or an already-sent message no longer conforms to the resumed connection)
+
+```rust
+use mqtt5::{MqttClient, PublishOutcome, PublishResult};
+
+async fn send(client: &MqttClient) -> Result<(), Box<dyn std::error::Error>> {
+    match client.publish_qos1("telemetry", b"data").await? {
+        PublishResult::Sent(delivery) => println!("sent at {:?}", delivery.qos_used()),
+        PublishResult::Queued(handle) => match handle.await {
+            PublishOutcome::Delivered(delivery) => println!("flushed at {:?}", delivery.qos_used()),
+            PublishOutcome::Rejected(reason) => println!("not delivered: {reason:?}"),
+            PublishOutcome::Indeterminate(reason) => println!("may have been delivered: {reason:?}"),
+        },
+    }
+    Ok(())
+}
+```
+
+An offline retained publish is rejected immediately when the last connection reported Retain Available 0, and an offline publish that already exceeds the last known Maximum Packet Size is rejected immediately with `PacketTooLarge`.
+
 ### Testing with Mock Client
 
 ```rust
-use mqtt5::{MockMqttClient, MqttClientTrait, PublishResult, QoS};
+use mqtt5::{Delivery, MockMqttClient, MqttClientTrait, PublishResult, QoS};
 
 #[tokio::test]
 async fn test_my_iot_function() {
     let mock = MockMqttClient::new("test-device");
 
     mock.set_connect_response(Ok(())).await;
-    mock.set_publish_response(Ok(PublishResult::QoS1Or2 { packet_id: 123 })).await;
+    mock.set_publish_response(Ok(PublishResult::Sent(Delivery::AtLeastOnce { packet_id: 123 }))).await;
 
     my_iot_function(&mock).await.unwrap();
 

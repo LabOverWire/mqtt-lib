@@ -30,43 +30,17 @@ impl MqttClient {
         session_present: bool,
         keep_alive: std::time::Duration,
     ) {
-        if !session_present {
-            self.reset_inbound_state_for_lost_session().await;
-        }
         self.trigger_connection_event(ConnectionEvent::Connected {
             session_present,
             keep_alive,
         })
         .await;
+        #[cfg(feature = "transport-quic")]
         self.recover_quic_flows().await;
         self.restore_subscriptions_after_connect(stored_subs, session_present)
             .await;
         if !session_present {
             self.restore_ack_subscriptions_after_lost_session().await;
-        }
-    }
-
-    /// Clears stale inbound `QoS` 2 de-duplication state after the broker reports no session.
-    ///
-    /// Without a resumed session the broker's packet-ID space starts fresh, so any retained
-    /// `inbound_delivered` guard would suppress a genuinely new PUBLISH that reuses the ID.
-    /// With deferred ack any outstanding [`AckToken`](crate::AckToken) is also stale — the
-    /// message it referred to is gone — so this is surfaced as a warning.
-    async fn reset_inbound_state_for_lost_session(&self) {
-        let inner = self.inner.read().await;
-        let cleared = inner.session.read().await.clear_all_inbound_state().await;
-        if cleared {
-            if inner.options.deferred_ack {
-                tracing::warn!(
-                    "Reconnected with session_present=0; cleared stale inbound QoS 2 \
-                     de-duplication state. Any outstanding AckTokens are now stale because the \
-                     broker no longer holds the session that delivered their messages."
-                );
-            } else {
-                tracing::debug!(
-                    "Reconnected with session_present=0; cleared stale inbound QoS 2 de-duplication state"
-                );
-            }
         }
     }
 
@@ -94,9 +68,9 @@ impl MqttClient {
             let (host, port) = Self::split_host_port(rest, 8883)?;
             Ok((ClientTransportType::Tls, host, port))
         } else if let Some(rest) = address.strip_prefix("ws://") {
-            let (host, port) = Self::split_host_port(rest, 80)?;
             #[cfg(feature = "transport-websocket")]
             {
+                let (host, port) = Self::split_host_port(rest, 80)?;
                 Ok((
                     ClientTransportType::WebSocket(address.to_string()),
                     host,
@@ -105,16 +79,15 @@ impl MqttClient {
             }
             #[cfg(not(feature = "transport-websocket"))]
             {
-                let _ = (host, port);
-                Err(Self::unsupported_transport_feature(
+                Self::split_host_port(rest, 80).and(Err(Self::unsupported_transport_feature(
                     "WebSocket",
                     "transport-websocket",
-                ))
+                )))
             }
         } else if let Some(rest) = address.strip_prefix("wss://") {
-            let (host, port) = Self::split_host_port(rest, 443)?;
             #[cfg(feature = "transport-websocket")]
             {
+                let (host, port) = Self::split_host_port(rest, 443)?;
                 Ok((
                     ClientTransportType::WebSocketSecure(address.to_string()),
                     host,
@@ -123,11 +96,10 @@ impl MqttClient {
             }
             #[cfg(not(feature = "transport-websocket"))]
             {
-                let _ = (host, port);
-                Err(Self::unsupported_transport_feature(
+                Self::split_host_port(rest, 443).and(Err(Self::unsupported_transport_feature(
                     "WebSocket",
                     "transport-websocket",
-                ))
+                )))
             }
         } else if let Some(rest) = address.strip_prefix("tcp://") {
             let (host, port) = Self::split_host_port(rest, 1883)?;
@@ -136,32 +108,30 @@ impl MqttClient {
             let (host, port) = Self::split_host_port(rest, 8883)?;
             Ok((ClientTransportType::Tls, host, port))
         } else if let Some(rest) = address.strip_prefix("quic://") {
-            let (host, port) = Self::split_host_port(rest, 14567)?;
             #[cfg(feature = "transport-quic")]
             {
+                let (host, port) = Self::split_host_port(rest, 14567)?;
                 Ok((ClientTransportType::Quic, host, port))
             }
             #[cfg(not(feature = "transport-quic"))]
             {
-                let _ = (host, port);
-                Err(Self::unsupported_transport_feature(
+                Self::split_host_port(rest, 14567).and(Err(Self::unsupported_transport_feature(
                     "QUIC",
                     "transport-quic",
-                ))
+                )))
             }
         } else if let Some(rest) = address.strip_prefix("quics://") {
-            let (host, port) = Self::split_host_port(rest, 14567)?;
             #[cfg(feature = "transport-quic")]
             {
+                let (host, port) = Self::split_host_port(rest, 14567)?;
                 Ok((ClientTransportType::QuicSecure, host, port))
             }
             #[cfg(not(feature = "transport-quic"))]
             {
-                let _ = (host, port);
-                Err(Self::unsupported_transport_feature(
+                Self::split_host_port(rest, 14567).and(Err(Self::unsupported_transport_feature(
                     "QUIC",
                     "transport-quic",
-                ))
+                )))
             }
         } else {
             let (host, port) = Self::split_host_port(address, 1883)?;

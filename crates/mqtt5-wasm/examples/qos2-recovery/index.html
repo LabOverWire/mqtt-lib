@@ -416,6 +416,7 @@
 
                 const opts = new ConnectOptions();
                 opts.cleanStart = false;
+                opts.resumeExistingSession = true;
                 opts.sessionExpiryInterval = 3600;
 
                 subscriberClient.connectMessagePortWithOptions(subscriberPort, opts).then(() => {

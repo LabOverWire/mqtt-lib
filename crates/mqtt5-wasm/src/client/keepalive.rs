@@ -1,4 +1,3 @@
-use bytes::BytesMut;
 use mqtt5_protocol::packet::Packet;
 use mqtt5_protocol::time::Duration;
 use mqtt5_protocol::u128_to_u32_saturating;
@@ -8,13 +7,19 @@ use std::rc::Rc;
 use wasm_bindgen_futures::spawn_local;
 
 use super::callbacks::handle_connection_lost;
-use super::packet::encode_packet;
+use super::packet::write_packet;
 use super::sleep_ms;
 use super::state::ClientState;
 
 pub fn spawn_keepalive_task(state: Rc<RefCell<ClientState>>) {
     let keepalive_config = KeepaliveConfig::conservative();
-    let generation = state.borrow().connection_generation;
+    let (generation, keep_alive) = {
+        let state_ref = state.borrow();
+        (state_ref.connection_generation, state_ref.keep_alive)
+    };
+    if keep_alive == 0 {
+        return;
+    }
 
     spawn_local(async move {
         loop {
@@ -67,32 +72,12 @@ pub fn spawn_keepalive_task(state: Rc<RefCell<ClientState>>) {
                 break;
             }
 
-            let packet = Packet::PingReq;
-            let mut buf = BytesMut::new();
-            if let Err(e) = encode_packet(&packet, &mut buf) {
-                web_sys::console::error_1(&format!("Ping encode error: {e}").into());
-                continue;
-            }
-
             state.borrow_mut().last_ping_sent = Some(js_sys::Date::now());
 
-            let writer_rc = {
-                let state_ref = state.borrow();
-                state_ref.writer.as_ref().map(Rc::clone)
-            };
-
-            match writer_rc {
-                Some(writer_rc) => match writer_rc.borrow_mut().write(&buf) {
-                    Ok(()) => {}
-                    Err(e) => {
-                        let error_msg = format!("Ping send error: {e}");
-                        handle_connection_lost(&state, &error_msg);
-                        break;
-                    }
-                },
-                None => {
-                    break;
-                }
+            if let Err(e) = write_packet(&state, &Packet::PingReq) {
+                let error_msg = format!("Ping send error: {e}");
+                handle_connection_lost(&state, &error_msg);
+                break;
             }
         }
     });

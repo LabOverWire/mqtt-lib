@@ -18,7 +18,28 @@ pub struct ConnectOptions {
     /// Enable deferred acknowledgement: inbound `QoS` > 0 messages are delivered with
     /// an `AckToken` the application resolves after durable processing. Requires a
     /// persistent session and a bounded receive maximum; see `validate_deferred_ack`.
+    ///
+    /// Acknowledgements are sent in arrival order (`[MQTT-4.6.0-2]`/`[MQTT-4.6.0-3]`), so
+    /// an unresolved `AckToken` also holds back the automatic PUBACK/PUBREC of every later
+    /// message, including those for plain `subscribe` callbacks, and can stall the
+    /// broker's in-flight window. See the `AckToken` head-of-line blocking notes.
     pub deferred_ack: bool,
+    /// Accept a broker-held session that this client instance has no local state for.
+    ///
+    /// By default a client that holds no session state (a fresh `MqttClient` that has not
+    /// yet connected, or any `Clean Start = 1` connection) treats a CONNACK with
+    /// `Session Present = 1` as a protocol violation per `[MQTT-3.2.2-4]`: it sends
+    /// DISCONNECT with reason code 0x82 (Protocol Error), closes the network connection and
+    /// `connect` returns an error.
+    ///
+    /// Setting this to `true` lets a fresh client connecting with `Clean Start = 0` resume
+    /// the session the broker kept for its client identifier, for example after a process
+    /// restart. The broker's subscriptions and queued messages are resumed, but any
+    /// outbound or inbound `QoS` 1/2 exchanges the previous process had in flight are lost
+    /// locally, so delivery across the restart is at-least-once: this is the deferred-ack
+    /// crash-recovery pattern, where messages whose `AckToken` was never resolved are
+    /// redelivered to the new process. It has no effect on `Clean Start = 1` connections.
+    pub resume_existing_session: bool,
 }
 
 impl ConnectOptions {
@@ -31,12 +52,28 @@ impl ConnectOptions {
             keepalive_config: None,
             codec_registry: None,
             deferred_ack: false,
+            resume_existing_session: false,
         }
+    }
+
+    /// Opts in to resuming a broker-held session without local session state.
+    ///
+    /// See [`ConnectOptions::resume_existing_session`].
+    #[must_use]
+    pub fn with_resume_existing_session(mut self, resume: bool) -> Self {
+        self.resume_existing_session = resume;
+        self
     }
 
     /// Enables deferred acknowledgement. Connection-wide: every `subscribe_with_ack`
     /// subscription delivers an `AckToken`. Must be paired with a persistent session
     /// and an explicit bounded receive maximum (see `validate_deferred_ack`).
+    ///
+    /// Once enabled, an unresolved `AckToken` blocks all later PUBACK/PUBREC on the
+    /// connection, including automatic acknowledgements for plain `subscribe`
+    /// callbacks, because acknowledgements must follow arrival order
+    /// (`[MQTT-4.6.0-2]`/`[MQTT-4.6.0-3]`). A long-held token can therefore exhaust the
+    /// Receive Maximum window and stall all inbound `QoS` 1/2 delivery.
     #[must_use]
     pub fn with_deferred_ack(mut self, on: bool) -> Self {
         self.deferred_ack = on;
@@ -208,6 +245,7 @@ impl std::fmt::Debug for ConnectOptions {
                 &self.codec_registry.as_ref().map(|_| "CodecRegistry"),
             )
             .field("deferred_ack", &self.deferred_ack)
+            .field("resume_existing_session", &self.resume_existing_session)
             .finish()
     }
 }
@@ -228,8 +266,8 @@ impl DerefMut for ConnectOptions {
 
 pub use mqtt5_protocol::{
     ConnectProperties, ConnectResult, KeepaliveConfig, Message, MessageProperties, ProtocolVersion,
-    PublishOptions, PublishProperties, PublishResult, RetainHandling, SubscribeOptions,
-    WillMessage, WillProperties,
+    PublishOptions, PublishProperties, RetainHandling, SubscribeOptions, WillMessage,
+    WillProperties,
 };
 
 #[derive(Debug, Clone, Default)]

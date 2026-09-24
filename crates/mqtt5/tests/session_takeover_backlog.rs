@@ -41,6 +41,7 @@ fn qos1() -> SubscribeOptions {
 fn persistent(client_id: &str, clean_start: bool) -> ConnectOptions {
     ConnectOptions::new(client_id)
         .with_clean_start(clean_start)
+        .with_resume_existing_session(!clean_start)
         .with_session_expiry_interval(3600)
         .with_automatic_reconnect(false)
 }

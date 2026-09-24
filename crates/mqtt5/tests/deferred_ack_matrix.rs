@@ -1,5 +1,4 @@
 #![cfg(feature = "broker")]
-#![allow(clippy::large_futures)]
 
 mod common;
 
@@ -271,10 +270,12 @@ async fn crash_regime_fresh_client_resumes_and_redelivers() {
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     let second = MqttClient::new(&id);
-    let result = second
-        .connect_with_options(broker.address(), deferred_options(&id, 8))
-        .await
-        .unwrap();
+    let result = Box::pin(second.connect_with_options(
+        broker.address(),
+        deferred_options(&id, 8).with_resume_existing_session(true),
+    ))
+    .await
+    .unwrap();
     assert!(
         result.session_present,
         "the still-running broker resumes the persistent session"
@@ -363,8 +364,7 @@ async fn websocket_deferred_qos2_delivers_backpressures_and_acks() {
 
     let sub_opts = deferred_options(&client_id("ws-sub"), 1);
     let subscriber = MqttClient::with_options(sub_opts.clone());
-    subscriber
-        .connect_with_options(broker.address(), sub_opts)
+    Box::pin(subscriber.connect_with_options(broker.address(), sub_opts))
         .await
         .unwrap();
 

@@ -38,6 +38,30 @@
 
 ## Diary Entries
 
+### Quorum review of the client fixes, and a TLA+-verified outcome model for the offline queue (2026-09-23)
+
+**Trigger**: a five-reviewer quorum review of PR #164 before merge. Most findings came with a failing test. The worst was a regression in the wasm client: a v3.1.1 persistent session could never reconnect, because the session-lifetime check used Session Expiry (always 0 in 3.1.1) and the new strict `[MQTT-3.2.2-4]` check then rejected the broker's Session Present=1 forever. Other findings: QUIC teardown left the connection open after the client's own DISCONNECT; a publish waiting across a reconnect was sent under the old server's limits; and the offline queue dropped messages silently after `publish()` had returned success. All were fixed in the same PR.
+
+**The offline-queue question was settled by three independent TLA+ models, not by argument.** All three found the same defects in the current behaviour: silent loss at flush, silent loss on Session Present=0, and replay resending packets the new CONNACK forbids. All three arrived at the same design: per-publish outcomes (Delivered / Rejected / Indeterminate) that are never keyed by packet id, checks at enqueue, reject-and-continue at flush, re-checks on replay, and quarantine of abandoned QoS 2 ids. Holding a message fails liveness, skipping ahead breaks ordering, and transforming it silently loses the caller's intent. One model showed that reporting failures by packet id misattributes them after the id is reused (ABA). The user chose downgrade-and-report for Maximum QoS, and requeueing QoS 1 when the server loses the session. A Clean Start=1 connect discards unacked outbound state, as `[MQTT-3.1.2-4]` requires. The consolidated spec is in `specs/tla/offline-queue/`. New tests are in `crates/mqtt5/tests/conf_client_offline_queue.rs`: 11 fake-broker tests, all failing on the prior tree.
+
+**Second quorum round on the outcome code**: three re-reviewers checked the implementation against the models. The protocol behaviour held. Two defects were in how outcomes are settled: a connection loss never closed the send quota, so a parked flush task kept handles alive forever, and a reader aborted between releasing session state and settling the outcome left a delivered publish unsettled. A live publish returned `Err` on connection loss although its message stayed in the session and was resent. It now returns a handle like a queued one. A QoS 2 message that received PUBREC Success before the session was lost is reported delivered. Each fix has a test that fails on the previous code.
+
+**Tooling lesson**: tla-mcp 0.9.4 passed a `~>` negative control vacuously and ignored missing fairness. Liveness results are trusted only as `[]<>` properties with negative controls that fail, backed by an ENABLED-based progress invariant.
+
+### Client-side audit: the suite only ever tested brokers, and our own clients failed ~40 MUSTs (2026-09-23)
+
+**Trigger**: checking a third-party client's claim of full MQTT v5 conformance. This suite's SUT is always a broker, so it could not answer the question. The 149 statements in `conformance.toml` with `applies_to = "Client"` or `"Both"` were audited instead with raw-byte fake-broker tests that drive the real client and record what it puts on the wire. After the third-party client had been tested, the same audit ran against our own `MqttClient` and the `mqtt5-wasm` client.
+
+**Result**: our native client failed about 40 client MUST statements. The third-party client failed 7. Resend on session resume did not exist. Packet identifiers were reused while in flight. There was no topic or filter validation. Topic Alias Maximum and Retain Available were never enforced. The offline queue bypassed flow control. Protocol errors left the socket half-open. WebSocket reads assumed one packet per frame. The wasm client had most of the same defects and also never sent PUBACK. All of them are fixed in mqtt5 0.41.0 and mqtt5-wasm 2.0.0.
+
+**Where the tests live**: `crates/mqtt5/tests/conf_client_{a,b,c,d}.rs` (native) and `crates/mqtt5-wasm/tests/conformance_client.rs` (wasm, MessagePort fake broker under Node). They are not yet registered in this crate's manifest or runner. A client-side SUT mode for this suite is the natural next step.
+
+**Manifest drift bit the audit**: statement IDs in `conformance.toml` were used to label findings, and several were wrong. For example, the manifest files "no session state + Session Present=1 → close" under 3.2.2-5, but it is 3.2.2-4. All client-test names use IDs from `mqtt-v5.0-statement-texts.txt`. `known-text-drift.txt` is real debt with consequences outside this crate.
+
+**Decision recorded**: `[MQTT-3.2.2-4]` is enforced strictly by default. A fresh client can still resume a broker-held session through an explicit `ConnectOptions::resume_existing_session` opt-in, which the deferred-ack crash-recovery pattern needs. This crate's in-process test client sets the opt-in, because it checks `session_present` as an observer of the broker.
+
+**Lesson**: a conformance suite that only tests one side of the protocol says nothing about the other. Run any check we would point at someone else's implementation against our own first.
+
 ### External-broker ack timeouts were a lost-wakeup race in the test client, not broker timing (2026-09-07)
 
 **Trigger**: issue #146. `deferred_qos2_zero_quota_still_serves_control_plane [MQTT-4.9.0-3]` failed

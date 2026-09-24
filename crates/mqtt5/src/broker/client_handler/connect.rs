@@ -1,4 +1,5 @@
 use crate::broker::auth::EnhancedAuthStatus;
+use crate::broker::router::SubscriptionRequest;
 use crate::broker::storage::{ClientSession, DynamicStorage, StorageBackend};
 use crate::error::{MqttError, Result};
 use crate::packet::auth::AuthPacket;
@@ -513,16 +514,19 @@ impl ClientHandler {
             }
             self.router
                 .subscribe(
-                    connect.client_id.clone(),
-                    topic_filter.clone(),
-                    stored.qos,
-                    stored.subscription_id,
-                    stored.no_local,
-                    stored.retain_as_published,
-                    stored.retain_handling,
-                    ProtocolVersion::try_from(self.protocol_version).unwrap_or_default(),
-                    stored.change_only,
-                    None,
+                    SubscriptionRequest::new(
+                        connect.client_id.clone(),
+                        topic_filter.clone(),
+                        stored.qos,
+                    )
+                    .with_subscription_id(stored.subscription_id)
+                    .with_no_local(stored.no_local)
+                    .with_retain_as_published(stored.retain_as_published)
+                    .with_retain_handling(stored.retain_handling)
+                    .with_protocol_version(
+                        ProtocolVersion::try_from(self.protocol_version).unwrap_or_default(),
+                    )
+                    .with_change_only(stored.change_only),
                 )
                 .await?;
         }

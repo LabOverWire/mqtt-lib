@@ -1003,12 +1003,12 @@ async fn publish_message(
     payload: Vec<u8>,
     qos: QoS,
 ) -> Result<()> {
-    match qos {
+    let result = match qos {
         QoS::AtMostOnce => client.publish(topic, payload).await?,
         QoS::AtLeastOnce => client.publish_qos1(topic, payload).await?,
         QoS::ExactlyOnce => client.publish_qos2(topic, payload).await?,
     };
-    Ok(())
+    super::pub_cmd::require_sent(&result)
 }
 
 struct PayloadSpec {

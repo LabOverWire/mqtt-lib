@@ -157,8 +157,8 @@ async fn ack_timeout_holds_quota_and_does_not_exceed_window() {
 
     let first_result = first_handle.await.unwrap();
     assert!(
-        matches!(first_result, Err(MqttError::Timeout)),
-        "an unacknowledged publish must eventually time out"
+        matches!(&first_result, Ok(mqtt5::PublishResult::Queued(handle)) if handle.try_outcome().is_none()),
+        "an unacknowledged publish must stop waiting and stay in flight: {first_result:?}"
     );
 
     let second = client.clone();

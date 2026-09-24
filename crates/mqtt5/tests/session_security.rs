@@ -1,5 +1,4 @@
 #![cfg(feature = "broker")]
-#![allow(clippy::large_futures)]
 
 mod common;
 
@@ -94,8 +93,7 @@ async fn test_session_user_binding_rejects_different_user() {
         .with_credentials("alice", b"pass1")
         .with_session_expiry_interval(300);
     let alice = MqttClient::with_options(alice_opts.clone());
-    alice
-        .connect_with_options(broker.address(), alice_opts)
+    Box::pin(alice.connect_with_options(broker.address(), alice_opts))
         .await
         .expect("alice connect");
     alice.subscribe("test/bind", |_| {}).await.unwrap();
@@ -103,10 +101,11 @@ async fn test_session_user_binding_rejects_different_user() {
 
     let bob_opts = ConnectOptions::new(shared_client_id)
         .with_clean_start(false)
+        .with_resume_existing_session(true)
         .with_credentials("bob", b"pass2")
         .with_session_expiry_interval(300);
     let bob = MqttClient::with_options(bob_opts.clone());
-    let result = bob.connect_with_options(broker.address(), bob_opts).await;
+    let result = Box::pin(bob.connect_with_options(broker.address(), bob_opts)).await;
 
     assert!(
         result.is_err(),
@@ -128,8 +127,7 @@ async fn test_session_user_binding_allows_same_user() {
         .with_credentials("alice", b"pass1")
         .with_session_expiry_interval(300);
     let client1 = MqttClient::with_options(opts.clone());
-    client1
-        .connect_with_options(broker.address(), opts)
+    Box::pin(client1.connect_with_options(broker.address(), opts))
         .await
         .expect("first connect");
     client1.subscribe("test/same", |_| {}).await.unwrap();
@@ -137,11 +135,11 @@ async fn test_session_user_binding_allows_same_user() {
 
     let resume_opts = ConnectOptions::new(client_id)
         .with_clean_start(false)
+        .with_resume_existing_session(true)
         .with_credentials("alice", b"pass1")
         .with_session_expiry_interval(300);
     let client2 = MqttClient::with_options(resume_opts.clone());
-    let result = client2
-        .connect_with_options(broker.address(), resume_opts)
+    let result = Box::pin(client2.connect_with_options(broker.address(), resume_opts))
         .await
         .expect("same user reconnect must succeed");
 
@@ -217,8 +215,7 @@ async fn test_session_resume_preserves_subscriptions_with_acl() {
         .with_credentials("alice", b"pass1")
         .with_session_expiry_interval(300);
     let client1 = MqttClient::with_options(opts.clone());
-    client1
-        .connect_with_options(broker.address(), opts)
+    Box::pin(client1.connect_with_options(broker.address(), opts))
         .await
         .expect("first connect");
 
@@ -227,11 +224,11 @@ async fn test_session_resume_preserves_subscriptions_with_acl() {
 
     let resume_opts = ConnectOptions::new(client_id)
         .with_clean_start(false)
+        .with_resume_existing_session(true)
         .with_credentials("alice", b"pass1")
         .with_session_expiry_interval(300);
     let client2 = MqttClient::with_options(resume_opts.clone());
-    let result = client2
-        .connect_with_options(broker.address(), resume_opts)
+    let result = Box::pin(client2.connect_with_options(broker.address(), resume_opts))
         .await
         .expect("reconnect must succeed");
 
@@ -250,8 +247,7 @@ async fn test_session_resume_preserves_subscriptions_with_acl() {
         .with_clean_start(true)
         .with_credentials("alice", b"pass1");
     let publisher = MqttClient::with_options(pub_opts.clone());
-    publisher
-        .connect_with_options(broker.address(), pub_opts)
+    Box::pin(publisher.connect_with_options(broker.address(), pub_opts))
         .await
         .expect("publisher connect");
 

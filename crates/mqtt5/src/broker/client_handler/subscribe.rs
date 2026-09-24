@@ -15,7 +15,7 @@ use crate::validation::{parse_shared_subscription, topic_matches_filter, validat
 use crate::QoS;
 use tracing::{debug, warn};
 
-use crate::broker::router::{RoutableMessage, Subscribed, Unsubscribed};
+use crate::broker::router::{RoutableMessage, Subscribed, SubscriptionRequest, Unsubscribed};
 
 use super::ClientHandler;
 
@@ -54,16 +54,20 @@ impl ClientHandler {
                 .router
                 .subscribe_as(
                     Some(self.generation),
-                    client_id.clone(),
-                    filter.filter.clone(),
-                    QoS::from(granted_qos),
-                    subscribe.properties.get_subscription_identifier(),
-                    filter.options.no_local,
-                    filter.options.retain_as_published,
-                    filter.options.retain_handling as u8,
-                    ProtocolVersion::try_from(self.protocol_version).unwrap_or_default(),
-                    change_only,
-                    flow_id,
+                    SubscriptionRequest::new(
+                        client_id.clone(),
+                        filter.filter.clone(),
+                        QoS::from(granted_qos),
+                    )
+                    .with_subscription_id(subscribe.properties.get_subscription_identifier())
+                    .with_no_local(filter.options.no_local)
+                    .with_retain_as_published(filter.options.retain_as_published)
+                    .with_retain_handling(filter.options.retain_handling as u8)
+                    .with_protocol_version(
+                        ProtocolVersion::try_from(self.protocol_version).unwrap_or_default(),
+                    )
+                    .with_change_only(change_only)
+                    .with_flow_id(flow_id),
                 )
                 .await?;
             let is_new = match outcome {

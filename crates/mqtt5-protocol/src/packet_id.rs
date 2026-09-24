@@ -52,6 +52,11 @@ impl PacketIdGenerator {
             current
         }
     }
+
+    #[must_use]
+    pub fn next_available(&self, in_use: impl Fn(u16) -> bool) -> Option<u16> {
+        (0..u16::MAX).map(|_| self.next()).find(|id| !in_use(*id))
+    }
 }
 
 impl Default for PacketIdGenerator {
@@ -81,6 +86,26 @@ mod tests {
         assert_eq!(gen.next(), u16::MAX);
         assert_eq!(gen.next(), 1);
         assert_eq!(gen.next(), 2);
+    }
+
+    #[test]
+    fn test_next_available_skips_ids_in_use() {
+        let gen = PacketIdGenerator::new();
+        assert_eq!(gen.next_available(|id| id == 1 || id == 2), Some(3));
+        assert_eq!(gen.next_available(|_| false), Some(4));
+    }
+
+    #[test]
+    fn test_next_available_skips_in_use_id_after_wrap() {
+        let gen = PacketIdGenerator::new();
+        gen.next_id.store(u16::MAX, Ordering::SeqCst);
+        assert_eq!(gen.next_available(|id| id == u16::MAX || id == 1), Some(2));
+    }
+
+    #[test]
+    fn test_next_available_exhausted() {
+        let gen = PacketIdGenerator::new();
+        assert_eq!(gen.next_available(|_| true), None);
     }
 
     #[cfg(feature = "std")]

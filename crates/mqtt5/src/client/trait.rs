@@ -3,10 +3,9 @@
 //! This module provides a trait interface for the MQTT client to enable
 //! mocking and testing without a real broker connection.
 
+use crate::client::PublishResult;
 use crate::error::Result;
-use crate::types::{
-    ConnectOptions, ConnectResult, Message, PublishOptions, PublishResult, SubscribeOptions,
-};
+use crate::types::{ConnectOptions, ConnectResult, Message, PublishOptions, SubscribeOptions};
 use crate::QoS;
 use std::future::Future;
 

@@ -2,10 +2,9 @@
 //! Integration tests for broker-to-broker bridging
 
 use mqtt5::broker::bridge::{BridgeConfig, BridgeDirection, BridgeManager};
-use mqtt5::broker::router::MessageRouter;
+use mqtt5::broker::router::{MessageRouter, SubscriptionRequest};
 use mqtt5::packet::publish::PublishPacket;
 use mqtt5::time::Duration;
-use mqtt5::types::ProtocolVersion;
 use mqtt5::QoS;
 use std::sync::Arc;
 
@@ -96,18 +95,11 @@ async fn test_bridge_message_routing() {
         )
         .await;
     router
-        .subscribe(
-            "test-client".to_string(),
-            "test/topic".to_string(),
+        .subscribe(SubscriptionRequest::new(
+            "test-client",
+            "test/topic",
             QoS::AtMostOnce,
-            None,
-            false,
-            false,
-            0,
-            ProtocolVersion::V5,
-            false,
-            None,
-        )
+        ))
         .await
         .unwrap();
 
