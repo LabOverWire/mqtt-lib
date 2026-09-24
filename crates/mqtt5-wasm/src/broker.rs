@@ -806,3 +806,101 @@ impl WasmBroker {
         )
     }
 }
+
+#[cfg(all(test, target_arch = "wasm32"))]
+mod tests {
+    use super::{WasmBroker, WasmBrokerConfig};
+    use bytes::BytesMut;
+    use mqtt5::broker::storage::StorageBackend;
+    use mqtt5_protocol::packet::connect::ConnectPacket;
+    use mqtt5_protocol::packet::disconnect::DisconnectPacket;
+    use mqtt5_protocol::packet::MqttPacket;
+    use mqtt5_protocol::protocol::v5::reason_codes::ReasonCode;
+    use mqtt5_protocol::types::{ConnectOptions, WillMessage};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use wasm_bindgen::prelude::*;
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen_test::wasm_bindgen_test;
+    use web_sys::{MessageEvent, MessagePort};
+
+    async fn sleep(ms: u32) {
+        gloo_timers::future::TimeoutFuture::new(ms).await;
+    }
+
+    fn send(port: &MessagePort, packet: &impl MqttPacket) {
+        let mut buf = BytesMut::new();
+        packet.encode(&mut buf).unwrap();
+        port.post_message(&js_sys::Uint8Array::from(&buf[..]).buffer())
+            .unwrap();
+    }
+
+    async fn connect_with_will(broker: &WasmBroker, client_id: &str) -> MessagePort {
+        let port = broker.create_client_port().unwrap();
+        let inbox = Rc::new(RefCell::new(Vec::new()));
+        let inbox_in = Rc::clone(&inbox);
+        let on_message = Closure::<dyn FnMut(MessageEvent)>::new(move |event: MessageEvent| {
+            inbox_in
+                .borrow_mut()
+                .extend(js_sys::Uint8Array::new(&event.data()).to_vec());
+        });
+        port.add_event_listener_with_callback("message", on_message.as_ref().unchecked_ref())
+            .unwrap();
+        on_message.forget();
+        port.start();
+        let options = ConnectOptions::new(client_id)
+            .with_session_expiry_interval(60)
+            .with_will(WillMessage::new(format!("will/{client_id}"), "offline"));
+        send(&port, &ConnectPacket::new(options));
+        for _ in 0..200 {
+            if inbox.borrow().len() >= 4 {
+                break;
+            }
+            sleep(5).await;
+        }
+        assert_eq!(inbox.borrow().first(), Some(&0x20), "expected CONNACK");
+        port
+    }
+
+    async fn stored_will_present(broker: &WasmBroker, client_id: &str) -> bool {
+        broker
+            .storage
+            .get_session(client_id)
+            .await
+            .unwrap()
+            .expect("session is kept for its expiry interval")
+            .will_message
+            .is_some()
+    }
+
+    fn broker() -> WasmBroker {
+        let mut config = WasmBrokerConfig::new();
+        config.set_allow_anonymous(true);
+        WasmBroker::with_config(config).unwrap()
+    }
+
+    #[wasm_bindgen_test]
+    async fn normal_disconnect_removes_stored_will() {
+        let broker = broker();
+        let port = connect_with_will(&broker, "stored-will-normal").await;
+        assert!(stored_will_present(&broker, "stored-will-normal").await);
+
+        send(&port, &DisconnectPacket::new(ReasonCode::Success));
+        port.close();
+        sleep(300).await;
+
+        assert!(!stored_will_present(&broker, "stored-will-normal").await);
+    }
+
+    #[wasm_bindgen_test]
+    async fn published_will_is_removed_from_stored_session() {
+        let broker = broker();
+        let port = connect_with_will(&broker, "stored-will-published").await;
+        assert!(stored_will_present(&broker, "stored-will-published").await);
+
+        port.close();
+        sleep(300).await;
+
+        assert!(!stored_will_present(&broker, "stored-will-published").await);
+    }
+}

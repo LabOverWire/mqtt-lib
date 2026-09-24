@@ -714,3 +714,32 @@ async fn test_dynamic_storage_inflight() {
     let msgs = dynamic.get_inflight_messages("client1").await.unwrap();
     assert!(msgs.is_empty());
 }
+
+#[test]
+fn will_publish_delay_is_bounded_by_session_expiry() {
+    let delayed_will = |delay: Option<u32>| {
+        let mut will = crate::types::WillMessage::new("will/t", "gone");
+        will.properties.will_delay_interval = delay;
+        will
+    };
+
+    let no_will = ClientSession::new_with_will("c", true, Some(60), None);
+    assert_eq!(no_will.will_publish_delay(), None);
+
+    let undelayed = ClientSession::new_with_will("c", true, Some(60), Some(delayed_will(None)));
+    assert_eq!(undelayed.will_publish_delay(), Some(0));
+
+    let delayed = ClientSession::new_with_will("c", true, Some(60), Some(delayed_will(Some(5))));
+    assert_eq!(delayed.will_publish_delay(), Some(5));
+
+    let session_ends =
+        ClientSession::new_with_will("c", false, Some(0), Some(delayed_will(Some(5))));
+    assert_eq!(session_ends.will_publish_delay(), Some(0));
+
+    let short_session =
+        ClientSession::new_with_will("c", true, Some(2), Some(delayed_will(Some(10))));
+    assert_eq!(short_session.will_publish_delay(), Some(2));
+
+    let never_expires = ClientSession::new_with_will("c", true, None, Some(delayed_will(Some(10))));
+    assert_eq!(never_expires.will_publish_delay(), Some(10));
+}
