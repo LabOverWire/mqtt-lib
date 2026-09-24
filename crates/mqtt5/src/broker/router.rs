@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::sync::Weak;
 use tokio::sync::{mpsc, oneshot, RwLock};
 use tokio::time::{Duration, Instant};
-use tracing::{debug, error, info, trace};
+use tracing::{debug, error, info, trace, warn};
 
 /// Upper bound on how long one publish may wait for slow subscribers' delivery channels.
 pub const ROUTE_BUDGET_MAX: Duration = Duration::from_secs(2);
@@ -180,6 +180,12 @@ pub struct MessageRouter {
     max_outbound_rate: AtomicU32,
     fallback_queues: QueueRegistry,
     next_generation: std::sync::atomic::AtomicU64,
+    pending_wills: parking_lot::Mutex<HashMap<String, PendingWill>>,
+}
+
+struct PendingWill {
+    generation: u64,
+    cancel: oneshot::Sender<()>,
 }
 
 /// Information about a connected client
@@ -342,6 +348,7 @@ impl MessageRouter {
             max_outbound_rate: AtomicU32::new(0),
             fallback_queues: QueueRegistry::new(QueueLimits::default(), None),
             next_generation: std::sync::atomic::AtomicU64::new(0),
+            pending_wills: parking_lot::Mutex::new(HashMap::new()),
         }
     }
 
@@ -375,6 +382,7 @@ impl MessageRouter {
             max_outbound_rate: AtomicU32::new(0),
             fallback_queues: QueueRegistry::new(QueueLimits::default(), None),
             next_generation: std::sync::atomic::AtomicU64::new(0),
+            pending_wills: parking_lot::Mutex::new(HashMap::new()),
         }
     }
 
@@ -500,6 +508,16 @@ impl MessageRouter {
             .next_generation
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             + 1;
+        if let Some(pending) = self.pending_wills.lock().remove(&client_id) {
+            debug!(
+                client_id = %client_id,
+                armed_by = pending.generation,
+                "New connection cancelled pending delayed will"
+            );
+            if pending.cancel.send(()).is_err() {
+                debug!(client_id = %client_id, "Delayed will timer already gone");
+            }
+        }
         let released = match clients.remove(&client_id) {
             Some(old_client) => {
                 info!("Client ID takeover: {}", client_id);
@@ -569,6 +587,65 @@ impl MessageRouter {
             debug!("Unregistered client: {}", client_id);
         }
         Release::Owned
+    }
+
+    pub async fn arm_will(
+        &self,
+        client_id: &str,
+        generation: u64,
+    ) -> Option<oneshot::Receiver<()>> {
+        let clients = self.clients.read().await;
+        if clients
+            .get(client_id)
+            .is_none_or(|info| info.generation != generation)
+        {
+            return None;
+        }
+        let (cancel, cancelled) = oneshot::channel();
+        self.pending_wills
+            .lock()
+            .insert(client_id.to_string(), PendingWill { generation, cancel });
+        drop(clients);
+        Some(cancelled)
+    }
+
+    pub async fn owns_client(&self, client_id: &str, generation: u64) -> bool {
+        self.clients
+            .read()
+            .await
+            .get(client_id)
+            .is_some_and(|info| info.generation == generation)
+    }
+
+    pub async fn claim_will(&self, client_id: &str, generation: u64) -> bool {
+        let claimed = {
+            let mut pending = self.pending_wills.lock();
+            let armed_here = pending
+                .get(client_id)
+                .is_some_and(|will| will.generation == generation);
+            armed_here && pending.remove(client_id).is_some()
+        };
+        if claimed {
+            self.clear_stored_will(client_id).await;
+        }
+        claimed
+    }
+
+    pub async fn clear_stored_will(&self, client_id: &str) {
+        let Some(storage) = &self.storage else {
+            return;
+        };
+        match storage.get_session(client_id).await {
+            Ok(Some(mut session)) if session.will_message.is_some() => {
+                session.will_message = None;
+                session.will_delay_interval = None;
+                if let Err(e) = storage.store_session(session).await {
+                    warn!("Failed to clear stored will for {client_id}: {e}");
+                }
+            }
+            Ok(_) => {}
+            Err(e) => warn!("Failed to load session for {client_id} to clear its will: {e}"),
+        }
     }
 
     pub async fn is_connected(&self, client_id: &str) -> bool {
@@ -2337,5 +2414,91 @@ mod tests {
         let routable = rx.recv_async().await.unwrap();
         assert_eq!(routable.target_flow, Some(5));
         assert!(rx.try_recv().is_err());
+    }
+
+    async fn register(router: &MessageRouter, client_id: &str, lanes: &TestLanes) -> u64 {
+        let (dtx, _drx) = tokio::sync::oneshot::channel();
+        router
+            .register_client(
+                client_id.to_string(),
+                lanes.lanes(),
+                router.queue_handle(client_id),
+                dtx,
+            )
+            .await
+            .generation
+    }
+
+    #[tokio::test]
+    async fn armed_will_is_claimed_exactly_once() {
+        let router = MessageRouter::new();
+        let lanes = TestLanes::new(10);
+        let generation = register(&router, "w1", &lanes).await;
+
+        let cancelled = router.arm_will("w1", generation).await;
+        assert!(cancelled.is_some());
+        router.release_client("w1", generation, true).await;
+
+        assert!(router.claim_will("w1", generation).await);
+        assert!(!router.claim_will("w1", generation).await);
+        assert!(router.pending_wills.lock().is_empty());
+    }
+
+    #[tokio::test]
+    async fn new_connection_cancels_armed_will() {
+        let router = MessageRouter::new();
+        let lanes = TestLanes::new(10);
+        let generation = register(&router, "w2", &lanes).await;
+        let cancelled = router
+            .arm_will("w2", generation)
+            .await
+            .expect("owner can arm its will");
+        router.release_client("w2", generation, true).await;
+
+        register(&router, "w2", &lanes).await;
+
+        assert!(cancelled.await.is_ok(), "the timer is woken by the cancel");
+        assert!(!router.claim_will("w2", generation).await);
+        assert!(router.pending_wills.lock().is_empty());
+    }
+
+    #[tokio::test]
+    async fn displaced_connection_cannot_arm_will() {
+        let router = MessageRouter::new();
+        let lanes = TestLanes::new(10);
+        let displaced = register(&router, "w3", &lanes).await;
+        register(&router, "w3", &lanes).await;
+
+        assert!(router.arm_will("w3", displaced).await.is_none());
+        assert!(router.pending_wills.lock().is_empty());
+    }
+
+    #[tokio::test]
+    async fn claimed_will_is_removed_from_stored_session() {
+        let storage = Arc::new(DynamicStorage::Memory(
+            crate::broker::storage::MemoryBackend::new(),
+        ));
+        let router = MessageRouter::with_storage(Arc::clone(&storage));
+        let will = crate::types::WillMessage::new("will/w4", "offline");
+        storage
+            .store_session(crate::broker::storage::ClientSession::new_with_will(
+                "w4",
+                true,
+                Some(60),
+                Some(will),
+            ))
+            .await
+            .unwrap();
+        let lanes = TestLanes::new(10);
+        let generation = register(&router, "w4", &lanes).await;
+        let armed = router.arm_will("w4", generation).await;
+        assert!(armed.is_some());
+        router.release_client("w4", generation, true).await;
+
+        assert!(router.claim_will("w4", generation).await);
+
+        let stored = storage.get_session("w4").await.unwrap().unwrap();
+        assert!(stored.will_message.is_none());
+        assert!(stored.will_delay_interval.is_none());
     }
 }

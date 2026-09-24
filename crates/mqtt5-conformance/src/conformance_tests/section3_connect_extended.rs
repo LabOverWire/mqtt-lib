@@ -379,7 +379,7 @@ async fn will_delay_reconnect_suppresses_will(sut: SutHandle) {
         .await
         .unwrap();
     raw.send_raw(&RawPacketBuilder::connect_with_will_delay(
-        &client_id, 5, 60,
+        &client_id, 2, 60,
     ))
     .await
     .unwrap();
@@ -398,7 +398,7 @@ async fn will_delay_reconnect_suppresses_will(sut: SutHandle) {
         .await
         .expect("reconnect failed");
 
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    tokio::time::sleep(Duration::from_secs(4)).await;
 
     assert_eq!(
         subscription.count(),
@@ -407,6 +407,56 @@ async fn will_delay_reconnect_suppresses_will(sut: SutHandle) {
     );
 
     reconnected.disconnect().await.expect("disconnect failed");
+    subscriber.disconnect().await.expect("disconnect failed");
+}
+
+/// Positive control for `[MQTT-3.1.3-9]`: without a reconnect, the delayed
+/// Will is published once the Will Delay Interval elapses and not before.
+#[conformance_test(
+    ids = ["MQTT-3.1.3-9"],
+    requires = ["transport.tcp"],
+)]
+async fn will_delay_elapsed_publishes_will(sut: SutHandle) {
+    let client_id = unique_client_id("wdpub");
+    let will_topic = format!("will/{client_id}");
+
+    let subscriber = TestClient::connect_with_prefix(&sut, "wdpub-sub")
+        .await
+        .unwrap();
+    let subscription = subscriber
+        .subscribe(&will_topic, SubscribeOptions::default())
+        .await
+        .expect("subscribe failed");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let mut raw = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
+        .await
+        .unwrap();
+    raw.send_raw(&RawPacketBuilder::connect_with_will_delay(
+        &client_id, 2, 60,
+    ))
+    .await
+    .unwrap();
+    let connack = raw.expect_connack(TIMEOUT).await;
+    assert!(connack.is_some(), "Must receive CONNACK");
+    let (_, reason) = connack.unwrap();
+    assert_eq!(reason, 0x00, "Connection must succeed");
+
+    drop(raw);
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+
+    assert_eq!(
+        subscription.count(),
+        0,
+        "Will message must not be sent before the Will Delay Interval elapses"
+    );
+    assert!(
+        subscription
+            .wait_for_messages(1, Duration::from_secs(4))
+            .await,
+        "Will message must be sent once the Will Delay Interval elapses without a reconnect"
+    );
+
     subscriber.disconnect().await.expect("disconnect failed");
 }
 

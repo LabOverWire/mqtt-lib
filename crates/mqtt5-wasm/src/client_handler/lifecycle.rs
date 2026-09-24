@@ -1,3 +1,4 @@
+use futures::future::{select, Either};
 use mqtt5::broker::auth::EnhancedAuthStatus;
 use mqtt5_protocol::error::{MqttError, Result};
 use mqtt5_protocol::packet::auth::AuthPacket;
@@ -190,59 +191,73 @@ impl WasmClientHandler {
         true
     }
 
-    pub(super) async fn publish_will_message(&self, client_id: &str) {
-        if let Some(ref session) = self.session {
-            if let Some(ref will) = session.will_message {
-                debug!("Publishing will message for client {}", client_id);
-
-                let mut publish =
-                    PublishPacket::new(will.topic.clone(), will.payload.clone(), will.qos);
-                publish.retain = will.retain;
-
-                will.properties
-                    .apply_to_publish_properties(&mut publish.properties);
-                publish.properties.inject_sender(self.user_id.as_deref());
-                publish.properties.inject_client_id(Some(client_id));
-
-                if let Some(delay) = session.will_delay_interval {
-                    if delay > 0 {
-                        debug!("Spawning task to publish will after {} seconds", delay);
-                        let router = Arc::clone(&self.router);
-                        let auth_provider = Arc::clone(&self.auth_provider);
-                        let user_id = self.user_id.clone();
-                        let publish_clone = publish.clone();
-                        let client_id_clone = client_id.to_string();
-                        spawn_local(async move {
-                            gloo_timers::future::sleep(std::time::Duration::from_secs(u64::from(
-                                delay,
-                            )))
-                            .await;
-
-                            let authorized = auth_provider
-                                .authorize_publish(
-                                    &client_id_clone,
-                                    user_id.as_deref(),
-                                    &publish_clone.topic_name,
-                                )
-                                .await;
-                            if !authorized {
-                                warn!(
-                                    "Delayed will for {} denied for topic {}",
-                                    client_id_clone, publish_clone.topic_name
-                                );
-                                return;
-                            }
-
-                            debug!("Publishing delayed will message for {}", client_id_clone);
-                            router.route_message(&publish_clone, None).await;
-                        });
-                    } else if self.authorize_will(client_id, &publish).await {
-                        self.router.route_message(&publish, None).await;
-                    }
-                } else if self.authorize_will(client_id, &publish).await {
-                    self.router.route_message(&publish, None).await;
-                }
-            }
+    pub(super) async fn clear_owned_stored_will(&self, client_id: &str) {
+        if self.router.owns_client(client_id, self.generation).await {
+            self.router.clear_stored_will(client_id).await;
         }
+    }
+
+    pub(super) async fn publish_will_message(&self, client_id: &str) {
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        let (Some(will), Some(delay)) = (&session.will_message, session.will_publish_delay())
+        else {
+            return;
+        };
+
+        let mut publish = PublishPacket::new(will.topic.clone(), will.payload.clone(), will.qos);
+        publish.retain = will.retain;
+        will.properties
+            .apply_to_publish_properties(&mut publish.properties);
+        publish.properties.inject_sender(self.user_id.as_deref());
+        publish.properties.inject_client_id(Some(client_id));
+
+        if delay == 0 {
+            if self.authorize_will(client_id, &publish).await {
+                self.router.route_message(&publish, None).await;
+            }
+            self.clear_owned_stored_will(client_id).await;
+            return;
+        }
+
+        let Some(cancelled) = self.router.arm_will(client_id, self.generation).await else {
+            debug!(
+                client_id,
+                "Delayed will dropped: a new connection for the client id was opened"
+            );
+            return;
+        };
+
+        debug!(client_id, delay, "Scheduling delayed will");
+        let router = Arc::clone(&self.router);
+        let auth_provider = Arc::clone(&self.auth_provider);
+        let user_id = self.user_id.clone();
+        let client_id = client_id.to_string();
+        let generation = self.generation;
+        spawn_local(async move {
+            let timer =
+                gloo_timers::future::sleep(std::time::Duration::from_secs(u64::from(delay)));
+            if let Either::Right(_) = select(timer, cancelled).await {
+                debug!(client_id, "Delayed will cancelled by a new connection");
+                return;
+            }
+            if !router.claim_will(&client_id, generation).await {
+                debug!(client_id, "Delayed will cancelled by a new connection");
+                return;
+            }
+            let authorized = auth_provider
+                .authorize_publish(&client_id, user_id.as_deref(), &publish.topic_name)
+                .await;
+            if !authorized {
+                warn!(
+                    "Delayed will for {client_id} denied for topic {}",
+                    publish.topic_name
+                );
+                return;
+            }
+            debug!(client_id, "Publishing delayed will");
+            router.route_message(&publish, None).await;
+        });
     }
 }
