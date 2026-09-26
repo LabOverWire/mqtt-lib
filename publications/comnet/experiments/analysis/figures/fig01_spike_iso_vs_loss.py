@@ -16,8 +16,8 @@ from style import (
     save_figure,
 )
 
-LOSS_RATES = [0, 1, 2, 5]
-LOSS_LABELS = ["0%", "1%", "2%", "5%"]
+LOSS_RATES = [1, 2, 5]
+LOSS_LABELS = ["1%", "2%", "5%"]
 RUNS = range(1, 16)
 
 
@@ -64,13 +64,6 @@ def main(results_dir: Path, output_dir: Path):
 
     fig, ax = plt.subplots(figsize=(7, 4.5))
 
-    x_offsets = {
-        "tcp": -0.15,
-        "quic-control": -0.05,
-        "quic-pertopic": 0.05,
-        "quic-perpub": 0.15,
-    }
-
     group_positions = np.arange(len(LOSS_RATES))
 
     for transport in TRANSPORT_ORDER:
@@ -82,7 +75,7 @@ def main(results_dir: Path, output_dir: Path):
                 mean, ci_half = compute_ci(data[transport][loss])
                 means.append(mean)
                 ci_halves.append(ci_half)
-                positions.append(group_positions[loss_idx] + x_offsets[transport])
+                positions.append(group_positions[loss_idx])
 
         ax.errorbar(
             positions,

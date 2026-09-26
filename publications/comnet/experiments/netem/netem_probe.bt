@@ -1,0 +1,11 @@
+kprobe:netem_enqueue
+{
+    $skb = (struct sk_buff *)arg0;
+    $shinfo = (struct skb_shared_info *)($skb->head + $skb->end);
+    @enq = count();
+    @maxlen = max($skb->len);
+    if ($shinfo->gso_size > 0 || $shinfo->gso_segs > 1) {
+        @gso = count();
+        @gso_segs = hist($shinfo->gso_segs);
+    }
+}

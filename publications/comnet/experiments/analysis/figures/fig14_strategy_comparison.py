@@ -42,11 +42,17 @@ def load_data(results_dir: Path):
         for topics in TOPIC_COUNTS:
             tp_values = []
             for run in RUNS:
-                tp_path = exp_dir / f"{strategy}_{topics}topics_throughput_run{run}.json"
+                tp_path = exp_dir / f"{strategy}_{topics}topics_throughput_run{run}_pub.json"
                 if tp_path.exists():
-                    with open(tp_path) as f:
-                        d = json.load(f)
-                    tp_values.append(d["results"]["throughput_avg"])
+                    try:
+                        with open(tp_path) as f:
+                            d = json.load(f)
+                    except json.JSONDecodeError:
+                        print(f"  warning: skipping invalid JSON: {tp_path.name}")
+                        continue
+                    elapsed = d["results"].get("elapsed_secs", 0)
+                    if elapsed:
+                        tp_values.append(d["results"]["published"] / elapsed)
 
             if tp_values:
                 data[strategy]["throughput"][topics] = tp_values
@@ -85,10 +91,13 @@ def main(results_dir: Path, output_dir: Path):
         )
 
     ax_tp.set_xlabel("Topic Count")
-    ax_tp.set_ylabel("Throughput (K msgs/sec)")
-    ax_tp.set_title("Throughput vs. Topic Count")
+    ax_tp.set_ylabel("Publish rate (K msg/s)")
+    ax_tp.set_title("Single-Connection Publish Rate vs. Topic Count")
     ax_tp.set_xticks(TOPIC_COUNTS)
-    ax_tp.legend(loc="best", fontsize=8)
+    ax_tp.set_yticks([0, 10, 20, 30, 40, 50])
+    ax_tp.set_ylim(0, 57)
+    ax_tp.grid(True, which="major", axis="y", linewidth=0.4, alpha=0.4)
+    ax_tp.legend(loc="center", bbox_to_anchor=(0.5, 0.36), fontsize=8)
 
     fig.tight_layout()
     save_figure(fig, output_dir, "fig14_strategy_comparison")

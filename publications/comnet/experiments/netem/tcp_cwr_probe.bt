@@ -1,0 +1,10 @@
+kprobe:tcp_enter_cwr
+{
+    @cwr = count();
+}
+
+kretprobe:ip_queue_xmit
+/retval != 0/
+{
+    @xmit_err[retval] = count();
+}

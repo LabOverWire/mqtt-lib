@@ -38,20 +38,25 @@
   publisher = {IETF}
 }
 
-@misc{rfc9221,
-  title = {An Unreliable Datagram Extension to {QUIC}},
-  author = {Pauly, Tommy and Kinnear, Eric and Schinazi, David},
-  year = {2022},
-  howpublished = {RFC 9221},
-  publisher = {IETF}
-}
-
 @article{kumar2019mqtt-quic,
   title = {Implementation and Analysis of {QUIC} for {MQTT}},
   author = {Kumar, Puneet and Dezfouli, Behnam},
   journal = {Computer Networks},
+  volume = {150},
+  pages = {28--45},
   year = {2019},
-  publisher = {Elsevier}
+  publisher = {Elsevier},
+  doi = {10.1016/j.comnet.2018.12.012}
+}
+
+@inproceedings{scharf2006hol,
+  title = {Head-of-line Blocking in {TCP} and {SCTP}: Analysis and Measurements},
+  author = {Scharf, Michael and Kiesel, Sebastian},
+  booktitle = {Proceedings of the IEEE Global Telecommunications Conference (GLOBECOM 2006)},
+  year = {2006},
+  address = {San Francisco, CA, USA},
+  publisher = {IEEE},
+  doi = {10.1109/GLOCOM.2006.333}
 }
 
 @inproceedings{fernandez2020iot-quic,
@@ -127,7 +132,7 @@
   title = {Experiment Data for ``{Evaluating Stream Mapping Strategies for MQTT over QUIC}''},
   author = {Bracht, Fabricio},
   year = {2026},
-  doi = {10.5281/zenodo.19098820},
+  doi = {10.5281/zenodo.19098819},
   publisher = {Zenodo}
 }
 
@@ -137,4 +142,56 @@
   year = {2015},
   howpublished = {RFC 7540},
   publisher = {IETF}
+}
+
+@misc{yang2024mqttnext,
+  title = {{Spec MQTT-next}: A Mapping of {MQTT} to the {QUIC} Transport Protocol},
+  author = {Yang, William},
+  year = {2024},
+  howpublished = {OASIS MQTT Technical Committee, document 71729},
+  url = {https://groups.oasis-open.org/higherlogic/ws/public/download/71729/oasis_mqtt_over_quic.pdf}
+}
+
+@misc{nanomq-quic,
+  title = {{NanoMQ}: {MQTT} over {QUIC} Bridge},
+  author = {{EMQ Technologies}},
+  year = {2024},
+  url = {https://nanomq.io/docs/en/latest/bridges/quic-bridge.html}
+}
+
+@misc{rtpfolks2017,
+  title = {{RTP} over {QUIC}},
+  author = {Ott, J{\"o}rg and Even, Roni and Perkins, Colin and Singh, Varun},
+  year = {2017},
+  howpublished = {Internet-Draft draft-rtpfolks-quic-rtp-over-quic-01, IETF},
+  url = {https://datatracker.ietf.org/doc/html/draft-rtpfolks-quic-rtp-over-quic}
+}
+
+@article{chiu1989aimd,
+  title = {Analysis of the Increase and Decrease Algorithms for Congestion Avoidance in Computer Networks},
+  author = {Chiu, Dah-Ming and Jain, Raj},
+  journal = {Computer Networks and ISDN Systems},
+  volume = {17},
+  number = {1},
+  pages = {1--14},
+  year = {1989},
+  doi = {10.1016/0169-7552(89)90019-6}
+}
+
+@misc{azureiot,
+  title = {Communicate with your {IoT} Hub using the {MQTT} protocol},
+  author = {{Microsoft}},
+  year = {2024},
+  howpublished = {Microsoft Azure IoT Hub documentation},
+  url = {https://learn.microsoft.com/en-us/azure/iot-hub/iot-hub-mqtt-support}
+}
+
+@article{mathis1997macroscopic,
+  title = {The Macroscopic Behavior of the {TCP} Congestion Avoidance Algorithm},
+  author = {Mathis, Matthew and Semke, Jeffrey and Mahdavi, Jamshid and Ott, Teunis},
+  journal = {ACM SIGCOMM Computer Communication Review},
+  volume = {27},
+  number = {3},
+  pages = {67--82},
+  year = {1997}
 }

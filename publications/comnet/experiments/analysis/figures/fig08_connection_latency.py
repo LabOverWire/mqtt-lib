@@ -3,6 +3,7 @@ import sys
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+from matplotlib.ticker import FixedLocator, FuncFormatter, NullLocator
 import numpy as np
 from scipy import stats
 
@@ -18,6 +19,8 @@ from style import (
 DELAYS_MS = [0, 25, 50, 100, 200]
 DELAY_LABELS = ["0ms", "25ms", "50ms", "100ms", "200ms"]
 RUNS = range(1, 16)
+US_PER_MS = 1000
+Y_TICKS_MS = [0.5, 1, 2, 5, 10, 20, 50, 100, 200, 500]
 
 
 def load_connection_latency(results_dir: Path):
@@ -38,8 +41,8 @@ def load_connection_latency(results_dir: Path):
                     continue
                 with open(filepath) as f:
                     result = json.load(f)
-                p50_values.append(result["results"]["p50_connect_us"])
-                p95_values.append(result["results"]["p95_connect_us"])
+                p50_values.append(result["results"]["p50_connect_us"] / US_PER_MS)
+                p95_values.append(result["results"]["p95_connect_us"] / US_PER_MS)
             if p50_values:
                 data[transport][delay] = {"p50": p50_values, "p95": p95_values}
     return data
@@ -96,9 +99,13 @@ def main(results_dir: Path, output_dir: Path):
             linewidth=0.5,
         )
 
-    ax.set_xlabel("One-Way Delay (RTT = 2x)")
-    ax.set_ylabel("Connect Latency (us)")
+    ax.set_xlabel("Emulated Path Delay (ms)")
+    ax.set_ylabel("Connect Latency (ms)")
     ax.set_yscale("log")
+    ax.yaxis.set_major_locator(FixedLocator(Y_TICKS_MS))
+    ax.yaxis.set_minor_locator(NullLocator())
+    ax.yaxis.set_major_formatter(FuncFormatter(lambda value, _: f"{value:g}"))
+    ax.set_ylim(Y_TICKS_MS[0], 800)
     ax.set_title("Connection Setup Latency vs. Network Delay")
     ax.set_xticks(group_positions)
     ax.set_xticklabels(DELAY_LABELS)

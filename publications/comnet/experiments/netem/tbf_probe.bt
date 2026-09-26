@@ -1,0 +1,4 @@
+kretprobe:tbf_enqueue
+{
+    @ret[retval] = count();
+}

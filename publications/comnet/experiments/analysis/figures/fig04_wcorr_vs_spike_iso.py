@@ -16,8 +16,8 @@ from style import (
     save_figure,
 )
 
-LOSS_RATES = [0, 1, 2, 5]
-LOSS_LABELS = ["0%", "1%", "2%", "5%"]
+LOSS_RATES = [1, 2, 5]
+LOSS_LABELS = ["1%", "2%", "5%"]
 RUNS = range(1, 16)
 
 
@@ -64,13 +64,6 @@ def main(results_dir: Path, output_dir: Path):
 
     fig, ax = plt.subplots(figsize=(7, 4.5))
 
-    x_offsets = {
-        "tcp": -0.15,
-        "quic-control": -0.05,
-        "quic-pertopic": 0.05,
-        "quic-perpub": 0.15,
-    }
-
     group_positions = np.arange(len(LOSS_RATES))
 
     for transport in TRANSPORT_ORDER:
@@ -82,7 +75,7 @@ def main(results_dir: Path, output_dir: Path):
                 mean, ci_half = compute_ci(data[transport][loss])
                 means.append(mean)
                 ci_halves.append(ci_half)
-                positions.append(group_positions[loss_idx] + x_offsets[transport])
+                positions.append(group_positions[loss_idx])
 
         ax.errorbar(
             positions,
@@ -105,9 +98,9 @@ def main(results_dir: Path, output_dir: Path):
     ax.set_ylabel("Spike Isolation Ratio")
     ax.set_xticks(group_positions)
     ax.set_xticklabels(LOSS_LABELS)
-    ax.set_ylim(-0.05, 1.15)
+    ax.set_ylim(0.5, 1.05)
     ax.axhline(y=1.0, color="gray", linewidth=0.5, linestyle="--", zorder=1)
-    ax.legend(loc="center right", framealpha=0.9)
+    ax.legend(loc="lower right", framealpha=0.9)
 
     fig.tight_layout()
     save_figure(fig, output_dir, "fig04_wcorr_vs_spike_iso")

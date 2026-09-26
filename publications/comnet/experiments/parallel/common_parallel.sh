@@ -5,7 +5,22 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 : "${GROUP:?Set GROUP=1|2|3 before sourcing common_parallel.sh}"
+
+_cfg_keys="BROKER_IP BROKER_SSH_IP PUB_IP PUB_INTERNAL_IP SUB_IP SUB_INTERNAL_IP SUB_PROXY ROUTER_IP ROUTER_HOP_US SSH_USER SSH_KEY_PATH RUNS_PER_DATAPOINT"
+for _k in $_cfg_keys; do
+    if [ -n "${!_k+set}" ]; then
+        eval "_preset_${_k}=\${${_k}}"
+    fi
+done
 source "${SCRIPT_DIR}/group${GROUP}.env"
+for _k in $_cfg_keys; do
+    _p="_preset_${_k}"
+    if [ -n "${!_p+set}" ]; then
+        eval "${_k}=\${${_p}}"
+        unset "${_p}"
+    fi
+done
+unset _cfg_keys _k _p
 
 : "${BROKER_IP:?Set BROKER_IP in group${GROUP}.env}"
 : "${BROKER_SSH_IP:=${BROKER_IP}}"
@@ -18,7 +33,7 @@ SSH_USER="${SSH_USER:-bench}"
 RESULTS_DIR="${ROOT_DIR}/results_v2"
 mkdir -p "$RESULTS_DIR"
 
-SSH_OPTS="-o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=10"
+SSH_OPTS="-o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=10 -o ConnectTimeout=20 -o ConnectionAttempts=6"
 SUB_SSH_OPTS="$SSH_OPTS"
 if [ -n "${SUB_PROXY:-}" ]; then
     SUB_SSH_OPTS="$SSH_OPTS -o ProxyJump=${SSH_USER}@${SUB_PROXY}"
@@ -26,6 +41,41 @@ fi
 ssh_broker() { ssh -i "$SSH_KEY_PATH" $SSH_OPTS "${SSH_USER}@${BROKER_SSH_IP}" "$@"; }
 ssh_pub()    { ssh -i "$SSH_KEY_PATH" $SSH_OPTS "${SSH_USER}@${PUB_IP}" "$@"; }
 ssh_sub()    { ssh -i "$SSH_KEY_PATH" $SUB_SSH_OPTS "${SSH_USER}@${SUB_IP}" "$@"; }
+REMOTE_EXPERIMENTS_DIR="/opt/mqtt-lib/experiments"
+GCP_PROJECT="${GCP_PROJECT:-$(gcloud config get-value project 2>/dev/null)}"
+GCP_ACCOUNT="${GCP_ACCOUNT:-$(gcloud config get-value account 2>/dev/null)}"
+GCP_REGION="us-west1"
+
+gc() { gcloud "$@" --project="$GCP_PROJECT" --account="$GCP_ACCOUNT" --quiet; }
+
+ilb_health() {
+    gc compute backend-services get-health "exp3-bs-${GROUP}" --region="$GCP_REGION" \
+        --format='value(status.healthStatus[].healthState)' 2>/dev/null | tr -s '[:space:];' ' ' | sed 's/ *$//' || echo "unknown"
+}
+
+router_ingress_packets() {
+    ssh_router "sudo bash ${REMOTE_EXPERIMENTS_DIR}/netem/router_ingress_count.sh"
+}
+
+router_path_state() {
+    local before after moved
+    before=$(router_ingress_packets) || { echo "unknown"; return 0; }
+    ssh_broker "ping -q -c 200 -i 0.005 ${SUB_INTERNAL_IP}; ping -q -c 200 -i 0.005 ${PUB_INTERNAL_IP}" >/dev/null 2>&1 || true
+    after=$(router_ingress_packets) || { echo "unknown"; return 0; }
+    moved=$((after - before))
+    if [ "$moved" -ge 380 ]; then
+        echo "on"
+    elif [ "$moved" -lt 20 ]; then
+        echo "off"
+    else
+        echo "partial:${moved}"
+    fi
+}
+
+ssh_router() {
+    : "${ROUTER_IP:?Set ROUTER_IP in group${GROUP}.env}"
+    ssh -i "$SSH_KEY_PATH" $SSH_OPTS -o ProxyJump="${SSH_USER}@${BROKER_SSH_IP}" "${SSH_USER}@${ROUTER_IP}" "$@"
+}
 
 scp_from_sub() {
     local remote_path="$1"
@@ -48,7 +98,12 @@ start_broker() {
     local attempt
     for attempt in 1 2 3; do
         echo "starting broker on ${BROKER_IP} (group ${GROUP}) [attempt ${attempt}]..."
-        BROKER_PID=$(ssh_broker "ulimit -n 65536; nohup mqttv5 broker --allow-anonymous --host 0.0.0.0:1883 --storage-backend memory --max-clients 50000 \
+        local quic_stats_env=""
+        if [ "${COLLECT_QUIC_STATS:-0}" = "1" ]; then
+            ssh_broker "rm -rf /tmp/quic-stats; mkdir -p /tmp/quic-stats" 2>/dev/null || true
+            quic_stats_env="MQTT5_QUIC_STATS_DIR=/tmp/quic-stats "
+        fi
+        BROKER_PID=$(ssh_broker "ulimit -n 65536; ${quic_stats_env}nohup mqttv5 broker --allow-anonymous --host 0.0.0.0:1883 --storage-backend memory --max-clients 50000 \
             ${extra_flags} > /tmp/broker.log 2>&1 & echo \$!") || BROKER_PID=""
         sleep 2
         if [ -n "${BROKER_PID}" ] && ssh_broker "kill -0 ${BROKER_PID}" 2>/dev/null; then
@@ -116,7 +171,14 @@ BROKER_MONITOR_PID=""
 PUB_MONITOR_PID=""
 SUB_MONITOR_PID=""
 
+stop_stale_monitors() {
+    ssh_broker "pkill -f '[r]esource_monitor.sh'" 2>/dev/null || true
+    ssh_pub "pkill -f '[c]lient_monitor.sh'" 2>/dev/null || true
+    ssh_sub "pkill -f '[c]lient_monitor.sh'" 2>/dev/null || true
+}
+
 start_monitors() {
+    stop_stale_monitors
     BROKER_MONITOR_PID=$(ssh_broker "nohup bash /opt/mqtt-lib/experiments/monitor/resource_monitor.sh ${BROKER_PID} \
         > /tmp/monitor.csv 2>&1 & echo \$!") || BROKER_MONITOR_PID=""
     PUB_MONITOR_PID=$(ssh_pub "nohup bash /opt/mqtt-lib/experiments/monitor/client_monitor.sh \
@@ -191,8 +253,11 @@ run_bench_split() {
         pub_args="${pub_args} --subscribers 0"
     fi
 
-    ssh_sub "rm -f /tmp/sub_bench.json; ulimit -n 65536; nohup mqttv5 bench ${sub_args} \
-        > /tmp/sub_bench.json 2>/dev/null &"
+    if ! ssh_sub "rm -f /tmp/sub_bench.json; ulimit -n 65536; nohup mqttv5 bench ${sub_args} \
+        > /tmp/sub_bench.json 2>/dev/null &"; then
+        echo "WARN: subscriber launch failed for ${label}" >&2
+        return 0
+    fi
     sleep 2
 
     ssh_pub "ulimit -n 65536; mqttv5 bench ${pub_args}" \
@@ -201,7 +266,7 @@ run_bench_split() {
     local waited=0
     while [ "$waited" -lt 60 ]; do
         local size
-        size=$(ssh_sub "stat -c%s /tmp/sub_bench.json 2>/dev/null || echo 0")
+        size=$(ssh_sub "stat -c%s /tmp/sub_bench.json 2>/dev/null || echo 0") || size=0
         if [ "$size" -gt 0 ]; then
             break
         fi
