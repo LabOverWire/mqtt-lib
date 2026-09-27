@@ -592,6 +592,18 @@ impl MqttBroker {
                 acceptor_config = acceptor_config.with_early_data(true);
             }
 
+            if let Some(max) = quic_config.max_concurrent_streams {
+                acceptor_config = acceptor_config.with_max_concurrent_streams(max);
+            }
+
+            if let Some(bytes) = quic_config.stream_receive_window {
+                acceptor_config = acceptor_config.with_stream_receive_window(bytes);
+            }
+
+            if quic_config.disable_segmentation_offload {
+                acceptor_config = acceptor_config.with_disable_segmentation_offload(true);
+            }
+
             let mut endpoints = Vec::new();
             let mut failures = Vec::new();
             for addr in &quic_config.bind_addresses {

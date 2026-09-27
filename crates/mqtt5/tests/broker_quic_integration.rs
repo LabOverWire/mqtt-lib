@@ -1,7 +1,9 @@
 #![cfg(feature = "broker")]
 #![cfg(feature = "transport-quic")]
 
-use mqtt5::broker::config::{BrokerConfig, QuicConfig, ServerDeliveryStrategy};
+use mqtt5::broker::config::{
+    BrokerConfig, QuicConfig, ServerDeliveryStrategy, StorageBackend, StorageConfig,
+};
 use mqtt5::broker::MqttBroker;
 use mqtt5::time::Duration;
 use mqtt5::transport::StreamStrategy;
@@ -51,6 +53,7 @@ async fn start_quic_broker_at(bind_addr: SocketAddr) -> (MqttBroker, SocketAddr)
     let cert_dir = manifest_dir.join("../../test_certs");
 
     let config = BrokerConfig::default()
+        .with_storage(StorageConfig::default().with_backend(StorageBackend::Memory))
         .with_bind_address(([127, 0, 0, 1], 0))
         .with_quic(
             QuicConfig::new(cert_dir.join("server.pem"), cert_dir.join("server.key"))
@@ -115,6 +118,7 @@ async fn test_broker_quic_creation() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     let config = BrokerConfig::default()
+        .with_storage(StorageConfig::default().with_backend(StorageBackend::Memory))
         .with_bind_address(([127, 0, 0, 1], 0))
         .with_quic(
             QuicConfig::new(
@@ -142,6 +146,7 @@ async fn test_broker_quic_creation() {
 #[tokio::test]
 async fn test_broker_default_quic_port() {
     let config = BrokerConfig::default()
+        .with_storage(StorageConfig::default().with_backend(StorageBackend::Memory))
         .with_bind_address(([127, 0, 0, 1], 1883))
         .with_quic(QuicConfig::new(
             PathBuf::from("../../test_certs/server.pem"),
@@ -715,6 +720,7 @@ async fn start_quic_broker_with_early_data() -> (MqttBroker, SocketAddr) {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     let config = BrokerConfig::default()
+        .with_storage(StorageConfig::default().with_backend(StorageBackend::Memory))
         .with_bind_address(([127, 0, 0, 1], 0))
         .with_quic(
             QuicConfig::new(
@@ -1019,6 +1025,7 @@ async fn test_subscribe_on_data_flow_delivers_on_server_stream() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     let config = BrokerConfig::default()
+        .with_storage(StorageConfig::default().with_backend(StorageBackend::Memory))
         .with_bind_address(([127, 0, 0, 1], 0))
         .with_server_delivery_strategy(ServerDeliveryStrategy::PerTopic)
         .with_quic(
@@ -1154,6 +1161,7 @@ async fn test_qos1_subscriber_over_quic_receives_message() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     let config = BrokerConfig::default()
+        .with_storage(StorageConfig::default().with_backend(StorageBackend::Memory))
         .with_bind_address(([127, 0, 0, 1], 0))
         .with_server_delivery_strategy(ServerDeliveryStrategy::PerTopic)
         .with_quic(

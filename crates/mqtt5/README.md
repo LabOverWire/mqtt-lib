@@ -18,7 +18,7 @@ Full-featured MQTT v5.0 and v3.1.1 client and broker for native platforms (Linux
 
 ```toml
 [dependencies]
-mqtt5 = "0.36"
+mqtt5 = "0.43"
 ```
 
 ### Client-only builds

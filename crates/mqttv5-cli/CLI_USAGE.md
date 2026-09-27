@@ -38,6 +38,10 @@ Every flag on the `broker`, `pub`, and `sub` subcommands can be set via environm
 | `--non-interactive` | `MQTT5_NON_INTERACTIVE` | |
 | `--otel-endpoint` | `MQTT5_OTEL_ENDPOINT` | |
 
+### QUIC Statistics
+
+`MQTT5_QUIC_STATS_DIR` has no flag. When it names a directory, the broker writes one CSV per QUIC connection, `broker_quic_<peer>.csv`, with a row every 100 ms and a last row when the connection closes. Columns: `timestamp_ns`, `rtt_us`, `cwnd`, `lost_packets`, `congestion_events`, `sent_packets` (the broker's own path, so they describe the broker-to-client direction), then `stream_data_blocked`, `data_blocked` and `streams_blocked_uni` (blocked frames received from the client). Clients built on quinn 0.11 never send STREAMS_BLOCKED, so `streams_blocked_uni` stays 0 with them.
+
 ### Precedence
 
 CLI flag > environment variable > default value.
@@ -122,6 +126,9 @@ mqttv5 broker generate-config [--output FILE] [--format json|toml]
 | `--quic-host <ADDR>` | QUIC bind address(es), requires TLS cert/key | None |
 | `--quic-delivery-strategy <S>` | QUIC server delivery strategy: `control-only`, `per-topic`, `per-publish` | `per-topic` |
 | `--quic-early-data` | Enable QUIC 0-RTT early data | `false` |
+| `--quic-max-streams <N>` | Maximum concurrent QUIC streams a client may open, per direction | `100` |
+| `--quic-stream-window <BYTES>` | Per-stream QUIC receive window | `262144` |
+| `--quic-disable-offload` | Disable UDP segmentation offload (one datagram per send) | `false` |
 | `--storage-dir <DIR>` | Storage directory for persistence | `./mqtt_storage` |
 | `--storage-backend <TYPE>` | Storage backend: `memory` or `file` | `file` |
 | `--no-persistence` | Disable message persistence | `false` |

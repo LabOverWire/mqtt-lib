@@ -33,7 +33,6 @@ pub struct QuicConfig {
     pub enable_datagrams: bool,
     pub datagram_send_buffer_size: usize,
     pub datagram_receive_buffer_size: usize,
-    // [MQoQ§4] Flow header toggle
     pub enable_flow_headers: bool,
     pub flow_expire_interval: u64,
     pub flow_flags: FlowFlags,
@@ -232,15 +231,19 @@ impl QuicConfig {
         let mut client_config = ClientConfig::new(Arc::new(quic_crypto));
 
         let mut transport_config = quinn::TransportConfig::default();
-        transport_config.max_idle_timeout(Some(
-            std::time::Duration::from_secs(120)
-                .try_into()
-                .expect("valid duration"),
-        ));
+        transport_config.max_idle_timeout(Some(quinn::IdleTimeout::from(quinn::VarInt::from_u32(
+            120_000,
+        ))));
 
         transport_config.stream_receive_window(262_144u32.into());
         transport_config.receive_window(1_048_576u32.into());
         transport_config.send_window(1_048_576);
+
+        if let Some(max) = self.max_concurrent_streams {
+            let max = u32::try_from(max).unwrap_or(u32::MAX);
+            transport_config.max_concurrent_uni_streams(max.into());
+            transport_config.max_concurrent_bidi_streams(max.into());
+        }
 
         if self.enable_datagrams {
             transport_config.datagram_send_buffer_size(self.datagram_send_buffer_size);
@@ -367,7 +370,6 @@ impl QuicTransport {
     }
 }
 
-// [RFC9000§7] QUIC connection establishment
 impl Transport for QuicTransport {
     #[instrument(skip(self), fields(server_name = %self.config.server_name, addr = %self.config.addr))]
     async fn connect(&mut self) -> Result<()> {
@@ -384,7 +386,7 @@ impl Transport for QuicTransport {
 
         self.built_client_config = Some(client_config.clone());
 
-        let mut endpoint = Endpoint::client("0.0.0.0:0".parse().unwrap())
+        let mut endpoint = Endpoint::client(SocketAddr::from(([0, 0, 0, 0], 0)))
             .map_err(|e| MqttError::ConnectionError(format!("Failed to create endpoint: {e}")))?;
         endpoint.set_default_client_config(client_config);
 
@@ -510,7 +512,6 @@ impl Transport for QuicTransport {
     }
 }
 
-// [MQTT5§2] Fixed header parsing
 impl PacketReader for RecvStream {
     async fn read_packet(&mut self, protocol_version: u8) -> Result<Packet> {
         let mut header_buf = BytesMut::with_capacity(5);
@@ -601,7 +602,6 @@ fn packet_to_type(packet: &Packet) -> PacketType {
     }
 }
 
-// [MQTT5§2] Packet encoding
 impl PacketWriter for SendStream {
     async fn write_packet(&mut self, packet: Packet) -> Result<()> {
         let packet_type = packet_to_type(&packet);

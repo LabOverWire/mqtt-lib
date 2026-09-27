@@ -28,7 +28,6 @@ use tracing::{debug, error, instrument, trace, warn};
 
 use super::tls_acceptor::TlsAcceptorConfig;
 
-// [RFC9000§7] QUIC transport parameters
 pub struct QuicAcceptorConfig {
     pub cert_chain: Vec<CertificateDer<'static>>,
     pub private_key: PrivateKeyDer<'static>,
@@ -36,10 +35,13 @@ pub struct QuicAcceptorConfig {
     pub require_client_cert: bool,
     pub alpn_protocols: Vec<Vec<u8>>,
     pub enable_early_data: bool,
+    pub max_concurrent_streams: Option<u32>,
+    pub stream_receive_window: Option<u32>,
+    pub disable_segmentation_offload: bool,
 }
 
 impl QuicAcceptorConfig {
-    #[allow(clippy::must_use_candidate)]
+    #[must_use]
     pub fn new(
         cert_chain: Vec<CertificateDer<'static>>,
         private_key: PrivateKeyDer<'static>,
@@ -51,6 +53,9 @@ impl QuicAcceptorConfig {
             require_client_cert: false,
             alpn_protocols: vec![b"MQTT-next".to_vec(), b"mqtt".to_vec()],
             enable_early_data: false,
+            max_concurrent_streams: None,
+            stream_receive_window: None,
+            disable_segmentation_offload: false,
         }
     }
 
@@ -98,13 +103,28 @@ impl QuicAcceptorConfig {
         self
     }
 
+    #[must_use]
+    pub fn with_max_concurrent_streams(mut self, max: u32) -> Self {
+        self.max_concurrent_streams = Some(max);
+        self
+    }
+
+    #[must_use]
+    pub fn with_stream_receive_window(mut self, bytes: u32) -> Self {
+        self.stream_receive_window = Some(bytes);
+        self
+    }
+
+    #[must_use]
+    pub fn with_disable_segmentation_offload(mut self, disable: bool) -> Self {
+        self.disable_segmentation_offload = disable;
+        self
+    }
+
     /// Builds a rustls `ServerConfig` from this QUIC acceptor configuration.
     ///
     /// # Errors
     /// Returns an error if certificate loading fails or TLS configuration is invalid.
-    ///
-    /// # Panics
-    /// Panics if the idle timeout duration conversion fails (should never happen).
     pub fn build_server_config(&self) -> Result<ServerConfig> {
         let crypto_provider = Arc::new(rustls::crypto::ring::default_provider());
 
@@ -165,17 +185,25 @@ impl QuicAcceptorConfig {
         let mut server_config = ServerConfig::with_crypto(Arc::new(quic_config));
 
         let mut transport_config = quinn::TransportConfig::default();
-        transport_config.max_idle_timeout(Some(
-            std::time::Duration::from_secs(60)
-                .try_into()
-                .expect("valid duration"),
-        ));
+        transport_config.max_idle_timeout(Some(quinn::IdleTimeout::from(quinn::VarInt::from_u32(
+            60_000,
+        ))));
         transport_config.datagram_receive_buffer_size(Some(65536));
         transport_config.datagram_send_buffer_size(65536);
 
-        transport_config.stream_receive_window(262_144u32.into());
+        transport_config
+            .stream_receive_window(self.stream_receive_window.unwrap_or(262_144).into());
         transport_config.receive_window(1_048_576u32.into());
         transport_config.send_window(1_048_576);
+
+        if let Some(max) = self.max_concurrent_streams {
+            transport_config.max_concurrent_uni_streams(max.into());
+            transport_config.max_concurrent_bidi_streams(max.into());
+        }
+
+        if self.disable_segmentation_offload {
+            transport_config.enable_segmentation_offload(false);
+        }
 
         server_config.transport_config(Arc::new(transport_config));
 
@@ -200,7 +228,7 @@ pub struct QuicStreamWrapper {
 }
 
 impl QuicStreamWrapper {
-    #[allow(clippy::must_use_candidate)]
+    #[must_use]
     pub fn new(send: SendStream, recv: RecvStream, peer_addr: SocketAddr) -> Self {
         Self {
             send,
@@ -301,7 +329,6 @@ pub async fn accept_quic_stream(
     Ok(QuicStreamWrapper::new(send, recv, peer_addr))
 }
 
-// [MQoQ§4.1] Flow type detection
 fn is_flow_header_byte(b: u8) -> bool {
     matches!(
         b,
@@ -502,7 +529,6 @@ pub(super) async fn read_packet_with_buffer(
     Packet::decode_from_body(fixed_header.packet_type, &fixed_header, &mut payload_buf)
 }
 
-// [MQoQ§4] QUIC connection handling with flow headers
 #[allow(clippy::too_many_arguments)]
 #[instrument(skip(connection, config, router, auth_provider, storage, stats, resource_monitor, shutdown_rx), fields(peer_addr = %peer_addr))]
 pub async fn run_quic_connection_handler(
@@ -628,6 +654,7 @@ async fn run_quic_handler_inner(
 
     spawn_datagram_reader(connection.clone(), packet_tx.clone(), peer_addr, label);
     spawn_bi_accept_loop(connection.clone(), flow_registry.clone(), peer_addr, label);
+    spawn_quic_stats_sampler(connection.clone(), peer_addr);
     spawn_uni_accept_loop(
         connection,
         packet_tx,
@@ -636,6 +663,69 @@ async fn run_quic_handler_inner(
         flow_closed_tx,
         label,
     );
+}
+
+const QUIC_STATS_DIR_ENV: &str = "MQTT5_QUIC_STATS_DIR";
+const QUIC_STATS_HEADER: &str = "timestamp_ns,rtt_us,cwnd,lost_packets,congestion_events,sent_packets,stream_data_blocked,data_blocked,streams_blocked_uni\n";
+const QUIC_STATS_INTERVAL: Duration = Duration::from_millis(100);
+
+fn spawn_quic_stats_sampler(connection: Arc<Connection>, peer_addr: SocketAddr) {
+    let Some(dir) = std::env::var_os(QUIC_STATS_DIR_ENV).filter(|dir| !dir.is_empty()) else {
+        return;
+    };
+    tokio::spawn(async move {
+        match sample_quic_stats(&connection, std::path::Path::new(&dir), peer_addr).await {
+            Ok(rows) => debug!(%peer_addr, rows, "QUIC stats sampling finished"),
+            Err(e) => warn!(%peer_addr, error = %e, "QUIC stats sampling stopped"),
+        }
+    });
+}
+
+async fn sample_quic_stats(
+    connection: &Connection,
+    dir: &std::path::Path,
+    peer_addr: SocketAddr,
+) -> std::io::Result<u64> {
+    use tokio::io::AsyncWriteExt;
+
+    tokio::fs::create_dir_all(dir).await?;
+    let name = peer_addr.to_string().replace([':', '.', '[', ']'], "-");
+    let mut out = tokio::fs::File::create(dir.join(format!("broker_quic_{name}.csv"))).await?;
+    out.write_all(QUIC_STATS_HEADER.as_bytes()).await?;
+
+    let mut rows = 0u64;
+    let mut ticker = tokio::time::interval(QUIC_STATS_INTERVAL);
+    loop {
+        let closed = tokio::select! {
+            _ = connection.closed() => true,
+            _ = ticker.tick() => false,
+        };
+        out.write_all(quic_stats_row(connection).as_bytes()).await?;
+        rows += 1;
+        if closed {
+            return Ok(rows);
+        }
+    }
+}
+
+fn quic_stats_row(connection: &Connection) -> String {
+    let stats = connection.stats();
+    let timestamp_ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX)
+        });
+    let rtt_us = u64::try_from(stats.path.rtt.as_micros()).unwrap_or(u64::MAX);
+    format!(
+        "{timestamp_ns},{rtt_us},{},{},{},{},{},{},{}\n",
+        stats.path.cwnd,
+        stats.path.lost_packets,
+        stats.path.congestion_events,
+        stats.path.sent_packets,
+        stats.frame_rx.stream_data_blocked,
+        stats.frame_rx.data_blocked,
+        stats.frame_rx.streams_blocked_uni,
+    )
 }
 
 fn spawn_datagram_reader(
@@ -859,7 +949,6 @@ fn spawn_discard_handler(
     });
 }
 
-// [MQoQ§5] Data stream processing
 fn spawn_data_stream_reader(
     mut recv: RecvStream,
     packet_tx: mpsc::Sender<(Packet, Option<u64>)>,
