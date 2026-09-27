@@ -2,6 +2,7 @@
 //!
 //! Provides durable storage using organized file structure with atomic operations.
 
+use super::session_log::{sync_directory, SessionChange, SessionLog};
 use super::{
     ClientSession, InflightDirection, InflightMessage, QueueHandle, QueueLimits, QueueOp,
     QueueRegistry, QueueWriter, QueuedMessage, RetainedMessage, StorageBackend, SEQ_FLOOR,
@@ -11,11 +12,11 @@ use crate::validation::topic_matches_filter;
 use serde_json;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::fs::{self, File};
 use tokio::io::AsyncWriteExt;
-use tokio::sync::{mpsc, oneshot, RwLock};
+use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
 /// How long an inflight or queued row may sit unwritten so that its remove can cancel it.
@@ -173,18 +174,18 @@ static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 ///
 /// Version History:
 /// - 1: Initial version (0.10.0)
-const STORAGE_VERSION: &str = "1";
+/// - 2: Sessions in one group-committed log, `sessions/sessions.log` (0.42.0); version 1
+///   directories are migrated on open
+const STORAGE_VERSION: &str = "2";
+const LEGACY_STORAGE_VERSION: &str = "1";
 
-/// File-based storage backend with write-behind session caching
+/// File-based storage backend; session writes are group-committed to one log
 pub struct FileBackend {
     _base_dir: PathBuf,
     retained_dir: PathBuf,
-    sessions_dir: PathBuf,
     queues_dir: PathBuf,
     inflight_dir: PathBuf,
-    sessions_cache: Arc<RwLock<HashMap<String, ClientSession>>>,
-    dirty_sessions: Arc<RwLock<HashSet<String>>>,
-    shutdown: Arc<AtomicBool>,
+    sessions: SessionLog,
     queues: QueueRegistry,
     queue_writer: QueueWriter,
     queue_flush: mpsc::Sender<oneshot::Sender<()>>,
@@ -213,12 +214,16 @@ impl FileBackend {
         let queues_dir = base_dir.join("queues");
         let inflight_dir = base_dir.join("inflight");
 
-        Self::check_storage_version(&base_dir).await?;
+        let legacy = Self::check_storage_version(&base_dir).await?;
 
         for dir in [&retained_dir, &sessions_dir, &queues_dir, &inflight_dir] {
             fs::create_dir_all(dir).await.map_err(|e| {
                 MqttError::Configuration(format!("Failed to create dir {}: {e}", dir.display()))
             })?;
+        }
+        let sessions = SessionLog::open(sessions_dir, legacy).await?;
+        if legacy {
+            Self::write_storage_version(&base_dir).await?;
         }
 
         let (writer_tx, writer_rx) = mpsc::unbounded_channel();
@@ -233,12 +238,9 @@ impl FileBackend {
         let backend = Self {
             _base_dir: base_dir.clone(),
             retained_dir,
-            sessions_dir,
             queues_dir,
             inflight_dir,
-            sessions_cache: Arc::new(RwLock::new(HashMap::new())),
-            dirty_sessions: Arc::new(RwLock::new(HashSet::new())),
-            shutdown: Arc::new(AtomicBool::new(false)),
+            sessions,
             queues: QueueRegistry::new(limits, Some(writer_tx.clone())),
             queue_writer: writer_tx,
             queue_flush: flush_tx,
@@ -450,72 +452,26 @@ impl FileBackend {
             .join(format!("{direction_tag}_{}.json", key.1))
     }
 
-    /// # Errors
-    /// Returns an error if any session fails to persist.
-    pub async fn flush_sessions(&self) -> Result<()> {
-        let to_flush: Vec<String> = self.dirty_sessions.read().await.iter().cloned().collect();
-
-        if to_flush.is_empty() {
-            return Ok(());
-        }
-
-        let cache = self.sessions_cache.read().await;
-        let mut failed = Vec::new();
-
-        for client_id in to_flush {
-            if let Some(session) = cache.get(&client_id) {
-                let filename = format!("{client_id}.json");
-                let path = self.sessions_dir.join(filename);
-                if let Err(e) = self.write_file_atomic(path, session).await {
-                    warn!("failed to persist session {}: {}", client_id, e);
-                    failed.push(client_id);
-                } else {
-                    self.dirty_sessions.write().await.remove(&client_id);
-                }
-            } else {
-                self.dirty_sessions.write().await.remove(&client_id);
-            }
-        }
-
-        if failed.is_empty() {
-            Ok(())
-        } else {
-            Err(MqttError::Io(format!(
-                "failed to persist {} sessions",
-                failed.len()
-            )))
-        }
+    #[cfg(test)]
+    pub(crate) async fn pause_session_writes(&self) -> impl Sized {
+        self.sessions.pause_writes().await
     }
 
-    pub fn start_flush_task(self: &Arc<Self>, flush_interval: std::time::Duration) {
-        let backend = Arc::clone(self);
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(flush_interval);
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    #[cfg(test)]
+    pub(crate) async fn break_next_session_write(&self) {
+        self.sessions.break_next_write().await;
+    }
 
-            loop {
-                interval.tick().await;
-
-                if backend.shutdown.load(Ordering::Relaxed) {
-                    if let Err(e) = backend.flush_sessions().await {
-                        warn!("failed to flush sessions on shutdown: {e}");
-                    }
-                    break;
-                }
-
-                if let Err(e) = backend.flush_sessions().await {
-                    warn!("failed to flush sessions: {e}");
-                }
-            }
-        });
+    #[cfg(test)]
+    pub(crate) async fn session_flushes(&self) -> u64 {
+        self.sessions.flushes().await
     }
 
     /// # Errors
-    /// Returns an error if flushing sessions fails.
+    /// Never fails; session writes are durable before they are acknowledged.
     pub async fn shutdown(&self) -> Result<()> {
-        self.shutdown.store(true, Ordering::Relaxed);
         self.flush_queue_writes().await;
-        self.flush_sessions().await
+        Ok(())
     }
 
     fn send_queue_op(&self, op: QueueOp) -> Result<()> {
@@ -532,52 +488,79 @@ impl FileBackend {
         }
     }
 
-    async fn check_storage_version(base_dir: &Path) -> Result<()> {
+    async fn check_storage_version(base_dir: &Path) -> Result<bool> {
         let version_file = base_dir.join(".storage_version");
 
-        if version_file.exists() {
-            let stored_version = fs::read_to_string(&version_file).await.map_err(|e| {
-                MqttError::Configuration(format!("Failed to read storage version: {e}"))
-            })?;
-
-            let stored_version = stored_version.trim();
-
-            if stored_version != STORAGE_VERSION {
-                return Err(MqttError::Configuration(format!(
-                    "Storage version mismatch: found version {}, expected version {}.\n\
-                     \n\
-                     The storage format has changed and is incompatible.\n\
-                     \n\
-                     To resolve this issue:\n\
-                     1. Backup your data: mqttv5 storage backup --dir {} --output backup.json\n\
-                     2. Remove the storage directory: rm -rf {}\n\
-                     3. Restart the broker (it will create a new storage with version {})\n\
-                     \n\
-                     Note: Without backup, all retained messages and session data will be lost.",
-                    stored_version,
-                    STORAGE_VERSION,
-                    base_dir.display(),
-                    base_dir.display(),
-                    STORAGE_VERSION
-                )));
-            }
-
-            debug!("Storage version verified: {}", STORAGE_VERSION);
-        } else {
+        if !version_file.exists() {
             fs::create_dir_all(base_dir).await.map_err(|e| {
                 MqttError::Configuration(format!("Failed to create storage dir: {e}"))
             })?;
-
-            fs::write(&version_file, STORAGE_VERSION)
-                .await
-                .map_err(|e| {
-                    MqttError::Configuration(format!("Failed to write storage version: {e}"))
-                })?;
-
-            info!("Created new storage with version {}", STORAGE_VERSION);
+            Self::write_storage_version(base_dir).await?;
+            info!("Created new storage with version {STORAGE_VERSION}");
+            return Ok(false);
         }
 
-        Ok(())
+        let stored_version = fs::read_to_string(&version_file).await.map_err(|e| {
+            MqttError::Configuration(format!("Failed to read storage version: {e}"))
+        })?;
+
+        match stored_version.trim() {
+            STORAGE_VERSION => {
+                debug!("Storage version verified: {STORAGE_VERSION}");
+                Ok(false)
+            }
+            LEGACY_STORAGE_VERSION => {
+                info!("Migrating storage from version {LEGACY_STORAGE_VERSION} to {STORAGE_VERSION}");
+                Ok(true)
+            }
+            stored_version => Err(MqttError::Configuration(format!(
+                "Storage version mismatch: {} holds storage version {stored_version}, and this broker \
+                 reads versions {LEGACY_STORAGE_VERSION} and {STORAGE_VERSION} only.\n\
+                 \n\
+                 The directory was written by a newer broker, which changes the format in a way \
+                 this broker cannot read. To recover, do one of:\n\
+                 1. Run the broker version that wrote this directory, or a newer one.\n\
+                 2. Restore the backup of the storage directory taken before that upgrade, and \
+                 start this broker on it.\n\
+                 \n\
+                 The directory has not been modified.",
+                base_dir.display(),
+            ))),
+        }
+    }
+
+    async fn write_storage_version(base_dir: &Path) -> Result<()> {
+        let base_dir = base_dir.to_path_buf();
+        tokio::task::spawn_blocking(move || Self::write_storage_version_blocking(&base_dir))
+            .await
+            .map_err(|e| {
+                MqttError::Configuration(format!("Failed to write storage version: {e}"))
+            })?
+    }
+
+    fn write_storage_version_blocking(base_dir: &Path) -> Result<()> {
+        use std::io::Write;
+        let target = base_dir.join(".storage_version");
+        let temp = base_dir.join(format!(
+            ".storage_version.tmp.{}.{}",
+            std::process::id(),
+            TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        let written = std::fs::File::create(&temp)
+            .and_then(|mut file| {
+                file.write_all(STORAGE_VERSION.as_bytes())?;
+                file.sync_all()
+            })
+            .and_then(|()| std::fs::rename(&temp, &target));
+        if let Err(e) = written {
+            if let Err(cleanup) = std::fs::remove_file(&temp) {
+                debug!("Could not remove {}: {cleanup}", temp.display());
+            }
+            return Err(MqttError::Configuration(format!(
+                "Failed to write storage version: {e}"
+            )));
+        }
+        sync_directory(base_dir)
     }
 
     fn topic_to_filename(topic: &str) -> String {
@@ -877,55 +860,81 @@ impl StorageBackend for FileBackend {
 
     async fn store_session(&self, session: ClientSession) -> Result<()> {
         let client_id = session.client_id.clone();
-        self.sessions_cache
-            .write()
+        self.sessions
+            .apply(&client_id, |_| {
+                (Some(SessionChange::Put(Box::new(session))), ())
+            })
             .await
-            .insert(client_id.clone(), session);
-        self.dirty_sessions.write().await.insert(client_id);
-        Ok(())
     }
 
-    async fn get_session(&self, client_id: &str) -> Result<Option<ClientSession>> {
-        let cached = self.sessions_cache.read().await.get(client_id).cloned();
-        if let Some(session) = cached {
-            if session.is_expired() {
-                self.remove_session(client_id).await?;
-                return Ok(None);
-            }
-            return Ok(Some(session));
-        }
+    fn get_session(
+        &self,
+        client_id: &str,
+    ) -> impl std::future::Future<Output = Result<Option<ClientSession>>> + Send {
+        std::future::ready(Ok(self
+            .sessions
+            .get(client_id)
+            .filter(|session| !session.is_expired())))
+    }
 
-        let filename = format!("{client_id}.json");
-        let path = self.sessions_dir.join(filename);
-        let session: Option<ClientSession> = self.read_file(path).await?;
+    async fn remove_expired_session(&self, client_id: &str) -> Result<bool> {
+        self.sessions
+            .apply(client_id, |current| {
+                if current.is_some_and(ClientSession::is_expired) {
+                    (Some(SessionChange::Remove), true)
+                } else {
+                    (None, false)
+                }
+            })
+            .await
+    }
 
-        if let Some(ref sess) = session {
-            if sess.is_expired() {
-                self.remove_session(client_id).await?;
-                return Ok(None);
-            }
-            self.sessions_cache
-                .write()
-                .await
-                .insert(client_id.to_string(), sess.clone());
-        }
+    fn session_client_ids(&self) -> impl std::future::Future<Output = Result<Vec<String>>> + Send {
+        std::future::ready(Ok(self.sessions.client_ids()))
+    }
 
-        Ok(session)
+    async fn update_session<F>(
+        &self,
+        client_id: &str,
+        connection_token: u64,
+        update: F,
+    ) -> Result<bool>
+    where
+        F: FnOnce(&mut ClientSession) + Send,
+    {
+        self.sessions
+            .apply(client_id, |current| {
+                match current.filter(|session| session.connection_token == connection_token) {
+                    Some(current) => {
+                        let mut updated = current.clone();
+                        update(&mut updated);
+                        (Some(SessionChange::Put(Box::new(updated))), true)
+                    }
+                    None => (None, false),
+                }
+            })
+            .await
+    }
+
+    async fn remove_owned_session(&self, client_id: &str, connection_token: u64) -> Result<bool> {
+        self.sessions
+            .apply(client_id, |current| {
+                if current.is_some_and(|session| session.connection_token == connection_token) {
+                    (Some(SessionChange::Remove), true)
+                } else {
+                    (None, false)
+                }
+            })
+            .await
     }
 
     async fn remove_session(&self, client_id: &str) -> Result<()> {
-        self.sessions_cache.write().await.remove(client_id);
-        self.dirty_sessions.write().await.remove(client_id);
-
-        let filename = format!("{client_id}.json");
-        let path = self.sessions_dir.join(filename);
-        if path.exists() {
-            fs::remove_file(&path)
-                .await
-                .map_err(|e| MqttError::Io(format!("Failed to remove session file: {e}")))?;
-            debug!("Removed session for client: {}", client_id);
-        }
-
+        self.sessions
+            .apply(client_id, |current| {
+                (current.map(|_| SessionChange::Remove), ())
+            })
+            .await?;
+        debug!("Removed session for client: {client_id}");
         Ok(())
     }
 
@@ -1025,20 +1034,6 @@ impl StorageBackend for FileBackend {
             }
         }
 
-        // Clean expired sessions
-        let session_files = self.list_files(&self.sessions_dir, "json").await?;
-        for file_path in session_files {
-            if let Some(session) = self.read_file::<ClientSession>(file_path.clone()).await? {
-                if session.is_expired() {
-                    if let Err(e) = fs::remove_file(&file_path).await {
-                        warn!("Failed to remove expired session: {e}");
-                    } else {
-                        removed_count += 1;
-                    }
-                }
-            }
-        }
-
         for queue in self.queues.handles() {
             // Scanned entries carry their expiry in memory (recorded during scan_queues), so
             // purge_expired covers them too; no per-tick re-read of every queued file.
@@ -1053,10 +1048,6 @@ impl StorageBackend for FileBackend {
         }
 
         Ok(())
-    }
-
-    async fn flush_sessions(&self) -> Result<()> {
-        FileBackend::flush_sessions(self).await
     }
 }
 
@@ -1307,5 +1298,47 @@ mod tests {
             let name = entry.file_name().to_string_lossy().to_string();
             assert!(!name.contains(".tmp"), "temp file left behind: {name}");
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn storage_version_is_replaced_by_rename_not_rewritten_in_place() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let version = dir.path().join(".storage_version");
+        std::fs::write(&version, "1").unwrap();
+        std::fs::set_permissions(&version, std::fs::Permissions::from_mode(0o444)).unwrap();
+        if std::fs::OpenOptions::new()
+            .write(true)
+            .open(&version)
+            .is_ok()
+        {
+            return;
+        }
+        let backend = FileBackend::new(dir.path()).await;
+        assert!(backend.is_ok(), "migration failed: {:?}", backend.err());
+        assert_eq!(std::fs::read_to_string(&version).unwrap(), STORAGE_VERSION);
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .filter(|name| name.to_string_lossy().contains(".tmp."))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "temp files left behind: {leftovers:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn newer_storage_version_names_the_recovery_steps() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".storage_version"), "3").unwrap();
+        let Err(error) = FileBackend::new(dir.path()).await else {
+            panic!("a newer storage version was opened");
+        };
+        let message = error.to_string();
+        assert!(message.contains("backup"), "{message}");
+        assert!(!message.contains("rm -rf"), "{message}");
+        assert!(!message.contains("mqttv5 storage"), "{message}");
     }
 }

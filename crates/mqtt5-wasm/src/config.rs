@@ -216,6 +216,10 @@ impl WasmConnectOptions {
     /// for example after a page reload or crash. The client has nothing to resend in
     /// that case; the broker resumes delivery of the messages it holds. A CONNACK with
     /// Session Present set to 1 in reply to `cleanStart = true` is always rejected.
+    ///
+    /// The broker only keeps a session to resume if the previous connection set a non-zero
+    /// `sessionExpiryInterval`: under MQTT v5 an absent value means 0, so the session ends
+    /// when the connection closes.
     #[wasm_bindgen(getter = resumeExistingSession)]
     #[must_use]
     pub fn resume_existing_session(&self) -> bool {

@@ -39,6 +39,10 @@ pub struct ConnectOptions {
     /// locally, so delivery across the restart is at-least-once: this is the deferred-ack
     /// crash-recovery pattern, where messages whose `AckToken` was never resolved are
     /// redelivered to the new process. It has no effect on `Clean Start = 1` connections.
+    ///
+    /// The broker only keeps a session to resume if the previous connection set a non-zero
+    /// Session Expiry Interval (`with_session_expiry_interval`): under MQTT v5 an absent
+    /// Session Expiry Interval means 0, so the session ends when the connection closes.
     pub resume_existing_session: bool,
 }
 
@@ -137,6 +141,10 @@ impl ConnectOptions {
         self
     }
 
+    /// Sets Clean Start. With `false` the broker resumes the session it kept for this
+    /// client identifier, but under MQTT v5 it only keeps one if a connection set a non-zero
+    /// Session Expiry Interval (`with_session_expiry_interval`): an absent Session Expiry
+    /// Interval means 0, which ends the session when the network connection closes.
     #[must_use]
     pub fn with_clean_start(mut self, clean: bool) -> Self {
         self.protocol_options = self.protocol_options.with_clean_start(clean);
@@ -159,6 +167,8 @@ impl ConnectOptions {
         self
     }
 
+    /// Sets how long, in seconds, the broker keeps the session after the network connection
+    /// closes. Leaving it unset means 0 under MQTT v5: the session ends at disconnect.
     #[must_use]
     pub fn with_session_expiry_interval(mut self, interval: u32) -> Self {
         self.protocol_options = self.protocol_options.with_session_expiry_interval(interval);

@@ -9,12 +9,18 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use tokio::time::sleep;
 
+const SESSION_EXPIRY: u32 = 300;
+
 #[tokio::test]
 async fn test_no_local_persists_after_reconnect() {
     let broker = TestBroker::start().await;
     let client_id = "no-local-persist-test";
 
-    let client1 = MqttClient::with_options(ConnectOptions::new(client_id).with_clean_start(true));
+    let client1 = MqttClient::with_options(
+        ConnectOptions::new(client_id)
+            .with_clean_start(true)
+            .with_session_expiry_interval(SESSION_EXPIRY),
+    );
     client1.connect(broker.address()).await.unwrap();
 
     client1
@@ -41,17 +47,17 @@ async fn test_no_local_persists_after_reconnect() {
             broker.address(),
             ConnectOptions::new(client_id)
                 .with_clean_start(false)
+                .with_session_expiry_interval(SESSION_EXPIRY)
                 .with_resume_existing_session(true),
         ),
     )
     .await
     .unwrap();
 
-    if !session.session_present {
-        println!("Session not preserved, skipping test");
-        client2.disconnect().await.unwrap();
-        return;
-    }
+    assert!(
+        session.session_present,
+        "a session with a Session Expiry Interval must be resumed"
+    );
 
     client2
         .subscribe_with_options(
@@ -120,7 +126,11 @@ async fn test_retain_as_published_persists_after_reconnect() {
         .unwrap();
     pub_client.disconnect().await.unwrap();
 
-    let client1 = MqttClient::with_options(ConnectOptions::new(client_id).with_clean_start(true));
+    let client1 = MqttClient::with_options(
+        ConnectOptions::new(client_id)
+            .with_clean_start(true)
+            .with_session_expiry_interval(SESSION_EXPIRY),
+    );
     client1.connect(broker.address()).await.unwrap();
 
     client1
@@ -147,17 +157,17 @@ async fn test_retain_as_published_persists_after_reconnect() {
             broker.address(),
             ConnectOptions::new(client_id)
                 .with_clean_start(false)
+                .with_session_expiry_interval(SESSION_EXPIRY)
                 .with_resume_existing_session(true),
         ),
     )
     .await
     .unwrap();
 
-    if !session.session_present {
-        println!("Session not preserved, skipping test");
-        client2.disconnect().await.unwrap();
-        return;
-    }
+    assert!(
+        session.session_present,
+        "a session with a Session Expiry Interval must be resumed"
+    );
 
     client2
         .subscribe_with_options(
@@ -209,7 +219,11 @@ async fn test_subscription_options_all_preserved() {
     let broker = TestBroker::start().await;
     let client_id = "full-options-persist";
 
-    let client1 = MqttClient::with_options(ConnectOptions::new(client_id).with_clean_start(true));
+    let client1 = MqttClient::with_options(
+        ConnectOptions::new(client_id)
+            .with_clean_start(true)
+            .with_session_expiry_interval(SESSION_EXPIRY),
+    );
     client1.connect(broker.address()).await.unwrap();
 
     client1
@@ -237,17 +251,17 @@ async fn test_subscription_options_all_preserved() {
             broker.address(),
             ConnectOptions::new(client_id)
                 .with_clean_start(false)
+                .with_session_expiry_interval(SESSION_EXPIRY)
                 .with_resume_existing_session(true),
         ),
     )
     .await
     .unwrap();
 
-    if !session.session_present {
-        println!("Session not preserved, skipping test");
-        client2.disconnect().await.unwrap();
-        return;
-    }
+    assert!(
+        session.session_present,
+        "a session with a Session Expiry Interval must be resumed"
+    );
 
     client2
         .subscribe_with_options(

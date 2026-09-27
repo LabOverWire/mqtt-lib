@@ -10,28 +10,105 @@ use crate::packet::unsuback::UnsubAckPacket;
 use crate::packet::unsubscribe::UnsubscribePacket;
 use crate::packet::Packet;
 use crate::protocol::v5::reason_codes::ReasonCode;
-use crate::types::ProtocolVersion;
 use crate::validation::{parse_shared_subscription, topic_matches_filter, validate_topic_filter};
 use crate::QoS;
 use tracing::{debug, warn};
 
-use crate::broker::router::{RoutableMessage, Subscribed, SubscriptionRequest, Unsubscribed};
+use crate::broker::router::{MessageRouter, RoutableMessage, Subscribed, Unsubscribed};
+use crate::broker::session_slot::SessionSlotGuard;
 
 use super::ClientHandler;
 
+struct AcceptedFilter<'a> {
+    filter: &'a crate::packet::subscribe::TopicFilter,
+    stored: StoredSubscription,
+    is_new: bool,
+}
+
 impl ClientHandler {
     pub(super) async fn handle_subscribe(&mut self, subscribe: SubscribePacket) -> Result<()> {
-        let client_id = self.client_id.clone().unwrap();
-        let mut reason_codes: Vec<crate::packet::suback::SubAckReasonCode> = Vec::new();
-
+        let client_id = self.connected_client_id()?;
+        let mut reason_codes = Vec::with_capacity(subscribe.filters.len());
         for filter in &subscribe.filters {
-            if let Some(rc) = self.validate_subscribe_filter(filter, &client_id).await? {
-                reason_codes.push(rc);
+            reason_codes.push(self.validate_subscribe_filter(filter, &client_id).await?);
+        }
+
+        let slot = self.router.lock_session(&client_id).await;
+        let routed = match self
+            .route_subscriptions(&subscribe, &client_id, &mut reason_codes)
+            .await
+        {
+            Ok(Some(routed)) => routed,
+            Ok(None) => {
+                debug!("Ignoring SUBSCRIBE from a connection whose session was taken over");
+                return Ok(());
+            }
+            Err(e) => {
+                self.restore_stored_routes(&slot).await?;
+                return Err(e);
+            }
+        };
+        if !routed.is_empty() {
+            let stored: Vec<(String, StoredSubscription)> = routed
+                .iter()
+                .map(|accepted| (accepted.filter.filter.clone(), accepted.stored.clone()))
+                .collect();
+            let kept = stored.clone();
+            self.persist_or_restore_routes(&slot, move |session| {
+                for (filter, subscription) in stored {
+                    session.add_subscription(filter, subscription);
+                }
+            })
+            .await?;
+            if let Some(session) = self.session.as_mut() {
+                for (filter, subscription) in kept {
+                    session.add_subscription(filter, subscription);
+                }
+            }
+        }
+        drop(slot);
+
+        let subscription_id = subscribe.properties.get_subscription_identifier();
+        for accepted in routed {
+            #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
+            if let Some(fid) = accepted.stored.flow_id {
+                self.track_flow_subscription(fid, &accepted.filter.filter)
+                    .await;
+            }
+            self.deliver_retained_for_filter(
+                &accepted.filter.filter,
+                &accepted.filter.options,
+                subscription_id,
+                accepted.is_new,
+            )
+            .await?;
+        }
+
+        let reason_codes: Vec<crate::packet::suback::SubAckReasonCode> =
+            reason_codes.into_iter().flatten().collect();
+        self.build_and_send_suback(&subscribe, &reason_codes).await
+    }
+
+    fn connected_client_id(&self) -> Result<String> {
+        self.client_id
+            .clone()
+            .ok_or_else(|| MqttError::ProtocolError("packet received before CONNECT".to_string()))
+    }
+
+    async fn route_subscriptions<'a>(
+        &self,
+        subscribe: &'a SubscribePacket,
+        client_id: &str,
+        reason_codes: &mut [Option<crate::packet::suback::SubAckReasonCode>],
+    ) -> Result<Option<Vec<AcceptedFilter<'a>>>> {
+        let subscription_id = subscribe.properties.get_subscription_identifier();
+        let mut routed = Vec::new();
+        for (filter, reason_code) in subscribe.filters.iter().zip(reason_codes.iter_mut()) {
+            if reason_code.is_some() {
                 continue;
             }
-
-            if let Some(rc) = self.check_subscription_quota(filter, &client_id).await {
-                reason_codes.push(rc);
+            if let Some(rc) = self.check_subscription_quota(filter, client_id).await {
+                *reason_code = Some(rc);
                 continue;
             }
 
@@ -49,64 +126,38 @@ impl ClientHandler {
                     .iter()
                     .any(|pattern| topic_matches_filter(&filter.filter, pattern));
 
-            let flow_id = self.pending_external_flow_id;
+            let stored = StoredSubscription {
+                qos: QoS::from(granted_qos),
+                no_local: filter.options.no_local,
+                retain_as_published: filter.options.retain_as_published,
+                retain_handling: filter.options.retain_handling as u8,
+                subscription_id,
+                protocol_version: self.protocol_version,
+                change_only,
+                flow_id: self.pending_external_flow_id,
+            };
             let outcome = self
                 .router
                 .subscribe_as(
                     Some(self.generation),
-                    SubscriptionRequest::new(
-                        client_id.clone(),
-                        filter.filter.clone(),
-                        QoS::from(granted_qos),
-                    )
-                    .with_subscription_id(subscribe.properties.get_subscription_identifier())
-                    .with_no_local(filter.options.no_local)
-                    .with_retain_as_published(filter.options.retain_as_published)
-                    .with_retain_handling(filter.options.retain_handling as u8)
-                    .with_protocol_version(
-                        ProtocolVersion::try_from(self.protocol_version).unwrap_or_default(),
-                    )
-                    .with_change_only(change_only)
-                    .with_flow_id(flow_id),
+                    MessageRouter::stored_subscription_request(client_id, &filter.filter, &stored),
                 )
                 .await?;
             let is_new = match outcome {
                 Subscribed::New => true,
                 Subscribed::Updated => false,
-                Subscribed::Fenced => {
-                    debug!("Ignoring SUBSCRIBE from a connection whose session was taken over");
-                    return Ok(());
-                }
+                Subscribed::Fenced => return Ok(None),
             };
-
-            self.persist_subscription(
-                &filter.filter,
-                &filter.options,
-                granted_qos,
-                subscribe.properties.get_subscription_identifier(),
-                change_only,
-            )
-            .await;
-
-            #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
-            if let Some(fid) = flow_id {
-                self.track_flow_subscription(fid, &filter.filter).await;
-            }
-
-            self.deliver_retained_for_filter(
-                &filter.filter,
-                &filter.options,
-                subscribe.properties.get_subscription_identifier(),
-                is_new,
-            )
-            .await?;
-
-            reason_codes.push(crate::packet::suback::SubAckReasonCode::from_qos(
-                QoS::from(granted_qos),
+            *reason_code = Some(crate::packet::suback::SubAckReasonCode::from_qos(
+                stored.qos,
             ));
+            routed.push(AcceptedFilter {
+                filter,
+                stored,
+                is_new,
+            });
         }
-
-        self.build_and_send_suback(&subscribe, &reason_codes).await
+        Ok(Some(routed))
     }
 
     async fn validate_subscribe_filter(
@@ -199,32 +250,61 @@ impl ClientHandler {
         None
     }
 
-    async fn persist_subscription(
+    async fn persist_or_restore_routes<F>(
         &mut self,
-        topic_filter: &str,
-        options: &crate::packet::subscribe::SubscriptionOptions,
-        granted_qos: u8,
-        subscription_id: Option<u32>,
-        change_only: bool,
-    ) {
-        if let Some(ref mut session) = self.session {
-            let stored = StoredSubscription {
-                qos: QoS::from(granted_qos),
-                no_local: options.no_local,
-                retain_as_published: options.retain_as_published,
-                retain_handling: options.retain_handling as u8,
-                subscription_id,
-                protocol_version: self.protocol_version,
-                change_only,
-                flow_id: self.pending_external_flow_id,
-            };
-            session.add_subscription(topic_filter.to_string(), stored);
-            if let Some(ref storage) = self.storage {
-                if let Err(e) = storage.store_session(session.clone()).await {
-                    warn!("Failed to store session: {e}");
-                }
+        slot: &SessionSlotGuard,
+        update: F,
+    ) -> Result<()>
+    where
+        F: FnOnce(&mut crate::broker::storage::ClientSession) + Send,
+    {
+        let Err(e) = self.update_stored_session(update).await else {
+            return Ok(());
+        };
+        warn!(
+            client_id = slot.client_id(),
+            "Failed to store a subscription change; restoring the stored subscriptions: {e}"
+        );
+        self.restore_stored_routes(slot).await?;
+        self.disconnect_reason = Some(ReasonCode::UnspecifiedError);
+        if self.protocol_version == 5 {
+            let disconnect = DisconnectPacket::new(ReasonCode::UnspecifiedError);
+            if let Err(write_error) = self.write_to_client(Packet::Disconnect(disconnect)).await {
+                debug!("Failed to send DISCONNECT after a failed session write: {write_error}");
             }
         }
+        Err(e)
+    }
+
+    async fn restore_stored_routes(&mut self, slot: &SessionSlotGuard) -> Result<()> {
+        let stored = match self.storage.as_ref() {
+            Some(storage) => storage.get_session(slot.client_id()).await?,
+            None => None,
+        };
+        self.router
+            .set_client_subscriptions(slot, stored.as_ref())
+            .await?;
+        if let (Some(session), Some(stored)) = (self.session.as_mut(), stored) {
+            session.subscriptions = stored.subscriptions;
+        }
+        Ok(())
+    }
+
+    pub(super) async fn update_stored_session<F>(&self, update: F) -> Result<()>
+    where
+        F: FnOnce(&mut crate::broker::storage::ClientSession) + Send,
+    {
+        let (Some(storage), Some(client_id)) = (self.storage.as_ref(), self.client_id.as_ref())
+        else {
+            return Ok(());
+        };
+        if !storage
+            .update_session(client_id, self.generation, update)
+            .await?
+        {
+            debug!(client_id = %client_id, "Stored session is not this connection's");
+        }
+        Ok(())
     }
 
     async fn deliver_retained_for_filter(
@@ -305,7 +385,7 @@ impl ClientHandler {
         subscribe: &SubscribePacket,
         reason_codes: &[crate::packet::suback::SubAckReasonCode],
     ) -> Result<()> {
-        let client_id = self.client_id.clone().unwrap();
+        let client_id = self.connected_client_id()?;
         let mut suback = if self.protocol_version == 4 {
             SubAckPacket::new_v311(subscribe.packet_id)
         } else {
@@ -351,9 +431,11 @@ impl ClientHandler {
             return;
         };
 
+        let client_id = client_id.clone();
+        let slot = self.router.lock_session(&client_id).await;
         let removed_filters = self
             .router
-            .unsubscribe_by_flow(Some(self.generation), client_id, flow_id)
+            .unsubscribe_by_flow(Some(self.generation), &client_id, flow_id)
             .await;
         if removed_filters.is_empty() {
             return;
@@ -366,15 +448,21 @@ impl ClientHandler {
             "Removed flow-bound subscriptions on flow close"
         );
 
-        if let Some(ref mut session) = self.session {
+        if let Some(session) = self.session.as_mut() {
             for filter in &removed_filters {
                 session.remove_subscription(filter);
             }
-            if let Some(ref storage) = self.storage {
-                if let Err(e) = storage.store_session(session.clone()).await {
-                    warn!("Failed to store session after flow close: {e}");
+        }
+        let persisted = self
+            .update_stored_session(move |session| {
+                for filter in &removed_filters {
+                    session.remove_subscription(filter);
                 }
-            }
+            })
+            .await;
+        drop(slot);
+        if let Err(e) = persisted {
+            warn!("Failed to store session after flow close: {e}");
         }
 
         #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
@@ -409,11 +497,13 @@ impl ClientHandler {
         &mut self,
         unsubscribe: UnsubscribePacket,
     ) -> Result<()> {
-        let client_id = self.client_id.clone().unwrap();
-        let mut reason_codes = Vec::new();
+        let client_id = self.connected_client_id()?;
+        let mut reason_codes = Vec::with_capacity(unsubscribe.filters.len());
+        let mut removed_filters = Vec::new();
 
+        let slot = self.router.lock_session(&client_id).await;
         for topic_filter in &unsubscribe.filters {
-            let removed = match self
+            match self
                 .router
                 .unsubscribe_as(
                     Some(self.generation),
@@ -423,35 +513,39 @@ impl ClientHandler {
                 )
                 .await
             {
-                Unsubscribed::Removed => true,
-                Unsubscribed::Absent => false,
+                Unsubscribed::Removed => {
+                    removed_filters.push(topic_filter.clone());
+                    reason_codes.push(crate::packet::unsuback::UnsubAckReasonCode::Success);
+                }
+                Unsubscribed::Absent => reason_codes
+                    .push(crate::packet::unsuback::UnsubAckReasonCode::NoSubscriptionExisted),
                 Unsubscribed::Fenced => {
                     debug!("Ignoring UNSUBSCRIBE from a connection whose session was taken over");
                     return Ok(());
                 }
-            };
-
-            if removed {
-                if let Some(ref mut session) = self.session {
-                    session.remove_subscription(topic_filter);
-                    if let Some(ref storage) = self.storage {
-                        if let Err(e) = storage.store_session(session.clone()).await {
-                            warn!("Failed to store session: {e}");
-                        }
-                    }
+            }
+        }
+        if !removed_filters.is_empty() {
+            let removed = removed_filters.clone();
+            self.persist_or_restore_routes(&slot, move |session| {
+                for filter in &removed {
+                    session.remove_subscription(filter);
                 }
-
-                #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
-                if let Some(fid) = self.pending_external_flow_id {
-                    self.untrack_flow_subscription(fid, topic_filter).await;
+            })
+            .await?;
+            if let Some(session) = self.session.as_mut() {
+                for filter in &removed_filters {
+                    session.remove_subscription(filter);
                 }
             }
+        }
+        drop(slot);
 
-            reason_codes.push(if removed {
-                crate::packet::unsuback::UnsubAckReasonCode::Success
-            } else {
-                crate::packet::unsuback::UnsubAckReasonCode::NoSubscriptionExisted
-            });
+        #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
+        if let Some(fid) = self.pending_external_flow_id {
+            for topic_filter in &removed_filters {
+                self.untrack_flow_subscription(fid, topic_filter).await;
+            }
         }
 
         let mut unsuback = if self.protocol_version == 4 {

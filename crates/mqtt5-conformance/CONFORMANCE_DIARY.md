@@ -38,6 +38,34 @@
 
 ## Diary Entries
 
+### Absent Session Expiry now means 0, and DISCONNECT can change the Session Expiry (2026-09-24)
+
+**Trigger**: the quorum review of PR #170 and issue #171, which was folded into it. The broker stored an absent CONNECT Session Expiry Interval as "never expires", although §3.1.2.11.2 says an absent value is 0. A client that left the property out kept its session, subscriptions and queued messages forever. It also broke the Will timing from #154: with the Will bounded by session end, "never" meant the delay was always honoured instead of the Will going out at disconnect. The broker also ignored a Session Expiry Interval sent on DISCONNECT (§3.14.2.2.2), and a resumed session kept the Session Expiry of the connection that created it instead of taking the resuming CONNECT's value.
+
+**Fix**: the Session Expiry is worked out once, from the CONNECT, when a session is created or resumed. MQTT v5: the property's value, or 0 when absent. MQTT v3.1.1 has no property, so CleanSession=1 gives 0 and CleanSession=0 keeps the session with no expiry, as before. A Session Expiry on DISCONNECT replaces the stored value before the session-end and Will logic runs. If CONNECT had 0 and DISCONNECT sends a non-zero value, the server sends DISCONNECT 0x82 and closes. The spec says such a DISCONNECT is not valid, so it is not a normal disconnection: the Will is published, and the session still ends because its expiry stays 0.
+
+**New tests**, all failing on the tree before the fix:
+- `absent_session_expiry_discards_session_at_disconnect` (`[MQTT-4.1.0-2]`): connect without the property, subscribe at QoS 1, disconnect, publish while offline, then reconnect with Clean Start 0. It expects Session Present 0 and no delivery of the offline message.
+- `disconnect_session_expiry_zero_discards_session` (`[MQTT-4.1.0-2]`): CONNECT 300, DISCONNECT 0, then Session Present 0.
+- `disconnect_session_expiry_extends_session` (`[MQTT-3.1.2-23]`): CONNECT 1, DISCONNECT 300, wait 2.5 s, then Session Present 1.
+- `disconnect_session_expiry_after_zero_is_protocol_error` (`[MQTT-4.13.1-1]`): CONNECT 0, DISCONNECT 300, then DISCONNECT 0x82 and the connection closes.
+
+**IDs**: neither "absent means 0" nor the DISCONNECT 0 to non-zero rule has its own normative statement in `mqtt-v5.0-statement-texts.txt`; both are prose in §3.1.2.11.2 and §3.14.2.2.2. The tests are filed under the statements they exercise: session discard after the interval (MQTT-4.1.0-2), session storage when the interval is above 0 (MQTT-3.1.2-23), and closing the connection on a Protocol Error (MQTT-4.13.1-1). The manifest text for all three matches the statement file.
+
+**Knock-on**: tests elsewhere in the workspace had resumed sessions without setting a Session Expiry. Several of them only asserted inside `if session_present`, so after the fix they would have passed without checking anything. They now set an explicit expiry and assert Session Present.
+
+### Delayed Will was never cancelled, and the MQTT-3.1.3-9 test could not see it (2026-09-24)
+
+**Trigger**: issue #154. With a Will Delay Interval above zero, the broker spawned a detached task that slept for the delay and then published the Will unconditionally. A client that reconnected inside the delay still had its Will published, which violates `[MQTT-3.1.3-9]` and the "new Network Connection ... before the Will Delay Interval has elapsed" clause of `[MQTT-3.1.2-8]`.
+
+**Why the suite passed anyway**: `will_delay_reconnect_suppresses_will` used a 5 s delay but stopped watching about 2.3 s after the drop, so the stale Will always arrived after the assertion. The test was vacuous. It now uses a 2 s delay and waits 4 s after the reconnect. On the unfixed broker it fails with the Will received. A positive control, `will_delay_elapsed_publishes_will`, runs the same setup without a reconnect and asserts that nothing arrives at 1.2 s and that the Will arrives once the delay has elapsed. It passes on both the old and the fixed broker, which shows the negative test fails for the right reason and not because Wills are never delivered.
+
+**Fix**: the router keeps one pending delayed Will per client id, tagged with the generation of the connection that armed it. A connection arms its Will before it releases its router entry, and only if it still owns that entry. `register_session` removes any pending Will for the client id while it holds the clients write lock, so any new connection (Clean Start 0 or 1, takeover included) cancels it. When the timer fires, the task has to claim the entry by generation before it publishes. Claim and cancel both remove the entry under one mutex, so exactly one of them wins. The Will fires at min(Will Delay Interval, Session Expiry Interval), so a Session Expiry of 0 publishes at once and a shorter expiry publishes when the session ends (`[MQTT-3.1.2-8]`, §3.1.3.2.2). A published Will, and a Will deleted by DISCONNECT 0x00, is also removed from the stored session (`[MQTT-3.1.2-10]`).
+
+**Manifest**: both tests are listed under MQTT-3.1.3-9, whose manifest text matches `mqtt-v5.0-statement-texts.txt`. The manifest entry labelled MQTT-3.1.2-8 carries the Will Retain text ("If the Will Flag is set to 0, then Will Retain MUST be set to 0"), not the Will publication statement, so neither test is cited there. That drift is left as it was.
+
+**Broker-side coverage**: `crates/mqtt5/tests/will_delay.rs` covers resume and clean-start reconnects, no reconnect, Session Expiry 0 and 2 against longer delays, reconnect-then-drop, DISCONNECT 0x00 and 0x04, and takeover with and without a delay. Six of these fail on the unfixed broker. The other four are regression guards for behaviour that was already correct.
+
 ### Quorum review of the client fixes, and a TLA+-verified outcome model for the offline queue (2026-09-23)
 
 **Trigger**: a five-reviewer quorum review of PR #164 before merge. Most findings came with a failing test. The worst was a regression in the wasm client: a v3.1.1 persistent session could never reconnect, because the session-lifetime check used Session Expiry (always 0 in 3.1.1) and the new strict `[MQTT-3.2.2-4]` check then rejected the broker's Session Present=1 forever. Other findings: QUIC teardown left the connection open after the client's own DISCONNECT; a publish waiting across a reconnect was sent under the old server's limits; and the offline queue dropped messages silently after `publish()` had returned success. All were fixed in the same PR.

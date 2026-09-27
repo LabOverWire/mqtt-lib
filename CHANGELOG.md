@@ -5,6 +5,119 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [mqtt5 0.42.0] - 2026-09-25
+
+### Breaking
+
+- **An absent Session Expiry Interval in an MQTT v5 CONNECT now means 0**, as §3.1.2.11.2 requires: the session ends when the network connection closes. Before, the broker kept such sessions, with their subscriptions and queued messages, forever. Clients that resume with Clean Start 0 must set a non-zero Session Expiry Interval (`ConnectOptions::with_session_expiry_interval`). For MQTT v3.1.1, CleanSession=0 keeps the session and CleanSession=1 now ends it at disconnect. Reported in #171.
+- **`BrokerConfig::session_expiry_interval` is now the maximum Session Expiry the broker grants.** A client that asks for more, or an MQTT v3.1.1 CleanSession=0 session, gets the maximum. MQTT v5 clients are told the granted value in the CONNACK Session Expiry Interval (§3.2.2.3.2); an MQTT v3.1.1 CONNACK carries no properties. A Session Expiry sent on DISCONNECT is capped the same way. The setting was previously unused. Its default is `u32::MAX` seconds (no limit), so nothing is capped unless you set it.
+- **With persistence disabled, every connection now has an in-memory session that ends at disconnect.** Will Messages are now published; before, no Will was ever sent without persistence. Because the session ends at disconnect:
+  - a delayed Will is published at disconnect;
+  - CONNACK returns Session Expiry Interval 0 when the client asked for more;
+  - Session Present is always 0;
+  - a connection that takes over a ClientID never inherits the previous connection's subscriptions.
+- **Session ownership is now one protocol**, verified with TLA+ in `specs/tla/session-ownership/`.
+  - **The session slot.** Each ClientID has one. Claiming a session (before CONNACK), applying a SUBSCRIBE, UNSUBSCRIBE or QUIC flow close, releasing a session, and sweeping it each run as one critical section over the router and storage.
+  - **What the claim does.** It decides Session Present, writes the session, and sets the router's subscriptions for the ClientID to exactly the session's. A displaced connection changes nothing.
+  - **What this fixes:**
+    - a SUBSCRIBE racing a takeover left a session that never expired;
+    - a failed or aborted handshake overwrote or orphaned a live connection's session;
+    - a resumed session kept routing a subscription that is no longer authorized (#173);
+    - a takeover or clean start inherited subscriptions;
+    - a new connection could claim a session while it was still being released;
+    - the sweep could delete a session a new connection had just claimed.
+- **The file storage backend group-commits session writes.** Sessions live in one append-only log, `sessions/sessions.log`.
+  - A write is visible to later readers at once.
+  - One flush appends and fsyncs every pending write.
+  - CONNACK, SUBACK/UNSUBACK and the end of DISCONNECT processing wait for the flush that covers their write and every earlier one, so a crash can no longer lose an acknowledged session or bring back a discarded one.
+  - A failed flush rejects all pending writes and restores the last durable state.
+  - The log is compacted when it is larger than both 1 MB and twice its live size.
+  - A SUBSCRIBE or UNSUBSCRIBE is stored in one write however many filters it carries, so it waits for one flush.
+  - 1000 concurrent CONNECTs are acknowledged in about 70 ms, where a per-write fsync under a global lock needed about 9 s.
+  - The ordering rule (no acknowledgement before the flush covering the write and every earlier one) is model-checked in `specs/tla/session-ownership/`. The failure path (rejecting pending writes, restoring the durable state, repairing the log) is not in the model; it is covered by tests.
+- **The session log is robust against damage and failed writes.**
+  - Every record carries a CRC-32 and an explicit type (put or remove), so a damaged record is detected instead of being misread, and a damaged update can no longer be replayed as a removal.
+  - A damaged record is skipped and replay continues with the records after it. Before, replay stopped at the first damaged record and startup compaction deleted every later session. When anything other than an incomplete last line is discarded, the original log is kept as `sessions/sessions.log.corrupt-<unix millis>` and the broker logs an error.
+  - A write whose flush failed is truncated out of the log before the failure is reported, so a restart cannot bring back a write the client was told had failed. If the truncation fails, the log is rewritten; until that succeeds, every session write fails.
+  - If the log cannot be rewritten at startup (full disk, read-only directory), the broker starts with the replayed sessions and refuses session writes until a rewrite succeeds, instead of refusing to start.
+  - Leftover temporary files from an interrupted write are removed at startup. A legacy session file that cannot be read or parsed during migration is kept as `<name>.corrupt-<unix millis>`, and an unreadable log is moved to `sessions.log.unreadable-<unix millis>`; neither overwrites an earlier copy.
+  - The `.storage_version` file is replaced atomically (temp file, fsync, rename, directory fsync).
+- **Storage format version 2.** Version 1 directories are migrated on open; older brokers refuse a version 2 directory. **Back up the storage directory before upgrading.** Rolling back means restoring that backup, because older builds refuse version 2. A broker that finds a storage version newer than it supports refuses to start and says to run the version that wrote the directory or restore the backup; it no longer suggests a `mqttv5 storage backup` command, which does not exist. On Windows, the compaction rename relies on NTFS metadata journaling. `FileBackend::flush_sessions`, `FileBackend::start_flush_task`, `DynamicStorage::flush_sessions` and the 5 s flush task are removed. `MessageRouter::recover_sessions` takes the maximum Session Expiry.
+- **Sessions survive a broker restart as the protocol requires.** Reported in #172.
+  - The disconnect time is persisted (`ClientSession::disconnected_at`), so an ended session expires at its disconnect time plus its expiry.
+  - A session that was connected when the broker stopped is treated as disconnected at boot.
+  - Expiry-0 sessions are dropped at startup.
+  - The router's subscriptions are rebuilt from the persisted sessions, so an offline persistent session receives and queues messages before its client reconnects.
+  - Session files from earlier versions still load.
+- **`ClientSession` has new public fields.** Code that builds it with a struct literal must add them:
+  - `connection_token`, which now holds the router generation of the owning connection;
+  - `connected`;
+  - `disconnected_at`.
+  Router generations are now epoch-qualified, so they don't repeat across restarts.
+- **Expired sessions are removed only by the sweep.** `StorageBackend::get_session` and `StorageBackend::cleanup_expired` no longer remove them; `MessageRouter::sweep_sessions` does, and it replaces `MessageRouter::cleanup_stale_subscriptions`.
+- `MessageRouter::release_client` reports a missing registration as `Release::Displaced`. `MessageRouter::arm_will` and `MessageRouter::clear_stored_will` identify the connection by its generation.
+
+### Fixed
+
+- **A delayed Will Message is cancelled when a new connection for the same ClientID opens before the Will Delay Interval elapses** (`[MQTT-3.1.3-9]`, `[MQTT-3.1.2-8]`). This holds whether the new connection resumes the session, starts clean, or takes over a live connection. Before, the broker always published the Will after the delay. The pending Will is cancelled when the new session is claimed, before CONNACK. Reported in #154.
+- **The Will is published when the Will Delay Interval elapses or the session ends, whichever comes first.** A Session Expiry Interval of 0 publishes it at disconnect.
+- **Session Expiry is counted from disconnect**, as §3.1.2.11.2 requires. A connected client's session never expires.
+- **A resumed session takes its Session Expiry Interval from the resuming CONNECT** instead of keeping the value from the connection that created it. A live expiry-0 session that is taken over is never resumed.
+- **A Session Expiry Interval sent on DISCONNECT is applied** (§3.14.2.2.2). A non-zero value after a CONNECT value of 0 is a Protocol Error: the broker sends DISCONNECT 0x82, closes the connection, publishes the Will, and ends the session. Reported in #171.
+- **The CONNACK sent after enhanced authentication carries the same properties as a plain CONNACK**, including a capped Session Expiry Interval. Enhanced authentication now completes before the connection starts its normal packet loop.
+- **A published Will, or one deleted by DISCONNECT 0x00, is removed from the stored session state** (`[MQTT-3.1.2-10]`).
+- **The connect timeout no longer cancels a claim in progress.** Before, it could leave a router owner with no connection and a session stuck connected.
+- **A claim whose write fails gets CONNACK 0x88** and no longer disconnects the live owner. A SUBSCRIBE or UNSUBSCRIBE whose write fails is not acknowledged, and its route change is undone; the broker sends DISCONNECT 0x80 and closes the connection, and the Will is published. A session left connected by a failed release write is ended by the sweep.
+- **The DISCONNECT Session Expiry is stored when the DISCONNECT is processed.**
+- **Multi-step enhanced authentication applies the Will QoS/Retain checks and the client Receive Maximum**, like a plain CONNECT.
+- **A failed multi-step enhanced authentication is refused with CONNACK** carrying the provider's reason code (0x87 Not authorized), or with DISCONNECT during re-authentication. Before, the broker sent an AUTH packet with that reason code, which AUTH may not carry (`[MQTT-3.15.2-1]`).
+- **The server's final Authentication Data reaches the client.** It is sent in the CONNACK after enhanced authentication, and in the AUTH 0x00 that ends a re-authentication. Before, it was dropped, so a SCRAM client never received the server signature.
+- **Startup recovery is concurrent and caps stored expiry to the configured maximum.** Before, 500 sessions left connected by a crash delayed the first CONNACK by over 5 s. Measured on a Mac release build, the first CONNACK now comes about 44 ms after start with 500 such sessions, and about 0.5 s with 5000. An unreadable session log or legacy session file no longer blocks startup or a ClientID.
+- **The connected-clients statistic no longer underflows when a handshake fails.** In debug builds, the underflow made a later handler panic. Reported in #175.
+- The conformance test for `[MQTT-3.1.3-9]` passed vacuously. It now waits past the delay, with a positive control. New conformance tests cover an absent Session Expiry and a Session Expiry sent on DISCONNECT.
+
+### Added
+
+- `broker::session_slot` (`SessionSlots`, `SessionSlotGuard`), `MessageRouter::lock_session`, `MessageRouter::set_client_subscriptions`, `MessageRouter::sweep_sessions`, `MessageRouter::recover_sessions`, `MessageRouter::is_current_owner`, `MessageRouter::stored_subscription_request`, `MessageRouter::claim_will`, `MessageRouter::cancel_pending_will`, `MessageRouter::allocate_generation`, `MessageRouter::register_session_as` and `MqttBroker::storage`.
+- `StorageBackend::update_session`, `StorageBackend::remove_owned_session`, `StorageBackend::remove_expired_session` and `StorageBackend::session_client_ids`, with default implementations. The first three are atomic in the memory and file backends.
+- `ClientSession::expiry_from_connect`, `ClientSession::granted_expiry`, `ClientSession::will_publish_delay`, `ClientSession::mark_connected`, `ClientSession::mark_disconnected` and `broker::storage::unix_millis_now`.
+
+## [mqttv5-cli 0.29.0] - 2026-09-25
+
+### Breaking
+
+- **The broker's file storage is migrated to version 2 on first start**, and the migration is one-way: sessions move into `sessions/sessions.log`, and earlier mqttv5 versions refuse a migrated directory. **Back up the storage directory (`--storage-dir`, default `./mqtt_storage`) before upgrading.** Rolling back means stopping the broker and restoring that backup. Version 1 directories are migrated automatically.
+- **`broker --session-expiry` is now an optional maximum Session Expiry the broker grants** (default: no limit). Before, it defaulted to 3600 and had no effect. `broker generate-config` no longer writes a `session_expiry_interval`; add one to set a maximum.
+- **The broker ends a session at disconnect when an MQTT v5 client sends no Session Expiry Interval**, as mqtt5 0.42.0 does. Clients that resume with Clean Start 0 must send a non-zero Session Expiry Interval.
+
+### Changed
+
+- `--no-clean-start` without `--session-expiry` now sends a Session Expiry Interval of 1 hour, so the resumed session also survives this run. An explicit `--session-expiry`, including 0, still takes precedence.
+- Requires mqtt5 0.42.
+
+## [mqtt5-wasm 2.1.0] - 2026-09-25
+
+### Changed
+
+- **An absent Session Expiry Interval in an MQTT v5 CONNECT now means 0 in the in-browser broker**: the session ends when the connection closes. Clients that resume with Clean Start 0 must set `sessionExpiryInterval`.
+- **`BrokerConfig.sessionExpiryIntervalSecs` is now the maximum Session Expiry the broker grants.** It applies to CONNECT and DISCONNECT values and to MQTT v3.1.1 persistent sessions. It is returned in CONNACK only when it caps an MQTT v5 client's value. Its default is 4294967295 (no limit). Before, the broker put 3600 in every CONNACK without applying it.
+- **The in-browser broker uses the same session ownership protocol as mqtt5 0.42.0.** A clean start, or a takeover of a live expiry-0 session, never resumes or inherits the previous session's subscriptions (#174). SUBSCRIBE and UNSUBSCRIBE from a displaced connection change nothing. Expired sessions are swept periodically.
+- Requires mqtt5 0.42.
+
+### Added
+
+- `BrokerConfig.sessionSweepIntervalSecs` (default 3600 s).
+
+### Fixed
+
+- **The in-browser broker cancels a delayed Will when the client reconnects within the Will Delay Interval**, and publishes it no later than session end. This is the same fix as mqtt5 0.42.0.
+- **Session Expiry is counted from disconnect.** A resumed session takes the resuming CONNECT's Session Expiry, and a Session Expiry sent on DISCONNECT is applied, as in mqtt5 0.42.0. A non-zero value after 0 is answered with DISCONNECT 0x82.
+- **Will Delay Intervals longer than about 24.8 days no longer fire immediately or throw.** The timer now sleeps in chunks.
+- **The in-browser broker detects a client closing its MessagePort** (the port's `close` event) and treats it as an abnormal disconnect, so the Will is published. Before, a closed port went unnoticed until keep-alive expiry, and never with a keep-alive of 0, which also leaked the connection handler. Environments that don't raise `close` on MessagePort still rely on keep-alive expiry.
+- **Enhanced authentication completes before the connection starts serving**, and its CONNACK carries the capped Session Expiry.
+- **The claimed session is stored before the connection is registered**, so a failed write can't disconnect the live owner; the client gets CONNACK Server Unavailable. Failing to discard queued or inflight messages on Clean Start is only logged.
+- **A published Will, or one deleted by DISCONNECT 0x00, is removed from the stored session** (`[MQTT-3.1.2-10]`).
+
 ## [mqtt5 0.41.0] - 2026-09-23
 
 A client-side conformance audit drove the real `MqttClient` against a raw-byte fake broker for each of the 149 normative statements in MQTT v5.0 that apply to a client. About 40 MUST statements failed. All are fixed here, and each is pinned by a test named after its OASIS statement ID in `crates/mqtt5/tests/conf_client_{a,b,c,d}.rs`.

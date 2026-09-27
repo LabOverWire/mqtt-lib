@@ -1,5 +1,5 @@
 use crate::broker::auth::EnhancedAuthStatus;
-use crate::broker::router::SubscriptionRequest;
+use crate::broker::router::DeliveryLanes;
 use crate::broker::storage::{ClientSession, DynamicStorage, StorageBackend};
 use crate::error::{MqttError, Result};
 use crate::packet::auth::AuthPacket;
@@ -8,8 +8,9 @@ use crate::packet::connect::ConnectPacket;
 use crate::packet::Packet;
 use crate::protocol::v5::reason_codes::ReasonCode;
 use crate::time::Duration;
-use crate::types::ProtocolVersion;
 use std::sync::Arc;
+use tokio::sync::oneshot;
+use tokio::time::Instant;
 use tracing::{debug, info, trace, warn};
 
 use super::{AuthState, ClientHandler, PendingConnect};
@@ -58,7 +59,10 @@ impl ClientHandler {
         }
     }
 
-    pub(super) async fn handle_connect(&mut self, mut connect: ConnectPacket) -> Result<()> {
+    pub(super) async fn handle_connect(
+        &mut self,
+        mut connect: ConnectPacket,
+    ) -> Result<Option<PendingConnect>> {
         debug!(
             client_id = %connect.client_id,
             addr = %self.client_addr,
@@ -72,7 +76,7 @@ impl ClientHandler {
             .await?;
 
         if let Some(redirect) = self.check_load_balancer_redirect(&connect).await? {
-            return redirect;
+            return redirect.map(|()| None);
         }
 
         self.request_problem_information = connect
@@ -100,15 +104,24 @@ impl ClientHandler {
         let assigned_client_id = Self::assign_client_id_if_empty(&mut connect);
         self.validate_client_id(&connect).await?;
 
-        let connect = match self
+        match self
             .handle_authentication(connect, assigned_client_id.clone())
             .await?
         {
-            AuthOutcome::Authenticated(connect) => *connect,
-            AuthOutcome::ConnectDeferred => return Ok(()),
-            AuthOutcome::Failed(err) => return Err(err),
-        };
+            AuthOutcome::Authenticated(connect) => Ok(Some(PendingConnect {
+                connect: *connect,
+                assigned_client_id,
+            })),
+            AuthOutcome::ConnectDeferred => Ok(None),
+            AuthOutcome::Failed(err) => Err(err),
+        }
+    }
 
+    pub(super) async fn complete_connect(&mut self, accepted: PendingConnect) -> Result<()> {
+        let PendingConnect {
+            connect,
+            assigned_client_id,
+        } = accepted;
         self.validate_will_capabilities(&connect).await?;
 
         self.client_id = Some(connect.client_id.clone());
@@ -134,14 +147,15 @@ impl ClientHandler {
         #[cfg(not(feature = "opentelemetry"))]
         let session_present = self.handle_session(&connect).await?;
 
-        let mut connack = if self.protocol_version == 4 {
-            ConnAckPacket::new_v311(session_present, ReasonCode::Success)
-        } else {
-            ConnAckPacket::new(session_present, ReasonCode::Success)
-        };
-
+        let mut connack = self.new_connack(session_present, ReasonCode::Success);
         if self.protocol_version == 5 {
             self.build_connack_properties(&mut connack, assigned_client_id.as_ref());
+            if let Some(method) = self.auth_method.clone() {
+                connack.properties.set_authentication_method(method);
+                if let Some(data) = self.connack_auth_data.take() {
+                    connack.properties.set_authentication_data(data.into());
+                }
+            }
         }
 
         debug!(
@@ -252,6 +266,7 @@ impl ClientHandler {
                     EnhancedAuthStatus::Success => {
                         self.auth_state = AuthState::Completed;
                         self.user_id = result.user_id;
+                        self.connack_auth_data = result.auth_data;
                     }
                     EnhancedAuthStatus::Continue => {
                         self.auth_state = AuthState::InProgress;
@@ -319,7 +334,11 @@ impl ClientHandler {
         Ok(AuthOutcome::Authenticated(Box::new(connect)))
     }
 
-    fn new_connack(&self, session_present: bool, reason_code: ReasonCode) -> ConnAckPacket {
+    pub(super) fn new_connack(
+        &self,
+        session_present: bool,
+        reason_code: ReasonCode,
+    ) -> ConnAckPacket {
         if self.protocol_version == 4 {
             ConnAckPacket::new_v311(session_present, reason_code)
         } else {
@@ -355,7 +374,7 @@ impl ClientHandler {
         Ok(())
     }
 
-    fn build_connack_properties(
+    pub(super) fn build_connack_properties(
         &mut self,
         connack: &mut ConnAckPacket,
         assigned_client_id: Option<&String>,
@@ -365,6 +384,10 @@ impl ClientHandler {
             connack
                 .properties
                 .set_assigned_client_identifier(assigned_id.clone());
+        }
+
+        if let Some(granted) = self.advertised_session_expiry {
+            connack.properties.set_session_expiry_interval(granted);
         }
 
         connack
@@ -414,142 +437,323 @@ impl ClientHandler {
         }
     }
 
-    /// Decides whether the connection resumes a session; a session that only lives as long
-    /// as its connection (expiry 0) cannot be resumed from a live connection, so taking one
-    /// over is a clean start.
-    pub(super) async fn handle_session(&mut self, connect: &ConnectPacket) -> Result<bool> {
-        let mut session_present = false;
-        self.clean_start = connect.clean_start;
-        if let Some(storage) = self.storage.clone() {
-            let existing_session = storage.get_session(&connect.client_id).await?;
-            let connection_bound = existing_session
-                .as_ref()
-                .is_some_and(|session| session.expiry_interval == Some(0));
-            if connection_bound && self.router.is_connected(&connect.client_id).await {
-                self.clean_start = true;
-            }
-
-            match existing_session {
-                Some(session) if !self.clean_start => {
-                    session_present = true;
-                    self.restore_existing_session(connect, session, &storage)
-                        .await?;
-                }
-                _ => {
-                    self.clean_start = true;
-                    self.create_new_session(connect, &storage).await?;
-                }
-            }
+    pub(super) fn maximum_session_expiry(&self) -> u32 {
+        if self.storage.is_none() {
+            return 0;
         }
-        Ok(session_present)
+        u32::try_from(self.config.session_expiry_interval.as_secs()).unwrap_or(u32::MAX)
     }
 
-    async fn create_new_session(
-        &mut self,
-        connect: &ConnectPacket,
-        storage: &Arc<DynamicStorage>,
-    ) -> Result<()> {
-        let session_expiry = connect.properties.get_session_expiry_interval();
+    pub(super) async fn handle_session(&mut self, connect: &ConnectPacket) -> Result<bool> {
+        let client_id = connect.client_id.clone();
+        let requested = ClientSession::expiry_from_connect(connect);
+        let granted = ClientSession::granted_expiry(requested, self.maximum_session_expiry());
+        self.connect_session_expiry = requested;
+        self.advertised_session_expiry = (requested != Some(granted)).then_some(granted);
 
-        let will_message = connect.will.clone();
-        if let Some(ref will) = will_message {
-            debug!(
-                "Will message present with delay: {:?}",
-                will.properties.will_delay_interval
-            );
+        let slot = self.router.lock_session(&client_id).await;
+        let stored = match self.storage.as_ref() {
+            Some(storage) => storage.get_session(&client_id).await?,
+            None => None,
+        };
+        let resumable =
+            stored.filter(|session| !connect.clean_start && session.expiry_interval != Some(0));
+        if let Some(session) = resumable.as_ref() {
+            if session.user_id.as_deref() != self.user_id.as_deref() {
+                drop(slot);
+                warn!(
+                    client_id = %client_id,
+                    session_user = ?session.user_id,
+                    current_user = ?self.user_id,
+                    "Session user mismatch, rejecting connection"
+                );
+                let connack = ConnAckPacket::new(false, ReasonCode::NotAuthorized);
+                self.write_to_client(Packet::ConnAck(connack)).await?;
+                return Err(MqttError::AuthenticationFailed);
+            }
+        }
+        let resume = resumable.is_some();
+        let mut session = self.session_for_claim(connect, resumable, granted).await;
+
+        let generation = self.router.allocate_generation();
+        session.mark_connected(generation);
+        if let Some(storage) = self.storage.clone() {
+            if let Err(e) = Self::write_claim(&storage, &session, resume).await {
+                drop(slot);
+                warn!(client_id = %client_id, "Failed to store the claimed session: {e}");
+                let connack = self.new_connack(false, ReasonCode::ServerUnavailable);
+                self.write_to_client(Packet::ConnAck(connack)).await?;
+                return Err(e);
+            }
         }
 
-        let mut session = ClientSession::new_with_will(
-            connect.client_id.clone(),
-            true,
-            session_expiry,
-            will_message,
+        let (disconnect_tx, disconnect_rx) = oneshot::channel();
+        let queue = self.router.queue_handle(&client_id);
+        let registration = self
+            .router
+            .register_session_as(
+                generation,
+                client_id.clone(),
+                DeliveryLanes {
+                    qos1_tx: self.qos1_tx.clone(),
+                    qos0_tx: self.qos0_tx.clone(),
+                },
+                Arc::clone(&queue),
+                disconnect_tx,
+                !resume,
+            )
+            .await;
+        self.generation = generation;
+        self.handoff_deadline = registration
+            .released
+            .as_ref()
+            .map(|_| Instant::now() + super::HANDOFF_BOUND);
+        self.released_rx = registration.released;
+        self.disconnect_rx = Some(disconnect_rx);
+        self.queue = Some(queue);
+        self.clean_start = !resume;
+
+        if let Err(e) = self
+            .router
+            .set_client_subscriptions(&slot, Some(&session))
+            .await
+        {
+            warn!(client_id = %client_id, "Failed to install session subscriptions: {e}");
+        }
+        if resume {
+            self.router
+                .load_change_only_state(&client_id, session.change_only_state.clone())
+                .await;
+        }
+        drop(slot);
+
+        debug!(
+            client_id = %client_id,
+            generation,
+            session_present = resume,
+            session_expiry = granted,
+            "Session claimed"
         );
+        self.session = Some(session);
+        Ok(resume)
+    }
+
+    async fn session_for_claim(
+        &self,
+        connect: &ConnectPacket,
+        resumable: Option<ClientSession>,
+        granted: u32,
+    ) -> ClientSession {
+        let mut session = match resumable {
+            Some(mut session) => {
+                self.drop_unauthorized_subscriptions(&mut session).await;
+                session.will_message.clone_from(&connect.will);
+                session.will_delay_interval = connect
+                    .will
+                    .as_ref()
+                    .and_then(|will| will.properties.will_delay_interval);
+                session
+            }
+            None => ClientSession::new_with_will(
+                connect.client_id.clone(),
+                true,
+                Some(granted),
+                connect.will.clone(),
+            ),
+        };
+        session.expiry_interval = Some(granted);
         session.receive_maximum = self.client_receive_maximum;
         session.user_id.clone_from(&self.user_id);
-        debug!(
-            "Created new session with will_delay_interval: {:?}",
-            session.will_delay_interval
-        );
+        session
+    }
+
+    async fn write_claim(
+        storage: &DynamicStorage,
+        session: &ClientSession,
+        resume: bool,
+    ) -> Result<()> {
         storage.store_session(session.clone()).await?;
-        storage
-            .remove_all_inflight_messages(&connect.client_id)
-            .await?;
-        self.session = Some(session);
+        if !resume {
+            if let Err(e) = storage
+                .remove_all_inflight_messages(&session.client_id)
+                .await
+            {
+                warn!(
+                    client_id = %session.client_id,
+                    "Failed to discard the inflight messages of the replaced session: {e}"
+                );
+            }
+        }
         Ok(())
     }
 
-    async fn restore_existing_session(
-        &mut self,
-        connect: &ConnectPacket,
-        mut session: ClientSession,
-        storage: &Arc<DynamicStorage>,
-    ) -> Result<()> {
-        if session.user_id.as_deref() != self.user_id.as_deref() {
-            warn!(
-                client_id = %connect.client_id,
-                session_user = ?session.user_id,
-                current_user = ?self.user_id,
-                "Session user mismatch, rejecting connection"
-            );
-            let connack = ConnAckPacket::new(false, ReasonCode::NotAuthorized);
-            self.write_to_client(Packet::ConnAck(connack)).await?;
-            return Err(MqttError::AuthenticationFailed);
-        }
-
-        let mut unauthorized_filters = Vec::new();
-        for (topic_filter, stored) in &session.subscriptions {
+    async fn drop_unauthorized_subscriptions(&self, session: &mut ClientSession) {
+        let mut unauthorized = Vec::new();
+        for topic_filter in session.subscriptions.keys() {
             let authorized = self
                 .auth_provider
-                .authorize_subscribe(&connect.client_id, self.user_id.as_deref(), topic_filter)
+                .authorize_subscribe(&session.client_id, self.user_id.as_deref(), topic_filter)
                 .await;
             if !authorized {
                 warn!(
-                    client_id = %connect.client_id,
+                    client_id = %session.client_id,
                     topic_filter = %topic_filter,
                     "Dropping subscription on session restore: no longer authorized"
                 );
-                unauthorized_filters.push(topic_filter.clone());
-                continue;
+                unauthorized.push(topic_filter.clone());
             }
-            self.router
-                .subscribe(
-                    SubscriptionRequest::new(
-                        connect.client_id.clone(),
-                        topic_filter.clone(),
-                        stored.qos,
-                    )
-                    .with_subscription_id(stored.subscription_id)
-                    .with_no_local(stored.no_local)
-                    .with_retain_as_published(stored.retain_as_published)
-                    .with_retain_handling(stored.retain_handling)
-                    .with_protocol_version(
-                        ProtocolVersion::try_from(self.protocol_version).unwrap_or_default(),
-                    )
-                    .with_change_only(stored.change_only),
-                )
-                .await?;
         }
-        for filter in &unauthorized_filters {
+        for filter in &unauthorized {
             session.subscriptions.remove(filter);
         }
+    }
+}
 
-        self.router
-            .load_change_only_state(&connect.client_id, session.change_only_state.clone())
-            .await;
+#[cfg(test)]
+mod tests {
+    use super::super::ClientHandler;
+    use crate::broker::auth::AllowAllAuthProvider;
+    use crate::broker::config::BrokerConfig;
+    use crate::broker::resource_monitor::{ResourceLimits, ResourceMonitor};
+    use crate::broker::router::{DeliveryLanes, MessageRouter};
+    use crate::broker::storage::{DynamicStorage, MemoryBackend};
+    use crate::broker::sys_topics::BrokerStats;
+    use crate::broker::transport::BrokerTransport;
+    use crate::packet::connect::ConnectPacket;
+    use crate::time::Duration;
+    use std::sync::Arc;
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio::sync::{broadcast, mpsc, oneshot};
 
-        session.will_message.clone_from(&connect.will);
-        session.will_delay_interval = connect
-            .will
-            .as_ref()
-            .and_then(|w| w.properties.will_delay_interval);
+    #[tokio::test]
+    async fn accepted_session_cancels_pending_will_before_connack() {
+        let storage = Arc::new(DynamicStorage::Memory(MemoryBackend::new()));
+        let router = Arc::new(MessageRouter::with_storage(Arc::clone(&storage)));
 
-        session.receive_maximum = self.client_receive_maximum;
-        session.user_id.clone_from(&self.user_id);
+        let (qos1_tx, _qos1_rx) = mpsc::channel(4);
+        let (qos0_tx, _qos0_rx) = mpsc::channel(4);
+        let (disconnect_tx, _disconnect_rx) = oneshot::channel();
+        let departing = router
+            .register_client(
+                "early-cancel".to_string(),
+                DeliveryLanes { qos1_tx, qos0_tx },
+                router.queue_handle("early-cancel"),
+                disconnect_tx,
+            )
+            .await
+            .generation;
+        let cancelled = router
+            .arm_will("early-cancel", departing)
+            .await
+            .expect("the departing connection owns its entry");
+        router.release_client("early-cancel", departing, true).await;
 
-        session.touch();
-        storage.store_session(session.clone()).await?;
-        self.session = Some(session);
-        Ok(())
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let _client = TcpStream::connect(addr).await.expect("connect");
+        let (server, peer) = listener.accept().await.expect("accept");
+        let (_shutdown_tx, shutdown_rx) = broadcast::channel(1);
+        let mut handler = ClientHandler::new(
+            BrokerTransport::tcp(server),
+            peer,
+            Arc::new(BrokerConfig::default()),
+            Arc::clone(&router),
+            Arc::new(AllowAllAuthProvider),
+            Some(storage),
+            Arc::new(BrokerStats::new()),
+            Arc::new(ResourceMonitor::new(ResourceLimits::default())),
+            shutdown_rx,
+        );
+
+        let connect = ConnectPacket::new(
+            crate::types::ConnectOptions::new("early-cancel")
+                .with_clean_start(false)
+                .with_session_expiry_interval(60)
+                .protocol_options,
+        );
+        handler
+            .handle_session(&connect)
+            .await
+            .expect("session accepted");
+
+        let woken = tokio::time::timeout(Duration::from_secs(1), cancelled).await;
+        assert!(
+            matches!(woken, Ok(Ok(()))),
+            "an accepted session must cancel the pending Will before CONNACK, not only at registration"
+        );
+    }
+
+    async fn claim_with_inflight(clean_start: bool) -> usize {
+        use crate::broker::storage::{
+            ClientSession, InflightDirection, InflightMessage, InflightPhase, StorageBackend,
+        };
+        let storage = Arc::new(DynamicStorage::Memory(MemoryBackend::new()));
+        let mut stored = ClientSession::new("held-inflight", true, Some(60));
+        stored.mark_disconnected(crate::broker::storage::unix_millis_now());
+        storage.store_session(stored).await.expect("store session");
+        let mut publish = crate::packet::publish::PublishPacket::new(
+            "inflight/t".to_string(),
+            b"unacked".to_vec(),
+            crate::QoS::AtLeastOnce,
+        );
+        publish.packet_id = Some(7);
+        storage
+            .store_inflight_message(InflightMessage::from_publish(
+                &publish,
+                "held-inflight".to_string(),
+                InflightDirection::Outbound,
+                InflightPhase::AwaitingPubrec,
+            ))
+            .await
+            .expect("store inflight");
+        let router = Arc::new(MessageRouter::with_storage(Arc::clone(&storage)));
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let _client = TcpStream::connect(addr).await.expect("connect");
+        let (server, peer) = listener.accept().await.expect("accept");
+        let (_shutdown_tx, shutdown_rx) = broadcast::channel(1);
+        let mut handler = ClientHandler::new(
+            BrokerTransport::tcp(server),
+            peer,
+            Arc::new(BrokerConfig::default()),
+            router,
+            Arc::new(AllowAllAuthProvider),
+            Some(Arc::clone(&storage)),
+            Arc::new(BrokerStats::new()),
+            Arc::new(ResourceMonitor::new(ResourceLimits::default())),
+            shutdown_rx,
+        );
+        let connect = ConnectPacket::new(
+            crate::types::ConnectOptions::new("held-inflight")
+                .with_clean_start(clean_start)
+                .with_session_expiry_interval(60)
+                .protocol_options,
+        );
+        let present = handler.handle_session(&connect).await.expect("claim");
+        assert_eq!(present, !clean_start);
+        storage
+            .get_inflight_messages("held-inflight")
+            .await
+            .expect("read inflight")
+            .len()
+    }
+
+    #[tokio::test]
+    async fn resuming_claim_keeps_the_persisted_inflight_messages() {
+        assert_eq!(
+            claim_with_inflight(false).await,
+            1,
+            "a resumed session lost its unacknowledged messages at the claim"
+        );
+    }
+
+    #[tokio::test]
+    async fn clean_start_claim_discards_the_persisted_inflight_messages() {
+        assert_eq!(
+            claim_with_inflight(true).await,
+            0,
+            "a clean start kept the old session's unacknowledged messages past its claim"
+        );
     }
 }

@@ -125,7 +125,7 @@ mqttv5 broker generate-config [--output FILE] [--format json|toml]
 | `--storage-dir <DIR>` | Storage directory for persistence | `./mqtt_storage` |
 | `--storage-backend <TYPE>` | Storage backend: `memory` or `file` | `file` |
 | `--no-persistence` | Disable message persistence | `false` |
-| `--session-expiry <SECS>` | Default session expiry interval in seconds | `3600` |
+| `--session-expiry <SECS>` | Optional maximum session expiry interval granted to clients; a client asking for more, or an MQTT 3.1.1 persistent session, gets this value. MQTT 5 clients are told the granted value in CONNACK; an MQTT 3.1.1 CONNACK carries no properties | no limit |
 | `--max-qos <0\|1\|2>` | Maximum QoS level | `2` |
 | `--keep-alive <SECS>` | Server keep-alive time in seconds | None |
 | `--response-information <STR>` | Response information sent to clients that request it | None |
@@ -134,6 +134,10 @@ mqttv5 broker generate-config [--output FILE] [--format json|toml]
 | `--no-sys-topics` | Disable `$SYS` topic publishing (broker statistics) | `false` |
 | `--sys-interval <DUR>` | `$SYS` topic publish interval (e.g., `10`, `10s`, `1m`) | `10` |
 | `--non-interactive` | Skip interactive prompts | `false` |
+
+##### Upgrading the file storage
+
+mqttv5 0.29.0 stores sessions in a new format (storage version 2). On its first start it migrates a version 1 storage directory in place, and earlier mqttv5 versions refuse to open the migrated directory. Back up the storage directory (`--storage-dir`, default `./mqtt_storage`) with the broker stopped before upgrading. To roll back, stop the broker, restore that backup, and start the earlier version.
 
 ##### Broker JWT Auth Flags
 
@@ -377,8 +381,8 @@ Publish an MQTT message to a broker. Supports all transport types (TCP, TLS, Web
 | `--auth-method <METHOD>` | Authentication method: `password`, `scram`, `jwt` | `password` |
 | `--jwt-token <TOKEN>` | JWT token for JWT authentication | None |
 | `--client-id, -c <ID>` | Client ID | Auto-generated |
-| `--no-clean-start` | Resume existing session | `false` |
-| `--session-expiry <SECS>` | Session expiry interval in seconds | `0` |
+| `--no-clean-start` | Resume existing session; unless `--session-expiry` is given, a session expiry of 1 hour is requested so the session also survives this run | `false` |
+| `--session-expiry <SECS>` | Session expiry interval in seconds (0 = the session ends at disconnect) | `0`, or `3600` with `--no-clean-start` |
 | `--keep-alive, -k <SECS>` | Keep-alive interval | `60` |
 | `--protocol-version <VER>` | MQTT protocol version: `3.1.1`, `311`, `4`, `5`, `5.0` | `5` |
 | `--will-topic <TOPIC>` | Will message topic | None |
@@ -579,8 +583,8 @@ Subscribe to one or more MQTT topics and print received messages. The subscriber
 | `--auth-method <METHOD>` | Authentication method: `password`, `scram`, `jwt` | `password` |
 | `--jwt-token <TOKEN>` | JWT token for JWT authentication | None |
 | `--client-id, -c <ID>` | Client ID | Auto-generated |
-| `--no-clean-start` | Resume existing session | `false` |
-| `--session-expiry <SECS>` | Session expiry interval in seconds | `0` |
+| `--no-clean-start` | Resume existing session; unless `--session-expiry` is given, a session expiry of 1 hour is requested so the session also survives this run | `false` |
+| `--session-expiry <SECS>` | Session expiry interval in seconds (0 = the session ends at disconnect) | `0`, or `3600` with `--no-clean-start` |
 | `--keep-alive, -k <SECS>` | Keep-alive interval | `60` |
 | `--protocol-version <VER>` | MQTT protocol version: `3.1.1`, `311`, `4`, `5`, `5.0` | `5` |
 | `--will-topic <TOPIC>` | Will message topic | None |
@@ -1111,7 +1115,7 @@ Every field is optional. Any field omitted from the file falls back to the defau
 | --- | --- | --- | --- |
 | `bind_addresses` | `string[]` | TCP listener addresses | `["0.0.0.0:1883", "[::]:1883"]` |
 | `max_clients` | `number` | Maximum concurrent client connections | `10000` |
-| `session_expiry_interval` | `duration` | Default session expiry for clients | `"1h"` |
+| `session_expiry_interval` | `duration` | Optional maximum session expiry granted to clients; larger requests, and MQTT 3.1.1 persistent sessions, are capped to it. MQTT 5 clients are told the granted value in CONNACK; an MQTT 3.1.1 CONNACK carries no properties. Omitted by `generate-config` | no limit |
 | `max_packet_size` | `number` | Maximum MQTT packet size in bytes | `268435456` (256 MB) |
 | `topic_alias_maximum` | `number` | Maximum number of topic aliases | `65535` |
 | `retain_available` | `boolean` | Enable retained messages | `true` |

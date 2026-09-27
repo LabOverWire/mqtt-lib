@@ -408,7 +408,7 @@ level = "Must"
 applies_to = "Both"
 text = "The Client and Server MUST store the Session State after the Network Connection is closed if the Session Expiry Interval is greater than 0"
 status = "Tested"
-test_names = ["session_stored_when_expiry_positive"]
+test_names = ["session_stored_when_expiry_positive", "disconnect_session_expiry_extends_session"]
 
 [[sections."3.1".statements]]
 id = "MQTT-3.1.2-24"
@@ -519,7 +519,7 @@ level = "MustNot"
 applies_to = "Server"
 text = "If a new Network Connection to this Session is made before the Will Delay Interval has passed, the Server MUST NOT send the Will Message"
 status = "Tested"
-test_names = ["will_delay_reconnect_suppresses_will"]
+test_names = ["will_delay_reconnect_suppresses_will", "will_delay_elapsed_publishes_will"]
 
 [[sections."3.1".statements]]
 id = "MQTT-3.1.3-10"
@@ -1795,7 +1795,7 @@ level = "Must"
 applies_to = "Server"
 text = "The Server MUST discard the Session State when the Network Connection is closed and the Session Expiry Interval has passed"
 status = "Tested"
-test_names = ["session_discarded_after_expiry"]
+test_names = ["session_discarded_after_expiry", "absent_session_expiry_discards_session_at_disconnect", "disconnect_session_expiry_zero_discards_session"]
 
 # ===========================================================================
 # Section 4.2 -- Network Connections
@@ -2359,7 +2359,7 @@ level = "Must"
 applies_to = "Server"
 text = "When a Server detects a Malformed Packet or Protocol Error, and a Reason Code is given in the specification, it MUST close the Network Connection"
 status = "Tested"
-test_names = ["malformed_packet_closes_connection"]
+test_names = ["malformed_packet_closes_connection", "disconnect_session_expiry_after_zero_is_protocol_error"]
 
 [[sections."4.13".statements]]
 id = "MQTT-4.13.2-1"

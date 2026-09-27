@@ -50,6 +50,7 @@ struct ConfigHashFields {
     max_message_rate_per_client: u32,
     max_bandwidth_per_client: u64,
     load_balancer_backends: Vec<String>,
+    session_sweep_interval_secs: u32,
 }
 
 #[wasm_bindgen(js_name = "BrokerConfig")]
@@ -74,6 +75,7 @@ pub struct WasmBrokerConfig {
     max_message_rate_per_client: u32,
     max_bandwidth_per_client: u64,
     load_balancer_backends: Vec<String>,
+    session_sweep_interval_secs: u32,
 }
 
 #[wasm_bindgen(js_class = "BrokerConfig")]
@@ -83,7 +85,7 @@ impl WasmBrokerConfig {
     pub fn new() -> Self {
         Self {
             max_clients: 1000,
-            session_expiry_interval_secs: 3600,
+            session_expiry_interval_secs: u32::MAX,
             max_packet_size: 268_435_456,
             topic_alias_maximum: 65535,
             retain_available: true,
@@ -101,6 +103,7 @@ impl WasmBrokerConfig {
             max_message_rate_per_client: 0,
             max_bandwidth_per_client: 0,
             load_balancer_backends: Vec::new(),
+            session_sweep_interval_secs: 3600,
         }
     }
 
@@ -209,8 +212,13 @@ impl WasmBrokerConfig {
         self.load_balancer_backends.clear();
     }
 
+    #[wasm_bindgen(setter, js_name = "sessionSweepIntervalSecs")]
+    pub fn set_session_sweep_interval_secs(&mut self, value: u32) {
+        self.session_sweep_interval_secs = value;
+    }
+
     fn to_broker_config(&self) -> BrokerConfig {
-        BrokerConfig {
+        let mut config = BrokerConfig {
             max_clients: self.max_clients as usize,
             session_expiry_interval: Duration::from_secs(u64::from(
                 self.session_expiry_interval_secs,
@@ -245,7 +253,10 @@ impl WasmBrokerConfig {
                 Some(LoadBalancerConfig::new(self.load_balancer_backends.clone()))
             },
             ..Default::default()
-        }
+        };
+        config.storage_config.cleanup_interval =
+            Duration::from_secs(u64::from(self.session_sweep_interval_secs.max(1)));
+        config
     }
 
     fn calculate_hash(&self) -> u64 {
@@ -269,6 +280,7 @@ impl WasmBrokerConfig {
             max_message_rate_per_client: self.max_message_rate_per_client,
             max_bandwidth_per_client: self.max_bandwidth_per_client,
             load_balancer_backends: self.load_balancer_backends.clone(),
+            session_sweep_interval_secs: self.session_sweep_interval_secs,
         };
         let mut hasher = DefaultHasher::new();
         fields.hash(&mut hasher);
@@ -291,6 +303,8 @@ fn resource_limits_from(config: &BrokerConfig) -> ResourceLimits {
         ..Default::default()
     }
 }
+
+const SESSION_SWEEP_INTERVAL_MS: u32 = 60_000;
 
 #[wasm_bindgen(js_name = "Broker")]
 pub struct WasmBroker {
@@ -376,8 +390,36 @@ impl WasmBroker {
         };
 
         broker.setup_bridge_callback();
+        broker.spawn_session_sweep();
 
         Ok(broker)
+    }
+
+    fn spawn_session_sweep(&self) {
+        let router = Arc::downgrade(&self.router);
+        let storage = Arc::downgrade(&self.storage);
+        let interval = self
+            .config
+            .read()
+            .map_or(SESSION_SWEEP_INTERVAL_MS, |config| {
+                u32::try_from(config.storage_config.cleanup_interval.as_millis())
+                    .unwrap_or(SESSION_SWEEP_INTERVAL_MS)
+                    .max(1)
+            });
+        wasm_bindgen_futures::spawn_local(async move {
+            loop {
+                gloo_timers::future::TimeoutFuture::new(interval).await;
+                let (Some(router), Some(storage)) = (router.upgrade(), storage.upgrade()) else {
+                    break;
+                };
+                router.sweep_sessions().await;
+                if let Err(e) =
+                    mqtt5::broker::storage::StorageBackend::cleanup_expired(&*storage).await
+                {
+                    tracing::warn!("Storage cleanup error: {e}");
+                }
+            }
+        });
     }
 
     /// # Errors
@@ -800,9 +842,476 @@ impl WasmBroker {
                 web_sys::console::warn_1(
                     &"Config read failed, using default session_expiry_interval".into(),
                 );
-                3600
+                u32::MAX
             },
             |c| u64_to_u32_saturating(c.session_expiry_interval.as_secs()),
         )
+    }
+}
+
+#[cfg(all(test, target_arch = "wasm32"))]
+mod tests {
+    use super::{WasmBroker, WasmBrokerConfig};
+    use crate::client_handler::WasmClientHandler;
+    use bytes::BytesMut;
+    use mqtt5::broker::auth::{AuthProvider, AuthResult, EnhancedAuthResult};
+    use mqtt5::broker::storage::StorageBackend;
+    use mqtt5_protocol::error::Result;
+    use mqtt5_protocol::packet::auth::AuthPacket;
+    use mqtt5_protocol::packet::connect::ConnectPacket;
+    use mqtt5_protocol::packet::disconnect::DisconnectPacket;
+    use mqtt5_protocol::packet::MqttPacket;
+    use mqtt5_protocol::protocol::v5::reason_codes::ReasonCode;
+    use mqtt5_protocol::types::{ConnectOptions, WillMessage};
+    use mqtt5_protocol::QoS;
+    use std::cell::RefCell;
+    use std::future::Future;
+    use std::net::SocketAddr;
+    use std::pin::Pin;
+    use std::rc::Rc;
+    use std::sync::Arc;
+    use wasm_bindgen::prelude::*;
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen_test::wasm_bindgen_test;
+    use web_sys::{MessageEvent, MessagePort};
+
+    async fn sleep(ms: u32) {
+        gloo_timers::future::TimeoutFuture::new(ms).await;
+    }
+
+    fn send(port: &MessagePort, packet: &impl MqttPacket) {
+        let mut buf = BytesMut::new();
+        packet.encode(&mut buf).unwrap();
+        port.post_message(&js_sys::Uint8Array::from(&buf[..]).buffer())
+            .unwrap();
+    }
+
+    async fn connect_with_will(broker: &WasmBroker, client_id: &str) -> MessagePort {
+        let port = broker.create_client_port().unwrap();
+        let inbox = Rc::new(RefCell::new(Vec::new()));
+        let inbox_in = Rc::clone(&inbox);
+        let on_message = Closure::<dyn FnMut(MessageEvent)>::new(move |event: MessageEvent| {
+            inbox_in
+                .borrow_mut()
+                .extend(js_sys::Uint8Array::new(&event.data()).to_vec());
+        });
+        port.add_event_listener_with_callback("message", on_message.as_ref().unchecked_ref())
+            .unwrap();
+        on_message.forget();
+        port.start();
+        let options = ConnectOptions::new(client_id)
+            .with_session_expiry_interval(60)
+            .with_will(WillMessage::new(format!("will/{client_id}"), "offline"));
+        send(&port, &ConnectPacket::new(options));
+        for _ in 0..200 {
+            if inbox.borrow().len() >= 4 {
+                break;
+            }
+            sleep(5).await;
+        }
+        assert_eq!(inbox.borrow().first(), Some(&0x20), "expected CONNACK");
+        port
+    }
+
+    async fn stored_will_present(broker: &WasmBroker, client_id: &str) -> bool {
+        broker
+            .storage
+            .get_session(client_id)
+            .await
+            .unwrap()
+            .expect("session is kept for its expiry interval")
+            .will_message
+            .is_some()
+    }
+
+    fn broker() -> WasmBroker {
+        let mut config = WasmBrokerConfig::new();
+        config.set_allow_anonymous(true);
+        WasmBroker::with_config(config).unwrap()
+    }
+
+    #[wasm_bindgen_test]
+    async fn normal_disconnect_removes_stored_will() {
+        let broker = broker();
+        let port = connect_with_will(&broker, "stored-will-normal").await;
+        assert!(stored_will_present(&broker, "stored-will-normal").await);
+
+        send(&port, &DisconnectPacket::new(ReasonCode::Success));
+        port.close();
+        sleep(300).await;
+
+        assert!(!stored_will_present(&broker, "stored-will-normal").await);
+    }
+
+    #[wasm_bindgen_test]
+    async fn published_will_is_removed_from_stored_session() {
+        let broker = broker();
+        let port = connect_with_will(&broker, "stored-will-published").await;
+        assert!(stored_will_present(&broker, "stored-will-published").await);
+
+        port.close();
+        sleep(300).await;
+
+        assert!(!stored_will_present(&broker, "stored-will-published").await);
+    }
+
+    struct Client {
+        port: MessagePort,
+        inbox: Rc<RefCell<Vec<u8>>>,
+    }
+
+    impl Client {
+        fn open(port: MessagePort) -> Self {
+            let inbox = Rc::new(RefCell::new(Vec::new()));
+            let inbox_in = Rc::clone(&inbox);
+            let on_message = Closure::<dyn FnMut(MessageEvent)>::new(move |event: MessageEvent| {
+                inbox_in
+                    .borrow_mut()
+                    .extend(js_sys::Uint8Array::new(&event.data()).to_vec());
+            });
+            port.add_event_listener_with_callback("message", on_message.as_ref().unchecked_ref())
+                .unwrap();
+            on_message.forget();
+            port.start();
+            Self { port, inbox }
+        }
+
+        fn send(&self, packet: &impl MqttPacket) {
+            send(&self.port, packet);
+        }
+
+        fn send_raw(&self, bytes: &[u8]) {
+            self.port
+                .post_message(&js_sys::Uint8Array::from(bytes).buffer())
+                .unwrap();
+        }
+
+        async fn wait_for(&self, len: usize) -> Vec<u8> {
+            for _ in 0..300 {
+                if self.inbox.borrow().len() >= len {
+                    break;
+                }
+                sleep(10).await;
+            }
+            self.inbox.borrow().clone()
+        }
+
+        fn received(&self) -> Vec<u8> {
+            self.inbox.borrow().clone()
+        }
+
+        fn clear(&self) {
+            self.inbox.borrow_mut().clear();
+        }
+    }
+
+    fn connect_options(client_id: &str, clean_start: bool, expiry: u32) -> ConnectOptions {
+        ConnectOptions::new(client_id)
+            .with_clean_start(clean_start)
+            .with_session_expiry_interval(expiry)
+    }
+
+    fn start_connect(broker: &WasmBroker, options: ConnectOptions) -> Client {
+        let client = Client::open(broker.create_client_port().unwrap());
+        client.send(&ConnectPacket::new(options));
+        client
+    }
+
+    async fn connected(broker: &WasmBroker, options: ConnectOptions) -> Client {
+        let client = start_connect(broker, options);
+        let connack = client.wait_for(4).await;
+        assert_eq!(connack.first(), Some(&0x20), "expected CONNACK");
+        assert_eq!(connack[3], 0x00, "CONNACK must be Success");
+        client.clear();
+        client
+    }
+
+    fn subscribe_bytes(topic: &str) -> Vec<u8> {
+        let topic_len = u8::try_from(topic.len()).unwrap();
+        let mut bytes = vec![0x82, 6 + topic_len, 0x00, 0x01, 0x00, 0x00, topic_len];
+        bytes.extend_from_slice(topic.as_bytes());
+        bytes.push(0x01);
+        bytes
+    }
+
+    fn unsubscribe_bytes(topic: &str) -> Vec<u8> {
+        let topic_len = u8::try_from(topic.len()).unwrap();
+        let mut bytes = vec![0xA2, 5 + topic_len, 0x00, 0x02, 0x00, 0x00, topic_len];
+        bytes.extend_from_slice(topic.as_bytes());
+        bytes
+    }
+
+    async fn subscribed(client: &Client, topic: &str) {
+        client.send_raw(&subscribe_bytes(topic));
+        assert_eq!(
+            client.wait_for(1).await.first(),
+            Some(&0x90),
+            "expected SUBACK"
+        );
+        client.clear();
+    }
+
+    #[wasm_bindgen_test]
+    async fn claim_waits_for_the_session_slot() {
+        let broker = broker();
+        let slot = broker.router.lock_session("slot-claim").await;
+        let client = start_connect(&broker, connect_options("slot-claim", true, 60));
+        sleep(200).await;
+        assert!(
+            client.received().is_empty(),
+            "CONNACK sent while the slot was held"
+        );
+        assert!(
+            broker
+                .storage
+                .get_session("slot-claim")
+                .await
+                .unwrap()
+                .is_none(),
+            "the claim wrote the session without holding the slot"
+        );
+        assert!(
+            !broker.router.is_connected("slot-claim").await,
+            "the claim registered without holding the slot"
+        );
+        drop(slot);
+        assert_eq!(client.wait_for(4).await.first(), Some(&0x20));
+        assert!(broker.router.is_connected("slot-claim").await);
+    }
+
+    #[wasm_bindgen_test]
+    async fn displaced_subscribe_installs_no_route() {
+        let broker = broker();
+        let first = connected(&broker, connect_options("dsub", true, 60)).await;
+        let slot = broker.router.lock_session("dsub").await;
+        let second = start_connect(&broker, connect_options("dsub", true, 60));
+        sleep(50).await;
+        first.send_raw(&subscribe_bytes("dsub/t"));
+        sleep(50).await;
+        drop(slot);
+        assert_eq!(second.wait_for(4).await.first(), Some(&0x20));
+        sleep(200).await;
+        assert!(
+            !broker.router.has_subscription("dsub", "dsub/t").await,
+            "a displaced connection's SUBSCRIBE installed a route for the successor"
+        );
+        let stored = broker.storage.get_session("dsub").await.unwrap().unwrap();
+        assert!(!stored.subscriptions.contains_key("dsub/t"));
+    }
+
+    #[wasm_bindgen_test]
+    async fn displaced_unsubscribe_keeps_the_successors_route() {
+        let broker = broker();
+        let first = connected(&broker, connect_options("dunsub", true, 60)).await;
+        subscribed(&first, "keep/x").await;
+        let slot = broker.router.lock_session("dunsub").await;
+        let second = start_connect(&broker, connect_options("dunsub", false, 60));
+        sleep(50).await;
+        first.send_raw(&unsubscribe_bytes("keep/x"));
+        sleep(50).await;
+        drop(slot);
+        let connack = second.wait_for(4).await;
+        assert_eq!(connack.first(), Some(&0x20));
+        assert_eq!(connack[2] & 1, 1, "session present");
+        sleep(200).await;
+        assert!(
+            broker.router.has_subscription("dunsub", "keep/x").await,
+            "a displaced connection's UNSUBSCRIBE removed the successor's route"
+        );
+        let stored = broker.storage.get_session("dunsub").await.unwrap().unwrap();
+        assert!(stored.subscriptions.contains_key("keep/x"));
+    }
+
+    #[wasm_bindgen_test]
+    async fn resume_drops_a_revoked_subscription_from_session_and_routes() {
+        let broker = broker();
+        let first = connected(&broker, connect_options("revoked", true, 3600)).await;
+        subscribed(&first, "secret/x").await;
+        first.send(&DisconnectPacket::new(ReasonCode::Success));
+        first.port.close();
+        sleep(200).await;
+        assert!(broker.router.has_subscription("revoked", "secret/x").await);
+
+        broker.set_acl_default_deny().await;
+        let second = start_connect(&broker, connect_options("revoked", false, 3600));
+        let connack = second.wait_for(4).await;
+        assert_eq!(connack.first(), Some(&0x20));
+        assert_eq!(connack[2] & 1, 1, "session present");
+        assert!(
+            !broker.router.has_subscription("revoked", "secret/x").await,
+            "a subscription no longer authorized must not stay routed after resume"
+        );
+        let stored = broker
+            .storage
+            .get_session("revoked")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!stored.subscriptions.contains_key("secret/x"));
+    }
+
+    #[wasm_bindgen_test]
+    async fn sweep_removes_an_expired_offline_session() {
+        let mut config = WasmBrokerConfig::new();
+        config.set_allow_anonymous(true);
+        config.set_session_sweep_interval_secs(1);
+        let broker = WasmBroker::with_config(config).unwrap();
+        let client = connected(&broker, connect_options("swept", true, 1)).await;
+        subscribed(&client, "swept/t").await;
+        client.send(&DisconnectPacket::new(ReasonCode::Success));
+        client.port.close();
+        sleep(200).await;
+        assert!(broker.router.has_subscription("swept", "swept/t").await);
+        sleep(3500).await;
+        assert_eq!(
+            broker.router.subscription_count_for_client("swept").await,
+            0,
+            "the periodic sweep must strip an expired session's routes"
+        );
+        assert!(broker.storage.get_session("swept").await.unwrap().is_none());
+    }
+
+    #[wasm_bindgen_test]
+    async fn release_waits_for_the_session_slot() {
+        let broker = broker();
+        let client = connected(&broker, connect_options("slot-release", true, 60)).await;
+        let slot = broker.router.lock_session("slot-release").await;
+        client.port.close();
+        sleep(200).await;
+        assert!(
+            broker.router.is_connected("slot-release").await,
+            "the router entry was released without holding the slot"
+        );
+        drop(slot);
+        sleep(200).await;
+        assert!(!broker.router.is_connected("slot-release").await);
+    }
+
+    #[wasm_bindgen_test]
+    async fn disconnect_expiry_is_stored_before_the_release() {
+        let broker = broker();
+        let client = connected(&broker, connect_options("disc-zero", true, 3600)).await;
+        let slot = broker.router.lock_session("disc-zero").await;
+        let mut disconnect = DisconnectPacket::new(ReasonCode::Success);
+        disconnect.properties.set_session_expiry_interval(0);
+        client.send(&disconnect);
+        sleep(100).await;
+        let next = broker.router.lock_session("disc-zero");
+        futures::pin_mut!(next);
+        assert!(futures::poll!(next.as_mut()).is_pending());
+        drop(slot);
+        let observed = next.await;
+        let owner_live = broker.router.is_connected("disc-zero").await;
+        let stored = broker
+            .storage
+            .get_session("disc-zero")
+            .await
+            .unwrap()
+            .map(|session| session.expiry_interval);
+        drop(observed);
+        assert!(
+            owner_live,
+            "the release ran before the DISCONNECT expiry reached the store"
+        );
+        assert_eq!(
+            stored,
+            Some(Some(0)),
+            "between DISCONNECT and release a claim must already see expiry 0"
+        );
+        let resumed = start_connect(&broker, connect_options("disc-zero", false, 3600));
+        let connack = resumed.wait_for(4).await;
+        assert_eq!(connack[2] & 1, 0, "an ended session must not be resumed");
+    }
+
+    struct Challenge;
+
+    impl AuthProvider for Challenge {
+        fn authenticate<'a>(
+            &'a self,
+            _connect: &'a ConnectPacket,
+            _client_addr: SocketAddr,
+        ) -> Pin<Box<dyn Future<Output = Result<AuthResult>> + Send + 'a>> {
+            Box::pin(async move { Ok(AuthResult::success()) })
+        }
+
+        fn authorize_publish<'a>(
+            &'a self,
+            _client_id: &str,
+            _user_id: Option<&'a str>,
+            _topic: &'a str,
+        ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+            Box::pin(async move { true })
+        }
+
+        fn authorize_subscribe<'a>(
+            &'a self,
+            _client_id: &str,
+            _user_id: Option<&'a str>,
+            _topic_filter: &'a str,
+        ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+            Box::pin(async move { true })
+        }
+
+        fn supports_enhanced_auth(&self) -> bool {
+            true
+        }
+
+        fn authenticate_enhanced<'a>(
+            &'a self,
+            auth_method: &'a str,
+            auth_data: Option<&'a [u8]>,
+            _client_id: &'a str,
+        ) -> Pin<Box<dyn Future<Output = Result<EnhancedAuthResult>> + Send + 'a>> {
+            let method = auth_method.to_string();
+            Box::pin(async move {
+                Ok(match auth_data {
+                    None => EnhancedAuthResult::continue_auth(method, Some(b"c".to_vec())),
+                    Some(_) => EnhancedAuthResult::success(method),
+                })
+            })
+        }
+    }
+
+    #[wasm_bindgen_test]
+    async fn multi_step_enhanced_auth_rejects_an_unsupported_will_qos() {
+        let mut config = WasmBrokerConfig::new();
+        config.set_maximum_qos(1);
+        let broker = WasmBroker::with_config(config).unwrap();
+        let channel = web_sys::MessageChannel::new().unwrap();
+        WasmClientHandler::new(
+            channel.port2(),
+            Arc::clone(&broker.config),
+            Arc::clone(&broker.router),
+            Arc::new(Challenge),
+            Arc::clone(&broker.storage),
+            Arc::clone(&broker.stats),
+            Arc::clone(&broker.resource_monitor),
+            broker.event_callbacks.clone(),
+        );
+        let client = Client::open(channel.port1());
+        let will = WillMessage::new("will/scram", "offline").with_qos(QoS::ExactlyOnce);
+        client.send(&ConnectPacket::new(
+            ConnectOptions::new("scram")
+                .with_authentication_method("X")
+                .with_will(will),
+        ));
+        assert_eq!(
+            client.wait_for(1).await.first(),
+            Some(&0xF0),
+            "expected AUTH"
+        );
+        client.clear();
+        client.send(
+            &AuthPacket::continue_authentication("X".to_string(), Some(b"r".to_vec())).unwrap(),
+        );
+        let connack = client.wait_for(4).await;
+        assert_eq!(connack.first(), Some(&0x20), "expected CONNACK");
+        assert_eq!(
+            connack[3],
+            u8::from(ReasonCode::QoSNotSupported),
+            "a Will QoS above the server maximum must be rejected after multi-step auth too"
+        );
+        assert!(!broker.router.is_connected("scram").await);
+        assert!(broker.storage.get_session("scram").await.unwrap().is_none());
     }
 }

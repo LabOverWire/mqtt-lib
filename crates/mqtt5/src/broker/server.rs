@@ -903,9 +903,6 @@ impl MqttBroker {
         shutdown_tx: &tokio::sync::broadcast::Sender<()>,
         task_handles: &mut Vec<tokio::task::JoinHandle<()>>,
     ) -> Result<()> {
-        // The periodic cleanup runs whether or not persistence is on: it also evicts the
-        // router's in-memory fallback queues, which otherwise leak one entry per distinct
-        // client id when storage is off.
         {
             if let Some(ref storage) = self.storage {
                 storage.cleanup_expired().await?;
@@ -925,36 +922,14 @@ impl MqttBroker {
                                     error!("Storage cleanup error: {e}");
                                 }
                             }
-                            router_clone.cleanup_stale_subscriptions().await;
+                            router_clone.sweep_sessions().await;
                         }
                         _ = shutdown_rx.recv() => {
                             debug!("Storage cleanup task shutting down");
-                            break;
-                        }
-                    }
-                }
-            }));
-        }
-
-        if let Some(ref storage) = self.storage {
-            let storage_clone = Arc::clone(storage);
-            let mut shutdown_rx = shutdown_tx.subscribe();
-            let flush_interval = std::time::Duration::from_secs(5);
-
-            task_handles.push(tokio::spawn(async move {
-                let mut interval = tokio::time::interval(flush_interval);
-                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                loop {
-                    tokio::select! {
-                        _ = interval.tick() => {
-                            if let Err(e) = storage_clone.flush_sessions().await {
-                                error!("Session flush error: {e}");
-                            }
-                        }
-                        _ = shutdown_rx.recv() => {
-                            debug!("Flushing sessions before shutdown");
-                            if let Err(e) = storage_clone.shutdown().await {
-                                error!("Session shutdown flush error: {e}");
+                            if let Some(ref storage) = storage_clone {
+                                if let Err(e) = storage.shutdown().await {
+                                    error!("Storage shutdown error: {e}");
+                                }
                             }
                             break;
                         }
@@ -962,6 +937,7 @@ impl MqttBroker {
                 }
             }));
         }
+
         Ok(())
     }
 
@@ -1713,6 +1689,11 @@ impl MqttBroker {
 
         let mut task_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
+        self.router
+            .recover_sessions(
+                u32::try_from(self.config.session_expiry_interval.as_secs()).unwrap_or(u32::MAX),
+            )
+            .await?;
         self.initialize_storage(&shutdown_tx, &mut task_handles)
             .await?;
         self.router.initialize().await?;
@@ -1870,6 +1851,11 @@ impl MqttBroker {
     #[must_use]
     pub fn router(&self) -> Arc<MessageRouter> {
         Arc::clone(&self.router)
+    }
+
+    #[must_use]
+    pub fn storage(&self) -> Option<Arc<DynamicStorage>> {
+        self.storage.clone()
     }
 
     #[must_use]

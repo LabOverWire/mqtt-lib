@@ -9,6 +9,8 @@ pub mod file_backend;
 pub mod memory_backend;
 pub mod queue;
 pub mod retained;
+#[cfg(not(target_arch = "wasm32"))]
+mod session_log;
 pub mod sessions;
 
 pub use client_queue::{
@@ -276,6 +278,21 @@ pub struct ClientSession {
     pub change_only_state: ChangeOnlyState,
     #[serde(default)]
     pub user_id: Option<String>,
+    #[serde(default)]
+    pub connection_token: u64,
+    #[serde(skip)]
+    pub connected: bool,
+    #[serde(default)]
+    pub disconnected_at: Option<u64>,
+}
+
+#[must_use]
+pub fn unix_millis_now() -> u64 {
+    SystemTime::now()
+        .duration_since(crate::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+        })
 }
 
 fn default_receive_maximum() -> u16 {
@@ -426,6 +443,56 @@ pub trait StorageBackend: Send + Sync {
     /// Flush any cached session data to persistent storage (no-op for non-caching backends)
     fn flush_sessions(&self) -> impl std::future::Future<Output = Result<()>> + Send {
         async { Ok(()) }
+    }
+
+    fn session_client_ids(&self) -> impl std::future::Future<Output = Result<Vec<String>>> + Send {
+        async { Ok(Vec::new()) }
+    }
+
+    fn remove_expired_session(
+        &self,
+        _client_id: &str,
+    ) -> impl std::future::Future<Output = Result<bool>> + Send {
+        async { Ok(false) }
+    }
+
+    fn remove_owned_session(
+        &self,
+        client_id: &str,
+        connection_token: u64,
+    ) -> impl std::future::Future<Output = Result<bool>> + Send {
+        async move {
+            let owned = self
+                .get_session(client_id)
+                .await?
+                .is_some_and(|session| session.connection_token == connection_token);
+            if owned {
+                self.remove_session(client_id).await?;
+            }
+            Ok(owned)
+        }
+    }
+
+    fn update_session<F>(
+        &self,
+        client_id: &str,
+        connection_token: u64,
+        update: F,
+    ) -> impl std::future::Future<Output = Result<bool>> + Send
+    where
+        F: FnOnce(&mut ClientSession) + Send,
+    {
+        async move {
+            let Some(mut session) = self.get_session(client_id).await? else {
+                return Ok(false);
+            };
+            if session.connection_token != connection_token {
+                return Ok(false);
+            }
+            update(&mut session);
+            self.store_session(session).await?;
+            Ok(true)
+        }
     }
 }
 
@@ -709,15 +776,7 @@ impl<B: StorageBackend + 'static> Storage<B> {
         // Clean expired sessions from cache
         {
             let mut cache = self.sessions_cache.write().await;
-            cache.retain(|_, session| {
-                if let Some(expiry_interval) = session.expiry_interval {
-                    let expiry_time =
-                        session.last_seen + Duration::from_secs(u64::from(expiry_interval));
-                    expiry_time > now
-                } else {
-                    true
-                }
-            });
+            cache.retain(|_, session| !session.is_expired());
         }
 
         // Clean expired data from backend
@@ -825,6 +884,9 @@ impl ClientSession {
             receive_maximum: 65535,
             change_only_state: ChangeOnlyState::default(),
             user_id: None,
+            connection_token: 0,
+            connected: false,
+            disconnected_at: None,
         }
     }
 
@@ -852,6 +914,9 @@ impl ClientSession {
             receive_maximum: 65535,
             change_only_state: ChangeOnlyState::default(),
             user_id: None,
+            connection_token: 0,
+            connected: false,
+            disconnected_at: None,
         }
     }
 
@@ -877,12 +942,57 @@ impl ClientSession {
     /// Check if session has expired
     #[must_use]
     pub fn is_expired(&self) -> bool {
-        if let Some(expiry_interval) = self.expiry_interval {
-            let expiry_time = self.last_seen + Duration::from_secs(u64::from(expiry_interval));
-            SystemTime::now() > expiry_time
-        } else {
-            false
+        if self.connected {
+            return false;
         }
+        let Some(expiry_interval) = self.expiry_interval else {
+            return false;
+        };
+        let since = self.disconnected_at.map_or(self.last_seen, |millis| {
+            crate::time::UNIX_EPOCH + Duration::from_millis(millis)
+        });
+        SystemTime::now() > since + Duration::from_secs(u64::from(expiry_interval))
+    }
+
+    pub fn mark_connected(&mut self, connection_token: u64) {
+        self.connection_token = connection_token;
+        self.connected = true;
+        self.disconnected_at = None;
+        self.touch();
+    }
+
+    pub fn mark_disconnected(&mut self, disconnected_at: u64) {
+        self.connected = false;
+        self.disconnected_at = Some(disconnected_at);
+        self.touch();
+    }
+
+    #[must_use]
+    pub fn expiry_from_connect(connect: &crate::packet::connect::ConnectPacket) -> Option<u32> {
+        if connect.protocol_version == 5 {
+            Some(
+                connect
+                    .properties
+                    .get_session_expiry_interval()
+                    .unwrap_or(0),
+            )
+        } else if connect.clean_start {
+            Some(0)
+        } else {
+            None
+        }
+    }
+
+    #[must_use]
+    pub fn granted_expiry(requested: Option<u32>, maximum: u32) -> u32 {
+        requested.map_or(maximum, |requested| requested.min(maximum))
+    }
+
+    #[must_use]
+    pub fn will_publish_delay(&self) -> Option<u32> {
+        self.will_message.as_ref()?;
+        let will_delay = self.will_delay_interval.unwrap_or(0);
+        Some(will_delay.min(self.expiry_interval.unwrap_or(u32::MAX)))
     }
 }
 
@@ -1182,6 +1292,62 @@ impl StorageBackend for DynamicStorage {
         }
     }
 
+    async fn remove_expired_session(&self, client_id: &str) -> Result<bool> {
+        match self {
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::File(backend) => backend.remove_expired_session(client_id).await,
+            Self::Memory(backend) => backend.remove_expired_session(client_id).await,
+        }
+    }
+
+    async fn session_client_ids(&self) -> Result<Vec<String>> {
+        match self {
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::File(backend) => backend.session_client_ids().await,
+            Self::Memory(backend) => backend.session_client_ids().await,
+        }
+    }
+
+    async fn remove_owned_session(&self, client_id: &str, connection_token: u64) -> Result<bool> {
+        match self {
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::File(backend) => {
+                backend
+                    .remove_owned_session(client_id, connection_token)
+                    .await
+            }
+            Self::Memory(backend) => {
+                backend
+                    .remove_owned_session(client_id, connection_token)
+                    .await
+            }
+        }
+    }
+
+    async fn update_session<F>(
+        &self,
+        client_id: &str,
+        connection_token: u64,
+        update: F,
+    ) -> Result<bool>
+    where
+        F: FnOnce(&mut ClientSession) + Send,
+    {
+        match self {
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::File(backend) => {
+                backend
+                    .update_session(client_id, connection_token, update)
+                    .await
+            }
+            Self::Memory(backend) => {
+                backend
+                    .update_session(client_id, connection_token, update)
+                    .await
+            }
+        }
+    }
+
     async fn queue_message(&self, message: QueuedMessage) -> Result<()> {
         match self {
             #[cfg(not(target_arch = "wasm32"))]
@@ -1261,20 +1427,6 @@ impl StorageBackend for DynamicStorage {
 }
 
 impl DynamicStorage {
-    /// # Errors
-    /// Returns an error if any session fails to persist.
-    #[cfg_attr(
-        target_arch = "wasm32",
-        allow(clippy::unused_async, clippy::unused_async_trait_impl)
-    )]
-    pub async fn flush_sessions(&self) -> Result<()> {
-        match self {
-            #[cfg(not(target_arch = "wasm32"))]
-            Self::File(backend) => backend.flush_sessions().await,
-            Self::Memory(_) => Ok(()),
-        }
-    }
-
     /// # Errors
     /// Returns an error if flushing sessions fails.
     #[cfg_attr(

@@ -112,20 +112,77 @@ impl StorageBackend for MemoryBackend {
         std::future::ready(Ok(()))
     }
 
-    async fn get_session(&self, client_id: &str) -> Result<Option<ClientSession>> {
-        let session = {
-            let sessions = self.sessions.lock();
-            sessions.get(client_id).cloned()
-        };
+    fn get_session(
+        &self,
+        client_id: &str,
+    ) -> impl std::future::Future<Output = Result<Option<ClientSession>>> + Send {
+        let session = self
+            .sessions
+            .lock()
+            .get(client_id)
+            .filter(|session| !session.is_expired())
+            .cloned();
+        std::future::ready(Ok(session))
+    }
 
-        if let Some(ref sess) = session {
-            if sess.is_expired() {
-                self.remove_session(client_id).await?;
-                return Ok(None);
-            }
+    fn remove_expired_session(
+        &self,
+        client_id: &str,
+    ) -> impl std::future::Future<Output = Result<bool>> + Send {
+        let mut sessions = self.sessions.lock();
+        let expired = sessions
+            .get(client_id)
+            .is_some_and(ClientSession::is_expired);
+        if expired {
+            sessions.remove(client_id);
         }
+        drop(sessions);
+        std::future::ready(Ok(expired))
+    }
 
-        Ok(session)
+    fn session_client_ids(&self) -> impl std::future::Future<Output = Result<Vec<String>>> + Send {
+        let ids = self.sessions.lock().keys().cloned().collect();
+        std::future::ready(Ok(ids))
+    }
+
+    fn update_session<F>(
+        &self,
+        client_id: &str,
+        connection_token: u64,
+        update: F,
+    ) -> impl std::future::Future<Output = Result<bool>> + Send
+    where
+        F: FnOnce(&mut ClientSession) + Send,
+    {
+        let updated = {
+            let mut sessions = self.sessions.lock();
+            match sessions.get_mut(client_id) {
+                Some(session) if session.connection_token == connection_token => {
+                    update(session);
+                    true
+                }
+                _ => false,
+            }
+        };
+        std::future::ready(Ok(updated))
+    }
+
+    fn remove_owned_session(
+        &self,
+        client_id: &str,
+        connection_token: u64,
+    ) -> impl std::future::Future<Output = Result<bool>> + Send {
+        let removed = {
+            let mut sessions = self.sessions.lock();
+            let owned = sessions
+                .get(client_id)
+                .is_some_and(|session| session.connection_token == connection_token);
+            if owned {
+                sessions.remove(client_id);
+            }
+            owned
+        };
+        std::future::ready(Ok(removed))
     }
 
     fn remove_session(
@@ -226,18 +283,6 @@ impl StorageBackend for MemoryBackend {
             let mut retained = self.retained.lock();
             retained.retain(|_, message| {
                 if message.is_expired() {
-                    removed_count += 1;
-                    false
-                } else {
-                    true
-                }
-            });
-        }
-
-        {
-            let mut sessions = self.sessions.lock();
-            sessions.retain(|_, session| {
-                if session.is_expired() {
                     removed_count += 1;
                     false
                 } else {

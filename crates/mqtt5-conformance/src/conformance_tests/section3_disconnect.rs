@@ -5,7 +5,11 @@ use crate::harness::unique_client_id;
 use crate::raw_client::{RawMqttClient, RawPacketBuilder};
 use crate::sut::SutHandle;
 use crate::test_client::TestClient;
-use mqtt5_protocol::types::SubscribeOptions;
+use bytes::BytesMut;
+use mqtt5_protocol::packet::disconnect::DisconnectPacket;
+use mqtt5_protocol::packet::MqttPacket;
+use mqtt5_protocol::protocol::v5::reason_codes::ReasonCode;
+use mqtt5_protocol::types::{ConnectOptions, SubscribeOptions};
 use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -264,5 +268,134 @@ async fn no_packets_after_client_disconnect(sut: SutHandle) {
     assert!(
         !raw.expect_pingresp(Duration::from_secs(1)).await,
         "[MQTT-3.14.4-1] no PINGRESP should be received after client sent DISCONNECT"
+    );
+}
+
+fn disconnect_with_session_expiry(session_expiry: u32) -> Vec<u8> {
+    let mut disconnect = DisconnectPacket::new(ReasonCode::Success);
+    disconnect
+        .properties
+        .set_session_expiry_interval(session_expiry);
+    let mut buf = BytesMut::new();
+    disconnect.encode(&mut buf).expect("DISCONNECT encodes");
+    buf.to_vec()
+}
+
+async fn reconnect_session_present(sut: &SutHandle, client_id: &str) -> bool {
+    let opts = ConnectOptions::new(client_id)
+        .with_clean_start(false)
+        .with_session_expiry_interval(300);
+    let client = TestClient::connect_with_options(sut, opts)
+        .await
+        .expect("reconnect failed");
+    let present = client.session_present();
+    client.disconnect().await.expect("disconnect failed");
+    present
+}
+
+/// `[MQTT-4.1.0-2]` A Session Expiry Interval sent on DISCONNECT replaces the
+/// one from CONNECT (§3.14.2.2.2). A value of 0 makes the session end when the
+/// Network Connection closes, so the Server discards the Session State.
+#[conformance_test(
+    ids = ["MQTT-4.1.0-2"],
+    requires = ["transport.tcp"],
+)]
+async fn disconnect_session_expiry_zero_discards_session(sut: SutHandle) {
+    let client_id = unique_client_id("disc-sei0");
+
+    let mut raw = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
+        .await
+        .unwrap();
+    raw.send_raw(&RawPacketBuilder::connect_with_session_expiry(
+        &client_id, 300,
+    ))
+    .await
+    .unwrap();
+    raw.expect_connack(TIMEOUT).await.expect("expected CONNACK");
+    raw.send_raw(&disconnect_with_session_expiry(0))
+        .await
+        .unwrap();
+    assert!(
+        raw.expect_disconnect(TIMEOUT).await,
+        "server must close after DISCONNECT"
+    );
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    assert!(
+        !reconnect_session_present(&sut, &client_id).await,
+        "[MQTT-4.1.0-2] Session Expiry 0 on DISCONNECT must end the session at disconnect"
+    );
+}
+
+/// `[MQTT-3.1.2-23]` The Server MUST store the Session State after the
+/// Network Connection closes if the Session Expiry Interval is greater than 0.
+/// A non-zero value sent on DISCONNECT replaces a shorter CONNECT value.
+#[conformance_test(
+    ids = ["MQTT-3.1.2-23"],
+    requires = ["transport.tcp"],
+)]
+async fn disconnect_session_expiry_extends_session(sut: SutHandle) {
+    let client_id = unique_client_id("disc-seiext");
+
+    let mut raw = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
+        .await
+        .unwrap();
+    raw.send_raw(&RawPacketBuilder::connect_with_session_expiry(
+        &client_id, 1,
+    ))
+    .await
+    .unwrap();
+    raw.expect_connack(TIMEOUT).await.expect("expected CONNACK");
+    raw.send_raw(&disconnect_with_session_expiry(300))
+        .await
+        .unwrap();
+    assert!(
+        raw.expect_disconnect(TIMEOUT).await,
+        "server must close after DISCONNECT"
+    );
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+
+    assert!(
+        reconnect_session_present(&sut, &client_id).await,
+        "[MQTT-3.1.2-23] the DISCONNECT Session Expiry of 300s replaces the CONNECT value of 1s"
+    );
+}
+
+/// `[MQTT-4.13.1-1]` If CONNECT set a Session Expiry Interval of 0, a
+/// non-zero value on DISCONNECT is a Protocol Error (§3.14.2.2.2): the Server
+/// sends DISCONNECT 0x82 and MUST close the Network Connection.
+#[conformance_test(
+    ids = ["MQTT-4.13.1-1"],
+    requires = ["transport.tcp"],
+)]
+async fn disconnect_session_expiry_after_zero_is_protocol_error(sut: SutHandle) {
+    let client_id = unique_client_id("disc-seierr");
+
+    let mut raw = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
+        .await
+        .unwrap();
+    raw.send_raw(&RawPacketBuilder::connect_with_session_expiry(
+        &client_id, 0,
+    ))
+    .await
+    .unwrap();
+    raw.expect_connack(TIMEOUT).await.expect("expected CONNACK");
+    raw.send_raw(&disconnect_with_session_expiry(300))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        raw.expect_disconnect_packet(TIMEOUT).await,
+        Some(0x82),
+        "[MQTT-4.13.1-1] non-zero Session Expiry on DISCONNECT after 0 on CONNECT is a Protocol Error"
+    );
+    assert!(
+        raw.expect_disconnect(TIMEOUT).await,
+        "[MQTT-4.13.1-1] Server must close the connection after the Protocol Error"
+    );
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        !reconnect_session_present(&sut, &client_id).await,
+        "the session keeps its Session Expiry of 0 and ends at disconnect"
     );
 }

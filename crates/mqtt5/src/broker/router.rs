@@ -1,9 +1,10 @@
 #[cfg(not(target_arch = "wasm32"))]
 use crate::broker::bridge::BridgeManager;
 use crate::broker::events::{BrokerEventHandler, RetainedSetEvent};
+use crate::broker::session_slot::{SessionSlotGuard, SessionSlots};
 use crate::broker::storage::{
-    ChangeOnlyState, DynamicStorage, QueueHandle, QueueLimits, QueueRegistry, QueuedMessage,
-    RetainedMessage, StorageBackend,
+    unix_millis_now, ChangeOnlyState, ClientSession, DynamicStorage, QueueHandle, QueueLimits,
+    QueueRegistry, QueuedMessage, RetainedMessage, StorageBackend, StoredSubscription,
 };
 use crate::packet::publish::PublishPacket;
 use crate::types::ProtocolVersion;
@@ -17,7 +18,7 @@ use std::sync::Arc;
 use std::sync::Weak;
 use tokio::sync::{mpsc, oneshot, RwLock};
 use tokio::time::{Duration, Instant};
-use tracing::{debug, error, info, trace};
+use tracing::{debug, error, info, trace, warn};
 
 /// Upper bound on how long one publish may wait for slow subscribers' delivery channels.
 pub const ROUTE_BUDGET_MAX: Duration = Duration::from_secs(2);
@@ -180,6 +181,20 @@ pub struct MessageRouter {
     max_outbound_rate: AtomicU32,
     fallback_queues: QueueRegistry,
     next_generation: std::sync::atomic::AtomicU64,
+    pending_wills: parking_lot::Mutex<HashMap<String, PendingWill>>,
+    session_slots: SessionSlots,
+}
+
+struct PendingWill {
+    generation: u64,
+    cancel: oneshot::Sender<()>,
+}
+
+const GENERATIONS_PER_MILLISECOND: u64 = 1 << 20;
+const RECOVERY_CONCURRENCY: usize = 1024;
+
+fn generation_epoch() -> u64 {
+    unix_millis_now().saturating_mul(GENERATIONS_PER_MILLISECOND)
 }
 
 /// Information about a connected client
@@ -341,7 +356,9 @@ impl MessageRouter {
             outbound_rates: parking_lot::RwLock::new(HashMap::new()),
             max_outbound_rate: AtomicU32::new(0),
             fallback_queues: QueueRegistry::new(QueueLimits::default(), None),
-            next_generation: std::sync::atomic::AtomicU64::new(0),
+            next_generation: std::sync::atomic::AtomicU64::new(generation_epoch()),
+            pending_wills: parking_lot::Mutex::new(HashMap::new()),
+            session_slots: SessionSlots::default(),
         }
     }
 
@@ -374,7 +391,9 @@ impl MessageRouter {
             outbound_rates: parking_lot::RwLock::new(HashMap::new()),
             max_outbound_rate: AtomicU32::new(0),
             fallback_queues: QueueRegistry::new(QueueLimits::default(), None),
-            next_generation: std::sync::atomic::AtomicU64::new(0),
+            next_generation: std::sync::atomic::AtomicU64::new(generation_epoch()),
+            pending_wills: parking_lot::Mutex::new(HashMap::new()),
+            session_slots: SessionSlots::default(),
         }
     }
 
@@ -485,6 +504,34 @@ impl MessageRouter {
         disconnect_tx: oneshot::Sender<TakeoverNotice>,
         clean_start: bool,
     ) -> Registration {
+        let generation = self.allocate_generation();
+        self.register_session_as(
+            generation,
+            client_id,
+            lanes,
+            queue,
+            disconnect_tx,
+            clean_start,
+        )
+        .await
+    }
+
+    #[must_use]
+    pub fn allocate_generation(&self) -> u64 {
+        self.next_generation
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1
+    }
+
+    pub async fn register_session_as(
+        &self,
+        generation: u64,
+        client_id: String,
+        lanes: DeliveryLanes,
+        queue: QueueHandle,
+        disconnect_tx: oneshot::Sender<TakeoverNotice>,
+        clean_start: bool,
+    ) -> Registration {
         let subscription_maps = if clean_start {
             let mut exact = self.exact_subscriptions.write().await;
             let mut wildcard = self.wildcard_subscriptions.write().await;
@@ -496,10 +543,7 @@ impl MessageRouter {
         };
 
         let mut clients = self.clients.write().await;
-        let generation = self
-            .next_generation
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            + 1;
+        self.cancel_pending_will(&client_id);
         let released = match clients.remove(&client_id) {
             Some(old_client) => {
                 info!("Client ID takeover: {}", client_id);
@@ -543,32 +587,347 @@ impl MessageRouter {
         }
     }
 
-    /// Removes the handler's router entry if it still owns it; a displaced handler's entry
-    /// already belongs to its successor and is left alone.
     pub async fn release_client(
         &self,
         client_id: &str,
         generation: u64,
         preserve_session: bool,
     ) -> Release {
+        let mut exact = self.exact_subscriptions.write().await;
+        let mut wildcard = self.wildcard_subscriptions.write().await;
+        let mut clients = self.clients.write().await;
+        if clients
+            .get(client_id)
+            .is_none_or(|info| info.generation != generation)
         {
-            let mut clients = self.clients.write().await;
-            match clients.get(client_id) {
-                Some(info) if info.generation == generation => {
-                    clients.remove(client_id);
-                }
-                Some(_) => return Release::Displaced,
-                None => {}
-            }
+            return Release::Displaced;
         }
+        clients.remove(client_id);
+        if !preserve_session {
+            Self::strip_client(&mut exact, client_id);
+            Self::strip_client(&mut wildcard, client_id);
+        }
+        drop(clients);
+        drop(wildcard);
+        drop(exact);
         self.outbound_rates.write().remove(client_id);
         if preserve_session {
             debug!("Disconnected client (keeping subscriptions): {}", client_id);
         } else {
-            self.remove_client_subscriptions(client_id).await;
             debug!("Unregistered client: {}", client_id);
         }
         Release::Owned
+    }
+
+    pub async fn lock_session(&self, client_id: &str) -> SessionSlotGuard {
+        self.session_slots.lock(client_id).await
+    }
+
+    #[must_use]
+    pub fn session_slot_count(&self) -> usize {
+        self.session_slots.len()
+    }
+
+    pub async fn is_current_owner(&self, client_id: &str, generation: u64) -> bool {
+        self.clients
+            .read()
+            .await
+            .get(client_id)
+            .is_some_and(|info| info.generation == generation)
+    }
+
+    pub fn cancel_pending_will(&self, client_id: &str) {
+        let Some(pending) = self.pending_wills.lock().remove(client_id) else {
+            return;
+        };
+        debug!(
+            client_id,
+            armed_by = pending.generation,
+            "New connection cancelled pending delayed will"
+        );
+        if pending.cancel.send(()).is_err() {
+            debug!(client_id, "Delayed will timer already gone");
+        }
+    }
+
+    pub async fn arm_will(
+        &self,
+        client_id: &str,
+        generation: u64,
+    ) -> Option<oneshot::Receiver<()>> {
+        let clients = self.clients.read().await;
+        if clients
+            .get(client_id)
+            .is_none_or(|info| info.generation != generation)
+        {
+            return None;
+        }
+        let (cancel, cancelled) = oneshot::channel();
+        self.pending_wills
+            .lock()
+            .insert(client_id.to_string(), PendingWill { generation, cancel });
+        drop(clients);
+        Some(cancelled)
+    }
+
+    pub async fn claim_will(&self, client_id: &str, generation: u64) -> bool {
+        let claimed = {
+            let mut pending = self.pending_wills.lock();
+            let armed_here = pending
+                .get(client_id)
+                .is_some_and(|will| will.generation == generation);
+            armed_here && pending.remove(client_id).is_some()
+        };
+        if claimed {
+            self.clear_stored_will(client_id, generation).await;
+        }
+        claimed
+    }
+
+    pub async fn clear_stored_will(&self, client_id: &str, generation: u64) {
+        let Some(storage) = &self.storage else {
+            return;
+        };
+        let cleared = storage
+            .update_session(client_id, generation, |session| {
+                session.will_message = None;
+                session.will_delay_interval = None;
+            })
+            .await;
+        match cleared {
+            Ok(true) => debug!(client_id, "Removed will from stored session"),
+            Ok(false) => debug!(
+                client_id,
+                "Stored session belongs to a newer connection; left its will alone"
+            ),
+            Err(e) => warn!("Failed to clear stored will for {client_id}: {e}"),
+        }
+    }
+
+    #[must_use]
+    pub fn stored_subscription_request(
+        client_id: &str,
+        topic_filter: &str,
+        stored: &StoredSubscription,
+    ) -> SubscriptionRequest {
+        SubscriptionRequest::new(client_id.to_string(), topic_filter.to_string(), stored.qos)
+            .with_subscription_id(stored.subscription_id)
+            .with_no_local(stored.no_local)
+            .with_retain_as_published(stored.retain_as_published)
+            .with_retain_handling(stored.retain_handling)
+            .with_protocol_version(
+                ProtocolVersion::try_from(stored.protocol_version).unwrap_or_default(),
+            )
+            .with_change_only(stored.change_only)
+            .with_flow_id(stored.flow_id)
+    }
+
+    /// # Errors
+    /// Returns an error if a stored subscription carries an invalid `retain_handling`.
+    pub async fn set_client_subscriptions(
+        &self,
+        slot: &SessionSlotGuard,
+        session: Option<&ClientSession>,
+    ) -> Result<()> {
+        let client_id = slot.client_id();
+        let requests: Vec<SubscriptionRequest> = session
+            .map(|session| {
+                session
+                    .subscriptions
+                    .iter()
+                    .map(|(filter, stored)| {
+                        Self::stored_subscription_request(client_id, filter, stored)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let keep: HashSet<(String, Option<u64>)> = requests
+            .iter()
+            .map(|request| {
+                (
+                    parse_shared_subscription(&request.topic_filter)
+                        .0
+                        .to_string(),
+                    request.flow_id,
+                )
+            })
+            .collect();
+        {
+            let mut exact = self.exact_subscriptions.write().await;
+            let mut wildcard = self.wildcard_subscriptions.write().await;
+            for map in [&mut *exact, &mut *wildcard] {
+                for (filter, subs) in map.iter_mut() {
+                    subs.retain(|sub| {
+                        sub.client_id != client_id || keep.contains(&(filter.clone(), sub.flow_id))
+                    });
+                }
+                map.retain(|_, subs| !subs.is_empty());
+            }
+        }
+        for request in requests {
+            self.subscribe_as(None, request).await?;
+        }
+        Ok(())
+    }
+
+    pub async fn sweep_sessions(&self) {
+        let mut candidates: HashSet<String> = {
+            let exact = self.exact_subscriptions.read().await;
+            let wildcard = self.wildcard_subscriptions.read().await;
+            exact
+                .values()
+                .flatten()
+                .chain(wildcard.values().flatten())
+                .map(|sub| sub.client_id.clone())
+                .collect()
+        };
+        if let Some(storage) = &self.storage {
+            match storage.session_client_ids().await {
+                Ok(ids) => candidates.extend(ids),
+                Err(e) => warn!("Failed to list stored sessions for the expiry sweep: {e}"),
+            }
+        }
+        let connected: HashSet<String> = self.clients.read().await.keys().cloned().collect();
+        let mut swept = 0usize;
+        for client_id in candidates.difference(&connected) {
+            let slot = self.lock_session(client_id).await;
+            if self.sweep_session(&slot).await {
+                swept += 1;
+            }
+        }
+        self.session_slots.prune();
+        for queue in self.fallback_queues.handles() {
+            queue.purge_expired();
+        }
+        self.fallback_queues.evict_idle();
+        if swept > 0 {
+            info!("Swept {swept} expired or ownerless session(s)");
+        }
+    }
+
+    async fn sweep_session(&self, slot: &SessionSlotGuard) -> bool {
+        let client_id = slot.client_id();
+        if self.clients.read().await.contains_key(client_id) {
+            return false;
+        }
+        if let Some(storage) = &self.storage {
+            match storage.remove_expired_session(client_id).await {
+                Ok(removed) if removed => debug!(client_id, "Removed expired session"),
+                Ok(_) => {}
+                Err(e) => {
+                    warn!("Failed to remove expired session for {client_id}: {e}");
+                    return false;
+                }
+            }
+            match storage.get_session(client_id).await {
+                Ok(Some(session)) => {
+                    if session.connected {
+                        self.end_stranded_session(storage, &session).await;
+                    }
+                    return false;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    warn!("Failed to read session for {client_id} during the sweep: {e}");
+                    return false;
+                }
+            }
+        }
+        let had_subscriptions = self.subscription_count_for_client(client_id).await > 0;
+        self.remove_client_subscriptions(client_id).await;
+        self.change_only_states.write().await.remove(client_id);
+        self.queue_handle(client_id).clear(None);
+        had_subscriptions
+    }
+
+    async fn end_stranded_session(&self, storage: &DynamicStorage, session: &ClientSession) {
+        let client_id = session.client_id.as_str();
+        let disconnected_at = unix_millis_now();
+        match storage
+            .update_session(client_id, session.connection_token, |stored| {
+                stored.mark_disconnected(disconnected_at);
+            })
+            .await
+        {
+            Ok(true) => info!(
+                client_id,
+                "Ended a stored session left connected without an owner"
+            ),
+            Ok(false) => {}
+            Err(e) => warn!("Failed to end the ownerless session of {client_id}: {e}"),
+        }
+    }
+
+    /// # Errors
+    /// Returns an error if the stored sessions cannot be listed.
+    pub async fn recover_sessions(&self, maximum_expiry: u32) -> Result<usize> {
+        use futures::StreamExt;
+        let Some(storage) = &self.storage else {
+            return Ok(0);
+        };
+        let boot = unix_millis_now();
+        let recovered = futures::stream::iter(storage.session_client_ids().await?)
+            .map(|client_id| self.recover_session(storage, client_id, boot, maximum_expiry))
+            .buffer_unordered(RECOVERY_CONCURRENCY)
+            .filter(|recovered| std::future::ready(*recovered))
+            .count()
+            .await;
+        self.session_slots.prune();
+        if recovered > 0 {
+            info!("Recovered {recovered} persisted session(s)");
+        }
+        Ok(recovered)
+    }
+
+    async fn recover_session(
+        &self,
+        storage: &DynamicStorage,
+        client_id: String,
+        boot: u64,
+        maximum_expiry: u32,
+    ) -> bool {
+        let slot = self.lock_session(&client_id).await;
+        if let Err(e) = storage.remove_expired_session(&client_id).await {
+            warn!("Failed to remove expired session for {client_id}: {e}");
+            return false;
+        }
+        let mut session = match storage.get_session(&client_id).await {
+            Ok(Some(session)) => session,
+            Ok(None) => return false,
+            Err(e) => {
+                warn!("Failed to read session for {client_id} during recovery: {e}");
+                return false;
+            }
+        };
+        let stored_expiry = session.expiry_interval;
+        let capped = Some(ClientSession::granted_expiry(stored_expiry, maximum_expiry));
+        let stamp = session.disconnected_at.is_none();
+        if stamp {
+            session.mark_disconnected(boot);
+        }
+        session.expiry_interval = capped;
+        if session.expiry_interval == Some(0) || session.is_expired() {
+            if let Err(e) = storage
+                .remove_owned_session(&client_id, session.connection_token)
+                .await
+            {
+                warn!("Failed to remove ended session for {client_id}: {e}");
+            }
+            return false;
+        }
+        if stamp || capped != stored_expiry {
+            if let Err(e) = storage.store_session(session.clone()).await {
+                warn!("Failed to stamp the disconnect time of {client_id}: {e}");
+                return false;
+            }
+        }
+        if let Err(e) = self.set_client_subscriptions(&slot, Some(&session)).await {
+            warn!("Failed to restore subscriptions for {client_id}: {e}");
+            return false;
+        }
+        self.load_change_only_state(&client_id, session.change_only_state.clone())
+            .await;
+        true
     }
 
     pub async fn is_connected(&self, client_id: &str) -> bool {
@@ -608,78 +967,6 @@ impl MessageRouter {
             subs.retain(|sub| sub.client_id != client_id);
         }
         map.retain(|_, subs| !subs.is_empty());
-    }
-
-    pub async fn cleanup_stale_subscriptions(&self) {
-        for queue in self.fallback_queues.handles() {
-            queue.purge_expired();
-        }
-        self.fallback_queues.evict_idle();
-        let subscribed_ids: HashSet<String> = {
-            let exact = self.exact_subscriptions.read().await;
-            let wildcard = self.wildcard_subscriptions.read().await;
-            exact
-                .values()
-                .flatten()
-                .chain(wildcard.values().flatten())
-                .map(|sub| sub.client_id.clone())
-                .collect()
-        };
-
-        let connected: HashSet<String> = self.clients.read().await.keys().cloned().collect();
-
-        let mut stale: Vec<String> = Vec::new();
-        let storage = self.storage.as_ref();
-
-        for client_id in &subscribed_ids {
-            if connected.contains(client_id) {
-                continue;
-            }
-            let has_session = if let Some(storage) = storage {
-                matches!(storage.get_session(client_id).await, Ok(Some(s)) if !s.is_expired())
-            } else {
-                false
-            };
-            if !has_session {
-                stale.push(client_id.clone());
-            }
-        }
-
-        if stale.is_empty() {
-            return;
-        }
-
-        {
-            let mut exact = self.exact_subscriptions.write().await;
-            for subs in exact.values_mut() {
-                subs.retain(|sub| !stale.contains(&sub.client_id));
-            }
-            exact.retain(|_, subs| !subs.is_empty());
-        }
-
-        {
-            let mut wildcard = self.wildcard_subscriptions.write().await;
-            for subs in wildcard.values_mut() {
-                subs.retain(|sub| !stale.contains(&sub.client_id));
-            }
-            wildcard.retain(|_, subs| !subs.is_empty());
-        }
-
-        {
-            let mut change_only = self.change_only_states.write().await;
-            for client_id in &stale {
-                change_only.remove(client_id);
-            }
-        }
-
-        for client_id in &stale {
-            self.queue_handle(client_id).clear(None);
-        }
-
-        info!(
-            "Cleaned up stale subscriptions for {} disconnected client(s)",
-            stale.len()
-        );
     }
 
     /// Adds a subscription for a client.
@@ -1465,6 +1752,7 @@ impl Default for MessageRouter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::broker::storage::ClientSession;
     use bytes::Bytes;
 
     struct TestLanes {
@@ -1692,7 +1980,7 @@ mod tests {
             let router = Arc::clone(&router);
             tokio::spawn(async move {
                 for _ in 0..500 {
-                    router.cleanup_stale_subscriptions().await;
+                    router.sweep_sessions().await;
                     tokio::task::yield_now().await;
                 }
             })
@@ -2337,5 +2625,329 @@ mod tests {
         let routable = rx.recv_async().await.unwrap();
         assert_eq!(routable.target_flow, Some(5));
         assert!(rx.try_recv().is_err());
+    }
+
+    async fn register(router: &MessageRouter, client_id: &str, lanes: &TestLanes) -> u64 {
+        let (dtx, _drx) = tokio::sync::oneshot::channel();
+        router
+            .register_client(
+                client_id.to_string(),
+                lanes.lanes(),
+                router.queue_handle(client_id),
+                dtx,
+            )
+            .await
+            .generation
+    }
+
+    #[tokio::test]
+    async fn armed_will_is_claimed_exactly_once() {
+        let router = MessageRouter::new();
+        let lanes = TestLanes::new(10);
+        let generation = register(&router, "w1", &lanes).await;
+
+        let cancelled = router.arm_will("w1", generation).await;
+        assert!(cancelled.is_some());
+        router.release_client("w1", generation, true).await;
+
+        assert!(router.claim_will("w1", generation).await);
+        assert!(!router.claim_will("w1", generation).await);
+        assert!(router.pending_wills.lock().is_empty());
+    }
+
+    #[tokio::test]
+    async fn new_connection_cancels_armed_will() {
+        let router = MessageRouter::new();
+        let lanes = TestLanes::new(10);
+        let generation = register(&router, "w2", &lanes).await;
+        let cancelled = router
+            .arm_will("w2", generation)
+            .await
+            .expect("owner can arm its will");
+        router.release_client("w2", generation, true).await;
+
+        register(&router, "w2", &lanes).await;
+
+        let woken = tokio::time::timeout(Duration::from_secs(5), cancelled).await;
+        assert!(
+            matches!(woken, Ok(Ok(()))),
+            "the timer is woken by the cancel"
+        );
+        assert!(!router.claim_will("w2", generation).await);
+        assert!(router.pending_wills.lock().is_empty());
+    }
+
+    #[tokio::test]
+    async fn claim_rejects_a_will_armed_by_an_older_connection() {
+        let router = MessageRouter::new();
+        let lanes = TestLanes::new(10);
+        let first = register(&router, "w5", &lanes).await;
+        let first_armed = router.arm_will("w5", first).await;
+        assert!(first_armed.is_some());
+        router.release_client("w5", first, true).await;
+
+        let second = register(&router, "w5", &lanes).await;
+        router.release_client("w5", second, true).await;
+        let second_armed = router.arm_will("w5", second).await;
+        assert!(second_armed.is_none(), "a released connection cannot arm");
+
+        let third = register(&router, "w5", &lanes).await;
+        let third_armed = router.arm_will("w5", third).await;
+        assert!(third_armed.is_some());
+        router.release_client("w5", third, true).await;
+
+        assert!(
+            !router.claim_will("w5", first).await,
+            "the first connection's will was cancelled; its timer must not claim the newer will"
+        );
+        assert!(router.claim_will("w5", third).await);
+        assert!(router.pending_wills.lock().is_empty());
+    }
+
+    #[tokio::test]
+    async fn displaced_connection_cannot_arm_will() {
+        let router = MessageRouter::new();
+        let lanes = TestLanes::new(10);
+        let displaced = register(&router, "w3", &lanes).await;
+        register(&router, "w3", &lanes).await;
+
+        assert!(router.arm_will("w3", displaced).await.is_none());
+        assert!(router.pending_wills.lock().is_empty());
+    }
+
+    fn session_with_will(client_id: &str, connection_token: u64) -> ClientSession {
+        let will = crate::types::WillMessage::new(format!("will/{client_id}"), "offline");
+        let mut session = ClientSession::new_with_will(client_id, true, Some(60), Some(will));
+        session.connection_token = connection_token;
+        session
+    }
+
+    #[tokio::test]
+    async fn claimed_will_is_removed_from_stored_session() {
+        let storage = Arc::new(DynamicStorage::Memory(
+            crate::broker::storage::MemoryBackend::new(),
+        ));
+        let router = MessageRouter::with_storage(Arc::clone(&storage));
+        let lanes = TestLanes::new(10);
+        let generation = register(&router, "w4", &lanes).await;
+        storage
+            .store_session(session_with_will("w4", generation))
+            .await
+            .unwrap();
+        let armed = router.arm_will("w4", generation).await;
+        assert!(armed.is_some());
+        router.release_client("w4", generation, true).await;
+
+        assert!(router.claim_will("w4", generation).await);
+
+        let stored = storage.get_session("w4").await.unwrap().unwrap();
+        assert!(stored.will_message.is_none());
+        assert!(stored.will_delay_interval.is_none());
+    }
+
+    #[tokio::test]
+    async fn claimed_will_leaves_a_newer_stored_session_alone() {
+        let storage = Arc::new(DynamicStorage::Memory(
+            crate::broker::storage::MemoryBackend::new(),
+        ));
+        let router = MessageRouter::with_storage(Arc::clone(&storage));
+        let lanes = TestLanes::new(10);
+        let generation = register(&router, "w6", &lanes).await;
+        storage
+            .store_session(session_with_will("w6", generation))
+            .await
+            .unwrap();
+        let armed = router.arm_will("w6", generation).await;
+        assert!(armed.is_some());
+        router.release_client("w6", generation, true).await;
+
+        let successor = register(&router, "w6", &lanes).await;
+        storage
+            .store_session(session_with_will("w6", successor))
+            .await
+            .unwrap();
+
+        assert!(!router.claim_will("w6", generation).await);
+
+        let stored = storage.get_session("w6").await.unwrap().unwrap();
+        assert_eq!(stored.connection_token, successor);
+        assert!(
+            stored.will_message.is_some(),
+            "the successor's freshly stored will must survive"
+        );
+    }
+
+    #[tokio::test]
+    async fn generations_start_above_every_earlier_run() {
+        let earlier = MessageRouter::new();
+        let lanes = TestLanes::new(10);
+        let earlier_generation = register(&earlier, "epoch", &lanes).await;
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        let later = MessageRouter::new();
+        let later_generation = register(&later, "epoch", &lanes).await;
+        assert!(
+            later_generation > earlier_generation,
+            "a restarted router must never hand out a generation a previous run used"
+        );
+    }
+
+    #[tokio::test]
+    async fn release_of_a_missing_entry_is_not_owned() {
+        let router = MessageRouter::new();
+        assert!(matches!(
+            router.release_client("absent", 1, false).await,
+            Release::Displaced
+        ));
+    }
+
+    #[tokio::test]
+    async fn sweep_leaves_a_client_id_claimed_while_it_waited_for_the_slot() {
+        let router = Arc::new(MessageRouter::new());
+        router
+            .subscribe(SubscriptionRequest::new(
+                "late-owner",
+                "late/t",
+                QoS::AtMostOnce,
+            ))
+            .await
+            .unwrap();
+        let slot = router.lock_session("late-owner").await;
+        let sweeping = tokio::spawn({
+            let router = Arc::clone(&router);
+            async move { router.sweep_sessions().await }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let lanes = TestLanes::new(10);
+        register(&router, "late-owner", &lanes).await;
+        drop(slot);
+        sweeping.await.unwrap();
+        assert!(
+            router.has_subscription("late-owner", "late/t").await,
+            "the sweep stripped the routes of a connection that claimed the ClientID while the sweep waited"
+        );
+    }
+
+    #[tokio::test]
+    async fn exact_subscription_set_replaces_rather_than_unions() {
+        let router = MessageRouter::new();
+        let rx = TestLanes::new(10);
+        let (dtx, _drx) = tokio::sync::oneshot::channel();
+        router
+            .register_client(
+                "exact".to_string(),
+                rx.lanes(),
+                router.queue_handle("exact"),
+                dtx,
+            )
+            .await;
+        router
+            .subscribe(SubscriptionRequest::new(
+                "exact",
+                "old/topic",
+                QoS::AtMostOnce,
+            ))
+            .await
+            .unwrap();
+        let mut session = ClientSession::new("exact", true, Some(60));
+        session.add_subscription(
+            "new/topic",
+            StoredSubscription {
+                qos: QoS::AtLeastOnce,
+                no_local: false,
+                retain_as_published: false,
+                retain_handling: 0,
+                subscription_id: None,
+                protocol_version: 5,
+                change_only: false,
+                flow_id: None,
+            },
+        );
+        let slot = router.lock_session("exact").await;
+        router
+            .set_client_subscriptions(&slot, Some(&session))
+            .await
+            .unwrap();
+        drop(slot);
+        assert!(!router.has_subscription("exact", "old/topic").await);
+        assert!(router.has_subscription("exact", "new/topic").await);
+
+        let slot = router.lock_session("exact").await;
+        router.set_client_subscriptions(&slot, None).await.unwrap();
+        drop(slot);
+        assert_eq!(router.subscription_count_for_client("exact").await, 0);
+        assert_eq!(router.session_slot_count(), 0);
+    }
+
+    fn ended_session(client_id: &str, expiry: u32, ended_ago_ms: u64) -> ClientSession {
+        let mut session = ClientSession::new(client_id, true, Some(expiry));
+        session.add_subscription(
+            format!("{client_id}/t"),
+            crate::broker::storage::StoredSubscription::new(QoS::AtLeastOnce),
+        );
+        session.mark_disconnected(unix_millis_now() - ended_ago_ms);
+        session
+    }
+
+    #[tokio::test]
+    async fn session_expired_by_the_capped_expiry_is_not_routed_after_recovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(DynamicStorage::File(
+            crate::broker::storage::FileBackend::new(dir.path())
+                .await
+                .unwrap(),
+        ));
+        storage
+            .store_session(ended_session("stale", 3600, 120_000))
+            .await
+            .unwrap();
+        let router = MessageRouter::with_storage(Arc::clone(&storage));
+        router.recover_sessions(60).await.unwrap();
+        assert_eq!(
+            router.subscription_count_for_client("stale").await,
+            0,
+            "a session that ended 120s ago outlived the 60s maximum, yet its routes were rebuilt"
+        );
+        assert!(storage.session_client_ids().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn capped_expiry_of_an_ended_session_is_stored_at_recovery() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let storage = Arc::new(DynamicStorage::File(
+                crate::broker::storage::FileBackend::new(dir.path())
+                    .await
+                    .unwrap(),
+            ));
+            storage
+                .store_session(ended_session("idle", 3600, 10_000))
+                .await
+                .unwrap();
+            let router = MessageRouter::with_storage(Arc::clone(&storage));
+            router.recover_sessions(60).await.unwrap();
+            assert_eq!(router.subscription_count_for_client("idle").await, 1);
+            assert_eq!(
+                storage
+                    .get_session("idle")
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .expiry_interval,
+                Some(60)
+            );
+        }
+        let reopened = crate::broker::storage::FileBackend::new(dir.path())
+            .await
+            .unwrap();
+        assert_eq!(
+            reopened
+                .get_session("idle")
+                .await
+                .unwrap()
+                .unwrap()
+                .expiry_interval,
+            Some(60),
+            "the capped expiry must be stored, not only applied in memory"
+        );
     }
 }

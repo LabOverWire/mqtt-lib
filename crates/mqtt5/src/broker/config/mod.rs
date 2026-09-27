@@ -78,6 +78,7 @@ pub struct BrokerConfig {
     pub bind_addresses: Vec<SocketAddr>,
     pub max_clients: usize,
     #[cfg_attr(not(target_arch = "wasm32"), serde(with = "humantime_serde"))]
+    #[serde(skip_serializing_if = "is_unlimited_session_expiry")]
     pub session_expiry_interval: Duration,
     pub max_packet_size: usize,
     pub topic_alias_maximum: u16,
@@ -213,7 +214,7 @@ impl Default for BrokerConfig {
                 "[::]:1883".parse().unwrap(),
             ],
             max_clients: 10000,
-            session_expiry_interval: Duration::from_secs(3600),
+            session_expiry_interval: Duration::from_secs(u64::from(u32::MAX)),
             max_packet_size: 268_435_456,
             topic_alias_maximum: 65535,
             retain_available: true,
@@ -494,6 +495,10 @@ impl BrokerConfig {
 
         Ok(self)
     }
+}
+
+fn is_unlimited_session_expiry(interval: &Duration) -> bool {
+    *interval >= Duration::from_secs(u64::from(u32::MAX))
 }
 
 #[cfg(test)]

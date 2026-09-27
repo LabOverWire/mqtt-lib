@@ -9,10 +9,11 @@ use crate::broker::config::BrokerConfig;
 use crate::broker::events::{ClientConnectEvent, ClientDisconnectEvent};
 use crate::broker::resource_monitor::ResourceMonitor;
 use crate::broker::router::{
-    DeliveryLanes, MessageRouter, Release, RoutableMessage, TakeoverNotice, ROUTE_BUDGET_MAX,
+    MessageRouter, Release, RoutableMessage, TakeoverNotice, ROUTE_BUDGET_MAX,
 };
 use crate::broker::storage::{
-    ClientSession, DynamicStorage, InflightDirection, QueueHandle, QueuedMessage, StorageBackend,
+    unix_millis_now, ClientSession, DynamicStorage, InflightDirection, QueueHandle, QueuedMessage,
+    StorageBackend,
 };
 use crate::broker::sys_topics::BrokerStats;
 use crate::broker::transport::BrokerTransport;
@@ -36,7 +37,7 @@ use tokio::time::{interval, timeout, timeout_at, Instant, Interval};
 use tracing::{debug, info, warn};
 
 /// Longest a new connection waits for the handler it displaced to hand the session over.
-const HANDOFF_BOUND: Duration = Duration::from_secs(30);
+pub(super) const HANDOFF_BOUND: Duration = Duration::from_secs(30);
 
 /// Why the packet loop returned.
 #[derive(Debug)]
@@ -96,7 +97,9 @@ pub struct ClientHandler {
     pub(super) window: u16,
     pub(super) generation: u64,
     pub(super) bound: bool,
+    pub(super) counted_as_connected: bool,
     pub(super) released_rx: Option<oneshot::Receiver<()>>,
+    pub(super) disconnect_rx: Option<oneshot::Receiver<TakeoverNotice>>,
     pub(super) handoff_deadline: Option<Instant>,
     pub(super) handoff_waived: bool,
     pub(super) handoff_baseline: usize,
@@ -106,14 +109,18 @@ pub struct ClientHandler {
     pub(super) inflight_order: VecDeque<u16>,
     pub(super) inflight_publishes: HashMap<u16, InflightPublish>,
     pub(super) session: Option<ClientSession>,
+    pub(super) connect_session_expiry: Option<u32>,
+    pub(super) advertised_session_expiry: Option<u32>,
     pub(super) next_packet_id: u16,
     pub(super) normal_disconnect: bool,
     pub(super) disconnect_reason: Option<ReasonCode>,
     pub(super) request_problem_information: bool,
     pub(super) request_response_information: bool,
     pub(super) auth_method: Option<String>,
+    pub(super) connack_auth_data: Option<Vec<u8>>,
     pub(super) auth_state: AuthState,
     pub(super) pending_connect: Option<PendingConnect>,
+    pub(super) authenticated_connect: Option<PendingConnect>,
     pub(super) topic_aliases: HashMap<u16, String>,
     pub(super) external_packet_rx: Option<mpsc::Receiver<(Packet, Option<u64>)>>,
     pub(super) pending_external_flow_id: Option<u64>,
@@ -208,7 +215,9 @@ impl ClientHandler {
             window,
             generation: 0,
             bound: false,
+            counted_as_connected: false,
             released_rx: None,
+            disconnect_rx: None,
             handoff_deadline: None,
             handoff_waived: false,
             handoff_baseline: 0,
@@ -218,14 +227,18 @@ impl ClientHandler {
             inflight_order: VecDeque::new(),
             inflight_publishes: HashMap::new(),
             session: None,
+            connect_session_expiry: None,
+            advertised_session_expiry: None,
             next_packet_id: 1,
             normal_disconnect: false,
             disconnect_reason: None,
             request_problem_information: true,
             request_response_information: false,
             auth_method: None,
+            connack_auth_data: None,
             auth_state: AuthState::NotStarted,
             pending_connect: None,
+            authenticated_connect: None,
             topic_aliases: HashMap::new(),
             external_packet_rx,
             pending_external_flow_id: None,
@@ -323,35 +336,23 @@ impl ClientHandler {
     ///
     /// Panics if `client_id` is None after successful connection
     pub async fn run(mut self) -> Result<()> {
-        let client_id = self.perform_connect_handshake().await?;
+        let handshake = self.perform_connect_handshake().await;
+        let (Some(client_id), Some(mut disconnect_rx), Some(queue)) = (
+            self.client_id.clone().filter(|_| self.generation != 0),
+            self.disconnect_rx.take(),
+            self.queue.clone(),
+        ) else {
+            return handshake.map(|_| ());
+        };
+        if let Err(e) = handshake {
+            self.abandon_claim(&client_id, &queue).await;
+            return Err(e);
+        }
 
-        let (disconnect_tx, mut disconnect_rx) = oneshot::channel();
-
-        let queue = self.router.queue_handle(&client_id);
-        self.queue = Some(Arc::clone(&queue));
         self.window = self
             .client_receive_maximum
             .min(self.config.max_outbound_inflight)
             .max(1);
-        let registration = self
-            .router
-            .register_session(
-                client_id.clone(),
-                DeliveryLanes {
-                    qos1_tx: self.qos1_tx.clone(),
-                    qos0_tx: self.qos0_tx.clone(),
-                },
-                Arc::clone(&queue),
-                disconnect_tx,
-                self.clean_start,
-            )
-            .await;
-        self.generation = registration.generation;
-        self.handoff_deadline = registration
-            .released
-            .as_ref()
-            .map(|_| Instant::now() + HANDOFF_BOUND);
-        self.released_rx = registration.released;
 
         self.fire_connect_event(&client_id).await;
 
@@ -360,55 +361,76 @@ impl ClientHandler {
             Err(e) => (Err(e), LoopExit::Closed),
         };
 
-        let taken_over = if let LoopExit::TakenOver(notice) = exit {
+        let armed_will = if let LoopExit::TakenOver(notice) = exit {
             self.hand_off(&queue, notice).await;
-            self.release_router_entry(&client_id).await;
-            true
+            self.release_ownership(&client_id, false).await;
+            None
         } else {
-            // Move this connection's unfinished deliveries back to (or off) the queue BEFORE
-            // releasing the router entry, so a reconnect that races the release still sees this
-            // entry, is handed a notice, and waits for the hand-off instead of binding onto
-            // half-torn-down state and re-delivering.
             if self.session_preserved() {
                 self.requeue_unsent(&queue).await;
             } else {
                 self.drop_unsent().await;
             }
-            match self.release_router_entry(&client_id).await {
-                Release::Owned => {
+            match self.release_ownership(&client_id, true).await {
+                (Release::Owned, armed_will) => {
                     queue.finish_drain();
                     if self.session_preserved() {
                         queue.notify();
                     } else {
                         queue.clear(None);
                     }
-                    false
+                    armed_will
                 }
-                Release::Displaced => {
-                    // A successor registered during the requeue above. Complete its hand-off
-                    // protocol: this connection's messages are already back on the queue, so
-                    // just release the successor and let its guard balance the count.
+                (Release::Displaced, armed_will) => {
                     if let Ok(notice) = disconnect_rx.try_recv() {
                         queue.finish_drain();
                         let TakeoverNotice {
                             released, guard, ..
                         } = notice;
                         drop(guard);
-                        let _ = released.send(());
+                        if released.send(()).is_err() {
+                            debug!("New session handler went away before the hand-off completed");
+                        }
                         queue.notify();
                     } else {
                         queue.finish_drain();
                     }
-                    true
+                    armed_will
                 }
             }
         };
 
-        self.handle_disconnect_cleanup(&client_id, taken_over).await;
+        self.handle_disconnect_cleanup(&client_id, armed_will).await;
 
         info!("Client {} disconnected", client_id);
 
         result
+    }
+
+    async fn abandon_claim(&mut self, client_id: &str, queue: &QueueHandle) {
+        let (release, _) = self.release_ownership(client_id, false).await;
+        if matches!(release, Release::Owned) && !self.session_preserved() {
+            queue.clear(None);
+        }
+    }
+
+    async fn release_ownership(
+        &mut self,
+        client_id: &str,
+        arm_will: bool,
+    ) -> (Release, Option<oneshot::Receiver<()>>) {
+        let slot = self.router.lock_session(client_id).await;
+        let armed_will = if arm_will {
+            self.arm_delayed_will(client_id).await
+        } else {
+            None
+        };
+        let release = self.release_router_entry(client_id).await;
+        if matches!(release, Release::Owned) {
+            self.persist_session_end(client_id).await;
+        }
+        drop(slot);
+        (release, armed_will)
     }
 
     async fn serve(
@@ -497,41 +519,47 @@ impl ClientHandler {
             "Waiting for CONNECT packet with {}s timeout",
             connect_timeout.as_secs()
         );
-        match timeout(connect_timeout, self.wait_for_connect()).await {
-            Ok(Ok(())) => {
-                let client_id = self.client_id.as_ref().unwrap().clone();
-                info!(
-                    "Client {} connected from {} ({})",
-                    client_id,
-                    self.client_addr,
-                    self.transport.transport_type()
-                );
-                if let Some(cert_info) = self.transport.client_cert_info() {
-                    debug!("Client certificate: {}", cert_info);
-                }
-
-                self.resource_monitor
-                    .register_connection(client_id.clone(), self.client_addr.ip())
-                    .await;
-
-                self.stats.client_connected();
-                Ok(client_id)
-            }
-            Ok(Err(e)) => {
-                if e.to_string().contains("Connection closed") {
-                    info!("Client disconnected during connect phase: {e}");
-                    tracing::debug!("Connection closed error details: {:?}", e);
-                } else {
-                    warn!("Connect error: {e}");
-                    tracing::debug!("Connect error details: {:?}", e);
-                }
-                Err(e)
-            }
+        let negotiated = timeout(connect_timeout, self.negotiate_connect()).await;
+        let completed = match negotiated {
+            Ok(Ok(accepted)) => self.complete_connect(accepted).await,
+            Ok(Err(e)) => Err(e),
             Err(_) => {
                 warn!("Connect timeout from {}", self.client_addr);
-                Err(MqttError::Timeout)
+                return Err(MqttError::Timeout);
             }
+        };
+        if let Err(e) = completed {
+            if e.to_string().contains("Connection closed") {
+                info!("Client disconnected during connect phase: {e}");
+                tracing::debug!("Connection closed error details: {:?}", e);
+            } else {
+                warn!("Connect error: {e}");
+                tracing::debug!("Connect error details: {:?}", e);
+            }
+            return Err(e);
         }
+        let Some(client_id) = self.client_id.clone() else {
+            return Err(MqttError::ProtocolError(
+                "CONNECT completed without a client identifier".to_string(),
+            ));
+        };
+        info!(
+            "Client {} connected from {} ({})",
+            client_id,
+            self.client_addr,
+            self.transport.transport_type()
+        );
+        if let Some(cert_info) = self.transport.client_cert_info() {
+            debug!("Client certificate: {}", cert_info);
+        }
+
+        self.resource_monitor
+            .register_connection(client_id.clone(), self.client_addr.ip())
+            .await;
+
+        self.stats.client_connected();
+        self.counted_as_connected = true;
+        Ok(client_id)
     }
 
     async fn fire_connect_event(&self, client_id: &str) {
@@ -567,7 +595,22 @@ impl ClientHandler {
         }
     }
 
-    async fn handle_disconnect_cleanup(&mut self, client_id: &str, session_taken_over: bool) {
+    async fn arm_delayed_will(&self, client_id: &str) -> Option<oneshot::Receiver<()>> {
+        if self.normal_disconnect {
+            return None;
+        }
+        let delay = self.session.as_ref()?.will_publish_delay()?;
+        if delay == 0 {
+            return None;
+        }
+        self.router.arm_will(client_id, self.generation).await
+    }
+
+    async fn handle_disconnect_cleanup(
+        &mut self,
+        client_id: &str,
+        armed_will: Option<oneshot::Receiver<()>>,
+    ) {
         #[cfg(feature = "opentelemetry")]
         {
             use tracing::Instrument;
@@ -575,23 +618,23 @@ impl ClientHandler {
                 "mqtt.disconnect",
                 mqtt.client_id = %client_id,
             );
-            self.handle_disconnect_cleanup_inner(client_id, session_taken_over)
+            self.handle_disconnect_cleanup_inner(client_id, armed_will)
                 .instrument(span)
                 .await;
         }
         #[cfg(not(feature = "opentelemetry"))]
-        self.handle_disconnect_cleanup_inner(client_id, session_taken_over)
+        self.handle_disconnect_cleanup_inner(client_id, armed_will)
             .await;
     }
 
-    async fn handle_disconnect_cleanup_inner(&mut self, client_id: &str, session_taken_over: bool) {
+    async fn handle_disconnect_cleanup_inner(
+        &mut self,
+        client_id: &str,
+        armed_will: Option<oneshot::Receiver<()>>,
+    ) {
         self.resource_monitor
             .unregister_connection(client_id, self.client_addr.ip())
             .await;
-
-        if !session_taken_over {
-            self.cleanup_session_storage(client_id).await;
-        }
 
         if let Some(ref user_id) = self.user_id {
             self.auth_provider.cleanup_session(user_id).await;
@@ -608,16 +651,18 @@ impl ClientHandler {
                             mqtt.client_id = %client_id,
                             mqtt.topic = %will.topic,
                         );
-                        self.publish_will_message(client_id).instrument(span).await;
+                        self.publish_will_message(client_id, armed_will)
+                            .instrument(span)
+                            .await;
                     } else {
-                        self.publish_will_message(client_id).await;
+                        self.publish_will_message(client_id, armed_will).await;
                     }
                 } else {
-                    self.publish_will_message(client_id).await;
+                    self.publish_will_message(client_id, armed_will).await;
                 }
             }
             #[cfg(not(feature = "opentelemetry"))]
-            self.publish_will_message(client_id).await;
+            self.publish_will_message(client_id, armed_will).await;
         }
 
         self.fire_disconnect_event(client_id).await;
@@ -638,36 +683,44 @@ impl ClientHandler {
         release
     }
 
-    async fn cleanup_session_storage(&self, client_id: &str) {
-        if let Some(ref storage) = self.storage {
-            if let Some(ref session) = self.session {
-                match storage.get_session(client_id).await {
-                    Ok(Some(mut stored_session)) => {
-                        stored_session.touch();
-                        if let Err(e) = storage.store_session(stored_session).await {
-                            warn!("Failed to store session for {client_id}: {e}");
-                        }
-                    }
-                    Ok(None) => {}
-                    Err(e) => {
-                        warn!("Failed to get session for {client_id}: {e}");
-                    }
-                }
-
-                if session.expiry_interval == Some(0) {
-                    if let Err(e) = storage.remove_session(client_id).await {
-                        warn!("Failed to remove session for {client_id}: {e}");
-                    }
+    async fn persist_session_end(&self, client_id: &str) {
+        let (Some(storage), Some(session)) = (self.storage.as_ref(), self.session.as_ref()) else {
+            return;
+        };
+        if session.expiry_interval == Some(0) {
+            match storage
+                .remove_owned_session(client_id, self.generation)
+                .await
+            {
+                Ok(true) => {
                     storage.queue_handle(client_id).clear(None);
                     if let Err(e) = storage.remove_all_inflight_messages(client_id).await {
                         warn!("Failed to remove inflight messages for {client_id}: {e}");
                     }
-                    debug!(
-                        "Removed session, queued, and inflight messages for client {}",
-                        client_id
-                    );
+                    debug!(client_id, "Removed session, queued, and inflight messages");
                 }
+                Ok(false) => debug!(client_id, "Stored session is not this connection's"),
+                Err(e) => warn!("Failed to remove session for {client_id}: {e}"),
             }
+            return;
+        }
+        let expiry_interval = session.expiry_interval;
+        let discard_will = self.normal_disconnect;
+        let disconnected_at = unix_millis_now();
+        let updated = storage
+            .update_session(client_id, self.generation, |stored| {
+                stored.mark_disconnected(disconnected_at);
+                stored.expiry_interval = expiry_interval;
+                if discard_will {
+                    stored.will_message = None;
+                    stored.will_delay_interval = None;
+                }
+            })
+            .await;
+        match updated {
+            Ok(true) => {}
+            Ok(false) => debug!(client_id, "Stored session is not this connection's"),
+            Err(e) => warn!("Failed to update session for {client_id}: {e}"),
         }
     }
 
@@ -742,31 +795,50 @@ impl ClientHandler {
         }
     }
 
-    async fn wait_for_connect(&mut self) -> Result<()> {
+    async fn negotiate_connect(&mut self) -> Result<PendingConnect> {
         let max_size = self.max_packet_size();
         let packet =
             read_packet_reusing_buffer(&mut self.transport, 5, &mut self.read_buffer, max_size)
                 .await?;
-
-        match packet {
-            Packet::Connect(connect) => {
-                #[cfg(feature = "opentelemetry")]
-                {
-                    use tracing::Instrument;
-                    let span = tracing::info_span!(
-                        "mqtt.connect",
-                        mqtt.client_id = %connect.client_id,
-                        mqtt.clean_start = connect.clean_start,
-                        mqtt.protocol_version = connect.protocol_version,
-                    );
-                    self.handle_connect(*connect).instrument(span).await
-                }
-                #[cfg(not(feature = "opentelemetry"))]
-                self.handle_connect(*connect).await
-            }
-            _ => Err(MqttError::ProtocolError(
+        let Packet::Connect(connect) = packet else {
+            return Err(MqttError::ProtocolError(
                 "Expected CONNECT packet".to_string(),
-            )),
+            ));
+        };
+        #[cfg(feature = "opentelemetry")]
+        let accepted = {
+            use tracing::Instrument;
+            let span = tracing::info_span!(
+                "mqtt.connect",
+                mqtt.client_id = %connect.client_id,
+                mqtt.clean_start = connect.clean_start,
+                mqtt.protocol_version = connect.protocol_version,
+            );
+            self.handle_connect(*connect).instrument(span).await?
+        };
+        #[cfg(not(feature = "opentelemetry"))]
+        let accepted = self.handle_connect(*connect).await?;
+        if let Some(accepted) = accepted {
+            return Ok(accepted);
+        }
+        loop {
+            let max_size = self.max_packet_size();
+            let packet = read_packet_reusing_buffer(
+                &mut self.transport,
+                self.protocol_version,
+                &mut self.read_buffer,
+                max_size,
+            )
+            .await?;
+            let Packet::Auth(auth) = packet else {
+                return Err(MqttError::ProtocolError(
+                    "Only AUTH may follow CONNECT before CONNACK".to_string(),
+                ));
+            };
+            self.handle_auth(auth).await?;
+            if let Some(accepted) = self.authenticated_connect.take() {
+                return Ok(accepted);
+            }
         }
     }
 
@@ -1280,7 +1352,7 @@ impl ClientHandler {
                 Ok(())
             }
             Packet::PingReq => self.handle_pingreq().await,
-            Packet::Disconnect(disconnect) => self.handle_disconnect(&disconnect),
+            Packet::Disconnect(disconnect) => self.handle_disconnect(&disconnect).await,
             Packet::Auth(auth) => self.handle_auth(auth).await,
             _ => {
                 warn!("Unexpected packet type");
@@ -1292,8 +1364,8 @@ impl ClientHandler {
 
 impl Drop for ClientHandler {
     fn drop(&mut self) {
-        if let Some(ref client_id) = self.client_id {
-            debug!("Client handler dropped for {}", client_id);
+        if self.counted_as_connected {
+            debug!(client_id = ?self.client_id, "Client handler dropped");
             self.stats.client_disconnected();
         }
     }

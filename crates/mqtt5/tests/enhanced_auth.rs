@@ -5,9 +5,13 @@ use mqtt5::broker::{BrokerConfig, MqttBroker};
 use mqtt5::client::{AuthHandler, AuthResponse};
 use mqtt5::error::{MqttError, Result};
 use mqtt5::packet::auth::AuthPacket;
+use mqtt5::packet::connack::ConnAckPacket;
 use mqtt5::packet::connect::ConnectPacket;
-use mqtt5::packet::MqttPacket;
+use mqtt5::packet::publish::PublishPacket;
+use mqtt5::packet::subscribe::SubscribePacket;
+use mqtt5::packet::{MqttPacket, Packet};
 use mqtt5::protocol::v5::reason_codes::ReasonCode;
+use mqtt5::transport::packet_io::read_packet_from_stream;
 use mqtt5::types::ConnectOptions;
 use mqtt5::MqttClient;
 use std::future::Future;
@@ -234,6 +238,7 @@ async fn test_auth_packet_large_data() {
 struct TestChallengeResponseAuthProvider {
     challenge: Vec<u8>,
     expected_response: Vec<u8>,
+    server_final: Option<Vec<u8>>,
 }
 
 impl AuthProvider for TestChallengeResponseAuthProvider {
@@ -276,6 +281,7 @@ impl AuthProvider for TestChallengeResponseAuthProvider {
         let method = auth_method.to_string();
         let challenge = self.challenge.clone();
         let expected = self.expected_response.clone();
+        let server_final = self.server_final.clone();
 
         Box::pin(async move {
             if method != "CHALLENGE-RESPONSE" {
@@ -287,7 +293,11 @@ impl AuthProvider for TestChallengeResponseAuthProvider {
 
             match auth_data {
                 None => Ok(EnhancedAuthResult::continue_auth(method, Some(challenge))),
-                Some(response) if response == expected => Ok(EnhancedAuthResult::success(method)),
+                Some(response) if response == expected => {
+                    let mut success = EnhancedAuthResult::success(method);
+                    success.auth_data = server_final;
+                    Ok(success)
+                }
                 Some(_) => Ok(EnhancedAuthResult::fail(method, ReasonCode::NotAuthorized)),
             }
         })
@@ -336,6 +346,7 @@ async fn test_client_enhanced_auth_success() {
     let auth_provider = Arc::new(TestChallengeResponseAuthProvider {
         challenge: challenge.clone(),
         expected_response: response.clone(),
+        server_final: None,
     });
 
     let mut broker = MqttBroker::with_config(test_broker_config())
@@ -381,6 +392,7 @@ async fn test_client_enhanced_auth_failure() {
     let auth_provider = Arc::new(TestChallengeResponseAuthProvider {
         challenge: challenge.clone(),
         expected_response: correct_response,
+        server_final: None,
     });
 
     let mut broker = MqttBroker::with_config(test_broker_config())
@@ -419,6 +431,7 @@ async fn test_client_enhanced_auth_no_handler() {
     let auth_provider = Arc::new(TestChallengeResponseAuthProvider {
         challenge: b"challenge".to_vec(),
         expected_response: b"response".to_vec(),
+        server_final: None,
     });
 
     let mut broker = MqttBroker::with_config(test_broker_config())
@@ -446,4 +459,260 @@ async fn test_client_enhanced_auth_no_handler() {
     }
 
     broker_handle.abort();
+}
+
+struct Wire {
+    stream: tokio::net::TcpStream,
+    buffer: bytes::BytesMut,
+}
+
+impl Wire {
+    async fn open(addr: SocketAddr) -> Self {
+        Self {
+            stream: tokio::net::TcpStream::connect(addr).await.unwrap(),
+            buffer: bytes::BytesMut::new(),
+        }
+    }
+
+    async fn send(&mut self, packet: &impl MqttPacket) {
+        use tokio::io::AsyncWriteExt;
+        let mut bytes = Vec::new();
+        packet.encode(&mut bytes).unwrap();
+        self.stream.write_all(&bytes).await.unwrap();
+    }
+
+    async fn next(&mut self, millis: u64) -> Option<Packet> {
+        tokio::time::timeout(
+            Duration::from_millis(millis),
+            read_packet_from_stream(&mut self.stream, 5, &mut self.buffer, 1 << 20),
+        )
+        .await
+        .ok()?
+        .ok()
+    }
+}
+
+const METHOD: &str = "CHALLENGE-RESPONSE";
+const CHALLENGE: &[u8] = b"server-challenge-xyz";
+const RESPONSE: &[u8] = b"client-response-abc";
+const SERVER_FINAL: &[u8] = b"server-final-signature";
+
+async fn start_challenge_broker(config: BrokerConfig) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+    let auth_provider = Arc::new(TestChallengeResponseAuthProvider {
+        challenge: CHALLENGE.to_vec(),
+        expected_response: RESPONSE.to_vec(),
+        server_final: Some(SERVER_FINAL.to_vec()),
+    });
+    let mut broker = MqttBroker::with_config(config)
+        .await
+        .unwrap()
+        .with_auth_provider(auth_provider);
+    let addr = broker.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        if let Err(e) = broker.run().await {
+            tracing::debug!("broker stopped: {e}");
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    (addr, handle)
+}
+
+async fn two_step_exchange(
+    addr: SocketAddr,
+    options: ConnectOptions,
+    response: &[u8],
+) -> (Wire, Option<Packet>) {
+    let mut wire = Wire::open(addr).await;
+    wire.send(&ConnectPacket::new(
+        options.with_authentication_method(METHOD).protocol_options,
+    ))
+    .await;
+    match wire.next(5000).await {
+        Some(Packet::Auth(auth)) => {
+            assert_eq!(auth.reason_code, ReasonCode::ContinueAuthentication);
+            assert_eq!(auth.authentication_data(), Some(CHALLENGE));
+        }
+        other => panic!("expected AUTH continue, got {other:?}"),
+    }
+    wire.send(
+        &AuthPacket::continue_authentication(METHOD.to_string(), Some(response.to_vec())).unwrap(),
+    )
+    .await;
+    let reply = wire.next(5000).await;
+    (wire, reply)
+}
+
+async fn two_step_connect(addr: SocketAddr, options: ConnectOptions) -> (Wire, ConnAckPacket) {
+    match two_step_exchange(addr, options, RESPONSE).await {
+        (wire, Some(Packet::ConnAck(connack))) => (wire, connack),
+        (_, other) => panic!("expected CONNACK, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn enhanced_auth_connack_advertises_capped_session_expiry() {
+    let (addr, handle) =
+        start_challenge_broker(test_broker_config().with_session_expiry(Duration::from_secs(10)))
+            .await;
+    let (_wire, connack) = two_step_connect(
+        addr,
+        ConnectOptions::new("capped-enhanced").with_session_expiry_interval(3600),
+    )
+    .await;
+    handle.abort();
+    assert_eq!(connack.reason_code, ReasonCode::Success);
+    assert_eq!(
+        connack.properties.get_session_expiry_interval(),
+        Some(10),
+        "the broker granted its 10s maximum instead of the requested 3600s, so CONNACK must say so"
+    );
+}
+
+#[tokio::test]
+async fn two_step_enhanced_auth_rejects_an_unsupported_will_qos() {
+    let (addr, handle) = start_challenge_broker(test_broker_config().with_maximum_qos(1)).await;
+    let will = mqtt5::types::WillMessage::new("will/t", b"gone".to_vec())
+        .with_qos(mqtt5::QoS::ExactlyOnce);
+    let (_wire, connack) =
+        two_step_connect(addr, ConnectOptions::new("will-qos").with_will(will)).await;
+    handle.abort();
+    assert_eq!(
+        connack.reason_code,
+        ReasonCode::QoSNotSupported,
+        "the Will QoS check must apply after multi-step authentication too"
+    );
+}
+
+#[tokio::test]
+async fn two_step_enhanced_auth_honours_the_client_receive_maximum() {
+    let (addr, handle) = start_challenge_broker(test_broker_config()).await;
+    let (mut subscriber, connack) =
+        two_step_connect(addr, ConnectOptions::new("rm-one").with_receive_maximum(1)).await;
+    assert_eq!(connack.reason_code, ReasonCode::Success);
+    subscriber
+        .send(&SubscribePacket::new(1).add_filter("rm/t", mqtt5::QoS::AtLeastOnce))
+        .await;
+    assert!(matches!(
+        subscriber.next(5000).await,
+        Some(Packet::SubAck(_))
+    ));
+
+    let mut publisher = Wire::open(addr).await;
+    publisher
+        .send(&ConnectPacket::new(
+            ConnectOptions::new("rm-pub").protocol_options,
+        ))
+        .await;
+    assert!(matches!(
+        publisher.next(5000).await,
+        Some(Packet::ConnAck(_))
+    ));
+    for packet_id in 1..=3u16 {
+        let mut publish =
+            PublishPacket::new("rm/t".to_string(), b"hi".to_vec(), mqtt5::QoS::AtLeastOnce);
+        publish.packet_id = Some(packet_id);
+        publisher.send(&publish).await;
+    }
+    let mut delivered = 0;
+    while let Some(packet) = subscriber.next(1000).await {
+        if matches!(packet, Packet::Publish(_)) {
+            delivered += 1;
+        }
+    }
+    handle.abort();
+    assert_eq!(
+        delivered, 1,
+        "Receive Maximum 1 allows one unacknowledged QoS 1 PUBLISH, yet {delivered} were sent"
+    );
+}
+
+#[tokio::test]
+async fn two_step_enhanced_auth_success_returns_method_and_server_data_in_connack() {
+    let (addr, handle) = start_challenge_broker(test_broker_config()).await;
+    let (_wire, connack) = two_step_connect(addr, ConnectOptions::new("server-final")).await;
+    handle.abort();
+    assert_eq!(connack.reason_code, ReasonCode::Success);
+    assert_eq!(
+        connack
+            .properties
+            .get_authentication_method()
+            .map(String::as_str),
+        Some(METHOD),
+        "CONNACK after enhanced authentication must carry the Authentication Method"
+    );
+    assert_eq!(
+        connack.properties.get_authentication_data(),
+        Some(SERVER_FINAL),
+        "the server's final authentication data never reached the client"
+    );
+}
+
+#[tokio::test]
+async fn failed_two_step_enhanced_auth_is_refused_by_connack() {
+    let (addr, handle) = start_challenge_broker(test_broker_config()).await;
+    let (mut wire, reply) =
+        two_step_exchange(addr, ConnectOptions::new("wrong-proof"), b"wrong").await;
+    let closed = wire.next(2000).await.is_none();
+    handle.abort();
+    match reply {
+        Some(Packet::ConnAck(connack)) => {
+            assert_eq!(connack.reason_code, ReasonCode::NotAuthorized);
+        }
+        other => {
+            panic!("a failed authentication must be answered with CONNACK 0x87, got {other:?}")
+        }
+    }
+    assert!(closed);
+}
+
+async fn reauthenticate(wire: &mut Wire, response: &[u8]) -> Option<Packet> {
+    wire.send(&AuthPacket::re_authenticate(METHOD.to_string(), None).unwrap())
+        .await;
+    match wire.next(5000).await {
+        Some(Packet::Auth(auth)) => {
+            assert_eq!(auth.reason_code, ReasonCode::ContinueAuthentication);
+        }
+        other => panic!("expected AUTH continue, got {other:?}"),
+    }
+    wire.send(
+        &AuthPacket::continue_authentication(METHOD.to_string(), Some(response.to_vec())).unwrap(),
+    )
+    .await;
+    wire.next(5000).await
+}
+
+#[tokio::test]
+async fn reauthentication_success_returns_the_server_data() {
+    let (addr, handle) = start_challenge_broker(test_broker_config()).await;
+    let (mut wire, connack) = two_step_connect(addr, ConnectOptions::new("reauth-ok")).await;
+    assert_eq!(connack.reason_code, ReasonCode::Success);
+    let reply = reauthenticate(&mut wire, RESPONSE).await;
+    handle.abort();
+    match reply {
+        Some(Packet::Auth(auth)) => {
+            assert_eq!(auth.reason_code, ReasonCode::Success);
+            assert_eq!(auth.authentication_method(), Some(METHOD));
+            assert_eq!(auth.authentication_data(), Some(SERVER_FINAL));
+        }
+        other => panic!("expected AUTH success, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn failed_reauthentication_is_refused_by_disconnect() {
+    let (addr, handle) = start_challenge_broker(test_broker_config()).await;
+    let (mut wire, connack) = two_step_connect(addr, ConnectOptions::new("reauth-bad")).await;
+    assert_eq!(connack.reason_code, ReasonCode::Success);
+    let reply = reauthenticate(&mut wire, b"wrong").await;
+    handle.abort();
+    match reply {
+        Some(Packet::Disconnect(disconnect)) => {
+            assert_eq!(disconnect.reason_code, ReasonCode::NotAuthorized);
+        }
+        other => {
+            panic!(
+                "a failed re-authentication must be answered with DISCONNECT 0x87, got {other:?}"
+            )
+        }
+    }
 }

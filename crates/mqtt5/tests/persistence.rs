@@ -9,6 +9,8 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use tokio::time::sleep;
 
+const SESSION_EXPIRY: u32 = 300;
+
 #[tokio::test]
 async fn test_clean_start_true() {
     let broker = TestBroker::start().await;
@@ -54,7 +56,11 @@ async fn test_clean_start_false() {
 
     let client_id = "persist-test-1";
 
-    let client1 = MqttClient::with_options(ConnectOptions::new(client_id).with_clean_start(true));
+    let client1 = MqttClient::with_options(
+        ConnectOptions::new(client_id)
+            .with_clean_start(true)
+            .with_session_expiry_interval(SESSION_EXPIRY),
+    );
     client1.connect(broker.address()).await.unwrap();
 
     client1.subscribe("test/persist/1", |_| {}).await.unwrap();
@@ -65,6 +71,7 @@ async fn test_clean_start_false() {
     let client2 = MqttClient::with_options(
         ConnectOptions::new(client_id)
             .with_clean_start(false)
+            .with_session_expiry_interval(SESSION_EXPIRY)
             .with_resume_existing_session(true),
     );
 
@@ -73,6 +80,7 @@ async fn test_clean_start_false() {
             broker.address(),
             ConnectOptions::new(client_id)
                 .with_clean_start(false)
+                .with_session_expiry_interval(SESSION_EXPIRY)
                 .with_resume_existing_session(true),
         ),
     )
@@ -81,9 +89,10 @@ async fn test_clean_start_false() {
 
     let session_present_flag = session_present.session_present;
     println!("Session present: {session_present_flag}");
-    if !session_present.session_present {
-        println!("Warning: Broker did not preserve session. This is broker-dependent behavior.");
-    }
+    assert!(
+        session_present.session_present,
+        "a session with a Session Expiry Interval must be resumed"
+    );
 
     let received = Arc::new(AtomicU32::new(0));
     let received_clone = received.clone();
@@ -170,6 +179,7 @@ async fn test_qos1_message_persistence() {
 
     let sub_options = ConnectOptions::new(sub_client_id)
         .with_clean_start(false)
+        .with_session_expiry_interval(SESSION_EXPIRY)
         .with_resume_existing_session(true);
     let sub_client = MqttClient::with_options(sub_options);
 
@@ -205,6 +215,7 @@ async fn test_qos1_message_persistence() {
     let sub_client2 = MqttClient::with_options(
         ConnectOptions::new(sub_client_id)
             .with_clean_start(false)
+            .with_session_expiry_interval(SESSION_EXPIRY)
             .with_resume_existing_session(true),
     );
 
@@ -213,6 +224,7 @@ async fn test_qos1_message_persistence() {
             broker.address(),
             ConnectOptions::new(sub_client_id)
                 .with_clean_start(false)
+                .with_session_expiry_interval(SESSION_EXPIRY)
                 .with_resume_existing_session(true),
         ),
     )
@@ -223,9 +235,10 @@ async fn test_qos1_message_persistence() {
         "Session present after reconnect: {}",
         session_present.session_present
     );
-    if !session_present.session_present {
-        println!("Warning: Broker did not restore session for QoS persistence test");
-    }
+    assert!(
+        session_present.session_present,
+        "a session with a Session Expiry Interval must be resumed"
+    );
 
     sub_client2
         .subscribe_with_options(
@@ -267,6 +280,7 @@ async fn test_qos2_message_persistence() {
 
     let sub_options = ConnectOptions::new(sub_client_id)
         .with_clean_start(false)
+        .with_session_expiry_interval(SESSION_EXPIRY)
         .with_resume_existing_session(true);
     let sub_client = MqttClient::with_options(sub_options);
 
@@ -302,6 +316,7 @@ async fn test_qos2_message_persistence() {
     let sub_client2 = MqttClient::with_options(
         ConnectOptions::new(sub_client_id)
             .with_clean_start(false)
+            .with_session_expiry_interval(SESSION_EXPIRY)
             .with_resume_existing_session(true),
     );
 
@@ -349,7 +364,11 @@ async fn test_subscription_persistence() {
 
     let client_id = "sub-persist-test";
 
-    let client1 = MqttClient::with_options(ConnectOptions::new(client_id).with_clean_start(true));
+    let client1 = MqttClient::with_options(
+        ConnectOptions::new(client_id)
+            .with_clean_start(true)
+            .with_session_expiry_interval(SESSION_EXPIRY),
+    );
     client1.connect(broker.address()).await.unwrap();
 
     client1.subscribe("test/sub/1", |_| {}).await.unwrap();
@@ -364,6 +383,7 @@ async fn test_subscription_persistence() {
     let client2 = MqttClient::with_options(
         ConnectOptions::new(client_id)
             .with_clean_start(false)
+            .with_session_expiry_interval(SESSION_EXPIRY)
             .with_resume_existing_session(true),
     );
 
@@ -372,6 +392,7 @@ async fn test_subscription_persistence() {
             broker.address(),
             ConnectOptions::new(client_id)
                 .with_clean_start(false)
+                .with_session_expiry_interval(SESSION_EXPIRY)
                 .with_resume_existing_session(true),
         ),
     )
@@ -382,11 +403,10 @@ async fn test_subscription_persistence() {
         "Session present for subscription persistence: {}",
         session_present.session_present
     );
-    if !session_present.session_present {
-        println!("Warning: Broker did not preserve session for subscription test");
-        client2.disconnect().await.unwrap();
-        return;
-    }
+    assert!(
+        session_present.session_present,
+        "a session with a Session Expiry Interval must be resumed"
+    );
 
     client2
         .subscribe("test/sub/+", move |msg| {
@@ -444,6 +464,7 @@ async fn test_will_message_persistence() {
 
     let will_options = ConnectOptions::new(will_client_id)
         .with_clean_start(false)
+        .with_session_expiry_interval(SESSION_EXPIRY)
         .with_resume_existing_session(true)
         .with_will(will_msg);
 
@@ -471,6 +492,7 @@ async fn test_packet_id_persistence() {
 
     let options = ConnectOptions::new(client_id)
         .with_clean_start(false)
+        .with_session_expiry_interval(SESSION_EXPIRY)
         .with_resume_existing_session(true);
     let client1 = MqttClient::with_options(options.clone());
 
@@ -515,6 +537,7 @@ async fn test_inflight_message_persistence() {
     let sub_client = MqttClient::with_options(
         ConnectOptions::new(sub_client_id)
             .with_clean_start(false)
+            .with_session_expiry_interval(SESSION_EXPIRY)
             .with_resume_existing_session(true),
     );
     sub_client.connect(broker.address()).await.unwrap();
@@ -539,6 +562,7 @@ async fn test_inflight_message_persistence() {
     let pub_client = MqttClient::with_options(
         ConnectOptions::new(pub_client_id)
             .with_clean_start(false)
+            .with_session_expiry_interval(SESSION_EXPIRY)
             .with_resume_existing_session(true),
     );
     pub_client.connect(broker.address()).await.unwrap();
@@ -559,6 +583,7 @@ async fn test_inflight_message_persistence() {
     let pub_client2 = MqttClient::with_options(
         ConnectOptions::new(pub_client_id)
             .with_clean_start(false)
+            .with_session_expiry_interval(SESSION_EXPIRY)
             .with_resume_existing_session(true),
     );
     pub_client2.connect(broker.address()).await.unwrap();
@@ -587,6 +612,7 @@ async fn test_qos2_outbound_inflight_resend_on_reconnect() {
     let sub_client = MqttClient::with_options(
         ConnectOptions::new(sub_client_id)
             .with_clean_start(false)
+            .with_session_expiry_interval(SESSION_EXPIRY)
             .with_resume_existing_session(true),
     );
     sub_client.connect(broker.address()).await.unwrap();
@@ -620,6 +646,7 @@ async fn test_qos2_outbound_inflight_resend_on_reconnect() {
     let sub_client2 = MqttClient::with_options(
         ConnectOptions::new(sub_client_id)
             .with_clean_start(false)
+            .with_session_expiry_interval(SESSION_EXPIRY)
             .with_resume_existing_session(true),
     );
 
@@ -628,6 +655,7 @@ async fn test_qos2_outbound_inflight_resend_on_reconnect() {
             broker.address(),
             ConnectOptions::new(sub_client_id)
                 .with_clean_start(false)
+                .with_session_expiry_interval(SESSION_EXPIRY)
                 .with_resume_existing_session(true),
         ),
     )
@@ -687,6 +715,7 @@ async fn test_clean_start_clears_inflight_state() {
     let sub_client = MqttClient::with_options(
         ConnectOptions::new(sub_client_id)
             .with_clean_start(false)
+            .with_session_expiry_interval(SESSION_EXPIRY)
             .with_resume_existing_session(true),
     );
     sub_client.connect(broker.address()).await.unwrap();

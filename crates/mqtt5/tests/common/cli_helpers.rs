@@ -194,7 +194,6 @@ pub async fn verify_pub_sub_delivery(
 }
 
 pub async fn verify_session_persistence(broker_url: &str, client_id: &str) -> Result<bool, String> {
-    // First connection with clean start
     let result1 = run_cli_command(&[
         "pub",
         "--url",
@@ -205,6 +204,8 @@ pub async fn verify_session_persistence(broker_url: &str, client_id: &str) -> Re
         "test",
         "--client-id",
         client_id,
+        "--session-expiry",
+        "60",
         "--non-interactive",
     ])
     .await;
@@ -213,7 +214,6 @@ pub async fn verify_session_persistence(broker_url: &str, client_id: &str) -> Re
         return Err(format!("First connection failed: {}", result1.stderr));
     }
 
-    // Second connection without clean start - should resume session
     let result2 = run_cli_command(&[
         "pub",
         "--url",
@@ -233,7 +233,6 @@ pub async fn verify_session_persistence(broker_url: &str, client_id: &str) -> Re
         return Err(format!("Second connection failed: {}", result2.stderr));
     }
 
-    // Check for session resumption message
     Ok(result2.stdout_contains("Resumed existing session")
         || result2.stdout_contains("Session present: true"))
 }

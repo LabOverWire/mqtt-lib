@@ -178,6 +178,7 @@ async fn test_will_message_with_delay() {
 
     let connect_opts = ConnectOptions::new(will_client_id)
         .with_clean_start(true)
+        .with_session_expiry_interval(60)
         .with_will(will);
 
     let disconnect_time = Arc::new(Mutex::new(None::<std::time::Instant>));

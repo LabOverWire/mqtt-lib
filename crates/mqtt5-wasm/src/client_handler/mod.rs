@@ -5,7 +5,6 @@ mod publish;
 mod subscribe;
 
 use crate::broker::WasmEventCallbacks;
-use crate::transport::message_port::MessagePortTransport;
 use crate::transport::{WasmReader, WasmWriter};
 use bytes::BytesMut;
 use events::{fire_event, set_prop};
@@ -13,7 +12,7 @@ use mqtt5::broker::auth::AuthProvider;
 use mqtt5::broker::config::BrokerConfig;
 use mqtt5::broker::resource_monitor::ResourceMonitor;
 use mqtt5::broker::router::MessageRouter;
-use mqtt5::broker::router::{DeliveryLanes, RoutableMessage};
+use mqtt5::broker::router::RoutableMessage;
 use mqtt5::broker::storage::{ClientSession, DynamicStorage, QueueHandle};
 use mqtt5::broker::sys_topics::BrokerStats;
 use mqtt5_protocol::error::{MqttError, Result};
@@ -22,7 +21,6 @@ use mqtt5_protocol::packet::MqttPacket;
 use mqtt5_protocol::packet::Packet;
 use mqtt5_protocol::KeepaliveConfig;
 use mqtt5_protocol::QoS;
-use mqtt5_protocol::Transport;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -56,6 +54,9 @@ pub struct WasmClientHandler {
     pub(super) stats: Arc<BrokerStats>,
     pub(super) resource_monitor: Arc<ResourceMonitor>,
     pub(super) session: Option<ClientSession>,
+    pub(super) connect_session_expiry: Option<u32>,
+    pub(super) advertised_session_expiry: Option<u32>,
+    disconnect_rx: Option<tokio::sync::oneshot::Receiver<mqtt5::broker::router::TakeoverNotice>>,
     qos1_rx: tokio::sync::mpsc::Receiver<RoutableMessage>,
     qos1_tx: tokio::sync::mpsc::Sender<RoutableMessage>,
     qos0_rx: tokio::sync::mpsc::Receiver<RoutableMessage>,
@@ -76,59 +77,6 @@ pub struct WasmClientHandler {
 static HANDLER_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
 
 impl WasmClientHandler {
-    #[allow(dead_code, clippy::too_many_arguments)]
-    pub fn start_deferred(
-        port: MessagePort,
-        config: Arc<RwLock<BrokerConfig>>,
-        router: Arc<MessageRouter>,
-        auth_provider: Arc<dyn AuthProvider>,
-        storage: Arc<DynamicStorage>,
-        stats: Arc<BrokerStats>,
-        resource_monitor: Arc<ResourceMonitor>,
-        event_callbacks: WasmEventCallbacks,
-    ) {
-        use wasm_bindgen::JsCast;
-
-        let port = Rc::new(RefCell::new(Some(port)));
-        let port_clone = Rc::clone(&port);
-
-        let config = Rc::new(config);
-        let router = Rc::new(router);
-        let auth_provider: Rc<Arc<dyn AuthProvider>> = Rc::new(auth_provider);
-        let storage = Rc::new(storage);
-        let stats = Rc::new(stats);
-        let resource_monitor = Rc::new(resource_monitor);
-        let event_callbacks = Rc::new(event_callbacks);
-
-        let callback = wasm_bindgen::closure::Closure::<dyn FnMut()>::new(move || {
-            if let Some(p) = port_clone.borrow_mut().take() {
-                let config = (*config).clone();
-                let router = (*router).clone();
-                let auth_provider = (*auth_provider).clone();
-                let storage = (*storage).clone();
-                let stats = (*stats).clone();
-                let resource_monitor = (*resource_monitor).clone();
-                let event_callbacks = (*event_callbacks).clone();
-
-                Self::new(
-                    p,
-                    config,
-                    router,
-                    auth_provider,
-                    storage,
-                    stats,
-                    resource_monitor,
-                    event_callbacks,
-                );
-            }
-        });
-
-        if let Some(window) = web_sys::window() {
-            let _ = window.set_timeout_with_callback(callback.as_ref().unchecked_ref());
-        }
-        callback.forget();
-    }
-
     #[allow(
         clippy::must_use_candidate,
         clippy::new_ret_no_self,
@@ -158,13 +106,26 @@ impl WasmClientHandler {
             move |e: web_sys::MessageEvent| {
                 if let Ok(abuf) = e.data().dyn_into::<js_sys::ArrayBuffer>() {
                     let array = js_sys::Uint8Array::new(&abuf);
-                    let vec = array.to_vec();
-                    let _ = msg_tx_clone.unbounded_send(vec);
+                    if msg_tx_clone.unbounded_send(array.to_vec()).is_err() {
+                        debug!("Dropping message received after the client port closed");
+                    }
                 }
             },
         );
         let js_fn: js_sys::Function = handler_fn.into_js_value().unchecked_into();
-        let _ = port.add_event_listener_with_callback("message", &js_fn);
+        if let Err(e) = port.add_event_listener_with_callback("message", &js_fn) {
+            error!("Failed to listen for client port messages: {e:?}");
+        }
+        let close_fn = wasm_bindgen::closure::Closure::<dyn FnMut(web_sys::Event)>::new(
+            move |_: web_sys::Event| {
+                debug!("Client port closed");
+                msg_tx.close_channel();
+            },
+        );
+        let close_js: js_sys::Function = close_fn.into_js_value().unchecked_into();
+        if let Err(e) = port.add_event_listener_with_callback("close", &close_js) {
+            error!("Failed to listen for client port close: {e:?}");
+        }
         port.start();
 
         let handler = Self {
@@ -179,6 +140,9 @@ impl WasmClientHandler {
             stats,
             resource_monitor,
             session: None,
+            connect_session_expiry: None,
+            advertised_session_expiry: None,
+            disconnect_rx: None,
             qos1_rx,
             qos1_tx,
             qos0_rx,
@@ -203,51 +167,6 @@ impl WasmClientHandler {
         });
     }
 
-    #[allow(dead_code)]
-    async fn run(mut self, port: MessagePort) -> Result<()> {
-        let mut transport = MessagePortTransport::new(port);
-        transport.connect().await?;
-
-        let (reader, writer) = transport.into_split()?;
-        let mut reader = WasmReader::MessagePort(reader);
-        let mut writer = WasmWriter::MessagePort(writer);
-
-        self.wait_for_connect(&mut reader, &mut writer).await?;
-
-        let client_id = self.client_id.clone().unwrap();
-        let (disconnect_tx, disconnect_rx) = tokio::sync::oneshot::channel();
-
-        let queue = self.router.queue_handle(&client_id);
-        self.queue = Some(queue.clone());
-        let registration = self
-            .router
-            .register_client(
-                client_id.clone(),
-                DeliveryLanes {
-                    qos1_tx: self.qos1_tx.clone(),
-                    qos0_tx: self.qos0_tx.clone(),
-                },
-                queue.clone(),
-                disconnect_tx,
-            )
-            .await;
-        self.generation = registration.generation;
-        queue.notify();
-
-        self.stats.client_connected();
-
-        let result = self.packet_loop(&mut reader, writer, disconnect_rx).await;
-
-        if !self.normal_disconnect {
-            self.publish_will_message(&client_id).await;
-        }
-
-        self.release_router_entry(&client_id).await;
-        self.stats.client_disconnected();
-
-        result
-    }
-
     async fn run_with_receiver(
         mut self,
         port: MessagePort,
@@ -264,59 +183,36 @@ impl WasmClientHandler {
         let mut reader = WasmReader::MessagePort(reader);
         let mut writer = WasmWriter::MessagePort(writer);
 
-        self.wait_for_connect(&mut reader, &mut writer).await?;
-
-        let client_id = self.client_id.clone().unwrap();
-        let (disconnect_tx, disconnect_rx) = tokio::sync::oneshot::channel();
-
-        let queue = self.router.queue_handle(&client_id);
-        self.queue = Some(queue.clone());
-        let registration = self
-            .router
-            .register_client(
-                client_id.clone(),
-                DeliveryLanes {
-                    qos1_tx: self.qos1_tx.clone(),
-                    qos0_tx: self.qos0_tx.clone(),
-                },
-                queue.clone(),
-                disconnect_tx,
-            )
-            .await;
-        self.generation = registration.generation;
+        let handshake = self.wait_for_connect(&mut reader, &mut writer).await;
+        let (Some(client_id), Some(disconnect_rx), Some(queue)) = (
+            self.client_id.clone().filter(|_| self.generation != 0),
+            self.disconnect_rx.take(),
+            self.queue.clone(),
+        ) else {
+            return handshake;
+        };
+        if let Err(e) = handshake {
+            self.release_ownership(&client_id).await;
+            return Err(e);
+        }
         queue.notify();
 
         self.stats.client_connected();
 
         let result = self.packet_loop(&mut reader, writer, disconnect_rx).await;
 
+        let armed_will = self.release_ownership(&client_id).await;
         let (reason, unexpected) = if self.normal_disconnect {
             ("client disconnected", false)
         } else {
-            self.publish_will_message(&client_id).await;
+            self.publish_will_message(&client_id, armed_will).await;
             ("connection lost", true)
         };
 
         self.fire_client_disconnect(&client_id, reason, unexpected);
-
-        self.release_router_entry(&client_id).await;
         self.stats.client_disconnected();
 
         result
-    }
-
-    /// Releases this connection's router entry, but only if it still owns it. A newer
-    /// connection with the same client id takes over the entry (a higher generation); an
-    /// unconditional unregister here would evict that live successor and strip its
-    /// subscriptions.
-    async fn release_router_entry(&self, client_id: &str) {
-        let preserve_session = self
-            .session
-            .as_ref()
-            .is_some_and(|session| session.expiry_interval != Some(0));
-        self.router
-            .release_client(client_id, self.generation, preserve_session)
-            .await;
     }
 
     fn spawn_disconnect_watcher(
@@ -580,7 +476,7 @@ impl WasmClientHandler {
                 Ok(())
             }
             Packet::PingReq => self.handle_pingreq(writer),
-            Packet::Disconnect(ref disconnect) => self.handle_disconnect(disconnect),
+            Packet::Disconnect(ref disconnect) => self.handle_disconnect(disconnect, writer).await,
             Packet::Auth(auth) => self.handle_auth(auth, writer).await,
             _ => {
                 warn!("Unexpected packet type");
