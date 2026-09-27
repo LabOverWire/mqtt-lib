@@ -242,6 +242,12 @@ impl QuicConfig {
         transport_config.receive_window(1_048_576u32.into());
         transport_config.send_window(1_048_576);
 
+        if let Some(max) = self.max_concurrent_streams {
+            let max = u32::try_from(max).unwrap_or(u32::MAX);
+            transport_config.max_concurrent_uni_streams(max.into());
+            transport_config.max_concurrent_bidi_streams(max.into());
+        }
+
         if self.enable_datagrams {
             transport_config.datagram_send_buffer_size(self.datagram_send_buffer_size);
             transport_config.datagram_receive_buffer_size(Some(self.datagram_receive_buffer_size));

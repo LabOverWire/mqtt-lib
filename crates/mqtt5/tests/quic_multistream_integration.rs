@@ -1,7 +1,7 @@
 #![cfg(feature = "broker")]
 #![cfg(feature = "transport-quic")]
 
-use mqtt5::broker::config::{BrokerConfig, QuicConfig};
+use mqtt5::broker::config::{BrokerConfig, QuicConfig, ServerDeliveryStrategy};
 use mqtt5::broker::MqttBroker;
 use mqtt5::session::quic_flow::{FlowRegistry, FlowState, FlowType};
 use mqtt5::time::Duration;
@@ -860,4 +860,58 @@ async fn test_quic_delivery_with_segmentation_offload_disabled() {
         received, 50,
         "disabling segmentation offload must not affect delivery"
     );
+}
+
+#[tokio::test]
+async fn test_quic_per_publish_delivery_under_tight_client_stream_limit() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    let config = BrokerConfig::default()
+        .with_bind_address(([127, 0, 0, 1], 0))
+        .with_quic(test_quic_config())
+        .with_server_delivery_strategy(ServerDeliveryStrategy::PerPublish);
+    let mut broker = MqttBroker::with_config(config).await.unwrap();
+    let quic_addr = broker
+        .quic_local_addr()
+        .expect("QUIC endpoint must be bound");
+    let broker_handle = tokio::spawn(async move { broker.run().await });
+
+    let topic = format!("quic-client-limit/{}/test", Ulid::new());
+    let pub_client = MqttClient::new(test_client_id("quic-client-limit-pub"));
+    let sub_client = MqttClient::new(test_client_id("quic-client-limit-sub"));
+    pub_client.set_insecure_tls(true).await;
+    sub_client.set_insecure_tls(true).await;
+    sub_client.set_quic_max_streams(Some(2)).await;
+
+    let broker_url = format!("quic://{quic_addr}");
+    pub_client.connect(&broker_url).await.unwrap();
+    sub_client.connect(&broker_url).await.unwrap();
+
+    let received = Arc::new(AtomicU32::new(0));
+    let received_clone = received.clone();
+    sub_client
+        .subscribe(&topic, move |_msg| {
+            received_clone.fetch_add(1, Ordering::Relaxed);
+        })
+        .await
+        .unwrap();
+
+    for _ in 0..20 {
+        pub_client.publish(&topic, vec![0u8; 16]).await.unwrap();
+    }
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while received.load(Ordering::Relaxed) < 20 && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    assert_eq!(
+        received.load(Ordering::Relaxed),
+        20,
+        "the broker must reuse streams when the client caps concurrent streams below the message count"
+    );
+
+    pub_client.disconnect().await.unwrap();
+    sub_client.disconnect().await.unwrap();
+    broker_handle.abort();
 }
