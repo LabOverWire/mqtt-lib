@@ -1,7 +1,9 @@
 #![cfg(feature = "broker")]
 #![cfg(feature = "transport-quic")]
 
-use mqtt5::broker::config::{BrokerConfig, QuicConfig, ServerDeliveryStrategy};
+use mqtt5::broker::config::{
+    BrokerConfig, QuicConfig, ServerDeliveryStrategy, StorageBackend, StorageConfig,
+};
 use mqtt5::broker::MqttBroker;
 use mqtt5::session::quic_flow::{FlowRegistry, FlowState, FlowType};
 use mqtt5::time::Duration;
@@ -30,6 +32,7 @@ async fn start_quic_broker_with(quic_config: QuicConfig) -> (MqttBroker, SocketA
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     let config = BrokerConfig::default()
+        .with_storage(StorageConfig::default().with_backend(StorageBackend::Memory))
         .with_bind_address(([127, 0, 0, 1], 0))
         .with_quic(quic_config);
 
@@ -867,6 +870,7 @@ async fn test_quic_per_publish_delivery_under_tight_client_stream_limit() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     let config = BrokerConfig::default()
+        .with_storage(StorageConfig::default().with_backend(StorageBackend::Memory))
         .with_bind_address(([127, 0, 0, 1], 0))
         .with_quic(test_quic_config())
         .with_server_delivery_strategy(ServerDeliveryStrategy::PerPublish);

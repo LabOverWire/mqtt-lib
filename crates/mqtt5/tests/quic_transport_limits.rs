@@ -1,7 +1,9 @@
 #![cfg(feature = "broker")]
 #![cfg(feature = "transport-quic")]
 
-use mqtt5::broker::config::{BrokerConfig, QuicConfig as BrokerQuicConfig};
+use mqtt5::broker::config::{
+    BrokerConfig, QuicConfig as BrokerQuicConfig, StorageBackend, StorageConfig,
+};
 use mqtt5::broker::quic_acceptor::QuicAcceptorConfig;
 use mqtt5::broker::MqttBroker;
 use mqtt5::transport::{QuicConfig, QuicSplitResult, QuicTransport};
@@ -20,6 +22,7 @@ fn install_crypto_provider() {
 async fn start_broker(quic_config: BrokerQuicConfig) -> (SocketAddr, tokio::task::JoinHandle<()>) {
     install_crypto_provider();
     let config = BrokerConfig::default()
+        .with_storage(StorageConfig::default().with_backend(StorageBackend::Memory))
         .with_bind_address(([127, 0, 0, 1], 0))
         .with_quic(quic_config);
     let mut broker = MqttBroker::with_config(config).await.unwrap();
