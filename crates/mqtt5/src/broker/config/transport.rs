@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -41,8 +41,8 @@ impl QuicConfig {
             ca_file: None,
             require_client_cert: false,
             bind_addresses: vec![
-                "0.0.0.0:14567".parse().expect("valid IPv4 address"),
-                "[::]:14567".parse().expect("valid IPv6 address"),
+                SocketAddr::from((Ipv4Addr::UNSPECIFIED, 14567)),
+                SocketAddr::from((Ipv6Addr::UNSPECIFIED, 14567)),
             ],
             enable_early_data: false,
             max_concurrent_streams: None,
@@ -119,8 +119,8 @@ impl Default for WebSocketConfig {
     fn default() -> Self {
         Self {
             bind_addresses: vec![
-                "0.0.0.0:8080".parse().unwrap(),
-                "[::]:8080".parse().unwrap(),
+                SocketAddr::from((Ipv4Addr::UNSPECIFIED, 8080)),
+                SocketAddr::from((Ipv6Addr::UNSPECIFIED, 8080)),
             ],
             path: "/mqtt".to_string(),
             subprotocol: "mqtt".to_string(),

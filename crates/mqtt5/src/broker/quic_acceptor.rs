@@ -28,7 +28,6 @@ use tracing::{debug, error, instrument, trace, warn};
 
 use super::tls_acceptor::TlsAcceptorConfig;
 
-// [RFC9000§7] QUIC transport parameters
 pub struct QuicAcceptorConfig {
     pub cert_chain: Vec<CertificateDer<'static>>,
     pub private_key: PrivateKeyDer<'static>,
@@ -42,7 +41,7 @@ pub struct QuicAcceptorConfig {
 }
 
 impl QuicAcceptorConfig {
-    #[allow(clippy::must_use_candidate)]
+    #[must_use]
     pub fn new(
         cert_chain: Vec<CertificateDer<'static>>,
         private_key: PrivateKeyDer<'static>,
@@ -126,9 +125,6 @@ impl QuicAcceptorConfig {
     ///
     /// # Errors
     /// Returns an error if certificate loading fails or TLS configuration is invalid.
-    ///
-    /// # Panics
-    /// Panics if the idle timeout duration conversion fails (should never happen).
     pub fn build_server_config(&self) -> Result<ServerConfig> {
         let crypto_provider = Arc::new(rustls::crypto::ring::default_provider());
 
@@ -189,11 +185,9 @@ impl QuicAcceptorConfig {
         let mut server_config = ServerConfig::with_crypto(Arc::new(quic_config));
 
         let mut transport_config = quinn::TransportConfig::default();
-        transport_config.max_idle_timeout(Some(
-            std::time::Duration::from_secs(60)
-                .try_into()
-                .expect("valid duration"),
-        ));
+        transport_config.max_idle_timeout(Some(quinn::IdleTimeout::from(quinn::VarInt::from_u32(
+            60_000,
+        ))));
         transport_config.datagram_receive_buffer_size(Some(65536));
         transport_config.datagram_send_buffer_size(65536);
 
@@ -234,7 +228,7 @@ pub struct QuicStreamWrapper {
 }
 
 impl QuicStreamWrapper {
-    #[allow(clippy::must_use_candidate)]
+    #[must_use]
     pub fn new(send: SendStream, recv: RecvStream, peer_addr: SocketAddr) -> Self {
         Self {
             send,
@@ -335,7 +329,6 @@ pub async fn accept_quic_stream(
     Ok(QuicStreamWrapper::new(send, recv, peer_addr))
 }
 
-// [MQoQ§4.1] Flow type detection
 fn is_flow_header_byte(b: u8) -> bool {
     matches!(
         b,
@@ -536,7 +529,6 @@ pub(super) async fn read_packet_with_buffer(
     Packet::decode_from_body(fixed_header.packet_type, &fixed_header, &mut payload_buf)
 }
 
-// [MQoQ§4] QUIC connection handling with flow headers
 #[allow(clippy::too_many_arguments)]
 #[instrument(skip(connection, config, router, auth_provider, storage, stats, resource_monitor, shutdown_rx), fields(peer_addr = %peer_addr))]
 pub async fn run_quic_connection_handler(
@@ -893,7 +885,6 @@ fn spawn_discard_handler(
     });
 }
 
-// [MQoQ§5] Data stream processing
 fn spawn_data_stream_reader(
     mut recv: RecvStream,
     packet_tx: mpsc::Sender<(Packet, Option<u64>)>,
