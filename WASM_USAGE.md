@@ -550,7 +550,7 @@ The JavaScript class is exported as `BrokerConfig` (Rust type: `WasmBrokerConfig
 const config = new BrokerConfig();
 
 config.maxClients = 1000;                       // default: 1000
-config.sessionExpiryIntervalSecs = 3600;        // default: 3600
+config.sessionExpiryIntervalSecs = 3600;        // maximum granted; default: 4294967295 (no limit)
 config.maxPacketSize = 268435456;               // default: 268435456 (256MB)
 config.topicAliasMaximum = 65535;               // default: 65535
 config.retainAvailable = true;                  // default: true

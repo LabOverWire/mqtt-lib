@@ -1,4 +1,4 @@
-use mqtt5::broker::router::SubscriptionRequest;
+use mqtt5::broker::router::{Subscribed, SubscriptionRequest, Unsubscribed};
 use mqtt5::broker::storage::{StorageBackend, StoredSubscription};
 use mqtt5_protocol::error::{MqttError, Result};
 use mqtt5_protocol::packet::disconnect::DisconnectPacket;
@@ -90,8 +90,11 @@ impl WasmClientHandler {
             let subscription_id = subscribe.properties.get_subscription_identifier();
             let change_only = self.is_change_only_filter(&filter.filter);
 
-            self.router
-                .subscribe(
+            let slot = self.router.lock_session(&client_id).await;
+            let outcome = self
+                .router
+                .subscribe_as(
+                    Some(self.generation),
                     SubscriptionRequest::new(client_id.clone(), filter.filter.clone(), granted_qos)
                         .with_subscription_id(subscription_id)
                         .with_no_local(filter.options.no_local)
@@ -103,9 +106,14 @@ impl WasmClientHandler {
                         .with_change_only(change_only),
                 )
                 .await?;
+            if outcome == Subscribed::Fenced {
+                debug!("Ignoring SUBSCRIBE from a connection whose session was taken over");
+                return Ok(());
+            }
 
             self.persist_subscription(filter, granted_qos, subscription_id, change_only)
-                .await;
+                .await?;
+            drop(slot);
             self.deliver_retained_for_filter(filter, writer).await?;
 
             successful_subscriptions.push((filter.filter.clone(), granted_qos as u8));
@@ -157,21 +165,40 @@ impl WasmClientHandler {
         granted_qos: QoS,
         subscription_id: Option<u32>,
         change_only: bool,
-    ) {
-        if let Some(ref mut session) = self.session {
-            let stored = StoredSubscription {
-                qos: granted_qos,
-                no_local: filter.options.no_local,
-                retain_as_published: filter.options.retain_as_published,
-                retain_handling: filter.options.retain_handling as u8,
-                subscription_id,
-                protocol_version: self.protocol_version,
-                change_only,
-                flow_id: None,
-            };
-            session.add_subscription(filter.filter.clone(), stored);
-            self.storage.store_session(session.clone()).await.ok();
+    ) -> Result<()> {
+        let stored = StoredSubscription {
+            qos: granted_qos,
+            no_local: filter.options.no_local,
+            retain_as_published: filter.options.retain_as_published,
+            retain_handling: filter.options.retain_handling as u8,
+            subscription_id,
+            protocol_version: self.protocol_version,
+            change_only,
+            flow_id: None,
+        };
+        if let Some(session) = self.session.as_mut() {
+            session.add_subscription(filter.filter.clone(), stored.clone());
         }
+        let topic_filter = filter.filter.clone();
+        self.update_stored_session(move |session| session.add_subscription(topic_filter, stored))
+            .await
+    }
+
+    async fn update_stored_session<F>(&self, update: F) -> Result<()>
+    where
+        F: FnOnce(&mut mqtt5::broker::storage::ClientSession) + Send,
+    {
+        let Some(client_id) = self.client_id.as_ref() else {
+            return Ok(());
+        };
+        if !self
+            .storage
+            .update_session(client_id, self.generation, update)
+            .await?
+        {
+            debug!(client_id = %client_id, "Stored session is not this connection's");
+        }
+        Ok(())
     }
 
     async fn deliver_retained_for_filter(
@@ -196,18 +223,39 @@ impl WasmClientHandler {
         unsubscribe: UnsubscribePacket,
         writer: &mut WasmWriter,
     ) -> Result<()> {
-        let client_id = self.client_id.as_ref().unwrap();
+        let Some(client_id) = self.client_id.clone() else {
+            return Err(MqttError::ProtocolError(
+                "UNSUBSCRIBE before CONNECT".to_string(),
+            ));
+        };
         let mut reason_codes = Vec::new();
 
         for filter in &unsubscribe.filters {
-            let removed = self.router.unsubscribe(client_id, filter, None).await;
+            let slot = self.router.lock_session(&client_id).await;
+            let removed = match self
+                .router
+                .unsubscribe_as(Some(self.generation), &client_id, filter, None)
+                .await
+            {
+                Unsubscribed::Removed => true,
+                Unsubscribed::Absent => false,
+                Unsubscribed::Fenced => {
+                    debug!("Ignoring UNSUBSCRIBE from a connection whose session was taken over");
+                    return Ok(());
+                }
+            };
 
             if removed {
-                if let Some(ref mut session) = self.session {
+                if let Some(session) = self.session.as_mut() {
                     session.remove_subscription(filter);
-                    self.storage.store_session(session.clone()).await.ok();
                 }
+                let topic_filter = filter.clone();
+                self.update_stored_session(move |session| {
+                    session.remove_subscription(&topic_filter);
+                })
+                .await?;
             }
+            drop(slot);
 
             reason_codes.push(if removed {
                 UnsubAckReasonCode::Success
@@ -223,7 +271,7 @@ impl WasmClientHandler {
         self.write_packet(&Packet::UnsubAck(unsuback), writer)?;
 
         if !unsubscribe.filters.is_empty() {
-            self.fire_client_unsubscribe(client_id, &unsubscribe.filters);
+            self.fire_client_unsubscribe(&client_id, &unsubscribe.filters);
         }
 
         Ok(())

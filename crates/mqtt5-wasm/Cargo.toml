@@ -1,6 +1,6 @@
 [package]
 name = "mqtt5-wasm"
-version = "2.0.1"
+version = "2.1.0"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -28,7 +28,7 @@ codec = ["client", "dep:miniz_oxide"]
 
 [dependencies]
 mqtt5-protocol = "0.15.2"
-mqtt5 = { version = "0.41", optional = true, default-features = false, features = [
+mqtt5 = { version = "0.42", optional = true, default-features = false, features = [
     "tokio",
 ] }
 

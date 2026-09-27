@@ -98,7 +98,6 @@ async fn test_cli_clean_start() {
     let broker_url = broker.address();
     let client_id = "test-clean-client";
 
-    // First connection with default (clean_start=true)
     let pub1 = run_cli_command(&[
         "pub",
         "--url",
@@ -109,6 +108,8 @@ async fn test_cli_clean_start() {
         "test1",
         "--client-id",
         client_id,
+        "--session-expiry",
+        "60",
         "--non-interactive",
     ])
     .await;
@@ -119,7 +120,6 @@ async fn test_cli_clean_start() {
         "First connection should not resume session"
     );
 
-    // Second connection with no-clean-start should resume session
     let pub2 = run_cli_command(&[
         "pub",
         "--url",
@@ -137,12 +137,10 @@ async fn test_cli_clean_start() {
 
     assert!(pub2.success, "Second publish should succeed");
 
-    // Verify session resumption or check it didn't error
-    if pub2.stdout_contains("Resumed existing session") {
-        println!("✅ Clean start functionality verified - session resumed");
-    } else {
-        println!("⚠️  Session resumption not confirmed in output");
-    }
+    assert!(
+        pub2.stdout_contains("Resumed existing session"),
+        "--no-clean-start must resume the session the first connection kept with --session-expiry"
+    );
 }
 
 /// Test session expiry interval

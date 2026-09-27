@@ -1,7 +1,6 @@
 use crate::broker::auth::EnhancedAuthStatus;
 use crate::error::{MqttError, Result};
 use crate::packet::auth::AuthPacket;
-use crate::packet::connack::ConnAckPacket;
 use crate::packet::disconnect::DisconnectPacket;
 use crate::packet::Packet;
 use crate::protocol::v5::reason_codes::ReasonCode;
@@ -77,35 +76,10 @@ impl ClientHandler {
                 self.user_id = result.user_id;
 
                 if let Some(pending) = self.pending_connect.take() {
-                    let session_present = self.handle_session(&pending.connect).await?;
-
-                    let mut connack = if self.protocol_version == 4 {
-                        ConnAckPacket::new_v311(session_present, ReasonCode::Success)
-                    } else {
-                        ConnAckPacket::new(session_present, ReasonCode::Success)
-                    };
-
-                    if self.protocol_version == 5 {
-                        if let Some(ref assigned_id) = pending.assigned_client_id {
-                            connack
-                                .properties
-                                .set_assigned_client_identifier(assigned_id.clone());
-                        }
-
-                        connack
-                            .properties
-                            .set_topic_alias_maximum(self.config.topic_alias_maximum);
-                        connack
-                            .properties
-                            .set_retain_available(self.config.retain_available);
-                        connack.properties.set_maximum_packet_size(
-                            u32::try_from(self.config.max_packet_size).unwrap_or(u32::MAX),
-                        );
-                    }
-
-                    self.write_to_client(Packet::ConnAck(connack)).await?;
+                    self.connack_auth_data = result.auth_data;
+                    self.authenticated_connect = Some(pending);
                 } else {
-                    let success_auth = AuthPacket::success(result.auth_method)?;
+                    let success_auth = Self::auth_success(result.auth_method, result.auth_data)?;
                     self.write_to_client(Packet::Auth(success_auth)).await?;
                 }
             }
@@ -120,8 +94,19 @@ impl ClientHandler {
                 } else {
                     None
                 };
-                let failure_auth = AuthPacket::failure(result.reason_code, reason_string)?;
-                self.write_to_client(Packet::Auth(failure_auth)).await?;
+                if self.pending_connect.take().is_some() {
+                    let mut connack = self.new_connack(false, result.reason_code);
+                    if let Some(reason) = reason_string.filter(|_| self.protocol_version == 5) {
+                        connack.properties.set_reason_string(reason);
+                    }
+                    self.write_to_client(Packet::ConnAck(connack)).await?;
+                } else if self.protocol_version == 5 {
+                    let mut disconnect = DisconnectPacket::new(result.reason_code);
+                    if let Some(reason) = reason_string {
+                        disconnect.properties.set_reason_string(reason);
+                    }
+                    self.write_to_client(Packet::Disconnect(disconnect)).await?;
+                }
                 return Err(MqttError::AuthenticationFailed);
             }
         }
@@ -153,7 +138,7 @@ impl ClientHandler {
         match result.status {
             EnhancedAuthStatus::Success => {
                 self.user_id = result.user_id;
-                let success_auth = AuthPacket::success(result.auth_method)?;
+                let success_auth = Self::auth_success(result.auth_method, result.auth_data)?;
                 self.write_to_client(Packet::Auth(success_auth)).await?;
             }
             EnhancedAuthStatus::Continue => {
@@ -170,5 +155,13 @@ impl ClientHandler {
             }
         }
         Ok(())
+    }
+
+    fn auth_success(auth_method: String, auth_data: Option<Vec<u8>>) -> Result<AuthPacket> {
+        let mut success = AuthPacket::success(auth_method)?;
+        if let Some(data) = auth_data {
+            success.properties.set_authentication_data(data.into());
+        }
+        Ok(success)
     }
 }

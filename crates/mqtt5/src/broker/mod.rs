@@ -44,6 +44,9 @@ pub mod router;
 pub mod server;
 #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
 mod server_stream_manager;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod session_fault_tests;
+pub mod session_slot;
 pub mod storage;
 pub mod sys_topics;
 #[cfg(not(target_arch = "wasm32"))]

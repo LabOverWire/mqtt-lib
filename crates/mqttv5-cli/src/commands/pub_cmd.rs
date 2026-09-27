@@ -292,7 +292,7 @@ fn build_connect_options(cmd: &PubCommand, client_id: &str) -> ConnectOptions {
         options = options.with_protocol_version(version);
     }
 
-    if let Some(expiry) = cmd.session.session_expiry {
+    if let Some(expiry) = cmd.session.session_expiry_secs() {
         options = options.with_session_expiry_interval(duration_secs_to_u32(expiry));
     }
 

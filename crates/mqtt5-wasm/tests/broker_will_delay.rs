@@ -1,9 +1,10 @@
 #![cfg(all(target_arch = "wasm32", feature = "broker"))]
 
 use bytes::BytesMut;
+use mqtt5_protocol::packet::connack::ConnAckPacket;
 use mqtt5_protocol::packet::connect::ConnectPacket;
 use mqtt5_protocol::packet::disconnect::DisconnectPacket;
-use mqtt5_protocol::packet::MqttPacket;
+use mqtt5_protocol::packet::{FixedHeader, MqttPacket};
 use mqtt5_protocol::protocol::v5::reason_codes::ReasonCode;
 use mqtt5_protocol::types::{ConnectOptions, WillMessage};
 use mqtt5_wasm::{
@@ -48,6 +49,13 @@ fn broker() -> WasmBroker {
     WasmBroker::with_config(config).unwrap()
 }
 
+fn capped_broker(maximum: u32) -> WasmBroker {
+    let mut config = WasmBrokerConfig::new();
+    config.set_allow_anonymous(true);
+    config.set_session_expiry_interval_secs(maximum);
+    WasmBroker::with_config(config).unwrap()
+}
+
 fn will_topic(client_id: &str) -> String {
     format!("will/{client_id}")
 }
@@ -84,6 +92,18 @@ impl RawClient {
         will: Option<WillMessage>,
         keep_alive_secs: u64,
     ) -> Self {
+        let options = ConnectOptions::new(client_id)
+            .with_clean_start(clean_start)
+            .with_session_expiry_interval(session_expiry)
+            .with_keep_alive(Duration::from_secs(keep_alive_secs));
+        let options = match will {
+            Some(will) => options.with_will(will),
+            None => options,
+        };
+        Self::connect_with_options(broker, options).await
+    }
+
+    async fn connect_with_options(broker: &WasmBroker, options: ConnectOptions) -> Self {
         let port = broker.create_client_port().unwrap();
         let inbox = Rc::new(RefCell::new(Vec::new()));
         let inbox_in = Rc::clone(&inbox);
@@ -100,14 +120,7 @@ impl RawClient {
             on_message,
         };
 
-        let options = ConnectOptions::new(client_id)
-            .with_clean_start(clean_start)
-            .with_session_expiry_interval(session_expiry)
-            .with_keep_alive(Duration::from_secs(keep_alive_secs));
-        let options = match will {
-            Some(will) => options.with_will(will),
-            None => options,
-        };
+        let client_id = options.client_id.clone();
         client.send(&ConnectPacket::new(options));
 
         for _ in 0..200 {
@@ -123,6 +136,29 @@ impl RawClient {
         client
     }
 
+    fn connack(&self) -> ConnAckPacket {
+        let inbox = self.inbox.borrow().clone();
+        let mut cursor = &inbox[..];
+        let header = FixedHeader::decode(&mut cursor).unwrap();
+        ConnAckPacket::decode_body(&mut cursor, &header).unwrap()
+    }
+
+    fn session_present(&self) -> bool {
+        self.inbox.borrow()[2] & 0x01 == 0x01
+    }
+
+    async fn server_disconnect_reason(&self) -> Option<u8> {
+        for _ in 0..200 {
+            let inbox = self.inbox.borrow().clone();
+            let after_connack = usize::from(inbox[1]) + 2;
+            if inbox.len() >= after_connack + 3 && inbox[after_connack] == 0xE0 {
+                return Some(inbox[after_connack + 2]);
+            }
+            sleep(10).await;
+        }
+        None
+    }
+
     fn send(&self, packet: &impl MqttPacket) {
         let mut buf = BytesMut::new();
         packet.encode(&mut buf).unwrap();
@@ -135,7 +171,11 @@ impl RawClient {
     }
 
     fn disconnect(self, reason: ReasonCode) {
-        self.send(&DisconnectPacket::new(reason));
+        self.disconnect_with(&DisconnectPacket::new(reason));
+    }
+
+    fn disconnect_with(self, disconnect: &DisconnectPacket) {
+        self.send(disconnect);
         self.port.close();
     }
 }
@@ -329,4 +369,456 @@ async fn keep_alive_expiry_publishes_will() {
 
     drop(silent);
     watcher.disconnect().await.unwrap();
+}
+
+fn disconnect_with_expiry(reason: ReasonCode, session_expiry: u32) -> DisconnectPacket {
+    let mut disconnect = DisconnectPacket::new(reason);
+    disconnect
+        .properties
+        .set_session_expiry_interval(session_expiry);
+    disconnect
+}
+
+#[wasm_bindgen_test]
+async fn resume_with_longer_expiry_keeps_full_will_delay() {
+    let broker = broker();
+    let client_id = "wasm-wd-resume-longer";
+    let (watcher, count) = watch_will(&broker, client_id).await;
+
+    let first = RawClient::connect(&broker, client_id, true, 2, None).await;
+    first.disconnect(ReasonCode::Success);
+    sleep(300).await;
+
+    let second = RawClient::connect(
+        &broker,
+        client_id,
+        false,
+        SESSION_EXPIRY,
+        Some(delayed_will(client_id, 5)),
+    )
+    .await;
+    let dropped_at = now_ms();
+    second.close_without_disconnect();
+
+    let published = wait_for_will(&count, 3500).await;
+    let elapsed = now_ms() - dropped_at;
+    assert!(
+        !published,
+        "Will published {elapsed}ms after drop, before the 5s Will Delay, though the resuming CONNECT set Session Expiry 60"
+    );
+
+    watcher.disconnect().await.unwrap();
+}
+
+#[wasm_bindgen_test]
+async fn resume_with_expiry_zero_publishes_will_immediately() {
+    let broker = broker();
+    let client_id = "wasm-wd-resume-zero";
+    let (watcher, count) = watch_will(&broker, client_id).await;
+
+    let first = RawClient::connect(&broker, client_id, true, SESSION_EXPIRY, None).await;
+    first.disconnect(ReasonCode::Success);
+    sleep(300).await;
+
+    let second = RawClient::connect(
+        &broker,
+        client_id,
+        false,
+        0,
+        Some(delayed_will(client_id, 5)),
+    )
+    .await;
+    second.close_without_disconnect();
+
+    assert!(
+        wait_for_will(&count, 1500).await,
+        "Session Expiry 0 on the resuming CONNECT ends the session at disconnect, so the Will must not wait for the delay"
+    );
+
+    watcher.disconnect().await.unwrap();
+}
+
+#[wasm_bindgen_test]
+async fn long_will_delay_is_not_published_early() {
+    let broker = broker();
+    let client_id = "wasm-wd-long";
+    let (watcher, count) = watch_will(&broker, client_id).await;
+
+    let conn = RawClient::connect(
+        &broker,
+        client_id,
+        true,
+        3_000_000,
+        Some(delayed_will(client_id, 2_200_000)),
+    )
+    .await;
+    conn.close_without_disconnect();
+
+    assert!(
+        !wait_for_will(&count, 1500).await,
+        "a 2_200_000s (25 day) Will Delay must not publish the Will within 1.5s"
+    );
+
+    watcher.disconnect().await.unwrap();
+}
+
+#[wasm_bindgen_test]
+async fn absent_session_expiry_publishes_will_immediately() {
+    let broker = broker();
+    let client_id = "wasm-wd-absent-expiry";
+    let (watcher, count) = watch_will(&broker, client_id).await;
+
+    let options = ConnectOptions::new(client_id)
+        .with_clean_start(true)
+        .with_will(delayed_will(client_id, 3));
+    let conn = RawClient::connect_with_options(&broker, options).await;
+    conn.close_without_disconnect();
+
+    assert!(
+        wait_for_will(&count, 1500).await,
+        "an absent Session Expiry Interval means 0, so the Will must be published immediately"
+    );
+
+    watcher.disconnect().await.unwrap();
+}
+
+#[wasm_bindgen_test]
+async fn absent_session_expiry_session_is_not_resumed() {
+    let broker = broker();
+    let client_id = "wasm-wd-absent-resume";
+
+    let first = RawClient::connect_with_options(
+        &broker,
+        ConnectOptions::new(client_id).with_clean_start(true),
+    )
+    .await;
+    first.disconnect(ReasonCode::Success);
+    sleep(300).await;
+
+    let second = RawClient::connect(&broker, client_id, false, SESSION_EXPIRY, None).await;
+    assert!(
+        !second.session_present(),
+        "an absent Session Expiry Interval means 0, so no session survives the disconnect"
+    );
+    second.disconnect(ReasonCode::Success);
+}
+
+#[wasm_bindgen_test]
+async fn disconnect_session_expiry_zero_releases_delayed_will() {
+    let broker = broker();
+    let client_id = "wasm-wd-disconnect-zero";
+    let (watcher, count) = watch_will(&broker, client_id).await;
+
+    let conn = RawClient::connect(
+        &broker,
+        client_id,
+        true,
+        SESSION_EXPIRY,
+        Some(delayed_will(client_id, 5)),
+    )
+    .await;
+    conn.disconnect_with(&disconnect_with_expiry(
+        ReasonCode::DisconnectWithWillMessage,
+        0,
+    ));
+
+    assert!(
+        wait_for_will(&count, 1500).await,
+        "Session Expiry 0 on DISCONNECT ends the session now, so the Will must not wait for the delay"
+    );
+
+    let second = RawClient::connect(&broker, client_id, false, SESSION_EXPIRY, None).await;
+    assert!(
+        !second.session_present(),
+        "Session Expiry 0 on DISCONNECT must end the session"
+    );
+    second.disconnect(ReasonCode::Success);
+    watcher.disconnect().await.unwrap();
+}
+
+#[wasm_bindgen_test]
+async fn disconnect_session_expiry_after_zero_is_protocol_error() {
+    let broker = broker();
+    let client_id = "wasm-wd-disconnect-error";
+    let (watcher, count) = watch_will(&broker, client_id).await;
+
+    let conn = RawClient::connect(
+        &broker,
+        client_id,
+        true,
+        0,
+        Some(delayed_will(client_id, 0)),
+    )
+    .await;
+    conn.send(&disconnect_with_expiry(ReasonCode::Success, SESSION_EXPIRY));
+
+    assert_eq!(
+        conn.server_disconnect_reason().await,
+        Some(0x82),
+        "a non-zero Session Expiry on DISCONNECT after CONNECT sent 0 is a Protocol Error"
+    );
+    assert!(
+        wait_for_will(&count, 1500).await,
+        "an invalid DISCONNECT is not a normal disconnection, so the Will is published"
+    );
+    conn.close_without_disconnect();
+
+    watcher.disconnect().await.unwrap();
+}
+
+#[wasm_bindgen_test]
+async fn session_expiry_counts_from_disconnect() {
+    let broker = broker();
+    let client_id = "wasm-long-lived";
+    let first = RawClient::connect(&broker, client_id, true, 2, None).await;
+    sleep(3000).await;
+    first.disconnect(ReasonCode::Success);
+    sleep(200).await;
+
+    let second = RawClient::connect(&broker, client_id, false, SESSION_EXPIRY, None).await;
+    let present = second.session_present();
+    second.disconnect(ReasonCode::Success);
+    assert!(
+        present,
+        "a 2s Session Expiry counts from the disconnect, not from CONNECT"
+    );
+}
+
+#[wasm_bindgen_test]
+async fn disconnect_expiry_extends_a_long_connection() {
+    let broker = broker();
+    let client_id = "wasm-long-extend";
+    let first = RawClient::connect(&broker, client_id, true, 1, None).await;
+    sleep(2500).await;
+    first.disconnect_with(&disconnect_with_expiry(ReasonCode::Success, SESSION_EXPIRY));
+    sleep(1500).await;
+
+    let second = RawClient::connect(&broker, client_id, false, SESSION_EXPIRY, None).await;
+    let present = second.session_present();
+    second.disconnect(ReasonCode::Success);
+    assert!(
+        present,
+        "the DISCONNECT Session Expiry of 60s applies from the disconnect"
+    );
+}
+
+#[wasm_bindgen_test]
+async fn session_expiry_above_the_broker_maximum_is_capped_and_advertised() {
+    let broker = capped_broker(1);
+    let client_id = "wasm-cap-high";
+    let (watcher, count) = watch_will(&broker, client_id).await;
+
+    let conn = RawClient::connect(
+        &broker,
+        client_id,
+        true,
+        3600,
+        Some(delayed_will(client_id, 5)),
+    )
+    .await;
+    assert_eq!(
+        conn.connack().properties.get_session_expiry_interval(),
+        Some(1)
+    );
+    conn.close_without_disconnect();
+
+    assert!(
+        wait_for_will(&count, 2500).await,
+        "the session ends 1s after disconnect under the broker maximum, so the 5s Will fires then"
+    );
+    watcher.disconnect().await.unwrap();
+}
+
+#[wasm_bindgen_test]
+async fn session_expiry_within_the_broker_maximum_is_not_advertised() {
+    let broker = capped_broker(10);
+    let conn = RawClient::connect(&broker, "wasm-cap-low", true, 5, None).await;
+    assert_eq!(
+        conn.connack().properties.get_session_expiry_interval(),
+        None
+    );
+    conn.disconnect(ReasonCode::Success);
+}
+
+#[wasm_bindgen_test]
+async fn connack_session_expiry_matches_the_session_kept() {
+    let broker = broker();
+    let client_id = "wasm-connack-kept";
+    let first = RawClient::connect_with_options(
+        &broker,
+        ConnectOptions::new(client_id).with_clean_start(true),
+    )
+    .await;
+    let advertised = first.connack().properties.get_session_expiry_interval();
+    first.disconnect(ReasonCode::Success);
+    sleep(300).await;
+
+    let second = RawClient::connect(&broker, client_id, false, SESSION_EXPIRY, None).await;
+    let present = second.session_present();
+    second.disconnect(ReasonCode::Success);
+    assert_eq!(
+        advertised, None,
+        "the broker keeps the client's Session Expiry, so CONNACK must not advertise another"
+    );
+    assert!(
+        !present,
+        "an absent Session Expiry means 0: the session ended"
+    );
+}
+
+#[wasm_bindgen_test]
+async fn reconnect_then_drop_again_publishes_one_will_after_second_delay() {
+    let broker = broker();
+    let client_id = "wasm-wd-redrop";
+    let (watcher, count) = watch_will(&broker, client_id).await;
+
+    let first = RawClient::connect(
+        &broker,
+        client_id,
+        true,
+        SESSION_EXPIRY,
+        Some(delayed_will(client_id, 2)),
+    )
+    .await;
+    let first_dropped_at = now_ms();
+    first.close_without_disconnect();
+    sleep(300).await;
+
+    let second = RawClient::connect(
+        &broker,
+        client_id,
+        false,
+        SESSION_EXPIRY,
+        Some(delayed_will(client_id, 2)),
+    )
+    .await;
+    sleep(500).await;
+    let second_dropped_at = now_ms();
+    second.close_without_disconnect();
+
+    sleep_until(first_dropped_at + 2400.0).await;
+    assert_eq!(
+        count.get(),
+        0,
+        "the first connection's Will was cancelled by the reconnect"
+    );
+    sleep_until(second_dropped_at + 1500.0).await;
+    assert_eq!(count.get(), 0, "the second Will waits for its own delay");
+    assert!(
+        wait_for_will(&count, 3000).await,
+        "the second connection's Will is published after its delay"
+    );
+    sleep(700).await;
+    assert_eq!(count.get(), 1, "exactly one Will is published");
+
+    watcher.disconnect().await.unwrap();
+}
+
+#[wasm_bindgen_test]
+async fn takeover_of_a_live_expiry_zero_session_is_not_resumed() {
+    let broker = broker();
+    let client_id = "wasm-live-zero";
+    let first = RawClient::connect(&broker, client_id, true, 0, None).await;
+    sleep(200).await;
+    let second = RawClient::connect(&broker, client_id, false, SESSION_EXPIRY, None).await;
+    let present = second.session_present();
+    second.disconnect(ReasonCode::Success);
+    drop(first);
+    assert!(
+        !present,
+        "an expiry-0 session ends when its connection is taken over"
+    );
+}
+
+fn send_raw(client: &RawClient, bytes: &[u8]) {
+    let array = js_sys::Uint8Array::from(bytes);
+    client.port.post_message(&array.buffer()).unwrap();
+}
+
+fn send_subscribe(client: &RawClient, topic: &str) {
+    let topic_len = u8::try_from(topic.len()).unwrap();
+    let mut subscribe = vec![0x82, 6 + topic_len, 0x00, 0x01, 0x00, 0x00, topic_len];
+    subscribe.extend_from_slice(topic.as_bytes());
+    subscribe.push(0x00);
+    send_raw(client, &subscribe);
+}
+
+fn send_publish(client: &RawClient, topic: &str) {
+    let topic_len = u8::try_from(topic.len()).unwrap();
+    let mut publish = vec![0x30, 5 + topic_len, 0x00, topic_len];
+    publish.extend_from_slice(topic.as_bytes());
+    publish.extend_from_slice(&[0x00, b'h', b'i']);
+    send_raw(client, &publish);
+}
+
+fn received_publish(client: &RawClient) -> bool {
+    let inbox = client.inbox.borrow().clone();
+    let mut i = usize::from(inbox[1]) + 2;
+    while i + 1 < inbox.len() {
+        if inbox[i] & 0xF0 == 0x30 {
+            return true;
+        }
+        i += usize::from(inbox[i + 1]) + 2;
+    }
+    false
+}
+
+#[wasm_bindgen_test]
+async fn clean_start_after_an_offline_session_drops_its_subscriptions() {
+    let broker = broker();
+    let publisher = RawClient::connect(&broker, "wcs-pub", true, 0, None).await;
+    let first = RawClient::connect(&broker, "wcs-take", true, SESSION_EXPIRY, None).await;
+    send_subscribe(&first, "wcs/t");
+    sleep(200).await;
+    first.disconnect(ReasonCode::Success);
+    sleep(200).await;
+    let second = RawClient::connect(&broker, "wcs-take", true, SESSION_EXPIRY, None).await;
+    let present = second.session_present();
+    sleep(200).await;
+    send_publish(&publisher, "wcs/t");
+    sleep(500).await;
+    let delivered = received_publish(&second);
+    second.disconnect(ReasonCode::Success);
+    publisher.disconnect(ReasonCode::Success);
+    assert!(!present);
+    assert!(
+        !delivered,
+        "a clean start must not keep the previous session's subscription"
+    );
+}
+
+#[wasm_bindgen_test]
+async fn subscription_delivers_to_its_own_connection() {
+    let broker = broker();
+    let publisher = RawClient::connect(&broker, "wpc-pub", true, 0, None).await;
+    let first = RawClient::connect(&broker, "wpc-sub", true, SESSION_EXPIRY, None).await;
+    send_subscribe(&first, "wpc/t");
+    sleep(200).await;
+    send_publish(&publisher, "wpc/t");
+    sleep(500).await;
+    let delivered = received_publish(&first);
+    first.disconnect(ReasonCode::Success);
+    publisher.disconnect(ReasonCode::Success);
+    assert!(delivered, "positive control for the clean-start test");
+}
+
+#[wasm_bindgen_test]
+async fn takeover_does_not_resume_a_session_the_new_connection_starts_clean() {
+    let broker = broker();
+    let publisher = RawClient::connect(&broker, "wtk-pub", true, 0, None).await;
+    let first = RawClient::connect(&broker, "wtk-sub", true, SESSION_EXPIRY, None).await;
+    send_subscribe(&first, "wtk/t");
+    sleep(200).await;
+    let second = RawClient::connect(&broker, "wtk-sub", true, SESSION_EXPIRY, None).await;
+    sleep(200).await;
+    send_publish(&publisher, "wtk/t");
+    sleep(500).await;
+    let delivered = received_publish(&second);
+    second.disconnect(ReasonCode::Success);
+    publisher.disconnect(ReasonCode::Success);
+    drop(first);
+    assert!(
+        !delivered,
+        "a clean-start takeover must not inherit the displaced connection's subscription"
+    );
 }

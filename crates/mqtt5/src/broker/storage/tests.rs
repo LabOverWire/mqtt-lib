@@ -740,6 +740,99 @@ fn will_publish_delay_is_bounded_by_session_expiry() {
         ClientSession::new_with_will("c", true, Some(2), Some(delayed_will(Some(10))));
     assert_eq!(short_session.will_publish_delay(), Some(2));
 
-    let never_expires = ClientSession::new_with_will("c", true, None, Some(delayed_will(Some(10))));
-    assert_eq!(never_expires.will_publish_delay(), Some(10));
+    let v311_persistent =
+        ClientSession::new_with_will("c", true, None, Some(delayed_will(Some(10))));
+    assert_eq!(v311_persistent.will_publish_delay(), Some(10));
+}
+
+fn connect_packet(
+    protocol_version: u8,
+    clean_start: bool,
+    session_expiry: Option<u32>,
+) -> crate::packet::connect::ConnectPacket {
+    let mut options = mqtt5_protocol::types::ConnectOptions::new("c").with_clean_start(clean_start);
+    if let Some(expiry) = session_expiry {
+        options = options.with_session_expiry_interval(expiry);
+    }
+    let mut connect = crate::packet::connect::ConnectPacket::new(options);
+    connect.protocol_version = protocol_version;
+    connect
+}
+
+#[test]
+fn session_expiry_from_connect_treats_absent_v5_value_as_zero() {
+    assert_eq!(
+        ClientSession::expiry_from_connect(&connect_packet(5, false, None)),
+        Some(0)
+    );
+    assert_eq!(
+        ClientSession::expiry_from_connect(&connect_packet(5, false, Some(120))),
+        Some(120)
+    );
+    assert_eq!(
+        ClientSession::expiry_from_connect(&connect_packet(5, true, Some(0))),
+        Some(0)
+    );
+}
+
+#[test]
+fn session_expiry_from_connect_keeps_v311_clean_session_semantics() {
+    assert_eq!(
+        ClientSession::expiry_from_connect(&connect_packet(4, true, None)),
+        Some(0),
+        "CleanSession=1 ends the session with the connection"
+    );
+    assert_eq!(
+        ClientSession::expiry_from_connect(&connect_packet(4, false, None)),
+        None,
+        "CleanSession=0 keeps the session with no expiry"
+    );
+}
+
+async fn assert_update_session_is_token_guarded(backend: &impl StorageBackend) {
+    let mut session = ClientSession::new_with_will(
+        "guarded",
+        true,
+        Some(60),
+        Some(crate::types::WillMessage::new("will/guarded", "gone")),
+    );
+    session.connection_token = 7;
+    backend.store_session(session).await.unwrap();
+
+    let stale = backend
+        .update_session("guarded", 6, |stored| stored.will_message = None)
+        .await
+        .unwrap();
+    assert!(
+        !stale,
+        "a different connection token must not update the session"
+    );
+    let stored = backend.get_session("guarded").await.unwrap().unwrap();
+    assert!(stored.will_message.is_some());
+
+    let owned = backend
+        .update_session("guarded", 7, |stored| stored.will_message = None)
+        .await
+        .unwrap();
+    assert!(owned);
+    let stored = backend.get_session("guarded").await.unwrap().unwrap();
+    assert!(stored.will_message.is_none());
+
+    let missing = backend
+        .update_session("absent", 7, |stored| stored.will_message = None)
+        .await
+        .unwrap();
+    assert!(!missing);
+}
+
+#[tokio::test]
+async fn memory_update_session_is_token_guarded() {
+    assert_update_session_is_token_guarded(&MemoryBackend::new()).await;
+}
+
+#[tokio::test]
+async fn file_update_session_is_token_guarded() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = FileBackend::new(dir.path()).await.unwrap();
+    assert_update_session_is_token_guarded(&backend).await;
 }

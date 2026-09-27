@@ -38,6 +38,22 @@
 
 ## Diary Entries
 
+### Absent Session Expiry now means 0, and DISCONNECT can change the Session Expiry (2026-09-24)
+
+**Trigger**: the quorum review of PR #170 and issue #171, which was folded into it. The broker stored an absent CONNECT Session Expiry Interval as "never expires", although §3.1.2.11.2 says an absent value is 0. A client that left the property out kept its session, subscriptions and queued messages forever. It also broke the Will timing from #154: with the Will bounded by session end, "never" meant the delay was always honoured instead of the Will going out at disconnect. The broker also ignored a Session Expiry Interval sent on DISCONNECT (§3.14.2.2.2), and a resumed session kept the Session Expiry of the connection that created it instead of taking the resuming CONNECT's value.
+
+**Fix**: the Session Expiry is worked out once, from the CONNECT, when a session is created or resumed. MQTT v5: the property's value, or 0 when absent. MQTT v3.1.1 has no property, so CleanSession=1 gives 0 and CleanSession=0 keeps the session with no expiry, as before. A Session Expiry on DISCONNECT replaces the stored value before the session-end and Will logic runs. If CONNECT had 0 and DISCONNECT sends a non-zero value, the server sends DISCONNECT 0x82 and closes. The spec says such a DISCONNECT is not valid, so it is not a normal disconnection: the Will is published, and the session still ends because its expiry stays 0.
+
+**New tests**, all failing on the tree before the fix:
+- `absent_session_expiry_discards_session_at_disconnect` (`[MQTT-4.1.0-2]`): connect without the property, subscribe at QoS 1, disconnect, publish while offline, then reconnect with Clean Start 0. It expects Session Present 0 and no delivery of the offline message.
+- `disconnect_session_expiry_zero_discards_session` (`[MQTT-4.1.0-2]`): CONNECT 300, DISCONNECT 0, then Session Present 0.
+- `disconnect_session_expiry_extends_session` (`[MQTT-3.1.2-23]`): CONNECT 1, DISCONNECT 300, wait 2.5 s, then Session Present 1.
+- `disconnect_session_expiry_after_zero_is_protocol_error` (`[MQTT-4.13.1-1]`): CONNECT 0, DISCONNECT 300, then DISCONNECT 0x82 and the connection closes.
+
+**IDs**: neither "absent means 0" nor the DISCONNECT 0 to non-zero rule has its own normative statement in `mqtt-v5.0-statement-texts.txt`; both are prose in §3.1.2.11.2 and §3.14.2.2.2. The tests are filed under the statements they exercise: session discard after the interval (MQTT-4.1.0-2), session storage when the interval is above 0 (MQTT-3.1.2-23), and closing the connection on a Protocol Error (MQTT-4.13.1-1). The manifest text for all three matches the statement file.
+
+**Knock-on**: tests elsewhere in the workspace had resumed sessions without setting a Session Expiry. Several of them only asserted inside `if session_present`, so after the fix they would have passed without checking anything. They now set an explicit expiry and assert Session Present.
+
 ### Delayed Will was never cancelled, and the MQTT-3.1.3-9 test could not see it (2026-09-24)
 
 **Trigger**: issue #154. With a Will Delay Interval above zero, the broker spawned a detached task that slept for the delay and then published the Will unconditionally. A client that reconnected inside the delay still had its Will published, which violates `[MQTT-3.1.3-9]` and the "new Network Connection ... before the Will Delay Interval has elapsed" clause of `[MQTT-3.1.2-8]`.

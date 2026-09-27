@@ -207,9 +207,10 @@ pub struct RunArgs {
     #[arg(long, env = "MQTT5_NO_PERSISTENCE")]
     pub no_persistence: bool,
 
-    /// Session expiry interval (e.g., 3600, 1h, 30m)
-    #[arg(long, default_value = "3600", value_parser = parse_duration_secs, env = "MQTT5_SESSION_EXPIRY")]
-    pub session_expiry: u64,
+    /// Maximum session expiry interval granted to clients (e.g., 3600, 1h, 30m); a client
+    /// asking for more, or an MQTT 3.1.1 persistent session, gets this value (default: no limit)
+    #[arg(long, value_parser = parse_duration_secs, env = "MQTT5_SESSION_EXPIRY")]
+    pub session_expiry: Option<u64>,
 
     /// Maximum `QoS` level supported (0, 1, or 2)
     #[arg(long, default_value = "2", env = "MQTT5_MAX_QOS")]
@@ -279,7 +280,7 @@ fn build_example_config() -> BrokerConfig {
             "[::]:1883".parse().unwrap(),
         ],
         max_clients: 10000,
-        session_expiry_interval: std::time::Duration::from_secs(3600),
+        session_expiry_interval: BrokerConfig::default().session_expiry_interval,
         max_packet_size: 268_435_456,
         topic_alias_maximum: 65535,
         retain_available: true,
@@ -1037,7 +1038,9 @@ async fn create_interactive_config(cmd: &mut RunArgs) -> Result<BrokerConfig> {
     config = config.with_bind_addresses(bind_addrs?);
 
     config = config.with_max_clients(cmd.max_clients);
-    config.session_expiry_interval = std::time::Duration::from_secs(cmd.session_expiry);
+    if let Some(maximum) = cmd.session_expiry {
+        config.session_expiry_interval = std::time::Duration::from_secs(maximum);
+    }
     config.maximum_qos = cmd.max_qos;
     config.retain_available = !cmd.no_retain;
     config.wildcard_subscription_available = !cmd.no_wildcards;

@@ -32,7 +32,6 @@ async fn test_cli_session_persistence() {
 
     let client_id = "persist-test";
 
-    // Test session persistence
     let result = verify_session_persistence(broker_url, client_id).await;
 
     match result {
@@ -40,7 +39,7 @@ async fn test_cli_session_persistence() {
             println!("✅ Session persistence verified - session was resumed");
         }
         Ok(false) => {
-            println!("⚠️  Session not resumed - broker may not support persistence");
+            panic!("Session was not resumed although the first connection set a Session Expiry Interval");
         }
         Err(e) => {
             println!("❌ Session persistence test failed: {e}");

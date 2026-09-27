@@ -23,11 +23,13 @@ pub fn parse_protocol_version(s: &str) -> Result<ProtocolVersion, String> {
 
 #[derive(Args)]
 pub struct SessionArgs {
-    /// Don't clean start (resume existing session)
+    /// Don't clean start (resume existing session); the session is kept for 1h after
+    /// disconnect unless --session-expiry says otherwise
     #[arg(long = "no-clean-start", env = "MQTT5_NO_CLEAN_START")]
     pub no_clean_start: bool,
 
-    /// Session expiry interval (e.g., 1h, 30m) (0 = expire on disconnect)
+    /// Session expiry interval (e.g., 1h, 30m) (0 = expire on disconnect; default: 0, or 1h
+    /// with --no-clean-start)
     #[arg(long, value_parser = parse_duration_secs, env = "MQTT5_SESSION_EXPIRY")]
     pub session_expiry: Option<u64>,
 
@@ -38,6 +40,16 @@ pub struct SessionArgs {
     /// MQTT protocol version (3.1.1 or 5, default: 5)
     #[arg(long, value_parser = parse_protocol_version, env = "MQTT5_PROTOCOL_VERSION")]
     pub protocol_version: Option<ProtocolVersion>,
+}
+
+pub const RESUMED_SESSION_EXPIRY_SECS: u64 = 3600;
+
+impl SessionArgs {
+    #[must_use]
+    pub fn session_expiry_secs(&self) -> Option<u64> {
+        self.session_expiry
+            .or(self.no_clean_start.then_some(RESUMED_SESSION_EXPIRY_SECS))
+    }
 }
 
 #[derive(Args)]
@@ -134,4 +146,37 @@ pub struct QuicArgs {
         env = "MQTT5_QUIC_EARLY_DATA"
     )]
     pub early_data: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SessionArgs, RESUMED_SESSION_EXPIRY_SECS};
+
+    fn session(no_clean_start: bool, session_expiry: Option<u64>) -> SessionArgs {
+        SessionArgs {
+            no_clean_start,
+            session_expiry,
+            keep_alive: 60,
+            protocol_version: None,
+        }
+    }
+
+    #[test]
+    fn resuming_without_expiry_keeps_the_session() {
+        assert_eq!(
+            session(true, None).session_expiry_secs(),
+            Some(RESUMED_SESSION_EXPIRY_SECS)
+        );
+    }
+
+    #[test]
+    fn explicit_expiry_wins() {
+        assert_eq!(session(true, Some(0)).session_expiry_secs(), Some(0));
+        assert_eq!(session(false, Some(30)).session_expiry_secs(), Some(30));
+    }
+
+    #[test]
+    fn clean_start_without_expiry_sends_none() {
+        assert_eq!(session(false, None).session_expiry_secs(), None);
+    }
 }

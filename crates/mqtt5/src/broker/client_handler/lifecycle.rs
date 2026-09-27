@@ -1,3 +1,4 @@
+use crate::broker::storage::ClientSession;
 use crate::error::{MqttError, Result};
 use crate::packet::disconnect::DisconnectPacket;
 use crate::packet::publish::PublishPacket;
@@ -10,7 +11,39 @@ use tracing::{debug, warn};
 use super::ClientHandler;
 
 impl ClientHandler {
-    pub(super) fn handle_disconnect(&mut self, disconnect: &DisconnectPacket) -> Result<()> {
+    pub(super) async fn handle_disconnect(&mut self, disconnect: &DisconnectPacket) -> Result<()> {
+        if let Some(requested) = disconnect.properties.get_session_expiry_interval() {
+            if self.connect_session_expiry == Some(0) && requested != 0 {
+                warn!(
+                    client_id = ?self.client_id,
+                    requested,
+                    "Session Expiry Interval on DISCONNECT after 0 on CONNECT is a Protocol Error"
+                );
+                self.disconnect_reason = Some(ReasonCode::ProtocolError);
+                let reply = DisconnectPacket::new(ReasonCode::ProtocolError);
+                self.write_to_client(crate::packet::Packet::Disconnect(reply))
+                    .await?;
+                return Err(MqttError::ProtocolError(
+                    "Session Expiry Interval on DISCONNECT after 0 on CONNECT".to_string(),
+                ));
+            }
+            let granted =
+                ClientSession::granted_expiry(Some(requested), self.maximum_session_expiry());
+            if let Some(session) = self.session.as_mut() {
+                session.expiry_interval = Some(granted);
+            }
+            if let Some(client_id) = self.client_id.clone() {
+                let slot = self.router.lock_session(&client_id).await;
+                let stored = self
+                    .update_stored_session(move |session| session.expiry_interval = Some(granted))
+                    .await;
+                drop(slot);
+                if let Err(e) = stored {
+                    warn!(client_id = %client_id, "Failed to store the DISCONNECT Session Expiry: {e}");
+                }
+            }
+        }
+
         self.disconnect_reason = Some(disconnect.reason_code);
 
         if disconnect.reason_code == ReasonCode::DisconnectWithWillMessage {
@@ -33,7 +66,6 @@ impl ClientHandler {
     pub(super) async fn publish_will_message(
         &self,
         client_id: &str,
-        session_taken_over: bool,
         armed_will: Option<oneshot::Receiver<()>>,
     ) {
         let Some(session) = self.session.as_ref() else {
@@ -56,9 +88,9 @@ impl ClientHandler {
             if self.authorize_will(client_id, &publish).await {
                 self.route_publish(&publish, None).await;
             }
-            if !session_taken_over {
-                self.router.clear_stored_will(client_id).await;
-            }
+            self.router
+                .clear_stored_will(client_id, session.connection_token)
+                .await;
             return;
         }
 
@@ -210,6 +242,69 @@ mod tests {
         assert_eq!(
             id, start,
             "when every id is in use the fallback reissues start"
+        );
+    }
+}
+
+#[cfg(test)]
+mod disconnect_tests {
+    use super::super::ClientHandler;
+    use crate::broker::auth::AllowAllAuthProvider;
+    use crate::broker::config::BrokerConfig;
+    use crate::broker::resource_monitor::{ResourceLimits, ResourceMonitor};
+    use crate::broker::router::MessageRouter;
+    use crate::broker::storage::{DynamicStorage, MemoryBackend, StorageBackend};
+    use crate::broker::sys_topics::BrokerStats;
+    use crate::broker::transport::BrokerTransport;
+    use crate::packet::connect::ConnectPacket;
+    use crate::packet::disconnect::DisconnectPacket;
+    use crate::protocol::v5::reason_codes::ReasonCode;
+    use std::sync::Arc;
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio::sync::broadcast;
+
+    #[tokio::test]
+    async fn disconnect_session_expiry_is_stored_when_the_disconnect_is_processed() {
+        let storage = Arc::new(DynamicStorage::Memory(MemoryBackend::new()));
+        let router = Arc::new(MessageRouter::with_storage(Arc::clone(&storage)));
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let _client = TcpStream::connect(addr).await.expect("connect");
+        let (server, peer) = listener.accept().await.expect("accept");
+        let (_shutdown_tx, shutdown_rx) = broadcast::channel(1);
+        let mut handler = ClientHandler::new(
+            BrokerTransport::tcp(server),
+            peer,
+            Arc::new(BrokerConfig::default()),
+            Arc::clone(&router),
+            Arc::new(AllowAllAuthProvider),
+            Some(Arc::clone(&storage)),
+            Arc::new(BrokerStats::new()),
+            Arc::new(ResourceMonitor::new(ResourceLimits::default())),
+            shutdown_rx,
+        );
+        let connect = ConnectPacket::new(
+            crate::types::ConnectOptions::new("ending")
+                .with_session_expiry_interval(3600)
+                .protocol_options,
+        );
+        handler.protocol_version = 5;
+        handler.client_id = Some("ending".to_string());
+        handler.handle_session(&connect).await.expect("claim");
+
+        let mut disconnect = DisconnectPacket::new(ReasonCode::Success);
+        disconnect.properties.set_session_expiry_interval(0);
+        assert!(handler.handle_disconnect(&disconnect).await.is_err());
+
+        let stored = storage
+            .get_session("ending")
+            .await
+            .expect("read")
+            .expect("session of the live connection");
+        assert_eq!(
+            stored.expiry_interval,
+            Some(0),
+            "a claim racing the release must see that the session ended at the DISCONNECT"
         );
     }
 }
