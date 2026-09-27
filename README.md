@@ -22,7 +22,7 @@ A production-ready MQTT v5.0 and v3.1.1 platform that ships a client library, a 
 
 ```toml
 [dependencies]
-mqtt5 = "0.36"
+mqtt5 = "0.43"
 ```
 
 For a lean client-only build (no broker, drops `argon2`/`hyper`/`regex`/`toml`/...):
