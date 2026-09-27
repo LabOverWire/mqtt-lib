@@ -195,6 +195,18 @@ pub struct RunArgs {
     #[arg(long, env = "MQTT5_QUIC_EARLY_DATA")]
     pub quic_early_data: bool,
 
+    /// Maximum concurrent QUIC streams a peer may open (default 100)
+    #[arg(long, env = "MQTT5_QUIC_MAX_STREAMS")]
+    pub quic_max_streams: Option<u32>,
+
+    /// Per-stream QUIC receive window in bytes (default 262144)
+    #[arg(long, env = "MQTT5_QUIC_STREAM_WINDOW")]
+    pub quic_stream_window: Option<u32>,
+
+    /// Disable QUIC UDP segmentation offload (send one datagram per syscall)
+    #[arg(long, env = "MQTT5_QUIC_DISABLE_OFFLOAD")]
+    pub quic_disable_offload: bool,
+
     /// Storage directory for persistent data
     #[arg(long, default_value = "./mqtt_storage", env = "MQTT5_STORAGE_DIR")]
     pub storage_dir: PathBuf,
@@ -336,17 +348,10 @@ fn build_example_config() -> BrokerConfig {
             subprotocol: "mqtt".to_string(),
             use_tls: true,
         }),
-        quic_config: Some(QuicConfig {
-            cert_file: PathBuf::from("/path/to/server.crt"),
-            key_file: PathBuf::from("/path/to/server.key"),
-            ca_file: None,
-            require_client_cert: false,
-            bind_addresses: vec![
-                "0.0.0.0:14567".parse().unwrap(),
-                "[::]:14567".parse().unwrap(),
-            ],
-            enable_early_data: false,
-        }),
+        quic_config: Some(QuicConfig::new(
+            PathBuf::from("/path/to/server.crt"),
+            PathBuf::from("/path/to/server.key"),
+        )),
         cluster_listener_config: None,
         storage_config: StorageConfig {
             backend: StorageBackend::File,
@@ -1003,6 +1008,15 @@ fn configure_quic(config: &mut BrokerConfig, cmd: &RunArgs) -> Result<()> {
 
         if cmd.quic_early_data {
             quic_config = quic_config.with_early_data(true);
+        }
+        if let Some(max) = cmd.quic_max_streams {
+            quic_config = quic_config.with_max_concurrent_streams(max);
+        }
+        if let Some(bytes) = cmd.quic_stream_window {
+            quic_config = quic_config.with_stream_receive_window(bytes);
+        }
+        if cmd.quic_disable_offload {
+            quic_config = quic_config.with_disable_segmentation_offload(true);
         }
         config.quic_config = Some(quic_config);
         if let Some(strategy) = cmd.quic_delivery_strategy {

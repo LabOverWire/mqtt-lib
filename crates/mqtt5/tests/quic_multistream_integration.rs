@@ -18,24 +18,79 @@ fn test_client_id(prefix: &str) -> String {
     format!("{}-{}", prefix, Ulid::new())
 }
 
-async fn start_quic_broker() -> (MqttBroker, SocketAddr) {
+fn test_quic_config() -> QuicConfig {
+    QuicConfig::new(
+        PathBuf::from("../../test_certs/server.pem"),
+        PathBuf::from("../../test_certs/server.key"),
+    )
+    .with_bind_address("127.0.0.1:0".parse::<SocketAddr>().unwrap())
+}
+
+async fn start_quic_broker_with(quic_config: QuicConfig) -> (MqttBroker, SocketAddr) {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     let config = BrokerConfig::default()
         .with_bind_address(([127, 0, 0, 1], 0))
-        .with_quic(
-            QuicConfig::new(
-                PathBuf::from("../../test_certs/server.pem"),
-                PathBuf::from("../../test_certs/server.key"),
-            )
-            .with_bind_address("127.0.0.1:0".parse::<SocketAddr>().unwrap()),
-        );
+        .with_quic(quic_config);
 
     let broker = MqttBroker::with_config(config).await.unwrap();
     let quic_addr = broker
         .quic_local_addr()
         .expect("QUIC endpoint must be bound");
     (broker, quic_addr)
+}
+
+async fn start_quic_broker() -> (MqttBroker, SocketAddr) {
+    start_quic_broker_with(test_quic_config()).await
+}
+
+async fn publish_and_count(
+    quic_config: QuicConfig,
+    strategy: StreamStrategy,
+    messages: u32,
+    payload_size: usize,
+) -> u32 {
+    let (mut broker, quic_addr) = start_quic_broker_with(quic_config).await;
+    let broker_handle = tokio::spawn(async move { broker.run().await });
+
+    let topic = format!("quic-transport-limit/{}/test", Ulid::new());
+    let pub_client = MqttClient::new(test_client_id("quic-limit-pub"));
+    let sub_client = MqttClient::new(test_client_id("quic-limit-sub"));
+
+    pub_client.set_insecure_tls(true).await;
+    sub_client.set_insecure_tls(true).await;
+    pub_client.set_quic_stream_strategy(strategy).await;
+
+    let broker_url = format!("quic://{quic_addr}");
+    pub_client.connect(&broker_url).await.unwrap();
+    sub_client.connect(&broker_url).await.unwrap();
+
+    let received = Arc::new(AtomicU32::new(0));
+    let received_clone = received.clone();
+    sub_client
+        .subscribe(&topic, move |_msg| {
+            received_clone.fetch_add(1, Ordering::Relaxed);
+        })
+        .await
+        .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let payload = vec![0u8; payload_size];
+    for _ in 0..messages {
+        pub_client.publish(&topic, payload.clone()).await.unwrap();
+    }
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while received.load(Ordering::Relaxed) < messages && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let count = received.load(Ordering::Relaxed);
+    pub_client.disconnect().await.unwrap();
+    sub_client.disconnect().await.unwrap();
+    broker_handle.abort();
+    count
 }
 
 #[tokio::test]
@@ -270,14 +325,8 @@ async fn test_quic_data_per_publish_with_broker() {
 
     let broker_url = format!("quic://{quic_addr}");
 
-    if pub_client.connect(&broker_url).await.is_err() {
-        broker_handle.abort();
-        return;
-    }
-    if sub_client.connect(&broker_url).await.is_err() {
-        broker_handle.abort();
-        return;
-    }
+    pub_client.connect(&broker_url).await.unwrap();
+    sub_client.connect(&broker_url).await.unwrap();
 
     let received = Arc::new(AtomicU32::new(0));
     let received_clone = received.clone();
@@ -336,14 +385,8 @@ async fn test_quic_multiple_topics_with_flow_isolation() {
 
     let broker_url = format!("quic://{quic_addr}");
 
-    if pub_client.connect(&broker_url).await.is_err() {
-        broker_handle.abort();
-        return;
-    }
-    if sub_client.connect(&broker_url).await.is_err() {
-        broker_handle.abort();
-        return;
-    }
+    pub_client.connect(&broker_url).await.unwrap();
+    sub_client.connect(&broker_url).await.unwrap();
 
     let topic1_count = Arc::new(AtomicU32::new(0));
     let topic2_count = Arc::new(AtomicU32::new(0));
@@ -419,14 +462,8 @@ async fn test_quic_control_only_strategy() {
 
     let broker_url = format!("quic://{quic_addr}");
 
-    if pub_client.connect(&broker_url).await.is_err() {
-        broker_handle.abort();
-        return;
-    }
-    if sub_client.connect(&broker_url).await.is_err() {
-        broker_handle.abort();
-        return;
-    }
+    pub_client.connect(&broker_url).await.unwrap();
+    sub_client.connect(&broker_url).await.unwrap();
 
     let received = Arc::new(AtomicU32::new(0));
     let received_clone = received.clone();
@@ -484,14 +521,8 @@ async fn test_quic_mixed_qos_with_streams() {
 
     let broker_url = format!("quic://{quic_addr}");
 
-    if pub_client.connect(&broker_url).await.is_err() {
-        broker_handle.abort();
-        return;
-    }
-    if sub_client.connect(&broker_url).await.is_err() {
-        broker_handle.abort();
-        return;
-    }
+    pub_client.connect(&broker_url).await.unwrap();
+    sub_client.connect(&broker_url).await.unwrap();
 
     let received = Arc::new(AtomicU32::new(0));
     let received_clone = received.clone();
@@ -536,10 +567,7 @@ async fn test_quic_concurrent_publishers() {
     let sub_client = MqttClient::new(test_client_id("quic-conc-sub"));
     sub_client.set_insecure_tls(true).await;
 
-    if sub_client.connect(&broker_url).await.is_err() {
-        broker_handle.abort();
-        return;
-    }
+    sub_client.connect(&broker_url).await.unwrap();
 
     let received = Arc::new(AtomicU32::new(0));
     let received_clone = received.clone();
@@ -615,14 +643,8 @@ async fn test_quic_large_payload_per_stream() {
 
     let broker_url = format!("quic://{quic_addr}");
 
-    if pub_client.connect(&broker_url).await.is_err() {
-        broker_handle.abort();
-        return;
-    }
-    if sub_client.connect(&broker_url).await.is_err() {
-        broker_handle.abort();
-        return;
-    }
+    pub_client.connect(&broker_url).await.unwrap();
+    sub_client.connect(&broker_url).await.unwrap();
 
     let received_sizes = Arc::new(tokio::sync::Mutex::new(Vec::new()));
     let received_clone = received_sizes.clone();
@@ -746,10 +768,7 @@ async fn test_discard_flow_removes_peer_state() {
 
     let broker_url = format!("quic://{quic_addr}");
 
-    if client.connect(&broker_url).await.is_err() {
-        broker_handle.abort();
-        return;
-    }
+    client.connect(&broker_url).await.unwrap();
 
     client.publish(&topic, b"establish flow").await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -786,10 +805,7 @@ async fn test_discard_flow_without_flow_headers_returns_error() {
         .await;
 
     let broker_url = format!("quic://{quic_addr}");
-    if client.connect(&broker_url).await.is_err() {
-        broker_handle.abort();
-        return;
-    }
+    client.connect(&broker_url).await.unwrap();
 
     let result = client.discard_flow(FlowId::client(1)).await;
     assert!(
@@ -799,4 +815,49 @@ async fn test_discard_flow_without_flow_headers_returns_error() {
 
     client.disconnect().await.unwrap();
     broker_handle.abort();
+}
+
+#[tokio::test]
+async fn test_quic_per_publish_under_tight_stream_limit() {
+    let received = publish_and_count(
+        test_quic_config().with_max_concurrent_streams(2),
+        StreamStrategy::DataPerPublish,
+        20,
+        16,
+    )
+    .await;
+    assert_eq!(
+        received, 20,
+        "per-publish must retire and reuse streams when the peer limit is below the message count"
+    );
+}
+
+#[tokio::test]
+async fn test_quic_control_only_under_small_stream_window() {
+    let received = publish_and_count(
+        test_quic_config().with_stream_receive_window(2048),
+        StreamStrategy::ControlOnly,
+        50,
+        512,
+    )
+    .await;
+    assert_eq!(
+        received, 50,
+        "a single stream must keep flowing when its receive window is far below the bytes sent"
+    );
+}
+
+#[tokio::test]
+async fn test_quic_delivery_with_segmentation_offload_disabled() {
+    let received = publish_and_count(
+        test_quic_config().with_disable_segmentation_offload(true),
+        StreamStrategy::ControlOnly,
+        50,
+        512,
+    )
+    .await;
+    assert_eq!(
+        received, 50,
+        "disabling segmentation offload must not affect delivery"
+    );
 }

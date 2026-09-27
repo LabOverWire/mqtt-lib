@@ -36,6 +36,9 @@ pub struct QuicAcceptorConfig {
     pub require_client_cert: bool,
     pub alpn_protocols: Vec<Vec<u8>>,
     pub enable_early_data: bool,
+    pub max_concurrent_streams: Option<u32>,
+    pub stream_receive_window: Option<u32>,
+    pub disable_segmentation_offload: bool,
 }
 
 impl QuicAcceptorConfig {
@@ -51,6 +54,9 @@ impl QuicAcceptorConfig {
             require_client_cert: false,
             alpn_protocols: vec![b"MQTT-next".to_vec(), b"mqtt".to_vec()],
             enable_early_data: false,
+            max_concurrent_streams: None,
+            stream_receive_window: None,
+            disable_segmentation_offload: false,
         }
     }
 
@@ -95,6 +101,24 @@ impl QuicAcceptorConfig {
     #[must_use]
     pub fn with_early_data(mut self, enable: bool) -> Self {
         self.enable_early_data = enable;
+        self
+    }
+
+    #[must_use]
+    pub fn with_max_concurrent_streams(mut self, max: u32) -> Self {
+        self.max_concurrent_streams = Some(max);
+        self
+    }
+
+    #[must_use]
+    pub fn with_stream_receive_window(mut self, bytes: u32) -> Self {
+        self.stream_receive_window = Some(bytes);
+        self
+    }
+
+    #[must_use]
+    pub fn with_disable_segmentation_offload(mut self, disable: bool) -> Self {
+        self.disable_segmentation_offload = disable;
         self
     }
 
@@ -173,9 +197,19 @@ impl QuicAcceptorConfig {
         transport_config.datagram_receive_buffer_size(Some(65536));
         transport_config.datagram_send_buffer_size(65536);
 
-        transport_config.stream_receive_window(262_144u32.into());
+        transport_config
+            .stream_receive_window(self.stream_receive_window.unwrap_or(262_144).into());
         transport_config.receive_window(1_048_576u32.into());
         transport_config.send_window(1_048_576);
+
+        if let Some(max) = self.max_concurrent_streams {
+            transport_config.max_concurrent_uni_streams(max.into());
+            transport_config.max_concurrent_bidi_streams(max.into());
+        }
+
+        if self.disable_segmentation_offload {
+            transport_config.enable_segmentation_offload(false);
+        }
 
         server_config.transport_config(Arc::new(transport_config));
 

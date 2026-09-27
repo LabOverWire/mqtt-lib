@@ -20,6 +20,12 @@ pub struct QuicConfig {
     pub bind_addresses: Vec<SocketAddr>,
     #[serde(default)]
     pub enable_early_data: bool,
+    #[serde(default)]
+    pub max_concurrent_streams: Option<u32>,
+    #[serde(default)]
+    pub stream_receive_window: Option<u32>,
+    #[serde(default)]
+    pub disable_segmentation_offload: bool,
 }
 
 impl QuicConfig {
@@ -39,6 +45,9 @@ impl QuicConfig {
                 "[::]:14567".parse().expect("valid IPv6 address"),
             ],
             enable_early_data: false,
+            max_concurrent_streams: None,
+            stream_receive_window: None,
+            disable_segmentation_offload: false,
         }
     }
 
@@ -75,6 +84,24 @@ impl QuicConfig {
     #[must_use]
     pub fn with_early_data(mut self, enable: bool) -> Self {
         self.enable_early_data = enable;
+        self
+    }
+
+    #[must_use]
+    pub fn with_max_concurrent_streams(mut self, max: u32) -> Self {
+        self.max_concurrent_streams = Some(max);
+        self
+    }
+
+    #[must_use]
+    pub fn with_stream_receive_window(mut self, bytes: u32) -> Self {
+        self.stream_receive_window = Some(bytes);
+        self
+    }
+
+    #[must_use]
+    pub fn with_disable_segmentation_offload(mut self, disable: bool) -> Self {
+        self.disable_segmentation_offload = disable;
         self
     }
 }

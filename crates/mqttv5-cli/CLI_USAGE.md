@@ -122,6 +122,9 @@ mqttv5 broker generate-config [--output FILE] [--format json|toml]
 | `--quic-host <ADDR>` | QUIC bind address(es), requires TLS cert/key | None |
 | `--quic-delivery-strategy <S>` | QUIC server delivery strategy: `control-only`, `per-topic`, `per-publish` | `per-topic` |
 | `--quic-early-data` | Enable QUIC 0-RTT early data | `false` |
+| `--quic-max-streams <N>` | Maximum concurrent QUIC streams a client may open, per direction | `100` |
+| `--quic-stream-window <BYTES>` | Per-stream QUIC receive window | `262144` |
+| `--quic-disable-offload` | Disable UDP segmentation offload (one datagram per send) | `false` |
 | `--storage-dir <DIR>` | Storage directory for persistence | `./mqtt_storage` |
 | `--storage-backend <TYPE>` | Storage backend: `memory` or `file` | `file` |
 | `--no-persistence` | Disable message persistence | `false` |
