@@ -54,7 +54,7 @@ for tname in "${TRANSPORTS[@]}"; do
         label="${tname}_${topics}topics"
         echo "[${EXPERIMENT}] ${label}"
 
-        bench_args="--url ${url} ${flags} --mode hol-blocking --topics ${topics} --duration 30 --warmup 5 --payload-size 512 --rate 5000 --trace-dir /tmp/hol-traces"
+        bench_args="--url ${url} ${flags} --mode hol-blocking --topics ${topics} --duration 60 --warmup 5 --payload-size 256 --rate 500 --trace-dir /tmp/hol-traces"
         output_dir="${RESULTS_DIR}/${EXPERIMENT}"
         mkdir -p "$output_dir"
 

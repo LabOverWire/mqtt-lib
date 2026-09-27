@@ -6,6 +6,8 @@ import math
 import sys
 from pathlib import Path
 
+from scipy import stats
+
 
 def load_results(results_dir: Path) -> dict[str, list]:
     experiments: dict[str, list] = {}
@@ -49,7 +51,8 @@ def stdev(values: list[float]) -> float:
 def ci95(values: list[float]) -> float:
     if len(values) < 2:
         return 0.0
-    return 1.96 * stdev(values) / math.sqrt(len(values))
+    n = len(values)
+    return float(stats.t.ppf(0.975, n - 1)) * stdev(values) / math.sqrt(n)
 
 
 def extract_metric(data: dict) -> dict[str, float]:
