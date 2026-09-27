@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **Broker QUIC flow-control settings.** `max_concurrent_streams` caps the unidirectional and bidirectional streams a client may open at once (QUIC default 100); `stream_receive_window` sets the per-stream receive window (default 262144 bytes); `disable_segmentation_offload` turns off UDP segmentation offload, so each datagram is sent separately. Set them with `with_max_concurrent_streams`, `with_stream_receive_window` and `with_disable_segmentation_offload`.
+- **Per-connection QUIC statistics.** When `MQTT5_QUIC_STATS_DIR` names a directory, the broker writes one CSV per QUIC connection, with a row every 100 ms and a last row at close: RTT, congestion window, lost packets, congestion events and sent packets on the broker's path, and the STREAM_DATA_BLOCKED, DATA_BLOCKED and STREAMS_BLOCKED (uni) frames received from the client. Unset, nothing is sampled.
 
 ### Fixed
 

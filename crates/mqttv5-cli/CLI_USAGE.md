@@ -38,6 +38,10 @@ Every flag on the `broker`, `pub`, and `sub` subcommands can be set via environm
 | `--non-interactive` | `MQTT5_NON_INTERACTIVE` | |
 | `--otel-endpoint` | `MQTT5_OTEL_ENDPOINT` | |
 
+### QUIC Statistics
+
+`MQTT5_QUIC_STATS_DIR` has no flag. When it names a directory, the broker writes one CSV per QUIC connection, `broker_quic_<peer>.csv`, with a row every 100 ms and a last row when the connection closes. Columns: `timestamp_ns`, `rtt_us`, `cwnd`, `lost_packets`, `congestion_events`, `sent_packets` (the broker's own path, so they describe the broker-to-client direction), then `stream_data_blocked`, `data_blocked` and `streams_blocked_uni` (blocked frames received from the client). Clients built on quinn 0.11 never send STREAMS_BLOCKED, so `streams_blocked_uni` stays 0 with them.
+
 ### Precedence
 
 CLI flag > environment variable > default value.

@@ -654,6 +654,7 @@ async fn run_quic_handler_inner(
 
     spawn_datagram_reader(connection.clone(), packet_tx.clone(), peer_addr, label);
     spawn_bi_accept_loop(connection.clone(), flow_registry.clone(), peer_addr, label);
+    spawn_quic_stats_sampler(connection.clone(), peer_addr);
     spawn_uni_accept_loop(
         connection,
         packet_tx,
@@ -662,6 +663,69 @@ async fn run_quic_handler_inner(
         flow_closed_tx,
         label,
     );
+}
+
+const QUIC_STATS_DIR_ENV: &str = "MQTT5_QUIC_STATS_DIR";
+const QUIC_STATS_HEADER: &str = "timestamp_ns,rtt_us,cwnd,lost_packets,congestion_events,sent_packets,stream_data_blocked,data_blocked,streams_blocked_uni\n";
+const QUIC_STATS_INTERVAL: Duration = Duration::from_millis(100);
+
+fn spawn_quic_stats_sampler(connection: Arc<Connection>, peer_addr: SocketAddr) {
+    let Some(dir) = std::env::var_os(QUIC_STATS_DIR_ENV).filter(|dir| !dir.is_empty()) else {
+        return;
+    };
+    tokio::spawn(async move {
+        match sample_quic_stats(&connection, std::path::Path::new(&dir), peer_addr).await {
+            Ok(rows) => debug!(%peer_addr, rows, "QUIC stats sampling finished"),
+            Err(e) => warn!(%peer_addr, error = %e, "QUIC stats sampling stopped"),
+        }
+    });
+}
+
+async fn sample_quic_stats(
+    connection: &Connection,
+    dir: &std::path::Path,
+    peer_addr: SocketAddr,
+) -> std::io::Result<u64> {
+    use tokio::io::AsyncWriteExt;
+
+    tokio::fs::create_dir_all(dir).await?;
+    let name = peer_addr.to_string().replace([':', '.', '[', ']'], "-");
+    let mut out = tokio::fs::File::create(dir.join(format!("broker_quic_{name}.csv"))).await?;
+    out.write_all(QUIC_STATS_HEADER.as_bytes()).await?;
+
+    let mut rows = 0u64;
+    let mut ticker = tokio::time::interval(QUIC_STATS_INTERVAL);
+    loop {
+        let closed = tokio::select! {
+            _ = connection.closed() => true,
+            _ = ticker.tick() => false,
+        };
+        out.write_all(quic_stats_row(connection).as_bytes()).await?;
+        rows += 1;
+        if closed {
+            return Ok(rows);
+        }
+    }
+}
+
+fn quic_stats_row(connection: &Connection) -> String {
+    let stats = connection.stats();
+    let timestamp_ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX)
+        });
+    let rtt_us = u64::try_from(stats.path.rtt.as_micros()).unwrap_or(u64::MAX);
+    format!(
+        "{timestamp_ns},{rtt_us},{},{},{},{},{},{},{}\n",
+        stats.path.cwnd,
+        stats.path.lost_packets,
+        stats.path.congestion_events,
+        stats.path.sent_packets,
+        stats.frame_rx.stream_data_blocked,
+        stats.frame_rx.data_blocked,
+        stats.frame_rx.streams_blocked_uni,
+    )
 }
 
 fn spawn_datagram_reader(
