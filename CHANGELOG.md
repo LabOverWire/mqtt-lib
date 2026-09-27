@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [mqtt5 0.43.1] - 2026-09-27
+
+### Fixed
+
+- **A clean-start reconnect no longer receives a message routed to the session it replaced.** A publish routed to a client just before that client reconnected with `clean_start=1` could land in the new session's queue after the queue had been cleared, delivering a message for a subscription the new session never made (#150). Each client queue now counts its full clears, and a message routed before the latest one is dropped. A resumed session still receives it.
+
+### Added
+
+- `ClientQueue::epoch` and `ClientQueue::push_in_epoch`.
+
 ## [mqtt5 0.43.0] - 2026-09-27
 
 ### Breaking

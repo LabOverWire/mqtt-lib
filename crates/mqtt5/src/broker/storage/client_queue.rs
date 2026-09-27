@@ -96,6 +96,7 @@ pub struct ClientQueue {
     count: AtomicUsize,
     handoffs: AtomicUsize,
     draining: AtomicBool,
+    epoch: AtomicU64,
     notify: Notify,
     handoff_done: Notify,
     seq: Arc<AtomicU64>,
@@ -123,6 +124,7 @@ impl ClientQueue {
             count: AtomicUsize::new(0),
             handoffs: AtomicUsize::new(0),
             draining: AtomicBool::new(false),
+            epoch: AtomicU64::new(0),
             notify: Notify::new(),
             handoff_done: Notify::new(),
             seq,
@@ -222,25 +224,52 @@ impl ClientQueue {
         self.seq.load(Ordering::Acquire)
     }
 
+    #[must_use]
+    pub fn epoch(&self) -> u64 {
+        self.epoch.load(Ordering::Acquire)
+    }
+
     /// Appends a message. Drops the oldest entries first when a limit is exceeded.
     pub fn push(&self, message: QueuedMessage) -> PushOutcome {
         let body = Arc::new(message);
-        let (seq, dropped, evicted) = {
+        let appended = self.append(&mut self.inner.lock(), &body);
+        self.persist_append(appended, body)
+    }
+
+    pub fn push_in_epoch(&self, message: QueuedMessage, epoch: u64) -> Option<PushOutcome> {
+        let body = Arc::new(message);
+        let appended = {
             let mut inner = self.inner.lock();
-            let seq = self.seq.fetch_add(1, Ordering::AcqRel);
-            let entry = QueueEntry {
-                seq,
-                bytes: body.payload.len(),
-                expires_at: body.expires_at,
-                body: Some(Arc::clone(&body)),
-                path: None,
-            };
-            inner.bytes += entry.bytes;
-            inner.entries.push_back(entry);
-            let evicted = self.enforce_limits(&mut inner);
-            self.count.store(inner.entries.len(), Ordering::Release);
-            (seq, evicted.len(), evicted)
+            if self.epoch() != epoch {
+                return None;
+            }
+            self.append(&mut inner, &body)
         };
+        Some(self.persist_append(appended, body))
+    }
+
+    fn append(&self, inner: &mut QueueInner, body: &Arc<QueuedMessage>) -> (u64, Vec<QueueEntry>) {
+        let seq = self.seq.fetch_add(1, Ordering::AcqRel);
+        let entry = QueueEntry {
+            seq,
+            bytes: body.payload.len(),
+            expires_at: body.expires_at,
+            body: Some(Arc::clone(body)),
+            path: None,
+        };
+        inner.bytes += entry.bytes;
+        inner.entries.push_back(entry);
+        let evicted = self.enforce_limits(inner);
+        self.count.store(inner.entries.len(), Ordering::Release);
+        (seq, evicted)
+    }
+
+    fn persist_append(
+        &self,
+        (seq, evicted): (u64, Vec<QueueEntry>),
+        body: Arc<QueuedMessage>,
+    ) -> PushOutcome {
+        let dropped = evicted.len();
         let mut self_evicted = false;
         for old in evicted {
             if old.seq == seq {
@@ -383,6 +412,9 @@ impl ClientQueue {
             });
             inner.bytes = inner.entries.iter().map(|entry| entry.bytes).sum();
             self.count.store(inner.entries.len(), Ordering::Release);
+            if cutoff.is_none() {
+                self.epoch.fetch_add(1, Ordering::AcqRel);
+            }
             removed
         };
         for seq in &removed {
@@ -721,10 +753,27 @@ mod tests {
         queue.push(message("c", "before1"));
         queue.push(message("c", "before2"));
         let cutoff = queue.next_seq();
+        let epoch = queue.epoch();
         queue.push(message("c", "after"));
         assert_eq!(queue.clear(Some(cutoff)), 2);
+        assert_eq!(queue.epoch(), epoch);
         assert_eq!(queue.count(), 1);
         assert_eq!(queue.take(5).await[0].topic, "t/after");
+    }
+
+    #[tokio::test]
+    async fn push_in_epoch_refuses_a_message_routed_before_a_clear() {
+        let registry = registry(QueueLimits::default());
+        let queue = registry.handle("c");
+        let stale = queue.epoch();
+        queue.push(message("c", "old"));
+        assert_eq!(queue.clear(None), 1);
+        assert!(queue.push_in_epoch(message("c", "stale"), stale).is_none());
+        assert!(queue
+            .push_in_epoch(message("c", "fresh"), queue.epoch())
+            .is_some());
+        assert_eq!(queue.count(), 1);
+        assert_eq!(queue.take(5).await[0].topic, "t/fresh");
     }
 
     #[tokio::test]

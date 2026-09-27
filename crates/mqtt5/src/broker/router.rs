@@ -326,12 +326,14 @@ enum DeliveryPlan {
         target_flow: Option<u64>,
         lanes: DeliveryLanes,
         queue: QueueHandle,
+        epoch: u64,
     },
     Behind {
         client_id: String,
         message: PublishPacket,
         target_flow: Option<u64>,
         queue: QueueHandle,
+        epoch: u64,
     },
 }
 
@@ -1418,12 +1420,7 @@ impl MessageRouter {
                 if self.storage.is_some() && sub.qos != QoS::AtMostOnce {
                     let mut message = publish.clone();
                     message.qos = sub.qos;
-                    plans.push(DeliveryPlan::Behind {
-                        client_id: sub.client_id.clone(),
-                        message,
-                        target_flow: sub.flow_id,
-                        queue: self.queue_handle(&sub.client_id),
-                    });
+                    plans.push(self.plan_behind(sub, message));
                 }
             }
         }
@@ -1478,15 +1475,21 @@ impl MessageRouter {
 
     fn queue_behind(
         queue: &QueueHandle,
+        epoch: u64,
         message: PublishPacket,
         client_id: &str,
         target_flow: Option<u64>,
     ) {
         let qos = message.qos;
-        let outcome = queue.push(
-            QueuedMessage::new(message, client_id.to_string(), qos, None)
-                .with_target_flow(target_flow),
-        );
+        let queued = QueuedMessage::new(message, client_id.to_string(), qos, None)
+            .with_target_flow(target_flow);
+        let Some(outcome) = queue.push_in_epoch(queued, epoch) else {
+            debug!(
+                client_id,
+                "Dropped message routed to a session that has since been discarded"
+            );
+            return;
+        };
         queue.notify();
         trace!(
             client_id,
@@ -1507,13 +1510,15 @@ impl MessageRouter {
                 message,
                 target_flow,
                 queue,
-            } => Self::queue_behind(&queue, message, &client_id, target_flow),
+                epoch,
+            } => Self::queue_behind(&queue, epoch, message, &client_id, target_flow),
             DeliveryPlan::Online {
                 client_id,
                 message,
                 target_flow,
                 lanes,
                 queue,
+                epoch,
             } => {
                 let routable = RoutableMessage {
                     publish: message,
@@ -1526,7 +1531,13 @@ impl MessageRouter {
                     return;
                 }
                 if queue.behind() {
-                    Self::queue_behind(&queue, routable.publish, &client_id, routable.target_flow);
+                    Self::queue_behind(
+                        &queue,
+                        epoch,
+                        routable.publish,
+                        &client_id,
+                        routable.target_flow,
+                    );
                     return;
                 }
                 let routable = match lanes.qos1_tx.try_send(routable) {
@@ -1534,6 +1545,7 @@ impl MessageRouter {
                     Err(mpsc::error::TrySendError::Closed(rejected)) => {
                         Self::queue_behind(
                             &queue,
+                            epoch,
                             rejected.publish,
                             &client_id,
                             rejected.target_flow,
@@ -1543,7 +1555,13 @@ impl MessageRouter {
                     Err(mpsc::error::TrySendError::Full(rejected)) => rejected,
                 };
                 if publishing_client_id == Some(client_id.as_str()) {
-                    Self::queue_behind(&queue, routable.publish, &client_id, routable.target_flow);
+                    Self::queue_behind(
+                        &queue,
+                        epoch,
+                        routable.publish,
+                        &client_id,
+                        routable.target_flow,
+                    );
                     return;
                 }
                 let permit = match deadline {
@@ -1557,6 +1575,7 @@ impl MessageRouter {
                     Some(permit) => permit.send(routable),
                     None => Self::queue_behind(
                         &queue,
+                        epoch,
                         routable.publish,
                         &client_id,
                         routable.target_flow,
@@ -1621,12 +1640,7 @@ impl MessageRouter {
                 if qos == QoS::AtMostOnce || self.storage.is_none() {
                     return None;
                 }
-                return Some(DeliveryPlan::Behind {
-                    client_id: sub.client_id.clone(),
-                    message: Self::prepare_message(publish, sub, qos),
-                    target_flow: sub.flow_id,
-                    queue: self.queue_handle(&sub.client_id),
-                });
+                return Some(self.plan_behind(sub, Self::prepare_message(publish, sub, qos)));
             }
         }
 
@@ -1649,6 +1663,7 @@ impl MessageRouter {
                     qos0_tx: client_info.qos0_tx.clone(),
                 },
                 queue: Arc::clone(&client_info.queue),
+                epoch: client_info.queue.epoch(),
             });
         }
 
@@ -1662,12 +1677,18 @@ impl MessageRouter {
             );
             return None;
         }
-        Some(DeliveryPlan::Behind {
+        Some(self.plan_behind(sub, Self::prepare_message(publish, sub, sub.qos)))
+    }
+
+    fn plan_behind(&self, sub: &Subscription, message: PublishPacket) -> DeliveryPlan {
+        let queue = self.queue_handle(&sub.client_id);
+        DeliveryPlan::Behind {
             client_id: sub.client_id.clone(),
-            message: Self::prepare_message(publish, sub, sub.qos),
+            message,
             target_flow: sub.flow_id,
-            queue: self.queue_handle(&sub.client_id),
-        })
+            epoch: queue.epoch(),
+            queue,
+        }
     }
 
     pub async fn get_retained_messages(&self, topic_filter: &str) -> Vec<PublishPacket> {
@@ -2638,6 +2659,93 @@ mod tests {
             )
             .await
             .generation
+    }
+
+    async fn stall_publish_behind_full_lane(
+        router: &Arc<MessageRouter>,
+        client_id: &str,
+        lanes: &TestLanes,
+    ) -> tokio::task::JoinHandle<()> {
+        register(router, client_id, lanes).await;
+        router
+            .subscribe(SubscriptionRequest::new(client_id, "t", QoS::AtLeastOnce))
+            .await
+            .unwrap();
+        let first = PublishPacket::new("t", &b"first"[..], QoS::AtLeastOnce);
+        router.route_message(&first, None).await;
+
+        let stalled = Arc::clone(router);
+        let handle = tokio::spawn(async move {
+            let second = PublishPacket::new("t", &b"second"[..], QoS::AtLeastOnce);
+            stalled
+                .route_message_with_deadline(
+                    &second,
+                    None,
+                    Instant::now() + Duration::from_secs(30),
+                )
+                .await;
+        });
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            !handle.is_finished(),
+            "the publish must wait on the full lane"
+        );
+        handle
+    }
+
+    #[tokio::test]
+    async fn clean_start_drops_a_publish_planned_for_the_previous_session() {
+        let router = Arc::new(MessageRouter::new());
+        let previous = TestLanes::new(1);
+        let stalled = stall_publish_behind_full_lane(&router, "c", &previous).await;
+
+        let current = TestLanes::new(1);
+        let queue = router.queue_handle("c");
+        let (dtx, _drx) = tokio::sync::oneshot::channel();
+        router
+            .register_session(
+                "c".to_string(),
+                current.lanes(),
+                Arc::clone(&queue),
+                dtx,
+                true,
+            )
+            .await;
+        queue.clear(None);
+        drop(previous);
+        stalled.await.unwrap();
+
+        assert_eq!(
+            queue.count(),
+            0,
+            "a publish routed under the previous session must not reach the clean session"
+        );
+    }
+
+    #[tokio::test]
+    async fn resumed_session_keeps_a_publish_planned_for_the_previous_connection() {
+        let router = Arc::new(MessageRouter::new());
+        let previous = TestLanes::new(1);
+        let stalled = stall_publish_behind_full_lane(&router, "c", &previous).await;
+
+        let current = TestLanes::new(1);
+        let queue = router.queue_handle("c");
+        let (dtx, _drx) = tokio::sync::oneshot::channel();
+        router
+            .register_session(
+                "c".to_string(),
+                current.lanes(),
+                Arc::clone(&queue),
+                dtx,
+                false,
+            )
+            .await;
+        drop(previous);
+        stalled.await.unwrap();
+
+        assert_eq!(queue.count(), 1, "a resumed session must still receive it");
     }
 
     #[tokio::test]
