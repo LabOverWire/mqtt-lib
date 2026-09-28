@@ -231,55 +231,44 @@ impl ClientQueue {
 
     /// Appends a message. Drops the oldest entries first when a limit is exceeded.
     pub fn push(&self, message: QueuedMessage) -> PushOutcome {
-        let body = Arc::new(message);
-        let appended = self.append(&mut self.inner.lock(), &body);
-        self.persist_append(appended, body)
+        let appended = self.append(&mut self.inner.lock(), Arc::new(message));
+        self.release_evicted(appended)
     }
 
     pub fn push_in_epoch(&self, message: QueuedMessage, epoch: u64) -> Option<PushOutcome> {
-        let body = Arc::new(message);
         let appended = {
             let mut inner = self.inner.lock();
             if self.epoch() != epoch {
                 return None;
             }
-            self.append(&mut inner, &body)
+            self.append(&mut inner, Arc::new(message))
         };
-        Some(self.persist_append(appended, body))
+        Some(self.release_evicted(appended))
     }
 
-    fn append(&self, inner: &mut QueueInner, body: &Arc<QueuedMessage>) -> (u64, Vec<QueueEntry>) {
+    fn append(&self, inner: &mut QueueInner, body: Arc<QueuedMessage>) -> (u64, Vec<QueueEntry>) {
         let seq = self.seq.fetch_add(1, Ordering::AcqRel);
         let entry = QueueEntry {
             seq,
             bytes: body.payload.len(),
             expires_at: body.expires_at,
-            body: Some(Arc::clone(body)),
+            body: Some(Arc::clone(&body)),
             path: None,
         };
         inner.bytes += entry.bytes;
         inner.entries.push_back(entry);
         let evicted = self.enforce_limits(inner);
         self.count.store(inner.entries.len(), Ordering::Release);
+        if !evicted.iter().any(|old| old.seq == seq) {
+            self.enqueue_write(seq, body);
+        }
         (seq, evicted)
     }
 
-    fn persist_append(
-        &self,
-        (seq, evicted): (u64, Vec<QueueEntry>),
-        body: Arc<QueuedMessage>,
-    ) -> PushOutcome {
+    fn release_evicted(&self, (seq, evicted): (u64, Vec<QueueEntry>)) -> PushOutcome {
         let dropped = evicted.len();
-        let mut self_evicted = false;
-        for old in evicted {
-            if old.seq == seq {
-                self_evicted = true;
-            } else {
-                self.enqueue_delete(old.seq);
-            }
-        }
-        if !self_evicted {
-            self.enqueue_write(seq, body);
+        for old in evicted.iter().filter(|old| old.seq != seq) {
+            self.enqueue_delete(old.seq);
         }
         if dropped > 0 {
             warn!(
@@ -350,51 +339,46 @@ impl ClientQueue {
             return;
         }
         let bodies: Vec<Arc<QueuedMessage>> = messages.into_iter().map(Arc::new).collect();
-        let entries: Vec<(QueueEntry, Arc<QueuedMessage>)> = {
-            let mut inner = self.inner.lock();
-            let base = inner
-                .entries
-                .front()
-                .map_or_else(|| self.seq.load(Ordering::Acquire), |front| front.seq);
-            let len = bodies.len() as u64;
-            let first = base.checked_sub(len).unwrap_or_else(|| {
-                warn!(
-                    client_id = %self.client_id,
-                    base,
-                    len,
-                    "Sequence space exhausted below the queue head; re-queued order is best effort"
-                );
-                0
+        let mut inner = self.inner.lock();
+        let base = inner
+            .entries
+            .front()
+            .map_or_else(|| self.seq.load(Ordering::Acquire), |front| front.seq);
+        let len = bodies.len() as u64;
+        let first = base.checked_sub(len).unwrap_or_else(|| {
+            warn!(
+                client_id = %self.client_id,
+                base,
+                len,
+                "Sequence space exhausted below the queue head; re-queued order is best effort"
+            );
+            0
+        });
+        let mut entries = Vec::with_capacity(bodies.len());
+        for (index, body) in bodies.iter().enumerate() {
+            entries.push(QueueEntry {
+                seq: first + index as u64,
+                bytes: body.payload.len(),
+                expires_at: body.expires_at,
+                body: Some(Arc::clone(body)),
+                path: None,
             });
-            let mut entries = Vec::with_capacity(bodies.len());
-            for (index, body) in bodies.iter().enumerate() {
-                entries.push(QueueEntry {
-                    seq: first + index as u64,
-                    bytes: body.payload.len(),
-                    expires_at: body.expires_at,
-                    body: Some(Arc::clone(body)),
-                    path: None,
-                });
+        }
+        for entry in entries.iter().rev() {
+            inner.bytes += entry.bytes;
+            inner.entries.push_front(entry.clone());
+        }
+        let evicted = self.enforce_limits_dir(&mut inner, true);
+        self.count.store(inner.entries.len(), Ordering::Release);
+        let evicted_seqs: Vec<u64> = evicted.iter().map(|old| old.seq).collect();
+        let batch_seqs: Vec<u64> = entries.iter().map(|entry| entry.seq).collect();
+        for old in evicted_seqs.iter().filter(|seq| !batch_seqs.contains(seq)) {
+            self.enqueue_delete(*old);
+        }
+        for (entry, body) in entries.iter().zip(bodies) {
+            if !evicted_seqs.contains(&entry.seq) {
+                self.enqueue_write(entry.seq, body);
             }
-            for entry in entries.iter().rev() {
-                inner.bytes += entry.bytes;
-                inner.entries.push_front(entry.clone());
-            }
-            let evicted = self.enforce_limits_dir(&mut inner, true);
-            self.count.store(inner.entries.len(), Ordering::Release);
-            let evicted_seqs: Vec<u64> = evicted.iter().map(|old| old.seq).collect();
-            let batch_seqs: Vec<u64> = entries.iter().map(|entry| entry.seq).collect();
-            for old in evicted_seqs.iter().filter(|seq| !batch_seqs.contains(seq)) {
-                self.enqueue_delete(*old);
-            }
-            entries
-                .into_iter()
-                .zip(bodies)
-                .filter(|(entry, _)| !evicted_seqs.contains(&entry.seq))
-                .collect::<Vec<_>>()
-        };
-        for (entry, body) in entries {
-            self.enqueue_write(entry.seq, body);
         }
     }
 
@@ -743,6 +727,56 @@ mod tests {
         assert_eq!(
             taken.iter().map(|m| m.topic.as_str()).collect::<Vec<_>>(),
             ["t/old1", "t/old2", "t/later"]
+        );
+    }
+
+    #[test]
+    fn writer_never_sees_a_write_after_the_delete_of_the_same_entry() {
+        let (writer, mut ops) = mpsc::unbounded_channel();
+        let registry = QueueRegistry::new(QueueLimits::default(), Some(writer));
+        let queue = registry.handle("c");
+        let pushers: Vec<_> = (0..4)
+            .map(|_| {
+                let queue = Arc::clone(&queue);
+                std::thread::spawn(move || {
+                    for _ in 0..50_000 {
+                        queue.push(message("c", "m"));
+                        queue.requeue_front(vec![message("c", "r")]);
+                    }
+                })
+            })
+            .collect();
+        let clearers: Vec<_> = (0..4)
+            .map(|_| {
+                let queue = Arc::clone(&queue);
+                std::thread::spawn(move || {
+                    for _ in 0..50_000 {
+                        queue.clear(None);
+                    }
+                })
+            })
+            .collect();
+        for handle in pushers.into_iter().chain(clearers) {
+            handle.join().unwrap();
+        }
+        queue.clear(None);
+
+        let mut last_op: std::collections::HashMap<u64, bool> = std::collections::HashMap::new();
+        while let Ok(op) = ops.try_recv() {
+            match op {
+                QueueOp::Write { seq, .. } => {
+                    last_op.insert(seq, true);
+                }
+                QueueOp::Delete { seq, .. } => {
+                    last_op.insert(seq, false);
+                }
+                _ => {}
+            }
+        }
+        let resurrected = last_op.values().filter(|written| **written).count();
+        assert_eq!(
+            resurrected, 0,
+            "every cleared entry must end deleted, not rewritten"
         );
     }
 

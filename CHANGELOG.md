@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **A clean-start reconnect no longer receives a message routed to the session it replaced.** A publish routed to a client just before that client reconnected with `clean_start=1` could land in the new session's queue after the queue had been cleared, delivering a message for a subscription the new session never made (#150). Each client queue now counts its full clears, and a message routed before the latest one is dropped. A resumed session still receives it.
+- **The file backend no longer writes a queued message to disk after it was delivered or cleared.** A message delivered or cleared at the same moment it was queued could have its delete reach the storage writer before its write, leaving the file on disk; after a restart it was loaded again and redelivered. Writes are now handed to the storage writer before the entry becomes visible to delivery or clearing.
 
 ### Added
 
