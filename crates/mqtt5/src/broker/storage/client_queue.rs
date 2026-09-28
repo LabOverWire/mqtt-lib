@@ -96,6 +96,7 @@ pub struct ClientQueue {
     count: AtomicUsize,
     handoffs: AtomicUsize,
     draining: AtomicBool,
+    epoch: AtomicU64,
     notify: Notify,
     handoff_done: Notify,
     seq: Arc<AtomicU64>,
@@ -123,6 +124,7 @@ impl ClientQueue {
             count: AtomicUsize::new(0),
             handoffs: AtomicUsize::new(0),
             draining: AtomicBool::new(false),
+            epoch: AtomicU64::new(0),
             notify: Notify::new(),
             handoff_done: Notify::new(),
             seq,
@@ -222,35 +224,51 @@ impl ClientQueue {
         self.seq.load(Ordering::Acquire)
     }
 
+    #[must_use]
+    pub fn epoch(&self) -> u64 {
+        self.epoch.load(Ordering::Acquire)
+    }
+
     /// Appends a message. Drops the oldest entries first when a limit is exceeded.
     pub fn push(&self, message: QueuedMessage) -> PushOutcome {
-        let body = Arc::new(message);
-        let (seq, dropped, evicted) = {
+        let appended = self.append(&mut self.inner.lock(), Arc::new(message));
+        self.release_evicted(appended)
+    }
+
+    pub fn push_in_epoch(&self, message: QueuedMessage, epoch: u64) -> Option<PushOutcome> {
+        let appended = {
             let mut inner = self.inner.lock();
-            let seq = self.seq.fetch_add(1, Ordering::AcqRel);
-            let entry = QueueEntry {
-                seq,
-                bytes: body.payload.len(),
-                expires_at: body.expires_at,
-                body: Some(Arc::clone(&body)),
-                path: None,
-            };
-            inner.bytes += entry.bytes;
-            inner.entries.push_back(entry);
-            let evicted = self.enforce_limits(&mut inner);
-            self.count.store(inner.entries.len(), Ordering::Release);
-            (seq, evicted.len(), evicted)
-        };
-        let mut self_evicted = false;
-        for old in evicted {
-            if old.seq == seq {
-                self_evicted = true;
-            } else {
-                self.enqueue_delete(old.seq);
+            if self.epoch() != epoch {
+                return None;
             }
-        }
-        if !self_evicted {
+            self.append(&mut inner, Arc::new(message))
+        };
+        Some(self.release_evicted(appended))
+    }
+
+    fn append(&self, inner: &mut QueueInner, body: Arc<QueuedMessage>) -> (u64, Vec<QueueEntry>) {
+        let seq = self.seq.fetch_add(1, Ordering::AcqRel);
+        let entry = QueueEntry {
+            seq,
+            bytes: body.payload.len(),
+            expires_at: body.expires_at,
+            body: Some(Arc::clone(&body)),
+            path: None,
+        };
+        inner.bytes += entry.bytes;
+        inner.entries.push_back(entry);
+        let evicted = self.enforce_limits(inner);
+        self.count.store(inner.entries.len(), Ordering::Release);
+        if !evicted.iter().any(|old| old.seq == seq) {
             self.enqueue_write(seq, body);
+        }
+        (seq, evicted)
+    }
+
+    fn release_evicted(&self, (seq, evicted): (u64, Vec<QueueEntry>)) -> PushOutcome {
+        let dropped = evicted.len();
+        for old in evicted.iter().filter(|old| old.seq != seq) {
+            self.enqueue_delete(old.seq);
         }
         if dropped > 0 {
             warn!(
@@ -321,51 +339,46 @@ impl ClientQueue {
             return;
         }
         let bodies: Vec<Arc<QueuedMessage>> = messages.into_iter().map(Arc::new).collect();
-        let entries: Vec<(QueueEntry, Arc<QueuedMessage>)> = {
-            let mut inner = self.inner.lock();
-            let base = inner
-                .entries
-                .front()
-                .map_or_else(|| self.seq.load(Ordering::Acquire), |front| front.seq);
-            let len = bodies.len() as u64;
-            let first = base.checked_sub(len).unwrap_or_else(|| {
-                warn!(
-                    client_id = %self.client_id,
-                    base,
-                    len,
-                    "Sequence space exhausted below the queue head; re-queued order is best effort"
-                );
-                0
+        let mut inner = self.inner.lock();
+        let base = inner
+            .entries
+            .front()
+            .map_or_else(|| self.seq.load(Ordering::Acquire), |front| front.seq);
+        let len = bodies.len() as u64;
+        let first = base.checked_sub(len).unwrap_or_else(|| {
+            warn!(
+                client_id = %self.client_id,
+                base,
+                len,
+                "Sequence space exhausted below the queue head; re-queued order is best effort"
+            );
+            0
+        });
+        let mut entries = Vec::with_capacity(bodies.len());
+        for (index, body) in bodies.iter().enumerate() {
+            entries.push(QueueEntry {
+                seq: first + index as u64,
+                bytes: body.payload.len(),
+                expires_at: body.expires_at,
+                body: Some(Arc::clone(body)),
+                path: None,
             });
-            let mut entries = Vec::with_capacity(bodies.len());
-            for (index, body) in bodies.iter().enumerate() {
-                entries.push(QueueEntry {
-                    seq: first + index as u64,
-                    bytes: body.payload.len(),
-                    expires_at: body.expires_at,
-                    body: Some(Arc::clone(body)),
-                    path: None,
-                });
+        }
+        for entry in entries.iter().rev() {
+            inner.bytes += entry.bytes;
+            inner.entries.push_front(entry.clone());
+        }
+        let evicted = self.enforce_limits_dir(&mut inner, true);
+        self.count.store(inner.entries.len(), Ordering::Release);
+        let evicted_seqs: Vec<u64> = evicted.iter().map(|old| old.seq).collect();
+        let batch_seqs: Vec<u64> = entries.iter().map(|entry| entry.seq).collect();
+        for old in evicted_seqs.iter().filter(|seq| !batch_seqs.contains(seq)) {
+            self.enqueue_delete(*old);
+        }
+        for (entry, body) in entries.iter().zip(bodies) {
+            if !evicted_seqs.contains(&entry.seq) {
+                self.enqueue_write(entry.seq, body);
             }
-            for entry in entries.iter().rev() {
-                inner.bytes += entry.bytes;
-                inner.entries.push_front(entry.clone());
-            }
-            let evicted = self.enforce_limits_dir(&mut inner, true);
-            self.count.store(inner.entries.len(), Ordering::Release);
-            let evicted_seqs: Vec<u64> = evicted.iter().map(|old| old.seq).collect();
-            let batch_seqs: Vec<u64> = entries.iter().map(|entry| entry.seq).collect();
-            for old in evicted_seqs.iter().filter(|seq| !batch_seqs.contains(seq)) {
-                self.enqueue_delete(*old);
-            }
-            entries
-                .into_iter()
-                .zip(bodies)
-                .filter(|(entry, _)| !evicted_seqs.contains(&entry.seq))
-                .collect::<Vec<_>>()
-        };
-        for (entry, body) in entries {
-            self.enqueue_write(entry.seq, body);
         }
     }
 
@@ -383,6 +396,9 @@ impl ClientQueue {
             });
             inner.bytes = inner.entries.iter().map(|entry| entry.bytes).sum();
             self.count.store(inner.entries.len(), Ordering::Release);
+            if cutoff.is_none() {
+                self.epoch.fetch_add(1, Ordering::AcqRel);
+            }
             removed
         };
         for seq in &removed {
@@ -714,6 +730,56 @@ mod tests {
         );
     }
 
+    #[test]
+    fn writer_never_sees_a_write_after_the_delete_of_the_same_entry() {
+        let (writer, mut ops) = mpsc::unbounded_channel();
+        let registry = QueueRegistry::new(QueueLimits::default(), Some(writer));
+        let queue = registry.handle("c");
+        let pushers: Vec<_> = (0..4)
+            .map(|_| {
+                let queue = Arc::clone(&queue);
+                std::thread::spawn(move || {
+                    for _ in 0..50_000 {
+                        queue.push(message("c", "m"));
+                        queue.requeue_front(vec![message("c", "r")]);
+                    }
+                })
+            })
+            .collect();
+        let clearers: Vec<_> = (0..4)
+            .map(|_| {
+                let queue = Arc::clone(&queue);
+                std::thread::spawn(move || {
+                    for _ in 0..50_000 {
+                        queue.clear(None);
+                    }
+                })
+            })
+            .collect();
+        for handle in pushers.into_iter().chain(clearers) {
+            handle.join().unwrap();
+        }
+        queue.clear(None);
+
+        let mut last_op: std::collections::HashMap<u64, bool> = std::collections::HashMap::new();
+        while let Ok(op) = ops.try_recv() {
+            match op {
+                QueueOp::Write { seq, .. } => {
+                    last_op.insert(seq, true);
+                }
+                QueueOp::Delete { seq, .. } => {
+                    last_op.insert(seq, false);
+                }
+                _ => {}
+            }
+        }
+        let resurrected = last_op.values().filter(|written| **written).count();
+        assert_eq!(
+            resurrected, 0,
+            "every cleared entry must end deleted, not rewritten"
+        );
+    }
+
     #[tokio::test]
     async fn clear_with_cutoff_keeps_messages_queued_after_the_cutoff() {
         let registry = registry(QueueLimits::default());
@@ -721,10 +787,27 @@ mod tests {
         queue.push(message("c", "before1"));
         queue.push(message("c", "before2"));
         let cutoff = queue.next_seq();
+        let epoch = queue.epoch();
         queue.push(message("c", "after"));
         assert_eq!(queue.clear(Some(cutoff)), 2);
+        assert_eq!(queue.epoch(), epoch);
         assert_eq!(queue.count(), 1);
         assert_eq!(queue.take(5).await[0].topic, "t/after");
+    }
+
+    #[tokio::test]
+    async fn push_in_epoch_refuses_a_message_routed_before_a_clear() {
+        let registry = registry(QueueLimits::default());
+        let queue = registry.handle("c");
+        let stale = queue.epoch();
+        queue.push(message("c", "old"));
+        assert_eq!(queue.clear(None), 1);
+        assert!(queue.push_in_epoch(message("c", "stale"), stale).is_none());
+        assert!(queue
+            .push_in_epoch(message("c", "fresh"), queue.epoch())
+            .is_some());
+        assert_eq!(queue.count(), 1);
+        assert_eq!(queue.take(5).await[0].topic, "t/fresh");
     }
 
     #[tokio::test]
