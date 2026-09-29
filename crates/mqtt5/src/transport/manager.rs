@@ -346,13 +346,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_manager_connect_not_available() {
-        // Use a non-routable address
+        let closed = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .unwrap()
+            .local_addr()
+            .unwrap();
         let transport = TcpTransport::new(
-            TcpConfig::new(SocketAddr::new(
-                IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)), // TEST-NET-1 address
-                1883,
-            ))
-            .with_connect_timeout(Duration::from_millis(100)),
+            TcpConfig::new(closed).with_connect_timeout(Duration::from_millis(100)),
         );
 
         let manager = TransportManager::new(transport, ManagerConfig::default());

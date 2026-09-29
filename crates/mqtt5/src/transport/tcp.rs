@@ -217,20 +217,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_tcp_connect_timeout() {
-        // Use a mock transport for reliable timeout testing
-        // Real network timeouts are unreliable across different environments
+    async fn test_tcp_connect_fails_when_nothing_listens() {
+        let closed = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .unwrap()
+            .local_addr()
+            .unwrap();
         let mut transport = TcpTransport::new(
-            TcpConfig::new(SocketAddr::new(
-                IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
-                1883,
-            ))
-            .with_connect_timeout(Duration::from_millis(100)),
+            TcpConfig::new(closed).with_connect_timeout(Duration::from_millis(100)),
         );
 
         let result = transport.connect().await;
-        // The error could be Timeout or Io depending on the system
-        assert!(result.is_err(), "Expected connection to 192.0.2.1 to fail");
+        assert!(result.is_err(), "Expected connection to {closed} to fail");
     }
 
     #[cfg(feature = "broker")]

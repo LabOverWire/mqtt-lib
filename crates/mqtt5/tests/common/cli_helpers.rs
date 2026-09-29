@@ -62,21 +62,29 @@ impl CliResult {
 }
 
 pub fn ensure_cli_built() {
-    let cli_binary = get_cli_binary_path();
-    if !cli_binary.exists() {
-        let workspace_root = find_workspace_root();
-        let output = Command::new("cargo")
-            .current_dir(&workspace_root)
-            .args(["build", "--release", "-p", "mqttv5-cli"])
-            .output()
-            .expect("Failed to build CLI");
+    static READY: std::sync::Once = std::sync::Once::new();
+    READY.call_once(|| {
+        let cli_binary = get_cli_binary_path();
+        if !cli_binary.exists() {
+            let workspace_root = find_workspace_root();
+            let output = Command::new("cargo")
+                .current_dir(&workspace_root)
+                .args(["build", "--release", "-p", "mqttv5-cli"])
+                .output()
+                .expect("Failed to build CLI");
 
-        assert!(
-            output.status.success(),
-            "Failed to build CLI: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+            assert!(
+                output.status.success(),
+                "Failed to build CLI: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let warm_up = Command::new(&cli_binary)
+            .arg("--version")
+            .output()
+            .expect("Failed to run CLI");
+        assert!(warm_up.status.success(), "CLI --version failed");
+    });
 }
 
 pub async fn run_cli_command(args: &[&str]) -> CliResult {
