@@ -94,6 +94,7 @@ pub struct ClientHandler {
     pub(super) qos0_rx: mpsc::Receiver<RoutableMessage>,
     pub(super) qos0_tx: mpsc::Sender<RoutableMessage>,
     pub(super) queue: Option<QueueHandle>,
+    pub(super) queue_epoch: u64,
     pub(super) window: u16,
     pub(super) generation: u64,
     pub(super) bound: bool,
@@ -212,6 +213,7 @@ impl ClientHandler {
             qos0_rx,
             qos0_tx,
             queue: None,
+            queue_epoch: 0,
             window,
             generation: 0,
             bound: false,
@@ -462,13 +464,6 @@ impl ClientHandler {
         };
         self.handoff_baseline = queue.handoffs();
         if self.clean_start {
-            // A clean start begins with no session state, so discard the whole queue rather
-            // than a seq cutoff: a stale delivery routed to the prior session during the
-            // hand-off must not survive into the fresh session.
-            let discarded = queue.clear(None);
-            if discarded > 0 {
-                debug!(count = discarded, "Clean start discarded queued messages");
-            }
             if let (Some(storage), Some(client_id)) = (&self.storage, &self.client_id) {
                 if let Err(e) = storage.remove_all_inflight_messages(client_id).await {
                     debug!("failed to clear inflight messages on clean start: {e}");
@@ -951,7 +946,7 @@ impl ClientHandler {
             count = unsent.len(),
             "Re-queued undelivered messages for the session"
         );
-        queue.requeue_front(unsent);
+        queue.requeue_front_in_epoch(unsent, self.queue_epoch);
         if let Some(storage) = self.storage.clone() {
             for packet_id in unacked_ids {
                 if let Err(e) = storage

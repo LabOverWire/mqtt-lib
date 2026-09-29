@@ -228,7 +228,8 @@ impl WasmClientHandler {
 
         let (disconnect_tx, disconnect_rx) = tokio::sync::oneshot::channel();
         let queue = self.router.queue_handle(&client_id);
-        self.router
+        let registration = self
+            .router
             .register_session_as(
                 generation,
                 client_id.clone(),
@@ -242,13 +243,11 @@ impl WasmClientHandler {
             )
             .await;
         self.generation = generation;
+        self.queue_epoch = registration.epoch;
         self.disconnect_rx = Some(disconnect_rx);
         self.queue = Some(queue);
 
         if !resume {
-            if let Err(e) = self.storage.remove_queued_messages(&client_id).await {
-                warn!(client_id = %client_id, "Failed to discard queued messages on clean start: {e}");
-            }
             if let Err(e) = self.storage.remove_all_inflight_messages(&client_id).await {
                 warn!(client_id = %client_id, "Failed to discard inflight messages on clean start: {e}");
             }

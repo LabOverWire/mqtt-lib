@@ -504,6 +504,7 @@ impl ClientHandler {
             )
             .await;
         self.generation = generation;
+        self.queue_epoch = registration.epoch;
         self.handoff_deadline = registration
             .released
             .as_ref()

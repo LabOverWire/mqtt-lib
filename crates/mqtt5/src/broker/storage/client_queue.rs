@@ -338,8 +338,27 @@ impl ClientQueue {
         if messages.is_empty() {
             return;
         }
-        let bodies: Vec<Arc<QueuedMessage>> = messages.into_iter().map(Arc::new).collect();
+        self.insert_front(&mut self.inner.lock(), messages);
+    }
+
+    pub fn requeue_front_in_epoch(&self, messages: Vec<QueuedMessage>, epoch: u64) {
+        if messages.is_empty() {
+            return;
+        }
         let mut inner = self.inner.lock();
+        if self.epoch() != epoch {
+            debug!(
+                client_id = %self.client_id,
+                count = messages.len(),
+                "Dropped messages re-queued for a session that has since been discarded"
+            );
+            return;
+        }
+        self.insert_front(&mut inner, messages);
+    }
+
+    fn insert_front(&self, inner: &mut QueueInner, messages: Vec<QueuedMessage>) {
+        let bodies: Vec<Arc<QueuedMessage>> = messages.into_iter().map(Arc::new).collect();
         let base = inner
             .entries
             .front()
@@ -368,7 +387,7 @@ impl ClientQueue {
             inner.bytes += entry.bytes;
             inner.entries.push_front(entry.clone());
         }
-        let evicted = self.enforce_limits_dir(&mut inner, true);
+        let evicted = self.enforce_limits_dir(inner, true);
         self.count.store(inner.entries.len(), Ordering::Release);
         let evicted_seqs: Vec<u64> = evicted.iter().map(|old| old.seq).collect();
         let batch_seqs: Vec<u64> = entries.iter().map(|entry| entry.seq).collect();
@@ -793,6 +812,23 @@ mod tests {
         assert_eq!(queue.epoch(), epoch);
         assert_eq!(queue.count(), 1);
         assert_eq!(queue.take(5).await[0].topic, "t/after");
+    }
+
+    #[tokio::test]
+    async fn requeue_front_in_epoch_refuses_messages_from_before_a_clear() {
+        let registry = registry(QueueLimits::default());
+        let queue = registry.handle("c");
+        let stale = queue.epoch();
+        queue.clear(None);
+        queue.push(message("c", "current"));
+        queue.requeue_front_in_epoch(vec![message("c", "stale")], stale);
+        assert_eq!(queue.count(), 1);
+        queue.requeue_front_in_epoch(vec![message("c", "resent")], queue.epoch());
+        let taken = queue.take(5).await;
+        assert_eq!(
+            taken.iter().map(|m| m.topic.as_str()).collect::<Vec<_>>(),
+            ["t/resent", "t/current"]
+        );
     }
 
     #[tokio::test]

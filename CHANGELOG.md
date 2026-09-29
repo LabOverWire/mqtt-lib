@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [mqtt5 0.44.0] - 2026-09-29
+
+### Breaking
+
+- **`broker::router::Registration` has a new public field, `epoch`**: the session queue's epoch at the moment the connection registered. Code that builds `Registration` with a struct literal must set it.
+
+### Fixed
+
+- **A client that reconnects with a clean start and subscribes before the previous connection has finished handing off now receives its retained messages.** The new connection's packets are handled during the hand-off, so its QoS 1 and 2 retained messages, and publishes routed to its new subscriptions, were queued and then discarded when the session bound. The hand-off can last up to 30 seconds when the previous connection's socket is blocked. A clean start now discards the previous session's queue when the connection registers instead of when it binds.
+- **A connection displaced by a clean-start takeover can no longer re-queue its undelivered messages into the new session.** Its re-queues and retained-message pushes are now dropped once the new session has discarded the queue. This also covers a hand-off that timed out while the previous connection was still running.
+
+### Added
+
+- `ClientQueue::requeue_front_in_epoch`.
+
+## [mqttv5-cli 0.29.2] - 2026-09-29
+
+### Changed
+
+- Requires mqtt5 0.44.
+
+## [mqtt5-wasm 2.1.2] - 2026-09-29
+
+### Changed
+
+- Requires mqtt5 0.44. A connection displaced by a clean-start takeover no longer re-queues undelivered messages into the new session. No change to the wasm API.
+
 ## [mqtt5 0.43.1] - 2026-09-27
 
 ### Fixed
