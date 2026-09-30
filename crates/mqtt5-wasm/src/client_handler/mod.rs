@@ -62,6 +62,7 @@ pub struct WasmClientHandler {
     qos0_rx: tokio::sync::mpsc::Receiver<RoutableMessage>,
     qos0_tx: tokio::sync::mpsc::Sender<RoutableMessage>,
     queue: Option<QueueHandle>,
+    queue_epoch: u64,
     generation: u64,
     pub(super) inflight_publishes: HashMap<u16, PublishPacket>,
     pub(super) outbound_inflight: Rc<RefCell<HashMap<u16, PublishPacket>>>,
@@ -148,6 +149,7 @@ impl WasmClientHandler {
             qos0_rx,
             qos0_tx,
             queue: None,
+            queue_epoch: 0,
             generation: 0,
             inflight_publishes: HashMap::new(),
             outbound_inflight: Rc::new(RefCell::new(HashMap::new())),
@@ -288,6 +290,7 @@ impl WasmClientHandler {
         let mut qos1_rx = std::mem::replace(&mut self.qos1_rx, tokio::sync::mpsc::channel(1).1);
         let mut qos0_rx = std::mem::replace(&mut self.qos0_rx, tokio::sync::mpsc::channel(1).1);
         let queue = self.queue.clone();
+        let queue_epoch = self.queue_epoch;
         let writer_for_forward = Rc::clone(writer_shared);
         let outbound_inflight_fwd = Rc::clone(&self.outbound_inflight);
         let next_pid_fwd = Rc::clone(&self.next_packet_id);
@@ -335,7 +338,7 @@ impl WasmClientHandler {
                                     // front so they survive for redelivery.
                                     let mut rest = vec![message];
                                     rest.extend(pending);
-                                    queue.requeue_front(rest);
+                                    queue.requeue_front_in_epoch(rest, queue_epoch);
                                     queue.finish_drain();
                                     break 'outer;
                                 }

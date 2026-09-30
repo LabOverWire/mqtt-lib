@@ -18,15 +18,18 @@ async fn test_connection_refused_wrong_port() {
 }
 
 #[tokio::test]
-async fn test_connection_timeout() {
-    let options = ConnectOptions::new("timeout-test");
+async fn test_connection_to_closed_port_fails() {
+    let options = ConnectOptions::new("closed-port-test");
 
     let client = MqttClient::with_options(options);
 
-    // Try to connect to an IP that will timeout (non-routable)
+    let closed = std::net::TcpListener::bind(("127.0.0.1", 0))
+        .unwrap()
+        .local_addr()
+        .unwrap();
     let result = timeout(
         Duration::from_secs(2),
-        client.connect("mqtt://192.0.2.1:1883"), // TEST-NET-1 (RFC 5737)
+        client.connect(&format!("mqtt://{closed}")),
     )
     .await;
 

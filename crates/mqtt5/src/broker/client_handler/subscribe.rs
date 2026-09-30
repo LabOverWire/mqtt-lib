@@ -365,8 +365,12 @@ impl ClientHandler {
         let queue_behind = |publish: crate::packet::publish::PublishPacket| {
             if let Some(queue) = self.queue.as_ref() {
                 let qos = publish.qos;
-                queue.push(QueuedMessage::new(publish, client_id.clone(), qos, None));
-                queue.notify();
+                let queued = QueuedMessage::new(publish, client_id.clone(), qos, None);
+                if queue.push_in_epoch(queued, self.queue_epoch).is_some() {
+                    queue.notify();
+                } else {
+                    debug!(client_id = %client_id, "Dropping retained message: session discarded");
+                }
             } else {
                 warn!(client_id = %client_id, "Dropping retained message: no session queue");
             }

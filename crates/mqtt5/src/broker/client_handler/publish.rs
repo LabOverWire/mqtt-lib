@@ -739,7 +739,7 @@ impl ClientHandler {
                 return Err(e);
             }
             if started.elapsed() > budget {
-                queue.requeue_front(pending.collect());
+                queue.requeue_front_in_epoch(pending.collect(), self.queue_epoch);
                 break;
             }
         }
@@ -862,7 +862,7 @@ impl ClientHandler {
                 count = requeue.len(),
                 "Re-queued persisted inflight messages for redelivery"
             );
-            queue.requeue_front(requeue);
+            queue.requeue_front_in_epoch(requeue, self.queue_epoch);
             for packet_id in packet_ids {
                 if let Err(e) = storage
                     .remove_inflight_message(&client_id, packet_id, InflightDirection::Outbound)

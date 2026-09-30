@@ -246,6 +246,7 @@ pub struct TakeoverNotice {
 pub struct Registration {
     pub generation: u64,
     pub released: Option<oneshot::Receiver<()>>,
+    pub epoch: u64,
 }
 
 /// Whether the releasing handler still owned the router entry.
@@ -497,7 +498,7 @@ impl MessageRouter {
     /// While a displaced handler is still handing its deliveries back, the queue's hand-off
     /// flag keeps routers queueing behind it; the returned `released` receiver fires when the
     /// old handler is done. A clean start also drops every subscription the client id still
-    /// holds; its handler discards the whole queue when it binds.
+    /// holds and discards the whole queue.
     pub async fn register_session(
         &self,
         client_id: String,
@@ -564,6 +565,17 @@ impl MessageRouter {
             None => None,
         };
 
+        if clean_start {
+            let discarded = queue.clear(None);
+            if discarded > 0 {
+                debug!(
+                    client_id,
+                    count = discarded,
+                    "Clean start discarded queued messages"
+                );
+            }
+        }
+        let epoch = queue.epoch();
         clients.insert(
             client_id.clone(),
             ClientInfo {
@@ -586,6 +598,7 @@ impl MessageRouter {
         Registration {
             generation,
             released,
+            epoch,
         }
     }
 
@@ -2713,7 +2726,6 @@ mod tests {
                 true,
             )
             .await;
-        queue.clear(None);
         drop(previous);
         stalled.await.unwrap();
 
