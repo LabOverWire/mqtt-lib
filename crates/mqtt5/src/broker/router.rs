@@ -526,6 +526,27 @@ impl MessageRouter {
             + 1
     }
 
+    pub async fn register_unbound_session(
+        &self,
+        generation: u64,
+        client_id: String,
+        lanes: DeliveryLanes,
+        queue: QueueHandle,
+        disconnect_tx: oneshot::Sender<TakeoverNotice>,
+        clean_start: bool,
+    ) -> Registration {
+        queue.expect_bind(generation);
+        self.register_session_as(
+            generation,
+            client_id,
+            lanes,
+            queue,
+            disconnect_tx,
+            clean_start,
+        )
+        .await
+    }
+
     pub async fn register_session_as(
         &self,
         generation: u64,
@@ -2706,6 +2727,61 @@ mod tests {
             "the publish must wait on the full lane"
         );
         handle
+    }
+
+    #[tokio::test]
+    async fn publish_routed_before_bind_is_queued_behind_the_resumed_inflight() {
+        let router = MessageRouter::new();
+        router
+            .subscribe(SubscriptionRequest::new("c", "t", QoS::AtLeastOnce))
+            .await
+            .unwrap();
+        let mut lanes = TestLanes::new(10);
+        let queue = router.queue_handle("c");
+        let (dtx, _drx) = tokio::sync::oneshot::channel();
+        let generation = router.allocate_generation();
+        router
+            .register_unbound_session(
+                generation,
+                "c".to_string(),
+                lanes.lanes(),
+                Arc::clone(&queue),
+                dtx,
+                false,
+            )
+            .await;
+
+        let newer = PublishPacket::new("t", &b"newer"[..], QoS::AtLeastOnce);
+        router.route_message(&newer, None).await;
+        let older = PublishPacket::new("t", &b"older"[..], QoS::AtLeastOnce);
+        queue.requeue_front(vec![QueuedMessage::new(
+            older,
+            "c".to_string(),
+            QoS::AtLeastOnce,
+            Some(1),
+        )]);
+
+        assert!(
+            lanes.try_recv().is_err(),
+            "a publish routed before bind must not overtake the re-queued inflight"
+        );
+        let payloads: Vec<Vec<u8>> = queue
+            .take(10)
+            .await
+            .into_iter()
+            .map(|message| message.payload)
+            .collect();
+        assert_eq!(payloads, [b"older".to_vec(), b"newer".to_vec()]);
+        queue.finish_drain();
+
+        queue.mark_bound(generation);
+        let after_bind = PublishPacket::new("t", &b"after"[..], QoS::AtLeastOnce);
+        router.route_message(&after_bind, None).await;
+        assert_eq!(
+            lanes.try_recv().map(|routable| routable.publish.payload),
+            Ok(b"after".to_vec().into()),
+            "once bound, the lane is used again"
+        );
     }
 
     #[tokio::test]
