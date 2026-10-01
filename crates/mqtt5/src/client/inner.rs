@@ -2,7 +2,6 @@ use crate::error::{MqttError, Result};
 use crate::protocol::v5::reason_codes::ReasonCode;
 use crate::types::{ConnectOptions, ConnectResult};
 use crate::Transport;
-use std::net::ToSocketAddrs;
 use tracing::instrument;
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
@@ -159,12 +158,15 @@ impl MqttClient {
         }
     }
 
-    pub(crate) fn resolve_addresses(host: &str, port: u16) -> Result<Vec<std::net::SocketAddr>> {
+    pub(crate) async fn resolve_addresses(
+        host: &str,
+        port: u16,
+    ) -> Result<Vec<std::net::SocketAddr>> {
         let addr_str = format!("{host}:{port}");
         tracing::debug!(addr_str = %addr_str, "🌐 DNS RESOLUTION - Starting address resolution");
 
-        let addrs: Vec<_> = addr_str
-            .to_socket_addrs()
+        let addrs: Vec<_> = tokio::net::lookup_host(addr_str.as_str())
+            .await
             .map_err(|e| {
                 tracing::error!(addr_str = %addr_str, error = %e, "🌐 DNS RESOLUTION - Failed to resolve address");
                 MqttError::ConnectionError(format!("Failed to resolve address: {e}"))
@@ -467,7 +469,7 @@ impl MqttClient {
             );
 
             let (client_transport_type, host, port) = Self::parse_address(&current_address)?;
-            let addrs = Self::resolve_addresses(host, port)?;
+            let addrs = Self::resolve_addresses(host, port).await?;
             let addresses_to_try = Self::select_addresses_for_connection(&addrs, host);
 
             match self
@@ -655,5 +657,29 @@ impl MqttClient {
         }
 
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MqttClient;
+    use std::future::Future;
+    use std::task::{Context, Waker};
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn hostname_resolution_yields_to_the_runtime() {
+        let mut resolution = Box::pin(MqttClient::resolve_addresses("localhost", 1883));
+        let first_poll = resolution
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()));
+        assert!(
+            first_poll.is_pending(),
+            "resolving a hostname must not block the runtime thread"
+        );
+
+        let addrs = resolution.await.unwrap();
+        assert!(!addrs.is_empty());
+        assert!(addrs.iter().all(|addr| addr.port() == 1883));
+        assert!(addrs.iter().all(|addr| addr.ip().is_loopback()));
     }
 }

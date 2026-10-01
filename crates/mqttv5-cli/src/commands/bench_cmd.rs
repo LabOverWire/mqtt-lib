@@ -1217,7 +1217,7 @@ async fn run_connections(cmd: BenchCommand) -> Result<()> {
     use std::sync::Mutex;
 
     let original_url = broker_url(&cmd);
-    let resolved_url = resolve_broker_url(&original_url)?;
+    let resolved_url = resolve_broker_url(&original_url).await?;
     let base_id = base_client_id(&cmd, "conn");
 
     eprintln!(
@@ -1310,13 +1310,11 @@ async fn run_connections(cmd: BenchCommand) -> Result<()> {
     Ok(())
 }
 
-fn resolve_broker_url(original_url: &str) -> Result<String> {
-    use std::net::ToSocketAddrs;
-
+async fn resolve_broker_url(original_url: &str) -> Result<String> {
     if let Some(rest) = original_url.strip_prefix("mqtt://") {
         let addr_str = rest.split('/').next().unwrap_or(rest);
-        let resolved: std::net::SocketAddr = addr_str
-            .to_socket_addrs()
+        let resolved: std::net::SocketAddr = tokio::net::lookup_host(addr_str)
+            .await
             .context("failed to resolve broker address")?
             .next()
             .context("no addresses resolved")?;

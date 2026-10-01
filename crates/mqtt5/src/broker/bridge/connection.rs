@@ -16,7 +16,6 @@ use crate::{AckToken, QoS, SubscribeOptions};
 use mqtt5_protocol::bridge::{evaluate_forwarding, TopicMappingCore};
 use rand::RngExt;
 use std::collections::VecDeque;
-use std::net::ToSocketAddrs;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use tokio::sync::{broadcast, mpsc, RwLock};
@@ -200,9 +199,9 @@ impl BridgeConnection {
     }
 
     /// Builds TLS configuration for a broker address
-    fn build_tls_config(&self, address: &str) -> Result<TlsConfig> {
-        let addr = address
-            .to_socket_addrs()
+    async fn build_tls_config(&self, address: &str) -> Result<TlsConfig> {
+        let addr = tokio::net::lookup_host(address)
+            .await
             .map_err(|e| BridgeError::ConfigurationError(format!("Invalid address: {e}")))?
             .next()
             .ok_or_else(|| {
@@ -307,7 +306,7 @@ impl BridgeConnection {
 
     /// Attempts to connect using TLS to primary and backup brokers
     async fn connect_tls(&self, options: &ConnectOptions) -> Result<ConnectedBroker> {
-        let tls_config = self.build_tls_config(&self.config.remote_address)?;
+        let tls_config = self.build_tls_config(&self.config.remote_address).await?;
         match self
             .client
             .connect_with_tls_and_options(tls_config, options.clone())
@@ -329,7 +328,7 @@ impl BridgeConnection {
         }
 
         for (idx, backup) in self.config.backup_brokers.iter().enumerate() {
-            let tls_config = self.build_tls_config(backup)?;
+            let tls_config = self.build_tls_config(backup).await?;
             match self
                 .client
                 .connect_with_tls_and_options(tls_config, options.clone())
