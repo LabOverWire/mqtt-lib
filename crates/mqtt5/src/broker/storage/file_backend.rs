@@ -3,14 +3,14 @@
 //! Provides durable storage using organized file structure with atomic operations.
 
 use super::session_log::{sync_directory, SessionChange, SessionLog};
+use super::write_behind::{InflightKey, WriteBatch, WriteBehind};
 use super::{
-    ClientSession, InflightDirection, InflightMessage, QueueHandle, QueueLimits, QueueOp,
-    QueueRegistry, QueueWriter, QueuedMessage, RetainedMessage, StorageBackend, SEQ_FLOOR,
+    ClientSession, InflightDirection, InflightMessage, QueueHandle, QueueLimits, QueueRegistry,
+    QueuedMessage, RetainedMessage, StorageBackend, SEQ_FLOOR,
 };
 use crate::error::{MqttError, Result};
 use crate::validation::topic_matches_filter;
 use serde_json;
-use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -21,132 +21,6 @@ use tracing::{debug, info, warn};
 
 /// How long an inflight or queued row may sit unwritten so that its remove can cancel it.
 const INFLIGHT_SETTLE: std::time::Duration = std::time::Duration::from_millis(250);
-/// Total pending rows (queue + inflight) that force a write-out before the settle window ends.
-const INFLIGHT_SETTLE_MAX: usize = 8192;
-
-type InflightKey = (String, u16, InflightDirection);
-type QueueKey = (String, u64);
-
-/// Queued-message writes waiting for the settle window, coalesced so a write immediately
-/// followed by its delete never touches the disk. Applying an op only mutates this map, so the
-/// writer drains its unbounded channel at memory speed and the map stays bounded by the number
-/// of distinct live sequence numbers (already capped per client).
-#[derive(Default)]
-struct PendingQueue {
-    pending: HashMap<QueueKey, Option<Arc<QueuedMessage>>>,
-    on_disk: HashSet<QueueKey>,
-}
-
-impl PendingQueue {
-    fn store(&mut self, client_id: String, seq: u64, body: Arc<QueuedMessage>) {
-        self.pending.insert((client_id, seq), Some(body));
-    }
-
-    fn remove(&mut self, client_id: String, seq: u64) {
-        let key = (client_id, seq);
-        if matches!(self.pending.get(&key), Some(Some(_))) && !self.on_disk.contains(&key) {
-            self.pending.remove(&key);
-        } else {
-            self.pending.insert(key, None);
-        }
-    }
-
-    fn len(&self) -> usize {
-        self.pending.len()
-    }
-
-    async fn write_out(&mut self, queues_dir: &Path) {
-        for (key, op) in self.pending.drain() {
-            let path = queues_dir.join(&key.0).join(format!("{:020}.json", key.1));
-            if let Some(body) = op {
-                if let Err(e) = FileBackend::write_atomic(path, &*body, false).await {
-                    warn!(
-                        client_id = key.0,
-                        seq = key.1,
-                        "Failed to persist queued message: {e}"
-                    );
-                } else {
-                    self.on_disk.insert(key);
-                }
-            } else {
-                FileBackend::remove_if_present(&path, || {
-                    warn!(
-                        client_id = key.0,
-                        seq = key.1,
-                        "Failed to delete queued message file"
-                    );
-                })
-                .await;
-                self.on_disk.remove(&key);
-            }
-        }
-    }
-}
-
-/// Inflight rows waiting for the settle window: `Some` is a store that has not reached the
-/// disk, `None` a remove that must delete whatever an earlier write-out (or boot) left there.
-///
-/// A remove may cancel a pending store only when nothing for that key has ever reached the
-/// disk; once a row is written out (or was found on disk at boot) its remove must always
-/// produce a delete, otherwise a stale row survives and is redelivered on restart.
-#[derive(Default)]
-struct PendingInflight {
-    pending: HashMap<InflightKey, Option<Box<InflightMessage>>>,
-    on_disk: HashSet<InflightKey>,
-}
-
-impl PendingInflight {
-    fn store(&mut self, message: Box<InflightMessage>) {
-        let key = (
-            message.client_id.clone(),
-            message.packet_id,
-            message.direction,
-        );
-        self.pending.insert(key, Some(message));
-    }
-
-    fn remove(&mut self, client_id: String, packet_id: u16, direction: InflightDirection) {
-        let key = (client_id, packet_id, direction);
-        if matches!(self.pending.get(&key), Some(Some(_))) && !self.on_disk.contains(&key) {
-            self.pending.remove(&key);
-        } else {
-            self.pending.insert(key, None);
-        }
-    }
-
-    fn forget_client(&mut self, client_id: &str) {
-        self.pending.retain(|key, _| key.0 != client_id);
-        self.on_disk.retain(|key| key.0 != client_id);
-    }
-
-    async fn write_out(&mut self, inflight_dir: &Path) {
-        for (key, op) in self.pending.drain() {
-            let path = FileBackend::inflight_path(inflight_dir, &key);
-            if let Some(message) = op {
-                if let Err(e) = FileBackend::write_atomic(path, &*message, false).await {
-                    warn!(
-                        client_id = key.0,
-                        packet_id = key.1,
-                        "Failed to persist inflight message: {e}"
-                    );
-                } else {
-                    self.on_disk.insert(key);
-                }
-            } else {
-                FileBackend::remove_if_present(&path, || {
-                    warn!(
-                        client_id = key.0,
-                        packet_id = key.1,
-                        "Failed to delete inflight file"
-                    );
-                })
-                .await;
-                self.on_disk.remove(&key);
-            }
-        }
-    }
-}
-
 enum QueueFileName {
     Seq(u64),
     Legacy { ts: u64, seq: u64 },
@@ -187,7 +61,7 @@ pub struct FileBackend {
     inflight_dir: PathBuf,
     sessions: SessionLog,
     queues: QueueRegistry,
-    queue_writer: QueueWriter,
+    write_behind: Arc<WriteBehind>,
     queue_flush: mpsc::Sender<oneshot::Sender<()>>,
 }
 
@@ -226,12 +100,12 @@ impl FileBackend {
             Self::write_storage_version(&base_dir).await?;
         }
 
-        let (writer_tx, writer_rx) = mpsc::unbounded_channel();
+        let write_behind = Arc::new(WriteBehind::default());
         let (flush_tx, flush_rx) = mpsc::channel(4);
         tokio::spawn(Self::run_queue_writer(
             queues_dir.clone(),
             inflight_dir.clone(),
-            writer_rx,
+            Arc::clone(&write_behind),
             flush_rx,
         ));
 
@@ -241,8 +115,8 @@ impl FileBackend {
             queues_dir,
             inflight_dir,
             sessions,
-            queues: QueueRegistry::new(limits, Some(writer_tx.clone())),
-            queue_writer: writer_tx,
+            queues: QueueRegistry::new(limits, Some(Arc::clone(&write_behind))),
+            write_behind,
             queue_flush: flush_tx,
         };
         backend.scan_queues().await?;
@@ -359,75 +233,78 @@ impl FileBackend {
         Ok(())
     }
 
-    /// Applies queue writes and deletes as they arrive, and batches inflight rows: a store
-    /// followed by its remove within one settle window never touches the disk, which is the
-    /// normal life of an at-least-once message, so only rows that stay open long enough are
-    /// written.
     async fn run_queue_writer(
         queues_dir: PathBuf,
         inflight_dir: PathBuf,
-        mut ops: mpsc::UnboundedReceiver<QueueOp>,
+        write_behind: Arc<WriteBehind>,
         mut flushes: mpsc::Receiver<oneshot::Sender<()>>,
     ) {
-        let mut inflight = PendingInflight::default();
-        let mut queue = PendingQueue::default();
         let mut settle = tokio::time::interval(INFLIGHT_SETTLE);
         settle.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
-            tokio::select! {
-                op = ops.recv() => {
-                    let Some(op) = op else { break };
-                    Self::apply_queue_op(&inflight_dir, &mut inflight, &mut queue, op).await;
-                    if inflight.pending.len() + queue.len() >= INFLIGHT_SETTLE_MAX {
-                        queue.write_out(&queues_dir).await;
-                        inflight.write_out(&inflight_dir).await;
-                    }
-                }
-                flush = flushes.recv() => {
-                    let Some(done) = flush else { break };
-                    while let Ok(op) = ops.try_recv() {
-                        Self::apply_queue_op(&inflight_dir, &mut inflight, &mut queue, op).await;
-                    }
-                    queue.write_out(&queues_dir).await;
-                    inflight.write_out(&inflight_dir).await;
-                    let _ = done.send(());
-                }
-                _ = settle.tick() => {
-                    queue.write_out(&queues_dir).await;
-                    inflight.write_out(&inflight_dir).await;
+            let flush_reply = tokio::select! {
+                flush = flushes.recv() => match flush {
+                    Some(done) => Some(done),
+                    None => break,
+                },
+                () = write_behind.filled() => None,
+                _ = settle.tick() => None,
+            };
+            Self::write_out(&queues_dir, &inflight_dir, write_behind.take_batch()).await;
+            if let Some(done) = flush_reply {
+                if done.send(()).is_err() {
+                    debug!("Flush requester stopped waiting");
                 }
             }
         }
-        queue.write_out(&queues_dir).await;
-        inflight.write_out(&inflight_dir).await;
+        Self::write_out(&queues_dir, &inflight_dir, write_behind.take_batch()).await;
     }
 
-    async fn apply_queue_op(
-        inflight_dir: &Path,
-        inflight: &mut PendingInflight,
-        queue: &mut PendingQueue,
-        op: QueueOp,
-    ) {
-        match op {
-            QueueOp::Write {
-                client_id,
-                seq,
-                body,
-            } => queue.store(client_id, seq, body),
-            QueueOp::Delete { client_id, seq } => queue.remove(client_id, seq),
-            QueueOp::StoreInflight(message) => inflight.store(message),
-            QueueOp::RemoveInflight {
-                client_id,
-                packet_id,
-                direction,
-            } => inflight.remove(client_id, packet_id, direction),
-            QueueOp::RemoveAllInflight { client_id } => {
-                inflight.forget_client(&client_id);
-                let client_dir = inflight_dir.join(&client_id);
-                match fs::remove_dir_all(&client_dir).await {
-                    Ok(()) => {}
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(e) => warn!(client_id, "Failed to remove inflight directory: {e}"),
+    async fn write_out(queues_dir: &Path, inflight_dir: &Path, batch: WriteBatch) {
+        for client_id in batch.cleared_inflight {
+            match fs::remove_dir_all(inflight_dir.join(&client_id)).await {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => warn!(client_id, "Failed to remove inflight directory: {e}"),
+            }
+        }
+        for ((client_id, seq), entry) in batch.queue {
+            let path = queues_dir.join(&client_id).join(format!("{seq:020}.json"));
+            match entry {
+                Some(body) => {
+                    if let Err(e) = Self::write_atomic(path, &*body, false).await {
+                        warn!(client_id, seq, "Failed to persist queued message: {e}");
+                    }
+                }
+                None => {
+                    Self::remove_if_present(&path, || {
+                        warn!(client_id, seq, "Failed to delete queued message file");
+                    })
+                    .await;
+                }
+            }
+        }
+        for (key, entry) in batch.inflight {
+            let path = Self::inflight_path(inflight_dir, &key);
+            match entry {
+                Some(message) => {
+                    if let Err(e) = Self::write_atomic(path, &*message, false).await {
+                        warn!(
+                            client_id = key.0,
+                            packet_id = key.1,
+                            "Failed to persist inflight message: {e}"
+                        );
+                    }
+                }
+                None => {
+                    Self::remove_if_present(&path, || {
+                        warn!(
+                            client_id = key.0,
+                            packet_id = key.1,
+                            "Failed to delete inflight file"
+                        );
+                    })
+                    .await;
                 }
             }
         }
@@ -472,12 +349,6 @@ impl FileBackend {
     pub async fn shutdown(&self) -> Result<()> {
         self.flush_queue_writes().await;
         Ok(())
-    }
-
-    fn send_queue_op(&self, op: QueueOp) -> Result<()> {
-        self.queue_writer
-            .send(op)
-            .map_err(|_| MqttError::Io("storage writer task is no longer running".to_string()))
     }
 
     /// Waits until every queued-message write and delete issued so far has reached disk.
@@ -969,7 +840,8 @@ impl StorageBackend for FileBackend {
         &self,
         message: InflightMessage,
     ) -> impl std::future::Future<Output = Result<()>> + Send {
-        std::future::ready(self.send_queue_op(QueueOp::StoreInflight(Box::new(message))))
+        self.write_behind.store_inflight(message);
+        std::future::ready(Ok(()))
     }
 
     async fn get_inflight_messages(&self, client_id: &str) -> Result<Vec<InflightMessage>> {
@@ -1001,20 +873,17 @@ impl StorageBackend for FileBackend {
         packet_id: u16,
         direction: InflightDirection,
     ) -> impl std::future::Future<Output = Result<()>> + Send {
-        std::future::ready(self.send_queue_op(QueueOp::RemoveInflight {
-            client_id: client_id.to_string(),
-            packet_id,
-            direction,
-        }))
+        self.write_behind
+            .remove_inflight(client_id, packet_id, direction);
+        std::future::ready(Ok(()))
     }
 
     fn remove_all_inflight_messages(
         &self,
         client_id: &str,
     ) -> impl std::future::Future<Output = Result<()>> + Send {
-        std::future::ready(self.send_queue_op(QueueOp::RemoveAllInflight {
-            client_id: client_id.to_string(),
-        }))
+        self.write_behind.clear_inflight(client_id);
+        std::future::ready(Ok(()))
     }
 
     async fn cleanup_expired(&self) -> Result<()> {

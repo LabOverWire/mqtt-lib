@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [mqtt5 0.45.0] - 2026-10-01
+
+### Breaking
+
+- **`broker::storage::QueueOp` and `broker::storage::QueueWriter` are no longer public.** They described the file backend's internal write-behind channel, which is gone.
+
+### Fixed
+
+- **The file backend's memory no longer grows with QoS 1/2 throughput** (#158, #159). Every outbound QoS 1/2 delivery stores an inflight row and removes it on acknowledgement, and every queued message is written and later deleted; these went through an unbounded channel to a single writer task, which fell behind under load. A 30-second QoS 1 flood (16 publishers, 8 subscribers, 256-byte payloads) left about 11 million operations in the channel and the broker at 4.6 GB, against 54 MB on the memory backend. Writes and removals now update a shared pending map in place, so a row removed before it reaches the disk cancels its write immediately, and the writer flushes that map every 250 ms or once it holds 8192 rows. Pending state is bounded by the rows that are actually open, so the same flood now holds the broker at 55 MB.
+
+## [mqttv5-cli 0.29.4] - 2026-10-01
+
+### Changed
+
+- Requires mqtt5 0.45.
+
+## [mqtt5-wasm 2.1.3] - 2026-10-01
+
+### Changed
+
+- Requires mqtt5 0.45. No change to the wasm API.
+
 ## [mqtt5 0.44.2] - 2026-10-01
 
 ### Fixed
