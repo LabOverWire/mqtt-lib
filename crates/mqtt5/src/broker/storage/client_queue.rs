@@ -97,6 +97,7 @@ pub struct ClientQueue {
     handoffs: AtomicUsize,
     draining: AtomicBool,
     epoch: AtomicU64,
+    awaiting_bind: AtomicU64,
     notify: Notify,
     handoff_done: Notify,
     seq: Arc<AtomicU64>,
@@ -125,6 +126,7 @@ impl ClientQueue {
             handoffs: AtomicUsize::new(0),
             draining: AtomicBool::new(false),
             epoch: AtomicU64::new(0),
+            awaiting_bind: AtomicU64::new(0),
             notify: Notify::new(),
             handoff_done: Notify::new(),
             seq,
@@ -206,7 +208,30 @@ impl ClientQueue {
     /// displaced handler is about to hand its deliveries back.
     #[must_use]
     pub fn behind(&self) -> bool {
-        self.count() > 0 || self.draining() || self.handoff()
+        self.count() > 0 || self.draining() || self.handoff() || self.awaiting_bind()
+    }
+
+    #[must_use]
+    pub fn awaiting_bind(&self) -> bool {
+        self.awaiting_bind.load(Ordering::Acquire) != 0
+    }
+
+    pub fn expect_bind(&self, generation: u64) {
+        self.awaiting_bind.store(generation, Ordering::Release);
+    }
+
+    pub fn mark_bound(&self, generation: u64) {
+        if self
+            .awaiting_bind
+            .compare_exchange(generation, 0, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            debug!(
+                client_id = %self.client_id,
+                generation,
+                "A newer connection registered before this one bound"
+            );
+        }
     }
 
     /// Wakes the handler that serves this client; a permit is stored if none is waiting.
@@ -812,6 +837,23 @@ mod tests {
         assert_eq!(queue.epoch(), epoch);
         assert_eq!(queue.count(), 1);
         assert_eq!(queue.take(5).await[0].topic, "t/after");
+    }
+
+    #[test]
+    fn only_the_latest_registration_clears_awaiting_bind() {
+        let registry = registry(QueueLimits::default());
+        let queue = registry.handle("c");
+        assert!(!queue.behind());
+        queue.expect_bind(1);
+        queue.expect_bind(2);
+        assert!(queue.behind());
+        queue.mark_bound(1);
+        assert!(
+            queue.awaiting_bind(),
+            "an older connection binding must not clear it"
+        );
+        queue.mark_bound(2);
+        assert!(!queue.behind());
     }
 
     #[tokio::test]

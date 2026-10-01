@@ -475,6 +475,7 @@ impl ClientHandler {
             // from memory when it exits; reloading here would deliver those messages twice.
             self.load_persisted_inflight(&queue).await?;
         }
+        queue.mark_bound(self.generation);
         queue.notify();
         Ok(())
     }

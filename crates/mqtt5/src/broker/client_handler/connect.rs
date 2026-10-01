@@ -491,7 +491,7 @@ impl ClientHandler {
         let queue = self.router.queue_handle(&client_id);
         let registration = self
             .router
-            .register_session_as(
+            .register_unbound_session(
                 generation,
                 client_id.clone(),
                 DeliveryLanes {

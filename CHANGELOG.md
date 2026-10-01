@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [mqtt5 0.44.1] - 2026-09-30
+
+### Fixed
+
+- **A resumed session no longer receives a new message before the older unacknowledged one it is resuming.** After a broker restart, a publish routed to a reconnecting client between its registration and the reload of its persisted inflight messages went straight to delivery, while the older inflight message was put back on the queue behind it ([MQTT-4.4.0-1], #151). A connection is now treated as behind until its session has bound, so such a publish is queued after the reloaded message.
+
+### Added
+
+- `MessageRouter::register_unbound_session`, and `ClientQueue::awaiting_bind`, `ClientQueue::expect_bind` and `ClientQueue::mark_bound`.
+
 ## [mqtt5 0.44.0] - 2026-09-29
 
 ### Breaking
