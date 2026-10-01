@@ -5,20 +5,17 @@
 //! entries. The lock never covers file I/O: the file backend persists through a write-behind
 //! lane and keeps the message body in memory until the file exists.
 
-use super::{InflightDirection, InflightMessage, QueuedMessage};
+use super::write_behind::WriteBehind;
+use super::QueuedMessage;
 use crate::time::SystemTime;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
-use tokio::sync::mpsc;
 use tokio::sync::Notify;
 use tracing::{debug, warn};
 
-/// Sender side of the file backend's write-behind lane. Unbounded: every op corresponds to a
-/// queue entry or an inflight row, both already bounded per client, and a dropped op would
-/// either lose a message or resurrect one on restart.
-pub type QueueWriter = mpsc::UnboundedSender<QueueOp>;
+pub(crate) type QueueWriter = Arc<WriteBehind>;
 
 /// Sequence numbers start high so a front re-queue always has room below the oldest entry.
 pub const SEQ_FLOOR: u64 = 1 << 62;
@@ -37,29 +34,6 @@ impl Default for QueueLimits {
             max_bytes: 64 * 1024 * 1024,
         }
     }
-}
-
-/// Work handed to the file backend's write-behind task, in per-client FIFO order.
-#[derive(Debug)]
-pub enum QueueOp {
-    Write {
-        client_id: String,
-        seq: u64,
-        body: Arc<QueuedMessage>,
-    },
-    Delete {
-        client_id: String,
-        seq: u64,
-    },
-    StoreInflight(Box<InflightMessage>),
-    RemoveInflight {
-        client_id: String,
-        packet_id: u16,
-        direction: InflightDirection,
-    },
-    RemoveAllInflight {
-        client_id: String,
-    },
 }
 
 #[derive(Debug, Clone)]
@@ -559,33 +533,14 @@ impl ClientQueue {
     }
 
     fn enqueue_write(&self, seq: u64, body: Arc<QueuedMessage>) {
-        let Some(writer) = &self.writer else {
-            return;
-        };
-        if writer
-            .send(QueueOp::Write {
-                client_id: self.client_id.clone(),
-                seq,
-                body,
-            })
-            .is_err()
-        {
-            debug!(client_id = %self.client_id, seq, "Storage writer stopped; queued message kept in memory only");
+        if let Some(writer) = &self.writer {
+            writer.store_queued(&self.client_id, seq, body);
         }
     }
 
     fn enqueue_delete(&self, seq: u64) {
-        let Some(writer) = &self.writer else {
-            return;
-        };
-        if writer
-            .send(QueueOp::Delete {
-                client_id: self.client_id.clone(),
-                seq,
-            })
-            .is_err()
-        {
-            debug!(client_id = %self.client_id, seq, "Storage writer stopped; queued message file may remain");
+        if let Some(writer) = &self.writer {
+            writer.remove_queued(&self.client_id, seq);
         }
     }
 }
@@ -687,6 +642,7 @@ impl QueueRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::broker::storage::write_behind::WriteBatch;
     use crate::packet::publish::PublishPacket;
     use crate::QoS;
 
@@ -775,10 +731,23 @@ mod tests {
     }
 
     #[test]
-    fn writer_never_sees_a_write_after_the_delete_of_the_same_entry() {
-        let (writer, mut ops) = mpsc::unbounded_channel();
-        let registry = QueueRegistry::new(QueueLimits::default(), Some(writer));
+    fn cleared_entries_never_survive_on_disk_under_concurrent_write_out() {
+        let writer = Arc::new(WriteBehind::default());
+        let registry = QueueRegistry::new(QueueLimits::default(), Some(Arc::clone(&writer)));
         let queue = registry.handle("c");
+        let done = Arc::new(AtomicBool::new(false));
+        let flusher = {
+            let writer = Arc::clone(&writer);
+            let done = Arc::clone(&done);
+            std::thread::spawn(move || {
+                let mut disk = std::collections::HashSet::new();
+                while !done.load(Ordering::Acquire) {
+                    apply(&mut disk, writer.take_batch());
+                }
+                apply(&mut disk, writer.take_batch());
+                disk
+            })
+        };
         let pushers: Vec<_> = (0..4)
             .map(|_| {
                 let queue = Arc::clone(&queue);
@@ -804,24 +773,23 @@ mod tests {
             handle.join().unwrap();
         }
         queue.clear(None);
+        done.store(true, Ordering::Release);
+        let disk = flusher.join().unwrap();
+        assert!(
+            disk.is_empty(),
+            "every cleared entry must end deleted, not rewritten: {} left",
+            disk.len()
+        );
+    }
 
-        let mut last_op: std::collections::HashMap<u64, bool> = std::collections::HashMap::new();
-        while let Ok(op) = ops.try_recv() {
-            match op {
-                QueueOp::Write { seq, .. } => {
-                    last_op.insert(seq, true);
-                }
-                QueueOp::Delete { seq, .. } => {
-                    last_op.insert(seq, false);
-                }
-                _ => {}
+    fn apply(disk: &mut std::collections::HashSet<u64>, batch: WriteBatch) {
+        for ((_, seq), entry) in batch.queue {
+            if entry.is_some() {
+                disk.insert(seq);
+            } else {
+                disk.remove(&seq);
             }
         }
-        let resurrected = last_op.values().filter(|written| **written).count();
-        assert_eq!(
-            resurrected, 0,
-            "every cleared entry must end deleted, not rewritten"
-        );
     }
 
     #[tokio::test]

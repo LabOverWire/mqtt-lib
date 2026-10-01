@@ -12,10 +12,10 @@ pub mod retained;
 #[cfg(not(target_arch = "wasm32"))]
 mod session_log;
 pub mod sessions;
+mod write_behind;
 
 pub use client_queue::{
-    ClientQueue, PushOutcome, QueueHandle, QueueLimits, QueueOp, QueueRegistry, QueueWriter,
-    SEQ_FLOOR,
+    ClientQueue, PushOutcome, QueueHandle, QueueLimits, QueueRegistry, SEQ_FLOOR,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use file_backend::FileBackend;
