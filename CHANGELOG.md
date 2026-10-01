@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [mqtt5 0.44.2] - 2026-10-01
+
+### Fixed
+
+- **Connecting no longer blocks a runtime thread while the broker's hostname is resolved** (#156). `MqttClient::connect` and its variants resolved the address with the blocking `ToSocketAddrs`, so a slow DNS server stalled the tokio worker thread running the connect, and every task scheduled on it. Resolution now uses `tokio::net::lookup_host`. The bridge's TLS connection path had the same blocking lookup and now uses it too.
+
+## [mqttv5-cli 0.29.3] - 2026-10-01
+
+### Fixed
+
+- `mqttv5 bench` resolves the broker address without blocking the runtime.
+
 ## [mqtt5 0.44.1] - 2026-09-30
 
 ### Fixed
