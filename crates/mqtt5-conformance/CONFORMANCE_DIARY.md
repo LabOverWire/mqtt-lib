@@ -38,6 +38,32 @@
 
 ## Diary Entries
 
+### Statement text drift cleared: all 77 entries corrected against the normative body (2026-10-01)
+
+**Trigger**: issue #166, part 1. `known-text-drift.txt` listed 77 statements whose manifest text did not correspond to the reference text for their ID. The client audit for #164 had taken wrong IDs from the manifest as a result (the manifest filed "Client without session state receiving Session Present=1 MUST close" under MQTT-3.2.2-5; it is MQTT-3.2.2-4).
+
+**Method**: every entry was compared against three sources side by side: the manifest text, `mqtt-v5.0-statement-texts.txt`, and the normative body as extracted in `rfc-extract/mqtt-v5.0-compliance.toml`. The cited tests and their `#[conformance_test(ids = ...)]` attributes were read to decide which statement each test really exercises. As in the earlier passes, no bulk replacement was applied; each entry fell into one of four kinds.
+
+**Applied**
+
+- **53 paraphrases** (right ID, lossy wording, extra sentences, or v3.1.1 vocabulary such as "spec table"): text replaced with the reference text, status and tests kept, since the tests exercise the statement.
+- **7 reference-file errors** where the manifest already matched the body and `mqtt-v5.0-statement-texts.txt` still carried an Appendix B variant: `3.1.3-10` (Appendix B says "forwarding the Application Message", the body says "publishing the Will Message"), `3.1.3-12`, `3.11.2-2` ("specified by the receiver" vs "the Client"), `3.14.2-3` and `3.7.2-2` ("use" vs "send"), `3.2.2-18` (Appendix B drops "or 0"), `3.7.2-3`. The reference file was corrected to the body.
+- **13 displaced entries**, plus 4 drifted entries that were also destinations (`3.1.2-11`, `3.1.3-5`, `3.3.2-7`, `3.3.4-9`), whose tests exercised a different statement. The tests moved to the statement they exercise, and their attribute, doc comment and assertion messages were retagged:
+  - `3.1.2-11` keep-alive tests → `3.1.2-22`; `3.1.2-7` Will QoS test → `3.1.2-11`; `3.1.2-8` Will Retain test → `3.1.2-13`; `3.1.2-6` Will payload test → `3.1.2-9`; `3.1.2-12` CONNECT fixed-header flags test → `2.1.3-1`.
+  - `3.1.3-3` allowed-characters test → `3.1.3-5`; `3.1.3-4` empty ClientID test → `3.1.3-6`; `3.1.3-5` 0x85 test → `3.1.3-8`.
+  - `3.11.2-1` UNSUBACK packet-id test → `3.10.4-5`; `3.8.3-3` empty-SUBSCRIBE test → `3.8.3-2`; `3.9.3-1` SUBACK count test → `3.8.4-6` (it checks the number of reason codes, not their order).
+  - Topic Alias run `3.3.2-7…-10`: connection-scope tests → `3.3.2-7` (and no longer claim `3.3.2-11`); alias-zero test → `3.3.2-8`. `3.3.2-10` is the Client acceptance rule.
+  - Receive Maximum run `3.3.4-7…-10` had Client and Server swapped: the outbound limit test → `3.3.4-9`; `-7` and `-8` are the Client rules; `-10` (Server must not delay non-PUBLISH packets) is Untested.
+- **Destinations promoted from CrossRef to Tested**: `3.1.2-22`, `3.1.2-13`, `3.1.3-6`, `3.8.3-2`, `3.8.4-2`, `3.8.4-6`, `3.10.4-5`. Their notes had pointed back at the wrong IDs.
+- **`3.10.4-2`** ("When a Server receives UNSUBSCRIBE it MUST stop adding new messages") was recorded as Client/NotApplicable. It is a Server statement and `unsubscribe_stops_delivery` exercises it.
+- **Citation drift reconciled where the corrected text made a pair correct** (13 pairs removed from `known-citation-drift.txt`): `connect_will_qos_3_is_malformed` is `3.1.2-12` (it restates that statement), `suback_packet_id_matches` is `3.8.4-2`, `overlapping_subs_no_local_prevents_echo` is `3.8.3-3`, and the manifest now cites the tests already declaring `3.14.2-1`, `4.13.2-1`, `3.8.4-8`, `4.9.0-2` and `3.11.3-2`.
+
+**Result**: `known-text-drift.txt` is empty and still guards against new drift; `known-citation-drift.txt` is down from 37 to 24 pairs. Status distribution: Tested 162 → 163, Untested 34 → 39, CrossRef 19 → 12, NotApplicable 36 → 37 (251 statements). The new Untested entries are real gaps the wrong IDs were hiding: `3.1.2-6` (new Session for Clean Start 0 without a session), `3.1.2-7` (Will Message stored), `3.1.2-8` (Will published after close or delay), `3.1.3-3` (ClientID first in the payload), `3.1.3-4` (ClientID is UTF-8), `3.3.4-10`, `3.9.3-1` (SUBACK reason-code order).
+
+**Dropped note**: `3.3.4-8` carried a note about the unregistered test `inbound_receive_maximum_exceeded_disconnects_with_0x93`. `3.3.4-8` is the Client "must not delay" rule, so the note did not belong there. The 0x93 DISCONNECT behaviour has no numbered statement of its own.
+
+**Not in this pass**: issue #166 part 2 (a client SUT mode) is unchanged.
+
 ### Absent Session Expiry now means 0, and DISCONNECT can change the Session Expiry (2026-09-24)
 
 **Trigger**: the quorum review of PR #170 and issue #171, which was folded into it. The broker stored an absent CONNECT Session Expiry Interval as "never expires", although §3.1.2.11.2 says an absent value is 0. A client that left the property out kept its session, subscriptions and queued messages forever. It also broke the Will timing from #154: with the Will bounded by session end, "never" meant the delay was always honoured instead of the Will going out at disconnect. The broker also ignored a Session Expiry Interval sent on DISCONNECT (§3.14.2.2.2), and a resumed session kept the Session Expiry of the connection that created it instead of taking the resuming CONNECT's value.

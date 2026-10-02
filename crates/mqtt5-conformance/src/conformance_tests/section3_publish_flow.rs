@@ -6,11 +6,11 @@ use crate::raw_client::{RawMqttClient, RawPacketBuilder};
 use crate::sut::SutHandle;
 use std::time::Duration;
 
-/// `[MQTT-3.3.4-7]` The Server MUST NOT send more than Receive Maximum
+/// `[MQTT-3.3.4-9]` The Server MUST NOT send more than Receive Maximum
 /// `QoS` 1 and `QoS` 2 PUBLISH packets for which it has not received PUBACK,
 /// PUBCOMP, or PUBREC with a Reason Code of 128 or greater from the Client.
 #[conformance_test(
-    ids = ["MQTT-3.3.4-7"],
+    ids = ["MQTT-3.3.4-9"],
     requires = ["transport.tcp", "max_qos>=1"],
 )]
 async fn receive_maximum_limits_outbound_publishes(sut: SutHandle) {
@@ -61,7 +61,7 @@ async fn receive_maximum_limits_outbound_publishes(sut: SutHandle) {
 
     assert_eq!(
         publish_count, 2,
-        "[MQTT-3.3.4-7] Server must not send more than receive_maximum (2) unACKed QoS 1 publishes"
+        "[MQTT-3.3.4-9] Server must not send more than receive_maximum (2) unACKed QoS 1 publishes"
     );
 }
 

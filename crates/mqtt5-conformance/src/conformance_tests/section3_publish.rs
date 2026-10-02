@@ -94,9 +94,9 @@ async fn publish_topic_must_not_be_empty_without_alias(sut: SutHandle) {
     assertions::expect_disconnect(&mut raw, "MQTT-3.3.2-1", TIMEOUT).await;
 }
 
-/// `[MQTT-3.3.2-7]` A Topic Alias of 0 is not permitted.
+/// `[MQTT-3.3.2-8]` A Topic Alias of 0 is not permitted.
 #[conformance_test(
-    ids = ["MQTT-3.3.2-7"],
+    ids = ["MQTT-3.3.2-8"],
     requires = ["transport.tcp"],
 )]
 async fn publish_topic_alias_zero_rejected(sut: SutHandle) {
@@ -113,7 +113,7 @@ async fn publish_topic_alias_zero_rejected(sut: SutHandle) {
     .await
     .unwrap();
 
-    assertions::expect_disconnect(&mut raw, "MQTT-3.3.2-7", TIMEOUT).await;
+    assertions::expect_disconnect(&mut raw, "MQTT-3.3.2-8", TIMEOUT).await;
 }
 
 /// `[MQTT-3.3.4-6]` A PUBLISH packet sent from a Client to a Server MUST NOT

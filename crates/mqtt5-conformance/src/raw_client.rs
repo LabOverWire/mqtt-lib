@@ -845,7 +845,7 @@ impl RawPacketBuilder {
     /// Will Payload in the payload.
     ///
     /// Connect flags `0x06` = Will Flag (bit 2) + `clean_start` (bit 1).
-    /// Used to test `[MQTT-3.1.2-6]`: Will Topic and Will Payload MUST be
+    /// Used to test `[MQTT-3.1.2-9]`: Will Topic and Will Payload MUST be
     /// present when Will Flag is 1.
     #[must_use]
     pub fn connect_with_will_flag_no_payload() -> Vec<u8> {
@@ -916,7 +916,7 @@ impl RawPacketBuilder {
     /// of the required `0x10`.
     ///
     /// The lower 4 bits of a CONNECT fixed header MUST be `0x00`.
-    /// Used to test `[MQTT-3.1.2-12]`.
+    /// Used to test `[MQTT-2.1.3-1]`.
     #[must_use]
     pub fn connect_with_invalid_fixed_header_flags() -> Vec<u8> {
         let mut body = BytesMut::new();
@@ -1139,7 +1139,7 @@ impl RawPacketBuilder {
     /// Builds a SUBSCRIBE packet with no topic filters (empty payload after
     /// packet ID and properties).
     ///
-    /// Violates `[MQTT-3.8.3-3]`.
+    /// Violates `[MQTT-3.8.3-2]`.
     #[must_use]
     pub fn subscribe_empty_payload(packet_id: u16) -> Vec<u8> {
         let mut body = BytesMut::new();

@@ -271,10 +271,10 @@ async fn connect_clean_start_false_resumes_session(sut: SutHandle) {
     client2.disconnect().await.expect("disconnect failed");
 }
 
-/// `[MQTT-3.1.2-6]` If the Will Flag is set to 1, the Will Properties, Will
+/// `[MQTT-3.1.2-9]` If the Will Flag is set to 1, the Will Properties, Will
 /// Topic and Will Payload fields MUST be present in the Payload.
 #[conformance_test(
-    ids = ["MQTT-3.1.2-6"],
+    ids = ["MQTT-3.1.2-9"],
     requires = ["transport.tcp"],
 )]
 async fn connect_will_flag_with_will_topic_payload(sut: SutHandle) {
@@ -284,14 +284,14 @@ async fn connect_will_flag_with_will_topic_payload(sut: SutHandle) {
         .with_will(will);
     let client = TestClient::connect_with_options(&sut, opts)
         .await
-        .expect("[MQTT-3.1.2-6] Connection with valid will must succeed");
+        .expect("[MQTT-3.1.2-9] Connection with valid will must succeed");
     client.disconnect().await.expect("disconnect failed");
 }
 
-/// `[MQTT-3.1.2-7]` If the Will Flag is set to 0, then the Will `QoS` MUST
+/// `[MQTT-3.1.2-11]` If the Will Flag is set to 0, then the Will `QoS` MUST
 /// be set to 0.
 #[conformance_test(
-    ids = ["MQTT-3.1.2-7"],
+    ids = ["MQTT-3.1.2-11"],
     requires = ["transport.tcp"],
 )]
 async fn connect_will_qos_zero_without_will_flag(sut: SutHandle) {
@@ -304,14 +304,14 @@ async fn connect_will_qos_zero_without_will_flag(sut: SutHandle) {
 
     assert!(
         raw.expect_disconnect(Duration::from_secs(2)).await,
-        "[MQTT-3.1.2-7] Server must reject Will QoS!=0 when Will Flag=0"
+        "[MQTT-3.1.2-11] Server must reject Will QoS!=0 when Will Flag=0"
     );
 }
 
-/// `[MQTT-3.1.2-8]` If the Will Flag is set to 0, then Will Retain MUST be
+/// `[MQTT-3.1.2-13]` If the Will Flag is set to 0, then Will Retain MUST be
 /// set to 0.
 #[conformance_test(
-    ids = ["MQTT-3.1.2-8"],
+    ids = ["MQTT-3.1.2-13"],
     requires = ["transport.tcp"],
 )]
 async fn connect_will_retain_zero_without_will_flag(sut: SutHandle) {
@@ -324,14 +324,14 @@ async fn connect_will_retain_zero_without_will_flag(sut: SutHandle) {
 
     assert!(
         raw.expect_disconnect(Duration::from_secs(2)).await,
-        "[MQTT-3.1.2-8] Server must reject Will Retain=1 when Will Flag=0"
+        "[MQTT-3.1.2-13] Server must reject Will Retain=1 when Will Flag=0"
     );
 }
 
-/// `[MQTT-3.1.2-9]` If the Will Flag is set to 1, the value of Will `QoS`
+/// `[MQTT-3.1.2-12]` If the Will Flag is set to 1, the value of Will `QoS`
 /// can be 0, 1, or 2. A value of 3 is a Malformed Packet.
 #[conformance_test(
-    ids = ["MQTT-3.1.2-9"],
+    ids = ["MQTT-3.1.2-12"],
     requires = ["transport.tcp"],
 )]
 async fn connect_will_qos_3_is_malformed(sut: SutHandle) {
@@ -344,14 +344,14 @@ async fn connect_will_qos_3_is_malformed(sut: SutHandle) {
 
     assert!(
         raw.expect_disconnect(Duration::from_secs(2)).await,
-        "[MQTT-3.1.2-9] Server must reject Will QoS=3 as malformed"
+        "[MQTT-3.1.2-12] Server must reject Will QoS=3 as malformed"
     );
 }
 
-/// `[MQTT-3.1.2-12]` If the CONNECT packet has a fixed header flags field
+/// `[MQTT-2.1.3-1]` If the CONNECT packet has a fixed header flags field
 /// that is not 0x00, the Server MUST treat it as a Malformed Packet.
 #[conformance_test(
-    ids = ["MQTT-3.1.2-12"],
+    ids = ["MQTT-2.1.3-1"],
     requires = ["transport.tcp"],
 )]
 async fn connect_invalid_fixed_header_flags(sut: SutHandle) {
@@ -365,29 +365,29 @@ async fn connect_invalid_fixed_header_flags(sut: SutHandle) {
 
     assert!(
         raw.expect_disconnect(Duration::from_secs(2)).await,
-        "[MQTT-3.1.2-12] Server must reject CONNECT with non-zero fixed header flags"
+        "[MQTT-2.1.3-1] Server must reject CONNECT with non-zero fixed header flags"
     );
 }
 
-/// `[MQTT-3.1.3-3]` The Server MUST allow `ClientID`s which are between 1
+/// `[MQTT-3.1.3-5]` The Server MUST allow `ClientID`s which are between 1
 /// and 23 UTF-8 encoded bytes in length, and that contain only the
 /// characters `0-9`, `a-z`, `A-Z`.
 #[conformance_test(
-    ids = ["MQTT-3.1.3-3"],
+    ids = ["MQTT-3.1.3-5"],
     requires = ["transport.tcp"],
 )]
 async fn connect_valid_client_id_accepted(sut: SutHandle) {
     let client = TestClient::connect(&sut, "abcABC012345")
         .await
-        .expect("[MQTT-3.1.3-3] Server must accept valid client ID");
+        .expect("[MQTT-3.1.3-5] Server must accept valid client ID");
     client.disconnect().await.expect("disconnect failed");
 }
 
-/// `[MQTT-3.1.3-4]` A Server MAY allow a Client to supply a `ClientID` that
+/// `[MQTT-3.1.3-6]` A Server MAY allow a Client to supply a `ClientID` that
 /// has a length of zero bytes; if so the Server MUST treat this as a special
 /// case and assign a unique `ClientID` to that Client.
 #[conformance_test(
-    ids = ["MQTT-3.1.3-4"],
+    ids = ["MQTT-3.1.3-6"],
     requires = ["transport.tcp"],
 )]
 async fn connect_empty_client_id_server_assigns(sut: SutHandle) {
@@ -401,26 +401,26 @@ async fn connect_empty_client_id_server_assigns(sut: SutHandle) {
     let response = raw.read_packet_bytes(Duration::from_secs(2)).await;
     assert!(
         response.is_some(),
-        "[MQTT-3.1.3-4] Server must send CONNACK"
+        "[MQTT-3.1.3-6] Server must send CONNACK"
     );
     let data = response.unwrap();
     assert_eq!(data[0], 0x20, "Response must be CONNACK");
     let reason_idx = find_connack_reason_code_index(&data);
     assert_eq!(
         data[reason_idx], 0x00,
-        "[MQTT-3.1.3-4] Empty client ID with clean_start must be accepted (reason=Success)"
+        "[MQTT-3.1.3-6] Empty client ID with clean_start must be accepted (reason=Success)"
     );
     assert!(
         data[reason_idx + 1..].contains(&0x12),
-        "[MQTT-3.1.3-4] CONNACK must contain Assigned Client Identifier property (0x12)"
+        "[MQTT-3.1.3-6] CONNACK must contain Assigned Client Identifier property (0x12)"
     );
 }
 
-/// `[MQTT-3.1.3-5]` If the Server rejects the `ClientID` it MAY respond to
+/// `[MQTT-3.1.3-8]` If the Server rejects the `ClientID` it MAY respond to
 /// the CONNECT packet with a CONNACK using Reason Code 0x85
 /// (`ClientIdentifierNotValid`).
 #[conformance_test(
-    ids = ["MQTT-3.1.3-5"],
+    ids = ["MQTT-3.1.3-8"],
     requires = ["transport.tcp", "strict_client_id_charset"],
 )]
 async fn client_id_rejected_with_0x85(sut: SutHandle) {
@@ -433,11 +433,11 @@ async fn client_id_rejected_with_0x85(sut: SutHandle) {
         .unwrap();
 
     let connack = raw.expect_connack(Duration::from_secs(2)).await;
-    assert!(connack.is_some(), "[MQTT-3.1.3-5] Server must send CONNACK");
+    assert!(connack.is_some(), "[MQTT-3.1.3-8] Server must send CONNACK");
     let (_, reason) = connack.unwrap();
     assert_eq!(
         reason, 0x85,
-        "[MQTT-3.1.3-5] Server must reject invalid client ID with 0x85 (ClientIdentifierNotValid)"
+        "[MQTT-3.1.3-8] Server must reject invalid client ID with 0x85 (ClientIdentifierNotValid)"
     );
 }
 

@@ -132,10 +132,10 @@ async fn topic_alias_update_mapping(sut: SutHandle) {
     );
 }
 
-/// `[MQTT-3.3.2-10]` `[MQTT-3.3.2-11]` Topic Alias mappings are scoped to
+/// `[MQTT-3.3.2-7]` Topic Alias mappings are scoped to
 /// the Network Connection. A new connection starts with no mappings.
 #[conformance_test(
-    ids = ["MQTT-3.3.2-10", "MQTT-3.3.2-11"],
+    ids = ["MQTT-3.3.2-7"],
     requires = ["transport.tcp"],
 )]
 async fn topic_alias_not_shared_across_connections(sut: SutHandle) {
@@ -166,14 +166,14 @@ async fn topic_alias_not_shared_across_connections(sut: SutHandle) {
 
     assert!(
         conn_b.expect_disconnect(TIMEOUT).await,
-        "[MQTT-3.3.2-10/11] Alias from connection A must not be usable on connection B"
+        "[MQTT-3.3.2-7] Alias from connection A must not be usable on connection B"
     );
 }
 
-/// `[MQTT-3.3.2-10]` `[MQTT-3.3.2-11]` Topic Alias mappings do not survive
+/// `[MQTT-3.3.2-7]` Topic Alias mappings do not survive
 /// reconnection.
 #[conformance_test(
-    ids = ["MQTT-3.3.2-10", "MQTT-3.3.2-11"],
+    ids = ["MQTT-3.3.2-7"],
     requires = ["transport.tcp"],
 )]
 async fn topic_alias_cleared_on_reconnect(sut: SutHandle) {
@@ -208,7 +208,7 @@ async fn topic_alias_cleared_on_reconnect(sut: SutHandle) {
 
     assert!(
         conn2.expect_disconnect(TIMEOUT).await,
-        "[MQTT-3.3.2-10/11] Alias from previous connection must not survive reconnection"
+        "[MQTT-3.3.2-7] Alias from previous connection must not survive reconnection"
     );
 }
 

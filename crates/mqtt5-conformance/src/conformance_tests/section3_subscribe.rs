@@ -33,9 +33,9 @@ async fn subscribe_invalid_flags_rejected(sut: SutHandle) {
     );
 }
 
-/// `[MQTT-3.8.3-3]` SUBSCRIBE payload MUST contain at least one topic filter.
+/// `[MQTT-3.8.3-2]` SUBSCRIBE payload MUST contain at least one topic filter.
 #[conformance_test(
-    ids = ["MQTT-3.8.3-3"],
+    ids = ["MQTT-3.8.3-2"],
     requires = ["transport.tcp"],
 )]
 async fn subscribe_empty_payload_rejected(sut: SutHandle) {
@@ -51,7 +51,7 @@ async fn subscribe_empty_payload_rejected(sut: SutHandle) {
 
     assert!(
         raw.expect_disconnect(TIMEOUT).await,
-        "[MQTT-3.8.3-3] server must disconnect on SUBSCRIBE with no topic filters"
+        "[MQTT-3.8.3-2] server must disconnect on SUBSCRIBE with no topic filters"
     );
 }
 
@@ -79,9 +79,9 @@ async fn subscribe_no_local_shared_rejected(sut: SutHandle) {
     );
 }
 
-/// `[MQTT-3.9.2-1]` SUBACK packet ID must match SUBSCRIBE packet ID.
+/// `[MQTT-3.8.4-2]` SUBACK packet ID must match SUBSCRIBE packet ID.
 #[conformance_test(
-    ids = ["MQTT-3.9.2-1"],
+    ids = ["MQTT-3.8.4-2"],
     requires = ["transport.tcp"],
 )]
 async fn suback_packet_id_matches(sut: SutHandle) {
@@ -107,14 +107,14 @@ async fn suback_packet_id_matches(sut: SutHandle) {
 
     assert_eq!(
         ack_id, packet_id,
-        "[MQTT-3.9.2-1] SUBACK packet ID must match SUBSCRIBE packet ID"
+        "[MQTT-3.8.4-2] SUBACK packet ID must match SUBSCRIBE packet ID"
     );
     assert_eq!(reason_codes.len(), 1, "SUBACK must contain one reason code");
 }
 
-/// `[MQTT-3.9.3-1]` SUBACK must contain one reason code per topic filter.
+/// `[MQTT-3.8.4-6]` SUBACK must contain one reason code per topic filter.
 #[conformance_test(
-    ids = ["MQTT-3.9.3-1"],
+    ids = ["MQTT-3.8.4-6"],
     requires = ["transport.tcp"],
 )]
 async fn suback_reason_codes_per_filter(sut: SutHandle) {
@@ -138,7 +138,7 @@ async fn suback_reason_codes_per_filter(sut: SutHandle) {
     assert_eq!(
         reason_codes.len(),
         3,
-        "[MQTT-3.9.3-1] SUBACK must contain one reason code per topic filter"
+        "[MQTT-3.8.4-6] SUBACK must contain one reason code per topic filter"
     );
 }
 
