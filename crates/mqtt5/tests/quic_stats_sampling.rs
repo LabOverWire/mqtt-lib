@@ -53,6 +53,7 @@ async fn broker_writes_quic_stats_per_connection_when_the_directory_is_set() {
             .await
             .unwrap();
     }
+    tokio::time::sleep(Duration::from_millis(500)).await;
     client.disconnect().await.unwrap();
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
