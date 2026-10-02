@@ -162,13 +162,13 @@ If the Server rejects the ClientID it MAY respond to the CONNECT packet with a C
 If a new Network Connection to this Session is made before the Will Delay Interval has passed, the Server MUST NOT send the Will Message.
 
 ## MQTT-3.1.3-10
-The Server MUST maintain the order of User Properties when forwarding the Application Message.
+The Server MUST maintain the order of User Properties when publishing the Will Message.
 
 ## MQTT-3.1.3-11
 The Will Topic MUST be a UTF-8 Encoded String.
 
 ## MQTT-3.1.3-12
-If the User Name Flag is set to 1, the User Name is the next field in the Payload. The User Name MUST be a UTF-8 Encoded String.
+The User Name MUST be a UTF-8 Encoded String as defined in section 1.5.4.
 
 ## MQTT-3.1.4-1
 The Server MUST validate that the CONNECT packet matches the format described in section 3.1 and close the Network Connection if it does not match.
@@ -246,7 +246,7 @@ If the Client connects using a zero length Client Identifier, the Server MUST re
 The Client MUST NOT send a Topic Alias in a PUBLISH packet to the Server greater than this value.
 
 ## MQTT-3.2.2-18
-Topic Alias Maximum is absent, the Client MUST NOT send any Topic Aliases on to the Server.
+If Topic Alias Maximum is absent or 0, the Client MUST NOT send any Topic Aliases on to the Server.
 
 ## MQTT-3.2.2-19
 The Server MUST NOT send this property if it would increase the size of the CONNACK packet beyond the Maximum Packet Size specified by the Client.
@@ -423,10 +423,10 @@ The sender MUST NOT send this property if it would increase the size of the PUBR
 The Client or Server sending the PUBCOMP packets MUST use one of the PUBCOMP Reason Codes.
 
 ## MQTT-3.7.2-2
-The sender MUST NOT use this Property if it would increase the size of the PUBCOMP packet beyond the Maximum Packet Size specified by the receiver.
+The sender MUST NOT send this Property if it would increase the size of the PUBCOMP packet beyond the Maximum Packet Size specified by the receiver.
 
 ## MQTT-3.7.2-3
-The sender MUST NOT send this property if it would increase the size of the PUBCOMP packet beyond the Maximum Packet Size specified by receiver.
+The sender MUST NOT send this property if it would increase the size of the PUBCOMP packet beyond the Maximum Packet Size specified by the receiver.
 
 ## MQTT-3.8.1-1
 Bits 3,2,1 and 0 of the Fixed Header of the SUBSCRIBE packet are reserved and MUST be set to 0,0,1 and 0 respectively. The Server MUST treat any other value as malformed and close the Network Connection
@@ -513,7 +513,7 @@ If a Server receives an UNSUBSCRIBE packet that contains multiple Topic Filters,
 The Server MUST NOT send this Property if it would increase the size of the UNSUBACK packet beyond the Maximum Packet Size specified by the Client.
 
 ## MQTT-3.11.2-2
-The Server MUST NOT send this property if it would increase the size of the UNSUBACK packet beyond the Maximum Packet Size specified by the receiver.
+The Server MUST NOT send this property if it would increase the size of the UNSUBACK packet beyond the Maximum Packet Size specified by the Client.
 
 ## MQTT-3.11.3-1
 The order of Reason Codes in the UNSUBACK packet MUST match the order of Topic Filters in the UNSUBSCRIBE packet.
@@ -537,7 +537,7 @@ The Client or Server sending the DISCONNECT packet MUST use one of the DISCONNEC
 The Session Expiry Interval MUST NOT be sent on a DISCONNECT by the Server.
 
 ## MQTT-3.14.2-3
-The sender MUST NOT use this Property if it would increase the size of the DISCONNECT packet beyond the Maximum Packet Size specified by the receiver.
+The sender MUST NOT send this Property if it would increase the size of the DISCONNECT packet beyond the Maximum Packet Size specified by the receiver.
 
 ## MQTT-3.14.2-4
 The sender MUST NOT send this property if it would increase the size of the DISCONNECT packet beyond the Maximum Packet Size specified by the receiver.

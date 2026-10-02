@@ -59,9 +59,9 @@ async fn unsubscribe_empty_payload_rejected(sut: SutHandle) {
     );
 }
 
-/// `[MQTT-3.11.2-1]` UNSUBACK packet ID must match UNSUBSCRIBE packet ID.
+/// `[MQTT-3.10.4-5]` UNSUBACK packet ID must match UNSUBSCRIBE packet ID.
 #[conformance_test(
-    ids = ["MQTT-3.11.2-1"],
+    ids = ["MQTT-3.10.4-5"],
     requires = ["transport.tcp"],
 )]
 async fn unsuback_packet_id_matches(sut: SutHandle) {
@@ -95,7 +95,7 @@ async fn unsuback_packet_id_matches(sut: SutHandle) {
 
     assert_eq!(
         ack_id, packet_id,
-        "[MQTT-3.11.2-1] UNSUBACK packet ID must match UNSUBSCRIBE packet ID"
+        "[MQTT-3.10.4-5] UNSUBACK packet ID must match UNSUBSCRIBE packet ID"
     );
     assert_eq!(
         reason_codes.len(),
@@ -204,7 +204,7 @@ async fn unsuback_no_subscription_existed(sut: SutHandle) {
 /// `[MQTT-3.10.4-1]` After unsubscribing, the broker must stop sending
 /// messages for that topic filter.
 #[conformance_test(
-    ids = ["MQTT-3.10.4-1"],
+    ids = ["MQTT-3.10.4-1", "MQTT-3.10.4-2"],
     requires = ["transport.tcp"],
 )]
 async fn unsubscribe_stops_delivery(sut: SutHandle) {

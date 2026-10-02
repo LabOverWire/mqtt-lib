@@ -54,10 +54,10 @@ async fn multiple_pingreqs_all_responded(sut: SutHandle) {
     }
 }
 
-/// `[MQTT-3.1.2-11]` Connect with keep-alive=2s, go silent, verify broker
+/// `[MQTT-3.1.2-22]` Connect with keep-alive=2s, go silent, verify broker
 /// closes the connection within 1.5x the keep-alive (3s), with 1s margin.
 #[conformance_test(
-    ids = ["MQTT-3.1.2-11"],
+    ids = ["MQTT-3.1.2-22"],
     requires = ["transport.tcp"],
 )]
 async fn keepalive_timeout_closes_connection(sut: SutHandle) {
@@ -72,14 +72,14 @@ async fn keepalive_timeout_closes_connection(sut: SutHandle) {
 
     assert!(
         raw.expect_disconnect(Duration::from_secs(5)).await,
-        "[MQTT-3.1.2-11] server must close connection when keep-alive expires (2s * 1.5 = 3s)"
+        "[MQTT-3.1.2-22] server must close connection when keep-alive expires (2s * 1.5 = 3s)"
     );
 }
 
 /// Connect with keep-alive=0 (disabled), go silent for 5s, verify connection
 /// stays open by sending a PINGREQ and getting a PINGRESP.
 #[conformance_test(
-    ids = ["MQTT-3.1.2-11"],
+    ids = ["MQTT-3.1.2-22"],
     requires = ["transport.tcp"],
 )]
 async fn keepalive_zero_no_timeout(sut: SutHandle) {
@@ -104,7 +104,7 @@ async fn keepalive_zero_no_timeout(sut: SutHandle) {
 /// Connect with keep-alive=2s, send PINGREQ every second for 5s. The
 /// PINGREQs reset the keep-alive timer so the connection must stay alive.
 #[conformance_test(
-    ids = ["MQTT-3.1.2-11"],
+    ids = ["MQTT-3.1.2-22"],
     requires = ["transport.tcp"],
 )]
 async fn pingreq_resets_keepalive(sut: SutHandle) {
