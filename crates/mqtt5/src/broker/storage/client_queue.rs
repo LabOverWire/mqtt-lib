@@ -249,7 +249,7 @@ impl ClientQueue {
         let seq = self.seq.fetch_add(1, Ordering::AcqRel);
         let entry = QueueEntry {
             seq,
-            bytes: body.payload.len(),
+            bytes: entry_bytes(&body),
             expires_at: body.expires_at,
             body: Some(Arc::clone(&body)),
             path: None,
@@ -376,7 +376,7 @@ impl ClientQueue {
         for (index, body) in bodies.iter().enumerate() {
             entries.push(QueueEntry {
                 seq: first + index as u64,
-                bytes: body.payload.len(),
+                bytes: entry_bytes(body),
                 expires_at: body.expires_at,
                 body: Some(Arc::clone(body)),
                 path: None,
@@ -478,17 +478,10 @@ impl ClientQueue {
         messages
     }
 
-    /// Adds an entry discovered on disk at startup; its body is read on take, but its byte
-    /// size (payload length, matching `push`) and expiry are recorded now. Only the file
-    /// backend scans a directory, so this is unused on wasm.
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn push_scanned(
-        &self,
-        seq: u64,
-        path: PathBuf,
-        bytes: usize,
-        expires_at: Option<SystemTime>,
-    ) {
+    pub(crate) fn push_scanned(&self, seq: u64, path: PathBuf, message: &QueuedMessage) {
+        let bytes = entry_bytes(message);
+        let expires_at = message.expires_at;
         let mut inner = self.inner.lock();
         inner.bytes += bytes;
         inner.entries.push_back(QueueEntry {
@@ -543,6 +536,10 @@ impl ClientQueue {
             writer.remove_queued(&self.client_id, seq);
         }
     }
+}
+
+pub(crate) fn entry_bytes(message: &QueuedMessage) -> usize {
+    message.footprint() + std::mem::size_of::<QueueEntry>() + 2 * std::mem::size_of::<usize>()
 }
 
 /// Reads a queued message whose body was left on disk by the startup scan. Only the file
@@ -790,6 +787,23 @@ mod tests {
                 disk.remove(&seq);
             }
         }
+    }
+
+    #[tokio::test]
+    async fn byte_cap_counts_more_than_the_payload() {
+        let mut heavy = message("c", "h");
+        heavy.user_properties = vec![("k".to_string(), "v".repeat(4096))];
+        let per_entry = entry_bytes(&heavy);
+        assert!(per_entry > heavy.payload.len() + 4096);
+        let registry = registry(QueueLimits {
+            max_messages: usize::MAX,
+            max_bytes: 2 * per_entry,
+        });
+        let queue = registry.handle("c");
+        for _ in 0..3 {
+            queue.push(heavy.clone());
+        }
+        assert_eq!(queue.count(), 2);
     }
 
     #[tokio::test]

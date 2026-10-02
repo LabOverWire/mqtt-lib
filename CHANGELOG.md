@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [mqtt5 0.45.1] - 2026-10-01
+
+### Fixed
+
+- **`max_queued_bytes_per_client` now limits the memory a queue actually uses** (#160). A queued message was counted by its payload length alone, so its topic, client id, user properties, content type, response topic, correlation data and the queue entry itself went uncounted, and a queue of small messages could occupy well over its configured byte limit. Each entry is now counted by `QueuedMessage::footprint` plus the queue's per-entry overhead, both when pushed and when reloaded from disk at startup. Queues of small messages now reach the byte limit, and start dropping their oldest entries, sooner than before.
+
+### Added
+
+- `QueuedMessage::footprint`.
+
 ## [mqtt5 0.45.0] - 2026-10-01
 
 ### Breaking
