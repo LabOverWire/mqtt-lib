@@ -108,6 +108,65 @@ pub(crate) enum StagedPublish {
     Ready(Box<ReadyPublish>),
 }
 
+pub(crate) struct QuotaClaim {
+    flow: Arc<tokio::sync::RwLock<FlowControlManager>>,
+    packet_id: u16,
+    generation: u64,
+    settled: bool,
+}
+
+impl QuotaClaim {
+    pub(crate) async fn acquire(
+        flow: Arc<tokio::sync::RwLock<FlowControlManager>>,
+        packet_id: u16,
+    ) -> Result<Self> {
+        let generation = FlowControlManager::acquire_shared_send_quota(&flow, packet_id).await?;
+        Ok(Self {
+            flow,
+            packet_id,
+            generation,
+            settled: false,
+        })
+    }
+
+    fn for_generation(self, generation: u64) -> Option<Self> {
+        if self.generation == generation {
+            Some(self)
+        } else {
+            self.hand_over();
+            None
+        }
+    }
+
+    fn hand_over(mut self) {
+        self.settled = true;
+    }
+
+    async fn release(mut self) {
+        self.settled = true;
+        DirectClientInner::release_send_quota(&self.flow, self.packet_id).await;
+    }
+}
+
+impl Drop for QuotaClaim {
+    fn drop(&mut self) {
+        if self.settled {
+            return;
+        }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let flow = Arc::clone(&self.flow);
+        let packet_id = self.packet_id;
+        let generation = self.generation;
+        runtime.spawn(async move {
+            if flow.read().await.quota_generation() == generation {
+                DirectClientInner::release_send_quota(&flow, packet_id).await;
+            }
+        });
+    }
+}
+
 pub(crate) enum Transmitted {
     Sent(Delivery),
     InFlight(InFlight),
@@ -1121,23 +1180,23 @@ impl DirectClientInner {
     pub(crate) async fn transmit_publish(
         &self,
         ready: Box<ReadyPublish>,
-        claim: Option<u64>,
+        claim: Option<QuotaClaim>,
     ) -> Result<Transmitted> {
         let packet_id = ready.packet_id();
         let flow = Arc::clone(self.session.read().await.flow_control());
         let quota_generation = flow.read().await.quota_generation();
-        let claimed = packet_id.filter(|_| claim == Some(quota_generation));
+        let mut claim = claim.and_then(|claim| claim.for_generation(quota_generation));
 
         if !self.is_connected() {
-            if let Some(pid) = claimed {
-                Self::release_send_quota(&flow, pid).await;
+            if let Some(claim) = claim {
+                claim.release().await;
             }
             return Err(MqttError::NotConnected);
         }
 
         if ready.epoch != self.connection_epoch.load(Ordering::SeqCst) {
-            if let Some(pid) = claimed {
-                Self::release_send_quota(&flow, pid).await;
+            if let Some(claim) = claim {
+                claim.release().await;
             }
             tracing::debug!(
                 packet_id = ?packet_id,
@@ -1169,8 +1228,14 @@ impl DirectClientInner {
                     Err(e) => Err(e),
                 };
                 if let Err(e) = stored {
-                    Self::release_send_quota(&flow, pid).await;
+                    match claim {
+                        Some(claim) => claim.release().await,
+                        None => Self::release_send_quota(&flow, pid).await,
+                    }
                     return Err(e);
+                }
+                if let Some(claim) = claim.take() {
+                    claim.hand_over();
                 }
                 let (completion, handle) = Completion::new();
                 self.publish_outcomes.lock().track(pid, qos, completion);
@@ -2290,14 +2355,10 @@ pub mod tests {
         }
     }
 
-    async fn claim_quota(client: &DirectClientInner, ready: &ReadyPublish) -> Option<u64> {
+    async fn claim_quota(client: &DirectClientInner, ready: &ReadyPublish) -> Option<QuotaClaim> {
         let flow = Arc::clone(client.session.read().await.flow_control());
         match ready.packet_id() {
-            Some(packet_id) => Some(
-                FlowControlManager::acquire_shared_send_quota(&flow, packet_id)
-                    .await
-                    .unwrap(),
-            ),
+            Some(packet_id) => Some(QuotaClaim::acquire(flow, packet_id).await.unwrap()),
             None => None,
         }
     }
@@ -2305,7 +2366,7 @@ pub mod tests {
     async fn send_with_claim(
         client: &DirectClientInner,
         mut ready: Box<ReadyPublish>,
-        mut claim: Option<u64>,
+        mut claim: Option<QuotaClaim>,
     ) -> usize {
         let mut restages = 0;
         loop {
@@ -2354,11 +2415,11 @@ pub mod tests {
         };
         let c_quota = tokio::time::timeout(
             Duration::from_millis(500),
-            FlowControlManager::acquire_shared_send_quota(&flow, c.packet_id().unwrap()),
+            QuotaClaim::acquire(Arc::clone(&flow), c.packet_id().unwrap()),
         )
         .await;
-        if let Ok(Ok(generation)) = c_quota {
-            send_with_claim(&client, c, Some(generation)).await;
+        if let Ok(Ok(claim)) = c_quota {
+            send_with_claim(&client, c, Some(claim)).await;
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
         let conn2 = publishes_on(&seen, 1);
@@ -2395,9 +2456,7 @@ pub mod tests {
         };
         let b_id = b.packet_id().unwrap();
         let waiting_flow = Arc::clone(&flow);
-        let waiting = tokio::spawn(async move {
-            FlowControlManager::acquire_shared_send_quota(&waiting_flow, b_id).await
-        });
+        let waiting = tokio::spawn(async move { QuotaClaim::acquire(waiting_flow, b_id).await });
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(!waiting.is_finished(), "b must wait for Receive Maximum 1");
 
@@ -2801,6 +2860,33 @@ pub mod tests {
             on_new > 0 && quota.is_ok(),
             "new healthy connection is starved by a replay stuck on the replaced connection: resent on new={on_new}, live quota={quota:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn cancelled_transmit_before_store_releases_its_quota() {
+        let (addr, _seen) =
+            silent_broker(vec![vec![0x20, 0x06, 0x00, 0x00, 0x03, 0x21, 0x00, 0x01]]).await;
+        let mut client =
+            DirectClientInner::new(ConnectOptions::new("cancel-quota").with_clean_start(false));
+        connect_to(&mut client, addr).await;
+        let Ok(StagedPublish::Ready(ready)) = client
+            .stage_publish("t/c".into(), b"c".to_vec(), qos(QoS::AtLeastOnce))
+            .await
+        else {
+            panic!("publish must stage while connected");
+        };
+        let claim = claim_quota(&client, &ready).await;
+        let session = Arc::clone(&client.session);
+        let held = session.write().await;
+        let transmit = client.transmit_publish(ready, claim);
+        assert!(tokio::time::timeout(Duration::from_millis(50), transmit)
+            .await
+            .is_err());
+        drop(held);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let flow = Arc::clone(client.session.read().await.flow_control());
+        assert_eq!(flow.read().await.in_flight_count().await, 0);
+        assert_eq!(flow.read().await.available_permits(), 1);
     }
 
     #[tokio::test]

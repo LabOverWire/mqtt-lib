@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [mqtt5 0.45.2] - 2026-10-02
+
+### Fixed
+
+- **A cancelled `publish()` no longer keeps a Receive Maximum slot** (part of #168). A QoS 1 or 2 publish takes a send-quota slot before its message is stored as in flight. If the `publish()` future was dropped in between, for example by a timeout or a `select!` while it waited on a lock, the slot was never returned, and with a small Receive Maximum every later QoS 1 or 2 publish waited until the next reconnect. The slot is now returned when the future is dropped before the message is stored.
+
 ## [mqtt5 0.45.1] - 2026-10-01
 
 ### Fixed

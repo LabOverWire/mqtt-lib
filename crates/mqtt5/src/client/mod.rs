@@ -67,8 +67,7 @@ pub(crate) async fn fire_connection_event(
 pub use self::direct::AckToken;
 use self::direct::AutomaticReconnectLifecycle;
 #[cfg(not(target_arch = "wasm32"))]
-use self::direct::{DirectClientInner, ReadyPublish, StagedPublish, Transmitted};
-use crate::session::flow_control::FlowControlManager;
+use self::direct::{DirectClientInner, QuotaClaim, ReadyPublish, StagedPublish, Transmitted};
 
 /// Thread-safe MQTT v5.0 client
 ///
@@ -467,7 +466,7 @@ impl MqttClient {
                 Some(pid) => {
                     let flow =
                         Arc::clone(self.inner.read().await.session.read().await.flow_control());
-                    Some(FlowControlManager::acquire_shared_send_quota(&flow, pid).await?)
+                    Some(QuotaClaim::acquire(flow, pid).await?)
                 }
                 None => None,
             };
@@ -1170,6 +1169,120 @@ fn build_subscribe_packet(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::time::Duration;
+
+    async fn read_frame(stream: &mut tokio::net::TcpStream) -> Option<Vec<u8>> {
+        use tokio::io::AsyncReadExt;
+        let first = stream.read_u8().await.ok()?;
+        let mut remaining = 0usize;
+        let mut shift = 0;
+        loop {
+            let byte = stream.read_u8().await.ok()?;
+            remaining |= usize::from(byte & 0x7F) << shift;
+            if byte & 0x80 == 0 {
+                break;
+            }
+            shift += 7;
+        }
+        let mut frame = vec![first];
+        let mut body = vec![0u8; remaining];
+        stream.read_exact(&mut body).await.ok()?;
+        frame.extend_from_slice(&body);
+        Some(frame)
+    }
+
+    #[tokio::test]
+    async fn cancelled_publish_does_not_keep_its_receive_maximum_slot() {
+        use tokio::io::AsyncWriteExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (publish_tx, mut publishes) = tokio::sync::mpsc::unbounded_channel::<u16>();
+        let (ack_tx, mut acks) = tokio::sync::mpsc::unbounded_channel::<u16>();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            read_frame(&mut stream).await.unwrap();
+            stream
+                .write_all(&[0x20, 0x06, 0x00, 0x00, 0x03, 0x21, 0x00, 0x01])
+                .await
+                .unwrap();
+            loop {
+                tokio::select! {
+                    frame = read_frame(&mut stream) => {
+                        let Some(frame) = frame else { break };
+                        if frame[0] >> 4 == 3 {
+                            let topic_len = usize::from(u16::from_be_bytes([frame[1], frame[2]]));
+                            let at = 3 + topic_len;
+                            publish_tx
+                                .send(u16::from_be_bytes([frame[at], frame[at + 1]]))
+                                .unwrap();
+                        }
+                    }
+                    Some(packet_id) = acks.recv() => {
+                        let [high, low] = packet_id.to_be_bytes();
+                        stream.write_all(&[0x40, 0x02, high, low]).await.unwrap();
+                    }
+                }
+            }
+        });
+
+        let client = MqttClient::with_options(
+            ConnectOptions::new("cancel-quota-e2e").with_automatic_reconnect(false),
+        );
+        client.connect(&format!("mqtt://{addr}")).await.unwrap();
+        let qos1 = PublishOptions {
+            qos: QoS::AtLeastOnce,
+            ..Default::default()
+        };
+
+        let first = {
+            let client = client.clone();
+            let qos1 = qos1.clone();
+            tokio::spawn(async move {
+                client
+                    .publish_with_options("t/a", b"a".to_vec(), qos1)
+                    .await
+            })
+        };
+        let first_id = publishes.recv().await.unwrap();
+
+        let second = {
+            let client = client.clone();
+            let qos1 = qos1.clone();
+            tokio::spawn(async move {
+                client
+                    .publish_with_options("t/b", b"b".to_vec(), qos1)
+                    .await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !second.is_finished(),
+            "the second publish must wait for Receive Maximum 1"
+        );
+
+        let held = client.inner.write().await;
+        ack_tx.send(first_id).unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        second.abort();
+        assert!(second.await.unwrap_err().is_cancelled());
+        drop(held);
+        first.await.unwrap().unwrap();
+
+        let third = {
+            let client = client.clone();
+            tokio::spawn(async move {
+                client
+                    .publish_with_options("t/c", b"c".to_vec(), qos1)
+                    .await
+            })
+        };
+        let third_id = tokio::time::timeout(Duration::from_secs(2), publishes.recv())
+            .await
+            .expect("a cancelled publish must not keep the only Receive Maximum slot")
+            .unwrap();
+        ack_tx.send(third_id).unwrap();
+        third.await.unwrap().unwrap();
+    }
 
     #[tokio::test]
     async fn test_client_creation() {
