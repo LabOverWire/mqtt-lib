@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **`wss://` connections now use the TLS configuration on `WebSocketConfig`** (#190). With server-certificate verification on, `WebSocketTransport::connect` used tokio-tungstenite's own client configuration built from the platform's root certificates, so a CA set with `with_ca_cert_from_file` or `with_ca_cert_from_bytes` was never trusted (a server it issued failed with `UnknownIssuer`), a client certificate set with `with_client_auth_from_files` or `with_client_auth_from_bytes` was never presented, and `use_system_roots` and ALPN protocols had no effect. With verification off, the client certificate and ALPN protocols were dropped. The handshake now uses the same rustls configuration `TlsTransport` builds from a `TlsConfig`, in both cases.
+- **`WebSocketConfig::with_tls_auto`, and the `with_ca_cert_*` and `with_client_auth_*` methods that call it, now accept a host name URL** (#190). They parsed the URL's host and port as a socket address, so they failed with "Invalid host/port combination" for anything but an IP address. A wss:// connection takes its server and certificate name from the URL and does not use `TlsConfig::addr`, so for a host name that is now the unspecified address with the URL's port.
+- **`MqttClient` now uses its stored TLS configuration for `wss://` connections** (#190), as it already did for `mqtts://`. A CA, client certificate or key set with `set_tls_config` was ignored over WebSocket, and `set_insecure_tls(true)` replaced the stored configuration with a bare one that disables verification.
+- **The WebSocket client transport now sends its configured headers, subprotocols and user agent** (#165). `WebSocketTransport::connect` built the upgrade request from a fixed set of headers and always offered `Sec-WebSocket-Protocol: mqtt`, so anything set with `WebSocketConfig::with_header`, `with_subprotocol`, `with_subprotocols` or `with_user_agent` never reached the server, and brokers that authenticate the upgrade request through custom headers rejected the connection. The request now carries every custom header, the configured subprotocols in order (or `mqtt` when none are configured), and the user agent when one is set. The default user agent is now `mqtt5/<crate version>` instead of `mqtt-v5/0.4.0`.
+- **The upgrade request's `Host` header now includes a non-default port**, so `ws://broker:8080/mqtt` sends `Host: broker:8080` rather than `Host: broker`.
+
+### Changed
+
+- **A `wss://` connection with a TLS configuration now trusts the bundled `webpki-roots` instead of the platform's root certificates** when `use_system_roots` is set, as `TlsTransport` does. A server whose certificate chains only to a root installed on the platform, such as a corporate CA, now needs that CA added to the configuration. A `wss://` connection with no TLS configuration still uses the platform's roots. The new behavior also applies to `MqttClient` `wss://` connections once a TLS configuration is set with `set_tls_config`.
+- **WebSocket configurations that relied on the old behavior may connect differently or fail to connect.** Because the configuration now reaches the wire:
+  - `with_subprotocol("mqttv5.0")` or a `with_subprotocols` list without `mqtt` now offers only what is listed. Previously `mqtt` was always offered instead, so a broker that accepts only `mqtt` will now refuse the upgrade. Include `mqtt` in the list (MQTT-6.0.0-3 requires it) to keep connecting.
+  - A custom header that is invalid or reserved (see the next entry) used to be silently dropped. It now makes `connect` fail.
+  - Every WebSocket connection, including those made by `MqttClient`, now sends a `User-Agent` header.
+- **`connect` rejects a WebSocket configuration it cannot send faithfully, before dialing.** It fails with `MqttError::Configuration` in these cases:
+  - a custom header has an invalid name or value, or repeats another custom header's name (case-insensitively);
+  - a custom header names one reserved for the handshake: `Host`, `Connection`, `Upgrade`, `Sec-WebSocket-Version`, `Sec-WebSocket-Key`, `Sec-WebSocket-Extensions` or `Sec-WebSocket-Accept`;
+  - a custom header is `Content-Length` or `Transfer-Encoding`, which would describe a body the upgrade request does not have;
+  - `Sec-WebSocket-Protocol` or `User-Agent` is set as a custom header instead of through its setter;
+  - a subprotocol is not a valid HTTP token.
+- Custom headers are sent, and validated, in name order, so the request and the error a bad configuration reports no longer depend on `HashMap` iteration order.
+- `WebSocketConfig`'s `Debug` output lists custom header names but not their values, which often carry credentials.
+
+### Added
+
+- `TlsConfig::client_config`, which returns the rustls client configuration a `TlsConfig` describes.
+- `WebSocketConfig::build_handshake_request`, which returns the upgrade request the configuration produces.
+
 ## [mqtt5 0.45.1] - 2026-10-01
 
 ### Fixed
