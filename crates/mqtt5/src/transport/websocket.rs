@@ -49,6 +49,7 @@ use bytes::{Buf, Bytes, BytesMut};
 use futures_util::{stream::SplitSink, stream::SplitStream, StreamExt};
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio_tungstenite::{
     tungstenite::{
@@ -59,7 +60,7 @@ use tokio_tungstenite::{
         },
         protocol::Message,
     },
-    MaybeTlsStream, WebSocketStream,
+    Connector, MaybeTlsStream, WebSocketStream,
 };
 use tracing::{debug, error, info, instrument};
 use url::Url;
@@ -205,6 +206,17 @@ impl WebSocketConfig {
     }
 
     /// Sets a custom TLS configuration for wss:// connections
+    ///
+    /// Its root certificates, system-roots setting, server-certificate
+    /// verification, client certificate and ALPN protocols are used for the
+    /// TLS handshake; with `use_system_roots`, the system roots are the
+    /// bundled `webpki-roots`, as for [`TlsTransport`](crate::transport::tls::TlsTransport).
+    /// Its `addr`, `hostname` and `connect_timeout` are not used: the server
+    /// and the name verified against its certificate come from the WebSocket
+    /// URL, and the timeout from [`with_timeout`](Self::with_timeout).
+    ///
+    /// Without a TLS configuration, a wss:// connection verifies the server
+    /// against the platform's native root certificates.
     #[must_use]
     pub fn with_tls_config(mut self, tls_config: TlsConfig) -> Self {
         self.tls_config = Some(tls_config);
@@ -658,39 +670,20 @@ impl Transport for WebSocketTransport {
 
         let request = self.config.build_handshake_request()?;
 
-        let ws_result = if self.config.is_secure()
-            && self
-                .config
-                .tls_config
-                .as_ref()
-                .is_some_and(|cfg| !cfg.verify_server_cert)
-        {
-            use tokio_tungstenite::Connector;
-
-            let tls = rustls::ClientConfig::builder()
-                .dangerous()
-                .with_custom_certificate_verifier(std::sync::Arc::new(NoVerifier))
-                .with_no_client_auth();
-
-            let connector = Connector::Rustls(std::sync::Arc::new(tls));
-
-            tokio::time::timeout(
-                self.config.timeout,
-                tokio_tungstenite::connect_async_tls_with_config(
-                    request,
-                    None,
-                    false,
-                    Some(connector),
-                ),
-            )
-            .await
-        } else {
-            tokio::time::timeout(
-                self.config.timeout,
-                tokio_tungstenite::connect_async(request),
-            )
-            .await
+        // With no TLS configuration, tokio-tungstenite builds its own client
+        // config from the platform's native root certificates.
+        let connector = match self.config.tls_config.as_ref() {
+            Some(tls_config) if self.config.is_secure() => {
+                Some(Connector::Rustls(Arc::new(tls_config.client_config()?)))
+            }
+            _ => None,
         };
+
+        let ws_result = tokio::time::timeout(
+            self.config.timeout,
+            tokio_tungstenite::connect_async_tls_with_config(request, None, false, connector),
+        )
+        .await;
 
         match ws_result {
             Ok(Ok((ws_stream, response))) => {
@@ -801,54 +794,6 @@ impl Transport for WebSocketTransport {
         self.connected = false;
         debug!("WebSocket connection closed");
         Ok(())
-    }
-}
-
-#[derive(Debug)]
-struct NoVerifier;
-
-impl rustls::client::danger::ServerCertVerifier for NoVerifier {
-    fn verify_server_cert(
-        &self,
-        _end_entity: &rustls::pki_types::CertificateDer<'_>,
-        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
-        _server_name: &rustls::pki_types::ServerName<'_>,
-        _ocsp_response: &[u8],
-        _now: rustls::pki_types::UnixTime,
-    ) -> std::result::Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-        Ok(rustls::client::danger::ServerCertVerified::assertion())
-    }
-
-    fn verify_tls12_signature(
-        &self,
-        _message: &[u8],
-        _cert: &rustls::pki_types::CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
-    ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
-    }
-
-    fn verify_tls13_signature(
-        &self,
-        _message: &[u8],
-        _cert: &rustls::pki_types::CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
-    ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
-    }
-
-    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        vec![
-            rustls::SignatureScheme::RSA_PKCS1_SHA256,
-            rustls::SignatureScheme::RSA_PKCS1_SHA384,
-            rustls::SignatureScheme::RSA_PKCS1_SHA512,
-            rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
-            rustls::SignatureScheme::ECDSA_NISTP384_SHA384,
-            rustls::SignatureScheme::RSA_PSS_SHA256,
-            rustls::SignatureScheme::RSA_PSS_SHA384,
-            rustls::SignatureScheme::RSA_PSS_SHA512,
-            rustls::SignatureScheme::ED25519,
-        ]
     }
 }
 

@@ -9,11 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`wss://` connections now use the TLS configuration on `WebSocketConfig`** (#190). With server-certificate verification on, `WebSocketTransport::connect` used tokio-tungstenite's own client configuration built from the platform's root certificates, so a CA set with `with_ca_cert_from_file` or `with_ca_cert_from_bytes` was never trusted (a server it issued failed with `UnknownIssuer`), a client certificate set with `with_client_auth_from_files` or `with_client_auth_from_bytes` was never presented, and `use_system_roots` and ALPN protocols had no effect. With verification off, the client certificate and ALPN protocols were dropped. The handshake now uses the same rustls configuration `TlsTransport` builds from a `TlsConfig`, in both cases.
 - **The WebSocket client transport now sends its configured headers, subprotocols and user agent** (#165). `WebSocketTransport::connect` built the upgrade request from a fixed set of headers and always offered `Sec-WebSocket-Protocol: mqtt`, so anything set with `WebSocketConfig::with_header`, `with_subprotocol`, `with_subprotocols` or `with_user_agent` never reached the server, and brokers that authenticate the upgrade request through custom headers rejected the connection. The request now carries every custom header, the configured subprotocols in order (or `mqtt` when none are configured), and the user agent when one is set. The default user agent is now `mqtt5/<crate version>` instead of `mqtt-v5/0.4.0`.
 - **The upgrade request's `Host` header now includes a non-default port**, so `ws://broker:8080/mqtt` sends `Host: broker:8080` rather than `Host: broker`.
 
 ### Changed
 
+- **A `wss://` connection with a TLS configuration now trusts the bundled `webpki-roots` instead of the platform's root certificates** when `use_system_roots` is set, as `TlsTransport` does. A server whose certificate chains only to a root installed on the platform, such as a corporate CA, now needs that CA added to the configuration. A `wss://` connection with no TLS configuration still uses the platform's roots.
 - **WebSocket configurations that relied on the old behavior may connect differently or fail to connect.** Because the configuration now reaches the wire:
   - `with_subprotocol("mqttv5.0")` or a `with_subprotocols` list without `mqtt` now offers only what is listed. Previously `mqtt` was always offered instead, so a broker that accepts only `mqtt` will now refuse the upgrade. Include `mqtt` in the list (MQTT-6.0.0-3 requires it) to keep connecting.
   - A custom header that is invalid or reserved (see the next entry) used to be silently dropped. It now makes `connect` fail.
@@ -29,6 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `TlsConfig::client_config`, which returns the rustls client configuration a `TlsConfig` describes.
 - `WebSocketConfig::build_handshake_request`, which returns the upgrade request the configuration produces.
 
 ## [mqtt5 0.45.1] - 2026-10-01

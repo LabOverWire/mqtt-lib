@@ -307,6 +307,71 @@ impl TlsConfig {
         self.root_certs = Some(vec![ca_cert]);
         Ok(())
     }
+
+    /// Builds the rustls client configuration this TLS configuration describes
+    ///
+    /// The `addr` and `hostname` fields are not part of it: they select the
+    /// server to dial and the name to verify, which the caller supplies when
+    /// connecting.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a root certificate cannot be added or the client
+    /// certificate and key cannot be used for client authentication
+    ///
+    /// # Panics
+    ///
+    /// Panics if the stored client key cannot be re-parsed from its own DER
+    /// encoding, as [`TlsConfig`]'s `Clone` does.
+    pub fn client_config(&self) -> Result<ClientConfig> {
+        let mut root_store = RootCertStore::empty();
+
+        // Add system roots if requested
+        if self.use_system_roots {
+            root_store.extend(webpki_roots::TLS_SERVER_ROOTS.to_vec());
+        }
+
+        // Add custom root certificates
+        if let Some(ref root_certs) = self.root_certs {
+            for cert in root_certs {
+                root_store.add(cert.clone()).map_err(|e| {
+                    MqttError::ProtocolError(format!("Failed to add root cert: {e}"))
+                })?;
+            }
+        }
+
+        let config_builder = if self.verify_server_cert {
+            ClientConfig::builder().with_root_certificates(root_store)
+        } else {
+            // Disable certificate verification for testing with self-signed certs
+            ClientConfig::builder()
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(NoVerification))
+        };
+
+        let mut config = if let (Some(cert), Some(key)) = (
+            self.client_cert.clone(),
+            self.client_key.as_ref().map(|k| {
+                PrivateKeyDer::try_from(k.secret_der().to_vec())
+                    .expect("Failed to clone private key")
+            }),
+        ) {
+            config_builder
+                .with_client_auth_cert(cert, key)
+                .map_err(|e| {
+                    MqttError::ProtocolError(format!("Failed to configure client auth: {e}"))
+                })?
+        } else {
+            config_builder.with_no_client_auth()
+        };
+
+        // Configure ALPN protocols if provided
+        if let Some(ref protocols) = self.alpn_protocols {
+            config.alpn_protocols.clone_from(protocols);
+        }
+
+        Ok(config)
+    }
 }
 
 /// TLS transport implementation
@@ -349,54 +414,8 @@ impl TlsTransport {
     /// # Errors
     ///
     /// Returns an error if the operation fails
-    fn build_tls_config(&mut self) -> Result<ClientConfig> {
-        let mut root_store = RootCertStore::empty();
-
-        // Add system roots if requested
-        if self.config.use_system_roots {
-            root_store.extend(webpki_roots::TLS_SERVER_ROOTS.to_vec());
-        }
-
-        // Add custom root certificates
-        if let Some(ref root_certs) = self.config.root_certs {
-            for cert in root_certs {
-                root_store.add(cert.clone()).map_err(|e| {
-                    MqttError::ProtocolError(format!("Failed to add root cert: {e}"))
-                })?;
-            }
-        }
-
-        let config_builder = if self.config.verify_server_cert {
-            ClientConfig::builder().with_root_certificates(root_store)
-        } else {
-            // Disable certificate verification for testing with self-signed certs
-            ClientConfig::builder()
-                .dangerous()
-                .with_custom_certificate_verifier(Arc::new(NoVerification))
-        };
-
-        let mut config = if let (Some(cert), Some(key)) = (
-            self.config.client_cert.clone(),
-            self.config.client_key.as_ref().map(|k| {
-                PrivateKeyDer::try_from(k.secret_der().to_vec())
-                    .expect("Failed to clone private key")
-            }),
-        ) {
-            config_builder
-                .with_client_auth_cert(cert, key)
-                .map_err(|e| {
-                    MqttError::ProtocolError(format!("Failed to configure client auth: {e}"))
-                })?
-        } else {
-            config_builder.with_no_client_auth()
-        };
-
-        // Configure ALPN protocols if provided
-        if let Some(ref protocols) = self.config.alpn_protocols {
-            config.alpn_protocols.clone_from(protocols);
-        }
-
-        Ok(config)
+    fn build_tls_config(&self) -> Result<ClientConfig> {
+        self.config.client_config()
     }
 }
 
