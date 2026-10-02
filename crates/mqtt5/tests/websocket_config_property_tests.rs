@@ -81,6 +81,22 @@ fn valid_http_headers() -> impl Strategy<Value = HashMap<String, String>> {
     .prop_map(|btree| btree.into_iter().collect())
 }
 
+// Header names a custom header may not use (lowercase): those reserved for
+// the handshake, plus the two that have dedicated setters.
+const RESTRICTED_HEADERS: [&str; 11] = [
+    "host",
+    "connection",
+    "upgrade",
+    "sec-websocket-version",
+    "sec-websocket-key",
+    "sec-websocket-extensions",
+    "sec-websocket-accept",
+    "content-length",
+    "transfer-encoding",
+    "sec-websocket-protocol",
+    "user-agent",
+];
+
 // Generate valid subprotocols
 fn valid_subprotocols() -> impl Strategy<Value = Vec<String>> {
     prop::collection::vec("[a-zA-Z][a-zA-Z0-9._-]{0,20}", 0..5)
@@ -189,9 +205,53 @@ proptest! {
             assert_eq!(config.subprotocols, subprotocols);
         }
 
-        if let Some(ua) = user_agent {
-            assert_eq!(config.user_agent, Some(ua));
+        if let Some(ua) = &user_agent {
+            assert_eq!(config.user_agent.as_ref(), Some(ua));
         }
+
+        // The configuration must reach the handshake request, not just the struct.
+        let mut seen = std::collections::HashSet::new();
+        let conflicting = headers.keys().any(|name| {
+            let lower = name.to_ascii_lowercase();
+            RESTRICTED_HEADERS.contains(&lower.as_str()) || !seen.insert(lower)
+        });
+        let request = config.build_handshake_request();
+        if conflicting {
+            prop_assert!(request.is_err(), "conflicting headers {headers:?} were accepted");
+            return Ok(());
+        }
+        let request = request.expect("valid configuration builds a request");
+        let sent = |name: &str| {
+            request
+                .headers()
+                .get(name)
+                .map(|v| v.to_str().expect("ascii header").to_string())
+        };
+
+        for (name, value) in &headers {
+            prop_assert_eq!(sent(name), Some(value.clone()));
+        }
+        let expected_protocols = if subprotocols.is_empty() {
+            "mqtt".to_string()
+        } else {
+            subprotocols.join(", ")
+        };
+        prop_assert_eq!(sent("Sec-WebSocket-Protocol"), Some(expected_protocols));
+        prop_assert_eq!(sent("User-Agent"), config.user_agent.clone());
+    }
+
+    #[test]
+    fn prop_handshake_request_rejects_restricted_headers(
+        name in prop::sample::select(RESTRICTED_HEADERS.to_vec()),
+        uppercase in any::<bool>(),
+        value in "[A-Za-z0-9]{1,20}"
+    ) {
+        let name = if uppercase { name.to_ascii_uppercase() } else { name.to_string() };
+        let config = WebSocketConfig::new("ws://localhost:8080/mqtt")
+            .unwrap()
+            .with_header(&name, &value);
+
+        prop_assert!(config.build_handshake_request().is_err(), "{name} was accepted");
     }
 
     #[test]
