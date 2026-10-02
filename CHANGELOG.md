@@ -14,7 +14,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **`connect` rejects a WebSocket configuration it cannot send faithfully, before dialing.** It fails with `MqttError::Configuration` when a custom header has an invalid name or value, repeats another custom header's name (case-insensitively), or names a header the transport sets itself (`Host`, `Connection`, `Upgrade`, `Sec-WebSocket-Version`, `Sec-WebSocket-Key`, `Sec-WebSocket-Extensions`); when `Sec-WebSocket-Protocol` or `User-Agent` is set as a custom header instead of through its setter; or when a subprotocol is not a valid HTTP token.
+- **WebSocket configurations that relied on the old behavior may connect differently or fail to connect.** Because the configuration now reaches the wire:
+  - `with_subprotocol("mqttv5.0")` or a `with_subprotocols` list without `mqtt` now offers only what is listed. Previously `mqtt` was always offered instead, so a broker that accepts only `mqtt` will now refuse the upgrade. Include `mqtt` in the list (MQTT-6.0.0-3 requires it) to keep connecting.
+  - A custom header that is invalid or reserved (see the next entry) used to be silently dropped. It now makes `connect` fail.
+  - Every WebSocket connection, including those made by `MqttClient`, now sends a `User-Agent` header.
+- **`connect` rejects a WebSocket configuration it cannot send faithfully, before dialing.** It fails with `MqttError::Configuration` in these cases:
+  - a custom header has an invalid name or value, or repeats another custom header's name (case-insensitively);
+  - a custom header names one reserved for the handshake: `Host`, `Connection`, `Upgrade`, `Sec-WebSocket-Version`, `Sec-WebSocket-Key`, `Sec-WebSocket-Extensions` or `Sec-WebSocket-Accept`;
+  - a custom header is `Content-Length` or `Transfer-Encoding`, which would describe a body the upgrade request does not have;
+  - `Sec-WebSocket-Protocol` or `User-Agent` is set as a custom header instead of through its setter;
+  - a subprotocol is not a valid HTTP token.
+- Custom headers are sent, and validated, in name order, so the request and the error a bad configuration reports no longer depend on `HashMap` iteration order.
 - `WebSocketConfig`'s `Debug` output lists custom header names but not their values, which often carry credentials.
 
 ### Added

@@ -81,15 +81,18 @@ fn valid_http_headers() -> impl Strategy<Value = HashMap<String, String>> {
     .prop_map(|btree| btree.into_iter().collect())
 }
 
-// Header names a custom header may not use (lowercase): the handshake headers
-// the transport sets itself, plus the two that have dedicated setters.
-const RESTRICTED_HEADERS: [&str; 8] = [
+// Header names a custom header may not use (lowercase): those reserved for
+// the handshake, plus the two that have dedicated setters.
+const RESTRICTED_HEADERS: [&str; 11] = [
     "host",
     "connection",
     "upgrade",
     "sec-websocket-version",
     "sec-websocket-key",
     "sec-websocket-extensions",
+    "sec-websocket-accept",
+    "content-length",
+    "transfer-encoding",
     "sec-websocket-protocol",
     "user-agent",
 ];

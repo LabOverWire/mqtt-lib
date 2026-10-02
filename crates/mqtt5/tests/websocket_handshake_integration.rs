@@ -5,6 +5,7 @@
 
 use mqtt5::transport::websocket::{WebSocketConfig, WebSocketTransport};
 use mqtt5::Transport;
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::net::TcpListener;
@@ -41,8 +42,11 @@ impl Callback for CaptureRequest {
 }
 
 /// Connects a transport built by `configure` to a loopback server and returns
-/// the headers of the upgrade request the server received.
-async fn received_headers(configure: impl FnOnce(WebSocketConfig) -> WebSocketConfig) -> HeaderMap {
+/// the headers of the upgrade request the server received, with the address
+/// the server listened on.
+async fn received_headers(
+    configure: impl FnOnce(WebSocketConfig) -> WebSocketConfig,
+) -> (HeaderMap, SocketAddr) {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("addr");
     let captured = Arc::new(Mutex::new(None));
@@ -69,7 +73,7 @@ async fn received_headers(configure: impl FnOnce(WebSocketConfig) -> WebSocketCo
     transport.close().await.expect("close");
 
     let headers = captured.lock().expect("lock").take();
-    headers.expect("server saw no upgrade request")
+    (headers.expect("server saw no upgrade request"), addr)
 }
 
 fn header<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
@@ -78,7 +82,7 @@ fn header<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
 
 #[tokio::test]
 async fn upgrade_request_carries_configured_headers_subprotocols_and_user_agent() {
-    let headers = received_headers(|config| {
+    let (headers, _) = received_headers(|config| {
         config
             .with_header("Authorization", "Bearer token123")
             .with_header("X-Custom", "expected")
@@ -98,14 +102,14 @@ async fn upgrade_request_carries_configured_headers_subprotocols_and_user_agent(
 
 #[tokio::test]
 async fn upgrade_request_defaults_offer_mqtt_and_crate_user_agent() {
-    let headers = received_headers(|config| config).await;
+    let (headers, addr) = received_headers(|config| config).await;
 
     assert_eq!(header(&headers, "Sec-WebSocket-Protocol"), Some("mqtt"));
     assert_eq!(
         header(&headers, "User-Agent"),
         Some(concat!("mqtt5/", env!("CARGO_PKG_VERSION")))
     );
-    assert!(header(&headers, "Host").is_some_and(|host| host.starts_with("127.0.0.1:")));
+    assert_eq!(header(&headers, "Host"), Some(addr.to_string().as_str()));
 }
 
 #[tokio::test]
@@ -120,7 +124,7 @@ async fn invalid_header_fails_connect_before_dialing() {
         .await
         .expect_err("reserved header accepted");
     assert!(
-        err.to_string().contains("set by the transport"),
+        err.to_string().contains("reserved for the handshake"),
         "unexpected error: {err}"
     );
     assert!(!transport.is_connected());

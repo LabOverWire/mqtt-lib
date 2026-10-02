@@ -68,17 +68,23 @@ use url::Url;
 /// client to include "mqtt" in the subprotocols it offers.
 const DEFAULT_SUBPROTOCOL: &str = "mqtt";
 
-/// Handshake headers the transport sets itself. A custom header with one of
-/// these names would duplicate or override the handshake, so it is rejected.
+/// Headers a custom header may not use. The first five are set by the
+/// transport, and a second copy would duplicate or override the handshake.
 /// `sec-websocket-extensions` is included because the transport negotiates no
-/// extensions and cannot speak one a server accepts.
-const RESERVED_HEADERS: [&str; 6] = [
+/// extensions and cannot speak one a server accepts, `sec-websocket-accept`
+/// because it belongs in the server's response, and `content-length` and
+/// `transfer-encoding` because the upgrade request has no body and a server
+/// told otherwise would wait for one.
+const RESERVED_HEADERS: [&str; 9] = [
     "host",
     "connection",
     "upgrade",
     "sec-websocket-version",
     "sec-websocket-key",
     "sec-websocket-extensions",
+    "sec-websocket-accept",
+    "content-length",
+    "transfer-encoding",
 ];
 
 /// WebSocket transport configuration
@@ -177,11 +183,14 @@ impl WebSocketConfig {
     /// The name and value are validated when the request is built, so an
     /// invalid header makes [`connect`](WebSocketTransport::connect) fail
     /// rather than this call. Names are matched case-insensitively and must not
-    /// repeat. The handshake headers (`Host`, `Connection`, `Upgrade`,
-    /// `Sec-WebSocket-Version`, `Sec-WebSocket-Key`, `Sec-WebSocket-Extensions`)
-    /// are rejected, as are `Sec-WebSocket-Protocol` and `User-Agent`, which are
-    /// set with [`with_subprotocols`](Self::with_subprotocols) and
-    /// [`with_user_agent`](Self::with_user_agent).
+    /// repeat. Headers that belong to the handshake itself (`Host`,
+    /// `Connection`, `Upgrade`, `Sec-WebSocket-Version`, `Sec-WebSocket-Key`,
+    /// `Sec-WebSocket-Extensions`, `Sec-WebSocket-Accept`) or would describe a
+    /// request body (`Content-Length`, `Transfer-Encoding`) are rejected, as are
+    /// `Sec-WebSocket-Protocol` and `User-Agent`, which are set with
+    /// [`with_subprotocols`](Self::with_subprotocols) and
+    /// [`with_user_agent`](Self::with_user_agent). Custom headers are sent in
+    /// name order.
     #[must_use]
     pub fn with_header(mut self, name: &str, value: &str) -> Self {
         self.headers.insert(name.to_string(), value.to_string());
@@ -413,13 +422,17 @@ impl WebSocketConfig {
             headers.insert(USER_AGENT, header_value("User-Agent", user_agent)?);
         }
 
-        for (name, value) in &self.headers {
+        // Sorted so the request, and which error a bad configuration reports,
+        // do not depend on HashMap iteration order.
+        let mut custom: Vec<(&String, &String)> = self.headers.iter().collect();
+        custom.sort_unstable();
+        for (name, value) in custom {
             let header_name = HeaderName::from_bytes(name.as_bytes()).map_err(|e| {
                 MqttError::Configuration(format!("Invalid WebSocket header name {name:?}: {e}"))
             })?;
             if RESERVED_HEADERS.contains(&header_name.as_str()) {
                 return Err(MqttError::Configuration(format!(
-                    "WebSocket header {name:?} is set by the transport and cannot be overridden"
+                    "WebSocket header {name:?} is reserved for the handshake and cannot be set"
                 )));
             }
             if header_name == SEC_WEBSOCKET_PROTOCOL {
@@ -1001,14 +1014,44 @@ mod tests {
             "Sec-WebSocket-Version",
             "Sec-WebSocket-Key",
             "Sec-WebSocket-Extensions",
+            "Sec-WebSocket-Accept",
+            "Content-Length",
+            "transfer-encoding",
         ] {
             let config = WebSocketConfig::new("ws://localhost/mqtt")
                 .unwrap()
                 .with_header(name, "value");
             assert!(
-                handshake_error(&config).contains("set by the transport"),
+                handshake_error(&config).contains("reserved for the handshake"),
                 "{name} should be rejected"
             );
+        }
+    }
+
+    #[test]
+    fn test_handshake_request_header_order_is_deterministic() {
+        // Each config gets a freshly seeded HashMap, so any dependence on
+        // iteration order would show up across iterations.
+        for _ in 0..32 {
+            let config = WebSocketConfig::new("ws://localhost/mqtt")
+                .unwrap()
+                .with_header("X-Charlie", "3")
+                .with_header("X-Alpha", "1")
+                .with_header("X-Bravo", "2");
+            let request = config.build_handshake_request().unwrap();
+            let custom: Vec<&str> = request
+                .headers()
+                .keys()
+                .map(HeaderName::as_str)
+                .filter(|name| name.starts_with("x-"))
+                .collect();
+            assert_eq!(custom, ["x-alpha", "x-bravo", "x-charlie"]);
+
+            let invalid = WebSocketConfig::new("ws://localhost/mqtt")
+                .unwrap()
+                .with_header("B-Header", "bad\r\nvalue")
+                .with_header("A Header", "value");
+            assert!(handshake_error(&invalid).contains("Invalid WebSocket header name"));
         }
     }
 
