@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **The WebSocket client transport now sends its configured headers, subprotocols and user agent** (#165). `WebSocketTransport::connect` built the upgrade request from a fixed set of headers and always offered `Sec-WebSocket-Protocol: mqtt`, so anything set with `WebSocketConfig::with_header`, `with_subprotocol`, `with_subprotocols` or `with_user_agent` never reached the server, and brokers that authenticate the upgrade request through custom headers rejected the connection. The request now carries every custom header, the configured subprotocols in order (or `mqtt` when none are configured), and the user agent when one is set. The default user agent is now `mqtt5/<crate version>` instead of `mqtt-v5/0.4.0`.
+- **The upgrade request's `Host` header now includes a non-default port**, so `ws://broker:8080/mqtt` sends `Host: broker:8080` rather than `Host: broker`.
+
+### Changed
+
+- **`connect` rejects a WebSocket configuration it cannot send faithfully, before dialing.** It fails with `MqttError::Configuration` when a custom header has an invalid name or value, repeats another custom header's name (case-insensitively), or names a header the transport sets itself (`Host`, `Connection`, `Upgrade`, `Sec-WebSocket-Version`, `Sec-WebSocket-Key`, `Sec-WebSocket-Extensions`); when `Sec-WebSocket-Protocol` or `User-Agent` is set as a custom header instead of through its setter; or when a subprotocol is not a valid HTTP token.
+- `WebSocketConfig`'s `Debug` output lists custom header names but not their values, which often carry credentials.
+
+### Added
+
+- `WebSocketConfig::build_handshake_request`, which returns the upgrade request the configuration produces.
+
 ## [mqtt5 0.45.1] - 2026-10-01
 
 ### Fixed
