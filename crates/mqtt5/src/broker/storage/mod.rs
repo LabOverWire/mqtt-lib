@@ -997,6 +997,24 @@ impl ClientSession {
 }
 
 impl QueuedMessage {
+    #[must_use]
+    pub fn footprint(&self) -> usize {
+        let user_properties: usize = self
+            .user_properties
+            .iter()
+            .map(|(key, value)| std::mem::size_of::<(String, String)>() + key.len() + value.len())
+            .sum();
+        std::mem::size_of::<Self>()
+            + self.topic.len()
+            + self.payload.len()
+            + self.client_id.len()
+            + self.subscription_identifiers.len() * std::mem::size_of::<u32>()
+            + user_properties
+            + self.content_type.as_ref().map_or(0, String::len)
+            + self.response_topic.as_ref().map_or(0, String::len)
+            + self.correlation_data.as_ref().map_or(0, Vec::len)
+    }
+
     /// Create new queued message from PUBLISH packet
     #[must_use]
     pub fn new(packet: PublishPacket, client_id: String, qos: QoS, packet_id: Option<u16>) -> Self {
