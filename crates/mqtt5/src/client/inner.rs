@@ -282,8 +282,21 @@ impl MqttClient {
         let mut config = WebSocketConfig::new(url)
             .map_err(|e| MqttError::ConnectionError(format!("Invalid WebSocket URL: {e}")))?;
 
-        if insecure {
-            let tls_config = TlsConfig::new(addr, host).with_verify_server_cert(false);
+        // As in connect_tls: a stored TLS config applies to wss:// too. With
+        // none, an insecure connection still needs one to disable
+        // verification; a secure one keeps the WebSocket transport's default.
+        let stored = self.tls_config.read().await.clone();
+        let tls_config = match stored {
+            Some(mut cfg) => {
+                cfg.addr = addr;
+                cfg.hostname = host.to_string();
+                cfg.verify_server_cert = !insecure;
+                Some(cfg)
+            }
+            None if insecure => Some(TlsConfig::new(addr, host).with_verify_server_cert(false)),
+            None => None,
+        };
+        if let Some(tls_config) = tls_config {
             config = config.with_tls_config(tls_config);
         }
 

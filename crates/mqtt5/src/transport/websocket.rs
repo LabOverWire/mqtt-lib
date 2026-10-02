@@ -226,14 +226,16 @@ impl WebSocketConfig {
     /// Creates a TLS configuration automatically from the WebSocket URL
     ///
     /// This is a convenience method that creates a TLS config with the same
-    /// host and port as the WebSocket URL.
+    /// host and port as the WebSocket URL. The host may be a name or an IP
+    /// address. A wss:// connection does not use the config's `addr`, so for a
+    /// host name it is the unspecified address with the URL's port, rather
+    /// than a resolved one.
     ///
     /// # Errors
     ///
     /// Returns an error if:
     /// - The URL is not a secure WebSocket (wss://)
     /// - The URL does not have a valid host
-    /// - The host/port combination cannot be parsed as a socket address
     pub fn with_tls_auto(mut self) -> Result<Self> {
         if !self.is_secure() {
             return Err(MqttError::ProtocolError(
@@ -245,9 +247,10 @@ impl WebSocketConfig {
             MqttError::ProtocolError("WebSocket URL must have a host".to_string())
         })?;
 
-        let addr: SocketAddr = format!("{host}:{}", self.port())
-            .parse()
-            .map_err(|e| MqttError::ProtocolError(format!("Invalid host/port combination: {e}")))?;
+        let port = self.port();
+        let addr = format!("{host}:{port}").parse().unwrap_or_else(|_| {
+            SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), port)
+        });
 
         let tls_config = TlsConfig::new(addr, host);
         self.tls_config = Some(tls_config);

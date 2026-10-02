@@ -8,7 +8,7 @@
 
 use mqtt5::transport::tls::TlsConfig;
 use mqtt5::transport::websocket::{WebSocketConfig, WebSocketTransport};
-use mqtt5::Transport;
+use mqtt5::{ConnectOptions, MqttClient, Transport};
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::WebPkiClientVerifier;
@@ -181,10 +181,7 @@ async fn certificate_from_another_ca_is_rejected() {
     let err = connect(config, server)
         .await
         .expect_err("certificate not issued by the configured CA was accepted");
-    assert!(
-        err.contains("certificate") || err.contains("Certificate"),
-        "unexpected error: {err}"
-    );
+    assert!(err.contains("UnknownIssuer"), "unexpected error: {err}");
 }
 
 #[tokio::test]
@@ -262,8 +259,75 @@ async fn without_tls_config_private_ca_is_not_trusted() {
     let err = connect(wss_config(addr), server)
         .await
         .expect_err("certificate from a private CA was accepted with no TLS configuration");
-    assert!(
-        err.contains("certificate") || err.contains("Certificate"),
-        "unexpected error: {err}"
+    assert!(err.contains("UnknownIssuer"), "unexpected error: {err}");
+}
+
+#[tokio::test]
+async fn custom_ca_works_with_a_host_name_url() {
+    let (addr, server) = wss_server(server_config(
+        certs(SERVER_CERT),
+        key(SERVER_KEY),
+        false,
+        &[],
+    ))
+    .await;
+    let config = WebSocketConfig::new(&format!("wss://localhost:{}/mqtt", addr.port()))
+        .expect("config")
+        .with_ca_cert_from_file(CA)
+        .expect("a host name URL should accept a CA");
+
+    connect(config, server)
+        .await
+        .expect("server certificate for localhost, issued by the configured CA, was rejected");
+}
+
+#[tokio::test]
+async fn certificate_is_verified_against_the_url_host_not_tls_config_hostname() {
+    let (addr, server) = wss_server(server_config(
+        certs(SERVER_CERT),
+        key(SERVER_KEY),
+        false,
+        &[],
+    ))
+    .await;
+    let mut tls_config = TlsConfig::new(addr, "wrong.example");
+    tls_config.load_ca_cert_pem(CA).expect("load CA");
+    let config = wss_config(addr).with_tls_config(tls_config);
+
+    connect(config, server)
+        .await
+        .expect("TlsConfig::hostname was used instead of the URL host");
+}
+
+#[tokio::test]
+async fn mqtt_client_presents_its_stored_tls_config_over_wss() {
+    let (addr, server) = wss_server(server_config(
+        certs(SERVER_CERT),
+        key(SERVER_KEY),
+        true,
+        &[],
+    ))
+    .await;
+    let client = MqttClient::with_options(
+        ConnectOptions::new("wss-stored-tls").with_automatic_reconnect(false),
     );
+    client
+        .set_tls_config(
+            Some(std::fs::read(CLIENT_CERT).expect("read client cert")),
+            Some(std::fs::read(CLIENT_KEY).expect("read client key")),
+            Some(std::fs::read(CA).expect("read CA")),
+        )
+        .await;
+
+    // The test server stops after the WebSocket handshake and never answers
+    // CONNECT, so only the TLS handshake it observed is checked.
+    let connecting = tokio::spawn(async move {
+        let _ = client.connect(&format!("wss://{addr}/mqtt")).await;
+    });
+    let handshake = timeout(WAIT, server)
+        .await
+        .expect("server timed out")
+        .expect("server saw no completed handshake: the stored TLS config was not used");
+    assert!(handshake.client_presented_cert);
+    connecting.abort();
 }
