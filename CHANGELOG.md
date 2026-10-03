@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [mqtt5 0.46.1] - 2026-10-03
+
+### Fixed
+
+- **`ConnectOptions::resume_existing_session` docs overstated delivery across a restart** (part of #168). They said delivery across a restart is at-least-once. That holds for inbound messages, which the broker redelivers. Outbound publishes the previous process had not completed are not resent and may never reach subscribers, so the application has to publish them again. New tests (`qos2_resume_after_restart`) cover this. They also check that the broker still holds the unfinished QoS 2 exchange after the reconnect, and that a new QoS 2 publish reusing its packet identifier replaces it and is delivered.
+
 ## [mqtt5 0.46.0] - 2026-10-02
 
 ### Changed

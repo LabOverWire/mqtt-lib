@@ -36,9 +36,12 @@ pub struct ConnectOptions {
     /// the session the broker kept for its client identifier, for example after a process
     /// restart. The broker's subscriptions and queued messages are resumed, but any
     /// outbound or inbound `QoS` 1/2 exchanges the previous process had in flight are lost
-    /// locally, so delivery across the restart is at-least-once: this is the deferred-ack
-    /// crash-recovery pattern, where messages whose `AckToken` was never resolved are
-    /// redelivered to the new process. It has no effect on `Clean Start = 1` connections.
+    /// locally. Inbound delivery across the restart is at-least-once: this is the
+    /// deferred-ack crash-recovery pattern, where messages whose `AckToken` was never
+    /// resolved are redelivered to the new process. Outbound publishes are not resent: a
+    /// publish whose `PublishHandle` had not completed, including one still in the offline
+    /// queue, may never reach subscribers, so the application must publish it again if it
+    /// still needs it delivered. It has no effect on `Clean Start = 1` connections.
     ///
     /// The broker only keeps a session to resume if the previous connection set a non-zero
     /// Session Expiry Interval (`with_session_expiry_interval`): under MQTT v5 an absent
