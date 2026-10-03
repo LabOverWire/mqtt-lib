@@ -980,27 +980,15 @@ impl DirectClientInner {
     /// the publish is rejected at enqueue time instead of being accepted and then
     /// rejected when the queue is flushed on reconnect. A packet identifier is
     /// allocated only after these checks pass.
-    async fn queue_publish_message(
-        &self,
-        topic: String,
-        payload: Vec<u8>,
-        options: &PublishOptions,
-    ) -> Result<PublishHandle> {
-        if options.retain && !self.server_retain_available.load(Ordering::SeqCst) {
+    async fn queue_publish_message(&self, request: PublishPacket) -> Result<PublishHandle> {
+        if request.retain && !self.server_retain_available.load(Ordering::SeqCst) {
             return Err(MqttError::RetainNotSupported);
         }
 
         let mut publish = self
             .with_aliased_topic(PublishPacket {
-                topic_name: topic,
                 packet_id: Some(SIZE_PROBE_PACKET_ID),
-                payload: payload.into(),
-                qos: options.qos,
-                retain: options.retain,
-                dup: false,
-                properties: options.properties.clone().into(),
-                protocol_version: self.options.protocol_version.as_u8(),
-                stream_id: None,
+                ..request
             })
             .await?;
 
@@ -1104,13 +1092,6 @@ impl DirectClientInner {
         let protocol_version = self.options.protocol_version.as_u8();
         outbound::check_publish(&topic, &options, protocol_version)?;
 
-        if !self.is_connected() && self.queue_on_disconnect && options.qos != QoS::AtMostOnce {
-            return self
-                .queue_publish_message(topic, payload, &options)
-                .await
-                .map(StagedPublish::Queued);
-        }
-
         #[cfg(feature = "opentelemetry")]
         let options = {
             let mut opts = options;
@@ -1118,7 +1099,8 @@ impl DirectClientInner {
             opts
         };
 
-        if !self.is_connected() {
+        let queue = self.queue_on_disconnect && options.qos != QoS::AtMostOnce;
+        if !self.is_connected() && !queue {
             return Err(MqttError::NotConnected);
         }
 
@@ -1138,6 +1120,12 @@ impl DirectClientInner {
             protocol_version,
             stream_id: None,
         };
+        if !self.is_connected() {
+            return self
+                .queue_publish_message(request)
+                .await
+                .map(StagedPublish::Queued);
+        }
         self.conform_to_connection(request)
             .await
             .map(StagedPublish::Ready)
@@ -2859,6 +2847,89 @@ pub mod tests {
         assert!(
             on_new > 0 && quota.is_ok(),
             "new healthy connection is starved by a replay stuck on the replaced connection: resent on new={on_new}, live quota={quota:?}"
+        );
+    }
+
+    struct ReverseCodec;
+
+    impl crate::codec::PayloadCodec for ReverseCodec {
+        fn name(&self) -> &'static str {
+            "reverse"
+        }
+
+        fn content_type(&self) -> &'static str {
+            "application/x-reverse"
+        }
+
+        fn encode(&self, payload: &[u8]) -> Result<bytes::Bytes> {
+            Ok(payload.iter().rev().copied().collect::<Vec<u8>>().into())
+        }
+
+        fn decode(&self, payload: &[u8]) -> Result<bytes::Bytes> {
+            self.encode(payload)
+        }
+
+        fn min_size_threshold(&self) -> usize {
+            0
+        }
+    }
+
+    fn queued_front(client: &DirectClientInner) -> PublishPacket {
+        client.queued_messages.lock().front().unwrap().1
+    }
+
+    #[tokio::test]
+    async fn queued_publish_is_encoded_with_the_codec() {
+        let registry = Arc::new(crate::codec::CodecRegistry::new());
+        registry.register(ReverseCodec);
+        registry.set_default("application/x-reverse").unwrap();
+        let client = DirectClientInner::new(
+            ConnectOptions::new("queued-codec")
+                .with_clean_start(false)
+                .with_codec_registry(registry),
+        );
+        let Ok(StagedPublish::Queued(_)) = client
+            .stage_publish("t/q".into(), b"abc".to_vec(), qos(QoS::AtLeastOnce))
+            .await
+        else {
+            panic!("an offline QoS 1 publish must be queued");
+        };
+        let queued = queued_front(&client);
+        assert_eq!(queued.payload.as_ref(), b"cba");
+        assert_eq!(
+            queued.properties.get_content_type().as_deref(),
+            Some("application/x-reverse")
+        );
+    }
+
+    #[cfg(feature = "opentelemetry")]
+    #[tokio::test]
+    async fn queued_publish_carries_the_trace_context() {
+        use opentelemetry::context::FutureExt;
+        use opentelemetry::trace::{
+            SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId, TraceState,
+        };
+        let client =
+            DirectClientInner::new(ConnectOptions::new("queued-trace").with_clean_start(false));
+        let span = SpanContext::new(
+            TraceId::from_hex("0af7651916cd43dd8448eb211c80319c").unwrap(),
+            SpanId::from_hex("b7ad6b7169203331").unwrap(),
+            TraceFlags::SAMPLED,
+            true,
+            TraceState::default(),
+        );
+        let context = opentelemetry::Context::new().with_remote_span_context(span);
+        let Ok(StagedPublish::Queued(_)) = client
+            .stage_publish("t/q".into(), b"abc".to_vec(), qos(QoS::AtLeastOnce))
+            .with_context(context)
+            .await
+        else {
+            panic!("an offline QoS 1 publish must be queued");
+        };
+        let queued = queued_front(&client);
+        assert_eq!(
+            queued.properties.get_user_property_value("traceparent"),
+            Some("00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01")
         );
     }
 

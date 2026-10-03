@@ -120,7 +120,7 @@ impl OfflineQueue {
         }
     }
 
-    fn front(&self) -> Option<(u64, PublishPacket)> {
+    pub(super) fn front(&self) -> Option<(u64, PublishPacket)> {
         self.messages
             .front()
             .map(|queued| (queued.serial, queued.packet.clone()))
