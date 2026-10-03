@@ -16,6 +16,7 @@ pub type Result<T> = core::result::Result<T, MqttError>;
 
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "std", derive(Error))]
+#[non_exhaustive]
 pub enum MqttError {
     #[cfg_attr(feature = "std", error("IO error: {0}"))]
     Io(String),
@@ -193,6 +194,15 @@ pub enum MqttError {
 
     #[cfg_attr(
         feature = "std",
+        error("Offline queue full: limit is {max_messages} messages or {max_bytes} bytes")
+    )]
+    OfflineQueueFull {
+        max_messages: usize,
+        max_bytes: usize,
+    },
+
+    #[cfg_attr(
+        feature = "std",
         error("String too long: {0} bytes exceeds maximum of 65535")
     )]
     StringTooLong(usize),
@@ -270,6 +280,13 @@ impl fmt::Display for MqttError {
             Self::MessageTooLarge => write!(f, "Message too large for queue"),
             Self::FlowControlExceeded => write!(f, "Flow control exceeded"),
             Self::PacketIdExhausted => write!(f, "Packet ID exhausted"),
+            Self::OfflineQueueFull {
+                max_messages,
+                max_bytes,
+            } => write!(
+                f,
+                "Offline queue full: limit is {max_messages} messages or {max_bytes} bytes"
+            ),
             Self::StringTooLong(len) => {
                 write!(f, "String too long: {len} bytes exceeds maximum of 65535")
             }

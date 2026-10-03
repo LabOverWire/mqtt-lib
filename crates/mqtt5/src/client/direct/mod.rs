@@ -997,11 +997,12 @@ impl DirectClientInner {
         let reservation = self.allocate_packet_id().await?;
         publish.packet_id = Some(reservation.packet_id());
         let (completion, handle) = Completion::new();
-        self.queued_messages.lock().push_back(QueuedPublish::new(
-            publish,
-            reservation,
-            Some(completion),
-        ));
+        let limits = &self.options.session_config;
+        self.queued_messages.lock().push_back_within(
+            QueuedPublish::new(publish, reservation, Some(completion)),
+            limits.max_queued_messages,
+            limits.max_queued_size,
+        )?;
         Ok(handle)
     }
 
@@ -2900,6 +2901,60 @@ pub mod tests {
             queued.properties.get_content_type().as_deref(),
             Some("application/x-reverse")
         );
+    }
+
+    fn bounded_offline_client(max_messages: usize, max_bytes: usize) -> DirectClientInner {
+        let mut options = ConnectOptions::new("bounded-queue").with_clean_start(false);
+        options.session_config.max_queued_messages = max_messages;
+        options.session_config.max_queued_size = max_bytes;
+        DirectClientInner::new(options)
+    }
+
+    async fn stage_offline(client: &DirectClientInner, payload: usize) -> Result<StagedPublish> {
+        client
+            .stage_publish("t/q".into(), vec![0u8; payload], qos(QoS::AtLeastOnce))
+            .await
+    }
+
+    #[tokio::test]
+    async fn offline_queue_refuses_a_publish_over_its_message_limit() {
+        let client = bounded_offline_client(2, usize::MAX);
+        for _ in 0..2 {
+            assert!(matches!(
+                stage_offline(&client, 1).await,
+                Ok(StagedPublish::Queued(_))
+            ));
+        }
+        let third = stage_offline(&client, 1).await;
+        assert!(
+            matches!(
+                third,
+                Err(MqttError::OfflineQueueFull {
+                    max_messages: 2,
+                    ..
+                })
+            ),
+            "{third:?}"
+        );
+        assert_eq!(client.queued_messages.lock().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn offline_queue_refuses_a_publish_over_its_byte_limit() {
+        let client = bounded_offline_client(usize::MAX, 300);
+        assert!(matches!(
+            stage_offline(&client, 200).await,
+            Ok(StagedPublish::Queued(_))
+        ));
+        assert!(matches!(
+            stage_offline(&client, 200).await,
+            Err(MqttError::OfflineQueueFull { max_bytes: 300, .. })
+        ));
+        assert!(matches!(
+            stage_offline(&client, 10).await,
+            Ok(StagedPublish::Queued(_))
+        ));
+        assert_eq!(client.queued_messages.lock().len(), 2);
     }
 
     #[cfg(feature = "opentelemetry")]
