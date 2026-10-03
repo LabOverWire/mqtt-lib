@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [mqtt5 0.45.3] - 2026-10-02
+
+### Fixed
+
+- **Publishes queued while offline now go through the codec and carry the trace context** (part of #168). A QoS 1 or 2 publish made while the client was disconnected was queued before the codec registry encoded its payload and before the OpenTelemetry trace context was injected, so after reconnecting it went out uncompressed, without its content type, and without `traceparent`. Queued and live publishes are now built the same way, and the trace context is the one active when `publish()` was called.
+
 ## [mqtt5 0.45.2] - 2026-10-02
 
 ### Fixed
