@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [mqtt5 0.46.0] - 2026-10-02
+
+### Changed
+
+- **The client's offline queue is now bounded** (part of #168). QoS 1 and 2 publishes made while disconnected were limited only by the packet identifier space (65,535 messages), each holding its full payload, so memory was effectively unbounded. The queue now enforces `ConnectOptions::session_config.max_queued_messages` and `max_queued_size`, which were previously not applied to it. A publish that would exceed either limit fails with `MqttError::OfflineQueueFull` and is not queued; nothing already queued is dropped. Messages put back into the queue on reconnect are never refused, but count toward the limits. The size of a queued message is its encoded PUBLISH packet.
+- **New defaults: 1,000 queued messages or 64 MiB.** `max_queued_messages` keeps its default of 1,000. `max_queued_size` goes from 1 MiB to 64 MiB, the same per-client limit the broker uses for its queues. A client that queued more than this while offline will now get `OfflineQueueFull` instead.
+- Requires mqtt5-protocol 0.16.
+
+## [mqtt5-protocol 0.16.0] - 2026-10-02
+
+### Breaking
+
+- **`MqttError` is now `#[non_exhaustive]`.** Code that matches on it exhaustively needs a wildcard arm. Future error variants are then no longer a breaking change.
+
+### Added
+
+- `MqttError::OfflineQueueFull { max_messages, max_bytes }`, returned when a publish would exceed the client's offline queue limits.
+
+## [mqttv5-cli 0.29.5] - 2026-10-02
+
+### Changed
+
+- Requires mqtt5 0.46.
+
+## [mqtt5-wasm 2.1.4] - 2026-10-02
+
+### Changed
+
+- Requires mqtt5 0.46 and mqtt5-protocol 0.16. No change to the wasm API.
+
 ## [mqtt5 0.45.3] - 2026-10-02
 
 ### Fixed
