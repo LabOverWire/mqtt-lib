@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [mqtt5 0.46.2] - 2026-10-04
+
+### Fixed
+
+- **QoS 0 messages on a QUIC server unidirectional stream now reach `subscribe_with_ack` callbacks** (part of #169). The client passed messages from server-opened unidirectional streams only to plain `subscribe` callbacks, so a subscription made with `subscribe_with_ack` never saw them. A broker sends QoS 0 on a unidirectional stream when it delivers each publish on its own stream, as the mqtt5 broker does with `ServerDeliveryStrategy::PerPublish`.
+
 ## [mqtt5 0.46.1] - 2026-10-03
 
 ### Fixed
