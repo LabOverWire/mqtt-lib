@@ -648,8 +648,9 @@ async fn quic_uni_stream_reader_task(mut recv: quinn::RecvStream, ctx: PacketRea
         let outcome = match read {
             Ok(packet) => {
                 tracing::trace!(flow_id = ?flow_id, "Received packet on unidirectional server stream");
-                handle_incoming_packet_no_writer(packet, flow_id, &ctx.incoming_handlers(None))
-                    .await
+                let ack_delivery = ctx.ack_delivery();
+                let handlers = ctx.incoming_handlers(ack_delivery.as_ref());
+                handle_incoming_packet_no_writer(packet, flow_id, &handlers).await
             }
             Err(e) => Err(e),
         };
