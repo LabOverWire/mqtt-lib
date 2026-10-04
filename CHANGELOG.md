@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [mqtt5 0.46.3] - 2026-10-04
+
+### Fixed
+
+- **A QUIC user-defined flow (type 0x14) opened by the server no longer risks closing the connection** (part of #169). The client did not recognise the 0x14 flow header and parsed the stream as MQTT. When the application data happened to decode as a complete packet, the client treated it as a malformed packet, sent DISCONNECT and closed the whole connection. A user-defined flow carries non-MQTT data (MQoQ §9.20), so the client now refuses it: it stops the stream with ERROR_FLOW_REFUSED (0xBE), resets its send side on a bidirectional stream, and leaves the connection and other flows untouched.
+
 ## [mqtt5 0.46.2] - 2026-10-04
 
 ### Fixed
