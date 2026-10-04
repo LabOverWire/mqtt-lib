@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [mqtt5 0.46.4] - 2026-10-04
+
+### Fixed
+
+- **Aborting the task running `MqttBroker::run()` now stops the broker** (#177). The accept loops, connection handlers and storage cleanup were detached tasks that only stopped on the graceful-shutdown signal, so aborting or dropping `run()` left the broker serving existing clients and accepting new ones. `run()` now sends that signal when it is dropped, so an abort takes the same path as graceful shutdown, and the `$SYS` topics task is stopped with it. Bridges are still stopped only by graceful shutdown.
+
 ## [mqtt5 0.46.3] - 2026-10-04
 
 ### Fixed
