@@ -249,7 +249,7 @@ description = "Build and publish WASM package to npm"
 
 [tasks.wasm-clippy]
 command = "cargo"
-args = ["clippy", "--target", "wasm32-unknown-unknown", "-p", "mqtt5-wasm", "--features", "broker", "--", "-D", "warnings", "-W", "clippy::pedantic"]
+args = ["clippy", "--target", "wasm32-unknown-unknown", "-p", "mqtt5-wasm", "--all-features", "--", "-D", "warnings", "-W", "clippy::pedantic"]
 description = "Run clippy for WASM target (strict, pedantic)"
 
 [tasks.wasm-test-runner]
@@ -276,6 +276,7 @@ script = '''
 set -euo pipefail
 cargo test -p mqtt5-wasm --target wasm32-unknown-unknown
 cargo test -p mqtt5-wasm --target wasm32-unknown-unknown --features broker
+cargo test --release -p mqtt5-wasm --target wasm32-unknown-unknown --features codec --lib
 '''
 description = "Run WASM crate tests under Node with wasm-bindgen-test-runner"
 

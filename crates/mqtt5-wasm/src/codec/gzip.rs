@@ -18,7 +18,7 @@ fn crc32(data: &[u8]) -> u32 {
     !crc
 }
 
-fn gzip_compress_native(input: &[u8], level: u8) -> Result<Vec<u8>, String> {
+fn gzip_compress_native(input: &[u8], level: u8) -> Vec<u8> {
     let deflated = compress_to_vec(input, level);
 
     let mut output = Vec::with_capacity(10 + deflated.len() + 8);
@@ -27,9 +27,9 @@ fn gzip_compress_native(input: &[u8], level: u8) -> Result<Vec<u8>, String> {
 
     let crc = crc32(input);
     output.extend_from_slice(&crc.to_le_bytes());
-    output.extend_from_slice(&(input.len() as u32).to_le_bytes());
+    output.extend_from_slice(&input.len().to_le_bytes()[..4]);
 
-    Ok(output)
+    output
 }
 
 const DEFAULT_MAX_DECOMPRESSED_SIZE: usize = 10 * 1024 * 1024;
@@ -99,7 +99,7 @@ impl WasmPayloadCodec for WasmGzipCodec {
             return Ok(payload.to_vec());
         }
 
-        gzip_compress_native(payload, self.level)
+        Ok(gzip_compress_native(payload, self.level))
     }
 
     fn decode(&self, payload: &[u8]) -> Result<Vec<u8>, String> {
@@ -159,5 +159,28 @@ impl WasmPayloadCodec for WasmGzipCodec {
             ));
         }
         Ok(result)
+    }
+}
+
+#[cfg(all(test, target_arch = "wasm32"))]
+mod tests {
+    use super::{WasmGzipCodec, WasmPayloadCodec};
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    #[wasm_bindgen_test]
+    fn trailer_holds_crc_and_input_length() {
+        let input = vec![b'a'; 1000];
+        let encoded = WasmGzipCodec::new().encode(&input).unwrap();
+        let trailer = &encoded[encoded.len() - 8..];
+        assert_eq!(&trailer[..4], &super::crc32(&input).to_le_bytes());
+        assert_eq!(&trailer[4..], &1000u32.to_le_bytes());
+    }
+
+    #[wasm_bindgen_test]
+    fn decode_reverses_encode() {
+        let codec = WasmGzipCodec::new();
+        let input = b"payload compressed by the gzip codec".repeat(20);
+        let encoded = codec.encode(&input).unwrap();
+        assert_eq!(codec.decode(&encoded).unwrap(), input);
     }
 }
