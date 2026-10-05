@@ -41,6 +41,55 @@ fn disable_nagle(stream: &TcpStream, addr: std::net::SocketAddr) {
     }
 }
 
+struct ShutdownOnDrop {
+    shutdown_tx: tokio::sync::broadcast::Sender<()>,
+    bridge_manager: Option<Arc<BridgeManager>>,
+}
+
+impl Drop for ShutdownOnDrop {
+    fn drop(&mut self) {
+        let _ = self.shutdown_tx.send(());
+        let runtime = tokio::runtime::Handle::try_current();
+        if let (Some(bridge_manager), Ok(runtime)) = (self.bridge_manager.take(), runtime) {
+            runtime.spawn(async move {
+                if let Err(e) = bridge_manager.stop_all().await {
+                    error!("Error stopping bridges: {e}");
+                }
+            });
+        }
+    }
+}
+
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+struct BrokerListeners {
+    tcp: Vec<TcpListener>,
+    tls: Vec<TcpListener>,
+    tls_acceptor: Option<TlsAcceptor>,
+    #[cfg(feature = "transport-websocket")]
+    ws: Vec<TcpListener>,
+    #[cfg(feature = "transport-websocket")]
+    ws_config: Option<WebSocketServerConfig>,
+    #[cfg(feature = "transport-websocket")]
+    ws_tls: Vec<TcpListener>,
+    #[cfg(feature = "transport-websocket")]
+    ws_tls_config: Option<WebSocketServerConfig>,
+    #[cfg(feature = "transport-websocket")]
+    ws_tls_acceptor: Option<TlsAcceptor>,
+    #[cfg(feature = "transport-quic")]
+    quic: Vec<Endpoint>,
+    cluster: Vec<TcpListener>,
+    cluster_tls_acceptor: Option<TlsAcceptor>,
+    #[cfg(feature = "transport-quic")]
+    cluster_quic: Vec<Endpoint>,
+}
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 #[derive(Clone)]
 struct AcceptLoopState {
     config_rx: watch::Receiver<Arc<BrokerConfig>>,
@@ -1490,6 +1539,78 @@ impl MqttBroker {
         }
     }
 
+    fn take_listeners(&mut self) -> BrokerListeners {
+        BrokerListeners {
+            tcp: std::mem::take(&mut self.listeners),
+            tls: std::mem::take(&mut self.tls_listeners),
+            tls_acceptor: self.tls_acceptor.take(),
+            #[cfg(feature = "transport-websocket")]
+            ws: std::mem::take(&mut self.ws_listeners),
+            #[cfg(feature = "transport-websocket")]
+            ws_config: self.ws_config.take(),
+            #[cfg(feature = "transport-websocket")]
+            ws_tls: std::mem::take(&mut self.ws_tls_listeners),
+            #[cfg(feature = "transport-websocket")]
+            ws_tls_config: self.ws_tls_config.take(),
+            #[cfg(feature = "transport-websocket")]
+            ws_tls_acceptor: self.ws_tls_acceptor.take(),
+            #[cfg(feature = "transport-quic")]
+            quic: std::mem::take(&mut self.quic_endpoints),
+            cluster: std::mem::take(&mut self.cluster_listeners),
+            cluster_tls_acceptor: self.cluster_tls_acceptor.take(),
+            #[cfg(feature = "transport-quic")]
+            cluster_quic: std::mem::take(&mut self.cluster_quic_endpoints),
+        }
+    }
+
+    fn spawn_accept_tasks(
+        listeners: BrokerListeners,
+        state: &AcceptLoopState,
+        task_handles: &mut Vec<tokio::task::JoinHandle<()>>,
+    ) {
+        Self::spawn_tcp_accept_tasks(listeners.tcp, state, task_handles);
+        Self::spawn_tls_accept_tasks(listeners.tls, listeners.tls_acceptor, state, task_handles);
+        Self::spawn_cluster_accept_tasks(
+            listeners.cluster,
+            listeners.cluster_tls_acceptor,
+            state,
+            task_handles,
+        );
+        #[cfg(feature = "transport-websocket")]
+        Self::spawn_ws_accept_tasks(listeners.ws, listeners.ws_config, state, task_handles);
+        #[cfg(feature = "transport-websocket")]
+        Self::spawn_wss_accept_tasks(
+            listeners.ws_tls,
+            listeners.ws_tls_config,
+            listeners.ws_tls_acceptor,
+            state,
+            task_handles,
+        );
+        #[cfg(feature = "transport-quic")]
+        Self::spawn_quic_accept_tasks(listeners.quic, state, task_handles);
+        #[cfg(feature = "transport-quic")]
+        Self::spawn_cluster_quic_accept_tasks(listeners.cluster_quic, state, task_handles);
+    }
+
+    async fn finish_shutdown(&self, task_handles: Vec<tokio::task::JoinHandle<()>>) {
+        if let Some(ref bridge_manager) = self.bridge_manager {
+            info!("Stopping all bridges");
+            if let Err(e) = bridge_manager.stop_all().await {
+                error!("Error stopping bridges: {e}");
+            }
+        }
+
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            for handle in task_handles {
+                let _ = handle.await;
+            }
+        })
+        .await;
+
+        #[cfg(feature = "opentelemetry")]
+        telemetry::shutdown_telemetry();
+    }
+
     fn spawn_tcp_accept_tasks(
         listeners: Vec<TcpListener>,
         state: &AcceptLoopState,
@@ -1667,7 +1788,6 @@ impl MqttBroker {
     /// # Errors
     ///
     /// Returns an error if the accept loop fails
-    #[allow(clippy::too_many_lines)]
     pub async fn run(&mut self) -> Result<()> {
         info!("Starting MQTT broker");
 
@@ -1677,27 +1797,13 @@ impl MqttBroker {
             ));
         }
 
-        let listeners = std::mem::take(&mut self.listeners);
-        let tls_listeners = std::mem::take(&mut self.tls_listeners);
-        let tls_acceptor = self.tls_acceptor.take();
-        #[cfg(feature = "transport-websocket")]
-        let ws_listeners = std::mem::take(&mut self.ws_listeners);
-        #[cfg(feature = "transport-websocket")]
-        let ws_config = self.ws_config.take();
-        #[cfg(feature = "transport-websocket")]
-        let ws_tls_listeners = std::mem::take(&mut self.ws_tls_listeners);
-        #[cfg(feature = "transport-websocket")]
-        let ws_tls_config = self.ws_tls_config.take();
-        #[cfg(feature = "transport-websocket")]
-        let ws_tls_acceptor = self.ws_tls_acceptor.take();
-        #[cfg(feature = "transport-quic")]
-        let quic_endpoints = std::mem::take(&mut self.quic_endpoints);
-        let cluster_listeners = std::mem::take(&mut self.cluster_listeners);
-        let cluster_tls_acceptor = self.cluster_tls_acceptor.take();
-        #[cfg(feature = "transport-quic")]
-        let cluster_quic_endpoints = std::mem::take(&mut self.cluster_quic_endpoints);
+        let listeners = self.take_listeners();
 
-        let shutdown_tx = self.shutdown_tx.clone();
+        let shutdown_on_drop = ShutdownOnDrop {
+            shutdown_tx: self.shutdown_tx.clone(),
+            bridge_manager: self.bridge_manager.clone(),
+        };
+        let shutdown_tx = &shutdown_on_drop.shutdown_tx;
 
         let mut task_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
@@ -1706,15 +1812,15 @@ impl MqttBroker {
                 u32::try_from(self.config.session_expiry_interval.as_secs()).unwrap_or(u32::MAX),
             )
             .await?;
-        self.initialize_storage(&shutdown_tx, &mut task_handles)
+        self.initialize_storage(shutdown_tx, &mut task_handles)
             .await?;
         self.router.initialize().await?;
 
-        let sys_handle = if self.config.sys_topics_enabled {
+        let sys_topics_task = if self.config.sys_topics_enabled {
             let sys_provider =
                 SysTopicsProvider::new(Arc::clone(&self.router), Arc::clone(&self.stats))
                     .with_update_interval(self.config.sys_topics_interval);
-            Some(sys_provider.start())
+            Some(AbortOnDrop(sys_provider.start()))
         } else {
             None
         };
@@ -1723,7 +1829,7 @@ impl MqttBroker {
 
         Self::spawn_resource_monitor_cleanup_task(
             &self.resource_monitor,
-            &shutdown_tx,
+            shutdown_tx,
             &mut task_handles,
         );
 
@@ -1739,37 +1845,7 @@ impl MqttBroker {
             shutdown_tx: shutdown_tx.clone(),
         };
 
-        Self::spawn_tcp_accept_tasks(listeners, &accept_state, &mut task_handles);
-        Self::spawn_tls_accept_tasks(
-            tls_listeners,
-            tls_acceptor,
-            &accept_state,
-            &mut task_handles,
-        );
-        Self::spawn_cluster_accept_tasks(
-            cluster_listeners,
-            cluster_tls_acceptor,
-            &accept_state,
-            &mut task_handles,
-        );
-        #[cfg(feature = "transport-websocket")]
-        Self::spawn_ws_accept_tasks(ws_listeners, ws_config, &accept_state, &mut task_handles);
-        #[cfg(feature = "transport-websocket")]
-        Self::spawn_wss_accept_tasks(
-            ws_tls_listeners,
-            ws_tls_config,
-            ws_tls_acceptor,
-            &accept_state,
-            &mut task_handles,
-        );
-        #[cfg(feature = "transport-quic")]
-        Self::spawn_quic_accept_tasks(quic_endpoints, &accept_state, &mut task_handles);
-        #[cfg(feature = "transport-quic")]
-        Self::spawn_cluster_quic_accept_tasks(
-            cluster_quic_endpoints,
-            &accept_state,
-            &mut task_handles,
-        );
+        Self::spawn_accept_tasks(listeners, &accept_state, &mut task_handles);
 
         Self::spawn_hot_reload_task(
             self.hot_reload_manager.take(),
@@ -1790,26 +1866,8 @@ impl MqttBroker {
         shutdown_rx.recv().await.ok();
         info!("Broker shutting down");
 
-        if let Some(sys_handle) = sys_handle {
-            sys_handle.abort();
-        }
-
-        if let Some(ref bridge_manager) = self.bridge_manager {
-            info!("Stopping all bridges");
-            if let Err(e) = bridge_manager.stop_all().await {
-                error!("Error stopping bridges: {e}");
-            }
-        }
-
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            for handle in task_handles {
-                let _ = handle.await;
-            }
-        })
-        .await;
-
-        #[cfg(feature = "opentelemetry")]
-        telemetry::shutdown_telemetry();
+        drop(sys_topics_task);
+        self.finish_shutdown(task_handles).await;
 
         info!("Broker shutdown complete");
 
@@ -1935,7 +1993,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_broker_bind() {
-        // Use random port to avoid conflicts
         let broker = MqttBroker::bind("127.0.0.1:0").await;
         assert!(broker.is_ok());
     }
