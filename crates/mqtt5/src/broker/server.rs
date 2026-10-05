@@ -41,11 +41,22 @@ fn disable_nagle(stream: &TcpStream, addr: std::net::SocketAddr) {
     }
 }
 
-struct ShutdownOnDrop(tokio::sync::broadcast::Sender<()>);
+struct ShutdownOnDrop {
+    shutdown_tx: tokio::sync::broadcast::Sender<()>,
+    bridge_manager: Option<Arc<BridgeManager>>,
+}
 
 impl Drop for ShutdownOnDrop {
     fn drop(&mut self) {
-        let _ = self.0.send(());
+        let _ = self.shutdown_tx.send(());
+        let runtime = tokio::runtime::Handle::try_current();
+        if let (Some(bridge_manager), Ok(runtime)) = (self.bridge_manager.take(), runtime) {
+            runtime.spawn(async move {
+                if let Err(e) = bridge_manager.stop_all().await {
+                    error!("Error stopping bridges: {e}");
+                }
+            });
+        }
     }
 }
 
@@ -1788,8 +1799,11 @@ impl MqttBroker {
 
         let listeners = self.take_listeners();
 
-        let shutdown_on_drop = ShutdownOnDrop(self.shutdown_tx.clone());
-        let shutdown_tx = &shutdown_on_drop.0;
+        let shutdown_on_drop = ShutdownOnDrop {
+            shutdown_tx: self.shutdown_tx.clone(),
+            bridge_manager: self.bridge_manager.clone(),
+        };
+        let shutdown_tx = &shutdown_on_drop.shutdown_tx;
 
         let mut task_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
