@@ -55,7 +55,7 @@ const LEGACY_STORAGE_VERSION: &str = "1";
 
 /// File-based storage backend; session writes are group-committed to one log
 pub struct FileBackend {
-    _base_dir: PathBuf,
+    directory_lock: std::fs::File,
     retained_dir: PathBuf,
     queues_dir: PathBuf,
     inflight_dir: PathBuf,
@@ -83,6 +83,7 @@ impl FileBackend {
         limits: QueueLimits,
     ) -> Result<Self> {
         let base_dir = base_dir.as_ref().to_path_buf();
+        let directory_lock = Self::lock_storage_dir(&base_dir).await?;
         let retained_dir = base_dir.join("retained");
         let sessions_dir = base_dir.join("sessions");
         let queues_dir = base_dir.join("queues");
@@ -110,7 +111,7 @@ impl FileBackend {
         ));
 
         let backend = Self {
-            _base_dir: base_dir.clone(),
+            directory_lock,
             retained_dir,
             queues_dir,
             inflight_dir,
@@ -338,7 +339,41 @@ impl FileBackend {
     /// Never fails; session writes are durable before they are acknowledged.
     pub async fn shutdown(&self) -> Result<()> {
         self.flush_queue_writes().await;
-        Ok(())
+        self.directory_lock
+            .unlock()
+            .map_err(|e| MqttError::Io(format!("Failed to release storage directory lock: {e}")))
+    }
+
+    async fn lock_storage_dir(base_dir: &Path) -> Result<std::fs::File> {
+        fs::create_dir_all(base_dir).await.map_err(|e| {
+            MqttError::Configuration(format!(
+                "Failed to create storage dir {}: {e}",
+                base_dir.display()
+            ))
+        })?;
+        let lock_path = base_dir.join(".lock");
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock_path)
+            .map_err(|e| {
+                MqttError::Configuration(format!(
+                    "Failed to open storage lock {}: {e}",
+                    lock_path.display()
+                ))
+            })?;
+        match lock.try_lock() {
+            Ok(()) => Ok(lock),
+            Err(std::fs::TryLockError::WouldBlock) => Err(MqttError::Configuration(format!(
+                "Storage directory {} is already in use by another broker",
+                base_dir.display()
+            ))),
+            Err(std::fs::TryLockError::Error(e)) => Err(MqttError::Configuration(format!(
+                "Failed to lock storage directory {}: {e}",
+                base_dir.display()
+            ))),
+        }
     }
 
     /// Waits until every queued-message write and delete issued so far has reached disk.

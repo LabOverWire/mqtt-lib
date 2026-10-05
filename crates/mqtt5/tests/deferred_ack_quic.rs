@@ -1,13 +1,4 @@
 #![cfg(all(feature = "broker", feature = "transport-quic"))]
-#![allow(clippy::large_futures)]
-
-//! Deferred acknowledgement over MQTT-over-QUIC (`MQoQ`).
-//!
-//! These run in the `DataPerTopic` stream strategy, so an inbound PUBLISH arrives on a per-topic
-//! data flow while the deferred PUBREC is written on the shared (control-stream) writer. The tests
-//! prove the broker still correlates that acknowledgement by packet id and completes the `QoS` 2
-//! handshake: delivery, Receive-Maximum backpressure, and both `ack()` and `reject()` behave as
-//! they do over TCP.
 
 use mqtt5::broker::config::{BrokerConfig, QuicConfig};
 use mqtt5::broker::MqttBroker;
@@ -31,6 +22,10 @@ async fn start_quic_broker() -> (mqtt5::broker::BrokerShutdownHandle, SocketAddr
     let cert_dir = manifest_dir.join("../../test_certs");
     let quic_bind: SocketAddr = "127.0.0.1:0".parse().unwrap();
     let config = BrokerConfig::default()
+        .with_storage(
+            mqtt5::broker::config::StorageConfig::new()
+                .with_backend(mqtt5::broker::config::StorageBackend::Memory),
+        )
         .with_bind_address(([127, 0, 0, 1], 0))
         .with_quic(
             QuicConfig::new(cert_dir.join("server.pem"), cert_dir.join("server.key"))
@@ -98,8 +93,7 @@ async fn setup(topic: &str) -> QuicFixture {
     subscriber
         .set_quic_stream_strategy(StreamStrategy::DataPerTopic)
         .await;
-    subscriber
-        .connect_with_options(&url, sub_opts)
+    Box::pin(subscriber.connect_with_options(&url, sub_opts))
         .await
         .expect("subscriber connects over QUIC");
 
@@ -144,7 +138,7 @@ async fn publish_two(fixture: &QuicFixture, topic: &str) {
 #[tokio::test]
 async fn deferred_qos2_over_quic_delivers_backpressures_and_acks() {
     let topic = "jobs/a";
-    let fixture = setup(topic).await;
+    let fixture = Box::pin(setup(topic)).await;
     publish_two(&fixture, topic).await;
 
     assert!(
@@ -173,7 +167,7 @@ async fn deferred_qos2_over_quic_delivers_backpressures_and_acks() {
 #[tokio::test]
 async fn deferred_qos2_over_quic_reject_frees_the_slot() {
     let topic = "jobs/b";
-    let fixture = setup(topic).await;
+    let fixture = Box::pin(setup(topic)).await;
     publish_two(&fixture, topic).await;
 
     assert!(

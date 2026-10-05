@@ -2023,7 +2023,8 @@ mod tests {
     async fn test_broker_with_config() {
         let config = BrokerConfig::default()
             .with_bind_address(([127, 0, 0, 1], 0))
-            .with_max_clients(100);
+            .with_max_clients(100)
+            .with_storage(crate::broker::config::StorageConfig::default().with_persistence(false));
 
         let broker = MqttBroker::with_config(config).await;
         assert!(broker.is_ok());
@@ -2052,7 +2053,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_broker_stats() {
-        let broker = MqttBroker::bind("127.0.0.1:0").await.unwrap();
+        let config = BrokerConfig::default()
+            .with_bind_address(([127, 0, 0, 1], 0))
+            .with_storage(crate::broker::config::StorageConfig::default().with_persistence(false));
+        let broker = MqttBroker::with_config(config).await.unwrap();
         let stats = broker.stats();
 
         assert_eq!(

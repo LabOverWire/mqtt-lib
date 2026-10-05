@@ -1,5 +1,4 @@
 #![cfg(feature = "broker")]
-//! Integration tests for resource monitoring
 
 use mqtt5::broker::{BrokerConfig, MqttBroker};
 use mqtt5::time::Duration;
@@ -7,8 +6,11 @@ use tokio::time::sleep;
 
 #[tokio::test]
 async fn test_connection_limits_enforcement() {
-    // Create broker with very low connection limit
     let config = BrokerConfig::default()
+        .with_storage(
+            mqtt5::broker::config::StorageConfig::new()
+                .with_backend(mqtt5::broker::config::StorageBackend::Memory),
+        )
         .with_bind_address("127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap())
         .with_max_clients(2);
 
@@ -16,39 +18,31 @@ async fn test_connection_limits_enforcement() {
     let resource_monitor = broker.resource_monitor();
     let _broker_addr = broker.local_addr().expect("Failed to get broker address");
 
-    // Start broker in background
     let broker_handle = tokio::spawn(async move {
         let _ = broker.run().await;
     });
 
-    // Give broker time to start
     sleep(Duration::from_millis(100)).await;
 
-    // Test resource monitoring directly
     let ip = std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
 
-    // Should accept first connection
     assert!(resource_monitor.can_accept_connection(ip).await);
     resource_monitor
         .register_connection("client1".to_string(), ip)
         .await;
 
-    // Should accept second connection
     assert!(resource_monitor.can_accept_connection(ip).await);
     resource_monitor
         .register_connection("client2".to_string(), ip)
         .await;
 
-    // Should reject third connection (exceeds limit)
     assert!(!resource_monitor.can_accept_connection(ip).await);
 
-    // Check statistics
     let stats = resource_monitor.get_stats().await;
     assert_eq!(stats.current_connections, 2);
     assert_eq!(stats.max_connections, 2);
     assert!((stats.connection_utilization() - 100.0).abs() < f64::EPSILON);
 
-    // Clean up
     resource_monitor.unregister_connection("client1", ip).await;
     resource_monitor.unregister_connection("client2", ip).await;
 
@@ -61,6 +55,10 @@ async fn test_connection_limits_enforcement() {
 #[tokio::test]
 async fn test_per_ip_connection_limits() {
     let config = BrokerConfig::default()
+        .with_storage(
+            mqtt5::broker::config::StorageConfig::new()
+                .with_backend(mqtt5::broker::config::StorageBackend::Memory),
+        )
         .with_bind_address("127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap())
         .with_max_clients(10);
 
@@ -76,13 +74,11 @@ async fn test_per_ip_connection_limits() {
     let ip1 = std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 1));
     let ip2 = std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 2));
 
-    // Connect from first IP - should succeed
     assert!(resource_monitor.can_accept_connection(ip1).await);
     resource_monitor
         .register_connection("client1".to_string(), ip1)
         .await;
 
-    // Connect from second IP - should succeed
     assert!(resource_monitor.can_accept_connection(ip2).await);
     resource_monitor
         .register_connection("client2".to_string(), ip2)
@@ -98,6 +94,10 @@ async fn test_per_ip_connection_limits() {
 #[tokio::test]
 async fn test_message_rate_limiting() {
     let config = BrokerConfig::default()
+        .with_storage(
+            mqtt5::broker::config::StorageConfig::new()
+                .with_backend(mqtt5::broker::config::StorageBackend::Memory),
+        )
         .with_bind_address("127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap())
         .with_max_clients(1);
 
@@ -112,7 +112,6 @@ async fn test_message_rate_limiting() {
 
     let ip = std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
 
-    // Register a client
     resource_monitor
         .register_connection("test_client".to_string(), ip)
         .await;

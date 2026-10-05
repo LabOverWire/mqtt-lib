@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [mqtt5 0.47.0] - 2026-10-05
+
+### Breaking
+
+- **Minimum supported Rust version is now 1.89** (was 1.88), for `std::fs::File::try_lock`.
+- **A broker refuses to start on a storage directory another broker is using** (#179). Since 0.42.0 all session writes go to one append-only log, `<storage_dir>/sessions/sessions.log`, and nothing stopped two brokers, in one process or in two, from opening the same directory. Both then wrote and compacted the same log, so one broker's compaction could drop sessions the other had written: with two brokers on one directory, a session written through the first broker was gone after a restart. The file backend now takes an exclusive lock on `<storage_dir>/.lock` when it opens the directory and holds it until storage shuts down; the OS releases it if the process exits or crashes. A second broker on the same directory fails in `MqttBroker::with_config` with `Storage directory <dir> is already in use by another broker`. Two `mqttv5 broker` processes started from the same working directory with the default `./mqtt_storage`, or sharing `--storage-dir`, now hit this error instead of sharing the directory. In-memory storage is not affected.
+
+### Changed
+
+- Integration tests that started brokers on the default `./mqtt_storage` in parallel now use in-memory storage.
+
+## [mqttv5-cli 0.29.6] - 2026-10-05
+
+### Changed
+
+- Requires mqtt5 0.47. `mqttv5 broker` now refuses to start when another broker holds its storage directory.
+
+## [mqtt5-wasm 2.1.5] - 2026-10-05
+
+### Changed
+
+- Requires mqtt5 0.47. No change to the wasm API; the wasm broker uses in-memory storage and takes no directory lock.
+
 ## [mqtt5 0.46.4] - 2026-10-04
 
 ### Fixed
