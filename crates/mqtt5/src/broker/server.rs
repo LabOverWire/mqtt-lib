@@ -91,6 +91,13 @@ impl Drop for AbortOnDrop {
     }
 }
 
+impl AbortOnDrop {
+    async fn stop(mut self) {
+        self.0.abort();
+        let _ = (&mut self.0).await;
+    }
+}
+
 #[derive(Clone)]
 struct AcceptLoopState {
     config_rx: watch::Receiver<Arc<BrokerConfig>>,
@@ -1896,7 +1903,9 @@ impl MqttBroker {
         shutdown_rx.recv().await.ok();
         info!("Broker shutting down");
 
-        drop(sys_topics_task);
+        if let Some(sys_topics_task) = sys_topics_task {
+            sys_topics_task.stop().await;
+        }
         drop(accept_state);
         self.finish_shutdown(task_handles, connections_closed).await;
 

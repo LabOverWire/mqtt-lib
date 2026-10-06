@@ -133,6 +133,7 @@ pub struct MqttClient {
     pub(crate) connection_event_callbacks: Arc<RwLock<Vec<ConnectionEventCallback>>>,
     pub(crate) error_recovery_config: Arc<RwLock<error_recovery::ErrorRecoveryConfig>>,
     pub(crate) connection_mutex: Arc<tokio::sync::Mutex<()>>,
+    pub(crate) monitor_wakeup: Arc<tokio::sync::Notify>,
     pub(crate) tls_config: Arc<RwLock<Option<TlsConfig>>>,
     pub(crate) transport_config: Arc<RwLock<crate::transport::ClientTransportConfig>>,
     #[cfg(feature = "transport-quic")]
@@ -347,6 +348,7 @@ impl MqttClient {
 
         let mut inner = self.inner.write().await;
         inner.automatic_reconnect_lifecycle = AutomaticReconnectLifecycle::Stopped;
+        self.monitor_wakeup.notify_one();
         match inner.disconnect().await {
             Ok(()) => {
                 tracing::info!(client_id = %client_id, "Successfully disconnected from MQTT broker");

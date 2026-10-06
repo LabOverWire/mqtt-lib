@@ -1,11 +1,14 @@
 #![cfg(feature = "broker")]
 
+use mqtt5::broker::bridge::{BridgeConfig, BridgeDirection};
 use mqtt5::broker::config::{BrokerConfig, StorageBackend, StorageConfig};
+use mqtt5::broker::storage::FileBackend;
 use mqtt5::broker::{BrokerShutdownHandle, MqttBroker};
 use mqtt5::error::Result;
 use mqtt5::{ConnectOptions, MqttClient, QoS, SubscribeOptions};
 use std::net::SocketAddr;
 use std::path::Path;
+use std::time::{Duration, Instant};
 use tokio::task::JoinHandle;
 
 struct RunningBroker {
@@ -134,4 +137,70 @@ async fn run_returns_after_connected_clients_have_released_the_directory() {
         assert!(connect_persistent(restarted.addr, &format!("held-client-{i}")).await);
     }
     restarted.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn bridged_broker_releases_the_directory_promptly_after_shutdown() {
+    let mut remote = MqttBroker::with_config(
+        BrokerConfig::default()
+            .with_bind_address("127.0.0.1:0".parse::<SocketAddr>().expect("bind address"))
+            .with_storage(StorageConfig::new().with_backend(StorageBackend::Memory)),
+    )
+    .await
+    .expect("remote broker starts");
+    let remote_addr = remote.local_addr().expect("remote address");
+    let mut remote_ready = remote.ready_receiver();
+    let remote_shutdown = remote.shutdown_handle();
+    let remote_run = tokio::spawn(async move { remote.run().await });
+    remote_ready.wait_for(|&up| up).await.expect("remote ready");
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let mut bridge = BridgeConfig::new("lock-bridge", remote_addr.to_string()).add_topic(
+        "bridged/#",
+        BridgeDirection::Both,
+        QoS::AtLeastOnce,
+    );
+    bridge.initial_reconnect_delay = Duration::from_millis(200);
+    let mut config = BrokerConfig::default()
+        .with_bind_address("127.0.0.1:0".parse::<SocketAddr>().expect("bind address"))
+        .with_storage(
+            StorageConfig::new()
+                .with_backend(StorageBackend::File)
+                .with_base_dir(dir.path().to_path_buf()),
+        );
+    config.bridges = vec![bridge];
+    let mut local = MqttBroker::with_config(config)
+        .await
+        .expect("bridged broker starts");
+    let mut ready = local.ready_receiver();
+    let shutdown = local.shutdown_handle();
+    let run = tokio::spawn(async move { local.run().await });
+    ready
+        .wait_for(|&up| up)
+        .await
+        .expect("bridged broker ready");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    shutdown.shutdown();
+    run.await
+        .expect("broker task joins")
+        .expect("broker run returns cleanly");
+    let began = Instant::now();
+    let mut reopened = FileBackend::new(dir.path()).await;
+    while reopened.is_err() && began.elapsed() < Duration::from_secs(2) {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        reopened = FileBackend::new(dir.path()).await;
+    }
+    let waited = began.elapsed();
+    drop(reopened.expect("directory is released after shutdown"));
+    assert!(
+        waited < Duration::from_millis(400),
+        "directory held for {waited:?} after run returned"
+    );
+
+    remote_shutdown.shutdown();
+    remote_run
+        .await
+        .expect("remote task joins")
+        .expect("remote run returns cleanly");
 }

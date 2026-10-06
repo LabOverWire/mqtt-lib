@@ -16,7 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **Graceful shutdown now waits for connection handlers.** `MqttBroker::run()` used to return while connection handlers were still writing their final session state, so those writes could still be in progress after `run()` returned. `run()` now returns once every connection handler has finished, within the existing 5 second shutdown wait; if that wait runs out it logs a warning and returns. The release point and the wait are modelled in `specs/tla/storage-lock/`.
+- Graceful shutdown also waits for the `$SYS` topics task and for the bridge tasks it aborts. With bridges configured, the bridge client's connection monitor still exits a few milliseconds after `run()` returns, so the storage directory is released that much later.
 - Integration tests that started brokers on the default `./mqtt_storage` in parallel now use in-memory storage.
+
+### Fixed
+
+- **`MqttClient::disconnect()` now stops the connection monitor at once.** The monitor only checked for a stop once a second, so after `disconnect()` it kept the client, its callbacks and anything they hold alive for up to a second. A broker with a bridge held its storage directory that long after shutdown.
 
 ## [mqttv5-cli 0.29.6] - 2026-10-05
 
