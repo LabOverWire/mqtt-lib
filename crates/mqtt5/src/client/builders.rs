@@ -58,6 +58,7 @@ impl MqttClient {
             connection_event_callbacks,
             error_recovery_config: Arc::new(RwLock::new(ErrorRecoveryConfig::default())),
             connection_mutex: Arc::new(tokio::sync::Mutex::new(())),
+            monitor_wakeup: Arc::new(tokio::sync::Notify::new()),
             tls_config: Arc::new(RwLock::new(None)),
             transport_config: Arc::new(RwLock::new(
                 crate::transport::ClientTransportConfig::default(),

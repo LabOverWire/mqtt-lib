@@ -114,12 +114,12 @@ jobs:
 
   # Test with minimal supported Rust version
   msrv:
-    name: MSRV (1.88)
+    name: MSRV (1.89)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@1.88
+        uses: dtolnay/rust-toolchain@1.89
       - name: Cache dependencies
         uses: Swatinem/rust-cache@v2
       - name: Generate test certificates
@@ -128,7 +128,7 @@ jobs:
           ./scripts/generate_test_certs.sh
       - name: Check MSRV
         # Note: We exclude embedded-single-core feature as it only works on embedded targets
-        run: cargo +1.88 check --workspace
+        run: cargo +1.89 check --workspace
 
   # Build documentation
   docs:

@@ -14,6 +14,10 @@ async fn start_quic_broker(strategy: ServerDeliveryStrategy) -> (BrokerShutdownH
     let _ = rustls::crypto::ring::default_provider().install_default();
     let cert_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test_certs");
     let config = BrokerConfig::default()
+        .with_storage(
+            mqtt5::broker::config::StorageConfig::new()
+                .with_backend(mqtt5::broker::config::StorageBackend::Memory),
+        )
         .with_bind_address(([127, 0, 0, 1], 0))
         .with_server_delivery_strategy(strategy)
         .with_quic(

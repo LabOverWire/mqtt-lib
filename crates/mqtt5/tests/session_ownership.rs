@@ -4,7 +4,7 @@ use bytes::BytesMut;
 use mqtt5::broker::auth::{AuthProvider, AuthResult};
 use mqtt5::broker::config::{BrokerConfig, StorageBackend as BackendKind, StorageConfig};
 use mqtt5::broker::router::MessageRouter;
-use mqtt5::broker::server::MqttBroker;
+use mqtt5::broker::server::{BrokerShutdownHandle, MqttBroker};
 use mqtt5::broker::storage::{
     ClientSession, DynamicStorage, FileBackend, StorageBackend, StoredSubscription,
 };
@@ -69,6 +69,7 @@ struct Broker {
     storage: Option<Arc<DynamicStorage>>,
     router: Arc<MessageRouter>,
     provider: Arc<Provider>,
+    shutdown: BrokerShutdownHandle,
     handle: tokio::task::JoinHandle<()>,
 }
 
@@ -87,6 +88,7 @@ impl Broker {
         let addr = broker.local_addr().expect("broker address").to_string();
         let storage = broker.storage();
         let router = broker.router();
+        let shutdown = broker.shutdown_handle();
         let handle = tokio::spawn(async move {
             if let Err(e) = broker.run().await {
                 tracing::debug!("broker stopped: {e}");
@@ -98,6 +100,7 @@ impl Broker {
             storage,
             router,
             provider,
+            shutdown,
             handle,
         }
     }
@@ -106,6 +109,11 @@ impl Broker {
         self.handle.abort();
         let aborted = self.handle.await;
         assert!(aborted.is_err_and(|e| e.is_cancelled()));
+    }
+
+    async fn shut_down(self) {
+        self.shutdown.shutdown();
+        self.handle.await.expect("broker task joins");
     }
 
     fn storage(&self) -> &DynamicStorage {
@@ -505,7 +513,7 @@ async fn session_from_a_previous_run_expires_after_restart() {
         .session_client_ids()
         .await
         .expect("list sessions");
-    broker.stop().await;
+    broker.shut_down().await;
     assert!(
         !stored.iter().any(|id| id == "stale"),
         "a 1s-expiry session written by a previous run must expire after the restart"

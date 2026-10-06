@@ -55,7 +55,7 @@ const LEGACY_STORAGE_VERSION: &str = "1";
 
 /// File-based storage backend; session writes are group-committed to one log
 pub struct FileBackend {
-    _base_dir: PathBuf,
+    directory_lock: Option<std::fs::File>,
     retained_dir: PathBuf,
     queues_dir: PathBuf,
     inflight_dir: PathBuf,
@@ -63,6 +63,16 @@ pub struct FileBackend {
     queues: QueueRegistry,
     write_behind: Arc<WriteBehind>,
     queue_flush: mpsc::Sender<oneshot::Sender<()>>,
+}
+
+impl Drop for FileBackend {
+    fn drop(&mut self) {
+        if let Some(lock) = &self.directory_lock {
+            if let Err(e) = lock.unlock() {
+                warn!("Failed to release storage directory lock: {e}");
+            }
+        }
+    }
 }
 
 impl FileBackend {
@@ -83,6 +93,7 @@ impl FileBackend {
         limits: QueueLimits,
     ) -> Result<Self> {
         let base_dir = base_dir.as_ref().to_path_buf();
+        let directory_lock = Self::lock_storage_dir(&base_dir).await?;
         let retained_dir = base_dir.join("retained");
         let sessions_dir = base_dir.join("sessions");
         let queues_dir = base_dir.join("queues");
@@ -110,7 +121,7 @@ impl FileBackend {
         ));
 
         let backend = Self {
-            _base_dir: base_dir.clone(),
+            directory_lock,
             retained_dir,
             queues_dir,
             inflight_dir,
@@ -339,6 +350,54 @@ impl FileBackend {
     pub async fn shutdown(&self) -> Result<()> {
         self.flush_queue_writes().await;
         Ok(())
+    }
+
+    async fn lock_storage_dir(base_dir: &Path) -> Result<Option<std::fs::File>> {
+        fs::create_dir_all(base_dir).await.map_err(|e| {
+            MqttError::Configuration(format!(
+                "Failed to create storage dir {}: {e}",
+                base_dir.display()
+            ))
+        })?;
+        let lock_path = base_dir.join(".lock");
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock_path)
+            .map_err(|e| {
+                MqttError::Configuration(format!(
+                    "Failed to open storage lock {}: {e}",
+                    lock_path.display()
+                ))
+            })?;
+        let attempt = lock.try_lock();
+        Self::directory_lock_outcome(lock, attempt, base_dir)
+    }
+
+    fn directory_lock_outcome(
+        lock: std::fs::File,
+        attempt: std::result::Result<(), std::fs::TryLockError>,
+        base_dir: &Path,
+    ) -> Result<Option<std::fs::File>> {
+        match attempt {
+            Ok(()) => Ok(Some(lock)),
+            Err(std::fs::TryLockError::Error(e)) if e.kind() == std::io::ErrorKind::Unsupported => {
+                warn!(
+                    "File locking is not supported for storage directory {}; starting without the directory lock, so another broker could share it: {e}",
+                    base_dir.display()
+                );
+                Ok(None)
+            }
+            Err(std::fs::TryLockError::WouldBlock) => Err(MqttError::Configuration(format!(
+                "Storage directory {} is already in use by another broker",
+                base_dir.display()
+            ))),
+            Err(std::fs::TryLockError::Error(e)) => Err(MqttError::Configuration(format!(
+                "Failed to lock storage directory {}: {e}",
+                base_dir.display()
+            ))),
+        }
     }
 
     /// Waits until every queued-message write and delete issued so far has reached disk.
@@ -1196,5 +1255,36 @@ mod tests {
         assert!(message.contains("backup"), "{message}");
         assert!(!message.contains("rm -rf"), "{message}");
         assert!(!message.contains("mqttv5 storage"), "{message}");
+    }
+
+    fn lock_outcome(
+        attempt: std::result::Result<(), std::fs::TryLockError>,
+    ) -> Result<Option<std::fs::File>> {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = std::fs::File::create(dir.path().join(".lock")).unwrap();
+        FileBackend::directory_lock_outcome(lock, attempt, dir.path())
+    }
+
+    #[test]
+    fn unsupported_file_locking_starts_without_the_lock() {
+        let attempt = Err(std::fs::TryLockError::Error(std::io::Error::from(
+            std::io::ErrorKind::Unsupported,
+        )));
+        assert!(lock_outcome(attempt).unwrap().is_none());
+    }
+
+    #[test]
+    fn held_lock_refuses_the_directory() {
+        let error = lock_outcome(Err(std::fs::TryLockError::WouldBlock)).unwrap_err();
+        assert!(error.to_string().contains("already in use"), "{error}");
+    }
+
+    #[test]
+    fn other_lock_errors_refuse_the_directory() {
+        let attempt = Err(std::fs::TryLockError::Error(std::io::Error::from(
+            std::io::ErrorKind::PermissionDenied,
+        )));
+        let error = lock_outcome(attempt).unwrap_err();
+        assert!(error.to_string().contains("Failed to lock"), "{error}");
     }
 }
