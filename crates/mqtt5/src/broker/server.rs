@@ -27,6 +27,7 @@ use tracing::{debug, error, info, warn};
 #[cfg(feature = "transport-quic")]
 use crate::broker::quic_acceptor::{
     run_quic_cluster_connection_handler, run_quic_connection_handler, QuicAcceptorConfig,
+    QuicHandlerContext,
 };
 #[cfg(feature = "opentelemetry")]
 use crate::telemetry;
@@ -99,6 +100,7 @@ struct AcceptLoopState {
     stats: Arc<BrokerStats>,
     resource_monitor: Arc<ResourceMonitor>,
     shutdown_tx: tokio::sync::broadcast::Sender<()>,
+    connections: mpsc::Sender<()>,
 }
 
 impl AcceptLoopState {
@@ -1071,8 +1073,11 @@ impl MqttBroker {
                                                 state.shutdown_tx.subscribe(),
                                             );
 
+                                            let connection = state.connections.clone();
                                             tokio::spawn(async move {
-                                                if let Err(e) = handler.run().await {
+                                                let outcome = handler.run().await;
+                                                drop(connection);
+                                                if let Err(e) = outcome {
                                                     if e.is_normal_disconnect() {
                                                         debug!("Client handler finished");
                                                     } else {
@@ -1241,8 +1246,11 @@ impl MqttBroker {
                                                 state.shutdown_tx.subscribe(),
                                             );
 
+                                            let connection = state.connections.clone();
                                             tokio::spawn(async move {
-                                                if let Err(e) = handler.run().await {
+                                                let outcome = handler.run().await;
+                                                drop(connection);
+                                                if let Err(e) = outcome {
                                                     if e.is_normal_disconnect() {
                                                         debug!("Client handler finished");
                                                     } else {
@@ -1323,13 +1331,16 @@ impl MqttBroker {
                                 run_quic_connection_handler(
                                     conn,
                                     peer_addr,
-                                    cfg,
-                                    state.router,
-                                    auth,
-                                    state.storage,
-                                    state.stats,
-                                    state.resource_monitor,
-                                    state.shutdown_tx.subscribe(),
+                                    QuicHandlerContext {
+                                        config: cfg,
+                                        router: state.router,
+                                        auth_provider: auth,
+                                        storage: state.storage,
+                                        stats: state.stats,
+                                        resource_monitor: state.resource_monitor,
+                                        shutdown_rx: state.shutdown_tx.subscribe(),
+                                        connection_alive: state.connections,
+                                    },
                                 )
                                 .await;
                             });
@@ -1436,8 +1447,11 @@ impl MqttBroker {
                                         )
                                         .with_skip_bridge_forwarding(true);
 
+                                        let connection = state.connections.clone();
                                         tokio::spawn(async move {
-                                            if let Err(e) = handler.run().await {
+                                            let outcome = handler.run().await;
+                                            drop(connection);
+                                            if let Err(e) = outcome {
                                                 if e.is_normal_disconnect() {
                                                     debug!("Cluster client handler finished");
                                                 } else {
@@ -1517,13 +1531,16 @@ impl MqttBroker {
                                 run_quic_cluster_connection_handler(
                                     conn,
                                     peer_addr,
-                                    cfg,
-                                    state.router,
-                                    auth,
-                                    state.storage,
-                                    state.stats,
-                                    state.resource_monitor,
-                                    state.shutdown_tx.subscribe(),
+                                    QuicHandlerContext {
+                                        config: cfg,
+                                        router: state.router,
+                                        auth_provider: auth,
+                                        storage: state.storage,
+                                        stats: state.stats,
+                                        resource_monitor: state.resource_monitor,
+                                        shutdown_rx: state.shutdown_tx.subscribe(),
+                                        connection_alive: state.connections,
+                                    },
                                 )
                                 .await;
                             });
@@ -1592,7 +1609,11 @@ impl MqttBroker {
         Self::spawn_cluster_quic_accept_tasks(listeners.cluster_quic, state, task_handles);
     }
 
-    async fn finish_shutdown(&self, task_handles: Vec<tokio::task::JoinHandle<()>>) {
+    async fn finish_shutdown(
+        &self,
+        task_handles: Vec<tokio::task::JoinHandle<()>>,
+        mut connections_closed: mpsc::Receiver<()>,
+    ) {
         if let Some(ref bridge_manager) = self.bridge_manager {
             info!("Stopping all bridges");
             if let Err(e) = bridge_manager.stop_all().await {
@@ -1600,12 +1621,16 @@ impl MqttBroker {
             }
         }
 
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let drained = tokio::time::timeout(std::time::Duration::from_secs(5), async {
             for handle in task_handles {
                 let _ = handle.await;
             }
+            connections_closed.recv().await
         })
         .await;
+        if drained.is_err() {
+            warn!("Timed out waiting for connections to finish during shutdown");
+        }
 
         #[cfg(feature = "opentelemetry")]
         telemetry::shutdown_telemetry();
@@ -1653,8 +1678,11 @@ impl MqttBroker {
                                         state.shutdown_tx.subscribe(),
                                     );
 
+                                    let connection = state.connections.clone();
                                     tokio::spawn(async move {
-                                        if let Err(e) = handler.run().await {
+                                        let outcome = handler.run().await;
+                                        drop(connection);
+                                        if let Err(e) = outcome {
                                             if e.is_normal_disconnect() {
                                                 debug!("Client handler finished");
                                             } else {
@@ -1834,6 +1862,7 @@ impl MqttBroker {
         );
 
         let mut shutdown_rx = shutdown_tx.subscribe();
+        let (connections_open, connections_closed) = mpsc::channel(1);
 
         let accept_state = AcceptLoopState {
             config_rx: self.config_watch_rx.clone(),
@@ -1843,6 +1872,7 @@ impl MqttBroker {
             stats: Arc::clone(&self.stats),
             resource_monitor: Arc::clone(&self.resource_monitor),
             shutdown_tx: shutdown_tx.clone(),
+            connections: connections_open,
         };
 
         Self::spawn_accept_tasks(listeners, &accept_state, &mut task_handles);
@@ -1867,7 +1897,8 @@ impl MqttBroker {
         info!("Broker shutting down");
 
         drop(sys_topics_task);
-        self.finish_shutdown(task_handles).await;
+        drop(accept_state);
+        self.finish_shutdown(task_handles, connections_closed).await;
 
         info!("Broker shutdown complete");
 

@@ -3,7 +3,7 @@
 use mqtt5::broker::config::{BrokerConfig, StorageBackend, StorageConfig};
 use mqtt5::broker::{BrokerShutdownHandle, MqttBroker};
 use mqtt5::error::Result;
-use mqtt5::{ConnectOptions, MqttClient};
+use mqtt5::{ConnectOptions, MqttClient, QoS, SubscribeOptions};
 use std::net::SocketAddr;
 use std::path::Path;
 use tokio::task::JoinHandle;
@@ -90,5 +90,48 @@ async fn storage_directory_is_released_when_the_broker_shuts_down() {
         .expect("broker starts once the directory is released");
     assert!(connect_persistent(restarted.addr, "lock-client-a").await);
     assert!(connect_persistent(restarted.addr, "lock-client-b").await);
+    restarted.stop().await;
+}
+
+async fn stay_connected(addr: SocketAddr, client_id: &str) -> MqttClient {
+    let client = MqttClient::new(client_id);
+    let options = ConnectOptions::new(client_id)
+        .with_clean_start(false)
+        .with_session_expiry_interval(3600)
+        .with_automatic_reconnect(false);
+    Box::pin(client.connect_with_options(&format!("mqtt://{addr}"), options))
+        .await
+        .expect("client connects");
+    client
+        .subscribe_with_options(
+            &format!("held/{client_id}"),
+            SubscribeOptions {
+                qos: QoS::AtLeastOnce,
+                ..Default::default()
+            },
+            |_| {},
+        )
+        .await
+        .expect("client subscribes");
+    client
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn run_returns_after_connected_clients_have_released_the_directory() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let first = start_on(dir.path()).await.expect("first broker starts");
+    let mut clients = Vec::new();
+    for i in 0..20 {
+        clients.push(stay_connected(first.addr, &format!("held-client-{i}")).await);
+    }
+    first.stop().await;
+
+    let restarted = start_on(dir.path())
+        .await
+        .expect("directory is free as soon as run returns");
+    drop(clients);
+    for i in 0..20 {
+        assert!(connect_persistent(restarted.addr, &format!("held-client-{i}")).await);
+    }
     restarted.stop().await;
 }
