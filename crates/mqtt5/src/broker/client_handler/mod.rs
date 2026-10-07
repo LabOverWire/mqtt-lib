@@ -477,9 +477,6 @@ impl ClientHandler {
         }
     }
 
-    /// Takes ownership of the session's delivery state once no older handler can still be
-    /// touching it: a clean start discards what the old session left, a resumed session
-    /// reloads its persisted inflight messages at the front of the queue.
     async fn bind(&mut self) -> Result<()> {
         self.bound = true;
         self.released_rx = None;
@@ -502,8 +499,6 @@ impl ClientHandler {
         Ok(())
     }
 
-    /// The displaced handler's side of a takeover: give the session queue everything this
-    /// connection still owned (or drop it on a clean start), then let the new handler go.
     async fn hand_off(&mut self, queue: &QueueHandle, notice: TakeoverNotice) {
         let TakeoverNotice {
             discard,
