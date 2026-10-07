@@ -70,6 +70,31 @@ pub(super) struct PendingConnect {
     pub(super) assigned_client_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SessionStart {
+    CleanStart,
+    Resumed,
+    NothingToResume,
+}
+
+impl SessionStart {
+    pub(super) fn of(clean_start_requested: bool, resumed: bool) -> Self {
+        match (clean_start_requested, resumed) {
+            (true, _) => Self::CleanStart,
+            (false, true) => Self::Resumed,
+            (false, false) => Self::NothingToResume,
+        }
+    }
+
+    pub(super) fn is_fresh(self) -> bool {
+        self != Self::Resumed
+    }
+
+    pub(super) fn clean_start_requested(self) -> bool {
+        self == Self::CleanStart
+    }
+}
+
 pub(super) enum InflightPublish {
     Pending(PublishPacket),
     Handled,
@@ -104,7 +129,7 @@ pub struct ClientHandler {
     pub(super) handoff_deadline: Option<Instant>,
     pub(super) handoff_waived: bool,
     pub(super) handoff_baseline: usize,
-    pub(super) clean_start: bool,
+    pub(super) session_start: SessionStart,
     pub(super) held: Vec<QueuedMessage>,
     pub(super) awaiting_pubcomp: HashSet<u16>,
     pub(super) inflight_order: VecDeque<u16>,
@@ -223,7 +248,7 @@ impl ClientHandler {
             handoff_deadline: None,
             handoff_waived: false,
             handoff_baseline: 0,
-            clean_start: true,
+            session_start: SessionStart::CleanStart,
             held: Vec::new(),
             awaiting_pubcomp: HashSet::new(),
             inflight_order: VecDeque::new(),
@@ -463,16 +488,13 @@ impl ClientHandler {
             return Ok(());
         };
         self.handoff_baseline = queue.handoffs();
-        if self.clean_start {
+        if self.session_start.is_fresh() {
             if let (Some(storage), Some(client_id)) = (&self.storage, &self.client_id) {
                 if let Err(e) = storage.remove_all_inflight_messages(client_id).await {
                     debug!("failed to clear inflight messages on clean start: {e}");
                 }
             }
         } else if !self.handoff_waived {
-            // Only reload persisted inflight when no live predecessor still owns it. On a
-            // waived hand-off the old handler is still running and will re-queue its inflight
-            // from memory when it exits; reloading here would deliver those messages twice.
             self.load_persisted_inflight(&queue).await?;
         }
         queue.mark_bound(self.generation);
@@ -494,9 +516,6 @@ impl ClientHandler {
             self.requeue_unsent(queue).await;
         }
         queue.finish_drain();
-        // Dropping the guard decrements the hand-off count and, when it reaches zero, wakes
-        // the successor waiting to bind — do it before releasing so the successor sees the
-        // session quiesced.
         drop(guard);
         if released.send(()).is_err() {
             debug!("New session handler went away before the hand-off completed");
@@ -563,7 +582,7 @@ impl ClientHandler {
             let event = ClientConnectEvent {
                 client_id: client_id.to_string().into(),
                 user_id: self.user_id.as_deref().map(Arc::from),
-                clean_start: self.clean_start,
+                clean_start: self.session_start.clean_start_requested(),
                 session_expiry_interval: self
                     .session
                     .as_ref()

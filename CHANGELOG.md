@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [mqtt5 0.47.1] - 2026-10-07
+
+### Fixed
+
+- **`ClientConnectEvent.clean_start` reports the Clean Start flag the client sent** (#186). It reported whether a stored session was resumed instead, so a client connecting for the first time with Clean Start 0 and a session expiry was reported as `clean_start = true`. Consumers that decide session persistence from the event treated that client as clean. The wasm broker already passed the CONNECT flag. Covered for plain connects and for connects completed through multi-step enhanced authentication.
+
 ## [mqtt5 0.47.0] - 2026-10-05
 
 ### Breaking

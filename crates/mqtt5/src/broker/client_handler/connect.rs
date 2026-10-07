@@ -13,7 +13,7 @@ use tokio::sync::oneshot;
 use tokio::time::Instant;
 use tracing::{debug, info, trace, warn};
 
-use super::{AuthState, ClientHandler, PendingConnect};
+use super::{AuthState, ClientHandler, PendingConnect, SessionStart};
 
 enum AuthOutcome {
     Authenticated(Box<ConnectPacket>),
@@ -512,7 +512,7 @@ impl ClientHandler {
         self.released_rx = registration.released;
         self.disconnect_rx = Some(disconnect_rx);
         self.queue = Some(queue);
-        self.clean_start = !resume;
+        self.session_start = SessionStart::of(connect.clean_start, resume);
 
         if let Err(e) = self
             .router
