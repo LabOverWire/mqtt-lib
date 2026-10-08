@@ -229,13 +229,13 @@ impl FlowControlManager {
                 None => semaphore.acquire().await,
             };
             if let Ok(permit) = acquired {
-                permit.forget();
                 if let Some(generation) = flow
                     .read()
                     .await
                     .claim_send_quota(&semaphore, packet_id)
                     .await
                 {
+                    permit.forget();
                     return Ok(generation);
                 }
             } else if Arc::ptr_eq(&semaphore, &flow.read().await.quota_semaphore) {
@@ -609,6 +609,29 @@ mod tests {
             .claim_send_quota(&stale, 1)
             .await
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn cancelled_acquire_returns_its_permit() {
+        let flow = Arc::new(RwLock::new(FlowControlManager::new(1)));
+        FlowControlManager::acquire_shared_send_quota(&flow, 1)
+            .await
+            .unwrap();
+        let semaphore = Arc::clone(&flow.read().await.quota_semaphore);
+        let waiter = {
+            let flow = Arc::clone(&flow);
+            tokio::spawn(
+                async move { FlowControlManager::acquire_shared_send_quota(&flow, 2).await },
+            )
+        };
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let held = flow.write().await;
+        semaphore.add_permits(1);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        waiter.abort();
+        assert!(waiter.await.unwrap_err().is_cancelled());
+        drop(held);
+        assert_eq!(semaphore.available_permits(), 1);
     }
 
     #[tokio::test]

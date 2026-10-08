@@ -108,6 +108,65 @@ pub(crate) enum StagedPublish {
     Ready(Box<ReadyPublish>),
 }
 
+pub(crate) struct QuotaClaim {
+    flow: Arc<tokio::sync::RwLock<FlowControlManager>>,
+    packet_id: u16,
+    generation: u64,
+    settled: bool,
+}
+
+impl QuotaClaim {
+    pub(crate) async fn acquire(
+        flow: Arc<tokio::sync::RwLock<FlowControlManager>>,
+        packet_id: u16,
+    ) -> Result<Self> {
+        let generation = FlowControlManager::acquire_shared_send_quota(&flow, packet_id).await?;
+        Ok(Self {
+            flow,
+            packet_id,
+            generation,
+            settled: false,
+        })
+    }
+
+    fn for_generation(self, generation: u64) -> Option<Self> {
+        if self.generation == generation {
+            Some(self)
+        } else {
+            self.hand_over();
+            None
+        }
+    }
+
+    fn hand_over(mut self) {
+        self.settled = true;
+    }
+
+    async fn release(mut self) {
+        self.settled = true;
+        DirectClientInner::release_send_quota(&self.flow, self.packet_id).await;
+    }
+}
+
+impl Drop for QuotaClaim {
+    fn drop(&mut self) {
+        if self.settled {
+            return;
+        }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let flow = Arc::clone(&self.flow);
+        let packet_id = self.packet_id;
+        let generation = self.generation;
+        runtime.spawn(async move {
+            if flow.read().await.quota_generation() == generation {
+                DirectClientInner::release_send_quota(&flow, packet_id).await;
+            }
+        });
+    }
+}
+
 pub(crate) enum Transmitted {
     Sent(Delivery),
     InFlight(InFlight),
@@ -921,27 +980,15 @@ impl DirectClientInner {
     /// the publish is rejected at enqueue time instead of being accepted and then
     /// rejected when the queue is flushed on reconnect. A packet identifier is
     /// allocated only after these checks pass.
-    async fn queue_publish_message(
-        &self,
-        topic: String,
-        payload: Vec<u8>,
-        options: &PublishOptions,
-    ) -> Result<PublishHandle> {
-        if options.retain && !self.server_retain_available.load(Ordering::SeqCst) {
+    async fn queue_publish_message(&self, request: PublishPacket) -> Result<PublishHandle> {
+        if request.retain && !self.server_retain_available.load(Ordering::SeqCst) {
             return Err(MqttError::RetainNotSupported);
         }
 
         let mut publish = self
             .with_aliased_topic(PublishPacket {
-                topic_name: topic,
                 packet_id: Some(SIZE_PROBE_PACKET_ID),
-                payload: payload.into(),
-                qos: options.qos,
-                retain: options.retain,
-                dup: false,
-                properties: options.properties.clone().into(),
-                protocol_version: self.options.protocol_version.as_u8(),
-                stream_id: None,
+                ..request
             })
             .await?;
 
@@ -950,11 +997,12 @@ impl DirectClientInner {
         let reservation = self.allocate_packet_id().await?;
         publish.packet_id = Some(reservation.packet_id());
         let (completion, handle) = Completion::new();
-        self.queued_messages.lock().push_back(QueuedPublish::new(
-            publish,
-            reservation,
-            Some(completion),
-        ));
+        let limits = &self.options.session_config;
+        self.queued_messages.lock().push_back_within(
+            QueuedPublish::new(publish, reservation, Some(completion)),
+            limits.max_queued_messages,
+            limits.max_queued_size,
+        )?;
         Ok(handle)
     }
 
@@ -1045,13 +1093,6 @@ impl DirectClientInner {
         let protocol_version = self.options.protocol_version.as_u8();
         outbound::check_publish(&topic, &options, protocol_version)?;
 
-        if !self.is_connected() && self.queue_on_disconnect && options.qos != QoS::AtMostOnce {
-            return self
-                .queue_publish_message(topic, payload, &options)
-                .await
-                .map(StagedPublish::Queued);
-        }
-
         #[cfg(feature = "opentelemetry")]
         let options = {
             let mut opts = options;
@@ -1059,7 +1100,8 @@ impl DirectClientInner {
             opts
         };
 
-        if !self.is_connected() {
+        let queue = self.queue_on_disconnect && options.qos != QoS::AtMostOnce;
+        if !self.is_connected() && !queue {
             return Err(MqttError::NotConnected);
         }
 
@@ -1079,6 +1121,12 @@ impl DirectClientInner {
             protocol_version,
             stream_id: None,
         };
+        if !self.is_connected() {
+            return self
+                .queue_publish_message(request)
+                .await
+                .map(StagedPublish::Queued);
+        }
         self.conform_to_connection(request)
             .await
             .map(StagedPublish::Ready)
@@ -1121,23 +1169,23 @@ impl DirectClientInner {
     pub(crate) async fn transmit_publish(
         &self,
         ready: Box<ReadyPublish>,
-        claim: Option<u64>,
+        claim: Option<QuotaClaim>,
     ) -> Result<Transmitted> {
         let packet_id = ready.packet_id();
         let flow = Arc::clone(self.session.read().await.flow_control());
         let quota_generation = flow.read().await.quota_generation();
-        let claimed = packet_id.filter(|_| claim == Some(quota_generation));
+        let mut claim = claim.and_then(|claim| claim.for_generation(quota_generation));
 
         if !self.is_connected() {
-            if let Some(pid) = claimed {
-                Self::release_send_quota(&flow, pid).await;
+            if let Some(claim) = claim {
+                claim.release().await;
             }
             return Err(MqttError::NotConnected);
         }
 
         if ready.epoch != self.connection_epoch.load(Ordering::SeqCst) {
-            if let Some(pid) = claimed {
-                Self::release_send_quota(&flow, pid).await;
+            if let Some(claim) = claim {
+                claim.release().await;
             }
             tracing::debug!(
                 packet_id = ?packet_id,
@@ -1169,8 +1217,14 @@ impl DirectClientInner {
                     Err(e) => Err(e),
                 };
                 if let Err(e) = stored {
-                    Self::release_send_quota(&flow, pid).await;
+                    match claim {
+                        Some(claim) => claim.release().await,
+                        None => Self::release_send_quota(&flow, pid).await,
+                    }
                     return Err(e);
+                }
+                if let Some(claim) = claim.take() {
+                    claim.hand_over();
                 }
                 let (completion, handle) = Completion::new();
                 self.publish_outcomes.lock().track(pid, qos, completion);
@@ -2290,14 +2344,10 @@ pub mod tests {
         }
     }
 
-    async fn claim_quota(client: &DirectClientInner, ready: &ReadyPublish) -> Option<u64> {
+    async fn claim_quota(client: &DirectClientInner, ready: &ReadyPublish) -> Option<QuotaClaim> {
         let flow = Arc::clone(client.session.read().await.flow_control());
         match ready.packet_id() {
-            Some(packet_id) => Some(
-                FlowControlManager::acquire_shared_send_quota(&flow, packet_id)
-                    .await
-                    .unwrap(),
-            ),
+            Some(packet_id) => Some(QuotaClaim::acquire(flow, packet_id).await.unwrap()),
             None => None,
         }
     }
@@ -2305,7 +2355,7 @@ pub mod tests {
     async fn send_with_claim(
         client: &DirectClientInner,
         mut ready: Box<ReadyPublish>,
-        mut claim: Option<u64>,
+        mut claim: Option<QuotaClaim>,
     ) -> usize {
         let mut restages = 0;
         loop {
@@ -2354,11 +2404,11 @@ pub mod tests {
         };
         let c_quota = tokio::time::timeout(
             Duration::from_millis(500),
-            FlowControlManager::acquire_shared_send_quota(&flow, c.packet_id().unwrap()),
+            QuotaClaim::acquire(Arc::clone(&flow), c.packet_id().unwrap()),
         )
         .await;
-        if let Ok(Ok(generation)) = c_quota {
-            send_with_claim(&client, c, Some(generation)).await;
+        if let Ok(Ok(claim)) = c_quota {
+            send_with_claim(&client, c, Some(claim)).await;
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
         let conn2 = publishes_on(&seen, 1);
@@ -2395,9 +2445,7 @@ pub mod tests {
         };
         let b_id = b.packet_id().unwrap();
         let waiting_flow = Arc::clone(&flow);
-        let waiting = tokio::spawn(async move {
-            FlowControlManager::acquire_shared_send_quota(&waiting_flow, b_id).await
-        });
+        let waiting = tokio::spawn(async move { QuotaClaim::acquire(waiting_flow, b_id).await });
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(!waiting.is_finished(), "b must wait for Receive Maximum 1");
 
@@ -2801,6 +2849,170 @@ pub mod tests {
             on_new > 0 && quota.is_ok(),
             "new healthy connection is starved by a replay stuck on the replaced connection: resent on new={on_new}, live quota={quota:?}"
         );
+    }
+
+    struct ReverseCodec;
+
+    impl crate::codec::PayloadCodec for ReverseCodec {
+        fn name(&self) -> &'static str {
+            "reverse"
+        }
+
+        fn content_type(&self) -> &'static str {
+            "application/x-reverse"
+        }
+
+        fn encode(&self, payload: &[u8]) -> Result<bytes::Bytes> {
+            Ok(payload.iter().rev().copied().collect::<Vec<u8>>().into())
+        }
+
+        fn decode(&self, payload: &[u8]) -> Result<bytes::Bytes> {
+            self.encode(payload)
+        }
+
+        fn min_size_threshold(&self) -> usize {
+            0
+        }
+    }
+
+    fn queued_front(client: &DirectClientInner) -> PublishPacket {
+        client.queued_messages.lock().front().unwrap().1
+    }
+
+    #[tokio::test]
+    async fn queued_publish_is_encoded_with_the_codec() {
+        let registry = Arc::new(crate::codec::CodecRegistry::new());
+        registry.register(ReverseCodec);
+        registry.set_default("application/x-reverse").unwrap();
+        let client = DirectClientInner::new(
+            ConnectOptions::new("queued-codec")
+                .with_clean_start(false)
+                .with_codec_registry(registry),
+        );
+        let Ok(StagedPublish::Queued(_)) = client
+            .stage_publish("t/q".into(), b"abc".to_vec(), qos(QoS::AtLeastOnce))
+            .await
+        else {
+            panic!("an offline QoS 1 publish must be queued");
+        };
+        let queued = queued_front(&client);
+        assert_eq!(queued.payload.as_ref(), b"cba");
+        assert_eq!(
+            queued.properties.get_content_type().as_deref(),
+            Some("application/x-reverse")
+        );
+    }
+
+    fn bounded_offline_client(max_messages: usize, max_bytes: usize) -> DirectClientInner {
+        let mut options = ConnectOptions::new("bounded-queue").with_clean_start(false);
+        options.session_config.max_queued_messages = max_messages;
+        options.session_config.max_queued_size = max_bytes;
+        DirectClientInner::new(options)
+    }
+
+    async fn stage_offline(client: &DirectClientInner, payload: usize) -> Result<StagedPublish> {
+        client
+            .stage_publish("t/q".into(), vec![0u8; payload], qos(QoS::AtLeastOnce))
+            .await
+    }
+
+    #[tokio::test]
+    async fn offline_queue_refuses_a_publish_over_its_message_limit() {
+        let client = bounded_offline_client(2, usize::MAX);
+        for _ in 0..2 {
+            assert!(matches!(
+                stage_offline(&client, 1).await,
+                Ok(StagedPublish::Queued(_))
+            ));
+        }
+        let third = stage_offline(&client, 1).await;
+        assert!(
+            matches!(
+                third,
+                Err(MqttError::OfflineQueueFull {
+                    max_messages: 2,
+                    ..
+                })
+            ),
+            "{third:?}"
+        );
+        assert_eq!(client.queued_messages.lock().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn offline_queue_refuses_a_publish_over_its_byte_limit() {
+        let client = bounded_offline_client(usize::MAX, 300);
+        assert!(matches!(
+            stage_offline(&client, 200).await,
+            Ok(StagedPublish::Queued(_))
+        ));
+        assert!(matches!(
+            stage_offline(&client, 200).await,
+            Err(MqttError::OfflineQueueFull { max_bytes: 300, .. })
+        ));
+        assert!(matches!(
+            stage_offline(&client, 10).await,
+            Ok(StagedPublish::Queued(_))
+        ));
+        assert_eq!(client.queued_messages.lock().len(), 2);
+    }
+
+    #[cfg(feature = "opentelemetry")]
+    #[tokio::test]
+    async fn queued_publish_carries_the_trace_context() {
+        use opentelemetry::context::FutureExt;
+        use opentelemetry::trace::{
+            SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId, TraceState,
+        };
+        let client =
+            DirectClientInner::new(ConnectOptions::new("queued-trace").with_clean_start(false));
+        let span = SpanContext::new(
+            TraceId::from_hex("0af7651916cd43dd8448eb211c80319c").unwrap(),
+            SpanId::from_hex("b7ad6b7169203331").unwrap(),
+            TraceFlags::SAMPLED,
+            true,
+            TraceState::default(),
+        );
+        let context = opentelemetry::Context::new().with_remote_span_context(span);
+        let Ok(StagedPublish::Queued(_)) = client
+            .stage_publish("t/q".into(), b"abc".to_vec(), qos(QoS::AtLeastOnce))
+            .with_context(context)
+            .await
+        else {
+            panic!("an offline QoS 1 publish must be queued");
+        };
+        let queued = queued_front(&client);
+        assert_eq!(
+            queued.properties.get_user_property_value("traceparent"),
+            Some("00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01")
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_transmit_before_store_releases_its_quota() {
+        let (addr, _seen) =
+            silent_broker(vec![vec![0x20, 0x06, 0x00, 0x00, 0x03, 0x21, 0x00, 0x01]]).await;
+        let mut client =
+            DirectClientInner::new(ConnectOptions::new("cancel-quota").with_clean_start(false));
+        connect_to(&mut client, addr).await;
+        let Ok(StagedPublish::Ready(ready)) = client
+            .stage_publish("t/c".into(), b"c".to_vec(), qos(QoS::AtLeastOnce))
+            .await
+        else {
+            panic!("publish must stage while connected");
+        };
+        let claim = claim_quota(&client, &ready).await;
+        let session = Arc::clone(&client.session);
+        let held = session.write().await;
+        let transmit = client.transmit_publish(ready, claim);
+        assert!(tokio::time::timeout(Duration::from_millis(50), transmit)
+            .await
+            .is_err());
+        drop(held);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let flow = Arc::clone(client.session.read().await.flow_control());
+        assert_eq!(flow.read().await.in_flight_count().await, 0);
+        assert_eq!(flow.read().await.available_permits(), 1);
     }
 
     #[tokio::test]

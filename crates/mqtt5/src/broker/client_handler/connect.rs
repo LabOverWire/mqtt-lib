@@ -13,7 +13,7 @@ use tokio::sync::oneshot;
 use tokio::time::Instant;
 use tracing::{debug, info, trace, warn};
 
-use super::{AuthState, ClientHandler, PendingConnect};
+use super::{AuthState, ClientHandler, PendingConnect, SessionStart};
 
 enum AuthOutcome {
     Authenticated(Box<ConnectPacket>),
@@ -512,7 +512,7 @@ impl ClientHandler {
         self.released_rx = registration.released;
         self.disconnect_rx = Some(disconnect_rx);
         self.queue = Some(queue);
-        self.clean_start = !resume;
+        self.session_start = SessionStart::of(connect.clean_start, resume);
 
         if let Err(e) = self
             .router
@@ -612,7 +612,7 @@ impl ClientHandler {
 
 #[cfg(test)]
 mod tests {
-    use super::super::ClientHandler;
+    use super::super::{ClientHandler, SessionStart};
     use crate::broker::auth::AllowAllAuthProvider;
     use crate::broker::config::BrokerConfig;
     use crate::broker::resource_monitor::{ResourceLimits, ResourceMonitor};
@@ -756,5 +756,28 @@ mod tests {
             0,
             "a clean start kept the old session's unacknowledged messages past its claim"
         );
+    }
+
+    #[test]
+    fn session_start_keeps_the_client_flag_apart_from_the_fresh_session_decision() {
+        let cases = [
+            (true, true, SessionStart::CleanStart, true, true),
+            (true, false, SessionStart::CleanStart, true, true),
+            (false, true, SessionStart::Resumed, false, false),
+            (false, false, SessionStart::NothingToResume, true, false),
+        ];
+        for (clean_start, resumed, expected, fresh, reported) in cases {
+            let start = SessionStart::of(clean_start, resumed);
+            assert_eq!(
+                start, expected,
+                "clean_start={clean_start} resumed={resumed}"
+            );
+            assert_eq!(start.is_fresh(), fresh, "{start:?} is_fresh");
+            assert_eq!(
+                start.clean_start_requested(),
+                reported,
+                "{start:?} clean_start_requested"
+            );
+        }
     }
 }

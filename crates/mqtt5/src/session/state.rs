@@ -34,8 +34,7 @@ impl Default for SessionConfig {
         Self {
             session_expiry_interval: 0,
             max_queued_messages: 1000,
-            max_queued_size: crate::constants::buffer::DEFAULT_CAPACITY
-                * crate::constants::buffer::DEFAULT_CAPACITY,
+            max_queued_size: 64 * 1024 * 1024,
             persistent: false,
         }
     }

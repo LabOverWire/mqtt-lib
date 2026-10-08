@@ -144,7 +144,10 @@ impl MqttClient {
         tracing::info!("Starting connection monitor task");
 
         loop {
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            tokio::select! {
+                () = tokio::time::sleep(Duration::from_secs(1)) => {}
+                () = self.monitor_wakeup.notified() => {}
+            }
 
             if self.is_reconnect_stopped().await {
                 tracing::info!("Reconnection disabled, exiting connection monitor");

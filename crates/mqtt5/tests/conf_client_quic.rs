@@ -10,9 +10,10 @@ const SUBSCRIBE: u8 = 0x82;
 const PUBACK: u8 = 0x40;
 const DISCONNECT: u8 = 0xE0;
 const UNSPECIFIED_CLOSE: u32 = 0xB2;
+const FLOW_REFUSED: u32 = 0xBE;
+const USER_DEFINED_FLOW: [u8; 4] = [0x14, 0x02, b'h', b'i'];
 
 struct FakeBroker {
-    _endpoint: quinn::Endpoint,
     conn: quinn::Connection,
     ctl_send: quinn::SendStream,
     ctl_recv: quinn::RecvStream,
@@ -127,7 +128,6 @@ async fn connect_fake_broker(options: ConnectOptions) -> (MqttClient, FakeBroker
     (
         client,
         FakeBroker {
-            _endpoint: endpoint,
             conn,
             ctl_send,
             ctl_recv,
@@ -356,5 +356,86 @@ async fn quic_mismatched_ack_on_server_opened_stream_is_a_protocol_error() {
     assert!(
         !matches!(result, Ok(mqtt5::PublishResult::Sent(_))),
         "a PUBACK for a QoS 2 publish must not be accepted as its acknowledgement: {result:?}"
+    );
+}
+
+async fn delivered_after_user_defined_flow(
+    client: &MqttClient,
+    broker: &FakeBroker,
+    rx: &mut mpsc::UnboundedReceiver<Message>,
+) -> Vec<String> {
+    let mut uni = broker.conn.open_uni().await.expect("open uni stream");
+    uni.write_all(&publish_frame(0, "t/a", None, &[], b"after"))
+        .await
+        .expect("write PUBLISH");
+    uni.finish().expect("finish uni stream");
+    let payloads = drain(rx, Duration::from_millis(600))
+        .await
+        .into_iter()
+        .map(|message| String::from_utf8_lossy(&message.payload).into_owned())
+        .collect();
+    assert!(client.is_connected().await, "client dropped the connection");
+    assert!(
+        broker.conn.close_reason().is_none(),
+        "connection was closed"
+    );
+    payloads
+}
+
+#[tokio::test]
+async fn quic_user_defined_unidirectional_flow_is_refused_without_closing_the_connection() {
+    let options = ConnectOptions::new("conf-quic-user-uni").with_automatic_reconnect(false);
+    let (client, mut broker) = connect_fake_broker(options).await;
+    let mut rx = subscribe(&client, &mut broker, "t/a", QoS::AtMostOnce).await;
+
+    let mut user = broker.conn.open_uni().await.expect("open user flow");
+    user.write_all(&USER_DEFINED_FLOW)
+        .await
+        .expect("write user flow");
+    let stopped = tokio::time::timeout(Duration::from_secs(3), user.stopped())
+        .await
+        .expect("client answers the user flow within 3s")
+        .expect("stream state");
+    assert_eq!(
+        stopped.map(quinn::VarInt::into_inner),
+        Some(u64::from(FLOW_REFUSED))
+    );
+
+    assert_eq!(
+        delivered_after_user_defined_flow(&client, &broker, &mut rx).await,
+        ["after"]
+    );
+}
+
+#[tokio::test]
+async fn quic_user_defined_bidirectional_flow_is_refused_without_closing_the_connection() {
+    let options = ConnectOptions::new("conf-quic-user-bi").with_automatic_reconnect(false);
+    let (client, mut broker) = connect_fake_broker(options).await;
+    let mut rx = subscribe(&client, &mut broker, "t/a", QoS::AtMostOnce).await;
+
+    let (mut user_send, mut user_recv) = broker.conn.open_bi().await.expect("open user flow");
+    user_send
+        .write_all(&USER_DEFINED_FLOW)
+        .await
+        .expect("write user flow");
+    let read = tokio::time::timeout(Duration::from_secs(3), user_recv.read_to_end(64))
+        .await
+        .expect("client answers the user flow within 3s");
+    assert!(
+        matches!(read, Err(quinn::ReadToEndError::Read(quinn::ReadError::Reset(code))) if code.into_inner() == u64::from(FLOW_REFUSED)),
+        "client must reset its side of the user flow, got {read:?}"
+    );
+    let stopped = tokio::time::timeout(Duration::from_secs(3), user_send.stopped())
+        .await
+        .expect("client stops the user flow within 3s")
+        .expect("stream state");
+    assert_eq!(
+        stopped.map(quinn::VarInt::into_inner),
+        Some(u64::from(FLOW_REFUSED))
+    );
+
+    assert_eq!(
+        delivered_after_user_defined_flow(&client, &broker, &mut rx).await,
+        ["after"]
     );
 }
