@@ -208,7 +208,7 @@ impl MqttClient {
             ClientTransportType::Tcp => Self::connect_tcp(addr).await,
             ClientTransportType::Tls => self.connect_tls(addr, host).await,
             #[cfg(feature = "transport-websocket")]
-            ClientTransportType::WebSocket(url) => Self::connect_websocket(&url).await,
+            ClientTransportType::WebSocket(url) => self.connect_websocket(&url).await,
             #[cfg(feature = "transport-websocket")]
             ClientTransportType::WebSocketSecure(url) => {
                 self.connect_websocket_secure(addr, host, &url).await
@@ -259,16 +259,23 @@ impl MqttClient {
         Ok(TransportType::Tls(Box::new(tls_transport)))
     }
 
+    /// The WebSocket configuration for a connection to `url`: the one set with
+    /// `ConnectOptions::with_websocket_config`, read on every attempt so
+    /// reconnects use it too, or a default one.
     #[cfg(feature = "transport-websocket")]
-    async fn connect_websocket(url: &str) -> Result<TransportType> {
-        let config = WebSocketConfig::new(url)
-            .map_err(|e| MqttError::ConnectionError(format!("Invalid WebSocket URL: {e}")))?;
-        let mut ws_transport = WebSocketTransport::new(config);
-        ws_transport
-            .connect()
-            .await
-            .map_err(|e| MqttError::ConnectionError(format!("WebSocket connect failed: {e}")))?;
-        Ok(TransportType::WebSocket(Box::new(ws_transport)))
+    async fn websocket_config_for(&self, url: &str) -> Result<WebSocketConfig> {
+        let configured = self.inner.read().await.options.websocket_config.clone();
+        match configured {
+            Some(config) => WebSocketConfig::clone(&config).with_url(url),
+            None => WebSocketConfig::new(url),
+        }
+        .map_err(|e| MqttError::ConnectionError(format!("Invalid WebSocket URL: {e}")))
+    }
+
+    #[cfg(feature = "transport-websocket")]
+    async fn connect_websocket(&self, url: &str) -> Result<TransportType> {
+        let config = self.websocket_config_for(url).await?;
+        Self::open_websocket(config).await
     }
 
     #[cfg(feature = "transport-websocket")]
@@ -279,8 +286,16 @@ impl MqttClient {
         url: &str,
     ) -> Result<TransportType> {
         let insecure = self.transport_config.read().await.insecure_tls;
-        let mut config = WebSocketConfig::new(url)
-            .map_err(|e| MqttError::ConnectionError(format!("Invalid WebSocket URL: {e}")))?;
+        let mut config = self.websocket_config_for(url).await?;
+
+        // A TLS configuration on the WebSocket configuration is used as given,
+        // except that insecure_tls still disables verification.
+        if let Some(tls_config) = config.tls_config.as_mut() {
+            if insecure {
+                tls_config.verify_server_cert = false;
+            }
+            return Self::open_websocket(config).await;
+        }
 
         // As in connect_tls: a stored TLS config applies to wss:// too. With
         // none, an insecure connection still needs one to disable
@@ -304,6 +319,11 @@ impl MqttClient {
             config = config.with_tls_config(tls_config);
         }
 
+        Self::open_websocket(config).await
+    }
+
+    #[cfg(feature = "transport-websocket")]
+    async fn open_websocket(config: WebSocketConfig) -> Result<TransportType> {
         let mut ws_transport = WebSocketTransport::new(config);
         ws_transport
             .connect()
