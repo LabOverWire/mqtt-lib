@@ -12,22 +12,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`wss://` connections now use the TLS configuration on `WebSocketConfig`** (#190). With server-certificate verification on, `WebSocketTransport::connect` used tokio-tungstenite's own client configuration built from the platform's root certificates, so a CA set with `with_ca_cert_from_file` or `with_ca_cert_from_bytes` was never trusted (a server it issued failed with `UnknownIssuer`), a client certificate set with `with_client_auth_from_files` or `with_client_auth_from_bytes` was never presented, and `use_system_roots` and ALPN protocols had no effect. With verification off, the client certificate and ALPN protocols were dropped. The handshake now uses the same rustls configuration `TlsTransport` builds from a `TlsConfig`, in both cases.
 - **`WebSocketConfig::with_tls_auto`, and the `with_ca_cert_*` and `with_client_auth_*` methods that call it, now accept a host name URL** (#190). They parsed the URL's host and port as a socket address, so they failed with "Invalid host/port combination" for anything but an IP address. A wss:// connection takes its server and certificate name from the URL and does not use `TlsConfig::addr`, so for a host name that is now the unspecified address with the URL's port.
 - **`MqttClient` now uses its stored TLS configuration for `wss://` connections** (#190), as it already did for `mqtts://`. A CA, client certificate or key set with `set_tls_config` was ignored over WebSocket, and `set_insecure_tls(true)` replaced the stored configuration with a bare one that disables verification.
-- **The WebSocket client transport now sends its configured headers, subprotocols and user agent** (#165). `WebSocketTransport::connect` built the upgrade request from a fixed set of headers and always offered `Sec-WebSocket-Protocol: mqtt`, so anything set with `WebSocketConfig::with_header`, `with_subprotocol`, `with_subprotocols` or `with_user_agent` never reached the server, and brokers that authenticate the upgrade request through custom headers rejected the connection. The request now carries every custom header, the configured subprotocols in order (or `mqtt` when none are configured), and the user agent when one is set. The default user agent is now `mqtt5/<crate version>` instead of `mqtt-v5/0.4.0`.
+- **The WebSocket client transport now sends its configured headers, subprotocols and user agent** (#165). `WebSocketTransport::connect` built the upgrade request from a fixed set of headers and always offered `Sec-WebSocket-Protocol: mqtt`, so anything set with `WebSocketConfig::with_header`, `with_subprotocol`, `with_subprotocols` or `with_user_agent` never reached the server, and brokers that authenticate the upgrade request through custom headers rejected the connection. The request now carries every custom header, the configured subprotocols in order, followed by `mqtt` when the list does not include it (MQTT-6.0.0-3), and the user agent when one is set. The default user agent is now `mqtt5/<crate version>` instead of `mqtt-v5/0.4.0`.
 - **The upgrade request's `Host` header now includes a non-default port**, so `ws://broker:8080/mqtt` sends `Host: broker:8080` rather than `Host: broker`.
 
 ### Changed
 
 - **A `wss://` connection with a TLS configuration now trusts the bundled `webpki-roots` instead of the platform's root certificates** when `use_system_roots` is set, as `TlsTransport` does. A server whose certificate chains only to a root installed on the platform, such as a corporate CA, now needs that CA added to the configuration. A `wss://` connection with no TLS configuration still uses the platform's roots. The new behavior also applies to `MqttClient` `wss://` connections once a TLS configuration is set with `set_tls_config`.
 - **WebSocket configurations that relied on the old behavior may connect differently or fail to connect.** Because the configuration now reaches the wire:
-  - `with_subprotocol("mqttv5.0")` or a `with_subprotocols` list without `mqtt` now offers only what is listed. Previously `mqtt` was always offered instead, so a broker that accepts only `mqtt` will now refuse the upgrade. Include `mqtt` in the list (MQTT-6.0.0-3 requires it) to keep connecting.
   - A custom header that is invalid or reserved (see the next entry) used to be silently dropped. It now makes `connect` fail.
   - Every WebSocket connection, including those made by `MqttClient`, now sends a `User-Agent` header.
 - **`connect` rejects a WebSocket configuration it cannot send faithfully, before dialing.** It fails with `MqttError::Configuration` in these cases:
   - a custom header has an invalid name or value, or repeats another custom header's name (case-insensitively);
   - a custom header names one reserved for the handshake: `Host`, `Connection`, `Upgrade`, `Sec-WebSocket-Version`, `Sec-WebSocket-Key`, `Sec-WebSocket-Extensions` or `Sec-WebSocket-Accept`;
-  - a custom header is `Content-Length` or `Transfer-Encoding`, which would describe a body the upgrade request does not have;
+  - a custom header is `Content-Length`, `Transfer-Encoding` or `Trailer`, which would describe a body the upgrade request does not have, or a hop-by-hop or expectation header: `TE`, `Keep-Alive`, `Proxy-Connection` or `Expect`;
   - `Sec-WebSocket-Protocol` or `User-Agent` is set as a custom header instead of through its setter;
-  - a subprotocol is not a valid HTTP token.
+  - a subprotocol is not a valid HTTP token, or is listed more than once (RFC 6455 §4.1).
 - Custom headers are sent, and validated, in name order, so the request and the error a bad configuration reports no longer depend on `HashMap` iteration order.
 - `WebSocketConfig`'s `Debug` output lists custom header names but not their values, which often carry credentials.
 
@@ -35,6 +34,108 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `TlsConfig::client_config`, which returns the rustls client configuration a `TlsConfig` describes.
 - `WebSocketConfig::build_handshake_request`, which returns the upgrade request the configuration produces.
+
+## [mqtt5 0.47.1] - 2026-10-08
+
+### Fixed
+
+- **`ClientConnectEvent.clean_start` reports the Clean Start flag the client sent** (#186). It reported whether a stored session was resumed instead, so a client connecting for the first time with Clean Start 0 and a session expiry was reported as `clean_start = true`. Consumers that decide session persistence from the event treated that client as clean. The wasm broker already passed the CONNECT flag. Covered for plain connects and for connects completed through multi-step enhanced authentication.
+
+## [mqtt5 0.47.0] - 2026-10-05
+
+### Breaking
+
+- **Minimum supported Rust version is now 1.89** (was 1.88), for `std::fs::File::try_lock`.
+- **A broker refuses to start on a storage directory another broker is using** (#179). Since 0.42.0 all session writes go to one append-only log, `<storage_dir>/sessions/sessions.log`, and nothing stopped two brokers, in one process or in two, from opening the same directory. Both then wrote and compacted the same log, so one broker's compaction could drop sessions the other had written: with two brokers on one directory, a session written through the first broker was gone after a restart. The file backend now takes an exclusive lock on `<storage_dir>/.lock` when it opens the directory and holds it until the backend is dropped, after the last connection handler has finished with storage; the OS releases it if the process exits or crashes. A second broker on the same directory fails in `MqttBroker::with_config` with `Storage directory <dir> is already in use by another broker`. Two `mqttv5 broker` processes started from the same working directory with the default `./mqtt_storage`, or sharing `--storage-dir`, now hit this error instead of sharing the directory. In-memory storage is not affected. On a filesystem where file locking is not supported (`ErrorKind::Unsupported`), the broker logs a warning and starts without the lock, as before.
+- **`run_quic_connection_handler` and `run_quic_cluster_connection_handler` take a `QuicHandlerContext`** in place of their seven separate broker arguments.
+
+### Changed
+
+- **Graceful shutdown now waits for connection handlers.** `MqttBroker::run()` used to return while connection handlers were still writing their final session state, so those writes could still be in progress after `run()` returned. `run()` now returns once every connection handler has finished, within the existing 5 second shutdown wait; if that wait runs out it logs a warning and returns. The release point and the wait are modelled in `specs/tla/storage-lock/`.
+- Graceful shutdown also waits for the `$SYS` topics task and for the bridge tasks it aborts. With bridges configured, the bridge client's connection monitor still exits a few milliseconds after `run()` returns, so the storage directory is released that much later.
+- Integration tests that started brokers on the default `./mqtt_storage` in parallel now use in-memory storage.
+
+### Fixed
+
+- **`MqttClient::disconnect()` now stops the connection monitor at once.** The monitor only checked for a stop once a second, so after `disconnect()` it kept the client, its callbacks and anything they hold alive for up to a second. A broker with a bridge held its storage directory that long after shutdown.
+
+## [mqttv5-cli 0.29.6] - 2026-10-05
+
+### Changed
+
+- Requires mqtt5 0.47. `mqttv5 broker` now refuses to start when another broker holds its storage directory.
+
+## [mqtt5-wasm 2.1.5] - 2026-10-05
+
+### Changed
+
+- Requires mqtt5 0.47. No change to the wasm API; the wasm broker uses in-memory storage and takes no directory lock.
+
+## [mqtt5 0.46.4] - 2026-10-04
+
+### Fixed
+
+- **Aborting the task running `MqttBroker::run()` now stops the broker** (#177). The accept loops, connection handlers and storage cleanup were detached tasks that only stopped on the graceful-shutdown signal, so aborting or dropping `run()` left the broker serving existing clients and accepting new ones. `run()` now sends that signal when it is dropped, so an abort takes the same path as graceful shutdown. The `$SYS` topics task is stopped with it, and configured bridges are stopped the same way graceful shutdown stops them, disconnecting from the remote broker.
+
+## [mqtt5 0.46.3] - 2026-10-04
+
+### Fixed
+
+- **A QUIC user-defined flow (type 0x14) opened by the server no longer risks closing the connection** (part of #169). The client did not recognise the 0x14 flow header and parsed the stream as MQTT. When the application data happened to decode as a complete packet, the client treated it as a malformed packet, sent DISCONNECT and closed the whole connection. A user-defined flow carries non-MQTT data (MQoQ §9.20), so the client now refuses it: it stops the stream with ERROR_FLOW_REFUSED (0xBE), resets its send side on a bidirectional stream, and leaves the connection and other flows untouched.
+
+## [mqtt5 0.46.2] - 2026-10-04
+
+### Fixed
+
+- **QoS 0 messages on a QUIC server unidirectional stream now reach `subscribe_with_ack` callbacks** (part of #169). The client passed messages from server-opened unidirectional streams only to plain `subscribe` callbacks, so a subscription made with `subscribe_with_ack` never saw them. A broker sends QoS 0 on a unidirectional stream when it delivers each publish on its own stream, as the mqtt5 broker does with `ServerDeliveryStrategy::PerPublish`.
+
+## [mqtt5 0.46.1] - 2026-10-03
+
+### Fixed
+
+- **`ConnectOptions::resume_existing_session` docs overstated delivery across a restart** (part of #168). They said delivery across a restart is at-least-once. That holds for inbound messages, which the broker redelivers. Outbound publishes the previous process had not completed are not resent and may never reach subscribers, so the application has to publish them again. New tests (`qos2_resume_after_restart`) cover this. They also check that the broker still holds the unfinished QoS 2 exchange after the reconnect, and that a new QoS 2 publish reusing its packet identifier replaces it and is delivered.
+
+## [mqtt5 0.46.0] - 2026-10-02
+
+### Changed
+
+- **The client's offline queue is now bounded** (part of #168). QoS 1 and 2 publishes made while disconnected were limited only by the packet identifier space (65,535 messages), each holding its full payload, so memory was effectively unbounded. The queue now enforces `ConnectOptions::session_config.max_queued_messages` and `max_queued_size`, which were previously not applied to it. A publish that would exceed either limit fails with `MqttError::OfflineQueueFull` and is not queued; nothing already queued is dropped. Messages put back into the queue on reconnect are never refused, but count toward the limits. The size of a queued message is its encoded PUBLISH packet.
+- **New defaults: 1,000 queued messages or 64 MiB.** `max_queued_messages` keeps its default of 1,000. `max_queued_size` goes from 1 MiB to 64 MiB, the same per-client limit the broker uses for its queues. A client that queued more than this while offline will now get `OfflineQueueFull` instead.
+- Requires mqtt5-protocol 0.16.
+
+## [mqtt5-protocol 0.16.0] - 2026-10-02
+
+### Breaking
+
+- **`MqttError` is now `#[non_exhaustive]`.** Code that matches on it exhaustively needs a wildcard arm. Future error variants are then no longer a breaking change.
+
+### Added
+
+- `MqttError::OfflineQueueFull { max_messages, max_bytes }`, returned when a publish would exceed the client's offline queue limits.
+
+## [mqttv5-cli 0.29.5] - 2026-10-02
+
+### Changed
+
+- Requires mqtt5 0.46.
+
+## [mqtt5-wasm 2.1.4] - 2026-10-02
+
+### Changed
+
+- Requires mqtt5 0.46 and mqtt5-protocol 0.16. No change to the wasm API.
+
+## [mqtt5 0.45.3] - 2026-10-02
+
+### Fixed
+
+- **Publishes queued while offline now go through the codec and carry the trace context** (part of #168). A QoS 1 or 2 publish made while the client was disconnected was queued before the codec registry encoded its payload and before the OpenTelemetry trace context was injected, so after reconnecting it went out uncompressed, without its content type, and without `traceparent`. Queued and live publishes are now built the same way, and the trace context is the one active when `publish()` was called.
+
+## [mqtt5 0.45.2] - 2026-10-02
+
+### Fixed
+
+- **A cancelled `publish()` no longer keeps a Receive Maximum slot** (part of #168). A QoS 1 or 2 publish takes a send-quota slot before its message is stored as in flight. If the `publish()` future was dropped in between, for example by a timeout or a `select!` while it waited on a lock, the slot was never returned, and with a small Receive Maximum every later QoS 1 or 2 publish waited until the next reconnect. The slot is now returned when the future is dropped before the message is stored.
 
 ## [mqtt5 0.45.1] - 2026-10-01
 

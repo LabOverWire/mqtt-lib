@@ -27,6 +27,7 @@ use tracing::{debug, error, info, warn};
 #[cfg(feature = "transport-quic")]
 use crate::broker::quic_acceptor::{
     run_quic_cluster_connection_handler, run_quic_connection_handler, QuicAcceptorConfig,
+    QuicHandlerContext,
 };
 #[cfg(feature = "opentelemetry")]
 use crate::telemetry;
@@ -41,6 +42,62 @@ fn disable_nagle(stream: &TcpStream, addr: std::net::SocketAddr) {
     }
 }
 
+struct ShutdownOnDrop {
+    shutdown_tx: tokio::sync::broadcast::Sender<()>,
+    bridge_manager: Option<Arc<BridgeManager>>,
+}
+
+impl Drop for ShutdownOnDrop {
+    fn drop(&mut self) {
+        let _ = self.shutdown_tx.send(());
+        let runtime = tokio::runtime::Handle::try_current();
+        if let (Some(bridge_manager), Ok(runtime)) = (self.bridge_manager.take(), runtime) {
+            runtime.spawn(async move {
+                if let Err(e) = bridge_manager.stop_all().await {
+                    error!("Error stopping bridges: {e}");
+                }
+            });
+        }
+    }
+}
+
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+struct BrokerListeners {
+    tcp: Vec<TcpListener>,
+    tls: Vec<TcpListener>,
+    tls_acceptor: Option<TlsAcceptor>,
+    #[cfg(feature = "transport-websocket")]
+    ws: Vec<TcpListener>,
+    #[cfg(feature = "transport-websocket")]
+    ws_config: Option<WebSocketServerConfig>,
+    #[cfg(feature = "transport-websocket")]
+    ws_tls: Vec<TcpListener>,
+    #[cfg(feature = "transport-websocket")]
+    ws_tls_config: Option<WebSocketServerConfig>,
+    #[cfg(feature = "transport-websocket")]
+    ws_tls_acceptor: Option<TlsAcceptor>,
+    #[cfg(feature = "transport-quic")]
+    quic: Vec<Endpoint>,
+    cluster: Vec<TcpListener>,
+    cluster_tls_acceptor: Option<TlsAcceptor>,
+    #[cfg(feature = "transport-quic")]
+    cluster_quic: Vec<Endpoint>,
+}
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+impl AbortOnDrop {
+    async fn stop(mut self) {
+        self.0.abort();
+        let _ = (&mut self.0).await;
+    }
+}
+
 #[derive(Clone)]
 struct AcceptLoopState {
     config_rx: watch::Receiver<Arc<BrokerConfig>>,
@@ -50,6 +107,7 @@ struct AcceptLoopState {
     stats: Arc<BrokerStats>,
     resource_monitor: Arc<ResourceMonitor>,
     shutdown_tx: tokio::sync::broadcast::Sender<()>,
+    connections: mpsc::Sender<()>,
 }
 
 impl AcceptLoopState {
@@ -1022,8 +1080,11 @@ impl MqttBroker {
                                                 state.shutdown_tx.subscribe(),
                                             );
 
+                                            let connection = state.connections.clone();
                                             tokio::spawn(async move {
-                                                if let Err(e) = handler.run().await {
+                                                let outcome = handler.run().await;
+                                                drop(connection);
+                                                if let Err(e) = outcome {
                                                     if e.is_normal_disconnect() {
                                                         debug!("Client handler finished");
                                                     } else {
@@ -1192,8 +1253,11 @@ impl MqttBroker {
                                                 state.shutdown_tx.subscribe(),
                                             );
 
+                                            let connection = state.connections.clone();
                                             tokio::spawn(async move {
-                                                if let Err(e) = handler.run().await {
+                                                let outcome = handler.run().await;
+                                                drop(connection);
+                                                if let Err(e) = outcome {
                                                     if e.is_normal_disconnect() {
                                                         debug!("Client handler finished");
                                                     } else {
@@ -1274,13 +1338,16 @@ impl MqttBroker {
                                 run_quic_connection_handler(
                                     conn,
                                     peer_addr,
-                                    cfg,
-                                    state.router,
-                                    auth,
-                                    state.storage,
-                                    state.stats,
-                                    state.resource_monitor,
-                                    state.shutdown_tx.subscribe(),
+                                    QuicHandlerContext {
+                                        config: cfg,
+                                        router: state.router,
+                                        auth_provider: auth,
+                                        storage: state.storage,
+                                        stats: state.stats,
+                                        resource_monitor: state.resource_monitor,
+                                        shutdown_rx: state.shutdown_tx.subscribe(),
+                                        connection_alive: state.connections,
+                                    },
                                 )
                                 .await;
                             });
@@ -1387,8 +1454,11 @@ impl MqttBroker {
                                         )
                                         .with_skip_bridge_forwarding(true);
 
+                                        let connection = state.connections.clone();
                                         tokio::spawn(async move {
-                                            if let Err(e) = handler.run().await {
+                                            let outcome = handler.run().await;
+                                            drop(connection);
+                                            if let Err(e) = outcome {
                                                 if e.is_normal_disconnect() {
                                                     debug!("Cluster client handler finished");
                                                 } else {
@@ -1468,13 +1538,16 @@ impl MqttBroker {
                                 run_quic_cluster_connection_handler(
                                     conn,
                                     peer_addr,
-                                    cfg,
-                                    state.router,
-                                    auth,
-                                    state.storage,
-                                    state.stats,
-                                    state.resource_monitor,
-                                    state.shutdown_tx.subscribe(),
+                                    QuicHandlerContext {
+                                        config: cfg,
+                                        router: state.router,
+                                        auth_provider: auth,
+                                        storage: state.storage,
+                                        stats: state.stats,
+                                        resource_monitor: state.resource_monitor,
+                                        shutdown_rx: state.shutdown_tx.subscribe(),
+                                        connection_alive: state.connections,
+                                    },
                                 )
                                 .await;
                             });
@@ -1488,6 +1561,86 @@ impl MqttBroker {
                 }
             }));
         }
+    }
+
+    fn take_listeners(&mut self) -> BrokerListeners {
+        BrokerListeners {
+            tcp: std::mem::take(&mut self.listeners),
+            tls: std::mem::take(&mut self.tls_listeners),
+            tls_acceptor: self.tls_acceptor.take(),
+            #[cfg(feature = "transport-websocket")]
+            ws: std::mem::take(&mut self.ws_listeners),
+            #[cfg(feature = "transport-websocket")]
+            ws_config: self.ws_config.take(),
+            #[cfg(feature = "transport-websocket")]
+            ws_tls: std::mem::take(&mut self.ws_tls_listeners),
+            #[cfg(feature = "transport-websocket")]
+            ws_tls_config: self.ws_tls_config.take(),
+            #[cfg(feature = "transport-websocket")]
+            ws_tls_acceptor: self.ws_tls_acceptor.take(),
+            #[cfg(feature = "transport-quic")]
+            quic: std::mem::take(&mut self.quic_endpoints),
+            cluster: std::mem::take(&mut self.cluster_listeners),
+            cluster_tls_acceptor: self.cluster_tls_acceptor.take(),
+            #[cfg(feature = "transport-quic")]
+            cluster_quic: std::mem::take(&mut self.cluster_quic_endpoints),
+        }
+    }
+
+    fn spawn_accept_tasks(
+        listeners: BrokerListeners,
+        state: &AcceptLoopState,
+        task_handles: &mut Vec<tokio::task::JoinHandle<()>>,
+    ) {
+        Self::spawn_tcp_accept_tasks(listeners.tcp, state, task_handles);
+        Self::spawn_tls_accept_tasks(listeners.tls, listeners.tls_acceptor, state, task_handles);
+        Self::spawn_cluster_accept_tasks(
+            listeners.cluster,
+            listeners.cluster_tls_acceptor,
+            state,
+            task_handles,
+        );
+        #[cfg(feature = "transport-websocket")]
+        Self::spawn_ws_accept_tasks(listeners.ws, listeners.ws_config, state, task_handles);
+        #[cfg(feature = "transport-websocket")]
+        Self::spawn_wss_accept_tasks(
+            listeners.ws_tls,
+            listeners.ws_tls_config,
+            listeners.ws_tls_acceptor,
+            state,
+            task_handles,
+        );
+        #[cfg(feature = "transport-quic")]
+        Self::spawn_quic_accept_tasks(listeners.quic, state, task_handles);
+        #[cfg(feature = "transport-quic")]
+        Self::spawn_cluster_quic_accept_tasks(listeners.cluster_quic, state, task_handles);
+    }
+
+    async fn finish_shutdown(
+        &self,
+        task_handles: Vec<tokio::task::JoinHandle<()>>,
+        mut connections_closed: mpsc::Receiver<()>,
+    ) {
+        if let Some(ref bridge_manager) = self.bridge_manager {
+            info!("Stopping all bridges");
+            if let Err(e) = bridge_manager.stop_all().await {
+                error!("Error stopping bridges: {e}");
+            }
+        }
+
+        let drained = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            for handle in task_handles {
+                let _ = handle.await;
+            }
+            connections_closed.recv().await
+        })
+        .await;
+        if drained.is_err() {
+            warn!("Timed out waiting for connections to finish during shutdown");
+        }
+
+        #[cfg(feature = "opentelemetry")]
+        telemetry::shutdown_telemetry();
     }
 
     fn spawn_tcp_accept_tasks(
@@ -1532,8 +1685,11 @@ impl MqttBroker {
                                         state.shutdown_tx.subscribe(),
                                     );
 
+                                    let connection = state.connections.clone();
                                     tokio::spawn(async move {
-                                        if let Err(e) = handler.run().await {
+                                        let outcome = handler.run().await;
+                                        drop(connection);
+                                        if let Err(e) = outcome {
                                             if e.is_normal_disconnect() {
                                                 debug!("Client handler finished");
                                             } else {
@@ -1667,7 +1823,6 @@ impl MqttBroker {
     /// # Errors
     ///
     /// Returns an error if the accept loop fails
-    #[allow(clippy::too_many_lines)]
     pub async fn run(&mut self) -> Result<()> {
         info!("Starting MQTT broker");
 
@@ -1677,27 +1832,13 @@ impl MqttBroker {
             ));
         }
 
-        let listeners = std::mem::take(&mut self.listeners);
-        let tls_listeners = std::mem::take(&mut self.tls_listeners);
-        let tls_acceptor = self.tls_acceptor.take();
-        #[cfg(feature = "transport-websocket")]
-        let ws_listeners = std::mem::take(&mut self.ws_listeners);
-        #[cfg(feature = "transport-websocket")]
-        let ws_config = self.ws_config.take();
-        #[cfg(feature = "transport-websocket")]
-        let ws_tls_listeners = std::mem::take(&mut self.ws_tls_listeners);
-        #[cfg(feature = "transport-websocket")]
-        let ws_tls_config = self.ws_tls_config.take();
-        #[cfg(feature = "transport-websocket")]
-        let ws_tls_acceptor = self.ws_tls_acceptor.take();
-        #[cfg(feature = "transport-quic")]
-        let quic_endpoints = std::mem::take(&mut self.quic_endpoints);
-        let cluster_listeners = std::mem::take(&mut self.cluster_listeners);
-        let cluster_tls_acceptor = self.cluster_tls_acceptor.take();
-        #[cfg(feature = "transport-quic")]
-        let cluster_quic_endpoints = std::mem::take(&mut self.cluster_quic_endpoints);
+        let listeners = self.take_listeners();
 
-        let shutdown_tx = self.shutdown_tx.clone();
+        let shutdown_on_drop = ShutdownOnDrop {
+            shutdown_tx: self.shutdown_tx.clone(),
+            bridge_manager: self.bridge_manager.clone(),
+        };
+        let shutdown_tx = &shutdown_on_drop.shutdown_tx;
 
         let mut task_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
@@ -1706,15 +1847,15 @@ impl MqttBroker {
                 u32::try_from(self.config.session_expiry_interval.as_secs()).unwrap_or(u32::MAX),
             )
             .await?;
-        self.initialize_storage(&shutdown_tx, &mut task_handles)
+        self.initialize_storage(shutdown_tx, &mut task_handles)
             .await?;
         self.router.initialize().await?;
 
-        let sys_handle = if self.config.sys_topics_enabled {
+        let sys_topics_task = if self.config.sys_topics_enabled {
             let sys_provider =
                 SysTopicsProvider::new(Arc::clone(&self.router), Arc::clone(&self.stats))
                     .with_update_interval(self.config.sys_topics_interval);
-            Some(sys_provider.start())
+            Some(AbortOnDrop(sys_provider.start()))
         } else {
             None
         };
@@ -1723,11 +1864,12 @@ impl MqttBroker {
 
         Self::spawn_resource_monitor_cleanup_task(
             &self.resource_monitor,
-            &shutdown_tx,
+            shutdown_tx,
             &mut task_handles,
         );
 
         let mut shutdown_rx = shutdown_tx.subscribe();
+        let (connections_open, connections_closed) = mpsc::channel(1);
 
         let accept_state = AcceptLoopState {
             config_rx: self.config_watch_rx.clone(),
@@ -1737,39 +1879,10 @@ impl MqttBroker {
             stats: Arc::clone(&self.stats),
             resource_monitor: Arc::clone(&self.resource_monitor),
             shutdown_tx: shutdown_tx.clone(),
+            connections: connections_open,
         };
 
-        Self::spawn_tcp_accept_tasks(listeners, &accept_state, &mut task_handles);
-        Self::spawn_tls_accept_tasks(
-            tls_listeners,
-            tls_acceptor,
-            &accept_state,
-            &mut task_handles,
-        );
-        Self::spawn_cluster_accept_tasks(
-            cluster_listeners,
-            cluster_tls_acceptor,
-            &accept_state,
-            &mut task_handles,
-        );
-        #[cfg(feature = "transport-websocket")]
-        Self::spawn_ws_accept_tasks(ws_listeners, ws_config, &accept_state, &mut task_handles);
-        #[cfg(feature = "transport-websocket")]
-        Self::spawn_wss_accept_tasks(
-            ws_tls_listeners,
-            ws_tls_config,
-            ws_tls_acceptor,
-            &accept_state,
-            &mut task_handles,
-        );
-        #[cfg(feature = "transport-quic")]
-        Self::spawn_quic_accept_tasks(quic_endpoints, &accept_state, &mut task_handles);
-        #[cfg(feature = "transport-quic")]
-        Self::spawn_cluster_quic_accept_tasks(
-            cluster_quic_endpoints,
-            &accept_state,
-            &mut task_handles,
-        );
+        Self::spawn_accept_tasks(listeners, &accept_state, &mut task_handles);
 
         Self::spawn_hot_reload_task(
             self.hot_reload_manager.take(),
@@ -1790,26 +1903,11 @@ impl MqttBroker {
         shutdown_rx.recv().await.ok();
         info!("Broker shutting down");
 
-        if let Some(sys_handle) = sys_handle {
-            sys_handle.abort();
+        if let Some(sys_topics_task) = sys_topics_task {
+            sys_topics_task.stop().await;
         }
-
-        if let Some(ref bridge_manager) = self.bridge_manager {
-            info!("Stopping all bridges");
-            if let Err(e) = bridge_manager.stop_all().await {
-                error!("Error stopping bridges: {e}");
-            }
-        }
-
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            for handle in task_handles {
-                let _ = handle.await;
-            }
-        })
-        .await;
-
-        #[cfg(feature = "opentelemetry")]
-        telemetry::shutdown_telemetry();
+        drop(accept_state);
+        self.finish_shutdown(task_handles, connections_closed).await;
 
         info!("Broker shutdown complete");
 
@@ -1935,7 +2033,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_broker_bind() {
-        // Use random port to avoid conflicts
         let broker = MqttBroker::bind("127.0.0.1:0").await;
         assert!(broker.is_ok());
     }
@@ -1966,7 +2063,8 @@ mod tests {
     async fn test_broker_with_config() {
         let config = BrokerConfig::default()
             .with_bind_address(([127, 0, 0, 1], 0))
-            .with_max_clients(100);
+            .with_max_clients(100)
+            .with_storage(crate::broker::config::StorageConfig::default().with_persistence(false));
 
         let broker = MqttBroker::with_config(config).await;
         assert!(broker.is_ok());
@@ -1995,7 +2093,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_broker_stats() {
-        let broker = MqttBroker::bind("127.0.0.1:0").await.unwrap();
+        let config = BrokerConfig::default()
+            .with_bind_address(([127, 0, 0, 1], 0))
+            .with_storage(crate::broker::config::StorageConfig::default().with_persistence(false));
+        let broker = MqttBroker::with_config(config).await.unwrap();
         let stats = broker.stats();
 
         assert_eq!(

@@ -114,12 +114,12 @@ jobs:
 
   # Test with minimal supported Rust version
   msrv:
-    name: MSRV (1.88)
+    name: MSRV (1.89)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@1.88
+        uses: dtolnay/rust-toolchain@1.89
       - name: Cache dependencies
         uses: Swatinem/rust-cache@v2
       - name: Generate test certificates
@@ -128,7 +128,7 @@ jobs:
           ./scripts/generate_test_certs.sh
       - name: Check MSRV
         # Note: We exclude embedded-single-core feature as it only works on embedded targets
-        run: cargo +1.88 check --workspace
+        run: cargo +1.89 check --workspace
 
   # Build documentation
   docs:
@@ -157,6 +157,7 @@ jobs:
         uses: dtolnay/rust-toolchain@1.98.0
         with:
           targets: wasm32-unknown-unknown
+          components: clippy
 
       - name: Cache dependencies
         uses: Swatinem/rust-cache@v2
@@ -166,6 +167,9 @@ jobs:
 
       - name: Check WASM compilation
         run: cargo check --target wasm32-unknown-unknown --all-features -p mqtt5-wasm
+
+      - name: Lint WASM crate
+        run: cargo clippy --target wasm32-unknown-unknown --all-features -p mqtt5-wasm -- -D warnings -W clippy::pedantic
 
       - name: Install Node.js
         uses: actions/setup-node@v4
@@ -188,6 +192,7 @@ jobs:
         run: |
           cargo test -p mqtt5-wasm --target wasm32-unknown-unknown
           cargo test -p mqtt5-wasm --target wasm32-unknown-unknown --features broker
+          cargo test --release -p mqtt5-wasm --target wasm32-unknown-unknown --features codec --lib
 
       - name: Build WASM package
         run: |

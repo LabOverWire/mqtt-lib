@@ -416,6 +416,12 @@ pub(super) async fn handle_incoming_packet_no_writer(
                     registry.decode_if_needed(&publish.payload, content_type.as_deref())?;
                 publish.payload = decoded;
             }
+            if let Some(ack) = handlers.ack_delivery {
+                if let Some(callback) = ack.callbacks.find_one(&publish.topic_name) {
+                    return deliver_deferred(publish, handlers.session, flow_id, ack, callback)
+                        .await;
+                }
+            }
             publish.stream_id = flow_id.map(|f| f.raw());
             let _ = handlers.callback_manager.dispatch(&publish);
             Ok(())

@@ -21,7 +21,7 @@ pub struct BridgeManager {
 }
 
 impl BridgeManager {
-    #[allow(clippy::must_use_candidate)]
+    #[must_use]
     pub fn new(router: Arc<MessageRouter>) -> Self {
         Self {
             bridges: Arc::new(RwLock::new(HashMap::new())),
@@ -32,7 +32,7 @@ impl BridgeManager {
         }
     }
 
-    #[allow(clippy::must_use_candidate)]
+    #[must_use]
     pub fn with_runtime(router: Arc<MessageRouter>, handle: tokio::runtime::Handle) -> Self {
         Self {
             bridges: Arc::new(RwLock::new(HashMap::new())),
@@ -131,11 +131,9 @@ impl BridgeManager {
     /// # Errors
     /// Returns an error if the bridge is not found or stop fails.
     pub async fn remove_bridge(&self, name: &str) -> Result<()> {
-        // Get and remove the bridge
         let bridge = self.bridges.write().remove(name);
 
         if let Some(bridge) = bridge {
-            // Stop the bridge
             bridge.stop().await?;
 
             if let Some(task) = self.tasks.lock().remove(name) {
@@ -249,7 +247,6 @@ impl BridgeManager {
     pub async fn stop_all(&self) -> Result<()> {
         info!("Stopping all bridges");
 
-        // Stop all bridges
         let bridges: Vec<_> = self.bridges.read().values().cloned().collect();
         for bridge in bridges {
             if let Err(e) = bridge.stop().await {
@@ -257,13 +254,13 @@ impl BridgeManager {
             }
         }
 
-        let mut tasks = self.tasks.lock();
-        for (name, task) in tasks.drain() {
+        let tasks: Vec<(String, JoinHandle<()>)> = self.tasks.lock().drain().collect();
+        for (name, task) in tasks {
             debug!("Cancelling task for bridge '{}'", name);
             task.abort();
+            let _ = task.await;
         }
 
-        // Clear bridges
         self.bridges.write().clear();
 
         Ok(())
@@ -276,12 +273,10 @@ impl BridgeManager {
     pub async fn reload_bridge(&self, config: BridgeConfig) -> Result<()> {
         let name = config.name.clone();
 
-        // Remove existing bridge if present
         if self.bridges.read().contains_key(&name) {
             self.remove_bridge(&name).await?;
         }
 
-        // Add new bridge with updated config
         self.add_bridge(config)
     }
 }
@@ -300,8 +295,6 @@ mod tests {
         let router = Arc::new(MessageRouter::new());
         let manager = BridgeManager::new(router);
 
-        // Start our own MQTT broker for testing with in-memory storage
-
         let storage_config = StorageConfig {
             backend: StorageBackend::Memory,
             enable_persistence: true,
@@ -317,37 +310,28 @@ mod tests {
             .expect("Failed to create broker");
         let broker_addr = broker.local_addr().expect("Failed to get broker address");
 
-        // Run broker in background
         let broker_handle = tokio::spawn(async move { broker.run().await });
 
-        // Give broker time to start
         tokio::time::sleep(crate::time::Duration::from_millis(100)).await;
 
-        // Create test bridge config pointing to our test broker
         let config = BridgeConfig::new("test-bridge", format!("{broker_addr}")).add_topic(
             "test/#",
             BridgeDirection::Both,
             QoS::AtMostOnce,
         );
 
-        // Add bridge
         assert!(manager.add_bridge(config.clone()).is_ok());
 
-        // Check bridge exists
         let bridges = manager.list_bridges();
         assert_eq!(bridges.len(), 1);
         assert!(bridges.contains(&"test-bridge".to_string()));
 
-        // Try to add duplicate
         assert!(manager.add_bridge(config).is_err());
 
-        // Clean up
         broker_handle.abort();
 
-        // Remove bridge
         assert!(manager.remove_bridge("test-bridge").await.is_ok());
 
-        // Check bridge removed
         let bridges = manager.list_bridges();
         assert_eq!(bridges.len(), 0);
     }

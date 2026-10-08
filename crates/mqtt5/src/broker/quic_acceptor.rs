@@ -529,74 +529,38 @@ pub(super) async fn read_packet_with_buffer(
     Packet::decode_from_body(fixed_header.packet_type, &fixed_header, &mut payload_buf)
 }
 
-#[allow(clippy::too_many_arguments)]
-#[instrument(skip(connection, config, router, auth_provider, storage, stats, resource_monitor, shutdown_rx), fields(peer_addr = %peer_addr))]
+pub struct QuicHandlerContext {
+    pub config: Arc<BrokerConfig>,
+    pub router: Arc<MessageRouter>,
+    pub auth_provider: Arc<dyn AuthProvider>,
+    pub storage: Option<Arc<DynamicStorage>>,
+    pub stats: Arc<BrokerStats>,
+    pub resource_monitor: Arc<ResourceMonitor>,
+    pub shutdown_rx: broadcast::Receiver<()>,
+    pub connection_alive: mpsc::Sender<()>,
+}
+
+#[instrument(skip(connection, context), fields(peer_addr = %peer_addr))]
 pub async fn run_quic_connection_handler(
     connection: Arc<Connection>,
     peer_addr: SocketAddr,
-    config: Arc<BrokerConfig>,
-    router: Arc<MessageRouter>,
-    auth_provider: Arc<dyn AuthProvider>,
-    storage: Option<Arc<DynamicStorage>>,
-    stats: Arc<BrokerStats>,
-    resource_monitor: Arc<ResourceMonitor>,
-    shutdown_rx: broadcast::Receiver<()>,
+    context: QuicHandlerContext,
 ) {
-    run_quic_handler_inner(
-        connection,
-        peer_addr,
-        config,
-        router,
-        auth_provider,
-        storage,
-        stats,
-        resource_monitor,
-        shutdown_rx,
-        false,
-        "QUIC",
-    )
-    .await;
+    run_quic_handler_inner(connection, peer_addr, context, false, "QUIC").await;
 }
 
-#[allow(clippy::too_many_arguments)]
 pub async fn run_quic_cluster_connection_handler(
     connection: Arc<Connection>,
     peer_addr: SocketAddr,
-    config: Arc<BrokerConfig>,
-    router: Arc<MessageRouter>,
-    auth_provider: Arc<dyn AuthProvider>,
-    storage: Option<Arc<DynamicStorage>>,
-    stats: Arc<BrokerStats>,
-    resource_monitor: Arc<ResourceMonitor>,
-    shutdown_rx: broadcast::Receiver<()>,
+    context: QuicHandlerContext,
 ) {
-    run_quic_handler_inner(
-        connection,
-        peer_addr,
-        config,
-        router,
-        auth_provider,
-        storage,
-        stats,
-        resource_monitor,
-        shutdown_rx,
-        true,
-        "Cluster QUIC",
-    )
-    .await;
+    run_quic_handler_inner(connection, peer_addr, context, true, "Cluster QUIC").await;
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn run_quic_handler_inner(
     connection: Arc<Connection>,
     peer_addr: SocketAddr,
-    config: Arc<BrokerConfig>,
-    router: Arc<MessageRouter>,
-    auth_provider: Arc<dyn AuthProvider>,
-    storage: Option<Arc<DynamicStorage>>,
-    stats: Arc<BrokerStats>,
-    resource_monitor: Arc<ResourceMonitor>,
-    shutdown_rx: broadcast::Receiver<()>,
+    context: QuicHandlerContext,
     skip_bridge_forwarding: bool,
     label: &'static str,
 ) {
@@ -621,17 +585,18 @@ async fn run_quic_handler_inner(
     let stream = QuicStreamWrapper::new(send, recv, peer_addr);
     let transport = BrokerTransport::quic(stream);
 
-    let delivery_strategy = config.server_delivery_strategy;
+    let delivery_strategy = context.config.server_delivery_strategy;
+    let connection_alive = context.connection_alive;
     let handler = ClientHandler::new_with_external_packets(
         transport,
         peer_addr,
-        config,
-        router,
-        auth_provider,
-        storage,
-        stats,
-        resource_monitor,
-        shutdown_rx,
+        context.config,
+        context.router,
+        context.auth_provider,
+        context.storage,
+        context.stats,
+        context.resource_monitor,
+        context.shutdown_rx,
         Some(packet_rx),
     )
     .with_quic_connection(connection.clone())
@@ -643,7 +608,9 @@ async fn run_quic_handler_inner(
 
     let handler_label = label;
     tokio::spawn(async move {
-        if let Err(e) = handler.run().await {
+        let outcome = handler.run().await;
+        drop(connection_alive);
+        if let Err(e) = outcome {
             if e.is_normal_disconnect() {
                 debug!("{} client handler finished", handler_label);
             } else {
@@ -744,21 +711,17 @@ fn spawn_datagram_reader(
                         label,
                         peer_addr
                     );
-                    #[allow(
-                        clippy::collapsible_match,
-                        reason = "cannot move `packet` into async send from a pattern guard"
-                    )]
-                    match decode_datagram_packet(&datagram) {
-                        Some(Ok(packet)) => {
-                            if packet_tx.send((packet, None)).await.is_err() {
-                                debug!("Datagram packet channel closed for {}", peer_addr);
-                                break;
-                            }
-                        }
+                    let packet = match decode_datagram_packet(&datagram) {
+                        Some(Ok(packet)) => packet,
                         Some(Err(e)) => {
                             warn!("Failed to decode datagram from {}: {}", peer_addr, e);
+                            continue;
                         }
-                        None => {}
+                        None => continue,
+                    };
+                    if packet_tx.send((packet, None)).await.is_err() {
+                        debug!("Datagram packet channel closed for {}", peer_addr);
+                        break;
                     }
                 }
                 Err(e) => {

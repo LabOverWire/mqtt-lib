@@ -66,7 +66,15 @@ async fn connack_reason_string_omitted_over_max_packet_size(sut: SutHandle) {
 #[cfg(all(test, feature = "inprocess-fixture"))]
 #[tokio::test]
 async fn puback_reason_string_omitted_over_max_packet_size() {
-    let config = mqtt5::broker::config::BrokerConfig::default().with_maximum_qos(0);
+    let storage = mqtt5::broker::config::StorageConfig {
+        backend: mqtt5::broker::config::StorageBackend::Memory,
+        enable_persistence: true,
+        ..Default::default()
+    };
+    let config = mqtt5::broker::config::BrokerConfig::default()
+        .with_bind_address("127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap())
+        .with_storage(storage)
+        .with_maximum_qos(0);
     let sut = crate::sut::inprocess_sut_with_config(config).await;
 
     let mut client = RawMqttClient::connect_tcp(sut.expect_tcp_addr())

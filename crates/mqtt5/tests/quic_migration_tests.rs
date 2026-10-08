@@ -19,6 +19,10 @@ async fn start_quic_broker() -> (MqttBroker, SocketAddr) {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     let config = BrokerConfig::default()
+        .with_storage(
+            mqtt5::broker::config::StorageConfig::new()
+                .with_backend(mqtt5::broker::config::StorageBackend::Memory),
+        )
         .with_bind_address(([127, 0, 0, 1], 0))
         .with_quic(
             QuicConfig::new(

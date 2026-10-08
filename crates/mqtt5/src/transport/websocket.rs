@@ -65,8 +65,9 @@ use tokio_tungstenite::{
 use tracing::{debug, error, info, instrument};
 use url::Url;
 
-/// Subprotocol offered when none is configured. MQTT-6.0.0-3 requires the
-/// client to include "mqtt" in the subprotocols it offers.
+/// Subprotocol always offered. MQTT-6.0.0-3 requires the client to include
+/// "mqtt" in the subprotocols it offers, so it is appended when the configured
+/// list does not already contain it.
 const DEFAULT_SUBPROTOCOL: &str = "mqtt";
 
 /// Headers a custom header may not use. The first five are set by the
@@ -75,8 +76,10 @@ const DEFAULT_SUBPROTOCOL: &str = "mqtt";
 /// extensions and cannot speak one a server accepts, `sec-websocket-accept`
 /// because it belongs in the server's response, and `content-length` and
 /// `transfer-encoding` because the upgrade request has no body and a server
-/// told otherwise would wait for one.
-const RESERVED_HEADERS: [&str; 9] = [
+/// told otherwise would wait for one. The rest are hop-by-hop or
+/// expectation headers (`te`, `trailer`, `keep-alive`, `proxy-connection`,
+/// `expect`) that describe the connection or a body rather than the upgrade.
+const RESERVED_HEADERS: [&str; 14] = [
     "host",
     "connection",
     "upgrade",
@@ -86,6 +89,11 @@ const RESERVED_HEADERS: [&str; 9] = [
     "sec-websocket-accept",
     "content-length",
     "transfer-encoding",
+    "te",
+    "trailer",
+    "keep-alive",
+    "proxy-connection",
+    "expect",
 ];
 
 /// WebSocket transport configuration
@@ -95,7 +103,7 @@ pub struct WebSocketConfig {
     /// Connection timeout
     pub timeout: Duration,
     /// Subprotocols to offer, in order of preference (e.g., "mqtt", "mqttv5.0").
-    /// "mqtt" is offered when this is empty.
+    /// "mqtt" is appended when it is not in the list.
     pub subprotocols: Vec<String>,
     /// Custom HTTP headers for the WebSocket handshake
     pub headers: HashMap<String, String>,
@@ -158,8 +166,11 @@ impl WebSocketConfig {
 
     /// Sets the WebSocket subprotocols to offer, in order of preference
     ///
-    /// The list is sent exactly as given. MQTT-6.0.0-3 requires the client to
-    /// offer "mqtt", so keep it in the list unless the broker requires otherwise.
+    /// "mqtt" is appended to the offer when it is not in the list, as
+    /// MQTT-6.0.0-3 requires; the server selects one value, so a broker that
+    /// wants another listed subprotocol can still choose it. Each subprotocol
+    /// must be an HTTP token and appear only once (RFC 6455 §4.1), or
+    /// [`connect`](WebSocketTransport::connect) fails.
     #[must_use]
     pub fn with_subprotocols(mut self, subprotocols: &[&str]) -> Self {
         self.subprotocols = subprotocols
@@ -169,10 +180,10 @@ impl WebSocketConfig {
         self
     }
 
-    /// Sets a single WebSocket subprotocol to offer
+    /// Sets a single WebSocket subprotocol to offer, in preference to "mqtt"
     ///
-    /// MQTT-6.0.0-3 requires the client to offer "mqtt"; see
-    /// [`with_subprotocols`](Self::with_subprotocols) to offer it alongside another.
+    /// "mqtt" is still offered after it, as MQTT-6.0.0-3 requires; see
+    /// [`with_subprotocols`](Self::with_subprotocols).
     #[must_use]
     pub fn with_subprotocol(mut self, subprotocol: &str) -> Self {
         self.subprotocols = vec![subprotocol.to_string()];
@@ -186,8 +197,10 @@ impl WebSocketConfig {
     /// rather than this call. Names are matched case-insensitively and must not
     /// repeat. Headers that belong to the handshake itself (`Host`,
     /// `Connection`, `Upgrade`, `Sec-WebSocket-Version`, `Sec-WebSocket-Key`,
-    /// `Sec-WebSocket-Extensions`, `Sec-WebSocket-Accept`) or would describe a
-    /// request body (`Content-Length`, `Transfer-Encoding`) are rejected, as are
+    /// `Sec-WebSocket-Extensions`, `Sec-WebSocket-Accept`), would describe a
+    /// request body (`Content-Length`, `Transfer-Encoding`, `Trailer`), or are
+    /// hop-by-hop or expectation headers (`TE`, `Keep-Alive`,
+    /// `Proxy-Connection`, `Expect`) are rejected, as are
     /// `Sec-WebSocket-Protocol` and `User-Agent`, which are set with
     /// [`with_subprotocols`](Self::with_subprotocols) and
     /// [`with_user_agent`](Self::with_user_agent). Custom headers are sent in
@@ -401,14 +414,14 @@ impl WebSocketConfig {
 
     /// Builds the WebSocket handshake request this configuration produces
     ///
-    /// The request carries the configured subprotocols (or "mqtt" when none
-    /// are configured), the user agent when one is set, and every custom
+    /// The request carries the configured subprotocols followed by "mqtt" when
+    /// they do not include it, the user agent when one is set, and every custom
     /// header. Each call generates a fresh `Sec-WebSocket-Key`.
     ///
     /// # Errors
     ///
     /// Returns an error if:
-    /// - A subprotocol is not a valid HTTP token
+    /// - A subprotocol is not a valid HTTP token or is listed more than once
     /// - The user agent is not a valid header value
     /// - A custom header has an invalid name or value, names a header the
     ///   transport sets itself, or repeats another custom header's name
@@ -418,16 +431,24 @@ impl WebSocketConfig {
         })?;
         let headers = request.headers_mut();
 
-        let subprotocols = if self.subprotocols.is_empty() {
-            DEFAULT_SUBPROTOCOL.to_string()
-        } else {
-            if let Some(invalid) = self.subprotocols.iter().find(|p| !is_http_token(p)) {
+        let mut offered: Vec<&str> = Vec::with_capacity(self.subprotocols.len() + 1);
+        for subprotocol in &self.subprotocols {
+            if !is_http_token(subprotocol) {
                 return Err(MqttError::Configuration(format!(
-                    "Invalid WebSocket subprotocol {invalid:?}: must be a non-empty HTTP token"
+                    "Invalid WebSocket subprotocol {subprotocol:?}: must be a non-empty HTTP token"
                 )));
             }
-            self.subprotocols.join(", ")
-        };
+            if offered.contains(&subprotocol.as_str()) {
+                return Err(MqttError::Configuration(format!(
+                    "WebSocket subprotocol {subprotocol:?} is listed more than once"
+                )));
+            }
+            offered.push(subprotocol);
+        }
+        if !offered.contains(&DEFAULT_SUBPROTOCOL) {
+            offered.push(DEFAULT_SUBPROTOCOL);
+        }
+        let subprotocols = offered.join(", ");
         headers.insert(
             SEC_WEBSOCKET_PROTOCOL,
             header_value("Sec-WebSocket-Protocol", &subprotocols)?,
@@ -965,6 +986,11 @@ mod tests {
             "Sec-WebSocket-Accept",
             "Content-Length",
             "transfer-encoding",
+            "TE",
+            "Trailer",
+            "Keep-Alive",
+            "proxy-connection",
+            "Expect",
         ] {
             let config = WebSocketConfig::new("ws://localhost/mqtt")
                 .unwrap()
@@ -1052,6 +1078,40 @@ mod tests {
             assert!(
                 handshake_error(&config).contains("Invalid WebSocket subprotocol"),
                 "{subprotocol:?} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn test_handshake_request_appends_mqtt_to_other_subprotocols() {
+        let config = WebSocketConfig::new("ws://localhost/mqtt")
+            .unwrap()
+            .with_subprotocol("mqttv5.0");
+        let request = config.build_handshake_request().unwrap();
+        assert_eq!(
+            request_header(&request, "Sec-WebSocket-Protocol"),
+            Some("mqttv5.0, mqtt")
+        );
+
+        let config = WebSocketConfig::new("ws://localhost/mqtt")
+            .unwrap()
+            .with_subprotocols(&["mqtt", "mqttv5.0"]);
+        let request = config.build_handshake_request().unwrap();
+        assert_eq!(
+            request_header(&request, "Sec-WebSocket-Protocol"),
+            Some("mqtt, mqttv5.0")
+        );
+    }
+
+    #[test]
+    fn test_handshake_request_rejects_duplicate_subprotocols() {
+        for list in [&["mqtt", "mqtt"][..], &["mqttv5.0", "mqtt", "mqttv5.0"][..]] {
+            let config = WebSocketConfig::new("ws://localhost/mqtt")
+                .unwrap()
+                .with_subprotocols(list);
+            assert!(
+                handshake_error(&config).contains("listed more than once"),
+                "{list:?} should be rejected"
             );
         }
     }

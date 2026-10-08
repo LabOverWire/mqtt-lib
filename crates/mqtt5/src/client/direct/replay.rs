@@ -64,6 +64,7 @@ impl PublishPolicy {
 #[derive(Debug)]
 pub(crate) struct QueuedPublish {
     serial: u64,
+    bytes: usize,
     packet: PublishPacket,
     reservation: Option<IdReservation>,
     completion: Option<Completion>,
@@ -75,8 +76,13 @@ impl QueuedPublish {
         reservation: IdReservation,
         completion: Option<Completion>,
     ) -> Self {
+        let mut encoded = bytes::BytesMut::new();
+        let bytes = packet
+            .encode(&mut encoded)
+            .map_or(packet.payload.len(), |()| encoded.len());
         Self {
             serial: 0,
+            bytes,
             packet,
             reservation: Some(reservation),
             completion,
@@ -99,6 +105,7 @@ impl QueuedPublish {
 pub struct OfflineQueue {
     messages: VecDeque<QueuedPublish>,
     next_serial: u64,
+    bytes: usize,
 }
 
 impl OfflineQueue {
@@ -108,19 +115,37 @@ impl OfflineQueue {
         queued
     }
 
-    pub(crate) fn push_back(&mut self, queued: QueuedPublish) {
+    fn push_back(&mut self, queued: QueuedPublish) {
         let queued = self.stamp(queued);
+        self.bytes += queued.bytes;
         self.messages.push_back(queued);
+    }
+
+    pub(crate) fn push_back_within(
+        &mut self,
+        queued: QueuedPublish,
+        max_messages: usize,
+        max_bytes: usize,
+    ) -> Result<()> {
+        if self.len() >= max_messages || self.bytes.saturating_add(queued.bytes) > max_bytes {
+            return Err(MqttError::OfflineQueueFull {
+                max_messages,
+                max_bytes,
+            });
+        }
+        self.push_back(queued);
+        Ok(())
     }
 
     pub(crate) fn push_front_in_order(&mut self, ordered: Vec<QueuedPublish>) {
         for queued in ordered.into_iter().rev() {
             let queued = self.stamp(queued);
+            self.bytes += queued.bytes;
             self.messages.push_front(queued);
         }
     }
 
-    fn front(&self) -> Option<(u64, PublishPacket)> {
+    pub(super) fn front(&self) -> Option<(u64, PublishPacket)> {
         self.messages
             .front()
             .map(|queued| (queued.serial, queued.packet.clone()))
@@ -131,11 +156,17 @@ impl OfflineQueue {
             .messages
             .iter()
             .position(|queued| queued.serial == serial)?;
-        self.messages.remove(position)
+        let taken = self.messages.remove(position)?;
+        self.bytes -= taken.bytes;
+        Some(taken)
     }
 
     pub(crate) fn is_empty(&self) -> bool {
         self.messages.is_empty()
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.messages.len()
     }
 }
 
@@ -450,4 +481,47 @@ async fn release_claim(flow: &Arc<RwLock<FlowControlManager>>, packet_id: Option
 fn without_topic_alias(mut publish: PublishPacket) -> PublishPacket {
     publish.properties.remove_topic_alias();
     publish
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::client::direct::tracking::OutboundIds;
+
+    fn queued(ids: &SharedIds, packet_id: u16, payload: usize) -> QueuedPublish {
+        let mut packet = PublishPacket::new("t/q", vec![0u8; payload], QoS::AtLeastOnce);
+        packet.packet_id = Some(packet_id);
+        QueuedPublish::new(packet, IdReservation::claim(ids, packet_id).unwrap(), None)
+    }
+
+    #[test]
+    fn requeued_entries_are_never_refused_but_count_toward_the_limit() {
+        let ids: SharedIds = Arc::new(Mutex::new(OutboundIds::default()));
+        let mut queue = OfflineQueue::default();
+        queue.push_front_in_order(vec![queued(&ids, 1, 10), queued(&ids, 2, 10)]);
+        assert_eq!(queue.len(), 2);
+        assert!(matches!(
+            queue.push_back_within(queued(&ids, 3, 10), 2, usize::MAX),
+            Err(MqttError::OfflineQueueFull { .. })
+        ));
+        assert_eq!(queue.len(), 2);
+    }
+
+    #[test]
+    fn taking_an_entry_frees_its_space() {
+        let ids: SharedIds = Arc::new(Mutex::new(OutboundIds::default()));
+        let mut queue = OfflineQueue::default();
+        let first = queued(&ids, 1, 100);
+        let size = first.bytes;
+        queue.push_back_within(first, usize::MAX, size).unwrap();
+        assert!(queue
+            .push_back_within(queued(&ids, 2, 100), usize::MAX, size)
+            .is_err());
+        let (serial, _) = queue.front().unwrap();
+        assert!(queue.take(serial).is_some());
+        queue
+            .push_back_within(queued(&ids, 3, 100), usize::MAX, size)
+            .unwrap();
+        assert_eq!(queue.len(), 1);
+    }
 }
