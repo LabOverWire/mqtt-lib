@@ -129,3 +129,45 @@ async fn invalid_header_fails_connect_before_dialing() {
     );
     assert!(!transport.is_connected());
 }
+
+/// The broker in this crate only selects a subprotocol the client offers, and
+/// the client fails the handshake when the server selects none, so a client
+/// that preferred `mqttv5.0` could only connect because `mqtt` is still
+/// offered (MQTT-6.0.0-3).
+#[cfg(feature = "broker")]
+#[tokio::test]
+async fn preferring_another_subprotocol_still_connects_to_the_broker() {
+    use mqtt5::broker::config::{
+        BrokerConfig, StorageBackend, StorageConfig, WebSocketConfig as BrokerWebSocketConfig,
+    };
+    use mqtt5::broker::MqttBroker;
+
+    let config = BrokerConfig::default()
+        .with_storage(StorageConfig::new().with_backend(StorageBackend::Memory))
+        .with_bind_address(([127, 0, 0, 1], 0))
+        .with_websocket(
+            BrokerWebSocketConfig::new()
+                .with_bind_address(([127, 0, 0, 1], 0))
+                .with_path("/mqtt"),
+        );
+    let mut broker = MqttBroker::with_config(config).await.expect("broker");
+    let addr = broker.ws_local_addr().expect("websocket listener");
+    let mut ready = broker.ready_receiver();
+    let broker_task = tokio::spawn(async move { broker.run().await });
+    timeout(WAIT, ready.wait_for(|ready| *ready))
+        .await
+        .expect("broker did not become ready")
+        .expect("broker stopped");
+
+    let config = WebSocketConfig::new(&format!("ws://{addr}/mqtt"))
+        .expect("config")
+        .with_subprotocol("mqttv5.0");
+    let mut transport = WebSocketTransport::new(config);
+    timeout(WAIT, transport.connect())
+        .await
+        .expect("connect timed out")
+        .expect("broker refused a client preferring mqttv5.0");
+
+    transport.close().await.expect("close");
+    broker_task.abort();
+}

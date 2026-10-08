@@ -82,8 +82,9 @@ fn valid_http_headers() -> impl Strategy<Value = HashMap<String, String>> {
 }
 
 // Header names a custom header may not use (lowercase): those reserved for
-// the handshake, plus the two that have dedicated setters.
-const RESTRICTED_HEADERS: [&str; 11] = [
+// the handshake, hop-by-hop and expectation headers, plus the two that have
+// dedicated setters.
+const RESTRICTED_HEADERS: [&str; 16] = [
     "host",
     "connection",
     "upgrade",
@@ -93,6 +94,11 @@ const RESTRICTED_HEADERS: [&str; 11] = [
     "sec-websocket-accept",
     "content-length",
     "transfer-encoding",
+    "te",
+    "trailer",
+    "keep-alive",
+    "proxy-connection",
+    "expect",
     "sec-websocket-protocol",
     "user-agent",
 ];
@@ -211,13 +217,17 @@ proptest! {
 
         // The configuration must reach the handshake request, not just the struct.
         let mut seen = std::collections::HashSet::new();
+        let mut seen_protocols = std::collections::HashSet::new();
         let conflicting = headers.keys().any(|name| {
             let lower = name.to_ascii_lowercase();
             RESTRICTED_HEADERS.contains(&lower.as_str()) || !seen.insert(lower)
-        });
+        }) || subprotocols.iter().any(|p| !seen_protocols.insert(p.as_str()));
         let request = config.build_handshake_request();
         if conflicting {
-            prop_assert!(request.is_err(), "conflicting headers {headers:?} were accepted");
+            prop_assert!(
+                request.is_err(),
+                "conflicting headers {headers:?} or subprotocols {subprotocols:?} were accepted"
+            );
             return Ok(());
         }
         let request = request.expect("valid configuration builds a request");
@@ -231,11 +241,12 @@ proptest! {
         for (name, value) in &headers {
             prop_assert_eq!(sent(name), Some(value.clone()));
         }
-        let expected_protocols = if subprotocols.is_empty() {
-            "mqtt".to_string()
-        } else {
-            subprotocols.join(", ")
-        };
+        // "mqtt" is always offered, after the configured subprotocols.
+        let mut expected_protocols = subprotocols.clone();
+        if !expected_protocols.iter().any(|p| p == "mqtt") {
+            expected_protocols.push("mqtt".to_string());
+        }
+        let expected_protocols = expected_protocols.join(", ");
         prop_assert_eq!(sent("Sec-WebSocket-Protocol"), Some(expected_protocols));
         prop_assert_eq!(sent("User-Agent"), config.user_agent.clone());
     }
