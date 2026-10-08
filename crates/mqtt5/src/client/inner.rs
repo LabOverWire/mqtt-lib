@@ -285,12 +285,16 @@ impl MqttClient {
         // As in connect_tls: a stored TLS config applies to wss:// too. With
         // none, an insecure connection still needs one to disable
         // verification; a secure one keeps the WebSocket transport's default.
+        // The stored ALPN protocols are left out: they name the protocol for
+        // MQTT directly over TLS (mqtts://, e.g. AWS IoT's x-amzn-mqtt-ca),
+        // while a WebSocket server negotiates HTTP.
         let stored = self.tls_config.read().await.clone();
         let tls_config = match stored {
             Some(mut cfg) => {
                 cfg.addr = addr;
                 cfg.hostname = host.to_string();
                 cfg.verify_server_cert = !insecure;
+                cfg.alpn_protocols = None;
                 Some(cfg)
             }
             None if insecure => Some(TlsConfig::new(addr, host).with_verify_server_cert(false)),

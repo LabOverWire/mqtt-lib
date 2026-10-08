@@ -43,7 +43,7 @@ use crate::error::{MqttError, Result};
 use crate::packet::Packet;
 use crate::time::Duration;
 use crate::transport::packet_io::{decode_buffered_packet, PacketReader, PacketWriter};
-use crate::transport::tls::TlsConfig;
+use crate::transport::tls::{SystemRoots, TlsConfig};
 use crate::Transport;
 use bytes::{Buf, Bytes, BytesMut};
 use futures_util::{stream::SplitSink, stream::SplitStream, StreamExt};
@@ -222,11 +222,18 @@ impl WebSocketConfig {
     ///
     /// Its root certificates, system-roots setting, server-certificate
     /// verification, client certificate and ALPN protocols are used for the
-    /// TLS handshake; with `use_system_roots`, the system roots are the
-    /// bundled `webpki-roots`, as for [`TlsTransport`](crate::transport::tls::TlsTransport).
+    /// TLS handshake. With `use_system_roots`, the system roots are the
+    /// platform's native root certificates, as for a wss:// connection with no
+    /// TLS configuration, rather than the bundled `webpki-roots` that
+    /// [`TlsTransport`](crate::transport::tls::TlsTransport) uses.
     /// Its `addr`, `hostname` and `connect_timeout` are not used: the server
     /// and the name verified against its certificate come from the WebSocket
     /// URL, and the timeout from [`with_timeout`](Self::with_timeout).
+    ///
+    /// ALPN protocols are offered as configured. A WebSocket server negotiates
+    /// HTTP, so one that advertises only `http/1.1`, as this crate's broker
+    /// does, rejects a handshake offering only an MQTT protocol such as
+    /// `mqtt` with `NoApplicationProtocol`.
     ///
     /// Without a TLS configuration, a wss:// connection verifies the server
     /// against the platform's native root certificates.
@@ -241,8 +248,10 @@ impl WebSocketConfig {
     /// This is a convenience method that creates a TLS config with the same
     /// host and port as the WebSocket URL. The host may be a name or an IP
     /// address. A wss:// connection does not use the config's `addr`, so for a
-    /// host name it is the unspecified address with the URL's port, rather
-    /// than a resolved one.
+    /// host name it is the unspecified address `0.0.0.0` with the URL's port,
+    /// rather than a resolved one. Set a real address before using the config
+    /// with [`TlsTransport`](crate::transport::tls::TlsTransport), which would
+    /// otherwise dial the local host.
     ///
     /// # Errors
     ///
@@ -697,9 +706,9 @@ impl Transport for WebSocketTransport {
         // With no TLS configuration, tokio-tungstenite builds its own client
         // config from the platform's native root certificates.
         let connector = match self.config.tls_config.as_ref() {
-            Some(tls_config) if self.config.is_secure() => {
-                Some(Connector::Rustls(Arc::new(tls_config.client_config()?)))
-            }
+            Some(tls_config) if self.config.is_secure() => Some(Connector::Rustls(Arc::new(
+                tls_config.client_config_with(SystemRoots::Native)?,
+            ))),
             _ => None,
         };
 
