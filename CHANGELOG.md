@@ -38,6 +38,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `TlsConfig::client_config`, which returns the rustls client configuration a `TlsConfig` describes.
 - `WebSocketConfig::build_handshake_request`, which returns the upgrade request the configuration produces.
 
+## [mqtt5 0.47.2] - 2026-10-08
+
+### Fixed
+
+- **The broker closes a QUIC connection after a malformed packet on any path** (#192). A malformed packet on the control stream ended the MQTT session but left the QUIC connection open until the idle timeout. On a client data stream only that stream was stopped, with `ERROR_IMCOMPLETE_PACKET` (0xBA), and in a datagram the packet was logged and dropped; in both cases the session carried on. A malformed packet on the control stream, a data stream or in a datagram now closes the connection with `ERROR_PROTOCOL_L0` (0xB4), as a malformed packet closes the socket over TCP. A PUBLISH to a topic name with wildcards gets the same code. Empty datagrams and datagrams whose first byte is 0x00, which MQoQ reserves for non-MQTT payloads, are still ignored. When the control stream ends for any other reason, the broker waits up to one second for the client to close the connection, so a DISCONNECT or CONNACK it has just sent is not discarded, and then closes it with `NO_ERROR` after a normal end or `ERROR_UNSPECIFIED` (0xB2) otherwise. A client that resets or finishes one of its data streams still keeps its session.
+
 ## [mqtt5 0.47.1] - 2026-10-08
 
 ### Fixed
