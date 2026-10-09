@@ -21,6 +21,13 @@ pub type TlsWriteHalf = WriteHalf<TlsStream<TcpStream>>;
 #[derive(Debug)]
 pub struct TlsConfig {
     /// Server address
+    ///
+    /// [`TlsTransport`] dials it. A wss:// connection does not use it: the
+    /// WebSocket URL selects the server, so a config made by
+    /// [`WebSocketConfig::with_tls_auto`](crate::transport::websocket::WebSocketConfig::with_tls_auto)
+    /// for a host name URL holds the unspecified address `0.0.0.0` with the
+    /// URL's port, and must be given a real address before use with
+    /// [`TlsTransport`].
     pub addr: SocketAddr,
     /// Server hostname for SNI
     pub hostname: String,
@@ -47,10 +54,7 @@ impl Clone for TlsConfig {
             hostname: self.hostname.clone(),
             connect_timeout: self.connect_timeout,
             client_cert: self.client_cert.clone(),
-            client_key: self.client_key.as_ref().map(|key| {
-                PrivateKeyDer::try_from(key.secret_der().to_vec())
-                    .expect("Failed to clone private key")
-            }),
+            client_key: self.client_key.as_ref().map(PrivateKeyDer::clone_key),
             root_certs: self.root_certs.clone(),
             use_system_roots: self.use_system_roots,
             verify_server_cert: self.verify_server_cert,
@@ -307,6 +311,120 @@ impl TlsConfig {
         self.root_certs = Some(vec![ca_cert]);
         Ok(())
     }
+
+    /// Builds the rustls client configuration this TLS configuration describes
+    ///
+    /// The `addr` and `hostname` fields are not part of it: they select the
+    /// server to dial and the name to verify, which the caller supplies when
+    /// connecting.
+    ///
+    /// With `use_system_roots`, the system roots are the bundled
+    /// `webpki-roots`, as [`TlsTransport`] uses them.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a root certificate cannot be added or the client
+    /// certificate and key cannot be used for client authentication
+    pub fn client_config(&self) -> Result<ClientConfig> {
+        self.client_config_with(SystemRoots::Bundled)
+    }
+
+    /// Builds the rustls client configuration, taking the system roots that
+    /// `use_system_roots` adds from `system_roots`
+    ///
+    /// Roots are only loaded when the server certificate is verified.
+    pub(crate) fn client_config_with(&self, system_roots: SystemRoots) -> Result<ClientConfig> {
+        let config_builder = if self.verify_server_cert {
+            let mut root_store = RootCertStore::empty();
+
+            // Add custom root certificates
+            if let Some(ref root_certs) = self.root_certs {
+                for cert in root_certs {
+                    root_store.add(cert.clone()).map_err(|e| {
+                        MqttError::ProtocolError(format!("Failed to add root cert: {e}"))
+                    })?;
+                }
+            }
+
+            // Add system roots if requested
+            if self.use_system_roots {
+                system_roots.add_to(&mut root_store)?;
+            }
+
+            ClientConfig::builder().with_root_certificates(root_store)
+        } else {
+            // Disable certificate verification for testing with self-signed certs
+            ClientConfig::builder()
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(NoVerification))
+        };
+
+        let mut config = if let (Some(cert), Some(key)) = (
+            self.client_cert.clone(),
+            self.client_key.as_ref().map(PrivateKeyDer::clone_key),
+        ) {
+            config_builder
+                .with_client_auth_cert(cert, key)
+                .map_err(|e| {
+                    MqttError::ProtocolError(format!("Failed to configure client auth: {e}"))
+                })?
+        } else {
+            config_builder.with_no_client_auth()
+        };
+
+        // Configure ALPN protocols if provided
+        if let Some(ref protocols) = self.alpn_protocols {
+            config.alpn_protocols.clone_from(protocols);
+        }
+
+        Ok(config)
+    }
+}
+
+/// Where the roots added by [`TlsConfig::use_system_roots`] come from
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SystemRoots {
+    /// The bundled `webpki-roots`
+    Bundled,
+    /// The platform's certificate store, loaded with `rustls-native-certs`
+    #[cfg(feature = "transport-websocket")]
+    Native,
+}
+
+impl SystemRoots {
+    // Only loading native roots can fail.
+    #[cfg_attr(not(feature = "transport-websocket"), allow(clippy::unnecessary_wraps))]
+    fn add_to(self, root_store: &mut RootCertStore) -> Result<()> {
+        match self {
+            Self::Bundled => {
+                root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+                Ok(())
+            }
+            #[cfg(feature = "transport-websocket")]
+            Self::Native => add_native_roots(root_store),
+        }
+    }
+}
+
+/// Adds the platform's root certificates, as tokio-tungstenite does for a
+/// wss:// connection without a TLS configuration: load errors are logged, and
+/// only finding no usable certificate at all is an error, unless custom roots
+/// were already added.
+#[cfg(feature = "transport-websocket")]
+fn add_native_roots(root_store: &mut RootCertStore) -> Result<()> {
+    let loaded = rustls_native_certs::load_native_certs();
+    if !loaded.errors.is_empty() {
+        tracing::warn!(errors = ?loaded.errors, "errors loading native root certificates");
+    }
+    let (added, ignored) = root_store.add_parsable_certificates(loaded.certs);
+    debug!(added, ignored, "loaded native root certificates");
+    if root_store.is_empty() {
+        return Err(MqttError::ConnectionError(format!(
+            "no native root certificates found (errors: {:?})",
+            loaded.errors
+        )));
+    }
+    Ok(())
 }
 
 /// TLS transport implementation
@@ -349,54 +467,8 @@ impl TlsTransport {
     /// # Errors
     ///
     /// Returns an error if the operation fails
-    fn build_tls_config(&mut self) -> Result<ClientConfig> {
-        let mut root_store = RootCertStore::empty();
-
-        // Add system roots if requested
-        if self.config.use_system_roots {
-            root_store.extend(webpki_roots::TLS_SERVER_ROOTS.to_vec());
-        }
-
-        // Add custom root certificates
-        if let Some(ref root_certs) = self.config.root_certs {
-            for cert in root_certs {
-                root_store.add(cert.clone()).map_err(|e| {
-                    MqttError::ProtocolError(format!("Failed to add root cert: {e}"))
-                })?;
-            }
-        }
-
-        let config_builder = if self.config.verify_server_cert {
-            ClientConfig::builder().with_root_certificates(root_store)
-        } else {
-            // Disable certificate verification for testing with self-signed certs
-            ClientConfig::builder()
-                .dangerous()
-                .with_custom_certificate_verifier(Arc::new(NoVerification))
-        };
-
-        let mut config = if let (Some(cert), Some(key)) = (
-            self.config.client_cert.clone(),
-            self.config.client_key.as_ref().map(|k| {
-                PrivateKeyDer::try_from(k.secret_der().to_vec())
-                    .expect("Failed to clone private key")
-            }),
-        ) {
-            config_builder
-                .with_client_auth_cert(cert, key)
-                .map_err(|e| {
-                    MqttError::ProtocolError(format!("Failed to configure client auth: {e}"))
-                })?
-        } else {
-            config_builder.with_no_client_auth()
-        };
-
-        // Configure ALPN protocols if provided
-        if let Some(ref protocols) = self.config.alpn_protocols {
-            config.alpn_protocols.clone_from(protocols);
-        }
-
-        Ok(config)
+    fn build_tls_config(&self) -> Result<ClientConfig> {
+        self.config.client_config()
     }
 }
 

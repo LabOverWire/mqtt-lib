@@ -45,7 +45,7 @@ opentelemetry_sdk = ["dep:opentelemetry_sdk"]
 opentelemetry-otlp = ["dep:opentelemetry-otlp"]
 tracing-opentelemetry = ["dep:tracing-opentelemetry"]
 tokio = ["dep:tokio"]
-transport-websocket = ["dep:tokio-tungstenite", "dep:futures-util"]
+transport-websocket = ["dep:tokio-tungstenite", "dep:futures-util", "dep:rustls-native-certs"]
 transport-quic = ["dep:quinn"]
 codec-gzip = ["dep:flate2"]
 codec-deflate = ["dep:flate2"]
@@ -177,6 +177,7 @@ rustls-pki-types = "1.15.0"
 tokio = { version = "1.47", features = ["full"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "rustls-tls-native-roots"], optional = true }
+rustls-native-certs = { version = "0.8", optional = true }
 quinn = { version = "0.11.11", default-features = false, features = ["rustls-ring", "runtime-tokio", "platform-verifier"], optional = true }
 webpki-roots = "1.0.8"
 
