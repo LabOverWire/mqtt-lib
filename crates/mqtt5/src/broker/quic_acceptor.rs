@@ -607,16 +607,18 @@ async fn run_quic_handler_inner(
     .with_flow_registry(flow_registry.clone());
 
     let handler_label = label;
+    let handler_connection = connection.clone();
     tokio::spawn(async move {
         let outcome = handler.run().await;
         drop(connection_alive);
-        if let Err(e) = outcome {
+        if let Err(e) = &outcome {
             if e.is_normal_disconnect() {
                 debug!("{} client handler finished", handler_label);
             } else {
                 warn!("{} client handler error: {e}", handler_label);
             }
         }
+        close_after_control_flow(&handler_connection, peer_addr, &outcome).await;
     });
 
     spawn_datagram_reader(connection.clone(), packet_tx.clone(), peer_addr, label);
@@ -714,8 +716,8 @@ fn spawn_datagram_reader(
                     let packet = match decode_datagram_packet(&datagram) {
                         Some(Ok(packet)) => packet,
                         Some(Err(e)) => {
-                            warn!("Failed to decode datagram from {}: {}", peer_addr, e);
-                            continue;
+                            close_on_malformed_packet(&connection, peer_addr, "datagram", &e);
+                            break;
                         }
                         None => continue,
                     };
@@ -779,6 +781,7 @@ fn spawn_uni_accept_loop(
                         label, peer_addr
                     );
                     spawn_data_stream_reader(
+                        connection.clone(),
                         recv,
                         packet_tx.clone(),
                         peer_addr,
@@ -839,7 +842,9 @@ fn handle_stream_error(
             ?code,
             error_level, err_tolerance, "Stream error from {peer_addr}, resetting stream"
         );
-        let _ = send.reset(quinn::VarInt::from_u32(code.code()));
+        if let Err(e) = send.reset(quinn::VarInt::from_u32(code.code())) {
+            debug!("stream from {peer_addr} already closed before reset: {e}");
+        }
         return;
     }
 
@@ -906,13 +911,74 @@ fn spawn_discard_handler(
             }
         }
 
-        let _ = send.finish();
+        if let Err(e) = send.finish() {
+            debug!(flow_id = ?flow_id, "discard stream from {peer_addr} already closed: {e}");
+        }
 
         debug!(flow_id = ?flow_id, "completed discard handshake for {peer_addr}");
     });
 }
 
+const CONTROL_FLOW_CLOSE_GRACE: Duration = Duration::from_secs(1);
+
+fn close_code(outcome: &Result<()>) -> mqtt5_protocol::QuicConnectionCode {
+    match outcome {
+        Ok(()) => mqtt5_protocol::QuicConnectionCode::NoError,
+        Err(e) if e.is_normal_disconnect() => mqtt5_protocol::QuicConnectionCode::NoError,
+        Err(
+            MqttError::MalformedPacket(_)
+            | MqttError::ProtocolError(_)
+            | MqttError::InvalidQoS(_)
+            | MqttError::InvalidPacketType(_)
+            | MqttError::InvalidPropertyId(_)
+            | MqttError::DuplicatePropertyId(_)
+            | MqttError::InvalidReasonCode(_)
+            | MqttError::StringTooLong(_)
+            | MqttError::InvalidTopicName(_)
+            | MqttError::PacketTooLarge { .. },
+        ) => mqtt5_protocol::QuicConnectionCode::ProtocolLevel0,
+        Err(_) => mqtt5_protocol::QuicConnectionCode::Unspecified,
+    }
+}
+
+async fn close_after_control_flow(
+    connection: &Connection,
+    peer_addr: SocketAddr,
+    outcome: &Result<()>,
+) {
+    if tokio::time::timeout(CONTROL_FLOW_CLOSE_GRACE, connection.closed())
+        .await
+        .is_ok()
+    {
+        return;
+    }
+    let code = close_code(outcome);
+    debug!(%code, "closing QUIC connection from {peer_addr} after its control flow ended");
+    close_connection(connection, code);
+}
+
+fn close_on_malformed_packet(
+    connection: &Connection,
+    peer_addr: SocketAddr,
+    source: &str,
+    error: &MqttError,
+) {
+    warn!("malformed packet on {source} from {peer_addr}, closing connection: {error}");
+    close_connection(
+        connection,
+        mqtt5_protocol::QuicConnectionCode::ProtocolLevel0,
+    );
+}
+
+fn close_connection(connection: &Connection, code: mqtt5_protocol::QuicConnectionCode) {
+    connection.close(
+        quinn::VarInt::from_u32(code.code()),
+        code.to_string().as_bytes(),
+    );
+}
+
 fn spawn_data_stream_reader(
+    connection: Arc<Connection>,
     mut recv: RecvStream,
     packet_tx: mpsc::Sender<(Packet, Option<u64>)>,
     peer_addr: SocketAddr,
@@ -957,14 +1023,16 @@ fn spawn_data_stream_reader(
                         break;
                     }
                 }
+                Err(MqttError::ClientClosed) => {
+                    debug!(flow_id = ?flow_id, "QUIC data stream closed from {}", peer_addr);
+                    break;
+                }
+                Err(MqttError::ConnectionError(reason)) => {
+                    debug!(flow_id = ?flow_id, "QUIC data stream from {peer_addr} ended: {reason}");
+                    break;
+                }
                 Err(e) => {
-                    if matches!(e, MqttError::ClientClosed) {
-                        debug!(flow_id = ?flow_id, "QUIC data stream closed from {}", peer_addr);
-                    } else {
-                        warn!(flow_id = ?flow_id, "Error reading from QUIC data stream: {e}");
-                        let stop_code = mqtt5_protocol::QuicStreamCode::IncompletePacket;
-                        let _ = recv.stop(quinn::VarInt::from_u32(stop_code.code()));
-                    }
+                    close_on_malformed_packet(&connection, peer_addr, "data stream", &e);
                     break;
                 }
             }
@@ -979,7 +1047,9 @@ fn spawn_data_stream_reader(
                 debug!(flow_id = ?id, "Preserving flow state (err_tolerance >= 2) for recovery");
             } else if registry.remove(id).is_some() {
                 debug!(flow_id = ?id, "Removed flow from registry");
-                let _ = flow_closed_tx.send(id.raw()).await;
+                if flow_closed_tx.send(id.raw()).await.is_err() {
+                    debug!(flow_id = ?id, "client handler ended before the flow closed");
+                }
             }
         }
     });
