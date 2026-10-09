@@ -34,7 +34,7 @@ use crate::transport::flow::{
 #[cfg(feature = "transport-quic")]
 use crate::transport::packet_io::read_packet_from_stream;
 #[cfg(feature = "transport-quic")]
-use bytes::{Buf, Bytes, BytesMut};
+use bytes::{Bytes, BytesMut};
 #[cfg(feature = "transport-quic")]
 use quinn::Connection;
 #[cfg(feature = "transport-quic")]
@@ -492,27 +492,28 @@ async fn try_read_server_flow_header(recv: &mut quinn::RecvStream) -> Result<Ser
     let mut header_buf = Vec::with_capacity(32);
     header_buf.extend_from_slice(&chunk.bytes);
 
-    while header_buf.len() < 32 {
-        match recv.read_chunk(32 - header_buf.len(), true).await {
-            Ok(Some(chunk)) if !chunk.bytes.is_empty() => {
-                header_buf.extend_from_slice(&chunk.bytes);
-            }
-            Ok(_) => break,
-            Err(e) => {
-                return Err(MqttError::ConnectionError(format!(
-                    "Failed to read flow header: {e}"
-                )));
-            }
+    let (flow_header, leftover) = loop {
+        let mut bytes = Bytes::copy_from_slice(&header_buf);
+        match FlowHeader::decode(&mut bytes) {
+            Ok(header) => break (header, BytesMut::from(bytes.as_ref())),
+            Err(e) if header_buf.len() >= 32 => return Err(e),
+            Err(_) => match recv.read_chunk(32 - header_buf.len(), true).await {
+                Ok(Some(chunk)) if !chunk.bytes.is_empty() => {
+                    header_buf.extend_from_slice(&chunk.bytes);
+                }
+                Ok(_) => {
+                    return Err(MqttError::ProtocolError(
+                        "incomplete flow header".to_string(),
+                    ));
+                }
+                Err(e) => {
+                    return Err(MqttError::ConnectionError(format!(
+                        "Failed to read flow header: {e}"
+                    )));
+                }
+            },
         }
-    }
-
-    let mut bytes = Bytes::from(header_buf);
-    let flow_header = FlowHeader::decode(&mut bytes)?;
-
-    let mut leftover = BytesMut::with_capacity(bytes.remaining());
-    if bytes.has_remaining() {
-        leftover.extend_from_slice(&bytes);
-    }
+    };
 
     match flow_header {
         FlowHeader::Control(h) => {
