@@ -173,6 +173,8 @@ pub struct ClientHandler {
     /// back into this handler's packet loop.
     #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
     pub(super) quic_packet_tx: Option<mpsc::Sender<(Packet, Option<u64>)>>,
+    #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
+    pub(super) quic_protocol_version_tx: Option<tokio::sync::watch::Sender<Option<u8>>>,
 }
 
 impl ClientHandler {
@@ -289,6 +291,8 @@ impl ClientHandler {
             server_delivery_strategy: ServerDeliveryStrategy::default(),
             #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
             quic_packet_tx: None,
+            #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
+            quic_protocol_version_tx: None,
         }
     }
 
@@ -317,6 +321,16 @@ impl ClientHandler {
     #[must_use]
     pub fn with_quic_packet_tx(mut self, tx: mpsc::Sender<(Packet, Option<u64>)>) -> Self {
         self.quic_packet_tx = Some(tx);
+        self
+    }
+
+    #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
+    #[must_use]
+    pub fn with_quic_protocol_version_tx(
+        mut self,
+        tx: tokio::sync::watch::Sender<Option<u8>>,
+    ) -> Self {
+        self.quic_protocol_version_tx = Some(tx);
         self
     }
 
