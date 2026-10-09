@@ -9,11 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`wss://` connections now use the TLS configuration on `WebSocketConfig`** (#190). With server-certificate verification on, `WebSocketTransport::connect` used tokio-tungstenite's own client configuration built from the platform's root certificates, so a CA set with `with_ca_cert_from_file` or `with_ca_cert_from_bytes` was never trusted (a server it issued failed with `UnknownIssuer`), a client certificate set with `with_client_auth_from_files` or `with_client_auth_from_bytes` was never presented, and `use_system_roots` and ALPN protocols had no effect. With verification off, the client certificate and ALPN protocols were dropped. The handshake now uses the rustls configuration `TlsTransport` builds from a `TlsConfig`, in both cases, except that `use_system_roots` adds the platform's root certificates, as a `wss://` connection without a TLS configuration already did, rather than the bundled `webpki-roots`.
+- **`WebSocketConfig::with_tls_auto`, and the `with_ca_cert_*` and `with_client_auth_*` methods that call it, now accept a host name URL** (#190). They parsed the URL's host and port as a socket address, so they failed with "Invalid host/port combination" for anything but an IP address. A wss:// connection takes its server and certificate name from the URL and does not use `TlsConfig::addr`, so for a host name that is now the unspecified address `0.0.0.0` with the URL's port; set a real address before using such a config with `TlsTransport`.
+- **`MqttClient` now uses its stored TLS configuration for `wss://` connections** (#190), as it already did for `mqtts://`. A CA, client certificate or key set with `set_tls_config` was ignored over WebSocket, and `set_insecure_tls(true)` replaced the stored configuration with a bare one that disables verification.
 - **The WebSocket client transport now sends its configured headers, subprotocols and user agent** (#165). `WebSocketTransport::connect` built the upgrade request from a fixed set of headers and always offered `Sec-WebSocket-Protocol: mqtt`, so anything set with `WebSocketConfig::with_header`, `with_subprotocol`, `with_subprotocols` or `with_user_agent` never reached the server, and brokers that authenticate the upgrade request through custom headers rejected the connection. The request now carries every custom header, the configured subprotocols in order, followed by `mqtt` when the list does not include it (MQTT-6.0.0-3), and the user agent when one is set. The default user agent is now `mqtt5/<crate version>` instead of `mqtt-v5/0.4.0`.
 - **The upgrade request's `Host` header now includes a non-default port**, so `ws://broker:8080/mqtt` sends `Host: broker:8080` rather than `Host: broker`.
 
 ### Changed
 
+- **ALPN protocols on a `WebSocketConfig`'s TLS configuration are now offered on `wss://`.** They were ignored before. A WebSocket server negotiates HTTP, so one that advertises only `http/1.1`, as this crate's `wss://` listener does, now rejects a handshake that offers only an MQTT protocol such as `mqtt` with `NoApplicationProtocol`. `MqttClient` does not offer its stored configuration's ALPN protocols on `wss://` (for example those set with `connect_with_tls`, such as AWS IoT's `x-amzn-mqtt-ca`), since they select MQTT directly over TLS.
 - **WebSocket configurations that relied on the old behavior may connect differently or fail to connect.** Because the configuration now reaches the wire:
   - A custom header that is invalid or reserved (see the next entry) used to be silently dropped. It now makes `connect` fail.
   - Every WebSocket connection, including those made by `MqttClient`, now sends a `User-Agent` header.
@@ -28,6 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `TlsConfig::client_config`, which returns the rustls client configuration a `TlsConfig` describes.
 - `WebSocketConfig::build_handshake_request`, which returns the upgrade request the configuration produces.
 
 ## [mqtt5 0.47.3] - 2026-10-09
