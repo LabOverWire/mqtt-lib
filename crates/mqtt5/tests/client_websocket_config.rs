@@ -128,6 +128,44 @@ async fn websocket_config_is_sent_on_connect_and_on_reconnect() {
 }
 
 #[tokio::test]
+async fn request_modifier_runs_again_on_reconnect() {
+    let (url, mut requests) = closing_mqtt_server().await;
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = std::sync::Arc::clone(&calls);
+    // A token recomputed for each attempt, as a short-lived signature would be.
+    let websocket = WebSocketConfig::new("ws://placeholder.invalid/mqtt")
+        .expect("config")
+        .with_request_modifier(move |mut request| {
+            let call = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            async move {
+                request
+                    .headers_mut()
+                    .insert("x-token", format!("token-{call}").parse()?);
+                Ok::<_, Box<dyn std::error::Error + Send + Sync>>(request)
+            }
+        });
+    let options = ConnectOptions::new("ws-modifier-client")
+        .with_websocket_config(websocket)
+        .with_reconnect_delay(Duration::from_millis(100), Duration::from_millis(500));
+    let client = MqttClient::with_options(options);
+
+    timeout(WAIT, client.connect(&url))
+        .await
+        .expect("connect timed out")
+        .expect("connect");
+
+    for (attempt, token) in [("connect", "token-1"), ("reconnect", "token-2")] {
+        let headers = timeout(WAIT, requests.recv())
+            .await
+            .unwrap_or_else(|_| panic!("no upgrade request for the {attempt}"))
+            .expect("server stopped");
+        assert_eq!(header(&headers, "x-token"), Some(token), "{attempt}");
+    }
+
+    let _ = client.disconnect().await;
+}
+
+#[tokio::test]
 async fn websocket_config_tls_is_used_for_wss() {
     let (addr, server) = wss_server(server_config(
         certs(SERVER_CERT),

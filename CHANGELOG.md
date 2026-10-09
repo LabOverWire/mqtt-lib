@@ -34,6 +34,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`ConnectOptions::with_websocket_config`, so `MqttClient` can send custom WebSocket handshake headers** (#165). `MqttClient` built each connection's `WebSocketConfig` from the URL alone, so its ws:// and wss:// connections could not carry custom headers, subprotocols or a user agent. The configuration set here is applied on every connection attempt, including automatic reconnects, with the URL taken from the address passed to `connect`; for wss://, its TLS configuration, when it has one, is used in place of the one stored with `set_tls_config` or `connect_with_tls`.
 - `WebSocketConfig` implements `Clone`.
+- **`WebSocketConfig::with_request_modifier`, an async callback that adjusts the WebSocket upgrade request before each connection attempt** (#165). It receives the validated request and returns the one to send, so it can add values computed at connect time, such as a short-lived signed token, or replace the URI with a presigned one. Set on the `WebSocketConfig` given to `ConnectOptions::with_websocket_config`, it runs before every `MqttClient` connection attempt, including automatic reconnects. It runs within the connect timeout, and an error fails the attempt. `WebSocketConfig` gains a `request_modifier` field.
 - `TlsConfig::client_config`, which returns the rustls client configuration a `TlsConfig` describes.
 - `WebSocketConfig::build_handshake_request`, which returns the upgrade request the configuration produces.
 

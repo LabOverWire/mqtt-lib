@@ -48,7 +48,9 @@ use crate::Transport;
 use bytes::{Buf, Bytes, BytesMut};
 use futures_util::{stream::SplitSink, stream::SplitStream, StreamExt};
 use std::collections::HashMap;
+use std::future::Future;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio_tungstenite::{
@@ -112,6 +114,34 @@ pub struct WebSocketConfig {
     pub user_agent: Option<String>,
     /// TLS configuration for secure WebSocket connections (wss://)
     pub tls_config: Option<TlsConfig>,
+    /// Adjusts the upgrade request before each connection attempt; see
+    /// [`WebSocketConfig::with_request_modifier`]
+    pub request_modifier: Option<RequestModifier>,
+}
+
+/// Error a [`RequestModifier`] fails with
+pub type RequestModifierError = Box<dyn std::error::Error + Send + Sync>;
+
+type ModifiedRequest =
+    Pin<Box<dyn Future<Output = std::result::Result<Request<()>, RequestModifierError>> + Send>>;
+
+/// A callback that adjusts the WebSocket upgrade request before each
+/// connection attempt, set with [`WebSocketConfig::with_request_modifier`]
+#[derive(Clone)]
+pub struct RequestModifier(Arc<dyn Fn(Request<()>) -> ModifiedRequest + Send + Sync>);
+
+impl RequestModifier {
+    async fn apply(&self, request: Request<()>) -> Result<Request<()>> {
+        (self.0)(request).await.map_err(|e| {
+            MqttError::ConnectionError(format!("WebSocket request modifier failed: {e}"))
+        })
+    }
+}
+
+impl std::fmt::Debug for RequestModifier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RequestModifier(..)")
+    }
 }
 
 impl std::fmt::Debug for WebSocketConfig {
@@ -125,6 +155,7 @@ impl std::fmt::Debug for WebSocketConfig {
             .field("headers", &header_names)
             .field("user_agent", &self.user_agent)
             .field("tls_config", &self.tls_config)
+            .field("request_modifier", &self.request_modifier)
             .finish()
     }
 }
@@ -143,6 +174,7 @@ impl WebSocketConfig {
             headers: HashMap::new(),
             user_agent: Some(concat!("mqtt5/", env!("CARGO_PKG_VERSION")).to_string()),
             tls_config: None,
+            request_modifier: None,
         })
     }
 
@@ -214,6 +246,56 @@ impl WebSocketConfig {
     #[must_use]
     pub fn with_user_agent(mut self, user_agent: &str) -> Self {
         self.user_agent = Some(user_agent.to_string());
+        self
+    }
+
+    /// Sets a callback that adjusts the upgrade request before each connection
+    /// attempt
+    ///
+    /// The callback receives the validated request that
+    /// [`build_handshake_request`](Self::build_handshake_request) produces and
+    /// returns the request to send. It can add values computed at connect
+    /// time, such as a short-lived signed token, or replace the URI, such as
+    /// with a presigned URL. Through
+    /// [`ConnectOptions::with_websocket_config`](crate::ConnectOptions::with_websocket_config)
+    /// it runs before every connection attempt an `MqttClient` makes,
+    /// including automatic reconnects, so those values never go stale.
+    ///
+    /// The returned request is sent as is: the checks
+    /// [`with_header`](Self::with_header) applies do not cover headers the
+    /// callback adds, and tungstenite only requires its own handshake headers
+    /// to be present once. The connection is made to the returned request's
+    /// URI; a callback that points it at another host must update `Host` too.
+    /// The callback runs within the [`timeout`](Self::with_timeout), and an
+    /// error fails the attempt with `MqttError::ConnectionError`.
+    ///
+    /// ```rust,no_run
+    /// # use mqtt5::transport::websocket::WebSocketConfig;
+    /// # async fn sign() -> Result<String, std::io::Error> { Ok(String::new()) }
+    /// # fn example() -> mqtt5::Result<()> {
+    /// let config = WebSocketConfig::new("wss://broker.example.com/mqtt")?
+    ///     .with_header("x-amz-customauthorizer-name", "my-authorizer")
+    ///     .with_request_modifier(|mut request| async move {
+    ///         let signature = sign().await?;
+    ///         request
+    ///             .headers_mut()
+    ///             .insert("x-amz-customauthorizer-signature", signature.parse()?);
+    ///         Ok::<_, Box<dyn std::error::Error + Send + Sync>>(request)
+    ///     });
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn with_request_modifier<F, Fut, E>(mut self, modifier: F) -> Self
+    where
+        F: Fn(Request<()>) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = std::result::Result<Request<()>, E>> + Send + 'static,
+        E: Into<RequestModifierError>,
+    {
+        self.request_modifier = Some(RequestModifier(Arc::new(move |request| {
+            let pending = modifier(request);
+            Box::pin(async move { pending.await.map_err(Into::into) })
+        })));
         self
     }
 
@@ -724,11 +806,20 @@ impl Transport for WebSocketTransport {
             _ => None,
         };
 
-        let ws_result = tokio::time::timeout(
-            self.config.timeout,
-            tokio_tungstenite::connect_async_tls_with_config(request, None, false, connector),
-        )
-        .await;
+        let handshake = async {
+            let request = match &self.config.request_modifier {
+                Some(modifier) => modifier.apply(request).await?,
+                None => request,
+            };
+            tokio_tungstenite::connect_async_tls_with_config(request, None, false, connector)
+                .await
+                .map_err(|e| {
+                    error!(error = %e, "WebSocket connection failed");
+                    MqttError::ConnectionError(e.to_string())
+                })
+        };
+        // Boxed so the connect futures that await this one stay small.
+        let ws_result = tokio::time::timeout(self.config.timeout, Box::pin(handshake)).await;
 
         match ws_result {
             Ok(Ok((ws_stream, response))) => {
@@ -744,10 +835,7 @@ impl Transport for WebSocketTransport {
                 debug!("WebSocket connection established");
                 Ok(())
             }
-            Ok(Err(e)) => {
-                error!(error = %e, "WebSocket connection failed");
-                Err(MqttError::ConnectionError(e.to_string()))
-            }
+            Ok(Err(e)) => Err(e),
             Err(_) => {
                 error!("WebSocket connection timed out");
                 Err(MqttError::Timeout)
