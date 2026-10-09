@@ -4,18 +4,24 @@
 use mqtt5::broker::config::{
     BrokerConfig, QuicConfig as BrokerQuicConfig, StorageBackend, StorageConfig,
 };
-use mqtt5::broker::MqttBroker;
+use mqtt5::broker::{BrokerShutdownHandle, MqttBroker};
+use mqtt5::error::Result;
 use mqtt5::transport::{QuicConfig, QuicSplitResult, QuicTransport};
 use mqtt5::Transport;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Once;
 use std::time::Duration;
+use tokio::task::JoinHandle;
 
 const CERT: &str = "../../test_certs/server.pem";
 const KEY: &str = "../../test_certs/server.key";
 const PINGREQ: [u8; 2] = [0xC0, 0x00];
 const PINGREQ_WITH_FLAGS: [u8; 2] = [0xC1, 0x00];
 const PUBLISH_QOS_3: [u8; 6] = [0x36, 0x04, 0x00, 0x01, b't', 0x00];
+const PUBLISH_TO_WILDCARD: [u8; 8] = [0x30, 0x06, 0x00, 0x03, b'a', b'/', b'+', 0x00];
+const NON_MQTT_DATAGRAM: [u8; 2] = [0x00, 0x00];
+const EMPTY_DATAGRAM: [u8; 0] = [];
 const DISCONNECT: [u8; 2] = [0xE0, 0x00];
 const NO_ERROR: u64 = 0x00;
 const PROTOCOL_ERROR_LEVEL_0: u64 = 0xB4;
@@ -36,21 +42,44 @@ const CLOSED_AS_PROTOCOL_ERROR: Outcome = Outcome {
     close_code: Some(PROTOCOL_ERROR_LEVEL_0),
 };
 
-async fn start_broker() -> SocketAddr {
-    let _ = rustls::crypto::ring::default_provider().install_default();
-    let config = BrokerConfig::default()
-        .with_storage(StorageConfig::default().with_backend(StorageBackend::Memory))
-        .with_bind_address(([127, 0, 0, 1], 0))
-        .with_quic(
-            BrokerQuicConfig::new(PathBuf::from(CERT), PathBuf::from(KEY))
-                .with_bind_address("127.0.0.1:0".parse::<SocketAddr>().expect("bind address")),
-        );
-    let mut broker = MqttBroker::with_config(config)
-        .await
-        .expect("broker starts");
-    let addr = broker.quic_local_addr().expect("QUIC endpoint bound");
-    tokio::spawn(async move { broker.run().await });
-    addr
+static CRYPTO_PROVIDER: Once = Once::new();
+
+struct Broker {
+    shutdown: BrokerShutdownHandle,
+    run: JoinHandle<Result<()>>,
+}
+
+impl Broker {
+    async fn start() -> (Self, SocketAddr) {
+        CRYPTO_PROVIDER.call_once(|| {
+            rustls::crypto::ring::default_provider()
+                .install_default()
+                .expect("install crypto provider");
+        });
+        let config = BrokerConfig::default()
+            .with_storage(StorageConfig::default().with_backend(StorageBackend::Memory))
+            .with_bind_address(([127, 0, 0, 1], 0))
+            .with_quic(
+                BrokerQuicConfig::new(PathBuf::from(CERT), PathBuf::from(KEY))
+                    .with_bind_address("127.0.0.1:0".parse::<SocketAddr>().expect("bind address")),
+            );
+        let mut broker = MqttBroker::with_config(config)
+            .await
+            .expect("broker starts");
+        let addr = broker.quic_local_addr().expect("QUIC endpoint bound");
+        let shutdown = broker.shutdown_handle();
+        let run = tokio::spawn(async move { broker.run().await });
+        (Self { shutdown, run }, addr)
+    }
+
+    async fn stop(self) {
+        self.shutdown.shutdown();
+        tokio::time::timeout(Duration::from_secs(5), self.run)
+            .await
+            .expect("broker stops")
+            .expect("broker task joins")
+            .expect("broker run succeeds");
+    }
 }
 
 fn connect_frame(client_id: &str) -> Vec<u8> {
@@ -68,8 +97,8 @@ fn connect_frame(client_id: &str) -> Vec<u8> {
     frame
 }
 
-async fn connected_session(client_id: &str) -> QuicSplitResult {
-    let addr = start_broker().await;
+async fn connected_session(client_id: &str) -> (Broker, QuicSplitResult) {
+    let (broker, addr) = Broker::start().await;
     let mut transport =
         QuicTransport::new(QuicConfig::new(addr, "localhost").with_verify_server_cert(false));
     transport.connect().await.expect("QUIC handshake");
@@ -92,7 +121,7 @@ async fn connected_session(client_id: &str) -> QuicSplitResult {
         .read_exact(&mut body)
         .await
         .expect("read CONNACK body");
-    split
+    (broker, split)
 }
 
 async fn outcome(split: &mut QuicSplitResult) -> Outcome {
@@ -118,28 +147,34 @@ async fn outcome(split: &mut QuicSplitResult) -> Outcome {
 }
 
 async fn on_control_stream(bytes: &[u8]) -> Outcome {
-    let mut split = connected_session("malformed-control").await;
+    let (broker, mut split) = connected_session("malformed-control").await;
     split.send.write_all(bytes).await.expect("send on control");
     tokio::time::sleep(Duration::from_millis(200)).await;
-    outcome(&mut split).await
+    let result = outcome(&mut split).await;
+    broker.stop().await;
+    result
 }
 
 async fn on_data_stream(bytes: &[u8]) -> Outcome {
-    let mut split = connected_session("malformed-data").await;
+    let (broker, mut split) = connected_session("malformed-data").await;
     let mut data = split.connection.open_uni().await.expect("open data stream");
     data.write_all(bytes).await.expect("send on data stream");
     tokio::time::sleep(Duration::from_millis(200)).await;
-    outcome(&mut split).await
+    let result = outcome(&mut split).await;
+    broker.stop().await;
+    result
 }
 
 async fn in_datagram(bytes: &[u8]) -> Outcome {
-    let mut split = connected_session("malformed-datagram").await;
+    let (broker, mut split) = connected_session("malformed-datagram").await;
     split
         .connection
         .send_datagram(bytes.to_vec().into())
         .expect("send datagram");
     tokio::time::sleep(Duration::from_millis(200)).await;
-    outcome(&mut split).await
+    let result = outcome(&mut split).await;
+    broker.stop().await;
+    result
 }
 
 #[tokio::test]
@@ -155,6 +190,22 @@ async fn malformed_packet_on_the_control_stream_closes_the_connection() {
     );
     assert_eq!(
         on_control_stream(&PUBLISH_QOS_3).await,
+        CLOSED_AS_PROTOCOL_ERROR
+    );
+}
+
+#[tokio::test]
+async fn publish_to_a_wildcard_topic_closes_the_connection() {
+    assert_eq!(
+        on_control_stream(&PUBLISH_TO_WILDCARD).await,
+        CLOSED_AS_PROTOCOL_ERROR
+    );
+    assert_eq!(
+        on_data_stream(&PUBLISH_TO_WILDCARD).await,
+        CLOSED_AS_PROTOCOL_ERROR
+    );
+    assert_eq!(
+        in_datagram(&PUBLISH_TO_WILDCARD).await,
         CLOSED_AS_PROTOCOL_ERROR
     );
 }
@@ -182,6 +233,12 @@ async fn valid_datagram_keeps_the_session() {
 }
 
 #[tokio::test]
+async fn non_mqtt_and_empty_datagrams_keep_the_session() {
+    assert_eq!(in_datagram(&NON_MQTT_DATAGRAM).await, STILL_SERVED);
+    assert_eq!(in_datagram(&EMPTY_DATAGRAM).await, STILL_SERVED);
+}
+
+#[tokio::test]
 async fn malformed_datagram_closes_the_connection() {
     assert_eq!(
         in_datagram(&PINGREQ_WITH_FLAGS).await,
@@ -192,7 +249,7 @@ async fn malformed_datagram_closes_the_connection() {
 
 #[tokio::test]
 async fn client_resetting_a_data_stream_keeps_the_session() {
-    let mut split = connected_session("reset-data").await;
+    let (broker, mut split) = connected_session("reset-data").await;
     let mut data = split.connection.open_uni().await.expect("open data stream");
     data.write_all(&PINGREQ[..1])
         .await
@@ -201,21 +258,23 @@ async fn client_resetting_a_data_stream_keeps_the_session() {
         .expect("reset data stream");
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert_eq!(outcome(&mut split).await, STILL_SERVED);
+    broker.stop().await;
 }
 
 #[tokio::test]
 async fn client_finishing_a_data_stream_keeps_the_session() {
-    let mut split = connected_session("finish-data").await;
+    let (broker, mut split) = connected_session("finish-data").await;
     let mut data = split.connection.open_uni().await.expect("open data stream");
     data.write_all(&PINGREQ).await.expect("send on data stream");
     data.finish().expect("finish data stream");
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert_eq!(outcome(&mut split).await, STILL_SERVED);
+    broker.stop().await;
 }
 
 #[tokio::test]
 async fn connection_is_closed_without_error_after_a_client_disconnect() {
-    let mut split = connected_session("disconnect").await;
+    let (broker, mut split) = connected_session("disconnect").await;
     split
         .send
         .write_all(&DISCONNECT)
@@ -229,4 +288,5 @@ async fn connection_is_closed_without_error_after_a_client_disconnect() {
             _ => None,
         });
     assert_eq!(close_code, Some(NO_ERROR));
+    broker.stop().await;
 }

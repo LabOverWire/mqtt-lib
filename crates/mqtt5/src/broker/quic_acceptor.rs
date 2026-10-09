@@ -934,6 +934,7 @@ fn close_code(outcome: &Result<()>) -> mqtt5_protocol::QuicConnectionCode {
             | MqttError::DuplicatePropertyId(_)
             | MqttError::InvalidReasonCode(_)
             | MqttError::StringTooLong(_)
+            | MqttError::InvalidTopicName(_)
             | MqttError::PacketTooLarge { .. },
         ) => mqtt5_protocol::QuicConnectionCode::ProtocolLevel0,
         Err(_) => mqtt5_protocol::QuicConnectionCode::Unspecified,
@@ -953,10 +954,7 @@ async fn close_after_control_flow(
     }
     let code = close_code(outcome);
     debug!(%code, "closing QUIC connection from {peer_addr} after its control flow ended");
-    connection.close(
-        quinn::VarInt::from_u32(code.code()),
-        code.to_string().as_bytes(),
-    );
+    close_connection(connection, code);
 }
 
 fn close_on_malformed_packet(
@@ -966,7 +964,13 @@ fn close_on_malformed_packet(
     error: &MqttError,
 ) {
     warn!("malformed packet on {source} from {peer_addr}, closing connection: {error}");
-    let code = mqtt5_protocol::QuicConnectionCode::ProtocolLevel0;
+    close_connection(
+        connection,
+        mqtt5_protocol::QuicConnectionCode::ProtocolLevel0,
+    );
+}
+
+fn close_connection(connection: &Connection, code: mqtt5_protocol::QuicConnectionCode) {
     connection.close(
         quinn::VarInt::from_u32(code.code()),
         code.to_string().as_bytes(),
