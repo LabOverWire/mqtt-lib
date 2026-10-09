@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- **`ConnectOptions` has a new public field, `websocket_config`.** Code that builds `ConnectOptions` with a struct literal must add it. The field exists only with the `transport-websocket` feature, which is on by default.
+
 ### Fixed
 
 - **`wss://` connections now use the TLS configuration on `WebSocketConfig`** (#190). With server-certificate verification on, `WebSocketTransport::connect` used tokio-tungstenite's own client configuration built from the platform's root certificates, so a CA set with `with_ca_cert_from_file` or `with_ca_cert_from_bytes` was never trusted (a server it issued failed with `UnknownIssuer`), a client certificate set with `with_client_auth_from_files` or `with_client_auth_from_bytes` was never presented, and `use_system_roots` and ALPN protocols had no effect. With verification off, the client certificate and ALPN protocols were dropped. The handshake now uses the rustls configuration `TlsTransport` builds from a `TlsConfig`, in both cases, except that `use_system_roots` adds the platform's root certificates, as a `wss://` connection without a TLS configuration already did, rather than the bundled `webpki-roots`.

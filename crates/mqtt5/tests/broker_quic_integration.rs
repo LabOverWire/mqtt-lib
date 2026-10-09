@@ -164,22 +164,22 @@ async fn test_broker_default_quic_port() {
 
 #[tokio::test]
 async fn test_control_only_reconnect_publish_does_not_reenter_disconnect_loop() {
-    assert_control_only_reconnect_publish_stable(false).await;
+    Box::pin(assert_control_only_reconnect_publish_stable(false)).await;
 }
 
 #[tokio::test]
 async fn test_control_only_clean_session_reconnect_publish_does_not_reenter_disconnect_loop() {
-    assert_control_only_reconnect_publish_stable(true).await;
+    Box::pin(assert_control_only_reconnect_publish_stable(true)).await;
 }
 
 #[tokio::test]
 async fn test_control_only_clean_session_qos0_burst_after_reconnect_does_not_disconnect() {
-    assert_control_only_reconnect_qos0_burst_stable(false).await;
+    Box::pin(assert_control_only_reconnect_qos0_burst_stable(false)).await;
 }
 
 #[tokio::test]
 async fn test_control_only_secure_clean_session_qos0_burst_after_reconnect_does_not_disconnect() {
-    assert_control_only_reconnect_qos0_burst_stable(true).await;
+    Box::pin(assert_control_only_reconnect_qos0_burst_stable(true)).await;
 }
 
 async fn assert_control_only_reconnect_publish_stable(clean_start: bool) {

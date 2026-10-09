@@ -124,7 +124,7 @@ async fn retained_received_after_takeover_during_hand_off(clean_start: bool) -> 
 #[tokio::test]
 async fn clean_start_subscribe_during_hand_off_still_gets_retained_message() {
     assert_eq!(
-        retained_received_after_takeover_during_hand_off(true).await,
+        Box::pin(retained_received_after_takeover_during_hand_off(true)).await,
         1
     );
 }
@@ -132,7 +132,7 @@ async fn clean_start_subscribe_during_hand_off_still_gets_retained_message() {
 #[tokio::test]
 async fn resumed_subscribe_during_hand_off_gets_retained_message() {
     assert_eq!(
-        retained_received_after_takeover_during_hand_off(false).await,
+        Box::pin(retained_received_after_takeover_during_hand_off(false)).await,
         1
     );
 }
