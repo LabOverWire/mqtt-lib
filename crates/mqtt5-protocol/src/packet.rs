@@ -451,6 +451,14 @@ impl Packet {
                 )?;
                 Ok(Packet::Unsubscribe(packet))
             }
+            PacketType::UnsubAck => {
+                let packet = unsuback::UnsubAckPacket::decode_body_with_version(
+                    buf,
+                    fixed_header,
+                    protocol_version,
+                )?;
+                Ok(Packet::UnsubAck(packet))
+            }
             _ => Self::decode_from_body(packet_type, fixed_header, buf),
         }
     }

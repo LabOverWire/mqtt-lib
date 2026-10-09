@@ -2,6 +2,7 @@ use crate::error::{MqttError, Result};
 use crate::packet::{FixedHeader, MqttPacket, PacketType};
 use crate::prelude::{format, String, ToString, Vec};
 use crate::protocol::v5::properties::Properties;
+use crate::types::ProtocolVersion;
 use bytes::{Buf, BufMut};
 
 /// MQTT UNSUBACK packet
@@ -137,7 +138,23 @@ impl MqttPacket for UnsubAckPacket {
         Ok(())
     }
 
-    fn decode_body<B: Buf>(buf: &mut B, _fixed_header: &FixedHeader) -> Result<Self> {
+    fn decode_body<B: Buf>(buf: &mut B, fixed_header: &FixedHeader) -> Result<Self> {
+        Self::decode_body_with_version(buf, fixed_header, 5)
+    }
+}
+
+impl UnsubAckPacket {
+    /// # Errors
+    ///
+    /// Returns an error if decoding fails
+    pub fn decode_body_with_version<B: Buf>(
+        buf: &mut B,
+        _fixed_header: &FixedHeader,
+        protocol_version: u8,
+    ) -> Result<Self> {
+        ProtocolVersion::try_from(protocol_version)
+            .map_err(|()| MqttError::UnsupportedProtocolVersion)?;
+
         // Packet identifier
         if buf.remaining() < 2 {
             return Err(MqttError::MalformedPacket(
@@ -145,6 +162,15 @@ impl MqttPacket for UnsubAckPacket {
             ));
         }
         let packet_id = buf.get_u16();
+
+        if protocol_version == 4 {
+            if buf.has_remaining() {
+                return Err(MqttError::MalformedPacket(
+                    "v3.1.1 UNSUBACK must not have a payload".to_string(),
+                ));
+            }
+            return Ok(Self::new_v311(packet_id));
+        }
 
         // Properties (v5.0)
         let properties = Properties::decode(buf)?;
@@ -242,5 +268,37 @@ mod tests {
         let mut buf = BytesMut::new();
         let result = packet.encode(&mut buf);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_unsuback_v311_decodes_through_the_packet_decoder() {
+        let mut buf = BytesMut::new();
+        UnsubAckPacket::new_v311(456).encode(&mut buf).unwrap();
+        assert_eq!(&buf[..], &[0xB0, 0x02, 0x01, 0xC8]);
+
+        let fixed_header = FixedHeader::decode(&mut buf).unwrap();
+        let decoded = crate::packet::Packet::decode_from_body_with_version(
+            fixed_header.packet_type,
+            &fixed_header,
+            &mut buf,
+            4,
+        )
+        .unwrap();
+        let crate::packet::Packet::UnsubAck(unsuback) = decoded else {
+            panic!("expected UNSUBACK, got {decoded:?}");
+        };
+        assert_eq!(unsuback.packet_id, 456);
+        assert!(unsuback.reason_codes.is_empty());
+        assert_eq!(unsuback.protocol_version, 4);
+    }
+
+    #[test]
+    fn test_unsuback_v311_with_a_payload_is_malformed() {
+        let mut buf = BytesMut::from(&[0x01, 0xC8, 0x00][..]);
+        let fixed_header = FixedHeader::new(PacketType::UnsubAck, 0, 3);
+        assert!(matches!(
+            UnsubAckPacket::decode_body_with_version(&mut buf, &fixed_header, 4),
+            Err(MqttError::MalformedPacket(_))
+        ));
     }
 }
