@@ -38,6 +38,10 @@ impl ClientHandler {
         match protocol_version {
             4 | 5 => {
                 self.protocol_version = protocol_version;
+                #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
+                if let Some(tx) = &self.quic_protocol_version_tx {
+                    tx.send_replace(Some(protocol_version));
+                }
                 debug!(
                     protocol_version,
                     addr = %self.client_addr,

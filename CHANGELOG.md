@@ -35,6 +35,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `TlsConfig::client_config`, which returns the rustls client configuration a `TlsConfig` describes.
 - `WebSocketConfig::build_handshake_request`, which returns the upgrade request the configuration produces.
 
+## [mqtt5 0.47.3] - 2026-10-09
+
+### Fixed
+
+- **The QUIC broker decodes MQTT v3.1.1 packets on data streams and in datagrams** (#193). Only the control stream knew the protocol version the client connected with. A v3.1.1 SUBSCRIBE or PUBLISH on a client data stream, or a v3.1.1 PUBLISH in a datagram, was decoded as v5 and rejected, and since 0.47.2 the connection was closed with `ERROR_PROTOCOL_L0`. These readers now wait for CONNECT and decode with the negotiated version.
+- **A QUIC client reads short messages on broker-opened streams at once** (#195). The client kept reading a broker-opened stream until it had 32 bytes before parsing the flow header. A flow header and a PUBLISH with no properties can be shorter than that, which is the usual case for a v3.1.1 subscriber, so the message waited until more data arrived on that stream or the connection closed. The client now parses the header as soon as it is complete.
+- **A v3.1.1 client can unsubscribe** (#194). It could not decode the broker's UNSUBACK, which in v3.1.1 has no properties or reason codes, so `unsubscribe()` failed with `UNSUBACK channel closed` and the connection dropped. Fixed in mqtt5-protocol 0.16.1.
+
+## [mqtt5-wasm 2.1.6] - 2026-10-09
+
+### Fixed
+
+- **The wasm broker serves MQTT v3.1.1 clients** (#193). It decoded every client packet as v5, so a v3.1.1 client's first SUBSCRIBE, UNSUBSCRIBE or QoS 1 PUBLISH was rejected and its connection dropped. A PUBLISH whose payload started with `0x00` lost that byte. Packets are now decoded with the version the client connected with.
+- **The wasm client can unsubscribe over v3.1.1** (#194), through mqtt5-protocol 0.16.1.
+
+## [mqtt5-protocol 0.16.1] - 2026-10-09
+
+### Fixed
+
+- **`Packet::decode_from_body_with_version` decodes a v3.1.1 UNSUBACK** (#194). UNSUBACK was decoded as v5 for every version and a v3.1.1 UNSUBACK, which is only a packet identifier, was rejected as malformed. A v3.1.1 UNSUBACK with any payload is still malformed.
+
+### Added
+
+- `UnsubAckPacket::decode_body_with_version`.
+
 ## [mqtt5 0.47.2] - 2026-10-08
 
 ### Fixed
