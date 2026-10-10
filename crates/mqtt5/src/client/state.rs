@@ -12,18 +12,37 @@ use super::direct::AutomaticReconnectLifecycle;
 use super::direct::{StoredSubscription, SubscriptionPersistence};
 use super::MqttClient;
 
+#[cfg(feature = "transport-websocket")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WebSocketSettings {
+    Configured,
+    Default,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) enum ClientTransportType {
     Tcp,
     Tls,
     #[cfg(feature = "transport-websocket")]
-    WebSocket(String),
+    WebSocket(String, WebSocketSettings),
     #[cfg(feature = "transport-websocket")]
-    WebSocketSecure(String),
+    WebSocketSecure(String, WebSocketSettings),
     #[cfg(feature = "transport-quic")]
     Quic,
     #[cfg(feature = "transport-quic")]
     QuicSecure,
+}
+
+impl ClientTransportType {
+    pub(crate) fn redirected(self) -> Self {
+        match self {
+            #[cfg(feature = "transport-websocket")]
+            Self::WebSocket(url, _) => Self::WebSocket(url, WebSocketSettings::Default),
+            #[cfg(feature = "transport-websocket")]
+            Self::WebSocketSecure(url, _) => Self::WebSocketSecure(url, WebSocketSettings::Default),
+            other => other,
+        }
+    }
 }
 
 impl MqttClient {

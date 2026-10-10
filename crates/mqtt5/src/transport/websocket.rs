@@ -97,6 +97,7 @@ const RESERVED_HEADERS: [&str; 14] = [
 ];
 
 /// WebSocket transport configuration
+#[derive(Clone)]
 pub struct WebSocketConfig {
     /// WebSocket URL (ws:// or wss://)
     pub url: Url,
@@ -135,26 +136,24 @@ impl WebSocketConfig {
     ///
     /// Returns an error if the URL is invalid or uses an unsupported scheme
     pub fn new(url: &str) -> Result<Self> {
-        let parsed_url = Url::parse(url)
-            .map_err(|e| MqttError::ProtocolError(format!("Invalid WebSocket URL: {e}")))?;
-
-        match parsed_url.scheme() {
-            "ws" | "wss" => {}
-            scheme => {
-                return Err(MqttError::ProtocolError(format!(
-                    "Unsupported WebSocket scheme: {scheme}. Use 'ws' or 'wss'"
-                )));
-            }
-        }
-
         Ok(Self {
-            url: parsed_url,
+            url: parse_websocket_url(url)?,
             timeout: Duration::from_secs(30),
             subprotocols: vec![DEFAULT_SUBPROTOCOL.to_string()],
             headers: HashMap::new(),
             user_agent: Some(concat!("mqtt5/", env!("CARGO_PKG_VERSION")).to_string()),
             tls_config: None,
         })
+    }
+
+    /// Returns this configuration with its URL replaced
+    ///
+    /// Used by `MqttClient`, which connects to the address it is given with
+    /// the rest of the configuration from
+    /// [`ConnectOptions::with_websocket_config`](crate::ConnectOptions::with_websocket_config).
+    pub(crate) fn with_url(mut self, url: &str) -> Result<Self> {
+        self.url = parse_websocket_url(url)?;
+        Ok(self)
     }
 
     /// Sets the connection timeout
@@ -508,6 +507,19 @@ fn header_value(name: &str, value: &str) -> Result<HeaderValue> {
     HeaderValue::from_str(value).map_err(|e| {
         MqttError::Configuration(format!("Invalid value for WebSocket header {name:?}: {e}"))
     })
+}
+
+/// Parses a WebSocket URL, accepting only the ws and wss schemes
+fn parse_websocket_url(url: &str) -> Result<Url> {
+    let parsed_url = Url::parse(url)
+        .map_err(|e| MqttError::ProtocolError(format!("Invalid WebSocket URL: {e}")))?;
+
+    match parsed_url.scheme() {
+        "ws" | "wss" => Ok(parsed_url),
+        scheme => Err(MqttError::ProtocolError(format!(
+            "Unsupported WebSocket scheme: {scheme}. Use 'ws' or 'wss'"
+        ))),
+    }
 }
 
 /// Whether `s` is an HTTP token (RFC 9110 §5.6.2), as RFC 6455 §4.1 requires
