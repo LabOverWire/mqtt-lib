@@ -1344,7 +1344,7 @@ mod tests {
             let (transport, host, port) = MqttClient::parse_address("ws://localhost").unwrap();
             assert!(matches!(
                 transport,
-                state::ClientTransportType::WebSocket(_)
+                state::ClientTransportType::WebSocket(..)
             ));
             assert_eq!(host, "localhost");
             assert_eq!(port, 80);
@@ -1352,7 +1352,7 @@ mod tests {
             let (transport, host, port) = MqttClient::parse_address("ws://localhost:8080").unwrap();
             assert!(matches!(
                 transport,
-                state::ClientTransportType::WebSocket(_)
+                state::ClientTransportType::WebSocket(..)
             ));
             assert_eq!(host, "localhost");
             assert_eq!(port, 8080);
@@ -1360,7 +1360,7 @@ mod tests {
             let (transport, host, port) = MqttClient::parse_address("wss://secure.broker").unwrap();
             assert!(matches!(
                 transport,
-                state::ClientTransportType::WebSocketSecure(_)
+                state::ClientTransportType::WebSocketSecure(..)
             ));
             assert_eq!(host, "secure.broker");
             assert_eq!(port, 443);
@@ -1369,14 +1369,14 @@ mod tests {
                 MqttClient::parse_address("wss://secure.broker:8443").unwrap();
             assert!(matches!(
                 transport,
-                state::ClientTransportType::WebSocketSecure(_)
+                state::ClientTransportType::WebSocketSecure(..)
             ));
             assert_eq!(host, "secure.broker");
             assert_eq!(port, 8443);
 
             let (transport, host, port) =
                 MqttClient::parse_address("ws://broker.emqx.io:8083/mqtt").unwrap();
-            if let state::ClientTransportType::WebSocket(url) = transport {
+            if let state::ClientTransportType::WebSocket(url, _) = transport {
                 assert_eq!(url, "ws://broker.emqx.io:8083/mqtt");
             } else {
                 panic!("Expected WebSocket transport type");
@@ -1386,7 +1386,7 @@ mod tests {
 
             let (transport, host, port) =
                 MqttClient::parse_address("wss://broker.hivemq.com:8884/mqtt").unwrap();
-            if let state::ClientTransportType::WebSocketSecure(url) = transport {
+            if let state::ClientTransportType::WebSocketSecure(url, _) = transport {
                 assert_eq!(url, "wss://broker.hivemq.com:8884/mqtt");
             } else {
                 panic!("Expected WebSocketSecure transport type");

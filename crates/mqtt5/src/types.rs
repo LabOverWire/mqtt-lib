@@ -78,7 +78,9 @@ impl ConnectOptions {
     /// `connect_with_tls` (`set_insecure_tls(true)` still disables
     /// verification). The client connects to the address passed to `connect`,
     /// so the configuration's own `url` is not used; build it from that
-    /// address or any URL with the same scheme.
+    /// address or any URL with the same scheme. A connection that follows a
+    /// server redirect (`UseAnotherServer` or `ServerMoved`) does not use it,
+    /// so its headers only go to the address passed to `connect`.
     ///
     /// ```rust,no_run
     /// # use mqtt5::{ConnectOptions, MqttClient};

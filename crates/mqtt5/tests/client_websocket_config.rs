@@ -47,25 +47,25 @@ impl Callback for Capture {
     }
 }
 
-/// Starts a ws:// server that accepts each connection's CONNECT with a
-/// CONNACK and then closes it, so the client reconnects. The receiver yields
+/// Starts a ws:// server that answers each connection's CONNECT with
+/// `connack` and then closes it, so the client reconnects. The receiver yields
 /// the headers of every upgrade request.
-async fn closing_mqtt_server() -> (String, mpsc::UnboundedReceiver<HeaderMap>) {
+async fn closing_mqtt_server(connack: Vec<u8>) -> (String, mpsc::UnboundedReceiver<HeaderMap>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("addr");
     let (tx, rx) = mpsc::unbounded_channel();
     tokio::spawn(async move {
         while let Ok((stream, _)) = listener.accept().await {
             let capture = Capture(tx.clone());
+            let connack = connack.clone();
             tokio::spawn(async move {
                 let Ok(mut ws) = tokio_tungstenite::accept_hdr_async(stream, capture).await else {
                     return;
                 };
-                // CONNECT
                 if !matches!(ws.next().await, Some(Ok(Message::Binary(_)))) {
                     return;
                 }
-                let _ = ws.send(Message::Binary(CONNACK.to_vec().into())).await;
+                let _ = ws.send(Message::Binary(connack.into())).await;
                 tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             });
         }
@@ -79,8 +79,7 @@ fn header<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
 
 #[tokio::test]
 async fn websocket_config_is_sent_on_connect_and_on_reconnect() {
-    let (url, mut requests) = closing_mqtt_server().await;
-    // The configuration's own URL is not used: the client connects to `url`.
+    let (url, mut requests) = closing_mqtt_server(CONNACK.to_vec()).await;
     let websocket = WebSocketConfig::new("ws://placeholder.invalid/other")
         .expect("config")
         .with_header("Authorization", "Bearer token123")
@@ -127,6 +126,49 @@ async fn websocket_config_is_sent_on_connect_and_on_reconnect() {
     let _ = client.disconnect().await;
 }
 
+fn redirect_connack(server_reference: &str) -> Vec<u8> {
+    let reference = server_reference.as_bytes();
+    let reference_len = u16::try_from(reference.len()).expect("reference length");
+    let properties_len = u8::try_from(3 + reference.len()).expect("properties length");
+    let mut connack = vec![0x20, properties_len + 3, 0x00, 0x9C, properties_len, 0x1C];
+    connack.extend_from_slice(&reference_len.to_be_bytes());
+    connack.extend_from_slice(reference);
+    connack
+}
+
+#[tokio::test]
+async fn websocket_config_is_not_sent_to_a_redirect_target() {
+    let (target_url, mut target_requests) = closing_mqtt_server(CONNACK.to_vec()).await;
+    let (origin_url, mut origin_requests) =
+        closing_mqtt_server(redirect_connack(&target_url)).await;
+    let websocket = WebSocketConfig::new("ws://placeholder.invalid/other")
+        .expect("config")
+        .with_header("Authorization", "Bearer token123");
+    let client = MqttClient::with_options(
+        ConnectOptions::new("ws-redirect-client")
+            .with_websocket_config(websocket)
+            .with_automatic_reconnect(false),
+    );
+
+    timeout(WAIT, client.connect(&origin_url))
+        .await
+        .expect("connect timed out")
+        .expect("connect");
+
+    let origin = timeout(WAIT, origin_requests.recv())
+        .await
+        .expect("no upgrade request for the origin")
+        .expect("origin server stopped");
+    assert_eq!(header(&origin, "Authorization"), Some("Bearer token123"));
+    let target = timeout(WAIT, target_requests.recv())
+        .await
+        .expect("no upgrade request for the redirect target")
+        .expect("target server stopped");
+    assert_eq!(header(&target, "Authorization"), None);
+
+    let _ = client.disconnect().await;
+}
+
 #[tokio::test]
 async fn websocket_config_tls_is_used_for_wss() {
     let (addr, server) = wss_server(server_config(
@@ -136,9 +178,6 @@ async fn websocket_config_tls_is_used_for_wss() {
         &[],
     ))
     .await;
-    // No TLS configuration is stored on the client, and the platform roots do
-    // not include the test CA, so the handshake only succeeds if the
-    // WebSocket configuration's CA is used.
     let websocket = WebSocketConfig::new("wss://localhost/mqtt")
         .expect("config")
         .with_ca_cert_from_file(CA)
@@ -149,8 +188,6 @@ async fn websocket_config_tls_is_used_for_wss() {
             .with_automatic_reconnect(false),
     );
 
-    // The test server stops after the WebSocket handshake and never answers
-    // CONNECT, so only the handshake it observed is checked.
     let connecting = tokio::spawn(async move {
         let _ = client.connect(&format!("wss://{addr}/mqtt")).await;
     });
