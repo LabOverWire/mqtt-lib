@@ -16,7 +16,7 @@ use tokio::signal;
 use tokio::sync::Notify;
 use tracing::{debug, info, warn};
 
-use super::client_args::{parse_qos, QuicArgs, SessionArgs, TlsArgs, WillArgs};
+use super::client_args::{parse_qos, uses_tls, QuicArgs, SessionArgs, TlsArgs, WillArgs};
 use super::parsers::{
     calculate_wait_until, duration_secs_to_u32, parse_duration_millis, parse_duration_secs,
 };
@@ -395,9 +395,7 @@ async fn configure_tls_certs(
     broker_url: &str,
     cmd: &PubCommand,
 ) -> Result<()> {
-    let is_secure = broker_url.starts_with("ssl://")
-        || broker_url.starts_with("mqtts://")
-        || broker_url.starts_with("quics://");
+    let is_secure = uses_tls(broker_url);
     let has_certs = cmd.tls.cert.is_some() || cmd.tls.key.is_some() || cmd.tls.ca_cert.is_some();
 
     if is_secure && has_certs {

@@ -13,6 +13,12 @@ pub fn parse_qos(s: &str) -> Result<QoS, String> {
     }
 }
 
+pub fn uses_tls(url: &str) -> bool {
+    ["mqtts://", "ssl://", "wss://", "quics://"]
+        .iter()
+        .any(|scheme| url.starts_with(scheme))
+}
+
 pub fn parse_protocol_version(s: &str) -> Result<ProtocolVersion, String> {
     match s {
         "3.1.1" | "311" | "4" => Ok(ProtocolVersion::V311),
@@ -150,7 +156,7 @@ pub struct QuicArgs {
 
 #[cfg(test)]
 mod tests {
-    use super::{SessionArgs, RESUMED_SESSION_EXPIRY_SECS};
+    use super::{uses_tls, SessionArgs, RESUMED_SESSION_EXPIRY_SECS};
 
     fn session(no_clean_start: bool, session_expiry: Option<u64>) -> SessionArgs {
         SessionArgs {
@@ -178,5 +184,25 @@ mod tests {
     #[test]
     fn clean_start_without_expiry_sends_none() {
         assert_eq!(session(false, None).session_expiry_secs(), None);
+    }
+
+    #[test]
+    fn secure_schemes_use_tls() {
+        for url in [
+            "mqtts://h:8883",
+            "ssl://h:8883",
+            "wss://h/mqtt",
+            "quics://h:14567",
+        ] {
+            assert!(uses_tls(url), "{url}");
+        }
+        for url in [
+            "mqtt://h:1883",
+            "tcp://h:1883",
+            "ws://h/mqtt",
+            "quic://h:14567",
+        ] {
+            assert!(!uses_tls(url), "{url}");
+        }
     }
 }

@@ -16,6 +16,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::time::Instant;
 
+use super::client_args::uses_tls;
 use super::parsers::{parse_duration_secs, parse_stream_strategy};
 
 #[derive(Debug, Clone, Copy, ValueEnum, Default)]
@@ -563,8 +564,7 @@ async fn configure_transport(client: &MqttClient, cmd: &BenchCommand, url: &str)
     if cmd.quic_early_data {
         client.set_quic_early_data(true).await;
     }
-    let is_secure =
-        url.starts_with("ssl://") || url.starts_with("mqtts://") || url.starts_with("quics://");
+    let is_secure = uses_tls(url);
     let has_certs = cmd.cert.is_some() || cmd.key.is_some() || cmd.ca_cert.is_some();
     if is_secure && has_certs {
         let cert_pem = if let Some(p) = &cmd.cert {
@@ -1349,9 +1349,7 @@ fn spawn_connection_workers(
     concurrency: usize,
     state: &ConnectionBenchState,
 ) -> Vec<tokio::task::JoinHandle<()>> {
-    let is_secure = state.broker_url.starts_with("ssl://")
-        || state.broker_url.starts_with("mqtts://")
-        || state.broker_url.starts_with("quics://");
+    let is_secure = uses_tls(&state.broker_url);
     let has_certs = state.cert_pem.is_some() || state.key_pem.is_some() || state.ca_pem.is_some();
 
     let mut handles = Vec::with_capacity(concurrency);
