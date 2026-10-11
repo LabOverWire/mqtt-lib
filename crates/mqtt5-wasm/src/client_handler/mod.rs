@@ -432,7 +432,7 @@ impl WasmClientHandler {
                 return Ok(());
             }
 
-            let packet_future = read_packet(reader);
+            let packet_future = read_packet(reader, self.protocol_version);
             futures::pin_mut!(packet_future);
             let timeout_future = timeout_rx.recv();
             futures::pin_mut!(timeout_future);

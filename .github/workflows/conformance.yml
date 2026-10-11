@@ -101,7 +101,7 @@ jobs:
 
   mosquitto-interop:
     name: Conformance (Mosquitto interop)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -116,12 +116,20 @@ jobs:
 
       - name: Start Mosquitto
         run: |
-          mkdir -p mosquitto-config
-          printf 'listener 1883 0.0.0.0\nallow_anonymous true\n' > mosquitto-config/mosquitto.conf
-          docker run -d --name mosquitto-interop -p 1883:1883 \
-            -v "$PWD/mosquitto-config:/mosquitto/config" \
-            eclipse-mosquitto:2
+          sudo apt-get update
+          sudo apt-get install -y mosquitto
+          sudo systemctl disable --now mosquitto
+          dpkg-query -W mosquitto
+          mkdir -p mosquitto-run
+          printf 'listener 1883 0.0.0.0\nallow_anonymous true\n' > mosquitto-run/mosquitto.conf
+          mosquitto -c mosquitto-run/mosquitto.conf -v > mosquitto-run/mosquitto.log 2>&1 &
+          echo $! > mosquitto-run/mosquitto.pid
           for i in $(seq 1 30); do
+            if ! kill -0 "$(cat mosquitto-run/mosquitto.pid)" 2>/dev/null; then
+              echo "mosquitto exited before becoming ready" >&2
+              cat mosquitto-run/mosquitto.log >&2 || true
+              exit 1
+            fi
             if timeout 1 bash -c '</dev/tcp/127.0.0.1/1883' 2>/dev/null; then
               echo "mosquitto ready after ${i}s"
               exit 0
@@ -129,7 +137,7 @@ jobs:
             sleep 1
           done
           echo "mosquitto did not become ready in time" >&2
-          docker logs mosquitto-interop || true
+          cat mosquitto-run/mosquitto.log >&2 || true
           exit 1
 
       - name: Run deferred-ack conformance against Mosquitto
@@ -139,13 +147,20 @@ jobs:
             --report conformance-report-mosquitto.json \
             deferred_qos2
 
-      - name: Mosquitto log
-        if: always()
-        run: docker logs mosquitto-interop || true
-
       - name: Stop Mosquitto
         if: always()
-        run: docker rm -f mosquitto-interop || true
+        run: |
+          if [ -f mosquitto-run/mosquitto.pid ]; then
+            kill "$(cat mosquitto-run/mosquitto.pid)" || true
+          fi
+
+      - name: Upload Mosquitto log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: broker-log-mosquitto
+          path: mosquitto-run/mosquitto.log
+          if-no-files-found: ignore
 
       - name: Upload report
         uses: actions/upload-artifact@v4

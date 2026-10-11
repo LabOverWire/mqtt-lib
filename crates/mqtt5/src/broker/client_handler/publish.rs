@@ -759,8 +759,11 @@ impl ClientHandler {
         &self,
     ) -> crate::broker::server_stream_manager::ServerStreamManager {
         let conn = self.quic_connection.clone().unwrap();
-        let manager = crate::broker::server_stream_manager::ServerStreamManager::new(conn)
-            .with_strategy(self.server_delivery_strategy);
+        let manager = crate::broker::server_stream_manager::ServerStreamManager::new(
+            conn,
+            self.protocol_version,
+        )
+        .with_strategy(self.server_delivery_strategy);
         match self.quic_packet_tx.clone() {
             Some(tx) => manager.with_packet_tx(tx),
             None => manager,

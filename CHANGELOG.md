@@ -7,12 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- **`ConnectOptions` has a new public field, `websocket_config`.** Code that builds `ConnectOptions` with a struct literal must add it. The field exists only with the `transport-websocket` feature, which is on by default.
+
 ### Fixed
 
 - **`wss://` connections now use the TLS configuration on `WebSocketConfig`** (#190). With server-certificate verification on, `WebSocketTransport::connect` used tokio-tungstenite's own client configuration built from the platform's root certificates, so a CA set with `with_ca_cert_from_file` or `with_ca_cert_from_bytes` was never trusted (a server it issued failed with `UnknownIssuer`), a client certificate set with `with_client_auth_from_files` or `with_client_auth_from_bytes` was never presented, and `use_system_roots` and ALPN protocols had no effect. With verification off, the client certificate and ALPN protocols were dropped. The handshake now uses the rustls configuration `TlsTransport` builds from a `TlsConfig`, in both cases, except that `use_system_roots` adds the platform's root certificates, as a `wss://` connection without a TLS configuration already did, rather than the bundled `webpki-roots`.
 - **`WebSocketConfig::with_tls_auto`, and the `with_ca_cert_*` and `with_client_auth_*` methods that call it, now accept a host name URL** (#190). They parsed the URL's host and port as a socket address, so they failed with "Invalid host/port combination" for anything but an IP address. A wss:// connection takes its server and certificate name from the URL and does not use `TlsConfig::addr`, so for a host name that is now the unspecified address `0.0.0.0` with the URL's port; set a real address before using such a config with `TlsTransport`.
 - **`MqttClient` now uses its stored TLS configuration for `wss://` connections** (#190), as it already did for `mqtts://`. A CA, client certificate or key set with `set_tls_config` was ignored over WebSocket, and `set_insecure_tls(true)` replaced the stored configuration with a bare one that disables verification.
 - **The WebSocket client transport now sends its configured headers, subprotocols and user agent** (#165). `WebSocketTransport::connect` built the upgrade request from a fixed set of headers and always offered `Sec-WebSocket-Protocol: mqtt`, so anything set with `WebSocketConfig::with_header`, `with_subprotocol`, `with_subprotocols` or `with_user_agent` never reached the server, and brokers that authenticate the upgrade request through custom headers rejected the connection. The request now carries every custom header, the configured subprotocols in order, followed by `mqtt` when the list does not include it (MQTT-6.0.0-3), and the user agent when one is set. The default user agent is now `mqtt5/<crate version>` instead of `mqtt-v5/0.4.0`.
+- **`MqttClient` now opens one WebSocket connection per connection attempt.** It repeated the whole ws:// or wss:// handshake once for every address the host name resolved to, while each handshake dialed the URL's host itself, so a refused or failed attempt to `localhost` reached the server twice.
 - **The upgrade request's `Host` header now includes a non-default port**, so `ws://broker:8080/mqtt` sends `Host: broker:8080` rather than `Host: broker`.
 
 ### Changed
@@ -32,11 +37,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **`ConnectOptions::with_websocket_config`, so `MqttClient` can send custom WebSocket handshake headers** (#165). `MqttClient` built each connection's `WebSocketConfig` from the URL alone, so its ws:// and wss:// connections could not carry custom headers, subprotocols or a user agent. The configuration set here is applied on every connection attempt, including automatic reconnects, with the URL taken from the address passed to `connect`; for wss://, its TLS configuration, when it has one, is used in place of the one stored with `set_tls_config` or `connect_with_tls`.
+- **`ConnectOptions::with_websocket_config`, so `MqttClient` can send custom WebSocket handshake headers** (#165). `MqttClient` built each connection's `WebSocketConfig` from the URL alone, so its ws:// and wss:// connections could not carry custom headers, subprotocols or a user agent. The configuration set here is applied on every connection attempt, including automatic reconnects, with the URL taken from the address passed to `connect`; for wss://, its TLS configuration, when it has one, is used in place of the one stored with `set_tls_config` or `connect_with_tls`. A connection that follows a server redirect (`UseAnotherServer` or `ServerMoved`) does not use it, so its headers are never sent to a host the broker names.
 - `WebSocketConfig` implements `Clone`.
 - **`WebSocketConfig::with_request_modifier`, an async callback that adjusts the WebSocket upgrade request before each connection attempt** (#165). It receives the validated request and returns the one to send, so it can add values computed at connect time, such as a short-lived signed token, or replace the URI with a presigned one. Set on the `WebSocketConfig` given to `ConnectOptions::with_websocket_config`, it runs before every `MqttClient` connection attempt, including automatic reconnects. It runs within the connect timeout, and an error fails the attempt. `WebSocketConfig` gains a `request_modifier` field.
 - `TlsConfig::client_config`, which returns the rustls client configuration a `TlsConfig` describes.
 - `WebSocketConfig::build_handshake_request`, which returns the upgrade request the configuration produces.
+
+## [mqtt5 0.47.3] - 2026-10-09
+
+### Fixed
+
+- **The QUIC broker decodes MQTT v3.1.1 packets on data streams and in datagrams** (#193). Only the control stream knew the protocol version the client connected with. A v3.1.1 SUBSCRIBE or PUBLISH on a client data stream, or a v3.1.1 PUBLISH in a datagram, was decoded as v5 and rejected, and since 0.47.2 the connection was closed with `ERROR_PROTOCOL_L0`. These readers now wait for CONNECT and decode with the negotiated version.
+- **A QUIC client reads short messages on broker-opened streams at once** (#195). The client kept reading a broker-opened stream until it had 32 bytes before parsing the flow header. A flow header and a PUBLISH with no properties can be shorter than that, which is the usual case for a v3.1.1 subscriber, so the message waited until more data arrived on that stream or the connection closed. The client now parses the header as soon as it is complete.
+- **A v3.1.1 client can unsubscribe** (#194). It could not decode the broker's UNSUBACK, which in v3.1.1 has no properties or reason codes, so `unsubscribe()` failed with `UNSUBACK channel closed` and the connection dropped. Fixed in mqtt5-protocol 0.16.1.
+
+## [mqtt5-wasm 2.1.6] - 2026-10-09
+
+### Fixed
+
+- **The wasm broker serves MQTT v3.1.1 clients** (#193). It decoded every client packet as v5, so a v3.1.1 client's first SUBSCRIBE, UNSUBSCRIBE or QoS 1 PUBLISH was rejected and its connection dropped. A PUBLISH whose payload started with `0x00` lost that byte. Packets are now decoded with the version the client connected with.
+- **The wasm client can unsubscribe over v3.1.1** (#194), through mqtt5-protocol 0.16.1.
+
+## [mqtt5-protocol 0.16.1] - 2026-10-09
+
+### Fixed
+
+- **`Packet::decode_from_body_with_version` decodes a v3.1.1 UNSUBACK** (#194). UNSUBACK was decoded as v5 for every version and a v3.1.1 UNSUBACK, which is only a packet identifier, was rejected as malformed. A v3.1.1 UNSUBACK with any payload is still malformed.
+
+### Added
+
+- `UnsubAckPacket::decode_body_with_version`.
 
 ## [mqtt5 0.47.2] - 2026-10-08
 

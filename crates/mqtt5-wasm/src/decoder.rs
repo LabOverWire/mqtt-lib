@@ -7,12 +7,13 @@ const MAX_REMAINING_LENGTH_BYTES: usize = 4;
 
 /// # Errors
 /// Returns an error if the connection is closed or packet decoding fails.
-pub async fn read_packet(reader: &mut WasmReader) -> Result<Packet> {
+pub async fn read_packet(reader: &mut WasmReader, protocol_version: u8) -> Result<Packet> {
     let (fixed_header, body) = read_frame(reader, MAX_PACKET_SIZE).await?;
-    Packet::decode_from_body(
+    Packet::decode_from_body_with_version(
         fixed_header.packet_type,
         &fixed_header,
         &mut body.as_slice(),
+        protocol_version,
     )
 }
 

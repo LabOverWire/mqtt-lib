@@ -591,8 +591,6 @@ fn header_value(name: &str, value: &str) -> Result<HeaderValue> {
     })
 }
 
-/// Whether `s` is an HTTP token (RFC 9110 §5.6.2), as RFC 6455 §4.1 requires
-/// of each offered subprotocol.
 /// Parses a WebSocket URL, accepting only the ws and wss schemes
 fn parse_websocket_url(url: &str) -> Result<Url> {
     let parsed_url = Url::parse(url)
@@ -606,6 +604,8 @@ fn parse_websocket_url(url: &str) -> Result<Url> {
     }
 }
 
+/// Whether `s` is an HTTP token (RFC 9110 §5.6.2), as RFC 6455 §4.1 requires
+/// of each offered subprotocol.
 fn is_http_token(s: &str) -> bool {
     !s.is_empty()
         && s.bytes()

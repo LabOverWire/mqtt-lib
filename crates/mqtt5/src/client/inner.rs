@@ -20,6 +20,8 @@ use crate::transport::{TcpTransport, TlsTransport, TransportType};
 use super::connection::ConnectionEvent;
 use super::direct::{AutomaticReconnectLifecycle, StoredSubscription};
 use super::state::ClientTransportType;
+#[cfg(feature = "transport-websocket")]
+use super::state::WebSocketSettings;
 use super::MqttClient;
 
 impl MqttClient {
@@ -71,7 +73,10 @@ impl MqttClient {
             {
                 let (host, port) = Self::split_host_port(rest, 80)?;
                 Ok((
-                    ClientTransportType::WebSocket(address.to_string()),
+                    ClientTransportType::WebSocket(
+                        address.to_string(),
+                        WebSocketSettings::Configured,
+                    ),
                     host,
                     port,
                 ))
@@ -88,7 +93,10 @@ impl MqttClient {
             {
                 let (host, port) = Self::split_host_port(rest, 443)?;
                 Ok((
-                    ClientTransportType::WebSocketSecure(address.to_string()),
+                    ClientTransportType::WebSocketSecure(
+                        address.to_string(),
+                        WebSocketSettings::Configured,
+                    ),
                     host,
                     port,
                 ))
@@ -187,10 +195,12 @@ impl MqttClient {
     pub(crate) fn select_addresses_for_connection<'a>(
         addrs: &'a [std::net::SocketAddr],
         host: &str,
+        transport_type: &ClientTransportType,
     ) -> &'a [std::net::SocketAddr] {
-        let is_aws_iot = Self::is_aws_iot_endpoint(host);
-
-        if is_aws_iot {
+        if transport_type.dials_by_url() {
+            tracing::debug!("WebSocket transport dials the URL host, using one attempt");
+            &addrs[0..1]
+        } else if Self::is_aws_iot_endpoint(host) {
             tracing::debug!("AWS IoT endpoint detected, limiting to first resolved address");
             &addrs[0..1]
         } else {
@@ -208,10 +218,13 @@ impl MqttClient {
             ClientTransportType::Tcp => Self::connect_tcp(addr).await,
             ClientTransportType::Tls => self.connect_tls(addr, host).await,
             #[cfg(feature = "transport-websocket")]
-            ClientTransportType::WebSocket(url) => self.connect_websocket(&url).await,
+            ClientTransportType::WebSocket(url, settings) => {
+                self.connect_websocket(&url, settings).await
+            }
             #[cfg(feature = "transport-websocket")]
-            ClientTransportType::WebSocketSecure(url) => {
-                self.connect_websocket_secure(addr, host, &url).await
+            ClientTransportType::WebSocketSecure(url, settings) => {
+                self.connect_websocket_secure(addr, host, &url, settings)
+                    .await
             }
             #[cfg(feature = "transport-quic")]
             ClientTransportType::Quic => self.connect_quic(addr, host).await,
@@ -261,10 +274,20 @@ impl MqttClient {
 
     /// The WebSocket configuration for a connection to `url`: the one set with
     /// `ConnectOptions::with_websocket_config`, read on every attempt so
-    /// reconnects use it too, or a default one.
+    /// reconnects use it too, or a default one, which a server redirect
+    /// always gets.
     #[cfg(feature = "transport-websocket")]
-    async fn websocket_config_for(&self, url: &str) -> Result<WebSocketConfig> {
-        let configured = self.inner.read().await.options.websocket_config.clone();
+    async fn websocket_config_for(
+        &self,
+        url: &str,
+        settings: WebSocketSettings,
+    ) -> Result<WebSocketConfig> {
+        let configured = match settings {
+            WebSocketSettings::Configured => {
+                self.inner.read().await.options.websocket_config.clone()
+            }
+            WebSocketSettings::Default => None,
+        };
         match configured {
             Some(config) => WebSocketConfig::clone(&config).with_url(url),
             None => WebSocketConfig::new(url),
@@ -273,8 +296,12 @@ impl MqttClient {
     }
 
     #[cfg(feature = "transport-websocket")]
-    async fn connect_websocket(&self, url: &str) -> Result<TransportType> {
-        let config = self.websocket_config_for(url).await?;
+    async fn connect_websocket(
+        &self,
+        url: &str,
+        settings: WebSocketSettings,
+    ) -> Result<TransportType> {
+        let config = self.websocket_config_for(url, settings).await?;
         Self::open_websocket(config).await
     }
 
@@ -284,12 +311,11 @@ impl MqttClient {
         addr: std::net::SocketAddr,
         host: &str,
         url: &str,
+        settings: WebSocketSettings,
     ) -> Result<TransportType> {
         let insecure = self.transport_config.read().await.insecure_tls;
-        let mut config = self.websocket_config_for(url).await?;
+        let mut config = self.websocket_config_for(url, settings).await?;
 
-        // A TLS configuration on the WebSocket configuration is used as given,
-        // except that insecure_tls still disables verification.
         if let Some(tls_config) = config.tls_config.as_mut() {
             if insecure {
                 tls_config.verify_server_cert = false;
@@ -491,10 +517,18 @@ impl MqttClient {
     }
 
     pub(crate) async fn connect_internal(&self, address: &str) -> Result<ConnectResult> {
+        Box::pin(self.connect_following_redirects(address, 0)).await
+    }
+
+    async fn connect_following_redirects(
+        &self,
+        address: &str,
+        redirects_followed: u8,
+    ) -> Result<ConnectResult> {
         const MAX_REDIRECTS: u8 = 3;
         self.inner.read().await.options.validate_deferred_ack()?;
         let mut current_address = address.to_string();
-        let mut redirect_count: u8 = 0;
+        let mut redirect_count = redirects_followed;
 
         loop {
             let client_id = self.inner.read().await.options.client_id.clone();
@@ -505,9 +539,15 @@ impl MqttClient {
                 "Connection attempt"
             );
 
-            let (client_transport_type, host, port) = Self::parse_address(&current_address)?;
+            let (requested_transport_type, host, port) = Self::parse_address(&current_address)?;
+            let client_transport_type = if redirect_count == 0 {
+                requested_transport_type
+            } else {
+                requested_transport_type.redirected()
+            };
             let addrs = Self::resolve_addresses(host, port).await?;
-            let addresses_to_try = Self::select_addresses_for_connection(&addrs, host);
+            let addresses_to_try =
+                Self::select_addresses_for_connection(&addrs, host, &client_transport_type);
 
             match self
                 .try_connect_to_addresses(addresses_to_try, client_transport_type, host)
@@ -589,7 +629,7 @@ impl MqttClient {
                         reason = ?reason,
                         "Following server redirect from TLS connection"
                     );
-                    return Box::pin(self.connect_internal(&url)).await;
+                    return Box::pin(self.connect_following_redirects(&url, 1)).await;
                 }
                 Err(MqttError::ConnectionError(
                     "Server redirect missing server reference".to_string(),

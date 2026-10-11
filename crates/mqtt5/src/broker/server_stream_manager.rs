@@ -43,13 +43,18 @@ impl Drop for ServerStreamInfo {
 fn spawn_ack_reader(
     mut recv: RecvStream,
     flow_id: FlowId,
+    protocol_version: u8,
     packet_tx: PacketSender,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut buffer = BytesMut::new();
         loop {
-            match crate::broker::quic_acceptor::read_packet_with_buffer(&mut recv, &mut buffer)
-                .await
+            match crate::broker::quic_acceptor::read_packet_with_buffer(
+                &mut recv,
+                &mut buffer,
+                protocol_version,
+            )
+            .await
             {
                 Ok(packet) => {
                     trace!(
@@ -76,6 +81,7 @@ const FLOW_EXPIRE_INTERVAL: u64 = 300;
 
 pub struct ServerStreamManager {
     connection: Arc<Connection>,
+    protocol_version: u8,
     strategy: ServerDeliveryStrategy,
     topic_streams: HashMap<String, ServerStreamInfo>,
     flow_streams: HashMap<u64, ServerStreamInfo>,
@@ -86,9 +92,10 @@ pub struct ServerStreamManager {
 }
 
 impl ServerStreamManager {
-    pub fn new(connection: Arc<Connection>) -> Self {
+    pub fn new(connection: Arc<Connection>, protocol_version: u8) -> Self {
         Self {
             connection,
+            protocol_version,
             strategy: ServerDeliveryStrategy::default(),
             topic_streams: HashMap::new(),
             flow_streams: HashMap::new(),
@@ -120,7 +127,7 @@ impl ServerStreamManager {
             );
             return None;
         };
-        Some(spawn_ack_reader(recv, flow_id, tx))
+        Some(spawn_ack_reader(recv, flow_id, self.protocol_version, tx))
     }
 
     #[must_use]

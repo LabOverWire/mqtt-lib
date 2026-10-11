@@ -38,6 +38,18 @@
 
 ## Diary Entries
 
+### Mosquitto interop job: Ubuntu archive package instead of a registry image (2026-10-09)
+
+**Trigger**: the Mosquitto interop job failed on PR #210 before any test ran. Docker Hub refused `eclipse-mosquitto:2` with `toomanyrequests: You have reached your unauthenticated pull rate limit`. #214 moved the pull to the ECR Public mirror (same digest, `sha256:38c0da4f…`), and the next run failed there with `toomanyrequests: Rate exceeded`. Hosted runners share IP addresses, so any anonymous registry pull can hit a limit, and logging in does not help pull requests from forks, which get no secrets.
+
+**Change**: the job installs `mosquitto` from the Ubuntu archive, runs `systemctl disable --now mosquitto` so the packaged service cannot answer on 1883, and starts its own process with the same config (`listener 1883 0.0.0.0`, `allow_anonymous true`). The readiness loop fails if that process exits, the process is stopped by PID, and its log is uploaded as the `broker-log-mosquitto` artifact. `runs-on` is pinned to `ubuntu-24.04`, so the Mosquitto version only moves when the pin does.
+
+**Version under test**: 2.0.18 (Ubuntu 24.04). `eclipse-mosquitto:2` had moved to 2.1.2. The fixture is `mosquitto-2.x.toml` and the job runs only `deferred_qos2`.
+
+**Checked locally** with the conformance CLI and the same command the job runs: against Ubuntu 24.04's package in a container (2.0.18), both `deferred_qos2` tests pass; against `eclipse-mosquitto:2` (2.1.2), both pass; with no broker on 1883, both fail.
+
+**Known gap**: the fixture's `restart_command` is `systemctl restart mosquitto`, which would restart the packaged service rather than the job's process. No conformance test calls `restart()` today, and the Docker setup did not match the hook either.
+
 ### Statement text drift cleared: all 77 entries corrected against the normative body (2026-10-01)
 
 **Trigger**: issue #166, part 1. `known-text-drift.txt` listed 77 statements whose manifest text did not correspond to the reference text for their ID. The client audit for #164 had taken wrong IDs from the manifest as a result (the manifest filed "Client without session state receiving Session Present=1 MUST close" under MQTT-3.2.2-5; it is MQTT-3.2.2-4).

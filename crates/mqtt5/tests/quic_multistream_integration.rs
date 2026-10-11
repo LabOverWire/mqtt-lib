@@ -822,12 +822,12 @@ async fn test_discard_flow_without_flow_headers_returns_error() {
 
 #[tokio::test]
 async fn test_quic_per_publish_under_tight_stream_limit() {
-    let received = publish_and_count(
+    let received = Box::pin(publish_and_count(
         test_quic_config().with_max_concurrent_streams(2),
         StreamStrategy::DataPerPublish,
         20,
         16,
-    )
+    ))
     .await;
     assert_eq!(
         received, 20,
@@ -837,12 +837,12 @@ async fn test_quic_per_publish_under_tight_stream_limit() {
 
 #[tokio::test]
 async fn test_quic_control_only_under_small_stream_window() {
-    let received = publish_and_count(
+    let received = Box::pin(publish_and_count(
         test_quic_config().with_stream_receive_window(2048),
         StreamStrategy::ControlOnly,
         50,
         512,
-    )
+    ))
     .await;
     assert_eq!(
         received, 50,
@@ -852,12 +852,12 @@ async fn test_quic_control_only_under_small_stream_window() {
 
 #[tokio::test]
 async fn test_quic_delivery_with_segmentation_offload_disabled() {
-    let received = publish_and_count(
+    let received = Box::pin(publish_and_count(
         test_quic_config().with_disable_segmentation_offload(true),
         StreamStrategy::ControlOnly,
         50,
         512,
-    )
+    ))
     .await;
     assert_eq!(
         received, 50,

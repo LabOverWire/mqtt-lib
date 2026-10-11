@@ -22,7 +22,7 @@ impl WasmClientHandler {
         reader: &mut WasmReader,
         writer: &mut WasmWriter,
     ) -> Result<()> {
-        let packet = read_packet(reader).await?;
+        let packet = read_packet(reader, self.protocol_version).await?;
 
         let Packet::Connect(connect) = packet else {
             error!("First packet must be CONNECT");
@@ -32,7 +32,7 @@ impl WasmClientHandler {
         };
         self.handle_connect(*connect, writer).await?;
         while self.pending_connect.is_some() {
-            match read_packet(reader).await? {
+            match read_packet(reader, self.protocol_version).await? {
                 Packet::Auth(auth) => self.handle_auth(auth, writer).await?,
                 _ => {
                     return Err(MqttError::ProtocolError(

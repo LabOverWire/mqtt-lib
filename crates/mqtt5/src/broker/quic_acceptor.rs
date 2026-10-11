@@ -23,7 +23,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio::sync::{broadcast, mpsc, Mutex};
+use tokio::sync::{broadcast, mpsc, watch, Mutex};
 use tracing::{debug, error, instrument, trace, warn};
 
 use super::tls_acceptor::TlsAcceptorConfig;
@@ -457,6 +457,7 @@ fn build_flow_header_result(flow_header: FlowHeader, leftover: BytesMut) -> Flow
 pub(super) async fn read_packet_with_buffer(
     recv: &mut RecvStream,
     buffer: &mut BytesMut,
+    protocol_version: u8,
 ) -> Result<Packet> {
     while buffer.len() < 2 {
         let mut tmp = [0u8; 64];
@@ -526,7 +527,12 @@ pub(super) async fn read_packet_with_buffer(
     let fixed_header = FixedHeader::decode(&mut header_buf)?;
 
     let mut payload_buf = BytesMut::from(&packet_bytes[header_len..]);
-    Packet::decode_from_body(fixed_header.packet_type, &fixed_header, &mut payload_buf)
+    Packet::decode_from_body_with_version(
+        fixed_header.packet_type,
+        &fixed_header,
+        &mut payload_buf,
+        protocol_version,
+    )
 }
 
 pub struct QuicHandlerContext {
@@ -567,6 +573,7 @@ async fn run_quic_handler_inner(
     let (packet_tx, packet_rx) = mpsc::channel::<(Packet, Option<u64>)>(100);
     let (flow_closed_tx, flow_closed_rx) = mpsc::channel::<u64>(32);
     let flow_registry = Arc::new(Mutex::new(FlowRegistry::new(256)));
+    let (protocol_version_tx, protocol_version_rx) = watch::channel(None);
 
     let (send, recv) = match connection.accept_bi().await {
         Ok(streams) => streams,
@@ -602,6 +609,7 @@ async fn run_quic_handler_inner(
     .with_quic_connection(connection.clone())
     .with_server_delivery_strategy(delivery_strategy)
     .with_quic_packet_tx(packet_tx.clone())
+    .with_quic_protocol_version_tx(protocol_version_tx)
     .with_skip_bridge_forwarding(skip_bridge_forwarding)
     .with_flow_closed_rx(flow_closed_rx)
     .with_flow_registry(flow_registry.clone());
@@ -621,12 +629,19 @@ async fn run_quic_handler_inner(
         close_after_control_flow(&handler_connection, peer_addr, &outcome).await;
     });
 
-    spawn_datagram_reader(connection.clone(), packet_tx.clone(), peer_addr, label);
+    spawn_datagram_reader(
+        connection.clone(),
+        packet_tx.clone(),
+        protocol_version_rx.clone(),
+        peer_addr,
+        label,
+    );
     spawn_bi_accept_loop(connection.clone(), flow_registry.clone(), peer_addr, label);
     spawn_quic_stats_sampler(connection.clone(), peer_addr);
     spawn_uni_accept_loop(
         connection,
         packet_tx,
+        protocol_version_rx,
         peer_addr,
         flow_registry,
         flow_closed_tx,
@@ -697,13 +712,25 @@ fn quic_stats_row(connection: &Connection) -> String {
     )
 }
 
+async fn negotiated_protocol_version(mut rx: watch::Receiver<Option<u8>>) -> Option<u8> {
+    rx.wait_for(Option::is_some)
+        .await
+        .ok()
+        .and_then(|version| *version)
+}
+
 fn spawn_datagram_reader(
     connection: Arc<Connection>,
     packet_tx: mpsc::Sender<(Packet, Option<u64>)>,
+    protocol_version_rx: watch::Receiver<Option<u8>>,
     peer_addr: SocketAddr,
     label: &'static str,
 ) {
     tokio::spawn(async move {
+        let Some(protocol_version) = negotiated_protocol_version(protocol_version_rx).await else {
+            debug!("{label} client handler ended before CONNECT from {peer_addr}");
+            return;
+        };
         loop {
             match connection.read_datagram().await {
                 Ok(datagram) => {
@@ -713,7 +740,7 @@ fn spawn_datagram_reader(
                         label,
                         peer_addr
                     );
-                    let packet = match decode_datagram_packet(&datagram) {
+                    let packet = match decode_datagram_packet(&datagram, protocol_version) {
                         Some(Ok(packet)) => packet,
                         Some(Err(e)) => {
                             close_on_malformed_packet(&connection, peer_addr, "datagram", &e);
@@ -767,6 +794,7 @@ fn spawn_bi_accept_loop(
 fn spawn_uni_accept_loop(
     connection: Arc<Connection>,
     packet_tx: mpsc::Sender<(Packet, Option<u64>)>,
+    protocol_version_rx: watch::Receiver<Option<u8>>,
     peer_addr: SocketAddr,
     flow_registry: Arc<Mutex<FlowRegistry>>,
     flow_closed_tx: mpsc::Sender<u64>,
@@ -784,6 +812,7 @@ fn spawn_uni_accept_loop(
                         connection.clone(),
                         recv,
                         packet_tx.clone(),
+                        protocol_version_rx.clone(),
                         peer_addr,
                         flow_registry.clone(),
                         flow_closed_tx.clone(),
@@ -799,7 +828,7 @@ fn spawn_uni_accept_loop(
     });
 }
 
-fn decode_datagram_packet(data: &Bytes) -> Option<Result<Packet>> {
+fn decode_datagram_packet(data: &Bytes, protocol_version: u8) -> Option<Result<Packet>> {
     if data.is_empty() || data[0] == 0x00 {
         return None;
     }
@@ -809,10 +838,11 @@ fn decode_datagram_packet(data: &Bytes) -> Option<Result<Packet>> {
         Ok(h) => h,
         Err(e) => return Some(Err(e)),
     };
-    Some(Packet::decode_from_body(
+    Some(Packet::decode_from_body_with_version(
         fixed_header.packet_type,
         &fixed_header,
         &mut buf,
+        protocol_version,
     ))
 }
 
@@ -981,11 +1011,16 @@ fn spawn_data_stream_reader(
     connection: Arc<Connection>,
     mut recv: RecvStream,
     packet_tx: mpsc::Sender<(Packet, Option<u64>)>,
+    protocol_version_rx: watch::Receiver<Option<u8>>,
     peer_addr: SocketAddr,
     flow_registry: Arc<Mutex<FlowRegistry>>,
     flow_closed_tx: mpsc::Sender<u64>,
 ) {
     tokio::spawn(async move {
+        let Some(protocol_version) = negotiated_protocol_version(protocol_version_rx).await else {
+            debug!("client handler ended before CONNECT from {peer_addr}");
+            return;
+        };
         let (flow_id, mut buffer) = match try_read_flow_header(&mut recv).await {
             Ok(result) => {
                 let flow_id = if let (Some(id), Some(flags)) = (result.flow_id, result.flags) {
@@ -1010,7 +1045,7 @@ fn spawn_data_stream_reader(
         };
 
         loop {
-            match read_packet_with_buffer(&mut recv, &mut buffer).await {
+            match read_packet_with_buffer(&mut recv, &mut buffer, protocol_version).await {
                 Ok(packet) => {
                     if let Some(id) = flow_id {
                         let mut registry = flow_registry.lock().await;
