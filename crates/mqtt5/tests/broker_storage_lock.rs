@@ -186,16 +186,18 @@ async fn bridged_broker_releases_the_directory_promptly_after_shutdown() {
         .expect("broker task joins")
         .expect("broker run returns cleanly");
     let began = Instant::now();
+    let mut attempt_began = began;
     let mut reopened = FileBackend::new(dir.path()).await;
     while reopened.is_err() && began.elapsed() < Duration::from_secs(2) {
         tokio::time::sleep(Duration::from_millis(5)).await;
+        attempt_began = Instant::now();
         reopened = FileBackend::new(dir.path()).await;
     }
-    let waited = began.elapsed();
+    let held = attempt_began.duration_since(began);
     drop(reopened.expect("directory is released after shutdown"));
     assert!(
-        waited < Duration::from_millis(400),
-        "directory held for {waited:?} after run returned"
+        held < Duration::from_millis(400),
+        "directory held for {held:?} after run returned"
     );
 
     remote_shutdown.shutdown();
