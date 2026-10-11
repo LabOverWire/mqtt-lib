@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Breaking
 
 - **`ConnectOptions` has a new public field, `websocket_config`.** Code that builds `ConnectOptions` with a struct literal must add it. The field exists only with the `transport-websocket` feature, which is on by default.
+- **`WebSocketConfig` has a new public field, `request_modifier`.** Code that builds `WebSocketConfig` with a struct literal must add it.
 
 ### Fixed
 
@@ -34,13 +35,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - a subprotocol is not a valid HTTP token, or is listed more than once (RFC 6455 §4.1).
 - Custom headers are sent, and validated, in name order, so the request and the error a bad configuration reports no longer depend on `HashMap` iteration order.
 - `WebSocketConfig`'s `Debug` output lists custom header names but not their values, which often carry credentials.
+- **`MqttClient` returns WebSocket transport errors unchanged.** It wrapped every one in `MqttError::ConnectionError("WebSocket connect failed: ...")`, so a handshake that timed out was not `MqttError::Timeout` and a configuration the transport rejected was not `MqttError::Configuration`. The transport's own connection errors still start with "WebSocket connect failed".
+- **`MqttClient` no longer resolves the host of a ws:// or wss:// address itself.** The handshake dials the URL's host, so the separate lookup only added a second resolution. A host that does not resolve now fails with the transport's "WebSocket connect failed" error instead of "Failed to resolve address".
 
 ### Added
 
 - **`ConnectOptions::with_websocket_config`, so `MqttClient` can send custom WebSocket handshake headers** (#165). `MqttClient` built each connection's `WebSocketConfig` from the URL alone, so its ws:// and wss:// connections could not carry custom headers, subprotocols or a user agent. The configuration set here is applied on every connection attempt, including automatic reconnects, with the URL taken from the address passed to `connect`; for wss://, its TLS configuration, when it has one, is used in place of the one stored with `set_tls_config` or `connect_with_tls`. A connection that follows a server redirect (`UseAnotherServer` or `ServerMoved`) does not use it, so its headers are never sent to a host the broker names.
 - `WebSocketConfig` implements `Clone`.
-- **`WebSocketConfig::with_request_modifier`, an async callback that adjusts the WebSocket upgrade request before each connection attempt** (#165). It receives the validated request and returns the one to send, so it can add values computed at connect time, such as a short-lived signed token, or replace the URI with a presigned one. Set on the `WebSocketConfig` given to `ConnectOptions::with_websocket_config`, it runs before every `MqttClient` connection attempt, including automatic reconnects. It runs within the connect timeout, and an error fails the attempt. `WebSocketConfig` gains a `request_modifier` field.
+- **`WebSocketConfig::with_request_modifier`, an async callback that adjusts the WebSocket upgrade request before each connection attempt** (#165). It receives the validated request and returns the one to send, so it can add values computed at connect time, such as a short-lived signed token, or replace the URI with a presigned one. Set on the `WebSocketConfig` given to `ConnectOptions::with_websocket_config`, it runs before every `MqttClient` connection attempt, including automatic reconnects. It runs within the connect timeout, and an error fails the attempt with `MqttError::ConnectionError`, logged at error level. The returned request must keep the URI's scheme, the handshake headers the transport sets, and a `Sec-WebSocket-Protocol` header that offers `mqtt`, and must not add a header `with_header` reserves; otherwise the attempt fails with `MqttError::Configuration` before dialing. Because `MqttClient` does not resolve a WebSocket address, the address passed to `connect` can name a placeholder host that the callback replaces.
 - `TlsConfig::client_config`, which returns the rustls client configuration a `TlsConfig` describes.
+- `RequestModifier` and `RequestModifierError` are exported from `mqtt5::transport`.
 - `WebSocketConfig::build_handshake_request`, which returns the upgrade request the configuration produces.
 
 ## [mqtt5 0.47.3] - 2026-10-09

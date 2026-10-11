@@ -5,7 +5,7 @@
 
 use mqtt5::error::MqttError;
 use mqtt5::transport::websocket::{WebSocketConfig, WebSocketTransport};
-use mqtt5::Transport;
+use mqtt5::{ConnectOptions, MqttClient, Transport};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -87,7 +87,6 @@ async fn modifier_adds_headers_computed_at_connect_time() {
         headers.get("x-token").and_then(|v| v.to_str().ok()),
         Some("1")
     );
-    // The modifier sees the request the configuration built.
     assert_eq!(
         headers.get("x-static").and_then(|v| v.to_str().ok()),
         Some("configured")
@@ -155,4 +154,134 @@ async fn modifier_runs_within_the_connect_timeout() {
         .expect("the modifier was not bounded by the connect timeout")
         .expect_err("connect succeeded with a modifier that never finishes");
     assert!(matches!(err, MqttError::Timeout), "unexpected error: {err}");
+}
+
+async fn rejected_before_dialing(modify: fn(&mut Request)) -> MqttError {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let config = WebSocketConfig::new(&format!("ws://{addr}/mqtt"))
+        .expect("config")
+        .with_request_modifier(move |mut request| {
+            modify(&mut request);
+            async move { Ok::<_, std::convert::Infallible>(request) }
+        });
+    let mut transport = WebSocketTransport::new(config);
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("accept");
+        tokio_tungstenite::accept_hdr_async(stream, Capture(Seen::default())).await
+    });
+
+    let err = timeout(WAIT, transport.connect())
+        .await
+        .expect("connect timed out")
+        .expect_err("connect sent a request the modifier made invalid");
+    assert!(
+        timeout(Duration::from_millis(200), server).await.is_err(),
+        "the transport dialed although the modified request is invalid"
+    );
+    err
+}
+
+fn assert_configuration_error(err: &MqttError, expected: &str) {
+    assert!(
+        matches!(err, MqttError::Configuration(msg) if msg.contains(expected)),
+        "unexpected error: {err}"
+    );
+}
+
+#[tokio::test]
+async fn modifier_cannot_add_a_reserved_header() {
+    let err = rejected_before_dialing(|request| {
+        request
+            .headers_mut()
+            .insert("content-length", HeaderValue::from_static("5"));
+    })
+    .await;
+    assert_configuration_error(&err, "content-length");
+}
+
+#[tokio::test]
+async fn modifier_cannot_repeat_a_handshake_header() {
+    let err = rejected_before_dialing(|request| {
+        request
+            .headers_mut()
+            .append("host", HeaderValue::from_static("elsewhere.example"));
+    })
+    .await;
+    assert_configuration_error(&err, "host");
+}
+
+#[tokio::test]
+async fn modifier_cannot_stop_offering_mqtt() {
+    let err = rejected_before_dialing(|request| {
+        request
+            .headers_mut()
+            .insert("sec-websocket-protocol", HeaderValue::from_static("mqttv5"));
+    })
+    .await;
+    assert_configuration_error(&err, "mqtt");
+}
+
+#[tokio::test]
+async fn modifier_cannot_remove_the_subprotocol_header() {
+    let err = rejected_before_dialing(|request| {
+        request.headers_mut().remove("sec-websocket-protocol");
+    })
+    .await;
+    assert_configuration_error(&err, "Sec-WebSocket-Protocol");
+}
+
+#[tokio::test]
+async fn modifier_cannot_change_the_scheme() {
+    let err = rejected_before_dialing(|request| {
+        let secure = request.uri().to_string().replacen("ws://", "wss://", 1);
+        *request.uri_mut() = secure.parse().expect("uri");
+    })
+    .await;
+    assert_configuration_error(&err, "scheme");
+}
+
+fn client_with(config: WebSocketConfig) -> MqttClient {
+    MqttClient::with_options(
+        ConnectOptions::new("ws-modifier-errors")
+            .with_websocket_config(config)
+            .with_automatic_reconnect(false),
+    )
+}
+
+#[tokio::test]
+async fn client_reports_a_hung_modifier_as_a_timeout() {
+    let config = WebSocketConfig::new("ws://127.0.0.1:9/mqtt")
+        .expect("config")
+        .with_timeout(mqtt5::time::Duration::from_millis(200))
+        .with_request_modifier(|_request| {
+            std::future::pending::<Result<Request, std::io::Error>>()
+        });
+    let client = client_with(config);
+
+    let err = timeout(WAIT, client.connect("ws://127.0.0.1:9/mqtt"))
+        .await
+        .expect("connect finishes")
+        .expect_err("connect succeeded with a modifier that never finishes");
+    assert!(matches!(err, MqttError::Timeout), "unexpected error: {err}");
+}
+
+#[tokio::test]
+async fn client_reports_a_modifier_error_once() {
+    let config = WebSocketConfig::new("ws://127.0.0.1:9/mqtt")
+        .expect("config")
+        .with_request_modifier(|_request| async {
+            Err::<Request, _>(std::io::Error::other("token service unavailable"))
+        });
+    let client = client_with(config);
+
+    let err = timeout(WAIT, client.connect("ws://127.0.0.1:9/mqtt"))
+        .await
+        .expect("connect finishes")
+        .expect_err("connect succeeded despite the modifier failing");
+    assert!(
+        matches!(&err, MqttError::ConnectionError(msg)
+            if msg == "WebSocket request modifier failed: token service unavailable"),
+        "unexpected error: {err:?}"
+    );
 }

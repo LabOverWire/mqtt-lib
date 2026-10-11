@@ -195,12 +195,8 @@ impl MqttClient {
     pub(crate) fn select_addresses_for_connection<'a>(
         addrs: &'a [std::net::SocketAddr],
         host: &str,
-        transport_type: &ClientTransportType,
     ) -> &'a [std::net::SocketAddr] {
-        if transport_type.dials_by_url() {
-            tracing::debug!("WebSocket transport dials the URL host, using one attempt");
-            &addrs[0..1]
-        } else if Self::is_aws_iot_endpoint(host) {
+        if Self::is_aws_iot_endpoint(host) {
             tracing::debug!("AWS IoT endpoint detected, limiting to first resolved address");
             &addrs[0..1]
         } else {
@@ -351,10 +347,7 @@ impl MqttClient {
     #[cfg(feature = "transport-websocket")]
     async fn open_websocket(config: WebSocketConfig) -> Result<TransportType> {
         let mut ws_transport = WebSocketTransport::new(config);
-        ws_transport
-            .connect()
-            .await
-            .map_err(|e| MqttError::ConnectionError(format!("WebSocket connect failed: {e}")))?;
+        ws_transport.connect().await?;
         Ok(TransportType::WebSocket(Box::new(ws_transport)))
     }
 
@@ -545,9 +538,15 @@ impl MqttClient {
             } else {
                 requested_transport_type.redirected()
             };
-            let addrs = Self::resolve_addresses(host, port).await?;
-            let addresses_to_try =
-                Self::select_addresses_for_connection(&addrs, host, &client_transport_type);
+            let addrs = if client_transport_type.dials_by_url() {
+                vec![std::net::SocketAddr::new(
+                    std::net::Ipv4Addr::UNSPECIFIED.into(),
+                    port,
+                )]
+            } else {
+                Self::resolve_addresses(host, port).await?
+            };
+            let addresses_to_try = Self::select_addresses_for_connection(&addrs, host);
 
             match self
                 .try_connect_to_addresses(addresses_to_try, client_transport_type, host)

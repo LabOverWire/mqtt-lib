@@ -43,7 +43,7 @@ pub use tcp::{TcpConfig, TcpTransport};
 #[cfg(not(target_arch = "wasm32"))]
 pub use tls::{TlsConfig, TlsTransport};
 #[cfg(all(not(target_arch = "wasm32"), feature = "transport-websocket"))]
-pub use websocket::{WebSocketConfig, WebSocketTransport};
+pub use websocket::{RequestModifier, RequestModifierError, WebSocketConfig, WebSocketTransport};
 
 #[cfg(not(target_arch = "wasm32"))]
 pub enum TransportType {

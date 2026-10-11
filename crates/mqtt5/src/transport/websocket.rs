@@ -98,6 +98,14 @@ const RESERVED_HEADERS: [&str; 14] = [
     "expect",
 ];
 
+const TRANSPORT_HEADERS: [&str; 5] = [
+    "host",
+    "connection",
+    "upgrade",
+    "sec-websocket-version",
+    "sec-websocket-key",
+];
+
 /// WebSocket transport configuration
 #[derive(Clone)]
 pub struct WebSocketConfig {
@@ -131,10 +139,13 @@ type ModifiedRequest =
 pub struct RequestModifier(Arc<dyn Fn(Request<()>) -> ModifiedRequest + Send + Sync>);
 
 impl RequestModifier {
-    async fn apply(&self, request: Request<()>) -> Result<Request<()>> {
-        (self.0)(request).await.map_err(|e| {
+    async fn apply(&self, request: Request<()>, secure: bool) -> Result<Request<()>> {
+        let modified = (self.0)(request).await.map_err(|e| {
+            error!(error = %e, "WebSocket request modifier failed");
             MqttError::ConnectionError(format!("WebSocket request modifier failed: {e}"))
-        })
+        })?;
+        validate_modified_request(&modified, secure)?;
+        Ok(modified)
     }
 }
 
@@ -261,11 +272,16 @@ impl WebSocketConfig {
     /// it runs before every connection attempt an `MqttClient` makes,
     /// including automatic reconnects, so those values never go stale.
     ///
-    /// The returned request is sent as is: the checks
-    /// [`with_header`](Self::with_header) applies do not cover headers the
-    /// callback adds, and tungstenite only requires its own handshake headers
-    /// to be present once. The connection is made to the returned request's
-    /// URI; a callback that points it at another host must update `Host` too.
+    /// The connection is made to the returned request's URI, so a callback
+    /// that points it at another host must update `Host` too; `MqttClient`
+    /// does not resolve the host it was given for a WebSocket connection, so
+    /// that host may be a placeholder. The returned request must keep the
+    /// URI's scheme, exactly one of each header the transport sets (`Host`,
+    /// `Connection`, `Upgrade`, `Sec-WebSocket-Version`, `Sec-WebSocket-Key`),
+    /// none of the other headers [`with_header`](Self::with_header) reserves,
+    /// and one `Sec-WebSocket-Protocol` header that still offers `mqtt`;
+    /// otherwise the attempt fails with `MqttError::Configuration` before
+    /// dialing. Other headers the callback adds are sent unchecked.
     /// The callback runs within the [`timeout`](Self::with_timeout), and an
     /// error fails the attempt with `MqttError::ConnectionError`.
     ///
@@ -584,6 +600,45 @@ impl WebSocketConfig {
     }
 }
 
+fn validate_modified_request(request: &Request<()>, secure: bool) -> Result<()> {
+    let scheme = if secure { "wss" } else { "ws" };
+    if request.uri().scheme_str() != Some(scheme) {
+        return Err(MqttError::Configuration(format!(
+            "WebSocket request modifier changed the URI scheme; it must stay {scheme}"
+        )));
+    }
+
+    let headers = request.headers();
+    for name in RESERVED_HEADERS {
+        let expected = usize::from(TRANSPORT_HEADERS.contains(&name));
+        let found = headers.get_all(name).iter().count();
+        if found != expected {
+            return Err(MqttError::Configuration(format!(
+                "WebSocket request modifier left {found} {name:?} headers; the handshake needs {expected}"
+            )));
+        }
+    }
+
+    let mut protocols = headers.get_all(SEC_WEBSOCKET_PROTOCOL).iter();
+    let (Some(offered), None) = (protocols.next(), protocols.next()) else {
+        return Err(MqttError::Configuration(
+            "WebSocket request modifier must leave exactly one Sec-WebSocket-Protocol header"
+                .to_string(),
+        ));
+    };
+    let offers_mqtt = offered.to_str().is_ok_and(|offered| {
+        offered
+            .split(',')
+            .any(|subprotocol| subprotocol.trim() == DEFAULT_SUBPROTOCOL)
+    });
+    if !offers_mqtt {
+        return Err(MqttError::Configuration(format!(
+            "WebSocket request modifier must keep offering the {DEFAULT_SUBPROTOCOL:?} subprotocol"
+        )));
+    }
+    Ok(())
+}
+
 /// Parses a handshake header value, naming the header in the error.
 fn header_value(name: &str, value: &str) -> Result<HeaderValue> {
     HeaderValue::from_str(value).map_err(|e| {
@@ -806,19 +861,19 @@ impl Transport for WebSocketTransport {
             _ => None,
         };
 
+        let secure = self.config.is_secure();
         let handshake = async {
             let request = match &self.config.request_modifier {
-                Some(modifier) => modifier.apply(request).await?,
+                Some(modifier) => modifier.apply(request, secure).await?,
                 None => request,
             };
             tokio_tungstenite::connect_async_tls_with_config(request, None, false, connector)
                 .await
                 .map_err(|e| {
                     error!(error = %e, "WebSocket connection failed");
-                    MqttError::ConnectionError(e.to_string())
+                    MqttError::ConnectionError(format!("WebSocket connect failed: {e}"))
                 })
         };
-        // Boxed so the connect futures that await this one stay small.
         let ws_result = tokio::time::timeout(self.config.timeout, Box::pin(handshake)).await;
 
         match ws_result {
