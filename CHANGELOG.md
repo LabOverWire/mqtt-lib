@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [mqtt5 0.48.0] - 2026-10-11
 
 ### Breaking
 
@@ -43,9 +43,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`ConnectOptions::with_websocket_config`, so `MqttClient` can send custom WebSocket handshake headers** (#165). `MqttClient` built each connection's `WebSocketConfig` from the URL alone, so its ws:// and wss:// connections could not carry custom headers, subprotocols or a user agent. The configuration set here is applied on every connection attempt, including automatic reconnects, with the URL taken from the address passed to `connect`; for wss://, its TLS configuration, when it has one, is used in place of the one stored with `set_tls_config` or `connect_with_tls`. A connection that follows a server redirect (`UseAnotherServer` or `ServerMoved`) does not use it, so its headers are never sent to a host the broker names.
 - `WebSocketConfig` implements `Clone`.
 - **`WebSocketConfig::with_request_modifier`, an async callback that adjusts the WebSocket upgrade request before each connection attempt** (#165). It receives the validated request and returns the one to send, so it can add values computed at connect time, such as a short-lived signed token, or replace the URI with a presigned one. Set on the `WebSocketConfig` given to `ConnectOptions::with_websocket_config`, it runs before every `MqttClient` connection attempt, including automatic reconnects. It runs within the connect timeout, and an error fails the attempt with `MqttError::ConnectionError`, logged at error level. The returned request must keep the URI's scheme, the handshake headers the transport sets, and a `Sec-WebSocket-Protocol` header that offers `mqtt`, and must not add a header `with_header` reserves; otherwise the attempt fails with `MqttError::Configuration` before dialing. Because `MqttClient` does not resolve a WebSocket address, the address passed to `connect` can name a placeholder host that the callback replaces.
-- `TlsConfig::client_config`, which returns the rustls client configuration a `TlsConfig` describes.
 - `RequestModifier` and `RequestModifierError` are exported from `mqtt5::transport`.
+- `TlsConfig::client_config`, which returns the rustls client configuration a `TlsConfig` describes.
 - `WebSocketConfig::build_handshake_request`, which returns the upgrade request the configuration produces.
+
+## [mqttv5-cli 0.29.7] - 2026-10-11
+
+### Fixed
+
+- `pub`, `sub` and `bench` now apply `--ca-cert`, `--cert` and `--key` to `wss://` URLs. Before, they were only applied to `mqtts://`, `ssl://` and `quics://`, so a `wss://` broker with a private CA failed with `UnknownIssuer`.
+
+### Changed
+
+- Requires mqtt5 0.48. See mqtt5 0.48.0 for the WebSocket client changes.
+
+## [mqtt5-wasm 2.1.7] - 2026-10-11
+
+### Changed
+
+- Requires mqtt5 0.48. No change to the wasm API.
 
 ## [mqtt5 0.47.3] - 2026-10-09
 
