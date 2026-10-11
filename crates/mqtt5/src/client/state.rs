@@ -43,6 +43,14 @@ impl ClientTransportType {
             other => other,
         }
     }
+
+    pub(crate) fn dials_by_url(&self) -> bool {
+        match self {
+            #[cfg(feature = "transport-websocket")]
+            Self::WebSocket(..) | Self::WebSocketSecure(..) => true,
+            _ => false,
+        }
+    }
 }
 
 impl MqttClient {
