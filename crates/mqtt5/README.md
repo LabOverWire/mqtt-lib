@@ -27,7 +27,7 @@ The broker is enabled by default via the `broker` feature. If you only need the 
 
 ```toml
 [dependencies]
-mqtt5 = { version = "0.36", default-features = false }
+mqtt5 = { version = "0.48", default-features = false }
 ```
 
 ## Quick Start
@@ -490,7 +490,7 @@ Distributed tracing with OpenTelemetry support:
 
 ```toml
 [dependencies]
-mqtt5 = { version = "0.36", features = ["opentelemetry"] }
+mqtt5 = { version = "0.48", features = ["opentelemetry"] }
 ```
 
 - W3C trace context propagation via MQTT user properties
