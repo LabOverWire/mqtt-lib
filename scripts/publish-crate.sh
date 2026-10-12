@@ -11,34 +11,49 @@ if [ -z "$version" ]; then
   exit 1
 fi
 
-name=$(printf '%s' "$package" | tr '[:upper:]' '[:lower:]')
-case ${#name} in
-  1) index_path="1/$name" ;;
-  2) index_path="2/$name" ;;
-  3) index_path="3/${name:0:1}/$name" ;;
-  *) index_path="${name:0:2}/${name:2:2}/$name" ;;
-esac
-index_url="https://index.crates.io/$index_path"
+index_url="https://index.crates.io/${package:0:2}/${package:2:2}/$package"
+entries=$(mktemp)
+trap 'rm -f "$entries"' EXIT
 
-is_published() {
-  local entries
-  entries=$(curl -sf -A "LabOverWire/mqtt-lib release workflow" "$index_url") || return 1
-  grep -q "\"vers\":\"$version\"" <<<"$entries"
+index_status() {
+  local code
+  code=$(curl -s --connect-timeout 10 --max-time 30 \
+    -A "LabOverWire/mqtt-lib release workflow" \
+    -o "$entries" -w '%{http_code}' "$index_url") || code="curl exit $?"
+  case $code in
+    200)
+      if grep -qF "\"vers\":\"$version\"" "$entries"; then
+        echo listed
+      else
+        echo absent
+      fi
+      ;;
+    404) echo absent ;;
+    *) echo "unreachable ($code)" ;;
+  esac
 }
 
-if is_published; then
+wait_for_index() {
+  local wanted=$1 deadline=$((SECONDS + wait_secs)) status
+  status=$(index_status)
+  until [ "$status" = listed ] || { [ "$wanted" = known ] && [ "$status" = absent ]; }; do
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      echo "$package $version: crates.io index still $status after ${wait_secs}s" >&2
+      exit 1
+    fi
+    sleep 10
+    status=$(index_status)
+  done
+  echo "$status"
+}
+
+state=$(wait_for_index known)
+if [ "$state" = listed ]; then
   echo "$package $version is already on crates.io, skipping"
   exit 0
 fi
 
 cargo publish --package "$package"
 
-deadline=$((SECONDS + wait_secs))
-until is_published; do
-  if [ "$SECONDS" -ge "$deadline" ]; then
-    echo "$package $version did not appear in the crates.io index within ${wait_secs}s" >&2
-    exit 1
-  fi
-  sleep 10
-done
+wait_for_index listed > /dev/null
 echo "$package $version is on crates.io"
