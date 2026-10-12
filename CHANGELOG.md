@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **The QUIC broker refuses a client stream it does not support instead of closing the connection** (#207). Any client-opened bidirectional stream that was not a flow discard closed the connection with `ERROR_PROTOCOL_L0` (0xB4), including user-defined flows (0x14) and client data flows, which MQoQ §9.20 allows on bidirectional streams. A user-defined flow on a unidirectional stream was read as MQTT, so depending on its bytes it closed the connection as a malformed packet or was left open. As §9.10 describes, only the stream is now refused, and the connection stays up:
+  - a user-defined flow, or a client data flow on a bidirectional stream, with `ERROR_FLOW_REFUSED` (0xBE);
+  - a server data flow header, or a client data flow whose flow ID has the server bit set, with `ERROR_BAD_FLOW_ID` (0xB6);
+  - a control flow header on any stream but the control stream, or a bidirectional stream without a flow header, with `ERROR_STREAM_TYPE` (0xB5).
+
+  A refused bidirectional stream gets STOP_SENDING and RESET_STREAM with the code, a unidirectional one STOP_SENDING. Unidirectional streams without a flow header are still read as MQTT.
+- **Discarding a flow now removes its subscriptions** (#207). A discard removed the flow's state but left its flow-bound subscriptions, so the broker kept delivering to a flow the client had discarded. §9.21.2 counts subscriptions as part of the flow state that §9.16 says to discard. The broker now removes them before it answers the discard with FIN.
+- **Only a flow header followed directly by FIN is a discard** (§9.16). A bidirectional stream whose header carried the discard flags was treated as a discard even when MQTT data followed, and the data was dropped. Such a stream is now refused with `ERROR_FLOW_REFUSED`.
+
 ## [mqtt5 0.48.0] - 2026-10-11
 
 ### Breaking

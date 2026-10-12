@@ -12,12 +12,18 @@ use crate::packet::Packet;
 use crate::protocol::v5::reason_codes::ReasonCode;
 use crate::validation::{parse_shared_subscription, topic_matches_filter, validate_topic_filter};
 use crate::QoS;
+use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, warn};
 
 use crate::broker::router::{MessageRouter, RoutableMessage, Subscribed, Unsubscribed};
 use crate::broker::session_slot::SessionSlotGuard;
 
 use super::ClientHandler;
+
+pub(super) enum FlowEvent {
+    Closed(u64),
+    Discarded(u64, oneshot::Sender<()>),
+}
 
 struct AcceptedFilter<'a> {
     filter: &'a crate::packet::subscribe::TopicFilter,
@@ -428,6 +434,47 @@ impl ClientHandler {
         }
 
         result
+    }
+
+    pub(super) async fn next_flow_event(
+        closed_rx: Option<&mut mpsc::Receiver<u64>>,
+        discard_rx: Option<&mut mpsc::Receiver<(u64, oneshot::Sender<()>)>>,
+    ) -> Option<FlowEvent> {
+        let closed = async {
+            match closed_rx {
+                Some(rx) => rx.recv().await.map(FlowEvent::Closed),
+                None => std::future::pending().await,
+            }
+        };
+        let discarded = async {
+            match discard_rx {
+                Some(rx) => rx
+                    .recv()
+                    .await
+                    .map(|(flow_id, done)| FlowEvent::Discarded(flow_id, done)),
+                None => std::future::pending().await,
+            }
+        };
+        tokio::select! {
+            event = closed => event,
+            event = discarded => event,
+        }
+    }
+
+    pub(super) async fn handle_flow_event(&mut self, event: Option<FlowEvent>) {
+        match event {
+            Some(FlowEvent::Closed(flow_id)) => self.handle_flow_closed(flow_id).await,
+            Some(FlowEvent::Discarded(flow_id, done)) => {
+                self.handle_flow_closed(flow_id).await;
+                if done.send(()).is_err() {
+                    debug!(
+                        flow_id,
+                        "discard stream ended before its flow was discarded"
+                    );
+                }
+            }
+            None => {}
+        }
     }
 
     pub(super) async fn handle_flow_closed(&mut self, flow_id: u64) {

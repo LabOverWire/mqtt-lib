@@ -160,6 +160,7 @@ pub struct ClientHandler {
     pub(super) skip_bridge_forwarding: bool,
     pub(super) pending_target_flow: Option<u64>,
     pub(super) flow_closed_rx: Option<mpsc::Receiver<u64>>,
+    pub(super) flow_discard_rx: Option<mpsc::Receiver<(u64, oneshot::Sender<()>)>>,
     #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
     pub(super) flow_registry:
         Option<Arc<tokio::sync::Mutex<crate::session::quic_flow::FlowRegistry>>>,
@@ -281,6 +282,7 @@ impl ClientHandler {
             skip_bridge_forwarding: false,
             pending_target_flow: None,
             flow_closed_rx: None,
+            flow_discard_rx: None,
             #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
             flow_registry: None,
             #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
@@ -337,6 +339,15 @@ impl ClientHandler {
     #[must_use]
     pub fn with_flow_closed_rx(mut self, rx: mpsc::Receiver<u64>) -> Self {
         self.flow_closed_rx = Some(rx);
+        self
+    }
+
+    #[must_use]
+    pub(crate) fn with_flow_discard_rx(
+        mut self,
+        rx: mpsc::Receiver<(u64, oneshot::Sender<()>)>,
+    ) -> Self {
+        self.flow_discard_rx = Some(rx);
         self
     }
 
@@ -1072,16 +1083,8 @@ impl ClientHandler {
                     }
                 }
 
-                closed_flow_id = async {
-                    if let Some(ref mut rx) = self.flow_closed_rx {
-                        rx.recv().await
-                    } else {
-                        std::future::pending::<Option<u64>>().await
-                    }
-                } => {
-                    if let Some(flow_id) = closed_flow_id {
-                        self.handle_flow_closed(flow_id).await;
-                    }
+                flow_event = Self::next_flow_event(self.flow_closed_rx.as_mut(), self.flow_discard_rx.as_mut()) => {
+                    self.handle_flow_event(flow_event).await;
                 }
 
                 routable = async {
