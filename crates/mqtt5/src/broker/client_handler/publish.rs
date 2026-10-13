@@ -762,6 +762,7 @@ impl ClientHandler {
         let manager = crate::broker::server_stream_manager::ServerStreamManager::new(
             conn,
             self.protocol_version,
+            self.config.max_packet_size,
         )
         .with_strategy(self.server_delivery_strategy);
         match self.quic_packet_tx.clone() {

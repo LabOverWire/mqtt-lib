@@ -3,14 +3,15 @@
 
 use bytes::BytesMut;
 use mqtt5::broker::config::{
-    BrokerConfig, QuicConfig as BrokerQuicConfig, StorageBackend, StorageConfig,
+    BrokerConfig, QuicConfig as BrokerQuicConfig, ServerDeliveryStrategy, StorageBackend,
+    StorageConfig,
 };
 use mqtt5::broker::{BrokerShutdownHandle, MqttBroker};
 use mqtt5::error::Result;
 use mqtt5::transport::flow::{ControlFlowHeader, DataFlowHeader, FlowFlags, FlowId};
 use mqtt5::transport::{QuicConfig, QuicSplitResult, QuicTransport};
 use mqtt5::Transport;
-use mqtt5_protocol::QuicStreamCode;
+use mqtt5_protocol::{QuicConnectionCode, QuicStreamCode};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Once;
@@ -42,6 +43,14 @@ struct Broker {
 
 impl Broker {
     async fn start() -> (Self, SocketAddr) {
+        let defaults = BrokerConfig::default();
+        Self::start_with(defaults.max_packet_size, defaults.server_delivery_strategy).await
+    }
+
+    async fn start_with(
+        max_packet_size: usize,
+        delivery: ServerDeliveryStrategy,
+    ) -> (Self, SocketAddr) {
         CRYPTO_PROVIDER.call_once(|| {
             rustls::crypto::ring::default_provider()
                 .install_default()
@@ -50,6 +59,8 @@ impl Broker {
         let config = BrokerConfig::default()
             .with_storage(StorageConfig::default().with_backend(StorageBackend::Memory))
             .with_bind_address(([127, 0, 0, 1], 0))
+            .with_max_packet_size(max_packet_size)
+            .with_server_delivery_strategy(delivery)
             .with_quic(
                 BrokerQuicConfig::new(PathBuf::from(CERT), PathBuf::from(KEY))
                     .with_bind_address("127.0.0.1:0".parse::<SocketAddr>().expect("bind address")),
@@ -90,6 +101,10 @@ fn connect_frame(client_id: &str) -> Vec<u8> {
 
 async fn connected_session(client_id: &str) -> (Broker, QuicSplitResult) {
     let (broker, addr) = Broker::start().await;
+    (broker, session_at(addr, client_id).await)
+}
+
+async fn session_at(addr: SocketAddr, client_id: &str) -> QuicSplitResult {
     let mut transport =
         QuicTransport::new(QuicConfig::new(addr, "localhost").with_verify_server_cert(false));
     transport.connect().await.expect("QUIC handshake");
@@ -112,7 +127,7 @@ async fn connected_session(client_id: &str) -> (Broker, QuicSplitResult) {
         .read_exact(&mut body)
         .await
         .expect("read CONNACK body");
-    (broker, split)
+    split
 }
 
 async fn outcome(split: &mut QuicSplitResult) -> Outcome {
@@ -379,13 +394,13 @@ async fn delivered_to_aborted_flow(discard: bool) -> bool {
     let mut bytes = data_flow(5, 300, preserved);
     bytes.extend_from_slice(&subscribe_frame("flows/discard"));
     flow.write_all(&bytes).await.expect("subscribe on flow");
-    let mut suback = [0u8; 5];
+    let mut suback = [0u8; 6];
     split
         .recv
         .read_exact(&mut suback)
         .await
         .expect("read SUBACK");
-    assert_eq!(suback, [0x90, 0x04, 0x00, 0x01, 0x00]);
+    assert_eq!(suback, [0x90, 0x04, 0x00, 0x01, 0x00, 0x00]);
     flow.reset(quinn::VarInt::from_u32(
         QuicStreamCode::FlowCancelled.code(),
     ))
@@ -421,4 +436,147 @@ async fn delivered_to_aborted_flow(discard: bool) -> bool {
 async fn discarding_a_flow_removes_its_subscriptions() {
     assert!(delivered_to_aborted_flow(false).await);
     assert!(!delivered_to_aborted_flow(true).await);
+}
+
+const PACKET_LIMIT: usize = 1024;
+
+fn remaining_length(mut length: usize) -> Vec<u8> {
+    let mut encoded = Vec::new();
+    loop {
+        let byte = u8::try_from(length % 128).expect("seven bits");
+        length /= 128;
+        if length == 0 {
+            encoded.push(byte);
+            return encoded;
+        }
+        encoded.push(byte | 0x80);
+    }
+}
+
+fn sized_publish_frame(topic: &str, payload_len: usize) -> Vec<u8> {
+    let mut body = Vec::new();
+    body.extend_from_slice(
+        &u16::try_from(topic.len())
+            .expect("short topic")
+            .to_be_bytes(),
+    );
+    body.extend_from_slice(topic.as_bytes());
+    body.push(0x00);
+    body.resize(body.len() + payload_len, b'x');
+    let mut frame = vec![0x30];
+    frame.extend_from_slice(&remaining_length(body.len()));
+    frame.extend_from_slice(&body);
+    frame
+}
+
+async fn subscribed_session(addr: SocketAddr, topic: &str) -> QuicSplitResult {
+    let mut split = session_at(addr, "size-subscriber").await;
+    split
+        .send
+        .write_all(&subscribe_frame(topic))
+        .await
+        .expect("send SUBSCRIBE");
+    let mut suback = [0u8; 6];
+    split
+        .recv
+        .read_exact(&mut suback)
+        .await
+        .expect("read SUBACK");
+    assert_eq!(suback, [0x90, 0x04, 0x00, 0x01, 0x00, 0x00]);
+    split
+}
+
+async fn delivered_publish_len(subscriber: &mut QuicSplitResult) -> Option<usize> {
+    let read = async {
+        let mut first = [0u8; 1];
+        subscriber.recv.read_exact(&mut first).await.ok()?;
+        let mut length = 0usize;
+        let mut multiplier = 1usize;
+        loop {
+            let mut byte = [0u8; 1];
+            subscriber.recv.read_exact(&mut byte).await.ok()?;
+            length += usize::from(byte[0] & 0x7F) * multiplier;
+            multiplier *= 128;
+            if byte[0] & 0x80 == 0 {
+                break;
+            }
+        }
+        let mut body = vec![0u8; length];
+        subscriber.recv.read_exact(&mut body).await.ok()?;
+        Some(1 + remaining_length(length).len() + length)
+    };
+    tokio::time::timeout(Duration::from_secs(2), read)
+        .await
+        .ok()
+        .flatten()
+}
+
+async fn delivered_from_data_stream(payload_len: usize) -> Option<usize> {
+    let (broker, addr) =
+        Broker::start_with(PACKET_LIMIT, ServerDeliveryStrategy::ControlOnly).await;
+    let mut subscriber = subscribed_session(addr, "size/check").await;
+    let publisher = session_at(addr, "size-publisher").await;
+    let mut stream = publisher.connection.open_uni().await.expect("open uni");
+    let mut bytes = data_flow(1, 0, FlowFlags::default());
+    bytes.extend_from_slice(&sized_publish_frame("size/check", payload_len));
+    stream.write_all(&bytes).await.expect("write data stream");
+    let delivered = delivered_publish_len(&mut subscriber).await;
+    broker.stop().await;
+    delivered
+}
+
+async fn delivered_from_control_stream(payload_len: usize) -> Option<usize> {
+    let (broker, addr) =
+        Broker::start_with(PACKET_LIMIT, ServerDeliveryStrategy::ControlOnly).await;
+    let mut subscriber = subscribed_session(addr, "size/check").await;
+    let mut publisher = session_at(addr, "size-publisher").await;
+    publisher
+        .send
+        .write_all(&sized_publish_frame("size/check", payload_len))
+        .await
+        .expect("write control stream");
+    let delivered = delivered_publish_len(&mut subscriber).await;
+    broker.stop().await;
+    delivered
+}
+
+#[tokio::test]
+async fn a_packet_over_the_maximum_size_is_refused_on_a_data_stream_as_on_the_control_stream() {
+    assert!(delivered_from_control_stream(100).await.is_some());
+    assert!(delivered_from_data_stream(100).await.is_some());
+    assert_eq!(delivered_from_control_stream(2 * PACKET_LIMIT).await, None);
+    assert_eq!(delivered_from_data_stream(2 * PACKET_LIMIT).await, None);
+}
+
+#[tokio::test]
+async fn a_data_stream_announcing_an_oversized_packet_closes_the_connection() {
+    let (broker, addr) =
+        Broker::start_with(PACKET_LIMIT, ServerDeliveryStrategy::ControlOnly).await;
+    let publisher = session_at(addr, "size-announcer").await;
+    let mut stream = publisher.connection.open_uni().await.expect("open uni");
+    let mut header = data_flow(1, 0, FlowFlags::default());
+    header.push(0x30);
+    header.extend_from_slice(&remaining_length(64 * 1024 * 1024));
+    stream.write_all(&header).await.expect("write header");
+    let chunk = vec![0u8; 64 * 1024];
+    let mut written = 0usize;
+    while written < 8 * 1024 * 1024 {
+        match tokio::time::timeout(Duration::from_secs(2), stream.write_all(&chunk)).await {
+            Ok(Ok(())) => written += chunk.len(),
+            _ => break,
+        }
+    }
+    let close_code = tokio::time::timeout(Duration::from_secs(2), publisher.connection.closed())
+        .await
+        .ok()
+        .and_then(|error| match error {
+            quinn::ConnectionError::ApplicationClosed(close) => Some(close.error_code.into_inner()),
+            _ => None,
+        });
+    broker.stop().await;
+    assert_eq!(
+        close_code,
+        Some(u64::from(QuicConnectionCode::ProtocolLevel0.code())),
+        "broker read {written} bytes of an oversized packet"
+    );
 }

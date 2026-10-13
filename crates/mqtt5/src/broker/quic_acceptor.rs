@@ -452,6 +452,7 @@ pub(super) async fn read_packet_with_buffer(
     recv: &mut RecvStream,
     buffer: &mut BytesMut,
     protocol_version: u8,
+    max_packet_size: usize,
 ) -> Result<Packet> {
     while buffer.len() < 2 {
         let mut tmp = [0u8; 64];
@@ -502,6 +503,12 @@ pub(super) async fn read_packet_with_buffer(
 
     let header_len = 1 + remaining_length_bytes;
     let total_len = header_len + remaining_length as usize;
+    if total_len > max_packet_size {
+        return Err(MqttError::PacketTooLarge {
+            size: total_len,
+            max: max_packet_size,
+        });
+    }
 
     while buffer.len() < total_len {
         let mut tmp = [0u8; 1024];
@@ -588,6 +595,7 @@ async fn run_quic_handler_inner(
     let transport = BrokerTransport::quic(stream);
 
     let delivery_strategy = context.config.server_delivery_strategy;
+    let max_packet_size = context.config.max_packet_size;
     let connection_alive = context.connection_alive;
     let handler = ClientHandler::new_with_external_packets(
         transport,
@@ -641,12 +649,15 @@ async fn run_quic_handler_inner(
     );
     spawn_quic_stats_sampler(connection.clone(), peer_addr);
     spawn_uni_accept_loop(
-        connection,
-        packet_tx,
-        protocol_version_rx,
-        peer_addr,
-        flow_registry,
-        flow_closed_tx,
+        DataStreamContext {
+            connection,
+            packet_tx,
+            protocol_version_rx,
+            peer_addr,
+            flow_registry,
+            flow_closed_tx,
+            max_packet_size,
+        },
         label,
     );
 }
@@ -794,32 +805,25 @@ fn spawn_bi_accept_loop(
     });
 }
 
-fn spawn_uni_accept_loop(
+#[derive(Clone)]
+struct DataStreamContext {
     connection: Arc<Connection>,
     packet_tx: mpsc::Sender<(Packet, Option<u64>)>,
     protocol_version_rx: watch::Receiver<Option<u8>>,
     peer_addr: SocketAddr,
     flow_registry: Arc<Mutex<FlowRegistry>>,
     flow_closed_tx: mpsc::Sender<u64>,
-    label: &'static str,
-) {
+    max_packet_size: usize,
+}
+
+fn spawn_uni_accept_loop(context: DataStreamContext, label: &'static str) {
     tokio::spawn(async move {
+        let peer_addr = context.peer_addr;
         loop {
-            match connection.accept_uni().await {
+            match context.connection.accept_uni().await {
                 Ok(recv) => {
-                    debug!(
-                        "Additional {} data stream accepted from {}",
-                        label, peer_addr
-                    );
-                    spawn_data_stream_reader(
-                        connection.clone(),
-                        recv,
-                        packet_tx.clone(),
-                        protocol_version_rx.clone(),
-                        peer_addr,
-                        flow_registry.clone(),
-                        flow_closed_tx.clone(),
-                    );
+                    debug!("Additional {label} data stream accepted from {peer_addr}");
+                    spawn_data_stream_reader(context.clone(), recv);
                 }
                 Err(e) => {
                     let reason = crate::transport::quic_error::parse_connection_error(&e);
@@ -981,16 +985,17 @@ fn close_connection(connection: &Connection, code: mqtt5_protocol::QuicConnectio
     );
 }
 
-fn spawn_data_stream_reader(
-    connection: Arc<Connection>,
-    mut recv: RecvStream,
-    packet_tx: mpsc::Sender<(Packet, Option<u64>)>,
-    protocol_version_rx: watch::Receiver<Option<u8>>,
-    peer_addr: SocketAddr,
-    flow_registry: Arc<Mutex<FlowRegistry>>,
-    flow_closed_tx: mpsc::Sender<u64>,
-) {
+fn spawn_data_stream_reader(context: DataStreamContext, mut recv: RecvStream) {
     tokio::spawn(async move {
+        let DataStreamContext {
+            connection,
+            packet_tx,
+            protocol_version_rx,
+            peer_addr,
+            flow_registry,
+            flow_closed_tx,
+            max_packet_size,
+        } = context;
         let Some(protocol_version) = negotiated_protocol_version(protocol_version_rx).await else {
             debug!("client handler ended before CONNECT from {peer_addr}");
             return;
@@ -1026,7 +1031,9 @@ fn spawn_data_stream_reader(
         };
 
         loop {
-            match read_packet_with_buffer(&mut recv, &mut buffer, protocol_version).await {
+            match read_packet_with_buffer(&mut recv, &mut buffer, protocol_version, max_packet_size)
+                .await
+            {
                 Ok(packet) => {
                     if let Some(id) = flow_id {
                         let mut registry = flow_registry.lock().await;

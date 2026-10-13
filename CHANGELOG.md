@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A refused bidirectional stream gets STOP_SENDING and RESET_STREAM with the code, a unidirectional one STOP_SENDING. Unidirectional streams without a flow header are still read as MQTT.
 - **Discarding a flow now removes its subscriptions** (#207). A discard removed the flow's state but left its flow-bound subscriptions, so the broker kept delivering to a flow the client had discarded. §9.21.2 counts subscriptions as part of the flow state that §9.16 says to discard. The broker now removes them before it answers the discard with FIN.
 - **Only a flow header followed directly by FIN is a discard** (§9.16). A bidirectional stream whose header carried the discard flags was treated as a discard even when MQTT data followed, and the data was dropped. Such a stream is now refused with `ERROR_FLOW_REFUSED`.
+- **The QUIC broker enforces its maximum packet size on data streams.** Only the control stream checked `max_packet_size`. A packet over the limit on a client data stream was read in full and delivered, so a client could make the broker buffer up to 256 MB per stream by announcing a large packet. The broker now refuses such a packet from its fixed header and closes the connection with `ERROR_PROTOCOL_L0` (0xB4), as it does on the control stream. The same check applies to the acks the broker reads back on streams it opened.
 
 ## [mqtt5 0.48.0] - 2026-10-11
 

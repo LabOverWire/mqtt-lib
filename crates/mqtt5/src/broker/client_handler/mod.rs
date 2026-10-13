@@ -342,6 +342,7 @@ impl ClientHandler {
         self
     }
 
+    #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
     #[must_use]
     pub(crate) fn with_flow_discard_rx(
         mut self,

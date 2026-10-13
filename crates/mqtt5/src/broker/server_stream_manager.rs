@@ -44,6 +44,7 @@ fn spawn_ack_reader(
     mut recv: RecvStream,
     flow_id: FlowId,
     protocol_version: u8,
+    max_packet_size: usize,
     packet_tx: PacketSender,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -53,6 +54,7 @@ fn spawn_ack_reader(
                 &mut recv,
                 &mut buffer,
                 protocol_version,
+                max_packet_size,
             )
             .await
             {
@@ -82,6 +84,7 @@ const FLOW_EXPIRE_INTERVAL: u64 = 300;
 pub struct ServerStreamManager {
     connection: Arc<Connection>,
     protocol_version: u8,
+    max_packet_size: usize,
     strategy: ServerDeliveryStrategy,
     topic_streams: HashMap<String, ServerStreamInfo>,
     flow_streams: HashMap<u64, ServerStreamInfo>,
@@ -92,10 +95,11 @@ pub struct ServerStreamManager {
 }
 
 impl ServerStreamManager {
-    pub fn new(connection: Arc<Connection>, protocol_version: u8) -> Self {
+    pub fn new(connection: Arc<Connection>, protocol_version: u8, max_packet_size: usize) -> Self {
         Self {
             connection,
             protocol_version,
+            max_packet_size,
             strategy: ServerDeliveryStrategy::default(),
             topic_streams: HashMap::new(),
             flow_streams: HashMap::new(),
@@ -127,7 +131,13 @@ impl ServerStreamManager {
             );
             return None;
         };
-        Some(spawn_ack_reader(recv, flow_id, self.protocol_version, tx))
+        Some(spawn_ack_reader(
+            recv,
+            flow_id,
+            self.protocol_version,
+            self.max_packet_size,
+            tx,
+        ))
     }
 
     #[must_use]
