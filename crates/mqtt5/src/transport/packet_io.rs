@@ -313,28 +313,10 @@ pub async fn read_packet_reusing_buffer<T: Transport>(
     max_packet_size: usize,
 ) -> Result<Packet> {
     loop {
-        if let Some(header_len) = fixed_header_len(read_buffer)? {
-            let mut header_slice: &[u8] = &read_buffer[..header_len];
-            let fixed_header = FixedHeader::decode(&mut header_slice)?;
-            let remaining = fixed_header.remaining_length as usize;
-            if remaining > max_packet_size {
-                return Err(MqttError::PacketTooLarge {
-                    size: remaining,
-                    max: max_packet_size,
-                });
-            }
-            let frame_len = header_len + remaining;
-            if read_buffer.len() >= frame_len {
-                let mut frame = read_buffer.split_to(frame_len);
-                frame.advance(header_len);
-                return Packet::decode_from_body_with_version(
-                    fixed_header.packet_type,
-                    &fixed_header,
-                    &mut frame,
-                    protocol_version,
-                );
-            }
-            read_buffer.reserve(frame_len - read_buffer.len());
+        if let Some(packet) =
+            decode_buffered_packet(read_buffer, protocol_version, max_packet_size)?
+        {
+            return Ok(packet);
         }
         let mut chunk = [0u8; READ_CHUNK];
         let n = transport.read(&mut chunk).await?;
