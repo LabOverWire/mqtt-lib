@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [mqtt5 0.48.1] - 2026-10-14
+## [mqtt5 0.48.1] - 2026-10-15
 
 ### Breaking
 
@@ -23,7 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Only a flow header followed directly by FIN is a discard** (§9.16). A bidirectional stream whose header carried the discard flags was treated as a discard even when MQTT data followed, and the data was dropped. Such a stream is now refused with `ERROR_FLOW_REFUSED`.
 - **The QUIC broker enforces its maximum packet size on data streams and datagrams.** Only the control stream checked `max_packet_size`. A packet over the limit on a client data stream or in a datagram was read in full and delivered, whatever the limit, so a client could make the broker buffer up to 256 MB per stream by announcing a large packet. An oversized ack on a stream the broker opened only stopped that stream, so the flow's later acks were never read. The broker now refuses all of these from the fixed header and closes the connection with `ERROR_PROTOCOL_L0` (0xB4), as it does on the control stream.
 
-## [mqttv5-cli 0.29.8] - 2026-10-14
+## [mqttv5-cli 0.29.8] - 2026-10-15
 
 ### Changed
 
