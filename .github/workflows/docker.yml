@@ -10,11 +10,6 @@ on:
         description: 'Image tag (default: dev)'
         required: false
         default: 'dev'
-      opentelemetry:
-        description: 'Enable OpenTelemetry support'
-        type: boolean
-        required: false
-        default: false
 
 env:
   REGISTRY: ghcr.io
@@ -26,8 +21,18 @@ permissions:
 
 jobs:
   build-and-push:
-    name: Build and Push
+    name: Build and Push (${{ matrix.variant }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: standard
+            features: ''
+            suffix: ''
+          - variant: opentelemetry
+            features: '--features opentelemetry'
+            suffix: '-otel'
     steps:
       - uses: actions/checkout@v4
 
@@ -49,6 +54,8 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          flavor: |
+            suffix=${{ matrix.suffix }},onlatest=true
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
@@ -65,6 +72,6 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            FEATURES=${{ github.event.inputs.opentelemetry == 'true' && '--features opentelemetry' || '' }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+            FEATURES=${{ matrix.features }}
+          cache-from: type=gha,scope=${{ matrix.variant }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.variant }}
