@@ -1781,6 +1781,13 @@ impl MessageRouter {
         retained.contains_key(topic)
     }
 
+    pub async fn retained_store_full(&self, topic: &str, max_retained_messages: usize) -> bool {
+        let retained = self.retained_messages.read().await;
+        max_retained_messages > 0
+            && !retained.contains_key(topic)
+            && retained.len() >= max_retained_messages
+    }
+
     pub async fn load_change_only_state(&self, client_id: &str, state: ChangeOnlyState) {
         self.change_only_states
             .write()

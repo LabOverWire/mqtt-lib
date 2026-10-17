@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- **Retained wills are held to `max_retained_message_size` and `max_retained_messages`** (#227). A will with Will Retain set was stored without the checks a retained PUBLISH gets, so a client could store retained messages of any size, on any number of topics, by reconnecting with a different retained will each time. The broker must publish a will it has accepted, and publish a retained will as retained (MQTT-3.1.2-8, MQTT-3.1.2-15), so the size limit is now checked at CONNECT: a retained will over `max_retained_message_size` is refused with CONNACK 0x97 (Quota exceeded). The count depends on what is stored when the will fires, so it is checked then: a retained will on a new topic past `max_retained_messages` is still delivered to current subscribers, but not stored.
+
 ### Fixed
 
 - **Retained and queued messages reach MQTT 3.1.1 subscribers without MQTT 5 properties in the payload** (#213). A retained message, or a message queued for an offline 3.1.1 session, was sent with an MQTT 5 properties block, which a 3.1.1 subscriber reads as the start of the payload. With the broker's `x-mqtt-client-id` user property, that put the property bytes in front of every such payload. Live delivery was already correct. The broker and the wasm broker now encode every outbound PUBLISH for the protocol version of the connection it is sent on.

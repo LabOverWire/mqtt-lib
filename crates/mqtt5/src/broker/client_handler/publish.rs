@@ -328,24 +328,19 @@ impl ClientHandler {
             ));
         }
 
-        if self.config.max_retained_messages > 0 {
-            let is_update = self.router.has_retained_message(&publish.topic_name).await;
-            if !is_update {
-                let current_count = self.router.retained_count().await;
-                if current_count >= self.config.max_retained_messages {
-                    debug!(
-                        "Client {} retained message limit exceeded ({}/{})",
-                        client_id, current_count, self.config.max_retained_messages
-                    );
-                    return Ok(Some(
-                        self.send_quota_exceeded_response(
-                            publish,
-                            "Retained message limit exceeded",
-                        )
-                        .await,
-                    ));
-                }
-            }
+        if self
+            .router
+            .retained_store_full(&publish.topic_name, self.config.max_retained_messages)
+            .await
+        {
+            debug!(
+                "Client {} retained message limit exceeded ({})",
+                client_id, self.config.max_retained_messages
+            );
+            return Ok(Some(
+                self.send_quota_exceeded_response(publish, "Retained message limit exceeded")
+                    .await,
+            ));
         }
         Ok(None)
     }
