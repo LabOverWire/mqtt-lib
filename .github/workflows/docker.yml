@@ -20,11 +20,10 @@ permissions:
   packages: write
 
 jobs:
-  build-and-push:
-    name: Build and Push (${{ matrix.variant }})
+  build:
+    name: Build (${{ matrix.variant }})
     runs-on: ubuntu-latest
     strategy:
-      fail-fast: false
       matrix:
         include:
           - variant: standard
@@ -34,6 +33,9 @@ jobs:
             features: '--features opentelemetry'
             suffix: '-otel'
     steps:
+      - name: Set image name
+        run: echo "IMAGE=${REGISTRY}/${IMAGE_NAME,,}" >> "$GITHUB_ENV"
+
       - uses: actions/checkout@v4
 
       - name: Set up QEMU
@@ -53,25 +55,76 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: ${{ env.IMAGE }}
           flavor: |
             suffix=${{ matrix.suffix }},onlatest=true
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-') }}
             type=raw,value=${{ github.event.inputs.tag }},enable=${{ github.event_name == 'workflow_dispatch' }}
 
-      - name: Build and push
+      - name: Build and push by digest
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             FEATURES=${{ matrix.features }}
           cache-from: type=gha,scope=${{ matrix.variant }}
           cache-to: type=gha,mode=max,scope=${{ matrix.variant }}
+
+      - name: Record digest and tags
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          mkdir -p image
+          echo "$DIGEST" > image/digest
+          echo "$TAGS" > image/tags
+
+      - name: Upload digest and tags
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-${{ matrix.variant }}
+          path: image
+          retention-days: 1
+
+  tag:
+    name: Tag images
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set image name
+        run: echo "IMAGE=${REGISTRY}/${IMAGE_NAME,,}" >> "$GITHUB_ENV"
+
+      - name: Download digests and tags
+        uses: actions/download-artifact@v4
+        with:
+          pattern: image-*
+          path: images
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Tag each image
+        run: |
+          for dir in images/*; do
+            digest=$(cat "$dir/digest")
+            args=()
+            while read -r tag; do
+              [ -n "$tag" ] && args+=(-t "$tag")
+            done < "$dir/tags"
+            docker buildx imagetools create "${args[@]}" "$IMAGE@$digest"
+          done

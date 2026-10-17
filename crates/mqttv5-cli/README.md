@@ -209,6 +209,8 @@ mqttv5 broker
 
 The Docker image sets `MQTT5_NON_INTERACTIVE=true` by default. Use `--help` on any subcommand to see the env var name for each flag (shown as `[env: MQTT5_...]`).
 
+Release images are published to `ghcr.io/laboverwire/mqtt-lib` as `<version>`, `<major>.<minor>`, `<major>` and `latest`. The same tags with `-otel` appended, such as `latest-otel`, are built with the `opentelemetry` feature; only those images accept the `--otel-*` broker flags.
+
 ## Examples
 
 ### Publishing sensor data

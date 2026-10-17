@@ -71,6 +71,8 @@ MQTT5_ALLOW_ANONYMOUS=1 mqttv5 broker    # also works
 
 ### Docker Usage
 
+Release images are published to `ghcr.io/laboverwire/mqtt-lib` as `<version>`, `<major>.<minor>`, `<major>` and `latest`. The same tags with `-otel` appended, such as `latest-otel`, are built with the `opentelemetry` feature; only those images accept the `--otel-*` broker flags.
+
 The Docker image sets `MQTT5_NON_INTERACTIVE=true` by default. All broker configuration can be done via env vars:
 
 ```bash
