@@ -626,6 +626,7 @@ impl ClientHandler {
     }
 
     pub(super) async fn send_publish(&mut self, mut publish: PublishPacket) -> Result<()> {
+        publish.protocol_version = self.protocol_version;
         if publish.qos != QoS::AtMostOnce {
             debug_assert!(
                 self.outbound_inflight.len() < usize::from(self.window),

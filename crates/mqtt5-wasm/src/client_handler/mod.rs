@@ -297,6 +297,7 @@ impl WasmClientHandler {
         let storage_fwd = Arc::clone(&self.storage);
         let client_id_fwd = self.client_id.clone().unwrap_or_default();
         let handler_id = self.handler_id;
+        let protocol_version = self.protocol_version;
 
         spawn_local(async move {
             'outer: loop {
@@ -304,7 +305,7 @@ impl WasmClientHandler {
                     break;
                 }
 
-                let publish = tokio::select! {
+                let mut publish = tokio::select! {
                     lane = qos1_rx.recv() => match lane {
                         Some(routable) => routable.publish,
                         None => break,
@@ -322,8 +323,10 @@ impl WasmClientHandler {
                         if let Some(queue) = &queue {
                             let mut pending = queue.take(64).await.into_iter();
                             while let Some(message) = pending.next() {
+                                let mut queued = message.to_publish_packet();
+                                queued.protocol_version = protocol_version;
                                 if !Self::forward_one(
-                                    message.to_publish_packet(),
+                                    queued,
                                     &writer_for_forward,
                                     &outbound_inflight_fwd,
                                     &next_pid_fwd,
@@ -352,6 +355,7 @@ impl WasmClientHandler {
                     }
                 };
 
+                publish.protocol_version = protocol_version;
                 if !Self::forward_one(
                     publish,
                     &writer_for_forward,

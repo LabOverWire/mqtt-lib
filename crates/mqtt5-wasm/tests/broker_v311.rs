@@ -60,23 +60,7 @@ async fn subscribed_deliveries(
     publisher: &WasmMqttClient,
     topic: &str,
 ) -> Deliveries {
-    let received = Rc::new(RefCell::new(Vec::<Vec<u8>>::new()));
-    let sink = Rc::clone(&received);
-    let callback = Closure::<dyn FnMut(JsValue, JsValue, JsValue)>::new(
-        move |_: JsValue, payload: JsValue, _: JsValue| {
-            sink.borrow_mut()
-                .push(js_sys::Uint8Array::new(&payload).to_vec());
-        },
-    );
-    let mut subscribe_options = WasmSubscribeOptions::new();
-    subscribe_options.set_qos(1);
-    within(subscriber.subscribe_with_options(
-        topic,
-        callback.into_js_value().unchecked_into(),
-        &subscribe_options,
-    ))
-    .await?
-    .ok()?;
+    let received = subscribe_collecting(subscriber, topic).await?;
 
     let mut delivered = Vec::new();
     for qos in [0u8, 1] {
@@ -138,4 +122,115 @@ async fn v5_client_is_served_by_the_wasm_broker() {
 #[wasm_bindgen_test]
 async fn v311_client_is_served_by_the_wasm_broker() {
     assert_eq!(round_trip(4).await, served());
+}
+
+type Received = Rc<RefCell<Vec<Vec<u8>>>>;
+
+async fn subscribe_collecting(subscriber: &WasmMqttClient, topic: &str) -> Option<Received> {
+    let received = Rc::new(RefCell::new(Vec::<Vec<u8>>::new()));
+    let sink = Rc::clone(&received);
+    let callback = Closure::<dyn FnMut(JsValue, JsValue, JsValue)>::new(
+        move |_: JsValue, payload: JsValue, _: JsValue| {
+            sink.borrow_mut()
+                .push(js_sys::Uint8Array::new(&payload).to_vec());
+        },
+    );
+    let mut subscribe_options = WasmSubscribeOptions::new();
+    subscribe_options.set_qos(1);
+    within(subscriber.subscribe_with_options(
+        topic,
+        callback.into_js_value().unchecked_into(),
+        &subscribe_options,
+    ))
+    .await?
+    .ok()?;
+    Some(received)
+}
+
+async fn publish_with_properties(publisher: &WasmMqttClient, topic: &str, qos: u8, retain: bool) {
+    let mut publish_options = WasmPublishOptions::new();
+    publish_options.set_qos(qos);
+    publish_options.set_retain(retain);
+    publish_options.set_payload_format_indicator(Some(false));
+    within(publisher.publish_with_options(topic, &PAYLOAD, &publish_options))
+        .await
+        .expect("PUBACK in time")
+        .expect("publish");
+}
+
+async fn first_delivery(received: &Received) -> Option<Vec<u8>> {
+    for _ in 0..100 {
+        if let Some(payload) = received.borrow().first() {
+            return Some(payload.clone());
+        }
+        sleep(10).await;
+    }
+    None
+}
+
+async fn retained_payload_at(protocol_version: u8) -> Option<Vec<u8>> {
+    let mut config = WasmBrokerConfig::new();
+    config.set_allow_anonymous(true);
+    let broker = WasmBroker::with_config(config).unwrap();
+    let publisher = connected(&broker, "v5-pub", 5).await;
+    publish_with_properties(&publisher, "retained", 0, true).await;
+    sleep(50).await;
+    let subscriber = connected(&broker, "retained-sub", protocol_version).await;
+    let received = subscribe_collecting(&subscriber, "retained")
+        .await
+        .expect("subscribed");
+    let payload = first_delivery(&received).await;
+    within(publisher.disconnect()).await;
+    within(subscriber.disconnect()).await;
+    payload
+}
+
+async fn queued_payload_at(protocol_version: u8) -> Option<Vec<u8>> {
+    let mut config = WasmBrokerConfig::new();
+    config.set_allow_anonymous(true);
+    let broker = WasmBroker::with_config(config).unwrap();
+    let subscriber = WasmMqttClient::new("queued-sub".to_string());
+    let mut options = WasmConnectOptions::new();
+    options.set_protocol_version(protocol_version);
+    options.set_clean_start(false);
+    options.set_session_expiry_interval(Some(300));
+    subscriber
+        .connect_message_port_with_options(broker.create_client_port().unwrap(), &options)
+        .await
+        .unwrap();
+    let received = subscribe_collecting(&subscriber, "queued")
+        .await
+        .expect("subscribed");
+    within(subscriber.disconnect()).await;
+    sleep(50).await;
+    let publisher = connected(&broker, "v5-pub", 5).await;
+    publish_with_properties(&publisher, "queued", 1, false).await;
+    subscriber
+        .connect_message_port_with_options(broker.create_client_port().unwrap(), &options)
+        .await
+        .unwrap();
+    let payload = first_delivery(&received).await;
+    within(publisher.disconnect()).await;
+    within(subscriber.disconnect()).await;
+    payload
+}
+
+#[wasm_bindgen_test]
+async fn retained_delivery_to_v5_subscriber_carries_the_published_payload() {
+    assert_eq!(retained_payload_at(5).await, Some(PAYLOAD.to_vec()));
+}
+
+#[wasm_bindgen_test]
+async fn retained_delivery_to_v311_subscriber_carries_the_published_payload() {
+    assert_eq!(retained_payload_at(4).await, Some(PAYLOAD.to_vec()));
+}
+
+#[wasm_bindgen_test]
+async fn queued_delivery_to_v5_subscriber_carries_the_published_payload() {
+    assert_eq!(queued_payload_at(5).await, Some(PAYLOAD.to_vec()));
+}
+
+#[wasm_bindgen_test]
+async fn queued_delivery_to_v311_subscriber_carries_the_published_payload() {
+    assert_eq!(queued_payload_at(4).await, Some(PAYLOAD.to_vec()));
 }

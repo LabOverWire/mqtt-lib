@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Retained and queued messages reach MQTT 3.1.1 subscribers without MQTT 5 properties in the payload** (#213). A retained message, or a message queued for an offline 3.1.1 session, was sent with an MQTT 5 properties block, which a 3.1.1 subscriber reads as the start of the payload. With the broker's `x-mqtt-client-id` user property, that put the property bytes in front of every such payload. Live delivery was already correct. The broker and the wasm broker now encode every outbound PUBLISH for the protocol version of the connection it is sent on.
+
 ## [mqtt5 0.48.1] - 2026-10-15
 
 ### Breaking

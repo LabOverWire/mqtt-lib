@@ -237,6 +237,7 @@ impl WasmClientHandler {
                     InflightPhase::AwaitingPubrec => {
                         let mut publish = msg.to_publish_packet();
                         publish.dup = true;
+                        publish.protocol_version = self.protocol_version;
                         self.outbound_inflight
                             .borrow_mut()
                             .insert(msg.packet_id, publish.clone());
@@ -263,9 +264,10 @@ impl WasmClientHandler {
 
     pub(super) fn send_publish(
         &self,
-        publish: PublishPacket,
+        mut publish: PublishPacket,
         writer: &mut WasmWriter,
     ) -> Result<()> {
+        publish.protocol_version = self.protocol_version;
         self.write_packet(&Packet::Publish(publish), writer)
     }
 
