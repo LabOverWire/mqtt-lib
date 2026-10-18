@@ -1,4 +1,3 @@
-use crate::broker::router::MessageRouter;
 use crate::broker::storage::ClientSession;
 use crate::error::{MqttError, Result};
 use crate::packet::disconnect::DisconnectPacket;
@@ -84,12 +83,9 @@ impl ClientHandler {
         publish.properties.inject_sender(self.user_id.as_deref());
         publish.properties.inject_client_id(Some(client_id));
 
-        let max_retained_messages = self.config.max_retained_messages;
         if delay == 0 {
             debug!(client_id, "Publishing will immediately");
             if self.authorize_will(client_id, &publish).await {
-                keep_will_within_retained_limit(&self.router, max_retained_messages, &mut publish)
-                    .await;
                 self.route_publish(&publish, None).await;
             }
             self.router
@@ -136,7 +132,6 @@ impl ClientHandler {
                 return;
             }
             debug!(client_id, "Publishing delayed will");
-            keep_will_within_retained_limit(&router, max_retained_messages, &mut publish).await;
             if skip_bridges {
                 router.route_message_local_only(&publish, None).await;
             } else {
@@ -311,25 +306,5 @@ mod disconnect_tests {
             Some(0),
             "a claim racing the release must see that the session ended at the DISCONNECT"
         );
-    }
-}
-
-async fn keep_will_within_retained_limit(
-    router: &MessageRouter,
-    max_retained_messages: usize,
-    publish: &mut PublishPacket,
-) {
-    if publish.retain
-        && !publish.payload.is_empty()
-        && router
-            .retained_store_full(&publish.topic_name, max_retained_messages)
-            .await
-    {
-        warn!(
-            topic = %publish.topic_name,
-            max_retained_messages,
-            "Retained message limit reached: publishing the will without retaining it"
-        );
-        publish.retain = false;
     }
 }

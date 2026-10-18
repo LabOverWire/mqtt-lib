@@ -333,10 +333,9 @@ impl ClientHandler {
             .retained_store_full(&publish.topic_name, self.config.max_retained_messages)
             .await
         {
-            debug!(
-                "Client {} retained message limit exceeded ({})",
-                client_id, self.config.max_retained_messages
-            );
+            let max = self.config.max_retained_messages;
+            let count = self.router.retained_count().await;
+            debug!("Client {client_id} retained message limit exceeded ({count}/{max})");
             return Ok(Some(
                 self.send_quota_exceeded_response(publish, "Retained message limit exceeded")
                     .await,

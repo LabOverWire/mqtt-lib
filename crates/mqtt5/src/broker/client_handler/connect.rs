@@ -382,8 +382,10 @@ impl ClientHandler {
                     max_retained_message_size = max_size,
                     "Rejecting connection: retained Will exceeds the retained message size limit"
                 );
-                let connack = self.new_connack(false, ReasonCode::QuotaExceeded);
-                self.write_to_client(Packet::ConnAck(connack)).await?;
+                if self.protocol_version != 4 {
+                    let connack = self.new_connack(false, ReasonCode::QuotaExceeded);
+                    self.write_to_client(Packet::ConnAck(connack)).await?;
+                }
                 return Err(MqttError::ProtocolError(
                     "Retained Will exceeds the retained message size limit".into(),
                 ));

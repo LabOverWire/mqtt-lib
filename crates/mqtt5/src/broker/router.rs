@@ -179,6 +179,8 @@ pub struct MessageRouter {
     echo_suppression_key: Arc<RwLock<Option<String>>>,
     outbound_rates: parking_lot::RwLock<HashMap<String, OutboundRateState>>,
     max_outbound_rate: AtomicU32,
+    max_retained_messages: AtomicUsize,
+    max_retained_message_size: AtomicUsize,
     fallback_queues: QueueRegistry,
     next_generation: std::sync::atomic::AtomicU64,
     pending_wills: parking_lot::Mutex<HashMap<String, PendingWill>>,
@@ -358,6 +360,8 @@ impl MessageRouter {
             echo_suppression_key: Arc::new(RwLock::new(None)),
             outbound_rates: parking_lot::RwLock::new(HashMap::new()),
             max_outbound_rate: AtomicU32::new(0),
+            max_retained_messages: AtomicUsize::new(0),
+            max_retained_message_size: AtomicUsize::new(0),
             fallback_queues: QueueRegistry::new(QueueLimits::default(), None),
             next_generation: std::sync::atomic::AtomicU64::new(generation_epoch()),
             pending_wills: parking_lot::Mutex::new(HashMap::new()),
@@ -393,6 +397,8 @@ impl MessageRouter {
             echo_suppression_key: Arc::new(RwLock::new(None)),
             outbound_rates: parking_lot::RwLock::new(HashMap::new()),
             max_outbound_rate: AtomicU32::new(0),
+            max_retained_messages: AtomicUsize::new(0),
+            max_retained_message_size: AtomicUsize::new(0),
             fallback_queues: QueueRegistry::new(QueueLimits::default(), None),
             next_generation: std::sync::atomic::AtomicU64::new(generation_epoch()),
             pending_wills: parking_lot::Mutex::new(HashMap::new()),
@@ -443,6 +449,19 @@ impl MessageRouter {
 
     pub fn update_max_outbound_rate(&self, rate: u32) {
         self.max_outbound_rate.store(rate, Ordering::Relaxed);
+    }
+
+    #[must_use]
+    pub fn with_retained_limits(self, max_messages: usize, max_message_size: usize) -> Self {
+        self.update_retained_limits(max_messages, max_message_size);
+        self
+    }
+
+    pub fn update_retained_limits(&self, max_messages: usize, max_message_size: usize) {
+        self.max_retained_messages
+            .store(max_messages, Ordering::Relaxed);
+        self.max_retained_message_size
+            .store(max_message_size, Ordering::Relaxed);
     }
 
     fn has_wildcards(topic_filter: &str) -> bool {
@@ -1340,11 +1359,28 @@ impl MessageRouter {
             debug!("Deleted retained message for topic: {}", publish.topic_name);
             (true, None)
         } else {
+            let max_size = self.max_retained_message_size.load(Ordering::Relaxed);
+            let max_count = self.max_retained_messages.load(Ordering::Relaxed);
+            let limited = !publish.topic_name.starts_with('$');
             let retained_msg = RetainedMessage::new(publish.clone());
-            self.retained_messages
-                .write()
-                .await
-                .insert(publish.topic_name.clone(), retained_msg.clone());
+            {
+                let mut retained = self.retained_messages.write().await;
+                let too_large = max_size > 0 && publish.payload.len() > max_size;
+                let store_full = max_count > 0
+                    && !retained.contains_key(&publish.topic_name)
+                    && retained.len() >= max_count;
+                if limited && (too_large || store_full) {
+                    warn!(
+                        topic = %publish.topic_name,
+                        payload_len = publish.payload.len(),
+                        max_retained_message_size = max_size,
+                        max_retained_messages = max_count,
+                        "Retained message limit reached: delivering without retaining"
+                    );
+                    return;
+                }
+                retained.insert(publish.topic_name.clone(), retained_msg.clone());
+            }
             debug!("Stored retained message for topic: {}", publish.topic_name);
             (false, Some(retained_msg))
         };
@@ -2075,6 +2111,60 @@ mod tests {
         router.route_message(&delete, None).await;
 
         assert_eq!(router.retained_count().await, 0);
+    }
+
+    async fn retain(router: &MessageRouter, topic: &str, payload: &'static [u8]) {
+        let mut publish = PublishPacket::new(topic, payload, QoS::AtMostOnce);
+        publish.retain = true;
+        router.route_message(&publish, None).await;
+    }
+
+    async fn retained_payload(router: &MessageRouter, topic: &str) -> Option<Bytes> {
+        router
+            .get_retained_messages(topic)
+            .await
+            .first()
+            .map(|message| message.payload.clone())
+    }
+
+    #[tokio::test]
+    async fn retained_count_limit_refuses_new_topics_and_allows_replacement() {
+        let router = MessageRouter::new().with_retained_limits(1, 0);
+        retain(&router, "limits/a", b"first").await;
+        retain(&router, "limits/b", b"refused").await;
+        retain(&router, "limits/a", b"second").await;
+        assert_eq!(router.retained_count().await, 1);
+        assert_eq!(retained_payload(&router, "limits/b").await, None);
+        assert_eq!(
+            retained_payload(&router, "limits/a").await,
+            Some(Bytes::from_static(b"second"))
+        );
+    }
+
+    #[tokio::test]
+    async fn retained_size_limit_refuses_larger_payloads() {
+        let router = MessageRouter::new().with_retained_limits(0, 4);
+        retain(&router, "limits/small", b"four").await;
+        retain(&router, "limits/large", b"fives").await;
+        assert_eq!(router.retained_count().await, 1);
+        assert_eq!(retained_payload(&router, "limits/large").await, None);
+    }
+
+    #[tokio::test]
+    async fn sys_topics_are_retained_past_the_limits() {
+        let router = MessageRouter::new().with_retained_limits(1, 1);
+        retain(&router, "limits/a", b"x").await;
+        retain(&router, "$SYS/broker/uptime", b"12345").await;
+        assert_eq!(router.retained_count().await, 2);
+    }
+
+    #[tokio::test]
+    async fn updated_retained_limits_apply_to_later_messages() {
+        let router = MessageRouter::new();
+        retain(&router, "limits/a", b"x").await;
+        router.update_retained_limits(1, 0);
+        retain(&router, "limits/b", b"x").await;
+        assert_eq!(router.retained_count().await, 1);
     }
 
     #[tokio::test]

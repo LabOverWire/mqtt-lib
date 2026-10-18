@@ -4,7 +4,7 @@ mod common;
 use common::{MessageCollector, TestBroker};
 use mqtt5::broker::config::{BrokerConfig, StorageBackend, StorageConfig};
 use mqtt5::time::Duration;
-use mqtt5::{MqttClient, PublishOptions, QoS};
+use mqtt5::{MqttClient, ProtocolVersion, PublishOptions, QoS};
 use mqtt5_protocol::packet::connect::ConnectPacket;
 use mqtt5_protocol::packet::MqttPacket;
 use mqtt5_protocol::types::{ConnectOptions, WillMessage};
@@ -18,6 +18,7 @@ const SMALL_PAYLOAD: &str = "offline";
 const LARGE_PAYLOAD: &str = "a-will-payload-well-over-sixteen-bytes";
 const QUOTA_EXCEEDED: u8 = 0x97;
 const SUCCESS: u8 = 0x00;
+const MARKER: &str = "marker";
 
 async fn broker_with(config: BrokerConfig) -> TestBroker {
     let config = config
@@ -35,23 +36,30 @@ async fn connect_with_will(
     broker: &TestBroker,
     client_id: &str,
     will: WillMessage,
-) -> (TcpStream, u8) {
+    version: ProtocolVersion,
+) -> (TcpStream, Option<u8>) {
     let mut stream = TcpStream::connect(tcp_addr(broker))
         .await
         .expect("connect tcp");
     let mut buf = Vec::new();
-    ConnectPacket::new(ConnectOptions::new(client_id).with_will(will))
-        .encode(&mut buf)
-        .expect("encode CONNECT");
+    let options = ConnectOptions::new(client_id).with_will(will);
+    let connect = match version {
+        ProtocolVersion::V311 => ConnectPacket::new_v311(options),
+        ProtocolVersion::V5 => ConnectPacket::new(options),
+    };
+    connect.encode(&mut buf).expect("encode CONNECT");
     stream.write_all(&buf).await.expect("write CONNECT");
     let mut connack = [0u8; 64];
     let read = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut connack))
         .await
-        .expect("CONNACK in time")
-        .expect("read CONNACK");
-    assert!(read >= 4, "broker closed before CONNACK");
+        .expect("CONNACK or close in time")
+        .unwrap_or(0);
+    if read == 0 {
+        return (stream, None);
+    }
+    assert!(read >= 4, "CONNACK complete");
     assert_eq!(connack[0], 0x20, "expected CONNACK");
-    (stream, connack[3])
+    (stream, Some(connack[3]))
 }
 
 fn will(topic: &str, payload: &str, retain: bool) -> WillMessage {
@@ -69,9 +77,18 @@ async fn retained_on(broker: &TestBroker, topic: &str) -> usize {
         .subscribe(topic, collector.callback())
         .await
         .expect("check client subscribes");
-    collector
-        .wait_for_messages(1, Duration::from_millis(500))
-        .await;
+    client.publish(topic, MARKER).await.expect("publish marker");
+    for _ in 0..100 {
+        let marked = collector
+            .get_messages()
+            .await
+            .iter()
+            .any(|message| message.payload == MARKER.as_bytes());
+        if marked {
+            break;
+        }
+        sleep(Duration::from_millis(20)).await;
+    }
     let retained = collector
         .get_messages()
         .await
@@ -108,33 +125,71 @@ async fn publish_retained(broker: &TestBroker, topic: &str) {
     );
 }
 
-async fn connack_for_will(will: WillMessage) -> u8 {
+async fn connack_for_will(will: WillMessage, version: ProtocolVersion) -> Option<u8> {
     let broker =
         broker_with(BrokerConfig::default().with_max_retained_message_size(SIZE_LIMIT)).await;
-    connect_with_will(&broker, "will-size", will).await.1
+    connect_with_will(&broker, "will-size", will, version)
+        .await
+        .1
 }
 
 #[tokio::test]
 async fn retained_will_over_the_size_limit_is_refused_at_connect() {
     assert_eq!(
-        connack_for_will(will("limits/will", LARGE_PAYLOAD, true)).await,
-        QUOTA_EXCEEDED
+        connack_for_will(
+            will("limits/will", LARGE_PAYLOAD, true),
+            ProtocolVersion::V5
+        )
+        .await,
+        Some(QUOTA_EXCEEDED)
     );
 }
 
 #[tokio::test]
 async fn retained_will_within_the_size_limit_is_accepted() {
     assert_eq!(
-        connack_for_will(will("limits/will", SMALL_PAYLOAD, true)).await,
-        SUCCESS
+        connack_for_will(
+            will("limits/will", SMALL_PAYLOAD, true),
+            ProtocolVersion::V5
+        )
+        .await,
+        Some(SUCCESS)
     );
 }
 
 #[tokio::test]
 async fn non_retained_will_over_the_size_limit_is_accepted() {
     assert_eq!(
-        connack_for_will(will("limits/will", LARGE_PAYLOAD, false)).await,
-        SUCCESS
+        connack_for_will(
+            will("limits/will", LARGE_PAYLOAD, false),
+            ProtocolVersion::V5
+        )
+        .await,
+        Some(SUCCESS)
+    );
+}
+
+#[tokio::test]
+async fn v311_retained_will_over_the_size_limit_closes_without_connack() {
+    assert_eq!(
+        connack_for_will(
+            will("limits/will", LARGE_PAYLOAD, true),
+            ProtocolVersion::V311
+        )
+        .await,
+        None
+    );
+}
+
+#[tokio::test]
+async fn v311_retained_will_within_the_size_limit_is_accepted() {
+    assert_eq!(
+        connack_for_will(
+            will("limits/will", SMALL_PAYLOAD, true),
+            ProtocolVersion::V311
+        )
+        .await,
+        Some(SUCCESS)
     );
 }
 
@@ -166,9 +221,10 @@ async fn fire_retained_will(max_retained_messages: usize) -> FiredWill {
         &broker,
         "will-count",
         will("limits/will", SMALL_PAYLOAD, true),
+        ProtocolVersion::V5,
     )
     .await;
-    assert_eq!(reason, SUCCESS, "will client connects");
+    assert_eq!(reason, Some(SUCCESS), "will client connects");
     drop(stream);
 
     let delivered_live = collector.wait_for_messages(1, Duration::from_secs(3)).await;

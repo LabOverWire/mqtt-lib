@@ -900,7 +900,10 @@ impl MqttBroker {
         } else {
             with_echo
         };
-        Arc::new(router)
+        Arc::new(router.with_retained_limits(
+            config.max_retained_messages,
+            config.max_retained_message_size,
+        ))
     }
 
     fn default_resource_limits(config: &BrokerConfig) -> ResourceLimits {
@@ -1802,6 +1805,10 @@ impl MqttBroker {
                         };
                         router.update_echo_suppression_key(echo_key).await;
                         router.update_max_outbound_rate(new_config.max_outbound_rate_per_client);
+                        router.update_retained_limits(
+                            new_config.max_retained_messages,
+                            new_config.max_retained_message_size,
+                        );
 
                         let new_config = Arc::new(new_config);
                         let _ = config_watch_tx.send(Arc::clone(&new_config));
