@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [mqtt5 0.48.2] - 2026-10-18
 
 ### Breaking
 
@@ -13,7 +13,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Retained and queued messages reach MQTT 3.1.1 subscribers without MQTT 5 properties in the payload** (#213). A retained message, or a message queued for an offline 3.1.1 session, was sent with an MQTT 5 properties block, which a 3.1.1 subscriber reads as the start of the payload. With the broker's `x-mqtt-client-id` user property, that put the property bytes in front of every such payload. Live delivery was already correct. The broker and the wasm broker now encode every outbound PUBLISH for the protocol version of the connection it is sent on.
+- **Retained and queued messages reach MQTT 3.1.1 subscribers without MQTT 5 properties in the payload** (#213). A retained message, or a message queued for an offline 3.1.1 session, was sent with an MQTT 5 properties block, which a 3.1.1 subscriber reads as the start of the payload. With the broker's `x-mqtt-client-id` user property, that put the property bytes in front of every such payload. Live delivery was already correct. The broker now encodes every outbound PUBLISH for the protocol version of the connection it is sent on.
+
+## [mqttv5-cli 0.29.9] - 2026-10-18
+
+### Added
+
+- Docker images built with the `opentelemetry` feature are published with an `-otel` tag suffix, such as `latest-otel`. Only those images accept the `--otel-*` broker flags.
+
+### Changed
+
+- Requires mqtt5 0.48.2, so `mqttv5 broker` gets its retained message fixes. See mqtt5 0.48.2.
+
+## [mqtt5-wasm 2.1.8] - 2026-10-18
+
+### Fixed
+
+- **Retained and queued messages reach MQTT 3.1.1 subscribers without MQTT 5 properties in the payload** (#213). The wasm broker sent retained messages, and messages queued for an offline 3.1.1 session, with an MQTT 5 properties block, which a 3.1.1 subscriber reads as the start of the payload. It now encodes every outbound PUBLISH for the protocol version of the connection it is sent on.
 
 ## [mqtt5 0.48.1] - 2026-10-15
 
