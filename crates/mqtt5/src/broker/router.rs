@@ -1497,7 +1497,6 @@ impl MessageRouter {
         message.packet_id = None;
         message.qos = qos;
         message.dup = false;
-        message.protocol_version = sub.protocol_version.as_u8();
         if !sub.retain_as_published {
             message.retain = false;
         }

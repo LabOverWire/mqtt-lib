@@ -174,7 +174,7 @@ async fn retained_payload_at(protocol_version: u8) -> Option<Vec<u8>> {
     let broker = WasmBroker::with_config(config).unwrap();
     let publisher = connected(&broker, "v5-pub", 5).await;
     publish_with_properties(&publisher, "retained", 0, true).await;
-    sleep(50).await;
+    publish_with_properties(&publisher, "stored", 1, false).await;
     let subscriber = connected(&broker, "retained-sub", protocol_version).await;
     let received = subscribe_collecting(&subscriber, "retained")
         .await

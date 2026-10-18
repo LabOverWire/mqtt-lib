@@ -182,8 +182,12 @@ async fn delivered_to_v311(delivery: Delivery) -> ([u8; MAX_PACKET], usize) {
                 .write_all(&[0xe0, 0x00])
                 .await
                 .expect("send DISCONNECT");
-            drop(subscriber);
-            tokio::time::sleep(Duration::from_millis(200)).await;
+            let mut closed = [0u8; 1];
+            let read = tokio::time::timeout(WAIT, subscriber.read(&mut closed))
+                .await
+                .expect("broker closes after DISCONNECT")
+                .expect("read until close");
+            assert_eq!(read, 0, "broker closed the connection");
             publish_v5(addr, false).await;
             let mut subscriber = connect_v311(addr, false).await;
             received_payload(&mut subscriber).await
