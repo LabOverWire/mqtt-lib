@@ -1501,10 +1501,9 @@ impl MessageRouter {
                 }
             } else if !group_subs.is_empty() {
                 let sub = group_subs[0];
-                if self.storage.is_some() && sub.qos != QoS::AtMostOnce {
-                    let mut message = publish.clone();
-                    message.qos = sub.qos;
-                    plans.push(self.plan_behind(sub, message));
+                let qos = Self::effective_qos(publish.qos, sub.qos);
+                if self.storage.is_some() && qos != QoS::AtMostOnce {
+                    plans.push(self.plan_behind(sub, Self::prepare_message(publish, sub, qos)));
                 }
             }
         }
@@ -1751,7 +1750,8 @@ impl MessageRouter {
             });
         }
 
-        if sub.qos == QoS::AtMostOnce {
+        let qos = Self::effective_qos(publish.qos, sub.qos);
+        if qos == QoS::AtMostOnce {
             return None;
         }
         if self.storage.is_none() {
@@ -1761,7 +1761,7 @@ impl MessageRouter {
             );
             return None;
         }
-        Some(self.plan_behind(sub, Self::prepare_message(publish, sub, sub.qos)))
+        Some(self.plan_behind(sub, Self::prepare_message(publish, sub, qos)))
     }
 
     fn plan_behind(&self, sub: &Subscription, message: PublishPacket) -> DeliveryPlan {

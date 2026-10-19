@@ -2,9 +2,7 @@
 
 use crate::conformance_test;
 use crate::harness::unique_client_id;
-use crate::raw_client::{
-    encode_variable_int, put_mqtt_string, wrap_fixed_header, RawMqttClient, RawPacketBuilder,
-};
+use crate::raw_client::{put_mqtt_string, wrap_fixed_header, RawMqttClient, RawPacketBuilder};
 use crate::sut::SutHandle;
 use crate::test_client::TestClient;
 use mqtt5_protocol::types::{ConnectOptions, SubscribeOptions, WillMessage};
@@ -543,7 +541,7 @@ async fn connect_clean_start_false_session_present_one(sut: SutHandle) {
     let mut raw = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
-    raw.send_raw(&build_connect_resume(&client_id, 300))
+    raw.send_raw(&RawPacketBuilder::connect_resume(&client_id, 300))
         .await
         .unwrap();
 
@@ -703,27 +701,6 @@ fn build_connect_with_flags(connect_flags: u8) -> Vec<u8> {
         put_mqtt_string(&mut body, "will/topic");
         put_mqtt_string(&mut body, "will-payload");
     }
-
-    wrap_fixed_header(0x10, &body)
-}
-
-fn build_connect_resume(client_id: &str, session_expiry: u32) -> Vec<u8> {
-    use bytes::{BufMut, BytesMut};
-
-    let mut body = BytesMut::new();
-    body.put_u16(4);
-    body.put_slice(b"MQTT");
-    body.put_u8(5);
-    body.put_u8(0x00);
-    body.put_u16(60);
-
-    let mut props = BytesMut::new();
-    props.put_u8(0x11);
-    props.put_u32(session_expiry);
-    encode_variable_int(&mut body, u32::try_from(props.len()).unwrap());
-    body.put(props);
-
-    put_mqtt_string(&mut body, client_id);
 
     wrap_fixed_header(0x10, &body)
 }

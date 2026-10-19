@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Breaking
+
+- **A QoS 0 message is no longer queued for an offline subscriber** (#248). Messages queued for an offline persistent session were sent at the subscription's QoS, so a QoS 0 message reached a QoS 1 subscriber as QoS 1 (MQTT-3.8.4-8). Queued messages now use the minimum of the published and granted QoS, the same as live delivery, and a message whose effective QoS is 0 is not queued, as was already the case for a QoS 0 subscription.
+
+### Fixed
+
+- **Messages queued for a shared subscription whose members are all offline get the same treatment as other deliveries** (#248). They kept the publisher's RETAIN and DUP flags, so a member reconnecting could get RETAIN 1 with Retain As Published 0 (MQTT-3.3.1-12) or DUP 1 on a first delivery (MQTT-3.3.1-3).
+
 ## [mqtt5 0.48.2] - 2026-10-19
 
 ### Breaking

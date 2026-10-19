@@ -1394,6 +1394,36 @@ impl RawPacketBuilder {
         wrap_fixed_header(0x3A, &body)
     }
 
+    #[must_use]
+    pub fn publish_qos1_retained(topic: &str, payload: &[u8], packet_id: u16) -> Vec<u8> {
+        let mut body = BytesMut::new();
+        put_mqtt_string(&mut body, topic);
+        body.put_u16(packet_id);
+        body.put_u8(0);
+        body.put_slice(payload);
+        wrap_fixed_header(0x33, &body)
+    }
+
+    #[must_use]
+    pub fn connect_resume(client_id: &str, session_expiry: u32) -> Vec<u8> {
+        let mut body = BytesMut::new();
+        body.put_u16(4);
+        body.put_slice(b"MQTT");
+        body.put_u8(5);
+        body.put_u8(0x00);
+        body.put_u16(60);
+
+        let mut props = BytesMut::new();
+        props.put_u8(0x11);
+        props.put_u32(session_expiry);
+        encode_variable_int(&mut body, props.len() as u32);
+        body.put(props);
+
+        put_mqtt_string(&mut body, client_id);
+
+        wrap_fixed_header(0x10, &body)
+    }
+
     /// Builds a CONNECT packet with a Receive Maximum property.
     ///
     /// Same as [`valid_connect`](Self::valid_connect) but includes the Receive

@@ -790,7 +790,7 @@ level = "Must"
 applies_to = "Both"
 text = "The DUP flag in the outgoing PUBLISH packet is set independently to the incoming PUBLISH packet, its value MUST be determined solely by whether the outgoing PUBLISH packet is a retransmission."
 status = "Tested"
-test_names = ["dup_flag_not_propagated_to_subscribers"]
+test_names = ["dup_flag_not_propagated_to_subscribers", "offline_queued_dup_is_cleared", "offline_shared_queued_dup_is_cleared"]
 
 [[sections."3.3".statements]]
 id = "MQTT-3.3.1-4"
@@ -862,7 +862,7 @@ level = "Must"
 applies_to = "Server"
 text = "If the value of Retain As Published subscription option is set to 0, the Server MUST set the RETAIN flag to 0 when forwarding an Application Message regardless of how the RETAIN flag was set in the received PUBLISH packet."
 status = "Tested"
-test_names = ["publish_retain_as_published_zero_clears_flag"]
+test_names = ["publish_retain_as_published_zero_clears_flag", "offline_queued_retain_is_cleared", "offline_shared_queued_retain_is_cleared"]
 
 [[sections."3.3".statements]]
 id = "MQTT-3.3.1-13"
@@ -1409,7 +1409,7 @@ level = "Must"
 applies_to = "Server"
 text = "The QoS of Payload Messages sent in response to a Subscription MUST be the minimum of the QoS of the originally published message and the Maximum QoS granted by the Server."
 status = "Tested"
-test_names = ["delivered_qos_is_minimum_sub0_pub1", "delivered_qos_is_minimum_sub1_pub2", "retained_message_delivered_at_minimum_qos"]
+test_names = ["delivered_qos_is_minimum_sub0_pub1", "delivered_qos_is_minimum_sub1_pub2", "retained_message_delivered_at_minimum_qos", "offline_queued_qos0_is_not_upgraded", "offline_queued_qos2_is_downgraded"]
 
 
 [[sections."3.8".statements]]
@@ -2198,7 +2198,7 @@ level = "Must"
 applies_to = "Both"
 text = "When sending an Application Message to a Client, the Server MUST respect the granted QoS for the Client's subscription , in the same that it does when sending a message to a -Subscriber"
 status = "Tested"
-test_names = ["shared_sub_respects_granted_qos"]
+test_names = ["shared_sub_respects_granted_qos", "offline_shared_queued_qos0_is_not_upgraded", "offline_shared_queued_qos2_is_downgraded"]
 
 [[sections."4.8".statements]]
 id = "MQTT-4.8.2-4"
