@@ -5,17 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [mqtt5 0.48.2] - 2026-10-18
+## [mqtt5 0.48.2] - 2026-10-19
 
 ### Breaking
 
-- **Retained wills, and every other retained message the broker stores, are held to `max_retained_message_size` and `max_retained_messages`** (#227). The limits were checked only for a retained PUBLISH from a client, so a client could store retained messages of any size, on any number of topics, by reconnecting with a different retained will each time. The router now applies both limits under the same lock that stores the message, so they hold for every path that stores one, including wills and bridged messages. A message over a limit is still delivered to current subscribers but not stored. `$SYS` topics are exempt. A retained PUBLISH over a limit is still refused with 0x97 (Quota exceeded). A retained will over `max_retained_message_size` is refused at CONNECT, since the broker must publish a will it has accepted as retained (MQTT-3.1.2-8, MQTT-3.1.2-15): MQTT 5 clients get CONNACK 0x97, and MQTT 3.1.1 connections are closed without a CONNACK, since no 3.1.1 return code applies (MQTT 3.1.1 MQTT-3.2.2-6).
+- **Retained wills, and every other retained message the broker stores, are held to `max_retained_message_size` and `max_retained_messages`** (#227). The limits were checked only for a retained PUBLISH from a client, so a client could store retained messages of any size, on any number of topics, by reconnecting with a different retained will each time. The router now applies both limits under the same lock that stores the message, so they hold for every path that stores one, including wills and bridged messages. A message over a limit is still delivered to current subscribers but not stored. The broker's own `$SYS` messages are exempt, and a retained message a client sends on a `$SYS` topic is held to both limits. Limits changed by a config reload apply to clients that are already connected. A retained PUBLISH over a limit is still refused with 0x97 (Quota exceeded). A retained will over `max_retained_message_size` is refused at CONNECT, since the broker must publish a will it has accepted as retained (MQTT-3.1.2-8, MQTT-3.1.2-15): MQTT 5 clients get CONNACK 0x97, and MQTT 3.1.1 connections are closed without a CONNACK, since no 3.1.1 return code applies (MQTT 3.1.1 MQTT-3.2.2-6).
 
 ### Fixed
 
 - **Retained and queued messages reach MQTT 3.1.1 subscribers without MQTT 5 properties in the payload** (#213). A retained message, or a message queued for an offline 3.1.1 session, was sent with an MQTT 5 properties block, which a 3.1.1 subscriber reads as the start of the payload. With the broker's `x-mqtt-client-id` user property, that put the property bytes in front of every such payload. Live delivery was already correct. The broker now encodes every outbound PUBLISH for the protocol version of the connection it is sent on.
 
-## [mqttv5-cli 0.29.9] - 2026-10-18
+## [mqttv5-cli 0.29.9] - 2026-10-19
+
+### Breaking
+
+- With `max_retained_message_size` set in the `--config` file, `mqttv5 broker` refuses a CONNECT whose retained will is larger: MQTT 5 clients get CONNACK 0x97 (Quota exceeded), and MQTT 3.1.1 connections are closed without a CONNACK. See mqtt5 0.48.2.
 
 ### Added
 
@@ -25,7 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Requires mqtt5 0.48.2, so `mqttv5 broker` gets its retained message fixes. See mqtt5 0.48.2.
 
-## [mqtt5-wasm 2.1.8] - 2026-10-18
+## [mqtt5-wasm 2.1.8] - 2026-10-19
 
 ### Fixed
 
