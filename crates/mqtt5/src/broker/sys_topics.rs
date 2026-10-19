@@ -252,7 +252,7 @@ impl SysTopicsProvider {
         .with_retain(true);
 
         debug!("Publishing $SYS topic: {} = {}", topic, value);
-        self.router.route_message(&packet, None).await;
+        self.router.route_sys_message(&packet).await;
     }
 }
 

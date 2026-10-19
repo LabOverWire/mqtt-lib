@@ -3,6 +3,7 @@ mod common;
 
 use common::{MessageCollector, TestBroker};
 use mqtt5::broker::config::{BrokerConfig, StorageBackend, StorageConfig};
+use mqtt5::broker::server::MqttBroker;
 use mqtt5::time::Duration;
 use mqtt5::{MqttClient, ProtocolVersion, PublishOptions, QoS};
 use mqtt5_protocol::packet::connect::ConnectPacket;
@@ -271,4 +272,131 @@ async fn retained_publish_on_a_new_topic_past_the_count_limit_is_refused() {
 #[tokio::test]
 async fn retained_publish_replacing_a_stored_topic_at_the_count_limit_is_accepted() {
     assert!(second_retained_publish_accepted("limits/existing").await);
+}
+
+async fn dollar_will_past_the_count_limit(topic: &str) -> FiredWill {
+    let broker = broker_with(BrokerConfig::default().with_max_retained_messages(1)).await;
+    publish_retained(&broker, "limits/existing").await;
+
+    let watcher = MqttClient::new("will-watcher");
+    watcher
+        .connect(broker.address())
+        .await
+        .expect("watcher connects");
+    let collector = MessageCollector::new();
+    watcher
+        .subscribe(topic, collector.callback())
+        .await
+        .expect("watcher subscribes");
+
+    let (stream, reason) = connect_with_will(
+        &broker,
+        "will-dollar",
+        will(topic, SMALL_PAYLOAD, true),
+        ProtocolVersion::V5,
+    )
+    .await;
+    assert_eq!(reason, Some(SUCCESS), "will client connects");
+    drop(stream);
+
+    let delivered_live = collector.wait_for_messages(1, Duration::from_secs(3)).await;
+    watcher.disconnect().await.expect("watcher disconnects");
+    FiredWill {
+        delivered_live,
+        stored: retained_on(&broker, topic).await == 1,
+    }
+}
+
+#[tokio::test]
+async fn client_retained_wills_on_dollar_topics_are_held_to_the_count_limit() {
+    let held = FiredWill {
+        delivered_live: true,
+        stored: false,
+    };
+    assert_eq!(dollar_will_past_the_count_limit("$SYS/will").await, held);
+    assert_eq!(dollar_will_past_the_count_limit("$x/will").await, held);
+}
+
+#[tokio::test]
+async fn connected_publishers_follow_a_reloaded_retained_count_limit() {
+    let dir = tempfile::tempdir().expect("config dir");
+    let path = dir.path().join("broker.json");
+    let config = BrokerConfig::default()
+        .with_sys_topics_enabled(false)
+        .with_bind_address("127.0.0.1:0".parse::<SocketAddr>().expect("bind address"))
+        .with_storage(StorageConfig::default().with_backend(StorageBackend::Memory));
+    std::fs::write(
+        &path,
+        serde_json::to_string(&config).expect("encode config"),
+    )
+    .expect("write config");
+    let mut broker = MqttBroker::with_config_file(config.clone(), path.clone())
+        .await
+        .expect("broker starts");
+    let address = format!("mqtt://{}", broker.local_addr().expect("broker address"));
+    let reload = broker.manual_reload_sender().expect("reload sender");
+    let handle = tokio::spawn(async move { broker.run().await });
+    sleep(Duration::from_millis(100)).await;
+
+    let publisher = MqttClient::new("reload-publisher");
+    publisher
+        .connect(&address)
+        .await
+        .expect("publisher connects");
+    let options = PublishOptions {
+        qos: QoS::AtLeastOnce,
+        retain: true,
+        ..PublishOptions::default()
+    };
+    publisher
+        .publish_with_options("limits/existing", SMALL_PAYLOAD, options.clone())
+        .await
+        .expect("first retained publish");
+
+    std::fs::write(
+        &path,
+        serde_json::to_string(&config.with_max_retained_messages(1)).expect("encode config"),
+    )
+    .expect("rewrite config");
+    reload.send(()).await.expect("trigger reload");
+
+    let probe = MqttClient::new("reload-probe");
+    probe.connect(&address).await.expect("probe connects");
+    let mut applied = false;
+    for _ in 0..100 {
+        if probe
+            .publish_with_options("limits/probe", SMALL_PAYLOAD, options.clone())
+            .await
+            .is_err()
+        {
+            applied = true;
+            break;
+        }
+        probe.disconnect().await.expect("probe disconnects");
+        sleep(Duration::from_millis(20)).await;
+        probe.connect(&address).await.expect("probe reconnects");
+    }
+    assert!(applied, "reload applied for new connections");
+    probe.disconnect().await.expect("probe disconnects");
+
+    let accepted = publisher
+        .publish_with_options("limits/new", SMALL_PAYLOAD, options)
+        .await
+        .is_ok();
+    publisher.disconnect().await.expect("publisher disconnects");
+
+    let collector = MessageCollector::new();
+    let checker = MqttClient::new("reload-checker");
+    checker.connect(&address).await.expect("checker connects");
+    checker
+        .subscribe("limits/new", collector.callback())
+        .await
+        .expect("checker subscribes");
+    let stored = collector
+        .wait_for_messages(1, Duration::from_millis(500))
+        .await;
+    checker.disconnect().await.expect("checker disconnects");
+    handle.abort();
+
+    assert_eq!((accepted, stored), (false, false));
 }

@@ -374,7 +374,7 @@ impl ClientHandler {
                 self.write_to_client(Packet::ConnAck(connack)).await?;
                 return Err(MqttError::ProtocolError("Retain not supported".into()));
             }
-            let max_size = self.config.max_retained_message_size;
+            let max_size = self.router.max_retained_message_size();
             if will.retain && max_size > 0 && will.payload.len() > max_size {
                 info!(
                     client_id = %connect.client_id,

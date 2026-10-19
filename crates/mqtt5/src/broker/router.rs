@@ -464,6 +464,14 @@ impl MessageRouter {
             .store(max_message_size, Ordering::Relaxed);
     }
 
+    pub fn max_retained_messages(&self) -> usize {
+        self.max_retained_messages.load(Ordering::Relaxed)
+    }
+
+    pub fn max_retained_message_size(&self) -> usize {
+        self.max_retained_message_size.load(Ordering::Relaxed)
+    }
+
     fn has_wildcards(topic_filter: &str) -> bool {
         topic_filter.contains('+') || topic_filter.contains('#')
     }
@@ -1251,12 +1259,12 @@ impl MessageRouter {
                 mqtt.qos = publish.qos as u8,
                 mqtt.retain = publish.retain,
             );
-            self.route_message_internal(publish, publishing_client_id, true, deadline)
+            self.route_message_internal(publish, publishing_client_id, true, deadline, true)
                 .instrument(span)
                 .await;
         }
         #[cfg(not(feature = "opentelemetry"))]
-        self.route_message_internal(publish, publishing_client_id, true, deadline)
+        self.route_message_internal(publish, publishing_client_id, true, deadline, true)
             .await;
     }
 
@@ -1280,12 +1288,17 @@ impl MessageRouter {
                 mqtt.retain = publish.retain,
                 mqtt.bridge_forward = false,
             );
-            self.route_message_internal(publish, publishing_client_id, false, deadline)
+            self.route_message_internal(publish, publishing_client_id, false, deadline, true)
                 .instrument(span)
                 .await;
         }
         #[cfg(not(feature = "opentelemetry"))]
-        self.route_message_internal(publish, publishing_client_id, false, deadline)
+        self.route_message_internal(publish, publishing_client_id, false, deadline, true)
+            .await;
+    }
+
+    pub async fn route_sys_message(&self, publish: &PublishPacket) {
+        self.route_message_internal(publish, None, true, default_route_deadline(), false)
             .await;
     }
 
@@ -1295,6 +1308,7 @@ impl MessageRouter {
         publishing_client_id: Option<&str>,
         forward_to_bridges: bool,
         deadline: Option<Instant>,
+        retained_limits_apply: bool,
     ) {
         if forward_to_bridges {
             trace!("Routing message to topic: {}", publish.topic_name);
@@ -1306,7 +1320,8 @@ impl MessageRouter {
         }
 
         if publish.retain {
-            self.handle_retain_storage(publish).await;
+            self.handle_retain_storage(publish, retained_limits_apply)
+                .await;
         }
 
         let plans = {
@@ -1350,7 +1365,7 @@ impl MessageRouter {
         }
     }
 
-    async fn handle_retain_storage(&self, publish: &PublishPacket) {
+    async fn handle_retain_storage(&self, publish: &PublishPacket, retained_limits_apply: bool) {
         let (should_remove, retained_msg) = if publish.payload.is_empty() {
             self.retained_messages
                 .write()
@@ -1359,9 +1374,8 @@ impl MessageRouter {
             debug!("Deleted retained message for topic: {}", publish.topic_name);
             (true, None)
         } else {
-            let max_size = self.max_retained_message_size.load(Ordering::Relaxed);
-            let max_count = self.max_retained_messages.load(Ordering::Relaxed);
-            let limited = !publish.topic_name.starts_with("$SYS/");
+            let max_size = self.max_retained_message_size();
+            let max_count = self.max_retained_messages();
             let retained_msg = RetainedMessage::new(publish.clone());
             {
                 let mut retained = self.retained_messages.write().await;
@@ -1369,7 +1383,7 @@ impl MessageRouter {
                 let store_full = max_count > 0
                     && !retained.contains_key(&publish.topic_name)
                     && retained.len() >= max_count;
-                if limited && (too_large || store_full) {
+                if retained_limits_apply && (too_large || store_full) {
                     warn!(
                         topic = %publish.topic_name,
                         payload_len = publish.payload.len(),
@@ -1818,7 +1832,8 @@ impl MessageRouter {
         retained.contains_key(topic)
     }
 
-    pub async fn retained_store_full(&self, topic: &str, max_retained_messages: usize) -> bool {
+    pub async fn retained_store_full(&self, topic: &str) -> bool {
+        let max_retained_messages = self.max_retained_messages();
         let retained = self.retained_messages.read().await;
         max_retained_messages > 0
             && !retained.contains_key(topic)
@@ -2155,7 +2170,9 @@ mod tests {
     async fn sys_topics_are_retained_past_the_limits() {
         let router = MessageRouter::new().with_retained_limits(1, 1);
         retain(&router, "limits/a", b"x").await;
-        retain(&router, "$SYS/broker/uptime", b"12345").await;
+        let mut uptime = PublishPacket::new("$SYS/broker/uptime", &b"12345"[..], QoS::AtMostOnce);
+        uptime.retain = true;
+        router.route_sys_message(&uptime).await;
         assert_eq!(router.retained_count().await, 2);
     }
 
@@ -2169,18 +2186,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dollar_topics_outside_sys_are_held_to_the_limits() {
+    async fn dollar_topics_from_clients_are_held_to_the_limits() {
         let router = MessageRouter::new().with_retained_limits(1, 1);
         retain(&router, "limits/a", b"x").await;
         retain(&router, "$x/new", b"x").await;
+        retain(&router, "$SYS/client", b"x").await;
         retain(&router, "$SYSX/big", b"12345").await;
         assert_eq!(router.retained_count().await, 1);
     }
 
-    async fn delivered_protocol_version(subscriber_version: ProtocolVersion) -> Option<u8> {
+    async fn delivered_protocol_version(
+        publisher_version: u8,
+        subscriber_version: ProtocolVersion,
+    ) -> Option<u8> {
         let router = MessageRouter::new();
         let mut lanes = TestLanes::new(10);
-        let (disconnect_tx, _disconnect_rx) = tokio::sync::oneshot::channel();
+        let (disconnect_tx, mut disconnect_rx) = tokio::sync::oneshot::channel();
         router
             .register_client(
                 "subscriber".to_string(),
@@ -2196,8 +2217,13 @@ mod tests {
             )
             .await
             .ok()?;
-        let publish = PublishPacket::new("versions/t", &b"x"[..], QoS::AtMostOnce);
+        let mut publish = PublishPacket::new("versions/t", &b"x"[..], QoS::AtMostOnce);
+        publish.protocol_version = publisher_version;
         router.route_message(&publish, None).await;
+        assert!(
+            disconnect_rx.try_recv().is_err(),
+            "subscriber stays registered"
+        );
         lanes
             .try_recv()
             .ok()
@@ -2207,11 +2233,11 @@ mod tests {
     #[tokio::test]
     async fn live_delivery_is_stamped_with_the_subscription_protocol_version() {
         assert_eq!(
-            delivered_protocol_version(ProtocolVersion::V311).await,
+            delivered_protocol_version(5, ProtocolVersion::V311).await,
             Some(4)
         );
         assert_eq!(
-            delivered_protocol_version(ProtocolVersion::V5).await,
+            delivered_protocol_version(4, ProtocolVersion::V5).await,
             Some(5)
         );
     }

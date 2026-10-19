@@ -313,27 +313,18 @@ impl ClientHandler {
         publish: &PublishPacket,
         client_id: &str,
     ) -> Result<Option<Result<()>>> {
-        if self.config.max_retained_message_size > 0
-            && publish.payload.len() > self.config.max_retained_message_size
-        {
-            debug!(
-                "Client {} retained message too large ({} > {})",
-                client_id,
-                publish.payload.len(),
-                self.config.max_retained_message_size
-            );
+        let max_size = self.router.max_retained_message_size();
+        if max_size > 0 && publish.payload.len() > max_size {
+            let len = publish.payload.len();
+            debug!("Client {client_id} retained message too large ({len} > {max_size})");
             return Ok(Some(
                 self.send_quota_exceeded_response(publish, "Retained message too large")
                     .await,
             ));
         }
 
-        if self
-            .router
-            .retained_store_full(&publish.topic_name, self.config.max_retained_messages)
-            .await
-        {
-            let max = self.config.max_retained_messages;
+        if self.router.retained_store_full(&publish.topic_name).await {
+            let max = self.router.max_retained_messages();
             let count = self.router.retained_count().await;
             debug!("Client {client_id} retained message limit exceeded ({count}/{max})");
             return Ok(Some(
