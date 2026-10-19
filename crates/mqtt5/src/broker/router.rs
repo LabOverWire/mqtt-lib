@@ -1361,7 +1361,7 @@ impl MessageRouter {
         } else {
             let max_size = self.max_retained_message_size.load(Ordering::Relaxed);
             let max_count = self.max_retained_messages.load(Ordering::Relaxed);
-            let limited = !publish.topic_name.starts_with('$');
+            let limited = !publish.topic_name.starts_with("$SYS/");
             let retained_msg = RetainedMessage::new(publish.clone());
             {
                 let mut retained = self.retained_messages.write().await;
@@ -1533,6 +1533,7 @@ impl MessageRouter {
         message.packet_id = None;
         message.qos = qos;
         message.dup = false;
+        message.protocol_version = sub.protocol_version.as_u8();
         if !sub.retain_as_published {
             message.retain = false;
         }
@@ -2165,6 +2166,54 @@ mod tests {
         router.update_retained_limits(1, 0);
         retain(&router, "limits/b", b"x").await;
         assert_eq!(router.retained_count().await, 1);
+    }
+
+    #[tokio::test]
+    async fn dollar_topics_outside_sys_are_held_to_the_limits() {
+        let router = MessageRouter::new().with_retained_limits(1, 1);
+        retain(&router, "limits/a", b"x").await;
+        retain(&router, "$x/new", b"x").await;
+        retain(&router, "$SYSX/big", b"12345").await;
+        assert_eq!(router.retained_count().await, 1);
+    }
+
+    async fn delivered_protocol_version(subscriber_version: ProtocolVersion) -> Option<u8> {
+        let router = MessageRouter::new();
+        let mut lanes = TestLanes::new(10);
+        let (disconnect_tx, _disconnect_rx) = tokio::sync::oneshot::channel();
+        router
+            .register_client(
+                "subscriber".to_string(),
+                lanes.lanes(),
+                router.queue_handle("subscriber"),
+                disconnect_tx,
+            )
+            .await;
+        router
+            .subscribe(
+                SubscriptionRequest::new("subscriber", "versions/t", QoS::AtMostOnce)
+                    .with_protocol_version(subscriber_version),
+            )
+            .await
+            .ok()?;
+        let publish = PublishPacket::new("versions/t", &b"x"[..], QoS::AtMostOnce);
+        router.route_message(&publish, None).await;
+        lanes
+            .try_recv()
+            .ok()
+            .map(|message| message.publish.protocol_version)
+    }
+
+    #[tokio::test]
+    async fn live_delivery_is_stamped_with_the_subscription_protocol_version() {
+        assert_eq!(
+            delivered_protocol_version(ProtocolVersion::V311).await,
+            Some(4)
+        );
+        assert_eq!(
+            delivered_protocol_version(ProtocolVersion::V5).await,
+            Some(5)
+        );
     }
 
     #[tokio::test]
