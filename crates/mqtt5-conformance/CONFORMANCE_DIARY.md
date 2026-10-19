@@ -39,6 +39,20 @@
 
 ## Diary Entries
 
+### Offline queued delivery: review fixes (2026-10-19)
+
+**Trigger**: code review of #250.
+
+**Drain loop**: the subscriber answered every queued PUBLISH with a PUBACK, including a QoS 2 one. Against a broker that wrongly queues the QoS 2 probe at QoS 2, that is a protocol error, the broker may disconnect before the marker, and the test failed with a read error instead of the MQTT-3.8.4-8 assertion. A QoS 2 PUBLISH is now returned as soon as it arrives, so the QoS assertion reports it.
+
+**Retained cleanup**: the two RETAIN tests left a retained message on a new topic every run, which piles up on a long-lived external SUT and counts against its retained limit. Both now clear the topic with an empty retained message.
+
+**QoS 0 tests**: `offline_queued_qos0_is_not_upgraded` and `offline_shared_queued_qos0_is_not_upgraded` pass when nothing is delivered, because MQTT 5 lets a server skip QoS 0 for an offline session. Since #248 our broker never queues QoS 0, so against it these tests only check that a QoS 0 message is not delivered as QoS 1. A broker that queues QoS 0 runs the assertion.
+
+**Known limit**: the tests wait a fixed 200 ms after the subscriber's DISCONNECT before publishing, the same pattern the rest of the suite uses. If a SUT takes longer to mark the session offline, the probe is delivered live to the closing connection and the test fails with "a queued PUBLISH arrives before the marker".
+
+**Harness cleanup**: `raw_client.rs` no longer has a file-level lint allow. Lengths go through checked conversions, `encode_variable_int` takes a `usize`, and the three public functions returning `io::Result` document their errors. `connect_resume` and `connect_with_session_expiry` share one builder, and so do `publish_qos1_retained` and `publish_qos1_with_dup`. The `ParsedProperties` doc no longer says unknown property IDs are tolerated.
+
 ### What the suite cannot see: 3.1.1, the wasm broker, $SYS publishing (2026-10-19)
 
 **Trigger**: the same review found three problems the suite does not cover. None of them can be closed with a test in this crate today.

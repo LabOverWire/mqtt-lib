@@ -32,12 +32,21 @@ async fn publish_probe(sut: &SutHandle, topic: &str, probe: Probe) {
                 .await
                 .unwrap();
         }
-        Probe::Qos1Retained | Probe::Qos1Dup => {
-            let packet = match probe {
-                Probe::Qos1Retained => RawPacketBuilder::publish_qos1_retained(topic, PROBE, 1),
-                _ => RawPacketBuilder::publish_qos1_with_dup(topic, PROBE, 1),
-            };
-            publisher.send_raw(&packet).await.unwrap();
+        Probe::Qos1Retained => {
+            publisher
+                .send_raw(&RawPacketBuilder::publish_qos1_retained(topic, PROBE, 1))
+                .await
+                .unwrap();
+            publisher
+                .expect_puback(TIMEOUT)
+                .await
+                .expect("probe PUBACK");
+        }
+        Probe::Qos1Dup => {
+            publisher
+                .send_raw(&RawPacketBuilder::publish_qos1_with_dup(topic, PROBE, 1))
+                .await
+                .unwrap();
             publisher
                 .expect_puback(TIMEOUT)
                 .await
@@ -133,7 +142,10 @@ async fn offline_delivery(
             .await
             .as_deref()
             .and_then(ParsedPublish::parse)
-            .expect("queued marker is delivered");
+            .expect("a queued PUBLISH arrives before the marker");
+        if publish.qos == 2 {
+            return Some(publish);
+        }
         if let Some(packet_id) = publish.packet_id {
             member
                 .send_raw(&RawPacketBuilder::puback(packet_id))
@@ -148,6 +160,23 @@ async fn offline_delivery(
         }
     }
     panic!("marker not delivered within {MAX_READS} PUBLISH packets");
+}
+
+async fn clear_retained(sut: &SutHandle, topic: &str) {
+    let mut client = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
+        .await
+        .unwrap();
+    client
+        .connect_and_establish(&unique_client_id("offline-clear"), TIMEOUT)
+        .await;
+    client
+        .send_raw(&RawPacketBuilder::publish_qos0_retained(topic, b""))
+        .await
+        .unwrap();
+    client
+        .send_raw(&RawPacketBuilder::disconnect_normal())
+        .await
+        .unwrap();
 }
 
 fn shared(topic: &str) -> String {
@@ -192,6 +221,7 @@ async fn offline_queued_retain_is_cleared(sut: SutHandle) {
     let message = offline_delivery(&sut, &topic, &topic, Probe::Qos1Retained)
         .await
         .expect("retained message is queued for the offline subscriber");
+    clear_retained(&sut, &topic).await;
     assert!(
         !message.retain,
         "[MQTT-3.3.1-12] Retain As Published 0 must clear RETAIN on queued delivery"
@@ -251,6 +281,7 @@ async fn offline_shared_queued_retain_is_cleared(sut: SutHandle) {
     let message = offline_delivery(&sut, &shared(&topic), &topic, Probe::Qos1Retained)
         .await
         .expect("retained message is queued for the offline shared subscriber");
+    clear_retained(&sut, &topic).await;
     assert!(
         !message.retain,
         "[MQTT-3.3.1-12] Retain As Published 0 must clear RETAIN on queued shared delivery"

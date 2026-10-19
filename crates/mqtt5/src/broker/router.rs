@@ -1502,9 +1502,7 @@ impl MessageRouter {
             } else if !group_subs.is_empty() {
                 let sub = group_subs[0];
                 let qos = Self::effective_qos(publish.qos, sub.qos);
-                if self.storage.is_some() && qos != QoS::AtMostOnce {
-                    plans.push(self.plan_behind(sub, Self::prepare_message(publish, sub, qos)));
-                }
+                plans.extend(self.plan_queued(sub, publish, qos));
             }
         }
         plans
@@ -1710,6 +1708,7 @@ impl MessageRouter {
             drop(change_only_states);
         }
 
+        let qos = Self::effective_qos(publish.qos, sub.qos);
         let max_rate = self.max_outbound_rate.load(Ordering::Relaxed);
         if max_rate > 0 {
             let rate_exceeded = {
@@ -1719,16 +1718,11 @@ impl MessageRouter {
                     .is_some_and(|state| !state.check_and_increment(max_rate))
             };
             if rate_exceeded {
-                let qos = Self::effective_qos(publish.qos, sub.qos);
-                if qos == QoS::AtMostOnce || self.storage.is_none() {
-                    return None;
-                }
-                return Some(self.plan_behind(sub, Self::prepare_message(publish, sub, qos)));
+                return self.plan_queued(sub, publish, qos);
             }
         }
 
         if let Some(client_info) = clients.get(&sub.client_id) {
-            let qos = Self::effective_qos(publish.qos, sub.qos);
             let message = Self::prepare_message(publish, sub, qos);
             if sub.change_only {
                 let mut change_only_states = self.change_only_states.write().await;
@@ -1750,13 +1744,21 @@ impl MessageRouter {
             });
         }
 
-        let qos = Self::effective_qos(publish.qos, sub.qos);
+        self.plan_queued(sub, publish, qos)
+    }
+
+    fn plan_queued(
+        &self,
+        sub: &Subscription,
+        publish: &PublishPacket,
+        qos: QoS,
+    ) -> Option<DeliveryPlan> {
         if qos == QoS::AtMostOnce {
             return None;
         }
         if self.storage.is_none() {
             debug!(
-                "No storage configured, cannot queue message for offline client {}",
+                "No storage configured, cannot queue message for client {}",
                 sub.client_id
             );
             return None;

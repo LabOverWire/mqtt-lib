@@ -75,9 +75,7 @@ pub fn decode_string(data: &[u8], idx: usize) -> Option<(String, usize)> {
 /// A typed view over the property table of any MQTT v5.0 packet.
 ///
 /// Walks the variable-length property block once on construction and exposes
-/// accessors for the most common fields. Unknown property IDs are tolerated
-/// (the walker advances by the correct length for every defined property and
-/// returns `None` for unrecognized IDs encountered during eager extraction).
+/// accessors for the most common fields.
 #[derive(Debug, Clone, Default)]
 pub struct ParsedProperties {
     pub user_properties: Vec<(String, String)>,

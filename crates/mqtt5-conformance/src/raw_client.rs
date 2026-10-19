@@ -6,8 +6,6 @@
 //! [`RawPacketBuilder`] constructs both valid and deliberately invalid MQTT
 //! v5.0 packets for conformance edge-case testing.
 
-#![allow(clippy::cast_possible_truncation, clippy::missing_errors_doc)]
-
 use crate::transport::{TcpTransport, Transport};
 use bytes::{BufMut, BytesMut};
 use mqtt5_protocol::packet::connack::ConnAckPacket;
@@ -33,6 +31,9 @@ pub struct RawMqttClient<T: Transport = TcpTransport> {
 }
 
 impl RawMqttClient<TcpTransport> {
+    /// # Errors
+    ///
+    /// Returns the I/O error if the TCP connection cannot be opened.
     pub async fn connect_tcp(addr: SocketAddr) -> std::io::Result<Self> {
         let stream = TcpTransport::connect(addr).await?;
         Ok(Self {
@@ -55,6 +56,10 @@ impl<T: Transport> RawMqttClient<T> {
     }
 
     /// Sends raw bytes over the transport.
+    ///
+    /// # Errors
+    ///
+    /// Returns the I/O error if the write fails.
     pub async fn send_raw(&mut self, data: &[u8]) -> std::io::Result<()> {
         self.stream.write_all(data).await
     }
@@ -758,6 +763,9 @@ impl<T: Transport> RawMqttClient<T> {
         }
     }
 
+    /// # Errors
+    ///
+    /// Returns the I/O error if the write half cannot be shut down.
     pub async fn shutdown_write(&mut self) -> std::io::Result<()> {
         self.stream.shutdown().await
     }
@@ -905,7 +913,7 @@ impl RawPacketBuilder {
         props.put_u8(0x11);
         props.put_u32(600);
 
-        encode_variable_int(&mut body, props.len() as u32);
+        encode_variable_int(&mut body, props.len());
         body.put(props);
         put_mqtt_string(&mut body, "test-dup-prop-client");
 
@@ -1016,7 +1024,7 @@ impl RawPacketBuilder {
         let mut props = BytesMut::new();
         props.put_u8(0x23);
         props.put_u16(0);
-        encode_variable_int(&mut body, props.len() as u32);
+        encode_variable_int(&mut body, props.len());
         body.put(props);
         body.put_slice(payload);
         wrap_fixed_header(0x30, &body)
@@ -1032,8 +1040,8 @@ impl RawPacketBuilder {
         put_mqtt_string(&mut body, topic);
         let mut props = BytesMut::new();
         props.put_u8(0x0B);
-        encode_variable_int(&mut props, sub_id);
-        encode_variable_int(&mut body, props.len() as u32);
+        encode_variable_int(&mut props, variable_int_value(sub_id));
+        encode_variable_int(&mut body, props.len());
         body.put(props);
         body.put_slice(payload);
         wrap_fixed_header(0x30, &body)
@@ -1114,8 +1122,8 @@ impl RawPacketBuilder {
         body.put_u16(packet_id);
         let mut props = BytesMut::new();
         props.put_u8(0x0B);
-        encode_variable_int(&mut props, sub_id);
-        encode_variable_int(&mut body, props.len() as u32);
+        encode_variable_int(&mut props, variable_int_value(sub_id));
+        encode_variable_int(&mut body, props.len());
         body.put(props);
         put_mqtt_string(&mut body, topic);
         body.put_u8(qos & 0x03);
@@ -1337,7 +1345,7 @@ impl RawPacketBuilder {
         let mut props = BytesMut::new();
         props.put_u8(0x23);
         props.put_u16(alias);
-        encode_variable_int(&mut body, props.len() as u32);
+        encode_variable_int(&mut body, props.len());
         body.put(props);
         body.put_slice(payload);
         wrap_fixed_header(0x30, &body)
@@ -1354,7 +1362,7 @@ impl RawPacketBuilder {
         let mut props = BytesMut::new();
         props.put_u8(0x23);
         props.put_u16(alias);
-        encode_variable_int(&mut body, props.len() as u32);
+        encode_variable_int(&mut body, props.len());
         body.put(props);
         body.put_slice(payload);
         wrap_fixed_header(0x30, &body)
@@ -1375,7 +1383,7 @@ impl RawPacketBuilder {
         let mut props = BytesMut::new();
         props.put_u8(0x08);
         put_mqtt_string(&mut props, response_topic);
-        encode_variable_int(&mut body, props.len() as u32);
+        encode_variable_int(&mut body, props.len());
         body.put(props);
         body.put_slice(payload);
         wrap_fixed_header(0x30, &body)
@@ -1386,42 +1394,17 @@ impl RawPacketBuilder {
     /// Fixed header byte `0x3A` (PUBLISH, DUP=1, QoS=1, RETAIN=0).
     #[must_use]
     pub fn publish_qos1_with_dup(topic: &str, payload: &[u8], packet_id: u16) -> Vec<u8> {
-        let mut body = BytesMut::new();
-        put_mqtt_string(&mut body, topic);
-        body.put_u16(packet_id);
-        body.put_u8(0);
-        body.put_slice(payload);
-        wrap_fixed_header(0x3A, &body)
+        qos1_publish(0x3A, topic, payload, packet_id)
     }
 
     #[must_use]
     pub fn publish_qos1_retained(topic: &str, payload: &[u8], packet_id: u16) -> Vec<u8> {
-        let mut body = BytesMut::new();
-        put_mqtt_string(&mut body, topic);
-        body.put_u16(packet_id);
-        body.put_u8(0);
-        body.put_slice(payload);
-        wrap_fixed_header(0x33, &body)
+        qos1_publish(0x33, topic, payload, packet_id)
     }
 
     #[must_use]
     pub fn connect_resume(client_id: &str, session_expiry: u32) -> Vec<u8> {
-        let mut body = BytesMut::new();
-        body.put_u16(4);
-        body.put_slice(b"MQTT");
-        body.put_u8(5);
-        body.put_u8(0x00);
-        body.put_u16(60);
-
-        let mut props = BytesMut::new();
-        props.put_u8(0x11);
-        props.put_u32(session_expiry);
-        encode_variable_int(&mut body, props.len() as u32);
-        body.put(props);
-
-        put_mqtt_string(&mut body, client_id);
-
-        wrap_fixed_header(0x10, &body)
+        connect_with_flags_and_session_expiry(0x00, client_id, session_expiry)
     }
 
     /// Builds a CONNECT packet with a Receive Maximum property.
@@ -1441,7 +1424,7 @@ impl RawPacketBuilder {
         let mut props = BytesMut::new();
         props.put_u8(0x21);
         props.put_u16(receive_maximum);
-        encode_variable_int(&mut body, props.len() as u32);
+        encode_variable_int(&mut body, props.len());
         body.put(props);
 
         put_mqtt_string(&mut body, client_id);
@@ -1494,22 +1477,7 @@ impl RawPacketBuilder {
     /// Property ID `0x11` encodes the session expiry as a `u32`.
     #[must_use]
     pub fn connect_with_session_expiry(client_id: &str, session_expiry: u32) -> Vec<u8> {
-        let mut body = BytesMut::new();
-        body.put_u16(4);
-        body.put_slice(b"MQTT");
-        body.put_u8(5);
-        body.put_u8(0x02);
-        body.put_u16(60);
-
-        let mut props = BytesMut::new();
-        props.put_u8(0x11);
-        props.put_u32(session_expiry);
-        encode_variable_int(&mut body, props.len() as u32);
-        body.put(props);
-
-        put_mqtt_string(&mut body, client_id);
-
-        wrap_fixed_header(0x10, &body)
+        connect_with_flags_and_session_expiry(0x02, client_id, session_expiry)
     }
 
     /// Builds a CONNECT with `clean_start=true` and Maximum Packet Size property.
@@ -1527,7 +1495,7 @@ impl RawPacketBuilder {
         let mut props = BytesMut::new();
         props.put_u8(0x27);
         props.put_u32(max_packet_size);
-        encode_variable_int(&mut body, props.len() as u32);
+        encode_variable_int(&mut body, props.len());
         body.put(props);
 
         put_mqtt_string(&mut body, client_id);
@@ -1583,7 +1551,7 @@ impl RawPacketBuilder {
         let mut connect_props = BytesMut::new();
         connect_props.put_u8(0x11);
         connect_props.put_u32(300);
-        encode_variable_int(&mut body, connect_props.len() as u32);
+        encode_variable_int(&mut body, connect_props.len());
         body.put(connect_props);
 
         put_mqtt_string(&mut body, client_id);
@@ -1591,7 +1559,7 @@ impl RawPacketBuilder {
         let mut will_props = BytesMut::new();
         will_props.put_u8(0x18);
         will_props.put_u32(will_delay_secs);
-        encode_variable_int(&mut body, will_props.len() as u32);
+        encode_variable_int(&mut body, will_props.len());
         body.put(will_props);
 
         let will_topic = format!("will/{client_id}");
@@ -1625,7 +1593,7 @@ impl RawPacketBuilder {
             put_mqtt_string(&mut will_props, key);
             put_mqtt_string(&mut will_props, value);
         }
-        encode_variable_int(&mut body, will_props.len() as u32);
+        encode_variable_int(&mut body, will_props.len());
         body.put(will_props);
 
         let will_topic = format!("will/{client_id}");
@@ -1650,7 +1618,7 @@ impl RawPacketBuilder {
         let mut props = BytesMut::new();
         props.put_u8(0x19);
         props.put_u8(request_response);
-        encode_variable_int(&mut body, props.len() as u32);
+        encode_variable_int(&mut body, props.len());
         body.put(props);
 
         put_mqtt_string(&mut body, client_id);
@@ -1673,7 +1641,7 @@ impl RawPacketBuilder {
         let mut props = BytesMut::new();
         props.put_u8(0x17);
         props.put_u8(request_problem);
-        encode_variable_int(&mut body, props.len() as u32);
+        encode_variable_int(&mut body, props.len());
         body.put(props);
 
         put_mqtt_string(&mut body, client_id);
@@ -1714,7 +1682,7 @@ impl RawPacketBuilder {
         body.put_u8(0);
         put_mqtt_string(&mut body, client_id);
         let pw_bytes = password.as_bytes();
-        body.put_u16(pw_bytes.len() as u16);
+        body.put_u16(length_u16(pw_bytes.len()));
         body.put_slice(pw_bytes);
 
         wrap_fixed_header(0x10, &body)
@@ -1779,7 +1747,7 @@ impl RawPacketBuilder {
         body.put_u16(packet_id);
         body.put_u8(0);
         let invalid_topic: &[u8] = &[0xFF, 0xFE];
-        body.put_u16(invalid_topic.len() as u16);
+        body.put_u16(length_u16(invalid_topic.len()));
         body.put_slice(invalid_topic);
         body.put_u8(0x00);
         wrap_fixed_header(0x82, &body)
@@ -1794,7 +1762,7 @@ impl RawPacketBuilder {
         body.put_u16(packet_id);
         body.put_u8(0);
         let invalid_topic: &[u8] = &[0xFF, 0xFE];
-        body.put_u16(invalid_topic.len() as u16);
+        body.put_u16(length_u16(invalid_topic.len()));
         body.put_slice(invalid_topic);
         wrap_fixed_header(0xA2, &body)
     }
@@ -1826,7 +1794,7 @@ impl RawPacketBuilder {
         put_mqtt_string(&mut body, client_id);
         body.put_u8(0);
         let invalid_topic: &[u8] = &[0xFF, 0xFE];
-        body.put_u16(invalid_topic.len() as u16);
+        body.put_u16(length_u16(invalid_topic.len()));
         body.put_slice(invalid_topic);
         put_mqtt_string(&mut body, "will-payload");
         wrap_fixed_header(0x10, &body)
@@ -1844,7 +1812,7 @@ impl RawPacketBuilder {
         body.put_u8(0);
         put_mqtt_string(&mut body, client_id);
         let invalid_username: &[u8] = &[0xFF, 0xFE];
-        body.put_u16(invalid_username.len() as u16);
+        body.put_u16(length_u16(invalid_username.len()));
         body.put_slice(invalid_username);
         wrap_fixed_header(0x10, &body)
     }
@@ -1863,7 +1831,7 @@ impl RawPacketBuilder {
         let mut props = BytesMut::new();
         props.put_u8(0x02);
         props.put_u32(expiry_secs);
-        encode_variable_int(&mut body, props.len() as u32);
+        encode_variable_int(&mut body, props.len());
         body.put(props);
         body.put_slice(payload);
         wrap_fixed_header(0x34, &body)
@@ -1905,7 +1873,7 @@ impl RawPacketBuilder {
         body.put_u16(60);
         body.put_u8(0);
         let client_id_bytes: &[u8] = &[0xED, 0xA0, 0x80];
-        body.put_u16(client_id_bytes.len() as u16);
+        body.put_u16(length_u16(client_id_bytes.len()));
         body.put_slice(client_id_bytes);
         wrap_fixed_header(0x10, &body)
     }
@@ -1940,10 +1908,10 @@ impl RawPacketBuilder {
         let mut props = BytesMut::new();
         props.put_u8(0x26);
         let invalid_key: &[u8] = &[0xFF, 0xFE];
-        props.put_u16(invalid_key.len() as u16);
+        props.put_u16(length_u16(invalid_key.len()));
         props.put_slice(invalid_key);
         put_mqtt_string(&mut props, "value");
-        encode_variable_int(&mut body, props.len() as u32);
+        encode_variable_int(&mut body, props.len());
         body.put(props);
         body.put_slice(payload);
         wrap_fixed_header(0x30, &body)
@@ -1961,7 +1929,7 @@ impl RawPacketBuilder {
         let topic_len: usize = 65_535;
         let topic_bytes = vec![b'A'; topic_len];
         let mut body = BytesMut::new();
-        body.put_u16(topic_len as u16);
+        body.put_u16(length_u16(topic_len));
         body.put_slice(&topic_bytes);
         body.put_u8(0);
         body.put_slice(b"payload");
@@ -1976,7 +1944,7 @@ impl RawPacketBuilder {
         let mut body = BytesMut::new();
         body.put_u16(packet_id);
         body.put_u8(0);
-        body.put_u16(topic_bytes.len() as u16);
+        body.put_u16(length_u16(topic_bytes.len()));
         body.put_slice(topic_bytes);
         body.put_u8(qos & 0x03);
         wrap_fixed_header(0x82, &body)
@@ -1988,7 +1956,7 @@ impl RawPacketBuilder {
     #[must_use]
     pub fn publish_qos0_raw_topic(topic_bytes: &[u8], payload: &[u8]) -> Vec<u8> {
         let mut body = BytesMut::new();
-        body.put_u16(topic_bytes.len() as u16);
+        body.put_u16(length_u16(topic_bytes.len()));
         body.put_slice(topic_bytes);
         body.put_u8(0);
         body.put_slice(payload);
@@ -2008,7 +1976,7 @@ impl RawPacketBuilder {
         let mut props = BytesMut::new();
         props.put_u8(0x15);
         put_mqtt_string(&mut props, auth_method);
-        encode_variable_int(&mut body, props.len() as u32);
+        encode_variable_int(&mut body, props.len());
         body.put(props);
 
         put_mqtt_string(&mut body, client_id);
@@ -2036,7 +2004,7 @@ impl RawPacketBuilder {
         props.put_u32(max_packet_size);
         props.put_u8(0x15);
         put_mqtt_string(&mut props, auth_method);
-        encode_variable_int(&mut body, props.len() as u32);
+        encode_variable_int(&mut body, props.len());
         body.put(props);
 
         put_mqtt_string(&mut body, client_id);
@@ -2062,9 +2030,9 @@ impl RawPacketBuilder {
         props.put_u8(0x15);
         put_mqtt_string(&mut props, auth_method);
         props.put_u8(0x16);
-        props.put_u16(auth_data.len() as u16);
+        props.put_u16(length_u16(auth_data.len()));
         props.put_slice(auth_data);
-        encode_variable_int(&mut body, props.len() as u32);
+        encode_variable_int(&mut body, props.len());
         body.put(props);
 
         put_mqtt_string(&mut body, client_id);
@@ -2081,7 +2049,7 @@ impl RawPacketBuilder {
         let mut props = BytesMut::new();
         props.put_u8(0x15);
         put_mqtt_string(&mut props, auth_method);
-        encode_variable_int(&mut body, props.len() as u32);
+        encode_variable_int(&mut body, props.len());
         body.put(props);
 
         wrap_fixed_header(0xF0, &body)
@@ -2101,9 +2069,9 @@ impl RawPacketBuilder {
         props.put_u8(0x15);
         put_mqtt_string(&mut props, auth_method);
         props.put_u8(0x16);
-        props.put_u16(auth_data.len() as u16);
+        props.put_u16(length_u16(auth_data.len()));
         props.put_slice(auth_data);
-        encode_variable_int(&mut body, props.len() as u32);
+        encode_variable_int(&mut body, props.len());
         body.put(props);
 
         wrap_fixed_header(0xF0, &body)
@@ -2158,13 +2126,50 @@ fn parse_ack_packet(data: &[u8]) -> Option<(u16, u8)> {
 
 pub fn put_mqtt_string(buf: &mut BytesMut, s: &str) {
     let bytes = s.as_bytes();
-    buf.put_u16(bytes.len() as u16);
+    buf.put_u16(length_u16(bytes.len()));
     buf.put_slice(bytes);
 }
 
-pub fn encode_variable_int(buf: &mut BytesMut, mut value: u32) {
+fn qos1_publish(header: u8, topic: &str, payload: &[u8], packet_id: u16) -> Vec<u8> {
+    let mut body = BytesMut::new();
+    put_mqtt_string(&mut body, topic);
+    body.put_u16(packet_id);
+    body.put_u8(0);
+    body.put_slice(payload);
+    wrap_fixed_header(header, &body)
+}
+
+fn connect_with_flags_and_session_expiry(
+    flags: u8,
+    client_id: &str,
+    session_expiry: u32,
+) -> Vec<u8> {
+    let mut body = BytesMut::new();
+    body.put_u16(4);
+    body.put_slice(b"MQTT");
+    body.put_u8(5);
+    body.put_u8(flags);
+    body.put_u16(60);
+    let mut props = BytesMut::new();
+    props.put_u8(0x11);
+    props.put_u32(session_expiry);
+    encode_variable_int(&mut body, props.len());
+    body.put(props);
+    put_mqtt_string(&mut body, client_id);
+    wrap_fixed_header(0x10, &body)
+}
+
+fn variable_int_value(value: u32) -> usize {
+    usize::try_from(value).expect("variable byte integer fits in usize")
+}
+
+fn length_u16(length: usize) -> u16 {
+    u16::try_from(length).expect("length fits in a two byte integer")
+}
+
+pub fn encode_variable_int(buf: &mut BytesMut, mut value: usize) {
     loop {
-        let mut byte = (value & 0x7F) as u8;
+        let mut byte = value.to_le_bytes()[0] & 0x7F;
         value >>= 7;
         if value > 0 {
             byte |= 0x80;
@@ -2180,7 +2185,7 @@ pub fn encode_variable_int(buf: &mut BytesMut, mut value: u32) {
 pub fn wrap_fixed_header(first_byte: u8, body: &[u8]) -> Vec<u8> {
     let mut packet = BytesMut::new();
     packet.put_u8(first_byte);
-    encode_variable_int(&mut packet, body.len() as u32);
+    encode_variable_int(&mut packet, body.len());
     packet.put_slice(body);
     packet.to_vec()
 }
