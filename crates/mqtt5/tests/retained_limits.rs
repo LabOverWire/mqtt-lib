@@ -363,9 +363,13 @@ async fn connected_publishers_follow_a_reloaded_retained_count_limit() {
     let probe = MqttClient::new("reload-probe");
     probe.connect(&address).await.expect("probe connects");
     let mut applied = false;
-    for _ in 0..100 {
+    for attempt in 0..100 {
         if probe
-            .publish_with_options("limits/probe", SMALL_PAYLOAD, options.clone())
+            .publish_with_options(
+                &format!("limits/probe/{attempt}"),
+                SMALL_PAYLOAD,
+                options.clone(),
+            )
             .await
             .is_err()
         {
