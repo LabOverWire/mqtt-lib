@@ -438,6 +438,170 @@ async fn discarding_a_flow_removes_its_subscriptions() {
     assert!(!delivered_to_aborted_flow(true).await);
 }
 
+#[derive(Clone, Copy)]
+enum FlowEnd {
+    Fin,
+    Reset,
+}
+
+async fn subscribe_on_flow(
+    split: &mut QuicSplitResult,
+    expire: u64,
+    flags: FlowFlags,
+) -> quinn::SendStream {
+    let mut flow = split.connection.open_uni().await.expect("open flow");
+    let mut bytes = data_flow(5, expire, flags);
+    bytes.extend_from_slice(&subscribe_frame("flows/expiry"));
+    flow.write_all(&bytes).await.expect("subscribe on flow");
+    let mut suback = [0u8; 6];
+    split
+        .recv
+        .read_exact(&mut suback)
+        .await
+        .expect("read SUBACK");
+    assert_eq!(suback, [0x90, 0x04, 0x00, 0x01, 0x00, 0x00]);
+    flow
+}
+
+async fn delivered_on_flow_subscription(split: &mut QuicSplitResult) -> bool {
+    split
+        .send
+        .write_all(&publish_frame("flows/expiry", b"after"))
+        .await
+        .expect("publish");
+    tokio::time::timeout(Duration::from_secs(2), split.connection.accept_bi())
+        .await
+        .is_ok()
+}
+
+async fn delivered_after_flow_end(
+    err_tolerance: u8,
+    expire: u64,
+    end: FlowEnd,
+    wait: Duration,
+) -> bool {
+    let (broker, mut split) = connected_session("flow-expiry").await;
+    let flags = FlowFlags {
+        err_tolerance,
+        persistent_subscriptions: 1,
+        ..FlowFlags::default()
+    };
+    let mut flow = subscribe_on_flow(&mut split, expire, flags).await;
+    match end {
+        FlowEnd::Fin => flow.finish().expect("finish flow"),
+        FlowEnd::Reset => flow
+            .reset(quinn::VarInt::from_u32(
+                QuicStreamCode::FlowCancelled.code(),
+            ))
+            .expect("abort flow"),
+    }
+    tokio::time::sleep(wait).await;
+    let delivered = delivered_on_flow_subscription(&mut split).await;
+    broker.stop().await;
+    delivered
+}
+
+const SHORTLY: Duration = Duration::from_millis(200);
+
+#[tokio::test]
+async fn a_flow_ended_with_fin_drops_its_subscriptions() {
+    assert!(!delivered_after_flow_end(0, 2, FlowEnd::Fin, SHORTLY).await);
+    assert!(!delivered_after_flow_end(2, 2, FlowEnd::Fin, SHORTLY).await);
+}
+
+#[tokio::test]
+async fn an_aborted_flow_keeps_its_subscriptions_until_it_expires() {
+    for err_tolerance in [0, 2] {
+        assert!(delivered_after_flow_end(err_tolerance, 1, FlowEnd::Reset, SHORTLY).await);
+        assert!(
+            !delivered_after_flow_end(
+                err_tolerance,
+                1,
+                FlowEnd::Reset,
+                Duration::from_millis(1500)
+            )
+            .await
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_aborted_flow_with_expire_zero_drops_its_subscriptions() {
+    assert!(!delivered_after_flow_end(0, 0, FlowEnd::Reset, SHORTLY).await);
+    assert!(!delivered_after_flow_end(2, 0, FlowEnd::Reset, SHORTLY).await);
+}
+
+fn connect_with_session_expiry(client_id: &str, clean_start: bool) -> Vec<u8> {
+    let flags = if clean_start { 0x02 } else { 0x00 };
+    let mut body = vec![
+        0x00, 0x04, b'M', b'Q', b'T', b'T', 0x05, flags, 0x00, 0x3C, 0x05, 0x11, 0x00, 0x00, 0x01,
+        0x2C,
+    ];
+    body.extend_from_slice(
+        &u16::try_from(client_id.len())
+            .expect("client id fits u16")
+            .to_be_bytes(),
+    );
+    body.extend_from_slice(client_id.as_bytes());
+    let mut frame = vec![0x10, u8::try_from(body.len()).expect("short CONNECT")];
+    frame.extend_from_slice(&body);
+    frame
+}
+
+async fn persistent_session_at(addr: SocketAddr, clean_start: bool) -> (QuicSplitResult, u8) {
+    let mut transport =
+        QuicTransport::new(QuicConfig::new(addr, "localhost").with_verify_server_cert(false));
+    transport.connect().await.expect("QUIC handshake");
+    let mut split = transport.into_split().expect("split transport");
+    split
+        .send
+        .write_all(&connect_with_session_expiry("flow-reconnect", clean_start))
+        .await
+        .expect("send CONNECT");
+    let mut header = [0u8; 2];
+    split
+        .recv
+        .read_exact(&mut header)
+        .await
+        .expect("read CONNACK header");
+    let mut body = vec![0u8; usize::from(header[1])];
+    split
+        .recv
+        .read_exact(&mut body)
+        .await
+        .expect("read CONNACK body");
+    (split, body[0])
+}
+
+async fn delivered_after_reconnect(expire: u64, finish_first: bool) -> bool {
+    let (broker, addr) = Broker::start().await;
+    let (mut first, _) = persistent_session_at(addr, true).await;
+    let flags = FlowFlags {
+        persistent_subscriptions: 1,
+        ..FlowFlags::default()
+    };
+    let mut flow = subscribe_on_flow(&mut first, expire, flags).await;
+    if finish_first {
+        flow.finish().expect("finish flow");
+        tokio::time::sleep(SHORTLY).await;
+    }
+    first.connection.close(quinn::VarInt::from_u32(0), b"gone");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let (mut second, session_present) = persistent_session_at(addr, false).await;
+    assert_eq!(session_present, 1);
+    let delivered = delivered_on_flow_subscription(&mut second).await;
+    broker.stop().await;
+    delivered
+}
+
+#[tokio::test]
+async fn a_closed_connection_drops_subscriptions_of_flows_with_expire_zero() {
+    assert!(delivered_after_reconnect(300, false).await);
+    assert!(!delivered_after_reconnect(0, false).await);
+    assert!(!delivered_after_reconnect(300, true).await);
+}
+
 const PACKET_LIMIT: usize = 1024;
 const SIZE_TOPIC: &str = "size/check";
 

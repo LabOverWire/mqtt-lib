@@ -8,7 +8,7 @@ use crate::broker::sys_topics::BrokerStats;
 use crate::broker::transport::BrokerTransport;
 use crate::error::{MqttError, Result};
 use crate::packet::{FixedHeader, Packet};
-use crate::session::quic_flow::{FlowRegistry, FlowState};
+use crate::session::quic_flow::{FlowLifecycle, FlowRegistry, FlowState};
 use crate::transport::flow::{
     FlowFlags, FlowHeader, FlowId, FLOW_TYPE_CLIENT_DATA, FLOW_TYPE_CONTROL, FLOW_TYPE_SERVER_DATA,
     FLOW_TYPE_USER_DEFINED,
@@ -982,7 +982,7 @@ fn spawn_data_stream_reader(context: DataStreamContext, mut recv: RecvStream) {
             }
         };
 
-        loop {
+        let end = loop {
             match read_packet_with_buffer(&mut recv, &mut buffer, protocol_version, max_packet_size)
                 .await
             {
@@ -995,43 +995,82 @@ fn spawn_data_stream_reader(context: DataStreamContext, mut recv: RecvStream) {
                     debug!(flow_id = ?flow_id, packet_type = %packet.packet_type_name(), "Read packet from QUIC data stream");
                     if packet_tx.send((packet, raw_flow_id)).await.is_err() {
                         debug!("Packet channel closed, stopping data stream reader");
-                        break;
+                        break FlowEnd::Aborted;
                     }
                 }
                 Err(MqttError::ClientClosed) if buffer.is_empty() => {
                     debug!(flow_id = ?flow_id, "QUIC data stream closed from {}", peer_addr);
-                    break;
+                    break FlowEnd::Graceful;
                 }
                 Err(MqttError::ClientClosed) => {
                     warn!(flow_id = ?flow_id, "QUIC data stream from {peer_addr} ended inside a packet");
-                    break;
+                    break FlowEnd::Aborted;
                 }
                 Err(MqttError::ConnectionError(reason)) => {
                     debug!(flow_id = ?flow_id, "QUIC data stream from {peer_addr} ended: {reason}");
-                    break;
+                    break FlowEnd::Aborted;
                 }
                 Err(e) => {
                     close_on_protocol_error(&connection, peer_addr, "data stream", &e);
-                    break;
+                    break FlowEnd::Aborted;
                 }
             }
-        }
+        };
 
         if let Some(id) = flow_id {
-            let mut registry = flow_registry.lock().await;
-            let should_keep = registry
-                .get(id)
-                .is_some_and(|state| state.flags.err_tolerance >= 2);
-            if should_keep {
-                debug!(flow_id = ?id, "Preserving flow state (err_tolerance >= 2) for recovery");
-            } else if registry.remove(id).is_some() {
-                debug!(flow_id = ?id, "Removed flow from registry");
-                if flow_closed_tx.send(id.raw()).await.is_err() {
-                    debug!(flow_id = ?id, "client handler ended before the flow closed");
-                }
-            }
+            end_flow(id, end, &connection, &flow_registry, &flow_closed_tx).await;
         }
     });
+}
+
+#[derive(Debug, Clone, Copy)]
+enum FlowEnd {
+    Graceful,
+    Aborted,
+}
+
+async fn end_flow(
+    id: FlowId,
+    end: FlowEnd,
+    connection: &Connection,
+    flow_registry: &Mutex<FlowRegistry>,
+    flow_closed_tx: &mpsc::Sender<u64>,
+) {
+    let retained = {
+        let mut registry = flow_registry.lock().await;
+        let Some(state) = registry.get_mut(id) else {
+            return;
+        };
+        if let (FlowEnd::Aborted, Some(interval)) = (end, state.expire_interval) {
+            state.lifecycle = FlowLifecycle::Closed;
+            state.touch();
+            Some((interval, state.last_activity))
+        } else {
+            registry.remove(id);
+            None
+        }
+    };
+
+    if let Some((interval, aborted_at)) = retained {
+        debug!(flow_id = ?id, ?interval, "Keeping aborted flow state until it expires");
+        tokio::select! {
+            () = tokio::time::sleep(interval) => {}
+            _ = connection.closed() => return,
+        }
+        let mut registry = flow_registry.lock().await;
+        let still_aborted = registry
+            .get(id)
+            .is_some_and(|state| state.is_closed() && state.last_activity == aborted_at);
+        if !still_aborted {
+            return;
+        }
+        registry.remove(id);
+    }
+
+    debug!(flow_id = ?id, ?end, "Removed flow from registry");
+    if flow_closed_tx.send(id.raw()).await.is_err() {
+        debug!(flow_id = ?id, "client handler ended before the flow closed");
+    }
 }
 
 #[cfg(test)]

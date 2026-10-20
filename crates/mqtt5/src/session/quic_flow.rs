@@ -271,7 +271,7 @@ impl FlowRegistry {
     }
 
     pub fn register_flow(&mut self, state: FlowState) -> bool {
-        if self.flows.len() >= self.max_flows {
+        if !self.flows.contains_key(&state.id) && self.flows.len() >= self.max_flows {
             return false;
         }
         self.flows.insert(state.id, state);

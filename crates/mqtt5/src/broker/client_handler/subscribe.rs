@@ -523,6 +523,30 @@ impl ClientHandler {
     }
 
     #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
+    pub(super) async fn close_unretained_flows(&mut self) {
+        while let Some(flow_id) = self
+            .flow_closed_rx
+            .as_mut()
+            .and_then(|rx| rx.try_recv().ok())
+        {
+            self.handle_flow_closed(flow_id).await;
+        }
+        let Some(registry) = self.flow_registry.clone() else {
+            return;
+        };
+        let unretained: Vec<u64> = registry
+            .lock()
+            .await
+            .client_flows()
+            .filter(|(_, state)| state.expire_interval.is_none())
+            .map(|(id, _)| id.raw())
+            .collect();
+        for flow_id in unretained {
+            self.handle_flow_closed(flow_id).await;
+        }
+    }
+
+    #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
     async fn track_flow_subscription(&self, flow_id: u64, topic_filter: &str) {
         if let Some(ref registry) = self.flow_registry {
             let fid = crate::transport::flow::FlowId::from(flow_id);

@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Breaking
 
 - **A QoS 0 message is no longer queued for an offline subscriber** (#248). Messages queued for an offline persistent session were sent at the subscription's QoS, so a QoS 0 message reached a QoS 1 subscriber as QoS 1 (MQTT-3.8.4-8). Queued messages now use the minimum of the published and granted QoS, the same as live delivery, and a message whose effective QoS is 0 is not queued, as was already the case for a QoS 0 subscription.
+- **The QUIC broker keeps or removes a client flow's state by how the flow ended, and expires it** (#251). It kept the state, including the flow's subscriptions, when the flow header had `err_tolerance` 2 or more and removed it otherwise, and never expired what it kept. Following MQoQ §9.13 and §9.12, a flow ended with FIN loses its state at once, and an aborted flow keeps it for its `flow_expire_interval` and then loses it. An expire interval of 0 now means the state is removed when the flow is aborted, including when the connection closes, instead of never expiring. Expiry of state kept across a reconnect is not covered yet (#252).
 
 ### Fixed
 
