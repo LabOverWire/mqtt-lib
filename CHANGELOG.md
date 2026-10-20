@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Client IDs the broker assigns are unique across brokers and restarts** (MQTT-3.1.3-6). An empty client ID was replaced with `auto-<N>` from a counter that started at 0 in every process, so two brokers handed out the same IDs, and after a restart an unnamed client could be given the ID of a persisted session and take it over, with its subscriptions and queued messages. The broker now assigns `auto-` followed by 128 random bits in hex, and the wasm broker `wasm-auto-` followed by the same. If the random source fails, the CONNECT is refused with 0x88 (Server unavailable). A load balancer redirect now picks the backend from that same assigned ID instead of from a separate counter.
 - **Messages queued for a shared subscription whose members are all offline get the same treatment as other deliveries** (#248). They kept the publisher's RETAIN and DUP flags, so a member reconnecting could get RETAIN 1 with Retain As Published 0 (MQTT-3.3.1-12) or DUP 1 on a first delivery (MQTT-3.3.1-3).
 
 ## [mqtt5 0.48.2] - 2026-10-19

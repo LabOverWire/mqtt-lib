@@ -79,6 +79,8 @@ impl ClientHandler {
         self.validate_protocol_version(connect.protocol_version)
             .await?;
 
+        let assigned_client_id = self.assign_client_id_if_empty(&mut connect).await?;
+
         if let Some(redirect) = self.check_load_balancer_redirect(&connect).await? {
             return redirect.map(|()| None);
         }
@@ -105,7 +107,6 @@ impl ClientHandler {
         }
         self.client_max_packet_size = client_max_packet_size;
 
-        let assigned_client_id = Self::assign_client_id_if_empty(&mut connect);
         self.validate_client_id(&connect).await?;
 
         match self
@@ -182,15 +183,7 @@ impl ClientHandler {
         let Some(ref lb) = self.config.load_balancer else {
             return Ok(None);
         };
-        let generated;
-        let client_id = if connect.client_id.is_empty() {
-            use std::sync::atomic::{AtomicU64, Ordering};
-            static LB_COUNTER: AtomicU64 = AtomicU64::new(0);
-            generated = format!("auto-{}", LB_COUNTER.fetch_add(1, Ordering::Relaxed));
-            &generated
-        } else {
-            &connect.client_id
-        };
+        let client_id = &connect.client_id;
         if let Some(backend) = lb.select_backend(client_id) {
             let backend = backend.to_string();
             info!(
@@ -207,17 +200,26 @@ impl ClientHandler {
         Ok(None)
     }
 
-    fn assign_client_id_if_empty(connect: &mut ConnectPacket) -> Option<String> {
-        if connect.client_id.is_empty() {
-            use std::sync::atomic::{AtomicU32, Ordering};
-            static COUNTER: AtomicU32 = AtomicU32::new(0);
-            let generated_id = format!("auto-{}", COUNTER.fetch_add(1, Ordering::SeqCst));
-            debug!("Generated client ID '{}' for empty client ID", generated_id);
-            connect.client_id.clone_from(&generated_id);
-            Some(generated_id)
-        } else {
-            None
+    async fn assign_client_id_if_empty(
+        &mut self,
+        connect: &mut ConnectPacket,
+    ) -> Result<Option<String>> {
+        if !connect.client_id.is_empty() {
+            return Ok(None);
         }
+        let mut random = [0u8; 16];
+        if let Err(e) = getrandom::fill(&mut random) {
+            warn!(addr = %self.client_addr, "Cannot assign a client ID: {e}");
+            let connack = ConnAckPacket::new(false, ReasonCode::ServerUnavailable);
+            self.write_to_client(Packet::ConnAck(connack)).await?;
+            return Err(MqttError::Io(format!(
+                "failed to generate a client ID: {e}"
+            )));
+        }
+        let generated_id = format!("auto-{:032x}", u128::from_be_bytes(random));
+        debug!("Generated client ID '{generated_id}' for empty client ID");
+        connect.client_id.clone_from(&generated_id);
+        Ok(Some(generated_id))
     }
 
     async fn validate_client_id(&mut self, connect: &ConnectPacket) -> Result<()> {

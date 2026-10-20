@@ -59,17 +59,23 @@ impl WasmClientHandler {
         }
         self.protocol_version = connect.protocol_version;
 
-        self.check_load_balancer_redirect(&connect, writer)?;
-
         let mut assigned_client_id = None;
         if connect.client_id.is_empty() {
-            use std::sync::atomic::{AtomicU32, Ordering};
-            static COUNTER: AtomicU32 = AtomicU32::new(0);
-            let generated_id = format!("wasm-auto-{}", COUNTER.fetch_add(1, Ordering::SeqCst));
-            debug!("Generated client ID '{}' for empty client ID", generated_id);
+            let mut random = [0u8; 16];
+            if let Err(e) = getrandom::fill(&mut random) {
+                let connack = ConnAckPacket::new(false, ReasonCode::ServerUnavailable);
+                self.write_packet(&Packet::ConnAck(connack), writer)?;
+                return Err(MqttError::Io(format!(
+                    "failed to generate a client ID: {e}"
+                )));
+            }
+            let generated_id = format!("wasm-auto-{:032x}", u128::from_be_bytes(random));
+            debug!("Generated client ID '{generated_id}' for empty client ID");
             connect.client_id.clone_from(&generated_id);
             assigned_client_id = Some(generated_id);
         }
+
+        self.check_load_balancer_redirect(&connect, writer)?;
 
         if !mqtt5_protocol::is_path_safe_client_id(&connect.client_id) {
             let connack = ConnAckPacket::new(false, ReasonCode::ClientIdentifierNotValid);
@@ -363,15 +369,7 @@ impl WasmClientHandler {
     ) -> Result<()> {
         if let Ok(config) = self.config.read() {
             if let Some(ref lb) = config.load_balancer {
-                let generated;
-                let client_id = if connect.client_id.is_empty() {
-                    use std::sync::atomic::{AtomicU64, Ordering};
-                    static LB_COUNTER: AtomicU64 = AtomicU64::new(0);
-                    generated = format!("auto-{}", LB_COUNTER.fetch_add(1, Ordering::Relaxed));
-                    &generated
-                } else {
-                    &connect.client_id
-                };
+                let client_id = &connect.client_id;
                 if let Some(backend) = lb.select_backend(client_id) {
                     let backend = backend.to_string();
                     info!(
