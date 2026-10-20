@@ -8,7 +8,7 @@ use crate::broker::sys_topics::BrokerStats;
 use crate::broker::transport::BrokerTransport;
 use crate::error::{MqttError, Result};
 use crate::packet::{FixedHeader, Packet};
-use crate::session::quic_flow::{FlowLifecycle, FlowRegistry, FlowState};
+use crate::session::quic_flow::{FlowRegistry, FlowState};
 use crate::transport::flow::{
     FlowFlags, FlowHeader, FlowId, FLOW_TYPE_CLIENT_DATA, FLOW_TYPE_CONTROL, FLOW_TYPE_SERVER_DATA,
     FLOW_TYPE_USER_DEFINED,
@@ -952,6 +952,7 @@ fn spawn_data_stream_reader(context: DataStreamContext, mut recv: RecvStream) {
             debug!("client handler ended before CONNECT from {peer_addr}");
             return;
         };
+        let stream_id = u64::from(recv.id());
         let (flow_id, mut buffer) = match try_read_flow_header(&mut recv).await {
             Ok(StreamOpening::Refused(code)) => {
                 debug!(%code, "refusing data stream from {peer_addr}");
@@ -962,13 +963,21 @@ fn spawn_data_stream_reader(context: DataStreamContext, mut recv: RecvStream) {
             }
             Ok(StreamOpening::Flow(result)) => {
                 let flow_id = if let (Some(id), Some(flags)) = (result.flow_id, result.flags) {
-                    let state = FlowState::new_client_data(id, flags, result.expire);
-                    let mut registry = flow_registry.lock().await;
-                    if registry.register_flow(state) {
-                        debug!(flow_id = ?id, "Registered flow from {}", peer_addr);
-                    } else {
-                        warn!(flow_id = ?id, "Failed to register flow (registry full)");
+                    let mut state = FlowState::new_client_data(id, flags, result.expire);
+                    state.set_stream_id(stream_id);
+                    if let Err(e) = state.open() {
+                        debug!(flow_id = ?id, "flow state not opened: {e}");
                     }
+                    if !flow_registry.lock().await.register_flow(state) {
+                        warn!(flow_id = ?id, "refusing flow from {peer_addr}: flow registry full");
+                        if let Err(e) =
+                            recv.stop(quinn::VarInt::from_u32(QuicStreamCode::FlowRefused.code()))
+                        {
+                            debug!("data stream from {peer_addr} already closed before stop: {e}");
+                        }
+                        return;
+                    }
+                    debug!(flow_id = ?id, "Registered flow from {}", peer_addr);
                     Some(id)
                 } else {
                     trace!("No flow header on data stream from {}", peer_addr);
@@ -1018,7 +1027,15 @@ fn spawn_data_stream_reader(context: DataStreamContext, mut recv: RecvStream) {
         };
 
         if let Some(id) = flow_id {
-            end_flow(id, end, &connection, &flow_registry, &flow_closed_tx).await;
+            end_flow(
+                id,
+                stream_id,
+                end,
+                &connection,
+                &flow_registry,
+                &flow_closed_tx,
+            )
+            .await;
         }
     });
 }
@@ -1031,6 +1048,7 @@ enum FlowEnd {
 
 async fn end_flow(
     id: FlowId,
+    stream_id: u64,
     end: FlowEnd,
     connection: &Connection,
     flow_registry: &Mutex<FlowRegistry>,
@@ -1038,36 +1056,41 @@ async fn end_flow(
 ) {
     let retained = {
         let mut registry = flow_registry.lock().await;
-        let Some(state) = registry.get_mut(id) else {
+        let Some(state) = registry
+            .get_mut(id)
+            .filter(|state| state.stream_id == Some(stream_id))
+        else {
+            debug!(flow_id = ?id, "flow moved to a newer stream before this one ended");
             return;
         };
+        if let Err(e) = state.close() {
+            debug!(flow_id = ?id, "flow state not closed: {e}");
+        }
         if let (FlowEnd::Aborted, Some(interval)) = (end, state.expire_interval) {
-            state.lifecycle = FlowLifecycle::Closed;
-            state.touch();
-            Some((interval, state.last_activity))
+            Some(interval)
         } else {
-            registry.remove(id);
+            state.expire_interval = None;
             None
         }
     };
 
-    if let Some((interval, aborted_at)) = retained {
+    if let Some(interval) = retained {
         debug!(flow_id = ?id, ?interval, "Keeping aborted flow state until it expires");
         tokio::select! {
             () = tokio::time::sleep(interval) => {}
             _ = connection.closed() => return,
         }
         let mut registry = flow_registry.lock().await;
-        let still_aborted = registry
-            .get(id)
-            .is_some_and(|state| state.is_closed() && state.last_activity == aborted_at);
-        if !still_aborted {
+        let Some(state) = registry
+            .get_mut(id)
+            .filter(|state| state.stream_id == Some(stream_id) && state.is_closed())
+        else {
             return;
-        }
-        registry.remove(id);
+        };
+        state.expire_interval = None;
     }
 
-    debug!(flow_id = ?id, ?end, "Removed flow from registry");
+    debug!(flow_id = ?id, ?end, "Flow ended");
     if flow_closed_tx.send(id.raw()).await.is_err() {
         debug!(flow_id = ?id, "client handler ended before the flow closed");
     }

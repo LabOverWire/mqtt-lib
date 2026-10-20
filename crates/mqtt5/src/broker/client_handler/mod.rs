@@ -415,7 +415,9 @@ impl ClientHandler {
         };
 
         #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
-        self.close_unretained_flows().await;
+        if !matches!(exit, LoopExit::TakenOver(_)) {
+            self.close_unretained_flows().await;
+        }
 
         let armed_will = if let LoopExit::TakenOver(notice) = exit {
             self.hand_off(&queue, notice).await;

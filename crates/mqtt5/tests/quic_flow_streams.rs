@@ -51,20 +51,31 @@ impl Broker {
         max_packet_size: usize,
         delivery: ServerDeliveryStrategy,
     ) -> (Self, SocketAddr) {
+        Self::start_configured(max_packet_size, delivery, None).await
+    }
+
+    async fn start_configured(
+        max_packet_size: usize,
+        delivery: ServerDeliveryStrategy,
+        max_streams: Option<u32>,
+    ) -> (Self, SocketAddr) {
         CRYPTO_PROVIDER.call_once(|| {
             rustls::crypto::ring::default_provider()
                 .install_default()
                 .expect("install crypto provider");
         });
+        let quic = BrokerQuicConfig::new(PathBuf::from(CERT), PathBuf::from(KEY))
+            .with_bind_address("127.0.0.1:0".parse::<SocketAddr>().expect("bind address"));
+        let quic = match max_streams {
+            Some(max) => quic.with_max_concurrent_streams(max),
+            None => quic,
+        };
         let config = BrokerConfig::default()
             .with_storage(StorageConfig::default().with_backend(StorageBackend::Memory))
             .with_bind_address(([127, 0, 0, 1], 0))
             .with_max_packet_size(max_packet_size)
             .with_server_delivery_strategy(delivery)
-            .with_quic(
-                BrokerQuicConfig::new(PathBuf::from(CERT), PathBuf::from(KEY))
-                    .with_bind_address("127.0.0.1:0".parse::<SocketAddr>().expect("bind address")),
-            );
+            .with_quic(quic);
         let mut broker = MqttBroker::with_config(config)
             .await
             .expect("broker starts");
@@ -529,6 +540,86 @@ async fn an_aborted_flow_keeps_its_subscriptions_until_it_expires() {
 async fn an_aborted_flow_with_expire_zero_drops_its_subscriptions() {
     assert!(!delivered_after_flow_end(0, 0, FlowEnd::Reset, SHORTLY).await);
     assert!(!delivered_after_flow_end(2, 0, FlowEnd::Reset, SHORTLY).await);
+}
+
+#[tokio::test]
+async fn an_older_stream_ending_leaves_the_flow_that_took_it_over() {
+    let (broker, mut split) = connected_session("flow-takeover").await;
+    let mut older = subscribe_on_flow(&mut split, 0, FlowFlags::default()).await;
+    let mut newer = split
+        .connection
+        .open_uni()
+        .await
+        .expect("open newer stream");
+    let mut bytes = data_flow(5, 0, FlowFlags::default());
+    bytes.extend_from_slice(&subscribe_frame("flows/other"));
+    newer
+        .write_all(&bytes)
+        .await
+        .expect("subscribe on newer stream");
+    let mut suback = [0u8; 6];
+    split
+        .recv
+        .read_exact(&mut suback)
+        .await
+        .expect("read SUBACK");
+    older
+        .reset(quinn::VarInt::from_u32(
+            QuicStreamCode::FlowCancelled.code(),
+        ))
+        .expect("abort older stream");
+    tokio::time::sleep(SHORTLY).await;
+    let delivered = delivered_on_flow_subscription(&mut split).await;
+    broker.stop().await;
+    assert!(delivered);
+}
+
+const FLOW_REGISTRY_LIMIT: usize = 256;
+
+#[tokio::test]
+async fn a_flow_past_the_registry_limit_is_refused() {
+    let defaults = BrokerConfig::default();
+    let (broker, addr) = Broker::start_configured(
+        defaults.max_packet_size,
+        defaults.server_delivery_strategy,
+        Some(512),
+    )
+    .await;
+    let mut split = session_at(addr, "flow-limit").await;
+    let mut open_flows: [Option<quinn::SendStream>; FLOW_REGISTRY_LIMIT] =
+        std::array::from_fn(|_| None);
+    for (sequence, slot) in (1u64..).zip(open_flows.iter_mut()) {
+        let mut flow = split.connection.open_uni().await.expect("open flow");
+        let mut bytes = data_flow(sequence, 0, FlowFlags::default());
+        bytes.extend_from_slice(&subscribe_frame("flows/limit"));
+        flow.write_all(&bytes).await.expect("subscribe on flow");
+        let mut suback = [0u8; 6];
+        split
+            .recv
+            .read_exact(&mut suback)
+            .await
+            .expect("read SUBACK");
+        *slot = Some(flow);
+    }
+    let (end, result) = {
+        let mut flow = split.connection.open_uni().await.expect("open extra flow");
+        flow.write_all(&with_pingreq(data_flow(
+            u64::try_from(FLOW_REGISTRY_LIMIT + 1).expect("flow sequence fits u64"),
+            0,
+            FlowFlags::default(),
+        )))
+        .await
+        .expect("write extra flow");
+        let end = match tokio::time::timeout(Duration::from_secs(1), flow.stopped()).await {
+            Ok(Ok(Some(code))) => StreamEnd::Stopped(code.into_inner()),
+            Ok(_) => StreamEnd::Finished,
+            Err(_) => StreamEnd::Open,
+        };
+        (end, outcome(&mut split).await)
+    };
+    broker.stop().await;
+    assert_eq!(end, StreamEnd::Stopped(code(QuicStreamCode::FlowRefused)));
+    assert_eq!(result, STILL_SERVED);
 }
 
 fn connect_with_session_expiry(client_id: &str, clean_start: bool) -> Vec<u8> {
