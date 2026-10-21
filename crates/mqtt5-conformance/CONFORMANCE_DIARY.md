@@ -49,7 +49,7 @@
 
 **3.1.1 CONNACK format**: rejection paths built the CONNACK with `ConnAckPacket::new`, which always encodes MQTT 5. A 3.1.1 CONNECT with client ID `a/b` got `2003008500` instead of `20020002`. Every CONNACK in both handlers now goes through `new_connack`, which picks the encoding from the connection's protocol version.
 
-**Open**: the 3.1.1 CONNACK encoder in `mqtt5-protocol` maps every reason code without a 3.1.1 equivalent to the MQTT 5 value 0x87, not to 0x05. A 3.1.1 client that connects to a session owned by another user gets `20020087`; 3.1.1 defines return codes 0 to 5 only.
+**3.1.1 return codes (#257)**: the 3.1.1 CONNACK encoder in `mqtt5-protocol` mapped every reason code without a 3.1.1 equivalent to the MQTT 5 value 0x87, not to a 3.1.1 return code. A 3.1.1 client that connected to a session owned by another user got `20020087`; 3.1.1 defines return codes 0 to 5 only. Availability refusals (Server busy, Use another server, Server moved, Connection rate exceeded) now encode as 0x03 and the rest as 0x05. Covered by `test_connack_v311_return_codes` in `mqtt5-protocol` and `crates/mqtt5/tests/v311_connack.rs`, both failing on main with 0x87.
 
 ### Offline queued delivery: review fixes (2026-10-19)
 
