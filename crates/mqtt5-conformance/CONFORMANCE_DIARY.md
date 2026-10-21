@@ -39,6 +39,18 @@
 
 ## Diary Entries
 
+### Assigned client IDs and 3.1.1 CONNACKs (2026-10-20)
+
+**Trigger**: #255 and the code review of #256.
+
+**MQTT-3.1.3-6**: the broker assigned `auto-<N>` from a counter that starts at 0 in every process, so after a restart an unnamed client with clean start 0 was given the ID of a persisted session and resumed it (session present 1, the other client's queued message delivered). Assigned IDs are now `auto-` plus 128 random bits in hex (`wasm-auto-` in the wasm broker). `connect_empty_client_id_server_assigns` and `connack_assigned_client_id_unique` still pass; they check that IDs are assigned and differ within one SUT run. The restart case needs a SUT restart, so it is covered by `crates/mqtt5/tests/assigned_client_id.rs` instead of this crate.
+
+**MQTT 3.1.1 MQTT-3.1.3-8**: a 3.1.1 CONNECT with an empty ClientId and CleanSession 0 was accepted (`20020000`, connection kept open). It is now refused with return code 0x02 and closed. Like #247, this is a 3.1.1 statement and the manifest is MQTT 5 only, so the test lives in `assigned_client_id.rs`.
+
+**3.1.1 CONNACK format**: rejection paths built the CONNACK with `ConnAckPacket::new`, which always encodes MQTT 5. A 3.1.1 CONNECT with client ID `a/b` got `2003008500` instead of `20020002`. Every CONNACK in both handlers now goes through `new_connack`, which picks the encoding from the connection's protocol version.
+
+**Open**: the 3.1.1 CONNACK encoder in `mqtt5-protocol` maps every reason code without a 3.1.1 equivalent to the MQTT 5 value 0x87, not to 0x05. A 3.1.1 client that connects to a session owned by another user gets `20020087`; 3.1.1 defines return codes 0 to 5 only.
+
 ### Offline queued delivery: review fixes (2026-10-19)
 
 **Trigger**: code review of #250.

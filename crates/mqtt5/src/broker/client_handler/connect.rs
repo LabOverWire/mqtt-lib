@@ -25,9 +25,8 @@ fn clamp_keep_alive_to_u16(keep_alive: Duration) -> u16 {
     let secs = keep_alive.as_secs();
     u16::try_from(secs).unwrap_or_else(|_| {
         warn!(
-            "Configured server_keep_alive {}s exceeds the u16 wire range; clamping to {}s",
-            secs,
-            u16::MAX,
+            "Configured server_keep_alive {secs}s exceeds the u16 wire range; clamping to {}s",
+            u16::MAX
         );
         u16::MAX
     })
@@ -99,7 +98,7 @@ impl ClientHandler {
                 addr = %self.client_addr,
                 "Rejecting connection: Maximum Packet Size of 0 is a Protocol Error"
             );
-            let connack = ConnAckPacket::new(false, ReasonCode::ProtocolError);
+            let connack = self.new_connack(false, ReasonCode::ProtocolError);
             self.write_to_client(Packet::ConnAck(connack)).await?;
             return Err(MqttError::ProtocolError(
                 "Maximum Packet Size must not be zero".to_string(),
@@ -192,7 +191,8 @@ impl ClientHandler {
                 addr = %self.client_addr,
                 "Redirecting client to backend"
             );
-            let connack = ConnAckPacket::new(false, ReasonCode::UseAnotherServer)
+            let connack = self
+                .new_connack(false, ReasonCode::UseAnotherServer)
                 .with_server_reference(backend);
             self.write_to_client(Packet::ConnAck(connack)).await?;
             return Ok(Some(Err(MqttError::UseAnotherServer)));
@@ -207,10 +207,19 @@ impl ClientHandler {
         if !connect.client_id.is_empty() {
             return Ok(None);
         }
+        if self.protocol_version == 4 && !connect.clean_start {
+            warn!(
+                addr = %self.client_addr,
+                "Rejecting connection: empty client ID without CleanSession"
+            );
+            let connack = self.new_connack(false, ReasonCode::ClientIdentifierNotValid);
+            self.write_to_client(Packet::ConnAck(connack)).await?;
+            return Err(MqttError::InvalidClientId(String::new()));
+        }
         let mut random = [0u8; 16];
         if let Err(e) = getrandom::fill(&mut random) {
             warn!(addr = %self.client_addr, "Cannot assign a client ID: {e}");
-            let connack = ConnAckPacket::new(false, ReasonCode::ServerUnavailable);
+            let connack = self.new_connack(false, ReasonCode::ServerUnavailable);
             self.write_to_client(Packet::ConnAck(connack)).await?;
             return Err(MqttError::Io(format!(
                 "failed to generate a client ID: {e}"
@@ -229,7 +238,7 @@ impl ClientHandler {
                 addr = %self.client_addr,
                 "Rejecting connection: invalid client identifier"
             );
-            let connack = ConnAckPacket::new(false, ReasonCode::ClientIdentifierNotValid);
+            let connack = self.new_connack(false, ReasonCode::ClientIdentifierNotValid);
             self.write_to_client(Packet::ConnAck(connack)).await?;
             return Err(MqttError::InvalidClientId(connect.client_id.clone()));
         }
@@ -241,7 +250,7 @@ impl ClientHandler {
                 addr = %self.client_addr,
                 "Rejecting cert: client ID on connection without verified client certificate"
             );
-            let connack = ConnAckPacket::new(false, ReasonCode::NotAuthorized);
+            let connack = self.new_connack(false, ReasonCode::NotAuthorized);
             self.write_to_client(Packet::ConnAck(connack)).await?;
             return Err(MqttError::AuthenticationFailed);
         }
@@ -489,7 +498,7 @@ impl ClientHandler {
                     current_user = ?self.user_id,
                     "Session user mismatch, rejecting connection"
                 );
-                let connack = ConnAckPacket::new(false, ReasonCode::NotAuthorized);
+                let connack = self.new_connack(false, ReasonCode::NotAuthorized);
                 self.write_to_client(Packet::ConnAck(connack)).await?;
                 return Err(MqttError::AuthenticationFailed);
             }
