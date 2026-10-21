@@ -352,6 +352,7 @@ Manages broker-to-client QUIC stream delivery:
 - **ControlOnly**: returns error (caller writes to control stream directly)
 - **PerTopic**: cached bidirectional streams per topic with LRU eviction, writes server data flow header (type 0x13)
 - **PerPublish**: QoS 0 uses unidirectional; QoS 1+ uses bidirectional with flow header
+- **Flow-bound subscriptions**: a message for a subscription made on a client data flow goes on a cached bidirectional stream per client flow, whatever the strategy, with a server data flow header carrying a server-owned flow ID (MQoQ §9.4)
 
 #### FlowRegistry (Client)
 

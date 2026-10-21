@@ -194,11 +194,12 @@ impl ServerStreamManager {
             MqttError::ConnectionError(format!("failed to open server QUIC stream for flow: {e}"))
         })?;
 
-        let fid = FlowId::from(flow_id);
-        let ack_reader = self.start_ack_reader(recv, fid);
+        let ack_reader = self.start_ack_reader(recv, FlowId::from(flow_id));
+        let server_flow_id = self.flow_id_generator.next_server();
 
         self.header_buffer.clear();
-        let header = DataFlowHeader::server(fid, FLOW_EXPIRE_INTERVAL, FlowFlags::default());
+        let header =
+            DataFlowHeader::server(server_flow_id, FLOW_EXPIRE_INTERVAL, FlowFlags::default());
         header.encode(&mut self.header_buffer);
 
         send.write_all(&self.header_buffer).await.map_err(|e| {
@@ -207,6 +208,7 @@ impl ServerStreamManager {
 
         debug!(
             flow_id = flow_id,
+            server_flow_id = ?server_flow_id,
             "Opened new server stream for flow-bound subscription"
         );
 
@@ -216,7 +218,7 @@ impl ServerStreamManager {
             flow_id,
             ServerStreamInfo {
                 stream: send,
-                flow_id: fid,
+                flow_id: server_flow_id,
                 last_used: Instant::now(),
                 ack_reader,
             },

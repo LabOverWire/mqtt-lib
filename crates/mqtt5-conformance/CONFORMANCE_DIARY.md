@@ -39,6 +39,18 @@
 
 ## Diary Entries
 
+### QUIC server flow IDs for flow-bound delivery (2026-10-21)
+
+**Trigger**: #253.
+
+**Spec**: MQoQ §9.4 says the least significant bit of a Flow ID tells a server flow from a client flow, and the owner MUST set it correctly. §9.20 lists the server data flow (0x13) as one the server opens. §9.1.2 says a PUBLISH for a subscription goes over the data flow it was subscribed on, but the broker only serves client data flows on unidirectional streams, which cannot carry data back, and §9.2 leaves pairs of unidirectional streams as TBD. So the spec does not say where such a delivery goes; it only rules out the ID the broker used.
+
+**Behavior on main**, with a raw QUIC client subscribing on client flow 5: the delivery stream opened with `13 0A`, a server data flow carrying the client's flow ID (#253 has the trace, and the new test fails on main at the server-owned check).
+
+**Fix**: the broker still opens one server stream per client flow and reuses it, but gives it a server-owned ID from the connection's generator, as it does for per-topic and per-publish streams. Packets the client sends back on that stream are still tagged with the client flow, so acks and anything else read there stay with the subscription's flow.
+
+**Tests**: `subscriptions_on_client_flows_are_delivered_on_server_owned_flows` fails on main and passes with the fix: both delivery headers carry a server-owned ID, and the two IDs differ.
+
 ### QUIC flow recovery (2026-10-21)
 
 **Trigger**: #252, and the two cases #254 left to it.
