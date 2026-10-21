@@ -1,6 +1,6 @@
+use crate::broker::client_handler::ExternalInput;
 use crate::broker::config::ServerDeliveryStrategy;
 use crate::error::{MqttError, Result};
-use crate::packet::Packet;
 use crate::transport::flow::{DataFlowHeader, FlowFlags, FlowId, FlowIdGenerator};
 use crate::QoS;
 use bytes::BytesMut;
@@ -11,9 +11,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tracing::{debug, trace, warn};
 
-/// Channel carrying packets read off a QUIC stream into the client handler,
-/// tagged with the flow they arrived on.
-pub(super) type PacketSender = mpsc::Sender<(Packet, Option<u64>)>;
+pub(super) type PacketSender = mpsc::Sender<ExternalInput>;
 
 struct ServerStreamInfo {
     stream: SendStream,
@@ -65,7 +63,11 @@ fn spawn_ack_reader(
                         packet_type = %packet.packet_type_name(),
                         "Read ack from server data flow"
                     );
-                    if packet_tx.send((packet, Some(flow_id.raw()))).await.is_err() {
+                    if packet_tx
+                        .send(ExternalInput::Packet(packet, Some(flow_id.raw())))
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
                 }

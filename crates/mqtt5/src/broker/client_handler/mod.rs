@@ -58,6 +58,13 @@ use crate::broker::config::ServerDeliveryStrategy;
 #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
 use crate::broker::server_stream_manager::ServerStreamManager;
 
+#[derive(Debug)]
+pub enum ExternalInput {
+    Packet(Packet, Option<u64>),
+    #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
+    Flow(crate::broker::quic_flows::FlowInput),
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum AuthState {
     NotStarted,
@@ -148,7 +155,7 @@ pub struct ClientHandler {
     pub(super) pending_connect: Option<PendingConnect>,
     pub(super) authenticated_connect: Option<PendingConnect>,
     pub(super) topic_aliases: HashMap<u16, String>,
-    pub(super) external_packet_rx: Option<mpsc::Receiver<(Packet, Option<u64>)>>,
+    pub(super) external_packet_rx: Option<mpsc::Receiver<ExternalInput>>,
     pub(super) pending_external_flow_id: Option<u64>,
     pub(super) client_receive_maximum: u16,
     pub(super) server_receive_maximum: u16,
@@ -159,11 +166,7 @@ pub struct ClientHandler {
     pub(super) read_buffer: BytesMut,
     pub(super) skip_bridge_forwarding: bool,
     pub(super) pending_target_flow: Option<u64>,
-    pub(super) flow_closed_rx: Option<mpsc::Receiver<u64>>,
-    pub(super) flow_discard_rx: Option<mpsc::Receiver<(u64, oneshot::Sender<()>)>>,
-    #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
-    pub(super) flow_registry:
-        Option<Arc<tokio::sync::Mutex<crate::session::quic_flow::FlowRegistry>>>,
+    pub(super) flow_deadline: Option<Instant>,
     #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
     pub(super) quic_connection: Option<Arc<quinn::Connection>>,
     #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
@@ -173,7 +176,7 @@ pub struct ClientHandler {
     /// Feeds packets read off server-initiated QUIC data flows (the client's QoS>0 acks)
     /// back into this handler's packet loop.
     #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
-    pub(super) quic_packet_tx: Option<mpsc::Sender<(Packet, Option<u64>)>>,
+    pub(super) quic_packet_tx: Option<mpsc::Sender<ExternalInput>>,
     #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
     pub(super) quic_protocol_version_tx: Option<tokio::sync::watch::Sender<Option<u8>>>,
 }
@@ -216,7 +219,7 @@ impl ClientHandler {
         stats: Arc<BrokerStats>,
         resource_monitor: Arc<ResourceMonitor>,
         shutdown_rx: tokio::sync::broadcast::Receiver<()>,
-        external_packet_rx: Option<mpsc::Receiver<(Packet, Option<u64>)>>,
+        external_packet_rx: Option<mpsc::Receiver<ExternalInput>>,
     ) -> Self {
         let (qos1_tx, qos1_rx) = mpsc::channel(config.client_channel_capacity);
         let (qos0_tx, qos0_rx) = mpsc::channel(config.client_channel_capacity);
@@ -281,10 +284,7 @@ impl ClientHandler {
             read_buffer: BytesMut::with_capacity(4096),
             skip_bridge_forwarding: false,
             pending_target_flow: None,
-            flow_closed_rx: None,
-            flow_discard_rx: None,
-            #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
-            flow_registry: None,
+            flow_deadline: None,
             #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
             quic_connection: None,
             #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
@@ -321,7 +321,7 @@ impl ClientHandler {
     /// Supplies the channel that server data flows use to return the client's QoS>0 acks.
     #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
     #[must_use]
-    pub fn with_quic_packet_tx(mut self, tx: mpsc::Sender<(Packet, Option<u64>)>) -> Self {
+    pub fn with_quic_packet_tx(mut self, tx: mpsc::Sender<ExternalInput>) -> Self {
         self.quic_packet_tx = Some(tx);
         self
     }
@@ -333,32 +333,6 @@ impl ClientHandler {
         tx: tokio::sync::watch::Sender<Option<u8>>,
     ) -> Self {
         self.quic_protocol_version_tx = Some(tx);
-        self
-    }
-
-    #[must_use]
-    pub fn with_flow_closed_rx(mut self, rx: mpsc::Receiver<u64>) -> Self {
-        self.flow_closed_rx = Some(rx);
-        self
-    }
-
-    #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
-    #[must_use]
-    pub(crate) fn with_flow_discard_rx(
-        mut self,
-        rx: mpsc::Receiver<(u64, oneshot::Sender<()>)>,
-    ) -> Self {
-        self.flow_discard_rx = Some(rx);
-        self
-    }
-
-    #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
-    #[must_use]
-    pub fn with_flow_registry(
-        mut self,
-        registry: Arc<tokio::sync::Mutex<crate::session::quic_flow::FlowRegistry>>,
-    ) -> Self {
-        self.flow_registry = Some(registry);
         self
     }
 
@@ -413,11 +387,6 @@ impl ClientHandler {
             Ok(exit) => (Ok(()), exit),
             Err(e) => (Err(e), LoopExit::Closed),
         };
-
-        #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
-        if !matches!(exit, LoopExit::TakenOver(_)) {
-            self.close_unretained_flows().await;
-        }
 
         let armed_will = if let LoopExit::TakenOver(notice) = exit {
             self.hand_off(&queue, notice).await;
@@ -483,6 +452,8 @@ impl ClientHandler {
         } else {
             None
         };
+        #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
+        self.release_session_flows(client_id).await;
         let release = self.release_router_entry(client_id).await;
         if matches!(release, Release::Owned) {
             self.persist_session_end(client_id).await;
@@ -1055,6 +1026,7 @@ impl ClientHandler {
 
         loop {
             let (delivering, window_open) = self.delivery_gates();
+            let flow_deadline = self.flow_deadline;
             tokio::select! {
                 quiesced = Self::await_handoff_quiesce(
                     &mut self.released_rx,
@@ -1081,7 +1053,7 @@ impl ClientHandler {
                     if let Some(ref mut rx) = self.external_packet_rx {
                         rx.recv().await
                     } else {
-                        std::future::pending::<Option<(Packet, Option<u64>)>>().await
+                        std::future::pending::<Option<ExternalInput>>().await
                     }
                 } => {
                     if self.handle_external_packet(external_packet).await? {
@@ -1089,8 +1061,14 @@ impl ClientHandler {
                     }
                 }
 
-                flow_event = Self::next_flow_event(self.flow_closed_rx.as_mut(), self.flow_discard_rx.as_mut()) => {
-                    self.handle_flow_event(flow_event).await;
+                () = async move {
+                    match flow_deadline {
+                        Some(deadline) => tokio::time::sleep_until(deadline).await,
+                        None => std::future::pending::<()>().await,
+                    }
+                } => {
+                    #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
+                    self.expire_flows().await;
                 }
 
                 routable = async {
@@ -1158,10 +1136,16 @@ impl ClientHandler {
 
     async fn handle_external_packet(
         &mut self,
-        external_packet: Option<(Packet, Option<u64>)>,
+        external_packet: Option<ExternalInput>,
     ) -> Result<bool> {
-        let Some((packet, flow_id)) = external_packet else {
-            return Ok(false);
+        let (packet, flow_id) = match external_packet {
+            None => return Ok(false),
+            Some(ExternalInput::Packet(packet, flow_id)) => (packet, flow_id),
+            #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
+            Some(ExternalInput::Flow(input)) => {
+                self.handle_flow_input(input).await;
+                return Ok(true);
+            }
         };
         self.pending_external_flow_id = flow_id;
         let result = self.handle_packet(packet).await;

@@ -12,18 +12,19 @@ use crate::packet::Packet;
 use crate::protocol::v5::reason_codes::ReasonCode;
 use crate::validation::{parse_shared_subscription, topic_matches_filter, validate_topic_filter};
 use crate::QoS;
-use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, warn};
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
+use crate::broker::quic_flows::{Ended, FlowInput};
+#[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
+use std::sync::Arc;
+#[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
+use tokio::time::Instant;
 
 use crate::broker::router::{MessageRouter, RoutableMessage, Subscribed, Unsubscribed};
 use crate::broker::session_slot::SessionSlotGuard;
 
 use super::ClientHandler;
-
-pub(super) enum FlowEvent {
-    Closed(u64),
-    Discarded(u64, oneshot::Sender<()>),
-}
 
 struct AcceptedFilter<'a> {
     filter: &'a crate::packet::subscribe::TopicFilter,
@@ -76,11 +77,6 @@ impl ClientHandler {
 
         let subscription_id = subscribe.properties.get_subscription_identifier();
         for accepted in routed {
-            #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
-            if let Some(fid) = accepted.stored.flow_id {
-                self.track_flow_subscription(fid, &accepted.filter.filter)
-                    .await;
-            }
             self.deliver_retained_for_filter(
                 &accepted.filter.filter,
                 &accepted.filter.options,
@@ -436,148 +432,195 @@ impl ClientHandler {
         result
     }
 
-    pub(super) async fn next_flow_event(
-        closed_rx: Option<&mut mpsc::Receiver<u64>>,
-        discard_rx: Option<&mut mpsc::Receiver<(u64, oneshot::Sender<()>)>>,
-    ) -> Option<FlowEvent> {
-        let closed = async {
-            match closed_rx {
-                Some(rx) => rx.recv().await.map(FlowEvent::Closed),
-                None => std::future::pending().await,
-            }
+    #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
+    pub(super) async fn handle_flow_input(&mut self, input: FlowInput) {
+        let Some(client_id) = self.client_id.clone() else {
+            return;
         };
-        let discarded = async {
-            match discard_rx {
-                Some(rx) => rx
-                    .recv()
-                    .await
-                    .map(|(flow_id, done)| FlowEvent::Discarded(flow_id, done)),
-                None => std::future::pending().await,
-            }
-        };
-        tokio::select! {
-            event = closed => event,
-            event = discarded => event,
-        }
-    }
-
-    pub(super) async fn handle_flow_event(&mut self, event: Option<FlowEvent>) {
-        match event {
-            Some(FlowEvent::Closed(flow_id)) => self.handle_flow_closed(flow_id).await,
-            Some(FlowEvent::Discarded(flow_id, done)) => {
-                self.handle_flow_closed(flow_id).await;
-                if done.send(()).is_err() {
+        let generation = self.generation;
+        let now = Instant::now();
+        match input {
+            FlowInput::Opened(opening) => {
+                let opened = self
+                    .router
+                    .with_session_flows(&client_id, |flows| flows.open(generation, &opening, now));
+                if opened.drop_subscriptions {
+                    self.drop_flow_subscriptions(opening.flow_id).await;
+                }
+                self.refresh_flow_deadline(&client_id);
+                debug!(flow_id = opening.flow_id, answer = ?opened.answer, "Answered a client data flow");
+                if opening.answer.send(opened.answer).is_err() {
                     debug!(
-                        flow_id,
-                        "discard stream ended before its flow was discarded"
+                        flow_id = opening.flow_id,
+                        "Data stream ended before its flow was answered"
                     );
                 }
             }
-            None => {}
-        }
-    }
-
-    pub(super) async fn handle_flow_closed(&mut self, flow_id: u64) {
-        #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
-        if let Some(registry) = self.flow_registry.clone() {
-            let fid = crate::transport::flow::FlowId::from(flow_id);
-            let mut registry = registry.lock().await;
-            if registry
-                .get(fid)
-                .is_some_and(crate::session::quic_flow::FlowState::is_open)
-            {
-                return;
+            FlowInput::Ended {
+                flow_id,
+                stream_id,
+                graceful,
+            } => match self.router.with_session_flows(&client_id, |flows| {
+                flows.end(generation, flow_id, stream_id, graceful, now)
+            }) {
+                Ended::Removed => self.drop_flow_subscriptions(flow_id).await,
+                Ended::Kept => self.refresh_flow_deadline(&client_id),
+                Ended::Ignored => debug!(
+                    flow_id,
+                    stream_id, "Ignoring the end of a stream its flow no longer uses"
+                ),
+            },
+            FlowInput::Discard { flow_id, done } => {
+                if self
+                    .router
+                    .with_session_flows(&client_id, |flows| flows.discard(generation, flow_id))
+                {
+                    self.drop_flow_subscriptions(flow_id).await;
+                    self.refresh_flow_deadline(&client_id);
+                }
+                if done.send(()).is_err() {
+                    debug!(
+                        flow_id,
+                        "Discard stream ended before its flow was discarded"
+                    );
+                }
             }
-            registry.remove(fid);
         }
-        self.drop_flow_subscriptions(flow_id).await;
     }
 
-    async fn drop_flow_subscriptions(&mut self, flow_id: u64) {
-        let Some(ref client_id) = self.client_id else {
+    #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
+    fn refresh_flow_deadline(&mut self, client_id: &str) {
+        let generation = self.generation;
+        self.flow_deadline = self
+            .router
+            .with_session_flows(client_id, |flows| flows.deadline_for(generation));
+    }
+
+    #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
+    pub(super) async fn expire_flows(&mut self) {
+        let Some(client_id) = self.client_id.clone() else {
+            self.flow_deadline = None;
             return;
         };
+        let generation = self.generation;
+        while let Some(flow_id) = self.router.with_session_flows(&client_id, |flows| {
+            flows.take_expired_for(generation, Instant::now())
+        }) {
+            debug!(flow_id, "Flow state expired");
+            self.drop_flow_subscriptions(flow_id).await;
+        }
+        self.refresh_flow_deadline(&client_id);
+    }
 
-        let client_id = client_id.clone();
+    #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
+    pub(super) fn claim_session_flows(
+        &mut self,
+        client_id: &str,
+        generation: u64,
+        session: &mut crate::broker::storage::ClientSession,
+        fresh: bool,
+    ) {
+        let now = Instant::now();
+        self.flow_deadline = self.router.with_session_flows(client_id, |flows| {
+            flows.claim(generation, fresh, now);
+            session
+                .subscriptions
+                .retain(|_, sub| sub.flow_id.is_none_or(|flow_id| flows.holds(flow_id)));
+            flows.deadline_for(generation)
+        });
+    }
+
+    #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
+    pub(super) fn abandon_session_flows(&mut self, client_id: &str, generation: u64) {
+        self.flow_deadline = None;
+        self.router.with_session_flows(client_id, |flows| {
+            flows.release(generation, true, Instant::now())
+        });
+    }
+
+    #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
+    pub(super) async fn release_session_flows(&mut self, client_id: &str) {
+        let generation = self.generation;
+        let keep = self
+            .session
+            .as_ref()
+            .is_some_and(|session| session.expiry_interval != Some(0));
+        let now = Instant::now();
+        if !self
+            .router
+            .with_session_flows(client_id, |flows| flows.release(generation, keep, now))
+        {
+            return;
+        }
+        self.flow_deadline = None;
+        while let Some(flow_id) = self.unheld_flow(client_id) {
+            self.remove_flow_subscriptions(client_id, flow_id).await;
+        }
+        if let Some(epoch) = self.router.with_session_flows(client_id, |flows| {
+            flows.next_deadline().map(|_| flows.arm_expiry())
+        }) {
+            tokio::spawn(
+                Arc::clone(&self.router).expire_unowned_flows(client_id.to_string(), epoch),
+            );
+        }
+    }
+
+    #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
+    fn unheld_flow(&self, client_id: &str) -> Option<u64> {
+        self.session
+            .as_ref()?
+            .subscriptions
+            .values()
+            .filter_map(|sub| sub.flow_id)
+            .find(|flow_id| {
+                !self
+                    .router
+                    .with_session_flows(client_id, |flows| flows.holds(*flow_id))
+            })
+    }
+
+    #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
+    async fn drop_flow_subscriptions(&mut self, flow_id: u64) {
+        let Some(client_id) = self.client_id.clone() else {
+            return;
+        };
         let slot = self.router.lock_session(&client_id).await;
+        self.remove_flow_subscriptions(&client_id, flow_id).await;
+        drop(slot);
+    }
+
+    #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
+    async fn remove_flow_subscriptions(&mut self, client_id: &str, flow_id: u64) {
         let removed_filters = self
             .router
-            .unsubscribe_by_flow(Some(self.generation), &client_id, flow_id)
+            .unsubscribe_by_flow(Some(self.generation), client_id, flow_id)
             .await;
+        if let Some(session) = self.session.as_mut() {
+            session
+                .subscriptions
+                .retain(|_, sub| sub.flow_id != Some(flow_id));
+        }
+        if let Some(ref mut ssm) = self.server_stream_manager {
+            ssm.remove_flow_stream(flow_id);
+        }
         if removed_filters.is_empty() {
             return;
         }
-
         debug!(
             client_id = %client_id,
             flow_id = flow_id,
             count = removed_filters.len(),
-            "Removed flow-bound subscriptions on flow close"
+            "Removed flow-bound subscriptions"
         );
-
-        if let Some(session) = self.session.as_mut() {
-            for filter in &removed_filters {
-                session.remove_subscription(filter);
-            }
-        }
-        let persisted = self
+        if let Err(e) = self
             .update_stored_session(move |session| {
-                for filter in &removed_filters {
-                    session.remove_subscription(filter);
-                }
+                session
+                    .subscriptions
+                    .retain(|_, sub| sub.flow_id != Some(flow_id));
             })
-            .await;
-        drop(slot);
-        if let Err(e) = persisted {
-            warn!("Failed to store session after flow close: {e}");
-        }
-
-        #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
-        if let Some(ref mut ssm) = self.server_stream_manager {
-            ssm.remove_flow_stream(flow_id);
-        }
-    }
-
-    #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
-    pub(super) async fn close_unretained_flows(&mut self) {
-        while let Some(flow_id) = self
-            .flow_closed_rx
-            .as_mut()
-            .and_then(|rx| rx.try_recv().ok())
+            .await
         {
-            self.handle_flow_closed(flow_id).await;
-        }
-        let Some(registry) = self.flow_registry.clone() else {
-            return;
-        };
-        let registry = registry.lock().await;
-        for (id, _) in registry
-            .client_flows()
-            .filter(|(_, state)| state.expire_interval.is_none())
-        {
-            self.drop_flow_subscriptions(id.raw()).await;
-        }
-    }
-
-    #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
-    async fn track_flow_subscription(&self, flow_id: u64, topic_filter: &str) {
-        if let Some(ref registry) = self.flow_registry {
-            let fid = crate::transport::flow::FlowId::from(flow_id);
-            let mut reg = registry.lock().await;
-            if let Some(state) = reg.get_mut(fid) {
-                state.add_subscription(topic_filter.to_string());
-            }
-        }
-    }
-
-    #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
-    async fn untrack_flow_subscription(&self, flow_id: u64, topic_filter: &str) {
-        if let Some(ref registry) = self.flow_registry {
-            let fid = crate::transport::flow::FlowId::from(flow_id);
-            let mut reg = registry.lock().await;
-            if let Some(state) = reg.get_mut(fid) {
-                state.remove_subscription(topic_filter);
-            }
+            warn!("Failed to store session after removing flow-bound subscriptions: {e}");
         }
     }
 
@@ -628,13 +671,6 @@ impl ClientHandler {
             }
         }
         drop(slot);
-
-        #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
-        if let Some(fid) = self.pending_external_flow_id {
-            for topic_filter in &removed_filters {
-                self.untrack_flow_subscription(fid, topic_filter).await;
-            }
-        }
 
         let mut unsuback = if self.protocol_version == 4 {
             UnsubAckPacket::new_v311(unsubscribe.packet_id)

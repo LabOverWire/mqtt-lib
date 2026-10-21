@@ -1,6 +1,7 @@
 use crate::broker::auth::AuthProvider;
-use crate::broker::client_handler::ClientHandler;
+use crate::broker::client_handler::{ClientHandler, ExternalInput};
 use crate::broker::config::BrokerConfig;
+use crate::broker::quic_flows::{FlowAnswer, FlowInput, FlowOpening};
 use crate::broker::resource_monitor::ResourceMonitor;
 use crate::broker::router::MessageRouter;
 use crate::broker::storage::DynamicStorage;
@@ -8,7 +9,6 @@ use crate::broker::sys_topics::BrokerStats;
 use crate::broker::transport::BrokerTransport;
 use crate::error::{MqttError, Result};
 use crate::packet::{FixedHeader, Packet};
-use crate::session::quic_flow::{FlowRegistry, FlowState};
 use crate::transport::flow::{
     FlowFlags, FlowHeader, FlowId, FLOW_TYPE_CLIENT_DATA, FLOW_TYPE_CONTROL, FLOW_TYPE_SERVER_DATA,
     FLOW_TYPE_USER_DEFINED,
@@ -26,7 +26,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio::sync::{broadcast, mpsc, oneshot, watch, Mutex};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tracing::{debug, error, instrument, trace, warn};
 
 use super::tls_acceptor::TlsAcceptorConfig;
@@ -347,7 +347,7 @@ enum StreamOpening {
 struct FlowHeaderResult {
     flow_id: Option<FlowId>,
     flags: Option<FlowFlags>,
-    expire: Option<Duration>,
+    expire: Duration,
     leftover: BytesMut,
 }
 
@@ -362,7 +362,7 @@ async fn try_read_flow_header(recv: &mut RecvStream) -> Result<StreamOpening> {
         return Ok(StreamOpening::Flow(FlowHeaderResult {
             flow_id: None,
             flags: None,
-            expire: None,
+            expire: Duration::ZERO,
             leftover: BytesMut::new(),
         }));
     };
@@ -371,7 +371,7 @@ async fn try_read_flow_header(recv: &mut RecvStream) -> Result<StreamOpening> {
         return Ok(StreamOpening::Flow(FlowHeaderResult {
             flow_id: None,
             flags: None,
-            expire: None,
+            expire: Duration::ZERO,
             leftover: BytesMut::new(),
         }));
     }
@@ -384,7 +384,7 @@ async fn try_read_flow_header(recv: &mut RecvStream) -> Result<StreamOpening> {
         return Ok(StreamOpening::Flow(FlowHeaderResult {
             flow_id: None,
             flags: None,
-            expire: None,
+            expire: Duration::ZERO,
             leftover,
         }));
     }
@@ -428,11 +428,7 @@ async fn try_read_flow_header(recv: &mut RecvStream) -> Result<StreamOpening> {
 fn build_flow_header_result(flow_header: FlowHeader, leftover: BytesMut) -> StreamOpening {
     match flow_header {
         FlowHeader::ClientData(h) if h.flow_id.is_client_initiated() => {
-            let expire = if h.expire_interval > 0 {
-                Some(Duration::from_secs(h.expire_interval))
-            } else {
-                None
-            };
+            let expire = Duration::from_secs(h.expire_interval);
             trace!(flow_id = ?h.flow_id, expire = ?expire, "Parsed data flow header");
             StreamOpening::Flow(FlowHeaderResult {
                 flow_id: Some(h.flow_id),
@@ -507,10 +503,7 @@ async fn run_quic_handler_inner(
     skip_bridge_forwarding: bool,
     label: &'static str,
 ) {
-    let (packet_tx, packet_rx) = mpsc::channel::<(Packet, Option<u64>)>(100);
-    let (flow_closed_tx, flow_closed_rx) = mpsc::channel::<u64>(32);
-    let (flow_discard_tx, flow_discard_rx) = mpsc::channel(32);
-    let flow_registry = Arc::new(Mutex::new(FlowRegistry::new(256)));
+    let (packet_tx, packet_rx) = mpsc::channel::<ExternalInput>(100);
     let (protocol_version_tx, protocol_version_rx) = watch::channel(None);
 
     let (send, recv) = match connection.accept_bi().await {
@@ -549,10 +542,7 @@ async fn run_quic_handler_inner(
     .with_server_delivery_strategy(delivery_strategy)
     .with_quic_packet_tx(packet_tx.clone())
     .with_quic_protocol_version_tx(protocol_version_tx)
-    .with_skip_bridge_forwarding(skip_bridge_forwarding)
-    .with_flow_closed_rx(flow_closed_rx)
-    .with_flow_discard_rx(flow_discard_rx)
-    .with_flow_registry(flow_registry.clone());
+    .with_skip_bridge_forwarding(skip_bridge_forwarding);
 
     let handler_label = label;
     let handler_connection = connection.clone();
@@ -577,13 +567,7 @@ async fn run_quic_handler_inner(
         max_packet_size,
         label,
     );
-    spawn_bi_accept_loop(
-        connection.clone(),
-        flow_registry.clone(),
-        flow_discard_tx,
-        peer_addr,
-        label,
-    );
+    spawn_bi_accept_loop(connection.clone(), packet_tx.clone(), peer_addr, label);
     spawn_quic_stats_sampler(connection.clone(), peer_addr);
     spawn_uni_accept_loop(
         DataStreamContext {
@@ -591,8 +575,6 @@ async fn run_quic_handler_inner(
             packet_tx,
             protocol_version_rx,
             peer_addr,
-            flow_registry,
-            flow_closed_tx,
             max_packet_size,
         },
         label,
@@ -671,7 +653,7 @@ async fn negotiated_protocol_version(mut rx: watch::Receiver<Option<u8>>) -> Opt
 
 fn spawn_datagram_reader(
     connection: Arc<Connection>,
-    packet_tx: mpsc::Sender<(Packet, Option<u64>)>,
+    packet_tx: mpsc::Sender<ExternalInput>,
     protocol_version_rx: watch::Receiver<Option<u8>>,
     peer_addr: SocketAddr,
     max_packet_size: usize,
@@ -703,7 +685,11 @@ fn spawn_datagram_reader(
                         }
                         None => continue,
                     };
-                    if packet_tx.send((packet, None)).await.is_err() {
+                    if packet_tx
+                        .send(ExternalInput::Packet(packet, None))
+                        .await
+                        .is_err()
+                    {
                         debug!("Datagram packet channel closed for {}", peer_addr);
                         break;
                     }
@@ -719,8 +705,7 @@ fn spawn_datagram_reader(
 
 fn spawn_bi_accept_loop(
     connection: Arc<Connection>,
-    flow_registry: Arc<Mutex<FlowRegistry>>,
-    flow_discard_tx: mpsc::Sender<(u64, oneshot::Sender<()>)>,
+    packet_tx: mpsc::Sender<ExternalInput>,
     peer_addr: SocketAddr,
     label: &'static str,
 ) {
@@ -729,13 +714,7 @@ fn spawn_bi_accept_loop(
             match connection.accept_bi().await {
                 Ok((send, recv)) => {
                     debug!("{} bidirectional stream accepted from {}", label, peer_addr);
-                    spawn_bi_stream_handler(
-                        send,
-                        recv,
-                        peer_addr,
-                        flow_registry.clone(),
-                        flow_discard_tx.clone(),
-                    );
+                    spawn_bi_stream_handler(send, recv, peer_addr, packet_tx.clone());
                 }
                 Err(e) => {
                     let reason = crate::transport::quic_error::parse_connection_error(&e);
@@ -750,11 +729,9 @@ fn spawn_bi_accept_loop(
 #[derive(Clone)]
 struct DataStreamContext {
     connection: Arc<Connection>,
-    packet_tx: mpsc::Sender<(Packet, Option<u64>)>,
+    packet_tx: mpsc::Sender<ExternalInput>,
     protocol_version_rx: watch::Receiver<Option<u8>>,
     peer_addr: SocketAddr,
-    flow_registry: Arc<Mutex<FlowRegistry>>,
-    flow_closed_tx: mpsc::Sender<u64>,
     max_packet_size: usize,
 }
 
@@ -828,8 +805,7 @@ fn spawn_bi_stream_handler(
     mut send: SendStream,
     mut recv: RecvStream,
     peer_addr: SocketAddr,
-    flow_registry: Arc<Mutex<FlowRegistry>>,
-    flow_discard_tx: mpsc::Sender<(u64, oneshot::Sender<()>)>,
+    packet_tx: mpsc::Sender<ExternalInput>,
 ) {
     tokio::spawn(async move {
         let result = match try_read_flow_header(&mut recv).await {
@@ -857,17 +833,12 @@ fn spawn_bi_stream_handler(
             return;
         }
 
-        if let Some(state) = flow_registry.lock().await.remove(flow_id) {
-            debug!(flow_id = ?flow_id, "discarded flow state for {peer_addr}: {state:?}");
-        }
-
-        let (discarded_tx, discarded_rx) = oneshot::channel();
-        if flow_discard_tx
-            .send((flow_id.raw(), discarded_tx))
-            .await
-            .is_err()
-            || discarded_rx.await.is_err()
-        {
+        let (done, discarded) = oneshot::channel();
+        let discard = FlowInput::Discard {
+            flow_id: flow_id.raw(),
+            done,
+        };
+        if packet_tx.send(ExternalInput::Flow(discard)).await.is_err() || discarded.await.is_err() {
             debug!(flow_id = ?flow_id, "client handler ended before the flow was discarded");
         }
 
@@ -937,6 +908,35 @@ fn close_connection(connection: &Connection, code: mqtt5_protocol::QuicConnectio
     );
 }
 
+fn stop_data_stream(recv: &mut RecvStream, peer_addr: SocketAddr, code: QuicStreamCode) {
+    debug!(%code, "refusing data stream from {peer_addr}");
+    if let Err(e) = recv.stop(quinn::VarInt::from_u32(code.code())) {
+        debug!("data stream from {peer_addr} already closed before stop: {e}");
+    }
+}
+
+async fn open_flow(
+    packet_tx: &mpsc::Sender<ExternalInput>,
+    flow_id: FlowId,
+    stream_id: u64,
+    flags: FlowFlags,
+    expire: Duration,
+) -> Option<FlowAnswer> {
+    let (answer, answered) = oneshot::channel();
+    let opening = FlowOpening {
+        flow_id: flow_id.raw(),
+        stream_id,
+        flags,
+        expire,
+        answer,
+    };
+    packet_tx
+        .send(ExternalInput::Flow(FlowInput::Opened(opening)))
+        .await
+        .ok()?;
+    answered.await.ok()
+}
+
 fn spawn_data_stream_reader(context: DataStreamContext, mut recv: RecvStream) {
     tokio::spawn(async move {
         let DataStreamContext {
@@ -944,8 +944,6 @@ fn spawn_data_stream_reader(context: DataStreamContext, mut recv: RecvStream) {
             packet_tx,
             protocol_version_rx,
             peer_addr,
-            flow_registry,
-            flow_closed_tx,
             max_packet_size,
         } = context;
         let Some(protocol_version) = negotiated_protocol_version(protocol_version_rx).await else {
@@ -955,35 +953,36 @@ fn spawn_data_stream_reader(context: DataStreamContext, mut recv: RecvStream) {
         let stream_id = u64::from(recv.id());
         let (flow_id, mut buffer) = match try_read_flow_header(&mut recv).await {
             Ok(StreamOpening::Refused(code)) => {
-                debug!(%code, "refusing data stream from {peer_addr}");
-                if let Err(e) = recv.stop(quinn::VarInt::from_u32(code.code())) {
-                    debug!("data stream from {peer_addr} already closed before stop: {e}");
-                }
+                stop_data_stream(&mut recv, peer_addr, code);
                 return;
             }
+            Ok(StreamOpening::Flow(FlowHeaderResult {
+                flow_id: Some(id),
+                flags: Some(flags),
+                expire,
+                leftover,
+            })) => match open_flow(&packet_tx, id, stream_id, flags, expire).await {
+                Some(FlowAnswer::Served) => {
+                    debug!(flow_id = ?id, "Serving flow from {}", peer_addr);
+                    (Some(id), leftover)
+                }
+                Some(FlowAnswer::Refused(code)) => {
+                    stop_data_stream(&mut recv, peer_addr, code);
+                    return;
+                }
+                Some(FlowAnswer::Close(code)) => {
+                    warn!(flow_id = ?id, %code, "closing QUIC connection from {peer_addr}");
+                    close_connection(&connection, code);
+                    return;
+                }
+                None => {
+                    debug!(flow_id = ?id, "client handler ended before answering the flow from {peer_addr}");
+                    return;
+                }
+            },
             Ok(StreamOpening::Flow(result)) => {
-                let flow_id = if let (Some(id), Some(flags)) = (result.flow_id, result.flags) {
-                    let mut state = FlowState::new_client_data(id, flags, result.expire);
-                    state.set_stream_id(stream_id);
-                    if let Err(e) = state.open() {
-                        debug!(flow_id = ?id, "flow state not opened: {e}");
-                    }
-                    if !flow_registry.lock().await.register_flow(state) {
-                        warn!(flow_id = ?id, "refusing flow from {peer_addr}: flow registry full");
-                        if let Err(e) =
-                            recv.stop(quinn::VarInt::from_u32(QuicStreamCode::FlowRefused.code()))
-                        {
-                            debug!("data stream from {peer_addr} already closed before stop: {e}");
-                        }
-                        return;
-                    }
-                    debug!(flow_id = ?id, "Registered flow from {}", peer_addr);
-                    Some(id)
-                } else {
-                    trace!("No flow header on data stream from {}", peer_addr);
-                    None
-                };
-                (flow_id, result.leftover)
+                trace!("No flow header on data stream from {}", peer_addr);
+                (None, result.leftover)
             }
             Err(e) => {
                 warn!("Error parsing flow header from {}: {}", peer_addr, e);
@@ -991,109 +990,52 @@ fn spawn_data_stream_reader(context: DataStreamContext, mut recv: RecvStream) {
             }
         };
 
-        let end = loop {
+        let graceful = loop {
             match read_packet_with_buffer(&mut recv, &mut buffer, protocol_version, max_packet_size)
                 .await
             {
                 Ok(packet) => {
-                    if let Some(id) = flow_id {
-                        let mut registry = flow_registry.lock().await;
-                        registry.touch(id);
-                    }
                     let raw_flow_id = flow_id.map(|f| f.raw());
                     debug!(flow_id = ?flow_id, packet_type = %packet.packet_type_name(), "Read packet from QUIC data stream");
-                    if packet_tx.send((packet, raw_flow_id)).await.is_err() {
+                    if packet_tx
+                        .send(ExternalInput::Packet(packet, raw_flow_id))
+                        .await
+                        .is_err()
+                    {
                         debug!("Packet channel closed, stopping data stream reader");
-                        break FlowEnd::Aborted;
+                        break false;
                     }
                 }
                 Err(MqttError::ClientClosed) if buffer.is_empty() => {
                     debug!(flow_id = ?flow_id, "QUIC data stream closed from {}", peer_addr);
-                    break FlowEnd::Graceful;
+                    break true;
                 }
                 Err(MqttError::ClientClosed) => {
                     warn!(flow_id = ?flow_id, "QUIC data stream from {peer_addr} ended inside a packet");
-                    break FlowEnd::Aborted;
+                    break false;
                 }
                 Err(MqttError::ConnectionError(reason)) => {
                     debug!(flow_id = ?flow_id, "QUIC data stream from {peer_addr} ended: {reason}");
-                    break FlowEnd::Aborted;
+                    break false;
                 }
                 Err(e) => {
                     close_on_protocol_error(&connection, peer_addr, "data stream", &e);
-                    break FlowEnd::Aborted;
+                    break false;
                 }
             }
         };
 
         if let Some(id) = flow_id {
-            end_flow(
-                id,
+            let ended = FlowInput::Ended {
+                flow_id: id.raw(),
                 stream_id,
-                end,
-                &connection,
-                &flow_registry,
-                &flow_closed_tx,
-            )
-            .await;
+                graceful,
+            };
+            if packet_tx.send(ExternalInput::Flow(ended)).await.is_err() {
+                debug!(flow_id = ?id, "client handler ended before the flow did");
+            }
         }
     });
-}
-
-#[derive(Debug, Clone, Copy)]
-enum FlowEnd {
-    Graceful,
-    Aborted,
-}
-
-async fn end_flow(
-    id: FlowId,
-    stream_id: u64,
-    end: FlowEnd,
-    connection: &Connection,
-    flow_registry: &Mutex<FlowRegistry>,
-    flow_closed_tx: &mpsc::Sender<u64>,
-) {
-    let retained = {
-        let mut registry = flow_registry.lock().await;
-        let Some(state) = registry
-            .get_mut(id)
-            .filter(|state| state.stream_id == Some(stream_id))
-        else {
-            debug!(flow_id = ?id, "flow moved to a newer stream before this one ended");
-            return;
-        };
-        if let Err(e) = state.close() {
-            debug!(flow_id = ?id, "flow state not closed: {e}");
-        }
-        if let (FlowEnd::Aborted, Some(interval)) = (end, state.expire_interval) {
-            Some(interval)
-        } else {
-            state.expire_interval = None;
-            None
-        }
-    };
-
-    if let Some(interval) = retained {
-        debug!(flow_id = ?id, ?interval, "Keeping aborted flow state until it expires");
-        tokio::select! {
-            () = tokio::time::sleep(interval) => {}
-            _ = connection.closed() => return,
-        }
-        let mut registry = flow_registry.lock().await;
-        let Some(state) = registry
-            .get_mut(id)
-            .filter(|state| state.stream_id == Some(stream_id) && state.is_closed())
-        else {
-            return;
-        };
-        state.expire_interval = None;
-    }
-
-    debug!(flow_id = ?id, ?end, "Flow ended");
-    if flow_closed_tx.send(id.raw()).await.is_err() {
-        debug!(flow_id = ?id, "client handler ended before the flow closed");
-    }
 }
 
 #[cfg(test)]

@@ -39,6 +39,20 @@
 
 ## Diary Entries
 
+### QUIC flow recovery (2026-10-21)
+
+**Trigger**: #252, and the two cases #254 left to it.
+
+**Spec**: MQoQ §9.8 and §9.15. A flow owner recovers a flow by opening it again with `clean` 0. If the receiver has no state for it and `abort_if_no_state` is set, it MUST stop the flow with ERROR_NO_FLOW_STATE; if the flag is unset, it MUST NOT. A second recovery after that refusal is a level 0 protocol error, and the connection SHOULD be closed with ERROR_TOO_MANY_RECOVER_ATTEMPTS. `clean` 1 makes both ends discard the flow's previous state, and both flags set is a level 1 protocol error, which discards the state. §9.13 says an aborted flow keeps its state until it expires, and a connection closing is an abort, so the state has to outlive the connection. The spec lists ERROR_NO_FLOW_STATE as both 0xB3 and 0xC1; the broker uses 0xB3, as `QuicStreamCode::NoFlowState` does.
+
+**Behavior on main**, with a raw QUIC client: a recovery with no state was served with or without `abort_if_no_state`, so a second one was served too; `clean` 1 kept the subscriptions of the flow it replaced; both flags set was served. The registry was per connection and its expiry timer stopped when the connection closed, so a flow aborted by a closed connection kept its subscriptions in the session forever, and a connection that took over the session inherited the subscriptions of the old connection's expire-0 flows.
+
+**Model**: `specs/tla/flow-recovery` compares the old design, a per-connection registry that honors the flags, and four designs with the state in the session, against three properties: every header gets the answer the rules give, no subscription is removed while the spec still has it, and nothing stale is left once the broker is idle. Only the design with the session registry, a discard that finishes before the new stream is served, a lookup that checks the deadline, and conversion of the old connection's flows when a connection claims the session holds all three, exhaustively at 3 and 4 streams.
+
+**Fix**: the flow state is a per-session table in the router. The client handler is its only writer: a stream reader sends the flow header and waits for the answer, and sends the stream's end on the same channel as its packets. Claiming a session converts the open flows of earlier connections (kept until the expire interval runs out, or removed if it is 0) and drops subscriptions of flows the table no longer holds; releasing it does the same for the owner's flows. A connection expires kept flows from its own loop, and a task does it while the session has no connection. Flow state is not persisted, so restoring sessions at startup drops flow-bound subscriptions.
+
+**Tests**: six new tests in `quic_flow_streams.rs` fail on main and pass with the fix: refusal only with `abort_if_no_state`, the connection close on a second attempt, recovery without `clean` and a fresh start with it, both flags set, recovery across a reconnect until the expire interval runs out, and a takeover dropping expire-0 flow subscriptions. The other 20 tests in the file pass on both.
+
 ### Load balancer and MQTT 3.1.1 (2026-10-21)
 
 **Trigger**: #259, the open item from the previous entry.

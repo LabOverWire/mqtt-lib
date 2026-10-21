@@ -523,8 +523,12 @@ impl ClientHandler {
 
         let generation = self.router.allocate_generation();
         session.mark_connected(generation);
+        #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
+        self.claim_session_flows(&client_id, generation, &mut session, !resume);
         if let Some(storage) = self.storage.clone() {
             if let Err(e) = Self::write_claim(&storage, &session, resume).await {
+                #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
+                self.abandon_session_flows(&client_id, generation);
                 drop(slot);
                 warn!(client_id = %client_id, "Failed to store the claimed session: {e}");
                 let connack = self.new_connack(false, ReasonCode::ServerUnavailable);

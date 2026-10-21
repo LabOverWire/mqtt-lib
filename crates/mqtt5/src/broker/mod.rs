@@ -38,6 +38,8 @@ pub mod events;
 pub mod hot_reload;
 #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
 pub mod quic_acceptor;
+#[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
+pub mod quic_flows;
 pub mod resource_monitor;
 pub mod router;
 #[cfg(not(target_arch = "wasm32"))]

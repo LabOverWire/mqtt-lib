@@ -185,6 +185,8 @@ pub struct MessageRouter {
     next_generation: std::sync::atomic::AtomicU64,
     pending_wills: parking_lot::Mutex<HashMap<String, PendingWill>>,
     session_slots: SessionSlots,
+    #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
+    session_flows: parking_lot::Mutex<HashMap<String, crate::broker::quic_flows::SessionFlows>>,
 }
 
 struct PendingWill {
@@ -366,6 +368,8 @@ impl MessageRouter {
             next_generation: std::sync::atomic::AtomicU64::new(generation_epoch()),
             pending_wills: parking_lot::Mutex::new(HashMap::new()),
             session_slots: SessionSlots::default(),
+            #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
+            session_flows: parking_lot::Mutex::new(HashMap::new()),
         }
     }
 
@@ -403,6 +407,8 @@ impl MessageRouter {
             next_generation: std::sync::atomic::AtomicU64::new(generation_epoch()),
             pending_wills: parking_lot::Mutex::new(HashMap::new()),
             session_slots: SessionSlots::default(),
+            #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
+            session_flows: parking_lot::Mutex::new(HashMap::new()),
         }
     }
 
@@ -900,6 +906,8 @@ impl MessageRouter {
         self.remove_client_subscriptions(client_id).await;
         self.change_only_states.write().await.remove(client_id);
         self.queue_handle(client_id).clear(None);
+        #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
+        self.session_flows.lock().remove(client_id);
         had_subscriptions
     }
 
@@ -969,6 +977,9 @@ impl MessageRouter {
             session.mark_disconnected(boot);
         }
         session.expiry_interval = capped;
+        let subscriptions = session.subscriptions.len();
+        session.subscriptions.retain(|_, sub| sub.flow_id.is_none());
+        let unbound = session.subscriptions.len() != subscriptions;
         if session.expiry_interval == Some(0) || session.is_expired() {
             if let Err(e) = storage
                 .remove_owned_session(&client_id, session.connection_token)
@@ -978,7 +989,7 @@ impl MessageRouter {
             }
             return false;
         }
-        if stamp || capped != stored_expiry {
+        if stamp || unbound || capped != stored_expiry {
             if let Err(e) = storage.store_session(session.clone()).await {
                 warn!("Failed to stamp the disconnect time of {client_id}: {e}");
                 return false;
@@ -991,6 +1002,86 @@ impl MessageRouter {
         self.load_change_only_state(&client_id, session.change_only_state.clone())
             .await;
         true
+    }
+
+    #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
+    pub(crate) fn with_session_flows<R>(
+        &self,
+        client_id: &str,
+        update: impl FnOnce(&mut crate::broker::quic_flows::SessionFlows) -> R,
+    ) -> R {
+        let mut tables = self.session_flows.lock();
+        if let Some(flows) = tables.get_mut(client_id) {
+            let result = update(flows);
+            if flows.is_idle() {
+                tables.remove(client_id);
+            }
+            return result;
+        }
+        let mut flows = crate::broker::quic_flows::SessionFlows::default();
+        let result = update(&mut flows);
+        if !flows.is_idle() {
+            tables.insert(client_id.to_string(), flows);
+        }
+        result
+    }
+
+    #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
+    pub(crate) async fn expire_unowned_flows(self: Arc<Self>, client_id: String, epoch: u64) {
+        loop {
+            let Some(deadline) = self.with_session_flows(&client_id, |flows| {
+                flows
+                    .expiry_armed(epoch)
+                    .then(|| flows.next_deadline())
+                    .flatten()
+            }) else {
+                return;
+            };
+            tokio::time::sleep_until(deadline).await;
+            let slot = self.lock_session(&client_id).await;
+            while let Some(flow_id) = self.with_session_flows(&client_id, |flows| {
+                flows
+                    .expiry_armed(epoch)
+                    .then(|| flows.take_expired(Instant::now()))
+                    .flatten()
+            }) {
+                self.drop_unowned_flow_subscriptions(&client_id, flow_id)
+                    .await;
+            }
+            drop(slot);
+        }
+    }
+
+    #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
+    async fn drop_unowned_flow_subscriptions(&self, client_id: &str, flow_id: u64) {
+        let removed = self.unsubscribe_by_flow(None, client_id, flow_id).await;
+        debug!(
+            client_id,
+            flow_id,
+            count = removed.len(),
+            "Flow state expired while the session had no connection"
+        );
+        let Some(storage) = &self.storage else {
+            return;
+        };
+        let token = match storage.get_session(client_id).await {
+            Ok(Some(session)) => session.connection_token,
+            Ok(None) => return,
+            Err(e) => {
+                warn!("Failed to read session for {client_id} after a flow expired: {e}");
+                return;
+            }
+        };
+        if let Err(e) = storage
+            .update_session(client_id, token, |session| {
+                session
+                    .subscriptions
+                    .retain(|_, sub| sub.flow_id != Some(flow_id));
+            })
+            .await
+        {
+            warn!("Failed to store session for {client_id} after a flow expired: {e}");
+        }
     }
 
     pub async fn is_connected(&self, client_id: &str) -> bool {

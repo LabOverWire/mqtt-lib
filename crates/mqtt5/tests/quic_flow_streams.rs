@@ -693,6 +693,165 @@ async fn a_closed_connection_drops_subscriptions_of_flows_with_expire_zero() {
     assert!(!delivered_after_reconnect(300, true).await);
 }
 
+const RECOVER_IF_KEPT: FlowFlags = FlowFlags {
+    optional_headers: 0,
+    persistent_subscriptions: 1,
+    persistent_topic_alias: 0,
+    persistent_qos: 0,
+    err_tolerance: 0,
+    abort_if_no_state: 1,
+    clean: 0,
+};
+
+const CLEAN_START: FlowFlags = FlowFlags {
+    clean: 1,
+    abort_if_no_state: 0,
+    ..RECOVER_IF_KEPT
+};
+
+async fn uni_end(stream: &mut quinn::SendStream) -> StreamEnd {
+    match tokio::time::timeout(Duration::from_secs(1), stream.stopped()).await {
+        Ok(Ok(Some(code))) => StreamEnd::Stopped(code.into_inner()),
+        Ok(_) => StreamEnd::Finished,
+        Err(_) => StreamEnd::Open,
+    }
+}
+
+async fn reopen_flow(split: &QuicSplitResult, flags: FlowFlags) -> (quinn::SendStream, StreamEnd) {
+    let mut flow = split.connection.open_uni().await.expect("open flow");
+    flow.write_all(&with_pingreq(data_flow(5, 300, flags)))
+        .await
+        .expect("reopen flow");
+    let end = uni_end(&mut flow).await;
+    (flow, end)
+}
+
+#[tokio::test]
+async fn recovering_a_flow_without_state_is_refused_only_when_asked() {
+    for (flags, refused) in [
+        (RECOVER_IF_KEPT, true),
+        (
+            FlowFlags {
+                abort_if_no_state: 0,
+                ..RECOVER_IF_KEPT
+            },
+            false,
+        ),
+    ] {
+        let expected = if refused {
+            StreamEnd::Stopped(code(QuicStreamCode::NoFlowState))
+        } else {
+            StreamEnd::Open
+        };
+        assert_eq!(
+            on_uni(&with_pingreq(data_flow(1, 0, flags))).await,
+            (expected, STILL_SERVED)
+        );
+    }
+}
+
+#[tokio::test]
+async fn recovering_again_after_no_flow_state_closes_the_connection() {
+    let (broker, split) = connected_session("repeated-recovery").await;
+    let (_first, first_end) = reopen_flow(&split, RECOVER_IF_KEPT).await;
+    let mut second = split.connection.open_uni().await.expect("open flow");
+    if let Err(e) = second
+        .write_all(&with_pingreq(data_flow(5, 300, RECOVER_IF_KEPT)))
+        .await
+    {
+        tracing::debug!("second recovery not written: {e}");
+    }
+    let closed = close_code(&split.connection).await;
+    broker.stop().await;
+    assert_eq!(
+        first_end,
+        StreamEnd::Stopped(code(QuicStreamCode::NoFlowState))
+    );
+    assert_eq!(
+        closed,
+        Some(u64::from(QuicConnectionCode::TooManyRecoverAttempts.code()))
+    );
+}
+
+async fn reopened_after_abort(flags: FlowFlags) -> (StreamEnd, bool) {
+    let (broker, mut split) = connected_session("flow-reopen").await;
+    let mut flow = subscribe_on_flow(&mut split, 300, CLEAN_START).await;
+    flow.reset(quinn::VarInt::from_u32(
+        QuicStreamCode::FlowCancelled.code(),
+    ))
+    .expect("abort flow");
+    tokio::time::sleep(SHORTLY).await;
+    let (_reopened, end) = reopen_flow(&split, flags).await;
+    let delivered = delivered_on_flow_subscription(&mut split).await;
+    broker.stop().await;
+    (end, delivered)
+}
+
+#[tokio::test]
+async fn reopening_an_aborted_flow_keeps_its_subscriptions_only_without_clean() {
+    assert_eq!(
+        reopened_after_abort(RECOVER_IF_KEPT).await,
+        (StreamEnd::Open, true)
+    );
+    assert_eq!(
+        reopened_after_abort(CLEAN_START).await,
+        (StreamEnd::Open, false)
+    );
+}
+
+#[tokio::test]
+async fn clean_with_abort_if_no_state_discards_the_flow() {
+    assert_eq!(
+        reopened_after_abort(FlowFlags {
+            clean: 1,
+            ..RECOVER_IF_KEPT
+        })
+        .await,
+        (
+            StreamEnd::Stopped(code(QuicStreamCode::DiscardState)),
+            false
+        )
+    );
+}
+
+async fn recovered_after_reconnect(expire: u64, away: Duration) -> (StreamEnd, bool) {
+    let (broker, addr) = Broker::start().await;
+    let (mut first, _) = persistent_session_at(addr, true).await;
+    let _flow = subscribe_on_flow(&mut first, expire, CLEAN_START).await;
+    first.connection.close(quinn::VarInt::from_u32(0), b"gone");
+    tokio::time::sleep(away).await;
+    let (mut second, session_present) = persistent_session_at(addr, false).await;
+    assert_eq!(session_present, 1);
+    let (_recovered, end) = reopen_flow(&second, RECOVER_IF_KEPT).await;
+    let delivered = delivered_on_flow_subscription(&mut second).await;
+    broker.stop().await;
+    (end, delivered)
+}
+
+#[tokio::test]
+async fn a_flow_aborted_by_a_closed_connection_is_recovered_until_it_expires() {
+    assert_eq!(
+        recovered_after_reconnect(300, SHORTLY).await,
+        (StreamEnd::Open, true)
+    );
+    assert_eq!(
+        recovered_after_reconnect(1, Duration::from_millis(1500)).await,
+        (StreamEnd::Stopped(code(QuicStreamCode::NoFlowState)), false)
+    );
+}
+
+#[tokio::test]
+async fn a_taken_over_session_drops_subscriptions_of_flows_with_expire_zero() {
+    let (broker, addr) = Broker::start().await;
+    let (mut first, _) = persistent_session_at(addr, true).await;
+    let _flow = subscribe_on_flow(&mut first, 0, CLEAN_START).await;
+    let (mut second, session_present) = persistent_session_at(addr, false).await;
+    assert_eq!(session_present, 1);
+    let delivered = delivered_on_flow_subscription(&mut second).await;
+    broker.stop().await;
+    assert!(!delivered);
+}
+
 const PACKET_LIMIT: usize = 1024;
 const SIZE_TOPIC: &str = "size/check";
 

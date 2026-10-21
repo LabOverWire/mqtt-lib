@@ -285,7 +285,7 @@ graph TD
 
 The broker spawns three concurrent tasks per QUIC connection: a **client handler** that processes packets from the control stream, a **datagram reader** that decodes unreliable datagrams and forwards them via mpsc channel, and a **data stream acceptor** that accepts unidirectional streams and spawns per-stream readers with flow header parsing.
 
-Data stream readers detect flow headers by inspecting the first byte (0x11-0x13) and register flows in a per-connection `FlowRegistry`.
+Data stream readers detect flow headers by inspecting the first byte (0x11-0x13). A reader sends a client data flow header to the client handler and waits for its answer before it reads the stream's packets, and reports the end of the stream on the same channel as the packets.
 
 ### Internal Types
 
@@ -353,9 +353,23 @@ Manages broker-to-client QUIC stream delivery:
 - **PerTopic**: cached bidirectional streams per topic with LRU eviction, writes server data flow header (type 0x13)
 - **PerPublish**: QoS 0 uses unidirectional; QoS 1+ uses bidirectional with flow header
 
-#### FlowRegistry
+#### FlowRegistry (Client)
 
-Per-connection flow state management: stores up to 256 `FlowState` entries keyed by `FlowId`, tracking lifecycle, subscriptions, topic aliases, and pending packet IDs.
+Client session flow state: stores up to 256 `FlowState` entries keyed by `FlowId`, tracking lifecycle, subscriptions, topic aliases, and pending packet IDs.
+
+#### Broker Flow State
+
+The broker keeps client flow state with the session, not the connection, so it outlives a closed connection and a session takeover (MQoQ §9.13). The client handler answers every client data flow from the flow's `clean` and `abort_if_no_state` flags (MQoQ §9.8, §9.15):
+
+| `clean` | `abort_if_no_state` | Flow state | Answer |
+|---|---|---|---|
+| 1 | 1 | any | stream stopped with ERROR_DISCARD_STATE (0xBF), state discarded |
+| 1 | 0 | any | served as a new flow; the previous state and its subscriptions are discarded |
+| 0 | any | kept or open | recovered, with its subscriptions |
+| 0 | 1 | none | stream stopped with ERROR_NO_FLOW_STATE (0xB3); a second attempt on the same connection closes it with ERROR_TOO_MANY_RECOVER_ATTEMPTS (0xB3) |
+| 0 | 0 | none | served as a new flow |
+
+A flow ended with FIN loses its state. A flow aborted by a reset, a read error, a stream ending inside a packet or the connection closing keeps it for the flow's expire interval, also while the client is disconnected, and with an expire interval of 0 loses it at once. A session that ends (clean start, session expiry, or a session expiry interval of 0 at disconnect) ends its flows. A session holds up to 256 flows; a new flow past that is refused with ERROR_FLOW_REFUSED (0xBE). Flow state is not persisted, so when the broker restores sessions at startup it drops their flow-bound subscriptions. `specs/tla/flow-recovery` has the model this follows.
 
 ### Variable-Length Integers
 
