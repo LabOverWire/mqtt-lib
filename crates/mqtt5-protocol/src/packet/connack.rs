@@ -235,6 +235,69 @@ impl ConnAckPacket {
     }
 }
 
+fn v311_return_code(reason_code: ReasonCode) -> u8 {
+    match reason_code {
+        ReasonCode::Success => 0x00,
+        ReasonCode::UnsupportedProtocolVersion => 0x01,
+        ReasonCode::ClientIdentifierNotValid => 0x02,
+        ReasonCode::UnspecifiedError
+        | ReasonCode::ImplementationSpecificError
+        | ReasonCode::ServerUnavailable
+        | ReasonCode::ServerBusy
+        | ReasonCode::ServerShuttingDown
+        | ReasonCode::QuotaExceeded
+        | ReasonCode::UseAnotherServer
+        | ReasonCode::ServerMoved
+        | ReasonCode::ConnectionRateExceeded
+        | ReasonCode::GrantedQoS1
+        | ReasonCode::GrantedQoS2
+        | ReasonCode::DisconnectWithWillMessage
+        | ReasonCode::NoMatchingSubscribers
+        | ReasonCode::NoSubscriptionExisted
+        | ReasonCode::ContinueAuthentication
+        | ReasonCode::ReAuthenticate
+        | ReasonCode::KeepAliveTimeout
+        | ReasonCode::SessionTakenOver
+        | ReasonCode::TopicFilterInvalid
+        | ReasonCode::PacketIdentifierInUse
+        | ReasonCode::PacketIdentifierNotFound
+        | ReasonCode::ReceiveMaximumExceeded
+        | ReasonCode::TopicAliasInvalid
+        | ReasonCode::MessageRateTooHigh
+        | ReasonCode::AdministrativeAction
+        | ReasonCode::SharedSubscriptionsNotSupported
+        | ReasonCode::MaximumConnectTime
+        | ReasonCode::SubscriptionIdentifiersNotSupported
+        | ReasonCode::WildcardSubscriptionsNotSupported
+        | ReasonCode::MqoqNoFlowState
+        | ReasonCode::MqoqNotFlowOwner
+        | ReasonCode::MqoqStreamTypeError
+        | ReasonCode::MqoqBadFlowId
+        | ReasonCode::MqoqPersistentTopic
+        | ReasonCode::MqoqPersistentSubError
+        | ReasonCode::MqoqOptionalHeader
+        | ReasonCode::MqoqIncompletePacket
+        | ReasonCode::MqoqFlowOpenIdle
+        | ReasonCode::MqoqFlowCancelled
+        | ReasonCode::MqoqFlowPacketCancelled
+        | ReasonCode::MqoqFlowRefused
+        | ReasonCode::MqoqDiscardState
+        | ReasonCode::MqoqServerPushNotWelcome
+        | ReasonCode::MqoqRecoveryFailed => 0x03,
+        ReasonCode::BadUsernameOrPassword => 0x04,
+        ReasonCode::MalformedPacket
+        | ReasonCode::ProtocolError
+        | ReasonCode::NotAuthorized
+        | ReasonCode::Banned
+        | ReasonCode::BadAuthenticationMethod
+        | ReasonCode::TopicNameInvalid
+        | ReasonCode::PacketTooLarge
+        | ReasonCode::PayloadFormatInvalid
+        | ReasonCode::RetainNotSupported
+        | ReasonCode::QoSNotSupported => 0x05,
+    }
+}
+
 impl MqttPacket for ConnAckPacket {
     fn packet_type(&self) -> PacketType {
         PacketType::ConnAck
@@ -249,19 +312,7 @@ impl MqttPacket for ConnAckPacket {
         buf.put_u8(flags);
 
         if self.protocol_version == 4 {
-            let return_code = match self.reason_code {
-                ReasonCode::Success => 0x00,
-                ReasonCode::UnsupportedProtocolVersion => 0x01,
-                ReasonCode::ClientIdentifierNotValid => 0x02,
-                ReasonCode::ServerUnavailable
-                | ReasonCode::ServerBusy
-                | ReasonCode::UseAnotherServer
-                | ReasonCode::ServerMoved
-                | ReasonCode::ConnectionRateExceeded => 0x03,
-                ReasonCode::BadUsernameOrPassword => 0x04,
-                _ => 0x05,
-            };
-            buf.put_u8(return_code);
+            buf.put_u8(v311_return_code(self.reason_code));
         } else {
             buf.put_u8(u8::from(self.reason_code));
             self.properties.encode(buf)?;
@@ -434,14 +485,19 @@ mod tests {
             (ReasonCode::UseAnotherServer, 0x03),
             (ReasonCode::ServerMoved, 0x03),
             (ReasonCode::ConnectionRateExceeded, 0x03),
+            (ReasonCode::ServerShuttingDown, 0x03),
+            (ReasonCode::QuotaExceeded, 0x03),
+            (ReasonCode::UnspecifiedError, 0x03),
+            (ReasonCode::ImplementationSpecificError, 0x03),
             (ReasonCode::BadUsernameOrPassword, 0x04),
             (ReasonCode::NotAuthorized, 0x05),
             (ReasonCode::Banned, 0x05),
             (ReasonCode::BadAuthenticationMethod, 0x05),
-            (ReasonCode::QuotaExceeded, 0x05),
+            (ReasonCode::MalformedPacket, 0x05),
+            (ReasonCode::ProtocolError, 0x05),
+            (ReasonCode::PacketTooLarge, 0x05),
             (ReasonCode::QoSNotSupported, 0x05),
             (ReasonCode::RetainNotSupported, 0x05),
-            (ReasonCode::UnspecifiedError, 0x05),
         ];
         for (code, return_code) in expected {
             let mut buf = BytesMut::new();

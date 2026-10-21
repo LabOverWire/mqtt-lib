@@ -55,7 +55,11 @@ impl ClientHandler {
                     addr = %self.client_addr,
                     "Rejecting connection: unsupported protocol version"
                 );
-                let connack = ConnAckPacket::new(false, ReasonCode::UnsupportedProtocolVersion);
+                let connack = if protocol_version < 5 {
+                    ConnAckPacket::new_v311(false, ReasonCode::UnsupportedProtocolVersion)
+                } else {
+                    ConnAckPacket::new(false, ReasonCode::UnsupportedProtocolVersion)
+                };
                 self.write_to_client(Packet::ConnAck(connack)).await?;
                 Err(MqttError::UnsupportedProtocolVersion)
             }

@@ -50,8 +50,11 @@ impl WasmClientHandler {
         writer: &mut WasmWriter,
     ) -> Result<()> {
         if connect.protocol_version != 4 && connect.protocol_version != 5 {
-            let mut connack = ConnAckPacket::new(false, ReasonCode::UnsupportedProtocolVersion);
-            connack.protocol_version = connect.protocol_version;
+            let connack = if connect.protocol_version < 5 {
+                ConnAckPacket::new_v311(false, ReasonCode::UnsupportedProtocolVersion)
+            } else {
+                ConnAckPacket::new(false, ReasonCode::UnsupportedProtocolVersion)
+            };
             self.write_packet(&Packet::ConnAck(connack), writer)?;
             return Err(MqttError::ProtocolError(
                 "Unsupported protocol version".to_string(),
@@ -59,28 +62,7 @@ impl WasmClientHandler {
         }
         self.protocol_version = connect.protocol_version;
 
-        let mut assigned_client_id = None;
-        if connect.client_id.is_empty() {
-            if self.protocol_version == 4 && !connect.clean_start {
-                warn!("Rejecting connection: empty client ID without CleanSession");
-                let connack = self.new_connack(false, ReasonCode::ClientIdentifierNotValid);
-                self.write_packet(&Packet::ConnAck(connack), writer)?;
-                return Err(MqttError::InvalidClientId(String::new()));
-            }
-            let mut random = [0u8; 16];
-            if let Err(e) = getrandom::fill(&mut random) {
-                warn!("Cannot assign a client ID: {e}");
-                let connack = self.new_connack(false, ReasonCode::ServerUnavailable);
-                self.write_packet(&Packet::ConnAck(connack), writer)?;
-                return Err(MqttError::Io(format!(
-                    "failed to generate a client ID: {e}"
-                )));
-            }
-            let generated_id = format!("wasm-auto-{:032x}", u128::from_be_bytes(random));
-            debug!("Generated client ID '{generated_id}' for empty client ID");
-            connect.client_id.clone_from(&generated_id);
-            assigned_client_id = Some(generated_id);
-        }
+        let assigned_client_id = self.assign_client_id_if_empty(&mut connect, writer)?;
 
         self.check_load_balancer_redirect(&connect, writer)?;
 
@@ -165,6 +147,35 @@ impl WasmClientHandler {
             self.advance_packet_id_past_inflight();
         }
         Ok(())
+    }
+
+    fn assign_client_id_if_empty(
+        &self,
+        connect: &mut ConnectPacket,
+        writer: &mut WasmWriter,
+    ) -> Result<Option<String>> {
+        if !connect.client_id.is_empty() {
+            return Ok(None);
+        }
+        if self.protocol_version == 4 && !connect.clean_start {
+            warn!("Rejecting connection: empty client ID without CleanSession");
+            let connack = self.new_connack(false, ReasonCode::ClientIdentifierNotValid);
+            self.write_packet(&Packet::ConnAck(connack), writer)?;
+            return Err(MqttError::InvalidClientId(String::new()));
+        }
+        let mut random = [0u8; 16];
+        if let Err(e) = getrandom::fill(&mut random) {
+            warn!("Cannot assign a client ID: {e}");
+            let connack = self.new_connack(false, ReasonCode::ServerUnavailable);
+            self.write_packet(&Packet::ConnAck(connack), writer)?;
+            return Err(MqttError::Io(format!(
+                "failed to generate a client ID: {e}"
+            )));
+        }
+        let generated_id = format!("wasm-auto-{:032x}", u128::from_be_bytes(random));
+        debug!("Generated client ID '{generated_id}' for empty client ID");
+        connect.client_id.clone_from(&generated_id);
+        Ok(Some(generated_id))
     }
 
     fn new_connack(&self, session_present: bool, reason_code: ReasonCode) -> ConnAckPacket {

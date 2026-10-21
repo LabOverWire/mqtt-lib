@@ -39,6 +39,18 @@
 
 ## Diary Entries
 
+### 3.1.1 CONNACK return codes (2026-10-21)
+
+**Trigger**: #257, the open item from the previous entry, and the code review of #258.
+
+**Return codes**: the 3.1.1 CONNACK encoder in `mqtt5-protocol` sent the MQTT 5 value 0x87 for every reason code it did not map. A 3.1.1 client that connected to a session owned by another user got `20020087`; 3.1.1 defines return codes 0 to 5 only. The encoder now goes through `v311_return_code`, which names every `ReasonCode` with no wildcard, so a new code does not compile until it has a 3.1.1 mapping. Server-side and availability refusals (Unspecified error, Implementation specific error, Server unavailable, Server busy, Server shutting down, Quota exceeded, Use another server, Server moved, Connection rate exceeded) encode as 0x03. Bad username or password stays 0x04. Not authorized, Banned, Bad authentication method and refusals caused by the client's packet (Malformed packet, Protocol error, Packet too large, Topic name invalid, Payload format invalid, QoS or Retain not supported) encode as 0x05. Reason codes that are never valid in a CONNACK encode as 0x03.
+
+**Unsupported protocol level**: a CONNECT with protocol name `MQTT` and level 2 or 3 got the MQTT 5 CONNACK `2003008400`. MQTT 3.1.1 MQTT-3.1.2-2 requires return code 0x01, so levels below 5 now get `20020001`, in both brokers. Levels above 5 still get the MQTT 5 0x84. A CONNECT with the MQTT 3.1 protocol name `MQIsdp` is closed without a CONNACK, which MQTT 3.1.1 MQTT-3.1.2-1 allows.
+
+**Tests**: `test_connack_v311_return_codes` in `mqtt5-protocol` checks the encoded bytes for 21 reason codes. `crates/mqtt5/tests/v311_connack.rs` now holds every raw 3.1.1 CONNACK test, including the two that were in `assigned_client_id.rs`, with one CONNECT encoder. The session owner test waits for the broker to close the owner's connection after its DISCONNECT instead of sleeping. The level and session owner tests fail on main.
+
+**Open**: a load balancer redirect cannot be expressed in 3.1.1, which has no Server Reference. A redirected 3.1.1 client gets 0x03 (it got a malformed MQTT 5 CONNACK before) and has nowhere to go.
+
 ### Assigned client IDs and 3.1.1 CONNACKs (2026-10-20)
 
 **Trigger**: #255 and the code review of #256.
@@ -49,7 +61,7 @@
 
 **3.1.1 CONNACK format**: rejection paths built the CONNACK with `ConnAckPacket::new`, which always encodes MQTT 5. A 3.1.1 CONNECT with client ID `a/b` got `2003008500` instead of `20020002`. Every CONNACK in both handlers now goes through `new_connack`, which picks the encoding from the connection's protocol version.
 
-**3.1.1 return codes (#257)**: the 3.1.1 CONNACK encoder in `mqtt5-protocol` mapped every reason code without a 3.1.1 equivalent to the MQTT 5 value 0x87, not to a 3.1.1 return code. A 3.1.1 client that connected to a session owned by another user got `20020087`; 3.1.1 defines return codes 0 to 5 only. Availability refusals (Server busy, Use another server, Server moved, Connection rate exceeded) now encode as 0x03 and the rest as 0x05. Covered by `test_connack_v311_return_codes` in `mqtt5-protocol` and `crates/mqtt5/tests/v311_connack.rs`, both failing on main with 0x87.
+**Open**: the 3.1.1 CONNACK encoder in `mqtt5-protocol` maps every reason code without a 3.1.1 equivalent to the MQTT 5 value 0x87, not to 0x05. A 3.1.1 client that connects to a session owned by another user gets `20020087`; 3.1.1 defines return codes 0 to 5 only.
 
 ### Offline queued delivery: review fixes (2026-10-19)
 
