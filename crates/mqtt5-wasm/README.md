@@ -15,7 +15,7 @@ MQTT v5.0 and v3.1.1 WebAssembly client and broker for browser environments. Thi
 - **Broker lifecycle events** - Monitor client connections, publishes, and subscriptions
 - **Automatic keepalive** - Connection health monitoring with timeout detection
 - **Will messages** - Last Will and Testament (LWT) support
-- **Load balancer redirect** - Server redirect via CONNACK UseAnotherServer for horizontal scaling
+- **Load balancer redirect** - Server redirect via CONNACK UseAnotherServer for horizontal scaling (MQTT 5 clients only)
 
 ## Installation
 

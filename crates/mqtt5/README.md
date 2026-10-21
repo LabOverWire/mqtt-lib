@@ -136,7 +136,7 @@ let config = BrokerConfig::new()
 
 #### Load Balancer Mode
 
-Redirects clients to backend brokers using MQTT v5 `UseAnotherServer` (0x9C) with consistent hashing on the client ID.
+Redirects clients to backend brokers using MQTT v5 `UseAnotherServer` (0x9C), picking the backend from a hash of the client ID. Redirection only exists in MQTT 5: a 3.1.1 CONNACK cannot carry a Server Reference. An MQTT 3.1.1 client is refused with return code 0x03 (Server unavailable) and the broker logs a warning, so 3.1.1 clients must connect to a backend directly or through a TCP load balancer.
 
 ```bash
 mqttv5 broker --host 0.0.0.0:1884 --allow-anonymous

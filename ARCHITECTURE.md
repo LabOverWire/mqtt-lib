@@ -168,9 +168,11 @@ Bridges create broker-to-broker connections where each bridge acts as a client t
 
 ### Load Balancer (Server Redirect)
 
-The broker can act as a pure connection redirector for horizontal scaling. When `load_balancer` is configured, the broker never handles MQTT traffic — it only redirects clients to a backend.
+The broker can act as a pure connection redirector for horizontal scaling. When `load_balancer` is configured, the broker never handles MQTT traffic. It only redirects clients to a backend.
 
-On each CONNECT, the broker hashes the client ID (byte-sum modulo backend count) to deterministically select a backend. It responds with a CONNACK containing reason code `UseAnotherServer` (0x9C) and a `ServerReference` property set to the backend URL. The client parses the URL and reconnects directly to the backend.
+On each CONNECT, the broker hashes the client ID with the standard library's `DefaultHasher` and takes it modulo the backend count to select a backend, so a client ID goes to the same backend as long as the backend list and the broker build stay the same. It responds with a CONNACK containing reason code `UseAnotherServer` (0x9C) and a `ServerReference` property set to the backend URL. The client parses the URL and reconnects directly to the backend.
+
+Redirection only exists in MQTT 5: a 3.1.1 CONNACK cannot carry a Server Reference. An MQTT 3.1.1 client is refused with return code 0x03 (Server unavailable) and the broker logs a warning, so 3.1.1 clients must connect to a backend directly or through a TCP load balancer.
 
 The client-side redirect loop in `connect_internal()` follows up to 3 hops. The URL scheme in `ServerReference` determines the transport for the backend connection: `mqtt://` for TCP, `mqtts://` for TLS, `quic://` for QUIC.
 

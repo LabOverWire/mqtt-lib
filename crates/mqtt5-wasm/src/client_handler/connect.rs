@@ -393,6 +393,16 @@ impl WasmClientHandler {
                 let client_id = &connect.client_id;
                 if let Some(backend) = lb.select_backend(client_id) {
                     let backend = backend.to_string();
+                    if self.protocol_version == 4 {
+                        warn!(
+                            client_id = %client_id,
+                            backend = %backend,
+                            "Refusing MQTT 3.1.1 client: a load balancer redirect needs MQTT 5, so it must connect to a backend directly"
+                        );
+                        let connack = self.new_connack(false, ReasonCode::ServerUnavailable);
+                        self.write_packet(&Packet::ConnAck(connack), writer)?;
+                        return Err(MqttError::ServerUnavailable);
+                    }
                     info!(
                         client_id = %client_id,
                         backend = %backend,

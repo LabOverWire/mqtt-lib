@@ -1,7 +1,7 @@
 #![cfg(feature = "broker")]
 
 use mqtt5::broker::auth::{AuthProvider, AuthResult};
-use mqtt5::broker::config::{BrokerConfig, StorageBackend, StorageConfig};
+use mqtt5::broker::config::{BrokerConfig, LoadBalancerConfig, StorageBackend, StorageConfig};
 use mqtt5::broker::server::BrokerShutdownHandle;
 use mqtt5::broker::MqttBroker;
 use mqtt5::error::Result;
@@ -55,15 +55,22 @@ struct Broker {
     run: tokio::task::JoinHandle<Result<()>>,
 }
 
+fn config() -> BrokerConfig {
+    BrokerConfig::default()
+        .with_storage(StorageConfig {
+            backend: StorageBackend::Memory,
+            enable_persistence: true,
+            ..Default::default()
+        })
+        .with_bind_address(([127, 0, 0, 1], 0))
+}
+
 impl Broker {
     async fn start() -> Self {
-        let config = BrokerConfig::default()
-            .with_storage(StorageConfig {
-                backend: StorageBackend::Memory,
-                enable_persistence: true,
-                ..Default::default()
-            })
-            .with_bind_address(([127, 0, 0, 1], 0));
+        Self::start_with(config()).await
+    }
+
+    async fn start_with(config: BrokerConfig) -> Self {
         let mut broker = MqttBroker::with_config(config)
             .await
             .expect("broker starts")
@@ -235,5 +242,21 @@ async fn v311_session_owned_by_another_user_is_refused_with_not_authorized() {
         connack(broker.addr, &intruder).await.1,
         [0x20, 0x02, 0x00, 0x05]
     );
+    broker.stop().await;
+}
+
+#[tokio::test]
+async fn v311_client_is_refused_by_a_load_balancer() {
+    let broker = Broker::start_with(config().with_load_balancer(LoadBalancerConfig::new(vec![
+        "mqtt://backend-a:1883".to_string(),
+    ])))
+    .await;
+    let (mut stream, refused) = connack(broker.addr, &CLEAN).await;
+    assert_eq!(refused, [0x20, 0x02, 0x00, 0x03]);
+    let mut rest = [0u8; 1];
+    let read = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut rest))
+        .await
+        .expect("broker closes the connection");
+    assert!(matches!(read, Ok(0)), "connection still open: {read:?}");
     broker.stop().await;
 }

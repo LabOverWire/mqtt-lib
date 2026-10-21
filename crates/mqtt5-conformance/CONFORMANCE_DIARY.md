@@ -39,6 +39,14 @@
 
 ## Diary Entries
 
+### Load balancer and MQTT 3.1.1 (2026-10-21)
+
+**Trigger**: #259, the open item from the previous entry.
+
+**Behavior**: a broker with `load_balancer` backends redirects every client, since `select_backend` always returns a backend when any are configured. A 3.1.1 CONNACK has no Server Reference, so a 3.1.1 client gets 0x03 and the connection is closed, which is unchanged. Serving it on the redirecting broker would split it from every other client, so the refusal stays.
+
+**Fix**: the broker logged a 3.1.1 refusal as `Redirecting client to backend`. Both brokers now log a warning that the client must connect to a backend directly, and the docs say redirection is MQTT 5 only. Checked with the CLI broker and two backends: the 3.1.1 client gets `20020003` with the warning, and an MQTT 5 client still gets 0x9C with `mqtt://backend-a:1883` and the info line. `v311_client_is_refused_by_a_load_balancer` in `crates/mqtt5/tests/v311_connack.rs` pins the 3.1.1 CONNACK and the close; it also passes on main, since only the log changed.
+
 ### 3.1.1 CONNACK return codes (2026-10-21)
 
 **Trigger**: #257, the open item from the previous entry, and the code review of #258.

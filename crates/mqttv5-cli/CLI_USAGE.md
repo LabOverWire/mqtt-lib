@@ -318,9 +318,9 @@ Where `lb-config.json` contains a `load_balancer` section:
 }
 ```
 
-Clients connecting to the load balancer receive a CONNACK with reason code `UseAnotherServer` (0x9C) and a Server Reference property pointing to one of the backends. The client library automatically follows the redirect (up to 3 hops).
+Clients connecting to the load balancer receive a CONNACK with reason code `UseAnotherServer` (0x9C) and a Server Reference property pointing to one of the backends. The client library automatically follows the redirect (up to 3 hops). Redirection only exists in MQTT 5: a 3.1.1 CONNACK cannot carry a Server Reference. An MQTT 3.1.1 client is refused with return code 0x03 (Server unavailable) and the broker logs a warning, so 3.1.1 clients must connect to a backend directly or through a TCP load balancer.
 
-The load balancer only redirects — it does not broker messages. You must run the backend brokers separately:
+The load balancer only redirects and does not broker messages. You must run the backend brokers separately:
 
 ```bash
 mqttv5 broker --host 0.0.0.0:1884 --allow-anonymous
@@ -1225,7 +1225,7 @@ Every field is optional. Any field omitted from the file falls back to the defau
 | --- | --- | --- | --- |
 | `backends` | `string[]` | Backend broker URLs | Required |
 
-When `load_balancer` is set, the broker acts as a connection redirector. On each CONNECT, it selects a backend using a hash of the client ID (byte-sum modulo backend count) and responds with CONNACK reason code `UseAnotherServer` (0x9C) containing a Server Reference property. The client automatically follows the redirect (up to 3 hops). The same client ID always routes to the same backend.
+When `load_balancer` is set, the broker acts as a connection redirector. On each CONNECT, it selects a backend using a hash of the client ID (`DefaultHasher`, modulo the backend count) and responds with CONNACK reason code `UseAnotherServer` (0x9C) containing a Server Reference property. The client automatically follows the redirect (up to 3 hops). The same client ID routes to the same backend as long as the backend list and the broker build stay the same. MQTT 3.1.1 clients are refused with return code 0x03, since 3.1.1 has no redirect.
 
 Backend URL format determines the transport the client uses after redirect:
 
