@@ -1,14 +1,14 @@
 #![cfg(feature = "broker")]
 #![cfg(feature = "transport-quic")]
 
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use mqtt5::broker::config::{
     BrokerConfig, QuicConfig as BrokerQuicConfig, ServerDeliveryStrategy, StorageBackend,
     StorageConfig,
 };
 use mqtt5::broker::{BrokerShutdownHandle, MqttBroker};
 use mqtt5::error::Result;
-use mqtt5::transport::flow::{ControlFlowHeader, DataFlowHeader, FlowFlags, FlowId};
+use mqtt5::transport::flow::{decode_varint, ControlFlowHeader, DataFlowHeader, FlowFlags, FlowId};
 use mqtt5::transport::{QuicConfig, QuicSplitResult, QuicTransport};
 use mqtt5::Transport;
 use mqtt5_protocol::{QuicConnectionCode, QuicStreamCode};
@@ -484,15 +484,23 @@ async fn subscribe_on(
     flow
 }
 
-async fn delivered_on_flow_subscription(split: &mut QuicSplitResult) -> bool {
+async fn published_to(
+    split: &mut QuicSplitResult,
+    topic: &str,
+) -> Option<(quinn::SendStream, quinn::RecvStream)> {
     split
         .send
-        .write_all(&publish_frame("flows/expiry", b"after"))
+        .write_all(&publish_frame(topic, b"to flow"))
         .await
         .expect("publish");
     tokio::time::timeout(Duration::from_secs(2), split.connection.accept_bi())
         .await
-        .is_ok()
+        .ok()
+        .and_then(std::result::Result::ok)
+}
+
+async fn delivered_on_flow_subscription(split: &mut QuicSplitResult) -> bool {
+    published_to(split, "flows/expiry").await.is_some()
 }
 
 async fn delivered_after_flow_end(
@@ -864,22 +872,24 @@ async fn a_taken_over_session_drops_subscriptions_of_flows_with_expire_zero() {
     assert!(!delivered);
 }
 
-async fn delivery_flow_id(split: &mut QuicSplitResult, topic: &str) -> u8 {
-    split
-        .send
-        .write_all(&publish_frame(topic, b"to flow"))
+async fn delivery_flow_id(split: &mut QuicSplitResult, topic: &str) -> FlowId {
+    let (_, mut recv) = published_to(split, topic)
         .await
-        .expect("publish");
-    let (_, mut recv) = tokio::time::timeout(Duration::from_secs(2), split.connection.accept_bi())
+        .expect("delivery stream opened");
+    let mut flow_type = [0u8; 1];
+    recv.read_exact(&mut flow_type)
         .await
-        .expect("delivery stream opened")
-        .expect("accept delivery stream");
-    let mut head = [0u8; 2];
-    recv.read_exact(&mut head)
+        .expect("read delivery flow type");
+    assert_eq!(flow_type, [0x13]);
+    let mut id = [0u8; 8];
+    recv.read_exact(&mut id[..1])
         .await
-        .expect("read delivery header");
-    assert_eq!(head[0], 0x13);
-    head[1]
+        .expect("read delivery flow id");
+    let length = 1 << (id[0] >> 6);
+    recv.read_exact(&mut id[1..length])
+        .await
+        .expect("read delivery flow id");
+    FlowId::from(decode_varint(&mut Bytes::copy_from_slice(&id[..length])).expect("flow id"))
 }
 
 #[tokio::test]
@@ -893,9 +903,9 @@ async fn subscriptions_on_client_flows_are_delivered_on_server_owned_flows() {
     let second = delivery_flow_id(&mut split, "flows/b").await;
     broker.stop().await;
     drop(flows);
-    assert!(FlowId::from(u64::from(first)).is_server_initiated());
-    assert!(FlowId::from(u64::from(second)).is_server_initiated());
-    assert_ne!(first, second);
+    assert!(first.is_server_initiated());
+    assert!(second.is_server_initiated());
+    assert_ne!(first.raw(), second.raw());
 }
 
 const PACKET_LIMIT: usize = 1024;

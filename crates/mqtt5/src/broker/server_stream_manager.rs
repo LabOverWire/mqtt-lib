@@ -17,7 +17,6 @@ struct ServerStreamInfo {
     stream: SendStream,
     flow_id: FlowId,
     last_used: Instant,
-    /// Kept alive so the reader task keeps running for this flow's lifetime.
     ack_reader: Option<tokio::task::JoinHandle<()>>,
 }
 
@@ -28,16 +27,6 @@ impl Drop for ServerStreamInfo {
         }
     }
 }
-
-/// Reads the client's acknowledgements off the recv half of a stream the broker opened.
-///
-/// `MQoQ` 9.1.2: PUBACK/PUBREL/PUBCOMP for a PUBLISH must be exchanged in the same data flow
-/// as that PUBLISH. The broker therefore opens QoS>0 data flows as bidirectional streams and
-/// must read the return direction; dropping the recv half instead makes `quinn` emit
-/// `STOP_SENDING`, so the client's ack write fails and the handshake can never complete.
-///
-/// The client writes bare MQTT packets here (no flow header), so unlike a client-initiated
-/// data stream there is no header to parse.
 fn spawn_ack_reader(
     connection: Arc<Connection>,
     mut recv: RecvStream,
@@ -102,7 +91,6 @@ pub struct ServerStreamManager {
     flow_streams: HashMap<u64, ServerStreamInfo>,
     flow_id_generator: FlowIdGenerator,
     header_buffer: BytesMut,
-    /// Feeds acks read off server data flows back into the client handler.
     packet_tx: Option<PacketSender>,
 }
 
@@ -120,17 +108,11 @@ impl ServerStreamManager {
             packet_tx: None,
         }
     }
-
-    /// Supplies the channel used to deliver acks read off server data flows.
-    ///
-    /// Without it, QoS>0 delivery on a data flow cannot complete its handshake.
     #[must_use]
     pub(super) fn with_packet_tx(mut self, packet_tx: PacketSender) -> Self {
         self.packet_tx = Some(packet_tx);
         self
     }
-
-    /// Starts reading acks off a stream the broker opened, per `MQoQ` 9.1.2.
     fn start_ack_reader(
         &self,
         recv: RecvStream,
@@ -230,7 +212,11 @@ impl ServerStreamManager {
     pub fn remove_flow_stream(&mut self, flow_id: u64) {
         if let Some(mut info) = self.flow_streams.remove(&flow_id) {
             let _ = info.stream.finish();
-            debug!(flow_id = flow_id, "Closed server stream for flow");
+            debug!(
+                flow_id = flow_id,
+                server_flow_id = ?info.flow_id,
+                "Closed server stream for flow"
+            );
         }
     }
 
@@ -278,13 +264,6 @@ impl ServerStreamManager {
 
         Ok(())
     }
-
-    /// Delivers a PUBLISH on a fresh, uncached server flow.
-    ///
-    /// `QoS0` needs no ack, so a one-way flow suffices. `QoS>0` must be able to receive
-    /// PUBACK/PUBREC on the same flow (`MQoQ` 9.1.2), hence a bidirectional stream whose recv
-    /// half is read for the life of the flow. The reader is detached because an ephemeral
-    /// stream is not cached; it ends when the peer closes or errors.
     async fn write_on_ephemeral_stream(
         &mut self,
         topic: &str,
@@ -363,7 +342,11 @@ impl ServerStreamManager {
         }
         for (raw_id, mut info) in self.flow_streams.drain() {
             let _ = info.stream.finish();
-            trace!(flow_id = raw_id, "Closed flow-bound server stream");
+            trace!(
+                flow_id = raw_id,
+                server_flow_id = ?info.flow_id,
+                "Closed flow-bound server stream"
+            );
         }
     }
 }
