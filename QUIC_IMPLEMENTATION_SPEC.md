@@ -287,6 +287,8 @@ The broker spawns three concurrent tasks per QUIC connection: a **client handler
 
 Data stream readers detect flow headers by inspecting the first byte (0x11-0x13). A reader sends a client data flow header to the client handler and waits for its answer before it reads the stream's packets, and reports the end of the stream on the same channel as the packets.
 
+The control stream, client data streams and the return direction of streams the broker opens share one budget per connection for bytes of packets not yet complete, equal to `max_packet_size`. A connection whose streams together hold more than that is closed with ERROR_PROTOCOL_L0 (0xB4), so it can make the broker buffer no more than one TCP connection can.
+
 ### Internal Types
 
 #### StreamStrategy (Client)

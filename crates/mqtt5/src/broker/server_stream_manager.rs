@@ -2,6 +2,7 @@ use crate::broker::client_handler::ExternalInput;
 use crate::broker::config::ServerDeliveryStrategy;
 use crate::error::{MqttError, Result};
 use crate::transport::flow::{DataFlowHeader, FlowFlags, FlowId, FlowIdGenerator};
+use crate::transport::packet_io::{ReadBudget, ReadShare};
 use crate::QoS;
 use bytes::BytesMut;
 use quinn::{Connection, RecvStream, SendStream};
@@ -34,6 +35,7 @@ fn spawn_ack_reader(
     protocol_version: u8,
     max_packet_size: usize,
     packet_tx: PacketSender,
+    mut share: Option<ReadShare>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut buffer = BytesMut::new();
@@ -43,6 +45,7 @@ fn spawn_ack_reader(
                 &mut buffer,
                 protocol_version,
                 max_packet_size,
+                share.as_mut(),
             )
             .await
             {
@@ -92,6 +95,7 @@ pub struct ServerStreamManager {
     flow_id_generator: FlowIdGenerator,
     header_buffer: BytesMut,
     packet_tx: Option<PacketSender>,
+    read_budget: Option<ReadBudget>,
 }
 
 impl ServerStreamManager {
@@ -106,8 +110,15 @@ impl ServerStreamManager {
             flow_id_generator: FlowIdGenerator::new(),
             header_buffer: BytesMut::with_capacity(32),
             packet_tx: None,
+            read_budget: None,
         }
     }
+    #[must_use]
+    pub(super) fn with_read_budget(mut self, budget: ReadBudget) -> Self {
+        self.read_budget = Some(budget);
+        self
+    }
+
     #[must_use]
     pub(super) fn with_packet_tx(mut self, packet_tx: PacketSender) -> Self {
         self.packet_tx = Some(packet_tx);
@@ -132,6 +143,7 @@ impl ServerStreamManager {
             self.protocol_version,
             self.max_packet_size,
             tx,
+            self.read_budget.as_ref().map(ReadBudget::share),
         ))
     }
 

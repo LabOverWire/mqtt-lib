@@ -25,7 +25,9 @@ use crate::packet::Packet;
 use crate::protocol::v5::properties::Properties;
 use crate::protocol::v5::reason_codes::ReasonCode;
 use crate::time::Duration;
-use crate::transport::packet_io::{encode_packet_to_buffer, read_packet_reusing_buffer};
+#[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
+use crate::transport::packet_io::ReadBudget;
+use crate::transport::packet_io::{encode_packet_to_buffer, read_packet_reusing_buffer, ReadShare};
 use crate::transport::PacketIo;
 use bytes::{Bytes, BytesMut};
 use mqtt5_protocol::KeepaliveConfig;
@@ -164,6 +166,7 @@ pub struct ClientHandler {
     pub(super) protocol_version: u8,
     pub(super) write_buffer: BytesMut,
     pub(super) read_buffer: BytesMut,
+    pub(super) read_share: Option<ReadShare>,
     pub(super) skip_bridge_forwarding: bool,
     pub(super) pending_target_flow: Option<u64>,
     pub(super) flow_deadline: Option<Instant>,
@@ -282,6 +285,7 @@ impl ClientHandler {
             protocol_version: 5,
             write_buffer: BytesMut::with_capacity(4096),
             read_buffer: BytesMut::with_capacity(4096),
+            read_share: None,
             skip_bridge_forwarding: false,
             pending_target_flow: None,
             flow_deadline: None,
@@ -323,6 +327,13 @@ impl ClientHandler {
     #[must_use]
     pub fn with_quic_packet_tx(mut self, tx: mpsc::Sender<ExternalInput>) -> Self {
         self.quic_packet_tx = Some(tx);
+        self
+    }
+
+    #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
+    #[must_use]
+    pub(crate) fn with_read_budget(mut self, budget: &ReadBudget) -> Self {
+        self.read_share = Some(budget.share());
         self
     }
 
@@ -809,9 +820,14 @@ impl ClientHandler {
 
     async fn negotiate_connect(&mut self) -> Result<PendingConnect> {
         let max_size = self.max_packet_size();
-        let packet =
-            read_packet_reusing_buffer(&mut self.transport, 5, &mut self.read_buffer, max_size)
-                .await?;
+        let packet = read_packet_reusing_buffer(
+            &mut self.transport,
+            5,
+            &mut self.read_buffer,
+            max_size,
+            self.read_share.as_mut(),
+        )
+        .await?;
         let Packet::Connect(connect) = packet else {
             return Err(MqttError::ProtocolError(
                 "Expected CONNECT packet".to_string(),
@@ -840,6 +856,7 @@ impl ClientHandler {
                 self.protocol_version,
                 &mut self.read_buffer,
                 max_size,
+                self.read_share.as_mut(),
             )
             .await?;
             let Packet::Auth(auth) = packet else {
@@ -1042,7 +1059,7 @@ impl ClientHandler {
                     self.bind().await?;
                 }
 
-                read_result = timeout(read_timeout, read_packet_reusing_buffer(&mut self.transport, self.protocol_version, &mut self.read_buffer, max_size)) => {
+                read_result = timeout(read_timeout, read_packet_reusing_buffer(&mut self.transport, self.protocol_version, &mut self.read_buffer, max_size, self.read_share.as_mut())) => {
                     if let Some(exit) = self.handle_read(read_result, read_timeout).await? {
                         return Ok(exit);
                     }

@@ -751,6 +751,10 @@ impl ClientHandler {
             self.config.max_packet_size,
         )
         .with_strategy(self.server_delivery_strategy);
+        let manager = match self.read_share.as_ref() {
+            Some(share) => manager.with_read_budget(share.budget().clone()),
+            None => manager,
+        };
         match self.quic_packet_tx.clone() {
             Some(tx) => manager.with_packet_tx(tx),
             None => manager,

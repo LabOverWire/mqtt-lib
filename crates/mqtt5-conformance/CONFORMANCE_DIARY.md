@@ -39,6 +39,18 @@
 
 ## Diary Entries
 
+### QUIC per-connection buffer budget (2026-10-21)
+
+**Trigger**: #236.
+
+**Spec**: nothing in MQTT 5 or MQoQ is broken here, since every packet is held to the `max_packet_size` the broker announces. The concern is memory: a QUIC connection has many streams, each with its own read buffer, while a TCP connection has one.
+
+**Behavior on main**, with a raw QUIC client and `max_packet_size` 1024: two data streams each sending 612 bytes of a 1024-byte PUBLISH, or 612 bytes on the control stream and 612 on a data stream, leave the connection open.
+
+**Fix**: one budget per connection, equal to `max_packet_size`, shared by the control stream (read by the client handler), every client data stream reader, and the ack readers on streams the broker opens. Each reader holds a share sized to the bytes in its buffer, updated after every read and every decoded packet, and released when the reader ends. Going over the budget is reported as `PacketTooLarge` and closes the connection with ERROR_PROTOCOL_L0, the same way an oversized packet does. A connection can still send any single packet up to `max_packet_size`.
+
+**Tests**: `partial_packets_on_data_streams_over_the_maximum_size_close_the_connection`, `partial_packets_on_the_control_and_a_data_stream_over_the_maximum_size_close_the_connection` and `partial_packets_on_the_control_and_an_ack_stream_over_the_maximum_size_close_the_connection` fail on main and pass with the fix. `complete_and_abandoned_packets_free_the_connection_buffer` (three full-size packets on three streams, then a partial packet on a stream that is reset, then another partial packet) passes on both, and checks that complete packets and ended streams give their bytes back. A unit test covers the share accounting.
+
 ### QUIC server flow IDs for flow-bound delivery (2026-10-21)
 
 **Trigger**: #253.

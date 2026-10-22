@@ -9,6 +9,8 @@ use crate::transport::tls::{TlsReadHalf, TlsWriteHalf};
 use crate::Transport;
 use bytes::{Buf, BufMut, BytesMut};
 use std::future::Future;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 
@@ -298,24 +300,89 @@ pub fn encode_packet_to_buffer(packet: &Packet, buf: &mut BytesMut) -> Result<()
 
 const READ_CHUNK: usize = 4096;
 
+#[derive(Clone, Debug)]
+pub struct ReadBudget {
+    held: Arc<AtomicUsize>,
+    limit: usize,
+}
+
+impl ReadBudget {
+    #[cfg(feature = "transport-quic")]
+    #[must_use]
+    pub(crate) fn new(limit: usize) -> Self {
+        Self {
+            held: Arc::new(AtomicUsize::new(0)),
+            limit,
+        }
+    }
+
+    #[cfg(feature = "transport-quic")]
+    #[must_use]
+    pub(crate) fn share(&self) -> ReadShare {
+        ReadShare {
+            budget: self.clone(),
+            held: 0,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct ReadShare {
+    budget: ReadBudget,
+    held: usize,
+}
+
+impl ReadShare {
+    #[cfg(feature = "transport-quic")]
+    pub(crate) fn budget(&self) -> &ReadBudget {
+        &self.budget
+    }
+
+    pub(crate) fn hold(&mut self, len: usize) -> Result<()> {
+        if len <= self.held {
+            self.budget
+                .held
+                .fetch_sub(self.held - len, Ordering::AcqRel);
+            self.held = len;
+            return Ok(());
+        }
+        let added = len - self.held;
+        let total = self.budget.held.fetch_add(added, Ordering::AcqRel) + added;
+        self.held = len;
+        if total > self.budget.limit {
+            return Err(MqttError::PacketTooLarge {
+                size: total,
+                max: self.budget.limit,
+            });
+        }
+        Ok(())
+    }
+}
+
+impl Drop for ReadShare {
+    fn drop(&mut self) {
+        self.budget.held.fetch_sub(self.held, Ordering::AcqRel);
+    }
+}
+
 /// Reads one packet, keeping every byte received so far in `read_buffer`.
 ///
-/// The future is cancel-safe: all progress lives in `read_buffer`, the only
-/// await is a single transport read into a stack chunk, and bytes belonging to
-/// the next packet stay in the buffer for the next call.
-///
 /// # Errors
-/// Returns error if reading from transport fails or packet is malformed
+/// Returns error if reading from transport fails, the packet is malformed, or the bytes
+/// buffered under `share` exceed its budget
 pub async fn read_packet_reusing_buffer<T: Transport>(
     transport: &mut T,
     protocol_version: u8,
     read_buffer: &mut BytesMut,
     max_packet_size: usize,
+    mut share: Option<&mut ReadShare>,
 ) -> Result<Packet> {
     loop {
-        if let Some(packet) =
-            decode_buffered_packet(read_buffer, protocol_version, max_packet_size)?
-        {
+        let decoded = decode_buffered_packet(read_buffer, protocol_version, max_packet_size)?;
+        if let Some(share) = share.as_deref_mut() {
+            share.hold(read_buffer.len())?;
+        }
+        if let Some(packet) = decoded {
             return Ok(packet);
         }
         let mut chunk = [0u8; READ_CHUNK];
@@ -588,7 +655,7 @@ mod tests {
 
         tokio::select! {
             biased;
-            result = read_packet_reusing_buffer(&mut transport, 5, &mut read_buffer, 1024) => {
+            result = read_packet_reusing_buffer(&mut transport, 5, &mut read_buffer, 1024, None) => {
                 panic!("packet completed from a partial frame: {result:?}");
             }
             () = tokio::time::sleep(std::time::Duration::from_millis(20)) => {}
@@ -596,7 +663,7 @@ mod tests {
         assert_eq!(read_buffer.len(), first.len());
 
         tx.send(second.to_vec()).unwrap();
-        let packet = read_packet_reusing_buffer(&mut transport, 5, &mut read_buffer, 1024)
+        let packet = read_packet_reusing_buffer(&mut transport, 5, &mut read_buffer, 1024, None)
             .await
             .unwrap();
         match packet {
@@ -619,13 +686,13 @@ mod tests {
         tx.send(bytes).unwrap();
         let mut read_buffer = BytesMut::with_capacity(8);
 
-        let first = read_packet_reusing_buffer(&mut transport, 5, &mut read_buffer, 1024)
+        let first = read_packet_reusing_buffer(&mut transport, 5, &mut read_buffer, 1024, None)
             .await
             .unwrap();
-        let second = read_packet_reusing_buffer(&mut transport, 5, &mut read_buffer, 1024)
+        let second = read_packet_reusing_buffer(&mut transport, 5, &mut read_buffer, 1024, None)
             .await
             .unwrap();
-        let third = read_packet_reusing_buffer(&mut transport, 5, &mut read_buffer, 1024)
+        let third = read_packet_reusing_buffer(&mut transport, 5, &mut read_buffer, 1024, None)
             .await
             .unwrap();
         assert!(matches!(first, Packet::Publish(p) if p.topic_name == "first"));
@@ -639,7 +706,7 @@ mod tests {
         let (tx, mut transport) = ChunkTransport::new();
         tx.send(encoded_publish("big", &[0u8; 300])).unwrap();
         let mut read_buffer = BytesMut::new();
-        let err = read_packet_reusing_buffer(&mut transport, 5, &mut read_buffer, 100)
+        let err = read_packet_reusing_buffer(&mut transport, 5, &mut read_buffer, 100, None)
             .await
             .unwrap_err();
         assert!(matches!(err, MqttError::PacketTooLarge { .. }));
@@ -650,7 +717,7 @@ mod tests {
         let (tx, mut transport) = ChunkTransport::new();
         tx.send(vec![0x30, 0x80, 0x80, 0x80, 0x80, 0x01]).unwrap();
         let mut read_buffer = BytesMut::new();
-        let err = read_packet_reusing_buffer(&mut transport, 5, &mut read_buffer, 1024)
+        let err = read_packet_reusing_buffer(&mut transport, 5, &mut read_buffer, 1024, None)
             .await
             .unwrap_err();
         assert!(matches!(err, MqttError::MalformedPacket(_)));
@@ -662,7 +729,7 @@ mod tests {
         tx.send(vec![0x30]).unwrap();
         drop(tx);
         let mut read_buffer = BytesMut::new();
-        let err = read_packet_reusing_buffer(&mut transport, 5, &mut read_buffer, 1024)
+        let err = read_packet_reusing_buffer(&mut transport, 5, &mut read_buffer, 1024, None)
             .await
             .unwrap_err();
         assert!(matches!(err, MqttError::ClientClosed));
@@ -936,5 +1003,26 @@ mod tests {
 
         assert!(written[1] & crate::constants::masks::CONTINUATION_BIT != 0);
         assert!(written.len() > 200);
+    }
+
+    #[cfg(feature = "transport-quic")]
+    #[test]
+    fn read_shares_split_one_budget_and_release_what_they_hold() {
+        let budget = ReadBudget::new(100);
+        let mut first = budget.share();
+        let mut second = budget.share();
+        assert!(first.hold(60).is_ok());
+        assert!(matches!(
+            second.hold(41),
+            Err(MqttError::PacketTooLarge {
+                size: 101,
+                max: 100
+            })
+        ));
+        assert!(second.hold(40).is_ok());
+        assert!(first.hold(10).is_ok());
+        assert!(second.hold(90).is_ok());
+        drop(second);
+        assert!(first.hold(100).is_ok());
     }
 }
