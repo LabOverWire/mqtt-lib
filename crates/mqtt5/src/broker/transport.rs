@@ -1,6 +1,8 @@
 use crate::error::Result;
+use crate::transport::packet_io::ChunkReader;
 use crate::Transport;
 use std::fmt::Debug;
+use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -187,6 +189,12 @@ impl AsyncWrite for BrokerTransport {
             #[cfg(feature = "transport-quic")]
             Self::Quic(stream) => Pin::new(stream).poll_shutdown(cx),
         }
+    }
+}
+
+impl ChunkReader for BrokerTransport {
+    fn read_chunk(&mut self, chunk: &mut [u8]) -> impl Future<Output = Result<usize>> + Send {
+        Transport::read(self, chunk)
     }
 }
 

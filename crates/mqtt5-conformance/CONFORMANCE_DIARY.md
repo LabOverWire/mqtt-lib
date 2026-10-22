@@ -39,6 +39,16 @@
 
 ## Diary Entries
 
+### QUIC buffer budget reservations (2026-10-22)
+
+**Trigger**: second review of PR #263.
+
+**Behavior with the byte counter**: a reader gave its bytes back as soon as it decoded a packet, while the packet still waited in the client handler's 100-slot input queue. With `max_packet_size` 512 KB, a broker stream receive window of 64 KB, and a client subscribed to its own topic that never reads its deliveries (so its handler blocks writing to it), one data flow got 100 complete 200 KB packets read in a row, the most the test sends. Origin/main reads the same 100. Separately, a client writing large packets one after another on new streams was disconnected, because `write_all` returns before the broker has read the previous packet and two packets briefly overlapped.
+
+**Fix**: the budget is a semaphore of `max_packet_size` permits. A reader that sees a fixed header announcing more than 4096 bytes acquires that many permits before reading the rest, and the permit travels with the decoded packet through `ExternalInput::Packet` until the handler has processed it. A reader waiting for permits stops reading, so QUIC flow control slows the client down. Readers holding permits only need the network to finish, so waiting cannot deadlock. Packets of 4096 bytes or less are not reserved, since a reader already holds up to one 4096-byte read chunk uncounted; this keeps PINGREQ and acks on the control stream from waiting behind a large data packet, which the first version of these tests caught. The budget is closed when the handler ends, so waiting readers stop. Going over the budget no longer closes the connection.
+
+**Tests**: `a_stalled_handler_stops_reading_once_queued_packets_fill_the_maximum_size` reads 4 packets here and 100 on main and on the byte-counter commit. The three `partial_packets_..._wait_for_each_other` tests (data and data, control and data, control and ack stream) leave two partial packets over the budget, check the connection stays open, finish both, and check both get through; they fail on the byte-counter commit, where the connection is closed, and pass on main, which has no budget. `an_abandoned_packet_releases_its_reservation` resets a stream holding a reservation and checks a later packet is delivered. A unit test covers reservation, waiting, release and close.
+
 ### QUIC buffer budget review fixes (2026-10-22)
 
 **Trigger**: review of PR #263.

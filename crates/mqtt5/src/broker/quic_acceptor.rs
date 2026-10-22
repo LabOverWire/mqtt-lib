@@ -13,7 +13,7 @@ use crate::transport::flow::{
     FlowFlags, FlowHeader, FlowId, FLOW_TYPE_CLIENT_DATA, FLOW_TYPE_CONTROL, FLOW_TYPE_SERVER_DATA,
     FLOW_TYPE_USER_DEFINED,
 };
-use crate::transport::packet_io::{decode_buffered_packet, ReadBudget, ReadShare};
+use crate::transport::packet_io::{read_packet_within_budget, ChunkReader, ReadBudget};
 use bytes::{Buf, Bytes, BytesMut};
 use mqtt5_protocol::QuicStreamCode;
 use quinn::{Connection, Endpoint, RecvStream, SendStream, ServerConfig};
@@ -445,31 +445,13 @@ fn build_flow_header_result(flow_header: FlowHeader, leftover: BytesMut) -> Stre
     }
 }
 
-pub(super) async fn read_packet_with_buffer(
-    recv: &mut RecvStream,
-    buffer: &mut BytesMut,
-    protocol_version: u8,
-    max_packet_size: usize,
-    mut share: Option<&mut ReadShare>,
-) -> Result<Packet> {
-    loop {
-        let decoded = decode_buffered_packet(buffer, protocol_version, max_packet_size)?;
-        if let Some(share) = share.as_deref_mut() {
-            share.hold(buffer.len())?;
-        }
-        if let Some(packet) = decoded {
-            return Ok(packet);
-        }
-        let mut chunk = [0u8; 1024];
-        let n = recv
-            .read(&mut chunk)
+impl ChunkReader for RecvStream {
+    async fn read_chunk(&mut self, chunk: &mut [u8]) -> Result<usize> {
+        Ok(self
+            .read(chunk)
             .await
             .map_err(|e| MqttError::ConnectionError(format!("QUIC read error: {e}")))?
-            .ok_or(MqttError::ClientClosed)?;
-        if n == 0 {
-            return Err(MqttError::ClientClosed);
-        }
-        buffer.extend_from_slice(&chunk[..n]);
+            .unwrap_or(0))
     }
 }
 
@@ -550,8 +532,10 @@ async fn run_quic_handler_inner(
 
     let handler_label = label;
     let handler_connection = connection.clone();
+    let handler_budget = read_budget.clone();
     tokio::spawn(async move {
         let outcome = handler.run().await;
+        handler_budget.close();
         drop(connection_alive);
         if let Err(e) = &outcome {
             if e.is_normal_disconnect() {
@@ -689,7 +673,7 @@ fn spawn_datagram_reader(
                         None => continue,
                     };
                     if packet_tx
-                        .send(ExternalInput::Packet(packet, None))
+                        .send(ExternalInput::Packet(packet, None, None))
                         .await
                         .is_err()
                     {
@@ -951,21 +935,21 @@ async fn read_data_stream_packets(
     let peer_addr = context.peer_addr;
     let mut share = context.read_budget.share();
     loop {
-        match read_packet_with_buffer(
+        match read_packet_within_budget(
             recv,
-            &mut buffer,
             protocol_version,
+            &mut buffer,
             context.max_packet_size,
             Some(&mut share),
         )
         .await
         {
-            Ok(packet) => {
+            Ok((packet, permit)) => {
                 let raw_flow_id = flow_id.map(|f| f.raw());
                 debug!(flow_id = ?flow_id, packet_type = %packet.packet_type_name(), "Read packet from QUIC data stream");
                 if context
                     .packet_tx
-                    .send(ExternalInput::Packet(packet, raw_flow_id))
+                    .send(ExternalInput::Packet(packet, raw_flow_id, permit))
                     .await
                     .is_err()
                 {

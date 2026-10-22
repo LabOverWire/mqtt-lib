@@ -51,25 +51,23 @@ impl Broker {
         max_packet_size: usize,
         delivery: ServerDeliveryStrategy,
     ) -> (Self, SocketAddr) {
-        Self::start_configured(max_packet_size, delivery, None).await
+        Self::start_configured(max_packet_size, delivery, |quic| quic).await
     }
 
     async fn start_configured(
         max_packet_size: usize,
         delivery: ServerDeliveryStrategy,
-        max_streams: Option<u32>,
+        tune: fn(BrokerQuicConfig) -> BrokerQuicConfig,
     ) -> (Self, SocketAddr) {
         CRYPTO_PROVIDER.call_once(|| {
             rustls::crypto::ring::default_provider()
                 .install_default()
                 .expect("install crypto provider");
         });
-        let quic = BrokerQuicConfig::new(PathBuf::from(CERT), PathBuf::from(KEY))
-            .with_bind_address("127.0.0.1:0".parse::<SocketAddr>().expect("bind address"));
-        let quic = match max_streams {
-            Some(max) => quic.with_max_concurrent_streams(max),
-            None => quic,
-        };
+        let quic = tune(
+            BrokerQuicConfig::new(PathBuf::from(CERT), PathBuf::from(KEY))
+                .with_bind_address("127.0.0.1:0".parse::<SocketAddr>().expect("bind address")),
+        );
         let config = BrokerConfig::default()
             .with_storage(StorageConfig::default().with_backend(StorageBackend::Memory))
             .with_bind_address(([127, 0, 0, 1], 0))
@@ -600,7 +598,7 @@ async fn a_flow_past_the_registry_limit_is_refused() {
     let (broker, addr) = Broker::start_configured(
         defaults.max_packet_size,
         defaults.server_delivery_strategy,
-        Some(512),
+        |quic| quic.with_max_concurrent_streams(512),
     )
     .await;
     let mut split = session_at(addr, "flow-limit").await;
@@ -924,16 +922,20 @@ fn push_remaining_length(frame: &mut Vec<u8>, mut length: usize) {
 }
 
 fn publish_of_size(total: usize) -> Vec<u8> {
+    publish_of_size_to(SIZE_TOPIC, total)
+}
+
+fn publish_of_size_to(topic: &str, total: usize) -> Vec<u8> {
     let remaining = total - 3;
     let mut frame = vec![0x30];
     push_remaining_length(&mut frame, remaining);
     assert_eq!(frame.len(), 3, "a two-byte remaining length");
     frame.extend_from_slice(
-        &u16::try_from(SIZE_TOPIC.len())
+        &u16::try_from(topic.len())
             .expect("short topic")
             .to_be_bytes(),
     );
-    frame.extend_from_slice(SIZE_TOPIC.as_bytes());
+    frame.extend_from_slice(topic.as_bytes());
     frame.push(0x00);
     frame.resize(total, b'x');
     frame
@@ -1091,8 +1093,11 @@ async fn a_data_stream_announcing_an_oversized_packet_closes_the_connection() {
     );
 }
 
-async fn qos1_delivery_stream() -> (Broker, QuicSplitResult, quinn::SendStream) {
-    let (broker, addr) = Broker::start_with(PACKET_LIMIT, ServerDeliveryStrategy::PerTopic).await;
+async fn qos1_delivery_stream(
+    max_packet_size: usize,
+) -> (Broker, QuicSplitResult, quinn::SendStream) {
+    let (broker, addr) =
+        Broker::start_with(max_packet_size, ServerDeliveryStrategy::PerTopic).await;
     let mut subscriber = session_at(addr, "ack-subscriber").await;
     let mut subscribe = subscribe_frame(SIZE_TOPIC);
     *subscribe.last_mut().expect("subscription options") = 0x01;
@@ -1132,7 +1137,7 @@ async fn qos1_delivery_stream() -> (Broker, QuicSplitResult, quinn::SendStream) 
 
 #[tokio::test]
 async fn an_oversized_ack_on_a_stream_the_broker_opened_closes_the_connection() {
-    let (broker, subscriber, mut send) = qos1_delivery_stream().await;
+    let (broker, subscriber, mut send) = qos1_delivery_stream(PACKET_LIMIT).await;
     let mut ack = vec![0x40];
     push_remaining_length(&mut ack, 2 * PACKET_LIMIT);
     ack.resize(ack.len() + 2 * PACKET_LIMIT, 0);
@@ -1142,92 +1147,196 @@ async fn an_oversized_ack_on_a_stream_the_broker_opened_closes_the_connection() 
     assert_eq!(closed, Some(protocol_level_0()));
 }
 
-const MORE_THAN_HALF: usize = PACKET_LIMIT / 2 + 100;
+const BUDGET_LIMIT: usize = 12 * 1024;
+const MORE_THAN_HALF: usize = BUDGET_LIMIT / 2 + 100;
 
 async fn partial_on_data_stream(publisher: &QuicSplitResult, sequence: u64) -> quinn::SendStream {
     let mut stream = publisher.connection.open_uni().await.expect("open uni");
     let mut bytes = data_flow(sequence, 0, FlowFlags::default());
-    bytes.extend_from_slice(&publish_of_size(PACKET_LIMIT)[..MORE_THAN_HALF]);
+    bytes.extend_from_slice(&publish_of_size(BUDGET_LIMIT)[..MORE_THAN_HALF]);
     stream.write_all(&bytes).await.expect("write data stream");
     stream
 }
 
+fn rest_of_publish() -> Vec<u8> {
+    publish_of_size(BUDGET_LIMIT)[MORE_THAN_HALF..].to_vec()
+}
+
+fn puback_of_size(total: usize) -> Vec<u8> {
+    let reason_len = total - 11;
+    let mut frame = vec![0x40];
+    push_remaining_length(&mut frame, total - 3);
+    frame.extend_from_slice(&[0x00, 0x01, 0x00]);
+    push_remaining_length(&mut frame, reason_len + 3);
+    frame.push(0x1F);
+    frame.extend_from_slice(
+        &u16::try_from(reason_len)
+            .expect("short reason")
+            .to_be_bytes(),
+    );
+    frame.resize(total, b'r');
+    frame
+}
+
 #[tokio::test]
-async fn partial_packets_on_data_streams_over_the_maximum_size_close_the_connection() {
+async fn partial_packets_on_data_streams_over_the_maximum_size_wait_for_each_other() {
     let (broker, addr) =
-        Broker::start_with(PACKET_LIMIT, ServerDeliveryStrategy::ControlOnly).await;
-    let publisher = session_at(addr, "partial-streams").await;
-    let streams = [
+        Broker::start_with(BUDGET_LIMIT, ServerDeliveryStrategy::ControlOnly).await;
+    let mut subscriber = subscribed_session(addr).await;
+    let mut publisher = session_at(addr, "partial-streams").await;
+    let mut streams = [
         partial_on_data_stream(&publisher, 1).await,
         partial_on_data_stream(&publisher, 2).await,
     ];
-    let closed = close_code(&publisher.connection).await;
+    tokio::time::sleep(SHORTLY).await;
+    let alive = ping(&mut publisher).await;
+    for stream in &mut streams {
+        stream
+            .write_all(&rest_of_publish())
+            .await
+            .expect("finish packet");
+    }
+    let delivered = [
+        next_packet_type(&mut subscriber).await,
+        next_packet_type(&mut subscriber).await,
+    ];
     broker.stop().await;
     drop(streams);
-    assert_eq!(closed, Some(protocol_level_0()));
+    assert_eq!(alive, Some(0xD0));
+    assert_eq!(delivered, [Some(0x30), Some(0x30)]);
 }
 
 #[tokio::test]
-async fn partial_packets_on_the_control_and_a_data_stream_over_the_maximum_size_close_the_connection(
+async fn partial_packets_on_the_control_and_a_data_stream_over_the_maximum_size_wait_for_each_other(
 ) {
     let (broker, addr) =
-        Broker::start_with(PACKET_LIMIT, ServerDeliveryStrategy::ControlOnly).await;
+        Broker::start_with(BUDGET_LIMIT, ServerDeliveryStrategy::ControlOnly).await;
+    let mut subscriber = subscribed_session(addr).await;
     let mut publisher = session_at(addr, "partial-control").await;
     publisher
         .send
-        .write_all(&publish_of_size(PACKET_LIMIT)[..MORE_THAN_HALF])
+        .write_all(&publish_of_size(BUDGET_LIMIT)[..MORE_THAN_HALF])
         .await
         .expect("write control stream");
-    let stream = partial_on_data_stream(&publisher, 1).await;
-    let closed = close_code(&publisher.connection).await;
+    let mut stream = partial_on_data_stream(&publisher, 1).await;
+    tokio::time::sleep(SHORTLY).await;
+    publisher
+        .send
+        .write_all(&rest_of_publish())
+        .await
+        .expect("finish control packet");
+    stream
+        .write_all(&rest_of_publish())
+        .await
+        .expect("finish data packet");
+    let delivered = [
+        next_packet_type(&mut subscriber).await,
+        next_packet_type(&mut subscriber).await,
+    ];
+    let alive = ping(&mut publisher).await;
     broker.stop().await;
     drop(stream);
-    assert_eq!(closed, Some(protocol_level_0()));
+    assert_eq!(delivered, [Some(0x30), Some(0x30)]);
+    assert_eq!(alive, Some(0xD0));
 }
 
 #[tokio::test]
-async fn complete_and_abandoned_packets_free_the_connection_buffer() {
+async fn partial_packets_on_the_control_and_an_ack_stream_over_the_maximum_size_wait_for_each_other(
+) {
+    let (broker, mut subscriber, mut send) = qos1_delivery_stream(BUDGET_LIMIT).await;
+    let ack = puback_of_size(MORE_THAN_HALF);
+    send.write_all(&ack[..MORE_THAN_HALF / 2])
+        .await
+        .expect("write partial ack");
+    let publish = publish_of_size_to("unsubscribed", BUDGET_LIMIT);
+    subscriber
+        .send
+        .write_all(&publish[..MORE_THAN_HALF])
+        .await
+        .expect("write control stream");
+    tokio::time::sleep(SHORTLY).await;
+    send.write_all(&ack[MORE_THAN_HALF / 2..])
+        .await
+        .expect("finish ack");
+    subscriber
+        .send
+        .write_all(&publish[MORE_THAN_HALF..])
+        .await
+        .expect("finish control packet");
+    let alive = ping(&mut subscriber).await;
+    broker.stop().await;
+    drop(send);
+    assert_eq!(alive, Some(0xD0));
+}
+
+#[tokio::test]
+async fn an_abandoned_packet_releases_its_reservation() {
     let (broker, addr) =
-        Broker::start_with(PACKET_LIMIT, ServerDeliveryStrategy::ControlOnly).await;
+        Broker::start_with(BUDGET_LIMIT, ServerDeliveryStrategy::ControlOnly).await;
     let mut subscriber = subscribed_session(addr).await;
-    let mut publisher = session_at(addr, "partial-released").await;
-    for sequence in 1..=3 {
-        let mut stream = publisher.connection.open_uni().await.expect("open uni");
-        let mut bytes = data_flow(sequence, 0, FlowFlags::default());
-        bytes.extend_from_slice(&publish_of_size(PACKET_LIMIT));
-        stream.write_all(&bytes).await.expect("write data stream");
-        assert_eq!(next_packet_type(&mut subscriber).await, Some(0x30));
-    }
-    let mut abandoned = partial_on_data_stream(&publisher, 4).await;
+    let publisher = session_at(addr, "partial-released").await;
+    let mut abandoned = partial_on_data_stream(&publisher, 1).await;
     tokio::time::sleep(SHORTLY).await;
     abandoned
         .reset(quinn::VarInt::from_u32(
             QuicStreamCode::FlowCancelled.code(),
         ))
         .expect("reset stream");
-    tokio::time::sleep(SHORTLY).await;
-    let last = partial_on_data_stream(&publisher, 5).await;
-    tokio::time::sleep(SHORTLY).await;
-    let alive = ping(&mut publisher).await;
+    let mut stream = partial_on_data_stream(&publisher, 2).await;
+    stream
+        .write_all(&rest_of_publish())
+        .await
+        .expect("finish packet");
+    let delivered = next_packet_type(&mut subscriber).await;
     broker.stop().await;
-    drop(last);
-    assert_eq!(alive, Some(0xD0));
+    drop(stream);
+    assert_eq!(delivered, Some(0x30));
 }
 
 #[tokio::test]
-async fn partial_packets_on_the_control_and_an_ack_stream_over_the_maximum_size_close_the_connection(
-) {
-    let (broker, mut subscriber, mut send) = qos1_delivery_stream().await;
-    let mut ack = vec![0x40];
-    push_remaining_length(&mut ack, PACKET_LIMIT - 3);
-    ack.resize(MORE_THAN_HALF, 0);
-    send.write_all(&ack).await.expect("write partial ack");
-    subscriber
+async fn a_stalled_handler_stops_reading_once_queued_packets_fill_the_maximum_size() {
+    const LIMIT: usize = 512 * 1024;
+    const PACKET: usize = 200 * 1024;
+    let (broker, addr) =
+        Broker::start_configured(LIMIT, ServerDeliveryStrategy::ControlOnly, |quic| {
+            quic.with_stream_receive_window(64 * 1024)
+        })
+        .await;
+    let mut split = session_at(addr, "stalled").await;
+    split
         .send
-        .write_all(&publish_of_size(PACKET_LIMIT)[..MORE_THAN_HALF])
+        .write_all(&subscribe_frame(SIZE_TOPIC))
         .await
-        .expect("write control stream");
-    let closed = close_code(&subscriber.connection).await;
+        .expect("send SUBSCRIBE");
+    let mut frame = vec![0x30];
+    push_remaining_length(&mut frame, PACKET - 4);
+    frame.extend_from_slice(
+        &u16::try_from(SIZE_TOPIC.len())
+            .expect("short topic")
+            .to_be_bytes(),
+    );
+    frame.extend_from_slice(SIZE_TOPIC.as_bytes());
+    frame.push(0x00);
+    frame.resize(PACKET, b'x');
+    let mut stream = split.connection.open_uni().await.expect("open uni");
+    stream
+        .write_all(&data_flow(1, 0, FlowFlags::default()))
+        .await
+        .expect("write flow header");
+    let mut written = 0;
+    while written < 100 {
+        let write = tokio::time::timeout(SHORTLY, stream.write_all(&frame)).await;
+        if !matches!(write, Ok(Ok(()))) {
+            break;
+        }
+        written += 1;
+    }
+    let closed = split.connection.close_reason();
     broker.stop().await;
-    assert_eq!(closed, Some(protocol_level_0()));
+    drop(stream);
+    assert!(closed.is_none());
+    assert!(
+        written < 10,
+        "broker read {written} packets of {PACKET} bytes"
+    );
 }

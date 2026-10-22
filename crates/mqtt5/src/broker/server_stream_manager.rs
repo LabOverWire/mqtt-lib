@@ -2,7 +2,7 @@ use crate::broker::client_handler::ExternalInput;
 use crate::broker::config::ServerDeliveryStrategy;
 use crate::error::{MqttError, Result};
 use crate::transport::flow::{DataFlowHeader, FlowFlags, FlowId, FlowIdGenerator};
-use crate::transport::packet_io::{ReadBudget, ReadShare};
+use crate::transport::packet_io::{read_packet_within_budget, ReadBudget, ReadShare};
 use crate::QoS;
 use bytes::BytesMut;
 use quinn::{Connection, RecvStream, SendStream};
@@ -40,23 +40,23 @@ fn spawn_ack_reader(
     tokio::spawn(async move {
         let mut buffer = BytesMut::new();
         loop {
-            match crate::broker::quic_acceptor::read_packet_with_buffer(
+            match read_packet_within_budget(
                 &mut recv,
-                &mut buffer,
                 protocol_version,
+                &mut buffer,
                 max_packet_size,
                 share.as_mut(),
             )
             .await
             {
-                Ok(packet) => {
+                Ok((packet, permit)) => {
                     trace!(
                         flow_id = ?flow_id,
                         packet_type = %packet.packet_type_name(),
                         "Read ack from server data flow"
                     );
                     if packet_tx
-                        .send(ExternalInput::Packet(packet, Some(flow_id.raw())))
+                        .send(ExternalInput::Packet(packet, Some(flow_id.raw()), permit))
                         .await
                         .is_err()
                     {

@@ -27,7 +27,9 @@ use crate::protocol::v5::reason_codes::ReasonCode;
 use crate::time::Duration;
 #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
 use crate::transport::packet_io::ReadBudget;
-use crate::transport::packet_io::{encode_packet_to_buffer, read_packet_reusing_buffer, ReadShare};
+use crate::transport::packet_io::{
+    encode_packet_to_buffer, read_packet_within_budget, ReadPermit, ReadShare,
+};
 use crate::transport::PacketIo;
 use bytes::{Bytes, BytesMut};
 use mqtt5_protocol::KeepaliveConfig;
@@ -62,7 +64,7 @@ use crate::broker::server_stream_manager::ServerStreamManager;
 
 #[derive(Debug)]
 pub enum ExternalInput {
-    Packet(Packet, Option<u64>),
+    Packet(Packet, Option<u64>, Option<ReadPermit>),
     #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
     Flow(crate::broker::quic_flows::FlowInput),
 }
@@ -816,9 +818,23 @@ impl ClientHandler {
         }
     }
 
+    async fn read_control_packet(
+        transport: &mut BrokerTransport,
+        protocol_version: u8,
+        read_buffer: &mut BytesMut,
+        max_size: usize,
+        share: Option<&mut ReadShare>,
+    ) -> Result<Packet> {
+        let (packet, permit) =
+            read_packet_within_budget(transport, protocol_version, read_buffer, max_size, share)
+                .await?;
+        drop(permit);
+        Ok(packet)
+    }
+
     async fn negotiate_connect(&mut self) -> Result<PendingConnect> {
         let max_size = self.max_packet_size();
-        let packet = read_packet_reusing_buffer(
+        let packet = Self::read_control_packet(
             &mut self.transport,
             5,
             &mut self.read_buffer,
@@ -849,7 +865,7 @@ impl ClientHandler {
         }
         loop {
             let max_size = self.max_packet_size();
-            let packet = read_packet_reusing_buffer(
+            let packet = Self::read_control_packet(
                 &mut self.transport,
                 self.protocol_version,
                 &mut self.read_buffer,
@@ -1057,7 +1073,7 @@ impl ClientHandler {
                     self.bind().await?;
                 }
 
-                read_result = timeout(read_timeout, read_packet_reusing_buffer(&mut self.transport, self.protocol_version, &mut self.read_buffer, max_size, self.read_share.as_mut())) => {
+                read_result = timeout(read_timeout, Self::read_control_packet(&mut self.transport, self.protocol_version, &mut self.read_buffer, max_size, self.read_share.as_mut())) => {
                     if let Some(exit) = self.handle_read(read_result, read_timeout).await? {
                         return Ok(exit);
                     }
@@ -1153,9 +1169,9 @@ impl ClientHandler {
         &mut self,
         external_packet: Option<ExternalInput>,
     ) -> Result<bool> {
-        let (packet, flow_id) = match external_packet {
+        let (packet, flow_id, permit) = match external_packet {
             None => return Ok(false),
-            Some(ExternalInput::Packet(packet, flow_id)) => (packet, flow_id),
+            Some(ExternalInput::Packet(packet, flow_id, permit)) => (packet, flow_id, permit),
             #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
             Some(ExternalInput::Flow(input)) => {
                 self.handle_flow_input(input).await;
@@ -1164,6 +1180,7 @@ impl ClientHandler {
         };
         self.pending_external_flow_id = flow_id;
         let result = self.handle_packet(packet).await;
+        drop(permit);
         self.pending_external_flow_id = None;
         result.map(|()| true)
     }
