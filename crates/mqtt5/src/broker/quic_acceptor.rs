@@ -296,10 +296,10 @@ pub async fn accept_quic_connection(
     ))?;
 
     let peer_addr = incoming.remote_address();
-    debug!("Incoming QUIC connection from {}", peer_addr);
+    debug!("Incoming QUIC connection from {peer_addr}");
 
     let connection = incoming.await.map_err(|e| {
-        error!("QUIC connection failed from {}: {}", peer_addr, e);
+        error!("QUIC connection failed from {peer_addr}: {e}");
         MqttError::ConnectionError(format!("QUIC handshake failed: {e}"))
     })?;
 
@@ -327,7 +327,7 @@ pub async fn accept_quic_stream(
         MqttError::ConnectionError(format!("Failed to accept QUIC stream: {reason}"))
     })?;
 
-    debug!("QUIC bidirectional stream accepted from {}", peer_addr);
+    debug!("QUIC bidirectional stream accepted from {peer_addr}");
 
     Ok(QuicStreamWrapper::new(send, recv, peer_addr))
 }
@@ -520,10 +520,7 @@ async fn run_quic_handler_inner(
         }
     };
 
-    debug!(
-        "{} control stream accepted from {}, starting handler",
-        label, peer_addr
-    );
+    debug!("{label} control stream accepted from {peer_addr}, starting handler");
 
     let stream = QuicStreamWrapper::new(send, recv, peer_addr);
     let transport = BrokerTransport::quic(stream);
@@ -558,9 +555,9 @@ async fn run_quic_handler_inner(
         drop(connection_alive);
         if let Err(e) = &outcome {
             if e.is_normal_disconnect() {
-                debug!("{} client handler finished", handler_label);
+                debug!("{handler_label} client handler finished");
             } else {
-                warn!("{} client handler error: {e}", handler_label);
+                warn!("{handler_label} client handler error: {e}");
             }
         }
         close_after_control_flow(&handler_connection, peer_addr, &outcome).await;
@@ -677,9 +674,7 @@ fn spawn_datagram_reader(
                 Ok(datagram) => {
                     trace!(
                         len = datagram.len(),
-                        "Received {} datagram from {}",
-                        label,
-                        peer_addr
+                        "Received {label} datagram from {peer_addr}"
                     );
                     let packet = match decode_datagram_packet(
                         &datagram,
@@ -698,12 +693,12 @@ fn spawn_datagram_reader(
                         .await
                         .is_err()
                     {
-                        debug!("Datagram packet channel closed for {}", peer_addr);
+                        debug!("Datagram packet channel closed for {peer_addr}");
                         break;
                     }
                 }
                 Err(e) => {
-                    debug!("Datagram read ended for {}: {}", peer_addr, e);
+                    debug!("Datagram read ended for {peer_addr}: {e}");
                     break;
                 }
             }
@@ -721,7 +716,7 @@ fn spawn_bi_accept_loop(
         loop {
             match connection.accept_bi().await {
                 Ok((send, recv)) => {
-                    debug!("{} bidirectional stream accepted from {}", label, peer_addr);
+                    debug!("{label} bidirectional stream accepted from {peer_addr}");
                     spawn_bi_stream_handler(send, recv, peer_addr, packet_tx.clone());
                 }
                 Err(e) => {
@@ -979,7 +974,7 @@ async fn read_data_stream_packets(
                 }
             }
             Err(MqttError::ClientClosed) if buffer.is_empty() => {
-                debug!(flow_id = ?flow_id, "QUIC data stream closed from {}", peer_addr);
+                debug!(flow_id = ?flow_id, "QUIC data stream closed from {peer_addr}");
                 return true;
             }
             Err(MqttError::ClientClosed) => {
@@ -1020,7 +1015,7 @@ fn spawn_data_stream_reader(context: DataStreamContext, mut recv: RecvStream) {
                 leftover,
             })) => match open_flow(&context.packet_tx, id, stream_id, flags, expire).await {
                 Some(FlowAnswer::Served) => {
-                    debug!(flow_id = ?id, "Serving flow from {}", peer_addr);
+                    debug!(flow_id = ?id, "Serving flow from {peer_addr}");
                     (Some(id), leftover)
                 }
                 Some(FlowAnswer::Refused(code)) => {
@@ -1038,11 +1033,11 @@ fn spawn_data_stream_reader(context: DataStreamContext, mut recv: RecvStream) {
                 }
             },
             Ok(StreamOpening::Flow(result)) => {
-                trace!("No flow header on data stream from {}", peer_addr);
+                trace!("No flow header on data stream from {peer_addr}");
                 (None, result.leftover)
             }
             Err(e) => {
-                warn!("Error parsing flow header from {}: {}", peer_addr, e);
+                warn!("Error parsing flow header from {peer_addr}: {e}");
                 return;
             }
         };

@@ -440,7 +440,7 @@ impl ClientHandler {
 
         self.handle_disconnect_cleanup(&client_id, armed_will).await;
 
-        info!("Client {} disconnected", client_id);
+        info!("Client {client_id} disconnected");
 
         result
     }
@@ -554,10 +554,10 @@ impl ClientHandler {
         if let Err(e) = completed {
             if e.to_string().contains("Connection closed") {
                 info!("Client disconnected during connect phase: {e}");
-                tracing::debug!("Connection closed error details: {:?}", e);
+                tracing::debug!("Connection closed error details: {e:?}");
             } else {
                 warn!("Connect error: {e}");
-                tracing::debug!("Connect error details: {:?}", e);
+                tracing::debug!("Connect error details: {e:?}");
             }
             return Err(e);
         }
@@ -567,13 +567,12 @@ impl ClientHandler {
             ));
         };
         info!(
-            "Client {} connected from {} ({})",
-            client_id,
+            "Client {client_id} connected from {} ({})",
             self.client_addr,
             self.transport.transport_type()
         );
         if let Some(cert_info) = self.transport.client_cert_info() {
-            debug!("Client certificate: {}", cert_info);
+            debug!("Client certificate: {cert_info}");
         }
 
         self.resource_monitor
@@ -697,10 +696,9 @@ impl ClientHandler {
             .release_client(client_id, self.generation, self.session_preserved())
             .await;
         match release {
-            Release::Owned => info!("Unregistered client {} from the router", client_id),
+            Release::Owned => info!("Unregistered client {client_id} from the router"),
             Release::Displaced => info!(
-                "Client {} router entry now belongs to the connection that took it over",
-                client_id
+                "Client {client_id} router entry now belongs to the connection that took it over"
             ),
         }
         release
@@ -1198,7 +1196,7 @@ impl ClientHandler {
         read_timeout: Duration,
     ) -> Result<Option<LoopExit>> {
         let packet_result = read_result.map_err(|_| {
-            warn!("Read timeout (no data for {:?})", read_timeout);
+            warn!("Read timeout (no data for {read_timeout:?})");
             MqttError::Timeout
         })?;
         match packet_result {

@@ -978,6 +978,21 @@ async fn first_byte(split: &mut QuicSplitResult) -> Option<u8> {
     }
 }
 
+async fn next_packet_type(split: &mut QuicSplitResult) -> Option<u8> {
+    let packet_type = first_byte(split).await?;
+    let mut remaining = 0;
+    for shift in [0, 7, 14, 21] {
+        let byte = first_byte(split).await?;
+        remaining |= usize::from(byte & 0x7F) << shift;
+        if byte & 0x80 == 0 {
+            let mut body = vec![0u8; remaining];
+            split.recv.read_exact(&mut body).await.ok()?;
+            return Some(packet_type);
+        }
+    }
+    None
+}
+
 async fn ping(split: &mut QuicSplitResult) -> Option<u8> {
     split.send.write_all(&PINGREQ).await.ok()?;
     first_byte(split).await
@@ -1174,12 +1189,14 @@ async fn partial_packets_on_the_control_and_a_data_stream_over_the_maximum_size_
 async fn complete_and_abandoned_packets_free_the_connection_buffer() {
     let (broker, addr) =
         Broker::start_with(PACKET_LIMIT, ServerDeliveryStrategy::ControlOnly).await;
+    let mut subscriber = subscribed_session(addr).await;
     let mut publisher = session_at(addr, "partial-released").await;
     for sequence in 1..=3 {
         let mut stream = publisher.connection.open_uni().await.expect("open uni");
         let mut bytes = data_flow(sequence, 0, FlowFlags::default());
         bytes.extend_from_slice(&publish_of_size(PACKET_LIMIT));
         stream.write_all(&bytes).await.expect("write data stream");
+        assert_eq!(next_packet_type(&mut subscriber).await, Some(0x30));
     }
     let mut abandoned = partial_on_data_stream(&publisher, 4).await;
     tokio::time::sleep(SHORTLY).await;

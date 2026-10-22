@@ -39,6 +39,16 @@
 
 ## Diary Entries
 
+### QUIC buffer budget review fixes (2026-10-22)
+
+**Trigger**: review of PR #263.
+
+**Behavior with the first fix**: a stream's read buffer reserved the full size its fixed header announced as soon as the header arrived, while the budget counted only the bytes received. A unit test feeding `decode_buffered_packet` the five bytes `30 FF FF FF 7F` (a PUBLISH announcing 268435455 bytes) left the buffer with at least that much capacity, so a client could still make the broker reserve close to `max_packet_size` per stream by sending only headers.
+
+**Fix**: `decode_buffered_packet` no longer reserves for the announced size. A buffer now grows with the bytes that arrive, which the budget counts. Going over the budget now returns a `ProtocolError` that names the bytes held across the connection's streams instead of `PacketTooLarge`, which read as one oversized packet. The close code is still ERROR_PROTOCOL_L0.
+
+**Tests**: `an_announced_size_does_not_allocate_before_its_bytes_arrive` fails before the fix and passes after. `complete_and_abandoned_packets_free_the_connection_buffer` now waits for each full packet to be delivered to a subscriber before sending the next, since three full packets read at once could legitimately go over the budget. The reset half of that test still waits on fixed delays, because the broker gives no signal when a reader releases its share.
+
 ### QUIC per-connection buffer budget (2026-10-21)
 
 **Trigger**: #236.

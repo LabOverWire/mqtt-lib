@@ -69,16 +69,16 @@ impl ClientHandler {
 
         if !authorized {
             warn!(
-                "Client {} (user: {:?}) not authorized to publish to topic: {}",
-                client_id, self.user_id, publish.topic_name
+                "Client {client_id} (user: {:?}) not authorized to publish to topic: {}",
+                self.user_id, publish.topic_name
             );
             return self.send_not_authorized_response(&publish).await;
         }
 
         if (publish.qos as u8) > self.config.maximum_qos {
             debug!(
-                "Client {} sent QoS {} but max is {}",
-                client_id, publish.qos as u8, self.config.maximum_qos
+                "Client {client_id} sent QoS {} but max is {}",
+                publish.qos as u8, self.config.maximum_qos
             );
             return self.send_qos_not_supported_response(&publish).await;
         }
@@ -97,7 +97,7 @@ impl ClientHandler {
             .can_send_message(&client_id, payload_size)
             .await
         {
-            warn!("Message from {} dropped due to rate limit", client_id);
+            warn!("Message from {client_id} dropped due to rate limit");
             return self.send_rate_limit_response(&publish).await;
         }
 
@@ -137,8 +137,8 @@ impl ClientHandler {
         if let Some(alias) = publish.properties.get_topic_alias() {
             if alias == 0 || alias > self.config.topic_alias_maximum {
                 return Err(MqttError::ProtocolError(format!(
-                    "Invalid topic alias: {} (maximum: {})",
-                    alias, self.config.topic_alias_maximum
+                    "Invalid topic alias: {alias} (maximum: {})",
+                    self.config.topic_alias_maximum
                 )));
             }
 
@@ -736,10 +736,6 @@ impl ClientHandler {
         Ok(())
     }
 
-    /// Builds the manager for server-initiated QUIC data flows.
-    ///
-    /// The packet channel is what lets the broker read the client's QoS>0 acks back off the
-    /// same data flow it delivered the PUBLISH on, as `MQoQ` 9.1.2 requires.
     #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
     fn build_server_stream_manager(
         &self,

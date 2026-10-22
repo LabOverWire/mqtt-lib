@@ -350,10 +350,10 @@ impl ReadShare {
         let total = self.budget.held.fetch_add(added, Ordering::AcqRel) + added;
         self.held = len;
         if total > self.budget.limit {
-            return Err(MqttError::PacketTooLarge {
-                size: total,
-                max: self.budget.limit,
-            });
+            return Err(MqttError::ProtocolError(format!(
+                "{total} bytes buffered across the connection's streams, over the {} byte limit",
+                self.budget.limit
+            )));
         }
         Ok(())
     }
@@ -417,7 +417,6 @@ pub fn decode_buffered_packet(
         });
     }
     if read_buffer.len() < frame_len {
-        read_buffer.reserve(frame_len - read_buffer.len());
         return Ok(None);
     }
     let mut frame = read_buffer.split_to(frame_len);
@@ -1014,15 +1013,22 @@ mod tests {
         assert!(first.hold(60).is_ok());
         assert!(matches!(
             second.hold(41),
-            Err(MqttError::PacketTooLarge {
-                size: 101,
-                max: 100
-            })
+            Err(MqttError::ProtocolError(message)) if message.starts_with("101 bytes")
         ));
         assert!(second.hold(40).is_ok());
         assert!(first.hold(10).is_ok());
         assert!(second.hold(90).is_ok());
         drop(second);
         assert!(first.hold(100).is_ok());
+    }
+
+    #[test]
+    fn an_announced_size_does_not_allocate_before_its_bytes_arrive() {
+        let mut read_buffer = BytesMut::from(&[0x30, 0xFF, 0xFF, 0xFF, 0x7F][..]);
+        assert!(matches!(
+            decode_buffered_packet(&mut read_buffer, 5, usize::MAX),
+            Ok(None)
+        ));
+        assert!(read_buffer.capacity() < READ_CHUNK);
     }
 }
