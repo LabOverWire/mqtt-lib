@@ -152,8 +152,8 @@ See the [Authentication & Authorization Guide](AUTHENTICATION.md) for configurat
 The conformance test suite validates any MQTT v5.0 broker against the OASIS specification. Create a TOML descriptor for your broker and run the CLI runner:
 
 ```bash
-cargo build --release -p mqtt5-conformance-cli
-./target/release/mqtt5-conformance --sut your-broker.toml --report report.json
+cargo build --profile conformance -p mqtt5-conformance-cli
+./target/conformance/mqtt5-conformance --sut your-broker.toml --report report.json
 ```
 
 See the [Conformance Test Suite](crates/mqtt5-conformance/README.md) for test organization and architecture, and the [CLI Reference](crates/mqtt5-conformance-cli/README.md) for the full SUT descriptor schema and report format.

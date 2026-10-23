@@ -26,8 +26,6 @@ Most tests require only a TCP listener. The counts below show how many tests gat
 | Shared subscriptions | ~11 |
 | WebSocket | 3 |
 
-Total: **183 conformance tests**.
-
 ## Mosquitto 2.x
 
 **Fixture file:** `tests/fixtures/mosquitto-2.x.toml`
@@ -85,7 +83,7 @@ Mosquitto's default config does not support enhanced authentication or ACL, so t
 ### Run
 
 ```bash
-./target/release/mqtt5-conformance --sut tests/fixtures/mosquitto-2.x.toml
+./target/conformance/mqtt5-conformance --sut tests/fixtures/mosquitto-2.x.toml
 ```
 
 ## EMQX 5.x
@@ -131,7 +129,7 @@ EMQX supports nearly the full conformance profile: TCP, TLS, WebSocket, QUIC, sh
 ### Run
 
 ```bash
-./target/release/mqtt5-conformance --sut tests/fixtures/emqx.toml
+./target/conformance/mqtt5-conformance --sut tests/fixtures/emqx.toml
 ```
 
 ## HiveMQ CE
@@ -189,7 +187,7 @@ HiveMQ CE does not support TLS (Enterprise only), enhanced authentication, or AC
 ### Run
 
 ```bash
-./target/release/mqtt5-conformance --sut tests/fixtures/hivemq-ce.toml
+./target/conformance/mqtt5-conformance --sut tests/fixtures/hivemq-ce.toml
 ```
 
 ## mqtt-lib (External Process)
@@ -216,7 +214,7 @@ cargo build --release -p mqttv5-cli
 ### Run
 
 ```bash
-./target/release/mqtt5-conformance --sut tests/fixtures/external-mqtt5.toml
+./target/conformance/mqtt5-conformance --sut tests/fixtures/external-mqtt5.toml
 ```
 
 ## Custom Broker Setup
@@ -227,7 +225,7 @@ To test a broker not listed here:
 2. Adjust addresses and capabilities to match your broker's actual configuration.
 3. Start your broker and run:
    ```bash
-   ./target/release/mqtt5-conformance --sut your-broker.toml
+   ./target/conformance/mqtt5-conformance --sut your-broker.toml
    ```
 
 Tests whose requirements exceed your broker's declared capabilities are skipped automatically.

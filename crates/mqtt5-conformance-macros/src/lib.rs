@@ -153,6 +153,7 @@ fn validate_require_spec(spec: &LitStr) -> syn::Result<()> {
         | "wildcard_subscription_available"
         | "subscription_identifier_available"
         | "shared_subscription_available"
+        | "assigned_client_id_supported"
         | "hooks.restart"
         | "hooks.cleanup"
         | "acl"
@@ -191,6 +192,7 @@ fn requirement_to_tokens(spec: &LitStr) -> syn::Result<proc_macro2::TokenStream>
         "wildcard_subscription_available" => quote! { WildcardSubscriptionAvailable },
         "subscription_identifier_available" => quote! { SubscriptionIdentifierAvailable },
         "shared_subscription_available" => quote! { SharedSubscriptionAvailable },
+        "assigned_client_id_supported" => quote! { AssignedClientIdSupported },
         "hooks.restart" => quote! { HookRestart },
         "hooks.cleanup" => quote! { HookCleanup },
         "acl" => quote! { Acl },

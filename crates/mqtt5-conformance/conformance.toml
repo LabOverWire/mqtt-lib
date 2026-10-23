@@ -583,7 +583,7 @@ level = "Must"
 applies_to = "Server"
 text = "If the Server accepts a connection with Clean Start set to 1, the Server MUST set Session Present to 0 in the CONNACK packet in addition to setting a 0x00 (Success) Reason Code in the CONNACK packet."
 status = "Tested"
-test_names = ["connect_clean_start_session_present_zero"]
+test_names = ["connect_clean_start_session_present_zero", "connect_clean_start_takeover_session_present_zero"]
 note = "Promoted from CrossRef: the correct home for this statement; the duplicate under 3.1.4 has been corrected"
 
 [[sections."3.2".statements]]
@@ -1066,9 +1066,8 @@ id = "MQTT-3.3.4-4"
 level = "Must"
 applies_to = "Server"
 text = "If the Server sends a single copy of the message it MUST include in the PUBLISH packet the Subscription Identifiers for all matching subscriptions which have a Subscription Identifiers."
-status = "NotApplicable"
-test_names = []
-note = "Broker sends multiple PUBLISH packets for overlapping subscriptions (3.3.4-5 applies instead)"
+status = "Tested"
+test_names = ["overlapping_subs_subscription_ids_per_copy"]
 
 [[sections."3.3".statements]]
 id = "MQTT-3.3.4-5"

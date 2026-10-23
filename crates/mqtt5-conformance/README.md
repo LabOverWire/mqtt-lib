@@ -29,19 +29,19 @@ cargo test -p mqtt5-conformance --features inprocess-fixture --lib
 Build the standalone CLI runner:
 
 ```bash
-cargo build --release -p mqtt5-conformance-cli
+cargo build --profile conformance -p mqtt5-conformance-cli
 ```
 
 Run against an external broker:
 
 ```bash
-./target/release/mqtt5-conformance --sut tests/fixtures/mosquitto-2.x.toml
+./target/conformance/mqtt5-conformance --sut tests/fixtures/mosquitto-2.x.toml
 ```
 
 Generate a JSON conformance report:
 
 ```bash
-./target/release/mqtt5-conformance --sut sut.toml --report report.json
+./target/conformance/mqtt5-conformance --sut sut.toml --report report.json
 ```
 
 ## Testing Your Own Broker
@@ -52,7 +52,7 @@ Generate a JSON conformance report:
 
 3. **Run the CLI**:
    ```bash
-   ./target/release/mqtt5-conformance --sut your-broker.toml --report results.json
+   ./target/conformance/mqtt5-conformance --sut your-broker.toml --report results.json
    ```
 
 4. **Review results** — tests whose requirements exceed your broker's capabilities are skipped automatically. See the [CLI README](../mqtt5-conformance-cli/README.md) for the full SUT descriptor schema and report format.

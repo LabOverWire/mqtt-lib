@@ -39,6 +39,22 @@
 
 ## Diary Entries
 
+### Report outcomes, parser regression test, ClientIDs, optional behaviour, coverage gaps (2026-10-22)
+
+**Trigger**: issues #219 to #224, found running the suite against an external broker.
+
+**#219 report status**: the CLI wrote `"planned"` for every test that met its requirements, whether it ran, passed, failed or was filtered out. Reproduced with one test run and 199 filtered out: 197 `planned`, 3 `skipped`. Each trial now records its outcome, and the report gives `passed`, `failed` (with the panic message in `failure`), `skipped` or `not_run`. The full in-process run gives 198 `passed` and 3 `skipped`, and a test run against a closed port is `failed` with its message.
+
+**#220 CONNACK properties**: already fixed by #250, which taught `ParsedProperties` to skip every v5 property it does not extract. A unit test with the issue's two CONNACKs (Receive Maximum, Topic Alias Maximum) fails on the commit before #250 and passes now.
+
+**#221 shared ClientIDs**: the raw CONNECT builders used fixed ClientIDs (`test-flags-client`, `test-version-client`, `test-proto-client`, `test-reserved-client`, `test-will-client`, `test-dup-prop-client`, `test-pw-client`, `malformed-uflag`). Tests running in parallel could take over each other's session, and the takeover close counted as the broker rejecting a malformed packet. Every builder now generates a ULID-suffixed ClientID.
+
+**#222 optional behaviour**: checked against the normative text. MQTT-3.1.3-6 makes accepting an empty ClientID a MAY, so `connect_empty_client_id_server_assigns` and `connack_assigned_client_id_unique` now require the new `assigned_client_id_supported` requirement; with it set to false both are listed as skipped. §3.3.4 makes further copies for overlapping subscriptions a MAY, so the two overlap tests accept one or two copies: the maximum QoS across what arrives must be 1 (MQTT-3.3.4-2), a single copy must carry both identifiers (MQTT-3.3.4-4, now Tested instead of NotApplicable) and two copies must carry one each (MQTT-3.3.4-5). The single-copy branch is not exercised by the in-process broker, which sends two copies. §4.13.1 says the Server MUST close the connection and SHOULD send DISCONNECT, so `disconnect_session_expiry_after_zero_is_protocol_error` accepts a bare close and still checks 0x82 when a DISCONNECT arrives.
+
+**#223 coverage gaps**: `connect_clean_start_takeover_session_present_zero` connects with Clean Start 1 to a ClientID whose session is live with a subscription and checks Session Present 0 (MQTT-3.2.2-2). `publish_retain_handling_zero_sends_retained` now checks the RETAIN flag is 1 on the retained delivery (§3.3.1.3). Negative control: a broker changed to report Session Present whenever a stored session exists, and to send retained messages with RETAIN 0, passes `connect_clean_start_session_present_zero` and fails both new assertions. `connect_clean_start_session_present_zero` was tagged MQTT-3.1.4-3, a takeover statement, while the manifest lists it under MQTT-3.2.2-2; the tag now matches.
+
+**#224 CLI build**: a release build has `panic = "abort"`, so the first failing test ends the run. Reproduced against a closed port: the release binary stopped at the first of 21 tests with no summary, the `conformance` profile build reported 21 failed. The READMEs and BROKER_SETUP.md now build with `--profile conformance` and run `target/conformance/mqtt5-conformance`, and no longer state a test count.
+
 ### QUIC buffer budget reservations (2026-10-22)
 
 **Trigger**: second review of PR #263.

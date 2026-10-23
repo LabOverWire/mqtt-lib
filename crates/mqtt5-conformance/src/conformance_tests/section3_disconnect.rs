@@ -363,7 +363,7 @@ async fn disconnect_session_expiry_extends_session(sut: SutHandle) {
 
 /// `[MQTT-4.13.1-1]` If CONNECT set a Session Expiry Interval of 0, a
 /// non-zero value on DISCONNECT is a Protocol Error (§3.14.2.2.2): the Server
-/// sends DISCONNECT 0x82 and MUST close the Network Connection.
+/// MUST close the Network Connection and SHOULD send DISCONNECT 0x82 first.
 #[conformance_test(
     ids = ["MQTT-4.13.1-1"],
     requires = ["transport.tcp"],
@@ -384,11 +384,12 @@ async fn disconnect_session_expiry_after_zero_is_protocol_error(sut: SutHandle) 
         .await
         .unwrap();
 
-    assert_eq!(
-        raw.expect_disconnect_packet(TIMEOUT).await,
-        Some(0x82),
-        "[MQTT-4.13.1-1] non-zero Session Expiry on DISCONNECT after 0 on CONNECT is a Protocol Error"
-    );
+    if let Some(reason_code) = raw.expect_disconnect_packet(TIMEOUT).await {
+        assert_eq!(
+            reason_code, 0x82,
+            "[MQTT-4.13.1-1] non-zero Session Expiry on DISCONNECT after 0 on CONNECT is a Protocol Error"
+        );
+    }
     assert!(
         raw.expect_disconnect(TIMEOUT).await,
         "[MQTT-4.13.1-1] Server must close the connection after the Protocol Error"

@@ -144,6 +144,7 @@ pub enum Requirement {
     WildcardSubscriptionAvailable,
     SubscriptionIdentifierAvailable,
     SharedSubscriptionAvailable,
+    AssignedClientIdSupported,
     EnhancedAuthMethod(&'static str),
     HookRestart,
     HookCleanup,
@@ -166,6 +167,7 @@ impl Requirement {
             Self::WildcardSubscriptionAvailable => capabilities.wildcard_subscription_available,
             Self::SubscriptionIdentifierAvailable => capabilities.subscription_identifier_available,
             Self::SharedSubscriptionAvailable => capabilities.shared_subscription_available,
+            Self::AssignedClientIdSupported => capabilities.assigned_client_id_supported,
             Self::EnhancedAuthMethod(method) => capabilities
                 .enhanced_auth
                 .methods
@@ -192,6 +194,7 @@ impl Requirement {
             Self::WildcardSubscriptionAvailable => "wildcard_subscription_available".to_owned(),
             Self::SubscriptionIdentifierAvailable => "subscription_identifier_available".to_owned(),
             Self::SharedSubscriptionAvailable => "shared_subscription_available".to_owned(),
+            Self::AssignedClientIdSupported => "assigned_client_id_supported".to_owned(),
             Self::EnhancedAuthMethod(method) => format!("enhanced_auth.{method}"),
             Self::HookRestart => "hooks.restart".to_owned(),
             Self::HookCleanup => "hooks.cleanup".to_owned(),
@@ -208,7 +211,8 @@ impl Requirement {
     /// * `transport.tcp`, `transport.tls`, `transport.websocket`, `transport.quic`
     /// * `max_qos>=N` where `N` is 0, 1, or 2
     /// * `retain_available`, `wildcard_subscription_available`,
-    ///   `subscription_identifier_available`, `shared_subscription_available`
+    ///   `subscription_identifier_available`, `shared_subscription_available`,
+    ///   `assigned_client_id_supported`
     /// * `enhanced_auth.<METHOD>` — `<METHOD>` is passed through as a
     ///   `&'static str` (callers must use string literals)
     /// * `hooks.restart`, `hooks.cleanup`
@@ -240,6 +244,7 @@ impl Requirement {
             "wildcard_subscription_available" => Ok(Self::WildcardSubscriptionAvailable),
             "subscription_identifier_available" => Ok(Self::SubscriptionIdentifierAvailable),
             "shared_subscription_available" => Ok(Self::SharedSubscriptionAvailable),
+            "assigned_client_id_supported" => Ok(Self::AssignedClientIdSupported),
             "hooks.restart" => Ok(Self::HookRestart),
             "hooks.cleanup" => Ok(Self::HookCleanup),
             "acl" => Ok(Self::Acl),
@@ -331,6 +336,10 @@ mod tests {
         assert_eq!(
             Requirement::from_spec("shared_subscription_available").unwrap(),
             Requirement::SharedSubscriptionAvailable
+        );
+        assert_eq!(
+            Requirement::from_spec("assigned_client_id_supported").unwrap(),
+            Requirement::AssignedClientIdSupported
         );
         assert_eq!(Requirement::from_spec("acl").unwrap(), Requirement::Acl);
         assert!(Requirement::from_spec("unknown").is_err());

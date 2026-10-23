@@ -277,7 +277,8 @@ async fn publish_no_retain_does_not_store(sut: SutHandle) {
 }
 
 /// `[MQTT-3.3.1-9]` Retain Handling 0 — the Server MUST send retained
-/// messages matching the Topic Filter of the subscription.
+/// messages matching the Topic Filter of the subscription, with the RETAIN
+/// flag set to 1 (§3.3.1.3).
 #[conformance_test(
     ids = ["MQTT-3.3.1-9"],
     requires = ["transport.tcp", "retain_available"],
@@ -313,6 +314,11 @@ async fn publish_retain_handling_zero_sends_retained(sut: SutHandle) {
     assert!(
         subscription.wait_for_messages(1, TIMEOUT).await,
         "[MQTT-3.3.1-9] RetainHandling=0 must deliver retained message"
+    );
+    let msgs = subscription.snapshot();
+    assert!(
+        msgs[0].retain,
+        "[MQTT-3.3.1-9] a retained message sent for a new subscription must have RETAIN set to 1"
     );
     publisher.disconnect().await.expect("disconnect failed");
     subscriber.disconnect().await.expect("disconnect failed");

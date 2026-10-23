@@ -347,6 +347,14 @@ mod tests {
     }
 
     #[test]
+    fn parsed_connack_skips_receive_maximum_and_topic_alias_maximum() {
+        let receive_maximum = [0x20, 0x06, 0x00, 0x00, 0x03, 0x21, 0x80, 0x00];
+        let topic_alias_maximum = [0x20, 0x06, 0x00, 0x00, 0x03, 0x22, 0x00, 0x80];
+        assert!(ParsedConnAck::parse(&receive_maximum).is_some());
+        assert!(ParsedConnAck::parse(&topic_alias_maximum).is_some());
+    }
+
+    #[test]
     fn properties_reject_a_truncated_skipped_property() {
         let data = [0x27, 0x00, 0x01];
         assert!(ParsedProperties::parse(&data, 0, data.len()).is_none());

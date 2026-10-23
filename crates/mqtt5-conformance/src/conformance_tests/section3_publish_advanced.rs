@@ -3,6 +3,7 @@
 
 use crate::conformance_test;
 use crate::harness::unique_client_id;
+use crate::packet_parser::ParsedPublish;
 use crate::raw_client::{RawMqttClient, RawPacketBuilder};
 use crate::sut::SutHandle;
 use crate::test_client::TestClient;
@@ -11,9 +12,9 @@ use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
-/// `[MQTT-3.3.4-2]` Overlapping subscriptions: at least one PUBLISH copy
-/// must be delivered at the maximum granted `QoS` across the matching
-/// subscriptions.
+/// `[MQTT-3.3.4-2]` Overlapping subscriptions: the message must be delivered
+/// at the maximum granted `QoS` across the matching subscriptions, in one
+/// copy or in one copy per subscription.
 #[conformance_test(
     ids = ["MQTT-3.3.4-2"],
     requires = ["transport.tcp", "max_qos>=1"],
@@ -58,42 +59,25 @@ async fn overlapping_subs_max_qos_delivered(sut: SutHandle) {
         .await
         .expect("publish failed");
 
-    let mut received = Vec::new();
-    for _ in 0..3 {
-        if let Some(data) = sub.read_packet_bytes(TIMEOUT).await {
-            for pkt in split_mqtt_packets(&data) {
-                if !pkt.is_empty() && (pkt[0] & 0xF0) == 0x30 {
-                    received.push(pkt);
-                }
-            }
-        }
-        if received.len() >= 2 {
-            break;
-        }
-    }
-
-    assert_eq!(
-        received.len(),
-        2,
-        "[MQTT-3.3.4-2] overlapping subscriptions must deliver 2 copies"
+    let received = overlapping_copies(&mut sub).await;
+    assert!(
+        !received.is_empty(),
+        "[MQTT-3.3.4-2] overlapping subscriptions must deliver the message"
     );
-
-    let qos1 = (received[0][0] >> 1) & 0x03;
-    let qos2 = (received[1][0] >> 1) & 0x03;
-    let max_qos = qos1.max(qos2);
     assert_eq!(
-        max_qos, 1,
-        "[MQTT-3.3.4-2] at least one copy must be delivered at QoS 1 (max of overlapping)"
+        received.iter().map(|publish| publish.qos).max(),
+        Some(1),
+        "[MQTT-3.3.4-2] the message must be delivered at the maximum QoS of the matching subscriptions"
     );
 
     publisher.disconnect().await.expect("disconnect failed");
 }
 
-/// `[MQTT-3.3.4-3]` `[MQTT-3.3.4-5]` Each PUBLISH copy delivered for
-/// overlapping subscriptions must carry its matching Subscription
-/// Identifier.
+/// `[MQTT-3.3.4-3]` `[MQTT-3.3.4-4]` `[MQTT-3.3.4-5]` A single copy for
+/// overlapping subscriptions must carry every matching Subscription
+/// Identifier, and each of several copies must carry its own.
 #[conformance_test(
-    ids = ["MQTT-3.3.4-3", "MQTT-3.3.4-5"],
+    ids = ["MQTT-3.3.4-3", "MQTT-3.3.4-4", "MQTT-3.3.4-5"],
     requires = ["transport.tcp", "max_qos>=1"],
 )]
 async fn overlapping_subs_subscription_ids_per_copy(sut: SutHandle) {
@@ -132,41 +116,34 @@ async fn overlapping_subs_subscription_ids_per_copy(sut: SutHandle) {
         .await
         .expect("publish failed");
 
-    let mut received = Vec::new();
-    for _ in 0..3 {
-        if let Some(data) = sub.read_packet_bytes(TIMEOUT).await {
-            for pkt in split_mqtt_packets(&data) {
-                if !pkt.is_empty() && (pkt[0] & 0xF0) == 0x30 {
-                    received.push(pkt);
-                }
-            }
+    let received = overlapping_copies(&mut sub).await;
+    match received.as_slice() {
+        [single] => {
+            let mut ids = single.properties.subscription_identifiers.clone();
+            ids.sort_unstable();
+            assert_eq!(
+                ids,
+                [10, 20],
+                "[MQTT-3.3.4-4] a single copy must carry the Subscription Identifiers of every matching subscription"
+            );
         }
-        if received.len() >= 2 {
-            break;
+        [first, second] => {
+            let mut ids = [
+                first.properties.subscription_identifiers.as_slice(),
+                second.properties.subscription_identifiers.as_slice(),
+            ];
+            ids.sort_unstable();
+            assert_eq!(
+                ids,
+                [[10].as_slice(), [20].as_slice()],
+                "[MQTT-3.3.4-5] each copy must carry the Subscription Identifier of its matching subscription"
+            );
         }
+        _ => panic!(
+            "[MQTT-3.3.4-3] overlapping subscriptions must deliver one or two copies, got {}",
+            received.len()
+        ),
     }
-
-    assert_eq!(
-        received.len(),
-        2,
-        "[MQTT-3.3.4-3] overlapping subscriptions must deliver 2 PUBLISH copies"
-    );
-
-    let id1 = extract_subscription_identifier(&received[0]);
-    let id2 = extract_subscription_identifier(&received[1]);
-
-    assert!(
-        id1.is_some() && id2.is_some(),
-        "[MQTT-3.3.4-3] each PUBLISH copy must contain a Subscription Identifier"
-    );
-
-    let mut seen_ids = vec![id1.unwrap(), id2.unwrap()];
-    seen_ids.sort_unstable();
-    assert_eq!(
-        seen_ids,
-        vec![10, 20],
-        "[MQTT-3.3.4-5] each copy must carry its matching subscription identifier"
-    );
 
     publisher.disconnect().await.expect("disconnect failed");
 }
@@ -413,111 +390,17 @@ async fn response_topic_valid_utf8_forwarded(sut: SutHandle) {
     subscriber.disconnect().await.expect("disconnect failed");
 }
 
-fn split_mqtt_packets(data: &[u8]) -> Vec<Vec<u8>> {
-    let mut packets = Vec::new();
-    let mut offset = 0;
-    while offset < data.len() {
-        if offset + 1 >= data.len() {
+async fn overlapping_copies(sub: &mut RawMqttClient) -> Vec<ParsedPublish> {
+    let mut copies = Vec::with_capacity(2);
+    let mut wait = TIMEOUT;
+    while copies.len() < 2 {
+        let Some(packet) = sub.read_mqtt_packet(wait).await else {
             break;
-        }
-        let start = offset;
-        offset += 1;
-        let mut remaining_len: u32 = 0;
-        let mut shift = 0;
-        loop {
-            if offset >= data.len() {
-                return packets;
-            }
-            let byte = data[offset];
-            offset += 1;
-            remaining_len |= u32::from(byte & 0x7F) << shift;
-            if byte & 0x80 == 0 {
-                break;
-            }
-            shift += 7;
-            if shift > 21 {
-                return packets;
-            }
-        }
-        let end = offset + remaining_len as usize;
-        if end > data.len() {
-            break;
-        }
-        packets.push(data[start..end].to_vec());
-        offset = end;
-    }
-    packets
-}
-
-fn decode_variable_int(data: &[u8], start: usize) -> Option<(u32, usize)> {
-    let mut value: u32 = 0;
-    let mut shift = 0;
-    let mut idx = start;
-    loop {
-        if idx >= data.len() {
-            return None;
-        }
-        let byte = data[idx];
-        idx += 1;
-        value |= u32::from(byte & 0x7F) << shift;
-        if byte & 0x80 == 0 {
-            return Some((value, idx));
-        }
-        shift += 7;
-        if shift > 21 {
-            return None;
+        };
+        if let Some(publish) = ParsedPublish::parse(&packet) {
+            copies.push(publish);
+            wait = Duration::from_secs(1);
         }
     }
-}
-
-fn extract_subscription_identifier(data: &[u8]) -> Option<u32> {
-    if data.is_empty() || (data[0] & 0xF0) != 0x30 {
-        return None;
-    }
-    let qos = (data[0] >> 1) & 0x03;
-    let (remaining_len, mut idx) = decode_variable_int(data, 1)?;
-    let payload_end = idx + remaining_len as usize;
-    if data.len() < payload_end {
-        return None;
-    }
-    if idx + 2 > data.len() {
-        return None;
-    }
-    let topic_len = u16::from_be_bytes([data[idx], data[idx + 1]]) as usize;
-    idx += 2 + topic_len;
-    if qos > 0 {
-        idx += 2;
-    }
-    let (props_len, props_start) = decode_variable_int(data, idx)?;
-    let props_end = props_start + props_len as usize;
-    idx = props_start;
-    while idx < props_end {
-        let prop_id = data[idx];
-        idx += 1;
-        if prop_id == 0x0B {
-            let (val, _) = decode_variable_int(data, idx)?;
-            return Some(val);
-        }
-        match prop_id {
-            0x01 => idx += 1,
-            0x02 => idx += 4,
-            0x23 => idx += 2,
-            0x08 | 0x03 | 0x09 | 0x1A | 0x26 => {
-                if idx + 2 > data.len() {
-                    return None;
-                }
-                let len = u16::from_be_bytes([data[idx], data[idx + 1]]) as usize;
-                idx += 2 + len;
-                if prop_id == 0x26 {
-                    if idx + 2 > data.len() {
-                        return None;
-                    }
-                    let vlen = u16::from_be_bytes([data[idx], data[idx + 1]]) as usize;
-                    idx += 2 + vlen;
-                }
-            }
-            _ => return None,
-        }
-    }
-    None
+    copies
 }

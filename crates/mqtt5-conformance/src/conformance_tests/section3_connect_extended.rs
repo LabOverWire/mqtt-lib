@@ -732,7 +732,7 @@ fn build_connect_username_flag_set_no_username() -> Vec<u8> {
     body.put_u8(0x82);
     body.put_u16(60);
     body.put_u8(0);
-    put_mqtt_string(&mut body, "malformed-uflag");
+    put_mqtt_string(&mut body, &unique_client_id("malformed-uflag"));
 
     wrap_fixed_header(0x10, &body)
 }

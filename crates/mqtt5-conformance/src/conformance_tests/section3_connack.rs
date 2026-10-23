@@ -182,7 +182,7 @@ async fn connack_uses_valid_reason_code(sut: SutHandle) {
 /// server must assign different unique `ClientID`s.
 #[conformance_test(
     ids = ["MQTT-3.2.2-16"],
-    requires = ["transport.tcp"],
+    requires = ["transport.tcp", "assigned_client_id_supported"],
 )]
 async fn connack_assigned_client_id_unique(sut: SutHandle) {
     let mut ids = Vec::new();

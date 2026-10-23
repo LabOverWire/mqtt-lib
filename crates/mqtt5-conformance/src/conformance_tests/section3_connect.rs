@@ -386,7 +386,7 @@ async fn connect_valid_client_id_accepted(sut: SutHandle) {
 /// case and assign a unique `ClientID` to that Client.
 #[conformance_test(
     ids = ["MQTT-3.1.3-6"],
-    requires = ["transport.tcp"],
+    requires = ["transport.tcp", "assigned_client_id_supported"],
 )]
 async fn connect_empty_client_id_server_assigns(sut: SutHandle) {
     let mut raw = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
@@ -485,10 +485,10 @@ async fn connect_duplicate_property_rejected(sut: SutHandle) {
     );
 }
 
-/// `[MQTT-3.1.4-3]` If the Server accepts a connection with `CleanStart` set
+/// `[MQTT-3.2.2-2]` If the Server accepts a connection with `CleanStart` set
 /// to 1, the Server MUST set Session Present to 0 in the CONNACK packet.
 #[conformance_test(
-    ids = ["MQTT-3.1.4-3"],
+    ids = ["MQTT-3.2.2-2"],
     requires = ["transport.tcp"],
 )]
 async fn connect_clean_start_session_present_zero(sut: SutHandle) {
@@ -506,12 +506,68 @@ async fn connect_clean_start_session_present_zero(sut: SutHandle) {
     let (flags, reason) = connack.unwrap();
     assert_eq!(
         reason, 0x00,
-        "[MQTT-3.1.4-3] Reason code must be 0x00 (Success)"
+        "[MQTT-3.2.2-2] Reason code must be 0x00 (Success)"
     );
     assert_eq!(
         flags & 0x01,
         0,
-        "[MQTT-3.1.4-3] Session present flag must be 0 for clean start"
+        "[MQTT-3.2.2-2] Session present flag must be 0 for clean start"
+    );
+}
+
+/// `[MQTT-3.2.2-2]` Clean Start = 1 taking over a connected Client's session
+/// must still report Session Present = 0.
+#[conformance_test(
+    ids = ["MQTT-3.2.2-2"],
+    requires = ["transport.tcp"],
+)]
+async fn connect_clean_start_takeover_session_present_zero(sut: SutHandle) {
+    let client_id = unique_client_id("sp0-takeover");
+
+    let mut existing = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
+        .await
+        .unwrap();
+    existing
+        .send_raw(&RawPacketBuilder::connect_with_session_expiry(
+            &client_id, 300,
+        ))
+        .await
+        .unwrap();
+    existing
+        .expect_connack(TIMEOUT)
+        .await
+        .expect("first connect must receive CONNACK");
+    existing
+        .send_raw(&RawPacketBuilder::subscribe_with_packet_id(
+            &format!("sp0-takeover/{client_id}"),
+            0,
+            1,
+        ))
+        .await
+        .unwrap();
+    existing.expect_suback(TIMEOUT).await;
+
+    let mut taker = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
+        .await
+        .unwrap();
+    taker
+        .send_raw(&RawPacketBuilder::connect_with_session_expiry(
+            &client_id, 300,
+        ))
+        .await
+        .unwrap();
+    let (flags, reason) = taker
+        .expect_connack(TIMEOUT)
+        .await
+        .expect("takeover connect must receive CONNACK");
+    assert_eq!(
+        reason, 0x00,
+        "[MQTT-3.2.2-2] Reason code must be 0x00 (Success)"
+    );
+    assert_eq!(
+        flags & 0x01,
+        0,
+        "[MQTT-3.2.2-2] Session Present must be 0 when Clean Start = 1 takes over a live session"
     );
 }
 
@@ -694,7 +750,7 @@ fn build_connect_with_flags(connect_flags: u8) -> Vec<u8> {
     body.put_u8(connect_flags);
     body.put_u16(60);
     body.put_u8(0);
-    put_mqtt_string(&mut body, "test-flags-client");
+    put_mqtt_string(&mut body, &unique_client_id("flags"));
 
     if connect_flags & 0x04 != 0 {
         body.put_u8(0);

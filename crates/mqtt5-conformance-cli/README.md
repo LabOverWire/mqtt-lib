@@ -1,44 +1,46 @@
 # mqtt5-conformance-cli
 
-Standalone CLI runner for the MQTT v5.0 conformance test suite. Runs 183 conformance tests against any MQTT v5.0 broker described by a TOML descriptor file.
+Standalone CLI runner for the MQTT v5.0 conformance test suite. Runs the conformance tests against any MQTT v5.0 broker described by a TOML descriptor file.
 
 ## Installation
 
 ```bash
-cargo build --release -p mqtt5-conformance-cli
-# Binary: ./target/release/mqtt5-conformance
+cargo build --profile conformance -p mqtt5-conformance-cli
+# Binary: ./target/conformance/mqtt5-conformance
 ```
+
+The `conformance` profile keeps `panic = "unwind"`. The release profile aborts on panic, so a release build stops the whole run at the first failing test.
 
 ## Usage
 
 Run against the built-in in-process broker:
 
 ```bash
-./target/release/mqtt5-conformance
+./target/conformance/mqtt5-conformance
 ```
 
 Run against an external broker:
 
 ```bash
-./target/release/mqtt5-conformance --sut tests/fixtures/mosquitto-2.x.toml
+./target/conformance/mqtt5-conformance --sut tests/fixtures/mosquitto-2.x.toml
 ```
 
 Generate a JSON conformance report:
 
 ```bash
-./target/release/mqtt5-conformance --sut sut.toml --report report.json
+./target/conformance/mqtt5-conformance --sut sut.toml --report report.json
 ```
 
 Filter tests by name substring:
 
 ```bash
-./target/release/mqtt5-conformance connect
+./target/conformance/mqtt5-conformance connect
 ```
 
 List all tests without running them:
 
 ```bash
-./target/release/mqtt5-conformance --list
+./target/conformance/mqtt5-conformance --list
 ```
 
 ## CLI Arguments
@@ -151,7 +153,8 @@ When `--report <path>` is provided, the CLI writes a JSON file with this structu
       "file": "src/conformance_tests/section3_connect.rs",
       "line": 42,
       "ids": ["MQTT-3.1.0-1"],
-      "status": "planned",
+      "status": "passed",
+      "failure": null,
       "unmet_requirement": null
     },
     {
@@ -161,6 +164,7 @@ When `--report <path>` is provided, the CLI writes a JSON file with this structu
       "line": 10,
       "ids": ["MQTT-6.0.0-1"],
       "status": "skipped",
+      "failure": null,
       "unmet_requirement": "transport.websocket"
     }
   ]
@@ -171,15 +175,16 @@ When `--report <path>` is provided, the CLI writes a JSON file with this structu
 |-------|-------------|
 | `summary` | Aggregate pass/fail/ignore/filter counts from the test run |
 | `capabilities` | Snapshot of the SUT's declared capabilities |
-| `tests` | Per-test entries with conformance IDs, source location, and skip status |
-| `status` | `"planned"` (ran or will run) or `"skipped"` (requirement unmet) |
+| `tests` | Per-test entries with conformance IDs, source location, and outcome |
+| `status` | `"passed"`, `"failed"`, `"skipped"` (requirement unmet) or `"not_run"` (filtered out) |
+| `failure` | The panic message of a failed test, or `null` |
 | `unmet_requirement` | The first unmet requirement string, or `null` if all requirements met |
 
 ## CI Integration
 
 ```bash
-cargo build --release -p mqtt5-conformance-cli
-./target/release/mqtt5-conformance --sut sut.toml --report conformance.json
+cargo build --profile conformance -p mqtt5-conformance-cli
+./target/conformance/mqtt5-conformance --sut sut.toml --report conformance.json
 ```
 
 The CLI exits with code 0 if all non-skipped tests pass, nonzero otherwise.
