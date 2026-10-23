@@ -4,7 +4,6 @@ tests/manifest_load.rs fails on any pair not listed here, and on any listed pair
 been reconciled - so this file can only shrink.
 
 connect_clean_start_false_session_present_one MQTT-3.1.4-4
-connect_clean_start_session_present_zero MQTT-3.1.4-3
 connect_duplicate_property_rejected MQTT-3.1.4-2
 connect_success_connack MQTT-3.1.4-6
 connect_will_not_published_on_normal_disconnect MQTT-3.1.4-5

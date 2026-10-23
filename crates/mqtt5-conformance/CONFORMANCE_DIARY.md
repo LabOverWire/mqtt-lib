@@ -39,6 +39,14 @@
 
 ## Diary Entries
 
+### Citation drift pair removed after the MQTT-3.2.2-2 retag (2026-10-23)
+
+**Trigger**: `tests/manifest_load.rs` failed on the #264 branch. Retagging `connect_clean_start_session_present_zero` from MQTT-3.1.4-3 to MQTT-3.2.2-2 reconciled a pair listed in `known-citation-drift.txt`, and `manifest_and_test_attributes_agree_or_shrink` requires a reconciled pair to be removed. The earlier runs on this branch used `--lib` only, which skips that test, and so does the CI job.
+
+**Fix**: removed `connect_clean_start_session_present_zero MQTT-3.1.4-3` from `known-citation-drift.txt` (23 pairs left).
+
+**Results**: `cargo test -p mqtt5-conformance --features inprocess-fixture` passes: lib 245, manifest_load 11, and the integration test files.
+
 ### Review fixes for the #219 to #224 branch (2026-10-22)
 
 **Trigger**: code review of PR #264.
