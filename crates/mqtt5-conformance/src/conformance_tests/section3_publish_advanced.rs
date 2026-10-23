@@ -37,7 +37,7 @@ async fn overlapping_subs_max_qos_delivered(sut: SutHandle) {
     ))
     .await
     .unwrap();
-    sub.expect_suback(TIMEOUT).await;
+    expect_granted(&mut sub, 0).await;
     sub.send_raw(&RawPacketBuilder::subscribe_with_packet_id(
         &filter_hash,
         1,
@@ -45,7 +45,7 @@ async fn overlapping_subs_max_qos_delivered(sut: SutHandle) {
     ))
     .await
     .unwrap();
-    sub.expect_suback(TIMEOUT).await;
+    expect_granted(&mut sub, 1).await;
 
     let publisher = TestClient::connect_with_prefix(&sut, "pub-overlap-qos")
         .await
@@ -61,11 +61,11 @@ async fn overlapping_subs_max_qos_delivered(sut: SutHandle) {
 
     let received = overlapping_copies(&mut sub).await;
     assert!(
-        !received.is_empty(),
+        received[0].is_some(),
         "[MQTT-3.3.4-2] overlapping subscriptions must deliver the message"
     );
     assert_eq!(
-        received.iter().map(|publish| publish.qos).max(),
+        received.iter().flatten().map(|publish| publish.qos).max(),
         Some(1),
         "[MQTT-3.3.4-2] the message must be delivered at the maximum QoS of the matching subscriptions"
     );
@@ -96,13 +96,13 @@ async fn overlapping_subs_subscription_ids_per_copy(sut: SutHandle) {
     ))
     .await
     .unwrap();
-    sub.expect_suback(TIMEOUT).await;
+    expect_granted(&mut sub, 1).await;
     sub.send_raw(&RawPacketBuilder::subscribe_with_sub_id(
         &filter_b, 1, 2, 20,
     ))
     .await
     .unwrap();
-    sub.expect_suback(TIMEOUT).await;
+    expect_granted(&mut sub, 1).await;
 
     let publisher = TestClient::connect_with_prefix(&sut, "pub-overlap-id")
         .await
@@ -117,8 +117,8 @@ async fn overlapping_subs_subscription_ids_per_copy(sut: SutHandle) {
         .expect("publish failed");
 
     let received = overlapping_copies(&mut sub).await;
-    match received.as_slice() {
-        [single] => {
+    match &received {
+        [Some(single), None] => {
             let mut ids = single.properties.subscription_identifiers.clone();
             ids.sort_unstable();
             assert_eq!(
@@ -127,7 +127,7 @@ async fn overlapping_subs_subscription_ids_per_copy(sut: SutHandle) {
                 "[MQTT-3.3.4-4] a single copy must carry the Subscription Identifiers of every matching subscription"
             );
         }
-        [first, second] => {
+        [Some(first), Some(second)] => {
             let mut ids = [
                 first.properties.subscription_identifiers.as_slice(),
                 second.properties.subscription_identifiers.as_slice(),
@@ -139,10 +139,7 @@ async fn overlapping_subs_subscription_ids_per_copy(sut: SutHandle) {
                 "[MQTT-3.3.4-5] each copy must carry the Subscription Identifier of its matching subscription"
             );
         }
-        _ => panic!(
-            "[MQTT-3.3.4-3] overlapping subscriptions must deliver one or two copies, got {}",
-            received.len()
-        ),
+        [None, _] => panic!("[MQTT-3.3.4-3] overlapping subscriptions must deliver the message"),
     }
 
     publisher.disconnect().await.expect("disconnect failed");
@@ -390,17 +387,30 @@ async fn response_topic_valid_utf8_forwarded(sut: SutHandle) {
     subscriber.disconnect().await.expect("disconnect failed");
 }
 
-async fn overlapping_copies(sub: &mut RawMqttClient) -> Vec<ParsedPublish> {
-    let mut copies = Vec::with_capacity(2);
-    let mut wait = TIMEOUT;
-    while copies.len() < 2 {
-        let Some(packet) = sub.read_mqtt_packet(wait).await else {
-            break;
-        };
-        if let Some(publish) = ParsedPublish::parse(&packet) {
-            copies.push(publish);
-            wait = Duration::from_secs(1);
-        }
-    }
-    copies
+async fn overlapping_copies(sub: &mut RawMqttClient) -> [Option<ParsedPublish>; 2] {
+    let first = next_copy(sub).await;
+    let second = match first {
+        Some(_) => next_copy(sub).await,
+        None => None,
+    };
+    [first, second]
+}
+
+async fn next_copy(sub: &mut RawMqttClient) -> Option<ParsedPublish> {
+    let packet = sub.read_mqtt_packet(TIMEOUT).await?;
+    let publish = ParsedPublish::parse(&packet);
+    assert!(
+        publish.is_some(),
+        "overlapping subscriptions must deliver well-formed PUBLISH packets, got {packet:02x?}"
+    );
+    publish
+}
+
+async fn expect_granted(sub: &mut RawMqttClient, qos: u8) {
+    let (_, reason_codes) = sub.expect_suback(TIMEOUT).await.expect("expected SUBACK");
+    assert_eq!(
+        reason_codes,
+        [qos],
+        "subscription must be granted at QoS {qos}"
+    );
 }

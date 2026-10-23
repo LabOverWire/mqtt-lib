@@ -25,12 +25,20 @@ use mqtt5_conformance::{
     registry::{ConformanceTest, CONFORMANCE_TESTS},
     sut::{SutDescriptor, SutHandle},
 };
+use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::{Arc, OnceLock};
 use tokio::runtime::Runtime;
 
 fn main() -> ExitCode {
+    if cfg!(panic = "abort") {
+        eprintln!(
+            "error: this binary was built with panic = \"abort\" and would stop at the first failing test; build it with `cargo build --profile conformance -p mqtt5-conformance-cli`"
+        );
+        return ExitCode::from(2);
+    }
+
     let (options, libtest_args) = CliOptions::from_env();
 
     let plan = match SutPlan::from_options(&options) {
@@ -186,22 +194,16 @@ fn first_unmet_requirement(
 }
 
 fn run_trial(plan: &SutPlan, runtime: &Runtime, test: &ConformanceTest) -> Result<(), String> {
-    let handle = plan.build_handle(runtime);
     let test = *test;
-    let future = (test.runner)(handle);
-    let outcome: Result<(), Box<dyn std::any::Any + Send>> = runtime.block_on(async {
-        let result = std::panic::AssertUnwindSafe(future).catch_unwind().await;
-        tokio::task::yield_now().await;
-        result
-    });
-    match outcome {
-        Ok(()) => Ok(()),
-        Err(payload) => Err(format!(
-            "{}: {}",
-            test.name,
-            panic_message(payload.as_ref())
-        )),
-    }
+    std::panic::catch_unwind(AssertUnwindSafe(|| plan.build_handle(runtime)))
+        .and_then(|handle| {
+            runtime.block_on(async {
+                let result = AssertUnwindSafe((test.runner)(handle)).catch_unwind().await;
+                tokio::task::yield_now().await;
+                result
+            })
+        })
+        .map_err(|payload| format!("{}: {}", test.name, panic_message(payload.as_ref())))
 }
 
 fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {

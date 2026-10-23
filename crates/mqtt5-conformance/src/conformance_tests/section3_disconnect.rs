@@ -2,6 +2,7 @@
 
 use crate::conformance_test;
 use crate::harness::unique_client_id;
+use crate::packet_parser::decode_variable_int;
 use crate::raw_client::{RawMqttClient, RawPacketBuilder};
 use crate::sut::SutHandle;
 use crate::test_client::TestClient;
@@ -384,7 +385,18 @@ async fn disconnect_session_expiry_after_zero_is_protocol_error(sut: SutHandle) 
         .await
         .unwrap();
 
-    if let Some(reason_code) = raw.expect_disconnect_packet(TIMEOUT).await {
+    if let Some(packet) = raw.read_mqtt_packet(TIMEOUT).await {
+        assert_eq!(
+            packet[0], 0xE0,
+            "[MQTT-4.13.1-1] the only packet the Server may send before closing is DISCONNECT, got {packet:02x?}"
+        );
+        let (remaining_len, body_start) =
+            decode_variable_int(&packet, 1).expect("DISCONNECT remaining length");
+        let reason_code = if remaining_len == 0 {
+            0x00
+        } else {
+            packet[body_start]
+        };
         assert_eq!(
             reason_code, 0x82,
             "[MQTT-4.13.1-1] non-zero Session Expiry on DISCONNECT after 0 on CONNECT is a Protocol Error"

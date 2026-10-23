@@ -9,7 +9,7 @@ cargo build --profile conformance -p mqtt5-conformance-cli
 # Binary: ./target/conformance/mqtt5-conformance
 ```
 
-The `conformance` profile keeps `panic = "unwind"`. The release profile aborts on panic, so a release build stops the whole run at the first failing test.
+The `conformance` profile keeps `panic = "unwind"`. The release profile aborts on panic, which would stop the whole run at the first failing test, so a binary built that way exits with an error.
 
 ## Usage
 

@@ -4,8 +4,7 @@
 //! helper functions for creating and connecting MQTT clients, and
 //! [`MessageCollector`] for capturing published messages in tests.
 
-#![allow(clippy::missing_panics_doc)]
-
+pub use crate::raw_client::unique_client_id;
 use mqtt5::broker::auth::AuthProvider;
 use mqtt5::broker::config::{BrokerConfig, StorageBackend, StorageConfig, WebSocketConfig};
 use mqtt5::broker::server::MqttBroker;
@@ -16,7 +15,6 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio::time::Duration;
-use ulid::Ulid;
 
 /// An in-process MQTT v5.0 broker for conformance testing.
 ///
@@ -32,6 +30,9 @@ pub struct ConformanceBroker {
 
 impl ConformanceBroker {
     /// Starts a broker with default configuration (memory storage, random port).
+    ///
+    /// # Panics
+    /// Panics if the broker cannot be created or has no local address.
     pub async fn start() -> Self {
         let storage_config = StorageConfig {
             backend: StorageBackend::Memory,
@@ -47,6 +48,9 @@ impl ConformanceBroker {
     }
 
     /// Starts a broker with WebSocket enabled on a random port.
+    ///
+    /// # Panics
+    /// Panics if the broker cannot be created or has no local address.
     pub async fn start_with_websocket() -> Self {
         let storage_config = StorageConfig {
             backend: StorageBackend::Memory,
@@ -66,6 +70,9 @@ impl ConformanceBroker {
     }
 
     /// Starts a broker with the given configuration.
+    ///
+    /// # Panics
+    /// Panics if the broker cannot be created or has no local address.
     pub async fn start_with_config(config: BrokerConfig) -> Self {
         let mut broker = MqttBroker::with_config(config.clone())
             .await
@@ -92,6 +99,9 @@ impl ConformanceBroker {
     }
 
     /// Starts a broker with a custom auth provider.
+    ///
+    /// # Panics
+    /// Panics if the broker cannot be created or has no local address.
     pub async fn start_with_auth_provider(provider: Arc<dyn AuthProvider>) -> Self {
         let storage_config = StorageConfig {
             backend: StorageBackend::Memory,
@@ -173,6 +183,9 @@ impl ConformanceBroker {
     /// Stops and restarts the broker on a new random port.
     ///
     /// Preserves the original configuration but binds to a fresh port.
+    ///
+    /// # Panics
+    /// Panics if the broker cannot be recreated or has no local address.
     pub async fn restart(&mut self) {
         self.stop().await;
 
@@ -207,12 +220,6 @@ impl Drop for ConformanceBroker {
     }
 }
 
-/// Generates a unique client ID with the given prefix using a ULID suffix.
-#[must_use]
-pub fn unique_client_id(prefix: &str) -> String {
-    format!("conf-{prefix}-{}", Ulid::new())
-}
-
 /// Creates an unconnected [`MqttClient`] with a unique client ID.
 #[must_use]
 pub fn new_client(prefix: &str) -> MqttClient {
@@ -220,6 +227,9 @@ pub fn new_client(prefix: &str) -> MqttClient {
 }
 
 /// Creates and connects an [`MqttClient`] with default options.
+///
+/// # Panics
+/// Panics if the client cannot connect.
 pub async fn connected_client(prefix: &str, broker: &ConformanceBroker) -> MqttClient {
     let client = new_client(prefix);
     client
@@ -230,6 +240,9 @@ pub async fn connected_client(prefix: &str, broker: &ConformanceBroker) -> MqttC
 }
 
 /// Creates and connects an [`MqttClient`] with the given [`ConnectOptions`].
+///
+/// # Panics
+/// Panics if the client cannot connect.
 pub async fn connected_client_with_options(
     broker: &ConformanceBroker,
     options: ConnectOptions,
@@ -269,6 +282,9 @@ impl MessageCollector {
     }
 
     /// Returns a callback closure that stores received messages.
+    ///
+    /// # Panics
+    /// Panics if the message store lock is poisoned.
     pub fn callback(&self) -> impl Fn(Message) + Send + Sync + 'static {
         let messages = self.messages.clone();
         move |msg| {
@@ -284,6 +300,9 @@ impl MessageCollector {
     }
 
     /// Polls until at least `count` messages are received, or `timeout` elapses.
+    ///
+    /// # Panics
+    /// Panics if the message store lock is poisoned.
     pub async fn wait_for_messages(&self, count: usize, timeout: Duration) -> bool {
         let start = tokio::time::Instant::now();
         while start.elapsed() < timeout {
@@ -296,18 +315,27 @@ impl MessageCollector {
     }
 
     /// Returns a snapshot of all received messages.
+    ///
+    /// # Panics
+    /// Panics if the message store lock is poisoned.
     #[must_use]
     pub fn get_messages(&self) -> Vec<ReceivedMessage> {
         self.messages.lock().unwrap().clone()
     }
 
     /// Returns the number of messages received so far.
+    ///
+    /// # Panics
+    /// Panics if the message store lock is poisoned.
     #[must_use]
     pub fn count(&self) -> usize {
         self.messages.lock().unwrap().len()
     }
 
     /// Clears all collected messages.
+    ///
+    /// # Panics
+    /// Panics if the message store lock is poisoned.
     pub fn clear(&self) {
         self.messages.lock().unwrap().clear();
     }

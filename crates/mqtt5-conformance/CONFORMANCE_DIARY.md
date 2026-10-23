@@ -39,6 +39,24 @@
 
 ## Diary Entries
 
+### Review fixes for the #219 to #224 branch (2026-10-22)
+
+**Trigger**: code review of PR #264.
+
+**Fixed**:
+- The CLI built the SUT handle outside `catch_unwind`, so a panic while starting the in-process broker failed the trial but left its outcome empty, and the report said `not_run`. `run_trial` now catches that panic too. Control: with a temporary panic in `build_handle`, the report lists the test as `failed` with the panic message.
+- A binary built with `panic = "abort"` now exits with code 2 and tells you to use `--profile conformance`. Checked with `cargo build --release -p mqtt5-conformance-cli`: `--list` exits 2 with the message.
+- `overlapping_copies` waited only 1 s for a second copy, so a broker sending the second copy late was judged as sending one copy and failed MQTT-3.3.4-4. It now waits the full 10 s timeout for each copy and returns `[Option<ParsedPublish>; 2]`. Any packet that is not a well-formed PUBLISH fails the test instead of being skipped.
+- The overlap tests and the takeover test now assert the SUBACK and its granted QoS instead of discarding it, so the takeover test knows the session it takes over holds a subscription.
+- `disconnect_session_expiry_after_zero_is_protocol_error` accepted any packet before the close. It now fails unless the only packet is a DISCONNECT, and checks its reason code is 0x82.
+- The raw CONNECT builders call `unique_client_id`, which moved from `harness` to `raw_client` (re-exported from `harness`), because `raw_client` is built without the `inprocess-fixture` feature.
+- `harness.rs` dropped its `#![allow(clippy::missing_panics_doc)]` and documents `# Panics` on the 12 functions that needed it.
+- BROKER_SETUP.md capability counts are exact now (counted from the `requires` lists), with a row for assigned client IDs.
+
+**Not exercised here**: the malformed PUBLISH and non-DISCONNECT failure paths. The in-process broker sends neither.
+
+**Results**: CLI against the in-process broker 198 passed, 3 skipped; conformance lib tests 245 passed; fmt and the four pedantic clippy runs clean.
+
 ### Report outcomes, parser regression test, ClientIDs, optional behaviour, coverage gaps (2026-10-22)
 
 **Trigger**: issues #219 to #224, found running the suite against an external broker.

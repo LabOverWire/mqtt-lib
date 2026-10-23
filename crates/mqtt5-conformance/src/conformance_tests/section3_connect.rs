@@ -545,7 +545,15 @@ async fn connect_clean_start_takeover_session_present_zero(sut: SutHandle) {
         ))
         .await
         .unwrap();
-    existing.expect_suback(TIMEOUT).await;
+    let (_, reason_codes) = existing
+        .expect_suback(TIMEOUT)
+        .await
+        .expect("first connection must receive SUBACK");
+    assert_eq!(
+        reason_codes,
+        [0x00],
+        "the session being taken over must hold a subscription"
+    );
 
     let mut taker = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
