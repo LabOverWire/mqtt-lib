@@ -3,7 +3,6 @@
 use crate::assertions;
 use crate::conformance_test;
 use crate::harness::unique_client_id;
-use crate::packet_parser::ParsedPublish;
 use crate::raw_client::{RawMqttClient, RawPacketBuilder};
 use crate::sut::SutHandle;
 use crate::test_client::TestClient;
@@ -37,10 +36,10 @@ async fn unsubscribe_invalid_flags_rejected(sut: SutHandle) {
     );
 }
 
-/// `[MQTT-3.10.3-2]` UNSUBSCRIBE payload MUST contain at least one topic
-/// filter.
+/// `[MQTT-3.10.3-2]` `[MQTT-4.13.1-1]` UNSUBSCRIBE payload MUST contain at
+/// least one topic filter.
 #[conformance_test(
-    ids = ["MQTT-3.10.3-2"],
+    ids = ["MQTT-3.10.3-2", "MQTT-4.13.1-1"],
     requires = ["transport.tcp"],
 )]
 async fn unsubscribe_empty_payload_rejected(sut: SutHandle) {
@@ -215,32 +214,27 @@ async fn unsuback_no_subscription_existed(sut: SutHandle) {
 )]
 async fn unsubscribe_stops_delivery(sut: SutHandle) {
     let topic = format!("unsub-stop/{}", unique_client_id("t"));
-    let mut subscriber = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
-        .await
-        .unwrap();
-    subscriber
-        .connect_and_establish(&unique_client_id("unsub-stop"), TIMEOUT)
-        .await;
-    subscriber
-        .send_raw(&RawPacketBuilder::subscribe_with_packet_id(&topic, 0, 1))
-        .await
-        .unwrap();
-    let (_, granted) = subscriber
-        .expect_suback(TIMEOUT)
-        .await
-        .expect("expected SUBACK");
-    assert_eq!(granted, [0x00], "subscription must be granted at QoS 0");
+    let mut subscriber =
+        assertions::subscribed_raw_client(&sut, "unsub-stop", &topic, TIMEOUT).await;
+    let mut witness =
+        assertions::subscribed_raw_client(&sut, "unsub-stop-witness", &topic, TIMEOUT).await;
 
     let publisher = TestClient::connect_with_prefix(&sut, "unsub-stop-pub")
         .await
         .unwrap();
     publisher.publish(&topic, b"before").await.unwrap();
-    let before = subscriber
-        .read_mqtt_packet(TIMEOUT)
-        .await
-        .and_then(|packet| ParsedPublish::parse(&packet))
-        .expect("subscriber should receive message before unsubscribe");
-    assert_eq!(before.payload, b"before");
+    assert!(
+        assertions::first_publish_matching(&mut subscriber, TIMEOUT, |_| true)
+            .await
+            .is_some(),
+        "the subscriber must receive the message before unsubscribing"
+    );
+    assert!(
+        assertions::first_publish_matching(&mut witness, TIMEOUT, |_| true)
+            .await
+            .is_some(),
+        "the witness must receive the message before the unsubscribe"
+    );
 
     subscriber
         .send_raw(&RawPacketBuilder::unsubscribe(&topic, 2))
@@ -257,8 +251,19 @@ async fn unsubscribe_stops_delivery(sut: SutHandle) {
     );
 
     publisher.publish(&topic, b"after").await.unwrap();
-    assertions::expect_no_packet(&mut subscriber, "MQTT-3.10.4-2", Duration::from_millis(500))
-        .await;
+    assert!(
+        assertions::first_publish_matching(&mut witness, TIMEOUT, |_| true)
+            .await
+            .is_some(),
+        "the witness must receive the message published after the unsubscribe"
+    );
+    assertions::expect_no_publish(
+        &mut subscriber,
+        "MQTT-3.10.4-2",
+        Duration::from_millis(300),
+        |_| true,
+    )
+    .await;
 }
 
 /// `[MQTT-3.10.4-1]` `[MQTT-3.10.4-2]` `[MQTT-3.10.4-6]` `[MQTT-3.11.3-1]`
@@ -427,10 +432,10 @@ async fn unsuback_reason_codes_are_valid_spec_values(sut: SutHandle) {
     );
 }
 
-/// `[MQTT-3.10.3-1]` Topic filter in UNSUBSCRIBE must be valid UTF-8.
-/// Sending invalid UTF-8 bytes must cause disconnect.
+/// `[MQTT-3.10.3-1]` `[MQTT-4.13.1-1]` Topic filter in UNSUBSCRIBE must be
+/// valid UTF-8. Sending invalid UTF-8 bytes must cause disconnect.
 #[conformance_test(
-    ids = ["MQTT-3.10.3-1"],
+    ids = ["MQTT-3.10.3-1", "MQTT-4.13.1-1"],
     requires = ["transport.tcp"],
 )]
 async fn unsubscribe_invalid_utf8_rejected(sut: SutHandle) {

@@ -33,9 +33,10 @@ async fn subscribe_invalid_flags_rejected(sut: SutHandle) {
     );
 }
 
-/// `[MQTT-3.8.3-2]` SUBSCRIBE payload MUST contain at least one topic filter.
+/// `[MQTT-3.8.3-2]` `[MQTT-4.13.1-1]` SUBSCRIBE payload MUST contain at least
+/// one topic filter.
 #[conformance_test(
-    ids = ["MQTT-3.8.3-2"],
+    ids = ["MQTT-3.8.3-2", "MQTT-4.13.1-1"],
     requires = ["transport.tcp"],
 )]
 async fn subscribe_empty_payload_rejected(sut: SutHandle) {
@@ -55,9 +56,10 @@ async fn subscribe_empty_payload_rejected(sut: SutHandle) {
     );
 }
 
-/// `[MQTT-3.8.3-4]` `NoLocal=1` on a shared subscription is a Protocol Error.
+/// `[MQTT-3.8.3-4]` `[MQTT-4.13.1-1]` `NoLocal=1` on a shared subscription is a
+/// Protocol Error.
 #[conformance_test(
-    ids = ["MQTT-3.8.3-4"],
+    ids = ["MQTT-3.8.3-4", "MQTT-4.13.1-1"],
     requires = ["transport.tcp", "shared_subscription_available"],
 )]
 async fn subscribe_no_local_shared_rejected(sut: SutHandle) {
@@ -231,9 +233,10 @@ async fn subscribe_replaces_existing(sut: SutHandle) {
     );
 }
 
-/// `[MQTT-3.8.3-5]` Reserved bits in the subscribe options byte MUST be zero.
+/// `[MQTT-3.8.3-5]` `[MQTT-4.13.1-1]` Reserved bits in the subscribe options
+/// byte MUST be zero.
 #[conformance_test(
-    ids = ["MQTT-3.8.3-5"],
+    ids = ["MQTT-3.8.3-5", "MQTT-4.13.1-1"],
     requires = ["transport.tcp"],
 )]
 async fn subscribe_reserved_option_bits_rejected(sut: SutHandle) {
@@ -257,9 +260,10 @@ async fn subscribe_reserved_option_bits_rejected(sut: SutHandle) {
     );
 }
 
-/// `[MQTT-3.8.3-1]` Topic filter in SUBSCRIBE must be valid UTF-8.
+/// `[MQTT-3.8.3-1]` `[MQTT-4.13.1-1]` Topic filter in SUBSCRIBE must be valid
+/// UTF-8.
 #[conformance_test(
-    ids = ["MQTT-3.8.3-1"],
+    ids = ["MQTT-3.8.3-1", "MQTT-4.13.1-1"],
     requires = ["transport.tcp"],
 )]
 async fn subscribe_invalid_utf8_rejected(sut: SutHandle) {

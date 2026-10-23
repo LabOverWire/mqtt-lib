@@ -13,9 +13,10 @@ use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
-/// `[MQTT-3.3.1-4]` A PUBLISH packet MUST NOT have both `QoS` bits set to 1.
+/// `[MQTT-3.3.1-4]` `[MQTT-4.13.1-1]` A PUBLISH packet MUST NOT have both `QoS`
+/// bits set to 1.
 #[conformance_test(
-    ids = ["MQTT-3.3.1-4"],
+    ids = ["MQTT-3.3.1-4", "MQTT-4.13.1-1"],
     requires = ["transport.tcp"],
 )]
 async fn publish_qos3_is_malformed(sut: SutHandle) {
@@ -35,9 +36,10 @@ async fn publish_qos3_is_malformed(sut: SutHandle) {
     assertions::expect_disconnect(&mut raw, "MQTT-3.3.1-4", TIMEOUT).await;
 }
 
-/// `[MQTT-3.3.1-2]` The DUP flag MUST be set to 0 for all `QoS` 0 messages.
+/// `[MQTT-3.3.1-2]` `[MQTT-4.13.1-1]` The DUP flag MUST be set to 0 for all
+/// `QoS` 0 messages.
 #[conformance_test(
-    ids = ["MQTT-3.3.1-2"],
+    ids = ["MQTT-3.3.1-2", "MQTT-4.13.1-1"],
     requires = ["transport.tcp"],
 )]
 async fn publish_dup_must_be_zero_for_qos0(sut: SutHandle) {
@@ -54,10 +56,10 @@ async fn publish_dup_must_be_zero_for_qos0(sut: SutHandle) {
     assertions::expect_disconnect(&mut raw, "MQTT-3.3.1-2", TIMEOUT).await;
 }
 
-/// `[MQTT-3.3.2-2]` `[MQTT-4.7.0-1]` The Topic Name in a PUBLISH MUST NOT
-/// contain wildcard characters.
+/// `[MQTT-3.3.2-2]` `[MQTT-4.7.0-1]` `[MQTT-4.13.1-1]` The Topic Name in a
+/// PUBLISH MUST NOT contain wildcard characters.
 #[conformance_test(
-    ids = ["MQTT-3.3.2-2", "MQTT-4.7.0-1"],
+    ids = ["MQTT-3.3.2-2", "MQTT-4.7.0-1", "MQTT-4.13.1-1"],
     requires = ["transport.tcp"],
 )]
 async fn publish_topic_must_not_contain_wildcards(sut: SutHandle) {
@@ -74,11 +76,11 @@ async fn publish_topic_must_not_contain_wildcards(sut: SutHandle) {
     assertions::expect_disconnect(&mut raw, "MQTT-3.3.2-2", TIMEOUT).await;
 }
 
-/// `[MQTT-4.7.3-1]` Topic Names MUST be at least one character long. A PUBLISH
-/// with an empty Topic Name and no Topic Alias must make the Server close the
-/// connection.
+/// `[MQTT-4.7.3-1]` `[MQTT-4.13.1-1]` Topic Names MUST be at least one
+/// character long. A PUBLISH with an empty Topic Name and no Topic Alias must
+/// make the Server close the connection.
 #[conformance_test(
-    ids = ["MQTT-4.7.3-1"],
+    ids = ["MQTT-4.7.3-1", "MQTT-4.13.1-1"],
     requires = ["transport.tcp"],
 )]
 async fn publish_topic_must_not_be_empty_without_alias(sut: SutHandle) {
@@ -95,9 +97,9 @@ async fn publish_topic_must_not_be_empty_without_alias(sut: SutHandle) {
     assertions::expect_disconnect(&mut raw, "MQTT-4.7.3-1", TIMEOUT).await;
 }
 
-/// `[MQTT-3.3.2-8]` A Topic Alias of 0 is not permitted.
+/// `[MQTT-3.3.2-8]` `[MQTT-4.13.1-1]` A Topic Alias of 0 is not permitted.
 #[conformance_test(
-    ids = ["MQTT-3.3.2-8"],
+    ids = ["MQTT-3.3.2-8", "MQTT-4.13.1-1"],
     requires = ["transport.tcp"],
 )]
 async fn publish_topic_alias_zero_rejected(sut: SutHandle) {
@@ -117,10 +119,10 @@ async fn publish_topic_alias_zero_rejected(sut: SutHandle) {
     assertions::expect_disconnect(&mut raw, "MQTT-3.3.2-8", TIMEOUT).await;
 }
 
-/// `[MQTT-3.3.4-6]` A PUBLISH packet sent from a Client to a Server MUST NOT
-/// contain a Subscription Identifier.
+/// `[MQTT-3.3.4-6]` `[MQTT-4.13.1-1]` A PUBLISH packet sent from a Client to a
+/// Server MUST NOT contain a Subscription Identifier.
 #[conformance_test(
-    ids = ["MQTT-3.3.4-6"],
+    ids = ["MQTT-3.3.4-6", "MQTT-4.13.1-1"],
     requires = ["transport.tcp"],
 )]
 async fn publish_subscription_id_from_client_rejected(sut: SutHandle) {

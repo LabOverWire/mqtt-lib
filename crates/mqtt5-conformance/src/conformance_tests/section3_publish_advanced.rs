@@ -260,10 +260,11 @@ async fn message_expiry_interval_decremented(sut: SutHandle) {
     subscriber.disconnect().await.expect("disconnect failed");
 }
 
-/// `[MQTT-3.3.2-14]` The Response Topic must not contain wildcards.
-/// Sending PUBLISH with a wildcard Response Topic must cause disconnect.
+/// `[MQTT-3.3.2-14]` `[MQTT-4.13.1-1]` The Response Topic must not contain
+/// wildcards. Sending PUBLISH with a wildcard Response Topic must cause
+/// disconnect.
 #[conformance_test(
-    ids = ["MQTT-3.3.2-14"],
+    ids = ["MQTT-3.3.2-14", "MQTT-4.13.1-1"],
     requires = ["transport.tcp"],
 )]
 async fn response_topic_wildcard_rejected(sut: SutHandle) {

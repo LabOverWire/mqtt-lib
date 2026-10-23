@@ -1,4 +1,0 @@
-Registered tests whose #[conformance_test(ids = ...)] is not cited back by the statement's
-test_names in conformance.toml. Pre-existing drift between the code and the manifest.
-tests/manifest_load.rs fails on any pair not listed here, and on any listed pair that has
-been reconciled - so this file can only shrink.

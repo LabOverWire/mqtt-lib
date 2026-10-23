@@ -63,11 +63,11 @@ async fn session_takeover_disconnects_existing_client(sut: SutHandle) {
     );
 }
 
-/// `[MQTT-3.1.0-1]` After a Network Connection is established by a Client to
-/// a Server, the first packet sent from the Client to the Server MUST be a
-/// CONNECT packet.
+/// `[MQTT-3.1.0-1]` `[MQTT-4.13.1-1]` After a Network Connection is established
+/// by a Client to a Server, the first packet sent from the Client to the Server
+/// MUST be a CONNECT packet.
 #[conformance_test(
-    ids = ["MQTT-3.1.0-1"],
+    ids = ["MQTT-3.1.0-1", "MQTT-4.13.1-1"],
     requires = ["transport.tcp"],
 )]
 async fn connect_first_packet_must_be_connect(sut: SutHandle) {

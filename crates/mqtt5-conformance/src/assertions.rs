@@ -6,7 +6,8 @@
 //! and compare against the test expectation.
 
 use crate::packet_parser::{ParsedConnAck, ParsedProperties, ParsedPublish};
-use crate::raw_client::RawMqttClient;
+use crate::raw_client::{unique_client_id, RawMqttClient, RawPacketBuilder};
+use crate::sut::SutHandle;
 use crate::transport::Transport;
 use std::time::Duration;
 
@@ -70,19 +71,104 @@ pub async fn expect_disconnect<T: Transport>(
     );
 }
 
-/// Asserts that no packet arrives within the timeout.
+/// Connects a raw client and subscribes it to `filter` at `QoS` 0.
 ///
 /// # Panics
-/// Panics if the broker sends a packet before the timeout elapses.
-pub async fn expect_no_packet<T: Transport>(
+/// Panics if the connection, the SUBSCRIBE or the SUBACK fails, or the
+/// subscription is not granted at `QoS` 0.
+pub async fn subscribed_raw_client(
+    sut: &SutHandle,
+    prefix: &str,
+    filter: &str,
+    timeout: Duration,
+) -> RawMqttClient {
+    let mut client = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
+        .await
+        .expect("TCP connect");
+    client
+        .connect_and_establish(&unique_client_id(prefix), timeout)
+        .await;
+    client
+        .send_raw(&RawPacketBuilder::subscribe_with_packet_id(filter, 0, 1))
+        .await
+        .expect("send SUBSCRIBE");
+    let (_, granted) = client
+        .expect_suback(timeout)
+        .await
+        .expect("expected SUBACK");
+    assert_eq!(
+        granted,
+        [0x00],
+        "subscription to {filter} must be granted at QoS 0"
+    );
+    client
+}
+
+/// Reads packets until a PUBLISH whose topic `matches` arrives, returning its
+/// topic, or `None` once `window` elapses or the connection ends.
+pub async fn first_publish_matching<T: Transport>(
+    raw: &mut RawMqttClient<T>,
+    window: Duration,
+    matches: impl Fn(&str) -> bool,
+) -> Option<String> {
+    let deadline = tokio::time::Instant::now() + window;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let packet = raw.read_mqtt_packet(remaining).await?;
+        if let Some(publish) = ParsedPublish::parse(&packet) {
+            if matches(&publish.topic) {
+                return Some(publish.topic);
+            }
+        }
+    }
+}
+
+/// Asserts that no PUBLISH whose topic `matches` arrives within `window`, and
+/// that the connection is still open afterwards: a PINGREQ must get its
+/// PINGRESP, so a closed connection does not pass as silence.
+///
+/// # Panics
+/// Panics on a matching PUBLISH, on any packet other than PUBLISH or PINGRESP,
+/// or if the connection ends before the PINGRESP.
+pub async fn expect_no_publish<T: Transport>(
     raw: &mut RawMqttClient<T>,
     statement_id: &str,
-    timeout: Duration,
+    window: Duration,
+    matches: impl Fn(&str) -> bool,
 ) {
-    if let Some(packet) = raw.read_mqtt_packet(timeout).await {
-        let topic = ParsedPublish::parse(&packet).map(|publish| publish.topic);
-        panic!("[{statement_id}] expected no packet, got {packet:02x?} (PUBLISH topic {topic:?})");
+    let deadline = tokio::time::Instant::now() + window;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        let Some(packet) = raw.read_mqtt_packet(remaining).await else {
+            break;
+        };
+        reject_unexpected(&packet, statement_id, &matches);
     }
+    raw.send_raw(&RawPacketBuilder::pingreq())
+        .await
+        .unwrap_or_else(|error| panic!("[{statement_id}] the connection must stay open: {error}"));
+    loop {
+        let packet = raw.read_mqtt_packet(window).await.unwrap_or_else(|| {
+            panic!("[{statement_id}] the connection must stay open and answer PINGREQ")
+        });
+        if packet.first() == Some(&0xD0) {
+            return;
+        }
+        reject_unexpected(&packet, statement_id, &matches);
+    }
+}
+
+fn reject_unexpected(packet: &[u8], statement_id: &str, matches: &impl Fn(&str) -> bool) {
+    let publish = ParsedPublish::parse(packet)
+        .unwrap_or_else(|| panic!("[{statement_id}] expected no packet, got {packet:02x?}"));
+    assert!(
+        !matches(&publish.topic),
+        "[{statement_id}] expected no PUBLISH on {}, got one",
+        publish.topic
+    );
 }
 
 /// Reads a PUBLISH and asserts the topic name equals `expected_topic`.

@@ -158,7 +158,8 @@ fn validate_require_spec(spec: &LitStr) -> syn::Result<()> {
         | "hooks.cleanup"
         | "acl"
         | "strict_client_id_charset"
-        | "dollar_sys_publish" => Ok(()),
+        | "dollar_sys_publish"
+        | "sys_topics_published" => Ok(()),
         _ => Err(Error::new_spanned(
             spec,
             "unknown requirement spec (see Requirement::from_spec for accepted forms)",
@@ -198,6 +199,7 @@ fn requirement_to_tokens(spec: &LitStr) -> syn::Result<proc_macro2::TokenStream>
         "acl" => quote! { Acl },
         "strict_client_id_charset" => quote! { StrictClientIdCharset },
         "dollar_sys_publish" => quote! { DollarSysPublish },
+        "sys_topics_published" => quote! { SysTopicsPublished },
         _ => {
             return Err(Error::new_spanned(
                 spec,

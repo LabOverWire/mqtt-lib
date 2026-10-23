@@ -1945,7 +1945,7 @@ level = "Must"
 applies_to = "Server"
 text = "After it has sent a PUBCOMP, the receiver MUST treat any subsequent PUBLISH packet that contains that Packet Identifier as being a new Application Message"
 status = "Tested"
-test_names = ["qos2_after_pubcomp_same_id_is_new_message", "qos2_pubrec_error_allows_packet_id_reuse"]
+test_names = ["qos2_after_pubcomp_same_id_is_new_message"]
 
 [[sections."4.3".statements]]
 id = "MQTT-4.3.3-13"
@@ -2342,7 +2342,7 @@ level = "Must"
 applies_to = "Server"
 text = "When a Server detects a Malformed Packet or Protocol Error, and a Reason Code is given in the specification, it MUST close the Network Connection"
 status = "Tested"
-test_names = ["malformed_packet_closes_connection", "disconnect_session_expiry_after_zero_is_protocol_error", "disconnect_invalid_reason_code_rejected", "invalid_utf8_user_property_rejected", "unsolicited_auth_rejected"]
+test_names = ["malformed_packet_closes_connection", "disconnect_session_expiry_after_zero_is_protocol_error", "disconnect_invalid_reason_code_rejected", "invalid_utf8_user_property_rejected", "unsolicited_auth_rejected", "connect_first_packet_must_be_connect", "null_char_in_topic_name_rejected", "publish_dup_must_be_zero_for_qos0", "publish_qos3_is_malformed", "publish_subscription_id_from_client_rejected", "publish_topic_alias_zero_rejected", "publish_topic_must_not_be_empty_without_alias", "publish_topic_must_not_contain_wildcards", "response_topic_wildcard_rejected", "subscribe_empty_payload_rejected", "subscribe_invalid_utf8_rejected", "subscribe_no_local_shared_rejected", "subscribe_reserved_option_bits_rejected", "unsubscribe_empty_payload_rejected", "unsubscribe_invalid_utf8_rejected"]
 
 [[sections."4.13".statements]]
 id = "MQTT-4.13.2-1"

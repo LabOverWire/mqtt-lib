@@ -51,6 +51,9 @@ strict_client_id_charset = true
 # bool — broker allows clients to publish to $-prefixed topics [default: false]
 dollar_sys_publish = true
 
+# bool — broker publishes retained $SYS topics of its own [default: false]
+sys_topics_published = true
+
 # bool — broker uses DISCONNECT (not CONNACK) for auth failures [default: false]
 # auth_failure_uses_disconnect = false
 

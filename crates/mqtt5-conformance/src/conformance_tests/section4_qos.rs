@@ -33,7 +33,7 @@ async fn qos0_server_outbound_publish_has_dup_zero(sut: SutHandle) {
     let publisher = TestClient::connect_with_prefix(&sut, "pub").await.unwrap();
     publisher.publish(&topic, b"qos0-data").await.unwrap();
 
-    let (first_byte, _packet_id, qos, recv_topic, payload) = sub
+    let (first_byte, _, qos, recv_topic, payload) = sub
         .expect_publish_with_id(TIMEOUT)
         .await
         .expect("subscriber must receive QoS 0 PUBLISH");
@@ -85,7 +85,7 @@ async fn qos1_server_outbound_unique_nonzero_id_and_dup_zero(sut: SutHandle) {
             .unwrap();
         let _ = pub_raw.expect_puback(TIMEOUT).await;
 
-        let (first_byte, packet_id, qos, _topic, _payload) = sub
+        let (first_byte, packet_id, qos, ..) = sub
             .expect_publish_with_id(TIMEOUT)
             .await
             .unwrap_or_else(|| panic!("must receive PUBLISH #{i}"));
@@ -398,79 +398,6 @@ async fn qos2_server_sends_pubrel_after_pubrec_and_holds_until_pubcomp(sut: SutH
     sub.send_raw(&RawPacketBuilder::pubcomp(packet_id))
         .await
         .unwrap();
-}
-
-/// `[MQTT-4.3.3-12]` After it has sent a PUBCOMP, the Server MUST treat a new
-/// PUBLISH with the same Packet Identifier as a new Application Message.
-#[conformance_test(
-    ids = ["MQTT-4.3.3-12"],
-    requires = ["transport.tcp", "max_qos>=2"],
-)]
-async fn qos2_pubrec_error_allows_packet_id_reuse(sut: SutHandle) {
-    let topic = format!("qos2-pubrec-err/{}", unique_client_id("t"));
-
-    let subscriber = TestClient::connect_with_prefix(&sut, "sub").await.unwrap();
-    let sub_opts = SubscribeOptions {
-        qos: QoS::ExactlyOnce,
-        ..Default::default()
-    };
-    let _subscription = subscriber
-        .subscribe(&topic, sub_opts)
-        .await
-        .expect("subscribe failed");
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    let mut pub_raw = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
-        .await
-        .unwrap();
-    let pub_id = unique_client_id("pub");
-    pub_raw.connect_and_establish(&pub_id, TIMEOUT).await;
-
-    let packet_id: u16 = 10;
-    pub_raw
-        .send_raw(&RawPacketBuilder::publish_qos2(
-            &topic,
-            b"will-fail",
-            packet_id,
-        ))
-        .await
-        .unwrap();
-
-    let (rec_id, _reason) = pub_raw
-        .expect_pubrec(TIMEOUT)
-        .await
-        .expect("must receive PUBREC");
-    assert_eq!(rec_id, packet_id);
-
-    pub_raw
-        .send_raw(&RawPacketBuilder::pubrel(packet_id))
-        .await
-        .unwrap();
-    let _ = pub_raw.expect_pubcomp(TIMEOUT).await;
-
-    pub_raw
-        .send_raw(&RawPacketBuilder::publish_qos2(
-            &topic,
-            b"reused-id",
-            packet_id,
-        ))
-        .await
-        .unwrap();
-
-    let (rec_id2, reason2) = pub_raw.expect_pubrec(TIMEOUT).await.expect(
-        "[MQTT-4.3.3-12] Server must accept new PUBLISH with reused packet ID after flow completes",
-    );
-    assert_eq!(rec_id2, packet_id);
-    assert_eq!(
-        reason2, 0x00,
-        "[MQTT-4.3.3-12] PUBREC for reused packet ID must be Success"
-    );
-
-    pub_raw
-        .send_raw(&RawPacketBuilder::pubrel(packet_id))
-        .await
-        .unwrap();
-    let _ = pub_raw.expect_pubcomp(TIMEOUT).await;
 }
 
 /// `[MQTT-4.4.0-2]` A PUBLISH that the receiver answers with a PUBREC of 0x80

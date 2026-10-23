@@ -19,6 +19,7 @@ assigned_client_id_supported = true
 injected_user_properties = ["x-mqtt-sender", "x-mqtt-client-id"]
 strict_client_id_charset = true
 dollar_sys_publish = true
+sys_topics_published = true
 
 [capabilities.transports]
 tcp = true

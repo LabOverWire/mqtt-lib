@@ -39,6 +39,26 @@
 
 ## Diary Entries
 
+### Review fixes for the statement ID audit (2026-10-23)
+
+**Trigger**: code review of PR #265 (10 findings). Nine were confirmed against the code and fixed; one was not taken.
+
+**Fixed**:
+- `qos2_pubrec_error_allows_packet_id_reuse` cited MQTT-4.3.3-12 but never read its subscription and ignored both PUBCOMPs, so a broker that treated the reused ID as a duplicate passed. `qos2_after_pubcomp_same_id_is_new_message` already checks MQTT-4.3.3-12 in full, including delivery of both messages, so the weaker duplicate is removed.
+- `expect_no_packet` treated a closed connection as silence, since `read_mqtt_packet` returns `None` on EOF as on timeout. It is replaced by `assertions::expect_no_publish`, which fails on a matching PUBLISH or any other packet, and then sends PINGREQ and requires the PINGRESP. Control: `CTL_CLOSE_AFTER_UNSUB` closes the connection right after UNSUBACK; the #265 unsubscribe tests pass under it, the new ones fail with "the connection must stay open and answer PINGREQ".
+- `expect_suback` and `expect_unsuback` read one unbuffered 8 KB chunk and dropped anything after the ack, so a `#` subscriber could lose half a retained message and lose framing. Both now read one framed packet through `read_mqtt_packet`, which keeps the rest buffered, and share one parser (`parse_ack_reason_codes`).
+- The unsubscribe tests had no proof that the message published after the UNSUBSCRIBE was routed before the quiet window. Each now has a second, still-subscribed client that must receive it first. Control: `CTL_UNSUB` (UNSUBACK without removing the subscription) fails both tests on "expected no PUBLISH".
+- `raw_subscriber` and `first_topic_matching` were private to `section4_topic.rs` while the unsubscribe tests repeated the same setup. They are `assertions::subscribed_raw_client` and `assertions::first_publish_matching` now.
+- `dollar_topics_not_matched_by_root_wildcards` depended on `dollar_sys_publish`, which our broker should lose (#246) and other brokers lack, leaving MQTT-4.7.2-1 marked Tested with nothing running it. It now uses the broker's own `$SYS` messages: a `$SYS/#` subscriber must receive them, and `#` and `+/#` must not, under a new capability `sys_topics_published`. Our broker publishes retained `$SYS` topics by default, so the in-process SUT, `inprocess.toml`, `external-mqtt5.toml` and the full-broker profile declare it; the Mosquitto, EMQX and HiveMQ fixtures keep the default false because their `$SYS` behaviour was not checked here. Control: `CTL_DOLLAR` drops the `$` rule for wildcard filters on both the live and the retained path; the test fails with "expected no PUBLISH on $SYS/broker/version".
+- The close-statement rule was applied only where the first audit touched a test. Every registered test that sends a packet breaking a rule and requires the connection to close was checked: 15 cite MQTT-4.13.1-1 now (`connect_first_packet_must_be_connect`, the PUBLISH format and wildcard tests, `response_topic_wildcard_rejected`, the SUBSCRIBE and UNSUBSCRIBE payload and UTF-8 tests, `null_char_in_topic_name_rejected`). Tests whose statement already says the Server closes (MQTT-3.1.0-2, 3.1.2-1, 3.1.2-2, 3.1.3-8, 3.2.2-7, 3.6.1-1, 3.8.1-1, 3.10.1-1, 3.15.1-1, 4.12.0-1) and topic filter tests that accept SUBACK 0x8F instead of a close are unchanged.
+- `known-citation-drift.txt` was empty, so it and the shrink-only check are removed. `every_declared_statement_cites_the_test` and `every_cited_test_declares_the_statement` require exact agreement both ways.
+- Bindings `_t`, `_p`, `_pid`, `_packet_id`, `_topic` and `_payload` in `deferred_ack.rs` and `section4_qos.rs` became `_` or `..`.
+- The conformance README still said 186 tests and 159 Tested statements and described the drift file. The counts are removed and the guard description matches the tests. BROKER_SETUP.md counts follow the removed test and the new capability.
+
+**Not taken**: moving `message_expiry_drops_expired_retained` back under MQTT-3.3.2-5. That statement covers a copy of a message held for a matching subscriber whose onward delivery never started. A retained message that expires is a separate rule in §3.3.1.3 ("If the current retained message for a Topic expires, it is discarded and there will be no retained message for that topic"), which has no statement number. Both audit passes reached that reading independently, so the test stays a plain integration test and MQTT-3.3.2-5 stays Untested.
+
+**Results**: conformance lib tests 238 passed (one removed duplicate), `manifest_load` 12 passed, integration test files pass; CLI against the in-process broker 191 passed and 3 skipped in four full runs, with the `$SYS` wildcard test now running in-process; CLI against an external `mqttv5` broker 191 passed and 3 skipped (WebSocket); fmt and the four pedantic clippy runs clean.
+
 ### Statement IDs audited against the statement text for every registered test (2026-10-23)
 
 **Trigger**: while adding missing `[MQTT-x-y]` doc comments, a consistency check showed 52 of 201 registered tests where the attribute `ids`, the doc comment tags and the manifest's `test_names` disagreed, and 8 tests in `section3_offline_delivery.rs` had no doc comment.

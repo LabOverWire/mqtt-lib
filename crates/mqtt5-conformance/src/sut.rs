@@ -411,6 +411,7 @@ fn inprocess_capabilities(websocket: bool) -> Capabilities {
             quic: false,
         },
         injected_user_properties: vec!["x-mqtt-sender".to_owned(), "x-mqtt-client-id".to_owned()],
+        sys_topics_published: true,
         ..Capabilities::default()
     }
 }

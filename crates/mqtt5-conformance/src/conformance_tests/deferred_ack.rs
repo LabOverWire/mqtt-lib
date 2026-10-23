@@ -68,7 +68,7 @@ async fn deferred_qos2_slot_held_until_pubcomp(sut: SutHandle) {
 
     publish_qos2(&sut, &topic, &[b"first", b"second"]).await;
 
-    let (_, first_pid, qos, _t, _p) = sub
+    let (_, first_pid, qos, ..) = sub
         .expect_publish_with_id(TIMEOUT)
         .await
         .expect("broker delivers the first QoS 2 PUBLISH");
@@ -91,7 +91,7 @@ async fn deferred_qos2_slot_held_until_pubcomp(sut: SutHandle) {
         .await
         .unwrap();
 
-    let (_, second_pid, qos2, _t, _p) = sub
+    let (_, second_pid, qos2, ..) = sub
         .expect_publish_with_id(TIMEOUT)
         .await
         .expect("the second message flows once the handshake completes and frees the slot");
@@ -138,7 +138,7 @@ async fn deferred_qos2_zero_quota_still_serves_control_plane(sut: SutHandle) {
 
     publish_qos2(&sut, &topic, &[b"fill", b"queued"]).await;
 
-    let (_, _pid, qos, _t, _p) = sub
+    let (_, _, qos, ..) = sub
         .expect_publish_with_id(TIMEOUT)
         .await
         .expect("broker delivers the first QoS 2 PUBLISH");

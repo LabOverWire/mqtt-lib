@@ -49,6 +49,7 @@ pub struct Capabilities {
 
     pub strict_client_id_charset: bool,
     pub dollar_sys_publish: bool,
+    pub sys_topics_published: bool,
 
     pub transports: TransportSupport,
     pub enhanced_auth: EnhancedAuthSupport,
@@ -79,6 +80,7 @@ impl Default for Capabilities {
             shared_subscription_distribution: "RoundRobin".to_owned(),
             strict_client_id_charset: false,
             dollar_sys_publish: false,
+            sys_topics_published: false,
             transports: TransportSupport::default(),
             enhanced_auth: EnhancedAuthSupport::default(),
             acl: false,
@@ -151,6 +153,7 @@ pub enum Requirement {
     Acl,
     StrictClientIdCharset,
     DollarSysPublish,
+    SysTopicsPublished,
 }
 
 impl Requirement {
@@ -178,6 +181,7 @@ impl Requirement {
             Self::Acl => capabilities.acl,
             Self::StrictClientIdCharset => capabilities.strict_client_id_charset,
             Self::DollarSysPublish => capabilities.dollar_sys_publish,
+            Self::SysTopicsPublished => capabilities.sys_topics_published,
         }
     }
 
@@ -201,6 +205,7 @@ impl Requirement {
             Self::Acl => "acl".to_owned(),
             Self::StrictClientIdCharset => "strict_client_id_charset".to_owned(),
             Self::DollarSysPublish => "dollar_sys_publish".to_owned(),
+            Self::SysTopicsPublished => "sys_topics_published".to_owned(),
         }
     }
 
@@ -216,7 +221,8 @@ impl Requirement {
     /// * `enhanced_auth.<METHOD>` — `<METHOD>` is passed through as a
     ///   `&'static str` (callers must use string literals)
     /// * `hooks.restart`, `hooks.cleanup`
-    /// * `acl`
+    /// * `acl`, `strict_client_id_charset`, `dollar_sys_publish`,
+    ///   `sys_topics_published`
     ///
     /// # Errors
     /// Returns the unrecognised spec string on failure. Intended for use at
@@ -250,6 +256,7 @@ impl Requirement {
             "acl" => Ok(Self::Acl),
             "strict_client_id_charset" => Ok(Self::StrictClientIdCharset),
             "dollar_sys_publish" => Ok(Self::DollarSysPublish),
+            "sys_topics_published" => Ok(Self::SysTopicsPublished),
             _ => Err(spec),
         }
     }
@@ -340,6 +347,10 @@ mod tests {
         assert_eq!(
             Requirement::from_spec("assigned_client_id_supported").unwrap(),
             Requirement::AssignedClientIdSupported
+        );
+        assert_eq!(
+            Requirement::from_spec("sys_topics_published").unwrap(),
+            Requirement::SysTopicsPublished
         );
         assert_eq!(Requirement::from_spec("acl").unwrap(), Requirement::Acl);
         assert!(Requirement::from_spec("unknown").is_err());
