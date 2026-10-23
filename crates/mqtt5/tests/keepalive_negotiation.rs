@@ -141,15 +141,56 @@ async fn broker_read_timeout_uses_negotiated_keep_alive_not_client_request() {
     config.server_keep_alive = Some(Duration::from_secs(1));
 
     let broker = TestBroker::start_with_config(config).await;
-    let addr = broker.address().trim_start_matches("mqtt://").to_string();
+    let mut stream = connect_raw(&broker, "kanego-broker-timeout", 600).await;
 
+    let elapsed = time_until_close(&mut stream).await;
+    assert!(
+        elapsed >= Duration::from_millis(1400) && elapsed < Duration::from_millis(1800),
+        "broker disconnect took {elapsed:?}; expected ~1.5s (negotiated 1s * 1.5)",
+    );
+}
+
+#[tokio::test]
+async fn broker_closes_idle_connection_after_one_and_a_half_keep_alives() {
+    let broker = TestBroker::start().await;
+    let mut stream = connect_raw(&broker, "kanego-client-timeout", 2).await;
+
+    let elapsed = time_until_close(&mut stream).await;
+    assert!(
+        elapsed >= Duration::from_millis(2900) && elapsed < Duration::from_millis(3300),
+        "broker disconnect took {elapsed:?}; expected ~3s (client 2s * 1.5)",
+    );
+}
+
+#[tokio::test]
+async fn pingreq_moves_the_broker_keep_alive_deadline() {
+    let broker = TestBroker::start().await;
+    let mut stream = connect_raw(&broker, "kanego-ping", 2).await;
+
+    for _ in 0..4 {
+        tokio::time::sleep(Duration::from_millis(1400)).await;
+        stream
+            .write_all(&[0xC0, 0x00])
+            .await
+            .expect("write PINGREQ");
+        let mut pingresp = [0u8; 2];
+        tokio::time::timeout(Duration::from_secs(2), stream.read_exact(&mut pingresp))
+            .await
+            .expect("PINGRESP read timed out")
+            .expect("broker closed the connection despite PINGREQs within the keep alive");
+        assert_eq!(pingresp, [0xD0, 0x00]);
+    }
+}
+
+async fn connect_raw(broker: &TestBroker, client_id: &str, keep_alive: u16) -> TcpStream {
+    let addr = broker.address().trim_start_matches("mqtt://").to_string();
     let mut stream = TcpStream::connect(&addr).await.expect("connect tcp");
 
     let connect = ConnectPacket {
         protocol_version: 5,
         clean_start: true,
-        keep_alive: 600,
-        client_id: "kanego-broker-timeout".to_string(),
+        keep_alive,
+        client_id: client_id.to_string(),
         username: None,
         password: None,
         will: None,
@@ -167,23 +208,21 @@ async fn broker_read_timeout_uses_negotiated_keep_alive_not_client_request() {
         .expect("CONNACK read timed out")
         .expect("read CONNACK");
     assert!(n > 0, "broker closed before sending CONNACK");
+    stream
+}
 
+async fn time_until_close(stream: &mut TcpStream) -> Duration {
     let start = tokio::time::Instant::now();
     let mut drain = [0u8; 256];
-    let read_result = tokio::time::timeout(Duration::from_secs(4), stream.read(&mut drain)).await;
-    let elapsed = start.elapsed();
-
-    let bytes = read_result
-        .expect("broker did not close connection within 4s — read_timeout still using client's 600s request")
+    let bytes = tokio::time::timeout(Duration::from_secs(10), stream.read(&mut drain))
+        .await
+        .expect("broker did not close the idle connection within 10s")
         .expect("socket read error");
     assert_eq!(
         bytes, 0,
-        "expected EOF after broker timeout, got {bytes} bytes",
+        "expected EOF after broker timeout, got {bytes} bytes"
     );
-    assert!(
-        elapsed < Duration::from_secs(3),
-        "broker disconnect took {elapsed:?}; expected ~1.5s (negotiated 1s * 1.5)",
-    );
+    start.elapsed()
 }
 
 #[tokio::test]

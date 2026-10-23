@@ -37,7 +37,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
-use tokio::time::{interval, timeout, timeout_at, Instant, Interval};
+use tokio::time::{timeout, timeout_at, Instant};
 use tracing::{debug, info, warn};
 
 /// Longest a new connection waits for the handler it displaced to hand the session over.
@@ -482,14 +482,7 @@ impl ClientHandler {
         if self.released_rx.is_none() {
             self.bind().await?;
         }
-        if self.keep_alive.is_zero() {
-            self.handle_packets(None, disconnect_rx).await
-        } else {
-            let mut keep_alive_interval = interval(self.keep_alive);
-            keep_alive_interval.reset();
-            self.handle_packets(Some(&mut keep_alive_interval), disconnect_rx)
-                .await
-        }
+        self.handle_packets(disconnect_rx).await
     }
 
     async fn bind(&mut self) -> Result<()> {
@@ -1047,10 +1040,11 @@ impl ClientHandler {
 
     async fn handle_packets(
         &mut self,
-        mut keep_alive_interval: Option<&mut Interval>,
         disconnect_rx: &mut oneshot::Receiver<TakeoverNotice>,
     ) -> Result<LoopExit> {
         let mut last_packet_time = Instant::now();
+        let keep_alive_limit = (!self.keep_alive.is_zero())
+            .then(|| KeepaliveConfig::default().timeout_duration(self.keep_alive));
         let max_size = self.max_packet_size();
         let read_timeout = self.read_timeout();
         let queue = self.queue.clone();
@@ -1129,15 +1123,14 @@ impl ClientHandler {
                     self.drain_backlog().await?;
                 }
 
-                () = async {
-                    match keep_alive_interval.as_deref_mut() {
-                        Some(interval) => {
-                            interval.tick().await;
-                        }
+                () = async move {
+                    match keep_alive_limit {
+                        Some(limit) => tokio::time::sleep_until(last_packet_time + limit).await,
                         None => std::future::pending::<()>().await,
                     }
                 } => {
-                    self.check_keep_alive(last_packet_time)?;
+                    warn!("Keep-alive timeout");
+                    return Err(MqttError::KeepAliveTimeout);
                 }
 
                 notice = &mut *disconnect_rx => {
@@ -1196,15 +1189,6 @@ impl ClientHandler {
         };
         self.send_lane_batch(routable, lane).await?;
         Ok(None)
-    }
-
-    fn check_keep_alive(&self, last_packet_time: Instant) -> Result<()> {
-        let timeout_duration = KeepaliveConfig::default().timeout_duration(self.keep_alive);
-        if last_packet_time.elapsed() > timeout_duration {
-            warn!("Keep-alive timeout");
-            return Err(MqttError::KeepAliveTimeout);
-        }
-        Ok(())
     }
 
     async fn handle_read(
