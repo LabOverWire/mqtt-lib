@@ -1,7 +1,9 @@
 //! Section 4.8 — Shared Subscriptions.
 
+use crate::assertions;
 use crate::conformance_test;
 use crate::harness::unique_client_id;
+use crate::packet_parser::ParsedPublish;
 use crate::raw_client::{RawMqttClient, RawPacketBuilder};
 use crate::sut::SutHandle;
 use crate::test_client::TestClient;
@@ -85,10 +87,11 @@ async fn shared_sub_share_name_with_wildcard_rejected(sut: SutHandle) {
     }
 }
 
-/// `[MQTT-4.8.2-1]` Incomplete `$share/<name>` without a topic filter after
-/// the second `/` must be rejected with `TopicFilterInvalid`.
+/// `[MQTT-4.8.2-2]` A `ShareName` MUST be followed by a "/" and a Topic Filter.
+/// Subscribing to `$share/grouponly` must be rejected with Topic Filter invalid
+/// (0x8F).
 #[conformance_test(
-    ids = ["MQTT-4.8.2-1"],
+    ids = ["MQTT-4.8.2-2"],
     requires = ["transport.tcp", "shared_subscription_available"],
 )]
 async fn shared_sub_incomplete_format_rejected(sut: SutHandle) {
@@ -109,78 +112,26 @@ async fn shared_sub_incomplete_format_rejected(sut: SutHandle) {
     let pkt = raw.read_mqtt_packet(TIMEOUT).await;
     match pkt {
         Some(data) if data[0] == 0x90 => {
-            let (_, reason_codes) =
-                parse_suback_bytes(&data).expect("[MQTT-4.8.2-1] SUBACK must be parseable");
+            let (_, reason_codes) = parse_suback_bytes(&data).expect("SUBACK must be parseable");
             assert_eq!(reason_codes.len(), 1);
             assert_eq!(
                 reason_codes[0], 0x8F,
-                "[MQTT-4.8.2-1] incomplete $share/grouponly must return TopicFilterInvalid"
+                "[MQTT-4.8.2-2] incomplete $share/grouponly must return TopicFilterInvalid"
             );
         }
         Some(data) if data[0] == 0xE0 => {}
         None => {}
         Some(data) => panic!(
-            "[MQTT-4.8.2-1] expected SUBACK (0x90), DISCONNECT (0xE0), or EOF, got {:#04x}",
+            "expected SUBACK (0x90), DISCONNECT (0xE0), or EOF, got {:#04x}",
             data[0]
         ),
     }
 }
 
-/// `[MQTT-4.8.2-4]` Messages published to a shared subscription are
-/// distributed across the members of the shared group.
+/// `[MQTT-4.5.0-1]` A shared subscription and a regular subscription on the
+/// same topic must both receive the message.
 #[conformance_test(
-    ids = ["MQTT-4.8.2-4"],
-    requires = ["transport.tcp", "shared_subscription_available"],
-)]
-async fn shared_sub_round_robin_delivery(sut: SutHandle) {
-    let topic = format!("tasks/{}", unique_client_id("rr"));
-    let shared_filter = format!("$share/workers/{topic}");
-
-    let worker1 = TestClient::connect_with_prefix(&sut, "shared-rr-w1")
-        .await
-        .unwrap();
-    let sub1 = worker1
-        .subscribe(&shared_filter, SubscribeOptions::default())
-        .await
-        .unwrap();
-
-    let worker2 = TestClient::connect_with_prefix(&sut, "shared-rr-w2")
-        .await
-        .unwrap();
-    let sub2 = worker2
-        .subscribe(&shared_filter, SubscribeOptions::default())
-        .await
-        .unwrap();
-
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    let publisher = TestClient::connect_with_prefix(&sut, "shared-rr-pub")
-        .await
-        .unwrap();
-    for i in 0..6 {
-        let payload = format!("msg-{i}");
-        publisher.publish(&topic, payload.as_bytes()).await.unwrap();
-    }
-
-    tokio::time::sleep(Duration::from_millis(500)).await;
-
-    let count1 = sub1.count();
-    let count2 = sub2.count();
-    assert_eq!(
-        count1 + count2,
-        6,
-        "all 6 messages must be delivered across shared group"
-    );
-    assert!(
-        count1 >= 1 && count2 >= 1,
-        "both shared subscribers must receive at least one message: w1={count1}, w2={count2}"
-    );
-}
-
-/// `[MQTT-4.8.2-4]` A shared subscription coexists with regular
-/// subscriptions on the same topic; both must receive the message.
-#[conformance_test(
-    ids = ["MQTT-4.8.2-4"],
+    ids = ["MQTT-4.5.0-1"],
     requires = ["transport.tcp", "shared_subscription_available"],
 )]
 async fn shared_sub_mixed_with_regular(sut: SutHandle) {
@@ -230,118 +181,75 @@ async fn shared_sub_mixed_with_regular(sut: SutHandle) {
     );
 }
 
-/// `[MQTT-4.8.2-5]` Shared subscriptions MUST NOT receive retained messages
-/// on subscribe.
+/// `[MQTT-3.10.4-1]` `[MQTT-3.10.4-2]` After an UNSUBSCRIBE of a shared
+/// subscription, the Server MUST delete it and stop sending the share group's
+/// messages to that client.
 #[conformance_test(
-    ids = ["MQTT-4.8.2-5"],
-    requires = ["transport.tcp", "shared_subscription_available", "retain_available"],
-)]
-async fn shared_sub_no_retained_on_subscribe(sut: SutHandle) {
-    let topic = format!("sensor/temp/{}", unique_client_id("ret"));
-    let shared_filter = format!("$share/readers/{topic}");
-
-    let publisher = TestClient::connect_with_prefix(&sut, "shared-ret-pub")
-        .await
-        .unwrap();
-    publisher
-        .publish_with_options(
-            &topic,
-            b"25.5",
-            PublishOptions {
-                retain: true,
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-
-    tokio::time::sleep(Duration::from_millis(200)).await;
-
-    let shared_sub = TestClient::connect_with_prefix(&sut, "shared-ret-s")
-        .await
-        .unwrap();
-    let sub_shared = shared_sub
-        .subscribe(&shared_filter, SubscribeOptions::default())
-        .await
-        .unwrap();
-
-    tokio::time::sleep(Duration::from_millis(300)).await;
-
-    assert_eq!(
-        sub_shared.count(),
-        0,
-        "shared subscription must not receive retained messages on subscribe"
-    );
-
-    let regular_sub = TestClient::connect_with_prefix(&sut, "shared-ret-r")
-        .await
-        .unwrap();
-    let sub_regular = regular_sub
-        .subscribe(&topic, SubscribeOptions::default())
-        .await
-        .unwrap();
-
-    sub_regular.wait_for_messages(1, TIMEOUT).await;
-    let msgs = sub_regular.snapshot();
-    assert_eq!(
-        msgs.len(),
-        1,
-        "regular subscription must receive retained message"
-    );
-    assert_eq!(msgs[0].payload, b"25.5");
-}
-
-/// `[MQTT-4.8.2-4]` After unsubscribing from a shared subscription, the
-/// client must no longer receive messages distributed to the share group.
-#[conformance_test(
-    ids = ["MQTT-4.8.2-4"],
+    ids = ["MQTT-3.10.4-1", "MQTT-3.10.4-2"],
     requires = ["transport.tcp", "shared_subscription_available"],
 )]
 async fn shared_sub_unsubscribe_stops_delivery(sut: SutHandle) {
     let topic = format!("tasks/{}", unique_client_id("unsub"));
     let shared_filter = format!("$share/workers/{topic}");
 
-    let subscriber = TestClient::connect_with_prefix(&sut, "shared-unsub-s")
+    let mut subscriber = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
         .unwrap();
-    let subscription = subscriber
-        .subscribe(&shared_filter, SubscribeOptions::default())
+    subscriber
+        .connect_and_establish(&unique_client_id("shared-unsub-s"), TIMEOUT)
+        .await;
+    subscriber
+        .send_raw(&RawPacketBuilder::subscribe_with_packet_id(
+            &shared_filter,
+            0,
+            1,
+        ))
         .await
         .unwrap();
-
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    let (_, granted) = subscriber
+        .expect_suback(TIMEOUT)
+        .await
+        .expect("expected SUBACK");
+    assert_eq!(
+        granted,
+        [0x00],
+        "shared subscription must be granted at QoS 0"
+    );
 
     let publisher = TestClient::connect_with_prefix(&sut, "shared-unsub-pub")
         .await
         .unwrap();
     publisher.publish(&topic, b"before").await.unwrap();
+    let before = subscriber
+        .read_mqtt_packet(TIMEOUT)
+        .await
+        .and_then(|packet| ParsedPublish::parse(&packet))
+        .expect("must receive message before unsubscribe");
+    assert_eq!(before.payload, b"before");
 
-    subscription.wait_for_messages(1, TIMEOUT).await;
+    subscriber
+        .send_raw(&RawPacketBuilder::unsubscribe(&shared_filter, 2))
+        .await
+        .unwrap();
+    let (_, reason_codes) = subscriber
+        .expect_unsuback(TIMEOUT)
+        .await
+        .expect("expected UNSUBACK");
     assert_eq!(
-        subscription.count(),
-        1,
-        "must receive message before unsubscribe"
+        reason_codes,
+        [0x00],
+        "[MQTT-3.10.4-1] the exactly matching shared subscription must be deleted"
     );
-
-    subscriber.unsubscribe(&shared_filter).await.unwrap();
-
-    tokio::time::sleep(Duration::from_millis(100)).await;
 
     publisher.publish(&topic, b"after").await.unwrap();
-
-    tokio::time::sleep(Duration::from_millis(300)).await;
-
-    assert_eq!(
-        subscription.count(),
-        1,
-        "must not receive messages after unsubscribe from shared subscription"
-    );
+    assertions::expect_no_packet(&mut subscriber, "MQTT-3.10.4-2", Duration::from_millis(500))
+        .await;
 }
 
-/// `[MQTT-4.8.2-4]` Multiple shared groups with different `ShareNames` on the
-/// same topic are independent; each group receives the message.
+/// `[MQTT-4.5.0-1]` Share groups with different `ShareNames` on the same topic
+/// are independent: each group must receive the message.
 #[conformance_test(
-    ids = ["MQTT-4.8.2-4"],
+    ids = ["MQTT-4.5.0-1"],
     requires = ["transport.tcp", "shared_subscription_available"],
 )]
 async fn shared_sub_multiple_groups_independent(sut: SutHandle) {

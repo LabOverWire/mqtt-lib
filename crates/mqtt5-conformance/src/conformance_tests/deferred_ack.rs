@@ -39,11 +39,13 @@ async fn publish_qos2(sut: &SutHandle, topic: &str, payloads: &[&[u8]]) {
     publisher.disconnect().await.ok();
 }
 
-/// `[MQTT-4.9.0-1]` `[MQTT-4.9.0-2]` A withheld `QoS` 2 PUBREC keeps the Receive-Maximum slot
-/// occupied: the broker delivers only `receive_maximum` messages and releases the next one only
-/// after the full PUBREC/PUBREL/PUBCOMP handshake completes — the guarantee deferred ack depends on.
+/// `[MQTT-4.9.0-1]` `[MQTT-4.9.0-2]` `[MQTT-3.3.4-9]` A withheld `QoS` 2 PUBREC
+/// keeps the Receive Maximum slot occupied: the broker delivers only
+/// `receive_maximum` messages and releases the next one only after the full
+/// PUBREC/PUBREL/PUBCOMP handshake completes, the guarantee deferred ack
+/// depends on.
 #[conformance_test(
-    ids = ["MQTT-4.9.0-1", "MQTT-4.9.0-2"],
+    ids = ["MQTT-4.9.0-1", "MQTT-4.9.0-2", "MQTT-3.3.4-9"],
     requires = ["transport.tcp", "max_qos>=2"],
 )]
 async fn deferred_qos2_slot_held_until_pubcomp(sut: SutHandle) {
@@ -89,9 +91,10 @@ async fn deferred_qos2_slot_held_until_pubcomp(sut: SutHandle) {
         .await
         .unwrap();
 
-    let (_, second_pid, qos2, _t, _p) = sub.expect_publish_with_id(TIMEOUT).await.expect(
-        "[MQTT-4.9.0-1] the second message flows once the handshake completes and frees the slot",
-    );
+    let (_, second_pid, qos2, _t, _p) = sub
+        .expect_publish_with_id(TIMEOUT)
+        .await
+        .expect("the second message flows once the handshake completes and frees the slot");
     assert_eq!(qos2, 2, "second delivered message must be QoS 2");
     assert_ne!(
         second_pid, 0,
@@ -107,11 +110,11 @@ async fn deferred_qos2_slot_held_until_pubcomp(sut: SutHandle) {
         .unwrap();
 }
 
-/// `[MQTT-4.9.0-3]` With the `QoS` 2 quota fully consumed by a withheld PUBREC, the broker must
-/// still service control packets — PINGREQ and SUBSCRIBE — so a deferring client's control plane is
-/// never blocked.
+/// `[MQTT-4.9.0-3]` `[MQTT-3.3.4-10]` With the `QoS` 2 quota fully consumed by
+/// a withheld PUBREC, the broker must still answer PINGREQ and SUBSCRIBE
+/// without delay, so a deferring client's control plane is never blocked.
 #[conformance_test(
-    ids = ["MQTT-4.9.0-3"],
+    ids = ["MQTT-4.9.0-3", "MQTT-3.3.4-10"],
     requires = ["transport.tcp", "max_qos>=2"],
 )]
 async fn deferred_qos2_zero_quota_still_serves_control_plane(sut: SutHandle) {

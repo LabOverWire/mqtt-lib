@@ -31,11 +31,11 @@ async fn malformed_packet_closes_connection(sut: SutHandle) {
     );
 }
 
-/// [MQTT-4.13.2-1] The Server MUST perform one of the following if it detects
-/// a Protocol Error: send a DISCONNECT with an appropriate Reason Code, and
-/// then close the Network Connection.
+/// [MQTT-4.13.2-1] [MQTT-3.1.0-2] A second CONNECT is a Protocol Error. If the
+/// Server sends a DISCONNECT with a Reason Code of 0x80 or greater, it MUST
+/// close the connection.
 #[conformance_test(
-    ids = ["MQTT-4.13.2-1"],
+    ids = ["MQTT-4.13.2-1", "MQTT-3.1.0-2"],
     requires = ["transport.tcp"],
 )]
 async fn protocol_error_disconnect_closes_connection(sut: SutHandle) {
@@ -54,7 +54,7 @@ async fn protocol_error_disconnect_closes_connection(sut: SutHandle) {
         Some(reason) => {
             assert!(
                 reason >= 0x80,
-                "[MQTT-4.13.2-1] DISCONNECT reason code must indicate error (>= 0x80), got {reason:#04x}"
+                "[MQTT-3.1.0-2] DISCONNECT reason code must indicate error (>= 0x80), got {reason:#04x}"
             );
             assert!(
                 raw.expect_disconnect(TIMEOUT).await,

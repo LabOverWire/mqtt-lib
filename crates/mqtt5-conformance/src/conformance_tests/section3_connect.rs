@@ -31,8 +31,8 @@ async fn session_takeover_disconnects_existing_client(sut: SutHandle) {
     let (_, reason) = existing
         .expect_connack(TIMEOUT)
         .await
-        .expect("[MQTT-3.1.4-3] first connection must be accepted");
-    assert_eq!(reason, 0x00, "[MQTT-3.1.4-3] first CONNECT must succeed");
+        .expect("first connection must be accepted");
+    assert_eq!(reason, 0x00, "first CONNECT must succeed");
 
     let mut taking_over = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
         .await
@@ -44,11 +44,8 @@ async fn session_takeover_disconnects_existing_client(sut: SutHandle) {
     let (_, reason) = taking_over
         .expect_connack(TIMEOUT)
         .await
-        .expect("[MQTT-3.1.4-3] second connection with the same ClientID must be accepted");
-    assert_eq!(
-        reason, 0x00,
-        "[MQTT-3.1.4-3] taking-over CONNECT must succeed"
-    );
+        .expect("second connection with the same ClientID must be accepted");
+    assert_eq!(reason, 0x00, "taking-over CONNECT must succeed");
 
     let reason = existing
         .expect_disconnect_packet(TIMEOUT)
@@ -171,10 +168,10 @@ async fn connect_unsupported_protocol_version(sut: SutHandle) {
     );
 }
 
-/// `[MQTT-3.1.2-3]` The Server MUST validate that the reserved flag in the
-/// CONNECT packet is set to 0.
+/// `[MQTT-3.1.2-3]` `[MQTT-3.1.4-1]` The Server MUST validate that the reserved
+/// flag in the CONNECT packet is 0, and close the connection when it is not.
 #[conformance_test(
-    ids = ["MQTT-3.1.2-3"],
+    ids = ["MQTT-3.1.2-3", "MQTT-3.1.4-1"],
     requires = ["transport.tcp"],
 )]
 async fn connect_reserved_flag_must_be_zero(sut: SutHandle) {
@@ -192,10 +189,11 @@ async fn connect_reserved_flag_must_be_zero(sut: SutHandle) {
     );
 }
 
-/// `[MQTT-3.1.2-4]` If `CleanStart` is set to 1, the Client and Server MUST
-/// discard any existing Session and start a new Session.
+/// `[MQTT-3.2.2-2]` A connection accepted with Clean Start 1 must get Session
+/// Present 0, both on the first connection and on a reconnect to an existing
+/// session.
 #[conformance_test(
-    ids = ["MQTT-3.1.2-4"],
+    ids = ["MQTT-3.2.2-2"],
     requires = ["transport.tcp"],
 )]
 async fn connect_clean_start_new_session(sut: SutHandle) {
@@ -206,10 +204,10 @@ async fn connect_clean_start_new_session(sut: SutHandle) {
         .with_session_expiry_interval(300);
     let client = TestClient::connect_with_options(&sut, opts)
         .await
-        .expect("[MQTT-3.1.2-4] Clean start connection must succeed");
+        .expect("Clean start connection must succeed");
     assert!(
         !client.session_present(),
-        "[MQTT-3.1.2-4] First connection with clean_start=true must have session_present=false"
+        "[MQTT-3.2.2-2] First connection with clean_start=true must have session_present=false"
     );
     client
         .subscribe("test/topic", SubscribeOptions::default())
@@ -227,16 +225,15 @@ async fn connect_clean_start_new_session(sut: SutHandle) {
         .expect("reconnect failed");
     assert!(
         !client2.session_present(),
-        "[MQTT-3.1.2-4] CleanStart=1 must discard existing session (session_present=false)"
+        "[MQTT-3.2.2-2] CleanStart=1 must discard existing session (session_present=false)"
     );
     client2.disconnect().await.expect("disconnect failed");
 }
 
-/// `[MQTT-3.1.2-5]` If `CleanStart` is set to 0 and there is a Session
-/// associated with the Client Identifier, the Server MUST resume
-/// communications based on state from the existing Session.
+/// `[MQTT-3.2.2-3]` Reconnecting with Clean Start 0 to an existing session must
+/// get Session Present 1.
 #[conformance_test(
-    ids = ["MQTT-3.1.2-5"],
+    ids = ["MQTT-3.2.2-3"],
     requires = ["transport.tcp"],
 )]
 async fn connect_clean_start_false_resumes_session(sut: SutHandle) {
@@ -264,15 +261,16 @@ async fn connect_clean_start_false_resumes_session(sut: SutHandle) {
         .expect("reconnect failed");
     assert!(
         client2.session_present(),
-        "[MQTT-3.1.2-5] CleanStart=0 with existing session must have session_present=true"
+        "[MQTT-3.2.2-3] CleanStart=0 with existing session must have session_present=true"
     );
     client2.disconnect().await.expect("disconnect failed");
 }
 
-/// `[MQTT-3.1.2-9]` If the Will Flag is set to 1, the Will Properties, Will
-/// Topic and Will Payload fields MUST be present in the Payload.
+/// `[MQTT-3.1.4-5]` A CONNECT with the Will Flag set and the Will Properties,
+/// Will Topic and Will Payload present must be acknowledged with a CONNACK
+/// 0x00.
 #[conformance_test(
-    ids = ["MQTT-3.1.2-9"],
+    ids = ["MQTT-3.1.4-5"],
     requires = ["transport.tcp"],
 )]
 async fn connect_will_flag_with_will_topic_payload(sut: SutHandle) {
@@ -282,14 +280,15 @@ async fn connect_will_flag_with_will_topic_payload(sut: SutHandle) {
         .with_will(will);
     let client = TestClient::connect_with_options(&sut, opts)
         .await
-        .expect("[MQTT-3.1.2-9] Connection with valid will must succeed");
+        .expect("[MQTT-3.1.4-5] Connection with valid will must succeed");
     client.disconnect().await.expect("disconnect failed");
 }
 
-/// `[MQTT-3.1.2-11]` If the Will Flag is set to 0, then the Will `QoS` MUST
-/// be set to 0.
+/// `[MQTT-3.1.2-11]` `[MQTT-3.1.4-1]` If the Will Flag is 0, the Will `QoS`
+/// MUST be 0. A CONNECT with Will `QoS` 1 and no Will Flag does not match the
+/// format of section 3.1, so the Server must close the connection.
 #[conformance_test(
-    ids = ["MQTT-3.1.2-11"],
+    ids = ["MQTT-3.1.2-11", "MQTT-3.1.4-1"],
     requires = ["transport.tcp"],
 )]
 async fn connect_will_qos_zero_without_will_flag(sut: SutHandle) {
@@ -306,10 +305,11 @@ async fn connect_will_qos_zero_without_will_flag(sut: SutHandle) {
     );
 }
 
-/// `[MQTT-3.1.2-13]` If the Will Flag is set to 0, then Will Retain MUST be
-/// set to 0.
+/// `[MQTT-3.1.2-13]` `[MQTT-3.1.4-1]` If the Will Flag is 0, Will Retain MUST
+/// be 0. A CONNECT with Will Retain set and no Will Flag does not match the
+/// format of section 3.1, so the Server must close the connection.
 #[conformance_test(
-    ids = ["MQTT-3.1.2-13"],
+    ids = ["MQTT-3.1.2-13", "MQTT-3.1.4-1"],
     requires = ["transport.tcp"],
 )]
 async fn connect_will_retain_zero_without_will_flag(sut: SutHandle) {
@@ -326,10 +326,11 @@ async fn connect_will_retain_zero_without_will_flag(sut: SutHandle) {
     );
 }
 
-/// `[MQTT-3.1.2-12]` If the Will Flag is set to 1, the value of Will `QoS`
-/// can be 0, 1, or 2. A value of 3 is a Malformed Packet.
+/// `[MQTT-3.1.2-12]` `[MQTT-3.1.4-1]` Will `QoS` can be 0, 1 or 2. A CONNECT
+/// with Will `QoS` 3 does not match the format of section 3.1, so the Server
+/// must close the connection.
 #[conformance_test(
-    ids = ["MQTT-3.1.2-12"],
+    ids = ["MQTT-3.1.2-12", "MQTT-3.1.4-1"],
     requires = ["transport.tcp"],
 )]
 async fn connect_will_qos_3_is_malformed(sut: SutHandle) {
@@ -346,10 +347,11 @@ async fn connect_will_qos_3_is_malformed(sut: SutHandle) {
     );
 }
 
-/// `[MQTT-2.1.3-1]` If the CONNECT packet has a fixed header flags field
-/// that is not 0x00, the Server MUST treat it as a Malformed Packet.
+/// `[MQTT-2.1.3-1]` `[MQTT-3.1.4-1]` The CONNECT fixed header flags are
+/// reserved and MUST be 0. A CONNECT with any other value does not match the
+/// format of section 3.1, so the Server must close the connection.
 #[conformance_test(
-    ids = ["MQTT-2.1.3-1"],
+    ids = ["MQTT-2.1.3-1", "MQTT-3.1.4-1"],
     requires = ["transport.tcp"],
 )]
 async fn connect_invalid_fixed_header_flags(sut: SutHandle) {
@@ -381,11 +383,12 @@ async fn connect_valid_client_id_accepted(sut: SutHandle) {
     client.disconnect().await.expect("disconnect failed");
 }
 
-/// `[MQTT-3.1.3-6]` A Server MAY allow a Client to supply a `ClientID` that
-/// has a length of zero bytes; if so the Server MUST treat this as a special
-/// case and assign a unique `ClientID` to that Client.
+/// `[MQTT-3.1.3-6]` `[MQTT-3.1.3-7]` `[MQTT-3.2.2-16]` A Server that accepts a
+/// zero-length `ClientID` MUST assign a unique `ClientID`, process the CONNECT
+/// as if the Client had sent it, and return it as the Assigned Client
+/// Identifier in the CONNACK.
 #[conformance_test(
-    ids = ["MQTT-3.1.3-6"],
+    ids = ["MQTT-3.1.3-6", "MQTT-3.1.3-7", "MQTT-3.2.2-16"],
     requires = ["transport.tcp", "assigned_client_id_supported"],
 )]
 async fn connect_empty_client_id_server_assigns(sut: SutHandle) {
@@ -397,10 +400,7 @@ async fn connect_empty_client_id_server_assigns(sut: SutHandle) {
     raw.send_raw(&connect).await.unwrap();
 
     let response = raw.read_packet_bytes(Duration::from_secs(2)).await;
-    assert!(
-        response.is_some(),
-        "[MQTT-3.1.3-6] Server must send CONNACK"
-    );
+    assert!(response.is_some(), "Server must send CONNACK");
     let data = response.unwrap();
     assert_eq!(data[0], 0x20, "Response must be CONNACK");
     let reason_idx = find_connack_reason_code_index(&data);
@@ -410,7 +410,7 @@ async fn connect_empty_client_id_server_assigns(sut: SutHandle) {
     );
     assert!(
         data[reason_idx + 1..].contains(&0x12),
-        "[MQTT-3.1.3-6] CONNACK must contain Assigned Client Identifier property (0x12)"
+        "[MQTT-3.1.3-7] CONNACK must contain Assigned Client Identifier property (0x12)"
     );
 }
 
@@ -439,9 +439,9 @@ async fn client_id_rejected_with_0x85(sut: SutHandle) {
     );
 }
 
-/// `[MQTT-3.1.4-1]` The Server MUST validate that the CONNECT packet matches
-/// the format described in the specification and close the Network
-/// Connection if it does not.
+/// `[MQTT-3.1.4-1]` A CONNECT whose properties length runs past the end of the
+/// packet does not match the format of section 3.1, so the Server must close
+/// the connection.
 #[conformance_test(
     ids = ["MQTT-3.1.4-1"],
     requires = ["transport.tcp"],
@@ -451,23 +451,21 @@ async fn connect_malformed_packet_closes_connection(sut: SutHandle) {
         .await
         .unwrap();
 
-    raw.send_raw(&RawPacketBuilder::connect_malformed_truncated())
+    raw.send_raw(&RawPacketBuilder::connect_with_overlong_properties())
         .await
         .unwrap();
 
-    let _ = raw.shutdown_write().await;
-
     assert!(
-        raw.expect_disconnect(Duration::from_secs(12)).await,
+        raw.expect_disconnect(TIMEOUT).await,
         "[MQTT-3.1.4-1] Server must close connection on malformed CONNECT"
     );
 }
 
-/// `[MQTT-3.1.4-2]` The Server MAY check the CONNECT Packet contents are
-/// consistent and if any check fails SHOULD send the CONNACK packet with a
-/// non-zero return code.
+/// `[MQTT-3.1.4-1]` A CONNECT that includes the Session Expiry Interval
+/// property twice does not match the format of section 3.1, so the Server must
+/// close the connection.
 #[conformance_test(
-    ids = ["MQTT-3.1.4-2"],
+    ids = ["MQTT-3.1.4-1"],
     requires = ["transport.tcp"],
 )]
 async fn connect_duplicate_property_rejected(sut: SutHandle) {
@@ -481,7 +479,7 @@ async fn connect_duplicate_property_rejected(sut: SutHandle) {
 
     assert!(
         raw.expect_disconnect(Duration::from_secs(2)).await,
-        "[MQTT-3.1.4-2] Server must reject CONNECT with duplicate properties"
+        "[MQTT-3.1.4-1] Server must reject CONNECT with duplicate properties"
     );
 }
 
@@ -579,11 +577,11 @@ async fn connect_clean_start_takeover_session_present_zero(sut: SutHandle) {
     );
 }
 
-/// `[MQTT-3.1.4-4]` If the Server accepts a connection with `CleanStart` set
-/// to 0 and the Server has Session State for the `ClientID`, it MUST set
-/// Session Present to 1 in the CONNACK packet.
+/// `[MQTT-3.2.2-3]` If the Server accepts a connection with Clean Start 0 and
+/// has Session State for the `ClientID`, it MUST set Session Present to 1 in
+/// the CONNACK.
 #[conformance_test(
-    ids = ["MQTT-3.1.4-4"],
+    ids = ["MQTT-3.2.2-3"],
     requires = ["transport.tcp"],
 )]
 async fn connect_clean_start_false_session_present_one(sut: SutHandle) {
@@ -616,16 +614,14 @@ async fn connect_clean_start_false_session_present_one(sut: SutHandle) {
     assert_eq!(
         flags & 0x01,
         1,
-        "[MQTT-3.1.4-4] Session present flag must be 1 when resuming existing session"
+        "[MQTT-3.2.2-3] Session present flag must be 1 when resuming existing session"
     );
 }
 
-/// `[MQTT-3.1.4-5]` If the Will Flag is set to 1, the Server MUST store the
-/// Will Message and publish it after the Network Connection is subsequently
-/// closed unless the Will Message has been deleted on receipt of a DISCONNECT
-/// with Reason Code 0x00.
+/// `[MQTT-3.1.2-8]` The Will Message MUST be published after the Network
+/// Connection is closed without a DISCONNECT.
 #[conformance_test(
-    ids = ["MQTT-3.1.4-5"],
+    ids = ["MQTT-3.1.2-8"],
     requires = ["transport.tcp"],
 )]
 async fn connect_will_published_on_abnormal_disconnect(sut: SutHandle) {
@@ -657,7 +653,7 @@ async fn connect_will_published_on_abnormal_disconnect(sut: SutHandle) {
         subscription
             .wait_for_messages(1, Duration::from_secs(3))
             .await,
-        "[MQTT-3.1.4-5] Will message must be published on abnormal disconnect"
+        "[MQTT-3.1.2-8] Will message must be published on abnormal disconnect"
     );
     let msgs = subscription.snapshot();
     assert_eq!(msgs[0].topic, will_topic);
@@ -666,10 +662,10 @@ async fn connect_will_published_on_abnormal_disconnect(sut: SutHandle) {
     subscriber.disconnect().await.expect("disconnect failed");
 }
 
-/// `[MQTT-3.1.4-5]` (negative case) Will Message MUST NOT be published when
-/// the client sends a normal DISCONNECT with Reason Code 0x00.
+/// `[MQTT-3.14.4-3]` On a DISCONNECT with Reason Code 0x00 the Server MUST
+/// discard the Will Message without publishing it.
 #[conformance_test(
-    ids = ["MQTT-3.1.4-5"],
+    ids = ["MQTT-3.14.4-3"],
     requires = ["transport.tcp"],
 )]
 async fn connect_will_not_published_on_normal_disconnect(sut: SutHandle) {
@@ -698,17 +694,17 @@ async fn connect_will_not_published_on_normal_disconnect(sut: SutHandle) {
     assert_eq!(
         subscription.count(),
         0,
-        "[MQTT-3.1.4-5] Will message must NOT be published on normal disconnect"
+        "[MQTT-3.14.4-3] Will message must NOT be published on normal disconnect"
     );
 
     subscriber.disconnect().await.expect("disconnect failed");
 }
 
-/// `[MQTT-3.1.4-6]` The Server MUST respond to a CONNECT packet with a
-/// CONNACK packet. The CONNACK is the first packet sent from the Server to
-/// the Client.
+/// `[MQTT-3.1.4-5]` `[MQTT-3.2.0-1]` The Server MUST acknowledge a valid
+/// CONNECT with a CONNACK 0x00, and the CONNACK must be the first packet it
+/// sends.
 #[conformance_test(
-    ids = ["MQTT-3.1.4-6"],
+    ids = ["MQTT-3.1.4-5", "MQTT-3.2.0-1"],
     requires = ["transport.tcp"],
 )]
 async fn connect_success_connack(sut: SutHandle) {
@@ -724,12 +720,12 @@ async fn connect_success_connack(sut: SutHandle) {
     let connack = raw.expect_connack(Duration::from_secs(2)).await;
     assert!(
         connack.is_some(),
-        "[MQTT-3.1.4-6] Server must respond with CONNACK"
+        "[MQTT-3.1.4-5] Server must respond with CONNACK"
     );
     let (_, reason) = connack.unwrap();
     assert_eq!(
         reason, 0x00,
-        "[MQTT-3.1.4-6] Valid CONNECT must receive Success (0x00)"
+        "[MQTT-3.1.4-5] Valid CONNECT must receive Success (0x00)"
     );
 }
 

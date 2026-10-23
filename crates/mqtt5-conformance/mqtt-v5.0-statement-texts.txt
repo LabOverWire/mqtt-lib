@@ -123,7 +123,7 @@ Where a Packet is too large to send, the Server MUST discard it without sending 
 The Server MUST NOT send a Topic Alias in a PUBLISH packet to the Client greater than Topic Alias Maximum.
 
 ## MQTT-3.1.2-27
-If Topic Alias Maximum is absent or zero, the Server MUST NOT send any Topic Aliases to the.
+If Topic Alias Maximum is absent or zero, the Server MUST NOT send any Topic Aliases to the Client.
 
 ## MQTT-3.1.2-28
 A value of 0 indicates that the Server MUST NOT return Response Information.

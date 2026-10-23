@@ -5,14 +5,15 @@
 //! decode raw broker responses through [`packet_parser`](crate::packet_parser)
 //! and compare against the test expectation.
 
-#![allow(clippy::missing_panics_doc)]
-
 use crate::packet_parser::{ParsedConnAck, ParsedProperties, ParsedPublish};
 use crate::raw_client::RawMqttClient;
 use crate::transport::Transport;
 use std::time::Duration;
 
 /// Reads a CONNACK and asserts the reason code matches `expected`.
+///
+/// # Panics
+/// Panics if no valid CONNACK arrives or its reason code differs.
 pub async fn expect_connack_reason<T: Transport>(
     raw: &mut RawMqttClient<T>,
     expected: u8,
@@ -34,6 +35,9 @@ pub async fn expect_connack_reason<T: Transport>(
 }
 
 /// Reads a SUBACK and asserts every reason code matches `expected_codes`.
+///
+/// # Panics
+/// Panics if no SUBACK arrives or its reason codes differ.
 pub async fn expect_suback_codes<T: Transport>(
     raw: &mut RawMqttClient<T>,
     expected_codes: &[u8],
@@ -52,6 +56,9 @@ pub async fn expect_suback_codes<T: Transport>(
 }
 
 /// Asserts the broker closes the connection or sends DISCONNECT within the timeout.
+///
+/// # Panics
+/// Panics if the connection is still open when the timeout elapses.
 pub async fn expect_disconnect<T: Transport>(
     raw: &mut RawMqttClient<T>,
     statement_id: &str,
@@ -63,7 +70,25 @@ pub async fn expect_disconnect<T: Transport>(
     );
 }
 
+/// Asserts that no packet arrives within the timeout.
+///
+/// # Panics
+/// Panics if the broker sends a packet before the timeout elapses.
+pub async fn expect_no_packet<T: Transport>(
+    raw: &mut RawMqttClient<T>,
+    statement_id: &str,
+    timeout: Duration,
+) {
+    if let Some(packet) = raw.read_mqtt_packet(timeout).await {
+        let topic = ParsedPublish::parse(&packet).map(|publish| publish.topic);
+        panic!("[{statement_id}] expected no packet, got {packet:02x?} (PUBLISH topic {topic:?})");
+    }
+}
+
 /// Reads a PUBLISH and asserts the topic name equals `expected_topic`.
+///
+/// # Panics
+/// Panics if no valid PUBLISH arrives or its topic differs.
 pub async fn expect_publish_with_topic<T: Transport>(
     raw: &mut RawMqttClient<T>,
     expected_topic: &str,
@@ -91,6 +116,9 @@ pub async fn expect_publish_with_topic<T: Transport>(
 /// mqtt-lib inject `x-mqtt-sender` / `x-mqtt-client-id` on every PUBLISH, and
 /// the conformance suite must tolerate them when comparing forwarded
 /// application-level user properties.
+///
+/// # Panics
+/// Panics if the non-injected user properties differ from `expected`.
 pub fn expect_user_properties_subset(
     actual: &[(String, String)],
     expected: &[(String, String)],

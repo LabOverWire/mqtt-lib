@@ -78,11 +78,11 @@ async fn no_auth_method_no_server_auth(sut: SutHandle) {
     );
 }
 
-/// `[MQTT-4.12.0-7]` If the Client does not include an Authentication
-/// Method in the CONNECT, the Client MUST NOT send an AUTH packet. The
-/// Server treats this as a Protocol Error.
+/// `[MQTT-4.12.0-7]` `[MQTT-4.13.1-1]` A Client whose CONNECT had no
+/// Authentication Method MUST NOT send AUTH. An AUTH from such a Client is a
+/// Protocol Error, so the Server must close the connection.
 #[conformance_test(
-    ids = ["MQTT-4.12.0-7"],
+    ids = ["MQTT-4.12.0-7", "MQTT-4.13.1-1"],
     requires = ["transport.tcp"],
 )]
 async fn unsolicited_auth_rejected(sut: SutHandle) {
@@ -99,6 +99,6 @@ async fn unsolicited_auth_rejected(sut: SutHandle) {
 
     assert!(
         raw.expect_disconnect(Duration::from_secs(3)).await,
-        "[MQTT-4.12.0-7] Server must disconnect client that sends AUTH without prior auth method"
+        "[MQTT-4.13.1-1] Server must disconnect client that sends AUTH without prior auth method"
     );
 }

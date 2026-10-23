@@ -10,8 +10,9 @@ use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
-/// `[MQTT-3.1.2-14]` If Will Retain is set to 0, the Server MUST publish the
-/// Will Message as a non-retained message.
+/// `[MQTT-3.1.2-14]` A Will with Will Retain 0 MUST be published as a
+/// non-retained message. The subscriber uses Retain As Published, so RETAIN on
+/// the delivered Will shows how it was published.
 #[conformance_test(
     ids = ["MQTT-3.1.2-14"],
     requires = ["transport.tcp"],
@@ -23,8 +24,12 @@ async fn will_retain_zero_publishes_non_retained(sut: SutHandle) {
     let subscriber = TestClient::connect_with_prefix(&sut, "wr0-sub")
         .await
         .unwrap();
+    let sub_opts = SubscribeOptions {
+        retain_as_published: true,
+        ..Default::default()
+    };
     let subscription = subscriber
-        .subscribe(&will_topic, SubscribeOptions::default())
+        .subscribe(&will_topic, sub_opts)
         .await
         .expect("subscribe failed");
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -109,10 +114,10 @@ async fn will_retain_one_publishes_retained(sut: SutHandle) {
     subscriber.disconnect().await.expect("disconnect failed");
 }
 
-/// `[MQTT-3.1.2-16]` If the User Name Flag is set to 1, a User Name MUST be
-/// present in the Payload.
+/// `[MQTT-3.1.4-5]` A CONNECT with the User Name Flag set and a User Name
+/// present must be acknowledged with a CONNACK 0x00.
 #[conformance_test(
-    ids = ["MQTT-3.1.2-16"],
+    ids = ["MQTT-3.1.4-5"],
     requires = ["transport.tcp"],
 )]
 async fn username_flag_with_username_succeeds(sut: SutHandle) {
@@ -128,16 +133,17 @@ async fn username_flag_with_username_succeeds(sut: SutHandle) {
     let connack = raw.expect_connack(TIMEOUT).await;
     assert!(
         connack.is_some(),
-        "[MQTT-3.1.2-16] CONNECT with Username Flag=1 and username present must succeed"
+        "[MQTT-3.1.4-5] CONNECT with Username Flag=1 and username present must succeed"
     );
     let (_, reason) = connack.unwrap();
-    assert_eq!(reason, 0x00, "[MQTT-3.1.2-16] Reason code must be Success");
+    assert_eq!(reason, 0x00, "[MQTT-3.1.4-5] Reason code must be Success");
 }
 
-/// `[MQTT-3.1.2-17]` If the User Name Flag is set to 1 but no Username is
-/// present in the payload (truncated), the Server MUST treat it as malformed.
+/// `[MQTT-3.1.2-17]` `[MQTT-3.1.4-1]` If the User Name Flag is 1, a User Name
+/// MUST be present. A CONNECT with the flag set and no User Name does not match
+/// the format of section 3.1, so the Server must close the connection.
 #[conformance_test(
-    ids = ["MQTT-3.1.2-17"],
+    ids = ["MQTT-3.1.2-17", "MQTT-3.1.4-1"],
     requires = ["transport.tcp"],
 )]
 async fn username_flag_without_username_is_malformed(sut: SutHandle) {
@@ -153,10 +159,10 @@ async fn username_flag_without_username_is_malformed(sut: SutHandle) {
     );
 }
 
-/// `[MQTT-3.1.2-18]` `[MQTT-3.1.2-19]` If the Password Flag is set to 1, a
-/// Password MUST be present in the Payload.
+/// `[MQTT-3.1.4-5]` A CONNECT with the User Name and Password Flags set and
+/// both fields present must be acknowledged with a CONNACK 0x00.
 #[conformance_test(
-    ids = ["MQTT-3.1.2-18", "MQTT-3.1.2-19"],
+    ids = ["MQTT-3.1.4-5"],
     requires = ["transport.tcp"],
 )]
 async fn password_flag_payload_consistency(sut: SutHandle) {
@@ -172,10 +178,10 @@ async fn password_flag_payload_consistency(sut: SutHandle) {
     let connack = raw.expect_connack(TIMEOUT).await;
     assert!(
         connack.is_some(),
-        "[MQTT-3.1.2-18] CONNECT with Password Flag=1 and password present must succeed"
+        "[MQTT-3.1.4-5] CONNECT with Password Flag=1 and password present must succeed"
     );
     let (_, reason) = connack.unwrap();
-    assert_eq!(reason, 0x00, "[MQTT-3.1.2-18] Reason code must be Success");
+    assert_eq!(reason, 0x00, "[MQTT-3.1.4-5] Reason code must be Success");
 }
 
 /// `[MQTT-3.1.2-23]` If Session Expiry Interval is greater than 0, the Server
@@ -410,10 +416,10 @@ async fn will_delay_reconnect_suppresses_will(sut: SutHandle) {
     subscriber.disconnect().await.expect("disconnect failed");
 }
 
-/// Positive control for `[MQTT-3.1.3-9]`: without a reconnect, the delayed
-/// Will is published once the Will Delay Interval elapses and not before.
+/// `[MQTT-3.1.2-8]` Without a reconnect, a Will with a Will Delay Interval MUST
+/// be published once the delay elapses, and not before.
 #[conformance_test(
-    ids = ["MQTT-3.1.3-9"],
+    ids = ["MQTT-3.1.2-8"],
     requires = ["transport.tcp"],
 )]
 async fn will_delay_elapsed_publishes_will(sut: SutHandle) {

@@ -83,6 +83,26 @@ fn every_cited_test_is_registered() {
 }
 
 #[test]
+fn every_cited_test_declares_the_statement() {
+    let manifest = ConformanceManifest::load("conformance.toml");
+    let mut undeclared = Vec::new();
+    for statement in manifest.sections.values().flat_map(|s| &s.statements) {
+        for name in &statement.test_names {
+            let declares = CONFORMANCE_TESTS
+                .iter()
+                .any(|t| t.name == name.as_str() && t.ids.contains(&statement.id.as_str()));
+            if !declares {
+                undeclared.push(format!("{} -> {name}", statement.id));
+            }
+        }
+    }
+    assert!(
+        undeclared.is_empty(),
+        "manifest cites tests whose ids do not include the statement: {undeclared:?}"
+    );
+}
+
+#[test]
 fn every_registered_test_targets_a_known_statement() {
     let manifest = ConformanceManifest::load("conformance.toml");
     let known = manifest_statement_ids(&manifest);

@@ -10,10 +10,11 @@ use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
-/// `[MQTT-3.1.3-11]` The Will Topic MUST be a UTF-8 Encoded String.
-/// Sending invalid UTF-8 bytes in the Will Topic must cause disconnect.
+/// `[MQTT-3.1.3-11]` `[MQTT-3.1.4-1]` The Will Topic MUST be a UTF-8 Encoded
+/// String. A CONNECT whose Will Topic is invalid UTF-8 does not match the
+/// format of section 3.1, so the Server must close the connection.
 #[conformance_test(
-    ids = ["MQTT-3.1.3-11"],
+    ids = ["MQTT-3.1.3-11", "MQTT-3.1.4-1"],
     requires = ["transport.tcp"],
 )]
 async fn will_topic_invalid_utf8_rejected(sut: SutHandle) {
@@ -34,10 +35,11 @@ async fn will_topic_invalid_utf8_rejected(sut: SutHandle) {
     );
 }
 
-/// `[MQTT-3.1.3-12]` The User Name MUST be a UTF-8 Encoded String.
-/// Sending invalid UTF-8 bytes in the Username must cause disconnect.
+/// `[MQTT-3.1.3-12]` `[MQTT-3.1.4-1]` The User Name MUST be a UTF-8 Encoded
+/// String. A CONNECT whose User Name is invalid UTF-8 does not match the format
+/// of section 3.1, so the Server must close the connection.
 #[conformance_test(
-    ids = ["MQTT-3.1.3-12"],
+    ids = ["MQTT-3.1.3-12", "MQTT-3.1.4-1"],
     requires = ["transport.tcp"],
 )]
 async fn username_invalid_utf8_rejected(sut: SutHandle) {

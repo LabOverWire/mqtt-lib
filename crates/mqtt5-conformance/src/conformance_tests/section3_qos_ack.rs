@@ -10,11 +10,11 @@ use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
-/// `[MQTT-4.3.2-4]` `[MQTT-3.4.2-1]` Server MUST send PUBACK in response to
-/// a `QoS` 1 PUBLISH, containing the matching Packet Identifier and a valid
-/// reason code.
+/// `[MQTT-4.3.2-4]` `[MQTT-3.4.2-1]` `[MQTT-2.2.1-5]` The Server MUST answer a
+/// `QoS` 1 PUBLISH with a PUBACK that carries the PUBLISH's Packet Identifier
+/// and a PUBACK Reason Code.
 #[conformance_test(
-    ids = ["MQTT-4.3.2-4", "MQTT-3.4.2-1"],
+    ids = ["MQTT-4.3.2-4", "MQTT-3.4.2-1", "MQTT-2.2.1-5"],
     requires = ["transport.tcp", "max_qos>=1"],
 )]
 async fn puback_correct_packet_id_and_reason(sut: SutHandle) {
@@ -48,9 +48,10 @@ async fn puback_correct_packet_id_and_reason(sut: SutHandle) {
     );
 }
 
-/// `[MQTT-4.3.2-4]` `QoS` 1 PUBLISH results in message delivery to subscriber.
+/// `[MQTT-4.5.0-1]` A message published by a client is delivered to a matching
+/// `QoS` 1 subscriber.
 #[conformance_test(
-    ids = ["MQTT-4.3.2-4"],
+    ids = ["MQTT-4.5.0-1"],
     requires = ["transport.tcp", "max_qos>=1"],
 )]
 async fn puback_message_delivered_on_qos1(sut: SutHandle) {
@@ -83,11 +84,11 @@ async fn puback_message_delivered_on_qos1(sut: SutHandle) {
     assert_eq!(msg.payload, b"qos1-payload");
 }
 
-/// `[MQTT-4.3.3-8]` `[MQTT-3.5.2-1]` Server MUST send PUBREC in response to
-/// a `QoS` 2 PUBLISH, containing the matching Packet Identifier and a valid
-/// reason code.
+/// `[MQTT-4.3.3-8]` `[MQTT-3.5.2-1]` `[MQTT-2.2.1-5]` The Server MUST answer a
+/// `QoS` 2 PUBLISH with a PUBREC that carries the PUBLISH's Packet Identifier
+/// and a PUBREC Reason Code.
 #[conformance_test(
-    ids = ["MQTT-4.3.3-8", "MQTT-3.5.2-1"],
+    ids = ["MQTT-4.3.3-8", "MQTT-3.5.2-1", "MQTT-2.2.1-5"],
     requires = ["transport.tcp", "max_qos>=2"],
 )]
 async fn pubrec_correct_packet_id_and_reason(sut: SutHandle) {
@@ -154,10 +155,11 @@ async fn pubrel_invalid_flags_rejected(sut: SutHandle) {
     );
 }
 
-/// `[MQTT-3.6.2-1]` `[MQTT-3.7.2-1]` PUBREL for an unknown Packet Identifier
-/// MUST result in PUBCOMP with reason code `PacketIdentifierNotFound` (0x92).
+/// `[MQTT-4.3.3-11]` `[MQTT-3.7.2-1]` A PUBREL for an unknown Packet Identifier
+/// must still get a PUBCOMP with the same Packet Identifier and a PUBCOMP
+/// Reason Code (0x00 or 0x92).
 #[conformance_test(
-    ids = ["MQTT-3.6.2-1", "MQTT-3.7.2-1"],
+    ids = ["MQTT-4.3.3-11", "MQTT-3.7.2-1"],
     requires = ["transport.tcp", "max_qos>=2"],
 )]
 async fn pubrel_unknown_packet_id(sut: SutHandle) {
@@ -181,11 +183,11 @@ async fn pubrel_unknown_packet_id(sut: SutHandle) {
     );
 }
 
-/// `[MQTT-4.3.3-11]` `[MQTT-3.7.2-1]` Full inbound `QoS` 2 flow: PUBLISH →
-/// PUBREC → PUBREL → PUBCOMP. Verifies PUBCOMP has matching packet ID and
-/// reason=Success.
+/// `[MQTT-4.3.3-11]` `[MQTT-3.7.2-1]` `[MQTT-2.2.1-5]` Full inbound `QoS` 2
+/// flow: PUBLISH, PUBREC, PUBREL, PUBCOMP. The PUBCOMP must carry the Packet
+/// Identifier and Reason Code 0x00.
 #[conformance_test(
-    ids = ["MQTT-4.3.3-11", "MQTT-3.7.2-1"],
+    ids = ["MQTT-4.3.3-11", "MQTT-3.7.2-1", "MQTT-2.2.1-5"],
     requires = ["transport.tcp", "max_qos>=2"],
 )]
 async fn pubcomp_correct_packet_id_and_reason(sut: SutHandle) {
@@ -223,10 +225,10 @@ async fn pubcomp_correct_packet_id_and_reason(sut: SutHandle) {
     assert_eq!(reason, 0x00, "PUBCOMP reason code should be Success (0x00)");
 }
 
-/// `[MQTT-4.3.3-8]` Full `QoS` 2 exchange delivers the message to a
-/// subscriber.
+/// `[MQTT-4.5.0-1]` A message published with a full `QoS` 2 exchange is
+/// delivered to a matching subscriber.
 #[conformance_test(
-    ids = ["MQTT-4.3.3-8"],
+    ids = ["MQTT-4.5.0-1"],
     requires = ["transport.tcp", "max_qos>=2"],
 )]
 async fn pubcomp_message_delivered_after_exchange(sut: SutHandle) {
@@ -271,11 +273,12 @@ async fn pubcomp_message_delivered_after_exchange(sut: SutHandle) {
     assert_eq!(msg.payload, b"qos2-payload");
 }
 
-/// `[MQTT-3.6.1-1]` `[MQTT-3.6.2-1]` When the server delivers a `QoS` 2
-/// message to a subscriber, the PUBREL it sends MUST have fixed header
-/// flags = `0x02` (byte `0x62`).
+/// `[MQTT-3.6.1-1]` `[MQTT-3.6.2-1]` `[MQTT-4.3.3-4]` `[MQTT-2.2.1-5]` When the
+/// Server delivers a `QoS` 2 message and gets a PUBREC 0x00, it MUST send a
+/// PUBREL with the PUBLISH's Packet Identifier, fixed header flags 0x02 (byte
+/// 0x62) and a PUBREL Reason Code.
 #[conformance_test(
-    ids = ["MQTT-3.6.1-1", "MQTT-3.6.2-1"],
+    ids = ["MQTT-3.6.1-1", "MQTT-3.6.2-1", "MQTT-4.3.3-4", "MQTT-2.2.1-5"],
     requires = ["transport.tcp", "max_qos>=2"],
 )]
 async fn server_pubrel_correct_flags(sut: SutHandle) {

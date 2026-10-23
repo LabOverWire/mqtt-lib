@@ -178,10 +178,12 @@ async fn connack_uses_valid_reason_code(sut: SutHandle) {
     );
 }
 
-/// `[MQTT-3.2.2-16]` When two clients connect with empty client IDs, the
-/// server must assign different unique `ClientID`s.
+/// `[MQTT-3.2.2-16]` `[MQTT-3.1.3-7]` `[MQTT-3.1.3-6]` When two clients connect
+/// with empty client IDs, the Server must assign each a `ClientID`, return it
+/// as the Assigned Client Identifier in the CONNACK, and not reuse an ID held
+/// by another current Session.
 #[conformance_test(
-    ids = ["MQTT-3.2.2-16"],
+    ids = ["MQTT-3.2.2-16", "MQTT-3.1.3-7", "MQTT-3.1.3-6"],
     requires = ["transport.tcp", "assigned_client_id_supported"],
 )]
 async fn connack_assigned_client_id_unique(sut: SutHandle) {

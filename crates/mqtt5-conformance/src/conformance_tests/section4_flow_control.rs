@@ -10,11 +10,12 @@ use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
-/// `[MQTT-4.9.0-1]` / `[MQTT-4.9.0-2]` Server must not send more unACKed
-/// `QoS` 1/2 PUBLISH packets than the client's Receive Maximum. Further
-/// queued messages are delivered only after PUBACKs free the quota.
+/// `[MQTT-3.3.4-9]` `[MQTT-4.9.0-1]` `[MQTT-4.9.0-2]` The Server must not send
+/// more unacknowledged `QoS` 1 and `QoS` 2 PUBLISH packets than the Client's
+/// Receive Maximum. Further queued messages are delivered only after PUBACKs
+/// free the quota.
 #[conformance_test(
-    ids = ["MQTT-4.9.0-1", "MQTT-4.9.0-2"],
+    ids = ["MQTT-3.3.4-9", "MQTT-4.9.0-1", "MQTT-4.9.0-2"],
     requires = ["transport.tcp", "max_qos>=1"],
 )]
 async fn flow_control_quota_enforced(sut: SutHandle) {
@@ -76,7 +77,7 @@ async fn flow_control_quota_enforced(sut: SutHandle) {
     let (after_count, after_ids) = extract_publish_ids(&after_data);
     assert!(
         after_count > 0,
-        "[MQTT-4.9.0-1] after PUBACKing, broker must send queued messages"
+        "after PUBACKing, broker must send queued messages"
     );
 
     for pid in &after_ids {
@@ -84,11 +85,11 @@ async fn flow_control_quota_enforced(sut: SutHandle) {
     }
 }
 
-/// `[MQTT-4.9.0-3]` PINGREQ, SUBSCRIBE and other non-PUBLISH control
-/// packets must still be processed even when the PUBLISH quota is fully
-/// consumed.
+/// `[MQTT-4.9.0-3]` `[MQTT-3.3.4-10]` PINGREQ, SUBSCRIBE and other non-PUBLISH
+/// packets must still be answered without delay when the PUBLISH quota is used
+/// up.
 #[conformance_test(
-    ids = ["MQTT-4.9.0-3"],
+    ids = ["MQTT-4.9.0-3", "MQTT-3.3.4-10"],
     requires = ["transport.tcp", "max_qos>=1"],
 )]
 async fn flow_control_other_packets_at_zero_quota(sut: SutHandle) {

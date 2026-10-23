@@ -212,13 +212,11 @@ async fn topic_alias_cleared_on_reconnect(sut: SutHandle) {
     );
 }
 
-/// `[MQTT-3.1.2-26]` `[MQTT-3.1.2-27]` `[MQTT-3.3.2-11]` A publisher's Topic
-/// Alias is an inbound, per-connection encoding detail. Once resolved to a topic
-/// name it must be stripped: the subscriber here advertises no Topic Alias
-/// Maximum, so its value is zero and the delivered PUBLISH must carry no Topic
-/// Alias property at all.
+/// `[MQTT-3.1.2-27]` A publisher's Topic Alias is an inbound, per-connection
+/// encoding detail. The subscriber here sends no Topic Alias Maximum, so the
+/// delivered PUBLISH must carry no Topic Alias property.
 #[conformance_test(
-    ids = ["MQTT-3.1.2-26", "MQTT-3.1.2-27", "MQTT-3.3.2-11"],
+    ids = ["MQTT-3.1.2-27"],
     requires = ["transport.tcp"],
 )]
 async fn topic_alias_stripped_before_delivery(sut: SutHandle) {

@@ -769,13 +769,6 @@ impl<T: Transport> RawMqttClient<T> {
             }
         }
     }
-
-    /// # Errors
-    ///
-    /// Returns the I/O error if the write half cannot be shut down.
-    pub async fn shutdown_write(&mut self) -> std::io::Result<()> {
-        self.stream.shutdown().await
-    }
 }
 
 /// Builds hand-crafted MQTT v5.0 packet byte sequences.
@@ -890,14 +883,19 @@ impl RawPacketBuilder {
         wrap_fixed_header(0x30, &body)
     }
 
-    /// Builds a truncated CONNECT packet: fixed header claims 50 bytes
-    /// remaining but only 3 bytes of body follow.
-    ///
-    /// Used to test `[MQTT-3.1.4-1]`: server MUST close the connection
-    /// on malformed packets.
+    /// Builds a complete CONNECT packet whose properties length (10) runs
+    /// past the end of the packet, which holds only a 3-byte payload.
     #[must_use]
-    pub fn connect_malformed_truncated() -> Vec<u8> {
-        vec![0x10, 50, 0x00, 0x04, 0x4D]
+    pub fn connect_with_overlong_properties() -> Vec<u8> {
+        let mut body = BytesMut::new();
+        body.put_u16(4);
+        body.put_slice(b"MQTT");
+        body.put_u8(5);
+        body.put_u8(0x02);
+        body.put_u16(60);
+        body.put_u8(10);
+        put_mqtt_string(&mut body, "a");
+        wrap_fixed_header(0x10, &body)
     }
 
     /// Builds a CONNECT packet with a duplicated Session Expiry Interval

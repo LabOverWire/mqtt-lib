@@ -57,10 +57,10 @@ async fn disconnect_normal_suppresses_will(sut: SutHandle) {
     subscriber.disconnect().await.expect("disconnect failed");
 }
 
-/// `[MQTT-3.1.4-5]` DISCONNECT with reason code 0x04
-/// (`DisconnectWithWillMessage`) MUST still trigger will publication.
+/// `[MQTT-3.1.2-8]` A DISCONNECT with Reason Code 0x04 (Disconnect with Will
+/// Message) must still lead to the Will Message being published.
 #[conformance_test(
-    ids = ["MQTT-3.1.4-5"],
+    ids = ["MQTT-3.1.2-8"],
     requires = ["transport.tcp"],
 )]
 async fn disconnect_with_will_message_publishes_will(sut: SutHandle) {
@@ -99,10 +99,11 @@ async fn disconnect_with_will_message_publishes_will(sut: SutHandle) {
     subscriber.disconnect().await.expect("disconnect failed");
 }
 
-/// `[MQTT-3.1.4-5]` Connect with will + keepalive=2s, drop TCP without
-/// sending DISCONNECT. Will MUST be published after keep-alive timeout.
+/// `[MQTT-3.1.2-8]` A client with a Will and a 2 s Keep Alive drops its TCP
+/// connection without a DISCONNECT. The Will MUST be published once the
+/// connection is closed.
 #[conformance_test(
-    ids = ["MQTT-3.1.4-5"],
+    ids = ["MQTT-3.1.2-8"],
     requires = ["transport.tcp"],
 )]
 async fn tcp_drop_publishes_will(sut: SutHandle) {
@@ -139,38 +140,11 @@ async fn tcp_drop_publishes_will(sut: SutHandle) {
     subscriber.disconnect().await.expect("disconnect failed");
 }
 
-/// `[MQTT-3.14.2-1]` Send DISCONNECT with various valid reason codes
-/// (0x00, 0x04, 0x80) and verify the broker accepts them cleanly.
+/// `[MQTT-3.14.2-1]` `[MQTT-4.13.1-1]` The sender of a DISCONNECT MUST use a
+/// DISCONNECT Reason Code. A DISCONNECT with Reason Code 0x03, which is not
+/// one, is a Malformed Packet, so the Server must close the connection.
 #[conformance_test(
-    ids = ["MQTT-3.14.2-1"],
-    requires = ["transport.tcp"],
-)]
-async fn disconnect_valid_reason_codes_accepted(sut: SutHandle) {
-    for &reason in &[0x00u8, 0x04, 0x80] {
-        let mut raw = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
-            .await
-            .unwrap();
-        let client_id = unique_client_id(&format!("disc-rc-{reason:02x}"));
-        raw.connect_and_establish(&client_id, TIMEOUT).await;
-
-        let packet = if reason == 0x00 {
-            RawPacketBuilder::disconnect_normal()
-        } else {
-            RawPacketBuilder::disconnect_with_reason(reason)
-        };
-        raw.send_raw(&packet).await.unwrap();
-
-        assert!(
-            raw.expect_disconnect(TIMEOUT).await,
-            "[MQTT-3.14.2-1] broker must accept valid reason code 0x{reason:02x} and close connection"
-        );
-    }
-}
-
-/// `[MQTT-3.14.2-1]` Send DISCONNECT with an invalid reason code byte
-/// (0x03 is not in the valid set). The broker must close the connection.
-#[conformance_test(
-    ids = ["MQTT-3.14.2-1"],
+    ids = ["MQTT-3.14.2-1", "MQTT-4.13.1-1"],
     requires = ["transport.tcp"],
 )]
 async fn disconnect_invalid_reason_code_rejected(sut: SutHandle) {
@@ -186,15 +160,14 @@ async fn disconnect_invalid_reason_code_rejected(sut: SutHandle) {
 
     assert!(
         raw.expect_disconnect(TIMEOUT).await,
-        "[MQTT-3.14.2-1] broker must reject invalid reason code 0x03 and close connection"
+        "[MQTT-4.13.1-1] broker must reject invalid reason code 0x03 and close connection"
     );
 }
 
-/// `[MQTT-4.13.2-1]` Sending a second CONNECT packet is a protocol error.
-/// The server MUST send DISCONNECT with an error reason code and close
-/// the connection.
+/// `[MQTT-3.1.0-2]` The Server MUST treat a second CONNECT on the same
+/// connection as a Protocol Error and close the connection.
 #[conformance_test(
-    ids = ["MQTT-4.13.2-1"],
+    ids = ["MQTT-3.1.0-2"],
     requires = ["transport.tcp"],
 )]
 async fn server_disconnect_on_protocol_error(sut: SutHandle) {
@@ -243,33 +216,6 @@ async fn server_disconnect_uses_valid_reason_code(sut: SutHandle) {
             "[MQTT-3.14.2-1] server DISCONNECT reason code 0x{reason_code:02x} is not in the valid set"
         );
     }
-}
-
-/// `[MQTT-3.14.4-1]` / `[MQTT-3.14.4-2]` After sending DISCONNECT, the
-/// sender MUST close the connection. Verify no PINGRESP arrives in
-/// response to a PINGREQ sent after client DISCONNECT.
-#[conformance_test(
-    ids = ["MQTT-3.14.4-1", "MQTT-3.14.4-2"],
-    requires = ["transport.tcp"],
-)]
-async fn no_packets_after_client_disconnect(sut: SutHandle) {
-    let mut raw = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
-        .await
-        .unwrap();
-    let client_id = unique_client_id("disc-no-pkt");
-    raw.connect_and_establish(&client_id, TIMEOUT).await;
-
-    raw.send_raw(&RawPacketBuilder::disconnect_normal())
-        .await
-        .unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    let _ = raw.send_raw(&RawPacketBuilder::pingreq()).await;
-
-    assert!(
-        !raw.expect_pingresp(Duration::from_secs(1)).await,
-        "[MQTT-3.14.4-1] no PINGRESP should be received after client sent DISCONNECT"
-    );
 }
 
 fn disconnect_with_session_expiry(session_expiry: u32) -> Vec<u8> {

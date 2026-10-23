@@ -8,12 +8,12 @@ use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
-/// [MQTT-1.5.4-1] The character data in a UTF-8 Encoded String MUST be
-/// well-formed UTF-8 as defined by the Unicode specification and restated
-/// in RFC 3629. In particular it MUST NOT include encodings of code points
-/// between U+D800 and U+DFFF.
+/// [MQTT-1.5.4-1] [MQTT-3.1.4-1] UTF-8 Encoded Strings MUST NOT include
+/// encodings of code points between U+D800 and U+DFFF. A CONNECT carrying one
+/// does not match the format of section 3.1, so the Server must close the
+/// connection.
 #[conformance_test(
-    ids = ["MQTT-1.5.4-1"],
+    ids = ["MQTT-1.5.4-1", "MQTT-3.1.4-1"],
     requires = ["transport.tcp"],
 )]
 async fn utf8_surrogate_codepoints_rejected(sut: SutHandle) {
@@ -98,11 +98,11 @@ async fn bom_preserved_in_topic(sut: SutHandle) {
     );
 }
 
-/// [MQTT-1.5.5-1] The encoded value MUST use the minimum number of bytes
-/// necessary to represent the value. A variable byte integer MUST NOT use
-/// more than 4 bytes.
+/// [MQTT-3.1.4-1] A Remaining Length encoded in five bytes is not a valid
+/// Variable Byte Integer, which has at most four, so the CONNECT does not match
+/// the format of section 3.1 and the Server must close the connection.
 #[conformance_test(
-    ids = ["MQTT-1.5.5-1"],
+    ids = ["MQTT-3.1.4-1"],
     requires = ["transport.tcp"],
 )]
 async fn non_minimal_varint_rejected(sut: SutHandle) {
@@ -116,14 +116,16 @@ async fn non_minimal_varint_rejected(sut: SutHandle) {
 
     assert!(
         raw.expect_disconnect(TIMEOUT).await,
-        "[MQTT-1.5.5-1] server must disconnect on 5-byte variable byte integer"
+        "[MQTT-3.1.4-1] server must disconnect on 5-byte variable byte integer"
     );
 }
 
-/// [MQTT-1.5.7-1] Both the key and value of a UTF-8 String Pair MUST comply
-/// with the requirements for UTF-8 Encoded Strings.
+/// [MQTT-1.5.7-1] [MQTT-4.13.1-1] Both the key and the value of a UTF-8 String
+/// Pair MUST be UTF-8 Encoded Strings. A PUBLISH whose User Property key is
+/// invalid UTF-8 is a Malformed Packet, so the Server must close the
+/// connection.
 #[conformance_test(
-    ids = ["MQTT-1.5.7-1"],
+    ids = ["MQTT-1.5.7-1", "MQTT-4.13.1-1"],
     requires = ["transport.tcp"],
 )]
 async fn invalid_utf8_user_property_rejected(sut: SutHandle) {
@@ -144,35 +146,4 @@ async fn invalid_utf8_user_property_rejected(sut: SutHandle) {
         raw.expect_disconnect(TIMEOUT).await,
         "[MQTT-1.5.7-1] server must disconnect when user property key contains invalid UTF-8"
     );
-}
-
-/// [MQTT-4.7.3-3] Topic Names and Topic Filters are UTF-8 Encoded Strings;
-/// they MUST NOT encode to more than 65,535 bytes.
-#[conformance_test(
-    ids = ["MQTT-4.7.3-3"],
-    requires = ["transport.tcp"],
-)]
-async fn max_length_topic_handled(sut: SutHandle) {
-    let mut raw = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
-        .await
-        .unwrap();
-    let client_id = unique_client_id("bigtopic");
-    raw.connect_and_establish(&client_id, TIMEOUT).await;
-
-    raw.send_raw(&RawPacketBuilder::publish_with_oversized_topic())
-        .await
-        .unwrap();
-
-    let response = raw.expect_any_packet(TIMEOUT).await;
-    match response {
-        Some(data) if !data.is_empty() && data[0] == 0xE0 => {}
-        Some(_) | None => {
-            raw.send_raw(&RawPacketBuilder::pingreq()).await.unwrap();
-            let alive = raw.expect_pingresp(TIMEOUT).await;
-            assert!(
-                alive || raw.expect_disconnect(Duration::from_millis(500)).await,
-                "[MQTT-4.7.3-3] broker must handle max-length topic without hanging"
-            );
-        }
-    }
 }

@@ -32,7 +32,8 @@ async fn pingresp_sent_on_pingreq(sut: SutHandle) {
     );
 }
 
-/// Send 3 PINGREQs in sequence, verify all 3 PINGRESPs are received.
+/// [MQTT-3.12.4-1] The Server MUST answer each of three PINGREQs in a row with
+/// a PINGRESP.
 #[conformance_test(
     ids = ["MQTT-3.12.4-1"],
     requires = ["transport.tcp"],
@@ -54,10 +55,12 @@ async fn multiple_pingreqs_all_responded(sut: SutHandle) {
     }
 }
 
-/// `[MQTT-3.1.2-22]` Connect with keep-alive=2s, go silent, verify broker
-/// closes the connection within 1.5x the keep-alive (3s), with 1s margin.
+/// `[MQTT-3.1.2-22]` `[MQTT-3.2.2-22]` With Keep Alive 2 s, the Server must
+/// close the connection after 1.5 times the Keep Alive (3 s) of silence,
+/// checked with a 1 s margin. The test assumes the CONNACK carries no Server
+/// Keep Alive, so the Client's value applies.
 #[conformance_test(
-    ids = ["MQTT-3.1.2-22"],
+    ids = ["MQTT-3.1.2-22", "MQTT-3.2.2-22"],
     requires = ["transport.tcp"],
 )]
 async fn keepalive_timeout_closes_connection(sut: SutHandle) {
@@ -76,10 +79,11 @@ async fn keepalive_timeout_closes_connection(sut: SutHandle) {
     );
 }
 
-/// Connect with keep-alive=0 (disabled), go silent for 5s, verify connection
-/// stays open by sending a PINGREQ and getting a PINGRESP.
+/// [MQTT-3.2.2-22] With Keep Alive 0 the keep alive is off, so the connection
+/// must stay open after 5 s of silence. The test assumes the CONNACK carries no
+/// Server Keep Alive, so the Client's value applies.
 #[conformance_test(
-    ids = ["MQTT-3.1.2-22"],
+    ids = ["MQTT-3.2.2-22"],
     requires = ["transport.tcp"],
 )]
 async fn keepalive_zero_no_timeout(sut: SutHandle) {
@@ -101,10 +105,10 @@ async fn keepalive_zero_no_timeout(sut: SutHandle) {
     );
 }
 
-/// Connect with keep-alive=2s, send PINGREQ every second for 5s. The
-/// PINGREQs reset the keep-alive timer so the connection must stay alive.
+/// [MQTT-3.12.4-1] With Keep Alive 2 s, a PINGREQ every second for 5 s must get
+/// a PINGRESP each time.
 #[conformance_test(
-    ids = ["MQTT-3.1.2-22"],
+    ids = ["MQTT-3.12.4-1"],
     requires = ["transport.tcp"],
 )]
 async fn pingreq_resets_keepalive(sut: SutHandle) {

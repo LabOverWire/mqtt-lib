@@ -9,14 +9,15 @@ use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
-/// `[MQTT-3.2.2-19]` The Server MUST NOT send a Reason String on CONNACK if it
-/// would increase the packet beyond the Maximum Packet Size the Client
-/// specified. A CONNECT carrying an Authentication Method against a broker that
-/// does not support enhanced authentication yields a Bad Authentication Method
-/// CONNACK whose Reason String alone is larger than the tiny stated limit, so
-/// the property must be dropped while the packet is still sent.
+/// `[MQTT-3.2.2-19]` `[MQTT-3.1.2-24]` The Server MUST NOT send a Reason String
+/// on CONNACK if it would make the packet larger than the Maximum Packet Size
+/// the Client set, and MUST NOT send packets larger than that size. A CONNECT
+/// carrying an Authentication Method against a broker that does not support
+/// enhanced authentication yields a Bad Authentication Method CONNACK whose
+/// Reason String alone is larger than the tiny stated limit, so the property
+/// must be dropped while the packet is still sent.
 #[conformance_test(
-    ids = ["MQTT-3.2.2-19"],
+    ids = ["MQTT-3.2.2-19", "MQTT-3.1.2-24"],
     requires = ["transport.tcp"],
 )]
 async fn connack_reason_string_omitted_over_max_packet_size(sut: SutHandle) {
@@ -53,7 +54,7 @@ async fn connack_reason_string_omitted_over_max_packet_size(sut: SutHandle) {
     );
     assert!(
         data.len() <= 30,
-        "[MQTT-3.2.2-19] CONNACK is {} bytes, exceeding the client's Maximum Packet Size (30)",
+        "[MQTT-3.1.2-24] CONNACK is {} bytes, exceeding the client's Maximum Packet Size (30)",
         data.len()
     );
 }

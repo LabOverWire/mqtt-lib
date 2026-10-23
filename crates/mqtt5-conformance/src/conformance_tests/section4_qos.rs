@@ -11,10 +11,10 @@ use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
-/// `[MQTT-4.3.1-1]` In the `QoS` 0 delivery protocol, the Server MUST send a
-/// PUBLISH packet with DUP=0.
+/// `[MQTT-4.3.1-1]` `[MQTT-3.3.1-2]` The Server MUST send a `QoS` 0 PUBLISH
+/// with DUP 0.
 #[conformance_test(
-    ids = ["MQTT-4.3.1-1"],
+    ids = ["MQTT-4.3.1-1", "MQTT-3.3.1-2"],
     requires = ["transport.tcp"],
 )]
 async fn qos0_server_outbound_publish_has_dup_zero(sut: SutHandle) {
@@ -36,7 +36,7 @@ async fn qos0_server_outbound_publish_has_dup_zero(sut: SutHandle) {
     let (first_byte, _packet_id, qos, recv_topic, payload) = sub
         .expect_publish_with_id(TIMEOUT)
         .await
-        .expect("[MQTT-4.3.1-1] subscriber must receive QoS 0 PUBLISH");
+        .expect("subscriber must receive QoS 0 PUBLISH");
 
     assert_eq!(recv_topic, topic);
     assert_eq!(payload, b"qos0-data");
@@ -48,12 +48,10 @@ async fn qos0_server_outbound_publish_has_dup_zero(sut: SutHandle) {
     );
 }
 
-/// `[MQTT-4.3.2-1]` `[MQTT-4.3.2-2]` In the `QoS` 1 delivery protocol, the
-/// Server MUST assign a non-zero Packet Identifier each time it has a new
-/// Application Message to deliver, and the PUBLISH MUST have DUP=0 on first
-/// delivery.
+/// `[MQTT-4.3.2-2]` `[MQTT-2.2.1-4]` The Server MUST send a new `QoS` 1 PUBLISH
+/// with a non-zero Packet Identifier, `QoS` 1 and DUP 0.
 #[conformance_test(
-    ids = ["MQTT-4.3.2-1", "MQTT-4.3.2-2"],
+    ids = ["MQTT-4.3.2-2", "MQTT-2.2.1-4"],
     requires = ["transport.tcp", "max_qos>=1"],
 )]
 async fn qos1_server_outbound_unique_nonzero_id_and_dup_zero(sut: SutHandle) {
@@ -92,16 +90,16 @@ async fn qos1_server_outbound_unique_nonzero_id_and_dup_zero(sut: SutHandle) {
             .await
             .unwrap_or_else(|| panic!("must receive PUBLISH #{i}"));
 
-        assert_eq!(qos, 1, "[MQTT-4.3.2-1] QoS must be 1");
+        assert_eq!(qos, 1, "[MQTT-4.3.2-2] QoS must be 1");
 
         assert_ne!(
             packet_id, 0,
-            "[MQTT-4.3.2-1] Packet ID must be non-zero for QoS 1"
+            "[MQTT-2.2.1-4] Packet ID must be non-zero for QoS 1"
         );
 
         assert!(
             seen_ids.insert(packet_id),
-            "[MQTT-4.3.2-1] Packet IDs must be unique, duplicate: {packet_id}"
+            "Packet IDs must be unique, duplicate: {packet_id}"
         );
 
         let dup = (first_byte >> 3) & 0x01;
@@ -116,10 +114,10 @@ async fn qos1_server_outbound_unique_nonzero_id_and_dup_zero(sut: SutHandle) {
     }
 }
 
-/// `[MQTT-4.3.2-5]` After the Server has sent a PUBACK, the Packet Identifier
-/// is available for reuse.
+/// `[MQTT-2.2.1-4]` After the subscriber has sent a PUBACK, the Server's next
+/// `QoS` 1 PUBLISH must still carry a non-zero Packet Identifier.
 #[conformance_test(
-    ids = ["MQTT-4.3.2-5"],
+    ids = ["MQTT-2.2.1-4"],
     requires = ["transport.tcp", "max_qos>=1"],
 )]
 async fn qos1_packet_id_reusable_after_puback(sut: SutHandle) {
@@ -169,7 +167,7 @@ async fn qos1_packet_id_reusable_after_puback(sut: SutHandle) {
 
     assert_ne!(
         second_id, 0,
-        "[MQTT-4.3.2-5] Second packet ID must be non-zero"
+        "[MQTT-2.2.1-4] Second packet ID must be non-zero"
     );
 }
 
@@ -244,11 +242,10 @@ async fn server_assigns_nonzero_packet_ids(sut: SutHandle) {
         .unwrap();
 }
 
-/// `[MQTT-4.3.3-1]` `[MQTT-4.3.3-2]` In the `QoS` 2 delivery protocol, the
-/// Server MUST assign a non-zero Packet Identifier and the outbound PUBLISH
-/// MUST have DUP=0 on first delivery.
+/// `[MQTT-4.3.3-2]` `[MQTT-2.2.1-4]` The Server MUST send a new `QoS` 2 PUBLISH
+/// with a non-zero Packet Identifier, `QoS` 2 and DUP 0.
 #[conformance_test(
-    ids = ["MQTT-4.3.3-1", "MQTT-4.3.3-2"],
+    ids = ["MQTT-4.3.3-2", "MQTT-2.2.1-4"],
     requires = ["transport.tcp", "max_qos>=2"],
 )]
 async fn qos2_server_outbound_unique_nonzero_id_and_dup_zero(sut: SutHandle) {
@@ -277,14 +274,14 @@ async fn qos2_server_outbound_unique_nonzero_id_and_dup_zero(sut: SutHandle) {
     let (first_byte, packet_id, qos, recv_topic, payload) = sub
         .expect_publish_with_id(TIMEOUT)
         .await
-        .expect("[MQTT-4.3.3-1] subscriber must receive QoS 2 PUBLISH");
+        .expect("subscriber must receive QoS 2 PUBLISH");
 
     assert_eq!(recv_topic, topic);
     assert_eq!(payload, b"qos2-data");
-    assert_eq!(qos, 2, "[MQTT-4.3.3-1] QoS must be 2");
+    assert_eq!(qos, 2, "[MQTT-4.3.3-2] QoS must be 2");
     assert_ne!(
         packet_id, 0,
-        "[MQTT-4.3.3-1] Packet ID must be non-zero for QoS 2"
+        "[MQTT-2.2.1-4] Packet ID must be non-zero for QoS 2"
     );
 
     let dup = (first_byte >> 3) & 0x01;
@@ -346,11 +343,12 @@ async fn qos2_unacknowledged_until_pubrec(sut: SutHandle) {
     );
 }
 
-/// `[MQTT-4.3.3-5]` The Server MUST send a PUBREL after receiving PUBREC, and
-/// MUST hold the Packet Identifier state until the corresponding PUBCOMP is
-/// received.
+/// `[MQTT-4.3.3-4]` `[MQTT-3.6.1-1]` `[MQTT-3.6.2-1]` `[MQTT-2.2.1-5]` After a
+/// PUBREC 0x00 for a `QoS` 2 message it delivered, the Server MUST send a
+/// PUBREL with the PUBLISH's Packet Identifier, fixed header flags 0x02 and
+/// Reason Code 0x00.
 #[conformance_test(
-    ids = ["MQTT-4.3.3-5"],
+    ids = ["MQTT-4.3.3-4", "MQTT-3.6.1-1", "MQTT-3.6.2-1", "MQTT-2.2.1-5"],
     requires = ["transport.tcp", "max_qos>=2"],
 )]
 async fn qos2_server_sends_pubrel_after_pubrec_and_holds_until_pubcomp(sut: SutHandle) {
@@ -388,7 +386,7 @@ async fn qos2_server_sends_pubrel_after_pubrec_and_holds_until_pubcomp(sut: SutH
     let (first_byte, rel_id, reason) = sub
         .expect_pubrel_raw(TIMEOUT)
         .await
-        .expect("[MQTT-4.3.3-5] Server must send PUBREL after receiving PUBREC");
+        .expect("[MQTT-4.3.3-4] Server must send PUBREL after receiving PUBREC");
 
     assert_eq!(
         first_byte, 0x62,
@@ -402,11 +400,10 @@ async fn qos2_server_sends_pubrel_after_pubrec_and_holds_until_pubcomp(sut: SutH
         .unwrap();
 }
 
-/// `[MQTT-4.3.3-9]` A PUBREC with a Reason Code of 0x80 or greater indicates
-/// the Server MUST discard the message and treat the Packet Identifier as
-/// available for reuse.
+/// `[MQTT-4.3.3-12]` After it has sent a PUBCOMP, the Server MUST treat a new
+/// PUBLISH with the same Packet Identifier as a new Application Message.
 #[conformance_test(
-    ids = ["MQTT-4.3.3-9"],
+    ids = ["MQTT-4.3.3-12"],
     requires = ["transport.tcp", "max_qos>=2"],
 )]
 async fn qos2_pubrec_error_allows_packet_id_reuse(sut: SutHandle) {
@@ -461,12 +458,12 @@ async fn qos2_pubrec_error_allows_packet_id_reuse(sut: SutHandle) {
         .unwrap();
 
     let (rec_id2, reason2) = pub_raw.expect_pubrec(TIMEOUT).await.expect(
-        "[MQTT-4.3.3-9] Server must accept new PUBLISH with reused packet ID after flow completes",
+        "[MQTT-4.3.3-12] Server must accept new PUBLISH with reused packet ID after flow completes",
     );
     assert_eq!(rec_id2, packet_id);
     assert_eq!(
         reason2, 0x00,
-        "[MQTT-4.3.3-9] PUBREC for reused packet ID must be Success"
+        "[MQTT-4.3.3-12] PUBREC for reused packet ID must be Success"
     );
 
     pub_raw
@@ -476,12 +473,12 @@ async fn qos2_pubrec_error_allows_packet_id_reuse(sut: SutHandle) {
     let _ = pub_raw.expect_pubcomp(TIMEOUT).await;
 }
 
-/// `[MQTT-4.3.3-4]` A sender sends a PUBREL only in response to a PUBREC with a
-/// Reason Code below 0x80. When a subscriber rejects an outbound `QoS` 2 PUBLISH with
-/// a PUBREC whose Reason Code is 0x80 or greater, the exchange terminates: the Server
-/// MUST NOT send a PUBREL, and it releases the Packet Identifier.
+/// `[MQTT-4.4.0-2]` A PUBLISH that the receiver answers with a PUBREC of 0x80
+/// or greater is treated as acknowledged and MUST NOT be retransmitted. When a
+/// subscriber rejects an outbound `QoS` 2 PUBLISH that way, the Server must
+/// send neither a PUBREL nor the PUBLISH again.
 #[conformance_test(
-    ids = ["MQTT-4.3.3-4"],
+    ids = ["MQTT-4.4.0-2"],
     requires = ["transport.tcp", "max_qos>=2"],
 )]
 async fn error_pubrec_from_subscriber_terminates_qos2_no_pubrel(sut: SutHandle) {
@@ -519,7 +516,7 @@ async fn error_pubrec_from_subscriber_terminates_qos2_no_pubrel(sut: SutHandle) 
     let follow_up = sub.read_packet_bytes(Duration::from_secs(2)).await;
     assert!(
         follow_up.is_none(),
-        "[MQTT-4.3.3-4] Server MUST NOT send PUBREL after a PUBREC with Reason Code >= 0x80; got {follow_up:?}"
+        "[MQTT-4.4.0-2] Server MUST NOT send PUBREL after a PUBREC with Reason Code >= 0x80; got {follow_up:?}"
     );
 }
 

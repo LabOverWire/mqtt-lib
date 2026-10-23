@@ -19,13 +19,14 @@ Most tests require only a TCP listener. The counts below show how many tests gat
 
 | Capability | Tests |
 |------------|-------|
-| TCP only (core protocol) | 120 |
-| QoS 1 | 29 |
+| TCP only (core protocol) | 116 |
+| QoS 1 | 28 |
 | QoS 2 | 23 |
-| Retained messages | 17 |
-| Shared subscriptions | 15 |
+| Retained messages | 15 |
+| Shared subscriptions | 13 |
 | WebSocket | 3 |
 | Assigned client IDs | 2 |
+| Publishing to `$SYS` | 2 |
 
 ## Mosquitto 2.x
 

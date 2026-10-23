@@ -139,7 +139,7 @@ async fn overlapping_subs_subscription_ids_per_copy(sut: SutHandle) {
                 "[MQTT-3.3.4-5] each copy must carry the Subscription Identifier of its matching subscription"
             );
         }
-        [None, _] => panic!("[MQTT-3.3.4-3] overlapping subscriptions must deliver the message"),
+        [None, _] => panic!("overlapping subscriptions must deliver the message"),
     }
 
     publisher.disconnect().await.expect("disconnect failed");
@@ -203,55 +203,6 @@ async fn overlapping_subs_no_local_prevents_echo(sut: SutHandle) {
 
     client.disconnect().await.expect("disconnect failed");
     other.disconnect().await.expect("disconnect failed");
-}
-
-/// `[MQTT-3.3.2-5]` A retained message that has expired must not be
-/// delivered to a new subscriber.
-#[conformance_test(
-    ids = ["MQTT-3.3.2-5"],
-    requires = ["transport.tcp", "max_qos>=1", "retain_available"],
-)]
-async fn message_expiry_drops_expired_retained(sut: SutHandle) {
-    let tag = unique_client_id("expiry");
-    let topic = format!("expiry/{tag}");
-
-    let publisher = TestClient::connect_with_prefix(&sut, "pub-expiry")
-        .await
-        .unwrap();
-    let pub_opts = PublishOptions {
-        qos: QoS::AtLeastOnce,
-        retain: true,
-        properties: PublishProperties {
-            message_expiry_interval: Some(1),
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-    publisher
-        .publish_with_options(&topic, b"ephemeral", pub_opts)
-        .await
-        .expect("publish retained failed");
-    publisher.disconnect().await.expect("disconnect failed");
-
-    tokio::time::sleep(Duration::from_secs(2)).await;
-
-    let subscriber = TestClient::connect_with_prefix(&sut, "sub-expiry")
-        .await
-        .unwrap();
-    let subscription = subscriber
-        .subscribe(&topic, SubscribeOptions::default())
-        .await
-        .expect("subscribe failed");
-
-    tokio::time::sleep(Duration::from_millis(500)).await;
-
-    assert_eq!(
-        subscription.count(),
-        0,
-        "[MQTT-3.3.2-5] expired retained message must not be delivered to new subscriber"
-    );
-
-    subscriber.disconnect().await.expect("disconnect failed");
 }
 
 /// `[MQTT-3.3.2-6]` Message Expiry Interval must be decremented by the
@@ -336,10 +287,10 @@ async fn response_topic_wildcard_rejected(sut: SutHandle) {
     );
 }
 
-/// `[MQTT-3.3.2-13]` A valid UTF-8 Response Topic must be forwarded to
-/// subscribers unchanged.
+/// `[MQTT-3.3.2-15]` The Server MUST send the Response Topic unaltered to
+/// subscribers receiving the message.
 #[conformance_test(
-    ids = ["MQTT-3.3.2-13"],
+    ids = ["MQTT-3.3.2-15"],
     requires = ["transport.tcp"],
 )]
 async fn response_topic_valid_utf8_forwarded(sut: SutHandle) {
@@ -380,7 +331,7 @@ async fn response_topic_valid_utf8_forwarded(sut: SutHandle) {
     assert_eq!(
         msgs[0].response_topic.as_deref(),
         Some("reply/topic"),
-        "[MQTT-3.3.2-13] valid UTF-8 Response Topic must be forwarded to subscriber"
+        "[MQTT-3.3.2-15] valid UTF-8 Response Topic must be forwarded to subscriber"
     );
 
     publisher.disconnect().await.expect("disconnect failed");

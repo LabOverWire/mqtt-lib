@@ -183,6 +183,9 @@ fn shared(topic: &str) -> String {
     format!("$share/{}/{topic}", unique_client_id("grp"))
 }
 
+/// `[MQTT-3.8.4-8]` A `QoS` 0 message queued for an offline `QoS` 1
+/// subscription must be delivered at `QoS` 0, the minimum of the published
+/// and granted `QoS`.
 #[conformance_test(
     ids = ["MQTT-3.8.4-8"],
     requires = ["transport.tcp", "max_qos>=1"],
@@ -197,6 +200,9 @@ async fn offline_queued_qos0_is_not_upgraded(sut: SutHandle) {
     }
 }
 
+/// `[MQTT-3.8.4-8]` A `QoS` 2 message queued for an offline `QoS` 1
+/// subscription must be delivered at `QoS` 1, the minimum of the published
+/// and granted `QoS`.
 #[conformance_test(
     ids = ["MQTT-3.8.4-8"],
     requires = ["transport.tcp", "max_qos>=2"],
@@ -212,6 +218,8 @@ async fn offline_queued_qos2_is_downgraded(sut: SutHandle) {
     );
 }
 
+/// `[MQTT-3.3.1-12]` A retained message queued for an offline subscription
+/// with Retain As Published 0 must be delivered with RETAIN 0.
 #[conformance_test(
     ids = ["MQTT-3.3.1-12"],
     requires = ["transport.tcp", "retain_available", "max_qos>=1"],
@@ -228,6 +236,9 @@ async fn offline_queued_retain_is_cleared(sut: SutHandle) {
     );
 }
 
+/// `[MQTT-3.3.1-3]` A message published with DUP 1 and queued for an offline
+/// subscriber must be delivered with DUP 0, since that delivery is not a
+/// retransmission.
 #[conformance_test(
     ids = ["MQTT-3.3.1-3"],
     requires = ["transport.tcp", "max_qos>=1"],
@@ -243,6 +254,8 @@ async fn offline_queued_dup_is_cleared(sut: SutHandle) {
     );
 }
 
+/// `[MQTT-4.8.2-3]` A `QoS` 0 message queued for an offline `QoS` 1 shared
+/// subscription must be delivered at `QoS` 0, respecting the granted `QoS`.
 #[conformance_test(
     ids = ["MQTT-4.8.2-3"],
     requires = ["transport.tcp", "shared_subscription_available", "max_qos>=1"],
@@ -257,6 +270,8 @@ async fn offline_shared_queued_qos0_is_not_upgraded(sut: SutHandle) {
     }
 }
 
+/// `[MQTT-4.8.2-3]` A `QoS` 2 message queued for an offline `QoS` 1 shared
+/// subscription must be delivered at `QoS` 1, respecting the granted `QoS`.
 #[conformance_test(
     ids = ["MQTT-4.8.2-3"],
     requires = ["transport.tcp", "shared_subscription_available", "max_qos>=2"],
@@ -272,6 +287,8 @@ async fn offline_shared_queued_qos2_is_downgraded(sut: SutHandle) {
     );
 }
 
+/// `[MQTT-3.3.1-12]` A retained message queued for an offline shared
+/// subscription with Retain As Published 0 must be delivered with RETAIN 0.
 #[conformance_test(
     ids = ["MQTT-3.3.1-12"],
     requires = ["transport.tcp", "shared_subscription_available", "retain_available", "max_qos>=1"],
@@ -288,6 +305,9 @@ async fn offline_shared_queued_retain_is_cleared(sut: SutHandle) {
     );
 }
 
+/// `[MQTT-3.3.1-3]` A message published with DUP 1 and queued for an offline
+/// shared subscriber must be delivered with DUP 0, since that delivery is
+/// not a retransmission.
 #[conformance_test(
     ids = ["MQTT-3.3.1-3"],
     requires = ["transport.tcp", "shared_subscription_available", "max_qos>=1"],
