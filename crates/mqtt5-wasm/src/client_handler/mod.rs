@@ -379,17 +379,20 @@ impl WasmClientHandler {
         let timeout_duration = KeepaliveConfig::default().timeout_duration(keep_alive);
         spawn_local(async move {
             loop {
-                gloo_timers::future::sleep(std::time::Duration::from_secs(1)).await;
-
-                if !*running_timeout.borrow() {
+                let remaining =
+                    timeout_duration.saturating_sub(last_packet_time_timeout.get().elapsed());
+                if remaining.is_zero() {
+                    if *running_timeout.borrow() {
+                        warn!("Handler #{handler_id} keep-alive timeout detected");
+                        *running_timeout.borrow_mut() = false;
+                        let _ = timeout_tx.send(()).await;
+                    }
                     break;
                 }
 
-                let elapsed = last_packet_time_timeout.get().elapsed();
-                if elapsed > timeout_duration {
-                    warn!("Handler #{handler_id} keep-alive timeout detected");
-                    *running_timeout.borrow_mut() = false;
-                    let _ = timeout_tx.send(()).await;
+                gloo_timers::future::sleep(remaining).await;
+
+                if !*running_timeout.borrow() {
                     break;
                 }
             }

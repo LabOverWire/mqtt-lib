@@ -4,6 +4,7 @@ use bytes::BytesMut;
 use mqtt5_protocol::packet::connack::ConnAckPacket;
 use mqtt5_protocol::packet::connect::ConnectPacket;
 use mqtt5_protocol::packet::disconnect::DisconnectPacket;
+use mqtt5_protocol::packet::pingreq::PingReqPacket;
 use mqtt5_protocol::packet::{FixedHeader, MqttPacket};
 use mqtt5_protocol::protocol::v5::reason_codes::ReasonCode;
 use mqtt5_protocol::types::{ConnectOptions, WillMessage};
@@ -368,6 +369,67 @@ async fn keep_alive_expiry_publishes_will() {
     );
 
     drop(silent);
+    watcher.disconnect().await.unwrap();
+}
+
+#[wasm_bindgen_test]
+async fn keep_alive_expiry_closes_after_one_and_a_half_keep_alives() {
+    let broker = broker();
+    let client_id = "wasm-wd-keepalive-timing";
+    let (watcher, count) = watch_will(&broker, client_id).await;
+
+    let silent = RawClient::connect_with_keep_alive(
+        &broker,
+        client_id,
+        true,
+        SESSION_EXPIRY,
+        Some(delayed_will(client_id, 0)),
+        1,
+    )
+    .await;
+    let connected_at = now_ms();
+
+    assert!(
+        wait_for_will(&count, 4000).await,
+        "the Will must be published"
+    );
+    let elapsed = now_ms() - connected_at;
+    assert!(
+        (1400.0..1900.0).contains(&elapsed),
+        "the broker closed the silent client after {elapsed}ms; expected ~1500ms (1s * 1.5)"
+    );
+
+    drop(silent);
+    watcher.disconnect().await.unwrap();
+}
+
+#[wasm_bindgen_test]
+async fn pingreq_within_keep_alive_keeps_the_connection() {
+    let broker = broker();
+    let client_id = "wasm-wd-keepalive-ping";
+    let (watcher, count) = watch_will(&broker, client_id).await;
+
+    let pinging = RawClient::connect_with_keep_alive(
+        &broker,
+        client_id,
+        true,
+        SESSION_EXPIRY,
+        Some(delayed_will(client_id, 0)),
+        1,
+    )
+    .await;
+
+    for _ in 0..4 {
+        sleep(1000).await;
+        pinging.send(&PingReqPacket::default());
+    }
+    assert_eq!(
+        count.get(),
+        0,
+        "a client sending PINGREQ within its Keep Alive must stay connected"
+    );
+
+    drop(pinging);
     watcher.disconnect().await.unwrap();
 }
 

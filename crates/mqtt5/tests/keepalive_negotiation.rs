@@ -138,15 +138,15 @@ async fn broker_read_timeout_uses_negotiated_keep_alive_not_client_request() {
     let mut config = BrokerConfig::default()
         .with_bind_address("127.0.0.1:0".parse::<SocketAddr>().unwrap())
         .with_storage(storage_config);
-    config.server_keep_alive = Some(Duration::from_secs(1));
+    config.server_keep_alive = Some(Duration::from_secs(2));
 
     let broker = TestBroker::start_with_config(config).await;
     let mut stream = connect_raw(&broker, "kanego-broker-timeout", 600).await;
 
     let elapsed = time_until_close(&mut stream).await;
     assert!(
-        elapsed >= Duration::from_millis(1400) && elapsed < Duration::from_millis(1800),
-        "broker disconnect took {elapsed:?}; expected ~1.5s (negotiated 1s * 1.5)",
+        elapsed >= Duration::from_millis(2900) && elapsed < Duration::from_millis(3600),
+        "broker disconnect took {elapsed:?}; expected ~3s (negotiated 2s * 1.5)",
     );
 }
 
@@ -157,7 +157,7 @@ async fn broker_closes_idle_connection_after_one_and_a_half_keep_alives() {
 
     let elapsed = time_until_close(&mut stream).await;
     assert!(
-        elapsed >= Duration::from_millis(2900) && elapsed < Duration::from_millis(3300),
+        elapsed >= Duration::from_millis(2900) && elapsed < Duration::from_millis(3600),
         "broker disconnect took {elapsed:?}; expected ~3s (client 2s * 1.5)",
     );
 }

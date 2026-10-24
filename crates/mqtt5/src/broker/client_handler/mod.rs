@@ -890,14 +890,17 @@ impl ClientHandler {
     /// Zombie guard for one transport write; never long enough to push a live client past
     /// its keep-alive limit on its own.
     pub(super) fn write_timeout(&self) -> Duration {
-        if self.keep_alive.is_zero() {
-            Duration::from_secs(300)
-        } else {
-            KeepaliveConfig::default()
-                .timeout_duration(self.keep_alive)
+        match self.keep_alive_limit() {
+            None => Duration::from_secs(300),
+            Some(limit) => limit
                 .saturating_sub(self.batch_time_budget())
-                .max(Duration::from_secs(1))
+                .max(Duration::from_secs(1)),
         }
+    }
+
+    fn keep_alive_limit(&self) -> Option<Duration> {
+        (!self.keep_alive.is_zero())
+            .then(|| KeepaliveConfig::default().timeout_duration(self.keep_alive))
     }
 
     fn session_preserved(&self) -> bool {
@@ -1043,8 +1046,7 @@ impl ClientHandler {
         disconnect_rx: &mut oneshot::Receiver<TakeoverNotice>,
     ) -> Result<LoopExit> {
         let mut last_packet_time = Instant::now();
-        let keep_alive_limit = (!self.keep_alive.is_zero())
-            .then(|| KeepaliveConfig::default().timeout_duration(self.keep_alive));
+        let keep_alive_limit = self.keep_alive_limit();
         let max_size = self.max_packet_size();
         let read_timeout = self.read_timeout();
         let queue = self.queue.clone();
@@ -1154,7 +1156,7 @@ impl ClientHandler {
         if self.keep_alive.is_zero() {
             Duration::from_secs(300)
         } else {
-            self.keep_alive.mul_f32(1.5)
+            Duration::MAX
         }
     }
 
