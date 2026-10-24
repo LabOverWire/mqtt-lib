@@ -419,13 +419,21 @@ async fn pingreq_within_keep_alive_keeps_the_connection() {
     )
     .await;
 
-    for _ in 0..4 {
-        sleep(1000).await;
+    for sent in 1..=4 {
+        sleep(800).await;
         pinging.send(&PingReqPacket::default());
+        let deadline = now_ms() + 500.0;
+        while pingresp_count(&pinging) < sent && now_ms() < deadline {
+            sleep(10).await;
+        }
+        assert_eq!(
+            pingresp_count(&pinging),
+            sent,
+            "PINGREQ {sent}, sent within the Keep Alive, must be answered"
+        );
     }
-    assert_eq!(
-        count.get(),
-        0,
+    assert!(
+        !wait_for_will(&count, 500).await,
         "a client sending PINGREQ within its Keep Alive must stay connected"
     );
 
@@ -811,6 +819,19 @@ fn send_publish(client: &RawClient, topic: &str) {
     publish.extend_from_slice(topic.as_bytes());
     publish.extend_from_slice(&[0x00, b'h', b'i']);
     send_raw(client, &publish);
+}
+
+fn pingresp_count(client: &RawClient) -> usize {
+    let inbox = client.inbox.borrow().clone();
+    let mut i = usize::from(inbox[1]) + 2;
+    let mut count = 0;
+    while i + 1 < inbox.len() {
+        if inbox[i] == 0xD0 {
+            count += 1;
+        }
+        i += usize::from(inbox[i + 1]) + 2;
+    }
+    count
 }
 
 fn received_publish(client: &RawClient) -> bool {
