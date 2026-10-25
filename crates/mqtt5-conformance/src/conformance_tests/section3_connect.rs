@@ -5,7 +5,10 @@ use crate::harness::unique_client_id;
 use crate::raw_client::{put_mqtt_string, wrap_fixed_header, RawMqttClient, RawPacketBuilder};
 use crate::sut::SutHandle;
 use crate::test_client::TestClient;
+use mqtt5_protocol::protocol::v5::properties::PropertyId;
+use mqtt5_protocol::protocol::v5::reason_codes::ReasonCode;
 use mqtt5_protocol::types::{ConnectOptions, SubscribeOptions, WillMessage};
+use mqtt5_protocol::PropertyValue;
 use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -399,18 +402,21 @@ async fn connect_empty_client_id_server_assigns(sut: SutHandle) {
     let connect = build_connect_empty_client_id();
     raw.send_raw(&connect).await.unwrap();
 
-    let response = raw.read_packet_bytes(Duration::from_secs(2)).await;
-    assert!(response.is_some(), "Server must send CONNACK");
-    let data = response.unwrap();
-    assert_eq!(data[0], 0x20, "Response must be CONNACK");
-    let reason_idx = find_connack_reason_code_index(&data);
+    let connack = raw
+        .expect_connack_packet(Duration::from_secs(2))
+        .await
+        .expect("Server must send CONNACK");
     assert_eq!(
-        data[reason_idx], 0x00,
+        connack.reason_code,
+        ReasonCode::Success,
         "[MQTT-3.1.3-6] Empty client ID with clean_start must be accepted (reason=Success)"
     );
     assert!(
-        data[reason_idx + 1..].contains(&0x12),
-        "[MQTT-3.1.3-7] CONNACK must contain Assigned Client Identifier property (0x12)"
+        matches!(
+            connack.properties.get(PropertyId::AssignedClientIdentifier),
+            Some(PropertyValue::Utf8String(id)) if !id.is_empty()
+        ),
+        "[MQTT-3.1.3-7] CONNACK must contain a non-empty Assigned Client Identifier"
     );
 }
 

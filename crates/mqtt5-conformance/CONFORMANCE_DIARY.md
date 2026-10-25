@@ -39,6 +39,24 @@
 
 ## Diary Entries
 
+### Follow-up test bugs from the statement ID audit (2026-10-24)
+
+**Trigger**: the test bugs listed in the audit entry below.
+
+**Fixed** (each checked with a broker mutation in this worktree, reverted afterwards):
+- `TestClient`'s raw backend now matches the stripped filter when it removes a shared subscription on UNSUBSCRIBE. New unit test `shared_unsubscribe_stops_local_delivery` fails on the old code (left 1, right 0) and passes now.
+- `puback_message_delivered_on_qos1` publishes at QoS 1 on a unique topic and checks the delivered QoS. That check is MQTT-3.8.4-8 for min(1, 1), which none of its other tests covered, so the test now cites it. Control: `effective_qos` returns QoS 0 for a QoS 1 message on a QoS 1 subscription; the new test fails, the old one passes.
+- `qos1_server_outbound_unique_nonzero_id_and_dup_zero` receives three PUBLISHes before acknowledging any, so the uniqueness check only covers Packet Identifiers that are in use, as MQTT-2.2.1-4 says. `expect_publish_with_id` now reads one framed packet, since the three PUBLISHes can arrive in one read. Controls: a broker that always allocates the lowest free ID, which is compliant, passes the new test and fails the old one ("duplicate: 1"); a broker that sends every PUBLISH with ID 7 fails the new test.
+- `unsuback_reason_codes_are_valid_spec_values` accepts 0x8F and 0x91, checked against the UNSUBACK Reason Code table in 3.11.3.
+- `single_level_wildcard_matches_one_level` and `server_delivers_to_matching_subscribers` read with `RawMqttClient` and `expect_no_publish`, on unique topics. Their negative checks have no numbered statement, so their messages carry no tag. `expect_no_publish` takes a context label instead of a bare statement ID. Controls: a router that delivers to every wildcard and exact subscriber fails both new tests and passes both old ones; with only exact filters over-delivered, the non-matching subscriber check in `server_delivers_to_matching_subscribers` fails on its own.
+- `connack_assigned_client_id_unique` keeps both connections open and requires a PINGRESP on each. Controls: a broker that assigns `auto-fixed` to every client fails both versions; a broker that assigns `auto-fixed` unless a connected session holds it, which MQTT-3.2.2-16 allows, passes the new test and fails the old one in 3 of 3 runs.
+- `connect_empty_client_id_server_assigns` decodes the CONNACK instead of searching for a 0x12 byte.
+- The keep alive tests read the CONNACK's Server Keep Alive. `keepalive_timeout_closes_connection` waits 1.5 times the Keep Alive in force plus 1 s.
+
+**Broker finding**: with the 1 s margin, `keepalive_timeout_closes_connection` failed against our broker. A Python probe sending CONNECT with no traffic afterwards, and a CONNACK with no Server Keep Alive, measured the close at 2.005 s, 4.008 s, 8.007 s and 12.006 s for Keep Alive 1, 2, 4 and 6: twice the Keep Alive, not 1.5 times (MQTT-3.1.2-22). The old 5 s window hid this. Fixed in #266, which also counts the Keep Alive from when a packet arrives and fixes the wasm broker's late close. The test passes on this branch after rebasing onto it.
+
+**Results**: conformance lib tests 239 passed, `manifest_load` 12 passed, integration test files pass; CLI against the in-process broker 191 passed, 3 skipped; CLI against an external `mqttv5` broker (on port 21883, since 1883 is in use here) 191 passed, 3 skipped; fmt and the four pedantic clippy runs clean.
+
 ### Review fixes for the statement ID audit (2026-10-23)
 
 **Trigger**: code review of PR #265 (10 findings). Nine were confirmed against the code and fixed; one was not taken.

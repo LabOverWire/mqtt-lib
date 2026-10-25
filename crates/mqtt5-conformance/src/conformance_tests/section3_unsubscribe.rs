@@ -259,7 +259,7 @@ async fn unsubscribe_stops_delivery(sut: SutHandle) {
     );
     assertions::expect_no_publish(
         &mut subscriber,
-        "MQTT-3.10.4-2",
+        "[MQTT-3.10.4-2]",
         Duration::from_millis(300),
         |_| true,
     )
@@ -415,7 +415,7 @@ async fn unsuback_reason_codes_are_valid_spec_values(sut: SutHandle) {
 
     assert_eq!(reason_codes.len(), 2);
 
-    let valid_unsuback_codes: &[u8] = &[0x00, 0x11, 0x80, 0x83, 0x87];
+    let valid_unsuback_codes = [0x00, 0x11, 0x80, 0x83, 0x87, 0x8F, 0x91];
     for (i, rc) in reason_codes.iter().enumerate() {
         assert!(
             valid_unsuback_codes.contains(rc),

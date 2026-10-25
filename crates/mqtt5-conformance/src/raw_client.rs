@@ -445,7 +445,7 @@ impl<T: Transport> RawMqttClient<T> {
         &mut self,
         timeout_dur: Duration,
     ) -> Option<(u8, u16, u8, String, Vec<u8>)> {
-        let data = self.read_packet_bytes(timeout_dur).await?;
+        let data = self.read_mqtt_packet(timeout_dur).await?;
         if data.is_empty() || (data[0] & 0xF0) != 0x30 {
             return None;
         }

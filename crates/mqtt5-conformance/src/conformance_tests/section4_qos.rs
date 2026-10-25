@@ -6,7 +6,6 @@ use crate::raw_client::{RawMqttClient, RawPacketBuilder};
 use crate::sut::SutHandle;
 use crate::test_client::TestClient;
 use mqtt5_protocol::types::{PublishOptions, QoS, SubscribeOptions};
-use std::collections::HashSet;
 use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -73,7 +72,6 @@ async fn qos1_server_outbound_unique_nonzero_id_and_dup_zero(sut: SutHandle) {
     let pub_id = unique_client_id("pub");
     pub_raw.connect_and_establish(&pub_id, TIMEOUT).await;
 
-    let mut seen_ids = HashSet::new();
     for i in 1..=3u16 {
         pub_raw
             .send_raw(&RawPacketBuilder::publish_qos1(
@@ -84,30 +82,33 @@ async fn qos1_server_outbound_unique_nonzero_id_and_dup_zero(sut: SutHandle) {
             .await
             .unwrap();
         let _ = pub_raw.expect_puback(TIMEOUT).await;
+    }
 
+    let mut in_flight = [0u16; 3];
+    for i in 0..in_flight.len() {
         let (first_byte, packet_id, qos, ..) = sub
             .expect_publish_with_id(TIMEOUT)
             .await
             .unwrap_or_else(|| panic!("must receive PUBLISH #{i}"));
 
         assert_eq!(qos, 1, "[MQTT-4.3.2-2] QoS must be 1");
-
         assert_ne!(
             packet_id, 0,
             "[MQTT-2.2.1-4] Packet ID must be non-zero for QoS 1"
         );
-
         assert!(
-            seen_ids.insert(packet_id),
-            "Packet IDs must be unique, duplicate: {packet_id}"
+            !in_flight.contains(&packet_id),
+            "[MQTT-2.2.1-4] Packet ID {packet_id} is already in use by an unacknowledged PUBLISH"
         );
-
         let dup = (first_byte >> 3) & 0x01;
         assert_eq!(
             dup, 0,
             "[MQTT-4.3.2-2] Server outbound QoS 1 PUBLISH must have DUP=0 on first delivery"
         );
+        in_flight[i] = packet_id;
+    }
 
+    for packet_id in in_flight {
         sub.send_raw(&RawPacketBuilder::puback(packet_id))
             .await
             .unwrap();

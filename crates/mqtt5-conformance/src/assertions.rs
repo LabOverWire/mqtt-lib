@@ -132,7 +132,7 @@ pub async fn first_publish_matching<T: Transport>(
 /// or if the connection ends before the PINGRESP.
 pub async fn expect_no_publish<T: Transport>(
     raw: &mut RawMqttClient<T>,
-    statement_id: &str,
+    context: &str,
     window: Duration,
     matches: impl Fn(&str) -> bool,
 ) {
@@ -145,28 +145,28 @@ pub async fn expect_no_publish<T: Transport>(
         let Some(packet) = raw.read_mqtt_packet(remaining).await else {
             break;
         };
-        reject_unexpected(&packet, statement_id, &matches);
+        reject_unexpected(&packet, context, &matches);
     }
     raw.send_raw(&RawPacketBuilder::pingreq())
         .await
-        .unwrap_or_else(|error| panic!("[{statement_id}] the connection must stay open: {error}"));
+        .unwrap_or_else(|error| panic!("{context}: the connection must stay open: {error}"));
     loop {
         let packet = raw.read_mqtt_packet(window).await.unwrap_or_else(|| {
-            panic!("[{statement_id}] the connection must stay open and answer PINGREQ")
+            panic!("{context}: the connection must stay open and answer PINGREQ")
         });
         if packet.first() == Some(&0xD0) {
             return;
         }
-        reject_unexpected(&packet, statement_id, &matches);
+        reject_unexpected(&packet, context, &matches);
     }
 }
 
-fn reject_unexpected(packet: &[u8], statement_id: &str, matches: &impl Fn(&str) -> bool) {
+fn reject_unexpected(packet: &[u8], context: &str, matches: &impl Fn(&str) -> bool) {
     let publish = ParsedPublish::parse(packet)
-        .unwrap_or_else(|| panic!("[{statement_id}] expected no packet, got {packet:02x?}"));
+        .unwrap_or_else(|| panic!("{context}: expected no packet, got {packet:02x?}"));
     assert!(
         !matches(&publish.topic),
-        "[{statement_id}] expected no PUBLISH on {}, got one",
+        "{context}: expected no PUBLISH on {}, got one",
         publish.topic
     );
 }

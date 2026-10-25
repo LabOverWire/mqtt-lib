@@ -1399,7 +1399,7 @@ level = "Must"
 applies_to = "Server"
 text = "The QoS of Payload Messages sent in response to a Subscription MUST be the minimum of the QoS of the originally published message and the Maximum QoS granted by the Server."
 status = "Tested"
-test_names = ["delivered_qos_is_minimum_sub0_pub1", "delivered_qos_is_minimum_sub1_pub2", "retained_message_delivered_at_minimum_qos", "offline_queued_qos0_is_not_upgraded", "offline_queued_qos2_is_downgraded"]
+test_names = ["delivered_qos_is_minimum_sub0_pub1", "delivered_qos_is_minimum_sub1_pub2", "retained_message_delivered_at_minimum_qos", "offline_queued_qos0_is_not_upgraded", "offline_queued_qos2_is_downgraded", "puback_message_delivered_on_qos1"]
 
 
 [[sections."3.8".statements]]

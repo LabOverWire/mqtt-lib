@@ -235,7 +235,7 @@ async fn shared_sub_unsubscribe_stops_delivery(sut: SutHandle) {
     );
     assertions::expect_no_publish(
         &mut subscriber,
-        "MQTT-3.10.4-2",
+        "[MQTT-3.10.4-2]",
         Duration::from_millis(300),
         |_| true,
     )

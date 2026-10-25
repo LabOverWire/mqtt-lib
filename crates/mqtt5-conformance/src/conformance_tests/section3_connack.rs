@@ -187,37 +187,40 @@ async fn connack_uses_valid_reason_code(sut: SutHandle) {
     requires = ["transport.tcp", "assigned_client_id_supported"],
 )]
 async fn connack_assigned_client_id_unique(sut: SutHandle) {
-    let mut ids = Vec::new();
-    for _ in 0..2 {
-        let mut raw = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
-            .await
-            .unwrap();
-        raw.send_raw(&build_connect_empty_client_id())
-            .await
-            .unwrap();
-
-        let connack = raw
-            .expect_connack_packet(TIMEOUT)
-            .await
-            .expect("Must receive CONNACK");
-
-        assert_eq!(connack.reason_code, ReasonCode::Success);
-        let assigned = connack.properties.get(PropertyId::AssignedClientIdentifier);
-        assert!(
-            assigned.is_some(),
-            "[MQTT-3.2.2-16] CONNACK must include Assigned Client Identifier"
-        );
-        if let Some(mqtt5_protocol::PropertyValue::Utf8String(id)) = assigned {
-            ids.push(id.clone());
-        } else {
-            panic!("Assigned Client Identifier has wrong type");
-        }
-    }
+    let (mut first, first_id) = connect_with_assigned_client_id(&sut).await;
+    let (mut second, second_id) = connect_with_assigned_client_id(&sut).await;
 
     assert_ne!(
-        ids[0], ids[1],
+        first_id, second_id,
         "[MQTT-3.2.2-16] Assigned Client Identifiers must be unique"
     );
+    for (name, raw) in [("first", &mut first), ("second", &mut second)] {
+        raw.send_raw(&RawPacketBuilder::pingreq()).await.unwrap();
+        assert!(
+            raw.expect_pingresp(TIMEOUT).await,
+            "[MQTT-3.2.2-16] the {name} connection must keep its Session while both are connected"
+        );
+    }
+}
+
+async fn connect_with_assigned_client_id(sut: &SutHandle) -> (RawMqttClient, String) {
+    let mut raw = RawMqttClient::connect_tcp(sut.expect_tcp_addr())
+        .await
+        .unwrap();
+    raw.send_raw(&build_connect_empty_client_id())
+        .await
+        .unwrap();
+
+    let connack = raw
+        .expect_connack_packet(TIMEOUT)
+        .await
+        .expect("Must receive CONNACK");
+    assert_eq!(connack.reason_code, ReasonCode::Success);
+    match connack.properties.get(PropertyId::AssignedClientIdentifier) {
+        Some(mqtt5_protocol::PropertyValue::Utf8String(id)) => (raw, id.clone()),
+        Some(other) => panic!("Assigned Client Identifier has wrong type: {other:?}"),
+        None => panic!("[MQTT-3.2.2-16] CONNACK must include Assigned Client Identifier"),
+    }
 }
 
 fn build_connect_empty_client_id() -> Vec<u8> {

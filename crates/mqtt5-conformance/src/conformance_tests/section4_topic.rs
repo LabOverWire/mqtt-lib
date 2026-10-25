@@ -189,14 +189,14 @@ async fn dollar_topics_not_matched_by_root_wildcards(sut: SutHandle) {
     );
     assertions::expect_no_publish(
         &mut sub_hash,
-        "MQTT-4.7.2-1",
+        "[MQTT-4.7.2-1]",
         Duration::from_millis(500),
         |topic| topic.starts_with('$'),
     )
     .await;
     assertions::expect_no_publish(
         &mut sub_plus,
-        "MQTT-4.7.2-1",
+        "[MQTT-4.7.2-1]",
         Duration::from_millis(500),
         |topic| topic.starts_with('$'),
     )
@@ -304,42 +304,35 @@ async fn null_char_in_topic_name_rejected(sut: SutHandle) {
     requires = ["transport.tcp"],
 )]
 async fn single_level_wildcard_matches_one_level(sut: SutHandle) {
-    let subscriber = TestClient::connect_with_prefix(&sut, "sl-match")
-        .await
-        .unwrap();
-    let subscription = subscriber
-        .subscribe("sport/+/player", SubscribeOptions::default())
-        .await
-        .expect("subscribe failed");
-
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    let tag = unique_client_id("sl");
+    let one_level = format!("sport/{tag}/tennis/player");
+    let two_levels = format!("sport/{tag}/tennis/doubles/player");
+    let mut subscriber = assertions::subscribed_raw_client(
+        &sut,
+        "sl-match",
+        &format!("sport/{tag}/+/player"),
+        TIMEOUT,
+    )
+    .await;
 
     let publisher = TestClient::connect_with_prefix(&sut, "sl-pub")
         .await
         .unwrap();
-    publisher
-        .publish("sport/tennis/player", b"match")
-        .await
-        .unwrap();
-    publisher
-        .publish("sport/tennis/doubles/player", b"no-match")
-        .await
-        .unwrap();
+    publisher.publish(&one_level, b"match").await.unwrap();
+    publisher.publish(&two_levels, b"no-match").await.unwrap();
 
-    assert!(
-        subscription.wait_for_messages(1, TIMEOUT).await,
-        "sport/+/player must match sport/tennis/player"
-    );
-
-    tokio::time::sleep(Duration::from_millis(300)).await;
-
-    let msgs = subscription.snapshot();
     assert_eq!(
-        msgs.len(),
-        1,
-        "sport/+/player must not match sport/tennis/doubles/player"
+        assertions::first_publish_matching(&mut subscriber, TIMEOUT, |_| true).await,
+        Some(one_level),
+        "[MQTT-4.5.0-1] sport/+/player must match sport/tennis/player"
     );
-    assert_eq!(msgs[0].topic, "sport/tennis/player");
+    assertions::expect_no_publish(
+        &mut subscriber,
+        "sport/+/player must not match sport/tennis/doubles/player",
+        Duration::from_millis(300),
+        |_| true,
+    )
+    .await;
 }
 
 /// `[MQTT-4.5.0-1]` A `#` subscription must receive messages on the parent
@@ -392,56 +385,37 @@ async fn server_delivers_to_matching_subscribers(sut: SutHandle) {
     let tag = unique_client_id("deliver");
     let topic = format!("deliver/{tag}");
 
-    let sub_exact = TestClient::connect_with_prefix(&sut, "sub-exact")
-        .await
-        .unwrap();
-    let subscription_exact = sub_exact
-        .subscribe(&topic, SubscribeOptions::default())
-        .await
-        .expect("subscribe failed");
-
-    let filter_wild = format!("deliver/{tag}/+");
-    let sub_wild = TestClient::connect_with_prefix(&sut, "sub-wild")
-        .await
-        .unwrap();
-    let subscription_wild = sub_wild
-        .subscribe(&filter_wild, SubscribeOptions::default())
-        .await
-        .expect("subscribe failed");
-
-    let sub_non = TestClient::connect_with_prefix(&sut, "sub-non")
-        .await
-        .unwrap();
-    let subscription_non = sub_non
-        .subscribe("other/topic", SubscribeOptions::default())
-        .await
-        .expect("subscribe failed");
-
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    let mut sub_exact = assertions::subscribed_raw_client(&sut, "sub-exact", &topic, TIMEOUT).await;
+    let mut sub_wild =
+        assertions::subscribed_raw_client(&sut, "sub-wild", &format!("deliver/{tag}/+"), TIMEOUT)
+            .await;
+    let mut sub_non =
+        assertions::subscribed_raw_client(&sut, "sub-non", &format!("other/{tag}"), TIMEOUT).await;
 
     let publisher = TestClient::connect_with_prefix(&sut, "pub-deliver")
         .await
         .unwrap();
     publisher.publish(&topic, b"match-payload").await.unwrap();
 
-    assert!(
-        subscription_exact.wait_for_messages(1, TIMEOUT).await,
+    assert_eq!(
+        assertions::first_publish_matching(&mut sub_exact, TIMEOUT, |_| true).await,
+        Some(topic),
         "[MQTT-4.5.0-1] exact-match subscriber must receive the message"
     );
-    let msgs = subscription_exact.snapshot();
-    assert_eq!(msgs[0].payload, b"match-payload");
-
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(
-        subscription_wild.count(),
-        0,
-        "wildcard subscriber for deliver/tag/+ must not match deliver/tag"
-    );
-    assert_eq!(
-        subscription_non.count(),
-        0,
-        "non-matching subscriber must not receive the message"
-    );
+    assertions::expect_no_publish(
+        &mut sub_wild,
+        "wildcard subscriber for deliver/tag/+ must not match deliver/tag",
+        Duration::from_millis(300),
+        |_| true,
+    )
+    .await;
+    assertions::expect_no_publish(
+        &mut sub_non,
+        "non-matching subscriber must not receive the message",
+        Duration::from_millis(300),
+        |_| true,
+    )
+    .await;
 }
 
 /// `[MQTT-4.6.0-5]` `[MQTT-4.6.0-6]` Messages published by one client to a
@@ -521,7 +495,7 @@ async fn topic_matching_no_unicode_normalization(sut: SutHandle) {
     );
     assertions::expect_no_publish(
         &mut sub_dec,
-        "MQTT-4.7.3-4",
+        "[MQTT-4.7.3-4]",
         Duration::from_millis(300),
         |_| true,
     )
@@ -535,7 +509,7 @@ async fn topic_matching_no_unicode_normalization(sut: SutHandle) {
     );
     assertions::expect_no_publish(
         &mut sub_pre,
-        "MQTT-4.7.3-4",
+        "[MQTT-4.7.3-4]",
         Duration::from_millis(300),
         |_| true,
     )

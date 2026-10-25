@@ -48,19 +48,20 @@ async fn puback_correct_packet_id_and_reason(sut: SutHandle) {
     );
 }
 
-/// `[MQTT-4.5.0-1]` A message published by a client is delivered to a matching
-/// `QoS` 1 subscriber.
+/// `[MQTT-4.5.0-1]` `[MQTT-3.8.4-8]` A `QoS` 1 message published by a client is
+/// delivered to a matching `QoS` 1 subscriber at `QoS` 1.
 #[conformance_test(
-    ids = ["MQTT-4.5.0-1"],
+    ids = ["MQTT-4.5.0-1", "MQTT-3.8.4-8"],
     requires = ["transport.tcp", "max_qos>=1"],
 )]
 async fn puback_message_delivered_on_qos1(sut: SutHandle) {
+    let topic = format!("qos1-deliver/{}", unique_client_id("t"));
     let subscriber = TestClient::connect_with_prefix(&sut, "puback-sub")
         .await
         .unwrap();
     let subscription = subscriber
         .subscribe(
-            "test/qos1-deliver",
+            &topic,
             SubscribeOptions {
                 qos: QoS::AtLeastOnce,
                 ..SubscribeOptions::default()
@@ -73,15 +74,27 @@ async fn puback_message_delivered_on_qos1(sut: SutHandle) {
         .await
         .unwrap();
     publisher
-        .publish("test/qos1-deliver", b"qos1-payload")
+        .publish_with_options(
+            &topic,
+            b"qos1-payload",
+            PublishOptions {
+                qos: QoS::AtLeastOnce,
+                ..PublishOptions::default()
+            },
+        )
         .await
         .unwrap();
 
     let msg = subscription
         .expect_publish(TIMEOUT)
         .await
-        .expect("subscriber should receive QoS 1 message");
+        .expect("[MQTT-4.5.0-1] subscriber should receive the QoS 1 message");
     assert_eq!(msg.payload, b"qos1-payload");
+    assert_eq!(
+        msg.qos,
+        QoS::AtLeastOnce,
+        "[MQTT-3.8.4-8] QoS 1 message for a QoS 1 subscription must be delivered at min(pub=1, sub=1) = 1"
+    );
 }
 
 /// `[MQTT-4.3.3-8]` `[MQTT-3.5.2-1]` `[MQTT-2.2.1-5]` The Server MUST answer a
