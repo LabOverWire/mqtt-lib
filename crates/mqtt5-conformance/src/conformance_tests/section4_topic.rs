@@ -397,10 +397,17 @@ async fn server_delivers_to_matching_subscribers(sut: SutHandle) {
         .unwrap();
     publisher.publish(&topic, b"match-payload").await.unwrap();
 
+    let (_, received_topic, payload) = sub_exact
+        .expect_publish(TIMEOUT)
+        .await
+        .expect("[MQTT-4.5.0-1] exact-match subscriber must receive the message");
     assert_eq!(
-        assertions::first_publish_matching(&mut sub_exact, TIMEOUT, |_| true).await,
-        Some(topic),
+        received_topic, topic,
         "[MQTT-4.5.0-1] exact-match subscriber must receive the message"
+    );
+    assert_eq!(
+        payload, b"match-payload",
+        "the delivered message must carry the published payload"
     );
     assertions::expect_no_publish(
         &mut sub_wild,

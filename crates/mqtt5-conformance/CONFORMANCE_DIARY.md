@@ -39,6 +39,27 @@
 
 ## Diary Entries
 
+### Review fixes for the follow-up test bugs (2026-10-26)
+
+**Trigger**: a code review of PR #267 raised 10 findings. Each one was checked at runtime before any fix. Broker mutations were made in this worktree and reverted afterwards.
+
+**Confirmed and fixed**:
+- The shared unsubscribe fix in the entry below was wrong. `TestClient`'s raw backend compared the filter without its `$share/<name>/` prefix, so unsubscribing `$share/group/t` also removed a plain `t` subscription on the same client. Entries now keep the filter they were subscribed with, and unsubscribe matches it exactly (MQTT-3.10.4-1 compares filters character by character). Against Mosquitto on port 21884, a delivery test fails on the old code and passes on the new one. New unit test `shared_unsubscribe_keeps_plain_subscription` checks the client's subscription list instead (left `[]` on the old code), because our broker has its own bug here (see below).
+- `server_delivers_to_matching_subscribers` lost its payload check in the rewrite. Control: a router that empties every payload passes the PR's version and fails both the old version and the fixed one ("the delivered message must carry the published payload").
+- Server Keep Alive handling in the keep alive tests. With `--keep-alive 0` the broker sends Server Keep Alive 0, and `keepalive_timeout_closes_connection` failed a compliant broker. `keepalive_zero_no_timeout` slept 0 s and still reported MQTT-3.2.2-22 as passed. With `--keep-alive 600` the timeout test ran for 900.00 s. The CLI cannot skip a test while it runs, so the three keep alive tests now need a new requirement, `no_server_keep_alive`, which matches `server_keep_alive = 0` in the profile. The tests fail with "the CONNACK carries Server Keep Alive ..., but the SUT profile declares server_keep_alive = 0" when the profile is wrong. With `server_keep_alive = 600` in the profile, all three are skipped.
+- `pingreq_resets_keepalive` never read the CONNACK, although the CHANGELOG said the keep alive tests did. It is now covered by the same requirement and CONNACK check.
+- The `assertions.rs` module doc said every helper takes a statement ID. `expect_no_publish` takes a context that callers bracket themselves. All callers already did.
+
+**Keep alive margin**: a broker mutated to close at twice the Keep Alive passed the old 4 s window at Keep Alive 2 in 1 of 3 runs, since it closes at 4.0 s. Probe measurements of the close time: our broker 6.002 s at Keep Alive 4; Mosquitto 3.95 to 3.97 s at Keep Alive 2, 6.6 to 6.9 s at 4, and 9.14 to 9.96 s at 6. Mosquitto is up to about 1 s late at every Keep Alive, so the old window passed it by about 40 ms. The test now uses Keep Alive 6 and waits 11 s. The 2x mutant fails 3 of 3 runs. Our broker passes in 9.00 s and Mosquitto in 9.45 to 10.05 s, 3 of 3 each.
+
+**Not reproduced, left unchanged**: the PINGREQ loop in `connack_assigned_client_id_unique` calls `send_raw(...).unwrap()`. Against a broker mutated to close every connection with an assigned ID right after CONNACK, the write succeeded in 6 of 6 runs, and the tagged `[MQTT-3.2.2-16]` assertion fired.
+
+**Left for separate work**: `read_packet_bytes` and `expect_disconnect` read the socket directly, while `read_mqtt_packet` keeps leftover bytes in `self.buf`, so bytes it buffered are invisible to the other readers. The duplicate empty ClientID CONNECT builders in `section3_connack.rs` and `section3_connect.rs` stay.
+
+**Broker finding**: our router keys a subscription by client and flow under the filter without its share prefix. So `$share/g/t` replaces the same client's plain `t` subscription, and unsubscribing `$share/g/t` removes it. A raw probe that subscribes to both and publishes once: mqttv5 delivers 1 copy and then 0 after unsubscribing the shared filter; Mosquitto delivers 2 and then 1. Section 4.8.2 says a Client with both gets a copy through the Non-shared Subscription, and a second through the Shared Subscription. Not fixed here.
+
+**Results**: conformance lib tests 241 passed, `manifest_load` 12 passed, integration test files pass; CLI against the in-process broker 191 passed, 3 skipped; against an external `mqttv5` broker on port 21883, 191 passed, 3 skipped; against a local Mosquitto on port 21884 with TLS and WebSocket off in the profile, 187 passed, 7 skipped; fmt and the four pedantic clippy runs clean.
+
 ### Follow-up test bugs from the statement ID audit (2026-10-24)
 
 **Trigger**: the test bugs listed in the audit entry below.

@@ -154,6 +154,7 @@ pub enum Requirement {
     StrictClientIdCharset,
     DollarSysPublish,
     SysTopicsPublished,
+    NoServerKeepAlive,
 }
 
 impl Requirement {
@@ -182,6 +183,7 @@ impl Requirement {
             Self::StrictClientIdCharset => capabilities.strict_client_id_charset,
             Self::DollarSysPublish => capabilities.dollar_sys_publish,
             Self::SysTopicsPublished => capabilities.sys_topics_published,
+            Self::NoServerKeepAlive => capabilities.server_keep_alive == 0,
         }
     }
 
@@ -206,6 +208,7 @@ impl Requirement {
             Self::StrictClientIdCharset => "strict_client_id_charset".to_owned(),
             Self::DollarSysPublish => "dollar_sys_publish".to_owned(),
             Self::SysTopicsPublished => "sys_topics_published".to_owned(),
+            Self::NoServerKeepAlive => "server_keep_alive = 0".to_owned(),
         }
     }
 
@@ -222,7 +225,7 @@ impl Requirement {
     ///   `&'static str` (callers must use string literals)
     /// * `hooks.restart`, `hooks.cleanup`
     /// * `acl`, `strict_client_id_charset`, `dollar_sys_publish`,
-    ///   `sys_topics_published`
+    ///   `sys_topics_published`, `no_server_keep_alive`
     ///
     /// # Errors
     /// Returns the unrecognised spec string on failure. Intended for use at
@@ -257,6 +260,7 @@ impl Requirement {
             "strict_client_id_charset" => Ok(Self::StrictClientIdCharset),
             "dollar_sys_publish" => Ok(Self::DollarSysPublish),
             "sys_topics_published" => Ok(Self::SysTopicsPublished),
+            "no_server_keep_alive" => Ok(Self::NoServerKeepAlive),
             _ => Err(spec),
         }
     }
@@ -317,6 +321,16 @@ mod tests {
     }
 
     #[test]
+    fn no_server_keep_alive_requirement_matches_zero_only() {
+        assert!(Requirement::NoServerKeepAlive.matches(&Capabilities::default()));
+        let caps = Capabilities {
+            server_keep_alive: 60,
+            ..Capabilities::default()
+        };
+        assert!(!Requirement::NoServerKeepAlive.matches(&caps));
+    }
+
+    #[test]
     fn requirement_label_is_stable() {
         assert_eq!(Requirement::TransportTcp.label(), "transport.tcp");
         assert_eq!(Requirement::MinQos(2).label(), "max_qos >= 2");
@@ -351,6 +365,10 @@ mod tests {
         assert_eq!(
             Requirement::from_spec("sys_topics_published").unwrap(),
             Requirement::SysTopicsPublished
+        );
+        assert_eq!(
+            Requirement::from_spec("no_server_keep_alive").unwrap(),
+            Requirement::NoServerKeepAlive
         );
         assert_eq!(Requirement::from_spec("acl").unwrap(), Requirement::Acl);
         assert!(Requirement::from_spec("unknown").is_err());

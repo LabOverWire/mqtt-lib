@@ -1,9 +1,12 @@
 //! Reusable assertions for conformance tests.
 //!
-//! Each helper takes a `[MQTT-x.x.x-y]` conformance ID string so the panic
-//! message points directly at the spec statement that failed. The helpers
-//! decode raw broker responses through [`packet_parser`](crate::packet_parser)
-//! and compare against the test expectation.
+//! Most helpers take a conformance ID such as `MQTT-x.x.x-y` and bracket it in
+//! the panic message, so the message points at the spec statement that failed.
+//! [`expect_no_publish`] takes the message context as given instead, since a
+//! negative check may have no numbered statement; callers that cite one write
+//! it in brackets themselves. The helpers decode raw broker responses through
+//! [`packet_parser`](crate::packet_parser) and compare against the test
+//! expectation.
 
 use crate::packet_parser::{ParsedConnAck, ParsedProperties, ParsedPublish};
 use crate::raw_client::{unique_client_id, RawMqttClient, RawPacketBuilder};

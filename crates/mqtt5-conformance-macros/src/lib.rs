@@ -159,7 +159,8 @@ fn validate_require_spec(spec: &LitStr) -> syn::Result<()> {
         | "acl"
         | "strict_client_id_charset"
         | "dollar_sys_publish"
-        | "sys_topics_published" => Ok(()),
+        | "sys_topics_published"
+        | "no_server_keep_alive" => Ok(()),
         _ => Err(Error::new_spanned(
             spec,
             "unknown requirement spec (see Requirement::from_spec for accepted forms)",
@@ -200,6 +201,7 @@ fn requirement_to_tokens(spec: &LitStr) -> syn::Result<proc_macro2::TokenStream>
         "strict_client_id_charset" => quote! { StrictClientIdCharset },
         "dollar_sys_publish" => quote! { DollarSysPublish },
         "sys_topics_published" => quote! { SysTopicsPublished },
+        "no_server_keep_alive" => quote! { NoServerKeepAlive },
         _ => {
             return Err(Error::new_spanned(
                 spec,
