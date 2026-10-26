@@ -39,6 +39,26 @@
 
 ## Diary Entries
 
+### Review fixes for the shared reader buffer (2026-10-26)
+
+**Trigger**: a code review of PR #269 raised 10 findings. Five were tested in a scratch program over a tokio duplex stream, against the PR's first commit and against main.
+
+**Confirmed and fixed**:
+- `expect_disconnect` returned `true` as soon as a DISCONNECT arrived, on main and in the PR. A broker that sends DISCONNECT and leaves the connection open passed every test that requires the Server to close the Network Connection. It now skips packets, DISCONNECT included, until the connection closes (`true`) or the timeout runs out (`false`).
+- The session takeover test checked the close with `read_packet_bytes(..).is_none()`, which is also `None` when the read times out on an open connection. It now uses `expect_disconnect` (MQTT-3.1.4-3). Control: a broker mutated to wait 30 s after sending DISCONNECT 0x8E passes the old check and fails the new one with "... it is still open". Reverted.
+- New in the PR's first commit: a packet with a Remaining Length over 4 bytes stayed in the buffer until the timeout, and so did a partial packet before a close, so they looked like silence. On main `read_packet_bytes` returned those bytes. Both are returned to the caller again.
+- The readers now share one loop (`read_until`) that tells a packet, a close and a timeout apart, with a deadline check before each read. The two doc comments the PR added are removed.
+
+**Refuted**: `expect_disconnect` never ending while packets keep arriving. With a writer that never pauses, it ended in 3 of 3 runs, 7 to 158 ms after the deadline. The shared loop's deadline check removes the overshoot.
+
+**Confirmed, not acted on**: a `false` from `expect_disconnect` leaves the skipped packets consumed, on main too. Every caller wraps it in `assert!`, so none reads on after a `false`.
+
+**Left for a cleanup PR**: one name for `read_packet_bytes`, `read_mqtt_packet` and `expect_any_packet`; the re-framing parsers in `section3_publish_flow.rs` and `section4_flow_control.rs`, which now get one packet per read; and the hand-written Remaining Length loops, which could use `decode_variable_int`.
+
+**Tests**: `framing_tests` has 8 tests. Against main, 3 fail: a DISCONNECT on an open connection and the two coalesced-packet cases. Against the PR's first commit, 3 fail: a DISCONNECT on an open connection, the malformed Remaining Length and the partial packet before a close.
+
+**Results**: conformance lib 249 passed, `manifest_load` 12 passed, integration files pass. CLI in-process 191 passed, 3 skipped; external mqttv5 on 21883 191 passed, 3 skipped; Mosquitto 2.1.2 on 21884 187 passed, 7 skipped. Both brokers close the connection after every DISCONNECT the suite checks. fmt and the four pedantic clippy runs are clean.
+
 ### Raw client readers share one buffer (2026-10-26)
 
 **Trigger**: the separate work left from the #267 review below. `read_packet_bytes` and `expect_disconnect` read the socket directly, while `read_mqtt_packet` keeps leftover bytes in `self.buf`.

@@ -90,11 +90,6 @@ impl<T: Transport> RawMqttClient<T> {
         self.stream.write_all(data).await
     }
 
-    /// Reads one complete MQTT packet from the broker within the given timeout.
-    ///
-    /// Same as [`Self::read_mqtt_packet`]: bytes past the end of the packet
-    /// stay buffered for the next read. Returns `None` if the timeout elapses,
-    /// the connection closes, or a read error occurs.
     pub async fn read_packet_bytes(&mut self, timeout_dur: Duration) -> Option<Vec<u8>> {
         self.read_mqtt_packet(timeout_dur).await
     }
@@ -609,22 +604,13 @@ impl<T: Transport> RawMqttClient<T> {
         Some((reason_code, auth_method))
     }
 
-    /// Returns `true` if a DISCONNECT arrives or the connection closes within
-    /// the timeout. Other packets, buffered or new, are skipped.
     pub async fn expect_disconnect(&mut self, timeout_dur: Duration) -> bool {
         let deadline = tokio::time::Instant::now() + timeout_dur;
         loop {
-            while let Some(pkt) = Self::try_extract_packet(&mut self.buf) {
-                if pkt.first() == Some(&0xE0) {
-                    return true;
-                }
-            }
-            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            let mut tmp = [0u8; 8192];
-            match tokio::time::timeout(remaining, self.stream.read(&mut tmp)).await {
-                Ok(Ok(0) | Err(_)) => return true,
-                Ok(Ok(n)) => self.buf.extend_from_slice(&tmp[..n]),
-                Err(_) => return false,
+            match self.read_until(deadline).await {
+                ReadOutcome::Packet(_) => {}
+                ReadOutcome::Closed => return true,
+                ReadOutcome::TimedOut => return false,
             }
         }
     }
@@ -648,7 +634,7 @@ impl<T: Transport> RawMqttClient<T> {
             }
             shift += 7;
             if shift > 21 {
-                return None;
+                return Some(buf.split().to_vec());
             }
         }
         let total = idx + remaining_len as usize;
@@ -658,23 +644,40 @@ impl<T: Transport> RawMqttClient<T> {
         Some(buf.split_to(total).to_vec())
     }
 
-    pub async fn read_mqtt_packet(&mut self, timeout_dur: Duration) -> Option<Vec<u8>> {
-        let deadline = tokio::time::Instant::now() + timeout_dur;
+    async fn read_until(&mut self, deadline: tokio::time::Instant) -> ReadOutcome {
         loop {
             if let Some(pkt) = Self::try_extract_packet(&mut self.buf) {
-                return Some(pkt);
+                return ReadOutcome::Packet(pkt);
             }
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
-                return None;
+                return ReadOutcome::TimedOut;
             }
             let mut tmp = [0u8; 8192];
             match tokio::time::timeout(remaining, self.stream.read(&mut tmp)).await {
-                Ok(Ok(0) | Err(_)) | Err(_) => return None,
+                Ok(Ok(0) | Err(_)) if self.buf.is_empty() => return ReadOutcome::Closed,
+                Ok(Ok(0) | Err(_)) => return ReadOutcome::Packet(self.buf.split().to_vec()),
                 Ok(Ok(n)) => self.buf.extend_from_slice(&tmp[..n]),
+                Err(_) => return ReadOutcome::TimedOut,
             }
         }
     }
+
+    pub async fn read_mqtt_packet(&mut self, timeout_dur: Duration) -> Option<Vec<u8>> {
+        match self
+            .read_until(tokio::time::Instant::now() + timeout_dur)
+            .await
+        {
+            ReadOutcome::Packet(pkt) => Some(pkt),
+            ReadOutcome::Closed | ReadOutcome::TimedOut => None,
+        }
+    }
+}
+
+enum ReadOutcome {
+    Packet(Vec<u8>),
+    Closed,
+    TimedOut,
 }
 
 /// Builds hand-crafted MQTT v5.0 packet byte sequences.
@@ -2212,12 +2215,22 @@ mod framing_tests {
     }
 
     #[tokio::test]
-    async fn buffered_disconnect_is_seen() {
-        let (mut client, _server) = client_receiving(&[&SUBACK, &DISCONNECT]).await;
+    async fn buffered_disconnect_then_close_is_a_disconnect() {
+        let (mut client, server) = client_receiving(&[&SUBACK, &DISCONNECT]).await;
         assert!(client.expect_suback(TIMEOUT).await.is_some());
+        drop(server);
         assert!(
             client.expect_disconnect(TIMEOUT).await,
-            "a DISCONNECT buffered behind the SUBACK must count as a disconnect"
+            "a DISCONNECT buffered behind the SUBACK, then a close, must count as a disconnect"
+        );
+    }
+
+    #[tokio::test]
+    async fn disconnect_on_open_connection_is_not_a_close() {
+        let (mut client, _server) = client_receiving(&[&DISCONNECT]).await;
+        assert!(
+            !client.expect_disconnect(TIMEOUT).await,
+            "a DISCONNECT on a connection that stays open is not a close"
         );
     }
 
@@ -2235,5 +2248,27 @@ mod framing_tests {
         let (mut client, server) = client_receiving(&[&PUBLISH]).await;
         drop(server);
         assert!(client.expect_disconnect(TIMEOUT).await);
+    }
+
+    #[tokio::test]
+    async fn malformed_remaining_length_is_returned() {
+        let malformed = [0x20, 0xFF, 0xFF, 0xFF, 0xFF, 0x01, 0x00, 0x00];
+        let (mut client, _server) = client_receiving(&[&malformed]).await;
+        assert_eq!(
+            client.read_packet_bytes(TIMEOUT).await,
+            Some(malformed.to_vec()),
+            "bytes with a Remaining Length over 4 bytes must reach the caller, not look like silence"
+        );
+    }
+
+    #[tokio::test]
+    async fn truncated_packet_before_close_is_returned() {
+        let (mut client, server) = client_receiving(&[&PUBLISH[..4]]).await;
+        drop(server);
+        assert_eq!(
+            client.read_packet_bytes(TIMEOUT).await,
+            Some(PUBLISH[..4].to_vec()),
+            "a partial packet before the close must reach the caller, not look like silence"
+        );
     }
 }

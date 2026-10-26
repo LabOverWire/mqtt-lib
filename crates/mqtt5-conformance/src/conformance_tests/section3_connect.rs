@@ -60,9 +60,9 @@ async fn session_takeover_disconnects_existing_client(sut: SutHandle) {
     );
 
     assert!(
-        existing.read_packet_bytes(TIMEOUT).await.is_none(),
+        existing.expect_disconnect(TIMEOUT).await,
         "[MQTT-3.1.4-3] Server must close the Network Connection of the client whose session was taken over; \
-         it is still open and readable"
+         it is still open"
     );
 }
 
