@@ -39,6 +39,23 @@
 
 ## Diary Entries
 
+### Raw client readers share one buffer (2026-10-26)
+
+**Trigger**: the separate work left from the #267 review below. `read_packet_bytes` and `expect_disconnect` read the socket directly, while `read_mqtt_packet` keeps leftover bytes in `self.buf`.
+
+**Confirmed by test first**: a scratch program fed a `RawMqttClient` over a tokio duplex stream, once with each packet in its own write and once with the packets in one write. Separate writes passed every case. With one write:
+- SUBACK then PUBLISH: `expect_suback` buffered the PUBLISH and `expect_publish` returned `None`.
+- PUBACK then PINGRESP: `expect_puback` swallowed both, and `expect_pingresp` returned `false`.
+- SUBACK then DISCONNECT on a connection left open: `expect_disconnect` returned `false`.
+
+**Fix**: `read_packet_bytes` now returns one framed packet through `read_mqtt_packet`, so every raw reader built on it keeps the rest buffered. `expect_disconnect` drains the buffer first and skips other packets until a DISCONNECT, a close or the timeout. Before, after one non-DISCONNECT read it waited a second full timeout for one more byte. No test asserts that `expect_disconnect` returns `false`.
+
+**Tests**: five unit tests in `raw_client::framing_tests`. The three cases above fail on the old code (control: old `raw_client.rs` with the new test module) and pass on the new. Two guards pass on both: a PUBLISH on a connection that stays open is not a disconnect, and a closed connection is.
+
+**Results**: conformance lib 246 passed, `manifest_load` 12 passed, integration files pass. CLI in-process 191 passed, 3 skipped; external mqttv5 on 21883 191 passed, 3 skipped; Mosquitto 2.1.2 on 21884 187 passed, 7 skipped, the same as before the change. fmt and the four pedantic clippy runs are clean.
+
+**Left as is**: `read_packet_bytes`, `read_mqtt_packet` and `expect_any_packet` now do the same thing. Folding them into one name touches about 25 call sites and is left for its own change.
+
 ### Review fixes for the follow-up test bugs (2026-10-26)
 
 **Trigger**: a code review of PR #267 raised 10 findings. Each one was checked at runtime before any fix. Broker mutations were made in this worktree and reverted afterwards.

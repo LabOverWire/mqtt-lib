@@ -90,24 +90,13 @@ impl<T: Transport> RawMqttClient<T> {
         self.stream.write_all(data).await
     }
 
-    /// Reads raw response bytes from the broker within the given timeout.
+    /// Reads one complete MQTT packet from the broker within the given timeout.
     ///
-    /// Returns `None` if the timeout elapses, the connection closes, or a
-    /// read error occurs.
-    ///
-    /// **Limitation:** performs a single `read()` with an 8 KiB buffer. TCP may
-    /// deliver a partial packet or coalesce multiple packets into one read.
-    /// This is acceptable for conformance testing on loopback but may cause
-    /// flaky failures if the TCP stack fragments or coalesces data.
+    /// Same as [`Self::read_mqtt_packet`]: bytes past the end of the packet
+    /// stay buffered for the next read. Returns `None` if the timeout elapses,
+    /// the connection closes, or a read error occurs.
     pub async fn read_packet_bytes(&mut self, timeout_dur: Duration) -> Option<Vec<u8>> {
-        let mut buf = vec![0u8; 8192];
-        match tokio::time::timeout(timeout_dur, self.stream.read(&mut buf)).await {
-            Ok(Ok(n)) if n > 0 => {
-                buf.truncate(n);
-                Some(buf)
-            }
-            _ => None,
-        }
+        self.read_mqtt_packet(timeout_dur).await
     }
 
     /// Reads and parses a CONNACK packet, returning `(flags, reason_code)`.
@@ -620,21 +609,23 @@ impl<T: Transport> RawMqttClient<T> {
         Some((reason_code, auth_method))
     }
 
+    /// Returns `true` if a DISCONNECT arrives or the connection closes within
+    /// the timeout. Other packets, buffered or new, are skipped.
     pub async fn expect_disconnect(&mut self, timeout_dur: Duration) -> bool {
-        let mut tmp = [0u8; 4096];
-        match tokio::time::timeout(timeout_dur, self.stream.read(&mut tmp)).await {
-            Ok(Ok(0) | Err(_)) => true,
-            Ok(Ok(n)) => {
-                if tmp[..n].first() == Some(&0xE0) {
+        let deadline = tokio::time::Instant::now() + timeout_dur;
+        loop {
+            while let Some(pkt) = Self::try_extract_packet(&mut self.buf) {
+                if pkt.first() == Some(&0xE0) {
                     return true;
                 }
-                let mut second_buf = [0u8; 1];
-                match tokio::time::timeout(timeout_dur, self.stream.read(&mut second_buf)).await {
-                    Ok(Ok(0) | Err(_)) => true,
-                    Ok(Ok(_)) | Err(_) => false,
-                }
             }
-            Err(_) => false,
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let mut tmp = [0u8; 8192];
+            match tokio::time::timeout(remaining, self.stream.read(&mut tmp)).await {
+                Ok(Ok(0) | Err(_)) => return true,
+                Ok(Ok(n)) => self.buf.extend_from_slice(&tmp[..n]),
+                Err(_) => return false,
+            }
         }
     }
 
@@ -2175,4 +2166,74 @@ fn extract_auth_method_property(data: &[u8], props_start: usize) -> Option<Strin
         }
     }
     None
+}
+
+#[cfg(test)]
+mod framing_tests {
+    use super::RawMqttClient;
+    use std::time::Duration;
+    use tokio::io::{AsyncWriteExt, DuplexStream};
+
+    const TIMEOUT: Duration = Duration::from_millis(200);
+    const SUBACK: [u8; 6] = [0x90, 0x04, 0x00, 0x01, 0x00, 0x00];
+    const PUBLISH: [u8; 7] = [0x30, 0x05, 0x00, 0x01, b't', 0x00, b'x'];
+    const PUBACK: [u8; 4] = [0x40, 0x02, 0x00, 0x07];
+    const PINGRESP: [u8; 2] = [0xD0, 0x00];
+    const DISCONNECT: [u8; 3] = [0xE0, 0x01, 0x8D];
+
+    async fn client_receiving(chunks: &[&[u8]]) -> (RawMqttClient<DuplexStream>, DuplexStream) {
+        let (client, mut server) = tokio::io::duplex(4096);
+        server
+            .write_all(&chunks.concat())
+            .await
+            .expect("server write");
+        (RawMqttClient::from_transport(client), server)
+    }
+
+    #[tokio::test]
+    async fn publish_buffered_behind_suback_is_read() {
+        let (mut client, _server) = client_receiving(&[&SUBACK, &PUBLISH]).await;
+        assert!(client.expect_suback(TIMEOUT).await.is_some());
+        assert_eq!(
+            client.expect_publish(TIMEOUT).await,
+            Some((0, "t".to_owned(), b"x".to_vec())),
+            "a PUBLISH that arrived in the same read as the SUBACK must stay buffered"
+        );
+    }
+
+    #[tokio::test]
+    async fn coalesced_packets_are_read_one_at_a_time() {
+        let (mut client, _server) = client_receiving(&[&PUBACK, &PINGRESP]).await;
+        assert_eq!(client.expect_puback(TIMEOUT).await, Some((7, 0)));
+        assert!(
+            client.expect_pingresp(TIMEOUT).await,
+            "a PINGRESP that arrived in the same read as the PUBACK must stay buffered"
+        );
+    }
+
+    #[tokio::test]
+    async fn buffered_disconnect_is_seen() {
+        let (mut client, _server) = client_receiving(&[&SUBACK, &DISCONNECT]).await;
+        assert!(client.expect_suback(TIMEOUT).await.is_some());
+        assert!(
+            client.expect_disconnect(TIMEOUT).await,
+            "a DISCONNECT buffered behind the SUBACK must count as a disconnect"
+        );
+    }
+
+    #[tokio::test]
+    async fn open_connection_without_disconnect_is_not_a_disconnect() {
+        let (mut client, _server) = client_receiving(&[&PUBLISH]).await;
+        assert!(
+            !client.expect_disconnect(TIMEOUT).await,
+            "a PUBLISH on a connection that stays open is not a disconnect"
+        );
+    }
+
+    #[tokio::test]
+    async fn closed_connection_is_a_disconnect() {
+        let (mut client, server) = client_receiving(&[&PUBLISH]).await;
+        drop(server);
+        assert!(client.expect_disconnect(TIMEOUT).await);
+    }
 }
