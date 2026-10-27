@@ -810,13 +810,13 @@ impl MessageRouter {
                     .collect()
             })
             .unwrap_or_default();
-        let keep: HashSet<(String, Option<u64>)> = requests
+        let keep: HashSet<(String, Option<String>, Option<u64>)> = requests
             .iter()
             .map(|request| {
+                let (filter, share_group) = parse_shared_subscription(&request.topic_filter);
                 (
-                    parse_shared_subscription(&request.topic_filter)
-                        .0
-                        .to_string(),
+                    filter.to_string(),
+                    share_group.map(str::to_string),
                     request.flow_id,
                 )
             })
@@ -827,7 +827,12 @@ impl MessageRouter {
             for map in [&mut *exact, &mut *wildcard] {
                 for (filter, subs) in map.iter_mut() {
                     subs.retain(|sub| {
-                        sub.client_id != client_id || keep.contains(&(filter.clone(), sub.flow_id))
+                        sub.client_id != client_id
+                            || keep.contains(&(
+                                filter.clone(),
+                                sub.share_group.clone(),
+                                sub.flow_id,
+                            ))
                     });
                 }
                 map.retain(|_, subs| !subs.is_empty());
@@ -1186,9 +1191,9 @@ impl MessageRouter {
             return Ok(Subscribed::Fenced);
         }
         let subs = subs_map.entry(actual_filter.to_string()).or_default();
-        let existing_pos = subs
-            .iter()
-            .position(|s| s.client_id == client_id && s.flow_id == flow_id);
+        let existing_pos = subs.iter().position(|s| {
+            s.client_id == client_id && s.flow_id == flow_id && s.share_group == share_group
+        });
         let outcome = if let Some(pos) = existing_pos {
             subs[pos] = subscription;
             debug!(
@@ -1245,7 +1250,7 @@ impl MessageRouter {
         topic_filter: &str,
         flow_id: Option<u64>,
     ) -> Unsubscribed {
-        let (actual_filter, _) = parse_shared_subscription(topic_filter);
+        let (actual_filter, share_group) = parse_shared_subscription(topic_filter);
 
         let subscriptions = if Self::has_wildcards(actual_filter) {
             &self.wildcard_subscriptions
@@ -1260,7 +1265,11 @@ impl MessageRouter {
 
         if let Some(subs) = subs_map.get_mut(actual_filter) {
             let initial_len = subs.len();
-            subs.retain(|sub| !(sub.client_id == client_id && sub.flow_id == flow_id));
+            subs.retain(|sub| {
+                !(sub.client_id == client_id
+                    && sub.flow_id == flow_id
+                    && sub.share_group.as_deref() == share_group)
+            });
 
             let removed = initial_len != subs.len();
 
@@ -1908,16 +1917,17 @@ impl MessageRouter {
     }
 
     pub async fn has_subscription(&self, client_id: &str, topic_filter: &str) -> bool {
-        let (actual_filter, _) = parse_shared_subscription(topic_filter);
+        let (actual_filter, share_group) = parse_shared_subscription(topic_filter);
         let subscriptions = if Self::has_wildcards(actual_filter) {
             &self.wildcard_subscriptions
         } else {
             &self.exact_subscriptions
         };
         let subs_map = subscriptions.read().await;
-        subs_map
-            .get(actual_filter)
-            .is_some_and(|subs| subs.iter().any(|sub| sub.client_id == client_id))
+        subs_map.get(actual_filter).is_some_and(|subs| {
+            subs.iter()
+                .any(|sub| sub.client_id == client_id && sub.share_group.as_deref() == share_group)
+        })
     }
 
     pub async fn has_retained_message(&self, topic: &str) -> bool {
@@ -2494,6 +2504,50 @@ mod tests {
         let shared2_received = rx2.try_recv().is_ok();
 
         assert!(shared1_received ^ shared2_received);
+    }
+
+    #[tokio::test]
+    async fn shared_and_plain_subscriptions_to_one_filter_are_independent() {
+        let router = MessageRouter::new();
+        let mut rx = TestLanes::new(100);
+        let (dtx, _drx) = tokio::sync::oneshot::channel();
+        router
+            .register_client(
+                "both".to_string(),
+                rx.lanes(),
+                router.queue_handle("both"),
+                dtx,
+            )
+            .await;
+        for filter in ["t", "$share/g/t", "$share/h/t"] {
+            router
+                .subscribe(SubscriptionRequest::new("both", filter, QoS::AtMostOnce))
+                .await
+                .unwrap();
+        }
+        assert_eq!(router.subscription_count_for_client("both").await, 3);
+
+        let publish = PublishPacket::new("t", &b"x"[..], QoS::AtMostOnce);
+        router.route_message(&publish, None).await;
+        let mut copies = 0;
+        while rx.try_recv().is_ok() {
+            copies += 1;
+        }
+        assert_eq!(copies, 3, "each subscription must get its own copy");
+
+        assert!(router.unsubscribe("both", "$share/g/t", None).await);
+        assert!(router.has_subscription("both", "t").await);
+        assert!(!router.has_subscription("both", "$share/g/t").await);
+        assert!(router.has_subscription("both", "$share/h/t").await);
+        router.route_message(&publish, None).await;
+        let mut copies = 0;
+        while rx.try_recv().is_ok() {
+            copies += 1;
+        }
+        assert_eq!(
+            copies, 2,
+            "unsubscribing $share/g/t must leave t and $share/h/t"
+        );
     }
 
     #[tokio::test]
@@ -3336,6 +3390,46 @@ mod tests {
         drop(slot);
         assert_eq!(router.subscription_count_for_client("exact").await, 0);
         assert_eq!(router.session_slot_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn subscription_set_keeps_shared_and_plain_subscriptions_apart() {
+        let router = MessageRouter::new();
+        let rx = TestLanes::new(10);
+        let (dtx, _drx) = tokio::sync::oneshot::channel();
+        router
+            .register_client(
+                "mixed".to_string(),
+                rx.lanes(),
+                router.queue_handle("mixed"),
+                dtx,
+            )
+            .await;
+        router
+            .subscribe(SubscriptionRequest::new(
+                "mixed",
+                "$share/old/t",
+                QoS::AtMostOnce,
+            ))
+            .await
+            .unwrap();
+        let mut session = ClientSession::new("mixed", true, Some(60));
+        for filter in ["t", "$share/g/t"] {
+            session.add_subscription(
+                filter,
+                crate::broker::storage::StoredSubscription::new(QoS::AtMostOnce),
+            );
+        }
+        let slot = router.lock_session("mixed").await;
+        router
+            .set_client_subscriptions(&slot, Some(&session))
+            .await
+            .unwrap();
+        drop(slot);
+        assert!(router.has_subscription("mixed", "t").await);
+        assert!(router.has_subscription("mixed", "$share/g/t").await);
+        assert!(!router.has_subscription("mixed", "$share/old/t").await);
+        assert_eq!(router.subscription_count_for_client("mixed").await, 2);
     }
 
     fn ended_session(client_id: &str, expiry: u32, ended_ago_ms: u64) -> ClientSession {
