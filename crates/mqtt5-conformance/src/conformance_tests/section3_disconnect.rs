@@ -331,7 +331,7 @@ async fn disconnect_session_expiry_after_zero_is_protocol_error(sut: SutHandle) 
         .await
         .unwrap();
 
-    if let Some(packet) = raw.read_mqtt_packet(TIMEOUT).await {
+    if let Some(packet) = raw.read_packet_bytes(TIMEOUT).await {
         assert_eq!(
             packet[0], 0xE0,
             "[MQTT-4.13.1-1] the only packet the Server may send before closing is DISCONNECT, got {packet:02x?}"

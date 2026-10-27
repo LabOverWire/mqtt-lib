@@ -2,6 +2,7 @@
 
 use crate::conformance_test;
 use crate::harness::unique_client_id;
+use crate::packet_parser::ParsedPublish;
 use crate::raw_client::{RawMqttClient, RawPacketBuilder};
 use crate::sut::SutHandle;
 use crate::test_client::TestClient;
@@ -60,11 +61,11 @@ async fn flow_control_quota_enforced(sut: SutHandle) {
     }
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    let accumulated = read_all_available(&mut sub, Duration::from_secs(2)).await;
-    let (publish_count, packet_ids) = extract_publish_ids(&accumulated);
+    let packet_ids = read_publish_ids(&mut sub, Duration::from_secs(2)).await;
 
     assert_eq!(
-        publish_count, 2,
+        packet_ids.len(),
+        2,
         "[MQTT-4.9.0-1] [MQTT-4.9.0-2] broker must send exactly 2 unACKed QoS 1 publishes (receive_maximum=2)"
     );
 
@@ -73,10 +74,9 @@ async fn flow_control_quota_enforced(sut: SutHandle) {
     }
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let after_data = read_all_available(&mut sub, Duration::from_secs(2)).await;
-    let (after_count, after_ids) = extract_publish_ids(&after_data);
+    let after_ids = read_publish_ids(&mut sub, Duration::from_secs(2)).await;
     assert!(
-        after_count > 0,
+        !after_ids.is_empty(),
         "after PUBACKing, broker must send queued messages"
     );
 
@@ -131,10 +131,10 @@ async fn flow_control_other_packets_at_zero_quota(sut: SutHandle) {
 
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    let initial_data = read_all_available(&mut sub, Duration::from_secs(1)).await;
-    let (initial_count, initial_ids) = extract_publish_ids(&initial_data);
+    let initial_ids = read_publish_ids(&mut sub, Duration::from_secs(1)).await;
     assert_eq!(
-        initial_count, 1,
+        initial_ids.len(),
+        1,
         "broker must send only 1 QoS 1 PUBLISH when receive_maximum=1"
     );
     let first_pid = initial_ids[0];
@@ -159,10 +159,9 @@ async fn flow_control_other_packets_at_zero_quota(sut: SutHandle) {
         .unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let after_data = read_all_available(&mut sub, Duration::from_secs(2)).await;
-    let (after_count, _) = extract_publish_ids(&after_data);
+    let after_ids = read_publish_ids(&mut sub, Duration::from_secs(2)).await;
     assert!(
-        after_count > 0,
+        !after_ids.is_empty(),
         "after PUBACK, broker must deliver the queued message"
     );
 }
@@ -190,79 +189,24 @@ async fn auth_invalid_flags_malformed(sut: SutHandle) {
     );
 }
 
-async fn read_all_available(client: &mut RawMqttClient, timeout: Duration) -> Vec<u8> {
-    let mut accumulated = Vec::new();
+async fn read_publish_ids(client: &mut RawMqttClient, timeout: Duration) -> Vec<u16> {
     let deadline = tokio::time::Instant::now() + timeout;
-
+    let mut ids = Vec::new();
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
-            break;
+            return ids;
         }
         match client
             .read_packet_bytes(remaining.min(Duration::from_millis(500)))
             .await
         {
-            Some(data) => accumulated.extend_from_slice(&data),
-            None => break,
-        }
-    }
-
-    accumulated
-}
-
-fn extract_publish_ids(data: &[u8]) -> (u32, Vec<u16>) {
-    let mut count = 0;
-    let mut ids = Vec::new();
-    let mut idx = 0;
-
-    while idx < data.len() {
-        let first_byte = data[idx];
-        let packet_type = first_byte >> 4;
-        let qos = (first_byte >> 1) & 0x03;
-        idx += 1;
-
-        let mut remaining_len: u32 = 0;
-        let mut shift = 0;
-        loop {
-            if idx >= data.len() {
-                return (count, ids);
-            }
-            let byte = data[idx];
-            idx += 1;
-            remaining_len |= u32::from(byte & 0x7F) << shift;
-            if byte & 0x80 == 0 {
-                break;
-            }
-            shift += 7;
-            if shift > 21 {
-                return (count, ids);
-            }
-        }
-
-        let body_start = idx;
-        let body_end = idx + remaining_len as usize;
-        if body_end > data.len() {
-            if packet_type == 3 {
-                count += 1;
-            }
-            return (count, ids);
-        }
-
-        if packet_type == 3 {
-            count += 1;
-            if qos > 0 && body_start + 2 <= body_end {
-                let topic_len =
-                    u16::from_be_bytes([data[body_start], data[body_start + 1]]) as usize;
-                let pid_offset = body_start + 2 + topic_len;
-                if pid_offset + 2 <= body_end {
-                    let packet_id = u16::from_be_bytes([data[pid_offset], data[pid_offset + 1]]);
-                    ids.push(packet_id);
+            Some(data) => {
+                if let Some(publish) = ParsedPublish::parse(&data) {
+                    ids.push(publish.packet_id.unwrap_or(0));
                 }
             }
+            None => return ids,
         }
-        idx = body_end;
     }
-
-    (count, ids)
 }

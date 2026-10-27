@@ -127,7 +127,7 @@ async fn offline_delivery(
         .await
         .unwrap();
     let connack = member
-        .read_mqtt_packet(TIMEOUT)
+        .read_packet_bytes(TIMEOUT)
         .await
         .as_deref()
         .and_then(ParsedConnAck::parse)
@@ -138,7 +138,7 @@ async fn offline_delivery(
     let mut delivered = None;
     for _ in 0..MAX_READS {
         let publish = member
-            .read_mqtt_packet(TIMEOUT)
+            .read_packet_bytes(TIMEOUT)
             .await
             .as_deref()
             .and_then(ParsedPublish::parse)

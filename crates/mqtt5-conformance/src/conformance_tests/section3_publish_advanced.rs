@@ -349,7 +349,7 @@ async fn overlapping_copies(sub: &mut RawMqttClient) -> [Option<ParsedPublish>; 
 }
 
 async fn next_copy(sub: &mut RawMqttClient) -> Option<ParsedPublish> {
-    let packet = sub.read_mqtt_packet(TIMEOUT).await?;
+    let packet = sub.read_packet_bytes(TIMEOUT).await?;
     let publish = ParsedPublish::parse(&packet);
     assert!(
         publish.is_some(),

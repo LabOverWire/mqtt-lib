@@ -39,6 +39,20 @@
 
 ## Diary Entries
 
+### Raw reader cleanup (2026-10-27)
+
+**Trigger**: the cleanup left from the #269 review below. No behaviour change intended beyond the one noted.
+
+**Changes**:
+- `read_mqtt_packet` and `expect_any_packet` are gone. Every caller uses `read_packet_bytes`, which reads one framed packet.
+- The concatenate-and-reframe helpers are replaced by per-packet loops: `count_publish_headers` in `section3_publish_flow.rs` counts PUBLISH packets as they are read, and `read_all_available` plus `extract_publish_ids` in `section4_flow_control.rs` become `read_publish_ids`, which collects packet IDs through `ParsedPublish`.
+- Every hand-written Remaining Length loop in `raw_client.rs`, `section3_final_conformance.rs` and `section4_shared_sub.rs` uses `decode_variable_int`. `try_extract_packet` treats a failed decode with 5 or more bytes buffered as malformed, which keeps the #269 behaviour of returning those bytes.
+- The three PUBLISH readers (`expect_publish`, `expect_publish_raw_header`, `expect_publish_with_id`) and `expect_publish_qos2` share one `parse_publish`. `section4_shared_sub.rs` uses `raw_client::parse_ack_reason_codes` instead of its own SUBACK parser.
+
+**Behaviour change**: a PUBLISH whose properties length ran past the packet made `expect_publish` panic on a slice index; it now returns `None`. Scratch check over a duplex stream: `None` for `30 04 00 01 74 78`, and `Some((0x32, 5, 1, "t", "hi"))` for a valid QoS 1 PUBLISH through `expect_publish_with_id`.
+
+**Results**: conformance lib 249 passed, `manifest_load` 12 passed, integration files pass. CLI in-process 191 passed, 3 skipped; external mqttv5 on 21883 191 passed, 3 skipped; Mosquitto 2.1.2 on 21884 187 passed, 7 skipped, the same as before. fmt and the four pedantic clippy runs are clean.
+
 ### Review fixes for the shared reader buffer (2026-10-26)
 
 **Trigger**: a code review of PR #269 raised 10 findings. Five were tested in a scratch program over a tokio duplex stream, against the PR's first commit and against main.

@@ -18,7 +18,7 @@ async fn max_length_topic_handled() {
         .await
         .unwrap();
 
-    let response = raw.expect_any_packet(TIMEOUT).await;
+    let response = raw.read_packet_bytes(TIMEOUT).await;
     match response {
         Some(data) if !data.is_empty() && data[0] == 0xE0 => {}
         Some(_) | None => {

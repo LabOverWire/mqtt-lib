@@ -4,6 +4,7 @@
 
 use crate::conformance_test;
 use crate::harness::unique_client_id;
+use crate::packet_parser::decode_variable_int;
 use crate::raw_client::{RawMqttClient, RawPacketBuilder};
 use crate::sut::SutHandle;
 use std::time::Duration;
@@ -108,43 +109,13 @@ async fn server_disconnect_no_session_expiry(sut: SutHandle) {
 
     let data = raw.expect_disconnect_raw(TIMEOUT).await;
     if let Some(bytes) = data {
-        let mut idx = 1;
-        let mut remaining_len: u32 = 0;
-        let mut shift = 0;
-        loop {
-            if idx >= bytes.len() {
-                break;
-            }
-            let byte = bytes[idx];
-            idx += 1;
-            remaining_len |= u32::from(byte & 0x7F) << shift;
-            if byte & 0x80 == 0 {
-                break;
-            }
-            shift += 7;
-            if shift > 21 {
-                break;
-            }
-        }
+        let Some((remaining_len, body_start)) = decode_variable_int(&bytes, 1) else {
+            return;
+        };
         if remaining_len >= 2 {
-            idx += 1;
-            let mut props_len: u32 = 0;
-            let mut pshift = 0;
-            loop {
-                if idx >= bytes.len() {
-                    break;
-                }
-                let byte = bytes[idx];
-                idx += 1;
-                props_len |= u32::from(byte & 0x7F) << pshift;
-                if byte & 0x80 == 0 {
-                    break;
-                }
-                pshift += 7;
-                if pshift > 21 {
-                    break;
-                }
-            }
+            let Some((props_len, mut idx)) = decode_variable_int(&bytes, body_start + 1) else {
+                return;
+            };
             let props_end = idx + props_len as usize;
             while idx < props_end && idx < bytes.len() {
                 let prop_id = bytes[idx];

@@ -117,7 +117,7 @@ pub async fn first_publish_matching<T: Transport>(
     let deadline = tokio::time::Instant::now() + window;
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        let packet = raw.read_mqtt_packet(remaining).await?;
+        let packet = raw.read_packet_bytes(remaining).await?;
         if let Some(publish) = ParsedPublish::parse(&packet) {
             if matches(&publish.topic) {
                 return Some(publish.topic);
@@ -145,7 +145,7 @@ pub async fn expect_no_publish<T: Transport>(
         if remaining.is_zero() {
             break;
         }
-        let Some(packet) = raw.read_mqtt_packet(remaining).await else {
+        let Some(packet) = raw.read_packet_bytes(remaining).await else {
             break;
         };
         reject_unexpected(&packet, context, &matches);
@@ -154,7 +154,7 @@ pub async fn expect_no_publish<T: Transport>(
         .await
         .unwrap_or_else(|error| panic!("{context}: the connection must stay open: {error}"));
     loop {
-        let packet = raw.read_mqtt_packet(window).await.unwrap_or_else(|| {
+        let packet = raw.read_packet_bytes(window).await.unwrap_or_else(|| {
             panic!("{context}: the connection must stay open and answer PINGREQ")
         });
         if packet.first() == Some(&0xD0) {

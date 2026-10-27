@@ -3,7 +3,7 @@
 use crate::assertions;
 use crate::conformance_test;
 use crate::harness::unique_client_id;
-use crate::raw_client::{RawMqttClient, RawPacketBuilder};
+use crate::raw_client::{parse_ack_reason_codes, RawMqttClient, RawPacketBuilder};
 use crate::sut::SutHandle;
 use crate::test_client::TestClient;
 use mqtt5_protocol::types::{PublishOptions, QoS, SubscribeOptions};
@@ -62,11 +62,11 @@ async fn shared_sub_share_name_with_wildcard_rejected(sut: SutHandle) {
     .await
     .unwrap();
 
-    let pkt = raw.read_mqtt_packet(TIMEOUT).await;
+    let pkt = raw.read_packet_bytes(TIMEOUT).await;
     match pkt {
         Some(data) if data[0] == 0x90 => {
-            let (_, reason_codes) =
-                parse_suback_bytes(&data).expect("[MQTT-4.8.2-2] SUBACK must be parseable");
+            let (_, reason_codes) = parse_ack_reason_codes(&data, 0x90)
+                .expect("[MQTT-4.8.2-2] SUBACK must be parseable");
             assert_eq!(reason_codes.len(), 2);
             assert_eq!(
                 reason_codes[0], 0x8F,
@@ -108,10 +108,11 @@ async fn shared_sub_incomplete_format_rejected(sut: SutHandle) {
     .await
     .unwrap();
 
-    let pkt = raw.read_mqtt_packet(TIMEOUT).await;
+    let pkt = raw.read_packet_bytes(TIMEOUT).await;
     match pkt {
         Some(data) if data[0] == 0x90 => {
-            let (_, reason_codes) = parse_suback_bytes(&data).expect("SUBACK must be parseable");
+            let (_, reason_codes) =
+                parse_ack_reason_codes(&data, 0x90).expect("SUBACK must be parseable");
             assert_eq!(reason_codes.len(), 1);
             assert_eq!(
                 reason_codes[0], 0x8F,
@@ -406,57 +407,4 @@ async fn shared_sub_puback_error_discards(sut: SutHandle) {
         redistributed.is_none(),
         "[MQTT-4.8.2-6] message rejected with PUBACK error must not be redistributed"
     );
-}
-
-fn parse_suback_bytes(data: &[u8]) -> Option<(u16, Vec<u8>)> {
-    if data.len() < 4 || data[0] != 0x90 {
-        return None;
-    }
-    let mut idx = 1;
-    let mut remaining_len: u32 = 0;
-    let mut shift = 0;
-    loop {
-        if idx >= data.len() {
-            return None;
-        }
-        let byte = data[idx];
-        idx += 1;
-        remaining_len |= u32::from(byte & 0x7F) << shift;
-        if byte & 0x80 == 0 {
-            break;
-        }
-        shift += 7;
-        if shift > 21 {
-            return None;
-        }
-    }
-    let payload_start = idx;
-    if data.len() < payload_start + remaining_len as usize || remaining_len < 3 {
-        return None;
-    }
-    let packet_id = u16::from_be_bytes([data[idx], data[idx + 1]]);
-    idx += 2;
-    let mut props_len: u32 = 0;
-    let mut props_shift = 0;
-    loop {
-        if idx >= data.len() {
-            return None;
-        }
-        let byte = data[idx];
-        idx += 1;
-        props_len |= u32::from(byte & 0x7F) << props_shift;
-        if byte & 0x80 == 0 {
-            break;
-        }
-        props_shift += 7;
-        if props_shift > 21 {
-            return None;
-        }
-    }
-    idx += props_len as usize;
-    let end = payload_start + remaining_len as usize;
-    if idx > end {
-        return None;
-    }
-    Some((packet_id, data[idx..end].to_vec()))
 }

@@ -714,7 +714,7 @@ async fn reserved_flags_correct_on_server_packets(sut: SutHandle) {
         .unwrap();
     let puback_data = loop {
         let pkt = raw
-            .read_mqtt_packet(TIMEOUT)
+            .read_packet_bytes(TIMEOUT)
             .await
             .expect("Must receive PUBACK");
         if pkt[0] & 0xF0 == 0x30 {

@@ -67,64 +67,20 @@ async fn receive_maximum_limits_outbound_publishes(sut: SutHandle) {
 }
 
 async fn count_publish_packets_from_raw(client: &mut RawMqttClient, timeout: Duration) -> u32 {
-    let mut accumulated = Vec::new();
     let deadline = tokio::time::Instant::now() + timeout;
-
+    let mut count = 0;
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
-            break;
+            return count;
         }
         match client
             .read_packet_bytes(remaining.min(Duration::from_millis(500)))
             .await
         {
-            Some(data) => accumulated.extend_from_slice(&data),
-            None => break,
+            Some(data) if data[0] >> 4 == 3 => count += 1,
+            Some(_) => {}
+            None => return count,
         }
     }
-
-    count_publish_headers(&accumulated)
-}
-
-fn count_publish_headers(data: &[u8]) -> u32 {
-    let mut count = 0;
-    let mut idx = 0;
-    while idx < data.len() {
-        let first_byte = data[idx];
-        let packet_type = first_byte >> 4;
-        idx += 1;
-
-        let mut remaining_len: u32 = 0;
-        let mut shift = 0;
-        loop {
-            if idx >= data.len() {
-                return count;
-            }
-            let byte = data[idx];
-            idx += 1;
-            remaining_len |= u32::from(byte & 0x7F) << shift;
-            if byte & 0x80 == 0 {
-                break;
-            }
-            shift += 7;
-            if shift > 21 {
-                return count;
-            }
-        }
-
-        let body_end = idx + remaining_len as usize;
-        if body_end > data.len() {
-            if packet_type == 3 {
-                count += 1;
-            }
-            return count;
-        }
-
-        if packet_type == 3 {
-            count += 1;
-        }
-        idx = body_end;
-    }
-    count
 }
