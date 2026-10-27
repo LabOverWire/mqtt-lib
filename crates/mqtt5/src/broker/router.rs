@@ -162,6 +162,16 @@ pub struct Subscription {
     pub flow_id: Option<u64>,
 }
 
+type SubscriptionIdentity<'a> = (&'a str, Option<&'a str>, Option<u64>);
+type ShareGroups<'a> = HashMap<(&'a str, &'a str), Vec<&'a Subscription>>;
+type ShareGroupCounters = HashMap<String, HashMap<String, Arc<AtomicUsize>>>;
+
+impl Subscription {
+    fn identity(&self) -> SubscriptionIdentity<'_> {
+        (&self.client_id, self.share_group.as_deref(), self.flow_id)
+    }
+}
+
 /// Message router for the broker
 pub struct MessageRouter {
     exact_subscriptions: Arc<RwLock<HashMap<String, Vec<Subscription>>>>,
@@ -169,7 +179,7 @@ pub struct MessageRouter {
     retained_messages: Arc<RwLock<HashMap<String, RetainedMessage>>>,
     clients: Arc<RwLock<HashMap<String, ClientInfo>>>,
     storage: Option<Arc<DynamicStorage>>,
-    share_group_counters: Arc<RwLock<HashMap<String, Arc<AtomicUsize>>>>,
+    share_group_counters: Arc<RwLock<ShareGroupCounters>>,
     event_handler: Option<Arc<dyn BrokerEventHandler>>,
     change_only_states: Arc<RwLock<HashMap<String, ChangeOnlyState>>>,
     #[cfg(not(target_arch = "wasm32"))]
@@ -810,29 +820,21 @@ impl MessageRouter {
                     .collect()
             })
             .unwrap_or_default();
-        let keep: HashSet<(String, Option<String>, Option<u64>)> = requests
-            .iter()
-            .map(|request| {
-                let (filter, share_group) = parse_shared_subscription(&request.topic_filter);
-                (
-                    filter.to_string(),
-                    share_group.map(str::to_string),
-                    request.flow_id,
-                )
-            })
-            .collect();
         {
+            let keep: HashSet<(&str, SubscriptionIdentity)> = requests
+                .iter()
+                .map(|request| {
+                    let (filter, share_group) = parse_shared_subscription(&request.topic_filter);
+                    (filter, (client_id, share_group, request.flow_id))
+                })
+                .collect();
             let mut exact = self.exact_subscriptions.write().await;
             let mut wildcard = self.wildcard_subscriptions.write().await;
             for map in [&mut *exact, &mut *wildcard] {
                 for (filter, subs) in map.iter_mut() {
                     subs.retain(|sub| {
                         sub.client_id != client_id
-                            || keep.contains(&(
-                                filter.clone(),
-                                sub.share_group.clone(),
-                                sub.flow_id,
-                            ))
+                            || keep.contains(&(filter.as_str(), sub.identity()))
                     });
                 }
                 map.retain(|_, subs| !subs.is_empty());
@@ -1191,9 +1193,9 @@ impl MessageRouter {
             return Ok(Subscribed::Fenced);
         }
         let subs = subs_map.entry(actual_filter.to_string()).or_default();
-        let existing_pos = subs.iter().position(|s| {
-            s.client_id == client_id && s.flow_id == flow_id && s.share_group == share_group
-        });
+        let existing_pos = subs
+            .iter()
+            .position(|s| s.identity() == subscription.identity());
         let outcome = if let Some(pos) = existing_pos {
             subs[pos] = subscription;
             debug!(
@@ -1212,6 +1214,8 @@ impl MessageRouter {
             let mut counters = self.share_group_counters.write().await;
             counters
                 .entry(group)
+                .or_default()
+                .entry(actual_filter.to_string())
                 .or_insert_with(|| Arc::new(AtomicUsize::new(0)));
         }
 
@@ -1265,11 +1269,7 @@ impl MessageRouter {
 
         if let Some(subs) = subs_map.get_mut(actual_filter) {
             let initial_len = subs.len();
-            subs.retain(|sub| {
-                !(sub.client_id == client_id
-                    && sub.flow_id == flow_id
-                    && sub.share_group.as_deref() == share_group)
-            });
+            subs.retain(|sub| sub.identity() != (client_id, share_group, flow_id));
 
             let removed = initial_len != subs.len();
 
@@ -1529,17 +1529,17 @@ impl MessageRouter {
         exact: &'a HashMap<String, Vec<Subscription>>,
         wildcard: &'a HashMap<String, Vec<Subscription>>,
         topic_name: &str,
-    ) -> (
-        HashMap<String, Vec<&'a Subscription>>,
-        Vec<&'a Subscription>,
-    ) {
-        let mut share_groups: HashMap<String, Vec<&'a Subscription>> = HashMap::new();
+    ) -> (ShareGroups<'a>, Vec<&'a Subscription>) {
+        let mut share_groups: ShareGroups<'a> = HashMap::new();
         let mut regular_subs: Vec<&'a Subscription> = Vec::new();
 
-        if let Some(subs) = exact.get(topic_name) {
+        if let Some((topic_filter, subs)) = exact.get_key_value(topic_name) {
             for sub in subs {
                 if let Some(ref group) = sub.share_group {
-                    share_groups.entry(group.clone()).or_default().push(sub);
+                    share_groups
+                        .entry((group, topic_filter))
+                        .or_default()
+                        .push(sub);
                 } else {
                     regular_subs.push(sub);
                 }
@@ -1550,7 +1550,10 @@ impl MessageRouter {
             if topic_matches_filter(topic_name, topic_filter) {
                 for sub in subs {
                     if let Some(ref group) = sub.share_group {
-                        share_groups.entry(group.clone()).or_default().push(sub);
+                        share_groups
+                            .entry((group, topic_filter))
+                            .or_default()
+                            .push(sub);
                     } else {
                         regular_subs.push(sub);
                     }
@@ -1563,13 +1566,13 @@ impl MessageRouter {
 
     async fn plan_share_groups(
         &self,
-        share_groups: &HashMap<String, Vec<&Subscription>>,
+        share_groups: &ShareGroups<'_>,
         publish: &PublishPacket,
         clients: &HashMap<String, ClientInfo>,
         publishing_client_id: Option<&str>,
     ) -> Vec<DeliveryPlan> {
         let mut plans = Vec::new();
-        for (group_name, group_subs) in share_groups {
+        for ((group_name, topic_filter), group_subs) in share_groups {
             let online_subs: Vec<&&Subscription> = group_subs
                 .iter()
                 .filter(|sub| clients.contains_key(&sub.client_id))
@@ -1580,7 +1583,8 @@ impl MessageRouter {
                     .share_group_counters
                     .read()
                     .await
-                    .get(group_name)
+                    .get(*group_name)
+                    .and_then(|filters| filters.get(*topic_filter))
                     .cloned();
                 if let Some(counter) = counter {
                     let start = counter.fetch_add(1, Ordering::Relaxed) % online_subs.len();
@@ -2547,6 +2551,107 @@ mod tests {
         assert_eq!(
             copies, 2,
             "unsubscribing $share/g/t must leave t and $share/h/t"
+        );
+    }
+
+    #[tokio::test]
+    async fn one_share_name_on_two_filters_is_two_shared_subscriptions() {
+        let router = MessageRouter::new();
+        let mut lanes = [
+            TestLanes::new(100),
+            TestLanes::new(100),
+            TestLanes::new(100),
+        ];
+        let subscribers = [
+            ("x1", "$share/g/a/b"),
+            ("x2", "$share/g/a/b"),
+            ("y", "$share/g/a/+"),
+        ];
+        for ((client_id, filter), rx) in subscribers.iter().zip(&lanes) {
+            router
+                .register_client(
+                    (*client_id).to_string(),
+                    rx.lanes(),
+                    router.queue_handle(client_id),
+                    tokio::sync::oneshot::channel().0,
+                )
+                .await;
+            router
+                .subscribe(SubscriptionRequest::new(
+                    *client_id,
+                    *filter,
+                    QoS::AtMostOnce,
+                ))
+                .await
+                .unwrap();
+        }
+
+        let publish = PublishPacket::new("a/b", &b"x"[..], QoS::AtMostOnce);
+        router.route_message(&publish, None).await;
+        router.route_message(&publish, None).await;
+
+        let counts = lanes.each_mut().map(|rx| {
+            let mut count = 0;
+            while rx.try_recv().is_ok() {
+                count += 1;
+            }
+            count
+        });
+        assert_eq!(
+            counts,
+            [1, 1, 2],
+            "$share/g/a/b and $share/g/a/+ are separate shared subscriptions, each with its own round robin"
+        );
+    }
+
+    #[tokio::test]
+    async fn one_share_name_on_two_filters_round_robins_each_filter_separately() {
+        let router = MessageRouter::new();
+        let mut lanes = [
+            TestLanes::new(100),
+            TestLanes::new(100),
+            TestLanes::new(100),
+        ];
+        let subscribers = [
+            ("x1", "$share/g/a"),
+            ("x2", "$share/g/a"),
+            ("y", "$share/g/b"),
+        ];
+        for ((client_id, filter), rx) in subscribers.iter().zip(&lanes) {
+            router
+                .register_client(
+                    (*client_id).to_string(),
+                    rx.lanes(),
+                    router.queue_handle(client_id),
+                    tokio::sync::oneshot::channel().0,
+                )
+                .await;
+            router
+                .subscribe(SubscriptionRequest::new(
+                    *client_id,
+                    *filter,
+                    QoS::AtMostOnce,
+                ))
+                .await
+                .unwrap();
+        }
+
+        for topic in ["b", "a", "b", "a"] {
+            let publish = PublishPacket::new(topic, &b"x"[..], QoS::AtMostOnce);
+            router.route_message(&publish, None).await;
+        }
+
+        let counts = lanes.each_mut().map(|rx| {
+            let mut count = 0;
+            while rx.try_recv().is_ok() {
+                count += 1;
+            }
+            count
+        });
+        assert_eq!(
+            counts,
+            [1, 1, 2],
+            "publishes to b must not move the round robin of $share/g/a"
         );
     }
 
