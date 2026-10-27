@@ -4,7 +4,7 @@
 
 use crate::conformance_test;
 use crate::harness::unique_client_id;
-use crate::packet_parser::decode_variable_int;
+use crate::packet_parser::{decode_variable_int, ParsedProperties};
 use crate::raw_client::{RawMqttClient, RawPacketBuilder};
 use crate::sut::SutHandle;
 use std::time::Duration;
@@ -107,50 +107,18 @@ async fn server_disconnect_no_session_expiry(sut: SutHandle) {
         .await
         .unwrap();
 
-    let data = raw.expect_disconnect_raw(TIMEOUT).await;
-    if let Some(bytes) = data {
-        let Some((remaining_len, body_start)) = decode_variable_int(&bytes, 1) else {
-            return;
-        };
+    if let Some(bytes) = raw.expect_disconnect_raw(TIMEOUT).await {
+        let (remaining_len, body_start) = decode_variable_int(&bytes, 1)
+            .expect("server DISCONNECT has a malformed Remaining Length");
         if remaining_len >= 2 {
-            let Some((props_len, mut idx)) = decode_variable_int(&bytes, body_start + 1) else {
-                return;
-            };
-            let props_end = idx + props_len as usize;
-            while idx < props_end && idx < bytes.len() {
-                let prop_id = bytes[idx];
-                assert_ne!(
-                    prop_id, 0x11,
-                    "[MQTT-3.14.2-2] server DISCONNECT must not contain Session Expiry Interval (0x11)"
-                );
-                idx += 1;
-                match prop_id {
-                    0x1F => {
-                        if idx + 2 <= bytes.len() {
-                            let len = u16::from_be_bytes([bytes[idx], bytes[idx + 1]]) as usize;
-                            idx += 2 + len;
-                        } else {
-                            break;
-                        }
-                    }
-                    0x26 => {
-                        if idx + 2 <= bytes.len() {
-                            let klen = u16::from_be_bytes([bytes[idx], bytes[idx + 1]]) as usize;
-                            idx += 2 + klen;
-                            if idx + 2 <= bytes.len() {
-                                let vlen =
-                                    u16::from_be_bytes([bytes[idx], bytes[idx + 1]]) as usize;
-                                idx += 2 + vlen;
-                            } else {
-                                break;
-                            }
-                        } else {
-                            break;
-                        }
-                    }
-                    _ => break,
-                }
-            }
+            let (props_len, props_start) = decode_variable_int(&bytes, body_start + 1)
+                .expect("server DISCONNECT has a malformed properties length");
+            let props = ParsedProperties::parse(&bytes, props_start, props_len as usize)
+                .expect("server DISCONNECT has malformed properties");
+            assert!(
+                props.session_expiry_interval.is_none(),
+                "[MQTT-3.14.2-2] server DISCONNECT must not contain Session Expiry Interval (0x11)"
+            );
         }
     }
 }
@@ -189,39 +157,20 @@ async fn request_problem_info_zero_suppresses_properties(sut: SutHandle) {
         .expect("expected SUBACK");
     assert_eq!(data[0], 0x90, "expected SUBACK packet type");
 
-    let mut idx = 1;
-    while idx < data.len() && (data[idx] & 0x80) != 0 {
-        idx += 1;
-    }
-    idx += 1;
-    idx += 2;
-    let mut props_len: u32 = 0;
-    let mut pshift = 0;
-    loop {
-        if idx >= data.len() {
-            break;
-        }
-        let byte = data[idx];
-        idx += 1;
-        props_len |= u32::from(byte & 0x7F) << pshift;
-        if byte & 0x80 == 0 {
-            break;
-        }
-        pshift += 7;
-    }
-    let props_end = idx + props_len as usize;
-    while idx < props_end && idx < data.len() {
-        let prop_id = data[idx];
-        assert_ne!(
-            prop_id, 0x1F,
-            "[MQTT-3.1.2-29] SUBACK must not contain Reason String when Request Problem Information=0"
-        );
-        assert_ne!(
-            prop_id, 0x26,
-            "[MQTT-3.1.2-29] SUBACK must not contain User Property when Request Problem Information=0"
-        );
-        idx += 1;
-    }
+    let (_, body_start) =
+        decode_variable_int(&data, 1).expect("SUBACK has a malformed Remaining Length");
+    let (props_len, props_start) = decode_variable_int(&data, body_start + 2)
+        .expect("SUBACK has a malformed properties length");
+    let props = ParsedProperties::parse(&data, props_start, props_len as usize)
+        .expect("SUBACK has malformed properties");
+    assert!(
+        props.reason_string.is_none(),
+        "[MQTT-3.1.2-29] SUBACK must not contain Reason String when Request Problem Information=0"
+    );
+    assert!(
+        props.user_properties.is_empty(),
+        "[MQTT-3.1.2-29] SUBACK must not contain User Property when Request Problem Information=0"
+    );
 }
 
 /// `[MQTT-4.3.3-7]` Server MUST NOT apply message expiry if PUBLISH has been

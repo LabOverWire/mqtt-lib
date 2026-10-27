@@ -39,19 +39,27 @@
 
 ## Diary Entries
 
-### Raw reader cleanup (2026-10-27)
+### Raw reader cleanup (2026-10-26)
 
-**Trigger**: the cleanup left from the #269 review below. No behaviour change intended beyond the one noted.
+**Trigger**: the cleanup left from the #269 review below.
 
 **Changes**:
 - `read_mqtt_packet` and `expect_any_packet` are gone. Every caller uses `read_packet_bytes`, which reads one framed packet.
-- The concatenate-and-reframe helpers are replaced by per-packet loops: `count_publish_headers` in `section3_publish_flow.rs` counts PUBLISH packets as they are read, and `read_all_available` plus `extract_publish_ids` in `section4_flow_control.rs` become `read_publish_ids`, which collects packet IDs through `ParsedPublish`.
-- Every hand-written Remaining Length loop in `raw_client.rs`, `section3_final_conformance.rs` and `section4_shared_sub.rs` uses `decode_variable_int`. `try_extract_packet` treats a failed decode with 5 or more bytes buffered as malformed, which keeps the #269 behaviour of returning those bytes.
-- The three PUBLISH readers (`expect_publish`, `expect_publish_raw_header`, `expect_publish_with_id`) and `expect_publish_qos2` share one `parse_publish`. `section4_shared_sub.rs` uses `raw_client::parse_ack_reason_codes` instead of its own SUBACK parser.
+- The concatenate-and-reframe helpers (`count_publish_headers` in `section3_publish_flow.rs`, `read_all_available` plus `extract_publish_ids` in `section4_flow_control.rs`) are replaced by `RawMqttClient::read_publish_packets`, which returns every PUBLISH read before a close, a 500 ms gap or the timeout. Both receive maximum tests count those packets and PUBACK the packet identifiers `ParsedPublish` finds in them.
+- The hand-written Remaining Length loops in `raw_client.rs` and `section4_shared_sub.rs` use `decode_variable_int`. `try_extract_packet` treats a failed decode with 5 or more bytes buffered as malformed, which keeps the #269 behaviour of returning those bytes.
+- The DISCONNECT scan (MQTT-3.14.2-2) and the SUBACK scan (MQTT-3.1.2-29) in `section3_final_conformance.rs` parse the property block with `ParsedProperties`, which now reads Session Expiry Interval. A malformed block fails the test.
+- `parse_publish` is gone. `expect_publish`, `expect_publish_raw_header`, `expect_publish_with_id` and `expect_publish_qos2` use `ParsedPublish`. `section4_shared_sub.rs` uses `raw_client::parse_ack_reason_codes` instead of its own SUBACK parser.
 
-**Behaviour change**: a PUBLISH whose properties length ran past the packet made `expect_publish` panic on a slice index; it now returns `None`. Scratch check over a duplex stream: `None` for `30 04 00 01 74 78`, and `Some((0x32, 5, 1, "t", "hi"))` for a valid QoS 1 PUBLISH through `expect_publish_with_id`.
+**Review of this PR**: 10 findings, checked in a scratch program over a tokio duplex stream with copies of the old and new helpers.
+- The first version of the flow control helper kept only PUBLISHes that `ParsedPublish` accepted, so 3 QoS 1 PUBLISHes with one non UTF-8 topic counted as 2 (the old code counted 3). It also returned id 0 for a QoS 0 PUBLISH, which the test then PUBACKed.
+- The DISCONNECT scan stopped at the first property other than Reason String or User Property, so Server Reference followed by Session Expiry Interval passed. A truncated properties length passed with no assertion, as it did before.
+- The SUBACK scan's hand-written properties length panicked on shift overflow with 5 continuation bytes, and treated every byte of the property block as a property id.
+- The PUBLISH readers and `ParsedPublish` disagreed on a non UTF-8 topic and on an unknown property: the readers returned the packet, `ParsedPublish` returned `None`. Both return `None` now.
+- New unit tests: `read_publish_packets_keeps_publishes_the_parser_rejects` and `properties_read_session_expiry_after_another_property`.
 
-**Results**: conformance lib 249 passed, `manifest_load` 12 passed, integration files pass. CLI in-process 191 passed, 3 skipped; external mqttv5 on 21883 191 passed, 3 skipped; Mosquitto 2.1.2 on 21884 187 passed, 7 skipped, the same as before. fmt and the four pedantic clippy runs are clean.
+**Behaviour changes**: a PUBLISH whose properties length ran past the packet made `expect_publish` panic on a slice index; it now returns `None`. The `expect_publish*` readers also return `None` for a PUBLISH with a non UTF-8 topic or an unknown property.
+
+**Results**: conformance lib 251 passed, `manifest_load` 12 passed, integration files pass. CLI in-process 191 passed, 3 skipped; external mqttv5 on 21883 191 passed, 3 skipped; Mosquitto 2.1.2 on 21884 187 passed, 7 skipped, the same as before. fmt and the four pedantic clippy runs are clean.
 
 ### Review fixes for the shared reader buffer (2026-10-26)
 

@@ -58,29 +58,10 @@ async fn receive_maximum_limits_outbound_publishes(sut: SutHandle) {
     }
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    let publish_count = count_publish_packets_from_raw(&mut sub, Duration::from_secs(2)).await;
+    let publish_count = sub.read_publish_packets(Duration::from_secs(2)).await.len();
 
     assert_eq!(
         publish_count, 2,
         "[MQTT-3.3.4-9] Server must not send more than receive_maximum (2) unACKed QoS 1 publishes"
     );
-}
-
-async fn count_publish_packets_from_raw(client: &mut RawMqttClient, timeout: Duration) -> u32 {
-    let deadline = tokio::time::Instant::now() + timeout;
-    let mut count = 0;
-    loop {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() {
-            return count;
-        }
-        match client
-            .read_packet_bytes(remaining.min(Duration::from_millis(500)))
-            .await
-        {
-            Some(data) if data[0] >> 4 == 3 => count += 1,
-            Some(_) => {}
-            None => return count,
-        }
-    }
 }

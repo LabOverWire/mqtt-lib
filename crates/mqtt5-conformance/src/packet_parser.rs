@@ -18,12 +18,13 @@ const PROP_CONTENT_TYPE: u8 = 0x03;
 const PROP_RESPONSE_TOPIC: u8 = 0x08;
 const PROP_CORRELATION_DATA: u8 = 0x09;
 const PROP_SUBSCRIPTION_IDENTIFIER: u8 = 0x0B;
+const PROP_SESSION_EXPIRY_INTERVAL: u8 = 0x11;
 const PROP_REASON_STRING: u8 = 0x1F;
 const PROP_TOPIC_ALIAS: u8 = 0x23;
 const PROP_USER_PROPERTY: u8 = 0x26;
 const BYTE_PROPERTIES: [u8; 7] = [0x17, 0x19, 0x24, 0x25, 0x28, 0x29, 0x2A];
 const TWO_BYTE_PROPERTIES: [u8; 3] = [0x13, 0x21, 0x22];
-const FOUR_BYTE_PROPERTIES: [u8; 3] = [0x11, 0x18, 0x27];
+const FOUR_BYTE_PROPERTIES: [u8; 2] = [0x18, 0x27];
 const LENGTH_PREFIXED_PROPERTIES: [u8; 5] = [0x12, 0x15, 0x1A, 0x1C, 0x16];
 
 /// Decodes an MQTT variable-length integer starting at `start` in `data`.
@@ -86,6 +87,7 @@ pub struct ParsedProperties {
     pub correlation_data: Option<Vec<u8>>,
     pub payload_format_indicator: Option<u8>,
     pub message_expiry_interval: Option<u32>,
+    pub session_expiry_interval: Option<u32>,
     pub reason_string: Option<String>,
 }
 
@@ -113,15 +115,15 @@ impl ParsedProperties {
                     idx += 1;
                 }
                 PROP_MESSAGE_EXPIRY_INTERVAL => {
-                    if idx + 4 > end {
-                        return None;
-                    }
-                    props.message_expiry_interval = Some(u32::from_be_bytes([
-                        data[idx],
-                        data[idx + 1],
-                        data[idx + 2],
-                        data[idx + 3],
-                    ]));
+                    props.message_expiry_interval = Some(u32::from_be_bytes(
+                        *data[..end].get(idx..idx + 4)?.first_chunk()?,
+                    ));
+                    idx += 4;
+                }
+                PROP_SESSION_EXPIRY_INTERVAL => {
+                    props.session_expiry_interval = Some(u32::from_be_bytes(
+                        *data[..end].get(idx..idx + 4)?.first_chunk()?,
+                    ));
                     idx += 4;
                 }
                 PROP_CONTENT_TYPE => {
@@ -352,6 +354,13 @@ mod tests {
         let topic_alias_maximum = [0x20, 0x06, 0x00, 0x00, 0x03, 0x22, 0x00, 0x80];
         assert!(ParsedConnAck::parse(&receive_maximum).is_some());
         assert!(ParsedConnAck::parse(&topic_alias_maximum).is_some());
+    }
+
+    #[test]
+    fn properties_read_session_expiry_after_another_property() {
+        let data = [0x1C, 0x00, 0x01, b'h', 0x11, 0x00, 0x00, 0x00, 0x05];
+        let props = ParsedProperties::parse(&data, 0, data.len()).expect("valid properties");
+        assert_eq!(props.session_expiry_interval, Some(5));
     }
 
     #[test]

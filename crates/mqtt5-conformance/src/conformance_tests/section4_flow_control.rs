@@ -61,27 +61,33 @@ async fn flow_control_quota_enforced(sut: SutHandle) {
     }
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    let packet_ids = read_publish_ids(&mut sub, Duration::from_secs(2)).await;
+    let publishes = sub.read_publish_packets(Duration::from_secs(2)).await;
 
     assert_eq!(
-        packet_ids.len(),
+        publishes.len(),
         2,
         "[MQTT-4.9.0-1] [MQTT-4.9.0-2] broker must send exactly 2 unACKed QoS 1 publishes (receive_maximum=2)"
     );
 
-    for pid in &packet_ids {
-        sub.send_raw(&RawPacketBuilder::puback(*pid)).await.unwrap();
+    for pid in publishes
+        .iter()
+        .filter_map(|p| ParsedPublish::parse(p)?.packet_id)
+    {
+        sub.send_raw(&RawPacketBuilder::puback(pid)).await.unwrap();
     }
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let after_ids = read_publish_ids(&mut sub, Duration::from_secs(2)).await;
+    let after = sub.read_publish_packets(Duration::from_secs(2)).await;
     assert!(
-        !after_ids.is_empty(),
+        !after.is_empty(),
         "after PUBACKing, broker must send queued messages"
     );
 
-    for pid in &after_ids {
-        sub.send_raw(&RawPacketBuilder::puback(*pid)).await.unwrap();
+    for pid in after
+        .iter()
+        .filter_map(|p| ParsedPublish::parse(p)?.packet_id)
+    {
+        sub.send_raw(&RawPacketBuilder::puback(pid)).await.unwrap();
     }
 }
 
@@ -131,13 +137,15 @@ async fn flow_control_other_packets_at_zero_quota(sut: SutHandle) {
 
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    let initial_ids = read_publish_ids(&mut sub, Duration::from_secs(1)).await;
+    let initial = sub.read_publish_packets(Duration::from_secs(1)).await;
     assert_eq!(
-        initial_ids.len(),
+        initial.len(),
         1,
         "broker must send only 1 QoS 1 PUBLISH when receive_maximum=1"
     );
-    let first_pid = initial_ids[0];
+    let first_pid = ParsedPublish::parse(&initial[0])
+        .and_then(|p| p.packet_id)
+        .expect("QoS 1 PUBLISH must parse and carry a packet identifier");
 
     sub.send_raw(&RawPacketBuilder::pingreq()).await.unwrap();
     assert!(
@@ -159,9 +167,9 @@ async fn flow_control_other_packets_at_zero_quota(sut: SutHandle) {
         .unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let after_ids = read_publish_ids(&mut sub, Duration::from_secs(2)).await;
+    let after = sub.read_publish_packets(Duration::from_secs(2)).await;
     assert!(
-        !after_ids.is_empty(),
+        !after.is_empty(),
         "after PUBACK, broker must deliver the queued message"
     );
 }
@@ -187,26 +195,4 @@ async fn auth_invalid_flags_malformed(sut: SutHandle) {
         raw.expect_disconnect(TIMEOUT).await,
         "[MQTT-3.15.1-1] AUTH with non-zero reserved flags must cause disconnect"
     );
-}
-
-async fn read_publish_ids(client: &mut RawMqttClient, timeout: Duration) -> Vec<u16> {
-    let deadline = tokio::time::Instant::now() + timeout;
-    let mut ids = Vec::new();
-    loop {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() {
-            return ids;
-        }
-        match client
-            .read_packet_bytes(remaining.min(Duration::from_millis(500)))
-            .await
-        {
-            Some(data) => {
-                if let Some(publish) = ParsedPublish::parse(&data) {
-                    ids.push(publish.packet_id.unwrap_or(0));
-                }
-            }
-            None => return ids,
-        }
-    }
 }

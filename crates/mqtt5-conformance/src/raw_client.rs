@@ -6,7 +6,7 @@
 //! [`RawPacketBuilder`] constructs both valid and deliberately invalid MQTT
 //! v5.0 packets for conformance edge-case testing.
 
-use crate::packet_parser::decode_variable_int;
+use crate::packet_parser::{decode_variable_int, ParsedPublish};
 use crate::transport::{TcpTransport, Transport};
 use bytes::{BufMut, BytesMut};
 use mqtt5_protocol::packet::connack::ConnAckPacket;
@@ -97,6 +97,25 @@ impl<T: Transport> RawMqttClient<T> {
         {
             ReadOutcome::Packet(pkt) => Some(pkt),
             ReadOutcome::Closed | ReadOutcome::TimedOut => None,
+        }
+    }
+
+    pub async fn read_publish_packets(&mut self, timeout_dur: Duration) -> Vec<Vec<u8>> {
+        let deadline = tokio::time::Instant::now() + timeout_dur;
+        let mut publishes = Vec::new();
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return publishes;
+            }
+            match self
+                .read_packet_bytes(remaining.min(Duration::from_millis(500)))
+                .await
+            {
+                Some(data) if data[0] >> 4 == 3 => publishes.push(data),
+                Some(_) => {}
+                None => return publishes,
+            }
         }
     }
 
@@ -207,8 +226,8 @@ impl<T: Transport> RawMqttClient<T> {
     /// Returns `None` if the packet is not a `QoS` 2 PUBLISH or the timeout elapses.
     pub async fn expect_publish_qos2(&mut self, timeout_dur: Duration) -> Option<u16> {
         let data = self.read_packet_bytes(timeout_dur).await?;
-        let (first_byte, packet_id, _, _) = parse_publish(&data)?;
-        ((first_byte >> 1) & 0x03 == 2).then_some(packet_id)
+        let publish = ParsedPublish::parse(&data)?;
+        publish.packet_id.filter(|_| publish.qos == 2)
     }
 
     /// Reads one packet and parses it as a SUBACK, returning
@@ -235,8 +254,8 @@ impl<T: Transport> RawMqttClient<T> {
     /// Returns `None` if the packet is not a PUBLISH or the timeout elapses.
     pub async fn expect_publish(&mut self, timeout_dur: Duration) -> Option<(u8, String, Vec<u8>)> {
         let data = self.read_packet_bytes(timeout_dur).await?;
-        let (first_byte, _, topic, payload) = parse_publish(&data)?;
-        Some(((first_byte >> 1) & 0x03, topic, payload))
+        let publish = ParsedPublish::parse(&data)?;
+        Some((publish.qos, publish.topic, publish.payload))
     }
 
     /// Reads and parses a PUBLISH packet, returning `(first_byte, qos, topic, payload)`.
@@ -249,8 +268,8 @@ impl<T: Transport> RawMqttClient<T> {
         timeout_dur: Duration,
     ) -> Option<(u8, u8, String, Vec<u8>)> {
         let data = self.read_packet_bytes(timeout_dur).await?;
-        let (first_byte, _, topic, payload) = parse_publish(&data)?;
-        Some((first_byte, (first_byte >> 1) & 0x03, topic, payload))
+        let publish = ParsedPublish::parse(&data)?;
+        Some((data[0], publish.qos, publish.topic, publish.payload))
     }
 
     /// Reads and parses a PUBLISH packet, returning `(first_byte, packet_id, qos, topic, payload)`.
@@ -264,13 +283,13 @@ impl<T: Transport> RawMqttClient<T> {
         timeout_dur: Duration,
     ) -> Option<(u8, u16, u8, String, Vec<u8>)> {
         let data = self.read_packet_bytes(timeout_dur).await?;
-        let (first_byte, packet_id, topic, payload) = parse_publish(&data)?;
+        let publish = ParsedPublish::parse(&data)?;
         Some((
-            first_byte,
-            packet_id,
-            (first_byte >> 1) & 0x03,
-            topic,
-            payload,
+            data[0],
+            publish.packet_id.unwrap_or(0),
+            publish.qos,
+            publish.topic,
+            publish.payload,
         ))
     }
 
@@ -1725,47 +1744,6 @@ fn parse_ack_packet(data: &[u8]) -> Option<(u16, u8)> {
     Some((packet_id, reason_code))
 }
 
-fn parse_publish(data: &[u8]) -> Option<(u8, u16, String, Vec<u8>)> {
-    let first_byte = *data.first()?;
-    if first_byte & 0xF0 != 0x30 {
-        return None;
-    }
-    let (remaining_len, body_start) = decode_variable_int(data, 1)?;
-    let end = body_start + remaining_len as usize;
-    if data.len() < end || body_start + 2 > end {
-        return None;
-    }
-    let topic_start = body_start + 2;
-    let topic_end =
-        topic_start + u16::from_be_bytes([data[body_start], data[body_start + 1]]) as usize;
-    if topic_end > end {
-        return None;
-    }
-    let topic = String::from_utf8_lossy(&data[topic_start..topic_end]).to_string();
-    let (packet_id, props_len_start) = if (first_byte >> 1) & 0x03 > 0 {
-        if topic_end + 2 > end {
-            return None;
-        }
-        (
-            u16::from_be_bytes([data[topic_end], data[topic_end + 1]]),
-            topic_end + 2,
-        )
-    } else {
-        (0, topic_end)
-    };
-    let (props_len, props_start) = decode_variable_int(&data[..end], props_len_start)?;
-    let payload_start = props_start + props_len as usize;
-    if payload_start > end {
-        return None;
-    }
-    Some((
-        first_byte,
-        packet_id,
-        topic,
-        data[payload_start..end].to_vec(),
-    ))
-}
-
 pub fn put_mqtt_string(buf: &mut BytesMut, s: &str) {
     let bytes = s.as_bytes();
     buf.put_u16(length_u16(bytes.len()));
@@ -1977,6 +1955,18 @@ mod framing_tests {
             client.read_packet_bytes(TIMEOUT).await,
             Some(PUBLISH[..4].to_vec()),
             "a partial packet before the close must reach the caller, not look like silence"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_publish_packets_keeps_publishes_the_parser_rejects() {
+        let non_utf8_topic = [0x32, 0x07, 0x00, 0x01, 0xFF, 0x00, 0x03, 0x00, b'c'];
+        let (mut client, server) = client_receiving(&[&PUBLISH, &PUBACK, &non_utf8_topic]).await;
+        drop(server);
+        assert_eq!(
+            client.read_publish_packets(TIMEOUT).await,
+            [PUBLISH.to_vec(), non_utf8_topic.to_vec()],
+            "every PUBLISH must be counted, including one that does not parse"
         );
     }
 }
