@@ -14,6 +14,7 @@ Vendor-neutral MQTT v5.0 conformance test suite that validates any broker agains
   drift is baselined in `known-text-drift.txt`; the guard fails on any new drift and on any listed
   entry that is repaired without being delisted, so the file can only shrink
 - **Two execution modes**: in-process via `cargo test` or against any external broker via the CLI
+- **Client mode**: the suite plays a scripted broker over raw bytes and checks what the client under test sends and how it reacts, through a small per-client adapter
 - **Capability-based skipping**: tests declare requirements; the runner skips tests the SUT cannot support
 - **Raw TCP packet builder** for malformed and edge-case protocol testing
 - **CLI with JSON reports** for CI integration and cross-vendor comparison
@@ -38,6 +39,12 @@ Run against an external broker:
 ./target/conformance/mqtt5-conformance --sut tests/fixtures/mosquitto-2.x.toml
 ```
 
+Run the client tests against the in-process mqtt5 client:
+
+```bash
+./target/conformance/mqtt5-conformance --client mqtt5
+```
+
 Generate a JSON conformance report:
 
 ```bash
@@ -59,7 +66,7 @@ Generate a JSON conformance report:
 
 ## Test Organization
 
-Tests are organized by MQTT v5.0 specification section. All 21 modules live in `src/conformance_tests/`:
+Tests are organized by MQTT v5.0 specification section. The 24 broker test modules live in `src/conformance_tests/`:
 
 | Module | Section | Scope |
 |--------|---------|-------|
@@ -67,6 +74,8 @@ Tests are organized by MQTT v5.0 specification section. All 21 modules live in `
 | `section3_connect` | 3.1 | CONNECT packet |
 | `section3_connect_extended` | 3.1 | CONNECT edge cases, will messages, keep-alive |
 | `section3_connack` | 3.2 | CONNACK packet |
+| `section3_max_packet_size` | 3.1, 3.2, 3.4 | Maximum Packet Size enforcement |
+| `section3_offline_delivery` | 3.3, 3.8, 4.8 | Messages queued for an offline session |
 | `section3_publish` | 3.3 | PUBLISH packet basics |
 | `section3_publish_advanced` | 3.3 | PUBLISH properties and user properties |
 | `section3_publish_alias` | 3.3 | Topic alias handling |
@@ -84,8 +93,19 @@ Tests are organized by MQTT v5.0 specification section. All 21 modules live in `
 | `section4_enhanced_auth` | 4.12 | Enhanced authentication |
 | `section4_error_handling` | 4.13 | Error handling |
 | `section6_websocket` | 6 | WebSocket conformance |
+| `deferred_ack` | 3.3.4, 4.9 | Broker behaviour the client deferred-ack feature relies on |
 
-Additionally, 16 vendor-specific integration tests in `tests/` validate the conformance infrastructure itself.
+The client test modules live in `src/client_conformance_tests/`:
+
+| Module | Section | Scope |
+|--------|---------|-------|
+| `section1_data_repr` | 1.5 | UTF-8 strings and variable byte integers the client sends and receives |
+| `section2_packet_format` | 2 | Fixed header flags, packet identifiers, property length |
+| `section3_connect` | 3.1 | CONNECT encoding, keep alive, session resume, request problem information, enhanced auth |
+| `section3_connack` | 3.2 | How the client obeys the capabilities a CONNACK announces |
+| `section4_error_handling` | 4.13 | Closing the connection after a malformed packet |
+
+`tests/` holds `manifest_load.rs`, which checks the manifest against the registry, and 8 files of plain tokio tests run by `cargo test`.
 
 ## Writing Conformance Tests
 
@@ -117,6 +137,33 @@ async fn connect_first_packet_must_be_connect(sut: SutHandle) {
 
 The function must be `async`, take exactly one parameter `sut: SutHandle`, and return `()`. See the [macros README](../mqtt5-conformance-macros/README.md) for parameter details, requirement string reference, and generated output.
 
+A client test uses `#[client_conformance_test]` and takes a `ClientSutHandle`. It starts a `ScriptedBroker`, has the client connect to it, and checks the raw packets the client sends:
+
+```rust
+#[client_conformance_test(ids = ["MQTT-3.2.2-14"])]
+async fn retain_available_0_client_must_not_send_retain(sut: ClientSutHandle) {
+    let mut s = start(
+        &sut,
+        ConnectSpec::new("ra0"),
+        false,
+        &property_u8(PROP_RETAIN_AVAILABLE, 0),
+    )
+    .await;
+    s.result.as_ref().unwrap();
+    let spec = PublishSpec {
+        retain: true,
+        ..PublishSpec::default()
+    };
+    let result = s.client.publish("r/t", b"x", spec).await;
+    if let Some(packet) = s.conn.next_of_type(PUBLISH, Duration::from_secs(1)).await {
+        assert!(
+            !parse_publish(&packet).retain,
+            "[MQTT-3.2.2-14] client sent PUBLISH with RETAIN=1 after CONNACK Retain Available=0 (publish returned {result:?})"
+        );
+    }
+}
+```
+
 ## Requirement Strings
 
 Tests declare capability requirements via the `requires` parameter. The runner skips tests whose requirements the SUT cannot satisfy.
@@ -138,6 +185,19 @@ Tests declare capability requirements via the `requires` parameter. The runner s
 | `hooks.restart` | Broker restart hook available |
 | `hooks.cleanup` | Broker cleanup hook available |
 | `acl` | Topic-level access control supported |
+| `assigned_client_id_supported` | Server assigns a Client Identifier when the client sends an empty one |
+| `strict_client_id_charset` | Server rejects Client Identifiers with characters outside 0-9, a-z, A-Z |
+| `dollar_sys_publish` | Server lets clients publish to `$`-prefixed topics |
+| `sys_topics_published` | Server publishes retained `$SYS` topics of its own |
+| `no_server_keep_alive` | Server sends no Server Keep Alive in CONNACK |
+
+Client tests take their own requirement strings, checked against the client adapter's `ClientCapabilities`:
+
+| String | Description |
+|--------|-------------|
+| `client.automatic_reconnect` | The client reconnects on its own after the connection drops |
+| `client.offline_queue` | The client queues publishes made while it is disconnected |
+| `client.enhanced_auth` | The client runs a scripted enhanced authentication exchange and can re-authenticate |
 
 ## Conformance Profiles
 
@@ -167,6 +227,10 @@ The `SutHandle` enum abstracts over `InProcess` (in-process mqtt-lib broker) and
 
 Tests self-register at link time via `linkme::distributed_slice`. The `CONFORMANCE_TESTS` slice collects all `ConformanceTest` entries across the workspace with zero runtime cost. The CLI iterates over this slice to discover and run tests.
 
+### Client SUT mode
+
+`--client mqtt5` runs only the client tests, against the in-process mqtt5 client; without it the CLI runs only the broker tests. A client is plugged in through two traits in `client_sut.rs`: `ClientSut` creates a client from a `ConnectSpec` and reports its `ClientCapabilities`, and `ClientUnderTest` exposes connect, publish, subscribe, unsubscribe, disconnect, re-authenticate, the connection state and the messages received. The tests drive the client through these calls and play the broker side with `ScriptedBroker`, which accepts the client's TCP connection and reads and writes raw packets.
+
 ### Capability Gating
 
 Each `ConformanceTest` carries a `requires` array of `Requirement` values. Before running a test, the runner checks each requirement against the SUT's `Capabilities`. If any requirement fails, the test is skipped with a label identifying the missing capability.
@@ -178,7 +242,9 @@ Each `ConformanceTest` carries a `requires` array of `Requirement` values. Befor
 | `lib.rs` | Public API surface and module exports |
 | `sut.rs` | `SutDescriptor`, `SutHandle`, TOML parsing, address accessors |
 | `capabilities.rs` | `Capabilities` struct, `Requirement` enum, `TransportSupport`, `EnhancedAuthSupport`, `HookSupport` |
-| `registry.rs` | `ConformanceTest` record, `CONFORMANCE_TESTS` distributed slice, `TestRunner` type |
+| `registry.rs` | `ConformanceTest` record, `TestKind` (server or client runner), `CONFORMANCE_TESTS` distributed slice |
+| `client_sut.rs` | `ClientSut` and `ClientUnderTest` adapter traits, `ConnectSpec`, `PublishSpec`, `ClientCapabilities`, the in-process mqtt5 adapter |
+| `scripted_broker.rs` | `ScriptedBroker` and `BrokerConnection` (the broker side of client tests), packet builders |
 | `skip.rs` | `skip_if_missing()` evaluator, `SkipReason` |
 | `test_client/` | `TestClient` enum, `Subscription`, `ReceivedMessage`, in-process and raw backends |
 | `raw_client.rs` | `RawMqttClient` (byte-level transport), `RawPacketBuilder` (packet construction) |
@@ -188,4 +254,5 @@ Each `ConformanceTest` carries a `requires` array of `Requirement` values. Befor
 | `harness.rs` | `ConformanceBroker` — in-process broker fixture with random port binding |
 | `manifest.rs` | `ConformanceManifest` — TOML-based statement tracking, coverage statistics |
 | `report.rs` | `ConformanceReport` — text and JSON report generation |
-| `conformance_tests/` | 21 test modules organized by specification section |
+| `conformance_tests/` | 24 broker test modules organized by specification section |
+| `client_conformance_tests/` | 5 client test modules organized by specification section |

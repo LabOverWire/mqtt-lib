@@ -90,11 +90,13 @@ impl<T: Transport> RawMqttClient<T> {
         self.stream.write_all(data).await
     }
 
-    pub async fn read_packet_bytes(&mut self, timeout_dur: Duration) -> Option<Vec<u8>> {
-        match self
-            .read_until(tokio::time::Instant::now() + timeout_dur)
+    pub async fn read_packet(&mut self, timeout_dur: Duration) -> ReadOutcome {
+        self.read_until(tokio::time::Instant::now() + timeout_dur)
             .await
-        {
+    }
+
+    pub async fn read_packet_bytes(&mut self, timeout_dur: Duration) -> Option<Vec<u8>> {
+        match self.read_packet(timeout_dur).await {
             ReadOutcome::Packet(pkt) => Some(pkt),
             ReadOutcome::Closed | ReadOutcome::TimedOut => None,
         }
@@ -397,7 +399,7 @@ impl<T: Transport> RawMqttClient<T> {
     }
 }
 
-enum ReadOutcome {
+pub enum ReadOutcome {
     Packet(Vec<u8>),
     Closed,
     TimedOut,

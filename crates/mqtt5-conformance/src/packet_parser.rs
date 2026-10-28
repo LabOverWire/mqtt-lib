@@ -20,12 +20,19 @@ const PROP_CORRELATION_DATA: u8 = 0x09;
 const PROP_SUBSCRIPTION_IDENTIFIER: u8 = 0x0B;
 const PROP_SESSION_EXPIRY_INTERVAL: u8 = 0x11;
 const PROP_REASON_STRING: u8 = 0x1F;
+const PROP_AUTHENTICATION_METHOD: u8 = 0x15;
 const PROP_TOPIC_ALIAS: u8 = 0x23;
 const PROP_USER_PROPERTY: u8 = 0x26;
+const STRING_PROPERTIES: [u8; 4] = [
+    PROP_CONTENT_TYPE,
+    PROP_RESPONSE_TOPIC,
+    PROP_AUTHENTICATION_METHOD,
+    PROP_REASON_STRING,
+];
 const BYTE_PROPERTIES: [u8; 7] = [0x17, 0x19, 0x24, 0x25, 0x28, 0x29, 0x2A];
 const TWO_BYTE_PROPERTIES: [u8; 3] = [0x13, 0x21, 0x22];
 const FOUR_BYTE_PROPERTIES: [u8; 2] = [0x18, 0x27];
-const LENGTH_PREFIXED_PROPERTIES: [u8; 5] = [0x12, 0x15, 0x1A, 0x1C, 0x16];
+const LENGTH_PREFIXED_PROPERTIES: [u8; 4] = [0x12, 0x1A, 0x1C, 0x16];
 
 /// Decodes an MQTT variable-length integer starting at `start` in `data`.
 ///
@@ -89,9 +96,19 @@ pub struct ParsedProperties {
     pub message_expiry_interval: Option<u32>,
     pub session_expiry_interval: Option<u32>,
     pub reason_string: Option<String>,
+    pub authentication_method: Option<String>,
 }
 
 impl ParsedProperties {
+    fn string_slot(&mut self, prop_id: u8) -> &mut Option<String> {
+        match prop_id {
+            PROP_CONTENT_TYPE => &mut self.content_type,
+            PROP_RESPONSE_TOPIC => &mut self.response_topic,
+            PROP_AUTHENTICATION_METHOD => &mut self.authentication_method,
+            _ => &mut self.reason_string,
+        }
+    }
+
     /// Parses the property block at `[start..start+len]`.
     ///
     /// Returns `None` if any property's body is truncated or unknown.
@@ -126,14 +143,9 @@ impl ParsedProperties {
                     ));
                     idx += 4;
                 }
-                PROP_CONTENT_TYPE => {
+                id if STRING_PROPERTIES.contains(&id) => {
                     let (s, next) = decode_string(data, idx)?;
-                    props.content_type = Some(s);
-                    idx = next;
-                }
-                PROP_RESPONSE_TOPIC => {
-                    let (s, next) = decode_string(data, idx)?;
-                    props.response_topic = Some(s);
+                    *props.string_slot(id) = Some(s);
                     idx = next;
                 }
                 PROP_CORRELATION_DATA => {
@@ -152,11 +164,6 @@ impl ParsedProperties {
                 PROP_SUBSCRIPTION_IDENTIFIER => {
                     let (val, next) = decode_variable_int(data, idx)?;
                     props.subscription_identifiers.push(val);
-                    idx = next;
-                }
-                PROP_REASON_STRING => {
-                    let (s, next) = decode_string(data, idx)?;
-                    props.reason_string = Some(s);
                     idx = next;
                 }
                 PROP_TOPIC_ALIAS => {
@@ -188,6 +195,91 @@ impl ParsedProperties {
             }
         }
         Some(props)
+    }
+}
+
+#[must_use]
+pub fn decode_binary(data: &[u8], idx: usize) -> Option<(Vec<u8>, usize)> {
+    let len = usize::from(u16::from_be_bytes(*data.get(idx..idx + 2)?.first_chunk()?));
+    let end = idx + 2 + len;
+    Some((data.get(idx + 2..end)?.to_vec(), end))
+}
+
+#[derive(Debug, Clone)]
+pub struct ParsedWill {
+    pub properties: ParsedProperties,
+    pub topic: Vec<u8>,
+    pub payload: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ParsedConnect {
+    pub protocol_name: Vec<u8>,
+    pub protocol_version: u8,
+    pub flags: u8,
+    pub keep_alive: u16,
+    pub properties_length: u32,
+    pub properties: ParsedProperties,
+    pub client_id: Vec<u8>,
+    pub will: Option<ParsedWill>,
+    pub username: Option<Vec<u8>>,
+    pub password: Option<Vec<u8>>,
+    pub trailing_bytes: usize,
+}
+
+impl ParsedConnect {
+    #[must_use]
+    pub fn parse(data: &[u8]) -> Option<Self> {
+        if data.first() != Some(&0x10) {
+            return None;
+        }
+        let (remaining_len, body_start) = decode_variable_int(data, 1)?;
+        let body = data.get(body_start..body_start + remaining_len as usize)?;
+        let (protocol_name, idx) = decode_binary(body, 0)?;
+        let [protocol_version, flags, keep_alive @ ..] =
+            *body.get(idx..idx + 4)?.first_chunk::<4>()?;
+        let (properties_length, props_start) = decode_variable_int(body, idx + 4)?;
+        let properties = ParsedProperties::parse(body, props_start, properties_length as usize)?;
+        let (client_id, mut idx) = decode_binary(body, props_start + properties_length as usize)?;
+        let will = if flags & 0x04 == 0 {
+            None
+        } else {
+            let (will_props_len, will_props_start) = decode_variable_int(body, idx)?;
+            let properties =
+                ParsedProperties::parse(body, will_props_start, will_props_len as usize)?;
+            let (topic, after_topic) =
+                decode_binary(body, will_props_start + will_props_len as usize)?;
+            let (payload, after_payload) = decode_binary(body, after_topic)?;
+            idx = after_payload;
+            Some(ParsedWill {
+                properties,
+                topic,
+                payload,
+            })
+        };
+        let mut optional_field = |present: bool| -> Option<Option<Vec<u8>>> {
+            if !present {
+                return Some(None);
+            }
+            let (value, next) = decode_binary(body, idx)?;
+            idx = next;
+            Some(Some(value))
+        };
+        let username = optional_field(flags & 0x80 != 0)?;
+        let password = optional_field(flags & 0x40 != 0)?;
+        Some(Self {
+            protocol_name,
+            protocol_version,
+            flags,
+            keep_alive: u16::from_be_bytes(keep_alive),
+            properties_length,
+            properties,
+            client_id,
+            will,
+            username,
+            password,
+            trailing_bytes: body.len() - idx,
+        })
     }
 }
 

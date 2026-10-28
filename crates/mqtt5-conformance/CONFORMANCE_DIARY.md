@@ -32,12 +32,41 @@
 - [x] Phase 3 — QoS Protocol State Machine (12 tests, 15 normative statements)
 - [x] Final 7 remaining untested — 7 tests, 0 remaining Untested
 - [x] Offline queued delivery (8 tests, 4 normative statements)
+- [x] Client SUT mode, phase 1: framework and `conf_client_a.rs` (38 tests, 35 normative statements)
+- [ ] Client SUT mode, phase 2: `conf_client_b.rs`, `conf_client_c.rs`, `conf_client_d.rs`, `conf_client_offline_queue.rs`
+- [ ] Client SUT mode, phase 3: external client adapter protocol
 
 **Rule**: after every step, every detail learned, every fix applied — add an entry here. New entries go on top, beneath this plan list.
 
 ---
 
 ## Diary Entries
+
+### Client SUT mode, phase 1 (2026-10-27)
+
+**Trigger**: #166 part 2. The client tests in `crates/mqtt5/tests/conf_client_*.rs` and `crates/mqtt5-wasm/tests/conformance_client.rs` each bring their own fake broker and are invisible to the manifest, so every Client statement was NotApplicable or Untested.
+
+**Changes**:
+- `client_sut.rs`: `ClientSut` creates a client from a `ConnectSpec` and reports `ClientCapabilities`; `ClientUnderTest` exposes connect, publish, subscribe, unsubscribe, disconnect, reauthenticate, `is_connected` and the received messages. Futures are `'static`, so tests can spawn a call and keep acting as the broker. The in-process adapter wraps `MqttClient` and needs the `inprocess-fixture` feature.
+- `scripted_broker.rs`: `ScriptedBroker` accepts the client's TCP connection and `BrokerConnection` reads framed packets through `RawMqttClient::read_packet`, which now returns the packet, closed or timed out outcome. It also holds the packet builders. It is crate private, so it needs no `# Errors` docs.
+- `registry.rs`: a test has a `TestKind`, `Server` or `Client`, each with its own requirements and runner. `#[client_conformance_test]` registers a client test; its `cargo test` wrapper uses the in-process client. Client requirements are `client.automatic_reconnect`, `client.offline_queue` and `client.enhanced_auth`.
+- CLI: `--client mqtt5` runs only the client tests; without it only the broker tests run, so broker counts are unchanged.
+- `packet_parser.rs`: `ParsedConnect`, `decode_binary`, and `ParsedProperties::authentication_method`. The string properties share one branch through `string_slot`.
+
+**Port of `conf_client_a.rs`**: 38 of its 50 tests moved to `src/client_conformance_tests/`. Each test's IDs were checked against the statement texts:
+- MQTT-3.1.2-3 dropped from the CONNECT test (it is the Server's validation rule). The Will flag checks were split into MQTT-3.1.2-11 (Will QoS) and MQTT-3.1.2-13 (Will Retain).
+- The Request Problem Information tests cite MQTT-3.1.2-29 (the rule the scripted server breaks) and MQTT-4.13.2-1 (the close after DISCONNECT 0x82), as the broker tests cite a broken Client rule plus the close rule. DISCONNECT 0x82 and the close are separate assertions.
+- The QoS 0 PUBLISH test cited MQTT-2.1.3-1 for its flags, but PUBLISH flags are not reserved. It now checks DUP 0 under MQTT-3.3.1-2, and MQTT-2.2.1-2 (no packet id) and MQTT-2.2.2-1 (Property Length 0) are separate assertions.
+- 12 tests stay in `conf_client_a.rs`: four stale-capability checks, the Request Problem Information and Authentication Data wire checks, the `PacketTooLarge` error check, two `resume_existing_session` tests, two Topic Alias replay tests (their messages cited MQTT-3.3.2-7, a receiver rule) and the Wildcard Subscription Available test, which was named and labelled after MQTT-3.2.2-21, the Server Keep Alive rule.
+
+**Manifest**: 22 statements are Tested now (11 were NotApplicable, 10 Untested, MQTT-2.2.2-1 was CrossRef), 179 of 251. MQTT-2.2.2-1 was the only CrossRef, so `manifest_load`'s CrossRef parse and report checks use a temporary manifest.
+
+**Controls**: 50 mutations of the mqtt5 client and codec, one rule at a time, 62 test runs. Every target failed on the assertion tagged with the broken rule. Found along the way:
+- `BrokerConnection::next_of_type` first answered PINGREQ before checking the type, so the Server Keep Alive test could never see one.
+- Leaving a CONNECT field out made the test fail on an untagged parse; the parse now fails with the rule tags.
+- The client's PUBLISH writes its own fixed header in `transport/packet_io.rs`, so a mutation of `FixedHeader::encode` does not reach it.
+
+**Results**: conformance lib 289 passed (251 broker, 38 client), `manifest_load` 13 passed, integration files pass; `conf_client_a` 12 passed. CLI in-process 191 passed, 3 skipped; `--client mqtt5` 38 passed; external mqttv5 on 21883 191 passed, 3 skipped; Mosquitto 2.1.2 on 21884 187 passed, 7 skipped. fmt and the four pedantic clippy runs are clean.
 
 ### Raw reader cleanup (2026-10-26)
 

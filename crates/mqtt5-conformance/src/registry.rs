@@ -11,6 +11,7 @@
 //! The runner observes the union without any explicit registration step.
 
 use crate::capabilities::Requirement;
+use crate::client_sut::{ClientRequirement, ClientSutHandle};
 use crate::sut::SutHandle;
 use std::future::Future;
 use std::pin::Pin;
@@ -31,6 +32,20 @@ pub type TestFuture = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 /// panics on assertion failure, matching libtest-mimic's expectations.
 pub type TestRunner = fn(SutHandle) -> TestFuture;
 
+pub type ClientTestRunner = fn(ClientSutHandle) -> TestFuture;
+
+#[derive(Debug, Clone, Copy)]
+pub enum TestKind {
+    Server {
+        requires: &'static [Requirement],
+        runner: TestRunner,
+    },
+    Client {
+        requires: &'static [ClientRequirement],
+        runner: ClientTestRunner,
+    },
+}
+
 /// A single conformance test registered at compile time.
 ///
 /// Constructed by the `#[conformance_test]` proc-macro and stored in the
@@ -43,8 +58,7 @@ pub struct ConformanceTest {
     pub file: &'static str,
     pub line: u32,
     pub ids: &'static [&'static str],
-    pub requires: &'static [Requirement],
-    pub runner: TestRunner,
+    pub kind: TestKind,
 }
 
 /// Distributed slice collecting every `#[conformance_test]` in the build.

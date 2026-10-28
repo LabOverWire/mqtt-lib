@@ -25,6 +25,12 @@ Run against an external broker:
 ./target/conformance/mqtt5-conformance --sut tests/fixtures/mosquitto-2.x.toml
 ```
 
+Run the client tests against the in-process mqtt5 client:
+
+```bash
+./target/conformance/mqtt5-conformance --client mqtt5
+```
+
 Generate a JSON conformance report:
 
 ```bash
@@ -48,7 +54,8 @@ List all tests without running them:
 | Argument | Description |
 |----------|-------------|
 | `--sut <path>` | Path to a TOML file describing the System Under Test. If omitted, uses the built-in in-process mqtt-lib broker with WebSocket support. |
-| `--report <path>` | Write a JSON conformance report to this path after the test run completes. |
+| `--client <name>` | Run the client tests instead of the broker tests. The only built-in client is `mqtt5`, the in-process mqtt5 client. Cannot be combined with `--sut`. |
+| `--report <path>` | Write a JSON conformance report to this path after the test run completes. In client mode its `capabilities` object lists the client adapter's name and capabilities. |
 | All other args | Forwarded to the `libtest_mimic` test harness. Supports `--list`, `--ignored`, `--nocapture`, name substring filters, and all standard test flags. |
 
 ## SUT Descriptor Format
@@ -174,7 +181,7 @@ When `--report <path>` is provided, the CLI writes a JSON file with this structu
 | Field | Description |
 |-------|-------------|
 | `summary` | Aggregate pass/fail/ignore/filter counts from the test run |
-| `capabilities` | Snapshot of the SUT's declared capabilities |
+| `capabilities` | Snapshot of the SUT's declared capabilities; with `--client`, the client name and its `automatic_reconnect`, `offline_queue` and `enhanced_auth` capabilities |
 | `tests` | Per-test entries with conformance IDs, source location, and outcome |
 | `status` | `"passed"`, `"failed"`, `"skipped"` (requirement unmet) or `"not_run"` (filtered out) |
 | `failure` | The panic message of a failed test, or `null` |

@@ -212,6 +212,28 @@ fn requirement_to_tokens(spec: &LitStr) -> syn::Result<proc_macro2::TokenStream>
     Ok(quote! { #path::#variant })
 }
 
+fn client_requirement_to_tokens(spec: &LitStr) -> syn::Result<proc_macro2::TokenStream> {
+    let path = quote! { ::mqtt5_conformance::client_sut::ClientRequirement };
+    let variant = match spec.value().as_str() {
+        "client.automatic_reconnect" => quote! { AutomaticReconnect },
+        "client.offline_queue" => quote! { OfflineQueue },
+        "client.enhanced_auth" => quote! { EnhancedAuth },
+        _ => {
+            return Err(Error::new_spanned(
+                spec,
+                "unknown client requirement (expected client.automatic_reconnect, client.offline_queue or client.enhanced_auth)",
+            ));
+        }
+    };
+    Ok(quote! { #path::#variant })
+}
+
+#[derive(Clone, Copy)]
+enum Role {
+    Server,
+    Client,
+}
+
 fn validate_signature(item_fn: &ItemFn) -> syn::Result<()> {
     if item_fn.sig.asyncness.is_none() {
         return Err(Error::new_spanned(
@@ -222,7 +244,7 @@ fn validate_signature(item_fn: &ItemFn) -> syn::Result<()> {
     if item_fn.sig.inputs.len() != 1 {
         return Err(Error::new_spanned(
             &item_fn.sig.inputs,
-            "#[conformance_test] async fn must take exactly one argument: `sut: SutHandle`",
+            "#[conformance_test] async fn must take exactly one argument: `sut: SutHandle` or `client: ClientSutHandle`",
         ));
     }
     if !matches!(item_fn.sig.output, ReturnType::Default) {
@@ -238,19 +260,30 @@ fn validate_signature(item_fn: &ItemFn) -> syn::Result<()> {
 pub fn conformance_test(attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attr as ConformanceTestArgs);
     let item_fn = parse_macro_input!(item as ItemFn);
+    expand(&args, &item_fn, Role::Server).unwrap_or_else(|e| e.to_compile_error().into())
+}
 
-    if let Err(e) = validate_signature(&item_fn) {
-        return e.to_compile_error().into();
-    }
+#[proc_macro_attribute]
+pub fn client_conformance_test(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let args = parse_macro_input!(attr as ConformanceTestArgs);
+    let item_fn = parse_macro_input!(item as ItemFn);
+    expand(&args, &item_fn, Role::Client).unwrap_or_else(|e| e.to_compile_error().into())
+}
+
+fn expand(args: &ConformanceTestArgs, item_fn: &ItemFn, role: Role) -> syn::Result<TokenStream> {
+    validate_signature(item_fn)?;
     for id in &args.ids {
-        if let Err(e) = validate_id_format(id) {
-            return e.to_compile_error().into();
-        }
+        validate_id_format(id)?;
     }
-    for req in &args.requires {
-        if let Err(e) = validate_require_spec(req) {
-            return e.to_compile_error().into();
-        }
+    let mut requires_tokens = Vec::with_capacity(args.requires.len());
+    for spec in &args.requires {
+        requires_tokens.push(match role {
+            Role::Server => {
+                validate_require_spec(spec)?;
+                requirement_to_tokens(spec)?
+            }
+            Role::Client => client_requirement_to_tokens(spec)?,
+        });
     }
 
     let user_name = item_fn.sig.ident.clone();
@@ -267,13 +300,19 @@ pub fn conformance_test(attr: TokenStream, item: TokenStream) -> TokenStream {
         let v = s.value();
         quote! { #v }
     });
-    let mut requires_tokens = Vec::with_capacity(args.requires.len());
-    for spec in &args.requires {
-        match requirement_to_tokens(spec) {
-            Ok(tokens) => requires_tokens.push(tokens),
-            Err(e) => return e.to_compile_error().into(),
-        }
-    }
+
+    let (handle_type, inprocess_handle, kind_variant) = match role {
+        Role::Server => (
+            quote! { ::mqtt5_conformance::sut::SutHandle },
+            quote! { ::mqtt5_conformance::sut::inprocess_sut_with_websocket().await },
+            quote! { Server },
+        ),
+        Role::Client => (
+            quote! { ::mqtt5_conformance::client_sut::ClientSutHandle },
+            quote! { ::mqtt5_conformance::client_sut::inprocess_client() },
+            quote! { Client },
+        ),
+    };
 
     let expanded = quote! {
         #impl_fn
@@ -281,13 +320,11 @@ pub fn conformance_test(attr: TokenStream, item: TokenStream) -> TokenStream {
         #[cfg(test)]
         #[::tokio::test]
         async fn #user_name() {
-            let sut = ::mqtt5_conformance::sut::inprocess_sut_with_websocket().await;
+            let sut = #inprocess_handle;
             #impl_ident(sut).await;
         }
 
-        fn #runner_ident(
-            sut: ::mqtt5_conformance::sut::SutHandle,
-        ) -> ::mqtt5_conformance::registry::TestFuture {
+        fn #runner_ident(sut: #handle_type) -> ::mqtt5_conformance::registry::TestFuture {
             ::std::boxed::Box::pin(async move {
                 #impl_ident(sut).await;
             })
@@ -304,10 +341,12 @@ pub fn conformance_test(attr: TokenStream, item: TokenStream) -> TokenStream {
                 file: ::std::file!(),
                 line: ::std::line!(),
                 ids: &[#(#ids),*],
-                requires: &[#(#requires_tokens),*],
-                runner: #runner_ident,
+                kind: ::mqtt5_conformance::registry::TestKind::#kind_variant {
+                    requires: &[#(#requires_tokens),*],
+                    runner: #runner_ident,
+                },
             };
     };
 
-    expanded.into()
+    Ok(expanded.into())
 }

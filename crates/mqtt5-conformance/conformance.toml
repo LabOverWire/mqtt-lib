@@ -12,7 +12,7 @@ level = "Must"
 applies_to = "Both"
 text = "The character data in a UTF-8 Encoded String MUST be well-formed UTF-8 as defined by the Unicode specification [Unicode] and restated in RFC 3629 [RFC3629]. In particular, the character data MUST NOT include encodings of code points between U+D800 and U+DFFF"
 status = "Tested"
-test_names = ["utf8_surrogate_codepoints_rejected"]
+test_names = ["utf8_surrogate_codepoints_rejected", "surrogate_in_inbound_topic_is_malformed", "network_connection_closed_after_malformed_packet"]
 
 [[sections."1.5".statements]]
 id = "MQTT-1.5.4-3"
@@ -27,8 +27,8 @@ id = "MQTT-1.5.5-1"
 level = "Must"
 applies_to = "Both"
 text = "The encoded value MUST use the minimum number of bytes necessary to represent the value"
-status = "Untested"
-test_names = []
+status = "Tested"
+test_names = ["remaining_length_minimal_encoding"]
 
 [[sections."1.5".statements]]
 id = "MQTT-1.5.7-1"
@@ -36,15 +36,15 @@ level = "Must"
 applies_to = "Both"
 text = "Both strings MUST comply with the requirements for UTF-8 Encoded Strings . If a receiver (Client or Server) receives a string pair which does not meet these requirements it is a Malformed Packet"
 status = "Tested"
-test_names = ["invalid_utf8_user_property_rejected"]
+test_names = ["invalid_utf8_user_property_rejected", "invalid_utf8_user_property_pair_is_malformed"]
 
 [[sections."1.5".statements]]
 id = "MQTT-1.5.4-2"
 level = "MustNot"
 applies_to = "Both"
 text = "A UTF-8 Encoded String MUST NOT include an encoding of the null character U+0000."
-status = "Untested"
-test_names = []
+status = "Tested"
+test_names = ["null_in_inbound_topic_is_malformed", "null_character_never_encoded"]
 note = "Added: absent from the manifest. Eight of the nine are among the appendix IDs missing from the rfc-extract import source"
 
 # ===========================================================================
@@ -61,7 +61,7 @@ level = "Must"
 applies_to = "Both"
 text = "Where a flag bit is marked as Reserved, it is reserved for future use and MUST be set to the value listed"
 status = "Tested"
-test_names = ["reserved_flags_correct_on_server_packets", "connect_invalid_fixed_header_flags"]
+test_names = ["reserved_flags_correct_on_server_packets", "connect_invalid_fixed_header_flags", "reserved_flags_on_inbound_puback_is_malformed", "reserved_flags_on_inbound_suback_is_malformed", "acks_echo_inbound_packet_id", "outbound_reserved_flags_and_nonzero_packet_ids"]
 
 # ===========================================================================
 # Section 2.2 -- Variable Header
@@ -76,17 +76,16 @@ id = "MQTT-2.2.1-2"
 level = "MustNot"
 applies_to = "Both"
 text = "A PUBLISH packet MUST NOT contain a Packet Identifier if its QoS value is set to 0"
-status = "Untested"
-test_names = []
+status = "Tested"
+test_names = ["qos0_publish_has_no_packet_id_and_zero_property_length"]
 
 [[sections."2.2".statements]]
 id = "MQTT-2.2.1-3"
 level = "Must"
 applies_to = "Client"
 text = "Each time a Client sends a new SUBSCRIBE, UNSUBSCRIBE,or PUBLISH (where QoS > 0) MQTT Control Packet it MUST assign it a non-zero Packet Identifier that is currently unused"
-status = "NotApplicable"
-test_names = []
-note = "Client-side behavior"
+status = "Tested"
+test_names = ["outbound_reserved_flags_and_nonzero_packet_ids", "packet_id_not_reused_while_in_flight_after_wrap"]
 
 [[sections."2.2".statements]]
 id = "MQTT-2.2.1-4"
@@ -102,7 +101,7 @@ level = "Must"
 applies_to = "Both"
 text = "A PUBACK, PUBREC , PUBREL, or PUBCOMP packet MUST contain the same Packet Identifier as the PUBLISH packet that was originally sent"
 status = "Tested"
-test_names = ["puback_correct_packet_id_and_reason", "pubrec_correct_packet_id_and_reason", "pubcomp_correct_packet_id_and_reason", "qos2_server_sends_pubrel_after_pubrec_and_holds_until_pubcomp", "server_pubrel_correct_flags"]
+test_names = ["puback_correct_packet_id_and_reason", "pubrec_correct_packet_id_and_reason", "pubcomp_correct_packet_id_and_reason", "qos2_server_sends_pubrel_after_pubrec_and_holds_until_pubcomp", "server_pubrel_correct_flags", "acks_echo_inbound_packet_id", "outbound_reserved_flags_and_nonzero_packet_ids"]
 
 [[sections."2.2".statements]]
 id = "MQTT-2.2.1-6"
@@ -117,9 +116,8 @@ id = "MQTT-2.2.2-1"
 level = "Must"
 applies_to = "Both"
 text = "If there are no properties, this MUST be indicated by including a Property Length of zero"
-status = "CrossRef"
-test_names = []
-note = "Protocol layer encodes zero-length properties implicitly; verified by all CONNECT/PUBLISH packet exchanges"
+status = "Tested"
+test_names = ["qos0_publish_has_no_packet_id_and_zero_property_length", "connect_flags_payload_order_and_will"]
 
 [sections."3.1"]
 title = "CONNECT - Connection Request"
@@ -213,8 +211,8 @@ id = "MQTT-3.1.2-9"
 level = "Must"
 applies_to = "Server"
 text = "If the Will Flag is set to 1, the Will Properties, Will Topic, and Will Payload fields MUST be present in the Payload"
-status = "Untested"
-test_names = []
+status = "Tested"
+test_names = ["connect_flags_payload_order_and_will"]
 note = "Corrected from the normative body: previously carried the text of MQTT-3.1.2-12. Appendix B renders this statement differently and says 'Will Message' where the body says 'Will Payload'"
 
 [[sections."3.1".statements]]
@@ -231,7 +229,7 @@ level = "Must"
 applies_to = "Server"
 text = "If the Will Flag is set to 0, then the Will QoS MUST be set to 0 (0x00)."
 status = "Tested"
-test_names = ["connect_will_qos_zero_without_will_flag"]
+test_names = ["connect_will_qos_zero_without_will_flag", "connect_flags_payload_order_and_will"]
 
 [[sections."3.1".statements]]
 id = "MQTT-3.1.3-3"
@@ -326,7 +324,7 @@ level = "Must"
 applies_to = "Both"
 text = "If the Will Flag is set to 0, then Will Retain MUST be set to 0"
 status = "Tested"
-test_names = ["connect_will_retain_zero_without_will_flag"]
+test_names = ["connect_will_retain_zero_without_will_flag", "connect_flags_payload_order_and_will"]
 
 [[sections."3.1".statements]]
 id = "MQTT-3.1.2-14"
@@ -349,8 +347,8 @@ id = "MQTT-3.1.2-16"
 level = "MustNot"
 applies_to = "Both"
 text = "If the User Name Flag is set to 0, a User Name MUST NOT be present in the Payload"
-status = "Untested"
-test_names = []
+status = "Tested"
+test_names = ["connect_flags_payload_order_and_will"]
 
 [[sections."3.1".statements]]
 id = "MQTT-3.1.2-17"
@@ -358,41 +356,39 @@ level = "Must"
 applies_to = "Both"
 text = "If the User Name Flag is set to 1, a User Name MUST be present in the Payload"
 status = "Tested"
-test_names = ["username_flag_without_username_is_malformed"]
+test_names = ["username_flag_without_username_is_malformed", "connect_flags_payload_order_and_will"]
 
 [[sections."3.1".statements]]
 id = "MQTT-3.1.2-18"
 level = "MustNot"
 applies_to = "Both"
 text = "If the Password Flag is set to 0, a Password MUST NOT be present in the Payload"
-status = "Untested"
-test_names = []
+status = "Tested"
+test_names = ["connect_flags_payload_order_and_will"]
 
 [[sections."3.1".statements]]
 id = "MQTT-3.1.2-19"
 level = "Must"
 applies_to = "Both"
 text = "If the Password Flag is set to 1, a Password MUST be present in the Payload"
-status = "Untested"
-test_names = []
+status = "Tested"
+test_names = ["connect_flags_payload_order_and_will"]
 
 [[sections."3.1".statements]]
 id = "MQTT-3.1.2-20"
 level = "Must"
 applies_to = "Client"
 text = "If Keep Alive is non-zero and in the absence of sending any other MQTT Control Packets, the Client MUST send a PINGREQ packet"
-status = "NotApplicable"
-test_names = []
-note = "Client-side behavior"
+status = "Tested"
+test_names = ["pingreq_sent_when_idle"]
 
 [[sections."3.1".statements]]
 id = "MQTT-3.1.2-21"
 level = "Must"
 applies_to = "Both"
 text = "If the Server returns a Server Keep Alive on the CONNACK packet, the Client MUST use that value instead of the value it sent as the Keep Alive"
-status = "Untested"
-test_names = []
-note = "Cited test(s) are not in the conformance registry and never execute under the CLI: server_keep_alive_override. Most exist in tests/ as plain tokio tests needing a per-test fixture the shared SutHandle cannot provide"
+status = "Tested"
+test_names = ["server_keep_alive_overrides_client_value"]
 
 [[sections."3.1".statements]]
 id = "MQTT-3.1.2-22"
@@ -408,7 +404,7 @@ level = "Must"
 applies_to = "Both"
 text = "The Client and Server MUST store the Session State after the Network Connection is closed if the Session Expiry Interval is greater than 0"
 status = "Tested"
-test_names = ["session_stored_when_expiry_positive", "disconnect_session_expiry_extends_session"]
+test_names = ["session_stored_when_expiry_positive", "disconnect_session_expiry_extends_session", "unacked_qos1_publish_resent_on_session_resume", "unacked_pubrel_resent_on_session_resume"]
 
 [[sections."3.1".statements]]
 id = "MQTT-3.1.2-24"
@@ -458,33 +454,31 @@ level = "MustNot"
 applies_to = "Both"
 text = "If the value of Request Problem Information is 0, the Server MAY return a Reason String or User Properties on a CONNACK or DISCONNECT packet, but MUST NOT send a Reason String or User Properties on any packet other than PUBLISH, CONNACK, or DISCONNECT . If the value is 0 and the Client receives a Reason String or User Properties in a packet other than PUBLISH, CONNACK, or DISCONNECT, it uses a DISCONNECT packet with Reason Code 0x82 (Protocol Error) as described in section 4.13 Handling errors"
 status = "Tested"
-test_names = ["request_problem_info_zero_suppresses_properties"]
+test_names = ["request_problem_info_zero_suppresses_properties", "reason_string_on_puback_with_problem_information_0_disconnects", "user_property_on_suback_with_problem_information_0_disconnects", "reason_string_on_reauth_with_problem_information_0_disconnects"]
 
 [[sections."3.1".statements]]
 id = "MQTT-3.1.2-30"
 level = "MustNot"
 applies_to = "Client"
 text = "If a Client sets an Authentication Method in the CONNECT, the Client MUST NOT send any packets other than AUTH or DISCONNECT packets until it has received a CONNACK packet"
-status = "NotApplicable"
-test_names = []
-note = "Client-side behavior"
+status = "Tested"
+test_names = ["only_auth_before_connack_when_auth_method_set"]
 
 [[sections."3.1".statements]]
 id = "MQTT-3.1.3-1"
 level = "Must"
 applies_to = "Client"
 text = "These fields, if present, MUST appear in the order Client Identifier, Will Properties, Will Topic, Will Payload, User Name, Password"
-status = "NotApplicable"
-test_names = []
-note = "Client-side behavior — server parses fields in expected order"
+status = "Tested"
+test_names = ["connect_flags_payload_order_and_will"]
 
 [[sections."3.1".statements]]
 id = "MQTT-3.1.3-2"
 level = "Must"
 applies_to = "Both"
 text = "The ClientID MUST be used by Clients and by Servers to identify state that they hold relating to this MQTT Session between the Client and the Server"
-status = "Untested"
-test_names = []
+status = "Tested"
+test_names = ["assigned_client_identifier_used_to_resume_session"]
 
 [[sections."3.1".statements]]
 id = "MQTT-3.1.3-6"
@@ -570,7 +564,7 @@ level = "Must"
 applies_to = "Both"
 text = "Byte 1 is the Connect Acknowledge Flags. Bits 7-1 are reserved and MUST be set to 0."
 status = "Tested"
-test_names = ["connack_reserved_flags_zero"]
+test_names = ["connack_reserved_flags_zero", "connack_reserved_bits_rejected"]
 
 [[sections."3.2".statements]]
 id = "MQTT-3.2.2-2"
@@ -595,9 +589,8 @@ id = "MQTT-3.2.2-4"
 level = "Must"
 applies_to = "Client"
 text = "If the Client does not have Session State and receives Session Present set to 1 it MUST close the Network Connection."
-status = "NotApplicable"
-test_names = []
-note = "Client-side behavior"
+status = "Tested"
+test_names = ["fresh_client_clean_start_1_session_present_1_must_close", "fresh_client_clean_start_0_session_present_1_must_close"]
 
 [[sections."3.2".statements]]
 id = "MQTT-3.2.2-5"
@@ -655,9 +648,8 @@ id = "MQTT-3.2.2-11"
 level = "Must"
 applies_to = "Client"
 text = "If a Client receives a Maximum QoS from a Server, it MUST NOT send PUBLISH packets at a QoS level exceeding the Maximum QoS level specified."
-status = "NotApplicable"
-test_names = []
-note = "Client-side behavior"
+status = "Tested"
+test_names = ["maximum_qos_limits_live_publish", "maximum_qos_applies_to_messages_queued_while_offline", "maximum_qos_newly_imposed_on_reconnect"]
 
 [[sections."3.2".statements]]
 id = "MQTT-3.2.2-12"
@@ -682,18 +674,16 @@ id = "MQTT-3.2.2-14"
 level = "Must"
 applies_to = "Client"
 text = "A Client receiving Retain Available set to 0 from the Server MUST NOT send a PUBLISH packet with the RETAIN flag set to 1."
-status = "NotApplicable"
-test_names = []
-note = "Client-side behavior"
+status = "Tested"
+test_names = ["retain_available_0_client_must_not_send_retain", "retain_available_applies_to_messages_queued_while_offline"]
 
 [[sections."3.2".statements]]
 id = "MQTT-3.2.2-15"
 level = "Must"
 applies_to = "Client"
 text = "The Client MUST NOT send packets exceeding Maximum Packet Size to the Server."
-status = "NotApplicable"
-test_names = []
-note = "Client-side behavior"
+status = "Tested"
+test_names = ["maximum_packet_size_newly_imposed_on_reconnect", "automatic_puback_respects_tiny_maximum_packet_size", "automatic_pubrec_respects_tiny_maximum_packet_size", "oversized_subscribe_not_sent", "oversized_unsubscribe_not_sent"]
 
 [[sections."3.2".statements]]
 id = "MQTT-3.2.2-16"
@@ -708,18 +698,16 @@ id = "MQTT-3.2.2-17"
 level = "Must"
 applies_to = "Client"
 text = "The Client MUST NOT send a Topic Alias in a PUBLISH packet to the Server greater than this value."
-status = "NotApplicable"
-test_names = []
-note = "Client-side behavior"
+status = "Tested"
+test_names = ["topic_alias_above_server_maximum_not_sent"]
 
 [[sections."3.2".statements]]
 id = "MQTT-3.2.2-18"
 level = "Must"
 applies_to = "Client"
 text = "If Topic Alias Maximum is absent or 0, the Client MUST NOT send any Topic Aliases on to the Server."
-status = "NotApplicable"
-test_names = []
-note = "Client-side behavior"
+status = "Tested"
+test_names = ["topic_alias_absent_client_must_not_send_alias", "topic_alias_maximum_not_stale_after_reconnect"]
 
 [[sections."3.2".statements]]
 id = "MQTT-3.2.2-19"
@@ -744,9 +732,8 @@ id = "MQTT-3.2.2-21"
 level = "Must"
 applies_to = "Client"
 text = "If the Server sends a Server Keep Alive on the CONNACK packet, the Client MUST use this value instead of the Keep Alive value the Client sent on CONNECT."
-status = "NotApplicable"
-test_names = []
-note = "Client-side behavior"
+status = "Tested"
+test_names = ["server_keep_alive_overrides_client_value"]
 
 [[sections."3.2".statements]]
 id = "MQTT-3.2.2-22"
@@ -766,8 +753,8 @@ id = "MQTT-3.3.1-1"
 level = "Must"
 applies_to = "Both"
 text = "The DUP flag MUST be set to 1 by the Client or Server when it attempts to re-deliver a PUBLISH packet."
-status = "Untested"
-test_names = []
+status = "Tested"
+test_names = ["unacked_qos1_publish_resent_on_session_resume"]
 note = "Re-reviewed: previously NotApplicable as client-side, but the statement binds the Client OR Server and this broker re-delivers unacknowledged QoS 1/2 messages (publish.rs:819)"
 
 [[sections."3.3".statements]]
@@ -776,7 +763,7 @@ level = "Must"
 applies_to = "Both"
 text = "The DUP flag MUST be set to 0 for all QoS 0 messages."
 status = "Tested"
-test_names = ["publish_dup_must_be_zero_for_qos0", "qos0_server_outbound_publish_has_dup_zero"]
+test_names = ["publish_dup_must_be_zero_for_qos0", "qos0_server_outbound_publish_has_dup_zero", "qos0_publish_has_no_packet_id_and_zero_property_length"]
 
 [[sections."3.3".statements]]
 id = "MQTT-3.3.1-3"
@@ -1978,7 +1965,7 @@ level = "MustNot"
 applies_to = "Both"
 text = "Clients and Servers MUST NOT resend messages at any other time"
 status = "Tested"
-test_names = ["no_spontaneous_retransmission_on_active_connection"]
+test_names = ["no_spontaneous_retransmission_on_active_connection", "unacked_qos1_publish_resent_on_session_resume", "unacked_pubrel_resent_on_session_resume"]
 
 [[sections."4.4".statements]]
 id = "MQTT-4.4.0-2"
@@ -2350,7 +2337,7 @@ level = "Must"
 applies_to = "Both"
 text = "The CONNACK and DISCONNECT packets allow a Reason Code of 0x80 or greater to indicate that the Network Connection will be closed. If a Reason Code of 0x80 or greater is specified, then the Network Connection MUST be closed whether or not the CONNACK or DISCONNECT is sent."
 status = "Tested"
-test_names = ["protocol_error_disconnect_closes_connection"]
+test_names = ["protocol_error_disconnect_closes_connection", "reason_string_on_puback_with_problem_information_0_disconnects", "user_property_on_suback_with_problem_information_0_disconnects", "reason_string_on_reauth_with_problem_information_0_disconnects", "network_connection_closed_after_malformed_packet"]
 
 # ===========================================================================
 # Section 6.0 -- Using WebSocket as a Network Transport

@@ -1,6 +1,6 @@
 # mqtt5-conformance-macros
 
-Proc-macro crate providing the `#[conformance_test]` attribute for the MQTT v5.0 conformance test suite.
+Proc-macro crate providing the `#[conformance_test]` and `#[client_conformance_test]` attributes for the MQTT v5.0 conformance test suite.
 
 ## Usage
 
@@ -45,6 +45,13 @@ The `requires` parameter accepts these capability strings:
 | `hooks.restart` | SUT can be restarted between tests |
 | `hooks.cleanup` | SUT state can be cleaned up between tests |
 | `acl` | SUT supports topic-level access control |
+| `assigned_client_id_supported` | SUT assigns a Client Identifier when the client sends an empty one |
+| `strict_client_id_charset` | SUT rejects Client Identifiers with characters outside 0-9, a-z, A-Z |
+| `dollar_sys_publish` | SUT lets clients publish to `$`-prefixed topics |
+| `sys_topics_published` | SUT publishes retained `$SYS` topics of its own |
+| `no_server_keep_alive` | SUT sends no Server Keep Alive in CONNACK |
+
+`#[client_conformance_test]` accepts the client requirement strings instead: `client.automatic_reconnect`, `client.offline_queue` and `client.enhanced_auth`.
 
 All requirement strings are validated at compile time. Invalid strings produce a compilation error.
 
@@ -53,7 +60,7 @@ All requirement strings are validated at compile time. Invalid strings produce a
 The annotated function must be:
 
 - **`async`** — synchronous functions are rejected at compile time
-- **Exactly one parameter**: `sut: SutHandle`
+- **Exactly one parameter**: `sut: SutHandle`, or `client: ClientSutHandle` for `#[client_conformance_test]`
 - **Return type**: `()` (implicit unit return)
 
 ```rust
@@ -72,6 +79,6 @@ The macro generates three items from each annotated function:
 
 1. **Implementation function** — the user's async body, renamed with a `__conformance_impl_` prefix.
 
-2. **`#[tokio::test]` wrapper** — compiled under `#[cfg(test)]`, creates a fresh in-process SUT and calls the implementation. This allows `cargo test` to run conformance tests without an external broker.
+2. **`#[tokio::test]` wrapper** — compiled under `#[cfg(test)]`, creates a fresh in-process SUT (the in-process mqtt5 client for `#[client_conformance_test]`) and calls the implementation. This allows `cargo test` to run conformance tests without an external broker.
 
-3. **Registry entry** — a static `ConformanceTest` struct registered in a `linkme::distributed_slice`. The CLI runner iterates over all entries, evaluates capability requirements against the target SUT, and runs or skips each test accordingly. No runtime registration step is needed.
+3. **Registry entry** — a static `ConformanceTest` struct registered in a `linkme::distributed_slice`, with a `TestKind::Server` or `TestKind::Client` holding its requirements and runner. The CLI runner iterates over all entries, evaluates capability requirements against the target SUT, and runs or skips each test accordingly. No runtime registration step is needed.
