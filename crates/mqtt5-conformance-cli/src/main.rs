@@ -41,7 +41,13 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     }
 
-    let (options, libtest_args) = CliOptions::from_env();
+    let (options, libtest_args) = match CliOptions::from_env() {
+        Ok(parsed) => parsed,
+        Err(message) => {
+            eprintln!("error: {message}");
+            return ExitCode::from(2);
+        }
+    };
 
     let runtime = match Runtime::new() {
         Ok(runtime) => Arc::new(runtime),
@@ -82,7 +88,7 @@ struct CliOptions {
 }
 
 impl CliOptions {
-    fn from_env() -> (Self, Arguments) {
+    fn from_env() -> Result<(Self, Arguments), String> {
         let mut sut: Option<PathBuf> = None;
         let mut client: Option<String> = None;
         let mut report: Option<PathBuf> = None;
@@ -96,29 +102,29 @@ impl CliOptions {
             if let Some(value) = arg.strip_prefix("--sut=") {
                 sut = Some(PathBuf::from(value));
             } else if arg == "--sut" {
-                sut = raw.next().map(PathBuf::from);
+                sut = Some(PathBuf::from(raw.next().ok_or("--sut needs a path")?));
             } else if let Some(value) = arg.strip_prefix("--client=") {
                 client = Some(value.to_owned());
             } else if arg == "--client" {
-                client = raw.next();
+                client = Some(raw.next().ok_or("--client needs a client name")?);
             } else if let Some(value) = arg.strip_prefix("--report=") {
                 report = Some(PathBuf::from(value));
             } else if arg == "--report" {
-                report = raw.next().map(PathBuf::from);
+                report = Some(PathBuf::from(raw.next().ok_or("--report needs a path")?));
             } else {
                 forwarded.push(arg);
             }
         }
 
         let libtest = Arguments::from_iter(forwarded);
-        (
+        Ok((
             Self {
                 sut,
                 client,
                 report,
             },
             libtest,
-        )
+        ))
     }
 }
 

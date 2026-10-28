@@ -195,14 +195,14 @@ async fn packet_id_not_reused_while_in_flight_after_wrap(sut: ClientSutHandle) {
         .packet_id
         .unwrap();
 
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<u16>();
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<u16>(16);
     let mut conn = s.conn;
     let acker = tokio::spawn(async move {
         loop {
             match conn.next(Duration::from_secs(60)).await {
                 Next::Packet(packet) if packet.packet_type() == PUBLISH => {
                     let id = parse_publish(&packet).packet_id.unwrap();
-                    let _ = tx.send(id);
+                    let _ = tx.send(id).await;
                     if id != held_id {
                         let _ = conn.send(&ack(0x40, id)).await;
                     }
@@ -217,13 +217,17 @@ async fn packet_id_not_reused_while_in_flight_after_wrap(sut: ClientSutHandle) {
     });
 
     let mut reused = None;
-    for _ in 0..65535u32 {
+    for sent in 0..65535u32 {
         let _ =
             tokio::time::timeout(TIMEOUT, s.client.publish("w/t", b"x", PublishSpec::qos(1))).await;
-        if let Some(id) = rx.recv().await {
-            if id == held_id {
+        match tokio::time::timeout(TIMEOUT, rx.recv()).await {
+            Ok(Some(id)) if id == held_id => {
                 reused = Some(id);
                 break;
+            }
+            Ok(Some(_)) => {}
+            Ok(None) | Err(_) => {
+                panic!("client sent no PUBLISH within {TIMEOUT:?} after {sent} publishes")
             }
         }
     }

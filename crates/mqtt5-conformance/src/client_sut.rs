@@ -209,19 +209,22 @@ mod inprocess {
     struct ScriptedAuthHandler(AuthSpec);
 
     impl AuthHandler for ScriptedAuthHandler {
-        fn initial_response<'a>(
-            &'a self,
-            _auth_method: &'a str,
-        ) -> AuthFuture<'a, Option<Vec<u8>>> {
+        fn initial_response<'a>(&'a self, auth_method: &'a str) -> AuthFuture<'a, Option<Vec<u8>>> {
+            tracing::debug!(auth_method, "scripted authentication: initial response");
             let response = self.0.initial_response.clone();
             Box::pin(async move { Ok(response) })
         }
 
         fn handle_challenge<'a>(
             &'a self,
-            _auth_method: &'a str,
-            _challenge_data: Option<&'a [u8]>,
+            auth_method: &'a str,
+            challenge_data: Option<&'a [u8]>,
         ) -> AuthFuture<'a, AuthResponse> {
+            tracing::debug!(
+                auth_method,
+                ?challenge_data,
+                "scripted authentication: challenge"
+            );
             let response = self.0.challenge_response.clone();
             Box::pin(async move { Ok(AuthResponse::Continue(response)) })
         }
@@ -270,6 +273,19 @@ mod inprocess {
         options: ConnectOptions,
         authentication: Option<AuthSpec>,
         received: Arc<Mutex<Vec<ReceivedMessage>>>,
+    }
+
+    impl Drop for Mqtt5Client {
+        fn drop(&mut self) {
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                let client = self.client.clone();
+                runtime.spawn(async move {
+                    if let Err(error) = client.disconnect().await {
+                        tracing::debug!(%error, "client under test was not connected when dropped");
+                    }
+                });
+            }
+        }
     }
 
     impl ClientUnderTest for Mqtt5Client {

@@ -1961,9 +1961,9 @@ total_statements = 2
 
 [[sections."4.4".statements]]
 id = "MQTT-4.4.0-1"
-level = "MustNot"
+level = "Must"
 applies_to = "Both"
-text = "Clients and Servers MUST NOT resend messages at any other time"
+text = "When a Client reconnects with Clean Start set to 0 and a session is present, both the Client and Server MUST resend any unacknowledged PUBLISH packets (where QoS > 0) and PUBREL packets using their original Packet Identifiers. This is the only circumstance where a Client or Server is REQUIRED to resend messages. Clients and Servers MUST NOT resend messages at any other time."
 status = "Tested"
 test_names = ["no_spontaneous_retransmission_on_active_connection", "unacked_qos1_publish_resent_on_session_resume", "unacked_pubrel_resent_on_session_resume"]
 

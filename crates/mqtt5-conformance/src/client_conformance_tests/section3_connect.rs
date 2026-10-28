@@ -6,9 +6,9 @@ use crate::client_sut::{AuthSpec, ClientSutHandle, ConnectSpec, PublishSpec, Wil
 use crate::packet_parser::ParsedConnect;
 use crate::scripted_broker::{
     ack, ack_with_properties, auth, connack, property_string, property_u16, subscription_ack,
-    user_property, Next, AUTH, DISCONNECT, PINGREQ, PROP_ASSIGNED_CLIENT_IDENTIFIER,
-    PROP_AUTHENTICATION_METHOD, PROP_REASON_STRING, PROP_SERVER_KEEP_ALIVE, PUBLISH, PUBREL,
-    SUBSCRIBE,
+    user_property, Next, ScriptedBroker, AUTH, DISCONNECT, PINGREQ,
+    PROP_ASSIGNED_CLIENT_IDENTIFIER, PROP_AUTHENTICATION_METHOD, PROP_REASON_STRING,
+    PROP_SERVER_KEEP_ALIVE, PUBLISH, PUBREL, SUBSCRIBE,
 };
 use std::time::Duration;
 
@@ -105,17 +105,17 @@ async fn connect_flags_payload_order_and_will(sut: ClientSutHandle) {
 /// Topic Name.
 #[client_conformance_test(ids = ["MQTT-1.5.4-2"])]
 async fn null_character_never_encoded(sut: ClientSutHandle) {
-    let mut pending = begin(
-        &sut,
-        ConnectSpec::new("nul").with_credentials("us\0er", b"p"),
-    )
-    .await;
-    let got = pending.conn.next(Duration::from_secs(2)).await;
-    let outcome = tokio::time::timeout(TIMEOUT, pending.connecting).await;
-    assert!(
-        !matches!(got, Next::Packet(ref p) if p.body().windows(5).any(|w| w == b"us\0er")),
-        "[MQTT-1.5.4-2] CONNECT User Name carries U+0000 (connect {outcome:?})"
-    );
+    let broker = ScriptedBroker::bind().await.unwrap();
+    let client = sut.create(ConnectSpec::new("nul").with_credentials("us\0er", b"p"));
+    let connecting = tokio::spawn(client.connect(&broker.url().unwrap()));
+    if let Some(mut conn) = broker.accept(TIMEOUT).await {
+        let got = conn.next(Duration::from_secs(2)).await;
+        let outcome = tokio::time::timeout(TIMEOUT, connecting).await;
+        assert!(
+            !matches!(got, Next::Packet(ref p) if p.body().windows(5).any(|w| w == b"us\0er")),
+            "[MQTT-1.5.4-2] CONNECT User Name carries U+0000 (connect {outcome:?})"
+        );
+    }
 
     let mut s = start(&sut, ConnectSpec::new("nul-topic"), false, &[]).await;
     s.result.as_ref().unwrap();
@@ -359,7 +359,11 @@ async fn reason_string_on_reauth_with_problem_information_0_disconnects(sut: Cli
         .next_of_type(AUTH, TIMEOUT)
         .await
         .expect("no re-auth AUTH");
-    assert_eq!(reauth.body()[0], 0x19, "re-authentication reason code");
+    assert_eq!(
+        reauth.body().first(),
+        Some(&0x19),
+        "re-authentication reason code"
+    );
     s.conn
         .send(&auth(
             0x00,
@@ -398,11 +402,15 @@ async fn only_auth_before_connack_when_auth_method_set(sut: ClientSutHandle) {
     );
     let spam = pending.client.clone();
     let spammer = tokio::spawn(async move {
+        let mut calls = tokio::task::JoinSet::new();
         for _ in 0..50 {
-            let _ = spam.publish("x", b"y", PublishSpec::default()).await;
-            let _ = spam.subscribe("z").await;
+            let publish = spam.publish("x", b"y", PublishSpec::default());
+            calls.spawn(async move { publish.await.is_ok() });
+            let subscribe = spam.subscribe("z");
+            calls.spawn(async move { subscribe.await.is_ok() });
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
+        while calls.join_next().await.is_some() {}
     });
     pending.conn.send(&auth(0x18, b"TEST", &[])).await.unwrap();
     let mut before_connack = Vec::new();

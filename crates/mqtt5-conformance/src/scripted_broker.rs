@@ -1,5 +1,5 @@
 use crate::packet_parser::decode_variable_int;
-use crate::raw_client::{encode_variable_int, RawMqttClient, ReadOutcome};
+use crate::raw_client::{encode_variable_int, wrap_fixed_header, RawMqttClient, ReadOutcome};
 use bytes::BytesMut;
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
@@ -194,14 +194,6 @@ pub fn variable_int(value: usize) -> Vec<u8> {
 }
 
 #[must_use]
-pub fn packet(first_byte: u8, body: &[u8]) -> Vec<u8> {
-    let mut out = vec![first_byte];
-    out.extend(variable_int(body.len()));
-    out.extend_from_slice(body);
-    out
-}
-
-#[must_use]
 pub fn mqtt_string(value: &[u8]) -> Vec<u8> {
     let mut out = u16::try_from(value.len())
         .expect("string longer than 65535 bytes")
@@ -256,7 +248,7 @@ pub fn properties(props: &[u8]) -> Vec<u8> {
 pub fn connack(session_present: bool, props: &[u8]) -> Vec<u8> {
     let mut body = vec![u8::from(session_present), 0x00];
     body.extend(properties(props));
-    packet(0x20, &body)
+    wrap_fixed_header(0x20, &body)
 }
 
 #[must_use]
@@ -273,12 +265,12 @@ pub fn publish(
     }
     body.extend(properties(props));
     body.extend_from_slice(payload);
-    packet(first_byte, &body)
+    wrap_fixed_header(first_byte, &body)
 }
 
 #[must_use]
 pub fn ack(first_byte: u8, packet_id: u16) -> Vec<u8> {
-    packet(first_byte, &packet_id.to_be_bytes())
+    wrap_fixed_header(first_byte, &packet_id.to_be_bytes())
 }
 
 #[must_use]
@@ -286,7 +278,7 @@ pub fn ack_with_properties(first_byte: u8, packet_id: u16, reason: u8, props: &[
     let mut body = packet_id.to_be_bytes().to_vec();
     body.push(reason);
     body.extend(properties(props));
-    packet(first_byte, &body)
+    wrap_fixed_header(first_byte, &body)
 }
 
 #[must_use]
@@ -294,7 +286,7 @@ pub fn subscription_ack(first_byte: u8, packet_id: u16, props: &[u8], reasons: &
     let mut body = packet_id.to_be_bytes().to_vec();
     body.extend(properties(props));
     body.extend_from_slice(reasons);
-    packet(first_byte, &body)
+    wrap_fixed_header(first_byte, &body)
 }
 
 #[must_use]
@@ -303,5 +295,5 @@ pub fn auth(reason: u8, method: &[u8], extra_props: &[u8]) -> Vec<u8> {
     props.extend_from_slice(extra_props);
     let mut body = vec![reason];
     body.extend(properties(&props));
-    packet(0xF0, &body)
+    wrap_fixed_header(0xF0, &body)
 }

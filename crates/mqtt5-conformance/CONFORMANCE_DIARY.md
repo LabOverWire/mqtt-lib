@@ -66,6 +66,16 @@
 - Leaving a CONNECT field out made the test fail on an untagged parse; the parse now fails with the rule tags.
 - The client's PUBLISH writes its own fixed header in `transport/packet_io.rs`, so a mutation of `FixedHeader::encode` does not reach it.
 
+**Review of this PR**: 10 findings, 7 confirmed by counter-tests and fixed.
+- The in-process client was never shut down, so a client with automatic reconnect kept dialing its finished test's port for the rest of a `--client` run. The adapter now disconnects its client when it is dropped; a listener on the old port saw no connection afterwards, whether the client was connected or reconnecting when dropped.
+- The U+0000 user name test failed a client that refuses the name before dialing; that half now passes when no connection arrives.
+- The packet identifier wrap test waited without a limit for each PUBLISH, so a client that stopped sending kept it running; it now fails after 5 s without one. Its channel is bounded.
+- An empty AUTH (`F0 00`) panicked on `body()[0]`; the reason code is read with `first()`.
+- The MQTT-3.1.2-30 test awaited each publish and subscribe in turn, so one blocking call stopped the rest; each call is its own task now.
+- `--client`, `--sut` and `--report` without a value are errors instead of falling back to defaults.
+- `scripted_broker` uses `raw_client::wrap_fixed_header`, `expect_auth_packet` reads the Authentication Method with `ParsedProperties`, and the scripted auth handler traces its arguments instead of ignoring them.
+- Refuted: MQTT-4.4.0-1 does cover the resend on resume (3 of 3 independent checks of the spec body and Appendix B), so the citation stays; the manifest entry now carries the full statement and level Must. The malformed-packet close test citing MQTT-1.5.4-1 follows the rule of citing the broken rule with the close rule.
+
 **Results**: conformance lib 289 passed (251 broker, 38 client), `manifest_load` 13 passed, integration files pass; `conf_client_a` 12 passed. CLI in-process 191 passed, 3 skipped; `--client mqtt5` 38 passed; external mqttv5 on 21883 191 passed, 3 skipped; Mosquitto 2.1.2 on 21884 187 passed, 7 skipped. fmt and the four pedantic clippy runs are clean.
 
 ### Raw reader cleanup (2026-10-26)
