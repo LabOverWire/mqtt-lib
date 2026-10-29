@@ -1359,12 +1359,12 @@ impl MessageRouter {
                 mqtt.qos = publish.qos as u8,
                 mqtt.retain = publish.retain,
             );
-            self.route_message_internal(publish, publishing_client_id, true, deadline, true)
+            self.route_message_internal(publish, publishing_client_id, true, deadline, true, None)
                 .instrument(span)
                 .await;
         }
         #[cfg(not(feature = "opentelemetry"))]
-        self.route_message_internal(publish, publishing_client_id, true, deadline, true)
+        self.route_message_internal(publish, publishing_client_id, true, deadline, true, None)
             .await;
     }
 
@@ -1377,6 +1377,34 @@ impl MessageRouter {
         publish: &PublishPacket,
         publishing_client_id: Option<&str>,
     ) {
+        self.route_local(publish, publishing_client_id, None).await;
+    }
+
+    /// Routes a publish message to local subscribers only, serving only the shared
+    /// subscription groups named in `share_groups`.
+    ///
+    /// Plain subscribers receive the message as with [`Self::route_message_local_only`].
+    /// A matching `$share` group whose name is not in `share_groups` gets nothing, and
+    /// no message is queued for its offline members. Nothing is forwarded to bridges.
+    ///
+    /// A cluster that forwards a publish to several nodes uses this so that each
+    /// shared subscription group is served by exactly one node.
+    pub async fn route_message_local_only_with_share_groups(
+        &self,
+        publish: &PublishPacket,
+        publishing_client_id: Option<&str>,
+        share_groups: &HashSet<String>,
+    ) {
+        self.route_local(publish, publishing_client_id, Some(share_groups))
+            .await;
+    }
+
+    async fn route_local(
+        &self,
+        publish: &PublishPacket,
+        publishing_client_id: Option<&str>,
+        selected_groups: Option<&HashSet<String>>,
+    ) {
         let deadline = default_route_deadline();
         #[cfg(feature = "opentelemetry")]
         {
@@ -1388,17 +1416,31 @@ impl MessageRouter {
                 mqtt.retain = publish.retain,
                 mqtt.bridge_forward = false,
             );
-            self.route_message_internal(publish, publishing_client_id, false, deadline, true)
-                .instrument(span)
-                .await;
+            self.route_message_internal(
+                publish,
+                publishing_client_id,
+                false,
+                deadline,
+                true,
+                selected_groups,
+            )
+            .instrument(span)
+            .await;
         }
         #[cfg(not(feature = "opentelemetry"))]
-        self.route_message_internal(publish, publishing_client_id, false, deadline, true)
-            .await;
+        self.route_message_internal(
+            publish,
+            publishing_client_id,
+            false,
+            deadline,
+            true,
+            selected_groups,
+        )
+        .await;
     }
 
     pub async fn route_sys_message(&self, publish: &PublishPacket) {
-        self.route_message_internal(publish, None, true, default_route_deadline(), false)
+        self.route_message_internal(publish, None, true, default_route_deadline(), false, None)
             .await;
     }
 
@@ -1409,6 +1451,7 @@ impl MessageRouter {
         forward_to_bridges: bool,
         deadline: Option<Instant>,
         retained_limits_apply: bool,
+        selected_groups: Option<&HashSet<String>>,
     ) {
         if forward_to_bridges {
             trace!("Routing message to topic: {}", publish.topic_name);
@@ -1429,8 +1472,11 @@ impl MessageRouter {
             let wildcard = self.wildcard_subscriptions.read().await;
             let clients = self.clients.read().await;
 
-            let (share_groups, regular_subs) =
+            let (mut share_groups, regular_subs) =
                 Self::collect_matching_subscriptions(&exact, &wildcard, &publish.topic_name);
+            if let Some(selected) = selected_groups {
+                share_groups.retain(|(group, _), _| selected.contains(*group));
+            }
 
             let mut plans = self
                 .plan_share_groups(&share_groups, publish, &clients, publishing_client_id)
@@ -3607,6 +3653,91 @@ mod tests {
                 .expiry_interval,
             Some(60),
             "the capped expiry must be stored, not only applied in memory"
+        );
+    }
+
+    async fn share_group_router(
+        storage: Option<Arc<DynamicStorage>>,
+    ) -> (MessageRouter, [TestLanes; 3]) {
+        let router = storage.map_or_else(MessageRouter::new, MessageRouter::with_storage);
+        let lanes = [TestLanes::new(10), TestLanes::new(10), TestLanes::new(10)];
+        for ((client_id, filter), client_lanes) in [
+            ("plain", "bench/t"),
+            ("member-g", "$share/g/bench/t"),
+            ("member-h", "$share/h/bench/+"),
+        ]
+        .into_iter()
+        .zip(&lanes)
+        {
+            register(&router, client_id, client_lanes).await;
+            router
+                .subscribe(SubscriptionRequest::new(
+                    client_id,
+                    filter,
+                    QoS::AtLeastOnce,
+                ))
+                .await
+                .unwrap();
+        }
+        (router, lanes)
+    }
+
+    #[tokio::test]
+    async fn local_only_routing_serves_every_share_group() {
+        let (router, [mut plain, mut g, mut h]) = share_group_router(None).await;
+        let publish = PublishPacket::new("bench/t", &b"x"[..], QoS::AtLeastOnce);
+        router.route_message_local_only(&publish, None).await;
+
+        assert!(plain.try_recv().is_ok());
+        assert!(g.try_recv().is_ok());
+        assert!(h.try_recv().is_ok());
+    }
+
+    #[tokio::test]
+    async fn selected_share_groups_routing_skips_unlisted_groups() {
+        let (router, [mut plain, mut g, mut h]) = share_group_router(None).await;
+        let publish = PublishPacket::new("bench/t", &b"x"[..], QoS::AtLeastOnce);
+        let selected = HashSet::from(["h".to_string()]);
+        router
+            .route_message_local_only_with_share_groups(&publish, None, &selected)
+            .await;
+
+        assert!(
+            plain.try_recv().is_ok(),
+            "plain subscriber missed the publish"
+        );
+        assert!(g.try_recv().is_err(), "unlisted group g got the publish");
+        assert!(h.try_recv().is_ok(), "listed group h missed the publish");
+    }
+
+    #[tokio::test]
+    async fn selected_share_groups_routing_does_not_queue_unlisted_offline_groups() {
+        let storage = Arc::new(DynamicStorage::Memory(
+            crate::broker::storage::MemoryBackend::new(),
+        ));
+        let (router, [mut plain, ..]) = share_group_router(Some(Arc::clone(&storage))).await;
+        router.disconnect_client("member-g").await;
+        router.disconnect_client("member-h").await;
+        let publish = PublishPacket::new("bench/t", &b"x"[..], QoS::AtLeastOnce);
+        let selected = HashSet::from(["h".to_string()]);
+        router
+            .route_message_local_only_with_share_groups(&publish, None, &selected)
+            .await;
+
+        assert!(
+            plain.try_recv().is_ok(),
+            "plain subscriber missed the publish"
+        );
+        let queued_g = storage.get_queued_messages("member-g").await.unwrap();
+        let queued_h = storage.get_queued_messages("member-h").await.unwrap();
+        assert!(
+            queued_g.is_empty(),
+            "unlisted offline group g was queued a message"
+        );
+        assert_eq!(
+            queued_h.len(),
+            1,
+            "listed offline group h was not queued the message"
         );
     }
 }
