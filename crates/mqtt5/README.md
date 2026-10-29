@@ -18,7 +18,7 @@ Full-featured MQTT v5.0 and v3.1.1 client and broker for native platforms (Linux
 
 ```toml
 [dependencies]
-mqtt5 = "0.48"
+mqtt5 = "0.49"
 ```
 
 ### Client-only builds
@@ -27,7 +27,7 @@ The broker is enabled by default via the `broker` feature. If you only need the 
 
 ```toml
 [dependencies]
-mqtt5 = { version = "0.48", default-features = false }
+mqtt5 = { version = "0.49", default-features = false }
 ```
 
 ## Quick Start
@@ -490,7 +490,7 @@ Distributed tracing with OpenTelemetry support:
 
 ```toml
 [dependencies]
-mqtt5 = { version = "0.48", features = ["opentelemetry"] }
+mqtt5 = { version = "0.49", features = ["opentelemetry"] }
 ```
 
 - W3C trace context propagation via MQTT user properties

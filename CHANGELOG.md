@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [mqtt5 0.49.0] - 2026-10-29
 
 ### Breaking
 
@@ -37,6 +37,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Conformance tests that could fail a compliant broker, or pass a broken one, are fixed**. The Packet Identifier uniqueness test acknowledged each PUBLISH before the next, so it failed a broker that reuses a freed ID; it now holds three unacknowledged and checks only those (MQTT-2.2.1-4). The Assigned Client Identifier uniqueness test closed the first connection before the second CONNECT, so it failed a broker that reuses an ID no session holds; both connections now stay open (MQTT-3.2.2-16). The UNSUBACK test now accepts 0x8F and 0x91. The QoS 1 delivery test published at QoS 0; it now publishes at QoS 1 and checks the message arrives at QoS 1 (MQTT-3.8.4-8). The negative halves of two topic matching tests read through the test client, which drops non-matching PUBLISH packets, and now read the raw connection. The topic delivery test checks the payload again. The test client kept delivering a shared subscription locally after UNSUBSCRIBE, and now removes only the subscription made with that exact filter. The empty client ID test decodes the CONNACK instead of searching for a 0x12 byte. The keep alive tests need a new `no_server_keep_alive` requirement (`server_keep_alive = 0` in the profile), since a Server Keep Alive replaces the Client's value; they fail with a clear message if the CONNACK carries one anyway. The timeout test uses Keep Alive 6 s and waits 11 s instead of 5 s at Keep Alive 2 s, which allows a broker that checks once a second and still fails one that closes at twice the Keep Alive. `expect_publish_with_id` reads one packet at a time, so PUBLISH packets that arrive in one read are no longer lost.
 - **The raw conformance client reads one packet at a time in every reader**. `read_packet_bytes`, which most raw readers use, returned whatever one socket read gave, so a packet that arrived in the same read as an earlier one was lost, and it ignored bytes an earlier framed read had kept. `expect_disconnect` ignored those bytes too, so it missed a DISCONNECT that came in the same read as a SUBACK. Both now read through the same buffer. `expect_disconnect` also passed as soon as a DISCONNECT arrived, so a broker that sent one and left the connection open passed every test requiring the Server to close the Network Connection; it now waits for the close, skipping packets until then, and fails at the timeout instead of waiting up to twice the timeout. The session takeover test checks the close with it too (MQTT-3.1.4-3), since a read that timed out on an open connection counted as closed. Bytes with a malformed Remaining Length, or a partial packet before a close, are returned to the caller instead of looking like silence.
 - **Messages queued for a shared subscription whose members are all offline get the same treatment as other deliveries** (#248). They kept the publisher's RETAIN and DUP flags, so a member reconnecting could get RETAIN 1 with Retain As Published 0 (MQTT-3.3.1-12) or DUP 1 on a first delivery (MQTT-3.3.1-3).
+
+## [mqttv5-cli 0.29.10] - 2026-10-29
+
+### Breaking
+
+- `mqttv5 broker` takes the broker changes listed under Breaking in mqtt5 0.49.0. A QoS 0 message is no longer queued for an offline subscriber, an MQTT 3.1.1 CONNECT with an empty client ID and CleanSession 0 is refused with return code 0x02, and the QUIC listener keeps, recovers or removes client flow state by how the flow ended and by its `clean` and `abort_if_no_state` flags.
+
+### Changed
+
+- Requires mqtt5 0.49, so `mqttv5 broker` gets its fixes, including random assigned client IDs, closing idle connections after 1.5 times the Keep Alive, and 3.1.1 CONNACKs for every refusal. See mqtt5 0.49.0.
+- The load balancer docs in `CLI_USAGE.md` say that redirection is MQTT 5 only (#259).
+
+## [mqtt5-wasm 2.1.9] - 2026-10-29
+
+### Breaking
+
+- **An MQTT 3.1.1 CONNECT with an empty client ID and CleanSession 0 is refused** (MQTT 3.1.1 MQTT-3.1.3-8). The wasm broker stored a persistent session under an assigned ID the client has no way to learn. It now answers with return code 0x02 (Identifier rejected) and closes the connection.
+
+### Fixed
+
+- **The wasm broker closes an idle connection after 1.5 times the Keep Alive** (MQTT-3.1.2-22). It checked once a second, so it closed up to a second late, 2 s instead of 1.5 s for a Keep Alive of 1 s.
+- **Client IDs the wasm broker assigns are unique** (MQTT-3.1.3-6). It assigns `wasm-auto-` followed by 128 random bits in hex instead of a counter that started at 0 in every instance. If the random source fails, the CONNECT is refused with 0x88 (Server unavailable).
+- **MQTT 3.1.1 clients get a 3.1.1 CONNACK when the wasm broker refuses them**. An invalid client ID, a session owned by another user and a load balancer redirect were answered with an MQTT 5 CONNACK, and a CONNECT with protocol level 2 or 3 got reason code 0x84 instead of return code 0x01 (MQTT 3.1.1 MQTT-3.1.2-2). Refusals with no direct 3.1.1 equivalent now carry a 3.1.1 return code (#257).
+- **A load balancer says why it refuses an MQTT 3.1.1 client** (#259). It logs a warning that the client must connect to a backend directly instead of logging a redirect.
+
+### Changed
+
+- Requires mqtt5 0.49 and mqtt5-protocol 0.16.2.
+
+## [mqtt5-protocol 0.16.2] - 2026-10-29
+
+### Fixed
+
+- **MQTT 3.1.1 CONNACKs carry a 3.1.1 return code for every refusal** (#257). A refusal with no direct 3.1.1 equivalent was encoded as the MQTT 5 value 0x87, which 3.1.1 reserves. Server-side and availability refusals are now encoded as 0x03 (Server unavailable), and Not authorized, Banned and refusals caused by the client's packet as 0x05 (Not authorized).
 
 ## [mqtt5 0.48.2] - 2026-10-19
 
