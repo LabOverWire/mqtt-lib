@@ -1,9 +1,10 @@
-use super::common::{received_after, start, subscribe_and_ack, SHORT, TIMEOUT};
+use super::common::{
+    received_after, start, subscribe_and_ack, subscribe_deferred_and_ack, wait_for_received, SHORT,
+    TIMEOUT,
+};
 use crate::client_conformance_test;
 use crate::client_sut::{ClientSutHandle, ConnectSpec, Settle};
-use crate::scripted_broker::{
-    ack, publish, publish_first_byte, subscription_ack, PUBACK, PUBCOMP, PUBREC, SUBSCRIBE,
-};
+use crate::scripted_broker::{ack, publish, publish_first_byte, PUBACK, PUBCOMP, PUBREC};
 
 const PUBLISH_ACK_REASON_CODES: [u8; 9] = [0x00, 0x10, 0x80, 0x83, 0x87, 0x90, 0x91, 0x97, 0x99];
 const PUBCOMP_REASON_CODES: [u8; 2] = [0x00, 0x92];
@@ -115,22 +116,7 @@ async fn deferred_reject_reason(sut: &ClientSutHandle, qos: u8, ack_type: u8) ->
         .with_deferred_ack();
     let mut s = start(sut, spec, false, &[]).await;
     s.result.as_ref().unwrap();
-    let subscribing = tokio::spawn(s.client.subscribe_deferred("t/rej", qos));
-    let subscribe = s.conn.next_of_type(SUBSCRIBE, TIMEOUT).await.unwrap();
-    s.conn
-        .send(&subscription_ack(
-            0x90,
-            subscribe.leading_packet_id().unwrap(),
-            &[],
-            &[qos],
-        ))
-        .await
-        .unwrap();
-    tokio::time::timeout(TIMEOUT, subscribing)
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
+    subscribe_deferred_and_ack(&mut s, "t/rej", qos).await;
     s.conn
         .send(&publish(
             publish_first_byte(qos, false),
@@ -141,12 +127,7 @@ async fn deferred_reject_reason(sut: &ClientSutHandle, qos: u8, ack_type: u8) ->
         ))
         .await
         .unwrap();
-    for _ in 0..50 {
-        if !s.client.received().is_empty() {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
+    wait_for_received(&s.client, 1).await;
     assert_eq!(
         s.client.settle_deferred(Settle::Reject(0x89)),
         1,

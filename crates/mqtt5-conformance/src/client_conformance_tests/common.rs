@@ -1,6 +1,6 @@
 use crate::client_sut::{
-    ClientError, ClientSutHandle, ClientUnderTest, ConnectOutcome, ConnectSpec, PublishOutcome,
-    PublishSpec, ReceivedMessage,
+    ClientError, ClientFuture, ClientSutHandle, ClientUnderTest, ConnectOutcome, ConnectSpec,
+    PublishOutcome, PublishSpec, ReceivedMessage,
 };
 use crate::packet_parser::ParsedPublish;
 use crate::scripted_broker::{
@@ -107,13 +107,16 @@ pub async fn accept_next(
 }
 
 pub async fn wait_connected(client: &Arc<dyn ClientUnderTest>, want: bool) {
-    for _ in 0..100 {
-        if client.is_connected().await == want {
-            return;
+    let reached = tokio::time::timeout(Duration::from_secs(5), async {
+        while client.is_connected().await != want {
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    panic!("client connected state never became {want}");
+    })
+    .await;
+    assert!(
+        reached.is_ok(),
+        "client connected state never became {want}"
+    );
 }
 
 pub async fn drop_connection(session: Session) -> (Arc<dyn ClientUnderTest>, ScriptedBroker) {
@@ -215,7 +218,21 @@ pub fn parse_publish(packet: &Packet) -> ParsedPublish {
 }
 
 pub async fn subscribe_and_ack(session: &mut Session, filter: &str, qos: u8) {
-    let subscribing = tokio::spawn(session.client.subscribe(filter, qos));
+    let subscribing = session.client.subscribe(filter, qos);
+    complete_subscribe(session, subscribing, qos).await;
+}
+
+pub async fn subscribe_deferred_and_ack(session: &mut Session, filter: &str, qos: u8) {
+    let subscribing = session.client.subscribe_deferred(filter, qos);
+    complete_subscribe(session, subscribing, qos).await;
+}
+
+async fn complete_subscribe(
+    session: &mut Session,
+    subscribing: ClientFuture<Result<(), ClientError>>,
+    qos: u8,
+) {
+    let subscribing = tokio::spawn(subscribing);
     let subscribe = session
         .conn
         .next_of_type(SUBSCRIBE, TIMEOUT)
@@ -234,6 +251,20 @@ pub async fn subscribe_and_ack(session: &mut Session, filter: &str, qos: u8) {
         .expect("subscribe did not complete")
         .expect("subscribe task panicked")
         .expect("subscribe failed");
+}
+
+pub async fn wait_for_received(
+    client: &Arc<dyn ClientUnderTest>,
+    count: usize,
+) -> Vec<ReceivedMessage> {
+    let deadline = tokio::time::Instant::now() + TIMEOUT;
+    loop {
+        let received = client.received();
+        if received.len() >= count || tokio::time::Instant::now() >= deadline {
+            return received;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }
 
 pub async fn received_after(

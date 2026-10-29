@@ -461,7 +461,7 @@ async fn inbound_packet_above_client_maximum_packet_size(sut: ClientSutHandle) {
     let delivered = received_after(&s.client, SHORT).await.len();
     let close = s.conn.observe_close(Duration::from_secs(3)).await;
     assert!(
-        delivered == 0 && (close.closed || close.disconnect_reason == Some(0x95)),
+        delivered == 0 && close.disconnect_reason.map_or(close.closed, |rc| rc == 0x95),
         "[MQTT-3.1.2-24] packet larger than client Maximum Packet Size 128 was not refused; delivered={delivered} closed={} DISCONNECT reason {:?}",
         close.closed,
         close.disconnect_reason

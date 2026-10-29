@@ -1,11 +1,10 @@
-use super::common::{parse_publish, start, TIMEOUT};
+use super::common::{parse_publish, start, SHORT, TIMEOUT};
 use crate::client_conformance_test;
 use crate::client_sut::{ClientSutHandle, ConnectSpec, PublishSpec};
 use crate::packet_parser::decode_variable_int;
 use crate::scripted_broker::{
     ack, subscription_ack, Packet, PUBLISH, PUBREL, SUBSCRIBE, UNSUBSCRIBE,
 };
-use std::time::Duration;
 
 const PUBREL_REASON_CODES: [u8; 2] = [0x00, 0x92];
 
@@ -146,7 +145,7 @@ async fn suback_with_foreign_packet_id_is_not_accepted(sut: ClientSutHandle) {
         ))
         .await
         .unwrap();
-    tokio::time::sleep(Duration::from_millis(600)).await;
+    tokio::time::sleep(SHORT).await;
     assert!(
         !subscribing.is_finished(),
         "[MQTT-3.8.4-2] subscribe completed on a SUBACK carrying a different Packet Identifier"

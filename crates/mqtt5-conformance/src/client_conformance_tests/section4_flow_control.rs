@@ -4,6 +4,7 @@ use super::common::{
 };
 use crate::client_conformance_test;
 use crate::client_sut::{ClientSutHandle, ConnectSpec, PublishOutcome, PublishSpec};
+use crate::packet_parser::ParsedConnect;
 use crate::scripted_broker::{
     ack, property_u16, publish, publish_first_byte, subscription_ack, Next, PROP_RECEIVE_MAXIMUM,
     PUBLISH, PUBREC, SUBSCRIBE,
@@ -77,7 +78,14 @@ async fn session_resume_with_smaller_receive_maximum(sut: ClientSutHandle) {
     assert_eq!(old_ids, 2, "both QoS1 publishes reach the wire on RM=2");
     let (client, broker) = drop_connection(s).await;
 
-    let (mut conn, _) = accept_next(&broker, true, &property_u16(PROP_RECEIVE_MAXIMUM, 1)).await;
+    let (mut conn, connect) =
+        accept_next(&broker, true, &property_u16(PROP_RECEIVE_MAXIMUM, 1)).await;
+    let reconnect = ParsedConnect::parse(connect.bytes()).expect("client sent a malformed CONNECT");
+    assert_eq!(
+        reconnect.flags & 0x02,
+        0,
+        "client reconnected with Clean Start 1 instead of resuming"
+    );
     wait_connected(&client, true).await;
     let new: Vec<_> = ["t/new/1", "t/new/2"]
         .into_iter()
@@ -103,10 +111,12 @@ async fn session_resume_with_smaller_receive_maximum(sut: ClientSutHandle) {
             acked += 1;
         }
         let left = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if let Next::Packet(packet) = conn.next_answering_pings(left).await {
-            if packet.packet_type() == PUBLISH {
+        match conn.next_answering_pings(left).await {
+            Next::Packet(packet) if packet.packet_type() == PUBLISH => {
                 pending.extend(parse_publish(&packet).packet_id);
             }
+            Next::Closed => panic!("client dropped the resumed connection"),
+            Next::Packet(_) | Next::Malformed | Next::Silent => {}
         }
     }
     for handle in new {
@@ -152,11 +162,12 @@ async fn send_quota_reinitialized_on_new_connection(sut: ClientSutHandle) {
     let sent = conn
         .next_of_type(PUBLISH, Duration::from_secs(2))
         .await
-        .is_some();
+        .map(|packet| parse_publish(&packet).payload);
     fresh.abort();
-    assert!(
-        sent,
-        "[MQTT-4.9.0-1] new connection (Session Present 0, Receive Maximum 1) started with a send quota of 0"
+    assert_eq!(
+        sent.as_deref(),
+        Some(&b"fresh"[..]),
+        "[MQTT-4.9.0-1] new connection (Session Present 0, Receive Maximum 1) did not send the new publish, so it started with a send quota of 0"
     );
 }
 

@@ -63,6 +63,18 @@
 - MQTT-3.3.4-7 has two paths: resent publishes in `replay_session_state` and queued ones in `flush_offline_queue`. Each test fails only under the mutation of its own path.
 - MQTT-3.3.4-8 has one mutation per assertion (SUBSCRIBE and DISCONNECT waiting for send quota).
 
+**Review of this PR**: 10 findings. 4 were confirmed by counter-tests and fixed, 3 confirmed by reading and fixed, 1 confirmed and left, 2 refuted. Re-running the counter-tests found one more hang, fixed below.
+- The QoS 3 PUBLISH test passed when the client answered with DISCONNECT 0x00, and the Maximum Packet Size test passed with any DISCONNECT reason. They now need a reason of 0x80 or above, and 0x95 exactly, or a close with no DISCONNECT.
+- The Receive Maximum resume test passed when the client reconnected with Clean Start 1 or dropped the resumed connection. It now checks the reconnect CONNECT keeps Clean Start 0 and fails on a close.
+- The send quota test counted any PUBLISH as the fresh one, so a client that resent the old ones and blocked the new one passed. It now checks the payload.
+- The adapter pushed a deferred message before its acknowledgement token, so a multi-threaded `--client` run could see the message with no token. With a 50 ms gap between the pushes the reject tests failed 3 of 3; the token is pushed first now, and they pass 3 of 3 with the same gap.
+- `wait_connected` bounded its polling but not each `is_connected` call. When the client rejects a resumed session, its reconnect waits for a CONNACK with no time limit while holding the client's state lock, so `is_connected` blocked and the resume test hung for hours. The whole wait is bounded at 5 s now. On the unmodified client, `is_connected` did not return within 2 s while `connect` waited on a server that never sent CONNACK, and `connect` had not returned after 60 s.
+- The two deferred tests use a shared `subscribe_deferred_and_ack`, and the deferred wait polls with `wait_for_received` instead of sleeping. The fixed 600 ms and 20 ms waits use `SHORT` and the poll interval.
+- Left: the adapter maps QoS 3 to QoS 2 and an unknown reject reason to 0x80; no test sends either.
+- Refuted: the tests where the scripted server breaks a Server rule cite that rule, as the citation rules require. The PUBREL packet id and PUBACK flag checks this file dropped are covered by phase 1: a wrong PUBREL id fails the MQTT-2.2.1-5 test, and PUBACK flags 0x02 fail the MQTT-2.1.3-1 test.
+
+All 44 controls were re-run against the fixed tests and still fail on their tags, as do the five review counter-tests.
+
 **Results**: conformance lib 317 passed (251 broker, 66 client), `manifest_load` 13 passed, integration files pass; `conf_client_b` 6 passed. CLI in-process 191 passed, 3 skipped; `--client mqtt5` 66 passed; external mqttv5 on 21883 191 passed, 3 skipped; Mosquitto on 21884 187 passed, 7 skipped. fmt and the four pedantic clippy runs are clean.
 
 ### Client SUT mode, phase 1 (2026-10-27)

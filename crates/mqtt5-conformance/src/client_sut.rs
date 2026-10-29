@@ -431,6 +431,10 @@ mod inprocess {
             Box::pin(async move {
                 client
                     .subscribe_with_ack(filter, subscribe_options(qos), move |publish, token| {
+                        deferred
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .push(token);
                         received
                             .lock()
                             .unwrap_or_else(PoisonError::into_inner)
@@ -438,10 +442,6 @@ mod inprocess {
                                 topic: publish.topic_name.clone(),
                                 payload: publish.payload.to_vec(),
                             });
-                        deferred
-                            .lock()
-                            .unwrap_or_else(PoisonError::into_inner)
-                            .push(token);
                     })
                     .await
                     .map(|_| ())

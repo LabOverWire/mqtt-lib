@@ -1,13 +1,14 @@
 use super::common::{
     accept_next, begin, drop_connection, finish, parse_publish, queued_publish_then_reconnect,
-    read_connect, reconnect_with, start, subscribe_and_ack, wait_connected, TIMEOUT,
+    read_connect, reconnect_with, start, subscribe_and_ack, subscribe_deferred_and_ack,
+    wait_connected,
 };
 use crate::client_conformance_test;
 use crate::client_sut::{ClientSutHandle, ClientUnderTest, ConnectSpec, PublishSpec, Settle};
 use crate::scripted_broker::{
-    property_u16, property_u32, property_u8, publish, publish_first_byte, subscription_ack,
-    BrokerConnection, PROP_MAXIMUM_PACKET_SIZE, PROP_MAXIMUM_QOS, PROP_RETAIN_AVAILABLE,
-    PROP_TOPIC_ALIAS_MAXIMUM, PUBACK, PUBLISH, PUBREC, SUBSCRIBE, UNSUBSCRIBE,
+    property_u16, property_u32, property_u8, publish, publish_first_byte, BrokerConnection,
+    PROP_MAXIMUM_PACKET_SIZE, PROP_MAXIMUM_QOS, PROP_RETAIN_AVAILABLE, PROP_TOPIC_ALIAS_MAXIMUM,
+    PUBACK, PUBLISH, PUBREC, SUBSCRIBE, UNSUBSCRIBE,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -366,22 +367,7 @@ async fn queued_acks_discarded_when_session_not_present(sut: ClientSutHandle) {
         .reconnecting_after(Duration::from_millis(100), Duration::from_millis(200));
     let mut s = start(&sut, spec, false, &[]).await;
     s.result.as_ref().unwrap();
-    let subscribing = tokio::spawn(s.client.subscribe_deferred("t/deferred", 1));
-    let subscribe = s.conn.next_of_type(SUBSCRIBE, TIMEOUT).await.unwrap();
-    s.conn
-        .send(&subscription_ack(
-            0x90,
-            subscribe.leading_packet_id().unwrap(),
-            &[],
-            &[0x01],
-        ))
-        .await
-        .unwrap();
-    tokio::time::timeout(TIMEOUT, subscribing)
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
+    subscribe_deferred_and_ack(&mut s, "t/deferred", 1).await;
     subscribe_and_ack(&mut s, "t/auto", 1).await;
 
     s.conn

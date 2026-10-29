@@ -171,8 +171,9 @@ async fn inbound_qos3_publish_is_malformed(sut: ClientSutHandle) {
         "[MQTT-3.3.1-4] QoS 3 PUBLISH was delivered to the application"
     );
     assert!(
-        close.closed || close.disconnect_reason.is_some_and(|rc| rc >= 0x80),
-        "[MQTT-3.3.1-4] client neither closed the connection nor sent an error DISCONNECT after a QoS 3 PUBLISH (DISCONNECT reason {:?})",
+        close.disconnect_reason.map_or(close.closed, |rc| rc >= 0x80),
+        "[MQTT-3.3.1-4] client did not end the connection as malformed after a QoS 3 PUBLISH; closed={} DISCONNECT reason {:?}",
+        close.closed,
         close.disconnect_reason
     );
 }
