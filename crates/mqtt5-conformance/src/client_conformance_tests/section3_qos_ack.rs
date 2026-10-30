@@ -9,12 +9,20 @@ use crate::scripted_broker::{ack, publish, publish_first_byte, PUBACK, PUBCOMP, 
 const PUBLISH_ACK_REASON_CODES: [u8; 9] = [0x00, 0x10, 0x80, 0x83, 0x87, 0x90, 0x91, 0x97, 0x99];
 const PUBCOMP_REASON_CODES: [u8; 2] = [0x00, 0x92];
 
-/// [MQTT-3.3.4-1] [MQTT-3.4.2-1] [MQTT-3.5.2-1] [MQTT-3.7.2-1] [MQTT-4.3.3-11]
-/// The Client answers a `QoS` 1 PUBLISH with PUBACK, a `QoS` 2 PUBLISH with
-/// PUBREC and a PUBREL with PUBCOMP, each with a valid Reason Code and the
-/// Packet Identifier it acknowledges.
+/// [MQTT-3.3.4-1] [MQTT-3.4.2-1] [MQTT-3.5.2-1] [MQTT-3.7.2-1] [MQTT-4.3.2-4]
+/// [MQTT-4.3.3-8] [MQTT-4.3.3-11] The Client answers a `QoS` 1 PUBLISH with
+/// PUBACK, a `QoS` 2 PUBLISH with PUBREC and a PUBREL with PUBCOMP, each with
+/// a valid Reason Code and the Packet Identifier it acknowledges.
 #[client_conformance_test(
-    ids = ["MQTT-3.3.4-1", "MQTT-3.4.2-1", "MQTT-3.5.2-1", "MQTT-3.7.2-1", "MQTT-4.3.3-11"],
+    ids = [
+        "MQTT-3.3.4-1",
+        "MQTT-3.4.2-1",
+        "MQTT-3.5.2-1",
+        "MQTT-3.7.2-1",
+        "MQTT-4.3.2-4",
+        "MQTT-4.3.3-8",
+        "MQTT-4.3.3-11",
+    ],
 )]
 async fn client_acks_inbound_by_qos(sut: ClientSutHandle) {
     let mut s = start(&sut, ConnectSpec::new("ack-in"), false, &[]).await;
@@ -36,7 +44,11 @@ async fn client_acks_inbound_by_qos(sut: ClientSutHandle) {
         .next_of_type(PUBACK, TIMEOUT)
         .await
         .expect("[MQTT-3.3.4-1] no PUBACK for a QoS 1 PUBLISH");
-    assert_eq!(puback.leading_packet_id(), Some(11), "PUBACK id");
+    assert_eq!(
+        puback.leading_packet_id(),
+        Some(11),
+        "[MQTT-4.3.2-4] PUBACK id"
+    );
     assert!(
         PUBLISH_ACK_REASON_CODES.contains(&puback.ack_reason_code()),
         "[MQTT-3.4.2-1] PUBACK reason code 0x{:02X}",
@@ -58,7 +70,11 @@ async fn client_acks_inbound_by_qos(sut: ClientSutHandle) {
         .next_of_type(PUBREC, TIMEOUT)
         .await
         .expect("[MQTT-3.3.4-1] no PUBREC for a QoS 2 PUBLISH");
-    assert_eq!(pubrec.leading_packet_id(), Some(12), "PUBREC id");
+    assert_eq!(
+        pubrec.leading_packet_id(),
+        Some(12),
+        "[MQTT-4.3.3-8] PUBREC id"
+    );
     assert!(
         PUBLISH_ACK_REASON_CODES.contains(&pubrec.ack_reason_code()),
         "[MQTT-3.5.2-1] PUBREC reason code 0x{:02X}",

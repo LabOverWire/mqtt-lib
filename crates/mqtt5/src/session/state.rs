@@ -776,8 +776,8 @@ impl SessionState {
         self.touch().await;
         let mut publishes = self.unacked_publishes.write().await;
         let mut pubrels = self.unacked_pubrels.write().await;
-        if let Some((order, _)) = publishes.remove(&packet_id) {
-            pubrels.insert(packet_id, (order, Instant::now()));
+        if publishes.remove(&packet_id).is_some() {
+            pubrels.insert(packet_id, (self.next_send_order(), Instant::now()));
         }
     }
 
@@ -1431,7 +1431,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn outbound_replay_keeps_original_send_order_across_pubrec() {
+    async fn outbound_replay_orders_pubrel_by_pubrec_arrival() {
         let session = SessionState::new("test-client".to_string(), SessionConfig::default(), true);
         for (id, qos) in [
             (30, QoS::ExactlyOnce),
@@ -1445,17 +1445,19 @@ mod tests {
         }
         session.complete_pubrec(30).await;
         session.store_pubrel(30).await;
+        session.complete_pubrec(20).await;
+        session.store_pubrel(20).await;
 
         assert_eq!(
             replay_ids(&session.outbound_replay().await),
-            vec![('R', 30), ('P', 10), ('P', 20)]
+            vec![('P', 10), ('R', 30), ('R', 20)]
         );
 
         session.complete_outbound(10).await;
         session.complete_outbound(30).await;
         assert_eq!(
             replay_ids(&session.outbound_replay().await),
-            vec![('P', 20)]
+            vec![('R', 20)]
         );
 
         session.discard_outbound_state().await;

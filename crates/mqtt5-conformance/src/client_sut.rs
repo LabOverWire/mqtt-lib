@@ -17,6 +17,7 @@ pub struct AuthSpec {
     pub method: String,
     pub initial_response: Option<Vec<u8>>,
     pub challenge_response: Vec<u8>,
+    pub abort_after_challenges: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -186,6 +187,7 @@ pub trait ClientUnderTest: Send + Sync {
     fn subscribe(&self, filter: &str, qos: u8) -> ClientFuture<Result<(), ClientError>>;
     fn subscribe_deferred(&self, filter: &str, qos: u8) -> ClientFuture<Result<(), ClientError>>;
     fn settle_deferred(&self, settle: Settle) -> usize;
+    fn settle_newest_deferred(&self, settle: Settle) -> bool;
     fn unsubscribe(&self, filter: &str) -> ClientFuture<Result<(), ClientError>>;
     fn disconnect(&self) -> ClientFuture<Result<(), ClientError>>;
     fn reauthenticate(&self) -> ClientFuture<Result<(), ClientError>>;
@@ -248,16 +250,20 @@ mod inprocess {
     };
     use std::future::Future;
     use std::pin::Pin;
+    use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::{Arc, Mutex, PoisonError};
 
     type AuthFuture<'a, T> = Pin<Box<dyn Future<Output = mqtt5::Result<T>> + Send + 'a>>;
 
-    struct ScriptedAuthHandler(AuthSpec);
+    struct ScriptedAuthHandler {
+        spec: AuthSpec,
+        challenges: AtomicU32,
+    }
 
     impl AuthHandler for ScriptedAuthHandler {
         fn initial_response<'a>(&'a self, auth_method: &'a str) -> AuthFuture<'a, Option<Vec<u8>>> {
             tracing::debug!(auth_method, "scripted authentication: initial response");
-            let response = self.0.initial_response.clone();
+            let response = self.spec.initial_response.clone();
             Box::pin(async move { Ok(response) })
         }
 
@@ -271,8 +277,14 @@ mod inprocess {
                 ?challenge_data,
                 "scripted authentication: challenge"
             );
-            let response = self.0.challenge_response.clone();
-            Box::pin(async move { Ok(AuthResponse::Continue(response)) })
+            let answered = self.challenges.fetch_add(1, Ordering::SeqCst);
+            let response = match self.spec.abort_after_challenges {
+                Some(limit) if answered >= limit => {
+                    AuthResponse::Abort("scripted authentication aborts".to_owned())
+                }
+                _ => AuthResponse::Continue(self.spec.challenge_response.clone()),
+            };
+            Box::pin(async move { Ok(response) })
         }
     }
 
@@ -319,6 +331,15 @@ mod inprocess {
         options.with_deferred_ack(spec.deferred_ack)
     }
 
+    fn settle_token(token: AckToken, settle: Settle) {
+        match settle {
+            Settle::Ack => token.ack(),
+            Settle::Reject(reason) => {
+                token.reject(ReasonCode::from_u8(reason).unwrap_or(ReasonCode::UnspecifiedError));
+            }
+        }
+    }
+
     struct Mqtt5Client {
         client: MqttClient,
         options: ConnectOptions,
@@ -356,7 +377,10 @@ mod inprocess {
             Box::pin(async move {
                 if let Some(authentication) = authentication {
                     client
-                        .set_auth_handler(ScriptedAuthHandler(authentication))
+                        .set_auth_handler(ScriptedAuthHandler {
+                            spec: authentication,
+                            challenges: AtomicU32::new(0),
+                        })
                         .await;
                 }
                 Box::pin(client.connect_with_options(&url, options))
@@ -458,14 +482,18 @@ mod inprocess {
                 .collect();
             let settled = tokens.len();
             for token in tokens {
-                match settle {
-                    Settle::Ack => token.ack(),
-                    Settle::Reject(reason) => token.reject(
-                        ReasonCode::from_u8(reason).unwrap_or(ReasonCode::UnspecifiedError),
-                    ),
-                }
+                settle_token(token, settle);
             }
             settled
+        }
+
+        fn settle_newest_deferred(&self, settle: Settle) -> bool {
+            let newest = self
+                .deferred
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .pop();
+            newest.map(|token| settle_token(token, settle)).is_some()
         }
 
         fn unsubscribe(&self, filter: &str) -> ClientFuture<Result<(), ClientError>> {
