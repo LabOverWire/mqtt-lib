@@ -1,14 +1,14 @@
 use super::common::{
-    accept_next, begin, drop_connection, finish, parse_publish, queued_publish_then_reconnect,
-    read_connect, reconnect_with, start, subscribe_and_ack, subscribe_deferred_and_ack,
-    wait_connected,
+    accept_next, begin, drop_connection, finish, packets_until_quiet, parse_publish,
+    queued_publish_then_reconnect, read_connect, reconnect_with, start, subscribe_and_ack,
+    subscribe_deferred_and_ack, wait_connected, wait_for_received, TIMEOUT,
 };
 use crate::client_conformance_test;
 use crate::client_sut::{ClientSutHandle, ClientUnderTest, ConnectSpec, PublishSpec, Settle};
 use crate::scripted_broker::{
-    property_u16, property_u32, property_u8, publish, publish_first_byte, BrokerConnection,
-    PROP_MAXIMUM_PACKET_SIZE, PROP_MAXIMUM_QOS, PROP_RETAIN_AVAILABLE, PROP_TOPIC_ALIAS_MAXIMUM,
-    PUBACK, PUBLISH, PUBREC, SUBSCRIBE, UNSUBSCRIBE,
+    ack, property_u16, property_u32, property_u8, publish, publish_first_byte, BrokerConnection,
+    Packet, PROP_MAXIMUM_PACKET_SIZE, PROP_MAXIMUM_QOS, PROP_RETAIN_AVAILABLE,
+    PROP_TOPIC_ALIAS_MAXIMUM, PUBACK, PUBLISH, PUBREC, PUBREL, SUBSCRIBE, UNSUBSCRIBE,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -412,5 +412,79 @@ async fn queued_acks_discarded_when_session_not_present(sut: ClientSutHandle) {
         puback.is_none(),
         "[MQTT-3.2.2-5] an acknowledgement from the discarded session was sent on a Session Present=0 connection: packet id {:?}",
         puback.and_then(|p| p.leading_packet_id())
+    );
+}
+
+/// [MQTT-3.2.2-5] A Client that holds Session State and gets Session Present
+/// 0 discards it: no outbound PUBLISH or PUBREL of the old session is resent,
+/// and an inbound `QoS` 2 Packet Identifier still awaiting PUBREL starts a new
+/// Application Message.
+#[client_conformance_test(ids = ["MQTT-3.2.2-5"], requires = ["client.automatic_reconnect"])]
+async fn session_state_discarded_when_session_not_present(sut: ClientSutHandle) {
+    let spec = ConnectSpec::new("sp0-state").reconnecting().resuming(300);
+    let mut s = start(&sut, spec, false, &[]).await;
+    s.result.as_ref().unwrap();
+    subscribe_and_ack(&mut s, "t/in", 2).await;
+    let publishing = tokio::spawn(s.client.publish("t/out", b"q2", PublishSpec::qos(2)));
+    let out_id = parse_publish(&s.conn.next_of_type(PUBLISH, TIMEOUT).await.unwrap())
+        .packet_id
+        .unwrap();
+    s.conn.send(&ack(0x50, out_id)).await.unwrap();
+    s.conn
+        .next_of_type(PUBREL, TIMEOUT)
+        .await
+        .expect("no PUBREL after PUBREC");
+    s.conn
+        .send(&publish(
+            publish_first_byte(2, false),
+            b"t/in",
+            Some(9),
+            &[],
+            b"old",
+        ))
+        .await
+        .unwrap();
+    s.conn
+        .next_of_type(PUBREC, TIMEOUT)
+        .await
+        .expect("no PUBREC for the inbound QoS 2 PUBLISH");
+    assert_eq!(
+        wait_for_received(&s.client, 1).await.len(),
+        1,
+        "the first message was delivered"
+    );
+    let (client, broker) = drop_connection(s).await;
+
+    let (mut conn, _) = accept_next(&broker, false, &[]).await;
+    wait_connected(&client, true).await;
+    let resent: Vec<u8> = packets_until_quiet(&mut conn, Duration::from_secs(2))
+        .await
+        .iter()
+        .map(Packet::packet_type)
+        .filter(|t| *t == PUBLISH || *t == PUBREL)
+        .collect();
+    assert!(
+        resent.is_empty(),
+        "[MQTT-3.2.2-5] packets of the discarded session resent after Session Present 0 (packet types {resent:?})"
+    );
+    conn.send(&publish(
+        publish_first_byte(2, false),
+        b"t/in",
+        Some(9),
+        &[],
+        b"new",
+    ))
+    .await
+    .unwrap();
+    conn.next_of_type(PUBREC, TIMEOUT)
+        .await
+        .expect("no PUBREC for the new QoS 2 PUBLISH");
+    let received = wait_for_received(&client, 2).await;
+    drop(client);
+    publishing.abort();
+    assert_eq!(
+        received.len(),
+        2,
+        "[MQTT-3.2.2-5] inbound QoS 2 state kept after Session Present 0: the new PUBLISH with id 9 was dropped as a duplicate"
     );
 }
