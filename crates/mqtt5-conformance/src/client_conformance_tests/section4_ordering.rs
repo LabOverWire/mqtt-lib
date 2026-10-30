@@ -1,6 +1,7 @@
 use super::common::{
-    accept_next, ack_ids, drop_connection, packets_until_quiet, parse_publish, start,
-    subscribe_and_ack, subscribe_deferred_and_ack, wait_for_received, TIMEOUT,
+    accept_next, ack_ids, drop_connection, packets_until_quiet, parse_publish,
+    publishes_until_quiet, start, subscribe_and_ack, subscribe_deferred_and_ack, wait_for_received,
+    TIMEOUT,
 };
 use crate::client_conformance_test;
 use crate::client_sut::{ClientSutHandle, ConnectSpec, PublishSpec, Settle};
@@ -149,10 +150,9 @@ async fn resent_publishes_keep_original_order(sut: ClientSutHandle) {
     let (mut conn, connect) = accept_next(&broker, true, &[]).await;
     let resumed = ParsedConnect::parse(connect.bytes()).expect("client sent a malformed CONNECT");
     assert_eq!(resumed.flags & 0x02, 0, "the reconnect keeps Clean Start 0");
-    let resent: Vec<u16> = packets_until_quiet(&mut conn, Duration::from_secs(3))
+    let resent: Vec<u16> = publishes_until_quiet(&mut conn, Duration::from_secs(3))
         .await
         .iter()
-        .filter(|p| p.packet_type() == PUBLISH)
         .filter_map(|p| parse_publish(p).packet_id)
         .collect();
     drop(client);
@@ -222,7 +222,7 @@ async fn pubrel_order_follows_pubrec_order(sut: ClientSutHandle) {
         .collect();
     let mut rel_set = rels.clone();
     rel_set.sort_unstable();
-    let mut outstanding = vec![ids[2], ids[1]];
+    let mut outstanding = [ids[2], ids[1]];
     outstanding.sort_unstable();
     assert_eq!(
         rel_set, outstanding,

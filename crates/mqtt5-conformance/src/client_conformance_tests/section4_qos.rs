@@ -1,6 +1,6 @@
 use super::common::{
-    packets_until_quiet, parse_publish, publishes_until_quiet, queued_flush, received_after, start,
-    subscribe_and_ack, SHORT, TIMEOUT,
+    accept_next, drop_connection, packets_until_quiet, parse_publish, publishes_until_quiet,
+    queued_flush, received_after, start, subscribe_and_ack, Session, SHORT, TIMEOUT,
 };
 use crate::client_conformance_test;
 use crate::client_sut::{ClientError, ClientSutHandle, ConnectSpec, PublishSpec};
@@ -229,13 +229,7 @@ async fn first_transmissions_have_dup_zero_and_pubrel_ends_resends(sut: ClientSu
         .expect("publish failed");
 }
 
-/// [MQTT-4.4.0-2] A PUBREC with a Reason Code of 0x80 or greater ends the
-/// exchange: no PUBREL and no resend of the PUBLISH.
-#[client_conformance_test(ids = ["MQTT-4.4.0-2"])]
-async fn error_pubrec_gets_no_pubrel_or_resend(sut: ClientSutHandle) {
-    let mut s = start(&sut, ConnectSpec::new("qos-pubrec-err"), false, &[]).await;
-    s.result.as_ref().unwrap();
-    let publishing = tokio::spawn(s.client.publish("t/err", b"x", PublishSpec::qos(2)));
+async fn refused_qos2_publish(s: &mut Session, topic: &str) -> u16 {
     let packet = s.conn.next_of_type(PUBLISH, TIMEOUT).await.unwrap();
     let id = parse_publish(&packet).packet_id.unwrap();
     s.conn
@@ -247,10 +241,47 @@ async fn error_pubrec_gets_no_pubrel_or_resend(sut: ClientSutHandle) {
         .iter()
         .map(Packet::packet_type)
         .collect();
-    let _ = tokio::time::timeout(TIMEOUT, publishing).await;
     assert!(
         !after.contains(&PUBREL) && !after.contains(&PUBLISH),
-        "[MQTT-4.4.0-2] the client continued the exchange after PUBREC 0x80 (packet types {after:?})"
+        "[MQTT-4.4.0-2] the client continued the exchange on {topic} after PUBREC 0x80 (packet types {after:?})"
+    );
+    id
+}
+
+/// [MQTT-4.4.0-2] A PUBREC with a Reason Code of 0x80 or greater ends the
+/// exchange: no PUBREL follows.
+#[client_conformance_test(ids = ["MQTT-4.4.0-2"])]
+async fn error_pubrec_gets_no_pubrel(sut: ClientSutHandle) {
+    let mut s = start(&sut, ConnectSpec::new("qos-pubrec-err"), false, &[]).await;
+    s.result.as_ref().unwrap();
+    let publishing = tokio::spawn(s.client.publish("t/err", b"x", PublishSpec::qos(2)));
+    refused_qos2_publish(&mut s, "t/err").await;
+    publishing.abort();
+}
+
+/// [MQTT-4.4.0-2] A PUBLISH refused with PUBREC 0x80 or greater is treated as
+/// acknowledged, so it is not resent when the session resumes.
+#[client_conformance_test(ids = ["MQTT-4.4.0-2"], requires = ["client.automatic_reconnect"])]
+async fn error_pubrec_publish_not_resent_after_resume(sut: ClientSutHandle) {
+    let spec = ConnectSpec::new("qos-pubrec-err-resume")
+        .reconnecting()
+        .resuming(300);
+    let mut s = start(&sut, spec, false, &[]).await;
+    s.result.as_ref().unwrap();
+    let publishing = tokio::spawn(s.client.publish("t/err", b"x", PublishSpec::qos(2)));
+    let id = refused_qos2_publish(&mut s, "t/err").await;
+    let (client, broker) = drop_connection(s).await;
+    let (mut conn, _) = accept_next(&broker, true, &[]).await;
+    let resent: Vec<u16> = publishes_until_quiet(&mut conn, Duration::from_secs(3))
+        .await
+        .iter()
+        .filter_map(|p| parse_publish(p).packet_id)
+        .collect();
+    drop(client);
+    publishing.abort();
+    assert!(
+        !resent.contains(&id),
+        "[MQTT-4.4.0-2] PUBLISH {id} refused with PUBREC 0x80 was resent after Session Present 1 (resent ids {resent:?})"
     );
 }
 

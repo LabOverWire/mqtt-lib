@@ -17,6 +17,8 @@ pub struct AuthSpec {
     pub method: String,
     pub initial_response: Option<Vec<u8>>,
     pub challenge_response: Vec<u8>,
+    /// Aborts once this many challenges have been answered over the client's
+    /// lifetime, counting the CONNECT exchange and every re-authentication.
     pub abort_after_challenges: Option<u32>,
 }
 
@@ -493,7 +495,13 @@ mod inprocess {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .pop();
-            newest.map(|token| settle_token(token, settle)).is_some()
+            match newest {
+                Some(token) => {
+                    settle_token(token, settle);
+                    true
+                }
+                None => false,
+            }
         }
 
         fn unsubscribe(&self, filter: &str) -> ClientFuture<Result<(), ClientError>> {
