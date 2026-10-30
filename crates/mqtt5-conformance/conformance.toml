@@ -1968,7 +1968,7 @@ level = "MustNot"
 applies_to = "Both"
 text = "If PUBACK or PUBREC is received containing a Reason Code of 0x80 or greater the corresponding PUBLISH packet is treated as acknowledged, and MUST NOT be retransmitted"
 status = "Tested"
-test_names = ["puback_error_stops_retransmission", "error_pubrec_from_subscriber_terminates_qos2_no_pubrel", "error_pubrec_gets_no_pubrel_or_resend"]
+test_names = ["puback_error_stops_retransmission", "error_pubrec_from_subscriber_terminates_qos2_no_pubrel", "error_pubrec_gets_no_pubrel", "error_pubrec_publish_not_resent_after_resume"]
 
 # ===========================================================================
 # Section 4.5 -- Message Receipt

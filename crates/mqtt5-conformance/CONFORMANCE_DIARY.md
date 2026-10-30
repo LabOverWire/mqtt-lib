@@ -42,6 +42,20 @@
 
 ## Diary Entries
 
+### Client SUT mode, phase 2: review of `conf_client_c.rs` (2026-10-30)
+
+**Trigger**: code review of PR #284, 9 findings. 4 confirmed and fixed, 3 cleanups applied, 2 refuted.
+
+**Replay stall (CONFIRMED by test)**: the PUBREL order fix put every PUBREL behind any PUBLISH still unacknowledged when its PUBREC arrived. The replay waits for send quota before each PUBLISH, and an outstanding PUBREL keeps its quota. Counter-test: QoS 2 PUBLISH A, QoS 1 PUBLISH B, PUBREC A, connection lost, resume with Receive Maximum 1. With the fix the client sent nothing after the CONNACK; with the old order it sent PUBREL A, then PUBLISH B after PUBCOMP. With B sent before A, the old code stalled the same way, so the stall predates the fix. MQTT-4.6.0-1 orders PUBLISH packets among themselves and MQTT-4.6.0-4 PUBRELs among themselves, so `outbound_replay` now returns the PUBRELs first, in PUBREC order, then the PUBLISH packets in send order. Two tests in `conf_client_c.rs` cover both publish orders and both fail under the old combined order. The unit test is now `outbound_replay_sends_pubrels_by_pubrec_arrival_before_publishes`.
+
+**Error PUBREC resend (CONFIRMED by test)**: `error_pubrec_gets_no_pubrel_or_resend` watched one connection for 1 s, but a client only resends after a session resumes. A client that kept the refused PUBLISH in session state (quota released, publish not removed) passed it. It is split into `error_pubrec_gets_no_pubrel` (in session) and `error_pubrec_publish_not_resent_after_resume` (requires `client.automatic_reconnect`), which fails under that mutation. The first mutation tried only removed the explicit `remove_unacked_publish` and was a no-op, since `release_outbound_quota` also completes the outbound exchange.
+
+**Applied**: `AuthSpec::abort_after_challenges` now says it counts challenges over the client's lifetime, including the CONNECT exchange (the only user gets no challenge in CONNECT); `resent_publishes_keep_original_order` uses `publishes_until_quiet`; a fixed two-element list is an array; `settle_newest_deferred` uses a `match` instead of a side effect in `Option::map`.
+
+**Refuted**: that the MQTT-3.14.2-1 checks should reject Server-only codes from a Client (quorum 3/3: the statement requires a value from the table, the "Sent by" column carries no conformance statement, and side restrictions are written as their own statements, such as MQTT-3.14.2-2); that the `///` statement tags on tests break the no-comment rule (every client test on main has one).
+
+**Results**: conformance lib 334 passed (251 broker, 83 client), `manifest_load` 13 passed; `conf_client_c` 5 passed; mqtt5 lib 640 passed. CLI in-process 191 passed, 3 skipped; `--client mqtt5` 83 passed; external mqttv5 188 passed, 6 skipped; Mosquitto 187 passed, 7 skipped. fmt and the four pedantic clippy runs are clean.
+
 ### Client SUT mode, phase 2: `conf_client_c.rs` (2026-10-30)
 
 **Trigger**: #166 part 2, third step. `conf_client_c.rs` held 19 client tests with their own fake broker.

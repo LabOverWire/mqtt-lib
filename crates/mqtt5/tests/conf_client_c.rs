@@ -357,3 +357,91 @@ async fn mqtt_4_6_0_2_deferred_acked_immediately_mixed_with_automatic() {
     }))
     .await;
 }
+
+async fn published_id(wire: &mut Wire, what: &str) -> u16 {
+    let raw = wire.expect(what).await;
+    assert_eq!(raw.kind(), 3, "expected {what}, got {}", raw.describe());
+    raw.publish_id().expect("QoS > 0 PUBLISH has a packet id")
+}
+
+async fn replay_after_resume_with_receive_maximum_one(name: &str, qos1_first: bool) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let (client, mut wire) = connected(&listener, persistent_options(name)).await;
+    let mut publishing = Vec::new();
+    let mut ids = [0u16; 2];
+    for (slot, qos) in if qos1_first {
+        [(1, 1), (0, 2)]
+    } else {
+        [(0, 2), (1, 1)]
+    } {
+        let c = client.clone();
+        let qos = if qos == 2 {
+            QoS::ExactlyOnce
+        } else {
+            QoS::AtLeastOnce
+        };
+        publishing.push(tokio::spawn(async move {
+            c.publish_qos("t/x", b"x".to_vec(), qos).await
+        }));
+        ids[slot] = published_id(&mut wire, "PUBLISH").await;
+    }
+    let [released, unacked] = ids;
+    wire.send(&encode(0x50, &released.to_be_bytes())).await;
+    let pubrel = wire.expect("PUBREL").await;
+    assert_eq!((pubrel.kind(), pubrel.ack_id()), (6, released));
+    drop(wire);
+    let (stream, _) = tokio::time::timeout(Duration::from_secs(10), listener.accept())
+        .await
+        .expect("client did not reconnect in time")
+        .expect("accept");
+    let mut wire = Wire { stream };
+    let connect = wire.raw_read().await.expect("CONNECT");
+    assert_eq!(connect.kind(), 1, "first packet must be CONNECT");
+    wire.send(&encode(0x20, &[0x01, 0x00, 0x03, 0x21, 0x00, 0x01]))
+        .await;
+    let mut seen = Vec::new();
+    while let Next::Packet(raw) = wire.next(Duration::from_secs(3)).await {
+        match raw.kind() {
+            6 => wire.send(&encode(0x70, &raw.ack_id().to_be_bytes())).await,
+            3 => {
+                let id = raw.publish_id().expect("QoS 1 PUBLISH has a packet id");
+                wire.send(&encode(0x40, &id.to_be_bytes())).await;
+            }
+            _ => {}
+        }
+        seen.push(raw);
+    }
+    publishing.iter().for_each(tokio::task::JoinHandle::abort);
+    let resent: Vec<(u8, u16)> = seen
+        .iter()
+        .filter_map(|p| match p.kind() {
+            6 => Some((6, p.ack_id())),
+            3 => p.publish_id().map(|id| (3, id)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        resent,
+        [(6, released), (3, unacked)],
+        "after resuming with Receive Maximum 1 and PUBREL {released} outstanding, the replay must send the PUBREL before waiting for quota for PUBLISH {unacked}; saw {:?}",
+        descriptions(&seen)
+    );
+}
+
+#[tokio::test]
+async fn replay_sends_pubrel_before_publish_waiting_for_quota_sent_after_it() {
+    with_timeout(Box::pin(replay_after_resume_with_receive_maximum_one(
+        "c-replay-rel-first",
+        false,
+    )))
+    .await;
+}
+
+#[tokio::test]
+async fn replay_sends_pubrel_before_publish_waiting_for_quota_sent_before_it() {
+    with_timeout(Box::pin(replay_after_resume_with_receive_maximum_one(
+        "c-replay-pub-first",
+        true,
+    )))
+    .await;
+}
