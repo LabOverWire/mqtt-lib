@@ -449,6 +449,11 @@ pub trait StorageBackend: Send + Sync {
         async { Ok(Vec::new()) }
     }
 
+    /// Clients that have queued messages, with or without a stored session.
+    fn queued_client_ids(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     fn remove_expired_session(
         &self,
         _client_id: &str,
@@ -697,25 +702,22 @@ impl<B: StorageBackend + 'static> Storage<B> {
 
     /// Get client session
     pub async fn get_session(&self, client_id: &str) -> Option<ClientSession> {
-        // First check cache
         let cache_result = self.sessions_cache.read().await.get(client_id).cloned();
 
         if let Some(session) = cache_result {
-            // Check if cached session is expired
             if session.is_expired() {
-                // Remove from cache and backend
                 if let Err(e) = self.remove_session(client_id).await {
                     warn!("Failed to remove expired session for {client_id}: {e}");
+                }
+                if let Err(e) = self.remove_queued_messages(client_id).await {
+                    warn!("Failed to remove queued messages of expired session {client_id}: {e}");
                 }
                 return None;
             }
             return Some(session);
         }
 
-        // Not in cache, try loading from backend
         if let Ok(Some(session)) = self.backend.get_session(client_id).await {
-            // Backend already checks expiry, so if we get here it's valid
-            // Add to cache for future use
             self.sessions_cache
                 .write()
                 .await
@@ -1248,9 +1250,16 @@ impl StorageBackend for DynamicStorage {
         }
     }
 
-    async fn store_retained_message(&self, topic: &str, message: RetainedMessage) -> Result<()> {
+    fn queued_client_ids(&self) -> Vec<String> {
         match self {
             #[cfg(not(target_arch = "wasm32"))]
+            Self::File(backend) => backend.queued_client_ids(),
+            Self::Memory(backend) => backend.queued_client_ids(),
+        }
+    }
+
+    async fn store_retained_message(&self, topic: &str, message: RetainedMessage) -> Result<()> {
+        match self {
             #[cfg(not(target_arch = "wasm32"))]
             Self::File(backend) => backend.store_retained_message(topic, message).await,
             Self::Memory(backend) => backend.store_retained_message(topic, message).await,
@@ -1260,7 +1269,6 @@ impl StorageBackend for DynamicStorage {
     async fn get_retained_message(&self, topic: &str) -> Result<Option<RetainedMessage>> {
         match self {
             #[cfg(not(target_arch = "wasm32"))]
-            #[cfg(not(target_arch = "wasm32"))]
             Self::File(backend) => backend.get_retained_message(topic).await,
             Self::Memory(backend) => backend.get_retained_message(topic).await,
         }
@@ -1268,7 +1276,6 @@ impl StorageBackend for DynamicStorage {
 
     async fn remove_retained_message(&self, topic: &str) -> Result<()> {
         match self {
-            #[cfg(not(target_arch = "wasm32"))]
             #[cfg(not(target_arch = "wasm32"))]
             Self::File(backend) => backend.remove_retained_message(topic).await,
             Self::Memory(backend) => backend.remove_retained_message(topic).await,

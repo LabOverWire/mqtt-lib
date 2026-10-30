@@ -836,3 +836,35 @@ async fn file_update_session_is_token_guarded() {
     let backend = FileBackend::new(dir.path()).await.unwrap();
     assert_update_session_is_token_guarded(&backend).await;
 }
+
+#[tokio::test]
+async fn expired_cached_session_takes_its_queue_with_it() {
+    let storage = create_memory_storage();
+    for client_id in ["gone", "kept"] {
+        let expiry = if client_id == "gone" { 1 } else { 3600 };
+        let mut session = ClientSession::new(client_id.to_string(), false, Some(expiry));
+        session.mark_disconnected(crate::broker::storage::unix_millis_now() - 10_000);
+        storage.store_session(session).await;
+        storage
+            .queue_message(QueuedMessage::new(
+                PublishPacket::new(format!("{client_id}/t"), &b"x"[..], QoS::AtLeastOnce),
+                client_id.to_string(),
+                QoS::AtLeastOnce,
+                None,
+            ))
+            .await
+            .unwrap();
+    }
+
+    assert!(storage.get_session("gone").await.is_none());
+    assert!(
+        storage
+            .get_queued_messages("gone")
+            .await
+            .unwrap()
+            .is_empty(),
+        "the expired session's queued messages were kept"
+    );
+    assert!(storage.get_session("kept").await.is_some());
+    assert_eq!(storage.get_queued_messages("kept").await.unwrap().len(), 1);
+}

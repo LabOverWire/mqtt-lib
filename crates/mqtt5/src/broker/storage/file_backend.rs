@@ -862,6 +862,10 @@ impl StorageBackend for FileBackend {
         self.queues.handle(client_id)
     }
 
+    fn queued_client_ids(&self) -> Vec<String> {
+        self.queues.occupied_client_ids()
+    }
+
     fn queue_message(
         &self,
         message: QueuedMessage,

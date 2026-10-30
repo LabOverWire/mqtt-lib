@@ -862,6 +862,7 @@ impl MessageRouter {
                 Ok(ids) => candidates.extend(ids),
                 Err(e) => warn!("Failed to list stored sessions for the expiry sweep: {e}"),
             }
+            candidates.extend(storage.queued_client_ids());
         }
         let connected: HashSet<String> = self.clients.read().await.keys().cloned().collect();
         let mut swept = 0usize;
@@ -3739,5 +3740,119 @@ mod tests {
             1,
             "listed offline group h was not queued the message"
         );
+    }
+
+    fn queued_for(client_id: &str, tag: &str) -> crate::broker::storage::QueuedMessage {
+        crate::broker::storage::QueuedMessage::new(
+            PublishPacket::new(
+                format!("{client_id}/t"),
+                tag.as_bytes().to_vec(),
+                QoS::AtLeastOnce,
+            ),
+            client_id.to_string(),
+            QoS::AtLeastOnce,
+            None,
+        )
+    }
+
+    fn queue_files(dir: &std::path::Path, client_id: &str) -> usize {
+        std::fs::read_dir(dir.join("queues").join(client_id)).map_or(0, Iterator::count)
+    }
+
+    async fn restart_with_queues(
+        dir: &std::path::Path,
+        sessions: Vec<ClientSession>,
+        queued_clients: &[&str],
+    ) -> (Arc<DynamicStorage>, MessageRouter) {
+        {
+            let backend = crate::broker::storage::FileBackend::new(dir).await.unwrap();
+            for session in sessions {
+                backend.store_session(session).await.unwrap();
+            }
+            for client_id in queued_clients {
+                for tag in ["a", "b"] {
+                    backend
+                        .queue_message(queued_for(client_id, tag))
+                        .await
+                        .unwrap();
+                }
+            }
+            backend.flush_queue_writes().await;
+        }
+        for client_id in queued_clients {
+            assert_eq!(
+                queue_files(dir, client_id),
+                2,
+                "{client_id} queue was not written"
+            );
+        }
+        let storage = Arc::new(DynamicStorage::File(
+            crate::broker::storage::FileBackend::new(dir).await.unwrap(),
+        ));
+        let router = MessageRouter::with_storage(Arc::clone(&storage));
+        router.recover_sessions(3600).await.unwrap();
+        router.sweep_sessions().await;
+        if let DynamicStorage::File(backend) = &*storage {
+            backend.flush_queue_writes().await;
+        }
+        (storage, router)
+    }
+
+    #[tokio::test]
+    async fn queue_of_a_session_expired_while_down_is_removed_at_recovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let (storage, _router) = restart_with_queues(
+            dir.path(),
+            vec![
+                ended_session("gone", 1, 10_000),
+                ended_session("kept", 3600, 10_000),
+            ],
+            &["gone", "kept"],
+        )
+        .await;
+
+        assert!(storage.get_session("gone").await.unwrap().is_none());
+        assert!(
+            storage
+                .get_queued_messages("gone")
+                .await
+                .unwrap()
+                .is_empty(),
+            "the expired session's queue was loaded at boot"
+        );
+        assert_eq!(
+            queue_files(dir.path(), "gone"),
+            0,
+            "the expired session's queue files stayed on disk"
+        );
+        assert_eq!(storage.get_queued_messages("kept").await.unwrap().len(), 2);
+        assert_eq!(queue_files(dir.path(), "kept"), 2);
+    }
+
+    #[tokio::test]
+    async fn queue_without_a_stored_session_is_removed_at_recovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let (storage, _router) = restart_with_queues(
+            dir.path(),
+            vec![ended_session("kept", 3600, 10_000)],
+            &["orphan", "kept"],
+        )
+        .await;
+
+        assert!(
+            storage
+                .get_queued_messages("orphan")
+                .await
+                .unwrap()
+                .is_empty(),
+            "a queue with no session was loaded at boot"
+        );
+        assert_eq!(
+            queue_files(dir.path(), "orphan"),
+            0,
+            "a queue with no session stayed on disk"
+        );
+        assert_eq!(storage.get_queued_messages("kept").await.unwrap().len(), 2);
+        assert_eq!(queue_files(dir.path(), "kept"), 2);
     }
 }

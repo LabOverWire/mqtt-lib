@@ -614,6 +614,16 @@ impl QueueRegistry {
         self.queues.read().values().map(Arc::clone).collect()
     }
 
+    /// Clients whose queue holds at least one message.
+    pub fn occupied_client_ids(&self) -> Vec<String> {
+        self.queues
+            .read()
+            .values()
+            .filter(|queue| !queue.is_empty())
+            .map(|queue| queue.client_id().to_string())
+            .collect()
+    }
+
     /// Raises the sequence counter above everything found on disk. Only the file backend
     /// scans a directory, so this is unused on wasm.
     #[cfg(not(target_arch = "wasm32"))]
