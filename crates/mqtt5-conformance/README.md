@@ -106,7 +106,10 @@ The client test modules live in `src/client_conformance_tests/`:
 | `section3_publish` | 3.3 | PUBLISH the client sends and inbound PUBLISH it must refuse or resolve |
 | `section3_qos_ack` | 3.4-3.7 | PUBACK, PUBREC and PUBCOMP the client sends |
 | `section3_subscribe` | 3.6, 3.8, 3.10 | SUBSCRIBE, UNSUBSCRIBE and PUBREL wire format, SUBACK matching |
-| `section4_qos` | 4.3 | QoS 1 and QoS 2 receiver rules, first transmission DUP |
+| `section3_disconnect` | 3.14 | DISCONNECT the client sends, and closing the connection after it |
+| `section3_auth` | 3.15 | AUTH reserved flags and the Reason Codes of a re-authentication |
+| `section4_qos` | 4.3-4.5 | QoS 1 and QoS 2 sender and receiver rules, first transmission DUP, packet identifier reuse |
+| `section4_ordering` | 4.4, 4.6 | Acknowledgement order, and resend order after a session resumes |
 | `section4_flow_control` | 3.3.4, 4.9 | Receive Maximum and send quota |
 | `section4_error_handling` | 4.13 | Closing the connection after a malformed packet |
 
@@ -235,7 +238,7 @@ Tests self-register at link time via `linkme::distributed_slice`. The `CONFORMAN
 
 ### Client SUT mode
 
-`--client mqtt5` runs only the client tests, against the in-process mqtt5 client; without it the CLI runs only the broker tests. A client is plugged in through two traits in `client_sut.rs`: `ClientSut` creates a client from a `ConnectSpec` and reports its `ClientCapabilities`, and `ClientUnderTest` exposes connect, publish, subscribe, a subscribe whose acknowledgements the test settles, unsubscribe, disconnect, re-authenticate, the connection state and the messages received. The tests drive the client through these calls and play the broker side with `ScriptedBroker`, which accepts the client's TCP connection and reads and writes raw packets.
+`--client mqtt5` runs only the client tests, against the in-process mqtt5 client; without it the CLI runs only the broker tests. A client is plugged in through two traits in `client_sut.rs`: `ClientSut` creates a client from a `ConnectSpec` and reports its `ClientCapabilities`, and `ClientUnderTest` exposes connect, publish, subscribe, a subscribe whose acknowledgements the test settles, all at once or newest first, unsubscribe, disconnect, re-authenticate, the connection state and the messages received. The tests drive the client through these calls and play the broker side with `ScriptedBroker`, which accepts the client's TCP connection and reads and writes raw packets.
 
 ### Capability Gating
 
@@ -261,4 +264,4 @@ Each `ConformanceTest` carries a `requires` array of `Requirement` values. Befor
 | `manifest.rs` | `ConformanceManifest` — TOML-based statement tracking, coverage statistics |
 | `report.rs` | `ConformanceReport` — text and JSON report generation |
 | `conformance_tests/` | 24 broker test modules organized by specification section |
-| `client_conformance_tests/` | 9 client test modules organized by specification section |
+| `client_conformance_tests/` | 13 client test modules organized by specification section |

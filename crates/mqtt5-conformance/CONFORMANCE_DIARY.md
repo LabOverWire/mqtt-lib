@@ -42,6 +42,43 @@
 
 ## Diary Entries
 
+### Client SUT mode, phase 2: review of `conf_client_c.rs` (2026-10-30)
+
+**Trigger**: code review of PR #284, 9 findings. 4 confirmed and fixed, 3 cleanups applied, 2 refuted.
+
+**Replay stall (CONFIRMED by test)**: the PUBREL order fix put every PUBREL behind any PUBLISH still unacknowledged when its PUBREC arrived. The replay waits for send quota before each PUBLISH, and an outstanding PUBREL keeps its quota. Counter-test: QoS 2 PUBLISH A, QoS 1 PUBLISH B, PUBREC A, connection lost, resume with Receive Maximum 1. With the fix the client sent nothing after the CONNACK; with the old order it sent PUBREL A, then PUBLISH B after PUBCOMP. With B sent before A, the old code stalled the same way, so the stall predates the fix. MQTT-4.6.0-1 orders PUBLISH packets among themselves and MQTT-4.6.0-4 PUBRELs among themselves, so `outbound_replay` now returns the PUBRELs first, in PUBREC order, then the PUBLISH packets in send order. Two tests in `conf_client_c.rs` cover both publish orders and both fail under the old combined order. The unit test is now `outbound_replay_sends_pubrels_by_pubrec_arrival_before_publishes`.
+
+**Error PUBREC resend (CONFIRMED by test)**: `error_pubrec_gets_no_pubrel_or_resend` watched one connection for 1 s, but a client only resends after a session resumes. A client that kept the refused PUBLISH in session state (quota released, publish not removed) passed it. It is split into `error_pubrec_gets_no_pubrel` (in session) and `error_pubrec_publish_not_resent_after_resume` (requires `client.automatic_reconnect`), which fails under that mutation. The first mutation tried only removed the explicit `remove_unacked_publish` and was a no-op, since `release_outbound_quota` also completes the outbound exchange.
+
+**Applied**: `AuthSpec::abort_after_challenges` now says it counts challenges over the client's lifetime, including the CONNECT exchange (the only user gets no challenge in CONNECT); `resent_publishes_keep_original_order` uses `publishes_until_quiet`; a fixed two-element list is an array; `settle_newest_deferred` uses a `match` instead of a side effect in `Option::map`.
+
+**Refuted**: that the MQTT-3.14.2-1 checks should reject Server-only codes from a Client (quorum 3/3: the statement requires a value from the table, the "Sent by" column carries no conformance statement, and side restrictions are written as their own statements, such as MQTT-3.14.2-2); that the `///` statement tags on tests break the no-comment rule (every client test on main has one).
+
+**Results**: conformance lib 334 passed (251 broker, 83 client), `manifest_load` 13 passed; `conf_client_c` 5 passed; mqtt5 lib 640 passed. CLI in-process 191 passed, 3 skipped; `--client mqtt5` 83 passed; external mqttv5 188 passed, 6 skipped; Mosquitto 187 passed, 7 skipped. fmt and the four pedantic clippy runs are clean.
+
+### Client SUT mode, phase 2: `conf_client_c.rs` (2026-10-30)
+
+**Trigger**: #166 part 2, third step. `conf_client_c.rs` held 19 client tests with their own fake broker.
+
+**Adapter changes**:
+- `AuthSpec::abort_after_challenges` makes the scripted handler abort the exchange after that many challenges.
+- `ClientUnderTest::settle_newest_deferred` settles only the most recent deferred acknowledgement, so a test can settle them out of arrival order.
+- `common` gains `packets_until_quiet` (every packet until the client goes quiet, pings answered) and `ack_ids`.
+
+**Port**: 16 tests in three new modules, `section3_disconnect` (3.14), `section3_auth` (3.15) and `section4_ordering` (4.4, 4.6), plus four in `section4_qos` and one in `section3_connack`. They cite 20 statements, and the existing `client_acks_inbound_by_qos` now also cites MQTT-4.3.2-4 and MQTT-4.3.3-8, whose Packet Identifier checks it already made. 11 statements had no test (9 Untested, 2 NotApplicable), so 200 of 251 are Tested.
+- The AUTH reserved flags test now sends the bad AUTH as the answer to a re-authentication, where an AUTH is expected; the old test sent it with no authentication in progress.
+- The PUBREL order test sends the PUBRECs as 3, 1, 2 instead of in PUBLISH order, so PUBREC order and PUBLISH order can be told apart, and checks the resend after the session resumes too.
+- The resend order test checks that every unacknowledged PUBLISH comes back (MQTT-4.4.0-1) and, separately, their order (MQTT-4.6.0-1). Its DUP check is left to the phase 1 MQTT-3.3.1-1 test.
+- The error PUBREC test no longer checks that the publish call fails: no statement covers the API result.
+- Three tests stay in `conf_client_c.rs`: the DISCONNECT flushed before close with automatic reconnect (DISCONNECT on a malformed packet is optional, so it has no ID; its message no longer names MQTT-4.13), and the two that need mqtt5 callbacks: acknowledgement order with slow and panicking callbacks, and a token acknowledged inside its own callback.
+- Removed as duplicates: the queued-message DUP 0 test (phase 2 `queued_message_first_transmission_has_dup_zero`) and the receiver acknowledgement and de-duplication test (`client_acks_inbound_by_qos` and `duplicate_qos2_before_pubrel_delivered_once_then_id_reusable`).
+
+**Client fix**: the new PUBREL order test failed: after the resume the client resent PUBREL 2, 3 where the PUBRECs had come as 3, then 2. `SessionState::complete_pubrec` gave the PUBREL its PUBLISH's place in the resend order. 3 of 3 independent readings of sections 4.4 and 4.6 found MQTT-4.6.0-4 covers resent PUBRELs (it has no exemption, and the PUBLISH-order rule MQTT-4.6.0-1 names PUBLISH only). A PUBREL now takes a new place when its PUBREC arrives. The unit test that pinned the old order (`outbound_replay_keeps_original_send_order_across_pubrec`) is now `outbound_replay_orders_pubrel_by_pubrec_arrival` and fails on the old code.
+
+**Controls**: 32 mutations of the mqtt5 client and codec, one rule at a time, each run against its target test. Every target failed on the assertion tagged with the broken rule. The MQTT-3.14.4-2 mutation leaks the write half so the socket stays open, and the automatic acknowledgement order mutations delay the write of odd Packet Identifiers by 50 ms.
+
+**Results**: conformance lib 333 passed (251 broker, 82 client), `manifest_load` 13 passed, integration files pass; `conf_client_c` 3 passed. CLI in-process 191 passed, 3 skipped; `--client mqtt5` 82 passed; external mqttv5 on 21883 188 passed, 6 skipped (this run's profile declares Server Keep Alive 600 and no WebSocket); Mosquitto on 21884 187 passed, 7 skipped. mqtt5 lib 640 passed. fmt and the four pedantic clippy runs are clean.
+
 ### Client SUT mode, phase 2: `conf_client_b.rs` (2026-10-28)
 
 **Trigger**: #166 part 2, second step. `conf_client_b.rs` held 35 client tests with their own fake broker.

@@ -22,6 +22,7 @@ fn test_authentication() -> AuthSpec {
         method: "TEST".to_owned(),
         initial_response: Some(b"init".to_vec()),
         challenge_response: b"resp".to_vec(),
+        abort_after_challenges: None,
     }
 }
 

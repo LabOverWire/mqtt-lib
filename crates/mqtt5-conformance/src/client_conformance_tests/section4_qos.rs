@@ -1,9 +1,16 @@
 use super::common::{
-    parse_publish, queued_flush, received_after, start, subscribe_and_ack, SHORT, TIMEOUT,
+    accept_next, drop_connection, packets_until_quiet, parse_publish, publishes_until_quiet,
+    queued_flush, received_after, start, subscribe_and_ack, Session, SHORT, TIMEOUT,
 };
 use crate::client_conformance_test;
-use crate::client_sut::{ClientSutHandle, ConnectSpec};
-use crate::scripted_broker::{ack, publish, publish_first_byte, PUBACK, PUBCOMP, PUBREC};
+use crate::client_sut::{ClientError, ClientSutHandle, ConnectSpec, PublishSpec};
+use crate::packet_parser::ParsedPublish;
+use crate::scripted_broker::{
+    ack, ack_with_properties, publish, publish_first_byte, BrokerConnection, Next, Packet, PUBACK,
+    PUBCOMP, PUBLISH, PUBREC, PUBREL,
+};
+use std::sync::Arc;
+use std::time::Duration;
 
 /// [MQTT-4.3.3-10] [MQTT-4.3.3-12] A duplicate `QoS` 2 PUBLISH that arrives
 /// before PUBREL is acknowledged again with PUBREC and not delivered twice;
@@ -141,5 +148,221 @@ async fn queued_message_first_transmission_has_dup_zero(sut: ClientSutHandle) {
         !first.dup,
         "[MQTT-4.3.2-2] queued QoS1 message sent for the first time with DUP=1 (packet id {:?})",
         first.packet_id
+    );
+}
+
+async fn next_publish(conn: &mut BrokerConnection, what: &str) -> ParsedPublish {
+    let packet = conn
+        .next_of_type(PUBLISH, TIMEOUT)
+        .await
+        .unwrap_or_else(|| panic!("no {what} PUBLISH"));
+    parse_publish(&packet)
+}
+
+/// [MQTT-4.3.1-1] [MQTT-4.3.2-2] [MQTT-4.3.3-2] [MQTT-4.3.3-4] [MQTT-4.3.3-6]
+/// A first transmission at each `QoS` has DUP 0, the PUBREL carries the
+/// PUBLISH Packet Identifier, and the PUBLISH is not resent once the PUBREL
+/// was sent.
+#[client_conformance_test(
+    ids = ["MQTT-4.3.1-1", "MQTT-4.3.2-2", "MQTT-4.3.3-2", "MQTT-4.3.3-4", "MQTT-4.3.3-6"],
+)]
+async fn first_transmissions_have_dup_zero_and_pubrel_ends_resends(sut: ClientSutHandle) {
+    let mut s = start(&sut, ConnectSpec::new("qos-first"), false, &[]).await;
+    s.result.as_ref().unwrap();
+    let client = Arc::clone(&s.client);
+    let publishing = tokio::spawn(async move {
+        for qos in 0..=2u8 {
+            client
+                .publish("t/first", &[qos], PublishSpec::qos(qos))
+                .await?;
+        }
+        Ok::<(), ClientError>(())
+    });
+    let q0 = next_publish(&mut s.conn, "QoS 0").await;
+    assert!(
+        q0.qos == 0 && !q0.dup,
+        "[MQTT-4.3.1-1] QoS 0 PUBLISH sent with QoS {} DUP {}",
+        q0.qos,
+        q0.dup
+    );
+    let q1 = next_publish(&mut s.conn, "QoS 1").await;
+    assert!(
+        q1.qos == 1 && !q1.dup,
+        "[MQTT-4.3.2-2] first QoS 1 transmission sent with QoS {} DUP {}",
+        q1.qos,
+        q1.dup
+    );
+    s.conn
+        .send(&ack(0x40, q1.packet_id.unwrap()))
+        .await
+        .unwrap();
+    let q2 = next_publish(&mut s.conn, "QoS 2").await;
+    assert!(
+        q2.qos == 2 && !q2.dup,
+        "[MQTT-4.3.3-2] first QoS 2 transmission sent with QoS {} DUP {}",
+        q2.qos,
+        q2.dup
+    );
+    let id = q2.packet_id.unwrap();
+    s.conn.send(&ack(0x50, id)).await.unwrap();
+    let pubrel = s
+        .conn
+        .next_of_type(PUBREL, TIMEOUT)
+        .await
+        .expect("no PUBREL after PUBREC");
+    assert_eq!(
+        pubrel.leading_packet_id(),
+        Some(id),
+        "[MQTT-4.3.3-4] PUBREL packet id differs from the PUBLISH"
+    );
+    let resent = publishes_until_quiet(&mut s.conn, SHORT).await;
+    assert!(
+        resent.is_empty(),
+        "[MQTT-4.3.3-6] {} PUBLISH packets sent after the PUBREL",
+        resent.len()
+    );
+    s.conn.send(&ack(0x70, id)).await.unwrap();
+    tokio::time::timeout(TIMEOUT, publishing)
+        .await
+        .expect("publishes did not complete")
+        .expect("publish task panicked")
+        .expect("publish failed");
+}
+
+async fn refused_qos2_publish(s: &mut Session, topic: &str) -> u16 {
+    let packet = s.conn.next_of_type(PUBLISH, TIMEOUT).await.unwrap();
+    let id = parse_publish(&packet).packet_id.unwrap();
+    s.conn
+        .send(&ack_with_properties(0x50, id, 0x80, &[]))
+        .await
+        .unwrap();
+    let after: Vec<u8> = packets_until_quiet(&mut s.conn, Duration::from_secs(1))
+        .await
+        .iter()
+        .map(Packet::packet_type)
+        .collect();
+    assert!(
+        !after.contains(&PUBREL) && !after.contains(&PUBLISH),
+        "[MQTT-4.4.0-2] the client continued the exchange on {topic} after PUBREC 0x80 (packet types {after:?})"
+    );
+    id
+}
+
+/// [MQTT-4.4.0-2] A PUBREC with a Reason Code of 0x80 or greater ends the
+/// exchange: no PUBREL follows.
+#[client_conformance_test(ids = ["MQTT-4.4.0-2"])]
+async fn error_pubrec_gets_no_pubrel(sut: ClientSutHandle) {
+    let mut s = start(&sut, ConnectSpec::new("qos-pubrec-err"), false, &[]).await;
+    s.result.as_ref().unwrap();
+    let publishing = tokio::spawn(s.client.publish("t/err", b"x", PublishSpec::qos(2)));
+    refused_qos2_publish(&mut s, "t/err").await;
+    publishing.abort();
+}
+
+/// [MQTT-4.4.0-2] A PUBLISH refused with PUBREC 0x80 or greater is treated as
+/// acknowledged, so it is not resent when the session resumes.
+#[client_conformance_test(ids = ["MQTT-4.4.0-2"], requires = ["client.automatic_reconnect"])]
+async fn error_pubrec_publish_not_resent_after_resume(sut: ClientSutHandle) {
+    let spec = ConnectSpec::new("qos-pubrec-err-resume")
+        .reconnecting()
+        .resuming(300);
+    let mut s = start(&sut, spec, false, &[]).await;
+    s.result.as_ref().unwrap();
+    let publishing = tokio::spawn(s.client.publish("t/err", b"x", PublishSpec::qos(2)));
+    let id = refused_qos2_publish(&mut s, "t/err").await;
+    let (client, broker) = drop_connection(s).await;
+    let (mut conn, _) = accept_next(&broker, true, &[]).await;
+    let resent: Vec<u16> = publishes_until_quiet(&mut conn, Duration::from_secs(3))
+        .await
+        .iter()
+        .filter_map(|p| parse_publish(p).packet_id)
+        .collect();
+    drop(client);
+    publishing.abort();
+    assert!(
+        !resent.contains(&id),
+        "[MQTT-4.4.0-2] PUBLISH {id} refused with PUBREC 0x80 was resent after Session Present 1 (resent ids {resent:?})"
+    );
+}
+
+/// [MQTT-4.5.0-2] The Client acknowledges a PUBLISH it holds no subscription
+/// for.
+#[client_conformance_test(ids = ["MQTT-4.5.0-2"])]
+async fn publish_without_subscription_is_acknowledged(sut: ClientSutHandle) {
+    let mut s = start(&sut, ConnectSpec::new("qos-nosub"), false, &[]).await;
+    s.result.as_ref().unwrap();
+    for (qos, id, ack_type) in [(1u8, 5u16, PUBACK), (2, 6, PUBREC)] {
+        s.conn
+            .send(&publish(
+                publish_first_byte(qos, false),
+                b"unsubscribed",
+                Some(id),
+                &[],
+                b"x",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            s.conn
+                .next_of_type(ack_type, TIMEOUT)
+                .await
+                .and_then(|p| p.leading_packet_id()),
+            Some(id),
+            "[MQTT-4.5.0-2] QoS {qos} PUBLISH without a matching subscription was not acknowledged"
+        );
+    }
+}
+
+/// [MQTT-4.3.2-1] A Packet Identifier whose PUBREL is still unacknowledged is
+/// not given to a new `QoS` 1 message, even after the identifiers wrap.
+#[client_conformance_test(ids = ["MQTT-4.3.2-1"])]
+async fn packet_id_not_reused_while_pubrel_outstanding(sut: ClientSutHandle) {
+    let mut s = start(&sut, ConnectSpec::new("qos-pid-rel"), false, &[]).await;
+    s.result.as_ref().unwrap();
+    let held = tokio::spawn(s.client.publish("t/held", b"h", PublishSpec::qos(2)));
+    let packet = s.conn.next_of_type(PUBLISH, TIMEOUT).await.unwrap();
+    let held_id = parse_publish(&packet).packet_id.unwrap();
+    s.conn.send(&ack(0x50, held_id)).await.unwrap();
+    s.conn
+        .next_of_type(PUBREL, TIMEOUT)
+        .await
+        .expect("no PUBREL after PUBREC");
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<u16>(16);
+    let mut conn = s.conn;
+    let acker = tokio::spawn(async move {
+        loop {
+            match conn.next_answering_pings(Duration::from_secs(60)).await {
+                Next::Packet(packet) if packet.packet_type() == PUBLISH => {
+                    let id = parse_publish(&packet).packet_id.unwrap();
+                    let _ = tx.send(id).await;
+                    let _ = conn.send(&ack(0x40, id)).await;
+                }
+                Next::Packet(_) => {}
+                Next::Malformed | Next::Closed | Next::Silent => return,
+            }
+        }
+    });
+
+    let mut reused = None;
+    for sent in 0..65535u32 {
+        let _ =
+            tokio::time::timeout(TIMEOUT, s.client.publish("t/x", b"x", PublishSpec::qos(1))).await;
+        match tokio::time::timeout(TIMEOUT, rx.recv()).await {
+            Ok(Some(id)) if id == held_id => {
+                reused = Some(id);
+                break;
+            }
+            Ok(Some(_)) => {}
+            Ok(None) | Err(_) => {
+                panic!("client sent no PUBLISH within {TIMEOUT:?} after {sent} publishes")
+            }
+        }
+    }
+    acker.abort();
+    held.abort();
+    assert!(
+        reused.is_none(),
+        "[MQTT-4.3.2-1] packet id {held_id} given to a new QoS 1 message while its QoS 2 PUBREL was still unacknowledged"
     );
 }

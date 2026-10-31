@@ -182,17 +182,40 @@ pub async fn queued_publish_then_reconnect(
     })
 }
 
-pub async fn publishes_until_quiet(conn: &mut BrokerConnection, wait: Duration) -> Vec<Packet> {
+pub async fn packets_until_quiet(conn: &mut BrokerConnection, wait: Duration) -> Vec<Packet> {
     let deadline = tokio::time::Instant::now() + wait;
-    let mut publishes = Vec::new();
+    let mut packets = Vec::new();
     loop {
         let left = deadline.saturating_duration_since(tokio::time::Instant::now());
         match conn.next_answering_pings(left).await {
-            Next::Packet(packet) if packet.packet_type() == PUBLISH => publishes.push(packet),
-            Next::Packet(_) => {}
-            Next::Malformed | Next::Closed | Next::Silent => return publishes,
+            Next::Packet(packet) => packets.push(packet),
+            Next::Malformed | Next::Closed | Next::Silent => return packets,
         }
     }
+}
+
+pub async fn publishes_until_quiet(conn: &mut BrokerConnection, wait: Duration) -> Vec<Packet> {
+    packets_until_quiet(conn, wait)
+        .await
+        .into_iter()
+        .filter(|packet| packet.packet_type() == PUBLISH)
+        .collect()
+}
+
+pub async fn ack_ids(conn: &mut BrokerConnection, packet_type: u8, count: usize) -> Vec<u16> {
+    let mut ids = Vec::with_capacity(count);
+    while ids.len() < count {
+        let packet = conn
+            .next_of_type(packet_type, TIMEOUT)
+            .await
+            .unwrap_or_else(|| panic!("client sent {} of {count} acknowledgements", ids.len()));
+        ids.push(
+            packet
+                .leading_packet_id()
+                .expect("acknowledgement without a packet identifier"),
+        );
+    }
+    ids
 }
 
 pub async fn queued_flush(sut: &ClientSutHandle, client_id: &str) -> Vec<Packet> {

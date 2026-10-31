@@ -598,7 +598,7 @@ level = "Must"
 applies_to = "Client"
 text = "If the Client does have Session State and receives Session Present set to 0 it MUST discard its Session State if it continues with the Network Connection."
 status = "Tested"
-test_names = ["queued_acks_discarded_when_session_not_present"]
+test_names = ["queued_acks_discarded_when_session_not_present", "session_state_discarded_when_session_not_present"]
 
 [[sections."3.2".statements]]
 id = "MQTT-3.2.2-6"
@@ -1626,23 +1626,23 @@ level = "Must"
 applies_to = "Both"
 text = "The Client or Server sending the DISCONNECT packet MUST use one of the DISCONNECT Reason Codes."
 status = "Tested"
-test_names = ["disconnect_invalid_reason_code_rejected", "server_disconnect_uses_valid_reason_code"]
+test_names = ["disconnect_invalid_reason_code_rejected", "server_disconnect_uses_valid_reason_code", "client_disconnect_uses_disconnect_reason_code_and_closes", "reauthentication_uses_auth_and_disconnect_reason_codes"]
 
 [[sections."3.14".statements]]
 id = "MQTT-3.14.4-1"
 level = "Must"
 applies_to = "Both"
 text = "After sending a DISCONNECT packet the sender MUST NOT send any more MQTT Control Packets on that Network Connection."
-status = "Untested"
-test_names = []
+status = "Tested"
+test_names = ["no_packet_after_disconnect_while_deferred_ack_settles"]
 
 [[sections."3.14".statements]]
 id = "MQTT-3.14.4-2"
 level = "Must"
 applies_to = "Both"
 text = "After sending a DISCONNECT packet the sender MUST close the Network Connection."
-status = "Untested"
-test_names = []
+status = "Tested"
+test_names = ["client_disconnect_uses_disconnect_reason_code_and_closes", "disconnect_with_reserved_flags_answered_with_0x81"]
 
 [[sections."3.14".statements]]
 id = "MQTT-3.14.4-3"
@@ -1695,8 +1695,8 @@ id = "MQTT-3.14.1-1"
 level = "Must"
 applies_to = "Both"
 text = "The Client or Server MUST validate that reserved bits are set to 0. If they are not zero it sends a DISCONNECT packet with a Reason code of 0x81 (Malformed Packet)."
-status = "Untested"
-test_names = []
+status = "Tested"
+test_names = ["disconnect_with_reserved_flags_answered_with_0x81"]
 note = "Added: absent from the manifest. Eight of the nine are among the appendix IDs missing from the rfc-extract import source"
 
 # ===========================================================================
@@ -1713,16 +1713,15 @@ level = "Must"
 applies_to = "Both"
 text = "The Client or Server MUST treat any other value as malformed and close the Network Connection"
 status = "Tested"
-test_names = ["auth_invalid_flags_malformed"]
+test_names = ["auth_invalid_flags_malformed", "auth_with_reserved_flags_closes_connection"]
 
 [[sections."3.15".statements]]
 id = "MQTT-3.15.2-1"
 level = "Must"
 applies_to = "Client"
 text = "The sender of the AUTH Packet MUST use one of the Authenticate Reason Codes"
-status = "NotApplicable"
-test_names = []
-note = "Client-side behavior"
+status = "Tested"
+test_names = ["reauthentication_uses_auth_and_disconnect_reason_codes"]
 
 [[sections."3.15".statements]]
 id = "MQTT-3.15.2-2"
@@ -1797,15 +1796,15 @@ level = "Must"
 applies_to = "Both"
 text = "MUST send a PUBLISH packet with QoS 0 and DUP flag set to 0"
 status = "Tested"
-test_names = ["qos0_server_outbound_publish_has_dup_zero"]
+test_names = ["qos0_server_outbound_publish_has_dup_zero", "first_transmissions_have_dup_zero_and_pubrel_ends_resends"]
 
 [[sections."4.3".statements]]
 id = "MQTT-4.3.2-1"
 level = "Must"
 applies_to = "Both"
 text = "MUST assign an unused Packet Identifier each time it has a new Application Message to publish"
-status = "Untested"
-test_names = []
+status = "Tested"
+test_names = ["packet_id_not_reused_while_pubrel_outstanding"]
 
 [[sections."4.3".statements]]
 id = "MQTT-4.3.2-2"
@@ -1813,7 +1812,7 @@ level = "Must"
 applies_to = "Both"
 text = "MUST send a PUBLISH packet containing this Packet Identifier with QoS 1 and DUP flag set to 0"
 status = "Tested"
-test_names = ["qos1_server_outbound_unique_nonzero_id_and_dup_zero", "queued_message_first_transmission_has_dup_zero"]
+test_names = ["qos1_server_outbound_unique_nonzero_id_and_dup_zero", "queued_message_first_transmission_has_dup_zero", "first_transmissions_have_dup_zero_and_pubrel_ends_resends"]
 
 [[sections."4.3".statements]]
 id = "MQTT-4.3.2-4"
@@ -1821,7 +1820,7 @@ level = "Must"
 applies_to = "Both"
 text = "MUST respond with a PUBACK packet containing the Packet Identifier from the incoming PUBLISH packet, having accepted ownership of the Application Message"
 status = "Tested"
-test_names = ["puback_correct_packet_id_and_reason", "publish_qos1_puback_response"]
+test_names = ["puback_correct_packet_id_and_reason", "publish_qos1_puback_response", "client_acks_inbound_by_qos"]
 note = "Promoted from CrossRef: previously pointed at MQTT-3.4.0-1, an ID in neither v5.0 nor v3.1.1. Tests moved here"
 
 [[sections."4.3".statements]]
@@ -1846,7 +1845,7 @@ level = "Must"
 applies_to = "Both"
 text = "MUST send a PUBLISH packet containing this Packet Identifier with QoS 2 and DUP flag set to 0"
 status = "Tested"
-test_names = ["qos2_server_outbound_unique_nonzero_id_and_dup_zero", "subscribe_unsubscribe_and_pubrel_wire_format"]
+test_names = ["qos2_server_outbound_unique_nonzero_id_and_dup_zero", "subscribe_unsubscribe_and_pubrel_wire_format", "first_transmissions_have_dup_zero_and_pubrel_ends_resends"]
 
 [[sections."4.3".statements]]
 id = "MQTT-4.3.3-3"
@@ -1862,7 +1861,7 @@ level = "Must"
 applies_to = "Both"
 text = "This PUBREL packet MUST contain the same Packet Identifier as the original PUBLISH packet"
 status = "Tested"
-test_names = ["server_pubrel_correct_flags", "qos2_server_sends_pubrel_after_pubrec_and_holds_until_pubcomp"]
+test_names = ["server_pubrel_correct_flags", "qos2_server_sends_pubrel_after_pubrec_and_holds_until_pubcomp", "first_transmissions_have_dup_zero_and_pubrel_ends_resends"]
 
 [[sections."4.3".statements]]
 id = "MQTT-4.3.3-5"
@@ -1877,8 +1876,8 @@ id = "MQTT-4.3.3-6"
 level = "MustNot"
 applies_to = "Both"
 text = "MUST NOT re-send the PUBLISH once it has sent the corresponding PUBREL packet"
-status = "Untested"
-test_names = []
+status = "Tested"
+test_names = ["first_transmissions_have_dup_zero_and_pubrel_ends_resends", "pubrel_order_follows_pubrec_order"]
 
 [[sections."4.3".statements]]
 id = "MQTT-4.3.3-7"
@@ -1894,7 +1893,7 @@ level = "Must"
 applies_to = "Both"
 text = "MUST respond with a PUBREC containing the Packet Identifier from the incoming PUBLISH packet, having accepted ownership of the Application Message"
 status = "Tested"
-test_names = ["pubrec_correct_packet_id_and_reason", "publish_qos2_full_flow"]
+test_names = ["pubrec_correct_packet_id_and_reason", "publish_qos2_full_flow", "client_acks_inbound_by_qos"]
 note = "Promoted from CrossRef: previously pointed at MQTT-3.5.0-1, an ID in neither v5.0 nor v3.1.1. Tests moved here"
 
 [[sections."4.3".statements]]
@@ -1961,7 +1960,7 @@ level = "Must"
 applies_to = "Both"
 text = "When a Client reconnects with Clean Start set to 0 and a session is present, both the Client and Server MUST resend any unacknowledged PUBLISH packets (where QoS > 0) and PUBREL packets using their original Packet Identifiers. This is the only circumstance where a Client or Server is REQUIRED to resend messages. Clients and Servers MUST NOT resend messages at any other time."
 status = "Tested"
-test_names = ["no_spontaneous_retransmission_on_active_connection", "unacked_qos1_publish_resent_on_session_resume", "unacked_pubrel_resent_on_session_resume"]
+test_names = ["no_spontaneous_retransmission_on_active_connection", "unacked_qos1_publish_resent_on_session_resume", "unacked_pubrel_resent_on_session_resume", "pubrel_order_follows_pubrec_order", "resent_publishes_keep_original_order"]
 
 [[sections."4.4".statements]]
 id = "MQTT-4.4.0-2"
@@ -1969,7 +1968,7 @@ level = "MustNot"
 applies_to = "Both"
 text = "If PUBACK or PUBREC is received containing a Reason Code of 0x80 or greater the corresponding PUBLISH packet is treated as acknowledged, and MUST NOT be retransmitted"
 status = "Tested"
-test_names = ["puback_error_stops_retransmission", "error_pubrec_from_subscriber_terminates_qos2_no_pubrel"]
+test_names = ["puback_error_stops_retransmission", "error_pubrec_from_subscriber_terminates_qos2_no_pubrel", "error_pubrec_gets_no_pubrel", "error_pubrec_publish_not_resent_after_resume"]
 
 # ===========================================================================
 # Section 4.5 -- Message Receipt
@@ -1992,9 +1991,8 @@ id = "MQTT-4.5.0-2"
 level = "Must"
 applies_to = "Client"
 text = "The Client MUST acknowledge any Publish packet it receives according to the applicable QoS rules regardless of whether it elects to process the Application Message that it contains"
-status = "NotApplicable"
-test_names = []
-note = "Client-side behavior"
+status = "Tested"
+test_names = ["publish_without_subscription_is_acknowledged"]
 
 # ===========================================================================
 # Section 4.6 -- Message Ordering
@@ -2018,8 +2016,8 @@ id = "MQTT-4.6.0-1"
 level = "Must"
 applies_to = "Client"
 text = "When the Client re-sends any PUBLISH packets, it MUST re-send them in the order in which the original PUBLISH packets were sent (this applies to QoS 1 and QoS 2 messages)."
-status = "Untested"
-test_names = []
+status = "Tested"
+test_names = ["resent_publishes_keep_original_order"]
 note = "Added: absent from the manifest. Eight of the nine are among the appendix IDs missing from the rfc-extract import source"
 
 [[sections."4.6".statements]]
@@ -2027,8 +2025,8 @@ id = "MQTT-4.6.0-2"
 level = "Must"
 applies_to = "Client"
 text = "The Client MUST send PUBACK packets in the order in which the corresponding PUBLISH packets were received (QoS 1 messages)."
-status = "Untested"
-test_names = []
+status = "Tested"
+test_names = ["automatic_acks_follow_publish_order", "automatic_puback_waits_for_earlier_deferred_one", "deferred_pubacks_follow_publish_order"]
 note = "Added: absent from the manifest. Eight of the nine are among the appendix IDs missing from the rfc-extract import source"
 
 [[sections."4.6".statements]]
@@ -2036,8 +2034,8 @@ id = "MQTT-4.6.0-3"
 level = "Must"
 applies_to = "Client"
 text = "The Client MUST send PUBREC packets in the order in which the corresponding PUBLISH packets were received (QoS 2 messages)."
-status = "Untested"
-test_names = []
+status = "Tested"
+test_names = ["automatic_acks_follow_publish_order", "deferred_pubrecs_follow_publish_order"]
 note = "Added: absent from the manifest. Eight of the nine are among the appendix IDs missing from the rfc-extract import source"
 
 [[sections."4.6".statements]]
@@ -2045,8 +2043,8 @@ id = "MQTT-4.6.0-4"
 level = "Must"
 applies_to = "Client"
 text = "The Client MUST send PUBREL packets in the order in which the corresponding PUBREC packets were received (QoS 2 messages)."
-status = "Untested"
-test_names = []
+status = "Tested"
+test_names = ["pubrel_order_follows_pubrec_order"]
 note = "Added: absent from the manifest. Eight of the nine are among the appendix IDs missing from the rfc-extract import source"
 
 [[sections."4.6".statements]]

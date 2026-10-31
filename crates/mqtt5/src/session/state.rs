@@ -350,19 +350,19 @@ impl SessionState {
     pub async fn outbound_replay(&self) -> Vec<OutboundReplay> {
         let publishes = self.unacked_publishes.read().await;
         let pubrels = self.unacked_pubrels.read().await;
-        let mut ordered: Vec<(u64, OutboundReplay)> = publishes
-            .values()
-            .map(|(order, packet)| (*order, OutboundReplay::Publish(packet.clone())))
+        let mut ordered: Vec<(bool, u64, OutboundReplay)> = pubrels
+            .iter()
+            .map(|(packet_id, (order, _))| (false, *order, OutboundReplay::PubRel(*packet_id)))
             .chain(
-                pubrels
-                    .iter()
-                    .map(|(packet_id, (order, _))| (*order, OutboundReplay::PubRel(*packet_id))),
+                publishes
+                    .values()
+                    .map(|(order, packet)| (true, *order, OutboundReplay::Publish(packet.clone()))),
             )
             .collect();
         drop(pubrels);
         drop(publishes);
-        ordered.sort_by_key(|(order, _)| *order);
-        ordered.into_iter().map(|(_, item)| item).collect()
+        ordered.sort_by_key(|(is_publish, order, _)| (*is_publish, *order));
+        ordered.into_iter().map(|(_, _, item)| item).collect()
     }
 
     /// Reports which acknowledgement the outbound packet identifier is waiting for.
@@ -776,8 +776,8 @@ impl SessionState {
         self.touch().await;
         let mut publishes = self.unacked_publishes.write().await;
         let mut pubrels = self.unacked_pubrels.write().await;
-        if let Some((order, _)) = publishes.remove(&packet_id) {
-            pubrels.insert(packet_id, (order, Instant::now()));
+        if publishes.remove(&packet_id).is_some() {
+            pubrels.insert(packet_id, (self.next_send_order(), Instant::now()));
         }
     }
 
@@ -1431,7 +1431,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn outbound_replay_keeps_original_send_order_across_pubrec() {
+    async fn outbound_replay_sends_pubrels_by_pubrec_arrival_before_publishes() {
         let session = SessionState::new("test-client".to_string(), SessionConfig::default(), true);
         for (id, qos) in [
             (30, QoS::ExactlyOnce),
@@ -1445,17 +1445,19 @@ mod tests {
         }
         session.complete_pubrec(30).await;
         session.store_pubrel(30).await;
+        session.complete_pubrec(20).await;
+        session.store_pubrel(20).await;
 
         assert_eq!(
             replay_ids(&session.outbound_replay().await),
-            vec![('R', 30), ('P', 10), ('P', 20)]
+            vec![('R', 30), ('R', 20), ('P', 10)]
         );
 
         session.complete_outbound(10).await;
         session.complete_outbound(30).await;
         assert_eq!(
             replay_ids(&session.outbound_replay().await),
-            vec![('P', 20)]
+            vec![('R', 20)]
         );
 
         session.discard_outbound_state().await;

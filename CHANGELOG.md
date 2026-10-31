@@ -7,8 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **17 more client conformance tests, from `crates/mqtt5/tests/conf_client_c.rs`** (#166). They cover the DISCONNECT a client sends and the close after it, AUTH reserved flags and re-authentication Reason Codes, the QoS 1 and QoS 2 sender rules, acknowledgement order and resend order after a session resumes, and Session Present 0 discarding outbound and inbound QoS 2 state. They cite 20 statements, and two more (MQTT-4.3.2-4 and MQTT-4.3.3-8) are now cited by the existing inbound acknowledgement test; 11 statements that had no test are now Tested, so 200 of 251 are. The client adapter can abort a re-authentication after a number of challenges and settle only the newest deferred acknowledgement. Three tests stay in that file because they check mqtt5 callbacks, and two duplicates of tests already in the suite are removed. Each cited rule was checked by breaking it in the mqtt5 client: 32 mutations, and every target test failed on the assertion for that rule.
+
 ### Fixed
 
+- **A client resends outstanding PUBRELs in the order their PUBRECs arrived** (MQTT-4.6.0-4). When a session resumed, the client resent PUBRELs in the order of the original PUBLISH packets, so PUBRECs received as 3, 1, 2 with 1 completed were resent as PUBREL 2, 3 instead of 3, 2. A PUBREL now takes its place in the resend order when its PUBREC arrives.
+- **A resumed session no longer stalls when outstanding PUBRELs fill the Server's Receive Maximum**. The client resent unacknowledged PUBLISH and PUBREL packets in one combined order, and each PUBLISH waited for send quota. When the Server lowered Receive Maximum on reconnect so that the outstanding PUBRELs took all of it, a PUBLISH ahead of a PUBREL waited for quota that only that PUBREL's PUBCOMP could free, and nothing more was sent, including the offline queue. Outstanding PUBRELs are now resent first, in PUBREC order, then the PUBLISH packets in their original order.
 - **A session removed for expiry takes its offline queue with it** (#273). With the file backend, a persistent session that expired while the broker was down was removed at the next start, but its queued messages stayed on disk and were loaded at every start, since the expiry sweep only visited clients with a stored session or a subscription. Queues left without any session, such as those of sessions removed earlier, were never visited either. The sweep now also visits every client that has queued messages, so the sweep that runs at start-up and every `cleanup_interval` removes the queue of any disconnected client with no live session, from memory and from disk. `StorageBackend` gains `queued_client_ids`, with a default that lists none. `Storage::get_session` also removes the queued messages of an expired cached session it drops.
 
 ## [mqtt5 0.49.0] - 2026-10-29
