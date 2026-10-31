@@ -44,6 +44,8 @@ jobs:
           components: clippy
       - name: Cache dependencies
         uses: Swatinem/rust-cache@v2
+      - name: Check Cargo.lock is up to date
+        run: cargo metadata --locked --format-version 1 > /dev/null
       - name: Run clippy
         # Note: We exclude embedded-single-core feature as it only works on embedded targets
         run: cargo clippy --all-targets --workspace --features opentelemetry -- -D warnings
@@ -93,6 +95,9 @@ jobs:
 
       - name: Run integration tests
         run: cargo make test-integration
+
+      - name: Run tests behind optional features
+        run: cargo test -p mqtt5 --all-features --lib --test 'turmoil_*'
         
       - name: Build and test CLI
         run: |
