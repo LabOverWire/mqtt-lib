@@ -95,6 +95,9 @@ jobs:
 
       - name: Run integration tests
         run: cargo make test-integration
+
+      - name: Run tests behind optional features
+        run: cargo test -p mqtt5 --all-features --lib --test 'turmoil_*'
         
       - name: Build and test CLI
         run: |
