@@ -71,6 +71,9 @@ use reader::{packet_reader_task_with_responses, PacketReaderContext};
 use replay::{ConnectionLink, OfflineQueue, PublishPolicy, QueuedPublish, SessionReplay};
 use tracking::{Completion, IdReservation, OutboundIds, OutcomeTracker, SharedIds, SharedOutcomes};
 
+const CONNACK_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_CONNECT_AUTH_STEPS: usize = 32;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AutomaticReconnectLifecycle {
     Armed,
@@ -464,7 +467,12 @@ impl DirectClientInner {
                 match response {
                     AuthResponse::Continue(data) => {
                         let auth_packet = AuthPacket::continue_authentication(method, Some(data))?;
-                        transport.write_packet(Packet::Auth(auth_packet)).await?;
+                        tokio::time::timeout(
+                            CONNACK_TIMEOUT,
+                            transport.write_packet(Packet::Auth(auth_packet)),
+                        )
+                        .await
+                        .map_err(|_| MqttError::Timeout)??;
                     }
                     AuthResponse::Success => {
                         tracing::debug!(
@@ -495,13 +503,23 @@ impl DirectClientInner {
         &self,
         transport: &mut TransportType,
     ) -> Result<crate::packet::connack::ConnAckPacket> {
+        let mut auth_steps = 0;
         loop {
-            let packet = transport
-                .read_packet(self.options.protocol_version.as_u8())
-                .await?;
+            let packet = tokio::time::timeout(
+                CONNACK_TIMEOUT,
+                transport.read_packet(self.options.protocol_version.as_u8()),
+            )
+            .await
+            .map_err(|_| MqttError::Timeout)??;
 
             match packet {
                 Packet::Auth(auth) => {
+                    if auth_steps == MAX_CONNECT_AUTH_STEPS {
+                        return Err(MqttError::ProtocolError(
+                            "Too many AUTH packets before CONNACK".to_string(),
+                        ));
+                    }
+                    auth_steps += 1;
                     self.handle_connect_auth(auth, transport).await?;
                 }
                 Packet::ConnAck(connack) => {
@@ -528,9 +546,12 @@ impl DirectClientInner {
 
         let connect_packet = self.build_connect_packet().await;
 
-        transport
-            .write_packet(Packet::Connect(Box::new(connect_packet)))
-            .await?;
+        tokio::time::timeout(
+            CONNACK_TIMEOUT,
+            transport.write_packet(Packet::Connect(Box::new(connect_packet))),
+        )
+        .await
+        .map_err(|_| MqttError::Timeout)??;
 
         tracing::debug!("CLIENT: Waiting for CONNACK or AUTH");
 
