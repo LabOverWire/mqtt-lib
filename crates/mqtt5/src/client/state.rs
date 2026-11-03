@@ -58,11 +58,6 @@ impl MqttClient {
         super::fire_connection_event(&self.connection_event_callbacks, event).await;
     }
 
-    pub(crate) async fn reset_reconnect_counter(&self) {
-        let mut inner = self.inner.write().await;
-        inner.reconnect_attempt = 0;
-    }
-
     #[cfg(feature = "transport-quic")]
     pub(crate) async fn recover_quic_flows(&self) {
         let inner = self.inner.read().await;

@@ -71,7 +71,7 @@ use reader::{packet_reader_task_with_responses, PacketReaderContext};
 use replay::{ConnectionLink, OfflineQueue, PublishPolicy, QueuedPublish, SessionReplay};
 use tracking::{Completion, IdReservation, OutboundIds, OutcomeTracker, SharedIds, SharedOutcomes};
 
-const CONNACK_TIMEOUT: Duration = Duration::from_secs(30);
+const DEFAULT_CONNECT_PACKET_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_CONNECT_AUTH_STEPS: usize = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -467,12 +467,8 @@ impl DirectClientInner {
                 match response {
                     AuthResponse::Continue(data) => {
                         let auth_packet = AuthPacket::continue_authentication(method, Some(data))?;
-                        tokio::time::timeout(
-                            CONNACK_TIMEOUT,
-                            transport.write_packet(Packet::Auth(auth_packet)),
-                        )
-                        .await
-                        .map_err(|_| MqttError::Timeout)??;
+                        self.within_packet_limit(transport.write_packet(Packet::Auth(auth_packet)))
+                            .await?;
                     }
                     AuthResponse::Success => {
                         tracing::debug!(
@@ -499,18 +495,28 @@ impl DirectClientInner {
         Ok(())
     }
 
+    async fn within_packet_limit<T>(
+        &self,
+        step: impl std::future::Future<Output = Result<T>>,
+    ) -> Result<T> {
+        let limit = self
+            .options
+            .connect_packet_timeout
+            .unwrap_or(DEFAULT_CONNECT_PACKET_TIMEOUT);
+        tokio::time::timeout(limit, step)
+            .await
+            .map_err(|_| MqttError::Timeout)?
+    }
+
     async fn wait_for_connack(
         &self,
         transport: &mut TransportType,
     ) -> Result<crate::packet::connack::ConnAckPacket> {
         let mut auth_steps = 0;
         loop {
-            let packet = tokio::time::timeout(
-                CONNACK_TIMEOUT,
-                transport.read_packet(self.options.protocol_version.as_u8()),
-            )
-            .await
-            .map_err(|_| MqttError::Timeout)??;
+            let packet = self
+                .within_packet_limit(transport.read_packet(self.options.protocol_version.as_u8()))
+                .await?;
 
             match packet {
                 Packet::Auth(auth) => {
@@ -546,12 +552,8 @@ impl DirectClientInner {
 
         let connect_packet = self.build_connect_packet().await;
 
-        tokio::time::timeout(
-            CONNACK_TIMEOUT,
-            transport.write_packet(Packet::Connect(Box::new(connect_packet))),
-        )
-        .await
-        .map_err(|_| MqttError::Timeout)??;
+        self.within_packet_limit(transport.write_packet(Packet::Connect(Box::new(connect_packet))))
+            .await?;
 
         tracing::debug!("CLIENT: Waiting for CONNACK or AUTH");
 
@@ -569,7 +571,7 @@ impl DirectClientInner {
         }
 
         if connack.session_present && !self.holds_session_state() {
-            return Err(Self::reject_unexpected_session_present(&mut transport).await);
+            return Err(self.reject_unexpected_session_present(&mut transport).await);
         }
 
         let receive_maximum = self.apply_server_capabilities(&connack).await?;
@@ -716,7 +718,7 @@ impl DirectClientInner {
         self.apply_negotiated_packet_sizes(connack).await
     }
 
-    async fn reject_unexpected_session_present(transport: &mut TransportType) -> MqttError {
+    async fn reject_unexpected_session_present(&self, transport: &mut TransportType) -> MqttError {
         tracing::warn!(
             "CONNACK reported Session Present=1 but the client holds no session state; closing the connection"
         );
@@ -724,7 +726,10 @@ impl DirectClientInner {
             reason_code: ReasonCode::ProtocolError,
             properties: Properties::default(),
         };
-        if let Err(e) = transport.write_packet(Packet::Disconnect(disconnect)).await {
+        if let Err(e) = self
+            .within_packet_limit(transport.write_packet(Packet::Disconnect(disconnect)))
+            .await
+        {
             tracing::debug!("Failed to send DISCONNECT for unexpected Session Present: {e}");
         }
         MqttError::ProtocolError(

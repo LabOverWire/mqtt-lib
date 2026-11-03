@@ -470,11 +470,10 @@ impl MqttClient {
                 }
             };
 
-            self.reset_reconnect_counter().await;
-
             let mut inner = self.inner.write().await;
             match inner.connect(transport).await {
                 Ok(result) => {
+                    inner.reconnect_attempt = 0;
                     #[cfg(feature = "transport-quic")]
                     if let Some(cached) = inner.cached_quic_client_config.take() {
                         *self.quic_client_config.write().await = Some(cached);
