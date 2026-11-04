@@ -2307,7 +2307,7 @@ applies_to = "Both"
 text = "If the re-authentication fails, the Client or Server SHOULD send DISCONNECT with an appropriate Reason Code and MUST close the Network Connection."
 status = "Tested"
 test_names = ["reauthentication_uses_auth_and_disconnect_reason_codes"]
-note = "Client side only: a re-authentication the Client aborts must close the Network Connection. The Server half is covered only by reauth_failure_disconnects, a plain test outside the registry"
+note = "Client side only: a re-authentication the Client aborts must close the Network Connection. The Server half is tested outside the registry, by plain tests including reauth_failure_disconnects"
 
 # ===========================================================================
 # Section 4.13 -- Handling Errors
