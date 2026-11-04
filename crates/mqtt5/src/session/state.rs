@@ -1431,6 +1431,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn outbound_replay_keeps_publish_send_order_whatever_the_packet_ids() {
+        let session = SessionState::new("test-client".to_string(), SessionConfig::default(), true);
+        for id in [30, 10, 20] {
+            session
+                .store_unacked_publish(outbound_publish(id, QoS::AtLeastOnce))
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(
+            replay_ids(&session.outbound_replay().await),
+            vec![('P', 30), ('P', 10), ('P', 20)]
+        );
+    }
+
+    #[tokio::test]
     async fn outbound_replay_sends_pubrels_by_pubrec_arrival_before_publishes() {
         let session = SessionState::new("test-client".to_string(), SessionConfig::default(), true);
         for (id, qos) in [
@@ -1443,21 +1459,21 @@ mod tests {
                 .await
                 .unwrap();
         }
-        session.complete_pubrec(30).await;
-        session.store_pubrel(30).await;
         session.complete_pubrec(20).await;
         session.store_pubrel(20).await;
+        session.complete_pubrec(30).await;
+        session.store_pubrel(30).await;
 
         assert_eq!(
             replay_ids(&session.outbound_replay().await),
-            vec![('R', 30), ('R', 20), ('P', 10)]
+            vec![('R', 20), ('R', 30), ('P', 10)]
         );
 
         session.complete_outbound(10).await;
-        session.complete_outbound(30).await;
+        session.complete_outbound(20).await;
         assert_eq!(
             replay_ids(&session.outbound_replay().await),
-            vec![('R', 20)]
+            vec![('R', 30)]
         );
 
         session.discard_outbound_state().await;

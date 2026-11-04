@@ -1,5 +1,5 @@
 use super::common::{
-    packets_until_quiet, start, subscribe_deferred_and_ack, wait_for_received, TIMEOUT,
+    every_packet_until_quiet, start, subscribe_deferred_and_ack, wait_for_received, TIMEOUT,
 };
 use crate::client_conformance_test;
 use crate::client_sut::{ClientSutHandle, ConnectSpec, Settle};
@@ -61,13 +61,12 @@ async fn no_packet_after_disconnect_while_deferred_ack_settles(sut: ClientSutHan
             1,
             "the message was delivered with a token"
         );
-        let disconnecting = tokio::spawn(s.client.disconnect());
-        let types: Vec<u8> = packets_until_quiet(&mut s.conn, Duration::from_secs(2))
+        let _ = tokio::time::timeout(TIMEOUT, s.client.disconnect()).await;
+        let types: Vec<u8> = every_packet_until_quiet(&mut s.conn, Duration::from_secs(2))
             .await
             .iter()
             .map(Packet::packet_type)
             .collect();
-        let _ = tokio::time::timeout(TIMEOUT, disconnecting).await;
         let position = types
             .iter()
             .position(|t| *t == DISCONNECT)

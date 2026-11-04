@@ -124,9 +124,9 @@ async fn automatic_puback_waits_for_earlier_deferred_one(sut: ClientSutHandle) {
 
 /// [MQTT-4.4.0-1] [MQTT-4.6.0-1] After a session resumes, the Client resends
 /// its unacknowledged `QoS` 1 and `QoS` 2 PUBLISH packets in the order it
-/// first sent them.
+/// first sent them, with DUP set on each.
 #[client_conformance_test(
-    ids = ["MQTT-4.4.0-1", "MQTT-4.6.0-1"],
+    ids = ["MQTT-4.4.0-1", "MQTT-4.6.0-1", "MQTT-3.3.1-1"],
     requires = ["client.automatic_reconnect"],
 )]
 async fn resent_publishes_keep_original_order(sut: ClientSutHandle) {
@@ -150,10 +150,16 @@ async fn resent_publishes_keep_original_order(sut: ClientSutHandle) {
     let (mut conn, connect) = accept_next(&broker, true, &[]).await;
     let resumed = ParsedConnect::parse(connect.bytes()).expect("client sent a malformed CONNECT");
     assert_eq!(resumed.flags & 0x02, 0, "the reconnect keeps Clean Start 0");
-    let resent: Vec<u16> = publishes_until_quiet(&mut conn, Duration::from_secs(3))
-        .await
+    let packets = publishes_until_quiet(&mut conn, Duration::from_secs(3)).await;
+    let resent: Vec<u16> = packets
         .iter()
         .filter_map(|p| parse_publish(p).packet_id)
+        .collect();
+    let without_dup: Vec<u16> = packets
+        .iter()
+        .map(parse_publish)
+        .filter(|p| !p.dup)
+        .filter_map(|p| p.packet_id)
         .collect();
     drop(client);
     publishing.iter().for_each(tokio::task::JoinHandle::abort);
@@ -168,6 +174,10 @@ async fn resent_publishes_keep_original_order(sut: ClientSutHandle) {
     assert_eq!(
         resent, sent,
         "[MQTT-4.6.0-1] PUBLISH packets resent out of their original order"
+    );
+    assert!(
+        without_dup.is_empty(),
+        "[MQTT-3.3.1-1] resent PUBLISH packets without DUP: {without_dup:?}"
     );
 }
 

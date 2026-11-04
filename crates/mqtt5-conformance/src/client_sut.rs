@@ -17,8 +17,8 @@ pub struct AuthSpec {
     pub method: String,
     pub initial_response: Option<Vec<u8>>,
     pub challenge_response: Vec<u8>,
-    /// Aborts once this many challenges have been answered over the client's
-    /// lifetime, counting the CONNECT exchange and every re-authentication.
+    /// Aborts once this many challenges have been answered since the last
+    /// `connect`, counting its CONNECT exchange and every re-authentication.
     pub abort_after_challenges: Option<u32>,
 }
 

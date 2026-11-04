@@ -2,7 +2,9 @@ use super::common::{packets_until_quiet, start, Session, TIMEOUT};
 use super::section3_disconnect::DISCONNECT_REASON_CODES;
 use crate::client_conformance_test;
 use crate::client_sut::{AuthSpec, ClientSutHandle, ConnectSpec};
-use crate::scripted_broker::{auth, property_string, AUTH, DISCONNECT, PROP_AUTHENTICATION_METHOD};
+use crate::scripted_broker::{
+    auth, property_string, Next, AUTH, DISCONNECT, PROP_AUTHENTICATION_METHOD,
+};
 use std::time::Duration;
 
 const AUTH_REASON_CODES: [u8; 3] = [0x00, 0x18, 0x19];
@@ -59,7 +61,8 @@ async fn auth_with_reserved_flags_closes_connection(sut: ClientSutHandle) {
 
 /// [MQTT-3.15.2-1] [MQTT-3.14.2-1] Through a re-authentication that continues
 /// once and is then aborted by the Client, every AUTH carries an Authenticate
-/// Reason Code and the DISCONNECT a DISCONNECT Reason Code.
+/// Reason Code. The DISCONNECT is optional here (MQTT-4.12.1-2 says SHOULD),
+/// and one that is sent carries a DISCONNECT Reason Code.
 #[client_conformance_test(
     ids = ["MQTT-3.15.2-1", "MQTT-3.14.2-1"],
     requires = ["client.enhanced_auth"],
@@ -79,14 +82,15 @@ async fn reauthentication_uses_auth_and_disconnect_reason_codes(sut: ClientSutHa
     );
     s.conn.send(&auth(0x18, b"TEST", &[])).await.unwrap();
     let after = packets_until_quiet(&mut s.conn, Duration::from_secs(3)).await;
+    let closed = matches!(s.conn.next(Duration::from_millis(100)).await, Next::Closed);
+    assert!(
+        closed,
+        "[MQTT-4.12.1-2] the aborted re-authentication left the network connection open"
+    );
     let reasons: Vec<(u8, u8)> = after
         .iter()
         .map(|p| (p.packet_type(), p.body().first().copied().unwrap_or(0x00)))
         .collect();
-    assert!(
-        reasons.iter().any(|(t, _)| *t == DISCONNECT),
-        "the aborted re-authentication sent no DISCONNECT: {reasons:?}"
-    );
     for (packet_type, reason) in &reasons {
         match *packet_type {
             AUTH => assert!(

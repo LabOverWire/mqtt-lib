@@ -1,7 +1,7 @@
 use super::common::{
     accept_next, begin, drop_connection, finish, packets_until_quiet, parse_publish,
     queued_publish_then_reconnect, read_connect, reconnect_with, start, subscribe_and_ack,
-    subscribe_deferred_and_ack, wait_connected, wait_for_received, TIMEOUT,
+    subscribe_deferred_and_ack, wait_connected, wait_for_received, SHORT, TIMEOUT,
 };
 use crate::client_conformance_test;
 use crate::client_sut::{ClientSutHandle, ClientUnderTest, ConnectSpec, PublishSpec, Settle};
@@ -434,6 +434,10 @@ async fn session_state_discarded_when_session_not_present(sut: ClientSutHandle) 
         .next_of_type(PUBREL, TIMEOUT)
         .await
         .expect("no PUBREL after PUBREC");
+    let unreceived = tokio::spawn(s.client.publish("t/out", b"q2-2", PublishSpec::qos(2)));
+    if s.conn.next_of_type(PUBLISH, SHORT).await.is_none() {
+        unreceived.abort();
+    }
     s.conn
         .send(&publish(
             publish_first_byte(2, false),
@@ -482,6 +486,7 @@ async fn session_state_discarded_when_session_not_present(sut: ClientSutHandle) 
     let received = wait_for_received(&client, 2).await;
     drop(client);
     publishing.abort();
+    unreceived.abort();
     assert_eq!(
         received.len(),
         2,

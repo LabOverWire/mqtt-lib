@@ -194,6 +194,18 @@ pub async fn packets_until_quiet(conn: &mut BrokerConnection, wait: Duration) ->
     }
 }
 
+pub async fn every_packet_until_quiet(conn: &mut BrokerConnection, wait: Duration) -> Vec<Packet> {
+    let deadline = tokio::time::Instant::now() + wait;
+    let mut packets = Vec::new();
+    loop {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        match conn.next(left).await {
+            Next::Packet(packet) => packets.push(packet),
+            Next::Malformed | Next::Closed | Next::Silent => return packets,
+        }
+    }
+}
+
 pub async fn publishes_until_quiet(conn: &mut BrokerConnection, wait: Duration) -> Vec<Packet> {
     packets_until_quiet(conn, wait)
         .await

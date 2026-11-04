@@ -42,6 +42,18 @@
 
 ## Diary Entries
 
+### Client SUT mode, phase 2: second review of `conf_client_c.rs` (2026-11-04)
+
+**Trigger**: two independent reviews of PR #284 before merge. Each changed test was checked with a mutation of the mqtt5 client.
+
+**Lost in the port**: `no_packet_after_disconnect_while_deferred_ack_settles` spawned `disconnect()`, so on the current-thread test runtime the PUBACK went out first and no round settled an ack during the disconnect. It awaits `disconnect()` again. A client that keeps writing for 20 ms after DISCONNECT now fails under `cargo test`. DUP on a resent QoS 2 PUBLISH was checked nowhere; `resent_publishes_keep_original_order` asserts DUP on every resent PUBLISH and cites MQTT-3.3.1-1.
+
+**Gaps found**: the MQTT-3.14.4-1 test ignored a PINGREQ after DISCONNECT, so it reads through `every_packet_until_quiet`. The Session Present 0 test had no outbound PUBLISH to catch, so it now leaves a QoS 2 PUBLISH without a PUBREC, when the client sends a second one. The re-authentication test required a DISCONNECT that MQTT-4.12.1-2 only recommends; a client that closes without one now passes, and one that leaves the connection open fails. `abort_after_challenges` counts since the last `connect`, and its doc says so. The `outbound_replay` unit test sends PUBRECs against the original order, and a new one uses packet ids that do not ascend, since the wire test only sees ids 1, 2, 3.
+
+**Open**: the `mqtt5-wasm` client still resends PUBRELs in the original PUBLISH order (MQTT-4.6.0-4), and the changelog says so.
+
+**Results**: conformance lib 334 passed, `manifest_load` 13 passed. Mutations `ack_after_disconnect_window`, `dup_only_qos1`, `qos2_unacked_survive_sp0`, `pingreq_after_disconnect` and `pubrel_order_old` fail the conformance client tests, `resend_sorted_by_packet_id` and `pubrel_order_old` fail the mqtt5 unit tests, and `abort_closes_without_disconnect` passes both.
+
 ### Client SUT mode, phase 2: review of `conf_client_c.rs` (2026-10-30)
 
 **Trigger**: code review of PR #284, 9 findings. 4 confirmed and fixed, 3 cleanups applied, 2 refuted.

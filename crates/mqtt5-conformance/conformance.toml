@@ -753,7 +753,7 @@ level = "Must"
 applies_to = "Both"
 text = "The DUP flag MUST be set to 1 by the Client or Server when it attempts to re-deliver a PUBLISH packet."
 status = "Tested"
-test_names = ["unacked_qos1_publish_resent_on_session_resume"]
+test_names = ["unacked_qos1_publish_resent_on_session_resume", "resent_publishes_keep_original_order"]
 note = "Re-reviewed: previously NotApplicable as client-side, but the statement binds the Client OR Server and this broker re-delivers unacknowledged QoS 1/2 messages (publish.rs:819)"
 
 [[sections."3.3".statements]]
