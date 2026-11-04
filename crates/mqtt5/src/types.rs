@@ -242,8 +242,8 @@ impl ConnectOptions {
         self
     }
 
-    /// Sets how long a connect waits to write or receive one packet before
-    /// CONNACK, 30 seconds by default.
+    /// Sets how long a connect waits to write or receive one of its packets,
+    /// 30 seconds by default.
     ///
     /// The limit applies to each packet, so an enhanced authentication of
     /// several steps can take longer in total. Raise it for a slow server, or

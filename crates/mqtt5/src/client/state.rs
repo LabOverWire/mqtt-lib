@@ -244,13 +244,12 @@ impl MqttClient {
                 return Ok(());
             }
 
-            if self.is_connected().await {
-                tracing::info!("Already connected, stopping reconnection attempts");
-                return Ok(());
-            }
-
             let attempt = {
                 let mut inner = self.inner.write().await;
+                if inner.is_connected() {
+                    tracing::info!("Already connected, stopping reconnection attempts");
+                    return Ok(());
+                }
                 inner.reconnect_attempt += 1;
                 inner.reconnect_attempt
             };
@@ -352,5 +351,54 @@ impl MqttClient {
             .subscribe_with_callback_internal(packet, callback_id, SubscriptionPersistence::Skip)
             .await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::ConnectOptions;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_connect_that_beats_a_reconnection_leaves_no_attempt_counted() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("mqtt://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 1024];
+                    let _ = stream.read(&mut buf).await;
+                    let _ = stream.write_all(&[0x20, 3, 0, 0, 0]).await;
+                    while stream.read(&mut buf).await.unwrap_or(0) > 0 {}
+                });
+            }
+        });
+        let options = ConnectOptions::new("no-left-over").with_automatic_reconnect(false);
+        let client = MqttClient::with_options(options.clone());
+        let config = ReconnectConfig {
+            enabled: true,
+            initial_delay: Duration::from_millis(0),
+            max_delay: Duration::from_millis(0),
+            backoff_factor_tenths: 10,
+            max_attempts: None,
+        };
+        for trial in 0..4000u64 {
+            let monitor = client.clone();
+            let (address, retry) = (url.clone(), config.clone());
+            let spin = std::time::Duration::from_micros((trial % 60) * 10);
+            let reconnection = tokio::spawn(async move {
+                let started = std::time::Instant::now();
+                while started.elapsed() < spin {
+                    std::hint::spin_loop();
+                }
+                monitor.attempt_reconnection(&address, &retry).await
+            });
+            let _ = client.connect_with_options(&url, options.clone()).await;
+            reconnection.await.unwrap().unwrap();
+            let left_over = std::mem::take(&mut client.inner.write().await.reconnect_attempt);
+            assert_eq!(left_over, 0, "trial {trial}");
+            let _ = client.disconnect_abnormally().await;
+        }
     }
 }
