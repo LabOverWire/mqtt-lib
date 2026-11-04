@@ -136,6 +136,7 @@ async fn a_server_that_never_answers_connect_does_not_hold_the_client() {
         }
     });
     let client = MqttClient::new("silent-server");
+    let started = Instant::now();
     let outcome = tokio::time::timeout(
         Duration::from_secs(40),
         client.connect_with_options(
@@ -149,6 +150,7 @@ async fn a_server_that_never_answers_connect_does_not_hold_the_client() {
         matches!(outcome, Err(mqtt5::error::MqttError::Timeout)),
         "{outcome:?}"
     );
+    assert!(started.elapsed() >= Duration::from_secs(29));
     assert!(!client.is_connected().await);
 }
 
@@ -208,6 +210,19 @@ async fn a_server_that_never_reads_a_large_connect_does_not_hold_the_client() {
 
 const CONNACK_OK: [u8; 5] = [0x20, 3, 0x00, 0x00, 0x00];
 
+async fn connect_within_20s(
+    client: &MqttClient,
+    url: &str,
+    options: ConnectOptions,
+) -> mqtt5::Result<mqtt5::ConnectResult> {
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        client.connect_with_options(url, options),
+    )
+    .await
+    .expect("connect did not return")
+}
+
 async fn read_some(stream: &mut tokio::net::TcpStream) {
     let mut buf = [0u8; 4096];
     let _ = stream.read(&mut buf).await;
@@ -253,7 +268,7 @@ async fn thirty_two_auth_steps_then_connack_succeed() {
             size: 8,
         })
         .await;
-    client.connect_with_options(&url, options).await.unwrap();
+    connect_within_20s(&client, &url, options).await.unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 32);
 }
 
@@ -264,23 +279,20 @@ async fn the_limit_can_be_lowered_and_raised() {
         .with_automatic_reconnect(false)
         .with_connect_packet_timeout(Duration::from_millis(50));
     let started = Instant::now();
-    let outcome = MqttClient::with_options(short.clone())
-        .connect_with_options(&url, short)
-        .await;
+    let outcome = connect_within_20s(&MqttClient::with_options(short.clone()), &url, short).await;
     assert!(matches!(outcome, Err(MqttError::Timeout)), "{outcome:?}");
     assert!(started.elapsed() < Duration::from_millis(300));
 
     let long = ConnectOptions::new("limit-long")
         .with_automatic_reconnect(false)
         .with_connect_packet_timeout(Duration::from_secs(5));
-    MqttClient::with_options(long.clone())
-        .connect_with_options(&url, long)
+    connect_within_20s(&MqttClient::with_options(long.clone()), &url, long)
         .await
         .unwrap();
 }
 
 #[tokio::test]
-async fn options_built_from_default_keep_the_limit_of_30_seconds() {
+async fn options_built_from_default_use_the_default_limit() {
     let url = connack_after(Duration::from_millis(100)).await;
     let options = ConnectOptions {
         protocol_options: ConnectOptions::new("limit-default").protocol_options,
@@ -340,7 +352,7 @@ async fn max_reconnect_attempts_ends_reconnection_to_a_silent_server() {
     let options = reconnecting("attempts-silent", 2);
     let client = MqttClient::with_options(options.clone());
     let record = record_reconnects(&client).await;
-    let outcome = client.connect_with_options(&url, options).await;
+    let outcome = connect_within_20s(&client, &url, options).await;
     assert!(matches!(outcome, Err(MqttError::Timeout)), "{outcome:?}");
     tokio::time::sleep(Duration::from_secs(3)).await;
     assert!(
@@ -376,6 +388,103 @@ async fn a_successful_connect_restarts_the_attempts() {
     assert!(attempts.len() >= 3, "{attempts:?}");
     assert!(attempts.iter().all(|attempt| *attempt == 1), "{attempts:?}");
     assert!(!record.failed.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn max_reconnect_attempts_ends_reconnection_when_connect_is_refused() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("mqtt://{}", listener.local_addr().unwrap());
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let counted = accepted.clone();
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((mut stream, _)) = listener.accept().await {
+            let earlier = counted.fetch_add(1, Ordering::SeqCst);
+            read_some(&mut stream).await;
+            if earlier == 0 {
+                stream.write_all(&CONNACK_OK).await.unwrap();
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            } else {
+                stream
+                    .write_all(&[0x20, 3, 0x00, 0x87, 0x00])
+                    .await
+                    .unwrap();
+                held.push(stream);
+            }
+        }
+    });
+    let options = reconnecting("attempts-refused", 2);
+    let client = MqttClient::with_options(options.clone());
+    let record = record_reconnects(&client).await;
+    connect_within_20s(&client, &url, options).await.unwrap();
+    let started = Instant::now();
+    while !record.failed.load(Ordering::SeqCst) && started.elapsed() < Duration::from_secs(8) {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        record.failed.load(Ordering::SeqCst),
+        "accepted {} connections, attempts {:?}",
+        accepted.load(Ordering::SeqCst),
+        record.attempts.lock().unwrap()
+    );
+    assert_eq!(*record.attempts.lock().unwrap(), vec![1, 2]);
+}
+
+async fn silent_server() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("mqtt://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((stream, _)) = listener.accept().await {
+            held.push(stream);
+        }
+    });
+    url
+}
+
+async fn wait_for_attempts(record: &ReconnectRecord, count: usize) -> Vec<u32> {
+    let started = Instant::now();
+    while record.attempts.lock().unwrap().len() < count
+        && started.elapsed() < Duration::from_secs(15)
+    {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    record.attempts.lock().unwrap().clone()
+}
+
+#[tokio::test]
+async fn a_connect_after_reconnection_gave_up_gets_its_attempts() {
+    let url = silent_server().await;
+    let options = reconnecting("attempts-again", 2);
+    let client = MqttClient::with_options(options.clone());
+    let record = record_reconnects(&client).await;
+    let outcome = connect_within_20s(&client, &url, options.clone()).await;
+    assert!(matches!(outcome, Err(MqttError::Timeout)), "{outcome:?}");
+    assert_eq!(wait_for_attempts(&record, 2).await, vec![1, 2]);
+    let started = Instant::now();
+    while !record.failed.load(Ordering::SeqCst) && started.elapsed() < Duration::from_secs(15) {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let outcome = connect_within_20s(&client, &url, options).await;
+    assert!(matches!(outcome, Err(MqttError::Timeout)), "{outcome:?}");
+    assert_eq!(wait_for_attempts(&record, 4).await, vec![1, 2, 1, 2]);
+}
+
+#[tokio::test]
+async fn a_connect_after_disconnect_gets_its_attempts() {
+    let url = silent_server().await;
+    let options = reconnecting("attempts-disconnect", 3)
+        .with_reconnect_delay(Duration::from_millis(100), Duration::from_millis(100));
+    let client = MqttClient::with_options(options.clone());
+    let record = record_reconnects(&client).await;
+    let _ = connect_within_20s(&client, &url, options.clone()).await;
+    assert_eq!(wait_for_attempts(&record, 2).await[..2], [1, 2]);
+    let _ = client.disconnect().await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let before = record.attempts.lock().unwrap().len();
+    let _ = connect_within_20s(&client, &url, options).await;
+    let attempts = wait_for_attempts(&record, before + 3).await;
+    assert_eq!(attempts[before..], [1, 2, 3], "{attempts:?}");
 }
 
 #[cfg(feature = "transport-quic")]

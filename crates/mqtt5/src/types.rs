@@ -247,7 +247,8 @@ impl ConnectOptions {
     ///
     /// The limit applies to each packet, so an enhanced authentication of
     /// several steps can take longer in total. Raise it for a slow server, or
-    /// for an authentication step that waits for a person.
+    /// one that waits for a person during authentication. Time spent in an
+    /// `AuthHandler` does not count.
     #[must_use]
     pub fn with_connect_packet_timeout(mut self, timeout: Duration) -> Self {
         self.connect_packet_timeout = Some(timeout);

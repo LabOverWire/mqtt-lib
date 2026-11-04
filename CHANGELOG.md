@@ -7,11 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- **`ConnectOptions` gains the public field `connect_packet_timeout`.** A struct literal that names every field no longer compiles; add the field or use `..ConnectOptions::default()`.
+
+### Added
+
+- **`ConnectOptions::with_connect_packet_timeout` sets the limit on each packet of a connect**, 30 seconds by default, for a slow server or one that waits for a person during authentication. Time spent in an `AuthHandler` does not count.
+
 ### Fixed
 
 - **A session removed for expiry takes its offline queue with it** (#273). With the file backend, a persistent session that expired while the broker was down was removed at the next start, but its queued messages stayed on disk and were loaded at every start, since the expiry sweep only visited clients with a stored session or a subscription. Queues left without any session, such as those of sessions removed earlier, were never visited either. The sweep now also visits every client that has queued messages, so the sweep that runs at start-up and every `cleanup_interval` removes the queue of any disconnected client with no live session, from memory and from disk. `StorageBackend` gains `queued_client_ids`, with a default that lists none. `Storage::get_session` also removes the queued messages of an expired cached session it drops.
-- **A connect no longer waits forever for a server that doesn't answer** (#278). A server that accepted the connection and never sent CONNACK held `connect`, reconnections and every call that reads the client's state, `is_connected()` included. The client now gives up with `MqttError::Timeout` when writing or receiving one packet of the connect takes more than 30 seconds, and tries the next address if there is one, except over `ws://` and `wss://`, which dial one address. `ConnectOptions::with_connect_packet_timeout` changes the limit, for a slow server or an authentication step that waits for a person, and `ConnectOptions` gains the `connect_packet_timeout` field. The limit applies to each packet, in both directions of an enhanced authentication, and a 33rd AUTH packet before CONNACK fails the connect without reaching the `AuthHandler`. Calls that read the client's state still wait while a connect is under way, for as long as its packets take, so an enhanced authentication can hold them past the limit. An `AuthHandler` that doesn't return holds `connect` and those calls, and a QUIC server that gives no stream holds `connect`.
-- **`max_reconnect_attempts` ends reconnection against a server that fails the handshake.** The count restarted each time a connection to the server opened, so a server that accepted connections and never answered was retried forever and `ReconnectFailed` never fired. The count now restarts when a connect succeeds.
+- **A connect no longer waits forever for a server that doesn't answer** (#278). A server that accepted the connection and never sent CONNACK held `connect`, reconnections and every call that reads the client's state, `is_connected()` included. The client now gives up with `MqttError::Timeout` when writing or receiving one packet of the connect takes more than 30 seconds, and tries the next address if there is one, except over `ws://`, `wss://` and AWS IoT endpoints, which dial one address. The limit applies to each packet, in both directions of an enhanced authentication, and a 33rd AUTH packet before CONNACK fails the connect without reaching the `AuthHandler`. Calls that read the client's state still wait while a connect is under way, for as long as its packets take, so an enhanced authentication can hold them past the limit. An `AuthHandler` that doesn't return holds `connect` and those calls, and a QUIC server that gives no stream holds `connect`.
+- **`max_reconnect_attempts` ends reconnection against a server that fails the handshake** (#290). The count restarted each time a connection to the server opened, so a server that accepted connections and then failed each handshake was retried forever and `ReconnectFailed` never fired. The count now restarts when a connect succeeds and when the application calls `connect`, so a call made after reconnection gave up, or after `disconnect`, gets its full attempts.
 
 ## [mqtt5 0.49.0] - 2026-10-29
 
