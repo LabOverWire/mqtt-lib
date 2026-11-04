@@ -355,7 +355,10 @@ async fn reason_string_on_reauth_with_problem_information_0_disconnects(sut: Cli
     )
     .await;
     s.result.as_ref().unwrap();
-    s.client.reauthenticate().await.unwrap();
+    tokio::time::timeout(TIMEOUT, s.client.reauthenticate())
+        .await
+        .expect("reauthenticate did not return before the exchange")
+        .unwrap();
     let reauth = s
         .conn
         .next_of_type(AUTH, TIMEOUT)
