@@ -47,6 +47,8 @@ pub struct ConnectOptions {
     /// Session Expiry Interval (`with_session_expiry_interval`): under MQTT v5 an absent
     /// Session Expiry Interval means 0, so the session ends when the connection closes.
     pub resume_existing_session: bool,
+    /// See [`ConnectOptions::with_connect_packet_timeout`]. `None` means 30 seconds.
+    pub connect_packet_timeout: Option<Duration>,
     /// WebSocket configuration for ws:// and wss:// connections; see
     /// [`ConnectOptions::with_websocket_config`].
     #[cfg(feature = "transport-websocket")]
@@ -64,6 +66,7 @@ impl ConnectOptions {
             codec_registry: None,
             deferred_ack: false,
             resume_existing_session: false,
+            connect_packet_timeout: None,
             #[cfg(feature = "transport-websocket")]
             websocket_config: None,
         }
@@ -239,6 +242,19 @@ impl ConnectOptions {
         self
     }
 
+    /// Sets how long a connect waits to write or receive one of its packets,
+    /// 30 seconds by default.
+    ///
+    /// The limit applies to each packet, so an enhanced authentication of
+    /// several steps can take longer in total. Raise it for a slow server, or
+    /// one that waits for a person during authentication. Time spent in an
+    /// `AuthHandler` does not count.
+    #[must_use]
+    pub fn with_connect_packet_timeout(mut self, timeout: Duration) -> Self {
+        self.connect_packet_timeout = Some(timeout);
+        self
+    }
+
     #[must_use]
     pub fn with_max_reconnect_attempts(mut self, attempts: u32) -> Self {
         self.reconnect_config.max_attempts = Some(attempts);
@@ -301,7 +317,8 @@ impl std::fmt::Debug for ConnectOptions {
                 &self.codec_registry.as_ref().map(|_| "CodecRegistry"),
             )
             .field("deferred_ack", &self.deferred_ack)
-            .field("resume_existing_session", &self.resume_existing_session);
+            .field("resume_existing_session", &self.resume_existing_session)
+            .field("connect_packet_timeout", &self.connect_packet_timeout);
         #[cfg(feature = "transport-websocket")]
         debug.field("websocket_config", &self.websocket_config);
         debug.finish()

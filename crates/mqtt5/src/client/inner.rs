@@ -470,11 +470,10 @@ impl MqttClient {
                 }
             };
 
-            self.reset_reconnect_counter().await;
-
             let mut inner = self.inner.write().await;
             match inner.connect(transport).await {
                 Ok(result) => {
+                    inner.reconnect_attempt = 0;
                     #[cfg(feature = "transport-quic")]
                     if let Some(cached) = inner.cached_quic_client_config.take() {
                         *self.quic_client_config.write().await = Some(cached);
@@ -599,14 +598,10 @@ impl MqttClient {
 
         let transport = TransportType::Tls(Box::new(tls_transport));
 
-        {
-            let mut inner = self.inner.write().await;
-            inner.reconnect_attempt = 0;
-        }
-
         let mut inner = self.inner.write().await;
         match inner.connect(transport).await {
             Ok(result) => {
+                inner.reconnect_attempt = 0;
                 let stored_subs = inner.stored_subscriptions.lock().clone();
                 let session_present = result.session_present;
                 let keep_alive = inner.negotiated_keep_alive();
@@ -658,6 +653,7 @@ impl MqttClient {
                 .clone_from(&options.properties.authentication_method);
             inner.options = options.clone();
             inner.last_address = Some(address.to_string());
+            inner.reconnect_attempt = 0;
             inner.automatic_reconnect_lifecycle = AutomaticReconnectLifecycle::Armed;
         }
 
