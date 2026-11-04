@@ -2305,9 +2305,9 @@ id = "MQTT-4.12.1-2"
 level = "Must"
 applies_to = "Both"
 text = "If the re-authentication fails, the Client or Server SHOULD send DISCONNECT with an appropriate Reason Code and MUST close the Network Connection."
-status = "Untested"
-test_names = []
-note = "Cited test(s) are not in the conformance registry and never execute under the CLI: reauth_failure_disconnects. Most exist in tests/ as plain tokio tests needing a per-test fixture the shared SutHandle cannot provide"
+status = "Tested"
+test_names = ["reauthentication_uses_auth_and_disconnect_reason_codes"]
+note = "Client side only: a re-authentication the Client aborts must close the Network Connection. The Server half is not tested"
 
 # ===========================================================================
 # Section 4.13 -- Handling Errors

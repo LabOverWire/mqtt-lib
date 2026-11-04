@@ -1453,12 +1453,15 @@ mod tests {
             (30, QoS::ExactlyOnce),
             (10, QoS::AtLeastOnce),
             (20, QoS::ExactlyOnce),
+            (40, QoS::ExactlyOnce),
         ] {
             session
                 .store_unacked_publish(outbound_publish(id, qos))
                 .await
                 .unwrap();
         }
+        session.complete_pubrec(40).await;
+        session.store_pubrel(40).await;
         session.complete_pubrec(20).await;
         session.store_pubrel(20).await;
         session.complete_pubrec(30).await;
@@ -1466,14 +1469,14 @@ mod tests {
 
         assert_eq!(
             replay_ids(&session.outbound_replay().await),
-            vec![('R', 20), ('R', 30), ('P', 10)]
+            vec![('R', 40), ('R', 20), ('R', 30), ('P', 10)]
         );
 
         session.complete_outbound(10).await;
-        session.complete_outbound(20).await;
+        session.complete_outbound(40).await;
         assert_eq!(
             replay_ids(&session.outbound_replay().await),
-            vec![('R', 30)]
+            vec![('R', 20), ('R', 30)]
         );
 
         session.discard_outbound_state().await;

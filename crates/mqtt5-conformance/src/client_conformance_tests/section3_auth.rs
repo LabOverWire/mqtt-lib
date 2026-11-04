@@ -28,7 +28,10 @@ async fn reauthenticating(
     )
     .await;
     s.result.as_ref().unwrap();
-    s.client.reauthenticate().await.unwrap();
+    tokio::time::timeout(TIMEOUT, s.client.reauthenticate())
+        .await
+        .expect("reauthenticate did not return before the exchange")
+        .unwrap();
     let reauth = s
         .conn
         .next_of_type(AUTH, TIMEOUT)
@@ -62,9 +65,10 @@ async fn auth_with_reserved_flags_closes_connection(sut: ClientSutHandle) {
 /// [MQTT-3.15.2-1] [MQTT-3.14.2-1] Through a re-authentication that continues
 /// once and is then aborted by the Client, every AUTH carries an Authenticate
 /// Reason Code. The DISCONNECT is optional here (MQTT-4.12.1-2 says SHOULD),
-/// and one that is sent carries a DISCONNECT Reason Code.
+/// and one that is sent carries a DISCONNECT Reason Code. The Network
+/// Connection is closed either way.
 #[client_conformance_test(
-    ids = ["MQTT-3.15.2-1", "MQTT-3.14.2-1"],
+    ids = ["MQTT-3.15.2-1", "MQTT-3.14.2-1", "MQTT-4.12.1-2"],
     requires = ["client.enhanced_auth"],
 )]
 async fn reauthentication_uses_auth_and_disconnect_reason_codes(sut: ClientSutHandle) {
