@@ -601,6 +601,7 @@ impl MqttClient {
         let mut inner = self.inner.write().await;
         match inner.connect(transport).await {
             Ok(result) => {
+                inner.reconnect_attempt = 0;
                 let stored_subs = inner.stored_subscriptions.lock().clone();
                 let session_present = result.session_present;
                 let keep_alive = inner.negotiated_keep_alive();

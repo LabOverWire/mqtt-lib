@@ -395,10 +395,50 @@ mod tests {
                 monitor.attempt_reconnection(&address, &retry).await
             });
             let _ = client.connect_with_options(&url, options.clone()).await;
-            reconnection.await.unwrap().unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(30), reconnection)
+                .await
+                .expect("the reconnection did not end")
+                .unwrap()
+                .unwrap();
             let left_over = std::mem::take(&mut client.inner.write().await.reconnect_attempt);
             assert_eq!(left_over, 0, "trial {trial}");
             let _ = client.disconnect_abnormally().await;
         }
+    }
+
+    #[tokio::test]
+    async fn a_tls_connect_clears_the_attempt_count() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+        let chain = vec![rustls::pki_types::CertificateDer::from(
+            cert.cert.der().to_vec(),
+        )];
+        let key =
+            rustls::pki_types::PrivateKeyDer::try_from(cert.signing_key.serialize_der()).unwrap();
+        let server = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(chain, key)
+            .unwrap();
+        let acceptor = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(server));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut tls = acceptor.accept(stream).await.unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = tls.read(&mut buf).await;
+            tls.write_all(&[0x20, 3, 0, 0, 0]).await.unwrap();
+            while tls.read(&mut buf).await.unwrap_or(0) > 0 {}
+        });
+        let options = ConnectOptions::new("tls-count").with_automatic_reconnect(false);
+        let client = MqttClient::with_options(options.clone());
+        client.inner.write().await.reconnect_attempt = 3;
+        let tls =
+            crate::transport::tls::TlsConfig::new(addr, "localhost").with_verify_server_cert(false);
+        client
+            .connect_with_tls_and_options(tls, options)
+            .await
+            .unwrap();
+        assert_eq!(client.inner.read().await.reconnect_attempt, 0);
     }
 }

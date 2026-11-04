@@ -487,6 +487,156 @@ async fn a_connect_after_disconnect_gets_its_attempts() {
     assert_eq!(attempts[before..], [1, 2, 3], "{attempts:?}");
 }
 
+struct SlowHandler(Duration);
+
+impl AuthHandler for SlowHandler {
+    fn handle_challenge<'a>(
+        &'a self,
+        _method: &'a str,
+        _data: Option<&'a [u8]>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = mqtt5::Result<AuthResponse>> + Send + 'a>>
+    {
+        let wait = self.0;
+        Box::pin(async move {
+            tokio::time::sleep(wait).await;
+            Ok(AuthResponse::Continue(vec![1]))
+        })
+    }
+}
+
+async fn stepped_server(steps: usize, delay: Duration) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("mqtt://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        read_some(&mut stream).await;
+        for _ in 0..steps {
+            tokio::time::sleep(delay).await;
+            stream.write_all(&AUTH_CONTINUE).await.unwrap();
+            read_some(&mut stream).await;
+        }
+        tokio::time::sleep(delay).await;
+        stream.write_all(&CONNACK_OK).await.unwrap();
+        tokio::time::sleep(Duration::from_secs(30)).await;
+    });
+    url
+}
+
+fn limited_auth(client_id: &str, limit: Duration) -> ConnectOptions {
+    ConnectOptions::new(client_id)
+        .with_automatic_reconnect(false)
+        .with_authentication_method("m")
+        .with_connect_packet_timeout(limit)
+}
+
+#[tokio::test]
+async fn time_in_the_auth_handler_does_not_count() {
+    let url = stepped_server(1, Duration::ZERO).await;
+    let options = limited_auth("handler-time", Duration::from_millis(500));
+    let client = MqttClient::with_options(options.clone());
+    client
+        .set_auth_handler(SlowHandler(Duration::from_millis(1500)))
+        .await;
+    connect_within_20s(&client, &url, options).await.unwrap();
+}
+
+#[tokio::test]
+async fn the_limit_applies_to_each_packet_and_not_to_the_whole_connect() {
+    let url = stepped_server(4, Duration::from_millis(300)).await;
+    let limit = Duration::from_millis(1000);
+    let options = limited_auth("per-packet", limit);
+    let client = MqttClient::with_options(options.clone());
+    client.set_auth_handler(SlowHandler(Duration::ZERO)).await;
+    let started = Instant::now();
+    connect_within_20s(&client, &url, options).await.unwrap();
+    assert!(started.elapsed() > limit);
+}
+
+async fn localhost_addresses() -> Option<(u16, std::net::SocketAddr, std::net::SocketAddr)> {
+    for _ in 0..50 {
+        let v4 = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = v4.local_addr().unwrap().port();
+        if TcpListener::bind(("::1", port)).await.is_err() {
+            continue;
+        }
+        let addresses: Vec<_> = tokio::net::lookup_host(("localhost", port))
+            .await
+            .unwrap()
+            .collect();
+        return match addresses[..] {
+            [first, second] => Some((port, first, second)),
+            _ => None,
+        };
+    }
+    None
+}
+
+async fn hold_silently(address: std::net::SocketAddr) -> Arc<AtomicUsize> {
+    let listener = TcpListener::bind(address).await.unwrap();
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let counted = accepted.clone();
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((stream, _)) = listener.accept().await {
+            counted.fetch_add(1, Ordering::SeqCst);
+            held.push(stream);
+        }
+    });
+    accepted
+}
+
+async fn connect_to_localhost(client_id: &str, port: u16) -> mqtt5::Result<mqtt5::ConnectResult> {
+    let options = ConnectOptions::new(client_id)
+        .with_automatic_reconnect(false)
+        .with_connect_packet_timeout(Duration::from_millis(500));
+    connect_within_20s(
+        &MqttClient::with_options(options.clone()),
+        &format!("mqtt://localhost:{port}"),
+        options,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn a_timed_out_address_is_followed_by_the_next() {
+    let Some((port, first, second)) = localhost_addresses().await else {
+        return;
+    };
+    let accepted = hold_silently(first).await;
+    let listener = TcpListener::bind(second).await.unwrap();
+    tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        read_some(&mut stream).await;
+        stream.write_all(&CONNACK_OK).await.unwrap();
+        tokio::time::sleep(Duration::from_secs(30)).await;
+    });
+    connect_to_localhost("next-address", port).await.unwrap();
+    assert_eq!(accepted.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn the_last_address_error_is_returned_when_a_timeout_comes_first() {
+    let Some((port, first, _)) = localhost_addresses().await else {
+        return;
+    };
+    hold_silently(first).await;
+    let outcome = connect_to_localhost("last-refused", port).await;
+    assert!(
+        matches!(outcome, Err(MqttError::ConnectionError(_))),
+        "{outcome:?}"
+    );
+}
+
+#[tokio::test]
+async fn the_last_address_error_is_returned_when_a_refusal_comes_first() {
+    let Some((port, _, second)) = localhost_addresses().await else {
+        return;
+    };
+    hold_silently(second).await;
+    let outcome = connect_to_localhost("last-silent", port).await;
+    assert!(matches!(outcome, Err(MqttError::Timeout)), "{outcome:?}");
+}
+
 #[cfg(feature = "transport-quic")]
 mod quic {
     use super::*;
