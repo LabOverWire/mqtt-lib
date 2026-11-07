@@ -156,3 +156,43 @@ async fn client_stream_limit_stops_a_server_opening_more_streams() {
 async fn default_client_stream_limit_does_not_block_twenty_streams() {
     assert_eq!(streams_opened_toward_client(None).await, 20);
 }
+
+async fn server_sees_client_datagram_support(config: fn(SocketAddr) -> QuicConfig) -> bool {
+    install_crypto_provider();
+    let certs = QuicAcceptorConfig::load_cert_chain_from_file(CERT)
+        .await
+        .unwrap();
+    let key = QuicAcceptorConfig::load_private_key_from_file(KEY)
+        .await
+        .unwrap();
+    let server_config = QuicAcceptorConfig::new(certs, key)
+        .build_server_config()
+        .unwrap();
+    let endpoint = quinn::Endpoint::server(server_config, "127.0.0.1:0".parse().unwrap()).unwrap();
+    let addr = endpoint.local_addr().unwrap();
+
+    let server = tokio::spawn(async move {
+        let connection = endpoint.accept().await.unwrap().await.unwrap();
+        let supported = connection.max_datagram_size().is_some();
+        (supported, endpoint)
+    });
+
+    let split = connect(config(addr)).await;
+
+    let (supported, endpoint) = server.await.unwrap();
+    drop(split);
+    endpoint.close(0u32.into(), b"done");
+    supported
+}
+
+#[tokio::test]
+async fn client_without_datagrams_does_not_advertise_datagram_support() {
+    assert!(!server_sees_client_datagram_support(client_config).await);
+}
+
+#[tokio::test]
+async fn client_with_datagrams_advertises_datagram_support() {
+    assert!(
+        server_sees_client_datagram_support(|addr| client_config(addr).with_datagrams(true)).await
+    );
+}

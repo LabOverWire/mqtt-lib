@@ -248,6 +248,8 @@ impl QuicConfig {
         if self.enable_datagrams {
             transport_config.datagram_send_buffer_size(self.datagram_send_buffer_size);
             transport_config.datagram_receive_buffer_size(Some(self.datagram_receive_buffer_size));
+        } else {
+            transport_config.datagram_receive_buffer_size(None);
         }
 
         client_config.transport_config(Arc::new(transport_config));
