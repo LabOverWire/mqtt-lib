@@ -520,6 +520,9 @@ impl MqttClient {
     /// their PUBLISH packets in call order while keeping up to Receive Maximum of them
     /// in flight, which preserves the order of messages on a topic. Concurrent calls
     /// from separate tasks are written in whatever order they reach the connection.
+    /// Over QUIC with `StreamStrategy::DataPerPublish`, or for `QoS` 0 messages sent as
+    /// datagrams, each PUBLISH travels separately and QUIC does not order them against
+    /// one another, so the server can receive them in a different order.
     ///
     /// # Errors
     ///
