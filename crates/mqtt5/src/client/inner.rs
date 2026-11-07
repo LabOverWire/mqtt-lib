@@ -596,7 +596,8 @@ impl MqttClient {
             .with_flow_expire_interval(qc.flow_expire.as_secs())
             .with_datagrams(qc.datagrams)
             .with_connect_timeout(qc.connect_timeout)
-            .with_early_data(qc.enable_early_data);
+            .with_early_data(qc.enable_early_data)
+            .with_subscription_streams(qc.subscription_streams);
         if let Some(max) = qc.max_streams {
             config = config.with_max_concurrent_streams(max);
         }
@@ -657,7 +658,8 @@ impl MqttClient {
             .with_flow_expire_interval(qc.flow_expire.as_secs())
             .with_datagrams(qc.datagrams)
             .with_connect_timeout(qc.connect_timeout)
-            .with_early_data(qc.enable_early_data);
+            .with_early_data(qc.enable_early_data)
+            .with_subscription_streams(qc.subscription_streams);
 
         if let Some(max) = qc.max_streams {
             config = config.with_max_concurrent_streams(max);

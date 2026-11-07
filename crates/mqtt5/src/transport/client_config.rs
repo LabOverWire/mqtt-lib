@@ -25,6 +25,7 @@ pub struct ClientTransportConfig {
     pub enable_early_data: bool,
     /// A host, and the name a quics:// server reached at that host is verified against
     pub server_name: Option<(String, String)>,
+    pub subscription_streams: bool,
 }
 
 impl Default for ClientTransportConfig {
@@ -39,6 +40,7 @@ impl Default for ClientTransportConfig {
             connect_timeout: Duration::from_secs(30),
             enable_early_data: false,
             server_name: None,
+            subscription_streams: false,
         }
     }
 }

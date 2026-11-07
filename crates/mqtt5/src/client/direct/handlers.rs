@@ -196,7 +196,7 @@ pub(super) async fn handle_publish_with_ack(
         return Ok(());
     }
 
-    publish.stream_id = flow_id.map(|f| f.raw());
+    publish.stream_id = flow_id.map(|f| f.raw()).or(publish.stream_id);
     let _ = callback_manager.dispatch(&publish);
 
     Ok(())
@@ -217,7 +217,7 @@ async fn deliver_deferred(
     callback: AckPublishCallback,
 ) -> Result<()> {
     let qos = publish.qos;
-    publish.stream_id = flow_id.map(|f| f.raw());
+    publish.stream_id = flow_id.map(|f| f.raw()).or(publish.stream_id);
 
     if qos == QoS::AtMostOnce {
         let token = ack.dispatcher.token(0, QoS::AtMostOnce);
@@ -422,7 +422,7 @@ pub(super) async fn handle_incoming_packet_no_writer(
                         .await;
                 }
             }
-            publish.stream_id = flow_id.map(|f| f.raw());
+            publish.stream_id = flow_id.map(|f| f.raw()).or(publish.stream_id);
             let _ = handlers.callback_manager.dispatch(&publish);
             Ok(())
         }

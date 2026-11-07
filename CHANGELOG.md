@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- **`ClientTransportConfig` gains the public field `subscription_streams`, `QuicConfig` gains `enable_subscription_streams` and `QuicSplitResult` gains `subscription_streams_enabled`.** A struct literal that names every field no longer compiles; add the field, use `..ClientTransportConfig::default()`, or build a `QuicConfig` with `QuicConfig::new` and `with_subscription_streams`.
+- **A PUBLISH received on a server-opened QUIC stream without a flow header carries that stream's QUIC stream ID in `PublishPacket::stream_id`**, and in `Message::stream_id`, instead of `None`. Streams with a flow header still report the flow ID.
+
+### Added
+
+- **`MqttClient::set_quic_subscription_streams(true)` gives each QUIC subscription a stream of its own**. Off by default. Each SUBSCRIBE goes out on a new client-opened bidirectional stream, or on the stream its filter already has, and the client reads the SUBACK and the subscription's deliveries from that stream, writes their QoS acknowledgements on it and reports its QUIC stream ID in `Message::stream_id`. UNSUBSCRIBE goes out on the filter's stream, and once no filter uses the stream any more the client finishes it. A stream whose SUBSCRIBE is refused or times out is finished, and when two subscribes to the same filter race, the stream that loses the filter is finished. When the broker ends a subscription stream, its filters lose it, and a later SUBSCRIBE to one of them opens a new stream. The mapping belongs to the connection: after a reconnect, subscriptions restored by the client open new streams. `QuicConfig::with_subscription_streams` sets the same option for a `QuicTransport`.
+
 ## [mqtt5 0.50.0] - 2026-11-08
 
 ### Breaking

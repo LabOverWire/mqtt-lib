@@ -65,9 +65,9 @@ const SIZE_PROBE_PACKET_ID: u16 = 1;
 #[cfg(feature = "transport-quic")]
 use keepalive::flow_expiration_task;
 use keepalive::{keepalive_task_with_writer, KeepaliveState};
-#[cfg(feature = "transport-quic")]
-use reader::quic_stream_acceptor_task;
 use reader::{packet_reader_task_with_responses, PacketReaderContext};
+#[cfg(feature = "transport-quic")]
+use reader::{quic_stream_acceptor_task, quic_stream_reader_task};
 use replay::{ConnectionLink, OfflineQueue, PublishPolicy, QueuedPublish, SessionReplay};
 use tracking::{Completion, IdReservation, OutboundIds, OutcomeTracker, SharedIds, SharedOutcomes};
 
@@ -89,6 +89,16 @@ pub(crate) enum SubscriptionPersistence {
 pub(crate) type StoredSubscription = (String, SubscriptionOptions, Option<u32>, CallbackId);
 pub(crate) type StoredSubscriptions = Arc<Mutex<Vec<StoredSubscription>>>;
 pub(crate) type ConnectionEpoch = Arc<AtomicU64>;
+#[cfg(feature = "transport-quic")]
+type StreamWriter = Arc<tokio::sync::Mutex<UnifiedWriter>>;
+#[cfg(feature = "transport-quic")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SubscriptionDelivery {
+    ControlStream,
+    OwnStream,
+}
+#[cfg(feature = "transport-quic")]
+type SubscriptionStreamWriters = Arc<Mutex<HashMap<String, StreamWriter>>>;
 const ACKNOWLEDGEMENT_WAIT: Duration = Duration::from_secs(10);
 
 #[derive(Debug)]
@@ -221,6 +231,12 @@ pub struct DirectClientInner {
     pub quic_datagrams_enabled: bool,
     #[cfg(feature = "transport-quic")]
     pub quic_stream_manager: Option<Arc<QuicStreamManager>>,
+    #[cfg(feature = "transport-quic")]
+    subscription_delivery: SubscriptionDelivery,
+    #[cfg(feature = "transport-quic")]
+    quic_stream_reader_ctx: Option<PacketReaderContext>,
+    #[cfg(feature = "transport-quic")]
+    subscription_stream_writers: SubscriptionStreamWriters,
     pub session: Arc<tokio::sync::RwLock<SessionState>>,
     pub connected: Arc<AtomicBool>,
     pub connection_event_callbacks:
@@ -297,6 +313,12 @@ impl DirectClientInner {
             quic_datagrams_enabled: false,
             #[cfg(feature = "transport-quic")]
             quic_stream_manager: None,
+            #[cfg(feature = "transport-quic")]
+            subscription_delivery: SubscriptionDelivery::ControlStream,
+            #[cfg(feature = "transport-quic")]
+            quic_stream_reader_ctx: None,
+            #[cfg(feature = "transport-quic")]
+            subscription_stream_writers: Arc::new(Mutex::new(HashMap::new())),
             session,
             connected: Arc::new(AtomicBool::new(false)),
             connection_event_callbacks: Arc::new(tokio::sync::RwLock::new(Vec::new())),
@@ -430,6 +452,9 @@ impl DirectClientInner {
         {
             self.stream_strategy = None;
             self.quic_datagrams_enabled = false;
+            self.subscription_delivery = SubscriptionDelivery::ControlStream;
+            self.quic_stream_reader_ctx = None;
+            self.subscription_stream_writers.lock().clear();
         }
     }
 
@@ -614,6 +639,11 @@ impl DirectClientInner {
                 self.quic_endpoint = Some(split.endpoint);
                 self.stream_strategy = Some(split.strategy);
                 self.quic_datagrams_enabled = split.datagrams_enabled;
+                self.subscription_delivery = if split.subscription_streams_enabled {
+                    SubscriptionDelivery::OwnStream
+                } else {
+                    SubscriptionDelivery::ControlStream
+                };
                 self.zero_rtt_accepted = split.zero_rtt_accepted;
                 self.cached_quic_client_config = split.client_config;
                 let effective_flow_headers =
@@ -1429,6 +1459,104 @@ impl DirectClientInner {
     }
 
     #[cfg(feature = "transport-quic")]
+    async fn subscription_stream_for(
+        &self,
+        packet: &SubscribePacket,
+    ) -> Result<Option<StreamWriter>> {
+        if self.subscription_delivery == SubscriptionDelivery::ControlStream {
+            return Ok(None);
+        }
+        if let [filter] = packet.filters.as_slice() {
+            if let Some(existing) = self.subscription_stream_writers.lock().get(&filter.filter) {
+                return Ok(Some(Arc::clone(existing)));
+            }
+        }
+        let (Some(connection), Some(ctx)) = (&self.quic_connection, &self.quic_stream_reader_ctx)
+        else {
+            return Ok(None);
+        };
+        let (send, recv) = connection.open_bi().await.map_err(|e| {
+            MqttError::ConnectionError(format!("Failed to open QUIC subscription stream: {e}"))
+        })?;
+        let writer = Arc::new(tokio::sync::Mutex::new(UnifiedWriter::Quic(send)));
+        let reader_writer = Arc::clone(&writer);
+        let reader_ctx = ctx.clone();
+        let writers = Arc::clone(&self.subscription_stream_writers);
+        tokio::spawn(async move {
+            quic_stream_reader_task(recv, Arc::clone(&reader_writer), reader_ctx).await;
+            writers
+                .lock()
+                .retain(|_, other| !Arc::ptr_eq(other, &reader_writer));
+        });
+        Ok(Some(writer))
+    }
+
+    #[cfg(feature = "transport-quic")]
+    async fn settle_subscription_stream(
+        &self,
+        stream: Option<StreamWriter>,
+        packet: &SubscribePacket,
+        suback: Result<SubAckPacket>,
+    ) -> Result<SubAckPacket> {
+        let Some(stream) = stream else {
+            return suback;
+        };
+        let granted: Vec<&str> = match &suback {
+            Ok(ack) => packet
+                .filters
+                .iter()
+                .zip(ack.reason_codes.iter())
+                .filter(|(_, rc)| rc.granted_qos().is_some())
+                .map(|(filter, _)| filter.filter.as_str())
+                .collect(),
+            Err(_) => Vec::new(),
+        };
+        let orphaned = {
+            let mut writers = self.subscription_stream_writers.lock();
+            let mut candidates = vec![Arc::clone(&stream)];
+            for filter in granted {
+                candidates.extend(writers.insert(filter.to_string(), Arc::clone(&stream)));
+            }
+            unused_streams(&writers, candidates)
+        };
+        for orphan in orphaned {
+            Self::close_stream(&orphan).await;
+        }
+        suback
+    }
+
+    #[cfg(feature = "transport-quic")]
+    fn unsubscribe_subscription_stream(&self, packet: &UnsubscribePacket) -> Option<StreamWriter> {
+        let [filter] = packet.filters.as_slice() else {
+            return None;
+        };
+        self.subscription_stream_writers.lock().get(filter).cloned()
+    }
+
+    #[cfg(feature = "transport-quic")]
+    async fn release_unsubscribed_streams(&self, packet: &UnsubscribePacket) {
+        let orphaned = {
+            let mut writers = self.subscription_stream_writers.lock();
+            let removed: Vec<StreamWriter> = packet
+                .filters
+                .iter()
+                .filter_map(|filter| writers.remove(filter))
+                .collect();
+            unused_streams(&writers, removed)
+        };
+        for orphan in orphaned {
+            Self::close_stream(&orphan).await;
+        }
+    }
+
+    #[cfg(feature = "transport-quic")]
+    async fn close_stream(stream: &StreamWriter) {
+        if let Err(e) = stream.lock().await.close(None).await {
+            tracing::debug!(error = %e, "QUIC subscription stream already closed");
+        }
+    }
+
+    #[cfg(feature = "transport-quic")]
     fn datagrams_available(&self) -> bool {
         self.quic_datagrams_enabled
             && self
@@ -1560,7 +1688,16 @@ impl DirectClientInner {
         );
 
         #[cfg(feature = "transport-quic")]
-        let sent_on_flow = if let Some(manager) = self.subscribe_data_flow_manager(&packet) {
+        let subscription_stream = self.subscription_stream_for(&packet).await?;
+        #[cfg(feature = "transport-quic")]
+        let sent_on_flow = if let Some(stream) = &subscription_stream {
+            stream
+                .lock()
+                .await
+                .write_packet(Packet::Subscribe(packet.clone()))
+                .await?;
+            true
+        } else if let Some(manager) = self.subscribe_data_flow_manager(&packet) {
             let topic = packet.filters[0].filter.clone();
             manager
                 .send_on_topic_stream(topic, Packet::Subscribe(packet.clone()))
@@ -1580,7 +1717,13 @@ impl DirectClientInner {
                 .await?;
         }
 
-        let suback = self.wait_for_suback(rx, packet_id).await?;
+        let suback = self.wait_for_suback(rx, packet_id).await;
+        #[cfg(feature = "transport-quic")]
+        let suback = self
+            .settle_subscription_stream(subscription_stream, &packet, suback)
+            .await?;
+        #[cfg(not(feature = "transport-quic"))]
+        let suback = suback?;
 
         for (filter, reason_code) in packet.filters.iter().zip(suback.reason_codes.iter()) {
             if let Some(subscription) = Self::create_subscription_from_filter(filter, *reason_code)
@@ -1619,6 +1762,8 @@ impl DirectClientInner {
         }
 
         self.check_unsubscribe(&packet).await?;
+        #[cfg(feature = "transport-quic")]
+        let subscription_stream = self.unsubscribe_subscription_stream(&packet);
 
         let writer = self.writer.as_ref().ok_or(MqttError::NotConnected)?;
 
@@ -1639,8 +1784,14 @@ impl DirectClientInner {
         }
 
         #[cfg(feature = "transport-quic")]
-        let sent_on_flow = if let Some(manager) = self.unsubscribe_data_flow_manager(&packet).await
-        {
+        let sent_on_flow = if let Some(stream) = &subscription_stream {
+            stream
+                .lock()
+                .await
+                .write_packet(Packet::Unsubscribe(packet.clone()))
+                .await?;
+            true
+        } else if let Some(manager) = self.unsubscribe_data_flow_manager(&packet).await {
             let topic = packet.filters[0].clone();
             manager
                 .send_on_topic_stream(topic, Packet::Unsubscribe(packet.clone()))
@@ -1680,6 +1831,9 @@ impl DirectClientInner {
                 packet_id, unsuback.packet_id
             )));
         }
+
+        #[cfg(feature = "transport-quic")]
+        self.release_unsubscribed_streams(&packet).await;
 
         for filter in packet.filters {
             let removed = self
@@ -1897,6 +2051,7 @@ impl DirectClientInner {
         if let Some(conn) = &self.quic_connection {
             let connection = conn.clone();
             let ctx_for_streams = ctx.clone();
+            self.quic_stream_reader_ctx = Some(ctx.clone());
             self.quic_stream_acceptor_handle = Some(tokio::spawn(async move {
                 tracing::debug!("🔀 QUIC STREAM ACCEPTOR - Task starting");
                 quic_stream_acceptor_task(connection, ctx_for_streams).await;
@@ -2008,6 +2163,24 @@ impl DirectClientInner {
             let _ = handle.await;
         }
     }
+}
+
+#[cfg(feature = "transport-quic")]
+fn unused_streams(
+    writers: &HashMap<String, StreamWriter>,
+    candidates: Vec<StreamWriter>,
+) -> Vec<StreamWriter> {
+    let mut unused: Vec<StreamWriter> = Vec::new();
+    for candidate in candidates {
+        let in_use = writers
+            .values()
+            .any(|writer| Arc::ptr_eq(writer, &candidate));
+        let listed = unused.iter().any(|other| Arc::ptr_eq(other, &candidate));
+        if !in_use && !listed {
+            unused.push(candidate);
+        }
+    }
+    unused
 }
 
 fn maybe_store_subscriptions(

@@ -142,6 +142,10 @@ impl MqttClient {
         self.transport_config.write().await.enable_early_data = enable;
     }
 
+    pub async fn set_quic_subscription_streams(&self, enable: bool) {
+        self.transport_config.write().await.subscription_streams = enable;
+    }
+
     pub async fn set_tls_config(
         &self,
         cert_pem: Option<Vec<u8>>,

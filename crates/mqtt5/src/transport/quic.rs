@@ -37,6 +37,7 @@ pub struct QuicConfig {
     pub flow_expire_interval: u64,
     pub flow_flags: FlowFlags,
     pub enable_early_data: bool,
+    pub enable_subscription_streams: bool,
     pub cached_client_config: Option<ClientConfig>,
 }
 
@@ -64,6 +65,7 @@ impl QuicConfig {
             flow_expire_interval: DEFAULT_FLOW_EXPIRE_INTERVAL,
             flow_flags: FlowFlags::default(),
             enable_early_data: false,
+            enable_subscription_streams: false,
             cached_client_config: None,
         }
     }
@@ -144,6 +146,12 @@ impl QuicConfig {
     #[must_use]
     pub fn with_early_data(mut self, enable: bool) -> Self {
         self.enable_early_data = enable;
+        self
+    }
+
+    #[must_use]
+    pub fn with_subscription_streams(mut self, enable: bool) -> Self {
+        self.enable_subscription_streams = enable;
         self
     }
 
@@ -269,6 +277,7 @@ pub struct QuicSplitResult {
     pub flow_expire_interval: u64,
     pub flow_flags: FlowFlags,
     pub zero_rtt_accepted: bool,
+    pub subscription_streams_enabled: bool,
     pub client_config: Option<ClientConfig>,
 }
 
@@ -322,6 +331,7 @@ impl QuicTransport {
             flow_expire_interval: self.config.flow_expire_interval,
             flow_flags: self.config.flow_flags,
             zero_rtt_accepted: self.zero_rtt_accepted,
+            subscription_streams_enabled: self.config.enable_subscription_streams,
             client_config: self.built_client_config.take(),
         })
     }

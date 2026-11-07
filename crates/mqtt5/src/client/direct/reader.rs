@@ -264,27 +264,35 @@ async fn settle_acknowledgement(packet: &Packet, ctx: &PacketReaderContext) -> R
     }
 }
 
+fn settle_subscription_ack(packet: &Packet, ctx: &PacketReaderContext) -> bool {
+    match packet {
+        Packet::SubAck(suback) => ctx
+            .suback_channels
+            .lock()
+            .remove(&suback.packet_id)
+            .map(|tx| tx.send(suback.clone()))
+            .is_some(),
+        Packet::UnsubAck(unsuback) => ctx
+            .unsuback_channels
+            .lock()
+            .remove(&unsuback.packet_id)
+            .map(|tx| tx.send(unsuback.clone()))
+            .is_some(),
+        _ => false,
+    }
+}
+
 async fn process_packet(packet: Packet, ctx: &PacketReaderContext) -> Result<()> {
     tracing::trace!("Received packet: {:?}", packet);
     check_problem_information(&packet, ctx.request_problem_information)?;
     if let Routed::Settled = settle_acknowledgement(&packet, ctx).await? {
         return Ok(());
     }
-    match &packet {
-        Packet::SubAck(suback) => {
-            if let Some(tx) = ctx.suback_channels.lock().remove(&suback.packet_id) {
-                let _ = tx.send(suback.clone());
-                return Ok(());
-            }
-        }
-        Packet::UnsubAck(unsuback) => {
-            if let Some(tx) = ctx.unsuback_channels.lock().remove(&unsuback.packet_id) {
-                let _ = tx.send(unsuback.clone());
-                return Ok(());
-            }
-        }
-        Packet::Auth(auth) => return handle_auth_packet(auth.clone(), ctx).await,
-        _ => {}
+    if settle_subscription_ack(&packet, ctx) {
+        return Ok(());
+    }
+    if let Packet::Auth(auth) = &packet {
+        return handle_auth_packet(auth.clone(), ctx).await;
     }
 
     let ack_delivery = ctx.ack_delivery();
@@ -401,8 +409,10 @@ pub(super) async fn quic_stream_acceptor_task(
                     Ok((send, recv)) => {
                         tracing::debug!("Accepted bidirectional QUIC stream");
                         let ctx_for_reader = ctx.clone();
+                        let stream_writer =
+                            Arc::new(tokio::sync::Mutex::new(UnifiedWriter::Quic(send)));
                         tokio::spawn(async move {
-                            quic_stream_reader_task(recv, send, ctx_for_reader).await;
+                            quic_stream_reader_task(recv, stream_writer, ctx_for_reader).await;
                         });
                     }
                     Err(e) => {
@@ -572,17 +582,27 @@ async fn end_data_stream(ctx: &PacketReaderContext, flow_id: Option<FlowId>, err
 }
 
 #[cfg(feature = "transport-quic")]
-async fn quic_stream_reader_task(
+fn tag_publish_with_stream(packet: &mut Packet, stream_id: u64) {
+    if let Packet::Publish(publish) = packet {
+        publish.stream_id = Some(stream_id);
+    }
+}
+
+#[cfg(feature = "transport-quic")]
+pub(super) async fn quic_stream_reader_task(
     mut recv: quinn::RecvStream,
-    mut send: quinn::SendStream,
+    stream_writer: Arc<tokio::sync::Mutex<UnifiedWriter>>,
     ctx: PacketReaderContext,
 ) {
+    let quic_stream_id = u64::from(recv.id());
     let (flow_id, mut buffer) = match try_read_server_flow_header(&mut recv).await {
         Ok(ServerFlow::UserDefined) => {
             refuse_user_defined_flow(&mut recv);
-            let _ = send.reset(quinn::VarInt::from_u32(
-                mqtt5_protocol::QuicStreamCode::FlowRefused.code(),
-            ));
+            if let UnifiedWriter::Quic(send) = &mut *stream_writer.lock().await {
+                let _ = send.reset(quinn::VarInt::from_u32(
+                    mqtt5_protocol::QuicStreamCode::FlowRefused.code(),
+                ));
+            }
             return;
         }
         Ok(ServerFlow::Mqtt(result)) => {
@@ -607,14 +627,16 @@ async fn quic_stream_reader_task(
         }
     };
 
-    let stream_writer = Arc::new(tokio::sync::Mutex::new(UnifiedWriter::Quic(send)));
-
     while let Some(read) = read_data_stream_packet(&mut recv, &mut buffer, &ctx).await {
         let outcome = match read {
-            Ok(packet) => {
-                tracing::trace!(flow_id = ?flow_id, "Received packet on server-initiated QUIC stream: {:?}", packet);
+            Ok(mut packet) => {
+                if flow_id.is_none() {
+                    tag_publish_with_stream(&mut packet, quic_stream_id);
+                }
+                tracing::trace!(flow_id = ?flow_id, "Received packet on QUIC data stream: {:?}", packet);
                 match settle_acknowledgement(&packet, &ctx).await {
                     Ok(Routed::Settled) => Ok(()),
+                    Ok(Routed::Unhandled) if settle_subscription_ack(&packet, &ctx) => Ok(()),
                     Ok(Routed::Unhandled) => {
                         let ack_delivery = ctx.ack_delivery();
                         let handlers = ctx.incoming_handlers(ack_delivery.as_ref());
