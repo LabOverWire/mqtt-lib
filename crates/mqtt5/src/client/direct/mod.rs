@@ -171,10 +171,32 @@ impl Drop for QuotaClaim {
 }
 
 pub(crate) enum Transmitted {
+    Written(Written),
+    Restaged(Box<ReadyPublish>),
+}
+
+pub(crate) enum Written {
     Sent(Delivery),
     InFlight(InFlight),
     Detached(PublishHandle),
-    Restaged(Box<ReadyPublish>),
+}
+
+impl Written {
+    pub(crate) async fn settle(self) -> Result<PublishResult> {
+        match self {
+            Self::Sent(delivery) => Ok(PublishResult::Sent(delivery)),
+            Self::InFlight(in_flight) => in_flight.settle().await,
+            Self::Detached(handle) => Ok(PublishResult::Queued(handle)),
+        }
+    }
+
+    pub(crate) fn into_handle(self) -> PublishHandle {
+        match self {
+            Self::Sent(delivery) => PublishHandle::resolved(PublishOutcome::Delivered(delivery)),
+            Self::InFlight(in_flight) => in_flight.handle,
+            Self::Detached(handle) => handle,
+        }
+    }
 }
 
 pub(crate) struct InFlight {
@@ -1310,8 +1332,13 @@ impl DirectClientInner {
             self.record_outbound_topic_alias(alias, &alias_topic).await;
         }
         match (written, in_flight) {
-            (Ok(()), None) => Ok(Transmitted::Sent(Delivery::of(qos, packet_id))),
-            (Ok(()), Some(handle)) => Ok(Transmitted::InFlight(InFlight { handle, link })),
+            (Ok(()), None) => Ok(Transmitted::Written(Written::Sent(Delivery::of(
+                qos, packet_id,
+            )))),
+            (Ok(()), Some(handle)) => Ok(Transmitted::Written(Written::InFlight(InFlight {
+                handle,
+                link,
+            }))),
             (Err(e), None) => Err(e),
             (Err(e), Some(handle)) => {
                 tracing::debug!(
@@ -1319,7 +1346,7 @@ impl DirectClientInner {
                     error = %e,
                     "Stored PUBLISH could not be written; it is re-sent with the session"
                 );
-                Ok(Transmitted::Detached(handle))
+                Ok(Transmitted::Written(Written::Detached(handle)))
             }
         }
     }
@@ -2445,9 +2472,7 @@ pub mod tests {
         let mut restages = 0;
         loop {
             match client.transmit_publish(ready, claim).await.unwrap() {
-                Transmitted::Sent(_) | Transmitted::InFlight(_) | Transmitted::Detached(_) => {
-                    return restages;
-                }
+                Transmitted::Written(_) => return restages,
                 Transmitted::Restaged(next) => {
                     restages += 1;
                     claim = claim_quota(client, &next).await;
@@ -3125,7 +3150,7 @@ pub mod tests {
             .unwrap();
 
         let transmitted = client.transmit_publish(ready, claim).await;
-        let Ok(Transmitted::Detached(handle)) = transmitted else {
+        let Ok(Transmitted::Written(Written::Detached(handle))) = transmitted else {
             panic!("a stored publish whose write failed must come back as a pending handle");
         };
         assert_eq!(handle.try_outcome(), None);
@@ -3276,7 +3301,8 @@ pub mod tests {
             panic!("publish must stage");
         };
         let claim = claim_quota(&client, &ready).await;
-        let Ok(Transmitted::InFlight(in_flight)) = client.transmit_publish(ready, claim).await
+        let Ok(Transmitted::Written(Written::InFlight(in_flight))) =
+            client.transmit_publish(ready, claim).await
         else {
             panic!("live publish must be in flight");
         };
