@@ -51,6 +51,15 @@ async fn recording_broker() -> (TestBroker, SeenSubscriptions) {
 }
 
 async fn run_hol(broker_url: &str, extra: &[&str]) -> serde_json::Value {
+    run_hol_at(broker_url, "1", "400", extra).await
+}
+
+async fn run_hol_at(
+    broker_url: &str,
+    duration: &str,
+    rate: &str,
+    extra: &[&str],
+) -> serde_json::Value {
     let mut args = vec![
         "bench",
         "--url",
@@ -58,7 +67,7 @@ async fn run_hol(broker_url: &str, extra: &[&str]) -> serde_json::Value {
         "--mode",
         "hol-blocking",
         "--duration",
-        "1",
+        duration,
         "--warmup",
         "0",
         "--topics",
@@ -66,7 +75,7 @@ async fn run_hol(broker_url: &str, extra: &[&str]) -> serde_json::Value {
         "--sub-connections",
         "2",
         "--rate",
-        "400",
+        rate,
     ];
     args.extend_from_slice(extra);
     let result = run_cli_command(&args).await;
@@ -167,4 +176,40 @@ async fn hol_config_omits_the_new_flags_when_unset() {
     let json = run_hol(broker.address(), &[]).await;
     let config = json["config"].as_object().unwrap();
     assert!(!config.contains_key("hol_wildcard"));
+}
+
+#[tokio::test]
+async fn unpaced_qos0_publishes_keep_each_topics_order() {
+    let (broker, _) = recording_broker().await;
+    let trace_dir = tempfile::tempdir().unwrap();
+    let trace_path = trace_dir.path().to_str().unwrap();
+    run_hol_at(
+        broker.address(),
+        "2",
+        "0",
+        &["--qos", "0", "--trace-dir", trace_path],
+    )
+    .await;
+
+    let (_, mut rows) = trace_rows(trace_dir.path());
+    assert!(rows.len() > 1000, "too few messages traced: {}", rows.len());
+    rows.sort_by_key(|row| row[3]);
+    let mut highest: std::collections::HashMap<u64, u64> = std::collections::HashMap::new();
+    let mut out_of_order = 0usize;
+    for row in &rows {
+        let (topic_idx, seq) = (row[0], row[1]);
+        if let Some(previous) = highest.get(&topic_idx) {
+            if seq < *previous {
+                out_of_order += 1;
+            }
+        }
+        let entry = highest.entry(topic_idx).or_insert(seq);
+        *entry = (*entry).max(seq);
+    }
+    assert_eq!(
+        out_of_order,
+        0,
+        "{out_of_order} of {} messages arrived after a later message on their topic",
+        rows.len()
+    );
 }

@@ -2050,9 +2050,6 @@ fn spawn_hol_publishers(
                         tokio::time::sleep(next - now).await;
                     }
                 }
-                let Ok(permit) = Arc::clone(&sem).acquire_owned().await else {
-                    break;
-                };
                 let intended_wall = if per_topic_interval_us.is_some() {
                     epoch_wall + u64::try_from((next - start).as_nanos()).unwrap_or(u64::MAX)
                 } else {
@@ -2060,6 +2057,15 @@ fn spawn_hol_publishers(
                 };
                 let payload = encode_payload_at(format, payload_size, seq, intended_wall);
                 seq = seq.wrapping_add(1);
+                if qos == QoS::AtMostOnce {
+                    if publish_message(&client, &topic, payload, qos).await.is_ok() {
+                        published.fetch_add(1, Ordering::Relaxed);
+                    }
+                    continue;
+                }
+                let Ok(permit) = Arc::clone(&sem).acquire_owned().await else {
+                    break;
+                };
                 let client = client.clone();
                 let published = Arc::clone(&published);
                 let topic = Arc::clone(&topic);
