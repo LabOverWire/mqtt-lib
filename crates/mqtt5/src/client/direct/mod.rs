@@ -1050,6 +1050,26 @@ impl DirectClientInner {
         Ok(publish)
     }
 
+    #[cfg(feature = "transport-quic")]
+    async fn with_wire_topic(&self, publish: PublishPacket) -> Result<PublishPacket> {
+        if self.publishes_leave_control_stream() {
+            self.with_aliased_topic(publish)
+                .await
+                .map(replay::without_topic_alias)
+        } else {
+            Ok(publish)
+        }
+    }
+
+    #[cfg(feature = "transport-quic")]
+    fn publishes_leave_control_stream(&self) -> bool {
+        self.datagrams_available()
+            || self
+                .quic_stream_manager
+                .as_ref()
+                .is_some_and(|manager| manager.strategy() != StreamStrategy::ControlOnly)
+    }
+
     async fn allocate_packet_id(&self) -> Result<IdReservation> {
         for _ in 0..u16::MAX {
             let packet_id = self
@@ -1172,10 +1192,13 @@ impl DirectClientInner {
             outbound::check_topic_alias(&aliases, &request.topic_name, alias)?;
         }
 
-        let mut packet = self.publish_policy().conform(PublishPacket {
+        let packet = self.publish_policy().conform(PublishPacket {
             packet_id: (request.qos != QoS::AtMostOnce).then_some(SIZE_PROBE_PACKET_ID),
             ..request.clone()
         })?;
+        #[cfg(feature = "transport-quic")]
+        let packet = self.with_wire_topic(packet).await?;
+        let mut packet = packet;
 
         self.check_publish_size(&packet).await?;
 
@@ -1227,6 +1250,7 @@ impl DirectClientInner {
         }
 
         let ReadyPublish {
+            request,
             packet: publish,
             reservation,
             ..
@@ -1273,10 +1297,10 @@ impl DirectClientInner {
             );
         }
 
-        let alias_mapping = publish
+        let alias_mapping = request
             .topic_alias()
-            .filter(|_| !publish.topic_name.is_empty())
-            .map(|alias| (alias, publish.topic_name.clone()));
+            .filter(|_| !request.topic_name.is_empty())
+            .map(|alias| (alias, request.topic_name));
         let link = self
             .connection_alive
             .as_ref()

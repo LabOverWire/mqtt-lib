@@ -343,6 +343,7 @@ Manages client-side data streams using `Arc<Connection>`:
 - **DataPerPublish**: opens unidirectional stream, writes optional flow header + packet, calls `finish()`, then `yield_now()` to allow I/O driver to transmit
 - **DataPerTopic**: uses `get_or_create_topic_stream()` with LRU eviction (300s idle timeout, max 100 cached streams)
 - **Flow headers**: when enabled, writes `DataFlowHeader` (type 0x12) at beginning of each new data stream
+- **Topic aliases**: with DataPerPublish, DataPerTopic or datagrams enabled, the client sends every PUBLISH with its full topic name and no Topic Alias, and routes it by that topic. The broker keeps one alias table per connection (MQTT-3.3.2-7) and QUIC orders data only within a stream, so an alias set on one stream or datagram could be used on another before it arrived
 
 #### QuicAcceptorConfig (Broker)
 
