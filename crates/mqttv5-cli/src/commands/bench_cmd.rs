@@ -123,6 +123,12 @@ pub struct BenchCommand {
 
     #[arg(
         long,
+        help = "HOL mode: each subscriber connection makes one subscription to bench/hol/# instead of one per topic; the topic index is taken from the received topic name. With --sub-connections N every message is received N times"
+    )]
+    pub hol_wildcard: bool,
+
+    #[arg(
+        long,
         help = "Separate URL for publishers in HOL mode (e.g., mqtt://host:1883)"
     )]
     pub pub_url: Option<String>,
@@ -353,6 +359,8 @@ struct BenchConfig {
     steady_trim: f64,
     hol_pub_connections: usize,
     hol_sub_connections: usize,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    hol_wildcard: bool,
     payload_format: String,
     actual_payload_bytes: usize,
 }
@@ -528,6 +536,7 @@ fn bench_config(cmd: &BenchCommand, url: &str) -> BenchConfig {
         steady_trim: cmd.steady_trim,
         hol_pub_connections: cmd.pub_connections,
         hol_sub_connections: cmd.sub_connections,
+        hol_wildcard: cmd.hol_wildcard,
         payload_format: format_name(cmd.payload_format),
         actual_payload_bytes: sample.len(),
     }
@@ -1435,55 +1444,101 @@ fn spawn_connection_workers(
     handles
 }
 
+const HOL_TOPIC_PREFIX: &str = "bench/hol/";
+const HOL_WILDCARD_FILTER: &str = "bench/hol/#";
+
+struct HolRecorder {
+    format: PayloadFormat,
+    topic_samples: Vec<Arc<std::sync::Mutex<Vec<TimestampedSample>>>>,
+    measure_start_nanos: Arc<AtomicU64>,
+    trace_records: Option<Arc<std::sync::Mutex<Vec<TraceRecord>>>>,
+}
+
+impl HolRecorder {
+    fn record(&self, topic_idx: usize, conn_idx: u16, msg: &mqtt5::Message) {
+        let Some(samples) = self.topic_samples.get(topic_idx) else {
+            return;
+        };
+        let sent_nanos = decode_timestamp(self.format, &msg.payload);
+        if sent_nanos == 0 {
+            return;
+        }
+        let now_nanos = nanos_as_u64();
+        let latency_us = now_nanos.saturating_sub(sent_nanos) / 1000;
+        let base = self.measure_start_nanos.load(Ordering::Relaxed);
+        let received_at_us = if base > 0 {
+            now_nanos.saturating_sub(base) / 1000
+        } else {
+            0
+        };
+        samples
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(TimestampedSample {
+                received_at_us,
+                latency_us,
+            });
+        if let Some(traces) = &self.trace_records {
+            traces
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(TraceRecord {
+                    topic_idx: u16::try_from(topic_idx).unwrap_or(u16::MAX),
+                    seq: decode_sequence(self.format, &msg.payload),
+                    publish_ns: sent_nanos,
+                    receive_ns: now_nanos,
+                    latency_us,
+                    stream_id: msg.stream_id.unwrap_or(0),
+                    conn_idx,
+                });
+        }
+    }
+}
+
+fn hol_topic_index(topic: &str) -> Option<usize> {
+    topic.strip_prefix(HOL_TOPIC_PREFIX)?.parse().ok()
+}
+
 async fn subscribe_hol_topics(
     sub_clients: &[MqttClient],
-    num_topics: usize,
-    format: PayloadFormat,
-    topic_samples: &[Arc<std::sync::Mutex<Vec<TimestampedSample>>>],
-    measure_start_nanos: &Arc<AtomicU64>,
-    trace_records: Option<&Arc<std::sync::Mutex<Vec<TraceRecord>>>>,
+    qos: QoS,
+    wildcard: bool,
+    recorder: &Arc<HolRecorder>,
 ) -> Result<()> {
-    for (i, samples_vec) in topic_samples.iter().enumerate() {
-        let conn = i % sub_clients.len();
-        let sub_client = &sub_clients[conn];
-        let topic_filter = format!("bench/hol/{i}");
-        let samples_clone = Arc::clone(samples_vec);
-        let start_nanos = Arc::clone(measure_start_nanos);
-        let trace_clone = trace_records.map(Arc::clone);
-        #[allow(clippy::cast_possible_truncation)]
-        let topic_idx = i as u16;
-        #[allow(clippy::cast_possible_truncation)]
-        let conn_idx = conn as u16;
-        sub_client
-            .subscribe(&topic_filter, move |msg| {
-                let sent_nanos = decode_timestamp(format, &msg.payload);
-                if sent_nanos > 0 {
-                    let now_nanos = nanos_as_u64();
-                    let latency_us = (now_nanos.saturating_sub(sent_nanos)) / 1000;
-                    let base = start_nanos.load(Ordering::Relaxed);
-                    let received_at_us = if base > 0 {
-                        (now_nanos.saturating_sub(base)) / 1000
-                    } else {
-                        0
-                    };
-                    samples_clone.lock().unwrap().push(TimestampedSample {
-                        received_at_us,
-                        latency_us,
-                    });
-                    if let Some(ref traces) = trace_clone {
-                        let seq = decode_sequence(format, &msg.payload);
-                        traces.lock().unwrap().push(TraceRecord {
-                            topic_idx,
-                            seq,
-                            publish_ns: sent_nanos,
-                            receive_ns: now_nanos,
-                            latency_us,
-                            stream_id: msg.stream_id.unwrap_or(0),
-                            conn_idx,
-                        });
+    let options = mqtt5::SubscribeOptions {
+        qos,
+        ..Default::default()
+    };
+    if wildcard {
+        for (conn, sub_client) in sub_clients.iter().enumerate() {
+            let recorder = Arc::clone(recorder);
+            let conn_idx = u16::try_from(conn).unwrap_or(u16::MAX);
+            sub_client
+                .subscribe_with_options(HOL_WILDCARD_FILTER, options.clone(), move |msg| {
+                    if let Some(topic_idx) = hol_topic_index(&msg.topic) {
+                        recorder.record(topic_idx, conn_idx, &msg);
                     }
-                }
-            })
+                })
+                .await
+                .context("failed to subscribe")?;
+        }
+        eprintln!(
+            "subscribed to {HOL_WILDCARD_FILTER} on {} connection(s)",
+            sub_clients.len()
+        );
+        return Ok(());
+    }
+    let num_topics = recorder.topic_samples.len();
+    for topic_idx in 0..num_topics {
+        let conn = topic_idx % sub_clients.len();
+        let recorder = Arc::clone(recorder);
+        let conn_idx = u16::try_from(conn).unwrap_or(u16::MAX);
+        sub_clients[conn]
+            .subscribe_with_options(
+                format!("{HOL_TOPIC_PREFIX}{topic_idx}"),
+                options.clone(),
+                move |msg| recorder.record(topic_idx, conn_idx, &msg),
+            )
             .await
             .context("failed to subscribe")?;
     }
@@ -1764,15 +1819,13 @@ async fn run_hol_blocking(cmd: BenchCommand) -> Result<()> {
 
     let format = cmd.payload_format;
     let measure_start_nanos = Arc::new(AtomicU64::new(0));
-    subscribe_hol_topics(
-        &sub_clients,
-        num_topics,
+    let recorder = Arc::new(HolRecorder {
         format,
-        &topic_samples,
-        &measure_start_nanos,
-        trace_records.as_ref(),
-    )
-    .await?;
+        topic_samples: topic_samples.clone(),
+        measure_start_nanos: Arc::clone(&measure_start_nanos),
+        trace_records: trace_records.clone(),
+    });
+    subscribe_hol_topics(&sub_clients, cmd.qos, cmd.hol_wildcard, &recorder).await?;
 
     #[allow(clippy::cast_possible_truncation)]
     let per_topic_interval_us = (1_000_000u64 * (num_topics as u64)).checked_div(cmd.rate);

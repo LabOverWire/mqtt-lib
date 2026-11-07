@@ -774,6 +774,7 @@ Run performance benchmarks against a broker. Four modes are available: **through
 | `--cert <FILE>` | TLS client certificate (PEM) | None |
 | `--key <FILE>` | TLS client private key (PEM) | None |
 | `--pub-url <URL>` | Separate URL for publishers in HOL mode | None |
+| `--hol-wildcard` | HOL mode: each subscriber connection subscribes once to `bench/hol/#` instead of once per topic; with `--sub-connections N` every message is received N times | `false` |
 | `--quic-stream-strategy <S>` | QUIC stream strategy: `control-only`, `per-publish`, `per-topic`, `per-subscription` | `control-only` |
 | `--quic-flow-headers` | Enable QUIC flow headers for state tracking | `false` |
 | `--quic-flow-expire <SECS>` | Flow header expiry interval in seconds | `300` |
