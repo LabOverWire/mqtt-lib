@@ -13,9 +13,12 @@ use mqtt5::time::Duration;
 use mqtt5::transport::packet_io::read_packet_from_stream;
 use mqtt5_protocol::packet::connack::ConnAckPacket;
 use mqtt5_protocol::packet::connect::ConnectPacket;
+use mqtt5_protocol::packet::publish::PublishPacket;
 use mqtt5_protocol::packet::{MqttPacket, Packet};
 use mqtt5_protocol::protocol::v5::reason_codes::ReasonCode;
 use mqtt5_protocol::types::ConnectOptions;
+use mqtt5_protocol::validation::parse_shared_subscription;
+use mqtt5_protocol::QoS;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::path::Path;
@@ -59,7 +62,9 @@ impl AuthProvider for Provider {
             if topic_filter.starts_with("slow/") {
                 sleep(self.slow_subscribe).await;
             }
-            !(topic_filter.starts_with("secret/") && self.deny_secret.load(Ordering::SeqCst))
+            let topic_filter = parse_shared_subscription(topic_filter).0;
+            !((topic_filter.starts_with("secret/") || topic_filter == "wide/#")
+                && self.deny_secret.load(Ordering::SeqCst))
         })
     }
 }
@@ -248,6 +253,45 @@ async fn publish(wire: &mut Wire, topic: &str) {
     wire.write_all(&bytes).await.expect("PUBLISH");
 }
 
+async fn publish_at_least_once(wire: &mut Wire, topic: &str, packet_id: u16) {
+    let mut packet = PublishPacket::new(topic, b"hi".to_vec(), QoS::AtLeastOnce);
+    packet.packet_id = Some(packet_id);
+    let mut bytes = Vec::new();
+    packet.encode(&mut bytes).expect("encode PUBLISH");
+    wire.write_all(&bytes).await.expect("PUBLISH");
+    assert!(
+        matches!(
+            wire.next(Duration::from_secs(5)).await,
+            Some(Packet::PubAck(_))
+        ),
+        "expected PUBACK"
+    );
+}
+
+/// The topics of the messages received until none comes for half a second.
+async fn received_topics(wire: &mut Wire) -> Vec<String> {
+    received_publishes(wire)
+        .await
+        .into_iter()
+        .map(|(topic, _)| topic)
+        .collect()
+}
+
+/// The topic and DUP flag of each message received until none comes for half a second.
+async fn received_publishes(wire: &mut Wire) -> Vec<(String, bool)> {
+    let mut publishes = Vec::new();
+    while let Some(packet) = wire.next(Duration::from_millis(500)).await {
+        if let Packet::Publish(publish) = packet {
+            publishes.push((publish.topic_name, publish.dup));
+        }
+    }
+    publishes
+}
+
+fn sent(topic: &str, dup: bool) -> (String, bool) {
+    (topic.to_string(), dup)
+}
+
 async fn received_publish(wire: &mut Wire) -> bool {
     matches!(
         wire.next(Duration::from_millis(500)).await,
@@ -261,6 +305,12 @@ async fn end(mut wire: Wire) {
         wire.closed(Duration::from_secs(5)).await,
         "broker must close after DISCONNECT"
     );
+}
+
+/// Sends DISCONNECT and lets the broker see the connection close, while messages may still be arriving.
+async fn leave(mut wire: Wire) {
+    wire.write_all(&[0xE0, 0x00]).await.expect("DISCONNECT");
+    sleep(Duration::from_millis(100)).await;
 }
 
 async fn still_served(wire: &mut Wire) -> bool {
@@ -386,6 +436,316 @@ async fn resumed_session_drops_a_revoked_subscription_from_routing() {
     assert!(
         !received_publish(&mut sub).await,
         "a subscription dropped on restore as no longer authorized must not deliver"
+    );
+}
+
+#[tokio::test]
+async fn resumed_session_drops_the_queued_messages_of_a_revoked_subscription() {
+    let broker = Broker::start(memory(NEVER), Duration::ZERO).await;
+    let (mut publisher, _) = connect(&broker.addr, options("rq-pub", true, Some(0))).await;
+    let (mut sub, _) = connect(&broker.addr, options("rq", true, Some(3600))).await;
+    subscribe(&mut sub, "secret/x", 1).await;
+    subscribe(&mut sub, "open/x", 1).await;
+    end(sub).await;
+    sleep(Duration::from_millis(200)).await;
+
+    broker.provider.deny_secret.store(true, Ordering::SeqCst);
+    publish_at_least_once(&mut publisher, "secret/x", 1).await;
+    publish_at_least_once(&mut publisher, "open/x", 2).await;
+    let (mut sub, connack) = connect(&broker.addr, options("rq", false, Some(3600))).await;
+    assert!(connack.session_present);
+    assert_eq!(
+        received_topics(&mut sub).await,
+        ["open/x"],
+        "what was queued for a subscription dropped on restore must not be delivered"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn resumed_session_drops_the_queued_messages_of_a_revoked_subscription_after_restart() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let broker = Broker::start(file(dir.path(), NEVER), Duration::ZERO).await;
+    let (mut publisher, _) = connect(&broker.addr, options("rqf-pub", true, Some(0))).await;
+    let (mut sub, _) = connect(&broker.addr, options("rqf", true, Some(3600))).await;
+    subscribe(&mut sub, "secret/x", 1).await;
+    subscribe(&mut sub, "open/x", 1).await;
+    end(sub).await;
+    sleep(Duration::from_millis(200)).await;
+    publish_at_least_once(&mut publisher, "secret/x", 1).await;
+    publish_at_least_once(&mut publisher, "open/x", 2).await;
+    end(publisher).await;
+    broker.shut_down().await;
+
+    let broker = Broker::start(file(dir.path(), NEVER), Duration::ZERO).await;
+    broker.provider.deny_secret.store(true, Ordering::SeqCst);
+    let (mut sub, connack) = connect(&broker.addr, options("rqf", false, Some(3600))).await;
+    assert!(connack.session_present);
+    assert_eq!(
+        received_topics(&mut sub).await,
+        ["open/x"],
+        "what a previous run queued for a subscription dropped on restore must not be delivered"
+    );
+}
+
+#[tokio::test]
+async fn resumed_session_keeps_a_queued_message_another_subscription_matches() {
+    let broker = Broker::start(memory(NEVER), Duration::ZERO).await;
+    let (mut publisher, _) = connect(&broker.addr, options("rk-pub", true, Some(0))).await;
+    let (mut sub, _) = connect(&broker.addr, options("rk", true, Some(3600))).await;
+    subscribe(&mut sub, "secret/x", 1).await;
+    subscribe(&mut sub, "+/x", 1).await;
+    end(sub).await;
+    sleep(Duration::from_millis(200)).await;
+
+    broker.provider.deny_secret.store(true, Ordering::SeqCst);
+    publish_at_least_once(&mut publisher, "secret/x", 1).await;
+    let (mut sub, connack) = connect(&broker.addr, options("rk", false, Some(3600))).await;
+    assert!(connack.session_present);
+    assert_eq!(
+        received_topics(&mut sub).await,
+        ["secret/x"],
+        "a message queued for a dropped and a kept subscription is delivered once, for the kept one"
+    );
+}
+
+#[tokio::test]
+async fn takeover_drops_what_was_not_yet_sent_for_a_revoked_subscription() {
+    let broker = Broker::start(memory(NEVER), Duration::ZERO).await;
+    let (mut publisher, _) = connect(&broker.addr, options("rt-pub", true, Some(0))).await;
+    let (mut first, _) = connect(
+        &broker.addr,
+        options("rt", true, Some(3600)).with_receive_maximum(1),
+    )
+    .await;
+    subscribe(&mut first, "secret/x", 1).await;
+    subscribe(&mut first, "open/x", 1).await;
+    broker.provider.deny_secret.store(true, Ordering::SeqCst);
+    publish_at_least_once(&mut publisher, "secret/x", 1).await;
+    publish_at_least_once(&mut publisher, "secret/x", 2).await;
+    publish_at_least_once(&mut publisher, "open/x", 3).await;
+    sleep(Duration::from_millis(200)).await;
+
+    let (mut second, connack) = connect(&broker.addr, options("rt", false, Some(3600))).await;
+    assert!(connack.session_present);
+    assert_eq!(
+        received_publishes(&mut second).await,
+        [sent("secret/x", true), sent("open/x", false)],
+        "only the delivery already started for the dropped subscription is sent again"
+    );
+    drop(first);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn resumed_session_receives_nothing_routed_to_a_revoked_subscription_during_the_claim() {
+    let broker = Broker::start(memory(NEVER), Duration::ZERO).await;
+    let (mut sub, _) = connect(&broker.addr, options("rc", true, Some(3600))).await;
+    subscribe(&mut sub, "secret/x", 0).await;
+    end(sub).await;
+    let (mut publisher, _) = connect(&broker.addr, options("rc-pub", true, Some(0))).await;
+    let stop = Arc::new(AtomicBool::new(false));
+    let flood = {
+        let stop = Arc::clone(&stop);
+        tokio::spawn(async move {
+            while !stop.load(Ordering::SeqCst) {
+                for _ in 0..50 {
+                    publish(&mut publisher, "secret/x").await;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+    };
+
+    let mut leaked = 0;
+    for _ in 0..10 {
+        broker.provider.deny_secret.store(true, Ordering::SeqCst);
+        let (mut sub, _) = connect(&broker.addr, options("rc", false, Some(3600))).await;
+        leaked += received_topics(&mut sub).await.len();
+        leave(sub).await;
+        broker.provider.deny_secret.store(false, Ordering::SeqCst);
+        let (mut sub, _) = connect(&broker.addr, options("rc", false, Some(3600))).await;
+        subscribe(&mut sub, "secret/x", 0).await;
+        leave(sub).await;
+    }
+    stop.store(true, Ordering::SeqCst);
+    flood.await.expect("flood");
+    assert_eq!(
+        leaked, 0,
+        "messages routed to the dropped subscription while the session was claimed were delivered"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn resumed_session_after_restart_sends_again_a_delivery_already_started() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let broker = Broker::start(file(dir.path(), NEVER), Duration::ZERO).await;
+    let (mut publisher, _) = connect(&broker.addr, options("rs-pub", true, Some(0))).await;
+    let (mut sub, _) = connect(&broker.addr, options("rs", true, Some(3600))).await;
+    subscribe(&mut sub, "secret/x", 1).await;
+    publish_at_least_once(&mut publisher, "secret/x", 1).await;
+    assert_eq!(
+        received_publishes(&mut sub).await,
+        [sent("secret/x", false)]
+    );
+    end(publisher).await;
+    broker.shut_down().await;
+    drop(sub);
+
+    let broker = Broker::start(file(dir.path(), NEVER), Duration::ZERO).await;
+    broker.provider.deny_secret.store(true, Ordering::SeqCst);
+    let (mut sub, connack) = connect(&broker.addr, options("rs", false, Some(3600))).await;
+    assert!(connack.session_present);
+    let resent = match sub.next(Duration::from_secs(5)).await {
+        Some(Packet::Publish(publish)) => Some((publish.topic_name, publish.dup)),
+        _ => None,
+    };
+    assert_eq!(
+        resent,
+        Some(sent("secret/x", true)),
+        "a message sent and not acknowledged is sent again, its subscription dropped or not"
+    );
+    assert_eq!(received_publishes(&mut sub).await, []);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn revoked_subscription_stays_withheld_at_a_later_resume() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let broker = Broker::start(file(dir.path(), NEVER), Duration::ZERO).await;
+    let (mut publisher, _) = connect(&broker.addr, options("rl-pub", true, Some(0))).await;
+    let (mut sub, _) = connect(&broker.addr, options("rl", true, Some(3600))).await;
+    subscribe(&mut sub, "secret/x", 1).await;
+    subscribe(&mut sub, "open/x", 1).await;
+    end(sub).await;
+    sleep(Duration::from_millis(200)).await;
+    publish_at_least_once(&mut publisher, "open/x", 1).await;
+    publish_at_least_once(&mut publisher, "open/x", 2).await;
+    publish_at_least_once(&mut publisher, "secret/x", 3).await;
+    publish_at_least_once(&mut publisher, "secret/x", 4).await;
+
+    broker.provider.deny_secret.store(true, Ordering::SeqCst);
+    let (mut sub, connack) = connect(
+        &broker.addr,
+        options("rl", false, Some(3600)).with_receive_maximum(1),
+    )
+    .await;
+    assert!(connack.session_present);
+    assert_eq!(received_publishes(&mut sub).await, [sent("open/x", false)]);
+    end(sub).await;
+    end(publisher).await;
+    broker.shut_down().await;
+
+    let broker = Broker::start(file(dir.path(), NEVER), Duration::ZERO).await;
+    let (mut sub, connack) = connect(&broker.addr, options("rl", false, Some(3600))).await;
+    assert!(connack.session_present);
+    assert_eq!(
+        received_publishes(&mut sub).await,
+        [sent("open/x", true), sent("open/x", false)],
+        "messages queued for a subscription dropped at an earlier resume must not be delivered"
+    );
+}
+
+async fn shared_group_after_one_member_lost_it(revoke: bool) -> (Vec<String>, Vec<String>) {
+    let broker = Broker::start(memory(NEVER), Duration::ZERO).await;
+    let (mut publisher, _) =
+        connect(&broker.addr, options("revoked-shared-pub", true, Some(0))).await;
+    let (mut member, _) = connect(&broker.addr, options("revoked-shared", true, Some(3600))).await;
+    subscribe(&mut member, "$share/group/secret/x", 1).await;
+    subscribe(&mut member, "open/x", 1).await;
+    end(member).await;
+    sleep(Duration::from_millis(200)).await;
+    publish_at_least_once(&mut publisher, "secret/x", 1).await;
+    publish_at_least_once(&mut publisher, "open/x", 2).await;
+
+    let (mut other, _) = connect(
+        &broker.addr,
+        options("revoked-shared-other", true, Some(3600)),
+    )
+    .await;
+    subscribe(&mut other, "$share/group/secret/x", 1).await;
+    broker.provider.deny_secret.store(revoke, Ordering::SeqCst);
+    let (mut member, connack) =
+        connect(&broker.addr, options("revoked-shared", false, Some(3600))).await;
+    assert!(connack.session_present);
+    let member_received = received_topics(&mut member).await;
+    publish_at_least_once(&mut publisher, "secret/x", 3).await;
+    publish_at_least_once(&mut publisher, "secret/x", 4).await;
+    let mut member_later = received_topics(&mut member).await;
+    let other_received = received_topics(&mut other).await;
+    let mut member_all = member_received;
+    member_all.append(&mut member_later);
+    (member_all, other_received)
+}
+
+#[tokio::test]
+async fn resumed_session_drops_the_queued_messages_of_a_revoked_shared_subscription() {
+    let (member, other) = shared_group_after_one_member_lost_it(true).await;
+    assert_eq!(member, ["open/x"]);
+    assert_eq!(
+        other,
+        ["secret/x", "secret/x"],
+        "the other member of the group gets what is published after the first lost it"
+    );
+}
+
+#[tokio::test]
+async fn control_resumed_session_keeps_the_queued_messages_of_a_shared_subscription() {
+    let (member, other) = shared_group_after_one_member_lost_it(false).await;
+    assert_eq!(member.iter().filter(|topic| *topic == "open/x").count(), 1);
+    assert_eq!(
+        member.iter().filter(|topic| *topic == "secret/x").count() + other.len(),
+        3
+    );
+    assert!(member.contains(&"secret/x".to_string()));
+}
+
+async fn started_exactly_once_delivery_after_a_revocation(revoke: bool) -> Vec<(String, bool)> {
+    let broker = Broker::start(memory(NEVER), Duration::ZERO).await;
+    let (mut publisher, _) = connect(&broker.addr, options("rq2-pub", true, Some(0))).await;
+    let (mut sub, _) = connect(&broker.addr, options("rq2", true, Some(3600))).await;
+    subscribe(&mut sub, "secret/x", 2).await;
+    let mut packet = PublishPacket::new("secret/x", b"hi".to_vec(), QoS::ExactlyOnce);
+    packet.packet_id = Some(1);
+    let mut bytes = Vec::new();
+    packet.encode(&mut bytes).expect("encode PUBLISH");
+    publisher.write_all(&bytes).await.expect("PUBLISH");
+    assert!(matches!(
+        publisher.next(Duration::from_secs(5)).await,
+        Some(Packet::PubRec(_))
+    ));
+    publisher
+        .write_all(&[0x62, 0x02, 0x00, 0x01])
+        .await
+        .expect("PUBREL");
+    assert!(matches!(
+        publisher.next(Duration::from_secs(5)).await,
+        Some(Packet::PubComp(_))
+    ));
+    assert_eq!(
+        received_publishes(&mut sub).await,
+        [sent("secret/x", false)]
+    );
+    drop(sub);
+    sleep(Duration::from_millis(200)).await;
+
+    broker.provider.deny_secret.store(revoke, Ordering::SeqCst);
+    let (mut sub, connack) = connect(&broker.addr, options("rq2", false, Some(3600))).await;
+    assert!(connack.session_present);
+    received_publishes(&mut sub).await
+}
+
+#[tokio::test]
+async fn resumed_session_completes_an_exactly_once_delivery_already_started() {
+    assert_eq!(
+        started_exactly_once_delivery_after_a_revocation(true).await,
+        [sent("secret/x", true)],
+        "an exactly-once delivery sent and not acknowledged is completed after its subscription was dropped"
+    );
+}
+
+#[tokio::test]
+async fn control_resumed_session_completes_an_exactly_once_delivery() {
+    assert_eq!(
+        started_exactly_once_delivery_after_a_revocation(false).await,
+        [sent("secret/x", true)]
     );
 }
 
@@ -955,4 +1315,367 @@ async fn clean_start_after_restart_drops_the_persisted_inflight_message() {
         delivered.is_none(),
         "a clean start delivered the old session's message: {delivered:?}"
     );
+}
+
+async fn puback(wire: &mut Wire, packet_id: u16) {
+    let id = packet_id.to_be_bytes();
+    wire.write_all(&[0x40, 0x02, id[0], id[1]])
+        .await
+        .expect("PUBACK");
+}
+
+async fn publishes_until_silence(wire: &mut Wire) -> Vec<(String, Option<u16>)> {
+    let mut publishes = Vec::new();
+    while let Some(packet) = wire.next(Duration::from_millis(500)).await {
+        if let Packet::Publish(publish) = packet {
+            publishes.push((publish.topic_name, publish.packet_id));
+        }
+    }
+    publishes
+}
+
+async fn resubscribing_discards_what_was_withheld(broker: &Broker, wire: &mut Wire) {
+    let first = publishes_until_silence(wire).await;
+    assert_eq!(first.len(), 1, "{first:?}");
+    assert_eq!(first[0].0, "open/x");
+    broker.provider.deny_secret.store(false, Ordering::SeqCst);
+    subscribe(wire, "secret/x", 1).await;
+    puback(wire, first[0].1.unwrap()).await;
+    let after = publishes_until_silence(wire).await;
+    assert!(
+        after.is_empty(),
+        "published during the withdrawal, delivered after the re-subscribe: {after:?}"
+    );
+}
+
+#[tokio::test]
+async fn resubscribing_does_not_release_what_was_queued_during_the_withdrawal() {
+    let broker = Broker::start(memory(NEVER), Duration::ZERO).await;
+    let (mut publisher, _) = connect(&broker.addr, options("rs-pub", true, Some(0))).await;
+    let (mut sub, _) = connect(&broker.addr, options("rs", true, Some(3600))).await;
+    subscribe(&mut sub, "secret/x", 1).await;
+    subscribe(&mut sub, "open/x", 1).await;
+    end(sub).await;
+    sleep(Duration::from_millis(200)).await;
+
+    broker.provider.deny_secret.store(true, Ordering::SeqCst);
+    publish_at_least_once(&mut publisher, "open/x", 1).await;
+    publish_at_least_once(&mut publisher, "secret/x", 2).await;
+
+    let (mut sub, connack) = connect(
+        &broker.addr,
+        options("rs", false, Some(3600)).with_receive_maximum(1),
+    )
+    .await;
+    assert!(connack.session_present);
+    resubscribing_discards_what_was_withheld(&broker, &mut sub).await;
+
+    publish_at_least_once(&mut publisher, "secret/x", 3).await;
+    let later = publishes_until_silence(&mut sub).await;
+    assert_eq!(later.len(), 1, "{later:?}");
+    assert_eq!(later[0].0, "secret/x");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn resubscribing_after_a_restart_does_not_release_what_was_queued_on_disk() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let broker = Broker::start(file(dir.path(), NEVER), Duration::ZERO).await;
+    let (mut publisher, _) = connect(&broker.addr, options("rsd-pub", true, Some(0))).await;
+    let (mut sub, _) = connect(&broker.addr, options("rsd", true, Some(3600))).await;
+    subscribe(&mut sub, "secret/x", 1).await;
+    subscribe(&mut sub, "open/x", 1).await;
+    end(sub).await;
+    sleep(Duration::from_millis(200)).await;
+    publish_at_least_once(&mut publisher, "open/x", 1).await;
+    publish_at_least_once(&mut publisher, "secret/x", 2).await;
+    end(publisher).await;
+    broker.shut_down().await;
+
+    let broker = Broker::start(file(dir.path(), NEVER), Duration::ZERO).await;
+    broker.provider.deny_secret.store(true, Ordering::SeqCst);
+    let (mut sub, connack) = connect(
+        &broker.addr,
+        options("rsd", false, Some(3600)).with_receive_maximum(1),
+    )
+    .await;
+    assert!(connack.session_present);
+    resubscribing_discards_what_was_withheld(&broker, &mut sub).await;
+    broker.shut_down().await;
+}
+
+async fn rest_of_two_started_deliveries(subscribe_before_ack: bool) -> Vec<(String, bool)> {
+    let broker = Broker::start(memory(NEVER), Duration::ZERO).await;
+    let (mut publisher, _) = connect(&broker.addr, options("rvd-pub", true, Some(0))).await;
+    let (mut first, _) = connect(&broker.addr, options("rvd", true, Some(3600))).await;
+    subscribe(&mut first, "secret/x", 1).await;
+    broker.provider.deny_secret.store(true, Ordering::SeqCst);
+    publish_at_least_once(&mut publisher, "secret/x", 1).await;
+    publish_at_least_once(&mut publisher, "secret/x", 2).await;
+    sleep(Duration::from_millis(200)).await;
+    let (mut second, connack) = connect(
+        &broker.addr,
+        options("rvd", false, Some(3600)).with_receive_maximum(1),
+    )
+    .await;
+    assert!(connack.session_present);
+    let started = publishes_until_silence(&mut second).await;
+    assert_eq!(started.len(), 1, "{started:?}");
+    if subscribe_before_ack {
+        subscribe(&mut second, "open/y", 1).await;
+    }
+    puback(&mut second, started[0].1.unwrap()).await;
+    let rest = received_publishes(&mut second).await;
+    drop(first);
+    rest
+}
+
+#[tokio::test]
+async fn control_second_started_delivery_is_resent() {
+    assert_eq!(
+        rest_of_two_started_deliveries(false).await,
+        [sent("secret/x", true)]
+    );
+}
+
+#[tokio::test]
+async fn unrelated_subscribe_keeps_a_started_delivery() {
+    assert_eq!(
+        rest_of_two_started_deliveries(true).await,
+        [sent("secret/x", true)]
+    );
+}
+
+#[tokio::test]
+async fn handback_after_resubscribe_is_not_released() {
+    let broker = Broker::start(memory(NEVER), Duration::from_millis(1500)).await;
+    let (mut publisher, _) = connect(&broker.addr, options("rvh-pub", true, Some(0))).await;
+    let (mut first, _) = connect(&broker.addr, options("rvh", true, Some(3600))).await;
+    subscribe(&mut first, "secret/x", 1).await;
+    broker.provider.deny_secret.store(true, Ordering::SeqCst);
+    first
+        .write_all(&subscribe_bytes(2, "slow/a", 1))
+        .await
+        .expect("SUBSCRIBE");
+    sleep(Duration::from_millis(100)).await;
+    publish_at_least_once(&mut publisher, "secret/x", 1).await;
+    let (mut second, connack) = connect(&broker.addr, options("rvh", false, Some(3600))).await;
+    assert!(connack.session_present);
+    broker.provider.deny_secret.store(false, Ordering::SeqCst);
+    subscribe(&mut second, "secret/x", 1).await;
+    sleep(Duration::from_millis(2500)).await;
+    let delivered = received_publishes(&mut second).await;
+    drop(first);
+    assert!(
+        delivered.is_empty(),
+        "published during the withdrawal, before the re-subscribe, delivered after it: {delivered:?}"
+    );
+}
+
+async fn owners_messages_after_a_displaced_subscribe(revoke_at_first: bool) -> Vec<(String, bool)> {
+    let broker = Broker::start(memory(NEVER), Duration::from_millis(1500)).await;
+    let (mut publisher, _) = connect(&broker.addr, options("rvp-pub", true, Some(0))).await;
+    let (mut sub, _) = connect(&broker.addr, options("rvp", true, Some(3600))).await;
+    subscribe(&mut sub, "secret/x", 1).await;
+    end(sub).await;
+    sleep(Duration::from_millis(200)).await;
+    broker
+        .provider
+        .deny_secret
+        .store(revoke_at_first, Ordering::SeqCst);
+    let (mut displaced, connack) = connect(&broker.addr, options("rvp", false, Some(3600))).await;
+    assert!(connack.session_present);
+    displaced
+        .write_all(&subscribe_bytes(2, "slow/a", 1))
+        .await
+        .expect("SUBSCRIBE");
+    sleep(Duration::from_millis(100)).await;
+    broker.provider.deny_secret.store(false, Ordering::SeqCst);
+    let (mut owner, connack) = connect(&broker.addr, options("rvp", false, Some(3600))).await;
+    assert!(connack.session_present);
+    subscribe(&mut owner, "secret/x", 1).await;
+    publish_at_least_once(&mut publisher, "secret/x", 1).await;
+    sleep(Duration::from_millis(2500)).await;
+    let delivered = received_publishes(&mut owner).await;
+    drop(displaced);
+    delivered
+}
+
+#[tokio::test]
+async fn control_displaced_connection_without_revocation_keeps_the_owners_message() {
+    assert_eq!(
+        owners_messages_after_a_displaced_subscribe(false).await,
+        [sent("secret/x", false)]
+    );
+}
+
+#[tokio::test]
+async fn displaced_connection_does_not_purge_the_owners_queue() {
+    assert_eq!(
+        owners_messages_after_a_displaced_subscribe(true).await,
+        [sent("secret/x", false)]
+    );
+}
+
+fn copy_directory(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_directory(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), target).unwrap();
+        }
+    }
+}
+
+async fn delivered_from_a_crash_image(settle_before_crash: Duration) -> Vec<String> {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let broker = Broker::start(file(dir.path(), NEVER), Duration::ZERO).await;
+    let (mut publisher, _) = connect(&broker.addr, options("rvc-pub", true, Some(0))).await;
+    let (mut sub, _) = connect(&broker.addr, options("rvc", true, Some(3600))).await;
+    subscribe(&mut sub, "secret/x", 1).await;
+    subscribe(&mut sub, "open/x", 1).await;
+    end(sub).await;
+    sleep(Duration::from_millis(200)).await;
+    publish_at_least_once(&mut publisher, "open/x", 1).await;
+    publish_at_least_once(&mut publisher, "secret/x", 2).await;
+    sleep(Duration::from_millis(600)).await;
+    broker.provider.deny_secret.store(true, Ordering::SeqCst);
+    let (mut sub, connack) = connect(
+        &broker.addr,
+        options("rvc", false, Some(3600)).with_receive_maximum(1),
+    )
+    .await;
+    assert!(connack.session_present);
+    let first = publishes_until_silence(&mut sub).await;
+    assert_eq!(first.len(), 1, "{first:?}");
+    assert_eq!(first[0].0, "open/x");
+    broker.provider.deny_secret.store(false, Ordering::SeqCst);
+    subscribe(&mut sub, "secret/x", 1).await;
+    sleep(settle_before_crash).await;
+    let image = tempfile::tempdir().expect("tempdir");
+    copy_directory(dir.path(), image.path());
+    let restarted = Broker::start(file(image.path(), NEVER), Duration::ZERO).await;
+    let (mut resumed, connack) = connect(&restarted.addr, options("rvc", false, Some(3600))).await;
+    assert!(connack.session_present);
+    let topics = received_topics(&mut resumed).await;
+    drop(sub);
+    drop(resumed);
+    restarted.stop().await;
+    broker.stop().await;
+    topics
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn control_crash_after_the_resubscribe_settled_does_not_release() {
+    assert_eq!(
+        delivered_from_a_crash_image(Duration::from_millis(800)).await,
+        ["open/x"]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn crash_right_after_suback_does_not_release() {
+    assert_eq!(
+        delivered_from_a_crash_image(Duration::ZERO).await,
+        ["open/x"]
+    );
+}
+
+#[tokio::test]
+async fn later_subscribe_keeps_what_was_published_after_the_resubscribe() {
+    let broker = Broker::start(memory(NEVER), Duration::ZERO).await;
+    let (mut publisher, _) = connect(&broker.addr, options("rvk-pub", true, Some(0))).await;
+    let (mut sub, _) = connect(&broker.addr, options("rvk", true, Some(3600))).await;
+    subscribe(&mut sub, "secret/x", 1).await;
+    subscribe(&mut sub, "open/x", 1).await;
+    end(sub).await;
+    sleep(Duration::from_millis(200)).await;
+    broker.provider.deny_secret.store(true, Ordering::SeqCst);
+    publish_at_least_once(&mut publisher, "open/x", 1).await;
+    let (mut sub, _) = connect(
+        &broker.addr,
+        options("rvk", false, Some(3600)).with_receive_maximum(1),
+    )
+    .await;
+    let first = publishes_until_silence(&mut sub).await;
+    assert_eq!(first.len(), 1);
+    broker.provider.deny_secret.store(false, Ordering::SeqCst);
+    subscribe(&mut sub, "secret/x", 1).await;
+    publish_at_least_once(&mut publisher, "secret/x", 2).await;
+    publish_at_least_once(&mut publisher, "secret/x", 3).await;
+    subscribe(&mut sub, "other/y", 1).await;
+    puback(&mut sub, first[0].1.unwrap()).await;
+    let next = publishes_until_silence(&mut sub).await;
+    assert_eq!(next.len(), 1, "{next:?}");
+    puback(&mut sub, next[0].1.unwrap()).await;
+    let last = publishes_until_silence(&mut sub).await;
+    assert_eq!(last.len(), 1, "{last:?}");
+}
+
+async fn seed_legacy_session_and_queue(dir: &Path, client_id: &str) {
+    let backend = FileBackend::new(dir).await.expect("file backend");
+    let mut session = ClientSession::new(client_id, true, Some(3600));
+    for topic in ["legacy/x", "secret/x"] {
+        session.add_subscription(topic, StoredSubscription::new(QoS::AtLeastOnce));
+    }
+    session.mark_disconnected(mqtt5::broker::storage::unix_millis_now());
+    backend.store_session(session).await.expect("store session");
+    let queue = backend.queue_handle(client_id);
+    for topic in ["secret/x", "legacy/x"] {
+        queue.push(mqtt5::broker::storage::QueuedMessage::new(
+            PublishPacket::new(topic, b"queued".to_vec(), QoS::AtLeastOnce),
+            client_id.to_string(),
+            QoS::AtLeastOnce,
+            None,
+        ));
+    }
+    backend.flush_queue_writes().await;
+    drop(backend);
+    let queue_dir = dir.join("queues").join(client_id);
+    let mut rewritten = 0;
+    for entry in std::fs::read_dir(&queue_dir).expect("queue directory") {
+        let path = entry.expect("queue entry").path();
+        let mut message: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).expect("read")).expect("queued JSON");
+        assert!(message
+            .as_object_mut()
+            .expect("object")
+            .remove("subscription_instance")
+            .is_some());
+        std::fs::write(&path, serde_json::to_vec(&message).expect("encode")).expect("write");
+        rewritten += 1;
+    }
+    assert_eq!(rewritten, 2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn legacy_session_and_queue_deliver_as_before_and_get_instances_at_claim() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    seed_legacy_session_and_queue(dir.path(), "legacy").await;
+    let broker = Broker::start(file(dir.path(), NEVER), Duration::ZERO).await;
+    broker.provider.deny_secret.store(true, Ordering::SeqCst);
+    let (mut publisher, _) = connect(&broker.addr, options("legacy-pub", true, Some(0))).await;
+    let (mut sub, connack) = connect(&broker.addr, options("legacy", false, Some(3600))).await;
+    assert!(connack.session_present);
+    assert_eq!(
+        received_topics(&mut sub).await,
+        ["legacy/x"],
+        "a message queued without an instance is delivered when a subscription matches it, and only then"
+    );
+    let stored = broker
+        .storage()
+        .get_session("legacy")
+        .await
+        .expect("read")
+        .expect("session");
+    assert_eq!(stored.subscriptions.len(), 1);
+    assert_ne!(
+        stored.subscriptions["legacy/x"].instance, 0,
+        "a subscription stored without an instance gets one when the session is claimed"
+    );
+    publish_at_least_once(&mut publisher, "legacy/x", 1).await;
+    assert_eq!(received_topics(&mut sub).await, ["legacy/x"]);
+    broker.stop().await;
 }

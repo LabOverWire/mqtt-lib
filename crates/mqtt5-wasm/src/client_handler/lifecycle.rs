@@ -12,19 +12,19 @@ use std::sync::Arc;
 use tracing::{debug, warn};
 use wasm_bindgen_futures::spawn_local;
 
-use crate::transport::WasmWriter;
+use super::SharedWriter;
 
 use super::WasmClientHandler;
 
 impl WasmClientHandler {
-    pub(super) fn handle_pingreq(&self, writer: &mut WasmWriter) -> Result<()> {
+    pub(super) fn handle_pingreq(&self, writer: &SharedWriter) -> Result<()> {
         self.write_packet(&Packet::PingResp, writer)
     }
 
     pub(super) async fn handle_disconnect(
         &mut self,
         disconnect: &DisconnectPacket,
-        writer: &mut WasmWriter,
+        writer: &SharedWriter,
     ) -> Result<()> {
         if let Some(requested) = disconnect.properties.get_session_expiry_interval() {
             if self.connect_session_expiry == Some(0) && requested != 0 {
@@ -42,7 +42,7 @@ impl WasmClientHandler {
             }
             let granted =
                 ClientSession::granted_expiry(Some(requested), self.maximum_session_expiry());
-            if let Some(session) = self.session.as_mut() {
+            if let Some(session) = self.session.borrow_mut().as_mut() {
                 session.expiry_interval = Some(granted);
                 session.persistent = granted != 0;
             }
@@ -66,7 +66,7 @@ impl WasmClientHandler {
 
         if disconnect.reason_code != ReasonCode::DisconnectWithWillMessage {
             self.normal_disconnect = true;
-            if let Some(ref mut session) = self.session {
+            if let Some(session) = self.session.borrow_mut().as_mut() {
                 session.will_message = None;
                 session.will_delay_interval = None;
             }
@@ -78,7 +78,7 @@ impl WasmClientHandler {
     pub(super) async fn handle_auth(
         &mut self,
         auth: AuthPacket,
-        writer: &mut WasmWriter,
+        writer: &SharedWriter,
     ) -> Result<()> {
         let reason_code = auth.reason_code;
 
@@ -95,7 +95,7 @@ impl WasmClientHandler {
     async fn handle_continue_auth(
         &mut self,
         auth: AuthPacket,
-        writer: &mut WasmWriter,
+        writer: &SharedWriter,
     ) -> Result<()> {
         use super::AuthState;
 
@@ -148,7 +148,7 @@ impl WasmClientHandler {
         self.process_enhanced_auth_result(result, writer).await
     }
 
-    async fn handle_reauth(&mut self, auth: AuthPacket, writer: &mut WasmWriter) -> Result<()> {
+    async fn handle_reauth(&mut self, auth: AuthPacket, writer: &SharedWriter) -> Result<()> {
         use super::AuthState;
 
         if self.auth_state != AuthState::Completed {
@@ -235,6 +235,7 @@ impl WasmClientHandler {
 
     pub(super) fn session_preserved(&self) -> bool {
         self.session
+            .borrow()
             .as_ref()
             .is_some_and(|session| session.expiry_interval != Some(0))
     }
@@ -262,16 +263,22 @@ impl WasmClientHandler {
 
     fn will_delay(&self) -> u32 {
         self.session
+            .borrow()
             .as_ref()
             .and_then(ClientSession::will_publish_delay)
             .unwrap_or(0)
     }
 
     async fn persist_session_end(&self, client_id: &str) {
-        let Some(session) = self.session.as_ref() else {
+        let Some(expiry_interval) = self
+            .session
+            .borrow()
+            .as_ref()
+            .map(|session| session.expiry_interval)
+        else {
             return;
         };
-        if session.expiry_interval == Some(0) {
+        if expiry_interval == Some(0) {
             match self
                 .storage
                 .remove_owned_session(client_id, self.generation)
@@ -288,7 +295,6 @@ impl WasmClientHandler {
             }
             return;
         }
-        let expiry_interval = session.expiry_interval;
         let discard_will = self.normal_disconnect;
         let disconnected_at = unix_millis_now();
         let updated = self
@@ -312,15 +318,13 @@ impl WasmClientHandler {
         client_id: &str,
         armed_will: Option<tokio::sync::oneshot::Receiver<()>>,
     ) {
-        let Some(session) = self.session.as_ref() else {
-            return;
-        };
-        let (Some(will), Some(delay)) = (&session.will_message, session.will_publish_delay())
-        else {
+        let Some((will, delay)) = self.session.borrow().as_ref().and_then(|session| {
+            Some((session.will_message.clone()?, session.will_publish_delay()?))
+        }) else {
             return;
         };
 
-        let mut publish = PublishPacket::new(will.topic.clone(), will.payload.clone(), will.qos);
+        let mut publish = PublishPacket::new(will.topic, will.payload, will.qos);
         publish.retain = will.retain;
         will.properties
             .apply_to_publish_properties(&mut publish.properties);

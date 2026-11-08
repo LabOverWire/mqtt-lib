@@ -11,8 +11,9 @@ use mqtt5_protocol::{u64_to_u32_saturating, usize_to_u32_saturating};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use tracing::{debug, error, info, warn};
 
+use super::SharedWriter;
 use crate::decoder::read_packet;
-use crate::transport::{WasmReader, WasmWriter};
+use crate::transport::WasmReader;
 
 use super::{AuthState, PendingConnect, WasmClientHandler};
 
@@ -20,7 +21,7 @@ impl WasmClientHandler {
     pub(super) async fn wait_for_connect(
         &mut self,
         reader: &mut WasmReader,
-        writer: &mut WasmWriter,
+        writer: &SharedWriter,
     ) -> Result<()> {
         let packet = read_packet(reader, self.protocol_version).await?;
 
@@ -47,7 +48,7 @@ impl WasmClientHandler {
     pub(super) async fn handle_connect(
         &mut self,
         mut connect: ConnectPacket,
-        writer: &mut WasmWriter,
+        writer: &SharedWriter,
     ) -> Result<()> {
         if connect.protocol_version != 4 && connect.protocol_version != 5 {
             let connack = if connect.protocol_version < 5 {
@@ -141,8 +142,6 @@ impl WasmClientHandler {
         self.fire_client_connect(&connect.client_id, connect.clean_start);
 
         if session_present {
-            // Offline-queued messages are drained by the publish forwarder from the shared
-            // per-client queue; delivering them here too would double-deliver.
             self.resend_inflight_messages(writer).await?;
             self.advance_packet_id_past_inflight();
         }
@@ -152,7 +151,7 @@ impl WasmClientHandler {
     fn assign_client_id_if_empty(
         &self,
         connect: &mut ConnectPacket,
-        writer: &mut WasmWriter,
+        writer: &SharedWriter,
     ) -> Result<Option<String>> {
         if !connect.client_id.is_empty() {
             return Ok(None);
@@ -195,7 +194,7 @@ impl WasmClientHandler {
     pub(super) async fn handle_session(
         &mut self,
         connect: &ConnectPacket,
-        writer: &mut WasmWriter,
+        writer: &SharedWriter,
     ) -> Result<bool> {
         let client_id = connect.client_id.clone();
         let requested = ClientSession::expiry_from_connect(connect);
@@ -244,6 +243,7 @@ impl WasmClientHandler {
         session.expiry_interval = Some(granted);
         session.persistent = granted != 0;
         session.user_id.clone_from(&self.user_id);
+        session.assign_subscription_instances();
 
         let generation = self.router.allocate_generation();
         session.mark_connected(generation);
@@ -290,7 +290,7 @@ impl WasmClientHandler {
         }
         drop(slot);
 
-        self.session = Some(session);
+        *self.session.borrow_mut() = Some(session);
         Ok(resume)
     }
 
@@ -313,7 +313,7 @@ impl WasmClientHandler {
     pub(super) async fn process_enhanced_auth_result(
         &mut self,
         result: EnhancedAuthResult,
-        writer: &mut WasmWriter,
+        writer: &SharedWriter,
     ) -> Result<()> {
         match result.status {
             EnhancedAuthStatus::Success => {
@@ -352,8 +352,6 @@ impl WasmClientHandler {
                     );
 
                     if session_present {
-                        // Offline-queued messages are drained by the publish forwarder; see
-                        // handle_session above.
                         self.resend_inflight_messages(writer).await?;
                         self.advance_packet_id_past_inflight();
                     }
@@ -386,7 +384,7 @@ impl WasmClientHandler {
     fn check_load_balancer_redirect(
         &self,
         connect: &ConnectPacket,
-        writer: &mut WasmWriter,
+        writer: &SharedWriter,
     ) -> Result<()> {
         if let Ok(config) = self.config.read() {
             if let Some(ref lb) = config.load_balancer {
@@ -422,7 +420,7 @@ impl WasmClientHandler {
     fn validate_will_capabilities(
         &self,
         connect: &ConnectPacket,
-        writer: &mut WasmWriter,
+        writer: &SharedWriter,
     ) -> Result<()> {
         if let Some(ref will) = connect.will {
             if let Ok(config) = self.config.read() {

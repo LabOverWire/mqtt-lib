@@ -30,6 +30,7 @@ mod tests;
 use crate::error::Result;
 use crate::packet::publish::PublishPacket;
 use crate::time::{Duration, SystemTime};
+use crate::validation::{parse_shared_subscription, topic_matches_filter};
 use crate::QoS;
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
@@ -228,6 +229,10 @@ pub struct StoredSubscription {
     pub change_only: bool,
     #[serde(default)]
     pub flow_id: Option<u64>,
+    /// Identifies this subscription within its session; every message routed for it carries it.
+    /// 0 for a subscription stored before instances existed, until the session is claimed.
+    #[serde(default)]
+    pub instance: u64,
 }
 
 fn default_protocol_version() -> u8 {
@@ -246,6 +251,7 @@ impl StoredSubscription {
             protocol_version: 5,
             change_only: false,
             flow_id: None,
+            instance: 0,
         }
     }
 }
@@ -339,6 +345,10 @@ pub struct QueuedMessage {
     pub correlation_data: Option<Vec<u8>>,
     #[serde(default)]
     pub payload_format_indicator: Option<bool>,
+    /// Instance of the subscription the message was routed for; `None` when it was not routed
+    /// for a subscription, or was queued before instances existed
+    #[serde(default)]
+    pub subscription_instance: Option<u64>,
 }
 
 /// Storage backend trait for broker persistence
@@ -532,17 +542,11 @@ impl<B: StorageBackend + 'static> Storage<B> {
     /// # Errors
     /// Returns an error if the backend fails to load retained messages.
     pub async fn initialize(&self) -> Result<()> {
-        // Load retained messages into cache
-        // Use "#" as wildcard to match all topics
         let retained_messages = self.backend.get_retained_messages("#").await?;
         let mut cache = self.retained_cache.write().await;
         for (topic, msg) in retained_messages {
             cache.insert(topic, msg);
         }
-
-        // Load sessions into cache
-        // Note: We can't enumerate all sessions without adding a new backend method,
-        // so sessions will be loaded on-demand
 
         Ok(())
     }
@@ -552,13 +556,11 @@ impl<B: StorageBackend + 'static> Storage<B> {
     /// # Errors
     /// Returns an error if the backend fails to persist the message.
     pub async fn store_retained(&self, topic: &str, message: RetainedMessage) -> Result<()> {
-        // Update cache
         self.retained_cache
             .write()
             .await
             .insert(topic.to_string(), message.clone());
 
-        // Persist to backend
         self.backend.store_retained_message(topic, message).await
     }
 
@@ -567,9 +569,7 @@ impl<B: StorageBackend + 'static> Storage<B> {
         let cache_result = self.retained_cache.read().await.get(topic).cloned();
 
         if let Some(msg) = cache_result {
-            // Check if cached message is expired
             if msg.is_expired() {
-                // Remove from cache and backend
                 if let Err(e) = self.remove_retained(topic).await {
                     warn!("Failed to remove expired retained message for {topic}: {e}");
                 }
@@ -578,10 +578,7 @@ impl<B: StorageBackend + 'static> Storage<B> {
             return Some(msg);
         }
 
-        // Not in cache, try loading from backend
         if let Ok(Some(msg)) = self.backend.get_retained_message(topic).await {
-            // Backend already checks expiry, so if we get here it's valid
-            // Add to cache for future use
             self.retained_cache
                 .write()
                 .await
@@ -597,10 +594,8 @@ impl<B: StorageBackend + 'static> Storage<B> {
     /// # Errors
     /// Returns an error if the backend fails to remove the message.
     pub async fn remove_retained(&self, topic: &str) -> Result<()> {
-        // Remove from cache
         self.retained_cache.write().await.remove(topic);
 
-        // Remove from backend
         self.backend.remove_retained_message(topic).await
     }
 
@@ -769,19 +764,16 @@ impl<B: StorageBackend + 'static> Storage<B> {
     pub async fn cleanup_expired(&self) -> Result<()> {
         let now = SystemTime::now();
 
-        // Clean expired retained messages from cache
         {
             let mut cache = self.retained_cache.write().await;
             cache.retain(|_, msg| msg.expires_at.is_none_or(|expiry| expiry > now));
         }
 
-        // Clean expired sessions from cache
         {
             let mut cache = self.sessions_cache.write().await;
             cache.retain(|_, session| !session.is_expired());
         }
 
-        // Clean expired data from backend
         self.backend.cleanup_expired().await
     }
 }
@@ -941,6 +933,76 @@ impl ClientSession {
         self.subscriptions.remove(topic_filter);
     }
 
+    /// Follows the router after one flow's subscription to `topic_filter` was removed: the
+    /// session keeps the subscription, with its instance, on the flow the router still holds it
+    /// on (`held`), or removes it when the router holds it on none.
+    pub fn follow_removed_subscription(&mut self, topic_filter: &str, held: Option<Option<u64>>) {
+        match (held, self.subscriptions.get_mut(topic_filter)) {
+            (Some(flow_id), Some(subscription)) => subscription.flow_id = flow_id,
+            (None, _) => self.remove_subscription(topic_filter),
+            (Some(_), None) => {}
+        }
+    }
+
+    /// Whether a message routed for the subscription `instance` on `topic` may be sent: when the
+    /// session holds that subscription, or, for a message not routed for a subscription
+    /// (`None`), when one of its filters matches the topic.
+    #[must_use]
+    pub fn delivers(&self, instance: Option<u64>, topic: &str) -> bool {
+        match instance {
+            Some(instance) => self
+                .subscriptions
+                .values()
+                .any(|subscription| subscription.instance == instance),
+            None => self
+                .subscriptions
+                .keys()
+                .any(|filter| topic_matches_filter(topic, parse_shared_subscription(filter).0)),
+        }
+    }
+
+    /// The instance for a subscription to `topic_filter` being accepted: the one the session
+    /// already holds for that filter, whatever flow it is on, or a new one. The router keeps a
+    /// subscription per flow while the session keeps one per filter, so a filter subscribed on
+    /// another flow keeps the instance its first subscription is still routed with.
+    #[must_use]
+    pub fn subscription_instance(&self, topic_filter: &str) -> u64 {
+        self.subscriptions
+            .get(topic_filter)
+            .filter(|held| held.instance != 0)
+            .map_or_else(|| self.new_subscription_instance(), |held| held.instance)
+    }
+
+    /// Gives every subscription stored without an instance a new one.
+    pub fn assign_subscription_instances(&mut self) {
+        let unassigned: Vec<String> = self
+            .subscriptions
+            .iter()
+            .filter(|(_, subscription)| subscription.instance == 0)
+            .map(|(filter, _)| filter.clone())
+            .collect();
+        for filter in unassigned {
+            let instance = self.new_subscription_instance();
+            if let Some(subscription) = self.subscriptions.get_mut(&filter) {
+                subscription.instance = instance;
+            }
+        }
+    }
+
+    fn new_subscription_instance(&self) -> u64 {
+        loop {
+            let instance = rand::random::<u64>();
+            if instance != 0
+                && !self
+                    .subscriptions
+                    .values()
+                    .any(|subscription| subscription.instance == instance)
+            {
+                return instance;
+            }
+        }
+    }
+
     /// Check if session has expired
     #[must_use]
     pub fn is_expired(&self) -> bool {
@@ -1048,12 +1110,19 @@ impl QueuedMessage {
             response_topic: props.response_topic,
             correlation_data: props.correlation_data,
             payload_format_indicator: props.payload_format_indicator,
+            subscription_instance: None,
         }
     }
 
     #[must_use]
     pub fn with_target_flow(mut self, target_flow: Option<u64>) -> Self {
         self.target_flow = target_flow;
+        self
+    }
+
+    #[must_use]
+    pub fn with_subscription_instance(mut self, subscription_instance: Option<u64>) -> Self {
+        self.subscription_instance = subscription_instance;
         self
     }
 

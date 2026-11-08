@@ -1041,6 +1041,63 @@ mod tests {
         bytes
     }
 
+    fn subscribe_bytes_at(topic: &str, qos: u8) -> Vec<u8> {
+        let mut bytes = subscribe_bytes(topic);
+        if let Some(options) = bytes.last_mut() {
+            *options = qos;
+        }
+        bytes
+    }
+
+    /// The first byte and body of each packet in `bytes`, all shorter than 128 bytes.
+    fn frames(bytes: &[u8]) -> Vec<(u8, Vec<u8>)> {
+        let mut frames = Vec::new();
+        let mut rest = bytes;
+        while let [first_byte, length, tail @ ..] = rest {
+            assert!(*length < 128);
+            let (body, after) = tail.split_at(usize::from(*length));
+            frames.push((*first_byte, body.to_vec()));
+            rest = after;
+        }
+        frames
+    }
+
+    fn publish_frames(bytes: &[u8]) -> Vec<(u8, Vec<u8>)> {
+        frames(bytes)
+            .into_iter()
+            .filter(|(first_byte, _)| first_byte >> 4 == 3)
+            .collect()
+    }
+
+    async fn instance(broker: &WasmBroker, client_id: &str, topic_filter: &str) -> u64 {
+        broker
+            .storage
+            .get_session(client_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .subscriptions[topic_filter]
+            .instance
+    }
+
+    async fn route(broker: &WasmBroker, topic: &str, payload: &[u8], qos: QoS) {
+        let publish =
+            mqtt5_protocol::packet::publish::PublishPacket::new(topic, payload.to_vec(), qos);
+        broker.router.route_message(&publish, None).await;
+    }
+
+    fn pipelined_resume(broker: &WasmBroker, client_id: &str, topic: &str) -> Client {
+        let client = Client::open(broker.create_client_port().unwrap());
+        let mut connect = BytesMut::new();
+        ConnectPacket::new(connect_options(client_id, false, 3600))
+            .encode(&mut connect)
+            .unwrap();
+        let mut pipelined = connect.to_vec();
+        pipelined.extend_from_slice(&subscribe_bytes(topic));
+        client.send_raw(&pipelined);
+        client
+    }
+
     async fn subscribed(client: &Client, topic: &str) {
         client.send_raw(&subscribe_bytes(topic));
         assert_eq!(
@@ -1148,6 +1205,323 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(!stored.subscriptions.contains_key("secret/x"));
+    }
+
+    #[wasm_bindgen_test]
+    async fn resume_withholds_what_was_queued_for_a_revoked_subscription() {
+        let broker = broker();
+        let first = connected(&broker, connect_options("revoked-q", true, 3600)).await;
+        subscribed(&first, "secret/x").await;
+        first.send(&DisconnectPacket::new(ReasonCode::Success));
+        first.port.close();
+        sleep(200).await;
+
+        let publish = mqtt5_protocol::packet::publish::PublishPacket::new(
+            "secret/x",
+            &b"hi"[..],
+            QoS::AtLeastOnce,
+        );
+        broker.router.route_message(&publish, None).await;
+        assert_eq!(
+            broker.router.queue_handle("revoked-q").count(),
+            1,
+            "queued for the session"
+        );
+
+        broker.set_acl_default_deny().await;
+        let second = start_connect(&broker, connect_options("revoked-q", false, 3600));
+        let connack = second.wait_for(4).await;
+        assert_eq!(connack.first(), Some(&0x20));
+        assert_eq!(connack[2] & 1, 1, "session present");
+        sleep(500).await;
+        let received = second.received();
+        let after_connack = &received[2 + usize::from(received[1])..];
+        assert!(
+            after_connack.is_empty(),
+            "something followed CONNACK, a message queued for a subscription dropped on resume: {after_connack:?}"
+        );
+        assert_eq!(
+            broker.router.queue_handle("revoked-q").count(),
+            0,
+            "the queue drained"
+        );
+    }
+
+    #[wasm_bindgen_test]
+    async fn the_forwarder_withholds_what_a_lane_carries_for_a_revoked_subscription() {
+        let broker = broker();
+        let first = connected(&broker, connect_options("revoked-l", true, 3600)).await;
+        subscribed(&first, "secret/x").await;
+        first.send(&DisconnectPacket::new(ReasonCode::Success));
+        first.port.close();
+        sleep(200).await;
+        let routed_for = instance(&broker, "revoked-l", "secret/x").await;
+
+        broker.set_acl_default_deny().await;
+        let second = connected(&broker, connect_options("revoked-l", false, 3600)).await;
+        second.clear();
+        broker
+            .router
+            .subscribe(
+                mqtt5::broker::router::SubscriptionRequest::new(
+                    "revoked-l",
+                    "secret/x",
+                    QoS::AtMostOnce,
+                )
+                .with_instance(routed_for),
+            )
+            .await
+            .unwrap();
+        let publish = mqtt5_protocol::packet::publish::PublishPacket::new(
+            "secret/x",
+            &b"hi"[..],
+            QoS::AtMostOnce,
+        );
+        broker.router.route_message(&publish, None).await;
+        sleep(300).await;
+        assert!(
+            second.received().is_empty(),
+            "the forwarder sent a message for a subscription dropped on resume: {:?}",
+            second.received()
+        );
+    }
+
+    #[wasm_bindgen_test]
+    async fn resubscribing_does_not_release_what_was_queued_for_a_revoked_subscription() {
+        let broker = broker();
+        let first = connected(&broker, connect_options("rw1", true, 3600)).await;
+        subscribed(&first, "secret/#").await;
+        first.send(&DisconnectPacket::new(ReasonCode::Success));
+        first.port.close();
+        sleep(200).await;
+        let publish = mqtt5_protocol::packet::publish::PublishPacket::new(
+            "secret/x",
+            &b"hi"[..],
+            QoS::AtLeastOnce,
+        );
+        broker.router.route_message(&publish, None).await;
+        assert_eq!(broker.router.queue_handle("rw1").count(), 1);
+
+        broker.set_acl_default_deny().await;
+        broker
+            .add_acl_rule(
+                "anonymous".to_string(),
+                "secret/x".to_string(),
+                "readwrite".to_string(),
+            )
+            .await
+            .unwrap();
+        let client = Client::open(broker.create_client_port().unwrap());
+        let mut connect = BytesMut::new();
+        ConnectPacket::new(connect_options("rw1", false, 3600))
+            .encode(&mut connect)
+            .unwrap();
+        let mut pipelined = connect.to_vec();
+        pipelined.extend_from_slice(&subscribe_bytes("secret/x"));
+        client.send_raw(&pipelined);
+        sleep(500).await;
+        let stored = broker.storage.get_session("rw1").await.unwrap().unwrap();
+        assert!(!stored.subscriptions.contains_key("secret/#"));
+        assert!(stored.subscriptions.contains_key("secret/x"));
+        let received = client.received();
+        let mut rest = received.as_slice();
+        let mut types = Vec::new();
+        while let [first_byte, length, tail @ ..] = rest {
+            types.push(*first_byte);
+            rest = &tail[usize::from(*length)..];
+        }
+        assert!(
+            !types.iter().any(|first_byte| first_byte >> 4 == 3),
+            "queued during the withdrawal, sent after the re-subscribe: {types:02x?}"
+        );
+    }
+
+    #[wasm_bindgen_test]
+    async fn resubscribing_once_authorized_again_delivers_again() {
+        let broker = broker();
+        let first = connected(&broker, connect_options("revoked-r", true, 3600)).await;
+        subscribed(&first, "secret/x").await;
+        first.send(&DisconnectPacket::new(ReasonCode::Success));
+        first.port.close();
+        sleep(200).await;
+        broker.set_acl_default_deny().await;
+        let second = connected(&broker, connect_options("revoked-r", false, 3600)).await;
+
+        broker.set_acl_default_allow().await;
+        subscribed(&second, "secret/x").await;
+        let publish = mqtt5_protocol::packet::publish::PublishPacket::new(
+            "secret/x",
+            &b"hi"[..],
+            QoS::AtMostOnce,
+        );
+        broker.router.route_message(&publish, None).await;
+        assert_eq!(
+            second.wait_for(1).await.first().map(|byte| byte >> 4),
+            Some(3),
+            "a subscription made again once authorized again delivers"
+        );
+    }
+
+    #[wasm_bindgen_test]
+    async fn a_plain_resubscribe_keeps_what_was_queued_in_order() {
+        let broker = broker();
+        let first = connected(&broker, connect_options("plain-w", true, 3600)).await;
+        subscribed(&first, "open/x").await;
+        first.send(&DisconnectPacket::new(ReasonCode::Success));
+        first.port.close();
+        sleep(200).await;
+        for payload in ["q0", "q1", "q2"] {
+            route(&broker, "open/x", payload.as_bytes(), QoS::AtLeastOnce).await;
+        }
+        assert_eq!(broker.router.queue_handle("plain-w").count(), 3);
+
+        let client = pipelined_resume(&broker, "plain-w", "open/x");
+        sleep(500).await;
+        let payloads: Vec<Vec<u8>> = publish_frames(&client.received())
+            .into_iter()
+            .map(|(_, body)| body[body.len() - 2..].to_vec())
+            .collect();
+        assert_eq!(
+            payloads,
+            [b"q0".to_vec(), b"q1".to_vec(), b"q2".to_vec()],
+            "a SUBSCRIBE refreshing a held subscription dropped or reordered what was queued before it"
+        );
+    }
+
+    #[wasm_bindgen_test]
+    async fn subscribes_neither_reorder_nor_drop_messages_on_other_topics() {
+        let broker = broker();
+        let first = connected(&broker, connect_options("ordered-w", true, 3600)).await;
+        subscribed(&first, "secret/x").await;
+        subscribed(&first, "open/x").await;
+        first.send(&DisconnectPacket::new(ReasonCode::Success));
+        first.port.close();
+        sleep(200).await;
+        broker.set_acl_default_deny().await;
+        broker
+            .add_acl_rule(
+                "anonymous".to_string(),
+                "open/x".to_string(),
+                "readwrite".to_string(),
+            )
+            .await
+            .unwrap();
+        let client = connected(&broker, connect_options("ordered-w", false, 3600)).await;
+        broker
+            .add_acl_rule(
+                "anonymous".to_string(),
+                "other/#".to_string(),
+                "readwrite".to_string(),
+            )
+            .await
+            .unwrap();
+        for index in 0u32..500 {
+            route(&broker, "open/x", &index.to_be_bytes(), QoS::AtLeastOnce).await;
+            if index % 50 == 0 {
+                client.send_raw(&subscribe_bytes(&format!("other/{index}")));
+                sleep(1).await;
+            }
+        }
+        sleep(500).await;
+        let received: Vec<u32> = publish_frames(&client.received())
+            .into_iter()
+            .map(|(_, body)| u32::from_be_bytes(body[body.len() - 4..].try_into().unwrap()))
+            .collect();
+        assert_eq!(received, (0u32..500).collect::<Vec<_>>());
+    }
+
+    async fn shared_group_after_one_member_lost_it(revoke: bool) -> (Vec<String>, usize) {
+        let broker = broker();
+        let member = connected(&broker, connect_options("shared-w", true, 3600)).await;
+        subscribed(&member, "$share/g/secret/x").await;
+        subscribed(&member, "open/x").await;
+        member.send(&DisconnectPacket::new(ReasonCode::Success));
+        member.port.close();
+        sleep(200).await;
+        route(&broker, "secret/x", b"q", QoS::AtLeastOnce).await;
+        route(&broker, "open/x", b"q", QoS::AtLeastOnce).await;
+        assert_eq!(broker.router.queue_handle("shared-w").count(), 2);
+
+        let other = connected(&broker, connect_options("shared-w-other", true, 3600)).await;
+        subscribed(&other, "$share/g/secret/x").await;
+        if revoke {
+            broker.set_acl_default_deny().await;
+            broker
+                .add_acl_rule(
+                    "anonymous".to_string(),
+                    "open/x".to_string(),
+                    "readwrite".to_string(),
+                )
+                .await
+                .unwrap();
+        }
+        let member = start_connect(&broker, connect_options("shared-w", false, 3600));
+        sleep(300).await;
+        route(&broker, "secret/x", b"l", QoS::AtLeastOnce).await;
+        route(&broker, "secret/x", b"l", QoS::AtLeastOnce).await;
+        sleep(300).await;
+        let member_topics = publish_frames(&member.received())
+            .into_iter()
+            .map(|(_, body)| {
+                let length = usize::from(u16::from_be_bytes([body[0], body[1]]));
+                String::from_utf8_lossy(&body[2..2 + length]).into_owned()
+            })
+            .collect();
+        (member_topics, publish_frames(&other.received()).len())
+    }
+
+    #[wasm_bindgen_test]
+    async fn a_member_that_lost_its_shared_subscription_gets_none_of_its_messages() {
+        let (member, other) = shared_group_after_one_member_lost_it(true).await;
+        assert_eq!(member, ["open/x"]);
+        assert_eq!(other, 2, "the other member gets what is published after");
+    }
+
+    #[wasm_bindgen_test]
+    async fn control_a_member_keeping_its_shared_subscription_gets_its_queued_message() {
+        let (member, other) = shared_group_after_one_member_lost_it(false).await;
+        assert!(member.contains(&"secret/x".to_string()), "{member:?}");
+        assert!(member.contains(&"open/x".to_string()), "{member:?}");
+        assert_eq!(
+            member.iter().filter(|topic| *topic == "secret/x").count() + other,
+            3
+        );
+    }
+
+    async fn started_exactly_once_delivery_after(revoke: bool) -> Vec<u8> {
+        let broker = broker();
+        let first = connected(&broker, connect_options("started-w", true, 3600)).await;
+        first.send_raw(&subscribe_bytes_at("secret/x", 2));
+        assert_eq!(first.wait_for(1).await.first(), Some(&0x90));
+        first.clear();
+        route(&broker, "secret/x", b"s", QoS::ExactlyOnce).await;
+        assert_eq!(
+            publish_frames(&first.wait_for(1).await)
+                .first()
+                .map(|(first_byte, _)| *first_byte),
+            Some(0x34)
+        );
+        first.port.close();
+        sleep(200).await;
+        if revoke {
+            broker.set_acl_default_deny().await;
+        }
+        let second = start_connect(&broker, connect_options("started-w", false, 3600));
+        sleep(500).await;
+        publish_frames(&second.received())
+            .into_iter()
+            .map(|(first_byte, _)| first_byte)
+            .collect()
+    }
+
+    #[wasm_bindgen_test]
+    async fn an_exactly_once_delivery_already_started_is_completed_after_a_revocation() {
+        assert_eq!(started_exactly_once_delivery_after(true).await, [0x3C]);
+    }
+
+    #[wasm_bindgen_test]
+    async fn control_an_exactly_once_delivery_already_started_is_completed() {
+        assert_eq!(started_exactly_once_delivery_after(false).await, [0x3C]);
     }
 
     #[wasm_bindgen_test]
@@ -1313,5 +1687,25 @@ mod tests {
         );
         assert!(!broker.router.is_connected("scram").await);
         assert!(broker.storage.get_session("scram").await.unwrap().is_none());
+    }
+
+    #[wasm_bindgen_test]
+    async fn messages_routed_while_a_subscribe_waits_are_delivered() {
+        let broker = broker();
+        let client = connected(&broker, connect_options("busy", true, 0)).await;
+        subscribed(&client, "open/x").await;
+        let slot = broker.router.lock_session("busy").await;
+        client.send_raw(&subscribe_bytes("other/y"));
+        sleep(100).await;
+        for index in 0u32..5 {
+            route(&broker, "open/x", &index.to_be_bytes(), QoS::AtLeastOnce).await;
+        }
+        sleep(200).await;
+        drop(slot);
+        sleep(300).await;
+        let frames = frames(&client.received());
+        let publishes = frames.iter().filter(|(b, _)| b >> 4 == 3).count();
+        let subacks = frames.iter().filter(|(b, _)| *b == 0x90).count();
+        assert_eq!((publishes, subacks), (5, 1));
     }
 }

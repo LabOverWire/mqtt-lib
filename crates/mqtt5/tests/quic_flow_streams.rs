@@ -1340,3 +1340,129 @@ async fn a_stalled_handler_stops_reading_once_queued_packets_fill_the_maximum_si
         "broker read {written} packets of {PACKET} bytes"
     );
 }
+
+async fn copies_received(split: &mut QuicSplitResult, payload: &[u8]) -> usize {
+    let mut received = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let mut control = [0u8; 256];
+    loop {
+        tokio::select! {
+            accepted = split.connection.accept_bi() => {
+                if let Ok((_send, mut recv)) = accepted {
+                    let mut buf = [0u8; 512];
+                    while let Ok(Ok(Some(n))) =
+                        tokio::time::timeout(Duration::from_millis(500), recv.read(&mut buf)).await
+                    {
+                        received.extend_from_slice(&buf[..n]);
+                    }
+                }
+            }
+            read = split.recv.read(&mut control) => {
+                if let Ok(Some(n)) = read {
+                    received.extend_from_slice(&control[..n]);
+                }
+            }
+            () = tokio::time::sleep_until(deadline) => break,
+        }
+    }
+    received
+        .windows(payload.len())
+        .filter(|window| *window == payload)
+        .count()
+}
+
+async fn subscribe_on_control(split: &mut QuicSplitResult, topic: &str) {
+    split
+        .send
+        .write_all(&subscribe_frame(topic))
+        .await
+        .expect("subscribe on control");
+    let mut suback = [0u8; 6];
+    split
+        .recv
+        .read_exact(&mut suback)
+        .await
+        .expect("read control SUBACK");
+    assert_eq!(suback, [0x90, 0x04, 0x00, 0x01, 0x00, 0x00]);
+}
+
+fn persistent_flow() -> FlowFlags {
+    FlowFlags {
+        err_tolerance: 2,
+        persistent_subscriptions: 1,
+        ..FlowFlags::default()
+    }
+}
+
+#[tokio::test]
+async fn a_filter_subscribed_on_a_flow_and_on_the_control_stream_delivers_on_both() {
+    let (broker, mut split) = connected_session("two-flows").await;
+    let _flow = subscribe_on(&mut split, 5, 300, persistent_flow(), "flows/same").await;
+    subscribe_on_control(&mut split, "flows/same").await;
+    split
+        .send
+        .write_all(&publish_frame("flows/same", b"to flow"))
+        .await
+        .expect("publish");
+    let copies = copies_received(&mut split, b"to flow").await;
+    broker.stop().await;
+    assert_eq!(copies, 2);
+}
+
+#[tokio::test]
+async fn a_control_subscription_delivers_after_a_flow_with_the_same_filter_is_discarded() {
+    let (broker, mut split) = connected_session("discard-same-filter").await;
+    subscribe_on_control(&mut split, "flows/same").await;
+    drop(subscribe_on(&mut split, 5, 300, persistent_flow(), "flows/same").await);
+    let (mut send, mut recv) = split.connection.open_bi().await.expect("open discard");
+    send.write_all(&data_flow(5, 0, FlowFlags::discard()))
+        .await
+        .expect("send discard");
+    send.finish().expect("finish discard");
+    let response = tokio::time::timeout(Duration::from_secs(2), recv.read_to_end(16))
+        .await
+        .expect("discard answered")
+        .expect("discard ends with FIN");
+    assert!(response.is_empty());
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    split
+        .send
+        .write_all(&publish_frame("flows/same", b"after discard"))
+        .await
+        .expect("publish");
+    let copies = copies_received(&mut split, b"after discard").await;
+    broker.stop().await;
+    assert_eq!(copies, 1);
+}
+
+#[tokio::test]
+async fn a_flow_subscription_delivers_after_the_same_filter_is_unsubscribed_on_control() {
+    let (broker, mut split) = connected_session("unsubscribe-same-filter").await;
+    let _flow = subscribe_on(&mut split, 5, 300, persistent_flow(), "flows/same").await;
+    subscribe_on_control(&mut split, "flows/same").await;
+    let topic = b"flows/same";
+    let mut body = vec![0x00, 0x02, 0x00, 0x00, u8::try_from(topic.len()).unwrap()];
+    body.extend_from_slice(topic);
+    let mut unsubscribe = vec![0xA2, u8::try_from(body.len()).unwrap()];
+    unsubscribe.extend_from_slice(&body);
+    split
+        .send
+        .write_all(&unsubscribe)
+        .await
+        .expect("unsubscribe on control");
+    let mut unsuback = [0u8; 6];
+    split
+        .recv
+        .read_exact(&mut unsuback)
+        .await
+        .expect("read UNSUBACK");
+    assert_eq!(unsuback, [0xB0, 0x04, 0x00, 0x02, 0x00, 0x00]);
+    split
+        .send
+        .write_all(&publish_frame("flows/same", b"after unsubscribe"))
+        .await
+        .expect("publish");
+    let copies = copies_received(&mut split, b"after unsubscribe").await;
+    broker.stop().await;
+    assert_eq!(copies, 1);
+}

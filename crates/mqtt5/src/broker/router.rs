@@ -68,6 +68,9 @@ type WasmBridgeCallback = Box<dyn Fn(&PublishPacket)>;
 pub struct RoutableMessage {
     pub publish: PublishPacket,
     pub target_flow: Option<u64>,
+    /// Instance of the subscription the message was routed for; `None` when it was not routed
+    /// for a subscription
+    pub subscription_instance: Option<u64>,
 }
 
 /// Parameters of one subscription registration passed to [`MessageRouter::subscribe`].
@@ -83,11 +86,13 @@ pub struct SubscriptionRequest {
     pub protocol_version: ProtocolVersion,
     pub change_only: bool,
     pub flow_id: Option<u64>,
+    pub instance: u64,
 }
 
 impl SubscriptionRequest {
     /// Creates a request with no subscription identifier, all subscription options cleared,
-    /// `retain_handling` 0, MQTT v5.0, no change-only delivery and no flow.
+    /// `retain_handling` 0, MQTT v5.0, no change-only delivery, no flow and instance 0, which
+    /// routes messages without an instance.
     #[must_use]
     pub fn new(client_id: impl Into<String>, topic_filter: impl Into<String>, qos: QoS) -> Self {
         Self {
@@ -101,6 +106,7 @@ impl SubscriptionRequest {
             protocol_version: ProtocolVersion::default(),
             change_only: false,
             flow_id: None,
+            instance: 0,
         }
     }
 
@@ -145,6 +151,12 @@ impl SubscriptionRequest {
         self.flow_id = flow_id;
         self
     }
+
+    #[must_use]
+    pub fn with_instance(mut self, instance: u64) -> Self {
+        self.instance = instance;
+        self
+    }
 }
 
 /// Client subscription information
@@ -160,6 +172,7 @@ pub struct Subscription {
     pub protocol_version: ProtocolVersion,
     pub change_only: bool,
     pub flow_id: Option<u64>,
+    pub instance: u64,
 }
 
 type SubscriptionIdentity<'a> = (&'a str, Option<&'a str>, Option<u64>);
@@ -169,6 +182,10 @@ type ShareGroupCounters = HashMap<String, HashMap<String, Arc<AtomicUsize>>>;
 impl Subscription {
     fn identity(&self) -> SubscriptionIdentity<'_> {
         (&self.client_id, self.share_group.as_deref(), self.flow_id)
+    }
+
+    fn routed_instance(&self) -> Option<u64> {
+        (self.instance != 0).then_some(self.instance)
     }
 }
 
@@ -337,16 +354,14 @@ impl LaneReceivers {
 enum DeliveryPlan {
     Online {
         client_id: String,
-        message: PublishPacket,
-        target_flow: Option<u64>,
+        routable: RoutableMessage,
         lanes: DeliveryLanes,
         queue: QueueHandle,
         epoch: u64,
     },
     Behind {
         client_id: String,
-        message: PublishPacket,
-        target_flow: Option<u64>,
+        routable: RoutableMessage,
         queue: QueueHandle,
         epoch: u64,
     },
@@ -799,6 +814,7 @@ impl MessageRouter {
             )
             .with_change_only(stored.change_only)
             .with_flow_id(stored.flow_id)
+            .with_instance(stored.instance)
     }
 
     /// # Errors
@@ -1072,19 +1088,32 @@ impl MessageRouter {
         let Some(storage) = &self.storage else {
             return;
         };
-        let token = match storage.get_session(client_id).await {
-            Ok(Some(session)) => session.connection_token,
+        let (token, on_flow) = match storage.get_session(client_id).await {
+            Ok(Some(session)) => (
+                session.connection_token,
+                session
+                    .subscriptions
+                    .iter()
+                    .filter(|(_, sub)| sub.flow_id == Some(flow_id))
+                    .map(|(filter, _)| filter.clone())
+                    .collect::<Vec<_>>(),
+            ),
             Ok(None) => return,
             Err(e) => {
                 warn!("Failed to read session for {client_id} after a flow expired: {e}");
                 return;
             }
         };
+        let mut followed = Vec::with_capacity(on_flow.len());
+        for filter in on_flow {
+            let held = self.held_flow(client_id, &filter).await;
+            followed.push((filter, held));
+        }
         if let Err(e) = storage
-            .update_session(client_id, token, |session| {
-                session
-                    .subscriptions
-                    .retain(|_, sub| sub.flow_id != Some(flow_id));
+            .update_session(client_id, token, move |session| {
+                for (filter, held) in &followed {
+                    session.follow_removed_subscription(filter, *held);
+                }
             })
             .await
         {
@@ -1161,6 +1190,7 @@ impl MessageRouter {
             protocol_version,
             change_only,
             flow_id,
+            instance,
         } = request;
         if retain_handling > 2 {
             return Err(crate::MqttError::ProtocolError(format!(
@@ -1182,6 +1212,7 @@ impl MessageRouter {
             protocol_version,
             change_only,
             flow_id,
+            instance,
         };
 
         let subscriptions = if Self::has_wildcards(actual_filter) {
@@ -1286,6 +1317,24 @@ impl MessageRouter {
         } else {
             Unsubscribed::Absent
         }
+    }
+
+    /// The flow of a subscription `client_id` still holds to `topic_filter`, if it holds one on
+    /// any flow.
+    pub async fn held_flow(&self, client_id: &str, topic_filter: &str) -> Option<Option<u64>> {
+        let (actual_filter, share_group) = parse_shared_subscription(topic_filter);
+        let subscriptions = if Self::has_wildcards(actual_filter) {
+            &self.wildcard_subscriptions
+        } else {
+            &self.exact_subscriptions
+        };
+        subscriptions
+            .read()
+            .await
+            .get(actual_filter)?
+            .iter()
+            .find(|sub| sub.client_id == client_id && sub.share_group.as_deref() == share_group)
+            .map(|sub| sub.flow_id)
     }
 
     /// Removes every subscription the handler holding `generation` bound to `flow_id`;
@@ -1705,16 +1754,11 @@ impl MessageRouter {
         message
     }
 
-    fn queue_behind(
-        queue: &QueueHandle,
-        epoch: u64,
-        message: PublishPacket,
-        client_id: &str,
-        target_flow: Option<u64>,
-    ) {
-        let qos = message.qos;
-        let queued = QueuedMessage::new(message, client_id.to_string(), qos, None)
-            .with_target_flow(target_flow);
+    fn queue_behind(queue: &QueueHandle, epoch: u64, routable: RoutableMessage, client_id: &str) {
+        let qos = routable.publish.qos;
+        let queued = QueuedMessage::new(routable.publish, client_id.to_string(), qos, None)
+            .with_target_flow(routable.target_flow)
+            .with_subscription_instance(routable.subscription_instance);
         let Some(outcome) = queue.push_in_epoch(queued, epoch) else {
             debug!(
                 client_id,
@@ -1739,23 +1783,17 @@ impl MessageRouter {
         match plan {
             DeliveryPlan::Behind {
                 client_id,
-                message,
-                target_flow,
+                routable,
                 queue,
                 epoch,
-            } => Self::queue_behind(&queue, epoch, message, &client_id, target_flow),
+            } => Self::queue_behind(&queue, epoch, routable, &client_id),
             DeliveryPlan::Online {
                 client_id,
-                message,
-                target_flow,
+                routable,
                 lanes,
                 queue,
                 epoch,
             } => {
-                let routable = RoutableMessage {
-                    publish: message,
-                    target_flow,
-                };
                 if routable.publish.qos == QoS::AtMostOnce {
                     if lanes.qos0_tx.try_send(routable).is_err() {
                         trace!(client_id, "Dropped QoS 0 message: delivery lane full");
@@ -1763,37 +1801,19 @@ impl MessageRouter {
                     return;
                 }
                 if queue.behind() {
-                    Self::queue_behind(
-                        &queue,
-                        epoch,
-                        routable.publish,
-                        &client_id,
-                        routable.target_flow,
-                    );
+                    Self::queue_behind(&queue, epoch, routable, &client_id);
                     return;
                 }
                 let routable = match lanes.qos1_tx.try_send(routable) {
                     Ok(()) => return,
                     Err(mpsc::error::TrySendError::Closed(rejected)) => {
-                        Self::queue_behind(
-                            &queue,
-                            epoch,
-                            rejected.publish,
-                            &client_id,
-                            rejected.target_flow,
-                        );
+                        Self::queue_behind(&queue, epoch, rejected, &client_id);
                         return;
                     }
                     Err(mpsc::error::TrySendError::Full(rejected)) => rejected,
                 };
                 if publishing_client_id == Some(client_id.as_str()) {
-                    Self::queue_behind(
-                        &queue,
-                        epoch,
-                        routable.publish,
-                        &client_id,
-                        routable.target_flow,
-                    );
+                    Self::queue_behind(&queue, epoch, routable, &client_id);
                     return;
                 }
                 let permit = match deadline {
@@ -1805,13 +1825,7 @@ impl MessageRouter {
                 };
                 match permit {
                     Some(permit) => permit.send(routable),
-                    None => Self::queue_behind(
-                        &queue,
-                        epoch,
-                        routable.publish,
-                        &client_id,
-                        routable.target_flow,
-                    ),
+                    None => Self::queue_behind(&queue, epoch, routable, &client_id),
                 }
             }
         }
@@ -1884,8 +1898,11 @@ impl MessageRouter {
             }
             return Some(DeliveryPlan::Online {
                 client_id: sub.client_id.clone(),
-                message,
-                target_flow: sub.flow_id,
+                routable: RoutableMessage {
+                    publish: message,
+                    target_flow: sub.flow_id,
+                    subscription_instance: sub.routed_instance(),
+                },
                 lanes: DeliveryLanes {
                     qos1_tx: client_info.qos1_tx.clone(),
                     qos0_tx: client_info.qos0_tx.clone(),
@@ -1921,8 +1938,11 @@ impl MessageRouter {
         let queue = self.queue_handle(&sub.client_id);
         DeliveryPlan::Behind {
             client_id: sub.client_id.clone(),
-            message,
-            target_flow: sub.flow_id,
+            routable: RoutableMessage {
+                publish: message,
+                target_flow: sub.flow_id,
+                subscription_instance: sub.routed_instance(),
+            },
             epoch: queue.epoch(),
             queue,
         }
@@ -3526,6 +3546,7 @@ mod tests {
                 protocol_version: 5,
                 change_only: false,
                 flow_id: None,
+                instance: 0,
             },
         );
         let slot = router.lock_session("exact").await;

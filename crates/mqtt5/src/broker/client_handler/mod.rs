@@ -981,7 +981,8 @@ impl ClientHandler {
             let qos = routable.publish.qos;
             unsent.push(
                 QueuedMessage::new(routable.publish, client_id.clone(), qos, None)
-                    .with_target_flow(routable.target_flow),
+                    .with_target_flow(routable.target_flow)
+                    .with_subscription_instance(routable.subscription_instance),
             );
         }
         if unsent.is_empty() {

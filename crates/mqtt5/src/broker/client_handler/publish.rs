@@ -603,7 +603,26 @@ impl ClientHandler {
         }
     }
 
+    /// Whether `routable` was routed for a subscription the session no longer holds, wherever it
+    /// waited. A delivery already started, sent again with DUP and its packet identifier, is
+    /// completed.
+    fn withheld(&self, routable: &RoutableMessage) -> bool {
+        let publish = &routable.publish;
+        !(publish.dup && publish.packet_id.is_some())
+            && self.session.as_ref().is_some_and(|session| {
+                !session.delivers(routable.subscription_instance, &publish.topic_name)
+            })
+    }
+
     pub(super) async fn send_routable(&mut self, routable: RoutableMessage) -> Result<()> {
+        if self.withheld(&routable) {
+            debug!(
+                topic = %routable.publish.topic_name,
+                instance = ?routable.subscription_instance,
+                "Withholding PUBLISH routed for a subscription the session no longer holds"
+            );
+            return Ok(());
+        }
         self.pending_target_flow = routable.target_flow;
         let result = self.send_publish(routable.publish).await;
         self.pending_target_flow = None;
@@ -718,6 +737,7 @@ impl ClientHandler {
             }
             let routable = RoutableMessage {
                 target_flow: message.target_flow,
+                subscription_instance: message.subscription_instance,
                 publish: message.to_publish_packet(),
             };
             if let Err(e) = self.send_routable(routable).await {

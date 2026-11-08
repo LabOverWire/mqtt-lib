@@ -30,6 +30,24 @@ use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::spawn_local;
 use web_sys::MessagePort;
 
+/// The connection's writer, shared by the packet loop and the forwarder. Each write borrows it
+/// only while it writes, so neither waits on the other's packet handling.
+#[derive(Clone)]
+pub(crate) struct SharedWriter(Rc<RefCell<WasmWriter>>);
+
+impl SharedWriter {
+    fn new(writer: WasmWriter) -> Self {
+        Self(Rc::new(RefCell::new(writer)))
+    }
+
+    fn write(&self, buf: &[u8]) -> Result<()> {
+        self.0
+            .try_borrow_mut()
+            .map_err(|_| MqttError::ProtocolError("writer already in use".to_string()))?
+            .write(buf)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum AuthState {
     NotStarted,
@@ -53,7 +71,9 @@ pub struct WasmClientHandler {
     pub(super) storage: Arc<DynamicStorage>,
     pub(super) stats: Arc<BrokerStats>,
     pub(super) resource_monitor: Arc<ResourceMonitor>,
-    pub(super) session: Option<ClientSession>,
+    /// Shared with the forwarder, which withholds what was routed for a subscription the session no
+    /// longer holds.
+    pub(super) session: Rc<RefCell<Option<ClientSession>>>,
     pub(super) connect_session_expiry: Option<u32>,
     pub(super) advertised_session_expiry: Option<u32>,
     disconnect_rx: Option<tokio::sync::oneshot::Receiver<mqtt5::broker::router::TakeoverNotice>>,
@@ -140,7 +160,7 @@ impl WasmClientHandler {
             storage,
             stats,
             resource_monitor,
-            session: None,
+            session: Rc::new(RefCell::new(None)),
             connect_session_expiry: None,
             advertised_session_expiry: None,
             disconnect_rx: None,
@@ -183,9 +203,9 @@ impl WasmClientHandler {
         let writer = MessagePortWriter::new(port, connected, None);
 
         let mut reader = WasmReader::MessagePort(reader);
-        let mut writer = WasmWriter::MessagePort(writer);
+        let writer = SharedWriter::new(WasmWriter::MessagePort(writer));
 
-        let handshake = self.wait_for_connect(&mut reader, &mut writer).await;
+        let handshake = self.wait_for_connect(&mut reader, &writer).await;
         let (Some(client_id), Some(disconnect_rx), Some(queue)) = (
             self.client_id.clone().filter(|_| self.generation != 0),
             self.disconnect_rx.take(),
@@ -235,9 +255,25 @@ impl WasmClientHandler {
         });
     }
 
+    /// Whether the forwarder withholds `publish`, routed for the subscription `instance`, by the
+    /// native broker's rule. A `QoS` 2 delivery already started is sent again by
+    /// `resend_inflight_messages` rather than the forwarder, so the DUP exemption only keeps the
+    /// rule the same.
+    fn withheld(
+        session: &RefCell<Option<ClientSession>>,
+        publish: &PublishPacket,
+        instance: Option<u64>,
+    ) -> bool {
+        !(publish.dup && publish.packet_id.is_some())
+            && session
+                .borrow()
+                .as_ref()
+                .is_some_and(|session| !session.delivers(instance, &publish.topic_name))
+    }
+
     async fn forward_one(
         mut publish: PublishPacket,
-        writer: &Rc<RefCell<WasmWriter>>,
+        writer: &SharedWriter,
         outbound_inflight: &Rc<RefCell<HashMap<u16, PublishPacket>>>,
         next_pid: &Rc<Cell<u16>>,
         storage: &Arc<DynamicStorage>,
@@ -267,13 +303,9 @@ impl WasmClientHandler {
             }
         }
 
-        if let Ok(mut writer_guard) = writer.try_borrow_mut() {
-            if let Err(e) = Self::write_publish_packet(&publish, &mut writer_guard) {
-                error!("Handler #{handler_id} error forwarding publish: {e}");
-                return false;
-            }
-        } else {
-            error!("Handler #{handler_id} writer busy, cannot forward");
+        if let Err(e) = Self::write_publish_packet(&publish, writer) {
+            error!("Handler #{handler_id} error forwarding publish: {e}");
+            return false;
         }
         true
     }
@@ -281,18 +313,19 @@ impl WasmClientHandler {
     fn spawn_publish_forwarder(
         &mut self,
         running: &Rc<RefCell<bool>>,
-        writer_shared: &Rc<RefCell<WasmWriter>>,
+        writer_shared: &SharedWriter,
     ) {
         let running_forward = Rc::clone(running);
         let mut qos1_rx = std::mem::replace(&mut self.qos1_rx, tokio::sync::mpsc::channel(1).1);
         let mut qos0_rx = std::mem::replace(&mut self.qos0_rx, tokio::sync::mpsc::channel(1).1);
         let queue = self.queue.clone();
         let queue_epoch = self.queue_epoch;
-        let writer_for_forward = Rc::clone(writer_shared);
+        let writer_for_forward = writer_shared.clone();
         let outbound_inflight_fwd = Rc::clone(&self.outbound_inflight);
         let next_pid_fwd = Rc::clone(&self.next_packet_id);
         let storage_fwd = Arc::clone(&self.storage);
         let client_id_fwd = self.client_id.clone().unwrap_or_default();
+        let session_fwd = Rc::clone(&self.session);
         let handler_id = self.handler_id;
         let protocol_version = self.protocol_version;
 
@@ -302,13 +335,17 @@ impl WasmClientHandler {
                     break;
                 }
 
-                let mut publish = tokio::select! {
+                let RoutableMessage {
+                    mut publish,
+                    subscription_instance,
+                    ..
+                } = tokio::select! {
                     lane = qos1_rx.recv() => match lane {
-                        Some(routable) => routable.publish,
+                        Some(routable) => routable,
                         None => break,
                     },
                     lane = qos0_rx.recv() => match lane {
-                        Some(routable) => routable.publish,
+                        Some(routable) => routable,
                         None => break,
                     },
                     () = async {
@@ -321,6 +358,13 @@ impl WasmClientHandler {
                             let mut pending = queue.take(64).await.into_iter();
                             while let Some(message) = pending.next() {
                                 let mut queued = message.to_publish_packet();
+                                if Self::withheld(
+                                    &session_fwd,
+                                    &queued,
+                                    message.subscription_instance,
+                                ) {
+                                    continue;
+                                }
                                 queued.protocol_version = protocol_version;
                                 if !Self::forward_one(
                                     queued,
@@ -349,6 +393,9 @@ impl WasmClientHandler {
                     }
                 };
 
+                if Self::withheld(&session_fwd, &publish, subscription_instance) {
+                    continue;
+                }
                 publish.protocol_version = protocol_version;
                 if !Self::forward_one(
                     publish,
@@ -399,11 +446,10 @@ impl WasmClientHandler {
         });
     }
 
-    #[allow(clippy::await_holding_refcell_ref)]
     async fn packet_loop(
         &mut self,
         reader: &mut WasmReader,
-        writer: WasmWriter,
+        writer: SharedWriter,
         disconnect_rx: tokio::sync::oneshot::Receiver<mqtt5::broker::router::TakeoverNotice>,
     ) -> Result<()> {
         use crate::decoder::read_packet;
@@ -412,9 +458,7 @@ impl WasmClientHandler {
         Self::spawn_disconnect_watcher(&running, disconnect_rx);
 
         let last_packet_time = Rc::new(Cell::new(mqtt5::time::Instant::now()));
-        let writer_shared = Rc::new(RefCell::new(writer));
-
-        self.spawn_publish_forwarder(&running, &writer_shared);
+        self.spawn_publish_forwarder(&running, &writer);
 
         let (timeout_tx, mut timeout_rx) = tokio::sync::mpsc::channel::<()>(1);
         if !self.keep_alive.is_zero() {
@@ -442,13 +486,9 @@ impl WasmClientHandler {
                 futures::future::Either::Left((packet_result, _)) => match packet_result {
                     Ok(packet) => {
                         last_packet_time.set(mqtt5::time::Instant::now());
-                        if let Ok(mut writer_guard) = writer_shared.try_borrow_mut() {
-                            if let Err(e) = self.handle_packet(packet, &mut writer_guard).await {
-                                error!("Error handling packet: {e}");
-                                return Err(e);
-                            }
-                        } else {
-                            error!("Handler writer busy in main loop");
+                        if let Err(e) = self.handle_packet(packet, &writer).await {
+                            error!("Error handling packet: {e}");
+                            return Err(e);
                         }
                     }
                     Err(e) => {
@@ -464,7 +504,7 @@ impl WasmClientHandler {
         }
     }
 
-    async fn handle_packet(&mut self, packet: Packet, writer: &mut WasmWriter) -> Result<()> {
+    async fn handle_packet(&mut self, packet: Packet, writer: &SharedWriter) -> Result<()> {
         match packet {
             Packet::Subscribe(subscribe) => self.handle_subscribe(subscribe, writer).await,
             Packet::Unsubscribe(unsubscribe) => self.handle_unsubscribe(unsubscribe, writer).await,
@@ -490,7 +530,7 @@ impl WasmClientHandler {
     }
 
     #[allow(clippy::unused_self)]
-    pub(super) fn write_packet(&self, packet: &Packet, writer: &mut WasmWriter) -> Result<()> {
+    pub(super) fn write_packet(&self, packet: &Packet, writer: &SharedWriter) -> Result<()> {
         let mut buf = BytesMut::new();
 
         match packet {

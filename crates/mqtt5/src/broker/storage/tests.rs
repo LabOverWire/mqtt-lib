@@ -22,7 +22,6 @@ fn create_memory_storage() -> Storage<MemoryBackend> {
 async fn test_retained_message_storage() {
     let storage = create_memory_storage();
 
-    // Store retained message
     let packet = PublishPacket::new("test/topic", &b"hello world"[..], QoS::AtLeastOnce);
     let retained = RetainedMessage::new(packet);
 
@@ -31,12 +30,10 @@ async fn test_retained_message_storage() {
         .await
         .unwrap();
 
-    // Retrieve it
     let retrieved = storage.get_retained("test/topic").await;
     assert!(retrieved.is_some());
     assert_eq!(&retrieved.unwrap().payload[..], b"hello world");
 
-    // Remove it
     storage.remove_retained("test/topic").await.unwrap();
     assert!(storage.get_retained("test/topic").await.is_none());
 }
@@ -45,7 +42,6 @@ async fn test_retained_message_storage() {
 async fn test_retained_message_matching() {
     let storage = create_memory_storage();
 
-    // Store multiple retained messages
     let topics = vec![
         "sensors/temp/room1",
         "sensors/temp/room2",
@@ -59,7 +55,6 @@ async fn test_retained_message_matching() {
         storage.store_retained(topic, retained).await.unwrap();
     }
 
-    // Test wildcard matching
     let matches = storage.get_retained_matching("sensors/+/room1").await;
     assert_eq!(matches.len(), 2);
 
@@ -77,7 +72,6 @@ async fn test_retained_message_matching() {
 async fn test_session_persistence() {
     let storage = create_memory_storage();
 
-    // Create and store session with full subscription options
     let mut session = ClientSession::new("client1".to_string(), true, Some(3600));
     session.add_subscription(
         "test/+".to_string(),
@@ -90,6 +84,7 @@ async fn test_session_persistence() {
             protocol_version: 5,
             change_only: false,
             flow_id: None,
+            instance: 42,
         },
     );
     session.add_subscription(
@@ -110,6 +105,7 @@ async fn test_session_persistence() {
     assert!(sub.retain_as_published);
     assert_eq!(sub.retain_handling, 1);
     assert_eq!(sub.subscription_id, Some(42));
+    assert_eq!(sub.instance, 42);
 
     let sub2 = retrieved_session.subscriptions.get("sensors/#").unwrap();
     assert_eq!(sub2.qos, QoS::ExactlyOnce);
@@ -122,7 +118,6 @@ async fn test_session_persistence() {
     let retrieved = storage.get_session("client1").await.unwrap();
     assert_eq!(retrieved.subscriptions.len(), 1);
 
-    // Remove session
     storage.remove_session("client1").await.unwrap();
     assert!(storage.get_session("client1").await.is_none());
 }
@@ -131,7 +126,6 @@ async fn test_session_persistence() {
 async fn test_message_queuing() {
     let storage = create_memory_storage();
 
-    // Queue messages
     let packet1 = PublishPacket::new("test/1", &b"msg1"[..], QoS::AtLeastOnce);
     let packet2 = PublishPacket::new("test/2", &b"msg2"[..], QoS::ExactlyOnce);
 
@@ -141,13 +135,11 @@ async fn test_message_queuing() {
     storage.queue_message(msg1).await.unwrap();
     storage.queue_message(msg2).await.unwrap();
 
-    // Retrieve queued messages
     let messages = storage.get_queued_messages("client1").await.unwrap();
     assert_eq!(messages.len(), 2);
     assert_eq!(&messages[0].payload[..], b"msg1");
     assert_eq!(&messages[1].payload[..], b"msg2");
 
-    // Remove queued messages
     storage.remove_queued_messages("client1").await.unwrap();
     let messages = storage.get_queued_messages("client1").await.unwrap();
     assert_eq!(messages.len(), 0);
@@ -157,7 +149,6 @@ async fn test_message_queuing() {
 async fn test_expiry_cleanup() {
     let storage = create_memory_storage();
 
-    // Create message with very short expiry
     let mut packet = PublishPacket::new("test/expire", &b"will expire"[..], QoS::AtMostOnce);
     packet
         .properties
@@ -173,13 +164,10 @@ async fn test_expiry_cleanup() {
         .await
         .unwrap();
 
-    // Should exist immediately
     assert!(storage.get_retained("test/expire").await.is_some());
 
-    // Wait for expiry
     sleep(Duration::from_secs(2)).await;
 
-    // Cleanup should remove it
     storage.cleanup_expired().await.unwrap();
     assert!(storage.get_retained("test/expire").await.is_none());
 }
@@ -189,12 +177,10 @@ async fn test_file_backend_persistence() {
     let dir = tempfile::tempdir().unwrap();
     let backend_path = dir.path().to_path_buf();
 
-    // Create storage and store data
     {
         let backend = FileBackend::new(&backend_path).await.unwrap();
         let storage = Storage::new(backend);
 
-        // Store retained message
         let packet = PublishPacket::new(
             "persistent/topic",
             &b"persistent data"[..],
@@ -206,7 +192,6 @@ async fn test_file_backend_persistence() {
             .await
             .unwrap();
 
-        // Store session
         let mut session = ClientSession::new("persistent_client".to_string(), true, None);
         session.add_subscription(
             "persistent/+".to_string(),
@@ -216,20 +201,16 @@ async fn test_file_backend_persistence() {
         storage.flush_sessions().await.unwrap();
     }
 
-    // Create new storage instance and verify data persisted
     {
         let backend = FileBackend::new(&backend_path).await.unwrap();
         let storage = Storage::new(backend);
 
-        // Load retained messages
         storage.initialize().await.unwrap();
 
-        // Check retained message
         let retained = storage.get_retained("persistent/topic").await;
         assert!(retained.is_some());
         assert_eq!(&retained.unwrap().payload[..], b"persistent data");
 
-        // Check session
         let session = storage
             .backend
             .get_session("persistent_client")
@@ -347,7 +328,6 @@ async fn test_file_backend_retained_legacy_json_deserializes() {
 async fn test_concurrent_access() {
     let storage = Arc::new(create_memory_storage());
 
-    // Spawn multiple tasks that access storage concurrently
     let mut handles = vec![];
 
     for i in 0..10 {
@@ -368,12 +348,10 @@ async fn test_concurrent_access() {
         handles.push(handle);
     }
 
-    // Wait for all tasks to complete
     for handle in handles {
         handle.await.unwrap();
     }
 
-    // Verify all messages were stored
     let matches = storage.get_retained_matching("concurrent/+").await;
     assert_eq!(matches.len(), 10);
 }
@@ -385,19 +363,15 @@ async fn test_session_expiry() {
     let session = ClientSession::new("expiring_client".to_string(), true, Some(1));
     storage.store_session(session).await;
 
-    // Should exist immediately
     assert!(storage.get_session("expiring_client").await.is_some());
 
-    // Wait for expiry
     sleep(Duration::from_secs(2)).await;
 
-    // Should be expired
     assert!(storage.get_session("expiring_client").await.is_none());
 }
 
 #[tokio::test]
 async fn test_dynamic_storage_backends() {
-    // Test with memory backend
     let memory_backend = MemoryBackend::new();
     let dynamic = DynamicStorage::Memory(memory_backend);
 
@@ -411,7 +385,6 @@ async fn test_dynamic_storage_backends() {
     let retrieved = dynamic.get_retained_message("dynamic/test").await.unwrap();
     assert!(retrieved.is_some());
 
-    // Test with file backend
     let dir = tempfile::tempdir().unwrap();
     let file_backend = FileBackend::new(dir.path()).await.unwrap();
     let dynamic = DynamicStorage::File(file_backend);
@@ -867,4 +840,48 @@ async fn expired_cached_session_takes_its_queue_with_it() {
     );
     assert!(storage.get_session("kept").await.is_some());
     assert_eq!(storage.get_queued_messages("kept").await.unwrap().len(), 1);
+}
+
+#[test]
+fn subscription_and_queued_message_stored_without_instances_load_without_them() {
+    let subscription: StoredSubscription = serde_json::from_str(
+        r#"{"qos":"AtLeastOnce","no_local":false,"retain_as_published":false,"subscription_id":null}"#,
+    )
+    .unwrap();
+    assert_eq!(subscription.instance, 0);
+    let queued = QueuedMessage::new(
+        PublishPacket::new("t", b"m".to_vec(), QoS::AtLeastOnce),
+        "c".to_string(),
+        QoS::AtLeastOnce,
+        None,
+    )
+    .with_subscription_instance(Some(9));
+    let mut json = serde_json::to_value(&queued).unwrap();
+    json.as_object_mut()
+        .unwrap()
+        .remove("subscription_instance");
+    let loaded: QueuedMessage = serde_json::from_value(json).unwrap();
+    assert_eq!(loaded.subscription_instance, None);
+    let round_trip: QueuedMessage =
+        serde_json::from_slice(&serde_json::to_vec(&queued).unwrap()).unwrap();
+    assert_eq!(round_trip.subscription_instance, Some(9));
+}
+
+#[test]
+fn a_session_delivers_by_instance_or_for_none_by_filter() {
+    let mut session = ClientSession::new("c", true, Some(60));
+    session.add_subscription("a/+", StoredSubscription::new(QoS::AtLeastOnce));
+    session.add_subscription("$share/g/b/x", StoredSubscription::new(QoS::AtLeastOnce));
+    session.assign_subscription_instances();
+    let held = session.subscriptions["a/+"].instance;
+    assert_ne!(held, 0);
+    assert_ne!(held, session.subscriptions["$share/g/b/x"].instance);
+    assert!(session.delivers(Some(held), "anything"));
+    assert!(!session.delivers(Some(held.wrapping_add(1)), "a/x"));
+    assert!(session.delivers(None, "a/x"));
+    assert!(session.delivers(None, "b/x"));
+    assert!(!session.delivers(None, "c/x"));
+    assert_eq!(session.subscription_instance("a/+"), held);
+    assert_ne!(session.subscription_instance("c/+"), 0);
+    assert_ne!(session.subscription_instance("c/+"), held);
 }

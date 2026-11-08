@@ -128,6 +128,7 @@ impl ClientHandler {
                     .iter()
                     .any(|pattern| topic_matches_filter(&filter.filter, pattern));
 
+            let flow_id = self.pending_external_flow_id;
             let stored = StoredSubscription {
                 qos: QoS::from(granted_qos),
                 no_local: filter.options.no_local,
@@ -136,7 +137,19 @@ impl ClientHandler {
                 subscription_id,
                 protocol_version: self.protocol_version,
                 change_only,
-                flow_id: self.pending_external_flow_id,
+                flow_id,
+                instance: routed
+                    .iter()
+                    .rev()
+                    .find(|accepted: &&AcceptedFilter<'_>| accepted.filter.filter == filter.filter)
+                    .map_or_else(
+                        || {
+                            self.session
+                                .as_ref()
+                                .map_or(0, |session| session.subscription_instance(&filter.filter))
+                        },
+                        |accepted| accepted.stored.instance,
+                    ),
             };
             let outcome = self
                 .router
@@ -345,6 +358,7 @@ impl ClientHandler {
                 let routable = RoutableMessage {
                     publish: msg,
                     target_flow: None,
+                    subscription_instance: None,
                 };
                 self.offer_retained(routable);
             }
@@ -595,10 +609,23 @@ impl ClientHandler {
             .router
             .unsubscribe_by_flow(Some(self.generation), client_id, flow_id)
             .await;
-        if let Some(session) = self.session.as_mut() {
+        let on_flow: Vec<String> = self.session.as_ref().map_or_else(Vec::new, |session| {
             session
                 .subscriptions
-                .retain(|_, sub| sub.flow_id != Some(flow_id));
+                .iter()
+                .filter(|(_, sub)| sub.flow_id == Some(flow_id))
+                .map(|(filter, _)| filter.clone())
+                .collect()
+        });
+        let mut followed = Vec::with_capacity(on_flow.len());
+        for filter in on_flow {
+            let held = self.router.held_flow(client_id, &filter).await;
+            followed.push((filter, held));
+        }
+        if let Some(session) = self.session.as_mut() {
+            for (filter, held) in &followed {
+                session.follow_removed_subscription(filter, *held);
+            }
         }
         if let Some(ref mut ssm) = self.server_stream_manager {
             ssm.remove_flow_stream(flow_id);
@@ -614,9 +641,9 @@ impl ClientHandler {
         );
         if let Err(e) = self
             .update_stored_session(move |session| {
-                session
-                    .subscriptions
-                    .retain(|_, sub| sub.flow_id != Some(flow_id));
+                for (filter, held) in &followed {
+                    session.follow_removed_subscription(filter, *held);
+                }
             })
             .await
         {
@@ -657,16 +684,21 @@ impl ClientHandler {
             }
         }
         if !removed_filters.is_empty() {
-            let removed = removed_filters.clone();
+            let mut followed = Vec::with_capacity(removed_filters.len());
+            for filter in removed_filters {
+                let held = self.router.held_flow(&client_id, &filter).await;
+                followed.push((filter, held));
+            }
+            let stored = followed.clone();
             self.persist_or_restore_routes(&slot, move |session| {
-                for filter in &removed {
-                    session.remove_subscription(filter);
+                for (filter, held) in &stored {
+                    session.follow_removed_subscription(filter, *held);
                 }
             })
             .await?;
             if let Some(session) = self.session.as_mut() {
-                for filter in &removed_filters {
-                    session.remove_subscription(filter);
+                for (filter, held) in &followed {
+                    session.follow_removed_subscription(filter, *held);
                 }
             }
         }

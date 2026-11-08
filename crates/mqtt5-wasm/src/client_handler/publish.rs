@@ -12,7 +12,7 @@ use mqtt5_protocol::protocol::v5::reason_codes::ReasonCode;
 use mqtt5_protocol::QoS;
 use tracing::{debug, warn};
 
-use crate::transport::WasmWriter;
+use super::SharedWriter;
 
 use super::WasmClientHandler;
 
@@ -20,7 +20,7 @@ impl WasmClientHandler {
     pub(super) async fn handle_publish(
         &mut self,
         mut publish: PublishPacket,
-        writer: &mut WasmWriter,
+        writer: &SharedWriter,
     ) -> Result<()> {
         let client_id = self.client_id.as_ref().unwrap();
         self.stats.publish_received(publish.payload.len());
@@ -125,7 +125,7 @@ impl WasmClientHandler {
         &self,
         publish: &PublishPacket,
         reason_code: ReasonCode,
-        writer: &mut WasmWriter,
+        writer: &SharedWriter,
     ) -> Result<()> {
         if let Some(packet_id) = publish.packet_id {
             match publish.qos {
@@ -158,7 +158,7 @@ impl WasmClientHandler {
     pub(super) async fn handle_pubrec(
         &self,
         pubrec: &PubRecPacket,
-        writer: &mut WasmWriter,
+        writer: &SharedWriter,
     ) -> Result<()> {
         let inflight = self.client_id.as_ref().and_then(|client_id| {
             self.outbound_inflight
@@ -189,7 +189,7 @@ impl WasmClientHandler {
     pub(super) async fn handle_pubrel(
         &mut self,
         pubrel: PubRelPacket,
-        writer: &mut WasmWriter,
+        writer: &SharedWriter,
     ) -> Result<()> {
         let reason_code = if let Some(publish) = self.inflight_publishes.remove(&pubrel.packet_id) {
             let client_id = self.client_id.as_ref().unwrap();
@@ -221,7 +221,7 @@ impl WasmClientHandler {
         }
     }
 
-    pub(super) async fn resend_inflight_messages(&mut self, writer: &mut WasmWriter) -> Result<()> {
+    pub(super) async fn resend_inflight_messages(&mut self, writer: &SharedWriter) -> Result<()> {
         let client_id = self.client_id.as_ref().unwrap();
         let inflights = match self.storage.get_inflight_messages(client_id).await {
             Ok(msgs) => msgs,
@@ -265,7 +265,7 @@ impl WasmClientHandler {
     pub(super) fn send_publish(
         &self,
         mut publish: PublishPacket,
-        writer: &mut WasmWriter,
+        writer: &SharedWriter,
     ) -> Result<()> {
         publish.protocol_version = self.protocol_version;
         self.write_packet(&Packet::Publish(publish), writer)
@@ -273,7 +273,7 @@ impl WasmClientHandler {
 
     pub(super) fn write_publish_packet(
         publish: &PublishPacket,
-        writer: &mut WasmWriter,
+        writer: &SharedWriter,
     ) -> Result<()> {
         let mut buf = BytesMut::new();
         publish.encode(&mut buf)?;

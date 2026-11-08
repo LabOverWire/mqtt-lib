@@ -615,6 +615,7 @@ impl ClientHandler {
         session.expiry_interval = Some(granted);
         session.receive_maximum = self.client_receive_maximum;
         session.user_id.clone_from(&self.user_id);
+        session.assign_subscription_instances();
         session
     }
 

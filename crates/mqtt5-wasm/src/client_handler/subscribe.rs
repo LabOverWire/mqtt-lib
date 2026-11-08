@@ -14,7 +14,7 @@ use mqtt5_protocol::validation::{parse_shared_subscription, validate_topic_filte
 use mqtt5_protocol::QoS;
 use tracing::{debug, warn};
 
-use crate::transport::WasmWriter;
+use super::SharedWriter;
 
 use super::WasmClientHandler;
 
@@ -22,7 +22,7 @@ impl WasmClientHandler {
     pub(super) async fn handle_subscribe(
         &mut self,
         subscribe: SubscribePacket,
-        writer: &mut WasmWriter,
+        writer: &SharedWriter,
     ) -> Result<()> {
         let client_id = self.client_id.clone().unwrap();
         let mut reason_codes = Vec::new();
@@ -89,6 +89,7 @@ impl WasmClientHandler {
             let granted_qos = self.resolve_granted_qos(filter.options.qos);
             let subscription_id = subscribe.properties.get_subscription_identifier();
             let change_only = self.is_change_only_filter(&filter.filter);
+            let instance = self.subscription_instance(&filter.filter);
 
             let slot = self.router.lock_session(&client_id).await;
             let outcome = self
@@ -103,7 +104,8 @@ impl WasmClientHandler {
                         .with_protocol_version(
                             ProtocolVersion::try_from(self.protocol_version).unwrap_or_default(),
                         )
-                        .with_change_only(change_only),
+                        .with_change_only(change_only)
+                        .with_instance(instance),
                 )
                 .await?;
             if outcome == Subscribed::Fenced {
@@ -111,7 +113,7 @@ impl WasmClientHandler {
                 return Ok(());
             }
 
-            self.persist_subscription(filter, granted_qos, subscription_id, change_only)
+            self.persist_subscription(filter, granted_qos, subscription_id, change_only, instance)
                 .await?;
             drop(slot);
             self.deliver_retained_for_filter(filter, writer).await?;
@@ -149,6 +151,13 @@ impl WasmClientHandler {
         }
     }
 
+    fn subscription_instance(&self, topic_filter: &str) -> u64 {
+        self.session
+            .borrow()
+            .as_ref()
+            .map_or(0, |session| session.subscription_instance(topic_filter))
+    }
+
     fn is_change_only_filter(&self, topic_filter: &str) -> bool {
         self.config.read().is_ok_and(|c| {
             c.change_only_delivery_config.enabled
@@ -165,6 +174,7 @@ impl WasmClientHandler {
         granted_qos: QoS,
         subscription_id: Option<u32>,
         change_only: bool,
+        instance: u64,
     ) -> Result<()> {
         let stored = StoredSubscription {
             qos: granted_qos,
@@ -175,8 +185,9 @@ impl WasmClientHandler {
             protocol_version: self.protocol_version,
             change_only,
             flow_id: None,
+            instance,
         };
-        if let Some(session) = self.session.as_mut() {
+        if let Some(session) = self.session.borrow_mut().as_mut() {
             session.add_subscription(filter.filter.clone(), stored.clone());
         }
         let topic_filter = filter.filter.clone();
@@ -204,7 +215,7 @@ impl WasmClientHandler {
     async fn deliver_retained_for_filter(
         &mut self,
         filter: &mqtt5_protocol::packet::subscribe::TopicFilter,
-        writer: &mut WasmWriter,
+        writer: &SharedWriter,
     ) -> Result<()> {
         if filter.options.retain_handling
             != mqtt5_protocol::packet::subscribe::RetainHandling::DoNotSend
@@ -221,7 +232,7 @@ impl WasmClientHandler {
     pub(super) async fn handle_unsubscribe(
         &mut self,
         unsubscribe: UnsubscribePacket,
-        writer: &mut WasmWriter,
+        writer: &SharedWriter,
     ) -> Result<()> {
         let Some(client_id) = self.client_id.clone() else {
             return Err(MqttError::ProtocolError(
@@ -246,7 +257,7 @@ impl WasmClientHandler {
             };
 
             if removed {
-                if let Some(session) = self.session.as_mut() {
+                if let Some(session) = self.session.borrow_mut().as_mut() {
                     session.remove_subscription(filter);
                 }
                 let topic_filter = filter.clone();
