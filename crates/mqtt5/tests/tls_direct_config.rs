@@ -310,3 +310,54 @@ fn test_alpn_long_protocol_filtered() {
         .with_alpn_protocols(&[&long_protocol]);
     assert!(config.alpn_protocols.is_none());
 }
+
+/// Counts the client's connections, its reconnections included
+async fn connections_of(client: &MqttClient) -> Arc<std::sync::atomic::AtomicUsize> {
+    let connections = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = connections.clone();
+    client
+        .on_connection_event(move |event| {
+            if matches!(event, mqtt5::ConnectionEvent::Connected { .. }) {
+                counted.fetch_add(1, Ordering::SeqCst);
+            }
+        })
+        .await
+        .unwrap();
+    connections
+}
+
+#[tokio::test]
+async fn connect_with_tls_reconnects_with_the_configuration_it_was_given() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let broker = TestBroker::start_with_tls().await;
+    let (proxy, cut) = common::cutting_proxy(
+        broker
+            .address()
+            .strip_prefix("mqtts://")
+            .unwrap()
+            .parse()
+            .unwrap(),
+    )
+    .await;
+    let client = MqttClient::with_options(
+        ConnectOptions::new("connect-with-tls-reconnects")
+            .with_reconnect_delay(Duration::from_millis(100), Duration::from_millis(200)),
+    );
+    let connections = connections_of(&client).await;
+    let mut config = TlsConfig::new(proxy, "localhost").with_system_roots(false);
+    config.load_ca_cert_pem_bytes(&common::test_ca()).unwrap();
+    client.connect_with_tls(config).await.expect("connected");
+    // A TLS configuration stored since is for connections made from a URL.
+    client
+        .set_tls_config(None, None, Some(common::other_ca()))
+        .await;
+    cut.notify_waiters();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while connections.load(Ordering::SeqCst) < 2 {
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("reconnected by itself, trusting the CA it was given");
+    client.disconnect().await.unwrap();
+}

@@ -8,15 +8,37 @@ use crate::protocol::v5::properties::Properties;
 use tokio::time::Duration;
 
 use super::connection::{ConnectionEvent, ReconnectConfig};
-use super::direct::AutomaticReconnectLifecycle;
+use super::direct::{AutomaticReconnectLifecycle, DirectClientInner};
 use super::direct::{StoredSubscription, SubscriptionPersistence};
 use super::MqttClient;
+use crate::transport::tls::TlsConfig;
 
 #[cfg(feature = "transport-websocket")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WebSocketSettings {
+    /// The configuration set with `ConnectOptions::with_websocket_config`
     Configured,
-    Default,
+    Redirected {
+        keeps_tls: bool,
+    },
+}
+
+/// What an automatic reconnection connects to
+#[derive(Clone)]
+pub(crate) enum Reconnection {
+    /// The address given to `connect`
+    Address(String),
+    /// The TLS configuration given to `connect_with_tls`, used as it was given
+    Tls(Box<TlsConfig>),
+}
+
+impl std::fmt::Display for Reconnection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Address(address) => f.write_str(address),
+            Self::Tls(config) => write!(f, "{} ({}) over TLS", config.addr, config.hostname),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -34,13 +56,38 @@ pub(crate) enum ClientTransportType {
 }
 
 impl ClientTransportType {
-    pub(crate) fn redirected(self) -> Self {
+    pub(crate) fn redirected(self, keeps_tls: bool) -> Self {
+        match (self, keeps_tls) {
+            #[cfg(feature = "transport-websocket")]
+            (Self::WebSocket(url, _), keeps_tls) => {
+                Self::WebSocket(url, WebSocketSettings::Redirected { keeps_tls })
+            }
+            #[cfg(feature = "transport-websocket")]
+            (Self::WebSocketSecure(url, _), keeps_tls) => {
+                Self::WebSocketSecure(url, WebSocketSettings::Redirected { keeps_tls })
+            }
+            (other, _) => other,
+        }
+    }
+
+    pub(crate) fn is_websocket_secure(&self) -> bool {
         match self {
             #[cfg(feature = "transport-websocket")]
-            Self::WebSocket(url, _) => Self::WebSocket(url, WebSocketSettings::Default),
+            Self::WebSocketSecure(..) => true,
+            _ => false,
+        }
+    }
+
+    /// Whether the connection verifies the server's certificate: mqtts://,
+    /// wss:// and quics://
+    pub(crate) fn is_secure(&self) -> bool {
+        match self {
+            Self::Tls => true,
             #[cfg(feature = "transport-websocket")]
-            Self::WebSocketSecure(url, _) => Self::WebSocketSecure(url, WebSocketSettings::Default),
-            other => other,
+            Self::WebSocketSecure(..) => true,
+            #[cfg(feature = "transport-quic")]
+            Self::QuicSecure => true,
+            _ => false,
         }
     }
 
@@ -157,23 +204,50 @@ impl MqttClient {
         Ok(())
     }
 
-    async fn is_reconnect_stopped(&self) -> bool {
-        let inner = self.inner.read().await;
-        inner.automatic_reconnect_lifecycle == AutomaticReconnectLifecycle::Stopped
+    /// Whether a reconnection started for connect number `connect` is to stop:
+    /// reconnection was stopped, or the client was asked to connect since
+    async fn is_reconnect_stopped(&self, connect: u64) -> bool {
+        Self::reconnect_stopped(&*self.inner.read().await, connect)
     }
 
-    pub(crate) async fn monitor_connection(&self) {
+    fn reconnect_stopped(inner: &DirectClientInner, connect: u64) -> bool {
+        inner.automatic_reconnect_lifecycle == AutomaticReconnectLifecycle::Stopped
+            || inner.connects != connect
+    }
+
+    /// Reconnects whenever the connection made by connect number `connect` is
+    /// lost, until reconnection is stopped or the client is asked to connect
+    /// again
+    pub(crate) async fn monitor_connection(&self, connect: u64) {
         tracing::info!("Starting connection monitor task");
 
+        let failure = self.watch_connection(connect).await;
+
+        {
+            let mut monitored = self.monitored_connect.lock();
+            if *monitored == Some(connect) {
+                *monitored = None;
+            }
+        }
+
+        if let Some(error) = failure {
+            self.trigger_connection_event(ConnectionEvent::ReconnectFailed { error })
+                .await;
+        }
+    }
+
+    /// Reconnects for connect number `connect` until reconnection stops,
+    /// returning the error it gave up on, if it did
+    async fn watch_connection(&self, connect: u64) -> Option<MqttError> {
         loop {
             tokio::select! {
                 () = tokio::time::sleep(Duration::from_secs(1)) => {}
                 () = self.monitor_wakeup.notified() => {}
             }
 
-            if self.is_reconnect_stopped().await {
+            if self.is_reconnect_stopped(connect).await {
                 tracing::info!("Reconnection disabled, exiting connection monitor");
-                break;
+                return None;
             }
 
             let inner = self.inner.read().await;
@@ -183,37 +257,30 @@ impl MqttClient {
                 );
 
                 let reconnect_config = inner.options.reconnect_config.clone();
-                let last_address = inner.last_address.clone();
+                let reconnection = inner.reconnection.clone();
                 drop(inner);
 
                 if !reconnect_config.enabled {
                     tracing::info!("Reconnection disabled, exiting connection monitor");
-                    break;
+                    return None;
                 }
 
-                if let Some(address) = last_address {
-                    tracing::info!(
-                        address = %address,
-                        "Starting reconnection attempt"
-                    );
-
-                    if let Err(e) = self.attempt_reconnection(&address, &reconnect_config).await {
-                        tracing::error!("Reconnection failed: {e}");
-                        self.trigger_connection_event(ConnectionEvent::ReconnectFailed {
-                            error: e,
-                        })
-                        .await;
-                        break;
-                    }
-                } else {
+                let Some(reconnection) = reconnection else {
                     tracing::info!("No last address available for reconnection");
-                    self.trigger_connection_event(ConnectionEvent::ReconnectFailed {
-                        error: MqttError::ConnectionError(
-                            "no address recorded for reconnection".to_string(),
-                        ),
-                    })
-                    .await;
-                    break;
+                    return Some(MqttError::ConnectionError(
+                        "no address recorded for reconnection".to_string(),
+                    ));
+                };
+                tracing::info!(
+                    address = %reconnection,
+                    "Starting reconnection attempt"
+                );
+                if let Err(e) = self
+                    .attempt_reconnection(&reconnection, &reconnect_config, connect)
+                    .await
+                {
+                    tracing::error!("Reconnection failed: {e}");
+                    return Some(e);
                 }
             }
         }
@@ -226,11 +293,12 @@ impl MqttClient {
     /// Returns an error if max reconnection attempts exceeded
     pub(crate) async fn attempt_reconnection(
         &self,
-        address: &str,
+        reconnection: &Reconnection,
         config: &ReconnectConfig,
+        connect: u64,
     ) -> Result<()> {
         tracing::info!(
-            address = %address,
+            address = %reconnection,
             max_attempts = ?config.max_attempts,
             initial_delay = ?config.initial_delay,
             "Starting reconnection loop"
@@ -239,19 +307,18 @@ impl MqttClient {
         let mut delay = config.initial_delay;
 
         loop {
-            if self.is_reconnect_stopped().await {
+            if self.is_reconnect_stopped(connect).await {
                 tracing::info!("Automatic reconnect disabled, exiting reconnection loop");
                 return Ok(());
             }
 
             let attempt = {
-                let mut inner = self.inner.write().await;
+                let inner = self.inner.read().await;
                 if inner.is_connected() {
                     tracing::info!("Already connected, stopping reconnection attempts");
                     return Ok(());
                 }
-                inner.reconnect_attempt += 1;
-                inner.reconnect_attempt
+                inner.reconnect_attempt + 1
             };
 
             tracing::info!(
@@ -281,23 +348,31 @@ impl MqttClient {
 
             let connection_guard = self.connection_mutex.lock().await;
 
-            if self.is_reconnect_stopped().await {
-                tracing::info!("Automatic reconnect disabled before attempt, exiting");
-                drop(connection_guard);
-                return Ok(());
-            }
-
-            if self.is_connected().await {
-                tracing::info!("Connected during wait, stopping reconnection attempts");
-                return Ok(());
+            {
+                let mut inner = self.inner.write().await;
+                if Self::reconnect_stopped(&inner, connect) {
+                    tracing::info!("Automatic reconnect disabled before attempt, exiting");
+                    return Ok(());
+                }
+                if inner.is_connected() {
+                    tracing::info!("Connected during wait, stopping reconnection attempts");
+                    return Ok(());
+                }
+                inner.reconnect_attempt = attempt;
             }
 
             tracing::info!(
                 attempt = attempt,
-                address = %address,
-                "Making connection attempt #{} to {}", attempt, address
+                address = %reconnection,
+                "Making connection attempt #{} to {}", attempt, reconnection
             );
-            let reconnection_result = self.connect_internal(address).await;
+            let reconnection_result = match reconnection {
+                Reconnection::Address(address) => self.connect_internal(address).await,
+                Reconnection::Tls(tls_config) => {
+                    self.connect_with_tls_config(TlsConfig::clone(tls_config))
+                        .await
+                }
+            };
 
             drop(connection_guard);
 
@@ -305,6 +380,10 @@ impl MqttClient {
                 Ok(_) => {
                     tracing::info!("Reconnected successfully after {} attempts", attempt);
                     return Ok(());
+                }
+                Err(e) if Self::refused_for_good(&e) => {
+                    tracing::warn!("Reconnection attempt {attempt} refused for good: {e}");
+                    return Err(e);
                 }
                 Err(e) => {
                     tracing::warn!("Reconnection attempt {} failed: {}", attempt, e);
@@ -385,14 +464,16 @@ mod tests {
         };
         for trial in 0..4000u64 {
             let monitor = client.clone();
-            let (address, retry) = (url.clone(), config.clone());
+            let target = Reconnection::Address(url.clone());
+            let retry = config.clone();
+            let connect = client.inner.read().await.connects;
             let spin = std::time::Duration::from_micros((trial % 60) * 10);
             let reconnection = tokio::spawn(async move {
                 let started = std::time::Instant::now();
                 while started.elapsed() < spin {
                     std::hint::spin_loop();
                 }
-                monitor.attempt_reconnection(&address, &retry).await
+                monitor.attempt_reconnection(&target, &retry, connect).await
             });
             let _ = client.connect_with_options(&url, options.clone()).await;
             tokio::time::timeout(std::time::Duration::from_secs(30), reconnection)

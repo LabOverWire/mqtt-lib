@@ -82,8 +82,12 @@ impl ConnectOptions {
     /// verification). The client connects to the address passed to `connect`,
     /// so the configuration's own `url` is not used; build it from that
     /// address or any URL with the same scheme. A connection that follows a
-    /// server redirect (`UseAnotherServer` or `ServerMoved`) does not use it,
-    /// so its headers only go to the address passed to `connect`.
+    /// server redirect (`UseAnotherServer` or `ServerMoved`) uses its TLS
+    /// configuration alone, and only if the address passed to `connect` is
+    /// wss://, so its headers and request modifier only go to that address
+    /// and a connection that started over another scheme keeps the TLS
+    /// settings it had; and a wss:// connection with a TLS configuration here
+    /// is redirected only to wss://.
     ///
     /// ```rust,no_run
     /// # use mqtt5::{ConnectOptions, MqttClient};

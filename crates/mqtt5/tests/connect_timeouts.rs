@@ -406,7 +406,7 @@ async fn max_reconnect_attempts_ends_reconnection_when_connect_is_refused() {
                 tokio::time::sleep(Duration::from_millis(50)).await;
             } else {
                 stream
-                    .write_all(&[0x20, 3, 0x00, 0x87, 0x00])
+                    .write_all(&[0x20, 3, 0x00, 0x88, 0x00])
                     .await
                     .unwrap();
                 held.push(stream);

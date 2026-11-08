@@ -60,7 +60,7 @@ cat > "$CERT_DIR/server_ext.cnf" <<EOF
 basicConstraints = CA:FALSE
 keyUsage = digitalSignature, keyEncipherment
 extendedKeyUsage = serverAuth
-subjectAltName = DNS:localhost,IP:127.0.0.1
+subjectAltName = DNS:localhost,IP:127.0.0.1,IP:::1
 EOF
 
 # Sign server certificate with CA including SAN extension

@@ -174,7 +174,7 @@ On each CONNECT, the broker hashes the client ID with the standard library's `De
 
 Redirection only exists in MQTT 5: a 3.1.1 CONNACK cannot carry a Server Reference. An MQTT 3.1.1 client is refused with return code 0x03 (Server unavailable) and the broker logs a warning, so 3.1.1 clients must connect to a backend directly or through a TCP load balancer.
 
-The client-side redirect loop in `connect_internal()` follows up to 3 hops. The URL scheme in `ServerReference` determines the transport for the backend connection: `mqtt://` for TCP, `mqtts://` for TLS, `quic://` for QUIC.
+The client-side redirect loop in `connect_internal()` follows up to 3 hops. The URL scheme in `ServerReference` determines the transport for the backend connection: `mqtt://` for TCP, `mqtts://` for TLS, `quic://` for QUIC. A reference without a scheme (`backend1:1883`) means TCP, and TLS over TCP (`mqtts://`) when the connection redirected was over TLS (`mqtts://`, `wss://` or `quics://`). A connection over TLS is never redirected to one without: a reference such as `mqtt://`, `ws://` or `quic://` makes it fail. A connection made with `connect_with_tls` follows `mqtts://` references alone, and a `wss://` connection with a TLS configuration of its own follows `wss://` references alone, so one backend list can't serve both.
 
 ```rust
 BrokerConfig::default()

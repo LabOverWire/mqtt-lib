@@ -242,7 +242,9 @@ pub struct DirectClientInner {
     pub pending_subacks: Arc<Mutex<HashMap<u16, oneshot::Sender<SubAckPacket>>>>,
     pub pending_unsubacks: Arc<Mutex<HashMap<u16, oneshot::Sender<UnsubAckPacket>>>>,
     pub reconnect_attempt: u32,
-    pub last_address: Option<String>,
+    pub(crate) reconnection: Option<crate::client::state::Reconnection>,
+    /// Raised by each connect: a reconnection started for an earlier one stops
+    pub(crate) connects: u64,
     pub automatic_reconnect_lifecycle: AutomaticReconnectLifecycle,
     pub server_redirect: Option<String>,
     pub queued_messages: Arc<Mutex<OfflineQueue>>,
@@ -313,7 +315,8 @@ impl DirectClientInner {
             pending_subacks: Arc::new(Mutex::new(HashMap::new())),
             pending_unsubacks: Arc::new(Mutex::new(HashMap::new())),
             reconnect_attempt: 0,
-            last_address: None,
+            reconnection: None,
+            connects: 0,
             automatic_reconnect_lifecycle: AutomaticReconnectLifecycle::Armed,
             server_redirect: None,
             queued_messages: Arc::new(Mutex::new(OfflineQueue::default())),
@@ -550,9 +553,9 @@ impl DirectClientInner {
     pub async fn connect(&mut self, mut transport: TransportType) -> Result<ConnectResult> {
         self.reset_connection_runtime(b"reconnect").await;
 
-        let connect_packet = self.build_connect_packet().await;
+        let connect_packet = self.sendable_connect_packet().await?;
 
-        self.within_packet_limit(transport.write_packet(Packet::Connect(Box::new(connect_packet))))
+        self.within_packet_limit(transport.write_packet(connect_packet))
             .await?;
 
         tracing::debug!("CLIENT: Waiting for CONNACK or AUTH");
@@ -1693,7 +1696,51 @@ impl DirectClientInner {
         Ok(())
     }
 
+    /// The CONNECT for this attempt, refused before it is sent if it can't be encoded: for good
+    /// when the options alone can't be, and as a failure of this attempt only when what the auth
+    /// handler answered this time is what can't be
+    async fn sendable_connect_packet(&self) -> Result<Packet> {
+        let encodes = |packet: &Packet| {
+            crate::transport::packet_io::encode_packet_to_buffer(
+                packet,
+                &mut bytes::BytesMut::new(),
+            )
+        };
+        let connect_packet = Packet::Connect(Box::new(self.build_connect_packet().await));
+        let Err(e) = encodes(&connect_packet) else {
+            return Ok(connect_packet);
+        };
+        let from_options = Packet::Connect(Box::new(
+            self.connect_packet_with(self.options.properties.authentication_data.clone())
+                .await,
+        ));
+        Err(if encodes(&from_options).is_ok() {
+            MqttError::ProtocolError(format!(
+                "the auth handler's initial response can't be sent in a CONNECT: {e}"
+            ))
+        } else {
+            MqttError::Configuration(format!("the options can't be sent in a CONNECT: {e}"))
+        })
+    }
+
     pub(crate) async fn build_connect_packet(&self) -> ConnectPacket {
+        let auth_data = match (
+            &self.options.properties.authentication_method,
+            &self.auth_handler,
+        ) {
+            (Some(method), Some(handler)) => match handler.initial_response(method).await {
+                Ok(data) => data,
+                Err(e) => {
+                    tracing::warn!("Auth handler initial_response failed: {e}");
+                    self.options.properties.authentication_data.clone()
+                }
+            },
+            _ => self.options.properties.authentication_data.clone(),
+        };
+        self.connect_packet_with(auth_data).await
+    }
+
+    async fn connect_packet_with(&self, auth_data: Option<Vec<u8>>) -> ConnectPacket {
         let session = self.session.read().await;
 
         let mut properties = Properties::default();
@@ -1721,18 +1768,6 @@ impl DirectClientInner {
         }
         if let Some(ref method) = self.options.properties.authentication_method {
             properties.set_authentication_method(method.clone());
-
-            let auth_data = if let Some(ref handler) = self.auth_handler {
-                match handler.initial_response(method).await {
-                    Ok(data) => data,
-                    Err(e) => {
-                        tracing::warn!("Auth handler initial_response failed: {e}");
-                        self.options.properties.authentication_data.clone()
-                    }
-                }
-            } else {
-                self.options.properties.authentication_data.clone()
-            };
 
             if let Some(data) = auth_data {
                 properties.set_authentication_data(bytes::Bytes::from(data));

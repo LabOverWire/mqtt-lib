@@ -6,21 +6,26 @@
 use crate::broker::bridge::{BridgeConfig, BridgeError, BridgeProtocol, BridgeStats, Result};
 use crate::broker::router::MessageRouter;
 use crate::client::MqttClient;
+use crate::error::MqttError;
 use crate::packet::publish::PublishPacket;
 use crate::protocol::v5::reason_codes::ReasonCode;
 use crate::time::{Duration, Instant};
 use crate::transport::tls::TlsConfig;
 use crate::types::ConnectOptions;
+use crate::types::PublishOptions;
 use crate::validation::topic_matches_filter;
-use crate::{AckToken, QoS, SubscribeOptions};
+use crate::{AckToken, IndeterminateReason, PublishOutcome, QoS, SubscribeOptions};
+use bytes::Bytes;
 use mqtt5_protocol::bridge::{evaluate_forwarding, TopicMappingCore};
 use rand::RngExt;
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
-use tokio::sync::{broadcast, mpsc, RwLock};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
+use tokio::sync::{broadcast, mpsc, Notify, RwLock};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
+
+const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Bound on remote deliveries a bridge holds unacknowledged; also its Receive Maximum.
 const INGRESS_LANE_CAPACITY: usize = 1024;
@@ -49,10 +54,11 @@ struct IngressFilter {
 
 /// Connect options for the remote-facing client: a persistent deferred-ack session whose
 /// receive maximum equals the ingress lane, so the remote never sends more than the bridge
-/// can hold unacknowledged.
+/// can hold unacknowledged. The bridge reconnects by its own loop, so the client doesn't.
 fn connect_options(config: &BridgeConfig) -> ConnectOptions {
     let receive_maximum = u16::try_from(INGRESS_LANE_CAPACITY).unwrap_or(u16::MAX);
     let mut options = ConnectOptions::new(&config.client_id)
+        .with_automatic_reconnect(false)
         .with_deferred_ack(true)
         .with_clean_start(false)
         .with_resume_existing_session(true)
@@ -84,7 +90,18 @@ fn apply_jitter(delay: Duration, enable: bool) -> Duration {
     let secs = delay.as_secs_f64();
     let jitter_range = secs * 0.25;
     let jitter = (rand::rng().random::<f64>() - 0.5) * 2.0 * jitter_range;
-    Duration::from_secs_f64((secs + jitter).max(0.1))
+    Duration::try_from_secs_f64((secs + jitter).max(0.1)).unwrap_or(delay)
+}
+
+fn fallback_protocols(config: &BridgeConfig) -> Vec<BridgeProtocol> {
+    let tcp_fallback =
+        config.fallback_tcp && !config.fallback_protocols.contains(&BridgeProtocol::Tcp);
+    config
+        .fallback_protocols
+        .iter()
+        .copied()
+        .chain(tcp_fallback.then_some(BridgeProtocol::Tcp))
+        .collect()
 }
 
 /// Which broker the bridge is currently connected to
@@ -110,6 +127,12 @@ pub struct BridgeConnection {
     running: Arc<AtomicBool>,
     /// Shutdown signal
     shutdown_tx: broadcast::Sender<()>,
+    /// Raised by the health check when the primary broker is back, to leave the backup
+    failback: Arc<Notify>,
+    /// Whether the connection being made follows a failback, so it should reach the primary
+    failing_back: AtomicBool,
+    /// Failbacks in a row that ended on a backup again, each doubling the wait before the next
+    failed_failbacks: AtomicU32,
     /// Message counters for stats
     messages_sent: Arc<AtomicU64>,
     messages_received: Arc<AtomicU64>,
@@ -148,6 +171,9 @@ impl BridgeConnection {
             stats: Arc::new(RwLock::new(BridgeStats::default())),
             running: Arc::new(AtomicBool::new(false)),
             shutdown_tx,
+            failback: Arc::new(Notify::new()),
+            failing_back: AtomicBool::new(false),
+            failed_failbacks: AtomicU32::new(0),
             messages_sent: Arc::new(AtomicU64::new(0)),
             messages_received: Arc::new(AtomicU64::new(0)),
             bytes_sent: Arc::new(AtomicU64::new(0)),
@@ -166,6 +192,8 @@ impl BridgeConnection {
             return;
         }
 
+        self.failing_back.store(false, Ordering::Relaxed);
+        self.failed_failbacks.store(0, Ordering::Relaxed);
         self.running.store(true, Ordering::Relaxed);
         info!("Starting bridge '{}'", self.config.name);
     }
@@ -199,24 +227,14 @@ impl BridgeConnection {
     }
 
     /// Builds TLS configuration for a broker address
-    async fn build_tls_config(&self, address: &str) -> Result<TlsConfig> {
-        let addr = tokio::net::lookup_host(address)
-            .await
-            .map_err(|e| BridgeError::ConfigurationError(format!("Invalid address: {e}")))?
-            .next()
-            .ok_or_else(|| {
-                BridgeError::ConfigurationError("Could not resolve address".to_string())
-            })?;
-
+    fn build_tls_config(&self, address: &str, addr: std::net::SocketAddr) -> Result<TlsConfig> {
         let hostname = if let Some(ref server_name) = self.config.tls_server_name {
             server_name.clone()
         } else {
-            address
-                .split(':')
-                .next()
-                .ok_or_else(|| {
-                    BridgeError::ConfigurationError("Invalid address format".to_string())
-                })?
+            let host = address.rsplit_once(':').map_or(address, |(host, _)| host);
+            host.strip_prefix('[')
+                .and_then(|address| address.strip_suffix(']'))
+                .unwrap_or(host)
                 .to_string()
         };
 
@@ -306,13 +324,11 @@ impl BridgeConnection {
 
     /// Attempts to connect using TLS to primary and backup brokers
     async fn connect_tls(&self, options: &ConnectOptions) -> Result<ConnectedBroker> {
-        let tls_config = self.build_tls_config(&self.config.remote_address).await?;
         match self
-            .client
-            .connect_with_tls_and_options(tls_config, options.clone())
+            .connect_tls_to(&self.config.remote_address, options)
             .await
         {
-            Ok(_) => {
+            Ok(()) => {
                 info!(
                     "Bridge '{}' connected to primary broker: {} (TLS)",
                     self.config.name, self.config.remote_address
@@ -323,18 +339,13 @@ impl BridgeConnection {
             }
             Err(e) => {
                 warn!("Failed to connect to primary broker: {e}");
-                self.update_error_stats(e.to_string()).await;
+                self.update_error_stats(e).await;
             }
         }
 
         for (idx, backup) in self.config.backup_brokers.iter().enumerate() {
-            let tls_config = self.build_tls_config(backup).await?;
-            match self
-                .client
-                .connect_with_tls_and_options(tls_config, options.clone())
-                .await
-            {
-                Ok(_) => {
+            match self.connect_tls_to(backup, options).await {
+                Ok(()) => {
                     info!(
                         "Bridge '{}' connected to backup broker: {} (TLS)",
                         self.config.name, backup
@@ -345,7 +356,7 @@ impl BridgeConnection {
                 }
                 Err(e) => {
                     warn!("Failed to connect to backup broker {}: {}", backup, e);
-                    self.update_error_stats(e.to_string()).await;
+                    self.update_error_stats(e).await;
                 }
             }
         }
@@ -353,6 +364,31 @@ impl BridgeConnection {
         Err(BridgeError::ConnectionFailed(
             "Failed to connect to any broker".to_string(),
         ))
+    }
+
+    async fn connect_tls_to(
+        &self,
+        address: &str,
+        options: &ConnectOptions,
+    ) -> std::result::Result<(), String> {
+        let addrs = tokio::net::lookup_host(address)
+            .await
+            .map_err(|e| format!("Invalid address: {e}"))?;
+        let mut last_error = "Could not resolve address".to_string();
+        for addr in addrs {
+            let tls_config = self
+                .build_tls_config(address, addr)
+                .map_err(|e| e.to_string())?;
+            match self
+                .client
+                .connect_with_tls_and_options(tls_config, options.clone())
+                .await
+            {
+                Ok(_) => return Ok(()),
+                Err(e) => last_error = e.to_string(),
+            }
+        }
+        Err(last_error)
     }
 
     /// Attempts to connect without TLS to primary and backup brokers
@@ -514,22 +550,10 @@ impl BridgeConnection {
         }
     }
 
-    fn get_fallback_protocols(&self) -> Vec<BridgeProtocol> {
-        let tcp_fallback = self.config.fallback_tcp
-            && !self
-                .config
-                .fallback_protocols
-                .contains(&BridgeProtocol::Tcp);
-
-        self.config
-            .fallback_protocols
-            .iter()
-            .copied()
-            .chain(tcp_fallback.then_some(BridgeProtocol::Tcp))
-            .collect()
-    }
-
-    async fn try_all_protocols(&self, options: &ConnectOptions) -> Result<ConnectedBroker> {
+    async fn try_all_protocols(
+        &self,
+        options: &ConnectOptions,
+    ) -> Result<(ConnectedBroker, Vec<BridgeProtocol>)> {
         let max_retries = self.config.connection_retries.max(1);
 
         for attempt in 1..=max_retries {
@@ -537,7 +561,7 @@ impl BridgeConnection {
                 .connect_with_protocol(self.config.protocol, options)
                 .await
             {
-                return Ok(broker);
+                return Ok((broker, vec![self.config.protocol]));
             }
 
             if attempt < max_retries {
@@ -550,7 +574,7 @@ impl BridgeConnection {
             }
         }
 
-        let fallbacks = self.get_fallback_protocols();
+        let fallbacks = fallback_protocols(&self.config);
         if !fallbacks.is_empty() {
             warn!(
                 "Bridge '{}' primary protocol {:?} failed after {} attempts, trying fallbacks",
@@ -558,13 +582,16 @@ impl BridgeConnection {
             );
         }
 
-        for fallback in fallbacks {
+        for (index, &fallback) in fallbacks.iter().enumerate() {
             if let Ok(broker) = self.connect_with_protocol(fallback, options).await {
                 info!(
                     "Bridge '{}' connected via fallback protocol {:?}",
                     self.config.name, fallback
                 );
-                return Ok(broker);
+                let tried = std::iter::once(self.config.protocol)
+                    .chain(fallbacks[..=index].iter().copied())
+                    .collect();
+                return Ok((broker, tried));
             }
         }
 
@@ -576,6 +603,7 @@ impl BridgeConnection {
 
     async fn connect(&self) -> Result<ConnectedBroker> {
         let options = self.build_connect_options();
+        let failing_back = self.failing_back.swap(false, Ordering::Relaxed);
         let mut attempt = 0u32;
 
         loop {
@@ -587,9 +615,14 @@ impl BridgeConnection {
             }
 
             match self.try_all_protocols(&options).await {
-                Ok(broker) => {
+                Ok((broker, tried)) => {
+                    if matches!(broker, ConnectedBroker::Primary) {
+                        self.failed_failbacks.store(0, Ordering::Relaxed);
+                    } else if failing_back {
+                        self.failed_failbacks.fetch_add(1, Ordering::Relaxed);
+                    }
                     if matches!(broker, ConnectedBroker::Backup(_)) && self.config.enable_failback {
-                        self.start_health_check().await;
+                        self.start_health_check(tried).await;
                     }
                     return Ok(broker);
                 }
@@ -610,7 +643,10 @@ impl BridgeConnection {
                         let exponent = attempt.saturating_sub(2).min(30);
                         let delay_secs = self.config.initial_reconnect_delay.as_secs_f64()
                             * self.config.backoff_multiplier.powf(f64::from(exponent));
-                        Duration::from_secs_f64(delay_secs).min(self.config.max_reconnect_delay)
+                        Duration::try_from_secs_f64(delay_secs)
+                            .unwrap_or(self.config.max_reconnect_delay)
+                            .max(self.config.initial_reconnect_delay)
+                            .min(self.config.max_reconnect_delay)
                     };
 
                     let delay = apply_jitter(base_delay, self.config.retry_jitter);
@@ -628,17 +664,19 @@ impl BridgeConnection {
         }
     }
 
-    async fn start_health_check(&self) {
+    async fn start_health_check(&self, protocols: Vec<BridgeProtocol>) {
         self.stop_health_check().await;
 
         let config = self.config.clone();
         let running = self.running.clone();
-        let shutdown_tx = self.shutdown_tx.clone();
+        let failback = Arc::clone(&self.failback);
         let current_broker = self.current_broker.clone();
         let stats = self.stats.clone();
 
+        let period = self.health_check_period();
         let handle = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(config.primary_health_check_interval);
+            let mut interval = tokio::time::interval(period);
+            interval.tick().await;
 
             while running.load(Ordering::Relaxed) {
                 interval.tick().await;
@@ -652,7 +690,7 @@ impl BridgeConnection {
                     break;
                 }
 
-                if Self::probe_broker(&config.remote_address, &config).await {
+                if Self::probe_broker(&config.remote_address, &config.name, &protocols).await {
                     info!(
                         "Bridge '{}': primary broker {} is available, triggering failback",
                         config.name, config.remote_address
@@ -663,7 +701,7 @@ impl BridgeConnection {
                         stats.failback_attempts += 1;
                     }
 
-                    let _ = shutdown_tx.send(());
+                    failback.notify_one();
                     break;
                 }
             }
@@ -672,33 +710,81 @@ impl BridgeConnection {
         *self.health_check_handle.write().await = Some(handle);
     }
 
+    /// The wait between probes of the primary: the configured interval, doubled for each
+    /// failback in a row that ended on a backup again, up to `max_reconnect_delay` but never
+    /// below the configured interval.
+    fn health_check_period(&self) -> Duration {
+        let base = self.config.primary_health_check_interval;
+        let cap = self.config.max_reconnect_delay.max(base);
+        (0..self.failed_failbacks.load(Ordering::Relaxed))
+            .try_fold(base, |period, _| {
+                (period < cap).then(|| period.saturating_mul(2).min(cap))
+            })
+            .unwrap_or(cap)
+    }
+
     async fn stop_health_check(&self) {
         if let Some(handle) = self.health_check_handle.write().await.take() {
             handle.abort();
         }
     }
 
-    async fn probe_broker(address: &str, config: &BridgeConfig) -> bool {
-        use tokio::net::TcpStream;
-
-        let addr = match tokio::net::lookup_host(address).await {
-            Ok(mut addrs) => match addrs.next() {
-                Some(addr) => addr,
-                None => return false,
-            },
-            Err(_) => return false,
+    /// Whether the broker at `address` accepts a connection over one of `protocols`, the
+    /// protocols the bridge tried up to and including the one that reached its backup, at
+    /// each address the name resolves to. A TCP or TLS protocol is probed with a TCP
+    /// connection, a QUIC one with a QUIC handshake that verifies no certificate, since it
+    /// sends nothing; the failback connection that follows does.
+    async fn probe_broker(address: &str, name: &str, protocols: &[BridgeProtocol]) -> bool {
+        let Ok(addrs) = tokio::net::lookup_host(address).await else {
+            return false;
         };
-
-        match tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(addr)).await {
-            Ok(Ok(_stream)) => {
-                debug!(
-                    "Bridge '{}': primary broker {} responded to probe",
-                    config.name, address
-                );
-                true
+        for addr in addrs {
+            for &protocol in protocols {
+                if Self::accepts(protocol, addr).await {
+                    debug!(
+                        "Bridge '{}': primary broker {} responded to probe",
+                        name, address
+                    );
+                    return true;
+                }
             }
-            _ => false,
         }
+        false
+    }
+
+    async fn accepts(protocol: BridgeProtocol, addr: std::net::SocketAddr) -> bool {
+        match protocol {
+            BridgeProtocol::Tcp | BridgeProtocol::Tls => Self::accepts_tcp(addr).await,
+            #[cfg(feature = "transport-quic")]
+            BridgeProtocol::Quic | BridgeProtocol::QuicSecure => Self::accepts_quic(addr).await,
+            #[cfg(not(feature = "transport-quic"))]
+            BridgeProtocol::Quic | BridgeProtocol::QuicSecure => false,
+        }
+    }
+
+    async fn accepts_tcp(addr: std::net::SocketAddr) -> bool {
+        matches!(
+            tokio::time::timeout(PROBE_TIMEOUT, tokio::net::TcpStream::connect(addr)).await,
+            Ok(Ok(_))
+        )
+    }
+
+    #[cfg(feature = "transport-quic")]
+    async fn accepts_quic(addr: std::net::SocketAddr) -> bool {
+        use crate::transport::{QuicConfig, QuicTransport};
+        use crate::Transport;
+
+        let mut transport = QuicTransport::new(
+            QuicConfig::new(addr, "localhost")
+                .with_verify_server_cert(false)
+                .with_connect_timeout(PROBE_TIMEOUT),
+        );
+        let accepted = matches!(
+            tokio::time::timeout(PROBE_TIMEOUT, transport.connect()).await,
+            Ok(Ok(()))
+        );
+        let _ = transport.close().await;
+        accepted
     }
 
     #[must_use]
@@ -953,14 +1039,14 @@ impl BridgeConnection {
         );
 
         let msg_props: crate::types::MessageProperties = packet.properties.clone().into();
-        let options = crate::types::PublishOptions {
+        let options = PublishOptions {
             qos: decision.qos,
             retain: packet.retain,
             properties: msg_props.into(),
             skip_codec: false,
         };
 
-        let client = self.client.clone();
+        let client = Arc::downgrade(&self.client);
         let payload = packet.payload.clone();
         let messages_sent = self.messages_sent.clone();
         let bytes_sent = self.bytes_sent.clone();
@@ -973,24 +1059,22 @@ impl BridgeConnection {
                 topic = %remote_topic,
                 "publish task started"
             );
-            match client
-                .publish_with_options(&remote_topic, payload, options)
-                .await
-            {
-                Ok(crate::client::PublishResult::Sent(_)) => {
+            match Self::publish_to_remote(&client, &remote_topic, &payload, &options).await {
+                Ok(PublishOutcome::Delivered(_)) => {
                     debug!(
                         bridge = %bridge_name_clone,
                         topic = %remote_topic,
-                        "publish succeeded"
+                        "publish delivered"
                     );
                     messages_sent.fetch_add(1, Ordering::Relaxed);
                     bytes_sent.fetch_add(payload_len as u64, Ordering::Relaxed);
                 }
-                Ok(crate::client::PublishResult::Queued(_)) => {
-                    debug!(
+                Ok(outcome) => {
+                    warn!(
                         bridge = %bridge_name_clone,
                         topic = %remote_topic,
-                        "publish not yet acknowledged; it stays in flight with the session"
+                        outcome = ?outcome,
+                        "publish not delivered"
                     );
                 }
                 Err(e) => {
@@ -1005,6 +1089,37 @@ impl BridgeConnection {
         });
 
         Ok(())
+    }
+
+    /// Publishes to the remote broker until the message is settled there. A publish cut
+    /// off by a disconnect goes to the client's offline queue, and a `QoS` 2 message that
+    /// the new connection's server has no session for is published again.
+    async fn publish_to_remote(
+        client: &Weak<MqttClient>,
+        topic: &str,
+        payload: &Bytes,
+        options: &PublishOptions,
+    ) -> std::result::Result<PublishOutcome, MqttError> {
+        loop {
+            let Some(live) = client.upgrade() else {
+                return Ok(PublishOutcome::Indeterminate(
+                    IndeterminateReason::Abandoned,
+                ));
+            };
+            let published = live
+                .publish_with_options(topic, payload.to_vec(), options.clone())
+                .await;
+            drop(live);
+            match published {
+                Err(MqttError::NotConnected | MqttError::FlowControlExceeded)
+                    if options.qos != QoS::AtMostOnce => {}
+                Err(e) => return Err(e),
+                Ok(published) => match published.outcome().await {
+                    PublishOutcome::Indeterminate(IndeterminateReason::SessionLost) => {}
+                    outcome => return Ok(outcome),
+                },
+            }
+        }
     }
 
     /// Updates stats when connected
@@ -1100,20 +1215,38 @@ impl BridgeConnection {
                     info!("Bridge '{}' received shutdown signal", self.config.name);
                     break;
                 }
+                () = self.failback.notified() => {
+                    if matches!(*self.current_broker.read().await, Some(ConnectedBroker::Backup(_))) {
+                        self.leave_backup().await;
+                    }
+                }
                 result = self.run_connection() => {
                     if !self.running.load(Ordering::Relaxed) {
                         break;
                     }
 
-                    if let Err(e) = result {
-                        error!("Bridge '{}' connection failed: {}", self.config.name, e);
-                        break;
-                    }
+                    result?;
                 }
             }
         }
 
         Ok(())
+    }
+
+    /// Ends the connection to a backup broker so that the next one tries the primary first.
+    async fn leave_backup(&self) {
+        info!(
+            "Bridge '{}' failing back to the primary broker",
+            self.config.name
+        );
+        self.failing_back.store(true, Ordering::Relaxed);
+        if let Err(e) = self.client.disconnect().await {
+            debug!(bridge = %self.config.name, error = %e, "bridge client disconnect failed during failback");
+        }
+        *self.current_broker.write().await = None;
+        let mut stats = self.stats.write().await;
+        stats.connected = false;
+        stats.connected_since = None;
     }
 
     /// Runs a single connection until disconnected
@@ -1134,6 +1267,9 @@ impl BridgeConnection {
                 );
                 self.stop_health_check().await;
                 *self.current_broker.write().await = None;
+                let mut stats = self.stats.write().await;
+                stats.connected = false;
+                stats.connected_since = None;
                 break;
             }
 

@@ -134,10 +134,35 @@ pub struct MqttClient {
     pub(crate) error_recovery_config: Arc<RwLock<error_recovery::ErrorRecoveryConfig>>,
     pub(crate) connection_mutex: Arc<tokio::sync::Mutex<()>>,
     pub(crate) monitor_wakeup: Arc<tokio::sync::Notify>,
-    pub(crate) tls_config: Arc<RwLock<Option<TlsConfig>>>,
+    pub(crate) cancelled_connect: Arc<parking_lot::Mutex<Option<inner::ReplacedByConnect>>>,
+    pub(crate) monitored_connect: Arc<parking_lot::Mutex<Option<u64>>>,
+    pub(crate) tls_config: Arc<RwLock<StoredTlsConfig>>,
     pub(crate) transport_config: Arc<RwLock<crate::transport::ClientTransportConfig>>,
     #[cfg(feature = "transport-quic")]
-    pub(crate) quic_client_config: Arc<RwLock<Option<quinn::ClientConfig>>>,
+    pub(crate) quic_client_config: Arc<RwLock<Option<(inner::QuicBuiltFor, quinn::ClientConfig)>>>,
+}
+
+/// The TLS configuration stored for connections made from a URL, and how many
+/// times it has been stored: a QUIC configuration kept for early data is used
+/// again only with the one it was built from
+#[derive(Default)]
+pub(crate) struct StoredTlsConfig {
+    pub(crate) config: Option<TlsConfig>,
+    pub(crate) times_stored: u64,
+}
+
+impl StoredTlsConfig {
+    pub(crate) fn store(&mut self, config: TlsConfig) {
+        self.config = Some(config);
+        self.times_stored += 1;
+    }
+
+    pub(crate) fn restore(&mut self, config: Option<TlsConfig>, times_stored: u64) {
+        if self.times_stored == times_stored {
+            self.config = config;
+            self.times_stored += 1;
+        }
+    }
 }
 
 impl MqttClient {
@@ -261,6 +286,7 @@ impl MqttClient {
 
         let result = {
             let connection_guard = self.connection_mutex.lock().await;
+            self.settle_cancelled_connect().await;
             let options = self.inner.read().await.options.clone();
             let result = self.connect_with_options_internal(address, options).await;
             drop(connection_guard);
@@ -293,12 +319,19 @@ impl MqttClient {
         options: ConnectOptions,
     ) -> Result<ConnectResult> {
         let connection_guard = self.connection_mutex.lock().await;
+        self.settle_cancelled_connect().await;
         let result = self.connect_with_options_internal(address, options).await;
         drop(connection_guard);
         result
     }
 
     /// Connects to the MQTT broker using a custom TLS configuration
+    ///
+    /// Automatic reconnections connect with the same configuration, unless
+    /// the options turn them off
+    /// ([`ConnectOptions::with_automatic_reconnect`]). A server redirect is
+    /// followed with it too, to an mqtts:// address only. It is also stored
+    /// for later connections made from a URL, as with `set_tls_config`.
     ///
     /// # Errors
     ///
@@ -308,6 +341,7 @@ impl MqttClient {
         tls_config: crate::transport::tls::TlsConfig,
     ) -> Result<()> {
         let connection_guard = self.connection_mutex.lock().await;
+        self.settle_cancelled_connect().await;
         let options = self.inner.read().await.options.clone();
         let result = self
             .connect_with_tls_and_options_internal(tls_config, options)
@@ -318,7 +352,8 @@ impl MqttClient {
 
     /// Connects to the MQTT broker using custom TLS configuration and connect options
     ///
-    /// Returns `session_present` flag from CONNACK
+    /// Returns `session_present` flag from CONNACK. The configuration is used
+    /// as with [`connect_with_tls`](Self::connect_with_tls).
     ///
     /// # Errors
     ///
@@ -329,6 +364,7 @@ impl MqttClient {
         options: ConnectOptions,
     ) -> Result<ConnectResult> {
         let connection_guard = self.connection_mutex.lock().await;
+        self.settle_cancelled_connect().await;
         let result = self
             .connect_with_tls_and_options_internal(tls_config, options)
             .await;
@@ -623,7 +659,9 @@ impl MqttClient {
             Ok(results) => {
                 if let Some(&(packet_id, qos)) = results.first() {
                     if let Some(stored) = stored_options {
-                        inner.stored_ack_subscriptions.lock().push((
+                        let mut stored_subscriptions = inner.stored_ack_subscriptions.lock();
+                        stored_subscriptions.retain(|(topic, ..)| *topic != topic_filter);
+                        stored_subscriptions.push((
                             topic_filter.clone(),
                             stored,
                             options.subscription_identifier,
@@ -1291,6 +1329,19 @@ mod tests {
         let client = MqttClient::new("test-client");
         assert!(!client.is_connected().await);
         assert_eq!(client.client_id().await, "test-client");
+    }
+
+    #[test]
+    fn test_parse_ipv6_address() {
+        let (transport, host, port) = MqttClient::parse_address("mqtts://[::1]:9999").unwrap();
+        assert!(matches!(transport, state::ClientTransportType::Tls));
+        assert_eq!(host, "[::1]");
+        assert_eq!(port, 9999);
+
+        let (transport, host, port) = MqttClient::parse_address("mqtts://[::1]").unwrap();
+        assert!(matches!(transport, state::ClientTransportType::Tls));
+        assert_eq!(host, "[::1]");
+        assert_eq!(port, 8883);
     }
 
     #[test]

@@ -43,10 +43,7 @@ pub const TEST_BROKER: &str = "mqtt://127.0.0.1:1883";
 use mqtt5::broker::config::BrokerConfig;
 use mqtt5::broker::server::MqttBroker;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU16, Ordering};
 use tokio::task::JoinHandle;
-
-static TLS_PORT_COUNTER: AtomicU16 = AtomicU16::new(0);
 
 #[derive(Debug)]
 #[allow(dead_code)]
@@ -122,17 +119,12 @@ impl TestBroker {
         };
 
         let workspace_root = find_workspace_root();
-        let tls_port = 20000 + TLS_PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
         let tls_config = BrokerTlsConfig::new(
             workspace_root.join("test_certs/server.pem"),
             workspace_root.join("test_certs/server.key"),
         )
         .with_require_client_cert(false)
-        .with_bind_address(
-            format!("127.0.0.1:{tls_port}")
-                .parse::<SocketAddr>()
-                .unwrap(),
-        );
+        .with_bind_address("127.0.0.1:0".parse::<SocketAddr>().unwrap());
 
         let config = BrokerConfig::default()
             .with_bind_address("127.0.0.1:0".parse::<SocketAddr>().unwrap())
@@ -143,13 +135,16 @@ impl TestBroker {
             .await
             .expect("Failed to create test broker with TLS");
 
+        // Its listener is bound as it is made, on a port of its own.
+        let tls_port = broker
+            .tls_local_addr()
+            .expect("TLS listener must be bound")
+            .port();
         let address = format!("mqtts://127.0.0.1:{tls_port}");
 
         let handle = tokio::spawn(async move {
             let _ = broker.run().await;
         });
-
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         Self {
             address,
@@ -159,6 +154,7 @@ impl TestBroker {
         }
     }
 
+    #[cfg(feature = "transport-websocket")]
     #[allow(dead_code)]
     pub async fn start_with_websocket() -> Self {
         use mqtt5::broker::config::{BrokerConfig, StorageBackend, StorageConfig, WebSocketConfig};
@@ -169,9 +165,8 @@ impl TestBroker {
             ..Default::default()
         };
 
-        let ws_port = 20000 + TLS_PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
         let ws_config = WebSocketConfig::new()
-            .with_bind_addresses(vec![format!("127.0.0.1:{ws_port}").parse().unwrap()])
+            .with_bind_addresses(vec!["127.0.0.1:0".parse().unwrap()])
             .with_path("/mqtt".to_string());
 
         let config = BrokerConfig::default()
@@ -183,13 +178,16 @@ impl TestBroker {
             .await
             .expect("Failed to create test broker with WebSocket");
 
+        // Its listener is bound as it is made, on a port of its own.
+        let ws_port = broker
+            .ws_local_addr()
+            .expect("WebSocket listener must be bound")
+            .port();
         let address = format!("ws://127.0.0.1:{ws_port}/mqtt");
 
         let handle = tokio::spawn(async move {
             let _ = broker.run().await;
         });
-
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         Self {
             address,
@@ -315,6 +313,47 @@ impl Drop for TestBroker {
             handle.abort();
         }
     }
+}
+
+/// Forwards each connection to `to`, and drops every one open when `cut` is
+/// notified, while still taking new ones
+#[allow(dead_code)]
+pub async fn cutting_proxy(to: SocketAddr) -> (SocketAddr, std::sync::Arc<tokio::sync::Notify>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let cut = std::sync::Arc::new(tokio::sync::Notify::new());
+    let cuts = cut.clone();
+    tokio::spawn(async move {
+        while let Ok((mut client, _)) = listener.accept().await {
+            let Ok(mut server) = tokio::net::TcpStream::connect(to).await else {
+                return;
+            };
+            let cuts = cuts.clone();
+            tokio::spawn(async move {
+                tokio::select! {
+                    _ = tokio::io::copy_bidirectional(&mut client, &mut server) => {}
+                    () = cuts.notified() => {}
+                }
+            });
+        }
+    });
+    (addr, cut)
+}
+
+/// The test CA, which signs the test brokers' certificates
+#[allow(dead_code)]
+pub fn test_ca() -> Vec<u8> {
+    std::fs::read(find_workspace_root().join("test_certs/ca.pem")).unwrap()
+}
+
+/// A CA that signs no test broker's certificate
+#[allow(dead_code)]
+pub fn other_ca() -> Vec<u8> {
+    rcgen::generate_simple_self_signed(vec!["other-ca".to_string()])
+        .unwrap()
+        .cert
+        .pem()
+        .into_bytes()
 }
 
 /// Default timeout for test operations

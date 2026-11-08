@@ -133,7 +133,8 @@ pub struct BridgeConfig {
     #[serde(default)]
     pub backup_brokers: Vec<String>,
 
-    /// Interval for health-checking primary broker when connected to backup
+    /// Interval for health-checking primary broker when connected to backup, doubled after each
+    /// failback that ends on a backup again, up to `max_reconnect_delay` but never below this interval
     #[serde(
         with = "humantime_serde",
         default = "default_primary_health_check_interval"
@@ -216,7 +217,8 @@ pub enum BridgeProtocol {
     Tcp,
     /// TLS over TCP (mqtts://)
     Tls,
-    /// QUIC without certificate verification (quic://)
+    /// QUIC (quic://), which verifies the server certificate like `QuicSecure` unless
+    /// `insecure` is set
     Quic,
     /// QUIC with certificate verification (quics://)
     QuicSecure,
@@ -238,7 +240,6 @@ pub enum MqttVersion {
     V50,
 }
 
-// Default value functions for serde
 fn default_try_private() -> bool {
     true
 }
@@ -368,7 +369,10 @@ impl BridgeConfig {
     /// Validates the configuration.
     ///
     /// # Errors
-    /// Returns an error if the configuration is invalid (empty name, client ID, or topics).
+    /// Returns an error for an empty name, client ID or topic list, an empty topic pattern,
+    /// `clean_start` set, a protocol version other than MQTT 5.0, a negative or non-finite
+    /// `backoff_multiplier`, or a zero `primary_health_check_interval` with failback enabled
+    /// and backup brokers configured.
     pub fn validate(&self) -> crate::Result<()> {
         use crate::error::MqttError;
 
@@ -400,7 +404,22 @@ impl BridgeConfig {
             ));
         }
 
-        // Validate topic patterns
+        if !self.backoff_multiplier.is_finite() || self.backoff_multiplier < 0.0 {
+            return Err(MqttError::Configuration(
+                "backoff_multiplier must be a finite number of at least zero".into(),
+            ));
+        }
+
+        if self.enable_failback
+            && !self.backup_brokers.is_empty()
+            && self.primary_health_check_interval.is_zero()
+        {
+            return Err(MqttError::Configuration(
+                "primary_health_check_interval must be greater than zero when failback to the primary is enabled with backup brokers"
+                    .into(),
+            ));
+        }
+
         for topic in &self.topics {
             if topic.pattern.is_empty() {
                 return Err(MqttError::Configuration(
@@ -432,12 +451,41 @@ mod tests {
     #[test]
     fn test_bridge_config_validation() {
         let mut config = BridgeConfig::new("test", "broker:1883");
-
-        // Should fail without topics
         assert!(config.validate().is_err());
 
-        // Should pass with topics
         config = config.add_topic("test/#", BridgeDirection::Both, QoS::AtMostOnce);
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn backoff_multiplier_must_be_finite_and_not_negative() {
+        let mut config = BridgeConfig::new("test", "broker:1883").add_topic(
+            "test/#",
+            BridgeDirection::Both,
+            QoS::AtMostOnce,
+        );
+        for refused in [-1.0, f64::NAN, f64::INFINITY] {
+            config.backoff_multiplier = refused;
+            assert!(config.validate().is_err(), "{refused}");
+        }
+        config.backoff_multiplier = 0.0;
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn failback_needs_a_nonzero_health_check_interval() {
+        let mut config = BridgeConfig::new("test", "broker:1883").add_topic(
+            "test/#",
+            BridgeDirection::Both,
+            QoS::AtMostOnce,
+        );
+        config.primary_health_check_interval = Duration::ZERO;
+        assert!(config.validate().is_ok());
+
+        config = config.add_backup_broker("backup:1883");
+        assert!(config.validate().is_err());
+
+        config.enable_failback = false;
         assert!(config.validate().is_ok());
     }
 
