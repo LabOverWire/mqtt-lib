@@ -512,8 +512,10 @@ impl MqttClient {
     /// disconnected with offline queueing enabled is queued, as with
     /// [`Self::publish_with_options`], and its handle settles after the client
     /// reconnects. A publish that was written but not acknowledged before the
-    /// connection ended stays in flight with the session, and its handle settles once
-    /// it is re-sent and acknowledged on the next connection.
+    /// connection ended settles on the next connection: with its acknowledgement if it
+    /// is re-sent there, and otherwise as [`crate::PublishOutcome::Indeterminate`] with
+    /// the [`crate::IndeterminateReason`] it was not re-sent for, such as a discarded
+    /// session after a Clean Start 1 connect.
     ///
     /// When the server's Receive Maximum is reached, the call waits for send quota
     /// before writing. Calls made one after another from a single task therefore write
