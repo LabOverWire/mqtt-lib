@@ -106,6 +106,7 @@ struct MappedStream {
 #[derive(Default)]
 struct SubscriptionStreamMap {
     by_filter: HashMap<String, MappedStream>,
+    readable: Vec<StreamWriter>,
     sends: u64,
 }
 #[cfg(feature = "transport-quic")]
@@ -118,6 +119,19 @@ impl SubscriptionStreamMap {
     fn forget_writer(&mut self, writer: &StreamWriter) {
         self.by_filter
             .retain(|_, mapped| !Arc::ptr_eq(&mapped.writer, writer));
+        self.readable
+            .retain(|readable| !Arc::ptr_eq(readable, writer));
+    }
+
+    fn is_readable(&self, writer: &StreamWriter) -> bool {
+        self.readable
+            .iter()
+            .any(|readable| Arc::ptr_eq(readable, writer))
+    }
+
+    fn clear(&mut self) {
+        self.by_filter.clear();
+        self.readable.clear();
     }
 }
 #[cfg(feature = "transport-quic")]
@@ -482,7 +496,7 @@ impl DirectClientInner {
             self.quic_datagrams_enabled = false;
             self.subscription_delivery = SubscriptionDelivery::ControlStream;
             self.quic_stream_reader_ctx = None;
-            self.subscription_streams.lock().by_filter.clear();
+            self.subscription_streams.lock().clear();
         }
     }
 
@@ -1546,6 +1560,7 @@ impl DirectClientInner {
         let writer = Arc::new(tokio::sync::Mutex::new(UnifiedWriter::Quic(send)));
         {
             let mut streams = self.subscription_streams.lock();
+            streams.readable.push(Arc::clone(&writer));
             let opened = streams.next_send();
             for filter in &packet.filters {
                 streams.by_filter.insert(
@@ -1577,6 +1592,11 @@ impl DirectClientInner {
         let mut guard = stream.lock().await;
         let sent = {
             let mut streams = self.subscription_streams.lock();
+            if !streams.is_readable(stream) {
+                return Err(MqttError::ConnectionError(
+                    "QUIC subscription stream ended before the packet was sent".to_string(),
+                ));
+            }
             let sent = streams.next_send();
             for filter in subscribed {
                 streams.by_filter.insert(

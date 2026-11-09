@@ -1084,3 +1084,69 @@ async fn subscribe_queued_behind_a_blocked_unsubscribe_keeps_its_mapping() {
 async fn subscribe_after_an_unblocked_unsubscribe_keeps_its_mapping() {
     subscribe_queued_behind_an_unsubscribe(1_000_000).await;
 }
+
+#[tokio::test]
+async fn subscribe_queued_while_its_stream_ends_fails_and_the_next_opens_a_stream() {
+    let mut transport = quinn::TransportConfig::default();
+    transport.stream_receive_window(1000u32.into());
+    let options = ConnectOptions::new("queued-while-stream-ends").with_automatic_reconnect(false);
+    let (client, mut broker) = connect_fake_broker_limited(options, true, Some(transport)).await;
+    let filter = format!("q/{}", "x".repeat(3000));
+
+    let (task, _rx) = start_subscribe(&client, &filter, QoS::AtMostOnce);
+    let (mut send, mut recv) = broker.conn.accept_bi().await.unwrap();
+    let subscribe = read_frame(&mut recv).await.unwrap();
+    assert_eq!(subscribe[0], SUBSCRIBE);
+    send.write_all(&[0x90, 0x04, subscribe[3], subscribe[4], 0x00, 0x00])
+        .await
+        .unwrap();
+    task.await.unwrap().unwrap();
+
+    let (blocked, _blocked_rx) = start_subscribe(&client, &filter, QoS::AtMostOnce);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let (queued, _queued_rx) = start_subscribe(&client, &filter, QoS::AtMostOnce);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    send.finish().unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let frame = read_frame(&mut recv).await.unwrap();
+    assert_eq!(frame[0], SUBSCRIBE);
+    broker
+        .ctl_send
+        .write_all(&[0x90, 0x04, frame[3], frame[4], 0x00, 0x00])
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), blocked)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let queued = tokio::time::timeout(Duration::from_secs(2), queued)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        queued.is_err(),
+        "a SUBSCRIBE queued on a stream whose reader exited must fail: {queued:?}"
+    );
+
+    let (third, _third_rx) = start_subscribe(&client, &filter, QoS::AtMostOnce);
+    let (mut new_send, mut new_recv) =
+        tokio::time::timeout(Duration::from_secs(3), broker.conn.accept_bi())
+            .await
+            .expect("the SUBSCRIBE after the stream ended did not open a new stream")
+            .unwrap();
+    let frame = read_frame(&mut new_recv).await.unwrap();
+    assert_eq!(frame[0], SUBSCRIBE);
+    new_send
+        .write_all(&[0x90, 0x04, frame[3], frame[4], 0x00, 0x00])
+        .await
+        .unwrap();
+    third.await.unwrap().unwrap();
+    let on_old = tokio::time::timeout(Duration::from_millis(300), read_frame(&mut recv)).await;
+    assert!(
+        !matches!(on_old, Ok(Some(_))),
+        "a packet went on the stream whose reader exited: {on_old:?}"
+    );
+}
