@@ -25,6 +25,12 @@ use crate::validation::strip_shared_subscription_prefix;
 use crate::QoS;
 
 type WriterHandle = Arc<tokio::sync::Mutex<UnifiedWriter>>;
+
+#[derive(Clone)]
+pub(crate) struct AckStream {
+    pub(crate) writer: WriterHandle,
+    pub(crate) on_unwritable: Arc<dyn Fn() + Send + Sync>,
+}
 type WriterSlot = Arc<tokio::sync::Mutex<Option<WriterHandle>>>;
 
 /// The reason code an unresolved token uses when it is dropped without an explicit
@@ -46,7 +52,7 @@ pub(crate) struct AckRequest {
     packet_id: u16,
     qos: QoS,
     kind: AckKind,
-    stream: Option<WriterHandle>,
+    stream: Option<AckStream>,
 }
 
 #[derive(Default)]
@@ -118,7 +124,7 @@ pub struct AckToken {
     packet_id: u16,
     qos: QoS,
     armed: bool,
-    stream: Option<WriterHandle>,
+    stream: Option<AckStream>,
     sender: mpsc::UnboundedSender<AckRequest>,
 }
 
@@ -246,7 +252,7 @@ impl AckDispatcher {
     }
 
     /// Mints a token for a delivered inbound message.
-    pub(crate) fn token(&self, packet_id: u16, qos: QoS, stream: Option<WriterHandle>) -> AckToken {
+    pub(crate) fn token(&self, packet_id: u16, qos: QoS, stream: Option<AckStream>) -> AckToken {
         AckToken {
             seq: self.reserve(qos),
             packet_id,
@@ -289,7 +295,7 @@ impl AckDispatcher {
         packet_id: u16,
         qos: QoS,
         kind: AckKind,
-        stream: Option<WriterHandle>,
+        stream: Option<AckStream>,
     ) {
         let _ = self.tx.send(AckRequest {
             seq: self.reserve(qos),
@@ -396,7 +402,7 @@ impl AckDispatcher {
     async fn write(
         packet_id: u16,
         packet: Packet,
-        stream: Option<&WriterHandle>,
+        stream: Option<&AckStream>,
         generation: u64,
         order: &Mutex<AckOrder>,
         slot: &WriterSlot,
@@ -414,10 +420,16 @@ impl AckDispatcher {
             current.clone()
         };
         if let Some(stream) = stream {
-            let on_stream = stream.lock().await.write_packet(packet.clone()).await;
+            let on_stream = stream
+                .writer
+                .lock()
+                .await
+                .write_packet(packet.clone())
+                .await;
             if on_stream.is_ok() {
                 return;
             }
+            (stream.on_unwritable)();
         }
         let written = match &writer {
             Some(handle) => handle.lock().await.write_packet(packet).await.is_ok(),

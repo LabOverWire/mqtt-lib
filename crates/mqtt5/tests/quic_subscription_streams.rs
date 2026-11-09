@@ -1108,7 +1108,7 @@ async fn subscribe_after_an_unblocked_unsubscribe_keeps_its_mapping() {
 }
 
 #[tokio::test]
-async fn subscribe_queued_while_its_stream_ends_fails_and_the_next_opens_a_stream() {
+async fn subscribe_queued_while_its_stream_ends_opens_a_new_stream() {
     let mut transport = quinn::TransportConfig::default();
     transport.stream_receive_window(1000u32.into());
     let options = ConnectOptions::new("queued-while-stream-ends").with_automatic_reconnect(false);
@@ -1144,22 +1144,28 @@ async fn subscribe_queued_while_its_stream_ends_fails_and_the_next_opens_a_strea
         .unwrap()
         .unwrap()
         .unwrap();
-    let queued = tokio::time::timeout(Duration::from_secs(2), queued)
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(
-        queued.is_err(),
-        "a SUBSCRIBE queued on a stream whose reader exited must fail: {queued:?}"
-    );
-
-    let (third, _third_rx) = start_subscribe(&client, &filter, QoS::AtMostOnce);
     let (mut new_send, mut new_recv) =
         tokio::time::timeout(Duration::from_secs(3), broker.conn.accept_bi())
             .await
-            .expect("the SUBSCRIBE after the stream ended did not open a new stream")
+            .expect("the SUBSCRIBE queued behind the ended stream did not open a new stream")
             .unwrap();
     let frame = read_frame(&mut new_recv).await.unwrap();
+    assert_eq!(frame[0], SUBSCRIBE);
+    new_send
+        .write_all(&[0x90, 0x04, frame[3], frame[4], 0x00, 0x00])
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), queued)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+
+    let (third, _third_rx) = start_subscribe(&client, &filter, QoS::AtMostOnce);
+    let frame = tokio::time::timeout(Duration::from_secs(2), read_frame(&mut new_recv))
+        .await
+        .expect("the next SUBSCRIBE did not use the filter's new stream")
+        .unwrap();
     assert_eq!(frame[0], SUBSCRIBE);
     new_send
         .write_all(&[0x90, 0x04, frame[3], frame[4], 0x00, 0x00])
@@ -1337,7 +1343,7 @@ async fn delivery_on_a_stream_the_broker_stopped_reading_is_acked_on_the_control
     assert_eq!(second.payload, b"second");
     assert!(client.is_connected().await);
 
-    let (task, _rx) = start_subscribe(&client, "stopped/b", QoS::AtMostOnce);
+    let (task, _rx) = start_subscribe(&client, "stopped/a", QoS::AtMostOnce);
     let _other = tokio::time::timeout(
         Duration::from_secs(2),
         accept_subscription_stream(&broker.conn, 0x00),
@@ -1374,4 +1380,233 @@ async fn qos2_delivery_on_a_stopped_stream_completes_on_the_control_stream() {
         .expect("no PUBCOMP on the control stream")
         .unwrap();
     assert_eq!(pubcomp[0], PUBCOMP);
+}
+
+async fn two_subscribes_after_idle(publishes: u16) -> (usize, usize) {
+    let mut transport = quinn::TransportConfig::default();
+    transport.stream_receive_window(1000u32.into());
+    let options = ConnectOptions::new("sub-streams-idle-shared").with_automatic_reconnect(false);
+    let (client, broker) = connect_fake_broker_limited(options, true, Some(transport)).await;
+
+    let (task, _rx) = start_subscribe(&client, "idle/x", QoS::AtLeastOnce);
+    let (mut send, mut recv) = accept_subscription_stream(&broker.conn, 0x01).await;
+    task.await.unwrap().unwrap();
+    let unsubscriber = client.clone();
+    let unsubscribe = tokio::spawn(async move { unsubscriber.unsubscribe("idle/x").await });
+    let frame = read_frame(&mut recv).await.unwrap();
+    assert_eq!(frame[0], UNSUBSCRIBE);
+    send.write_all(&[0xB0, 0x04, frame[2], frame[3], 0x00, 0x00])
+        .await
+        .unwrap();
+    unsubscribe.await.unwrap().unwrap();
+
+    for id in 1..=publishes {
+        send.write_all(&publish_frame(1, "idle/x", Some(id), b"p"))
+            .await
+            .unwrap();
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let (first, _first_rx) = start_subscribe(&client, "idle/y", QoS::AtMostOnce);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let (second, _second_rx) = start_subscribe(&client, "idle/z", QoS::AtMostOnce);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let mut subscribes_on_idle = 0;
+    while let Ok(Some(frame)) =
+        tokio::time::timeout(Duration::from_millis(700), read_frame(&mut recv)).await
+    {
+        match frame[0] {
+            SUBSCRIBE => {
+                subscribes_on_idle += 1;
+                send.write_all(&[0x90, 0x04, frame[2], frame[3], 0x00, 0x00])
+                    .await
+                    .unwrap();
+            }
+            PUBACK => {}
+            other => panic!("unexpected {other:#04x}"),
+        }
+    }
+    let mut new_streams = 0;
+    while let Ok(Ok((mut new_send, mut new_recv))) =
+        tokio::time::timeout(Duration::from_millis(700), broker.conn.accept_bi()).await
+    {
+        new_streams += 1;
+        let frame = read_frame(&mut new_recv).await.unwrap();
+        new_send
+            .write_all(&[0x90, 0x04, frame[2], frame[3], 0x00, 0x00])
+            .await
+            .unwrap();
+    }
+    tokio::time::timeout(Duration::from_secs(5), first)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), second)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    (subscribes_on_idle, new_streams)
+}
+
+#[tokio::test]
+async fn concurrent_subscribes_of_two_filters_never_share_an_idle_stream() {
+    let (subscribes_on_idle, new_streams) = two_subscribes_after_idle(400).await;
+    assert_eq!(
+        (subscribes_on_idle, new_streams),
+        (1, 1),
+        "two concurrent SUBSCRIBEs of different filters shared the idle stream"
+    );
+}
+
+#[tokio::test]
+async fn concurrent_subscribes_of_two_filters_with_an_idle_writer_take_one_stream_each() {
+    let (subscribes_on_idle, new_streams) = two_subscribes_after_idle(0).await;
+    assert_eq!((subscribes_on_idle, new_streams), (1, 1));
+}
+
+#[tokio::test]
+async fn feature_off_suback_on_a_server_opened_stream_is_ignored() {
+    let (client, mut broker) = connect_fake_broker("sub-streams-server-suback", false).await;
+    let (task, _rx) = start_subscribe(&client, "plain/srv", QoS::AtMostOnce);
+    let subscribe = read_frame(&mut broker.ctl_recv).await.unwrap();
+    assert_eq!(subscribe[0], SUBSCRIBE);
+    let (mut send, _recv) = broker.conn.open_bi().await.unwrap();
+    send.write_all(&[0x90, 0x04, subscribe[2], subscribe[3], 0x00, 0x00])
+        .await
+        .unwrap();
+    let mut task = task;
+    let completed = tokio::time::timeout(Duration::from_secs(2), &mut task).await;
+    assert!(
+        completed.is_err(),
+        "SUBACK on a server-opened stream completed a control-stream SUBSCRIBE"
+    );
+    broker
+        .ctl_send
+        .write_all(&[0x90, 0x04, subscribe[2], subscribe[3], 0x00, 0x00])
+        .await
+        .unwrap();
+    task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn token_ack_fallback_stops_using_the_stopped_stream() {
+    let options = deferred_ack_options("sub-streams-token-fallback");
+    let (client, mut broker) = connect_fake_broker_with(options, true).await;
+    let (tx, mut tokens) = mpsc::unbounded_channel();
+    let subscriber = client.clone();
+    let task = tokio::spawn(async move {
+        subscriber
+            .subscribe_with_ack(
+                "deferred/m",
+                SubscribeOptions {
+                    qos: QoS::AtLeastOnce,
+                    ..Default::default()
+                },
+                move |_message, token| {
+                    let _ = tx.send(token);
+                },
+            )
+            .await
+    });
+    let (mut send, mut recv) = accept_subscription_stream(&broker.conn, 0x01).await;
+    task.await.unwrap().unwrap();
+    send.write_all(&publish_frame(1, "deferred/m", Some(9), b"x"))
+        .await
+        .unwrap();
+    let token = tokio::time::timeout(Duration::from_secs(2), tokens.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    recv.stop(0u32.into()).unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    token.ack();
+    let puback = tokio::time::timeout(Duration::from_secs(2), read_frame(&mut broker.ctl_recv))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(puback[0], PUBACK);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let (again, _rx) = start_subscribe(&client, "deferred/m", QoS::AtLeastOnce);
+    let _other = tokio::time::timeout(
+        Duration::from_secs(2),
+        accept_subscription_stream(&broker.conn, 0x01),
+    )
+    .await
+    .expect("SUBSCRIBE after a failed token ack went to the stopped stream");
+    tokio::time::timeout(Duration::from_secs(2), again)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn disconnect_during_the_connack_wait_stays_in_force() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let cert_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test_certs");
+    let certs = QuicAcceptorConfig::load_cert_chain_from_file(cert_dir.join("server.pem"))
+        .await
+        .unwrap();
+    let key = QuicAcceptorConfig::load_private_key_from_file(cert_dir.join("server.key"))
+        .await
+        .unwrap();
+    let mut server_config = QuicAcceptorConfig::new(certs, key)
+        .with_alpn_protocols(vec![b"mqtt".to_vec()])
+        .build_server_config()
+        .unwrap();
+    server_config.transport_config(std::sync::Arc::new(bidi_stream_limit(1)));
+    let endpoint = quinn::Endpoint::server(server_config, "127.0.0.1:0".parse().unwrap()).unwrap();
+    let url = format!("quic://{}", endpoint.local_addr().unwrap());
+
+    let options =
+        ConnectOptions::new("sub-streams-interrupt-connack").with_automatic_reconnect(false);
+    let client = MqttClient::with_options(options.clone());
+    client.set_insecure_tls(true).await;
+    client.set_quic_subscription_streams(true).await;
+    let connecting = client.clone();
+    let connect =
+        tokio::spawn(async move { Box::pin(connecting.connect_with_options(&url, options)).await });
+
+    let conn = tokio::time::timeout(Duration::from_secs(5), async {
+        endpoint.accept().await.unwrap().await.unwrap()
+    })
+    .await
+    .unwrap();
+    let (mut ctl_send, mut ctl_recv) = conn.accept_bi().await.unwrap();
+    let connect_frame = read_frame(&mut ctl_recv).await.unwrap();
+    assert_eq!(connect_frame[0] >> 4, 1);
+
+    let (blocked, _rx) = start_subscribe(&client, "limit/a", QoS::AtMostOnce);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let disconnecting = client.clone();
+    let disconnect = tokio::spawn(async move {
+        let started = std::time::Instant::now();
+        let outcome = disconnecting.disconnect().await;
+        (started.elapsed(), outcome)
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    ctl_send
+        .write_all(&[0x20, 0x03, 0x00, 0x00, 0x00])
+        .await
+        .unwrap();
+    connect.await.unwrap().unwrap();
+
+    let (elapsed, outcome) = tokio::time::timeout(Duration::from_secs(15), disconnect)
+        .await
+        .unwrap()
+        .unwrap();
+    outcome.unwrap();
+    let subscribed = tokio::time::timeout(Duration::from_secs(2), blocked)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "disconnect waited {elapsed:?} for a SUBSCRIBE blocked on a stream open"
+    );
+    assert!(subscribed.is_err(), "{subscribed:?}");
 }

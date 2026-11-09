@@ -73,7 +73,7 @@ impl PacketReaderContext {
 
     fn ack_delivery_on<'a>(
         &'a self,
-        stream: Option<&'a Arc<tokio::sync::Mutex<UnifiedWriter>>>,
+        stream: Option<&'a super::ack::AckStream>,
     ) -> Option<super::handlers::AckDelivery<'a>> {
         if self.deferred_ack {
             Some(super::handlers::AckDelivery {
@@ -602,7 +602,7 @@ pub(super) async fn quic_stream_reader_task(
     mut recv: quinn::RecvStream,
     stream_writer: Arc<tokio::sync::Mutex<UnifiedWriter>>,
     ctx: PacketReaderContext,
-    on_unwritable: Option<Box<dyn Fn() + Send + Sync>>,
+    on_unwritable: Option<Arc<dyn Fn() + Send + Sync>>,
 ) {
     let quic_stream_id = u64::from(recv.id());
     let subscription_stream = recv.id().initiator() == quinn::Side::Client;
@@ -638,6 +638,12 @@ pub(super) async fn quic_stream_reader_task(
         }
     };
 
+    let ack_stream = on_unwritable
+        .as_ref()
+        .map(|on_unwritable| super::ack::AckStream {
+            writer: Arc::clone(&stream_writer),
+            on_unwritable: Arc::clone(on_unwritable),
+        });
     while let Some(read) = read_data_stream_packet(&mut recv, &mut buffer, &ctx).await {
         let outcome = match read {
             Ok(mut packet) => {
@@ -652,10 +658,13 @@ pub(super) async fn quic_stream_reader_task(
                 };
                 match routed {
                     Ok(Routed::Settled) => Ok(()),
-                    Ok(Routed::Unhandled) if settle_subscription_ack(&packet, &ctx) => Ok(()),
+                    Ok(Routed::Unhandled)
+                        if subscription_stream && settle_subscription_ack(&packet, &ctx) =>
+                    {
+                        Ok(())
+                    }
                     Ok(Routed::Unhandled) => {
-                        let ack_delivery =
-                            ctx.ack_delivery_on(subscription_stream.then_some(&stream_writer));
+                        let ack_delivery = ctx.ack_delivery_on(ack_stream.as_ref());
                         let mut handlers = ctx.incoming_handlers(ack_delivery.as_ref());
                         handlers.ack_fallback = on_unwritable.as_deref().map(|on_stream_failure| {
                             super::handlers::AckFallback {

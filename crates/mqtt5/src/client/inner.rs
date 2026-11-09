@@ -784,6 +784,8 @@ impl MqttClient {
     }
 
     pub(crate) async fn connect_internal(&self, address: &str) -> Result<ConnectResult> {
+        #[cfg(feature = "transport-quic")]
+        self.subscription_stream_open_interrupt.send_replace(false);
         Box::pin(self.connect_following_redirects(address, 0, None)).await
     }
 
@@ -879,6 +881,8 @@ impl MqttClient {
         &self,
         tls_config: TlsConfig,
     ) -> Result<ConnectResult> {
+        #[cfg(feature = "transport-quic")]
+        self.subscription_stream_open_interrupt.send_replace(false);
         let transport = Self::open_tls(tls_config.clone()).await?;
 
         let mut inner = self.inner.write().await;

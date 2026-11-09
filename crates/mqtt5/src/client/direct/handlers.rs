@@ -25,7 +25,7 @@ use crate::transport::flow::FlowId;
 pub(super) struct AckDelivery<'a> {
     pub(super) callbacks: &'a Arc<AckCallbackManager>,
     pub(super) dispatcher: &'a Arc<AckDispatcher>,
-    pub(super) stream: Option<&'a Arc<tokio::sync::Mutex<UnifiedWriter>>>,
+    pub(super) stream: Option<&'a super::ack::AckStream>,
 }
 
 /// Connection-scoped handles the incoming-packet handler needs, bundled from the
