@@ -114,8 +114,11 @@ async fn connected_session(client_id: &str) -> (Broker, QuicSplitResult) {
 }
 
 async fn session_at(addr: SocketAddr, client_id: &str) -> QuicSplitResult {
-    let mut transport =
-        QuicTransport::new(QuicConfig::new(addr, "localhost").with_verify_server_cert(false));
+    let mut transport = QuicTransport::new(
+        QuicConfig::new(addr, "localhost")
+            .with_verify_server_cert(false)
+            .with_datagrams(true),
+    );
     transport.connect().await.expect("QUIC handshake");
     let mut split = transport.into_split().expect("split transport");
     split

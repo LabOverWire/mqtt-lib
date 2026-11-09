@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+
+### Fixed
+
+- **A QUIC client with datagrams disabled no longer advertises datagram support.** quinn enables a datagram receive buffer by default, so the client sent the `max_datagram_frame_size` transport parameter even when `QuicConfig` had datagrams off, and a server could treat it as datagram-capable; EMQX 5.10.5 closed such connections. The client now clears the receive buffer when datagrams are disabled, so the parameter is sent only when they are enabled. Because quinn sends datagrams only on a connection whose local endpoint accepts them, a raw `QuicTransport` that sends datagrams must now enable them with `with_datagrams(true)`; `MqttClient` sends datagrams only when they are enabled, so its behaviour is unchanged.
+
 ## [mqtt5 0.50.0] - 2026-11-08
 
 ### Breaking
