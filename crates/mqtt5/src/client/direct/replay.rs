@@ -478,7 +478,7 @@ async fn release_claim(flow: &Arc<RwLock<FlowControlManager>>, packet_id: Option
     }
 }
 
-fn without_topic_alias(mut publish: PublishPacket) -> PublishPacket {
+pub(super) fn without_topic_alias(mut publish: PublishPacket) -> PublishPacket {
     publish.properties.remove_topic_alias();
     publish
 }
