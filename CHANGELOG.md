@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [mqtt5 0.50.0] - 2026-11-08
+
 ### Breaking
 
 - **An ACL file applies with SCRAM-SHA-256 and JWT authentication.** With `auth_method` `ScramSha256` or `Jwt` (`--auth-method scram` or `jwt`), the broker ignored `acl_file`: it authorized every SUBSCRIBE, PUBLISH and delivery, so a client the ACL denied a topic could subscribe to it, publish to it and receive it. The ACL is now enforced for them as for password authentication. A deployment that set an ACL file with these methods will see the clients it denies refused.
@@ -56,8 +58,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A cancelled connect has no effect on the connection the client had.** A connect stops the reconnection left from an earlier one. Dropped before it finished, as by a timeout around it, it left nothing to reconnect. The options, the address or TLS configuration and the stored TLS configuration it replaced, unless another has been set since, are now put back before the next connect reads them, and a reconnection that was running starts again with them. A connection it had already made stays, with a reconnection for it, and its subscriptions are sent again. A future dropped outside a Tokio runtime is undone only by the next connect.
 - **A quics:// connection is never made with a QUIC configuration kept from a connection that verified nothing.** With early data on, the client keeps the QUIC configuration of its last connection and uses it again. It used it for any later QUIC connection, so a quics:// connection after a quic:// one, or after one made with insecure TLS, verified no certificate, and one made after `set_tls_config` still trusted the roots of the configuration stored before. The configuration is now kept with the settings it was built from (quics:// or quic://, insecure TLS, the stored TLS configuration, early data, flow headers, which choose the ALPN list, datagrams and the stream limit) and used again only while they are the same. Changing any of these between two connections now takes effect on the second one; before, it kept negotiating `mqtt` instead of `MQTT-next`, kept the first one's stream limit, and a client that had connected once with early data off never used 0-RTT after turning it on.
 - **A resumed session no longer receives what was routed to a subscription dropped as no longer authorized.** When a session resumes, a subscription its client is no longer authorized for is dropped (#173), but messages already routed under it still reached the client: those queued while it was away (in memory or on disk), those waiting on its delivery lanes, those a connection taken over handed back, and those routed while the session was being claimed. A later SUBSCRIBE to the same filter also released them. Every subscription a session holds now has an instance number, and every message the router produces for a subscription carries that subscription's instance through the lanes, the offline queue, the queue files and what a connection taken over hands back. The broker sends such a message only if the session still holds a subscription with that instance. A delivery already started (sent again with DUP and its packet identifier) is still completed. A SUBSCRIBE to a filter the session already holds, on whatever QUIC flow, keeps its instance, so it drops nothing already routed, and an UNSUBSCRIBE, or a flow discarded, ended or expired, that removes the filter from one flow keeps it while another flow still holds it; a SUBSCRIBE to a filter the session does not hold, including one it lost on resume or removed with UNSUBSCRIBE, gets a new instance, so only what is routed after it is delivered under it. A message not routed for a subscription, such as a retained message sent on SUBSCRIBE, or queued before this change, is sent when one of the session's filters matches its topic. A subscription stored before this change gets an instance when its session is next claimed. `StoredSubscription` gains `instance`, `QueuedMessage` gains `subscription_instance` and `with_subscription_instance`, `RoutableMessage` gains `subscription_instance`, `Subscription` gains `instance`, `SubscriptionRequest` gains `instance` and `with_instance`, and `ClientSession` gains `delivers`, `subscription_instance` and `assign_subscription_instances` (see Breaking).
+
+## [mqttv5-cli 0.29.11] - 2026-11-08
+
+### Breaking
+
+- `mqttv5 broker` takes the ACL changes listed under Breaking in mqtt5 0.50.0. `--acl-file` now applies with `--auth-method scram` and `jwt`, an ACL's deny rules apply to each message a subscriber is sent, a rule grants a subscription filter only if it covers every topic the filter does, and a shared subscription is checked as the filter it subscribes to.
+
+### Changed
+
+- Requires mqtt5 0.50, so `mqttv5 broker` gets its fixes. See mqtt5 0.50.0.
+- `--jwt-session-scoped-roles` is still accepted and has no effect: JWT roles are kept until the user's next authentication replaces them.
+- The ACL section of `CLI_USAGE.md` describes the order rules are chosen in.
+
+## [mqtt5-wasm 2.1.10] - 2026-11-08
+
+### Breaking
+
+- **An ACL's deny rules apply to each message a subscriber is sent, and a shared subscription is checked as the filter it subscribes to**, in the wasm broker as in the native one. See mqtt5 0.50.0.
+
+### Fixed
+
 - **The wasm broker no longer sends a resumed session what was routed to a subscription dropped as no longer authorized.** It dropped the subscription on resume but still sent the messages queued or waiting on a lane under it, and a later SUBSCRIBE to the same filter released them too. Its forwarder now sends a message only if the session still holds the subscription it was routed for, by the native broker's rule, and a SUBSCRIBE assigns instances the same way. A QoS 2 delivery already started is still completed, since the broker sends it again on resume outside the forwarder. The wasm broker does not send a QoS 1 delivery already started again on resume.
 - **The wasm broker no longer drops messages for a client while it handles a packet from that client.** The connection kept its writer for the whole time it handled a packet, including waits such as a SUBSCRIBE waiting for the session, and a message forwarded meanwhile was dropped with "writer busy, cannot forward", a QoS 2 one left in flight without ever being sent. Each write now takes the writer only while it writes.
+
+### Changed
+
+- Requires mqtt5 0.50.
 
 ## [mqtt5 0.49.0] - 2026-10-29
 
