@@ -67,7 +67,9 @@ pub(crate) async fn fire_connection_event(
 pub use self::direct::AckToken;
 use self::direct::AutomaticReconnectLifecycle;
 #[cfg(not(target_arch = "wasm32"))]
-use self::direct::{DirectClientInner, QuotaClaim, ReadyPublish, StagedPublish, Transmitted};
+use self::direct::{
+    DirectClientInner, QuotaClaim, ReadyPublish, StagedPublish, Transmitted, Written,
+};
 
 /// Thread-safe MQTT v5.0 client
 ///
@@ -476,7 +478,10 @@ impl MqttClient {
             .await;
         let outcome = match staged {
             Ok(StagedPublish::Queued(handle)) => Ok(PublishResult::Queued(handle)),
-            Ok(StagedPublish::Ready(publish)) => self.send_staged_publish(publish).await,
+            Ok(StagedPublish::Ready(publish)) => match self.write_staged_publish(publish).await {
+                Ok(written) => written.settle().await,
+                Err(e) => Err(e),
+            },
             Err(e) => Err(e),
         };
         match outcome {
@@ -498,7 +503,59 @@ impl MqttClient {
         }
     }
 
-    async fn send_staged_publish(&self, mut ready: Box<ReadyPublish>) -> Result<PublishResult> {
+    /// Starts a publish and returns once its PUBLISH packet is written, without
+    /// waiting for the acknowledgement.
+    ///
+    /// The returned [`PublishHandle`] yields the [`crate::PublishOutcome`]: a `QoS` 0
+    /// publish is already settled as [`crate::Delivery::Unconfirmed`], and a `QoS` 1/2
+    /// publish settles when the server acknowledges or refuses it. A publish made while
+    /// disconnected with offline queueing enabled is queued, as with
+    /// [`Self::publish_with_options`], and its handle settles after the client
+    /// reconnects. A publish that was written but not acknowledged before the
+    /// connection ended settles on the next connection: with its acknowledgement if it
+    /// is re-sent there, and otherwise as [`crate::PublishOutcome::Indeterminate`] with
+    /// the [`crate::IndeterminateReason`] it was not re-sent for, such as a discarded
+    /// session after a Clean Start 1 connect.
+    ///
+    /// When the server's Receive Maximum is reached, the call waits for send quota
+    /// before writing. Calls made one after another from a single task therefore write
+    /// their PUBLISH packets in call order while keeping up to Receive Maximum of them
+    /// in flight, which preserves the order of messages on a topic. Concurrent calls
+    /// from separate tasks are written in whatever order they reach the connection.
+    /// Over QUIC with `StreamStrategy::DataPerPublish`, or for `QoS` 0 messages sent as
+    /// datagrams, each PUBLISH travels separately and QUIC does not order them against
+    /// one another, so the server can receive them in a different order.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the publish is definitely not sent: invalid topic or
+    /// options, not connected without offline queueing, a capability violation, no send
+    /// quota within the backpressure timeout, or a failed write of a `QoS` 0 message or
+    /// before the message was stored. A refusal in PUBACK or PUBREC is reported by the
+    /// handle as [`crate::PublishRejection::Refused`], not as an error.
+    #[instrument(skip(self, topic, payload, options), fields(qos = ?options.qos, retain = %options.retain))]
+    pub async fn begin_publish(
+        &self,
+        topic: impl Into<String>,
+        payload: impl Into<Vec<u8>>,
+        options: PublishOptions,
+    ) -> Result<PublishHandle> {
+        let staged = self
+            .inner
+            .read()
+            .await
+            .stage_publish(topic.into(), payload.into(), options)
+            .await?;
+        match staged {
+            StagedPublish::Queued(handle) => Ok(handle),
+            StagedPublish::Ready(ready) => self
+                .write_staged_publish(ready)
+                .await
+                .map(Written::into_handle),
+        }
+    }
+
+    async fn write_staged_publish(&self, mut ready: Box<ReadyPublish>) -> Result<Written> {
         loop {
             let claim = match ready.packet_id() {
                 Some(pid) => {
@@ -515,9 +572,7 @@ impl MqttClient {
                 .transmit_publish(ready, claim)
                 .await?;
             match transmitted {
-                Transmitted::Sent(delivery) => return Ok(PublishResult::Sent(delivery)),
-                Transmitted::InFlight(in_flight) => return in_flight.settle().await,
-                Transmitted::Detached(handle) => return Ok(PublishResult::Queued(handle)),
+                Transmitted::Written(written) => return Ok(written),
                 Transmitted::Restaged(next) => ready = next,
             }
         }

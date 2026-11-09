@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`MqttClient::begin_publish` returns once the PUBLISH is written and hands back a `PublishHandle` for its outcome**. `publish_with_options` returns only after a QoS 1 or QoS 2 message is acknowledged, so keeping several in flight meant publishing from separate tasks, and those tasks reached the connection in any order, reordering the messages on a topic. `begin_publish` waits for send quota when the server's Receive Maximum is reached, writes the message and returns, so calls made one after another from one task keep up to Receive Maximum messages in flight and write them in call order. The handle settles with the PUBACK or PUBCOMP, or with `PublishRejection::Refused` for an error reason code; a QoS 0 handle is already settled. A message published while disconnected with offline queueing enabled is queued, as with `publish_with_options`.
+
 ### Fixed
 
 - **A QUIC client with datagrams disabled no longer advertises datagram support.** quinn enables a datagram receive buffer by default, so the client sent the `max_datagram_frame_size` transport parameter even when `QuicConfig` had datagrams off, and a server could treat it as datagram-capable; EMQX 5.10.5 closed such connections. The client now clears the receive buffer when datagrams are disabled, so the parameter is sent only when they are enabled. Because quinn sends datagrams only on a connection whose local endpoint accepts them, a raw `QuicTransport` that sends datagrams must now enable them with `with_datagrams(true)`; `MqttClient` sends datagrams only when they are enabled, so its behaviour is unchanged.
