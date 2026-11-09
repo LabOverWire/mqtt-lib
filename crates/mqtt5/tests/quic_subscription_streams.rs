@@ -211,7 +211,7 @@ async fn subscribe_travels_on_its_own_stream_and_deliveries_return_on_it() {
 }
 
 #[tokio::test]
-async fn each_subscription_gets_a_distinct_stream_and_unsubscribe_closes_it() {
+async fn each_subscription_gets_a_distinct_stream_that_outlives_its_unsubscribe() {
     let (client, mut broker) = connect_fake_broker("sub-streams-unsub", true).await;
     let mut streams = Vec::new();
     for filter in ["mirror/x", "mirror/y"] {
@@ -237,12 +237,15 @@ async fn each_subscription_gets_a_distinct_stream_and_unsubscribe_closes_it() {
         .unwrap();
     unsubscribe.await.unwrap().unwrap();
 
-    let after = tokio::time::timeout(Duration::from_secs(2), read_frame(recv))
-        .await
-        .unwrap();
-    assert!(after.is_none(), "unsubscribed stream must be finished");
+    assert!(nothing_on(recv).await, "unsubscribed stream must stay open");
     assert!(nothing_on(&mut streams[1].1).await);
     assert!(nothing_on(&mut broker.ctl_recv).await);
+
+    let (task, _rx) = start_subscribe(&client, "mirror/x", QoS::AtMostOnce);
+    let (_send, new_recv) = accept_subscription_stream(&broker.conn, 0x00).await;
+    task.await.unwrap().unwrap();
+    assert_ne!(new_recv.id(), streams[0].1.id());
+    assert!(nothing_on(&mut streams[0].1).await);
 }
 
 #[tokio::test]
@@ -276,66 +279,40 @@ async fn accept_subscription_stream(
 }
 
 #[tokio::test]
-async fn concurrent_subscribes_to_one_filter_keep_a_single_stream_open() {
+async fn concurrent_subscribes_to_one_filter_complete_and_keep_their_streams_open() {
     let (client, broker) = connect_fake_broker("sub-streams-concurrent", true).await;
-    let (mut first_task, _first_rx) = start_subscribe(&client, "mirror/dup", QoS::AtMostOnce);
-    let (mut second_task, _second_rx) = start_subscribe(&client, "mirror/dup", QoS::AtMostOnce);
+    let (first_task, _first_rx) = start_subscribe(&client, "mirror/dup", QoS::AtMostOnce);
+    let (second_task, _second_rx) = start_subscribe(&client, "mirror/dup", QoS::AtMostOnce);
 
-    let (mut first_send, mut first_recv) = broker.conn.accept_bi().await.unwrap();
-    let (mut second_send, mut second_recv) = broker.conn.accept_bi().await.unwrap();
-    let first_subscribe = read_frame(&mut first_recv).await.unwrap();
-    let second_subscribe = read_frame(&mut second_recv).await.unwrap();
-    assert_eq!(first_subscribe[0], SUBSCRIBE);
-    assert_eq!(second_subscribe[0], SUBSCRIBE);
-    first_send
-        .write_all(&[
-            0x90,
-            0x04,
-            first_subscribe[2],
-            first_subscribe[3],
-            0x00,
-            0x00,
-        ])
-        .await
-        .unwrap();
-    let remaining = tokio::select! {
-        settled = &mut first_task => {
-            settled.unwrap().unwrap();
-            second_task
+    let (mut first_send, mut first_recv) = accept_subscription_stream(&broker.conn, 0x00).await;
+    let mut second_stream = tokio::select! {
+        frame = read_frame(&mut first_recv) => {
+            let frame = frame.unwrap();
+            assert_eq!(frame[0], SUBSCRIBE);
+            first_send
+                .write_all(&[0x90, 0x04, frame[2], frame[3], 0x00, 0x00])
+                .await
+                .unwrap();
+            None
         }
-        settled = &mut second_task => {
-            settled.unwrap().unwrap();
-            first_task
-        }
+        accepted = accept_subscription_stream(&broker.conn, 0x00) => Some(accepted),
+        () = tokio::time::sleep(Duration::from_secs(5)) => panic!("second SUBSCRIBE never arrived"),
     };
-    second_send
-        .write_all(&[
-            0x90,
-            0x04,
-            second_subscribe[2],
-            second_subscribe[3],
-            0x00,
-            0x00,
-        ])
+    tokio::time::timeout(Duration::from_secs(2), first_task)
         .await
+        .unwrap()
+        .unwrap()
         .unwrap();
-    remaining.await.unwrap().unwrap();
+    tokio::time::timeout(Duration::from_secs(2), second_task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
 
-    let first_after = tokio::time::timeout(Duration::from_secs(1), read_frame(&mut first_recv))
-        .await
-        .ok();
-    let second_after = tokio::time::timeout(Duration::from_secs(1), read_frame(&mut second_recv))
-        .await
-        .ok();
-    assert_eq!(
-        first_after,
-        Some(None),
-        "the stream displaced by the later SUBACK must be finished"
-    );
-    assert_eq!(
-        second_after, None,
-        "the stream that owns the filter must stay open"
-    );
+    assert!(nothing_on(&mut first_recv).await, "stream must stay open");
+    if let Some((_send, recv)) = second_stream.as_mut() {
+        assert!(nothing_on(recv).await, "stream must stay open");
+    }
 }
 
 #[tokio::test]
@@ -368,18 +345,26 @@ async fn resubscribe_after_reconnect_opens_a_stream_on_the_new_connection() {
 }
 
 #[tokio::test]
-async fn refused_subscription_finishes_its_stream() {
+async fn refused_subscription_keeps_its_stream_for_the_filter() {
     let (client, broker) = connect_fake_broker("sub-streams-refused", true).await;
     let (task, _rx) = start_subscribe(&client, "mirror/denied", QoS::AtMostOnce);
-    let (_send, mut recv) = accept_subscription_stream(&broker.conn, 0x80).await;
+    let (mut send, mut recv) = accept_subscription_stream(&broker.conn, 0x80).await;
     assert!(task.await.unwrap().is_err());
-    let after = tokio::time::timeout(Duration::from_secs(2), read_frame(&mut recv))
+    assert!(
+        nothing_on(&mut recv).await,
+        "refused subscription stream must stay open"
+    );
+
+    let (task, _rx) = start_subscribe(&client, "mirror/denied", QoS::AtMostOnce);
+    let subscribe = tokio::time::timeout(Duration::from_secs(2), read_frame(&mut recv))
+        .await
+        .expect("SUBSCRIBE of the same filter did not reuse its stream")
+        .unwrap();
+    assert_eq!(subscribe[0], SUBSCRIBE);
+    send.write_all(&[0x90, 0x04, subscribe[2], subscribe[3], 0x00, 0x00])
         .await
         .unwrap();
-    assert!(
-        after.is_none(),
-        "refused subscription stream must be finished"
-    );
+    task.await.unwrap().unwrap();
 }
 
 #[tokio::test]
@@ -694,7 +679,7 @@ async fn resolved_ack_token_acknowledges_on_the_subscription_stream() {
 }
 
 #[tokio::test]
-async fn ack_token_uses_the_control_stream_once_its_stream_is_finished() {
+async fn ack_token_uses_the_control_stream_when_its_stream_cannot_be_written() {
     let options = deferred_ack_options("sub-streams-deferred-finished");
     let (client, mut broker) = connect_fake_broker_with(options, true).await;
     let (tx, mut tokens) = mpsc::unbounded_channel();
@@ -724,14 +709,8 @@ async fn ack_token_uses_the_control_stream_once_its_stream_is_finished() {
         .unwrap()
         .unwrap();
 
-    let unsubscriber = client.clone();
-    let unsubscribe = tokio::spawn(async move { unsubscriber.unsubscribe("deferred/f").await });
-    let frame = read_frame(&mut recv).await.unwrap();
-    assert_eq!(frame[0], UNSUBSCRIBE);
-    send.write_all(&[0xB0, 0x04, frame[2], frame[3], 0x00, 0x00])
-        .await
-        .unwrap();
-    unsubscribe.await.unwrap().unwrap();
+    recv.stop(0u32.into()).unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
 
     token.ack();
     let puback = tokio::time::timeout(Duration::from_secs(2), read_frame(&mut broker.ctl_recv))
@@ -768,4 +747,119 @@ async fn qos2_delivery_completes_on_the_subscription_stream() {
         .unwrap();
     assert_eq!(pubcomp[0], PUBCOMP);
     assert!(nothing_on(&mut broker.ctl_recv).await);
+}
+
+#[tokio::test]
+async fn pubrel_after_unsuback_gets_its_pubcomp_on_the_stream() {
+    let (client, mut broker) = connect_fake_broker("sub-streams-pubrel-late", true).await;
+    let (task, mut rx) = start_subscribe(&client, "late/a", QoS::ExactlyOnce);
+    let (mut send, mut recv) = accept_subscription_stream(&broker.conn, 0x02).await;
+    task.await.unwrap().unwrap();
+
+    send.write_all(&publish_frame(2, "late/a", Some(11), b"x"))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(read_frame(&mut recv).await.unwrap()[0], PUBREC);
+
+    let unsubscriber = client.clone();
+    let unsubscribe = tokio::spawn(async move { unsubscriber.unsubscribe("late/a").await });
+    let frame = read_frame(&mut recv).await.unwrap();
+    assert_eq!(frame[0], UNSUBSCRIBE);
+    send.write_all(&[0xB0, 0x04, frame[2], frame[3], 0x00, 0x00])
+        .await
+        .unwrap();
+    unsubscribe.await.unwrap().unwrap();
+
+    send.write_all(&[PUBREL, 0x02, 0x00, 11]).await.unwrap();
+    let pubcomp = tokio::time::timeout(Duration::from_secs(2), read_frame(&mut recv))
+        .await
+        .expect("no PUBCOMP on the subscription stream")
+        .expect("subscription stream finished before the PUBCOMP");
+    assert_eq!(pubcomp[0], PUBCOMP);
+    assert_eq!(&pubcomp[2..4], &11u16.to_be_bytes());
+    assert!(nothing_on(&mut broker.ctl_recv).await);
+}
+
+#[tokio::test]
+async fn cancelled_subscribe_leaves_the_filter_usable() {
+    let (client, broker) = connect_fake_broker("sub-streams-cancelled", true).await;
+    let (task, _rx) = start_subscribe(&client, "cancel/a", QoS::AtMostOnce);
+    let (mut send, mut recv) = accept_subscription_stream(&broker.conn, 0x00).await;
+    task.await.unwrap().unwrap();
+
+    let cancelled = tokio::time::timeout(
+        Duration::from_millis(300),
+        client.subscribe("cancel/a", |_message| {}),
+    )
+    .await;
+    assert!(cancelled.is_err());
+    assert_eq!(read_frame(&mut recv).await.unwrap()[0], SUBSCRIBE);
+
+    let unsubscriber = client.clone();
+    let unsubscribe = tokio::spawn(async move { unsubscriber.unsubscribe("cancel/a").await });
+    let frame = read_frame(&mut recv).await.unwrap();
+    assert_eq!(frame[0], UNSUBSCRIBE);
+    send.write_all(&[0xB0, 0x04, frame[2], frame[3], 0x00, 0x00])
+        .await
+        .unwrap();
+    unsubscribe.await.unwrap().unwrap();
+    assert!(
+        nothing_on(&mut recv).await,
+        "subscription stream must stay open after the unsubscribe"
+    );
+
+    let (task, mut rx) = start_subscribe(&client, "cancel/a", QoS::AtLeastOnce);
+    let (mut new_send, mut new_recv) = accept_subscription_stream(&broker.conn, 0x01).await;
+    task.await.unwrap().unwrap();
+    new_send
+        .write_all(&publish_frame(1, "cancel/a", Some(4), b"again"))
+        .await
+        .unwrap();
+    let message = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(message.payload, b"again");
+    let puback = tokio::time::timeout(Duration::from_secs(2), read_frame(&mut new_recv))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(puback[0], PUBACK);
+    assert_eq!(&puback[2..4], &4u16.to_be_bytes());
+}
+
+#[tokio::test]
+async fn unsubscribe_while_the_first_subscribe_awaits_its_suback_uses_the_stream() {
+    let (client, mut broker) = connect_fake_broker("sub-streams-unsub-pending", true).await;
+    let (task, _rx) = start_subscribe(&client, "pend/a", QoS::AtMostOnce);
+    let (mut send, mut recv) = broker.conn.accept_bi().await.unwrap();
+    let subscribe = read_frame(&mut recv).await.unwrap();
+    assert_eq!(subscribe[0], SUBSCRIBE);
+
+    let unsubscriber = client.clone();
+    let unsubscribe = tokio::spawn(async move { unsubscriber.unsubscribe("pend/a").await });
+    let frame = tokio::time::timeout(Duration::from_secs(1), read_frame(&mut recv))
+        .await
+        .expect("UNSUBSCRIBE not sent on the filter's stream")
+        .unwrap();
+    assert_eq!(frame[0], UNSUBSCRIBE);
+    assert!(nothing_on(&mut broker.ctl_recv).await);
+
+    send.write_all(&[0x90, 0x04, subscribe[2], subscribe[3], 0x00, 0x00])
+        .await
+        .unwrap();
+    send.write_all(&[0xB0, 0x04, frame[2], frame[3], 0x00, 0x00])
+        .await
+        .unwrap();
+    task.await.unwrap().unwrap();
+    unsubscribe.await.unwrap().unwrap();
+    assert!(nothing_on(&mut recv).await);
+
+    let (task, _rx) = start_subscribe(&client, "pend/a", QoS::AtMostOnce);
+    let _new_stream = accept_subscription_stream(&broker.conn, 0x00).await;
+    task.await.unwrap().unwrap();
 }
