@@ -466,6 +466,14 @@ impl BridgeConnection {
         if let Some(enable) = self.config.quic_datagrams {
             self.client.set_quic_datagrams(enable).await;
         }
+        if let Some(server_name) = &self.config.tls_server_name {
+            let host = self
+                .config
+                .remote_address
+                .rsplit_once(':')
+                .map_or(self.config.remote_address.as_str(), |(host, _)| host);
+            self.client.set_quic_server_name(host, server_name).await;
+        }
         if let Some(max) = self.config.quic_max_streams {
             self.client.set_quic_max_streams(Some(max)).await;
         }

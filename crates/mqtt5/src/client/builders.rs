@@ -112,6 +112,17 @@ impl MqttClient {
         self.transport_config.write().await.max_streams = max;
     }
 
+    /// Sets the name the certificate of a quics:// server at `host` is verified against, in
+    /// place of `host`. A server reached at another host, by a redirect for example, is
+    /// verified against its own.
+    pub async fn set_quic_server_name(
+        &self,
+        host: impl Into<String>,
+        server_name: impl Into<String>,
+    ) {
+        self.transport_config.write().await.server_name = Some((host.into(), server_name.into()));
+    }
+
     pub async fn set_quic_datagrams(&self, enable: bool) {
         self.transport_config.write().await.datagrams = enable;
     }

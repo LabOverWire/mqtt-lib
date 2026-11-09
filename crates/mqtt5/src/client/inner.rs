@@ -645,11 +645,11 @@ impl MqttClient {
         let qc: crate::transport::ClientTransportConfig =
             (*self.transport_config.read().await).clone();
         let tls_config_lock = self.tls_config.read().await;
-        let server_name = if host.parse::<std::net::IpAddr>().is_ok() {
-            "localhost"
-        } else {
-            host
-        };
+        let server_name = qc
+            .server_name
+            .as_ref()
+            .filter(|(for_host, _)| for_host.eq_ignore_ascii_case(host))
+            .map_or(host, |(_, server_name)| server_name.as_str());
         let mut config = QuicConfig::new(addr, server_name)
             .with_verify_server_cert(!qc.insecure_tls)
             .with_stream_strategy(qc.stream_strategy)

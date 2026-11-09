@@ -23,6 +23,8 @@ pub struct ClientTransportConfig {
     pub datagrams: bool,
     pub connect_timeout: Duration,
     pub enable_early_data: bool,
+    /// A host, and the name a quics:// server reached at that host is verified against
+    pub server_name: Option<(String, String)>,
 }
 
 impl Default for ClientTransportConfig {
@@ -36,6 +38,7 @@ impl Default for ClientTransportConfig {
             datagrams: false,
             connect_timeout: Duration::from_secs(30),
             enable_early_data: false,
+            server_name: None,
         }
     }
 }
