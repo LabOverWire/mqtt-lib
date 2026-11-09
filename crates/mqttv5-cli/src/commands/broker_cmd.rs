@@ -139,7 +139,7 @@ pub struct RunArgs {
     #[arg(long, action = ArgAction::Append, env = "MQTT5_JWT_TRUSTED_ROLE_CLAIM", value_delimiter = ',')]
     pub jwt_trusted_role_claim: Vec<String>,
 
-    /// Whether JWT-derived roles are session-scoped (cleared on disconnect)
+    /// Has no effect: JWT-derived roles are kept until the user's next authentication replaces them
     #[arg(long, num_args = 0..=1, default_missing_value = "true", env = "MQTT5_JWT_SESSION_SCOPED_ROLES")]
     pub jwt_session_scoped_roles: Option<bool>,
 

@@ -639,7 +639,12 @@ impl ClientHandler {
         Ok(())
     }
 
-    async fn drop_unauthorized_subscriptions(&self, session: &mut ClientSession) {
+    /// Removes from `session` the subscriptions its user is no longer authorized for, and
+    /// returns their filters.
+    pub(super) async fn drop_unauthorized_subscriptions(
+        &self,
+        session: &mut ClientSession,
+    ) -> Vec<String> {
         let mut unauthorized = Vec::new();
         for topic_filter in session.subscriptions.keys() {
             let authorized = self
@@ -658,6 +663,7 @@ impl ClientHandler {
         for filter in &unauthorized {
             session.subscriptions.remove(filter);
         }
+        unauthorized
     }
 }
 

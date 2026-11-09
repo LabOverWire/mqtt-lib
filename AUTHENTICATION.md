@@ -115,6 +115,8 @@ mqttv5 broker \
 
 ## Authorization (ACL)
 
+An ACL file (`--acl-file`) authorizes clients whichever authentication method they use: password, SCRAM-SHA-256, JWT or federated JWT. The user an ACL rule names is the authenticated username, for JWT the token's `sub` claim, and for federated JWT the user ID built from the issuer and `sub` (see Federated JWT).
+
 ### File Format
 
 ```
@@ -143,6 +145,12 @@ assign bob sensors
 3. Wildcard user rules (`user *`) checked last
 4. Default permission applied if no rule matches (deny unless `allow_all` mode)
 
+In the user-rule step, a best-matching rule that doesn't grant what is asked, such as a `read` rule for a PUBLISH, doesn't decide: the highest-ranked user rule below it that denies or grants it decides if it is a deny rule, and otherwise the check goes on to the next step. So `alice data/# deny` with `alice data/x read` refuses alice a PUBLISH to `data/x`. In the wildcard-rule step the best-matching rule decides.
+
+A rule matches a subscription filter only if it matches every topic the filter does: `allow a/+` matches `a/+` and `a/b`, not `a/#` or `a/+/c`. A shared subscription (`$share/group/filter`) is checked as `filter`, whatever its group. A rule that names `$share/group/...` doesn't match that group's subscriptions.
+
+A subscription is checked when it is made. Before each message is sent, its topic is checked against the rules again, and it is withheld if the rule that decides that topic is a deny rule. In the user-rule and wildcard-rule steps, the matching rule with the highest rank decides, and of two with the same rank the first added: a rule's rank is 50, less 10 for each `+` or `#` in its pattern, plus the pattern's length in bytes, with `%u` counted as written. So `deny data/secret/#` decides what a client subscribed to `data/#` would otherwise receive under `allow data/#`, while `deny +/secret/#` loses to it, and a longer pattern can outrank one with fewer wildcards. In the role step, any matching role deny rule wins over every role allow rule. A rule that only allows writing doesn't decide delivery: the highest-ranked rule below it in the same step does, if it is a deny rule, so a write grant on part of a tree a deny rule covers leaves that part withheld, as a SUBSCRIBE to it would be refused. A topic no rule denies is delivered, and a delivery already started is completed. A withheld message is dropped, and is not offered to another member of a shared subscription group.
+
 ### Username Substitution (`%u`)
 
 ACL topic patterns support `%u` as a placeholder for the authenticated username. The broker expands `%u` to the current user's identity before matching, enabling a single rule to scope every user to their own topic namespace.
@@ -161,7 +169,7 @@ assign alice db-user
 assign bob db-user
 ```
 
-Anonymous clients (no authenticated username) never match patterns containing `%u`. Usernames containing MQTT special characters (`+`, `#`, `/`) are also excluded from `%u` expansion to prevent wildcard and topic-level injection.
+Anonymous clients (no authenticated username) never match patterns containing `%u`. Usernames containing MQTT special characters (`+`, `#`, `/`), or starting with `$`, are also excluded from `%u` expansion to prevent wildcard and topic-level injection and access to `$SYS` and the other topics reserved to the broker. An allow rule with `%u` doesn't match such a user. A deny rule with `%u` matches every topic for that user, ranked as written, so a matching user rule, or a wildcard rule that outranks it, still decides.
 
 `%u` can be combined with MQTT wildcards:
 
@@ -226,7 +234,7 @@ mqttv5 acl list -f acl.txt
 | `--jwt-role-map` | Claim-to-role mapping (repeatable) |
 | `--jwt-default-roles` | Default roles for authenticated users (comma-separated) |
 | `--jwt-trusted-role-claim` | Trusted role claim paths (repeatable) |
-| `--jwt-session-scoped-roles` | Clear roles on disconnect |
+| `--jwt-session-scoped-roles` | Has no effect: roles are kept until the user's next authentication replaces them |
 | `--jwt-role-merge-mode` | merge or replace (deprecated, use `--jwt-auth-mode`) |
 | `--jwt-issuer-prefix` | Custom prefix for user ID namespacing |
 | `--jwt-config-file` | JSON config for multi-issuer |
@@ -329,7 +337,7 @@ mqttv5 broker \
 
 ### ComprehensiveAuthProvider
 
-The primary broker auth provider wraps `PasswordAuthProvider` + `AclManager` into a single provider handling both authentication and authorization. Factory methods include `from_files()`, `with_password_file_and_allow_all_acl()`, and `with_providers()`. Both password and ACL files support live reloading.
+The primary broker auth provider wraps `PasswordAuthProvider` + `AclManager` into a single provider handling both authentication and authorization. Factory methods include `from_files()`, `with_password_file_and_allow_all_acl()`, and `with_providers()`. Both password and ACL files support live reloading. `reload()` on the provider or on its `AclManager` replaces the rules in place, so connections already open use the new rules at once, for delivery as for subscribing and publishing. The broker's configuration hot-reload builds a new provider instead, which applies to connections made after it: a connection already open keeps the rules it connected with until it reconnects.
 
 ### CompositeAuthProvider
 
@@ -342,6 +350,8 @@ Authorization modes control how publish/subscribe checks combine:
 | `PrimaryOnly` (default) | Only primary provider's authorization checked |
 | `Or` | Allowed if either provider authorizes |
 | `And` | Allowed only if both providers authorize |
+
+Before each message is sent, `Or` mode delivers it if neither provider withholds it, or if one withholds it and the other doesn't withhold it and grants reading its topic; `And` mode delivers it if neither provider withholds it.
 
 ## Session Security
 

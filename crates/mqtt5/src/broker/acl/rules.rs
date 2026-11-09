@@ -5,8 +5,11 @@ use crate::validation::topic_matches_filter;
 use std::borrow::Cow;
 use std::collections::HashSet;
 
+/// Whether `name` can't stand for a topic level: it holds a wildcard or a level separator, or
+/// it starts with `$`, which would make a pattern starting with `%u` name `$SYS` and the other
+/// topics reserved to the broker.
 fn username_contains_mqtt_special_chars(name: &str) -> bool {
-    name.contains('+') || name.contains('#') || name.contains('/')
+    name.contains(['+', '#', '/']) || name.starts_with('$')
 }
 
 fn expand_pattern<'a>(pattern: &'a str, username: Option<&str>) -> Option<Cow<'a, str>> {
@@ -18,6 +21,44 @@ fn expand_pattern<'a>(pattern: &'a str, username: Option<&str>) -> Option<Cow<'a
         return None;
     }
     Some(Cow::Owned(pattern.replace("%u", name)))
+}
+
+/// A deny rule with `%u` covers a user whose name can't be expanded into a topic, whatever the
+/// topic, so that the name doesn't get the user out of it. Other rules don't match that user.
+fn pattern_matches(
+    pattern: &str,
+    permission: Permission,
+    username: Option<&str>,
+    topic: &str,
+) -> bool {
+    match expand_pattern(pattern, username) {
+        Some(expanded) => within_pattern(topic, &expanded),
+        None => permission.is_deny() && username.is_some(),
+    }
+}
+
+/// Whether every topic that `topic_or_filter` names matches `pattern`: a filter is within a
+/// pattern only if the pattern covers each topic it subscribes to.
+fn within_pattern(topic_or_filter: &str, pattern: &str) -> bool {
+    if !topic_or_filter.contains(['+', '#']) {
+        return topic_matches_filter(topic_or_filter, pattern);
+    }
+    if topic_or_filter.starts_with('$') && pattern.starts_with(['+', '#']) {
+        return false;
+    }
+    if topic_or_filter == "#" {
+        return matches!(pattern, "#" | "+/#");
+    }
+    let mut filter_levels = topic_or_filter.split('/');
+    let mut pattern_levels = pattern.split('/');
+    loop {
+        match (filter_levels.next(), pattern_levels.next()) {
+            (_, Some("#")) | (None, None) => return true,
+            (Some(level), Some(pattern_level))
+                if level != "#" && (pattern_level == "+" || level == pattern_level) => {}
+            _ => return false,
+        }
+    }
 }
 
 /// Access permissions for topics
@@ -93,10 +134,7 @@ impl AclRule {
             return false;
         }
 
-        let Some(expanded) = expand_pattern(&self.topic_pattern, username) else {
-            return false;
-        };
-        topic_matches_filter(topic, &expanded)
+        pattern_matches(&self.topic_pattern, self.permission, username, topic)
     }
 }
 
@@ -118,10 +156,7 @@ impl RoleRule {
 
     #[must_use]
     pub fn matches(&self, username: Option<&str>, topic: &str) -> bool {
-        let Some(expanded) = expand_pattern(&self.topic_pattern, username) else {
-            return false;
-        };
-        topic_matches_filter(topic, &expanded)
+        pattern_matches(&self.topic_pattern, self.permission, username, topic)
     }
 }
 

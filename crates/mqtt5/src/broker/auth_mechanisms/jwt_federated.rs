@@ -404,6 +404,25 @@ impl AuthProvider for FederatedJwtAuthProvider {
         })
     }
 
+    fn checks_delivery(&self) -> bool {
+        self.acl_manager.is_some()
+    }
+
+    fn authorize_delivery<'a>(
+        &'a self,
+        _client_id: &str,
+        user_id: Option<&'a str>,
+        topic: &'a str,
+    ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move {
+            let Some(ref acl) = self.acl_manager else {
+                return true;
+            };
+            let acl_guard = acl.read().await;
+            acl_guard.check_delivery(user_id, topic).await
+        })
+    }
+
     fn supports_enhanced_auth(&self) -> bool {
         true
     }
@@ -496,19 +515,6 @@ impl AuthProvider for FederatedJwtAuthProvider {
         _user_id: Option<&'a str>,
     ) -> Pin<Box<dyn Future<Output = Result<EnhancedAuthResult>> + Send + 'a>> {
         self.authenticate_enhanced(auth_method, auth_data, client_id)
-    }
-
-    fn cleanup_session<'a>(
-        &'a self,
-        user_id: &'a str,
-    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-        Box::pin(async move {
-            if let Some(ref acl) = self.acl_manager {
-                let acl_guard = acl.read().await;
-                acl_guard.clear_session_bound_roles(user_id).await;
-                debug!(user_id = %user_id, "Cleaned up session-bound federated roles");
-            }
-        })
     }
 }
 

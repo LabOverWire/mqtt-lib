@@ -207,6 +207,8 @@ pub struct JwtIssuerConfig {
     pub default_roles: Vec<String>,
     #[serde(default)]
     pub trusted_role_claims: Vec<String>,
+    /// Has no effect: a user's federated roles are kept until the user's next authentication
+    /// replaces them. Accepted so that configurations that set it still load.
     #[serde(default = "default_session_scoped_roles")]
     pub session_scoped_roles: bool,
     #[serde(default)]
@@ -285,6 +287,7 @@ impl JwtIssuerConfig {
         self
     }
 
+    /// Has no effect; see `session_scoped_roles`.
     #[must_use]
     pub fn with_session_scoped_roles(mut self, session_scoped: bool) -> Self {
         self.session_scoped_roles = session_scoped;

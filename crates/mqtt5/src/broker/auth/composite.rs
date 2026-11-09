@@ -38,6 +38,35 @@ impl CompositeAuthProvider {
         self.authorization_mode = mode;
         self
     }
+
+    /// Whether `provider` withholds a message on `topic` from the client.
+    async fn withholds(
+        provider: &dyn AuthProvider,
+        client_id: &str,
+        user_id: Option<&str>,
+        topic: &str,
+    ) -> bool {
+        provider.checks_delivery() && !provider.authorize_delivery(client_id, user_id, topic).await
+    }
+
+    /// `Or` mode's delivery: a message no provider withholds is delivered; one that a provider
+    /// withholds is delivered only if a provider that doesn't withhold it grants reading its
+    /// topic, as it would a subscription to it, so that a provider with no rule for the topic
+    /// doesn't outvote the other's deny.
+    async fn either_delivers(&self, client_id: &str, user_id: Option<&str>, topic: &str) -> bool {
+        let primary = self.primary.as_ref();
+        let fallback = self.fallback.as_ref();
+        let primary_withholds = Self::withholds(primary, client_id, user_id, topic).await;
+        let fallback_withholds = Self::withholds(fallback, client_id, user_id, topic).await;
+        if !primary_withholds && !fallback_withholds {
+            return true;
+        }
+        (!primary_withholds && primary.authorize_subscribe(client_id, user_id, topic).await)
+            || (!fallback_withholds
+                && fallback
+                    .authorize_subscribe(client_id, user_id, topic)
+                    .await)
+    }
 }
 
 impl AuthProvider for CompositeAuthProvider {
@@ -118,6 +147,40 @@ impl AuthProvider for CompositeAuthProvider {
                         && self
                             .fallback
                             .authorize_subscribe(&client_id, user_id, topic_filter)
+                            .await
+                }
+            }
+        })
+    }
+
+    fn checks_delivery(&self) -> bool {
+        match self.authorization_mode {
+            AuthorizationMode::PrimaryOnly => self.primary.checks_delivery(),
+            AuthorizationMode::Or | AuthorizationMode::And => {
+                self.primary.checks_delivery() || self.fallback.checks_delivery()
+            }
+        }
+    }
+
+    fn authorize_delivery<'a>(
+        &'a self,
+        client_id: &str,
+        user_id: Option<&'a str>,
+        topic: &'a str,
+    ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        let client_id = client_id.to_string();
+        let mode = self.authorization_mode;
+        Box::pin(async move {
+            match mode {
+                AuthorizationMode::PrimaryOnly => {
+                    self.primary
+                        .authorize_delivery(&client_id, user_id, topic)
+                        .await
+                }
+                AuthorizationMode::Or => self.either_delivers(&client_id, user_id, topic).await,
+                AuthorizationMode::And => {
+                    !Self::withholds(self.primary.as_ref(), &client_id, user_id, topic).await
+                        && !Self::withholds(self.fallback.as_ref(), &client_id, user_id, topic)
                             .await
                 }
             }

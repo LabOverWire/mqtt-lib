@@ -221,7 +221,11 @@ impl WasmClientHandler {
             != mqtt5_protocol::packet::subscribe::RetainHandling::DoNotSend
         {
             let retained = self.router.get_retained_messages(&filter.filter).await;
+            let delivery_check = self.delivery_check();
             for mut msg in retained {
+                if !delivery_check.allows(&msg, None).await {
+                    continue;
+                }
                 msg.retain = true;
                 self.send_publish(msg, writer)?;
             }

@@ -265,7 +265,7 @@ impl ClientHandler {
         None
     }
 
-    async fn persist_or_restore_routes<F>(
+    pub(super) async fn persist_or_restore_routes<F>(
         &mut self,
         slot: &SessionSlotGuard,
         update: F,

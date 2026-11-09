@@ -629,7 +629,29 @@ impl ClientHandler {
         result
     }
 
+    /// Whether the client's authorization covers `publish`. A delivery already started, sent
+    /// again with DUP and its packet identifier, is completed.
+    async fn delivery_authorized(&self, publish: &PublishPacket) -> bool {
+        if !self.auth_provider.checks_delivery() || (publish.dup && publish.packet_id.is_some()) {
+            return true;
+        }
+        self.auth_provider
+            .authorize_delivery(
+                self.client_id.as_deref().unwrap_or_default(),
+                self.user_id.as_deref(),
+                &publish.topic_name,
+            )
+            .await
+    }
+
     pub(super) async fn send_publish(&mut self, mut publish: PublishPacket) -> Result<()> {
+        if !self.delivery_authorized(&publish).await {
+            debug!(
+                topic = %publish.topic_name,
+                "Withholding PUBLISH on a topic the client is not authorized to receive"
+            );
+            return Ok(());
+        }
         publish.protocol_version = self.protocol_version;
         if publish.qos != QoS::AtMostOnce {
             debug_assert!(

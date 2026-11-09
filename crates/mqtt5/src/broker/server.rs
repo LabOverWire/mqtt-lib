@@ -230,6 +230,22 @@ fn create_jwt_provider(
     Ok(Arc::new(provider) as Arc<dyn AuthProvider>)
 }
 
+/// `authenticator` authorizing by the ACL file, when the configuration names one
+async fn with_acl(
+    authenticator: Arc<dyn AuthProvider>,
+    config: &crate::broker::config::AuthConfig,
+) -> Result<Arc<dyn AuthProvider>> {
+    use crate::broker::acl::AclManager;
+    use crate::broker::auth::AclAuthorizedProvider;
+
+    let Some(acl_file) = &config.acl_file else {
+        return Ok(authenticator);
+    };
+    let acl_manager = AclManager::from_file(acl_file).await?;
+    info!("ACL authorization enabled");
+    Ok(Arc::new(AclAuthorizedProvider::new(authenticator, acl_manager)) as Arc<dyn AuthProvider>)
+}
+
 async fn create_federated_jwt_provider(
     config: &crate::broker::config::AuthConfig,
 ) -> Result<Arc<dyn AuthProvider>> {
@@ -337,8 +353,8 @@ async fn create_auth_provider(
     };
 
     let provider = match config.auth_method {
-        AuthMethod::ScramSha256 => create_scram_provider(config)?,
-        AuthMethod::Jwt => create_jwt_provider(config)?,
+        AuthMethod::ScramSha256 => with_acl(create_scram_provider(config)?, config).await?,
+        AuthMethod::Jwt => with_acl(create_jwt_provider(config)?, config).await?,
         AuthMethod::JwtFederated => create_federated_jwt_provider(config).await?,
         AuthMethod::Password | AuthMethod::None => {
             create_password_or_anonymous_provider(config).await?

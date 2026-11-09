@@ -468,3 +468,132 @@ async fn disconnect_completes_only_after_its_writes_are_durable() {
         .unwrap()
         .is_empty());
 }
+
+struct R4Provider;
+
+impl crate::broker::auth::AuthProvider for R4Provider {
+    fn authenticate<'a>(
+        &'a self,
+        _c: &'a ConnectPacket,
+        _a: SocketAddr,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = crate::error::Result<crate::broker::auth::AuthResult>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async { Ok(crate::broker::auth::AuthResult::success()) })
+    }
+    fn authorize_publish<'a>(
+        &'a self,
+        _c: &str,
+        _u: Option<&'a str>,
+        _t: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
+        Box::pin(async { true })
+    }
+    fn authorize_subscribe<'a>(
+        &'a self,
+        _c: &str,
+        user: Option<&'a str>,
+        filter: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move { user != Some("bob") || !filter.starts_with("old/") })
+    }
+    fn supports_enhanced_auth(&self) -> bool {
+        true
+    }
+    fn authenticate_enhanced<'a>(
+        &'a self,
+        method: &'a str,
+        _d: Option<&'a [u8]>,
+        _c: &'a str,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = crate::error::Result<crate::broker::auth::EnhancedAuthResult>,
+                > + Send
+                + 'a,
+        >,
+    > {
+        let method = method.to_string();
+        Box::pin(async move {
+            Ok(crate::broker::auth::EnhancedAuthResult::success_with_user(
+                method,
+                "alice".to_string(),
+            ))
+        })
+    }
+    fn reauthenticate<'a>(
+        &'a self,
+        method: &'a str,
+        _d: Option<&'a [u8]>,
+        _c: &'a str,
+        _u: Option<&'a str>,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = crate::error::Result<crate::broker::auth::EnhancedAuthResult>,
+                > + Send
+                + 'a,
+        >,
+    > {
+        let method = method.to_string();
+        Box::pin(async move {
+            Ok(crate::broker::auth::EnhancedAuthResult::success_with_user(
+                method,
+                "bob".to_string(),
+            ))
+        })
+    }
+}
+
+#[tokio::test]
+async fn failed_reauthentication_write_disconnects_and_keeps_the_route() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = BrokerConfig::default()
+        .with_bind_address("127.0.0.1:0".parse::<SocketAddr>().unwrap())
+        .with_storage(StorageConfig {
+            backend: BackendKind::File,
+            base_dir: dir.path().to_path_buf(),
+            enable_persistence: true,
+            cleanup_interval: Duration::from_secs(3600),
+            ..Default::default()
+        });
+    let mut broker = MqttBroker::with_config(config)
+        .await
+        .unwrap()
+        .with_auth_provider(Arc::new(R4Provider));
+    let addr = broker.local_addr().unwrap().to_string();
+    let storage = broker.storage().unwrap();
+    let router = broker.router();
+    tokio::spawn(async move {
+        let _ = broker.run().await;
+    });
+    sleep(Duration::from_millis(100)).await;
+    let DynamicStorage::File(backend) = &*storage else {
+        panic!("file storage expected");
+    };
+    let options = ConnectOptions::new("rx")
+        .with_clean_start(false)
+        .with_session_expiry_interval(3600)
+        .with_authentication_method("X");
+    let (mut client, connack) = connect_with(&addr, options).await;
+    assert_eq!(connack_reason(connack.as_ref()), Some(ReasonCode::Success));
+    client.subscribed("old/t").await;
+
+    backend.break_next_session_write().await;
+    let mut reauth = crate::packet::auth::AuthPacket::new(ReasonCode::ReAuthenticate);
+    reauth.properties.set_authentication_method("X".to_string());
+    client.send(&reauth).await;
+    let replies = client.replies(500).await;
+    assert!(
+        matches!(replies.as_slice(), [Packet::Disconnect(_)]),
+        "{replies:?}"
+    );
+    sleep(Duration::from_millis(300)).await;
+    assert!(router.has_subscription("rx", "old/t").await);
+    let stored = storage.get_session("rx").await.unwrap().unwrap();
+    assert_eq!(stored.user_id.as_deref(), Some("alice"));
+}

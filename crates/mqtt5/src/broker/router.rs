@@ -1277,6 +1277,34 @@ impl MessageRouter {
             == Unsubscribed::Removed
     }
 
+    /// Removes `client_id`'s subscriptions to `topic_filter` on every flow, on behalf of the
+    /// handler holding `generation`; a displaced handler changes nothing.
+    pub async fn unsubscribe_on_every_flow(
+        &self,
+        generation: Option<u64>,
+        client_id: &str,
+        topic_filter: &str,
+    ) {
+        let (actual_filter, share_group) = parse_shared_subscription(topic_filter);
+        let subscriptions = if Self::has_wildcards(actual_filter) {
+            &self.wildcard_subscriptions
+        } else {
+            &self.exact_subscriptions
+        };
+        let mut subs_map = subscriptions.write().await;
+        if !self.generation_is_current(generation, client_id).await {
+            return;
+        }
+        if let Some(subs) = subs_map.get_mut(actual_filter) {
+            subs.retain(|sub| {
+                !(sub.client_id == client_id && sub.share_group.as_deref() == share_group)
+            });
+            if subs.is_empty() {
+                subs_map.remove(actual_filter);
+            }
+        }
+    }
+
     /// Removes a subscription on behalf of the handler holding `generation`; a displaced
     /// handler gets `Fenced` and changes nothing.
     pub async fn unsubscribe_as(

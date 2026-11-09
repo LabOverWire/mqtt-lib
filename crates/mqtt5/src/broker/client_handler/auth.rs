@@ -38,7 +38,7 @@ impl ClientHandler {
         }
 
         match auth.reason_code {
-            ReasonCode::ContinueAuthentication => {
+            ReasonCode::ContinueAuthentication if self.auth_state == AuthState::InProgress => {
                 self.handle_continue_auth(&auth_method, &auth, &client_id)
                     .await
             }
@@ -59,6 +59,48 @@ impl ClientHandler {
         }
     }
 
+    /// A re-authentication that names a user makes it the connection's and the session's, and
+    /// the session keeps only the subscriptions that user is now authorized for, whether the
+    /// user changed or only what it may do. One that names none keeps them.
+    async fn adopt_reauthenticated_user(&mut self, user_id: Option<String>) -> Result<()> {
+        let Some(user_id) = user_id else {
+            return Ok(());
+        };
+        let unchanged = self.user_id.as_deref() == Some(user_id.as_str());
+        let owner = Some(user_id);
+        self.user_id.clone_from(&owner);
+        let Some(mut session) = self.session.take() else {
+            return Ok(());
+        };
+        let dropped = self.drop_unauthorized_subscriptions(&mut session).await;
+        if unchanged && dropped.is_empty() {
+            self.session = Some(session);
+            return Ok(());
+        }
+        session.user_id.clone_from(&owner);
+        let kept = session.subscriptions.clone();
+        let slot = self.router.lock_session(&session.client_id).await;
+        if !self
+            .router
+            .is_current_owner(&session.client_id, self.generation)
+            .await
+        {
+            self.session = Some(session);
+            return Ok(());
+        }
+        for filter in &dropped {
+            self.router
+                .unsubscribe_on_every_flow(Some(self.generation), &session.client_id, filter)
+                .await;
+        }
+        self.session = Some(session);
+        self.persist_or_restore_routes(&slot, move |session| {
+            session.user_id = owner;
+            session.subscriptions = kept;
+        })
+        .await
+    }
+
     async fn handle_continue_auth(
         &mut self,
         auth_method: &str,
@@ -73,12 +115,13 @@ impl ClientHandler {
         match result.status {
             EnhancedAuthStatus::Success => {
                 self.auth_state = AuthState::Completed;
-                self.user_id = result.user_id;
 
                 if let Some(pending) = self.pending_connect.take() {
+                    self.user_id = result.user_id;
                     self.connack_auth_data = result.auth_data;
                     self.authenticated_connect = Some(pending);
                 } else {
+                    self.adopt_reauthenticated_user(result.user_id).await?;
                     let success_auth = Self::auth_success(result.auth_method, result.auth_data)?;
                     self.write_to_client(Packet::Auth(success_auth)).await?;
                 }
@@ -119,7 +162,7 @@ impl ClientHandler {
         auth: &AuthPacket,
         client_id: &str,
     ) -> Result<()> {
-        if self.auth_state != AuthState::Completed {
+        if self.auth_state == AuthState::NotStarted || self.pending_connect.is_some() {
             return Err(MqttError::ProtocolError(
                 "Cannot re-authenticate before initial auth completes".to_string(),
             ));
@@ -137,11 +180,13 @@ impl ClientHandler {
 
         match result.status {
             EnhancedAuthStatus::Success => {
-                self.user_id = result.user_id;
+                self.auth_state = AuthState::Completed;
+                self.adopt_reauthenticated_user(result.user_id).await?;
                 let success_auth = Self::auth_success(result.auth_method, result.auth_data)?;
                 self.write_to_client(Packet::Auth(success_auth)).await?;
             }
             EnhancedAuthStatus::Continue => {
+                self.auth_state = AuthState::InProgress;
                 let continue_auth =
                     AuthPacket::continue_authentication(result.auth_method, result.auth_data)?;
                 self.write_to_client(Packet::Auth(continue_auth)).await?;

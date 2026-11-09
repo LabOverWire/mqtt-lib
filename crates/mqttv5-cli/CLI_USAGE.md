@@ -114,7 +114,7 @@ mqttv5 broker generate-config [--output FILE] [--format json|toml]
 | `--max-clients <N>` | Maximum concurrent clients | `10000` |
 | `--allow-anonymous` | Allow anonymous connections | None (prompted if no auth configured) |
 | `--auth-password-file <FILE>` | Password file for authentication | None |
-| `--acl-file <FILE>` | ACL file for authorization | None |
+| `--acl-file <FILE>` | ACL file for authorization, with any `--auth-method` | None |
 | `--auth-method <METHOD>` | Authentication method: `password`, `scram`, `jwt`, `jwt-federated` | `password` if auth file provided |
 | `--scram-file <FILE>` | SCRAM credentials file path | None |
 | `--tls-cert <FILE>` | TLS certificate file (PEM format) | None |
@@ -166,7 +166,7 @@ mqttv5 0.29.0 stores sessions in a new format (storage version 2). On its first 
 | `--jwt-role-merge-mode <MODE>` | Role merge mode: `merge` or `replace` (deprecated, use `--jwt-auth-mode`) | `merge` |
 | `--jwt-auth-mode <MODE>` | Federated auth mode: `identity-only`, `claim-binding`, `trusted-roles` | None |
 | `--jwt-trusted-role-claim <PATH>` | Trusted role claim paths, can be specified multiple times | None |
-| `--jwt-session-scoped-roles` | Whether JWT roles are session-scoped (cleared on disconnect) | None |
+| `--jwt-session-scoped-roles` | Has no effect: JWT roles are kept until the user's next authentication replaces them | None |
 | `--jwt-issuer-prefix <PREFIX>` | Custom issuer prefix for user ID namespacing | None |
 | `--jwt-config-file <FILE>` | Federated JWT config file (JSON) for multi-issuer setup | None |
 
@@ -1566,12 +1566,16 @@ assign bob actuator-writer
 ```
 
 **Rule Priority:**
-- More specific rules override general rules
 - User-specific rules take precedence over wildcard rules
-- Deny rules have highest priority
+- Within user rules and within wildcard rules, the matching rule with the highest rank decides: a rule's rank is 50, less 10 for each `+` or `#` in its pattern, plus the pattern's length in bytes, with `%u` counted as written
+- Of two rules with the same rank, the one added first decides
+- A deny rule decides only when it is that rule, so `deny data/secret/#` beats `allow data/#`, while `deny +/secret/#` does not
+- A user rule that doesn't grant what is asked, such as `read` for a publish, doesn't decide: the best user rule below it that denies or grants it does if it is a deny rule, and otherwise the role and wildcard rules are checked
+- Among role rules, any matching deny wins
+- A rule matches a subscription filter only if it matches every topic the filter does, so `read a/+` grants `a/+` and `a/b` but not `a/#`
 
 **Security:**
-- `%u` substitution rejects usernames containing `+`, `#`, or `/` to prevent wildcard injection
+- `%u` substitution rejects usernames containing `+`, `#`, or `/`, or starting with `$`, to prevent wildcard injection and access to `$SYS` topics: an allow rule with `%u` doesn't match such a user, and a deny rule with `%u` matches every topic for that user, ranked as written
 - Anonymous clients never match `%u` patterns
 - Sessions are bound to authenticated user identity -- reconnecting with a different user is rejected
 - On session restore, subscriptions are re-checked against current ACL rules

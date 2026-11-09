@@ -8,6 +8,7 @@ mod rules;
 pub use rules::{AclRule, FederatedRoleEntry, Permission, Role, RoleRule};
 
 use crate::error::{MqttError, Result};
+use crate::validation::parse_shared_subscription;
 use std::collections::{HashMap, HashSet};
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
@@ -391,35 +392,74 @@ impl AclManager {
             .await
     }
 
+    /// A shared subscription is checked as the filter it subscribes to, whatever its group.
     pub async fn check_subscribe(&self, username: Option<&str>, topic_filter: &str) -> bool {
-        self.check_permission(username, topic_filter, |p| p.allows_read())
+        let (filter, _) = parse_shared_subscription(topic_filter);
+        self.check_permission(username, filter, |p| p.allows_read())
             .await
     }
 
-    async fn check_permission<F>(&self, username: Option<&str>, topic: &str, check: F) -> bool
+    /// Whether a message on `topic` may be sent to a client whose subscription was authorized
+    /// when it was made: only a rule that denies the topic withholds it. A rule that only allows
+    /// writing doesn't decide: the next rule in the same step does if it is a deny rule.
+    pub async fn check_delivery(&self, username: Option<&str>, topic: &str) -> bool {
+        let rules = self.rules.read().await;
+        if let Some(verdict) = Self::delivery_verdict(&rules, username, topic, false) {
+            return verdict;
+        }
+        if let Some(verdict) = self
+            .role_verdict(username, topic, |p| p.allows_read())
+            .await
+        {
+            return verdict;
+        }
+        Self::delivery_verdict(&rules, username, topic, true).unwrap_or(true)
+    }
+
+    fn delivery_verdict(
+        rules: &[AclRule],
+        username: Option<&str>,
+        topic: &str,
+        wildcard_only: bool,
+    ) -> Option<bool> {
+        let (best, _) = Self::find_best_direct_rule(rules, username, topic, wildcard_only);
+        let best = best?;
+        if best.permission.is_deny() {
+            return Some(false);
+        }
+        if best.permission.allows_read() {
+            return Some(true);
+        }
+        Self::denied_below(rules, username, topic, wildcard_only, |p| p.allows_read())
+            .then_some(false)
+    }
+
+    /// Whether the best rule that denies or passes `check`, below a best rule that does
+    /// neither, is a deny rule.
+    fn denied_below<F>(
+        rules: &[AclRule],
+        username: Option<&str>,
+        topic: &str,
+        wildcard_only: bool,
+        check: F,
+    ) -> bool
     where
         F: Fn(Permission) -> bool,
     {
-        let rules = self.rules.read().await;
+        let deciding: Vec<AclRule> = rules
+            .iter()
+            .filter(|rule| rule.permission.is_deny() || check(rule.permission))
+            .cloned()
+            .collect();
+        Self::find_best_direct_rule(&deciding, username, topic, wildcard_only)
+            .0
+            .is_some_and(|rule| rule.permission.is_deny())
+    }
 
-        let (direct_match, direct_specificity) =
-            Self::find_best_direct_rule(&rules, username, topic, false);
-
-        if let Some(rule) = direct_match {
-            debug!(
-                "Direct user rule matched: user={:?}, topic={}, permission={:?}, specificity={}",
-                username, topic, rule.permission, direct_specificity
-            );
-
-            if rule.permission.is_deny() {
-                return false;
-            }
-
-            if check(rule.permission) {
-                return true;
-            }
-        }
-
+    async fn role_verdict<F>(&self, username: Option<&str>, topic: &str, check: F) -> Option<bool>
+    where
+        F: Fn(Permission) -> bool,
+    {
         if let Some(user) = username {
             let user_roles_map = self.user_roles.read().await;
             let fed_roles_map = self.federated_user_roles.read().await;
@@ -459,13 +499,48 @@ impl AclManager {
                 }
 
                 if found_deny {
-                    return false;
+                    return Some(false);
                 }
 
                 if found_allow {
-                    return true;
+                    return Some(true);
                 }
             }
+        }
+
+        None
+    }
+
+    async fn check_permission<F>(&self, username: Option<&str>, topic: &str, check: F) -> bool
+    where
+        F: Fn(Permission) -> bool,
+    {
+        let rules = self.rules.read().await;
+
+        let (direct_match, direct_specificity) =
+            Self::find_best_direct_rule(&rules, username, topic, false);
+
+        if let Some(rule) = direct_match {
+            debug!(
+                "Direct user rule matched: user={:?}, topic={}, permission={:?}, specificity={}",
+                username, topic, rule.permission, direct_specificity
+            );
+
+            if rule.permission.is_deny() {
+                return false;
+            }
+
+            if check(rule.permission) {
+                return true;
+            }
+
+            if Self::denied_below(&rules, username, topic, false, &check) {
+                return false;
+            }
+        }
+
+        if let Some(verdict) = self.role_verdict(username, topic, &check).await {
+            return verdict;
         }
 
         let (wildcard_match, wildcard_specificity) =
@@ -546,63 +621,229 @@ impl AclManager {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_permission_parsing() {
-        assert_eq!("read".parse::<Permission>().unwrap(), Permission::Read);
-        assert_eq!("write".parse::<Permission>().unwrap(), Permission::Write);
-        assert_eq!(
-            "readwrite".parse::<Permission>().unwrap(),
-            Permission::ReadWrite
-        );
-        assert_eq!("deny".parse::<Permission>().unwrap(), Permission::Deny);
-        assert_eq!("subscribe".parse::<Permission>().unwrap(), Permission::Read);
-        assert_eq!("publish".parse::<Permission>().unwrap(), Permission::Write);
-        assert_eq!("all".parse::<Permission>().unwrap(), Permission::ReadWrite);
-
-        assert!("invalid".parse::<Permission>().is_err());
+    #[tokio::test]
+    async fn a_write_rule_does_not_hide_a_deny_rule_from_delivery() {
+        let acl = AclManager::new();
+        for (user, pattern, permission) in [
+            ("alice", "data/#", Permission::Read),
+            ("alice", "data/secret/#", Permission::Write),
+            ("*", "data/secret/#", Permission::Deny),
+        ] {
+            acl.add_rule(AclRule::new(
+                user.to_string(),
+                pattern.to_string(),
+                permission,
+            ))
+            .await;
+        }
+        assert!(!acl.check_delivery(Some("alice"), "data/secret/x").await);
+        assert!(acl.check_delivery(Some("alice"), "data/open").await);
     }
 
-    #[test]
-    fn test_permission_checks() {
-        assert!(Permission::Read.allows_read());
-        assert!(!Permission::Read.allows_write());
-
-        assert!(!Permission::Write.allows_read());
-        assert!(Permission::Write.allows_write());
-
-        assert!(Permission::ReadWrite.allows_read());
-        assert!(Permission::ReadWrite.allows_write());
-
-        assert!(!Permission::Deny.allows_read());
-        assert!(!Permission::Deny.allows_write());
-        assert!(Permission::Deny.is_deny());
+    #[tokio::test]
+    async fn a_narrower_write_rule_does_not_hide_a_deny_rule_in_its_tier() {
+        let acl = AclManager::new();
+        for (pattern, permission) in [
+            ("#", Permission::Read),
+            ("data/#", Permission::Deny),
+            ("data/in/#", Permission::Write),
+        ] {
+            acl.add_rule(AclRule::new(
+                "*".to_string(),
+                pattern.to_string(),
+                permission,
+            ))
+            .await;
+        }
+        assert!(!acl.check_delivery(None, "data/in/x").await);
+        assert!(acl.check_delivery(None, "other").await);
     }
 
-    #[test]
-    fn test_acl_rule_matching() {
-        let rule = AclRule::new(
-            "alice".to_string(),
-            "sensors/+".to_string(),
-            Permission::Read,
-        );
+    async fn user_rules(rules: [(&str, Permission); 3]) -> AclManager {
+        let acl = AclManager::new();
+        for (pattern, permission) in rules {
+            let user = if pattern == "#" { "*" } else { "alice" };
+            acl.add_rule(AclRule::new(
+                user.to_string(),
+                pattern.to_string(),
+                permission,
+            ))
+            .await;
+        }
+        acl
+    }
 
-        assert!(rule.matches(Some("alice"), "sensors/temp"));
-        assert!(!rule.matches(Some("bob"), "sensors/temp"));
-        assert!(!rule.matches(None, "sensors/temp"));
+    #[tokio::test]
+    async fn a_user_write_rule_does_not_hide_a_user_deny_rule_from_subscribe() {
+        let acl = user_rules([
+            ("data/#", Permission::Deny),
+            ("data/x", Permission::Write),
+            ("#", Permission::ReadWrite),
+        ])
+        .await;
+        assert!(!acl.check_subscribe(Some("alice"), "data/x").await);
+        assert!(!acl.check_delivery(Some("alice"), "data/x").await);
+        assert!(acl.check_publish(Some("alice"), "data/x").await);
+        assert!(acl.check_subscribe(Some("alice"), "other").await);
+    }
 
-        assert!(rule.matches(Some("alice"), "sensors/temp"));
-        assert!(rule.matches(Some("alice"), "sensors/humidity"));
-        assert!(!rule.matches(Some("alice"), "actuators/fan"));
-        assert!(!rule.matches(Some("alice"), "sensors/temp/room1"));
+    #[tokio::test]
+    async fn a_user_read_rule_does_not_hide_a_user_deny_rule_from_publish() {
+        let acl = user_rules([
+            ("data/#", Permission::Deny),
+            ("data/x", Permission::Read),
+            ("#", Permission::ReadWrite),
+        ])
+        .await;
+        assert!(!acl.check_publish(Some("alice"), "data/x").await);
+        assert!(acl.check_subscribe(Some("alice"), "data/x").await);
+        assert!(acl.check_publish(Some("alice"), "other").await);
+    }
 
-        let wildcard_rule = AclRule::new(
+    #[tokio::test]
+    async fn a_user_write_rule_over_a_user_read_rule_still_falls_through_for_subscribe() {
+        let acl = user_rules([
+            ("data/#", Permission::Read),
+            ("data/x", Permission::Write),
+            ("#", Permission::Deny),
+        ])
+        .await;
+        assert!(!acl.check_subscribe(Some("alice"), "data/x").await);
+        assert!(!acl.check_delivery(Some("alice"), "data/x").await);
+    }
+
+    #[tokio::test]
+    async fn a_rule_grants_a_filter_only_if_it_covers_every_topic_of_the_filter() {
+        for (pattern, filter, granted) in [
+            ("a/+", "a/#", false),
+            ("a/+", "a/+", true),
+            ("a/+", "a/b", true),
+            ("a/+", "a/+/c", false),
+            ("a/+/#", "a/#", false),
+            ("a/+/#", "a/+/#", true),
+            ("a/b", "a/+", false),
+            ("a/#", "a/+/c/#", true),
+            ("a/#", "a", true),
+            ("+/#", "#", true),
+            ("+/+/#", "#", false),
+            ("#", "+", true),
+            ("+/x", "+/x", true),
+            ("+", "#", false),
+            ("#", "#", true),
+            ("#", "$SYS/#", false),
+            ("$SYS/#", "$SYS/+", true),
+        ] {
+            let acl = AclManager::new();
+            acl.add_rule(AclRule::new(
+                "*".to_string(),
+                pattern.to_string(),
+                Permission::Read,
+            ))
+            .await;
+            assert_eq!(
+                acl.check_subscribe(None, filter).await,
+                granted,
+                "{pattern} for {filter}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_write_rule_without_a_deny_rule_does_not_withhold_delivery() {
+        let acl = AclManager::new();
+        for (pattern, permission) in [
+            ("data/#", Permission::Read),
+            ("data/in/#", Permission::Write),
+        ] {
+            acl.add_rule(AclRule::new(
+                "*".to_string(),
+                pattern.to_string(),
+                permission,
+            ))
+            .await;
+        }
+        assert!(acl.check_delivery(None, "data/in/x").await);
+    }
+
+    #[tokio::test]
+    async fn a_percent_u_deny_rule_covers_a_user_whose_name_cant_be_expanded() {
+        let acl = AclManager::allow_all();
+        acl.add_rule(AclRule::new(
             "*".to_string(),
-            "public/#".to_string(),
+            "%u/secret/#".to_string(),
+            Permission::Deny,
+        ))
+        .await;
+        assert!(!acl.check_subscribe(Some("ab"), "ab/secret/x").await);
+        assert!(acl.check_subscribe(Some("ab"), "ab/open").await);
+        assert!(!acl.check_subscribe(Some("a/b"), "a/b/secret/x").await);
+        assert!(!acl.check_delivery(Some("a/b"), "a/b/secret/x").await);
+        assert!(!acl.check_subscribe(Some("a+b"), "anything").await);
+        assert!(acl.check_subscribe(None, "anything").await);
+    }
+
+    #[tokio::test]
+    async fn a_percent_u_allow_rule_gives_a_user_whose_name_cant_be_expanded_nothing() {
+        let acl = AclManager::new();
+        acl.add_rule(AclRule::new(
+            "*".to_string(),
+            "%u/#".to_string(),
             Permission::ReadWrite,
-        );
-        assert!(wildcard_rule.matches(Some("alice"), "public/messages"));
-        assert!(wildcard_rule.matches(Some("bob"), "public/status"));
-        assert!(wildcard_rule.matches(None, "public/announcements"));
+        ))
+        .await;
+        assert!(!acl.check_subscribe(Some("a/b"), "a/b/x").await);
+    }
+
+    #[tokio::test]
+    async fn a_percent_u_rule_does_not_give_a_dollar_username_the_brokers_topics() {
+        let acl = AclManager::new();
+        acl.add_rule(AclRule::new(
+            "*".to_string(),
+            "%u/#".to_string(),
+            Permission::ReadWrite,
+        ))
+        .await;
+        assert!(!acl.check_subscribe(Some("$SYS"), "$SYS/#").await);
+        assert!(!acl.check_publish(Some("$SYS"), "$SYS/broker/version").await);
+        assert!(acl.check_subscribe(Some("ab"), "ab/#").await);
+    }
+
+    #[tokio::test]
+    async fn a_deny_rule_applies_to_a_shared_subscription() {
+        let acl = AclManager::allow_all();
+        acl.add_rule(AclRule::new(
+            "*".to_string(),
+            "secret/#".to_string(),
+            Permission::Deny,
+        ))
+        .await;
+        assert!(!acl.check_subscribe(None, "$share/g/secret/x").await);
+        assert!(acl.check_subscribe(None, "$share/g/open/x").await);
+    }
+
+    #[tokio::test]
+    async fn an_allow_rule_applies_to_a_shared_subscription() {
+        let acl = AclManager::new();
+        acl.add_rule(AclRule::new(
+            "*".to_string(),
+            "open/#".to_string(),
+            Permission::ReadWrite,
+        ))
+        .await;
+        assert!(acl.check_subscribe(None, "$share/g/open/x").await);
+        assert!(!acl.check_subscribe(None, "$share/g/other/x").await);
+    }
+
+    #[tokio::test]
+    async fn a_rule_naming_a_share_group_does_not_match_a_shared_subscription() {
+        let acl = AclManager::new();
+        acl.add_rule(AclRule::new(
+            "*".to_string(),
+            "$share/g/#".to_string(),
+            Permission::ReadWrite,
+        ))
+        .await;
+        assert!(!acl.check_subscribe(None, "$share/g/open/x").await);
     }
 
     #[tokio::test]

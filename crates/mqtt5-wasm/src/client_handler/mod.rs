@@ -97,6 +97,42 @@ pub struct WasmClientHandler {
 
 static HANDLER_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
 
+pub(super) struct DeliveryCheck {
+    auth_provider: Arc<dyn AuthProvider>,
+    client_id: String,
+    user_id: Option<String>,
+    session: Rc<RefCell<Option<ClientSession>>>,
+}
+
+impl DeliveryCheck {
+    /// Whether `publish`, routed for the subscription `instance`, may be sent, by the native
+    /// broker's rule. A `QoS` 2 delivery already started is sent again by
+    /// `resend_inflight_messages` rather than the forwarder, so the DUP exemption only keeps the
+    /// rule the same.
+    pub(super) async fn allows(&self, publish: &PublishPacket, instance: Option<u64>) -> bool {
+        if publish.dup && publish.packet_id.is_some() {
+            return true;
+        }
+        if self
+            .session
+            .borrow()
+            .as_ref()
+            .is_some_and(|session| !session.delivers(instance, &publish.topic_name))
+        {
+            return false;
+        }
+        !self.auth_provider.checks_delivery()
+            || self
+                .auth_provider
+                .authorize_delivery(
+                    &self.client_id,
+                    self.user_id.as_deref(),
+                    &publish.topic_name,
+                )
+                .await
+    }
+}
+
 impl WasmClientHandler {
     #[allow(
         clippy::must_use_candidate,
@@ -255,20 +291,13 @@ impl WasmClientHandler {
         });
     }
 
-    /// Whether the forwarder withholds `publish`, routed for the subscription `instance`, by the
-    /// native broker's rule. A `QoS` 2 delivery already started is sent again by
-    /// `resend_inflight_messages` rather than the forwarder, so the DUP exemption only keeps the
-    /// rule the same.
-    fn withheld(
-        session: &RefCell<Option<ClientSession>>,
-        publish: &PublishPacket,
-        instance: Option<u64>,
-    ) -> bool {
-        !(publish.dup && publish.packet_id.is_some())
-            && session
-                .borrow()
-                .as_ref()
-                .is_some_and(|session| !session.delivers(instance, &publish.topic_name))
+    pub(super) fn delivery_check(&self) -> DeliveryCheck {
+        DeliveryCheck {
+            auth_provider: Arc::clone(&self.auth_provider),
+            client_id: self.client_id.clone().unwrap_or_default(),
+            user_id: self.user_id.clone(),
+            session: Rc::clone(&self.session),
+        }
     }
 
     async fn forward_one(
@@ -325,7 +354,7 @@ impl WasmClientHandler {
         let next_pid_fwd = Rc::clone(&self.next_packet_id);
         let storage_fwd = Arc::clone(&self.storage);
         let client_id_fwd = self.client_id.clone().unwrap_or_default();
-        let session_fwd = Rc::clone(&self.session);
+        let delivery_check = self.delivery_check();
         let handler_id = self.handler_id;
         let protocol_version = self.protocol_version;
 
@@ -358,11 +387,10 @@ impl WasmClientHandler {
                             let mut pending = queue.take(64).await.into_iter();
                             while let Some(message) = pending.next() {
                                 let mut queued = message.to_publish_packet();
-                                if Self::withheld(
-                                    &session_fwd,
-                                    &queued,
-                                    message.subscription_instance,
-                                ) {
+                                if !delivery_check
+                                    .allows(&queued, message.subscription_instance)
+                                    .await
+                                {
                                     continue;
                                 }
                                 queued.protocol_version = protocol_version;
@@ -393,7 +421,7 @@ impl WasmClientHandler {
                     }
                 };
 
-                if Self::withheld(&session_fwd, &publish, subscription_instance) {
+                if !delivery_check.allows(&publish, subscription_instance).await {
                     continue;
                 }
                 publish.protocol_version = protocol_version;

@@ -1525,6 +1525,62 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
+    async fn a_deny_rule_refuses_a_shared_subscription_to_its_filter() {
+        let broker = broker();
+        broker
+            .add_acl_rule("*".to_string(), "secret/#".to_string(), "deny".to_string())
+            .await
+            .unwrap();
+        let client = connected(&broker, connect_options("shared-denied", true, 0)).await;
+        client.send_raw(&subscribe_bytes("$share/g/secret/x"));
+        let suback = client.wait_for(1).await;
+        assert_eq!(suback.first(), Some(&0x90), "expected SUBACK");
+        assert_eq!(suback.last(), Some(&0x87), "expected Not authorized");
+    }
+
+    #[wasm_bindgen_test]
+    async fn a_deny_rule_under_a_wildcard_keeps_its_topics_from_a_subscriber() {
+        let broker = broker();
+        let publish = |topic: &'static str, retain: bool| {
+            let mut publish = mqtt5_protocol::packet::publish::PublishPacket::new(
+                topic,
+                &b"hi"[..],
+                QoS::AtMostOnce,
+            );
+            publish.retain = retain;
+            publish
+        };
+        broker
+            .router
+            .route_message(&publish("data/secret/retained", true), None)
+            .await;
+        broker
+            .add_acl_rule(
+                "*".to_string(),
+                "data/secret/#".to_string(),
+                "deny".to_string(),
+            )
+            .await
+            .unwrap();
+        let client = connected(&broker, connect_options("wildcard-denied", true, 0)).await;
+        subscribed(&client, "data/#").await;
+        client.clear();
+        broker
+            .router
+            .route_message(&publish("data/secret/live", false), None)
+            .await;
+        broker
+            .router
+            .route_message(&publish("data/open", false), None)
+            .await;
+        sleep(200).await;
+        let received = client.received();
+        let contains = |needle: &[u8]| received.windows(needle.len()).any(|w| w == needle);
+        assert!(!contains(b"data/secret"), "{received:?}");
+        assert!(contains(b"data/open"), "{received:?}");
+    }
+
+    #[wasm_bindgen_test]
     async fn sweep_removes_an_expired_offline_session() {
         let mut config = WasmBrokerConfig::new();
         config.set_allow_anonymous(true);

@@ -458,6 +458,19 @@ impl AuthProvider for ComprehensiveAuthProvider {
                 .await
         })
     }
+
+    fn checks_delivery(&self) -> bool {
+        true
+    }
+
+    fn authorize_delivery<'a>(
+        &'a self,
+        _client_id: &str,
+        user_id: Option<&'a str>,
+        topic: &'a str,
+    ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move { self.acl_manager.check_delivery(user_id, topic).await })
+    }
 }
 
 /// Certificate-based authentication provider using X.509 client certificates

@@ -215,6 +215,19 @@ impl AuthProvider for RateLimitedAuthProvider {
         })
     }
 
+    fn checks_delivery(&self) -> bool {
+        self.inner.checks_delivery()
+    }
+
+    fn authorize_delivery<'a>(
+        &'a self,
+        client_id: &str,
+        user_id: Option<&'a str>,
+        topic: &'a str,
+    ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        self.inner.authorize_delivery(client_id, user_id, topic)
+    }
+
     fn supports_enhanced_auth(&self) -> bool {
         self.inner.supports_enhanced_auth()
     }

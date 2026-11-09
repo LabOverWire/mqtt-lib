@@ -1,5 +1,7 @@
 //! Authentication and authorization for the MQTT broker
 
+#[cfg(not(target_arch = "wasm32"))]
+mod acl_authorized;
 mod composite;
 mod providers;
 mod rate_limit;
@@ -9,6 +11,9 @@ pub use providers::{
     AllowAllAuthProvider, CertificateAuthProvider, ComprehensiveAuthProvider, PasswordAuthProvider,
 };
 pub use rate_limit::{AuthRateLimiter, RateLimitedAuthProvider};
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) use acl_authorized::AclAuthorizedProvider;
 
 use crate::error::Result;
 use crate::packet::connect::ConnectPacket;
@@ -232,6 +237,24 @@ pub trait AuthProvider: Send + Sync {
         user_id: Option<&'a str>,
         topic_filter: &'a str,
     ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>>;
+
+    /// Whether `authorize_delivery` needs calling, so that a provider with no rules for
+    /// delivery costs nothing per message
+    fn checks_delivery(&self) -> bool {
+        false
+    }
+
+    /// Whether a message on `topic`, which a client's subscription matched, may be sent to it.
+    /// A subscription to a wildcard is authorized as a filter, and a rule can deny part of it.
+    /// A provider that wraps another must forward this and `checks_delivery`.
+    fn authorize_delivery<'a>(
+        &'a self,
+        _client_id: &str,
+        _user_id: Option<&'a str>,
+        _topic: &'a str,
+    ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        Box::pin(async { true })
+    }
 
     fn supports_enhanced_auth(&self) -> bool {
         false
