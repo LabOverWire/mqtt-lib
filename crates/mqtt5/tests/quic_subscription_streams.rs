@@ -863,3 +863,134 @@ async fn unsubscribe_while_the_first_subscribe_awaits_its_suback_uses_the_stream
     let _new_stream = accept_subscription_stream(&broker.conn, 0x00).await;
     task.await.unwrap().unwrap();
 }
+
+#[tokio::test]
+async fn stream_the_broker_stopped_reading_is_replaced_after_a_failed_write() {
+    let (client, broker) = connect_fake_broker("sub-streams-stop-sending", true).await;
+    let (task, _rx) = start_subscribe(&client, "stop/a", QoS::AtMostOnce);
+    let (_send, mut recv) = accept_subscription_stream(&broker.conn, 0x00).await;
+    task.await.unwrap().unwrap();
+
+    recv.stop(0u32.into()).unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(client.is_connected().await);
+
+    let (task, _rx) = start_subscribe(&client, "stop/a", QoS::AtMostOnce);
+    let failed = tokio::time::timeout(Duration::from_secs(3), task)
+        .await
+        .expect("SUBSCRIBE on the stopped stream did not fail")
+        .unwrap();
+    assert!(failed.is_err(), "{failed:?}");
+
+    let (task, _rx) = start_subscribe(&client, "stop/a", QoS::AtMostOnce);
+    let (mut send, mut new_recv) = tokio::time::timeout(
+        Duration::from_secs(2),
+        accept_subscription_stream(&broker.conn, 0x00),
+    )
+    .await
+    .expect("SUBSCRIBE after the failed write did not open a new stream");
+    task.await.unwrap().unwrap();
+
+    let unsubscriber = client.clone();
+    let unsubscribe = tokio::spawn(async move { unsubscriber.unsubscribe("stop/a").await });
+    let frame = tokio::time::timeout(Duration::from_secs(2), read_frame(&mut new_recv))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(frame[0], UNSUBSCRIBE);
+    send.write_all(&[0xB0, 0x04, frame[2], frame[3], 0x00, 0x00])
+        .await
+        .unwrap();
+    unsubscribe.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn unsuback_keeps_the_mapping_of_a_subscribe_sent_after_the_unsubscribe() {
+    let (client, mut broker) = connect_fake_broker("sub-streams-unsuback-newer", true).await;
+    let (task, _first_rx) = start_subscribe(&client, "newer/a", QoS::AtLeastOnce);
+    let (mut send, mut recv) = accept_subscription_stream(&broker.conn, 0x01).await;
+    task.await.unwrap().unwrap();
+
+    let unsubscriber = client.clone();
+    let unsubscribe = tokio::spawn(async move { unsubscriber.unsubscribe("newer/a").await });
+    let unsubscribe_frame = read_frame(&mut recv).await.unwrap();
+    assert_eq!(unsubscribe_frame[0], UNSUBSCRIBE);
+    let (task, _rx) = start_subscribe(&client, "newer/a", QoS::AtLeastOnce);
+    let subscribe_frame = read_frame(&mut recv).await.unwrap();
+    assert_eq!(subscribe_frame[0], SUBSCRIBE);
+    send.write_all(&[
+        0xB0,
+        0x04,
+        unsubscribe_frame[2],
+        unsubscribe_frame[3],
+        0x00,
+        0x00,
+    ])
+    .await
+    .unwrap();
+    unsubscribe.await.unwrap().unwrap();
+    send.write_all(&[
+        0x90,
+        0x04,
+        subscribe_frame[2],
+        subscribe_frame[3],
+        0x00,
+        0x01,
+    ])
+    .await
+    .unwrap();
+    task.await.unwrap().unwrap();
+
+    let unsubscriber = client.clone();
+    let unsubscribe = tokio::spawn(async move { unsubscriber.unsubscribe("newer/a").await });
+    let frame = tokio::time::timeout(Duration::from_secs(2), read_frame(&mut recv))
+        .await
+        .expect("second UNSUBSCRIBE did not go on the subscription stream")
+        .unwrap();
+    assert_eq!(frame[0], UNSUBSCRIBE);
+    assert!(nothing_on(&mut broker.ctl_recv).await);
+    send.write_all(&[0xB0, 0x04, frame[2], frame[3], 0x00, 0x00])
+        .await
+        .unwrap();
+    unsubscribe.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn control_stream_unsuback_keeps_the_mapping_of_a_later_subscribe() {
+    let (client, mut broker) = connect_fake_broker("sub-streams-unsuback-control", true).await;
+
+    let unsubscriber = client.clone();
+    let unsubscribe = tokio::spawn(async move { unsubscriber.unsubscribe("ctl/a").await });
+    let unsubscribe_frame = read_frame(&mut broker.ctl_recv).await.unwrap();
+    assert_eq!(unsubscribe_frame[0], UNSUBSCRIBE);
+
+    let (task, _rx) = start_subscribe(&client, "ctl/a", QoS::AtMostOnce);
+    let (mut send, mut recv) = accept_subscription_stream(&broker.conn, 0x00).await;
+    task.await.unwrap().unwrap();
+    broker
+        .ctl_send
+        .write_all(&[
+            0xB0,
+            0x04,
+            unsubscribe_frame[2],
+            unsubscribe_frame[3],
+            0x00,
+            0x00,
+        ])
+        .await
+        .unwrap();
+    unsubscribe.await.unwrap().unwrap();
+
+    let unsubscriber = client.clone();
+    let unsubscribe = tokio::spawn(async move { unsubscriber.unsubscribe("ctl/a").await });
+    let frame = tokio::time::timeout(Duration::from_secs(2), read_frame(&mut recv))
+        .await
+        .expect("UNSUBSCRIBE did not go on the subscription stream")
+        .unwrap();
+    assert_eq!(frame[0], UNSUBSCRIBE);
+    assert!(nothing_on(&mut broker.ctl_recv).await);
+    send.write_all(&[0xB0, 0x04, frame[2], frame[3], 0x00, 0x00])
+        .await
+        .unwrap();
+    unsubscribe.await.unwrap().unwrap();
+}

@@ -98,7 +98,30 @@ enum SubscriptionDelivery {
     OwnStream,
 }
 #[cfg(feature = "transport-quic")]
-type SubscriptionStreams = Arc<Mutex<HashMap<String, StreamWriter>>>;
+struct MappedStream {
+    writer: StreamWriter,
+    sent: u64,
+}
+#[cfg(feature = "transport-quic")]
+#[derive(Default)]
+struct SubscriptionStreamMap {
+    by_filter: HashMap<String, MappedStream>,
+    sends: u64,
+}
+#[cfg(feature = "transport-quic")]
+impl SubscriptionStreamMap {
+    fn next_send(&mut self) -> u64 {
+        self.sends += 1;
+        self.sends
+    }
+
+    fn forget_writer(&mut self, writer: &StreamWriter) {
+        self.by_filter
+            .retain(|_, mapped| !Arc::ptr_eq(&mapped.writer, writer));
+    }
+}
+#[cfg(feature = "transport-quic")]
+type SubscriptionStreams = Arc<Mutex<SubscriptionStreamMap>>;
 const ACKNOWLEDGEMENT_WAIT: Duration = Duration::from_secs(10);
 const SUBSCRIPTION_ACK_WAIT: Duration = Duration::from_secs(10);
 
@@ -321,7 +344,7 @@ impl DirectClientInner {
             #[cfg(feature = "transport-quic")]
             quic_stream_reader_ctx: None,
             #[cfg(feature = "transport-quic")]
-            subscription_streams: Arc::new(Mutex::new(HashMap::new())),
+            subscription_streams: Arc::new(Mutex::new(SubscriptionStreamMap::default())),
             #[cfg(feature = "transport-quic")]
             subscription_stream_opens_interrupted: tokio::sync::watch::channel(false).0,
             session,
@@ -459,7 +482,7 @@ impl DirectClientInner {
             self.quic_datagrams_enabled = false;
             self.subscription_delivery = SubscriptionDelivery::ControlStream;
             self.quic_stream_reader_ctx = None;
-            self.subscription_streams.lock().clear();
+            self.subscription_streams.lock().by_filter.clear();
         }
     }
 
@@ -1506,8 +1529,13 @@ impl DirectClientInner {
             return Ok(None);
         }
         if let [filter] = packet.filters.as_slice() {
-            if let Some(existing) = self.subscription_streams.lock().get(&filter.filter) {
-                return Ok(Some(Arc::clone(existing)));
+            if let Some(existing) = self
+                .subscription_streams
+                .lock()
+                .by_filter
+                .get(&filter.filter)
+            {
+                return Ok(Some(Arc::clone(&existing.writer)));
             }
         }
         let (Some(connection), Some(ctx)) = (&self.quic_connection, &self.quic_stream_reader_ctx)
@@ -1518,8 +1546,15 @@ impl DirectClientInner {
         let writer = Arc::new(tokio::sync::Mutex::new(UnifiedWriter::Quic(send)));
         {
             let mut streams = self.subscription_streams.lock();
+            let opened = streams.next_send();
             for filter in &packet.filters {
-                streams.insert(filter.filter.clone(), Arc::clone(&writer));
+                streams.by_filter.insert(
+                    filter.filter.clone(),
+                    MappedStream {
+                        writer: Arc::clone(&writer),
+                        sent: opened,
+                    },
+                );
             }
         }
         let reader_writer = Arc::clone(&writer);
@@ -1527,11 +1562,37 @@ impl DirectClientInner {
         let streams = Arc::clone(&self.subscription_streams);
         tokio::spawn(async move {
             quic_stream_reader_task(recv, Arc::clone(&reader_writer), reader_ctx).await;
-            streams
-                .lock()
-                .retain(|_, other| !Arc::ptr_eq(other, &reader_writer));
+            streams.lock().forget_writer(&reader_writer);
         });
         Ok(Some(writer))
+    }
+
+    #[cfg(feature = "transport-quic")]
+    async fn send_on_subscription_stream(
+        &self,
+        stream: &StreamWriter,
+        packet: Packet,
+        restamped: &[&str],
+    ) -> Result<u64> {
+        let mut guard = stream.lock().await;
+        let sent = {
+            let mut streams = self.subscription_streams.lock();
+            let sent = streams.next_send();
+            for filter in restamped {
+                if let Some(mapped) = streams.by_filter.get_mut(*filter) {
+                    if Arc::ptr_eq(&mapped.writer, stream) {
+                        mapped.sent = sent;
+                    }
+                }
+            }
+            sent
+        };
+        let outcome = guard.write_packet(packet).await;
+        drop(guard);
+        if outcome.is_err() {
+            self.subscription_streams.lock().forget_writer(stream);
+        }
+        outcome.map(|()| sent)
     }
 
     #[cfg(feature = "transport-quic")]
@@ -1539,23 +1600,23 @@ impl DirectClientInner {
         let [filter] = packet.filters.as_slice() else {
             return None;
         };
-        self.subscription_streams.lock().get(filter).cloned()
+        self.subscription_streams
+            .lock()
+            .by_filter
+            .get(filter)
+            .map(|mapped| Arc::clone(&mapped.writer))
     }
 
     #[cfg(feature = "transport-quic")]
-    fn forget_unsubscribed_filters(
-        &self,
-        packet: &UnsubscribePacket,
-        stream: Option<&StreamWriter>,
-    ) {
+    fn forget_unsubscribed_filters(&self, packet: &UnsubscribePacket, unsubscribe_sent: u64) {
         let mut streams = self.subscription_streams.lock();
         for filter in &packet.filters {
-            let mapped_elsewhere = match (streams.get(filter), stream) {
-                (Some(mapped), Some(sent_on)) => !Arc::ptr_eq(mapped, sent_on),
-                _ => false,
-            };
-            if !mapped_elsewhere {
-                streams.remove(filter);
+            if streams
+                .by_filter
+                .get(filter)
+                .is_some_and(|mapped| mapped.sent < unsubscribe_sent)
+            {
+                streams.by_filter.remove(filter);
             }
         }
     }
@@ -1726,10 +1787,8 @@ impl DirectClientInner {
                 })?;
         #[cfg(feature = "transport-quic")]
         let sent_on_flow = if let Some(stream) = &subscription_stream {
-            stream
-                .lock()
-                .await
-                .write_packet(Packet::Subscribe(packet.clone()))
+            let filters: Vec<&str> = packet.filters.iter().map(|f| f.filter.as_str()).collect();
+            self.send_on_subscription_stream(stream, Packet::Subscribe(packet.clone()), &filters)
                 .await
                 .inspect_err(|_| {
                     self.pending_subacks.lock().remove(&packet_id);
@@ -1816,15 +1875,21 @@ impl DirectClientInner {
         }
 
         #[cfg(feature = "transport-quic")]
-        let sent_on_flow = if let Some(stream) = &subscription_stream {
-            stream
-                .lock()
-                .await
-                .write_packet(Packet::Unsubscribe(packet.clone()))
-                .await
-                .inspect_err(|_| {
-                    self.pending_unsubacks.lock().remove(&packet_id);
-                })?;
+        let sent_on_stream = match &subscription_stream {
+            Some(stream) => Some(
+                self.send_on_subscription_stream(stream, Packet::Unsubscribe(packet.clone()), &[])
+                    .await
+                    .inspect_err(|_| {
+                        self.pending_unsubacks.lock().remove(&packet_id);
+                    })?,
+            ),
+            None => None,
+        };
+        #[cfg(feature = "transport-quic")]
+        let unsubscribe_sent =
+            sent_on_stream.unwrap_or_else(|| self.subscription_streams.lock().next_send());
+        #[cfg(feature = "transport-quic")]
+        let sent_on_flow = if sent_on_stream.is_some() {
             true
         } else if let Some(manager) = self.unsubscribe_data_flow_manager(&packet).await {
             let topic = packet.filters[0].clone();
@@ -1849,7 +1914,7 @@ impl DirectClientInner {
         self.wait_for_unsuback(rx, packet_id).await?;
 
         #[cfg(feature = "transport-quic")]
-        self.forget_unsubscribed_filters(&packet, subscription_stream.as_ref());
+        self.forget_unsubscribed_filters(&packet, unsubscribe_sent);
 
         for filter in packet.filters {
             let removed = self
