@@ -123,6 +123,23 @@ impl SubscriptionStreamMap {
             .retain(|readable| !Arc::ptr_eq(readable, writer));
     }
 
+    fn reusable_for(&self, packet: &SubscribePacket) -> Option<StreamWriter> {
+        if let [filter] = packet.filters.as_slice() {
+            if let Some(mapped) = self.by_filter.get(&filter.filter) {
+                return Some(Arc::clone(&mapped.writer));
+            }
+        }
+        self.readable
+            .iter()
+            .find(|readable| {
+                !self
+                    .by_filter
+                    .values()
+                    .any(|mapped| Arc::ptr_eq(&mapped.writer, readable))
+            })
+            .cloned()
+    }
+
     fn is_readable(&self, writer: &StreamWriter) -> bool {
         self.readable
             .iter()
@@ -276,7 +293,7 @@ pub struct DirectClientInner {
     #[cfg(feature = "transport-quic")]
     subscription_streams: SubscriptionStreams,
     #[cfg(feature = "transport-quic")]
-    subscription_stream_opens_interrupted: tokio::sync::watch::Sender<bool>,
+    subscription_stream_opens_interrupted: Arc<tokio::sync::watch::Sender<bool>>,
     pub session: Arc<tokio::sync::RwLock<SessionState>>,
     pub connected: Arc<AtomicBool>,
     pub connection_event_callbacks:
@@ -360,7 +377,7 @@ impl DirectClientInner {
             #[cfg(feature = "transport-quic")]
             subscription_streams: Arc::new(Mutex::new(SubscriptionStreamMap::default())),
             #[cfg(feature = "transport-quic")]
-            subscription_stream_opens_interrupted: tokio::sync::watch::channel(false).0,
+            subscription_stream_opens_interrupted: Arc::new(tokio::sync::watch::channel(false).0),
             session,
             connected: Arc::new(AtomicBool::new(false)),
             connection_event_callbacks: Arc::new(tokio::sync::RwLock::new(Vec::new())),
@@ -1508,9 +1525,10 @@ impl DirectClientInner {
     }
 
     #[cfg(feature = "transport-quic")]
-    pub(crate) fn interrupt_subscription_stream_opens(&self) {
-        self.subscription_stream_opens_interrupted
-            .send_replace(true);
+    pub(crate) fn subscription_stream_open_interrupt(
+        &self,
+    ) -> Arc<tokio::sync::watch::Sender<bool>> {
+        Arc::clone(&self.subscription_stream_opens_interrupted)
     }
 
     #[cfg(feature = "transport-quic")]
@@ -1542,15 +1560,8 @@ impl DirectClientInner {
         if self.subscription_delivery == SubscriptionDelivery::ControlStream {
             return Ok(None);
         }
-        if let [filter] = packet.filters.as_slice() {
-            if let Some(existing) = self
-                .subscription_streams
-                .lock()
-                .by_filter
-                .get(&filter.filter)
-            {
-                return Ok(Some(Arc::clone(&existing.writer)));
-            }
+        if let Some(existing) = self.subscription_streams.lock().reusable_for(packet) {
+            return Ok(Some(existing));
         }
         let (Some(connection), Some(ctx)) = (&self.quic_connection, &self.quic_stream_reader_ctx)
         else {
@@ -1576,7 +1587,18 @@ impl DirectClientInner {
         let reader_ctx = ctx.clone();
         let streams = Arc::clone(&self.subscription_streams);
         tokio::spawn(async move {
-            quic_stream_reader_task(recv, Arc::clone(&reader_writer), reader_ctx).await;
+            let unwritable_streams = Arc::clone(&streams);
+            let unwritable_writer = Arc::clone(&reader_writer);
+            let on_unwritable: Box<dyn Fn() + Send + Sync> = Box::new(move || {
+                unwritable_streams.lock().forget_writer(&unwritable_writer);
+            });
+            quic_stream_reader_task(
+                recv,
+                Arc::clone(&reader_writer),
+                reader_ctx,
+                Some(on_unwritable),
+            )
+            .await;
             streams.lock().forget_writer(&reader_writer);
         });
         Ok(Some(writer))

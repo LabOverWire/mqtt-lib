@@ -97,6 +97,7 @@ impl PacketReaderContext {
             keepalive_state: &self.keepalive_state,
             codec_registry: self.codec_registry.as_ref(),
             ack_delivery,
+            ack_fallback: None,
         }
     }
 }
@@ -420,7 +421,7 @@ pub(super) async fn quic_stream_acceptor_task(
                         let stream_writer =
                             Arc::new(tokio::sync::Mutex::new(UnifiedWriter::Quic(send)));
                         tokio::spawn(async move {
-                            quic_stream_reader_task(recv, stream_writer, ctx_for_reader).await;
+                            quic_stream_reader_task(recv, stream_writer, ctx_for_reader, None).await;
                         });
                     }
                     Err(e) => {
@@ -601,6 +602,7 @@ pub(super) async fn quic_stream_reader_task(
     mut recv: quinn::RecvStream,
     stream_writer: Arc<tokio::sync::Mutex<UnifiedWriter>>,
     ctx: PacketReaderContext,
+    on_unwritable: Option<Box<dyn Fn() + Send + Sync>>,
 ) {
     let quic_stream_id = u64::from(recv.id());
     let subscription_stream = recv.id().initiator() == quinn::Side::Client;
@@ -654,7 +656,13 @@ pub(super) async fn quic_stream_reader_task(
                     Ok(Routed::Unhandled) => {
                         let ack_delivery =
                             ctx.ack_delivery_on(subscription_stream.then_some(&stream_writer));
-                        let handlers = ctx.incoming_handlers(ack_delivery.as_ref());
+                        let mut handlers = ctx.incoming_handlers(ack_delivery.as_ref());
+                        handlers.ack_fallback = on_unwritable.as_deref().map(|on_stream_failure| {
+                            super::handlers::AckFallback {
+                                control: &ctx.writer,
+                                on_stream_failure,
+                            }
+                        });
                         handle_incoming_packet_with_writer(
                             packet,
                             &stream_writer,

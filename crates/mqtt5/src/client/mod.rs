@@ -140,6 +140,8 @@ pub struct MqttClient {
     pub(crate) transport_config: Arc<RwLock<crate::transport::ClientTransportConfig>>,
     #[cfg(feature = "transport-quic")]
     pub(crate) quic_client_config: Arc<RwLock<Option<(inner::QuicBuiltFor, quinn::ClientConfig)>>>,
+    #[cfg(feature = "transport-quic")]
+    pub(crate) subscription_stream_open_interrupt: Arc<tokio::sync::watch::Sender<bool>>,
 }
 
 /// The TLS configuration stored for connections made from a URL, and how many
@@ -379,14 +381,11 @@ impl MqttClient {
     /// Returns an error if the operation fails
     #[instrument(skip(self))]
     pub async fn disconnect(&self) -> Result<()> {
+        #[cfg(feature = "transport-quic")]
+        self.subscription_stream_open_interrupt.send_replace(true);
         let client_id = self.client_id().await;
         tracing::info!(client_id = %client_id, "Initiating MQTT disconnect");
 
-        #[cfg(feature = "transport-quic")]
-        self.inner
-            .read()
-            .await
-            .interrupt_subscription_stream_opens();
         let mut inner = self.inner.write().await;
         inner.automatic_reconnect_lifecycle = AutomaticReconnectLifecycle::Stopped;
         self.monitor_wakeup.notify_one();
@@ -995,10 +994,7 @@ impl MqttClient {
     /// Returns an error if the operation fails
     pub async fn disconnect_abnormally(&self) -> Result<()> {
         #[cfg(feature = "transport-quic")]
-        self.inner
-            .read()
-            .await
-            .interrupt_subscription_stream_opens();
+        self.subscription_stream_open_interrupt.send_replace(true);
         let mut inner = self.inner.write().await;
         inner.disconnect_with_packet(false).await
     }

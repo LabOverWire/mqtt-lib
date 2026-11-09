@@ -37,6 +37,28 @@ pub(super) struct IncomingHandlers<'a> {
     pub(super) keepalive_state: &'a Arc<Mutex<KeepaliveState>>,
     pub(super) codec_registry: Option<&'a Arc<CodecRegistry>>,
     pub(super) ack_delivery: Option<&'a AckDelivery<'a>>,
+    pub(super) ack_fallback: Option<AckFallback<'a>>,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct AckFallback<'a> {
+    pub(super) control: &'a Arc<tokio::sync::Mutex<UnifiedWriter>>,
+    pub(super) on_stream_failure: &'a (dyn Fn() + Send + Sync),
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct AckWriter<'a> {
+    stream: &'a Arc<tokio::sync::Mutex<UnifiedWriter>>,
+    fallback: Option<AckFallback<'a>>,
+}
+
+impl<'a> From<&'a Arc<tokio::sync::Mutex<UnifiedWriter>>> for AckWriter<'a> {
+    fn from(stream: &'a Arc<tokio::sync::Mutex<UnifiedWriter>>) -> Self {
+        Self {
+            stream,
+            fallback: None,
+        }
+    }
 }
 
 pub(super) async fn handle_incoming_packet_with_writer(
@@ -46,12 +68,16 @@ pub(super) async fn handle_incoming_packet_with_writer(
     handlers: &IncomingHandlers<'_>,
 ) -> Result<()> {
     let session = handlers.session;
+    let ack_writer = AckWriter {
+        stream: writer,
+        fallback: handlers.ack_fallback,
+    };
     match packet {
         Packet::Publish(mut publish) => {
             validate_inbound_publish(&mut publish, handlers.topic_aliases)?;
             handle_publish_with_ack(
                 publish,
-                writer,
+                ack_writer,
                 session,
                 handlers.callback_manager,
                 flow_id,
@@ -65,7 +91,7 @@ pub(super) async fn handle_incoming_packet_with_writer(
             Ok(())
         }
         Packet::PubRec(pubrec) => handle_pubrec_outgoing(pubrec, writer, session).await,
-        Packet::PubRel(pubrel) => handle_pubrel(pubrel, writer, session).await,
+        Packet::PubRel(pubrel) => handle_pubrel(pubrel, ack_writer, session).await,
         Packet::PubComp(pubcomp) => handle_pubcomp_outgoing(pubcomp, session).await,
         Packet::Disconnect(disconnect) => {
             let reason_code = disconnect.reason_code;
@@ -77,7 +103,7 @@ pub(super) async fn handle_incoming_packet_with_writer(
 }
 
 enum AckRoute<'a> {
-    Direct(&'a Arc<tokio::sync::Mutex<UnifiedWriter>>),
+    Direct(AckWriter<'a>),
     Ordered(&'a Arc<AckDispatcher>),
 }
 
@@ -133,20 +159,33 @@ pub(super) async fn ack_fits_server_maximum(
 }
 
 async fn write_ack(
-    writer: &Arc<tokio::sync::Mutex<UnifiedWriter>>,
+    writer: AckWriter<'_>,
     session: &Arc<tokio::sync::RwLock<SessionState>>,
     packet: Packet,
 ) -> Result<()> {
-    if ack_fits_server_maximum(session, &packet).await {
-        writer.lock().await.write_packet(packet).await
-    } else {
-        Ok(())
+    if !ack_fits_server_maximum(session, &packet).await {
+        return Ok(());
     }
+    let Some(fallback) = writer.fallback else {
+        return writer.stream.lock().await.write_packet(packet).await;
+    };
+    let on_stream = writer
+        .stream
+        .lock()
+        .await
+        .write_packet(packet.clone())
+        .await;
+    if let Err(e) = on_stream {
+        tracing::debug!(error = %e, "Acknowledgement not written on its subscription stream; using the control stream");
+        (fallback.on_stream_failure)();
+        return fallback.control.lock().await.write_packet(packet).await;
+    }
+    Ok(())
 }
 
-pub(super) async fn handle_publish_with_ack(
+pub(super) async fn handle_publish_with_ack<'a>(
     mut publish: crate::packet::publish::PublishPacket,
-    writer: &Arc<tokio::sync::Mutex<UnifiedWriter>>,
+    writer: impl Into<AckWriter<'a>>,
     session: &Arc<tokio::sync::RwLock<SessionState>>,
     callback_manager: &Arc<CallbackManager>,
     flow_id: Option<crate::transport::flow::FlowId>,
@@ -167,7 +206,7 @@ pub(super) async fn handle_publish_with_ack(
 
     let route = match ack_delivery {
         Some(ack) if flow_id.is_none() && ack.stream.is_none() => AckRoute::Ordered(ack.dispatcher),
-        _ => AckRoute::Direct(writer),
+        _ => AckRoute::Direct(writer.into()),
     };
 
     let already_delivered = match publish.qos {
@@ -311,7 +350,7 @@ async fn ack_qos1_inbound(
         properties: Properties::default(),
     });
     let writer = match route {
-        AckRoute::Direct(writer) => writer,
+        AckRoute::Direct(writer) => *writer,
         AckRoute::Ordered(dispatcher) => {
             dispatcher.enqueue(
                 packet_id,
@@ -376,7 +415,7 @@ async fn ack_qos2_inbound(
     });
     match route {
         AckRoute::Direct(writer) => {
-            if let Err(e) = write_ack(writer, session, pubrec).await {
+            if let Err(e) = write_ack(*writer, session, pubrec).await {
                 if first_receipt {
                     session.write().await.remove_pubrec(packet_id).await;
                 }
@@ -486,9 +525,9 @@ pub(super) async fn handle_pubcomp_outgoing(
     Ok(())
 }
 
-pub(super) async fn handle_pubrel(
+pub(super) async fn handle_pubrel<'a>(
     pubrel: crate::packet::pubrel::PubRelPacket,
-    writer: &Arc<tokio::sync::Mutex<UnifiedWriter>>,
+    writer: impl Into<AckWriter<'a>>,
     session: &Arc<tokio::sync::RwLock<SessionState>>,
 ) -> Result<()> {
     session
@@ -503,7 +542,7 @@ pub(super) async fn handle_pubrel(
         properties: Properties::default(),
     };
 
-    write_ack(writer, session, Packet::PubComp(pubcomp)).await?;
+    write_ack(writer.into(), session, Packet::PubComp(pubcomp)).await?;
 
     session
         .read()

@@ -52,6 +52,8 @@ impl MqttClient {
         tracing::trace!(client_id = %options.client_id, "MQTT CLIENT - with_options() method called");
         let inner = DirectClientInner::new(options);
         let connection_event_callbacks = Arc::clone(&inner.connection_event_callbacks);
+        #[cfg(feature = "transport-quic")]
+        let subscription_stream_open_interrupt = inner.subscription_stream_open_interrupt();
 
         Self {
             inner: Arc::new(RwLock::new(inner)),
@@ -67,6 +69,8 @@ impl MqttClient {
             )),
             #[cfg(feature = "transport-quic")]
             quic_client_config: Arc::new(RwLock::new(None)),
+            #[cfg(feature = "transport-quic")]
+            subscription_stream_open_interrupt,
         }
     }
 
