@@ -1572,18 +1572,20 @@ impl DirectClientInner {
         &self,
         stream: &StreamWriter,
         packet: Packet,
-        restamped: &[&str],
+        subscribed: &[&str],
     ) -> Result<u64> {
         let mut guard = stream.lock().await;
         let sent = {
             let mut streams = self.subscription_streams.lock();
             let sent = streams.next_send();
-            for filter in restamped {
-                if let Some(mapped) = streams.by_filter.get_mut(*filter) {
-                    if Arc::ptr_eq(&mapped.writer, stream) {
-                        mapped.sent = sent;
-                    }
-                }
+            for filter in subscribed {
+                streams.by_filter.insert(
+                    (*filter).to_owned(),
+                    MappedStream {
+                        writer: Arc::clone(stream),
+                        sent,
+                    },
+                );
             }
             sent
         };

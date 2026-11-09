@@ -4,6 +4,7 @@ use mqtt5::broker::quic_acceptor::QuicAcceptorConfig;
 use mqtt5::{ConnectOptions, Message, MqttClient, MqttError, QoS, SubscribeOptions};
 use std::path::Path;
 use std::time::Duration;
+use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc;
 
 const SUBSCRIBE: u8 = 0x82;
@@ -94,7 +95,7 @@ async fn connect_fake_broker_with(
 async fn connect_fake_broker_limited(
     options: ConnectOptions,
     subscription_streams: bool,
-    max_bidi_streams: Option<u32>,
+    transport: Option<quinn::TransportConfig>,
 ) -> (MqttClient, FakeBroker) {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let cert_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test_certs");
@@ -108,9 +109,7 @@ async fn connect_fake_broker_limited(
         .with_alpn_protocols(vec![b"mqtt".to_vec()])
         .build_server_config()
         .unwrap();
-    if let Some(limit) = max_bidi_streams {
-        let mut transport = quinn::TransportConfig::default();
-        transport.max_concurrent_bidi_streams(limit.into());
+    if let Some(transport) = transport {
         server_config.transport_config(std::sync::Arc::new(transport));
     }
     let endpoint = quinn::Endpoint::server(server_config, "127.0.0.1:0".parse().unwrap()).unwrap();
@@ -130,6 +129,12 @@ async fn connect_fake_broker_limited(
         .unwrap();
     connect.await.unwrap().unwrap();
     (client, broker)
+}
+
+fn bidi_stream_limit(limit: u32) -> quinn::TransportConfig {
+    let mut transport = quinn::TransportConfig::default();
+    transport.max_concurrent_bidi_streams(limit.into());
+    transport
 }
 
 fn start_subscribe(
@@ -413,7 +418,8 @@ async fn filter_whose_stream_the_broker_reset_subscribes_on_a_new_stream() {
 #[tokio::test]
 async fn subscribe_fails_within_the_suback_limit_when_no_stream_is_available() {
     let options = ConnectOptions::new("sub-streams-no-stream").with_automatic_reconnect(false);
-    let (client, broker) = connect_fake_broker_limited(options, true, Some(2)).await;
+    let (client, broker) =
+        connect_fake_broker_limited(options, true, Some(bidi_stream_limit(2))).await;
     let (task, _rx) = start_subscribe(&client, "limit/1", QoS::AtMostOnce);
     let _held = accept_subscription_stream(&broker.conn, 0x00).await;
     task.await.unwrap().unwrap();
@@ -430,7 +436,8 @@ async fn subscribe_fails_within_the_suback_limit_when_no_stream_is_available() {
 #[tokio::test]
 async fn disconnect_is_not_blocked_by_a_subscribe_waiting_for_a_stream() {
     let options = ConnectOptions::new("sub-streams-no-stream-disc").with_automatic_reconnect(false);
-    let (client, broker) = connect_fake_broker_limited(options, true, Some(2)).await;
+    let (client, broker) =
+        connect_fake_broker_limited(options, true, Some(bidi_stream_limit(2))).await;
     let (task, _rx) = start_subscribe(&client, "limit/1", QoS::AtMostOnce);
     let _held = accept_subscription_stream(&broker.conn, 0x00).await;
     task.await.unwrap().unwrap();
@@ -993,4 +1000,87 @@ async fn control_stream_unsuback_keeps_the_mapping_of_a_later_subscribe() {
         .await
         .unwrap();
     unsubscribe.await.unwrap().unwrap();
+}
+
+async fn read_header(recv: &mut quinn::RecvStream) -> (u8, usize, [u8; 2]) {
+    let first = recv.read_u8().await.unwrap();
+    let mut remaining = 0usize;
+    let mut multiplier = 1usize;
+    loop {
+        let byte = recv.read_u8().await.unwrap();
+        remaining += usize::from(byte & 0x7F) * multiplier;
+        multiplier *= 128;
+        if byte & 0x80 == 0 {
+            break;
+        }
+    }
+    let mut id = [0u8; 2];
+    recv.read_exact(&mut id).await.unwrap();
+    (first, remaining - 2, id)
+}
+
+async fn subscribe_queued_behind_an_unsubscribe(stream_receive_window: u32) {
+    let mut transport = quinn::TransportConfig::default();
+    transport.stream_receive_window(stream_receive_window.into());
+    let options = ConnectOptions::new("queued-behind-unsubscribe").with_automatic_reconnect(false);
+    let (client, mut broker) = connect_fake_broker_limited(options, true, Some(transport)).await;
+    let filter = format!("q/{}", "x".repeat(3000));
+
+    let (task, _rx) = start_subscribe(&client, &filter, QoS::AtMostOnce);
+    let (mut send, mut recv) = broker.conn.accept_bi().await.unwrap();
+    let subscribe = read_frame(&mut recv).await.unwrap();
+    assert_eq!(subscribe[0], SUBSCRIBE);
+    send.write_all(&[0x90, 0x04, subscribe[3], subscribe[4], 0x00, 0x00])
+        .await
+        .unwrap();
+    task.await.unwrap().unwrap();
+
+    let unsubscriber = client.clone();
+    let unsubscribe_filter = filter.clone();
+    let unsubscribe =
+        tokio::spawn(async move { unsubscriber.unsubscribe(unsubscribe_filter).await });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let (second, _second_rx) = start_subscribe(&client, &filter, QoS::AtMostOnce);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let (first_byte, rest, unsubscribe_id) = read_header(&mut recv).await;
+    assert_eq!(first_byte, UNSUBSCRIBE);
+    send.write_all(&[0xB0, 0x04, unsubscribe_id[0], unsubscribe_id[1], 0x00, 0x00])
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let mut body = vec![0u8; rest];
+    recv.read_exact(&mut body).await.unwrap();
+    unsubscribe.await.unwrap().unwrap();
+
+    let resubscribe = read_frame(&mut recv).await.unwrap();
+    assert_eq!(resubscribe[0], SUBSCRIBE);
+    send.write_all(&[0x90, 0x04, resubscribe[3], resubscribe[4], 0x00, 0x00])
+        .await
+        .unwrap();
+    second.await.unwrap().unwrap();
+
+    let unsubscriber = client.clone();
+    let unsubscribe_filter = filter.clone();
+    let unsubscribe =
+        tokio::spawn(async move { unsubscriber.unsubscribe(unsubscribe_filter).await });
+    tokio::select! {
+        frame = read_frame(&mut recv) => assert_eq!(frame.unwrap()[0], UNSUBSCRIBE),
+        frame = read_frame(&mut broker.ctl_recv) => panic!(
+            "UNSUBSCRIBE of a filter whose SUBSCRIBE was sent on its stream went to the control stream: {:#04x}",
+            frame.unwrap()[0]
+        ),
+        () = tokio::time::sleep(Duration::from_secs(3)) => panic!("no UNSUBSCRIBE was sent"),
+    }
+    unsubscribe.abort();
+}
+
+#[tokio::test]
+async fn subscribe_queued_behind_a_blocked_unsubscribe_keeps_its_mapping() {
+    subscribe_queued_behind_an_unsubscribe(1000).await;
+}
+
+#[tokio::test]
+async fn subscribe_after_an_unblocked_unsubscribe_keeps_its_mapping() {
+    subscribe_queued_behind_an_unsubscribe(1_000_000).await;
 }
