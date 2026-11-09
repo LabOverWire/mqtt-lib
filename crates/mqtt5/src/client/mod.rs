@@ -382,6 +382,11 @@ impl MqttClient {
         let client_id = self.client_id().await;
         tracing::info!(client_id = %client_id, "Initiating MQTT disconnect");
 
+        #[cfg(feature = "transport-quic")]
+        self.inner
+            .read()
+            .await
+            .interrupt_subscription_stream_opens();
         let mut inner = self.inner.write().await;
         inner.automatic_reconnect_lifecycle = AutomaticReconnectLifecycle::Stopped;
         self.monitor_wakeup.notify_one();
@@ -989,6 +994,11 @@ impl MqttClient {
     ///
     /// Returns an error if the operation fails
     pub async fn disconnect_abnormally(&self) -> Result<()> {
+        #[cfg(feature = "transport-quic")]
+        self.inner
+            .read()
+            .await
+            .interrupt_subscription_stream_opens();
         let mut inner = self.inner.write().await;
         inner.disconnect_with_packet(false).await
     }

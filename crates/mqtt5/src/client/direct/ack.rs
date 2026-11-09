@@ -46,6 +46,7 @@ pub(crate) struct AckRequest {
     packet_id: u16,
     qos: QoS,
     kind: AckKind,
+    stream: Option<WriterHandle>,
 }
 
 #[derive(Default)]
@@ -105,8 +106,9 @@ impl AckOrder {
 /// (`[MQTT-4.6.0-2]`, `[MQTT-4.6.0-3]`). While deferred acknowledgement is enabled, an
 /// unresolved token therefore holds back **every** later PUBACK/PUBREC on the connection,
 /// not only those of other `subscribe_with_ack` deliveries: the automatic acknowledgements
-/// of plain `subscribe` callbacks queue behind it too. Only `QoS` 1/2 messages received on a
-/// QUIC data flow are acknowledged on their own stream and are not held back. Each held
+/// of plain `subscribe` callbacks queue behind it too. Only the automatic acknowledgements of
+/// `QoS` 1/2 messages received on a QUIC data flow or subscription stream are written on their
+/// own stream and are not held back. Each held
 /// acknowledgement keeps its message in the broker's in-flight window, so a token kept
 /// for long can exhaust the client's Receive Maximum and stall all inbound `QoS` 1/2
 /// delivery. Resolve tokens promptly, in any order; the acknowledgements are released
@@ -116,6 +118,7 @@ pub struct AckToken {
     packet_id: u16,
     qos: QoS,
     armed: bool,
+    stream: Option<WriterHandle>,
     sender: mpsc::UnboundedSender<AckRequest>,
 }
 
@@ -169,6 +172,7 @@ impl AckToken {
             packet_id: self.packet_id,
             qos: self.qos,
             kind,
+            stream: self.stream.take(),
         });
     }
 }
@@ -242,12 +246,13 @@ impl AckDispatcher {
     }
 
     /// Mints a token for a delivered inbound message.
-    pub(crate) fn token(&self, packet_id: u16, qos: QoS) -> AckToken {
+    pub(crate) fn token(&self, packet_id: u16, qos: QoS, stream: Option<WriterHandle>) -> AckToken {
         AckToken {
             seq: self.reserve(qos),
             packet_id,
             qos,
             armed: true,
+            stream,
             sender: self.tx.clone(),
         }
     }
@@ -276,11 +281,22 @@ impl AckDispatcher {
     /// Re-sends an acknowledgement for a duplicate that was already resolved,
     /// without a token (used on a post-reconnect replay).
     pub(crate) fn enqueue(&self, packet_id: u16, qos: QoS, kind: AckKind) {
+        self.enqueue_on(packet_id, qos, kind, None);
+    }
+
+    pub(crate) fn enqueue_on(
+        &self,
+        packet_id: u16,
+        qos: QoS,
+        kind: AckKind,
+        stream: Option<WriterHandle>,
+    ) {
         let _ = self.tx.send(AckRequest {
             seq: self.reserve(qos),
             packet_id,
             qos,
             kind,
+            stream,
         });
     }
 
@@ -298,6 +314,7 @@ impl AckDispatcher {
         slot: &WriterSlot,
         session: &Arc<tokio::sync::RwLock<SessionState>>,
     ) {
+        let stream = request.stream;
         let reason = match request.kind {
             AckKind::Ack => ReasonCode::Success,
             AckKind::Reject(r) => r,
@@ -306,7 +323,16 @@ impl AckDispatcher {
                 packet,
                 release_inbound,
             } => {
-                Self::write(request.packet_id, packet, generation, order, slot, session).await;
+                Self::write(
+                    request.packet_id,
+                    packet,
+                    stream.as_ref(),
+                    generation,
+                    order,
+                    slot,
+                    session,
+                )
+                .await;
                 if release_inbound {
                     let session = session.read().await;
                     if order.lock().generation == generation {
@@ -355,12 +381,22 @@ impl AckDispatcher {
             }
         }
 
-        Self::write(request.packet_id, packet, generation, order, slot, session).await;
+        Self::write(
+            request.packet_id,
+            packet,
+            stream.as_ref(),
+            generation,
+            order,
+            slot,
+            session,
+        )
+        .await;
     }
 
     async fn write(
         packet_id: u16,
         packet: Packet,
+        stream: Option<&WriterHandle>,
         generation: u64,
         order: &Mutex<AckOrder>,
         slot: &WriterSlot,
@@ -377,6 +413,12 @@ impl AckDispatcher {
             }
             current.clone()
         };
+        if let Some(stream) = stream {
+            let on_stream = stream.lock().await.write_packet(packet.clone()).await;
+            if on_stream.is_ok() {
+                return;
+            }
+        }
         let written = match &writer {
             Some(handle) => handle.lock().await.write_packet(packet).await.is_ok(),
             None => false,
@@ -534,6 +576,7 @@ mod tests {
             packet_id,
             qos: QoS::AtLeastOnce,
             kind: AckKind::Ack,
+            stream: None,
         }
     }
 
@@ -598,14 +641,14 @@ mod tests {
         mgr.dispatch(
             first,
             PublishPacket::new("a/1", b"x".to_vec(), QoS::AtLeastOnce),
-            dispatcher.token(1, QoS::AtLeastOnce),
+            dispatcher.token(1, QoS::AtLeastOnce, None),
         );
         tokio::task::yield_now().await;
         let second = mgr.find_one("a/2").expect("a/2 registered");
         mgr.dispatch(
             second,
             PublishPacket::new("a/2", b"x".to_vec(), QoS::AtLeastOnce),
-            dispatcher.token(2, QoS::AtLeastOnce),
+            dispatcher.token(2, QoS::AtLeastOnce, None),
         );
 
         let mut delivered_ok = false;
@@ -643,7 +686,7 @@ mod tests {
         let callback = mgr
             .find_one("jobs/build")
             .expect("a wildcard entry matches jobs/build");
-        let token = dispatcher.token(1, QoS::ExactlyOnce);
+        let token = dispatcher.token(1, QoS::ExactlyOnce, None);
         callback(
             PublishPacket::new("jobs/build", b"x".to_vec(), QoS::ExactlyOnce),
             token,
@@ -688,6 +731,7 @@ mod tests {
                 packet_id: 7,
                 qos: QoS::ExactlyOnce,
                 kind: AckKind::Ack,
+                stream: None,
             });
             (order.generation, released)
         };

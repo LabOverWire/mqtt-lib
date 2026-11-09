@@ -68,10 +68,18 @@ pub(super) struct PacketReaderContext {
 
 impl PacketReaderContext {
     fn ack_delivery(&self) -> Option<super::handlers::AckDelivery<'_>> {
+        self.ack_delivery_on(None)
+    }
+
+    fn ack_delivery_on<'a>(
+        &'a self,
+        stream: Option<&'a Arc<tokio::sync::Mutex<UnifiedWriter>>>,
+    ) -> Option<super::handlers::AckDelivery<'a>> {
         if self.deferred_ack {
             Some(super::handlers::AckDelivery {
                 callbacks: &self.ack_callbacks,
                 dispatcher: &self.ack_dispatcher,
+                stream,
             })
         } else {
             None
@@ -595,6 +603,7 @@ pub(super) async fn quic_stream_reader_task(
     ctx: PacketReaderContext,
 ) {
     let quic_stream_id = u64::from(recv.id());
+    let subscription_stream = recv.id().initiator() == quinn::Side::Client;
     let (flow_id, mut buffer) = match try_read_server_flow_header(&mut recv).await {
         Ok(ServerFlow::UserDefined) => {
             refuse_user_defined_flow(&mut recv);
@@ -634,11 +643,17 @@ pub(super) async fn quic_stream_reader_task(
                     tag_publish_with_stream(&mut packet, quic_stream_id);
                 }
                 tracing::trace!(flow_id = ?flow_id, "Received packet on QUIC data stream: {:?}", packet);
-                match settle_acknowledgement(&packet, &ctx).await {
+                let requested = !subscription_stream || ctx.request_problem_information;
+                let routed = match check_problem_information(&packet, requested) {
+                    Ok(()) => settle_acknowledgement(&packet, &ctx).await,
+                    Err(e) => Err(e),
+                };
+                match routed {
                     Ok(Routed::Settled) => Ok(()),
                     Ok(Routed::Unhandled) if settle_subscription_ack(&packet, &ctx) => Ok(()),
                     Ok(Routed::Unhandled) => {
-                        let ack_delivery = ctx.ack_delivery();
+                        let ack_delivery =
+                            ctx.ack_delivery_on(subscription_stream.then_some(&stream_writer));
                         let handlers = ctx.incoming_handlers(ack_delivery.as_ref());
                         handle_incoming_packet_with_writer(
                             packet,
@@ -662,6 +677,7 @@ pub(super) async fn quic_stream_reader_task(
 
 #[cfg(feature = "transport-quic")]
 async fn quic_uni_stream_reader_task(mut recv: quinn::RecvStream, ctx: PacketReaderContext) {
+    let quic_stream_id = u64::from(recv.id());
     let (flow_id, mut buffer) = match try_read_server_flow_header(&mut recv).await {
         Ok(ServerFlow::UserDefined) => {
             refuse_user_defined_flow(&mut recv);
@@ -690,7 +706,10 @@ async fn quic_uni_stream_reader_task(mut recv: quinn::RecvStream, ctx: PacketRea
 
     while let Some(read) = read_data_stream_packet(&mut recv, &mut buffer, &ctx).await {
         let outcome = match read {
-            Ok(packet) => {
+            Ok(mut packet) => {
+                if flow_id.is_none() {
+                    tag_publish_with_stream(&mut packet, quic_stream_id);
+                }
                 tracing::trace!(flow_id = ?flow_id, "Received packet on unidirectional server stream");
                 let ack_delivery = ctx.ack_delivery();
                 let handlers = ctx.incoming_handlers(ack_delivery.as_ref());

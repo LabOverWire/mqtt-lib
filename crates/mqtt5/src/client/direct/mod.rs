@@ -16,6 +16,8 @@ pub(crate) use ack::{AckCallbackManager, AckDispatcher};
 
 use parking_lot::Mutex;
 use std::collections::HashMap;
+#[cfg(feature = "transport-quic")]
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{oneshot, watch};
@@ -98,8 +100,17 @@ enum SubscriptionDelivery {
     OwnStream,
 }
 #[cfg(feature = "transport-quic")]
-type SubscriptionStreamWriters = Arc<Mutex<HashMap<String, StreamWriter>>>;
+struct SubscriptionStream {
+    writer: StreamWriter,
+    awaiting_ack: AtomicUsize,
+    ended: AtomicBool,
+}
+#[cfg(feature = "transport-quic")]
+type SharedSubscriptionStream = Arc<SubscriptionStream>;
+#[cfg(feature = "transport-quic")]
+type SubscriptionStreams = Arc<Mutex<HashMap<String, SharedSubscriptionStream>>>;
 const ACKNOWLEDGEMENT_WAIT: Duration = Duration::from_secs(10);
+const SUBSCRIPTION_ACK_WAIT: Duration = Duration::from_secs(10);
 
 #[derive(Debug)]
 pub(crate) struct ReadyPublish {
@@ -236,7 +247,9 @@ pub struct DirectClientInner {
     #[cfg(feature = "transport-quic")]
     quic_stream_reader_ctx: Option<PacketReaderContext>,
     #[cfg(feature = "transport-quic")]
-    subscription_stream_writers: SubscriptionStreamWriters,
+    subscription_streams: SubscriptionStreams,
+    #[cfg(feature = "transport-quic")]
+    subscription_stream_opens_interrupted: tokio::sync::watch::Sender<bool>,
     pub session: Arc<tokio::sync::RwLock<SessionState>>,
     pub connected: Arc<AtomicBool>,
     pub connection_event_callbacks:
@@ -318,7 +331,9 @@ impl DirectClientInner {
             #[cfg(feature = "transport-quic")]
             quic_stream_reader_ctx: None,
             #[cfg(feature = "transport-quic")]
-            subscription_stream_writers: Arc::new(Mutex::new(HashMap::new())),
+            subscription_streams: Arc::new(Mutex::new(HashMap::new())),
+            #[cfg(feature = "transport-quic")]
+            subscription_stream_opens_interrupted: tokio::sync::watch::channel(false).0,
             session,
             connected: Arc::new(AtomicBool::new(false)),
             connection_event_callbacks: Arc::new(tokio::sync::RwLock::new(Vec::new())),
@@ -454,7 +469,7 @@ impl DirectClientInner {
             self.quic_datagrams_enabled = false;
             self.subscription_delivery = SubscriptionDelivery::ControlStream;
             self.quic_stream_reader_ctx = None;
-            self.subscription_stream_writers.lock().clear();
+            self.subscription_streams.lock().clear();
         }
     }
 
@@ -639,11 +654,7 @@ impl DirectClientInner {
                 self.quic_endpoint = Some(split.endpoint);
                 self.stream_strategy = Some(split.strategy);
                 self.quic_datagrams_enabled = split.datagrams_enabled;
-                self.subscription_delivery = if split.subscription_streams_enabled {
-                    SubscriptionDelivery::OwnStream
-                } else {
-                    SubscriptionDelivery::ControlStream
-                };
+                self.begin_subscription_delivery(split.subscription_streams_enabled);
                 self.zero_rtt_accepted = split.zero_rtt_accepted;
                 self.cached_quic_client_config = split.client_config;
                 let effective_flow_headers =
@@ -1459,15 +1470,54 @@ impl DirectClientInner {
     }
 
     #[cfg(feature = "transport-quic")]
+    fn begin_subscription_delivery(&mut self, own_streams: bool) {
+        self.subscription_stream_opens_interrupted
+            .send_replace(false);
+        self.subscription_delivery = if own_streams {
+            SubscriptionDelivery::OwnStream
+        } else {
+            SubscriptionDelivery::ControlStream
+        };
+    }
+
+    #[cfg(feature = "transport-quic")]
+    pub(crate) fn interrupt_subscription_stream_opens(&self) {
+        self.subscription_stream_opens_interrupted
+            .send_replace(true);
+    }
+
+    #[cfg(feature = "transport-quic")]
+    async fn open_subscription_stream(
+        &self,
+        connection: &quinn::Connection,
+    ) -> Result<(quinn::SendStream, quinn::RecvStream)> {
+        let mut interrupted = self.subscription_stream_opens_interrupted.subscribe();
+        let interruption = async move {
+            let _ = interrupted.wait_for(|interrupted| *interrupted).await;
+        };
+        tokio::select! {
+            opened = tokio::time::timeout(SUBSCRIPTION_ACK_WAIT, connection.open_bi()) => {
+                opened.map_err(|_| MqttError::Timeout)?.map_err(|e| {
+                    MqttError::ConnectionError(format!(
+                        "Failed to open QUIC subscription stream: {e}"
+                    ))
+                })
+            }
+            () = interruption => Err(MqttError::NotConnected),
+        }
+    }
+
+    #[cfg(feature = "transport-quic")]
     async fn subscription_stream_for(
         &self,
         packet: &SubscribePacket,
-    ) -> Result<Option<StreamWriter>> {
+    ) -> Result<Option<SharedSubscriptionStream>> {
         if self.subscription_delivery == SubscriptionDelivery::ControlStream {
             return Ok(None);
         }
         if let [filter] = packet.filters.as_slice() {
-            if let Some(existing) = self.subscription_stream_writers.lock().get(&filter.filter) {
+            if let Some(existing) = self.subscription_streams.lock().get(&filter.filter) {
+                existing.awaiting_ack.fetch_add(1, Ordering::Relaxed);
                 return Ok(Some(Arc::clone(existing)));
             }
         }
@@ -1475,26 +1525,46 @@ impl DirectClientInner {
         else {
             return Ok(None);
         };
-        let (send, recv) = connection.open_bi().await.map_err(|e| {
-            MqttError::ConnectionError(format!("Failed to open QUIC subscription stream: {e}"))
-        })?;
-        let writer = Arc::new(tokio::sync::Mutex::new(UnifiedWriter::Quic(send)));
-        let reader_writer = Arc::clone(&writer);
-        let reader_ctx = ctx.clone();
-        let writers = Arc::clone(&self.subscription_stream_writers);
-        tokio::spawn(async move {
-            quic_stream_reader_task(recv, Arc::clone(&reader_writer), reader_ctx).await;
-            writers
-                .lock()
-                .retain(|_, other| !Arc::ptr_eq(other, &reader_writer));
+        let (send, recv) = self.open_subscription_stream(connection).await?;
+        let stream = Arc::new(SubscriptionStream {
+            writer: Arc::new(tokio::sync::Mutex::new(UnifiedWriter::Quic(send))),
+            awaiting_ack: AtomicUsize::new(1),
+            ended: AtomicBool::new(false),
         });
-        Ok(Some(writer))
+        let reader_stream = Arc::clone(&stream);
+        let reader_ctx = ctx.clone();
+        let streams = Arc::clone(&self.subscription_streams);
+        tokio::spawn(async move {
+            quic_stream_reader_task(recv, Arc::clone(&reader_stream.writer), reader_ctx).await;
+            let mut streams = streams.lock();
+            reader_stream.ended.store(true, Ordering::Relaxed);
+            streams.retain(|_, other| !Arc::ptr_eq(other, &reader_stream));
+        });
+        Ok(Some(stream))
+    }
+
+    #[cfg(feature = "transport-quic")]
+    async fn settle_stream_use(&self, stream: &SharedSubscriptionStream, granted: &[&str]) {
+        let orphaned = {
+            let mut streams = self.subscription_streams.lock();
+            stream.awaiting_ack.fetch_sub(1, Ordering::Relaxed);
+            let mut candidates = vec![Arc::clone(stream)];
+            if !stream.ended.load(Ordering::Relaxed) {
+                for filter in granted {
+                    candidates.extend(streams.insert((*filter).to_string(), Arc::clone(stream)));
+                }
+            }
+            unused_streams(&streams, candidates)
+        };
+        for orphan in orphaned {
+            Self::close_stream(&orphan).await;
+        }
     }
 
     #[cfg(feature = "transport-quic")]
     async fn settle_subscription_stream(
         &self,
-        stream: Option<StreamWriter>,
+        stream: Option<SharedSubscriptionStream>,
         packet: &SubscribePacket,
         suback: Result<SubAckPacket>,
     ) -> Result<SubAckPacket> {
@@ -1511,38 +1581,42 @@ impl DirectClientInner {
                 .collect(),
             Err(_) => Vec::new(),
         };
-        let orphaned = {
-            let mut writers = self.subscription_stream_writers.lock();
-            let mut candidates = vec![Arc::clone(&stream)];
-            for filter in granted {
-                candidates.extend(writers.insert(filter.to_string(), Arc::clone(&stream)));
-            }
-            unused_streams(&writers, candidates)
-        };
-        for orphan in orphaned {
-            Self::close_stream(&orphan).await;
-        }
+        self.settle_stream_use(&stream, &granted).await;
         suback
     }
 
     #[cfg(feature = "transport-quic")]
-    fn unsubscribe_subscription_stream(&self, packet: &UnsubscribePacket) -> Option<StreamWriter> {
+    fn unsubscribe_subscription_stream(
+        &self,
+        packet: &UnsubscribePacket,
+    ) -> Option<SharedSubscriptionStream> {
         let [filter] = packet.filters.as_slice() else {
             return None;
         };
-        self.subscription_stream_writers.lock().get(filter).cloned()
+        let streams = self.subscription_streams.lock();
+        let stream = streams.get(filter)?;
+        stream.awaiting_ack.fetch_add(1, Ordering::Relaxed);
+        Some(Arc::clone(stream))
     }
 
     #[cfg(feature = "transport-quic")]
-    async fn release_unsubscribed_streams(&self, packet: &UnsubscribePacket) {
+    async fn release_unsubscribed_streams(
+        &self,
+        packet: &UnsubscribePacket,
+        stream: Option<SharedSubscriptionStream>,
+    ) {
         let orphaned = {
-            let mut writers = self.subscription_stream_writers.lock();
-            let removed: Vec<StreamWriter> = packet
+            let mut streams = self.subscription_streams.lock();
+            let mut candidates: Vec<SharedSubscriptionStream> = packet
                 .filters
                 .iter()
-                .filter_map(|filter| writers.remove(filter))
+                .filter_map(|filter| streams.remove(filter))
                 .collect();
-            unused_streams(&writers, removed)
+            if let Some(stream) = stream {
+                stream.awaiting_ack.fetch_sub(1, Ordering::Relaxed);
+                candidates.push(stream);
+            }
+            unused_streams(&streams, candidates)
         };
         for orphan in orphaned {
             Self::close_stream(&orphan).await;
@@ -1550,8 +1624,8 @@ impl DirectClientInner {
     }
 
     #[cfg(feature = "transport-quic")]
-    async fn close_stream(stream: &StreamWriter) {
-        if let Err(e) = stream.lock().await.close(None).await {
+    async fn close_stream(stream: &SubscriptionStream) {
+        if let Err(e) = stream.writer.lock().await.close(None).await {
             tracing::debug!(error = %e, "QUIC subscription stream already closed");
         }
     }
@@ -1627,8 +1701,7 @@ impl DirectClientInner {
         rx: oneshot::Receiver<SubAckPacket>,
         packet_id: u16,
     ) -> Result<SubAckPacket> {
-        let timeout = Duration::from_secs(10);
-        match tokio::time::timeout(timeout, rx).await {
+        match tokio::time::timeout(SUBSCRIPTION_ACK_WAIT, rx).await {
             Ok(Ok(suback)) => Ok(suback),
             Ok(Err(_)) => Err(MqttError::ProtocolError(
                 "SUBACK channel closed".to_string(),
@@ -1638,6 +1711,33 @@ impl DirectClientInner {
                 Err(MqttError::Timeout)
             }
         }
+    }
+
+    async fn wait_for_unsuback(
+        &self,
+        rx: oneshot::Receiver<UnsubAckPacket>,
+        packet_id: u16,
+    ) -> Result<()> {
+        let unsuback = match tokio::time::timeout(SUBSCRIPTION_ACK_WAIT, rx).await {
+            Ok(Ok(unsuback)) => unsuback,
+            Ok(Err(_)) => {
+                return Err(MqttError::ProtocolError(
+                    "UNSUBACK channel closed".to_string(),
+                ))
+            }
+            Err(_) => {
+                self.pending_unsubacks.lock().remove(&packet_id);
+                return Err(MqttError::Timeout);
+            }
+        };
+
+        if unsuback.packet_id != packet_id {
+            return Err(MqttError::ProtocolError(format!(
+                "UNSUBACK packet ID mismatch: expected {}, got {}",
+                packet_id, unsuback.packet_id
+            )));
+        }
+        Ok(())
     }
 
     /// # Errors
@@ -1688,14 +1788,25 @@ impl DirectClientInner {
         );
 
         #[cfg(feature = "transport-quic")]
-        let subscription_stream = self.subscription_stream_for(&packet).await?;
+        let subscription_stream =
+            self.subscription_stream_for(&packet)
+                .await
+                .inspect_err(|_| {
+                    self.pending_subacks.lock().remove(&packet_id);
+                })?;
         #[cfg(feature = "transport-quic")]
         let sent_on_flow = if let Some(stream) = &subscription_stream {
-            stream
+            let written = stream
+                .writer
                 .lock()
                 .await
                 .write_packet(Packet::Subscribe(packet.clone()))
-                .await?;
+                .await;
+            if let Err(e) = written {
+                self.pending_subacks.lock().remove(&packet_id);
+                self.settle_stream_use(stream, &[]).await;
+                return Err(e);
+            }
             true
         } else if let Some(manager) = self.subscribe_data_flow_manager(&packet) {
             let topic = packet.filters[0].filter.clone();
@@ -1785,11 +1896,17 @@ impl DirectClientInner {
 
         #[cfg(feature = "transport-quic")]
         let sent_on_flow = if let Some(stream) = &subscription_stream {
-            stream
+            let written = stream
+                .writer
                 .lock()
                 .await
                 .write_packet(Packet::Unsubscribe(packet.clone()))
-                .await?;
+                .await;
+            if let Err(e) = written {
+                self.pending_unsubacks.lock().remove(&packet_id);
+                self.settle_stream_use(stream, &[]).await;
+                return Err(e);
+            }
             true
         } else if let Some(manager) = self.unsubscribe_data_flow_manager(&packet).await {
             let topic = packet.filters[0].clone();
@@ -1811,29 +1928,16 @@ impl DirectClientInner {
                 .await?;
         }
 
-        let timeout = Duration::from_secs(10);
-        let unsuback = match tokio::time::timeout(timeout, rx).await {
-            Ok(Ok(unsuback)) => unsuback,
-            Ok(Err(_)) => {
-                return Err(MqttError::ProtocolError(
-                    "UNSUBACK channel closed".to_string(),
-                ))
-            }
-            Err(_) => {
-                self.pending_unsubacks.lock().remove(&packet_id);
-                return Err(MqttError::Timeout);
-            }
-        };
-
-        if unsuback.packet_id != packet_id {
-            return Err(MqttError::ProtocolError(format!(
-                "UNSUBACK packet ID mismatch: expected {}, got {}",
-                packet_id, unsuback.packet_id
-            )));
+        let unsuback = self.wait_for_unsuback(rx, packet_id).await;
+        #[cfg(feature = "transport-quic")]
+        if let (Err(_), Some(stream)) = (&unsuback, &subscription_stream) {
+            self.settle_stream_use(stream, &[]).await;
         }
+        unsuback?;
 
         #[cfg(feature = "transport-quic")]
-        self.release_unsubscribed_streams(&packet).await;
+        self.release_unsubscribed_streams(&packet, subscription_stream)
+            .await;
 
         for filter in packet.filters {
             let removed = self
@@ -2167,14 +2271,15 @@ impl DirectClientInner {
 
 #[cfg(feature = "transport-quic")]
 fn unused_streams(
-    writers: &HashMap<String, StreamWriter>,
-    candidates: Vec<StreamWriter>,
-) -> Vec<StreamWriter> {
-    let mut unused: Vec<StreamWriter> = Vec::new();
+    streams: &HashMap<String, SharedSubscriptionStream>,
+    candidates: Vec<SharedSubscriptionStream>,
+) -> Vec<SharedSubscriptionStream> {
+    let mut unused: Vec<SharedSubscriptionStream> = Vec::new();
     for candidate in candidates {
-        let in_use = writers
-            .values()
-            .any(|writer| Arc::ptr_eq(writer, &candidate));
+        let in_use = candidate.awaiting_ack.load(Ordering::Relaxed) > 0
+            || streams
+                .values()
+                .any(|stream| Arc::ptr_eq(stream, &candidate));
         let listed = unused.iter().any(|other| Arc::ptr_eq(other, &candidate));
         if !in_use && !listed {
             unused.push(candidate);

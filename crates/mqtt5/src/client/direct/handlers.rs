@@ -25,6 +25,7 @@ use crate::transport::flow::FlowId;
 pub(super) struct AckDelivery<'a> {
     pub(super) callbacks: &'a Arc<AckCallbackManager>,
     pub(super) dispatcher: &'a Arc<AckDispatcher>,
+    pub(super) stream: Option<&'a Arc<tokio::sync::Mutex<UnifiedWriter>>>,
 }
 
 /// Connection-scoped handles the incoming-packet handler needs, bundled from the
@@ -165,7 +166,7 @@ pub(super) async fn handle_publish_with_ack(
     }
 
     let route = match ack_delivery {
-        Some(ack) if flow_id.is_none() => AckRoute::Ordered(ack.dispatcher),
+        Some(ack) if flow_id.is_none() && ack.stream.is_none() => AckRoute::Ordered(ack.dispatcher),
         _ => AckRoute::Direct(writer),
     };
 
@@ -220,7 +221,7 @@ async fn deliver_deferred(
     publish.stream_id = flow_id.map(|f| f.raw()).or(publish.stream_id);
 
     if qos == QoS::AtMostOnce {
-        let token = ack.dispatcher.token(0, QoS::AtMostOnce);
+        let token = ack.dispatcher.token(0, QoS::AtMostOnce, None);
         ack.callbacks.dispatch(callback, publish, token);
         return Ok(());
     }
@@ -255,7 +256,7 @@ async fn deliver_deferred(
         .set_resolution(packet_id, AckResolution::Unresolved)
         .await;
 
-    let token = ack.dispatcher.token(packet_id, qos);
+    let token = ack.dispatcher.token(packet_id, qos, ack.stream.cloned());
     ack.callbacks.dispatch(callback, publish, token);
     Ok(())
 }
@@ -273,7 +274,10 @@ async fn resend_matching_ack(
     ack: &AckDelivery<'_>,
 ) {
     match session.read().await.get_resolution(packet_id).await {
-        AckResolution::Acked => ack.dispatcher.enqueue(packet_id, qos, AckKind::Ack),
+        AckResolution::Acked => {
+            ack.dispatcher
+                .enqueue_on(packet_id, qos, AckKind::Ack, ack.stream.cloned());
+        }
         AckResolution::Unresolved => {}
     }
 }
@@ -827,6 +831,7 @@ mod tests {
         let ack = AckDelivery {
             callbacks: &callbacks,
             dispatcher: &dispatcher,
+            stream: None,
         };
 
         handle_publish_with_ack(
@@ -870,6 +875,7 @@ mod tests {
         let ack = AckDelivery {
             callbacks: &callbacks,
             dispatcher: &dispatcher,
+            stream: None,
         };
 
         handle_publish_with_ack(
@@ -926,6 +932,7 @@ mod tests {
         let ack = AckDelivery {
             callbacks: &callbacks,
             dispatcher: &dispatcher,
+            stream: None,
         };
 
         handle_publish_with_ack(
@@ -986,6 +993,7 @@ mod tests {
         let ack = AckDelivery {
             callbacks: &callbacks,
             dispatcher: &dispatcher,
+            stream: None,
         };
 
         handle_publish_with_ack(
@@ -1062,6 +1070,7 @@ mod tests {
         let ack = AckDelivery {
             callbacks: &callbacks,
             dispatcher: &dispatcher,
+            stream: None,
         };
 
         handle_publish_with_ack(
