@@ -1026,6 +1026,19 @@ struct PayloadSpec {
     qos: QoS,
 }
 
+const TIMER_SLACK: Duration = Duration::from_millis(2);
+
+async fn sleep_until_precise(deadline: Instant) {
+    if let Some(coarse) = deadline.checked_sub(TIMER_SLACK) {
+        if coarse > Instant::now() {
+            tokio::time::sleep_until(coarse).await;
+        }
+    }
+    while Instant::now() < deadline {
+        tokio::task::yield_now().await;
+    }
+}
+
 async fn paced_latency_pump(
     client: &MqttClient,
     topic: &str,
@@ -1044,10 +1057,7 @@ async fn paced_latency_pump(
     let mut seq = seq_start;
     while start.elapsed() < duration {
         next += Duration::from_micros(interval_us);
-        let now = Instant::now();
-        if next > now {
-            tokio::time::sleep(next - now).await;
-        }
+        sleep_until_precise(next).await;
         let intended_wall =
             epoch_wall + u64::try_from((next - start).as_nanos()).unwrap_or(u64::MAX);
         let payload = encode_payload_at(spec.format, spec.payload_size, seq, intended_wall);
@@ -2045,10 +2055,7 @@ fn spawn_hol_publishers(
             while running.load(Ordering::Relaxed) {
                 if let Some(interval) = per_topic_interval_us {
                     next += Duration::from_micros(interval);
-                    let now = Instant::now();
-                    if next > now {
-                        tokio::time::sleep(next - now).await;
-                    }
+                    sleep_until_precise(next).await;
                 }
                 let intended_wall = if per_topic_interval_us.is_some() {
                     epoch_wall + u64::try_from((next - start).as_nanos()).unwrap_or(u64::MAX)
@@ -2343,7 +2350,26 @@ fn inter_topic_spread(topic_samples: &[Vec<TimestampedSample>], window_ms: u64) 
 
 #[cfg(test)]
 mod tests {
-    use super::steady_state_mean;
+    use super::{sleep_until_precise, steady_state_mean};
+    use mqtt5::time::Duration;
+    use tokio::time::Instant;
+
+    #[tokio::test]
+    async fn paced_sleep_wakes_within_a_fraction_of_a_millisecond() {
+        let mut lateness_us: Vec<u128> = Vec::with_capacity(40);
+        let mut deadline = Instant::now();
+        for _ in 0..40 {
+            deadline += Duration::from_micros(2500);
+            sleep_until_precise(deadline).await;
+            lateness_us.push(Instant::now().duration_since(deadline).as_micros());
+        }
+        lateness_us.sort_unstable();
+        let median = lateness_us[lateness_us.len() / 2];
+        assert!(
+            median < 300,
+            "paced sleep woke a median {median} us after its deadline: {lateness_us:?}"
+        );
+    }
 
     #[test]
     fn no_trim_is_plain_mean() {
