@@ -1,4 +1,3 @@
-use bytes::BytesMut;
 use mqtt5::broker::storage::{InflightDirection, InflightMessage, InflightPhase, StorageBackend};
 use mqtt5_protocol::error::Result;
 use mqtt5_protocol::packet::puback::PubAckPacket;
@@ -6,7 +5,6 @@ use mqtt5_protocol::packet::pubcomp::PubCompPacket;
 use mqtt5_protocol::packet::publish::PublishPacket;
 use mqtt5_protocol::packet::pubrec::PubRecPacket;
 use mqtt5_protocol::packet::pubrel::PubRelPacket;
-use mqtt5_protocol::packet::MqttPacket;
 use mqtt5_protocol::packet::Packet;
 use mqtt5_protocol::protocol::v5::reason_codes::ReasonCode;
 use mqtt5_protocol::QoS;
@@ -145,10 +143,8 @@ impl WasmClientHandler {
         Ok(())
     }
 
-    pub(super) fn handle_puback(&mut self, puback: &PubAckPacket) {
-        self.outbound_inflight
-            .borrow_mut()
-            .remove(&puback.packet_id);
+    pub(super) async fn handle_puback(&mut self, puback: &PubAckPacket) {
+        self.finish_outbound(puback.packet_id).await;
         if let Some(client_id) = self.client_id.as_ref() {
             self.fire_message_delivered(client_id, puback.packet_id, 1);
         }
@@ -160,10 +156,17 @@ impl WasmClientHandler {
         pubrec: &PubRecPacket,
         writer: &SharedWriter,
     ) -> Result<()> {
+        if pubrec.reason_code.is_error() {
+            self.finish_outbound(pubrec.packet_id).await;
+            return Ok(());
+        }
+        self.outbound_inflight
+            .borrow_mut()
+            .mark_released(pubrec.packet_id);
         let inflight = self.client_id.as_ref().and_then(|client_id| {
             self.outbound_inflight
                 .borrow()
-                .get(&pubrec.packet_id)
+                .get(pubrec.packet_id)
                 .map(|publish| {
                     InflightMessage::from_publish(
                         publish,
@@ -209,21 +212,29 @@ impl WasmClientHandler {
     }
 
     pub(super) async fn handle_pubcomp(&mut self, pubcomp: &PubCompPacket) {
-        self.outbound_inflight
-            .borrow_mut()
-            .remove(&pubcomp.packet_id);
+        self.finish_outbound(pubcomp.packet_id).await;
         if let Some(client_id) = self.client_id.as_ref() {
-            let _ = self
-                .storage
-                .remove_inflight_message(client_id, pubcomp.packet_id, InflightDirection::Outbound)
-                .await;
             self.fire_message_delivered(client_id, pubcomp.packet_id, 2);
         }
     }
 
-    pub(super) async fn resend_inflight_messages(&mut self, writer: &SharedWriter) -> Result<()> {
+    async fn finish_outbound(&self, packet_id: u16) {
+        self.outbound_inflight.borrow_mut().remove(packet_id);
+        if let Some(client_id) = self.client_id.as_ref() {
+            let _ = self
+                .storage
+                .remove_inflight_message(client_id, packet_id, InflightDirection::Outbound)
+                .await;
+        }
+        self.acknowledged.notify_one();
+    }
+
+    /// Restores the exactly-once state of a resumed session: a PUBREL goes again for each
+    /// outbound delivery the client has received, and inbound ones wait for their PUBREL. The
+    /// forwarder resends unacknowledged deliveries once the session is handed over.
+    pub(super) async fn restore_inflight_messages(&mut self, writer: &SharedWriter) -> Result<()> {
         let client_id = self.client_id.as_ref().unwrap();
-        let inflights = match self.storage.get_inflight_messages(client_id).await {
+        let mut inflights = match self.storage.get_inflight_messages(client_id).await {
             Ok(msgs) => msgs,
             Err(e) => {
                 warn!("failed to load inflight messages for {client_id}: {e}");
@@ -231,53 +242,24 @@ impl WasmClientHandler {
             }
         };
 
+        inflights.sort_by_key(|msg| (msg.stored_at_secs, msg.packet_id));
+
         for msg in inflights {
-            match msg.direction {
-                InflightDirection::Outbound => match msg.phase {
-                    InflightPhase::AwaitingPubrec => {
-                        let mut publish = msg.to_publish_packet();
-                        publish.dup = true;
-                        publish.protocol_version = self.protocol_version;
-                        self.outbound_inflight
-                            .borrow_mut()
-                            .insert(msg.packet_id, publish.clone());
-                        self.write_packet(&Packet::Publish(publish), writer)?;
-                    }
-                    InflightPhase::AwaitingPubcomp => {
-                        let publish = msg.to_publish_packet();
-                        self.outbound_inflight
-                            .borrow_mut()
-                            .insert(msg.packet_id, publish);
-                        let pubrel = PubRelPacket::new(msg.packet_id);
-                        self.write_packet(&Packet::PubRel(pubrel), writer)?;
-                    }
-                    InflightPhase::AwaitingPubrel => {}
-                },
-                InflightDirection::Inbound => {
-                    let publish = msg.to_publish_packet();
-                    self.inflight_publishes.insert(msg.packet_id, publish);
+            match (msg.direction, msg.phase) {
+                (InflightDirection::Outbound, InflightPhase::AwaitingPubcomp) => {
+                    self.outbound_inflight
+                        .borrow_mut()
+                        .insert_released(msg.packet_id, msg.to_publish_packet());
+                    let pubrel = PubRelPacket::new(msg.packet_id);
+                    self.write_packet(&Packet::PubRel(pubrel), writer)?;
                 }
+                (InflightDirection::Inbound, _) => {
+                    self.inflight_publishes
+                        .insert(msg.packet_id, msg.to_publish_packet());
+                }
+                (InflightDirection::Outbound, _) => {}
             }
         }
-        Ok(())
-    }
-
-    pub(super) fn send_publish(
-        &self,
-        mut publish: PublishPacket,
-        writer: &SharedWriter,
-    ) -> Result<()> {
-        publish.protocol_version = self.protocol_version;
-        self.write_packet(&Packet::Publish(publish), writer)
-    }
-
-    pub(super) fn write_publish_packet(
-        publish: &PublishPacket,
-        writer: &SharedWriter,
-    ) -> Result<()> {
-        let mut buf = BytesMut::new();
-        publish.encode(&mut buf)?;
-        writer.write(&buf)?;
         Ok(())
     }
 }

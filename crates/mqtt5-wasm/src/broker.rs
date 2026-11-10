@@ -1764,4 +1764,1459 @@ mod tests {
         let subacks = frames.iter().filter(|(b, _)| *b == 0x90).count();
         assert_eq!((publishes, subacks), (5, 1));
     }
+
+    fn puback(packet_id: &[u8]) -> Vec<u8> {
+        vec![0x40, 0x02, packet_id[0], packet_id[1]]
+    }
+
+    /// The packet identifier of a `QoS` 1 or 2 PUBLISH body, whose topic is at its start.
+    fn publish_packet_id(body: &[u8]) -> Vec<u8> {
+        let topic_len = usize::from(u16::from_be_bytes([body[0], body[1]]));
+        body[2 + topic_len..4 + topic_len].to_vec()
+    }
+
+    async fn route_retained(broker: &WasmBroker, topic: &str, qos: QoS) {
+        let mut publish =
+            mqtt5_protocol::packet::publish::PublishPacket::new(topic, b"kept".to_vec(), qos);
+        publish.retain = true;
+        broker.router.route_message(&publish, None).await;
+    }
+
+    #[wasm_bindgen_test]
+    async fn a_burst_over_the_lane_stays_in_order() {
+        let broker = broker();
+        let client = connected(&broker, connect_options("burst", true, 0)).await;
+        client.send_raw(&subscribe_bytes_at("burst/x", 1));
+        assert_eq!(client.wait_for(1).await.first(), Some(&0x90));
+        client.clear();
+        for index in 0u32..300 {
+            route(&broker, "burst/x", &index.to_be_bytes(), QoS::AtLeastOnce).await;
+        }
+        for _ in 0..300 {
+            if publish_frames(&client.received()).len() >= 300 {
+                break;
+            }
+            sleep(10).await;
+        }
+        let received: Vec<u32> = publish_frames(&client.received())
+            .iter()
+            .map(|(_, body)| u32::from_be_bytes(body[body.len() - 4..].try_into().unwrap()))
+            .collect();
+        assert_eq!(received, (0u32..300).collect::<Vec<u32>>());
+    }
+
+    #[wasm_bindgen_test]
+    async fn a_retained_message_at_qos_1_reaches_the_subscriber() {
+        let broker = broker();
+        route_retained(&broker, "kept/one", QoS::AtLeastOnce).await;
+        let client = connected(&broker, connect_options("retained-1", true, 0)).await;
+        client.send_raw(&subscribe_bytes_at("kept/one", 1));
+        sleep(300).await;
+        let frames = frames(&client.received());
+        assert!(frames.iter().any(|(first_byte, _)| *first_byte == 0x90));
+        let publish = frames
+            .iter()
+            .find(|(first_byte, _)| *first_byte == 0x33)
+            .expect("a retained QoS 1 PUBLISH");
+        assert_ne!(publish_packet_id(&publish.1), [0, 0]);
+    }
+
+    #[wasm_bindgen_test]
+    async fn a_retained_message_is_capped_at_the_granted_qos() {
+        let broker = broker();
+        route_retained(&broker, "kept/two", QoS::ExactlyOnce).await;
+        let client = connected(&broker, connect_options("retained-2", true, 0)).await;
+        client.send_raw(&subscribe_bytes_at("kept/two", 0));
+        sleep(300).await;
+        let first_bytes: Vec<u8> = publish_frames(&client.received())
+            .into_iter()
+            .map(|(first_byte, _)| first_byte)
+            .collect();
+        assert_eq!(first_bytes, [0x31]);
+    }
+
+    async fn retained_on_a_second_subscribe(options: u8) -> usize {
+        let broker = broker();
+        route_retained(&broker, "kept/rh", QoS::AtMostOnce).await;
+        let client = connected(&broker, connect_options("retained-rh", true, 0)).await;
+        client.send_raw(&subscribe_bytes_at("kept/rh", options));
+        sleep(200).await;
+        assert_eq!(publish_frames(&client.received()).len(), 1);
+        client.clear();
+        client.send_raw(&subscribe_bytes_at("kept/rh", options));
+        sleep(200).await;
+        publish_frames(&client.received()).len()
+    }
+
+    #[wasm_bindgen_test]
+    async fn retain_handling_1_skips_a_subscription_that_exists() {
+        assert_eq!(retained_on_a_second_subscribe(0x10).await, 0);
+    }
+
+    #[wasm_bindgen_test]
+    async fn control_retain_handling_0_resends_on_every_subscribe() {
+        assert_eq!(retained_on_a_second_subscribe(0x00).await, 1);
+    }
+
+    async fn delivered_at_qos_1_then_resumed(acknowledge: bool) -> Vec<(u8, Vec<u8>)> {
+        let broker = broker();
+        let first = connected(&broker, connect_options("resend-1", true, 3600)).await;
+        first.send_raw(&subscribe_bytes_at("resend/x", 1));
+        assert_eq!(first.wait_for(1).await.first(), Some(&0x90));
+        first.clear();
+        for payload in [b"a", b"b", b"c"] {
+            route(&broker, "resend/x", payload, QoS::AtLeastOnce).await;
+        }
+        sleep(200).await;
+        let sent = publish_frames(&first.received());
+        assert_eq!(sent.len(), 3);
+        if acknowledge {
+            for (_, body) in &sent {
+                first.send_raw(&puback(&publish_packet_id(body)));
+            }
+            sleep(100).await;
+        }
+        first.port.close();
+        sleep(200).await;
+        let second = start_connect(&broker, connect_options("resend-1", false, 3600));
+        sleep(400).await;
+        publish_frames(&second.received())
+    }
+
+    #[wasm_bindgen_test]
+    async fn an_unacknowledged_qos_1_delivery_is_resent_in_order_on_resume() {
+        let resent = delivered_at_qos_1_then_resumed(false).await;
+        let payloads: Vec<u8> = resent
+            .iter()
+            .map(|(_, body)| body[body.len() - 1])
+            .collect();
+        assert!(resent.iter().all(|(first_byte, _)| *first_byte == 0x3A));
+        assert_eq!(payloads, *b"abc");
+    }
+
+    #[wasm_bindgen_test]
+    async fn an_acknowledged_qos_1_delivery_is_not_resent() {
+        assert!(delivered_at_qos_1_then_resumed(true).await.is_empty());
+    }
+
+    #[wasm_bindgen_test]
+    async fn a_displaced_connection_is_told_and_its_next_packet_is_not_handled() {
+        let broker = broker();
+        let watcher = connected(&broker, connect_options("takeover-watch", true, 0)).await;
+        subscribed(&watcher, "takeover/x").await;
+        let first = connected(&broker, connect_options("takeover", true, 3600)).await;
+        first.clear();
+        let second = connected(&broker, connect_options("takeover", false, 3600)).await;
+        sleep(200).await;
+        let told = frames(&first.received());
+        assert_eq!(
+            told.first()
+                .map(|(first_byte, body)| (*first_byte, body[0])),
+            Some((0xE0, u8::from(ReasonCode::SessionTakenOver)))
+        );
+        first.clear();
+        let publish = mqtt5_protocol::packet::publish::PublishPacket::new(
+            "takeover/x",
+            b"late".to_vec(),
+            QoS::AtLeastOnce,
+        )
+        .with_packet_id(9);
+        first.send(&publish);
+        sleep(200).await;
+        assert!(first.received().is_empty(), "no PUBACK");
+        assert!(watcher.received().is_empty(), "not routed");
+        drop(second);
+    }
+
+    #[wasm_bindgen_test]
+    async fn nothing_is_sent_after_the_server_disconnect() {
+        let broker = broker();
+        let client = connected(&broker, connect_options("after-disconnect", true, 0)).await;
+        subscribed(&client, "after/x").await;
+        let slot = broker.router.lock_session("after-disconnect").await;
+        client.send(
+            &AuthPacket::continue_authentication("X".to_string(), Some(b"r".to_vec())).unwrap(),
+        );
+        assert_eq!(client.wait_for(1).await.first(), Some(&0xE0));
+        client.clear();
+        route(&broker, "after/x", b"late", QoS::AtLeastOnce).await;
+        sleep(200).await;
+        drop(slot);
+        assert!(client.received().is_empty());
+    }
+
+    struct Reauth;
+
+    impl AuthProvider for Reauth {
+        fn authenticate<'a>(
+            &'a self,
+            _connect: &'a ConnectPacket,
+            _client_addr: SocketAddr,
+        ) -> Pin<Box<dyn Future<Output = Result<AuthResult>> + Send + 'a>> {
+            Box::pin(async move { Ok(AuthResult::success()) })
+        }
+
+        fn authorize_publish<'a>(
+            &'a self,
+            _client_id: &str,
+            _user_id: Option<&'a str>,
+            _topic: &'a str,
+        ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+            Box::pin(async move { true })
+        }
+
+        fn authorize_subscribe<'a>(
+            &'a self,
+            _client_id: &str,
+            user_id: Option<&'a str>,
+            topic_filter: &'a str,
+        ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+            Box::pin(
+                async move { user_id == Some("alice") || !topic_filter.starts_with("secret/") },
+            )
+        }
+
+        fn checks_delivery(&self) -> bool {
+            true
+        }
+
+        fn authorize_delivery<'a>(
+            &'a self,
+            _client_id: &str,
+            user_id: Option<&'a str>,
+            topic: &'a str,
+        ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+            Box::pin(async move { user_id == Some("alice") || !topic.starts_with("open/private") })
+        }
+
+        fn supports_enhanced_auth(&self) -> bool {
+            true
+        }
+
+        fn authenticate_enhanced<'a>(
+            &'a self,
+            auth_method: &'a str,
+            auth_data: Option<&'a [u8]>,
+            _client_id: &'a str,
+        ) -> Pin<Box<dyn Future<Output = Result<EnhancedAuthResult>> + Send + 'a>> {
+            let method = auth_method.to_string();
+            let user = auth_data.map(|data| String::from_utf8_lossy(data).to_string());
+            Box::pin(async move {
+                Ok(match user {
+                    None => EnhancedAuthResult::continue_auth(method, Some(b"c".to_vec())),
+                    Some(user) => EnhancedAuthResult::success_with_user(method, user),
+                })
+            })
+        }
+
+        fn reauthenticate<'a>(
+            &'a self,
+            auth_method: &'a str,
+            auth_data: Option<&'a [u8]>,
+            client_id: &'a str,
+            _user_id: Option<&'a str>,
+        ) -> Pin<Box<dyn Future<Output = Result<EnhancedAuthResult>> + Send + 'a>> {
+            self.authenticate_enhanced(auth_method, auth_data, client_id)
+        }
+    }
+
+    async fn authenticated_as_alice(broker: &WasmBroker, client_id: &str) -> Client {
+        let channel = web_sys::MessageChannel::new().unwrap();
+        WasmClientHandler::new(
+            channel.port2(),
+            Arc::clone(&broker.config),
+            Arc::clone(&broker.router),
+            Arc::new(Reauth),
+            Arc::clone(&broker.storage),
+            Arc::clone(&broker.stats),
+            Arc::clone(&broker.resource_monitor),
+            broker.event_callbacks.clone(),
+        );
+        let client = Client::open(channel.port1());
+        client.send(&ConnectPacket::new(
+            ConnectOptions::new(client_id)
+                .with_session_expiry_interval(3600)
+                .with_authentication_method("X"),
+        ));
+        assert_eq!(client.wait_for(1).await.first(), Some(&0xF0));
+        client.clear();
+        client.send(
+            &AuthPacket::continue_authentication("X".to_string(), Some(b"alice".to_vec())).unwrap(),
+        );
+        assert_eq!(client.wait_for(4).await.first(), Some(&0x20));
+        client.clear();
+        client
+    }
+
+    async fn reauthenticate_as(client: &Client, user: &[u8]) {
+        let mut auth = AuthPacket::new(ReasonCode::ReAuthenticate);
+        auth.properties.set_authentication_method("X".to_string());
+        auth.properties
+            .set_authentication_data(user.to_vec().into());
+        client.send(&auth);
+        assert_eq!(client.wait_for(1).await.first(), Some(&0xF0));
+        client.clear();
+    }
+
+    async fn delivered_after_reauthenticating_as(
+        user: &[u8],
+        topic: &str,
+    ) -> (usize, Option<String>) {
+        let broker = broker();
+        let client = authenticated_as_alice(&broker, "reauth").await;
+        subscribed(&client, topic).await;
+        reauthenticate_as(&client, user).await;
+        route(&broker, topic, b"m", QoS::AtLeastOnce).await;
+        sleep(200).await;
+        let stored = broker.storage.get_session("reauth").await.unwrap().unwrap();
+        (publish_frames(&client.received()).len(), stored.user_id)
+    }
+
+    #[wasm_bindgen_test]
+    async fn reauthenticating_as_another_user_drops_what_that_user_cannot_have() {
+        let (delivered, owner) = delivered_after_reauthenticating_as(b"bob", "secret/x").await;
+        assert_eq!((delivered, owner.as_deref()), (0, Some("bob")));
+    }
+
+    #[wasm_bindgen_test]
+    async fn delivery_is_checked_for_the_reauthenticated_user() {
+        let (delivered, owner) = delivered_after_reauthenticating_as(b"bob", "open/private").await;
+        assert_eq!((delivered, owner.as_deref()), (0, Some("bob")));
+    }
+
+    #[wasm_bindgen_test]
+    async fn control_reauthenticating_as_the_same_user_keeps_its_subscriptions() {
+        let (delivered, owner) = delivered_after_reauthenticating_as(b"alice", "secret/x").await;
+        assert_eq!((delivered, owner.as_deref()), (1, Some("alice")));
+    }
+
+    fn encoded(packet: &impl MqttPacket) -> Vec<u8> {
+        let mut buf = BytesMut::new();
+        packet.encode(&mut buf).unwrap();
+        buf.to_vec()
+    }
+
+    fn last_bytes(frames: &[(u8, Vec<u8>)]) -> String {
+        frames
+            .iter()
+            .map(|(_, body)| char::from(body[body.len() - 1]))
+            .collect()
+    }
+
+    #[wasm_bindgen_test]
+    async fn lane_contents_survive_the_end_of_the_connection() {
+        let broker = broker();
+        let first = connected(&broker, connect_options("lane-end", true, 3600)).await;
+        first.send_raw(&subscribe_bytes_at("lane/x", 1));
+        assert_eq!(first.wait_for(1).await.first(), Some(&0x90));
+        first.clear();
+        let mut chunk = Vec::new();
+        for (index, payload) in [b"a", b"b", b"c"].iter().enumerate() {
+            let publish = mqtt5_protocol::packet::publish::PublishPacket::new(
+                "lane/x",
+                payload.to_vec(),
+                QoS::AtLeastOnce,
+            )
+            .with_packet_id(u16::try_from(index).unwrap() + 1);
+            chunk.extend(encoded(&publish));
+        }
+        chunk.extend_from_slice(&[0xE0, 0x00]);
+        first.send_raw(&chunk);
+        sleep(200).await;
+        let acked = frames(&first.received())
+            .iter()
+            .filter(|(first_byte, _)| first_byte >> 4 == 4)
+            .count();
+        let second = start_connect(&broker, connect_options("lane-end", false, 3600));
+        sleep(300).await;
+        let resumed = publish_frames(&second.received());
+        assert_eq!((acked, last_bytes(&resumed).as_str()), (3, "abc"));
+    }
+
+    async fn retained_count_over_the_lane(qos: QoS, requested: u8) -> (usize, usize) {
+        let broker = broker();
+        for index in 0..150 {
+            route_retained(&broker, &format!("over/{index}"), qos).await;
+        }
+        let client = connected(&broker, connect_options("retained-over", true, 0)).await;
+        client.send_raw(&subscribe_bytes_at("over/#", requested));
+        sleep(500).await;
+        let all = publish_frames(&client.received());
+        let retain_bits = all.iter().filter(|(b, _)| b & 1 == 1).count();
+        (all.len(), retain_bits)
+    }
+
+    #[wasm_bindgen_test]
+    async fn all_retained_qos_0_arrive() {
+        assert_eq!(
+            retained_count_over_the_lane(QoS::AtMostOnce, 0).await,
+            (150, 150)
+        );
+    }
+
+    #[wasm_bindgen_test]
+    async fn all_retained_qos_1_arrive() {
+        assert_eq!(
+            retained_count_over_the_lane(QoS::AtLeastOnce, 1).await,
+            (150, 150)
+        );
+    }
+
+    #[wasm_bindgen_test]
+    async fn retained_qos_1_capped_to_0_all_arrive() {
+        assert_eq!(
+            retained_count_over_the_lane(QoS::AtLeastOnce, 0).await,
+            (150, 150)
+        );
+    }
+
+    #[wasm_bindgen_test]
+    async fn resend_keeps_send_order_when_identifiers_are_reused() {
+        while js_sys::Date::now() % 1000.0 > 100.0 {
+            sleep(5).await;
+        }
+        let broker = broker();
+        let first = connected(&broker, connect_options("reuse", true, 3600)).await;
+        first.send_raw(&subscribe_bytes_at("reuse/x", 1));
+        assert_eq!(first.wait_for(1).await.first(), Some(&0x90));
+        first.clear();
+        for payload in [b"a", b"b", b"c"] {
+            route(&broker, "reuse/x", payload, QoS::AtLeastOnce).await;
+        }
+        sleep(10).await;
+        let sent = publish_frames(&first.received());
+        for (_, body) in &sent[..2] {
+            first.send_raw(&puback(&publish_packet_id(body)));
+        }
+        sleep(10).await;
+        let second = start_connect(&broker, connect_options("reuse", false, 3600));
+        sleep(20).await;
+        for payload in [b"d", b"e", b"f"] {
+            route(&broker, "reuse/x", payload, QoS::AtLeastOnce).await;
+        }
+        sleep(10).await;
+        let on_second = publish_frames(&second.received());
+        let third = start_connect(&broker, connect_options("reuse", false, 3600));
+        sleep(20).await;
+        let elapsed_ms = js_sys::Date::now() % 1000.0;
+        let resent = publish_frames(&third.received());
+        assert_eq!(
+            (
+                last_bytes(&on_second).as_str(),
+                last_bytes(&resent).as_str()
+            ),
+            ("cdef", "cdef"),
+            "ms into the second at the end: {elapsed_ms}"
+        );
+    }
+
+    struct Gated(Arc<tokio::sync::Semaphore>);
+
+    impl AuthProvider for Gated {
+        fn authenticate<'a>(
+            &'a self,
+            _connect: &'a ConnectPacket,
+            _client_addr: SocketAddr,
+        ) -> Pin<Box<dyn Future<Output = Result<AuthResult>> + Send + 'a>> {
+            Box::pin(async move { Ok(AuthResult::success()) })
+        }
+        fn authorize_publish<'a>(
+            &'a self,
+            _client_id: &str,
+            _user_id: Option<&'a str>,
+            _topic: &'a str,
+        ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+            Box::pin(async move { true })
+        }
+        fn authorize_subscribe<'a>(
+            &'a self,
+            _client_id: &str,
+            _user_id: Option<&'a str>,
+            _topic_filter: &'a str,
+        ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+            Box::pin(async move { true })
+        }
+        fn checks_delivery(&self) -> bool {
+            true
+        }
+        fn authorize_delivery<'a>(
+            &'a self,
+            _client_id: &str,
+            _user_id: Option<&'a str>,
+            _topic: &'a str,
+        ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+            let gate = Arc::clone(&self.0);
+            Box::pin(async move {
+                gate.acquire()
+                    .await
+                    .map(tokio::sync::SemaphorePermit::forget)
+                    .is_ok()
+            })
+        }
+    }
+
+    fn open_with(broker: &WasmBroker, provider: Arc<dyn AuthProvider>) -> Client {
+        let channel = web_sys::MessageChannel::new().unwrap();
+        WasmClientHandler::new(
+            channel.port2(),
+            Arc::clone(&broker.config),
+            Arc::clone(&broker.router),
+            provider,
+            Arc::clone(&broker.storage),
+            Arc::clone(&broker.stats),
+            Arc::clone(&broker.resource_monitor),
+            broker.event_callbacks.clone(),
+        );
+        Client::open(channel.port1())
+    }
+
+    #[wasm_bindgen_test]
+    async fn takeover_with_a_slow_delivery_check_loses_nothing() {
+        let broker = broker();
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let provider: Arc<dyn AuthProvider> = Arc::new(Gated(Arc::clone(&gate)));
+        let first = open_with(&broker, Arc::clone(&provider));
+        first.send(&ConnectPacket::new(connect_options("slow", true, 3600)));
+        assert_eq!(first.wait_for(4).await.first(), Some(&0x20));
+        first.clear();
+        first.send_raw(&subscribe_bytes_at("slow/x", 1));
+        assert_eq!(first.wait_for(1).await.first(), Some(&0x90));
+        for payload in [b"a", b"b", b"c"] {
+            route(&broker, "slow/x", payload, QoS::AtLeastOnce).await;
+        }
+        sleep(50).await;
+        let second = open_with(&broker, provider);
+        second.send(&ConnectPacket::new(connect_options("slow", false, 3600)));
+        assert_eq!(second.wait_for(4).await.first(), Some(&0x20));
+        second.clear();
+        sleep(50).await;
+        gate.add_permits(1000);
+        sleep(200).await;
+        let before = last_bytes(&publish_frames(&second.received()));
+        route(&broker, "slow/x", b"d", QoS::AtLeastOnce).await;
+        sleep(200).await;
+        let after = last_bytes(&publish_frames(&second.received()));
+        assert_eq!((before.as_str(), after.as_str()), ("abc", "abcd"));
+    }
+
+    #[wasm_bindgen_test]
+    async fn two_step_reauthentication_completes() {
+        let broker = broker();
+        let client = authenticated_as_alice(&broker, "reauth-2").await;
+        let mut auth = AuthPacket::new(ReasonCode::ReAuthenticate);
+        auth.properties.set_authentication_method("X".to_string());
+        client.send(&auth);
+        assert_eq!(client.wait_for(1).await.first(), Some(&0xF0));
+        client.clear();
+        client.send(
+            &AuthPacket::continue_authentication("X".to_string(), Some(b"bob".to_vec())).unwrap(),
+        );
+        sleep(100).await;
+        let reply = frames(&client.received());
+        assert_eq!(reply[0].0, 0xF0, "reply: {reply:?}");
+    }
+
+    #[wasm_bindgen_test]
+    async fn packet_identifiers_stay_unique_for_a_client_that_never_acknowledges() {
+        let broker = broker();
+        let client = connected(&broker, connect_options("no-ack", true, 0)).await;
+        client.send_raw(&subscribe_bytes_at("na/x", 1));
+        assert_eq!(client.wait_for(1).await.first(), Some(&0x90));
+        client.clear();
+        for index in 0u32..65_600 {
+            route(&broker, "na/x", b"m", QoS::AtLeastOnce).await;
+            if index % 50 == 0 {
+                sleep(0).await;
+            }
+        }
+        sleep(500).await;
+        let all = publish_frames(&client.received());
+        let mut ids: Vec<Vec<u8>> = all.iter().map(|(_, b)| publish_packet_id(b)).collect();
+        let total = ids.len();
+        ids.sort();
+        ids.dedup();
+        let stored = broker
+            .storage
+            .get_inflight_messages("no-ack")
+            .await
+            .unwrap()
+            .len();
+        assert_eq!((total, ids.len(), stored), (65_535, 65_535, 65_535));
+    }
+
+    #[wasm_bindgen_test]
+    async fn receive_maximum_is_honoured() {
+        let broker = broker();
+        let client = connected(
+            &broker,
+            connect_options("recv-max", true, 0).with_receive_maximum(2),
+        )
+        .await;
+        client.send_raw(&subscribe_bytes_at("rm/x", 1));
+        assert_eq!(client.wait_for(1).await.first(), Some(&0x90));
+        client.clear();
+        for payload in [b"a", b"b", b"c", b"d", b"e"] {
+            route(&broker, "rm/x", payload, QoS::AtLeastOnce).await;
+        }
+        sleep(200).await;
+        assert_eq!(publish_frames(&client.received()).len(), 2);
+    }
+
+    #[wasm_bindgen_test]
+    async fn maximum_packet_size_is_honoured() {
+        let broker = broker();
+        let mut options = connect_options("max-size", true, 0);
+        options.properties.maximum_packet_size = Some(20);
+        let client = connected(&broker, options).await;
+        client.send_raw(&subscribe_bytes_at("ms/x", 0));
+        assert_eq!(client.wait_for(1).await.first(), Some(&0x90));
+        client.clear();
+        route(&broker, "ms/x", &[b'z'; 60], QoS::AtMostOnce).await;
+        sleep(200).await;
+        assert_eq!(publish_frames(&client.received()).len(), 0);
+    }
+
+    #[wasm_bindgen_test]
+    async fn reauthentication_with_another_method_is_refused() {
+        let broker = broker();
+        let client = authenticated_as_alice(&broker, "reauth-m").await;
+        let mut auth = AuthPacket::new(ReasonCode::ReAuthenticate);
+        auth.properties.set_authentication_method("Y".to_string());
+        auth.properties
+            .set_authentication_data(b"alice".to_vec().into());
+        client.send(&auth);
+        sleep(100).await;
+        let reply = frames(&client.received());
+        assert_eq!(reply[0].0, 0xE0, "reply: {reply:?}");
+    }
+
+    #[wasm_bindgen_test]
+    async fn auth_on_a_connection_without_a_method_is_refused() {
+        let broker = broker();
+        let client = open_with(&broker, Arc::new(Reauth));
+        client.send(&ConnectPacket::new(connect_options("reauth-n", true, 60)));
+        assert_eq!(client.wait_for(4).await.first(), Some(&0x20));
+        client.clear();
+        let mut auth = AuthPacket::new(ReasonCode::ReAuthenticate);
+        auth.properties.set_authentication_method("X".to_string());
+        auth.properties
+            .set_authentication_data(b"alice".to_vec().into());
+        client.send(&auth);
+        sleep(100).await;
+        let reply = frames(&client.received());
+        assert_eq!(reply[0].0, 0xE0, "reply: {reply:?}");
+    }
+
+    #[wasm_bindgen_test]
+    async fn pubrec_with_an_error_gets_no_pubrel() {
+        let broker = broker();
+        let client = connected(&broker, connect_options("pubrec-err", true, 60)).await;
+        client.send_raw(&subscribe_bytes_at("pe/x", 2));
+        assert_eq!(client.wait_for(1).await.first(), Some(&0x90));
+        client.clear();
+        route(&broker, "pe/x", b"m", QoS::ExactlyOnce).await;
+        sleep(100).await;
+        let sent = publish_frames(&client.received());
+        let id = publish_packet_id(&sent[0].1);
+        client.clear();
+        client.send_raw(&[0x50, 0x03, id[0], id[1], 0x80]);
+        sleep(100).await;
+        assert!(client.received().is_empty(), "got {:?}", client.received());
+    }
+
+    #[wasm_bindgen_test]
+    async fn retain_handling_1_after_resume_counts_as_existing() {
+        let broker = broker();
+        route_retained(&broker, "kept/rs", QoS::AtMostOnce).await;
+        let first = connected(&broker, connect_options("rh-resume", true, 3600)).await;
+        first.send_raw(&subscribe_bytes_at("kept/rs", 0x10));
+        sleep(100).await;
+        assert_eq!(publish_frames(&first.received()).len(), 1);
+        let second = start_connect(&broker, connect_options("rh-resume", false, 3600));
+        assert_eq!(second.wait_for(4).await.first(), Some(&0x20));
+        second.clear();
+        second.send_raw(&subscribe_bytes_at("kept/rs", 0x10));
+        sleep(100).await;
+        assert_eq!(publish_frames(&second.received()).len(), 0);
+    }
+
+    fn v4_connect(client_id: &str) -> Vec<u8> {
+        let id = client_id.as_bytes();
+        let mut bytes = vec![0x10, u8::try_from(12 + id.len()).unwrap()];
+        bytes.extend_from_slice(&[0, 4, b'M', b'Q', b'T', b'T', 4, 0x00, 0, 0]);
+        bytes.extend_from_slice(&[0, u8::try_from(id.len()).unwrap()]);
+        bytes.extend_from_slice(id);
+        bytes
+    }
+
+    #[wasm_bindgen_test]
+    async fn v311_takeover_stops_without_disconnect_and_resends() {
+        let broker = broker();
+        let watcher = connected(&broker, connect_options("v4-watch", true, 0)).await;
+        subscribed(&watcher, "v4/w").await;
+        let first = Client::open(broker.create_client_port().unwrap());
+        first.send_raw(&v4_connect("v4-take"));
+        assert_eq!(first.wait_for(4).await.first(), Some(&0x20));
+        first.clear();
+        first.send_raw(&[0x82, 0x09, 0, 1, 0, 4, b'v', b'4', b'/', b'x', 1]);
+        assert_eq!(first.wait_for(1).await.first(), Some(&0x90));
+        first.clear();
+        route(&broker, "v4/x", b"m", QoS::AtLeastOnce).await;
+        sleep(100).await;
+        assert_eq!(publish_frames(&first.received()).len(), 1);
+        first.clear();
+        let second = Client::open(broker.create_client_port().unwrap());
+        second.send_raw(&v4_connect("v4-take"));
+        sleep(200).await;
+        assert!(
+            first.received().is_empty(),
+            "v3.1.1 got {:?}",
+            first.received()
+        );
+        let resent = publish_frames(&second.received());
+        assert_eq!(resent.len(), 1);
+        assert_eq!(resent[0].0, 0x3A);
+        first.send_raw(&[0x32, 0x08, 0, 4, b'v', b'4', b'/', b'w', 0, 9, b'l']);
+        sleep(100).await;
+        assert!(first.received().is_empty());
+        assert!(watcher.received().is_empty());
+    }
+
+    #[wasm_bindgen_test]
+    async fn client_publish_to_another_subscriber_no_chunk() {
+        let broker = broker();
+        let sub = connected(&broker, connect_options("ct20-sub", true, 0)).await;
+        subscribed(&sub, "ct20/x").await;
+        let publisher = connected(&broker, connect_options("ct20-pub", true, 0)).await;
+        let publish = mqtt5_protocol::packet::publish::PublishPacket::new(
+            "ct20/x",
+            b"m".to_vec(),
+            QoS::AtLeastOnce,
+        )
+        .with_packet_id(1);
+        publisher.send(&publish);
+        sleep(100).await;
+        assert_eq!(publish_frames(&sub.received()).len(), 1);
+    }
+
+    #[wasm_bindgen_test]
+    async fn client_publish_to_itself_no_chunk() {
+        let broker = broker();
+        let sub = connected(&broker, connect_options("ct21", true, 0)).await;
+        sub.send_raw(&subscribe_bytes_at("ct21/x", 1));
+        assert_eq!(sub.wait_for(1).await.first(), Some(&0x90));
+        sub.clear();
+        let publish = mqtt5_protocol::packet::publish::PublishPacket::new(
+            "ct21/x",
+            b"m".to_vec(),
+            QoS::AtLeastOnce,
+        )
+        .with_packet_id(1);
+        sub.send(&publish);
+        sleep(100).await;
+        assert_eq!(publish_frames(&sub.received()).len(), 1);
+    }
+
+    #[wasm_bindgen_test]
+    async fn takeover_keeps_order_with_messages_routed_during_the_handoff() {
+        let broker = broker();
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let first = open_with(&broker, Arc::new(Gated(Arc::clone(&gate))));
+        first.send(&ConnectPacket::new(connect_options("handoff", true, 3600)));
+        assert_eq!(first.wait_for(4).await.first(), Some(&0x20));
+        first.clear();
+        first.send_raw(&subscribe_bytes_at("handoff/x", 1));
+        assert_eq!(first.wait_for(1).await.first(), Some(&0x90));
+        for payload in [b"a", b"b", b"c"] {
+            route(&broker, "handoff/x", payload, QoS::AtLeastOnce).await;
+        }
+        sleep(50).await;
+        let second = connected(&broker, connect_options("handoff", false, 3600)).await;
+        route(&broker, "handoff/x", b"d", QoS::AtLeastOnce).await;
+        sleep(100).await;
+        gate.add_permits(1000);
+        sleep(300).await;
+        assert_eq!(last_bytes(&publish_frames(&second.received())), "abcd");
+    }
+
+    async fn unacknowledged_then_resumed_with(
+        client_id: &str,
+        payload: &[u8],
+        count: usize,
+        options: ConnectOptions,
+    ) -> Vec<(u8, Vec<u8>)> {
+        let broker = broker();
+        let first = connected(&broker, connect_options(client_id, true, 3600)).await;
+        first.send_raw(&subscribe_bytes_at("rs/x", 1));
+        assert_eq!(first.wait_for(1).await.first(), Some(&0x90));
+        first.clear();
+        for _ in 0..count {
+            route(&broker, "rs/x", payload, QoS::AtLeastOnce).await;
+        }
+        sleep(200).await;
+        assert_eq!(publish_frames(&first.received()).len(), count);
+        first.port.close();
+        sleep(200).await;
+        let second = start_connect(&broker, options);
+        sleep(300).await;
+        publish_frames(&second.received())
+    }
+
+    #[wasm_bindgen_test]
+    async fn resume_resend_honours_receive_maximum() {
+        let resent = unacknowledged_then_resumed_with(
+            "rs-rm",
+            b"m",
+            5,
+            connect_options("rs-rm", false, 3600).with_receive_maximum(2),
+        )
+        .await;
+        assert!(
+            resent.len() <= 2,
+            "resent {} with Receive Maximum 2",
+            resent.len()
+        );
+    }
+
+    #[wasm_bindgen_test]
+    async fn resume_resend_honours_maximum_packet_size() {
+        let mut options = connect_options("rs-mps", false, 3600);
+        options.properties.maximum_packet_size = Some(20);
+        let resent = unacknowledged_then_resumed_with("rs-mps", &[b'z'; 60], 1, options).await;
+        let oversize: Vec<usize> = resent.iter().map(|(_, body)| body.len() + 2).collect();
+        assert!(
+            oversize.is_empty(),
+            "sent packets of {oversize:?} bytes over a 20 byte limit"
+        );
+    }
+
+    #[wasm_bindgen_test]
+    async fn receive_maximum_zero_is_refused_or_delivers() {
+        let broker = broker();
+        let client = start_connect(
+            &broker,
+            connect_options("rm-zero", true, 0).with_receive_maximum(0),
+        );
+        let connack = client.wait_for(4).await;
+        let accepted = connack.first() == Some(&0x20) && connack[3] == 0x00;
+        client.clear();
+        let mut delivered = 0;
+        if accepted {
+            client.send_raw(&subscribe_bytes_at("rz/x", 1));
+            assert_eq!(client.wait_for(1).await.first(), Some(&0x90));
+            client.clear();
+            route(&broker, "rz/x", b"m", QoS::AtLeastOnce).await;
+            sleep(200).await;
+            delivered = publish_frames(&client.received()).len();
+        }
+        assert!(
+            !accepted || delivered == 1,
+            "accepted Receive Maximum 0 and delivered {delivered} of 1"
+        );
+    }
+
+    #[wasm_bindgen_test]
+    async fn an_unexpected_auth_before_connack_gets_a_connack() {
+        let broker = broker();
+        let client = open_with(&broker, Arc::new(Reauth));
+        client.send(&ConnectPacket::new(
+            ConnectOptions::new("pre-connack").with_authentication_method("X"),
+        ));
+        assert_eq!(client.wait_for(1).await.first(), Some(&0xF0));
+        client.clear();
+        let mut auth = AuthPacket::new(ReasonCode::ReAuthenticate);
+        auth.properties.set_authentication_method("X".to_string());
+        auth.properties
+            .set_authentication_data(b"alice".to_vec().into());
+        client.send(&auth);
+        sleep(100).await;
+        let reply = frames(&client.received());
+        let connack = reply
+            .first()
+            .map(|(first_byte, body)| (*first_byte, body.get(..2).map(<[u8]>::to_vec)));
+        assert_eq!(connack, Some((0x20, Some(vec![0x00, 0x82]))), "{reply:?}");
+    }
+
+    #[wasm_bindgen_test]
+    async fn another_auth_method_before_connack_gets_a_connack() {
+        let broker = broker();
+        let client = open_with(&broker, Arc::new(Reauth));
+        client.send(&ConnectPacket::new(
+            ConnectOptions::new("pre-connack-m").with_authentication_method("X"),
+        ));
+        assert_eq!(client.wait_for(1).await.first(), Some(&0xF0));
+        client.clear();
+        client.send(
+            &AuthPacket::continue_authentication("Y".to_string(), Some(b"alice".to_vec())).unwrap(),
+        );
+        sleep(100).await;
+        let reply = frames(&client.received());
+        let connack = reply
+            .first()
+            .map(|(first_byte, body)| (*first_byte, body.get(..2).map(<[u8]>::to_vec)));
+        assert_eq!(connack, Some((0x20, Some(vec![0x00, 0x8C]))), "{reply:?}");
+    }
+
+    #[wasm_bindgen_test]
+    async fn resend_keeps_send_order_across_packet_identifier_wrap() {
+        use mqtt5::broker::storage::{InflightDirection, InflightMessage, InflightPhase};
+        while js_sys::Date::now() % 1000.0 > 100.0 {
+            sleep(5).await;
+        }
+        let broker = broker();
+        let first = connected(&broker, connect_options("wrap", true, 3600)).await;
+        first.send_raw(&subscribe_bytes_at("wrap/x", 1));
+        assert_eq!(first.wait_for(1).await.first(), Some(&0x90));
+        first.port.close();
+        sleep(20).await;
+        let earlier = mqtt5_protocol::packet::publish::PublishPacket::new(
+            "wrap/x",
+            b"a".to_vec(),
+            QoS::AtLeastOnce,
+        )
+        .with_packet_id(u16::MAX);
+        broker
+            .storage
+            .store_inflight_message(InflightMessage::from_publish(
+                &earlier,
+                "wrap".to_string(),
+                InflightDirection::Outbound,
+                InflightPhase::AwaitingPubrec,
+            ))
+            .await
+            .unwrap();
+        let second = start_connect(&broker, connect_options("wrap", false, 3600));
+        sleep(30).await;
+        route(&broker, "wrap/x", b"b", QoS::AtLeastOnce).await;
+        sleep(30).await;
+        let on_second = last_bytes(&publish_frames(&second.received()));
+        second.port.close();
+        sleep(20).await;
+        let third = start_connect(&broker, connect_options("wrap", false, 3600));
+        sleep(30).await;
+        let elapsed_ms = js_sys::Date::now() % 1000.0;
+        let resent = last_bytes(&publish_frames(&third.received()));
+        assert_eq!(
+            (on_second.as_str(), resent.as_str()),
+            ("ab", "ab"),
+            "ms into the second at the end: {elapsed_ms}"
+        );
+    }
+
+    #[wasm_bindgen_test]
+    async fn window_reopening_delivers_a_long_burst_in_order() {
+        let broker = broker();
+        let client = connected(
+            &broker,
+            connect_options("rm-burst", true, 0).with_receive_maximum(1),
+        )
+        .await;
+        client.send_raw(&subscribe_bytes_at("rb/x", 1));
+        assert_eq!(client.wait_for(1).await.first(), Some(&0x90));
+        client.clear();
+        for index in 0u32..300 {
+            route(&broker, "rb/x", &index.to_be_bytes(), QoS::AtLeastOnce).await;
+        }
+        let mut received = Vec::new();
+        for _ in 0..600 {
+            let batch = publish_frames(&client.received());
+            client.clear();
+            for (_, body) in &batch {
+                received.push(u32::from_be_bytes(
+                    body[body.len() - 4..].try_into().unwrap(),
+                ));
+                client.send_raw(&puback(&publish_packet_id(body)));
+            }
+            if received.len() >= 300 {
+                break;
+            }
+            sleep(2).await;
+        }
+        assert_eq!(received, (0u32..300).collect::<Vec<u32>>());
+    }
+
+    #[wasm_bindgen_test]
+    async fn qos_0_flows_while_the_window_is_closed() {
+        let broker = broker();
+        let client = connected(
+            &broker,
+            connect_options("rm-q0", true, 0).with_receive_maximum(1),
+        )
+        .await;
+        client.send_raw(&subscribe_bytes_at("rq/#", 1));
+        assert_eq!(client.wait_for(1).await.first(), Some(&0x90));
+        client.clear();
+        route(&broker, "rq/one", b"1", QoS::AtLeastOnce).await;
+        route(&broker, "rq/one", b"2", QoS::AtLeastOnce).await;
+        route(&broker, "rq/zero", b"z", QoS::AtMostOnce).await;
+        sleep(200).await;
+        let first_bytes: Vec<u8> = publish_frames(&client.received())
+            .iter()
+            .map(|(first_byte, _)| *first_byte)
+            .collect();
+        assert_eq!(first_bytes, [0x32, 0x30]);
+    }
+
+    async fn subscribed_at(client: &Client, topic: &str, qos: u8) {
+        client.send_raw(&subscribe_bytes_at(topic, qos));
+        assert_eq!(
+            client.wait_for(1).await.first(),
+            Some(&0x90),
+            "expected SUBACK"
+        );
+        client.clear();
+    }
+
+    async fn gated_connection(
+        broker: &WasmBroker,
+        client_id: &str,
+        gate: &Arc<tokio::sync::Semaphore>,
+    ) -> Client {
+        let client = open_with(broker, Arc::new(Gated(Arc::clone(gate))));
+        client.send(&ConnectPacket::new(connect_options(client_id, true, 3600)));
+        assert_eq!(client.wait_for(4).await.first(), Some(&0x20));
+        client.clear();
+        client
+    }
+
+    async fn stalled_after_two_of_three(
+        broker: &WasmBroker,
+        client_id: &str,
+        topic: &str,
+        qos: QoS,
+        gate: &Arc<tokio::sync::Semaphore>,
+    ) -> Client {
+        let first = gated_connection(broker, client_id, gate).await;
+        subscribed_at(&first, topic, qos as u8).await;
+        for payload in [b"a", b"b", b"c"] {
+            route(broker, topic, payload, qos).await;
+        }
+        sleep(100).await;
+        assert_eq!(last_bytes(&publish_frames(&first.received())), "ab");
+        first
+    }
+
+    #[wasm_bindgen_test]
+    async fn a_handoff_that_times_out_delivers_each_message_once() {
+        let broker = broker();
+        let gate = Arc::new(tokio::sync::Semaphore::new(2));
+        let first =
+            stalled_after_two_of_three(&broker, "waive", "waive/x", QoS::AtLeastOnce, &gate).await;
+        let second = connected(&broker, connect_options("waive", false, 3600)).await;
+        sleep(31_000).await;
+        route(&broker, "waive/x", b"d", QoS::AtLeastOnce).await;
+        sleep(100).await;
+        gate.add_permits(100);
+        sleep(300).await;
+        let delivered = deliveries(&second.received());
+        drop(first);
+        assert_eq!(
+            delivered,
+            vec![
+                ('d', false, vec![0, 3]),
+                ('a', true, vec![0, 1]),
+                ('b', true, vec![0, 2]),
+                ('c', false, vec![0, 4])
+            ]
+        );
+    }
+
+    #[wasm_bindgen_test]
+    async fn a_handoff_that_times_out_completes_exactly_once_delivery_once() {
+        let broker = broker();
+        let gate = Arc::new(tokio::sync::Semaphore::new(1));
+        let first = gated_connection(&broker, "waive2", &gate).await;
+        subscribed_at(&first, "waive2/x", 2).await;
+        route(&broker, "waive2/x", b"a", QoS::ExactlyOnce).await;
+        route(&broker, "waive2/x", b"b", QoS::ExactlyOnce).await;
+        sleep(100).await;
+        assert_eq!(last_bytes(&publish_frames(&first.received())), "a");
+        let second = connected(&broker, connect_options("waive2", false, 3600)).await;
+        sleep(31_000).await;
+        let before_release = deliveries(&second.received());
+        gate.add_permits(100);
+        sleep(300).await;
+        let after_release = deliveries(&second.received());
+        drop(first);
+        assert_eq!(
+            (before_release, after_release),
+            (
+                Vec::new(),
+                vec![('a', true, vec![0, 1]), ('b', false, vec![0, 2])]
+            )
+        );
+    }
+
+    #[wasm_bindgen_test]
+    async fn a_clean_start_takeover_of_a_stalled_connection_gets_none_of_its_messages() {
+        let broker = broker();
+        let gate = Arc::new(tokio::sync::Semaphore::new(2));
+        let first =
+            stalled_after_two_of_three(&broker, "clean", "clean/x", QoS::AtLeastOnce, &gate).await;
+        let second = connected(&broker, connect_options("clean", true, 3600)).await;
+        subscribed_at(&second, "clean/x", 1).await;
+        sleep(100).await;
+        gate.add_permits(100);
+        sleep(300).await;
+        route(&broker, "clean/x", b"d", QoS::AtLeastOnce).await;
+        sleep(200).await;
+        let on_second = last_bytes(&publish_frames(&second.received()));
+        second.port.close();
+        sleep(200).await;
+        let third = start_connect(&broker, connect_options("clean", false, 3600));
+        sleep(300).await;
+        let on_third = last_bytes(&publish_frames(&third.received()));
+        drop(first);
+        assert_eq!((on_second.as_str(), on_third.as_str()), ("d", "d"));
+    }
+
+    #[wasm_bindgen_test]
+    async fn a_takeover_during_bind_hands_the_session_on_in_order() {
+        let broker = broker();
+        let gate = Arc::new(tokio::sync::Semaphore::new(2));
+        let first =
+            stalled_after_two_of_three(&broker, "chain", "chain/x", QoS::AtLeastOnce, &gate).await;
+        let second = connected(&broker, connect_options("chain", false, 3600)).await;
+        sleep(100).await;
+        let third = connected(&broker, connect_options("chain", false, 3600)).await;
+        sleep(100).await;
+        let told = frames(&second.received());
+        route(&broker, "chain/x", b"d", QoS::AtLeastOnce).await;
+        sleep(100).await;
+        gate.add_permits(100);
+        sleep(300).await;
+        let on_third = last_bytes(&publish_frames(&third.received()));
+        drop(first);
+        assert_eq!(
+            (
+                told.first()
+                    .map(|(first_byte, body)| (*first_byte, body[0])),
+                on_third.as_str()
+            ),
+            (Some((0xE0, 0x8E)), "abcd")
+        );
+    }
+
+    #[wasm_bindgen_test]
+    async fn exactly_once_state_survives_a_resume() {
+        let broker = broker();
+        let first = connected(&broker, connect_options("qos2-resume", true, 3600)).await;
+        subscribed_at(&first, "q2/x", 2).await;
+        route(&broker, "q2/x", b"r", QoS::ExactlyOnce).await;
+        route(&broker, "q2/x", b"u", QoS::ExactlyOnce).await;
+        sleep(100).await;
+        let sent = publish_frames(&first.received());
+        assert_eq!(last_bytes(&sent), "ru");
+        let released = publish_packet_id(&sent[0].1);
+        let unreceived = publish_packet_id(&sent[1].1);
+        first.send_raw(&[0x50, 0x02, released[0], released[1]]);
+        sleep(100).await;
+        first.port.close();
+        sleep(200).await;
+        let second = start_connect(&broker, connect_options("qos2-resume", false, 3600));
+        sleep(300).await;
+        let pubrels: Vec<Vec<u8>> = frames(&second.received())
+            .into_iter()
+            .filter(|(first_byte, _)| *first_byte == 0x62)
+            .map(|(_, body)| body)
+            .collect();
+        let resent: Vec<(u8, Vec<u8>)> = publish_frames(&second.received())
+            .iter()
+            .map(|(first_byte, body)| (*first_byte, publish_packet_id(body)))
+            .collect();
+        assert_eq!(
+            (pubrels, resent),
+            (vec![released], vec![(0x3C, unreceived)])
+        );
+    }
+
+    #[wasm_bindgen_test]
+    async fn a_keep_alive_timeout_hands_back_unacknowledged_messages() {
+        let broker = broker();
+        let first = connected(
+            &broker,
+            connect_options("ka", true, 3600).with_keep_alive(std::time::Duration::from_secs(1)),
+        )
+        .await;
+        subscribed_at(&first, "ka/x", 1).await;
+        route(&broker, "ka/x", b"k", QoS::AtLeastOnce).await;
+        sleep(2_500).await;
+        let second = start_connect(&broker, connect_options("ka", false, 3600));
+        sleep(300).await;
+        let resent = publish_frames(&second.received());
+        assert_eq!(
+            (
+                resent
+                    .iter()
+                    .map(|(first_byte, _)| *first_byte)
+                    .collect::<Vec<u8>>(),
+                last_bytes(&resent)
+            ),
+            (vec![0x3A], "k".to_string())
+        );
+    }
+
+    #[wasm_bindgen_test]
+    async fn receive_maximum_counts_a_restored_pubrel() {
+        let broker = broker();
+        let first = connected(&broker, connect_options("rm-rel", true, 3600)).await;
+        subscribed_at(&first, "rr/x", 2).await;
+        route(&broker, "rr/x", b"r", QoS::ExactlyOnce).await;
+        route(&broker, "rr/x", b"q", QoS::AtLeastOnce).await;
+        sleep(100).await;
+        let sent = publish_frames(&first.received());
+        let released = publish_packet_id(&sent[0].1);
+        first.send_raw(&[0x50, 0x02, released[0], released[1]]);
+        sleep(100).await;
+        first.port.close();
+        sleep(200).await;
+        let second = start_connect(
+            &broker,
+            connect_options("rm-rel", false, 3600).with_receive_maximum(1),
+        );
+        sleep(300).await;
+        let before = publish_frames(&second.received()).len();
+        second.send_raw(&[0x70, 0x02, released[0], released[1]]);
+        sleep(200).await;
+        let after = last_bytes(&publish_frames(&second.received()));
+        assert_eq!((before, after.as_str()), (0, "q"));
+    }
+
+    #[wasm_bindgen_test]
+    async fn a_second_connect_is_a_protocol_error() {
+        let broker = broker();
+        let client = connected(&broker, connect_options("twice", true, 0)).await;
+        client.send(&ConnectPacket::new(connect_options("twice", true, 0)));
+        sleep(200).await;
+        let reply = frames(&client.received());
+        assert_eq!(
+            reply
+                .first()
+                .map(|(first_byte, body)| (*first_byte, body.first().copied())),
+            Some((0xE0, Some(0x82))),
+            "{reply:?}"
+        );
+    }
+
+    fn deliveries(bytes: &[u8]) -> Vec<(char, bool, Vec<u8>)> {
+        publish_frames(bytes)
+            .iter()
+            .map(|(first_byte, body)| {
+                (
+                    char::from(body[body.len() - 1]),
+                    first_byte & 0x08 != 0,
+                    publish_packet_id(body),
+                )
+            })
+            .collect()
+    }
+
+    async fn a_successor_that_timed_out_then_taken_over_resends_in_order(qos: QoS) {
+        let broker = broker();
+        let gate = Arc::new(tokio::sync::Semaphore::new(2));
+        let first = stalled_after_two_of_three(&broker, "chain-late", "late/x", qos, &gate).await;
+        let second = connected(&broker, connect_options("chain-late", false, 3600)).await;
+        sleep(31_000).await;
+        let on_second = deliveries(&second.received());
+        let third = connected(&broker, connect_options("chain-late", false, 3600)).await;
+        sleep(200).await;
+        gate.add_permits(100);
+        sleep(400).await;
+        let on_third = deliveries(&third.received());
+        drop(first);
+        assert_eq!(
+            (on_second, on_third),
+            (
+                Vec::new(),
+                vec![
+                    ('a', true, vec![0, 1]),
+                    ('b', true, vec![0, 2]),
+                    ('c', false, vec![0, 3])
+                ]
+            )
+        );
+    }
+
+    #[wasm_bindgen_test]
+    async fn a_successor_that_timed_out_then_taken_over_resends_qos_1_in_order() {
+        a_successor_that_timed_out_then_taken_over_resends_in_order(QoS::AtLeastOnce).await;
+    }
+
+    #[wasm_bindgen_test]
+    async fn a_successor_that_timed_out_then_taken_over_resends_qos_2_in_order() {
+        a_successor_that_timed_out_then_taken_over_resends_in_order(QoS::ExactlyOnce).await;
+    }
+
+    #[wasm_bindgen_test]
+    async fn a_successor_that_ended_during_the_handoff_leaves_the_session_in_order() {
+        let broker = broker();
+        let gate = Arc::new(tokio::sync::Semaphore::new(2));
+        let first =
+            stalled_after_two_of_three(&broker, "ended", "ended/x", QoS::ExactlyOnce, &gate).await;
+        let first_ids: Vec<Vec<u8>> = publish_frames(&first.received())
+            .iter()
+            .map(|(_, body)| publish_packet_id(body))
+            .collect();
+        let second = connected(&broker, connect_options("ended", false, 3600)).await;
+        sleep(100).await;
+        second.port.close();
+        sleep(300).await;
+        gate.add_permits(100);
+        sleep(300).await;
+        let mut stored: Vec<u16> = broker
+            .storage
+            .get_inflight_messages("ended")
+            .await
+            .unwrap()
+            .iter()
+            .map(|message| message.packet_id)
+            .collect();
+        stored.sort_unstable();
+        let third = start_connect(&broker, connect_options("ended", false, 3600));
+        sleep(300).await;
+        let on_third = deliveries(&third.received());
+        drop(first);
+        assert_eq!(
+            (stored, on_third),
+            (
+                vec![1, 2],
+                vec![
+                    ('a', true, first_ids[0].clone()),
+                    ('b', true, first_ids[1].clone()),
+                    ('c', false, vec![0, 3])
+                ]
+            )
+        );
+    }
+
+    async fn a_late_hand_back_ahead_of_a_resend_leaves_it_its_packet_id(qos: QoS) {
+        let broker = broker();
+        let gate = Arc::new(tokio::sync::Semaphore::new(2));
+        let first = stalled_after_two_of_three(&broker, "ahead", "ahead/x", qos, &gate).await;
+        let second = connected(&broker, connect_options("ahead", false, 3600)).await;
+        sleep(31_000).await;
+        route(&broker, "ahead/x", b"d", qos).await;
+        sleep(200).await;
+        let on_second = deliveries(&second.received());
+        second.port.close();
+        sleep(300).await;
+        gate.add_permits(100);
+        sleep(300).await;
+        let third = start_connect(&broker, connect_options("ahead", false, 3600));
+        sleep(400).await;
+        let on_third = deliveries(&third.received());
+        drop(first);
+        assert_eq!(
+            (on_second, on_third),
+            (
+                vec![('d', false, vec![0, 3])],
+                vec![
+                    ('a', true, vec![0, 1]),
+                    ('b', true, vec![0, 2]),
+                    ('c', false, vec![0, 4]),
+                    ('d', true, vec![0, 3])
+                ]
+            )
+        );
+    }
+
+    #[wasm_bindgen_test]
+    async fn a_late_hand_back_ahead_of_a_qos_1_resend_leaves_it_its_packet_id() {
+        a_late_hand_back_ahead_of_a_resend_leaves_it_its_packet_id(QoS::AtLeastOnce).await;
+    }
+
+    #[wasm_bindgen_test]
+    async fn a_late_hand_back_ahead_of_a_qos_2_resend_leaves_it_its_packet_id() {
+        a_late_hand_back_ahead_of_a_resend_leaves_it_its_packet_id(QoS::ExactlyOnce).await;
+    }
+
+    #[wasm_bindgen_test]
+    async fn reserved_packet_ids_are_not_given_to_new_deliveries_when_ids_run_out() {
+        let broker = broker();
+        let gate = Arc::new(tokio::sync::Semaphore::new(2));
+        let first =
+            stalled_after_two_of_three(&broker, "spent", "spent/x", QoS::AtLeastOnce, &gate).await;
+        let second = connected(&broker, connect_options("spent", false, 3600)).await;
+        sleep(31_000).await;
+        for index in 0u32..65_535 {
+            route(&broker, "spent/x", b"m", QoS::AtLeastOnce).await;
+            if index % 50 == 0 {
+                sleep(0).await;
+            }
+        }
+        sleep(500).await;
+        let before_hand_back = deliveries(&second.received());
+        let fresh_on_reserved = before_hand_back
+            .iter()
+            .filter(|(_, dup, pid)| !dup && (*pid == vec![0, 1] || *pid == vec![0, 2]))
+            .count();
+        gate.add_permits(100);
+        sleep(300).await;
+        second.send_raw(&puback(&[0, 3]));
+        second.send_raw(&puback(&[0, 4]));
+        sleep(500).await;
+        let resent: Vec<(char, Vec<u8>)> = deliveries(&second.received())
+            .into_iter()
+            .filter(|(payload, dup, _)| *dup && (*payload == 'a' || *payload == 'b'))
+            .map(|(payload, _, pid)| (payload, pid))
+            .collect();
+        drop(first);
+        assert_eq!(
+            (before_hand_back.len(), fresh_on_reserved, resent),
+            (65_533, 0, vec![('a', vec![0, 1]), ('b', vec![0, 2])])
+        );
+    }
+
+    async fn a_resend_held_by_a_stalled_connection_keeps_its_packet_id(qos: QoS) {
+        let broker = broker();
+        let gate_first = Arc::new(tokio::sync::Semaphore::new(2));
+        let first = stalled_after_two_of_three(&broker, "held", "held/x", qos, &gate_first).await;
+        let second = connected(&broker, connect_options("held", false, 3600)).await;
+        sleep(31_000).await;
+        route(&broker, "held/x", b"d", qos).await;
+        sleep(200).await;
+        let on_second = deliveries(&second.received());
+        second.port.close();
+        sleep(300).await;
+        gate_first.add_permits(100);
+        sleep(300).await;
+        let gate_third = Arc::new(tokio::sync::Semaphore::new(0));
+        let third = open_with(&broker, Arc::new(Gated(Arc::clone(&gate_third))));
+        third.send(&ConnectPacket::new(connect_options("held", false, 3600)));
+        sleep(300).await;
+        let on_third = deliveries(&third.received());
+        let fourth = connected(&broker, connect_options("held", false, 3600)).await;
+        sleep(31_000).await;
+        route(&broker, "held/x", b"e", qos).await;
+        sleep(200).await;
+        gate_third.add_permits(100);
+        sleep(400).await;
+        let on_fourth = deliveries(&fourth.received());
+        drop(first);
+        drop(third);
+        assert_eq!(
+            (on_second, on_third, on_fourth),
+            (
+                vec![('d', false, vec![0, 3])],
+                vec![('a', true, vec![0, 1]), ('b', true, vec![0, 2])],
+                vec![
+                    ('e', false, vec![0, 4]),
+                    ('a', true, vec![0, 1]),
+                    ('b', true, vec![0, 2]),
+                    ('c', false, vec![0, 5]),
+                    ('d', true, vec![0, 3])
+                ]
+            )
+        );
+    }
+
+    #[wasm_bindgen_test]
+    async fn a_qos_1_resend_held_by_a_stalled_connection_keeps_its_packet_id() {
+        a_resend_held_by_a_stalled_connection_keeps_its_packet_id(QoS::AtLeastOnce).await;
+    }
+
+    #[wasm_bindgen_test]
+    async fn a_qos_2_resend_held_by_a_stalled_connection_keeps_its_packet_id() {
+        a_resend_held_by_a_stalled_connection_keeps_its_packet_id(QoS::ExactlyOnce).await;
+    }
 }

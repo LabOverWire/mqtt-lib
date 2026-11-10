@@ -1,6 +1,8 @@
 mod connect;
 mod events;
+mod forwarder;
 mod lifecycle;
+mod outbound;
 mod publish;
 mod subscribe;
 
@@ -8,6 +10,7 @@ use crate::broker::WasmEventCallbacks;
 use crate::transport::{WasmReader, WasmWriter};
 use bytes::BytesMut;
 use events::{fire_event, set_prop};
+use forwarder::Forwarder;
 use mqtt5::broker::auth::AuthProvider;
 use mqtt5::broker::config::BrokerConfig;
 use mqtt5::broker::resource_monitor::ResourceMonitor;
@@ -20,7 +23,7 @@ use mqtt5_protocol::packet::publish::PublishPacket;
 use mqtt5_protocol::packet::MqttPacket;
 use mqtt5_protocol::packet::Packet;
 use mqtt5_protocol::KeepaliveConfig;
-use mqtt5_protocol::QoS;
+use outbound::OutboundInflight;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -77,6 +80,8 @@ pub struct WasmClientHandler {
     pub(super) connect_session_expiry: Option<u32>,
     pub(super) advertised_session_expiry: Option<u32>,
     disconnect_rx: Option<tokio::sync::oneshot::Receiver<mqtt5::broker::router::TakeoverNotice>>,
+    released_rx: Option<tokio::sync::oneshot::Receiver<()>>,
+    resumed: bool,
     qos1_rx: tokio::sync::mpsc::Receiver<RoutableMessage>,
     qos1_tx: tokio::sync::mpsc::Sender<RoutableMessage>,
     qos0_rx: tokio::sync::mpsc::Receiver<RoutableMessage>,
@@ -85,8 +90,11 @@ pub struct WasmClientHandler {
     queue_epoch: u64,
     generation: u64,
     pub(super) inflight_publishes: HashMap<u16, PublishPacket>,
-    pub(super) outbound_inflight: Rc<RefCell<HashMap<u16, PublishPacket>>>,
+    outbound_inflight: Rc<RefCell<OutboundInflight>>,
     pub(super) next_packet_id: Rc<Cell<u16>>,
+    pub(super) client_receive_maximum: u16,
+    pub(super) client_max_packet_size: Option<u32>,
+    pub(super) acknowledged: Rc<tokio::sync::Notify>,
     pub(super) normal_disconnect: bool,
     pub(super) keep_alive: mqtt5::time::Duration,
     pub(super) auth_method: Option<String>,
@@ -100,15 +108,51 @@ static HANDLER_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::Atomic
 pub(super) struct DeliveryCheck {
     auth_provider: Arc<dyn AuthProvider>,
     client_id: String,
-    user_id: Option<String>,
     session: Rc<RefCell<Option<ClientSession>>>,
+}
+
+/// Whether the connection is still served. The forwarder waits on `stopped` to hand the session's
+/// messages back.
+pub(super) struct RunState {
+    running: Cell<bool>,
+    stop: tokio::sync::Notify,
+}
+
+impl RunState {
+    fn new() -> Self {
+        Self {
+            running: Cell::new(true),
+            stop: tokio::sync::Notify::new(),
+        }
+    }
+
+    pub(super) fn is_running(&self) -> bool {
+        self.running.get()
+    }
+
+    pub(super) fn stop(&self) {
+        if self.running.replace(false) {
+            self.stop.notify_one();
+        }
+    }
+
+    pub(super) async fn stopped(&self) {
+        if self.running.get() {
+            self.stop.notified().await;
+        }
+    }
+}
+
+/// Why a connection's packet loop was told to stop while it waited for a packet.
+enum StopReason {
+    KeepAliveTimeout,
+    TakenOver,
 }
 
 impl DeliveryCheck {
     /// Whether `publish`, routed for the subscription `instance`, may be sent, by the native
-    /// broker's rule. A `QoS` 2 delivery already started is sent again by
-    /// `resend_inflight_messages` rather than the forwarder, so the DUP exemption only keeps the
-    /// rule the same.
+    /// broker's rule, for the session's current user. A delivery already started, sent again with
+    /// DUP and its packet identifier, is completed.
     pub(super) async fn allows(&self, publish: &PublishPacket, instance: Option<u64>) -> bool {
         if publish.dup && publish.packet_id.is_some() {
             return true;
@@ -121,15 +165,17 @@ impl DeliveryCheck {
         {
             return false;
         }
-        !self.auth_provider.checks_delivery()
-            || self
-                .auth_provider
-                .authorize_delivery(
-                    &self.client_id,
-                    self.user_id.as_deref(),
-                    &publish.topic_name,
-                )
-                .await
+        if !self.auth_provider.checks_delivery() {
+            return true;
+        }
+        let user_id = self
+            .session
+            .borrow()
+            .as_ref()
+            .and_then(|session| session.user_id.clone());
+        self.auth_provider
+            .authorize_delivery(&self.client_id, user_id.as_deref(), &publish.topic_name)
+            .await
     }
 }
 
@@ -200,6 +246,8 @@ impl WasmClientHandler {
             connect_session_expiry: None,
             advertised_session_expiry: None,
             disconnect_rx: None,
+            released_rx: None,
+            resumed: false,
             qos1_rx,
             qos1_tx,
             qos0_rx,
@@ -208,8 +256,11 @@ impl WasmClientHandler {
             queue_epoch: 0,
             generation: 0,
             inflight_publishes: HashMap::new(),
-            outbound_inflight: Rc::new(RefCell::new(HashMap::new())),
+            outbound_inflight: Rc::new(RefCell::new(OutboundInflight::default())),
             next_packet_id: Rc::new(Cell::new(1)),
+            client_receive_maximum: u16::MAX,
+            client_max_packet_size: None,
+            acknowledged: Rc::new(tokio::sync::Notify::new()),
             normal_disconnect: false,
             keep_alive: mqtt5::time::Duration::from_secs(60),
             auth_method: None,
@@ -253,11 +304,11 @@ impl WasmClientHandler {
             self.release_ownership(&client_id).await;
             return Err(e);
         }
-        queue.notify();
-
         self.stats.client_connected();
 
-        let result = self.packet_loop(&mut reader, writer, disconnect_rx).await;
+        let result = self
+            .packet_loop(&mut reader, writer, disconnect_rx, queue)
+            .await;
 
         let armed_will = self.release_ownership(&client_id).await;
         let (reason, unexpected) = if self.normal_disconnect {
@@ -274,15 +325,21 @@ impl WasmClientHandler {
     }
 
     fn spawn_disconnect_watcher(
-        running: &Rc<RefCell<bool>>,
+        run_state: &Rc<RunState>,
         disconnect_rx: tokio::sync::oneshot::Receiver<mqtt5::broker::router::TakeoverNotice>,
+        notice_tx: tokio::sync::oneshot::Sender<mqtt5::broker::router::TakeoverNotice>,
+        stop_tx: tokio::sync::mpsc::Sender<StopReason>,
     ) {
-        let running_clone = Rc::clone(running);
+        let run_state = Rc::clone(run_state);
         spawn_local(async move {
             match disconnect_rx.await {
-                Ok(_notice) => {
+                Ok(notice) => {
                     info!("Session takeover signal received");
-                    *running_clone.borrow_mut() = false;
+                    run_state.stop();
+                    if notice_tx.send(notice).is_err() {
+                        debug!("Forwarder already handed the session back");
+                    }
+                    let _ = stop_tx.send(StopReason::TakenOver).await;
                 }
                 Err(_) => {
                     debug!("Disconnect sender dropped");
@@ -295,161 +352,55 @@ impl WasmClientHandler {
         DeliveryCheck {
             auth_provider: Arc::clone(&self.auth_provider),
             client_id: self.client_id.clone().unwrap_or_default(),
-            user_id: self.user_id.clone(),
             session: Rc::clone(&self.session),
         }
     }
 
-    async fn forward_one(
-        mut publish: PublishPacket,
-        writer: &SharedWriter,
-        outbound_inflight: &Rc<RefCell<HashMap<u16, PublishPacket>>>,
-        next_pid: &Rc<Cell<u16>>,
-        storage: &Arc<DynamicStorage>,
-        client_id: &str,
-        handler_id: u32,
-    ) -> bool {
-        use mqtt5::broker::storage::{
-            InflightDirection, InflightMessage, InflightPhase, StorageBackend,
-        };
-
-        if publish.qos != QoS::AtMostOnce {
-            let pid = next_pid.get();
-            next_pid.set(if pid == u16::MAX { 1 } else { pid + 1 });
-            publish.packet_id = Some(pid);
-
-            if publish.qos == QoS::ExactlyOnce {
-                outbound_inflight.borrow_mut().insert(pid, publish.clone());
-                let inflight = InflightMessage::from_publish(
-                    &publish,
-                    client_id.to_string(),
-                    InflightDirection::Outbound,
-                    InflightPhase::AwaitingPubrec,
-                );
-                if let Err(e) = storage.store_inflight_message(inflight).await {
-                    tracing::debug!("failed to persist outbound inflight {pid}: {e}");
-                }
-            }
-        }
-
-        if let Err(e) = Self::write_publish_packet(&publish, writer) {
-            error!("Handler #{handler_id} error forwarding publish: {e}");
-            return false;
-        }
-        true
-    }
-
     fn spawn_publish_forwarder(
         &mut self,
-        running: &Rc<RefCell<bool>>,
+        run_state: &Rc<RunState>,
         writer_shared: &SharedWriter,
+        queue: QueueHandle,
+        notice_rx: tokio::sync::oneshot::Receiver<mqtt5::broker::router::TakeoverNotice>,
+        done_tx: tokio::sync::oneshot::Sender<()>,
     ) {
-        let running_forward = Rc::clone(running);
-        let mut qos1_rx = std::mem::replace(&mut self.qos1_rx, tokio::sync::mpsc::channel(1).1);
-        let mut qos0_rx = std::mem::replace(&mut self.qos0_rx, tokio::sync::mpsc::channel(1).1);
-        let queue = self.queue.clone();
-        let queue_epoch = self.queue_epoch;
-        let writer_for_forward = writer_shared.clone();
-        let outbound_inflight_fwd = Rc::clone(&self.outbound_inflight);
-        let next_pid_fwd = Rc::clone(&self.next_packet_id);
-        let storage_fwd = Arc::clone(&self.storage);
-        let client_id_fwd = self.client_id.clone().unwrap_or_default();
-        let delivery_check = self.delivery_check();
-        let handler_id = self.handler_id;
-        let protocol_version = self.protocol_version;
-
-        spawn_local(async move {
-            'outer: loop {
-                if !*running_forward.borrow() {
-                    break;
-                }
-
-                let RoutableMessage {
-                    mut publish,
-                    subscription_instance,
-                    ..
-                } = tokio::select! {
-                    lane = qos1_rx.recv() => match lane {
-                        Some(routable) => routable,
-                        None => break,
-                    },
-                    lane = qos0_rx.recv() => match lane {
-                        Some(routable) => routable,
-                        None => break,
-                    },
-                    () = async {
-                        match &queue {
-                            Some(queue) => queue.notified().await,
-                            None => std::future::pending().await,
-                        }
-                    } => {
-                        if let Some(queue) = &queue {
-                            let mut pending = queue.take(64).await.into_iter();
-                            while let Some(message) = pending.next() {
-                                let mut queued = message.to_publish_packet();
-                                if !delivery_check
-                                    .allows(&queued, message.subscription_instance)
-                                    .await
-                                {
-                                    continue;
-                                }
-                                queued.protocol_version = protocol_version;
-                                if !Self::forward_one(
-                                    queued,
-                                    &writer_for_forward,
-                                    &outbound_inflight_fwd,
-                                    &next_pid_fwd,
-                                    &storage_fwd,
-                                    &client_id_fwd,
-                                    handler_id,
-                                )
-                                .await
-                                {
-                                    let mut rest = vec![message];
-                                    rest.extend(pending);
-                                    queue.requeue_front_in_epoch(rest, queue_epoch);
-                                    queue.finish_drain();
-                                    break 'outer;
-                                }
-                            }
-                            queue.finish_drain();
-                            if queue.count() > 0 {
-                                queue.notify();
-                            }
-                        }
-                        continue;
-                    }
-                };
-
-                if !delivery_check.allows(&publish, subscription_instance).await {
-                    continue;
-                }
-                publish.protocol_version = protocol_version;
-                if !Self::forward_one(
-                    publish,
-                    &writer_for_forward,
-                    &outbound_inflight_fwd,
-                    &next_pid_fwd,
-                    &storage_fwd,
-                    &client_id_fwd,
-                    handler_id,
-                )
-                .await
-                {
-                    break;
-                }
-            }
-        });
+        let forwarder = Forwarder {
+            run_state: Rc::clone(run_state),
+            writer: writer_shared.clone(),
+            outbound_inflight: Rc::clone(&self.outbound_inflight),
+            next_pid: Rc::clone(&self.next_packet_id),
+            storage: Arc::clone(&self.storage),
+            client_id: self.client_id.clone().unwrap_or_default(),
+            handler_id: self.handler_id,
+            delivery_check: self.delivery_check(),
+            protocol_version: self.protocol_version,
+            queue,
+            queue_epoch: self.queue_epoch,
+            generation: self.generation,
+            resumed: self.resumed,
+            released: self.released_rx.take(),
+            notice_rx,
+            done_tx,
+            qos1_rx: std::mem::replace(&mut self.qos1_rx, tokio::sync::mpsc::channel(1).1),
+            qos0_rx: std::mem::replace(&mut self.qos0_rx, tokio::sync::mpsc::channel(1).1),
+            receive_maximum: usize::from(self.client_receive_maximum),
+            max_packet_size: self
+                .client_max_packet_size
+                .map(|max| usize::try_from(max).unwrap_or(usize::MAX)),
+            acknowledged: Rc::clone(&self.acknowledged),
+            reserved_pids: std::collections::HashSet::new(),
+        };
+        spawn_local(forwarder.run());
     }
 
     fn spawn_keepalive_timer(
-        running: &Rc<RefCell<bool>>,
+        run_state: &Rc<RunState>,
         last_packet_time: &Rc<Cell<mqtt5::time::Instant>>,
         keep_alive: mqtt5::time::Duration,
         handler_id: u32,
-        timeout_tx: tokio::sync::mpsc::Sender<()>,
+        stop_tx: tokio::sync::mpsc::Sender<StopReason>,
     ) {
-        let running_timeout = Rc::clone(running);
+        let run_state = Rc::clone(run_state);
         let last_packet_time_timeout = Rc::clone(last_packet_time);
         let timeout_duration = KeepaliveConfig::default().timeout_duration(keep_alive);
         spawn_local(async move {
@@ -457,17 +408,17 @@ impl WasmClientHandler {
                 let remaining =
                     timeout_duration.saturating_sub(last_packet_time_timeout.get().elapsed());
                 if remaining.is_zero() {
-                    if *running_timeout.borrow() {
+                    if run_state.is_running() {
                         warn!("Handler #{handler_id} keep-alive timeout detected");
-                        *running_timeout.borrow_mut() = false;
-                        let _ = timeout_tx.send(()).await;
+                        run_state.stop();
+                        let _ = stop_tx.send(StopReason::KeepAliveTimeout).await;
                     }
                     break;
                 }
 
                 gloo_timers::future::sleep(remaining).await;
 
-                if !*running_timeout.borrow() {
+                if !run_state.is_running() {
                     break;
                 }
             }
@@ -479,54 +430,98 @@ impl WasmClientHandler {
         reader: &mut WasmReader,
         writer: SharedWriter,
         disconnect_rx: tokio::sync::oneshot::Receiver<mqtt5::broker::router::TakeoverNotice>,
+        queue: QueueHandle,
     ) -> Result<()> {
-        use crate::decoder::read_packet;
-
-        let running = Rc::new(RefCell::new(true));
-        Self::spawn_disconnect_watcher(&running, disconnect_rx);
+        let run_state = Rc::new(RunState::new());
+        let (stop_tx, stop_rx) = tokio::sync::mpsc::channel(2);
+        let (notice_tx, notice_rx) = tokio::sync::oneshot::channel();
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        Self::spawn_disconnect_watcher(&run_state, disconnect_rx, notice_tx, stop_tx.clone());
 
         let last_packet_time = Rc::new(Cell::new(mqtt5::time::Instant::now()));
-        self.spawn_publish_forwarder(&running, &writer);
+        self.spawn_publish_forwarder(&run_state, &writer, queue, notice_rx, done_tx);
 
-        let (timeout_tx, mut timeout_rx) = tokio::sync::mpsc::channel::<()>(1);
         if !self.keep_alive.is_zero() {
             Self::spawn_keepalive_timer(
-                &running,
+                &run_state,
                 &last_packet_time,
                 self.keep_alive,
                 self.handler_id,
-                timeout_tx,
+                stop_tx,
             );
         }
 
+        let result = self
+            .read_packets(reader, &writer, &last_packet_time, stop_rx)
+            .await;
+        run_state.stop();
+        if done_rx.await.is_err() {
+            debug!("Forwarder ended without handing the session back");
+        }
+        result
+    }
+
+    async fn read_packets(
+        &mut self,
+        reader: &mut WasmReader,
+        writer: &SharedWriter,
+        last_packet_time: &Cell<mqtt5::time::Instant>,
+        mut stop_rx: tokio::sync::mpsc::Receiver<StopReason>,
+    ) -> Result<()> {
+        use crate::decoder::read_packet;
+        use futures::future::Either;
+
         loop {
-            if !*running.borrow() {
-                info!("Session takeover or keep-alive timeout, disconnecting");
-                return Ok(());
-            }
-
-            let packet_future = read_packet(reader, self.protocol_version);
-            futures::pin_mut!(packet_future);
-            let timeout_future = timeout_rx.recv();
-            futures::pin_mut!(timeout_future);
-
-            match futures::future::select(packet_future, timeout_future).await {
-                futures::future::Either::Left((packet_result, _)) => match packet_result {
-                    Ok(packet) => {
-                        last_packet_time.set(mqtt5::time::Instant::now());
-                        if let Err(e) = self.handle_packet(packet, &writer).await {
-                            error!("Error handling packet: {e}");
-                            return Err(e);
-                        }
+            let event = {
+                let packet_future = read_packet(reader, self.protocol_version);
+                futures::pin_mut!(packet_future);
+                let stop_future = async {
+                    match stop_rx.recv().await {
+                        Some(stop) => stop,
+                        None => std::future::pending().await,
                     }
-                    Err(e) => {
-                        debug!("Connection closed: {e}");
-                        return Ok(());
-                    }
-                },
-                futures::future::Either::Right((_, _)) => {
-                    info!("Keep-alive timeout signal received");
+                };
+                futures::pin_mut!(stop_future);
+                match futures::future::select(packet_future, stop_future).await {
+                    Either::Left((packet_result, _)) => Either::Left(packet_result),
+                    Either::Right((stop, _)) => Either::Right(stop),
+                }
+            };
+            let packet_result = match (event, stop_rx.try_recv()) {
+                (Either::Right(stop), _) | (Either::Left(_), Ok(stop)) => {
+                    self.stop_reading(&stop, writer);
                     return Ok(());
+                }
+                (Either::Left(packet_result), Err(_)) => packet_result,
+            };
+            match packet_result {
+                Ok(packet) => {
+                    last_packet_time.set(mqtt5::time::Instant::now());
+                    if let Err(e) = Box::pin(self.handle_packet(packet, writer)).await {
+                        error!("Error handling packet: {e}");
+                        return Err(e);
+                    }
+                }
+                Err(e) => {
+                    debug!("Connection closed: {e}");
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    fn stop_reading(&self, stop: &StopReason, writer: &SharedWriter) {
+        match stop {
+            StopReason::KeepAliveTimeout => info!("Keep-alive timeout, disconnecting"),
+            StopReason::TakenOver => {
+                info!("Session taken over, disconnecting");
+                if self.protocol_version == 5 {
+                    let disconnect = mqtt5_protocol::packet::disconnect::DisconnectPacket::new(
+                        mqtt5_protocol::protocol::v5::reason_codes::ReasonCode::SessionTakenOver,
+                    );
+                    if let Err(e) = self.write_packet(&Packet::Disconnect(disconnect), writer) {
+                        debug!("Failed to send the session taken over DISCONNECT: {e}");
+                    }
                 }
             }
         }
@@ -538,7 +533,7 @@ impl WasmClientHandler {
             Packet::Unsubscribe(unsubscribe) => self.handle_unsubscribe(unsubscribe, writer).await,
             Packet::Publish(publish) => self.handle_publish(publish, writer).await,
             Packet::PubAck(ref puback) => {
-                self.handle_puback(puback);
+                self.handle_puback(puback).await;
                 Ok(())
             }
             Packet::PubRec(pubrec) => self.handle_pubrec(&pubrec, writer).await,
@@ -550,6 +545,15 @@ impl WasmClientHandler {
             Packet::PingReq => self.handle_pingreq(writer),
             Packet::Disconnect(ref disconnect) => self.handle_disconnect(disconnect, writer).await,
             Packet::Auth(auth) => self.handle_auth(auth, writer).await,
+            Packet::Connect(_) => {
+                if self.protocol_version == 5 {
+                    let disconnect = mqtt5_protocol::packet::disconnect::DisconnectPacket::new(
+                        mqtt5_protocol::protocol::v5::reason_codes::ReasonCode::ProtocolError,
+                    );
+                    self.write_packet(&Packet::Disconnect(disconnect), writer)?;
+                }
+                Err(MqttError::ProtocolError("Duplicate CONNECT".to_string()))
+            }
             _ => {
                 warn!("Unexpected packet type");
                 Ok(())
@@ -586,21 +590,19 @@ impl WasmClientHandler {
         Ok(())
     }
 
+    /// Resumes after the highest identifier in flight, so later deliveries sort after it.
     pub(super) fn advance_packet_id_past_inflight(&self) {
+        let following = |pid: u16| if pid == u16::MAX { 1 } else { pid + 1 };
         let outbound = self.outbound_inflight.borrow();
-        let mut candidate = self.next_packet_id.get();
+        let mut candidate = outbound
+            .highest()
+            .map_or(self.next_packet_id.get(), following);
         for _ in 0..u16::MAX {
-            if !outbound.contains_key(&candidate)
-                && !self.inflight_publishes.contains_key(&candidate)
-            {
+            if !outbound.contains(candidate) && !self.inflight_publishes.contains_key(&candidate) {
                 self.next_packet_id.set(candidate);
                 return;
             }
-            candidate = if candidate == u16::MAX {
-                1
-            } else {
-                candidate + 1
-            };
+            candidate = following(candidate);
         }
     }
 

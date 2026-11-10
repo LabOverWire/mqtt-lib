@@ -1,5 +1,5 @@
 use futures::future::{select, Either};
-use mqtt5::broker::auth::EnhancedAuthStatus;
+use mqtt5::broker::auth::{EnhancedAuthResult, EnhancedAuthStatus};
 use mqtt5::broker::router::Release;
 use mqtt5::broker::storage::{unix_millis_now, ClientSession, StorageBackend};
 use mqtt5_protocol::error::{MqttError, Result};
@@ -75,147 +75,184 @@ impl WasmClientHandler {
         Err(MqttError::ClientClosed)
     }
 
+    fn refuse_auth(
+        &self,
+        reason_code: ReasonCode,
+        message: &str,
+        writer: &SharedWriter,
+    ) -> Result<()> {
+        warn!("{message}");
+        let refusal = if self.pending_connect.is_some() {
+            Packet::ConnAck(self.new_connack(false, reason_code))
+        } else {
+            Packet::Disconnect(DisconnectPacket::new(reason_code))
+        };
+        self.write_packet(&refusal, writer)?;
+        Err(MqttError::ProtocolError(message.to_string()))
+    }
+
     pub(super) async fn handle_auth(
         &mut self,
         auth: AuthPacket,
         writer: &SharedWriter,
     ) -> Result<()> {
-        let reason_code = auth.reason_code;
+        use super::AuthState;
 
-        match reason_code {
-            ReasonCode::ContinueAuthentication => self.handle_continue_auth(auth, writer).await,
-            ReasonCode::ReAuthenticate => self.handle_reauth(auth, writer).await,
-            _ => {
-                warn!("Unexpected AUTH reason code: {:?}", reason_code);
-                Ok(())
+        let Some(expected) = self.auth_method.clone() else {
+            return self.refuse_auth(
+                ReasonCode::ProtocolError,
+                "AUTH on a connection that did not use enhanced authentication",
+                writer,
+            );
+        };
+        match auth.properties.get_authentication_method() {
+            None => {
+                return self.refuse_auth(
+                    ReasonCode::ProtocolError,
+                    "AUTH without an authentication method",
+                    writer,
+                );
             }
+            Some(method) if *method != expected => {
+                return self.refuse_auth(
+                    ReasonCode::BadAuthenticationMethod,
+                    "AUTH with another authentication method",
+                    writer,
+                );
+            }
+            Some(_) => {}
+        }
+
+        match (auth.reason_code, &self.auth_state) {
+            (ReasonCode::ContinueAuthentication, AuthState::InProgress) => {
+                self.handle_continue_auth(&expected, &auth, writer).await
+            }
+            (ReasonCode::ReAuthenticate, AuthState::Completed) => {
+                let client_id = self.client_id.clone().unwrap_or_default();
+                let result = self
+                    .auth_provider
+                    .reauthenticate(
+                        &expected,
+                        auth.properties.get_authentication_data(),
+                        &client_id,
+                        self.user_id.as_deref(),
+                    )
+                    .await?;
+                self.process_reauth_result(result, writer).await
+            }
+            (reason_code, _) => self.refuse_auth(
+                ReasonCode::ProtocolError,
+                &format!("Unexpected AUTH reason code: {reason_code:?}"),
+                writer,
+            ),
         }
     }
 
     async fn handle_continue_auth(
         &mut self,
-        auth: AuthPacket,
+        auth_method: &str,
+        auth: &AuthPacket,
+        writer: &SharedWriter,
+    ) -> Result<()> {
+        let client_id = self.pending_connect.as_ref().map_or_else(
+            || self.client_id.clone().unwrap_or_default(),
+            |pending| pending.connect.client_id.clone(),
+        );
+        let result = self
+            .auth_provider
+            .authenticate_enhanced(
+                auth_method,
+                auth.properties.get_authentication_data(),
+                &client_id,
+            )
+            .await?;
+
+        if self.pending_connect.is_some() {
+            self.process_enhanced_auth_result(result, writer).await
+        } else {
+            self.process_reauth_result(result, writer).await
+        }
+    }
+
+    async fn process_reauth_result(
+        &mut self,
+        result: EnhancedAuthResult,
         writer: &SharedWriter,
     ) -> Result<()> {
         use super::AuthState;
 
-        if self.auth_state != AuthState::InProgress {
-            warn!("AUTH received but not in auth flow");
-            let disconnect = DisconnectPacket {
-                reason_code: ReasonCode::ProtocolError,
-                properties: mqtt5_protocol::protocol::v5::properties::Properties::default(),
-            };
-            self.write_packet(&Packet::Disconnect(disconnect), writer)?;
-            return Err(MqttError::ProtocolError(
-                "AUTH received outside of auth flow".to_string(),
-            ));
-        }
-
-        let Some(auth_method) = self.auth_method.clone() else {
-            return Err(MqttError::ProtocolError("No auth method set".to_string()));
-        };
-
-        let packet_method = auth
-            .properties
-            .get_authentication_method()
-            .cloned()
-            .unwrap_or_default();
-        if packet_method != auth_method {
-            warn!(
-                "AUTH method mismatch: expected {}, got {}",
-                auth_method, packet_method
-            );
-            let disconnect = DisconnectPacket {
-                reason_code: ReasonCode::ProtocolError,
-                properties: mqtt5_protocol::protocol::v5::properties::Properties::default(),
-            };
-            self.write_packet(&Packet::Disconnect(disconnect), writer)?;
-            return Err(MqttError::ProtocolError("AUTH method mismatch".to_string()));
-        }
-
-        let auth_data = auth.properties.get_authentication_data();
-        let client_id = self
-            .pending_connect
-            .as_ref()
-            .map(|pc| pc.connect.client_id.clone())
-            .unwrap_or_default();
-
-        let result = self
-            .auth_provider
-            .authenticate_enhanced(&auth_method, auth_data, &client_id)
-            .await?;
-
-        self.process_enhanced_auth_result(result, writer).await
-    }
-
-    async fn handle_reauth(&mut self, auth: AuthPacket, writer: &SharedWriter) -> Result<()> {
-        use super::AuthState;
-
-        if self.auth_state != AuthState::Completed {
-            warn!("Re-auth requested but initial auth not complete");
-            let disconnect = DisconnectPacket {
-                reason_code: ReasonCode::ProtocolError,
-                properties: mqtt5_protocol::protocol::v5::properties::Properties::default(),
-            };
-            self.write_packet(&Packet::Disconnect(disconnect), writer)?;
-            return Err(MqttError::ProtocolError(
-                "Re-auth before initial auth".to_string(),
-            ));
-        }
-
-        let Some(auth_method) = auth.properties.get_authentication_method().cloned() else {
-            let disconnect = DisconnectPacket {
-                reason_code: ReasonCode::ProtocolError,
-                properties: mqtt5_protocol::protocol::v5::properties::Properties::default(),
-            };
-            self.write_packet(&Packet::Disconnect(disconnect), writer)?;
-            return Err(MqttError::ProtocolError(
-                "Re-auth missing method".to_string(),
-            ));
-        };
-
-        let auth_data = auth.properties.get_authentication_data();
-        let client_id = self.client_id.clone().unwrap_or_default();
-
-        let result = self
-            .auth_provider
-            .reauthenticate(&auth_method, auth_data, &client_id, self.user_id.as_deref())
-            .await?;
-
-        match result.status {
+        let reason_code = match result.status {
             EnhancedAuthStatus::Success => {
-                debug!("Re-authentication successful for {}", client_id);
-                let mut response = AuthPacket::new(ReasonCode::Success);
-                response
-                    .properties
-                    .set_authentication_method(result.auth_method);
-                if let Some(data) = result.auth_data {
-                    response.properties.set_authentication_data(data.into());
-                }
-                self.write_packet(&Packet::Auth(response), writer)?;
-                Ok(())
+                debug!("Re-authentication successful");
+                self.auth_state = AuthState::Completed;
+                self.adopt_reauthenticated_user(result.user_id).await?;
+                ReasonCode::Success
             }
             EnhancedAuthStatus::Continue => {
-                let mut response = AuthPacket::new(ReasonCode::ContinueAuthentication);
-                response
-                    .properties
-                    .set_authentication_method(result.auth_method);
-                if let Some(data) = result.auth_data {
-                    response.properties.set_authentication_data(data.into());
-                }
-                self.write_packet(&Packet::Auth(response), writer)?;
-                Ok(())
+                self.auth_state = AuthState::InProgress;
+                ReasonCode::ContinueAuthentication
             }
             EnhancedAuthStatus::Failed => {
-                warn!("Re-authentication failed for {}", client_id);
-                let disconnect = DisconnectPacket {
-                    reason_code: result.reason_code,
-                    properties: mqtt5_protocol::protocol::v5::properties::Properties::default(),
-                };
-                self.write_packet(&Packet::Disconnect(disconnect), writer)?;
-                Err(MqttError::AuthenticationFailed)
+                warn!("Re-authentication failed");
+                self.write_packet(
+                    &Packet::Disconnect(DisconnectPacket::new(result.reason_code)),
+                    writer,
+                )?;
+                return Err(MqttError::AuthenticationFailed);
             }
+        };
+        let mut response = AuthPacket::new(reason_code);
+        response
+            .properties
+            .set_authentication_method(result.auth_method);
+        if let Some(data) = result.auth_data {
+            response.properties.set_authentication_data(data.into());
         }
+        self.write_packet(&Packet::Auth(response), writer)
+    }
+
+    /// A re-authentication that names a user makes it the connection's and the session's, and
+    /// the session keeps only the subscriptions that user is now authorized for. One that names
+    /// none keeps them.
+    async fn adopt_reauthenticated_user(&mut self, user_id: Option<String>) -> Result<()> {
+        let (Some(user_id), Some(client_id)) = (user_id, self.client_id.clone()) else {
+            return Ok(());
+        };
+        let owner = Some(user_id);
+        let unchanged = self.user_id == owner;
+        self.user_id.clone_from(&owner);
+        let held = self.session.borrow().clone();
+        let Some(mut session) = held else {
+            return Ok(());
+        };
+        let dropped = self.drop_unauthorized_subscriptions(&mut session).await;
+        if unchanged && dropped.is_empty() {
+            return Ok(());
+        }
+        let slot = self.router.lock_session(&client_id).await;
+        if !self
+            .router
+            .is_current_owner(&client_id, self.generation)
+            .await
+        {
+            return Ok(());
+        }
+        for filter in &dropped {
+            self.router
+                .unsubscribe_as(Some(self.generation), &client_id, filter, None)
+                .await;
+        }
+        session.user_id.clone_from(&owner);
+        let kept = session.subscriptions.clone();
+        *self.session.borrow_mut() = Some(session);
+        let stored = self
+            .update_stored_session(move |session| {
+                session.user_id = owner;
+                session.subscriptions = kept;
+            })
+            .await;
+        drop(slot);
+        stored
     }
 
     async fn authorize_will(&self, client_id: &str, publish: &PublishPacket) -> bool {
