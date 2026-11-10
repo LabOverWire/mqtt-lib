@@ -179,24 +179,30 @@ impl DeliveryCheck {
     }
 }
 
+pub(crate) struct BrokerContext {
+    pub(crate) config: Arc<RwLock<BrokerConfig>>,
+    pub(crate) router: Arc<MessageRouter>,
+    pub(crate) auth_provider: Arc<dyn AuthProvider>,
+    pub(crate) storage: Arc<DynamicStorage>,
+    pub(crate) stats: Arc<BrokerStats>,
+    pub(crate) resource_monitor: Arc<ResourceMonitor>,
+    pub(crate) event_callbacks: WasmEventCallbacks,
+}
+
 impl WasmClientHandler {
-    #[allow(
-        clippy::must_use_candidate,
-        clippy::new_ret_no_self,
-        clippy::too_many_arguments
-    )]
-    pub fn new(
-        port: MessagePort,
-        config: Arc<RwLock<BrokerConfig>>,
-        router: Arc<MessageRouter>,
-        auth_provider: Arc<dyn AuthProvider>,
-        storage: Arc<DynamicStorage>,
-        stats: Arc<BrokerStats>,
-        resource_monitor: Arc<ResourceMonitor>,
-        event_callbacks: WasmEventCallbacks,
-    ) {
+    pub(crate) fn spawn(port: MessagePort, context: BrokerContext) {
         use futures::channel::mpsc;
         use wasm_bindgen::JsCast;
+
+        let BrokerContext {
+            config,
+            router,
+            auth_provider,
+            storage,
+            stats,
+            resource_monitor,
+            event_callbacks,
+        } = context;
 
         let (qos1_tx, qos1_rx) = tokio::sync::mpsc::channel(100);
         let (qos0_tx, qos0_rx) = tokio::sync::mpsc::channel(100);
@@ -519,7 +525,7 @@ impl WasmClientHandler {
                     let disconnect = mqtt5_protocol::packet::disconnect::DisconnectPacket::new(
                         mqtt5_protocol::protocol::v5::reason_codes::ReasonCode::SessionTakenOver,
                     );
-                    if let Err(e) = self.write_packet(&Packet::Disconnect(disconnect), writer) {
+                    if let Err(e) = Self::write_packet(&Packet::Disconnect(disconnect), writer) {
                         debug!("Failed to send the session taken over DISCONNECT: {e}");
                     }
                 }
@@ -542,7 +548,7 @@ impl WasmClientHandler {
                 self.handle_pubcomp(pubcomp).await;
                 Ok(())
             }
-            Packet::PingReq => self.handle_pingreq(writer),
+            Packet::PingReq => Self::handle_pingreq(writer),
             Packet::Disconnect(ref disconnect) => self.handle_disconnect(disconnect, writer).await,
             Packet::Auth(auth) => self.handle_auth(auth, writer).await,
             Packet::Connect(_) => {
@@ -550,7 +556,7 @@ impl WasmClientHandler {
                     let disconnect = mqtt5_protocol::packet::disconnect::DisconnectPacket::new(
                         mqtt5_protocol::protocol::v5::reason_codes::ReasonCode::ProtocolError,
                     );
-                    self.write_packet(&Packet::Disconnect(disconnect), writer)?;
+                    Self::write_packet(&Packet::Disconnect(disconnect), writer)?;
                 }
                 Err(MqttError::ProtocolError("Duplicate CONNECT".to_string()))
             }
@@ -561,8 +567,7 @@ impl WasmClientHandler {
         }
     }
 
-    #[allow(clippy::unused_self)]
-    pub(super) fn write_packet(&self, packet: &Packet, writer: &SharedWriter) -> Result<()> {
+    pub(super) fn write_packet(packet: &Packet, writer: &SharedWriter) -> Result<()> {
         let mut buf = BytesMut::new();
 
         match packet {

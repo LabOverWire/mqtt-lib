@@ -9,11 +9,14 @@ use wasm_bindgen::prelude::*;
 pub use deflate::WasmDeflateCodec;
 pub use gzip::WasmGzipCodec;
 
-#[allow(clippy::missing_errors_doc)]
 pub trait WasmPayloadCodec {
     fn name(&self) -> &'static str;
     fn content_type(&self) -> &'static str;
+    /// # Errors
+    /// Returns an error if the payload cannot be compressed.
     fn encode(&self, payload: &[u8]) -> Result<Vec<u8>, String>;
+    /// # Errors
+    /// Returns an error if the payload is not valid compressed data or decompresses past the size limit.
     fn decode(&self, payload: &[u8]) -> Result<Vec<u8>, String>;
 
     fn min_size_threshold(&self) -> usize {
@@ -45,15 +48,17 @@ impl WasmCodecRegistry {
     /// # Errors
     /// Returns an error if no codec is registered for the specified content type.
     #[wasm_bindgen(js_name = "setDefault")]
-    #[allow(non_snake_case)]
-    pub fn set_default(&self, contentType: &str) -> Result<(), JsValue> {
+    pub fn set_default(
+        &self,
+        #[wasm_bindgen(js_name = "contentType")] content_type: &str,
+    ) -> Result<(), JsValue> {
         let codecs = self.codecs.borrow();
-        if codecs.contains_key(contentType) {
-            *self.default_codec.borrow_mut() = Some(contentType.to_string());
+        if codecs.contains_key(content_type) {
+            *self.default_codec.borrow_mut() = Some(content_type.to_string());
             Ok(())
         } else {
             Err(JsValue::from_str(&format!(
-                "No codec registered for content type: {contentType}"
+                "No codec registered for content type: {content_type}"
             )))
         }
     }
@@ -66,9 +71,8 @@ impl WasmCodecRegistry {
 
     #[wasm_bindgen(js_name = "hasCodec")]
     #[must_use]
-    #[allow(non_snake_case)]
-    pub fn has_codec(&self, contentType: &str) -> bool {
-        self.codecs.borrow().contains_key(contentType)
+    pub fn has_codec(&self, #[wasm_bindgen(js_name = "contentType")] content_type: &str) -> bool {
+        self.codecs.borrow().contains_key(content_type)
     }
 
     #[wasm_bindgen(js_name = "registerGzip")]
@@ -152,13 +156,15 @@ pub fn create_codec_registry() -> WasmCodecRegistry {
 
 #[wasm_bindgen(js_name = "createGzipCodec")]
 #[must_use]
-#[allow(non_snake_case)]
-pub fn create_gzip_codec(level: Option<u8>, minSize: Option<usize>) -> WasmGzipCodec {
+pub fn create_gzip_codec(
+    level: Option<u8>,
+    #[wasm_bindgen(js_name = "minSize")] min_size: Option<usize>,
+) -> WasmGzipCodec {
     let mut codec = WasmGzipCodec::new();
     if let Some(l) = level {
         codec = codec.with_level(l);
     }
-    if let Some(s) = minSize {
+    if let Some(s) = min_size {
         codec = codec.with_min_size(s);
     }
     codec
@@ -166,13 +172,15 @@ pub fn create_gzip_codec(level: Option<u8>, minSize: Option<usize>) -> WasmGzipC
 
 #[wasm_bindgen(js_name = "createDeflateCodec")]
 #[must_use]
-#[allow(non_snake_case)]
-pub fn create_deflate_codec(level: Option<u8>, minSize: Option<usize>) -> WasmDeflateCodec {
+pub fn create_deflate_codec(
+    level: Option<u8>,
+    #[wasm_bindgen(js_name = "minSize")] min_size: Option<usize>,
+) -> WasmDeflateCodec {
     let mut codec = WasmDeflateCodec::new();
     if let Some(l) = level {
         codec = codec.with_level(l);
     }
-    if let Some(s) = minSize {
+    if let Some(s) = min_size {
         codec = codec.with_min_size(s);
     }
     codec

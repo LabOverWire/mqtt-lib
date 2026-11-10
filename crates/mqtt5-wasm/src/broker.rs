@@ -1,8 +1,8 @@
 use crate::bridge::{WasmBridgeConfig, WasmBridgeManager};
-use crate::client_handler::WasmClientHandler;
+use crate::client_handler::{BrokerContext, WasmClientHandler};
 use crate::config::WasmConnectOptions;
 use mqtt5::broker::acl::{AclRule, Permission};
-use mqtt5::broker::auth::{ComprehensiveAuthProvider, PasswordAuthProvider};
+use mqtt5::broker::auth::{AuthProvider, ComprehensiveAuthProvider, PasswordAuthProvider};
 use mqtt5::broker::config::{BrokerConfig, ChangeOnlyDeliveryConfig, LoadBalancerConfig};
 use mqtt5::broker::resource_monitor::{ResourceLimits, ResourceMonitor};
 use mqtt5::broker::router::MessageRouter;
@@ -81,7 +81,7 @@ pub struct WasmBrokerConfig {
 #[wasm_bindgen(js_class = "BrokerConfig")]
 impl WasmBrokerConfig {
     #[wasm_bindgen(constructor)]
-    #[allow(clippy::must_use_candidate)]
+    #[must_use]
     pub fn new() -> Self {
         Self {
             max_clients: 1000,
@@ -217,7 +217,7 @@ impl WasmBrokerConfig {
         self.session_sweep_interval_secs = value;
     }
 
-    fn to_broker_config(&self) -> BrokerConfig {
+    fn into_broker_config(self) -> BrokerConfig {
         let mut config = BrokerConfig {
             max_clients: self.max_clients as usize,
             session_expiry_interval: Duration::from_secs(u64::from(
@@ -235,13 +235,12 @@ impl WasmBrokerConfig {
                 .map(|s| Duration::from_secs(u64::from(s))),
             change_only_delivery_config: ChangeOnlyDeliveryConfig {
                 enabled: self.change_only_delivery_enabled,
-                topic_patterns: self.change_only_delivery_patterns.clone(),
+                topic_patterns: self.change_only_delivery_patterns,
             },
             echo_suppression_config: mqtt5::broker::config::EchoSuppressionConfig {
                 enabled: self.echo_suppression_enabled,
                 property_key: self
                     .echo_suppression_property_key
-                    .clone()
                     .unwrap_or_else(|| "x-origin-client-id".to_string()),
             },
             max_outbound_rate_per_client: self.max_outbound_rate_per_client,
@@ -250,7 +249,7 @@ impl WasmBrokerConfig {
             load_balancer: if self.load_balancer_backends.is_empty() {
                 None
             } else {
-                Some(LoadBalancerConfig::new(self.load_balancer_backends.clone()))
+                Some(LoadBalancerConfig::new(self.load_balancer_backends))
             },
             ..Default::default()
         };
@@ -321,12 +320,25 @@ pub struct WasmBroker {
     event_callbacks: WasmEventCallbacks,
 }
 
+impl WasmBroker {
+    fn handler_context(&self, auth_provider: Arc<dyn AuthProvider>) -> BrokerContext {
+        BrokerContext {
+            config: Arc::clone(&self.config),
+            router: Arc::clone(&self.router),
+            auth_provider,
+            storage: Arc::clone(&self.storage),
+            stats: Arc::clone(&self.stats),
+            resource_monitor: Arc::clone(&self.resource_monitor),
+            event_callbacks: self.event_callbacks.clone(),
+        }
+    }
+}
+
 #[wasm_bindgen(js_class = "Broker")]
 impl WasmBroker {
     /// # Errors
     /// Returns an error if broker initialization fails.
     #[wasm_bindgen(constructor)]
-    #[allow(clippy::must_use_candidate)]
     pub fn new() -> Result<WasmBroker, JsValue> {
         Self::with_config(WasmBrokerConfig::new())
     }
@@ -334,11 +346,11 @@ impl WasmBroker {
     /// # Errors
     /// Returns an error if broker initialization fails.
     #[wasm_bindgen(js_name = "withConfig")]
-    #[allow(clippy::needless_pass_by_value, clippy::arc_with_non_send_sync)]
+    #[allow(clippy::arc_with_non_send_sync)]
     pub fn with_config(options: WasmBrokerConfig) -> Result<WasmBroker, JsValue> {
         let allow_anonymous = options.allow_anonymous;
         let config_hash = options.calculate_hash();
-        let config = Arc::new(RwLock::new(options.to_broker_config()));
+        let config = Arc::new(RwLock::new(options.into_broker_config()));
 
         let storage = Arc::new(DynamicStorage::Memory(MemoryBackend::new()));
         let broker_config = config
@@ -425,20 +437,22 @@ impl WasmBroker {
     /// # Errors
     /// Returns an error if adding the user fails.
     #[wasm_bindgen(js_name = "addUser")]
-    #[allow(clippy::needless_pass_by_value)]
-    pub fn add_user(&self, username: String, password: String) -> Result<(), JsValue> {
+    pub fn add_user(&self, username: String, password: &str) -> Result<(), JsValue> {
         self.auth_provider
             .password_provider()
-            .add_user(username, &password)
+            .add_user(username, password)
             .map_err(|e| JsValue::from_str(&e.to_string()))
     }
 
     #[wasm_bindgen(js_name = "addUserWithHash")]
-    #[allow(non_snake_case)]
-    pub fn add_user_with_hash(&self, username: String, passwordHash: String) {
+    pub fn add_user_with_hash(
+        &self,
+        username: String,
+        #[wasm_bindgen(js_name = "passwordHash")] password_hash: String,
+    ) {
         self.auth_provider
             .password_provider()
-            .add_user_with_hash(username, passwordHash);
+            .add_user_with_hash(username, password_hash);
     }
 
     #[wasm_bindgen(js_name = "removeUser")]
@@ -469,11 +483,10 @@ impl WasmBroker {
     /// # Errors
     /// Returns an error if the permission string is invalid.
     #[wasm_bindgen(js_name = "addAclRule")]
-    #[allow(non_snake_case)]
     pub async fn add_acl_rule(
         &self,
         username: String,
-        topicPattern: String,
+        #[wasm_bindgen(js_name = "topicPattern")] topic_pattern: String,
         permission: String,
     ) -> Result<(), JsValue> {
         let perm: Permission = permission
@@ -481,7 +494,7 @@ impl WasmBroker {
             .map_err(|e: mqtt5::error::MqttError| JsValue::from_str(&e.to_string()))?;
         self.auth_provider
             .acl_manager()
-            .add_rule(AclRule::new(username, topicPattern, perm))
+            .add_rule(AclRule::new(username, topic_pattern, perm))
             .await;
         Ok(())
     }
@@ -519,11 +532,10 @@ impl WasmBroker {
     /// # Errors
     /// Returns an error if the permission string is invalid or role does not exist.
     #[wasm_bindgen(js_name = "addRoleRule")]
-    #[allow(non_snake_case)]
     pub async fn add_role_rule(
         &self,
-        roleName: String,
-        topicPattern: String,
+        #[wasm_bindgen(js_name = "roleName")] role_name: String,
+        #[wasm_bindgen(js_name = "topicPattern")] topic_pattern: String,
         permission: String,
     ) -> Result<(), JsValue> {
         let perm: Permission = permission
@@ -531,7 +543,7 @@ impl WasmBroker {
             .map_err(|e: mqtt5::error::MqttError| JsValue::from_str(&e.to_string()))?;
         self.auth_provider
             .acl_manager()
-            .add_role_rule(&roleName, topicPattern, perm)
+            .add_role_rule(&role_name, topic_pattern, perm)
             .await
             .map_err(|e| JsValue::from_str(&e.to_string()))
     }
@@ -539,21 +551,27 @@ impl WasmBroker {
     /// # Errors
     /// Returns an error if the role does not exist.
     #[wasm_bindgen(js_name = "assignRole")]
-    #[allow(non_snake_case)]
-    pub async fn assign_role(&self, username: String, roleName: String) -> Result<(), JsValue> {
+    pub async fn assign_role(
+        &self,
+        username: String,
+        #[wasm_bindgen(js_name = "roleName")] role_name: String,
+    ) -> Result<(), JsValue> {
         self.auth_provider
             .acl_manager()
-            .assign_role(&username, &roleName)
+            .assign_role(&username, &role_name)
             .await
             .map_err(|e| JsValue::from_str(&e.to_string()))
     }
 
     #[wasm_bindgen(js_name = "unassignRole")]
-    #[allow(non_snake_case)]
-    pub async fn unassign_role(&self, username: &str, roleName: &str) -> bool {
+    pub async fn unassign_role(
+        &self,
+        username: &str,
+        #[wasm_bindgen(js_name = "roleName")] role_name: &str,
+    ) -> bool {
         self.auth_provider
             .acl_manager()
-            .unassign_role(username, roleName)
+            .unassign_role(username, role_name)
             .await
     }
 
@@ -595,15 +613,9 @@ impl WasmBroker {
         let client_port = channel.port1();
         let broker_port = channel.port2();
 
-        WasmClientHandler::new(
+        WasmClientHandler::spawn(
             broker_port,
-            Arc::clone(&self.config),
-            Arc::clone(&self.router),
-            Arc::clone(&self.auth_provider) as _,
-            Arc::clone(&self.storage),
-            Arc::clone(&self.stats),
-            Arc::clone(&self.resource_monitor),
-            self.event_callbacks.clone(),
+            self.handler_context(Arc::clone(&self.auth_provider) as _),
         );
 
         Ok(client_port)
@@ -612,20 +624,18 @@ impl WasmBroker {
     /// # Errors
     /// Returns an error if the bridge cannot be added.
     #[wasm_bindgen(js_name = "addBridge")]
-    #[allow(non_snake_case)]
     pub async fn add_bridge(
         &self,
         config: WasmBridgeConfig,
-        remotePort: MessagePort,
+        #[wasm_bindgen(js_name = "remotePort")] remote_port: MessagePort,
     ) -> Result<(), JsValue> {
         let manager = self.bridge_manager.borrow().clone();
-        manager.add_bridge(config, remotePort).await
+        manager.add_bridge(config, remote_port).await
     }
 
     /// # Errors
     /// Returns an error if the bridge cannot be added or WebSocket connection fails.
     #[wasm_bindgen(js_name = "addBridgeWebSocket")]
-    #[allow(non_snake_case)]
     pub async fn add_bridge_ws(
         &self,
         config: WasmBridgeConfig,
@@ -662,15 +672,17 @@ impl WasmBroker {
     }
 
     #[wasm_bindgen(js_name = "startSysTopicsWithIntervalSecs")]
-    #[allow(non_snake_case)]
-    pub fn start_sys_topics_with_interval_secs(&self, intervalSecs: u32) {
+    pub fn start_sys_topics_with_interval_secs(
+        &self,
+        #[wasm_bindgen(js_name = "intervalSecs")] interval_secs: u32,
+    ) {
         if self.sys_topics_running.get() {
             return;
         }
         self.sys_topics_running.set(true);
 
         let provider = SysTopicsProvider::new(Arc::clone(&self.router), Arc::clone(&self.stats));
-        let interval_ms = u64::from(intervalSecs) * 1000;
+        let interval_ms = u64::from(interval_secs) * 1000;
         let running = Rc::clone(&self.sys_topics_running);
 
         wasm_bindgen_futures::spawn_local(async move {
@@ -712,16 +724,18 @@ impl WasmBroker {
     /// # Errors
     /// Returns an error if the config write lock cannot be acquired.
     #[wasm_bindgen(js_name = "updateConfig")]
-    #[allow(clippy::needless_pass_by_value, non_snake_case)]
-    pub fn update_config(&self, newConfig: WasmBrokerConfig) -> Result<(), JsValue> {
-        let new_hash = newConfig.calculate_hash();
+    pub fn update_config(
+        &self,
+        #[wasm_bindgen(js_name = "newConfig")] new_config: WasmBrokerConfig,
+    ) -> Result<(), JsValue> {
+        let new_hash = new_config.calculate_hash();
         let old_hash = self.config_hash.get();
 
         if new_hash == old_hash {
             return Ok(());
         }
 
-        let broker_config = newConfig.to_broker_config();
+        let broker_config = new_config.into_broker_config();
 
         let echo_key = if broker_config.echo_suppression_config.enabled {
             Some(broker_config.echo_suppression_config.property_key.clone())
@@ -808,20 +822,18 @@ impl WasmBroker {
 
     #[wasm_bindgen(js_name = "getMaxClients")]
     #[must_use]
-    #[allow(clippy::cast_possible_truncation)]
     pub fn get_max_clients(&self) -> u32 {
         self.config.read().map_or_else(
             |_| {
                 web_sys::console::warn_1(&"Config read failed, using default max_clients".into());
                 1000
             },
-            |c| c.max_clients as u32,
+            |c| u32::try_from(c.max_clients).unwrap_or(u32::MAX),
         )
     }
 
     #[wasm_bindgen(js_name = "getMaxPacketSize")]
     #[must_use]
-    #[allow(clippy::cast_possible_truncation)]
     pub fn get_max_packet_size(&self) -> u32 {
         self.config.read().map_or_else(
             |_| {
@@ -830,7 +842,7 @@ impl WasmBroker {
                 );
                 268_435_456
             },
-            |c| c.max_packet_size as u32,
+            |c| u32::try_from(c.max_packet_size).unwrap_or(u32::MAX),
         )
     }
 
@@ -1708,16 +1720,7 @@ mod tests {
         config.set_maximum_qos(1);
         let broker = WasmBroker::with_config(config).unwrap();
         let channel = web_sys::MessageChannel::new().unwrap();
-        WasmClientHandler::new(
-            channel.port2(),
-            Arc::clone(&broker.config),
-            Arc::clone(&broker.router),
-            Arc::new(Challenge),
-            Arc::clone(&broker.storage),
-            Arc::clone(&broker.stats),
-            Arc::clone(&broker.resource_monitor),
-            broker.event_callbacks.clone(),
-        );
+        WasmClientHandler::spawn(channel.port2(), broker.handler_context(Arc::new(Challenge)));
         let client = Client::open(channel.port1());
         let will = WillMessage::new("will/scram", "offline").with_qos(QoS::ExactlyOnce);
         client.send(&ConnectPacket::new(
@@ -2022,16 +2025,7 @@ mod tests {
 
     async fn authenticated_as_alice(broker: &WasmBroker, client_id: &str) -> Client {
         let channel = web_sys::MessageChannel::new().unwrap();
-        WasmClientHandler::new(
-            channel.port2(),
-            Arc::clone(&broker.config),
-            Arc::clone(&broker.router),
-            Arc::new(Reauth),
-            Arc::clone(&broker.storage),
-            Arc::clone(&broker.stats),
-            Arc::clone(&broker.resource_monitor),
-            broker.event_callbacks.clone(),
-        );
+        WasmClientHandler::spawn(channel.port2(), broker.handler_context(Arc::new(Reauth)));
         let client = Client::open(channel.port1());
         client.send(&ConnectPacket::new(
             ConnectOptions::new(client_id)
@@ -2257,16 +2251,7 @@ mod tests {
 
     fn open_with(broker: &WasmBroker, provider: Arc<dyn AuthProvider>) -> Client {
         let channel = web_sys::MessageChannel::new().unwrap();
-        WasmClientHandler::new(
-            channel.port2(),
-            Arc::clone(&broker.config),
-            Arc::clone(&broker.router),
-            provider,
-            Arc::clone(&broker.storage),
-            Arc::clone(&broker.stats),
-            Arc::clone(&broker.resource_monitor),
-            broker.event_callbacks.clone(),
-        );
+        WasmClientHandler::spawn(channel.port2(), broker.handler_context(provider));
         Client::open(channel.port1())
     }
 

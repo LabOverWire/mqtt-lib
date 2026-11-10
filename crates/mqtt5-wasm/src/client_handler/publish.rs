@@ -33,7 +33,7 @@ impl WasmClientHandler {
                 "Client {client_id} not authorized to publish to {}",
                 publish.topic_name
             );
-            self.reject_publish(&publish, ReasonCode::NotAuthorized, writer)?;
+            Self::reject_publish(&publish, ReasonCode::NotAuthorized, writer)?;
             return Ok(());
         }
 
@@ -49,7 +49,7 @@ impl WasmClientHandler {
                 "Client {client_id} sent QoS {} but max is {max_qos}",
                 publish.qos as u8
             );
-            self.reject_publish(&publish, ReasonCode::QoSNotSupported, writer)?;
+            Self::reject_publish(&publish, ReasonCode::QoSNotSupported, writer)?;
             return Ok(());
         }
 
@@ -60,7 +60,7 @@ impl WasmClientHandler {
             .await
         {
             warn!("Client {client_id} exceeded quota");
-            self.reject_publish(&publish, ReasonCode::QuotaExceeded, writer)?;
+            Self::reject_publish(&publish, ReasonCode::QuotaExceeded, writer)?;
             return Ok(());
         }
 
@@ -90,7 +90,7 @@ impl WasmClientHandler {
                 );
                 self.router.route_message(&publish, Some(client_id)).await;
                 let puback = PubAckPacket::new(publish.packet_id.unwrap());
-                self.write_packet(&Packet::PubAck(puback), writer)?;
+                Self::write_packet(&Packet::PubAck(puback), writer)?;
             }
             QoS::ExactlyOnce => {
                 self.fire_client_publish(
@@ -112,7 +112,7 @@ impl WasmClientHandler {
                 }
                 self.inflight_publishes.insert(packet_id, publish);
                 let pubrec = PubRecPacket::new(packet_id);
-                self.write_packet(&Packet::PubRec(pubrec), writer)?;
+                Self::write_packet(&Packet::PubRec(pubrec), writer)?;
             }
         }
 
@@ -120,7 +120,6 @@ impl WasmClientHandler {
     }
 
     fn reject_publish(
-        &self,
         publish: &PublishPacket,
         reason_code: ReasonCode,
         writer: &SharedWriter,
@@ -130,12 +129,12 @@ impl WasmClientHandler {
                 QoS::AtLeastOnce => {
                     let mut puback = PubAckPacket::new(packet_id);
                     puback.reason_code = reason_code;
-                    self.write_packet(&Packet::PubAck(puback), writer)?;
+                    Self::write_packet(&Packet::PubAck(puback), writer)?;
                 }
                 QoS::ExactlyOnce => {
                     let mut pubrec = PubRecPacket::new(packet_id);
                     pubrec.reason_code = reason_code;
-                    self.write_packet(&Packet::PubRec(pubrec), writer)?;
+                    Self::write_packet(&Packet::PubRec(pubrec), writer)?;
                 }
                 QoS::AtMostOnce => {}
             }
@@ -150,7 +149,6 @@ impl WasmClientHandler {
         }
     }
 
-    #[allow(clippy::similar_names)]
     pub(super) async fn handle_pubrec(
         &self,
         pubrec: &PubRecPacket,
@@ -184,8 +182,7 @@ impl WasmClientHandler {
                 );
             }
         }
-        let pubrel = PubRelPacket::new(pubrec.packet_id);
-        self.write_packet(&Packet::PubRel(pubrel), writer)?;
+        Self::write_packet(&Packet::PubRel(PubRelPacket::new(pubrec.packet_id)), writer)?;
         Ok(())
     }
 
@@ -207,7 +204,7 @@ impl WasmClientHandler {
         };
 
         let pubcomp = PubCompPacket::new_with_reason(pubrel.packet_id, reason_code);
-        self.write_packet(&Packet::PubComp(pubcomp), writer)?;
+        Self::write_packet(&Packet::PubComp(pubcomp), writer)?;
         Ok(())
     }
 
@@ -251,7 +248,7 @@ impl WasmClientHandler {
                         .borrow_mut()
                         .insert_released(msg.packet_id, msg.to_publish_packet());
                     let pubrel = PubRelPacket::new(msg.packet_id);
-                    self.write_packet(&Packet::PubRel(pubrel), writer)?;
+                    Self::write_packet(&Packet::PubRel(pubrel), writer)?;
                 }
                 (InflightDirection::Inbound, _) => {
                     self.inflight_publishes

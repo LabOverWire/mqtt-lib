@@ -17,8 +17,8 @@ use super::SharedWriter;
 use super::WasmClientHandler;
 
 impl WasmClientHandler {
-    pub(super) fn handle_pingreq(&self, writer: &SharedWriter) -> Result<()> {
-        self.write_packet(&Packet::PingResp, writer)
+    pub(super) fn handle_pingreq(writer: &SharedWriter) -> Result<()> {
+        Self::write_packet(&Packet::PingResp, writer)
     }
 
     pub(super) async fn handle_disconnect(
@@ -32,7 +32,7 @@ impl WasmClientHandler {
                     requested,
                     "Session Expiry Interval on DISCONNECT after 0 on CONNECT is a Protocol Error"
                 );
-                self.write_packet(
+                Self::write_packet(
                     &Packet::Disconnect(DisconnectPacket::new(ReasonCode::ProtocolError)),
                     writer,
                 )?;
@@ -87,7 +87,7 @@ impl WasmClientHandler {
         } else {
             Packet::Disconnect(DisconnectPacket::new(reason_code))
         };
-        self.write_packet(&refusal, writer)?;
+        Self::write_packet(&refusal, writer)?;
         Err(MqttError::ProtocolError(message.to_string()))
     }
 
@@ -194,7 +194,7 @@ impl WasmClientHandler {
             }
             EnhancedAuthStatus::Failed => {
                 warn!("Re-authentication failed");
-                self.write_packet(
+                Self::write_packet(
                     &Packet::Disconnect(DisconnectPacket::new(result.reason_code)),
                     writer,
                 )?;
@@ -208,7 +208,7 @@ impl WasmClientHandler {
         if let Some(data) = result.auth_data {
             response.properties.set_authentication_data(data.into());
         }
-        self.write_packet(&Packet::Auth(response), writer)
+        Self::write_packet(&Packet::Auth(response), writer)
     }
 
     /// A re-authentication that names a user makes it the connection's and the session's, and
