@@ -2092,6 +2092,19 @@ struct HolPublishConfig {
     inflight: usize,
 }
 
+async fn stamp_when_ready(
+    qos: QoS,
+    sem: &Arc<tokio::sync::Semaphore>,
+    stamp: impl FnOnce() -> u64,
+) -> Option<(Option<tokio::sync::OwnedSemaphorePermit>, u64)> {
+    let permit = if qos == QoS::AtMostOnce {
+        None
+    } else {
+        Some(Arc::clone(sem).acquire_owned().await.ok()?)
+    };
+    Some((permit, stamp()))
+}
+
 fn spawn_hol_publishers(
     pub_clients: &[MqttClient],
     cfg: &HolPublishConfig,
@@ -2121,21 +2134,23 @@ fn spawn_hol_publishers(
                     next += Duration::from_micros(interval);
                     sleep_until_precise(next).await;
                 }
-                let intended_wall = if per_topic_interval_us.is_some() {
-                    epoch_wall + u64::try_from((next - start).as_nanos()).unwrap_or(u64::MAX)
-                } else {
-                    nanos_as_u64()
+                let stamp = || {
+                    if per_topic_interval_us.is_some() {
+                        epoch_wall + u64::try_from((next - start).as_nanos()).unwrap_or(u64::MAX)
+                    } else {
+                        nanos_as_u64()
+                    }
+                };
+                let Some((permit, intended_wall)) = stamp_when_ready(qos, &sem, stamp).await else {
+                    break;
                 };
                 let payload = encode_payload_at(format, payload_size, seq, intended_wall);
                 seq = seq.wrapping_add(1);
-                if qos == QoS::AtMostOnce {
+                let Some(permit) = permit else {
                     if publish_message(&client, &topic, payload, qos).await.is_ok() {
                         published.fetch_add(1, Ordering::Relaxed);
                     }
                     continue;
-                }
-                let Ok(permit) = Arc::clone(&sem).acquire_owned().await else {
-                    break;
                 };
                 let client = client.clone();
                 let published = Arc::clone(&published);
@@ -2414,7 +2429,42 @@ fn inter_topic_spread(topic_samples: &[Vec<TimestampedSample>], window_ms: u64) 
 
 #[cfg(test)]
 mod tests {
-    use super::{sleep_until_precise, steady_state_mean};
+    use super::{nanos_as_u64, sleep_until_precise, stamp_when_ready, steady_state_mean};
+    use mqtt5::QoS;
+    use std::sync::Arc;
+    use tokio::sync::Semaphore;
+
+    #[tokio::test]
+    async fn qos1_stamp_is_taken_after_the_inflight_slot_frees() {
+        let sem = Arc::new(Semaphore::new(1));
+        let held = Arc::clone(&sem).acquire_owned().await.unwrap();
+        let waiter = tokio::spawn({
+            let sem = Arc::clone(&sem);
+            async move { stamp_when_ready(QoS::AtLeastOnce, &sem, nanos_as_u64).await }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let released_at = nanos_as_u64();
+        drop(held);
+        let (permit, stamped) = waiter.await.unwrap().unwrap();
+        assert!(permit.is_some());
+        assert!(
+            stamped >= released_at,
+            "stamped {stamped} before the slot freed at {released_at}"
+        );
+    }
+
+    #[tokio::test]
+    async fn qos0_stamp_takes_no_inflight_slot() {
+        let sem = Arc::new(Semaphore::new(0));
+        let ready = tokio::time::timeout(
+            Duration::from_secs(1),
+            stamp_when_ready(QoS::AtMostOnce, &sem, nanos_as_u64),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(ready, Some((None, _))));
+    }
+
     use mqtt5::time::Duration;
     use tokio::time::Instant;
 
