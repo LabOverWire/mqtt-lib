@@ -142,7 +142,7 @@ impl WasmClientHandler {
         self.fire_client_connect(&connect.client_id, connect.clean_start);
 
         if session_present {
-            self.resend_inflight_messages(writer).await?;
+            self.restore_inflight_messages(writer).await?;
             self.advance_packet_id_past_inflight();
         }
         Ok(())
@@ -177,7 +177,11 @@ impl WasmClientHandler {
         Ok(Some(generated_id))
     }
 
-    fn new_connack(&self, session_present: bool, reason_code: ReasonCode) -> ConnAckPacket {
+    pub(super) fn new_connack(
+        &self,
+        session_present: bool,
+        reason_code: ReasonCode,
+    ) -> ConnAckPacket {
         if self.protocol_version == 4 {
             ConnAckPacket::new_v311(session_present, reason_code)
         } else {
@@ -191,6 +195,15 @@ impl WasmClientHandler {
         })
     }
 
+    fn adopt_client_limits(&mut self, connect: &ConnectPacket) {
+        self.client_receive_maximum = connect
+            .properties
+            .get_receive_maximum()
+            .unwrap_or(u16::MAX)
+            .max(1);
+        self.client_max_packet_size = connect.properties.get_maximum_packet_size();
+    }
+
     pub(super) async fn handle_session(
         &mut self,
         connect: &ConnectPacket,
@@ -200,6 +213,7 @@ impl WasmClientHandler {
         let requested = ClientSession::expiry_from_connect(connect);
         let granted = ClientSession::granted_expiry(requested, self.maximum_session_expiry());
         self.connect_session_expiry = requested;
+        self.adopt_client_limits(connect);
         self.advertised_session_expiry = (requested != Some(granted)).then_some(granted);
 
         let slot = self.router.lock_session(&client_id).await;
@@ -259,7 +273,7 @@ impl WasmClientHandler {
         let queue = self.router.queue_handle(&client_id);
         let registration = self
             .router
-            .register_session_as(
+            .register_unbound_session(
                 generation,
                 client_id.clone(),
                 DeliveryLanes {
@@ -273,6 +287,8 @@ impl WasmClientHandler {
             .await;
         self.generation = generation;
         self.queue_epoch = registration.epoch;
+        self.released_rx = registration.released;
+        self.resumed = resume;
         self.disconnect_rx = Some(disconnect_rx);
         self.queue = Some(queue);
 
@@ -294,7 +310,10 @@ impl WasmClientHandler {
         Ok(resume)
     }
 
-    async fn drop_unauthorized_subscriptions(&self, session: &mut ClientSession) {
+    pub(super) async fn drop_unauthorized_subscriptions(
+        &self,
+        session: &mut ClientSession,
+    ) -> Vec<String> {
         let mut unauthorized = Vec::new();
         for topic_filter in session.subscriptions.keys() {
             let authorized = self
@@ -308,6 +327,7 @@ impl WasmClientHandler {
         for filter in &unauthorized {
             session.subscriptions.remove(filter);
         }
+        unauthorized
     }
 
     pub(super) async fn process_enhanced_auth_result(
@@ -352,7 +372,7 @@ impl WasmClientHandler {
                     );
 
                     if session_present {
-                        self.resend_inflight_messages(writer).await?;
+                        self.restore_inflight_messages(writer).await?;
                         self.advance_packet_id_past_inflight();
                     }
                 }

@@ -1,9 +1,9 @@
-use mqtt5::broker::router::{Subscribed, SubscriptionRequest, Unsubscribed};
-use mqtt5::broker::storage::{StorageBackend, StoredSubscription};
+use mqtt5::broker::router::{RoutableMessage, Subscribed, SubscriptionRequest, Unsubscribed};
+use mqtt5::broker::storage::{QueuedMessage, StorageBackend, StoredSubscription};
 use mqtt5_protocol::error::{MqttError, Result};
 use mqtt5_protocol::packet::disconnect::DisconnectPacket;
 use mqtt5_protocol::packet::suback::{SubAckPacket, SubAckReasonCode};
-use mqtt5_protocol::packet::subscribe::SubscribePacket;
+use mqtt5_protocol::packet::subscribe::{RetainHandling, SubscribePacket};
 use mqtt5_protocol::packet::unsuback::{UnsubAckPacket, UnsubAckReasonCode};
 use mqtt5_protocol::packet::unsubscribe::UnsubscribePacket;
 use mqtt5_protocol::packet::Packet;
@@ -44,36 +44,9 @@ impl WasmClientHandler {
                 ));
             }
 
-            let (underlying, share_group) = parse_shared_subscription(&filter.filter);
-            if validate_topic_filter(underlying).is_err() {
-                warn!(
-                    "Client {client_id} sent invalid topic filter: {}",
-                    filter.filter
-                );
+            if !Self::filter_is_valid(&client_id, &filter.filter) {
                 reason_codes.push(SubAckReasonCode::TopicFilterInvalid);
                 continue;
-            }
-
-            if filter.filter.starts_with("$share/") {
-                match share_group {
-                    None => {
-                        warn!(
-                            "Client {client_id} sent malformed shared subscription: {}",
-                            filter.filter
-                        );
-                        reason_codes.push(SubAckReasonCode::TopicFilterInvalid);
-                        continue;
-                    }
-                    Some(group) if group.contains('+') || group.contains('#') => {
-                        warn!(
-                            "Client {client_id} sent shared subscription with invalid ShareName: {}",
-                            filter.filter
-                        );
-                        reason_codes.push(SubAckReasonCode::TopicFilterInvalid);
-                        continue;
-                    }
-                    _ => {}
-                }
             }
 
             let authorized = self
@@ -116,7 +89,13 @@ impl WasmClientHandler {
             self.persist_subscription(filter, granted_qos, subscription_id, change_only, instance)
                 .await?;
             drop(slot);
-            self.deliver_retained_for_filter(filter, writer).await?;
+            self.deliver_retained_for_filter(
+                filter,
+                granted_qos,
+                subscription_id,
+                outcome == Subscribed::New,
+            )
+            .await;
 
             successful_subscriptions.push((filter.filter.clone(), granted_qos as u8));
             reason_codes.push(SubAckReasonCode::from_qos(granted_qos));
@@ -134,6 +113,30 @@ impl WasmClientHandler {
 
         debug!("Client {} subscribed to topics", client_id);
         Ok(())
+    }
+
+    fn filter_is_valid(client_id: &str, topic_filter: &str) -> bool {
+        let (underlying, share_group) = parse_shared_subscription(topic_filter);
+        if validate_topic_filter(underlying).is_err() {
+            warn!("Client {client_id} sent invalid topic filter: {topic_filter}");
+            return false;
+        }
+        if !topic_filter.starts_with("$share/") {
+            return true;
+        }
+        match share_group {
+            None => {
+                warn!("Client {client_id} sent malformed shared subscription: {topic_filter}");
+                false
+            }
+            Some(group) if group.contains('+') || group.contains('#') => {
+                warn!(
+                    "Client {client_id} sent shared subscription with invalid ShareName: {topic_filter}"
+                );
+                false
+            }
+            Some(_) => true,
+        }
     }
 
     fn resolve_granted_qos(&self, requested: QoS) -> QoS {
@@ -195,7 +198,7 @@ impl WasmClientHandler {
             .await
     }
 
-    async fn update_stored_session<F>(&self, update: F) -> Result<()>
+    pub(super) async fn update_stored_session<F>(&self, update: F) -> Result<()>
     where
         F: FnOnce(&mut mqtt5::broker::storage::ClientSession) + Send,
     {
@@ -213,24 +216,62 @@ impl WasmClientHandler {
     }
 
     async fn deliver_retained_for_filter(
-        &mut self,
+        &self,
         filter: &mqtt5_protocol::packet::subscribe::TopicFilter,
-        writer: &SharedWriter,
-    ) -> Result<()> {
-        if filter.options.retain_handling
-            != mqtt5_protocol::packet::subscribe::RetainHandling::DoNotSend
-        {
-            let retained = self.router.get_retained_messages(&filter.filter).await;
-            let delivery_check = self.delivery_check();
-            for mut msg in retained {
-                if !delivery_check.allows(&msg, None).await {
-                    continue;
-                }
-                msg.retain = true;
-                self.send_publish(msg, writer)?;
-            }
+        granted_qos: QoS,
+        subscription_id: Option<u32>,
+        is_new: bool,
+    ) {
+        let should_send = match filter.options.retain_handling {
+            RetainHandling::SendAtSubscribe => true,
+            RetainHandling::SendAtSubscribeIfNew => is_new,
+            RetainHandling::DoNotSend => false,
+        };
+        if !should_send {
+            return;
         }
-        Ok(())
+        for mut publish in self.router.get_retained_messages(&filter.filter).await {
+            publish.retain = true;
+            publish.qos = QoS::from((publish.qos as u8).min(granted_qos as u8));
+            if let Some(id) = subscription_id {
+                publish.properties.set_subscription_identifier(id);
+            }
+            self.offer_retained(publish);
+        }
+    }
+
+    /// Hands a retained message to the forwarder, which gives it its packet identifier, without
+    /// waiting on the lanes: the packet loop is waiting for this subscribe. What the lane has no
+    /// room for goes on the queue, however many a filter matches.
+    fn offer_retained(&self, publish: mqtt5_protocol::packet::publish::PublishPacket) {
+        let (Some(queue), Some(client_id)) = (self.queue.as_ref(), self.client_id.as_ref()) else {
+            return;
+        };
+        let qos = publish.qos;
+        let routable = RoutableMessage {
+            publish,
+            target_flow: None,
+            subscription_instance: None,
+        };
+        let lane = if qos == QoS::AtMostOnce {
+            &self.qos0_tx
+        } else {
+            &self.qos1_tx
+        };
+        let rejected = if queue.behind() {
+            routable.publish
+        } else {
+            match lane.try_send(routable) {
+                Ok(()) => return,
+                Err(rejected) => rejected.into_inner().publish,
+            }
+        };
+        let queued = QueuedMessage::new(rejected, client_id.clone(), qos, None);
+        if queue.push_in_epoch(queued, self.queue_epoch).is_some() {
+            queue.notify();
+        } else {
+            debug!("Dropping retained message: session discarded");
+        }
     }
 
     pub(super) async fn handle_unsubscribe(
