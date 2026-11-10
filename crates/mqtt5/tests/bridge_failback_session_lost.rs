@@ -132,7 +132,7 @@ async fn inflight_message_across_failback(qos: QoS) -> (bool, usize) {
     assert!(!bridge.get_stats().await.on_primary);
 
     let packet = PublishPacket::new("out/x", b"held".to_vec(), qos);
-    bridge.forward_message(&packet).await.unwrap();
+    bridge.forward_message(&packet);
     tokio::time::sleep(Duration::from_millis(300)).await;
     let sent_to_backup = publishes.load(Ordering::SeqCst);
 

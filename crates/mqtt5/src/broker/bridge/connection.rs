@@ -14,14 +14,15 @@ use crate::transport::tls::TlsConfig;
 use crate::types::ConnectOptions;
 use crate::types::PublishOptions;
 use crate::validation::topic_matches_filter;
-use crate::{AckToken, IndeterminateReason, PublishOutcome, QoS, SubscribeOptions};
+use crate::{AckToken, IndeterminateReason, PublishHandle, PublishOutcome, QoS, SubscribeOptions};
 use bytes::Bytes;
+use futures::stream::{FuturesUnordered, StreamExt};
 use mqtt5_protocol::bridge::{evaluate_forwarding, TopicMappingCore};
 use rand::RngExt;
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, Weak};
-use tokio::sync::{broadcast, mpsc, Notify, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
+use tokio::sync::{broadcast, mpsc, watch, Notify, RwLock};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
@@ -36,6 +37,258 @@ const BRIDGE_SESSION_EXPIRY_SECS: u32 = 3600;
 /// One incoming delivery from the remote: every local copy it maps to, plus the token
 /// that acknowledges the remote once all of them are routed.
 type IngressItem = (Vec<PublishPacket>, AckToken);
+
+/// A message waiting in a bridge's outbound queue for its turn to be published remotely.
+struct Outbound {
+    topic: String,
+    payload: Bytes,
+    options: PublishOptions,
+}
+
+/// A bridge's outbound messages in the order they reach it. Adding never waits: when the queue
+/// is full the oldest waiting message is dropped.
+struct OutboundQueue {
+    messages: Mutex<VecDeque<Outbound>>,
+    capacity: usize,
+    ready: Notify,
+    closed: AtomicBool,
+}
+
+impl OutboundQueue {
+    fn new(capacity: usize) -> Self {
+        Self {
+            messages: Mutex::new(VecDeque::new()),
+            capacity,
+            ready: Notify::new(),
+            closed: AtomicBool::new(false),
+        }
+    }
+
+    /// Returns the message dropped to make room, if any.
+    fn push_back(&self, outbound: Outbound) -> Option<Outbound> {
+        let dropped = {
+            let mut messages = self.messages.lock().unwrap_or_else(PoisonError::into_inner);
+            let dropped = (messages.len() >= self.capacity)
+                .then(|| messages.pop_front())
+                .flatten();
+            messages.push_back(outbound);
+            dropped
+        };
+        self.ready.notify_one();
+        dropped
+    }
+
+    fn push_back_all(&self, mut outbounds: Vec<Outbound>) -> Vec<Outbound> {
+        let dropped = {
+            let mut messages = self.messages.lock().unwrap_or_else(PoisonError::into_inner);
+            let room = self.capacity.saturating_sub(messages.len());
+            let excess = outbounds.len().saturating_sub(room);
+            let dropped = outbounds.drain(..excess).collect::<Vec<_>>();
+            messages.extend(outbounds);
+            dropped
+        };
+        self.ready.notify_one();
+        dropped
+    }
+
+    fn push_front(&self, outbound: Outbound) -> Option<Outbound> {
+        let mut messages = self.messages.lock().unwrap_or_else(PoisonError::into_inner);
+        if messages.len() >= self.capacity {
+            return Some(outbound);
+        }
+        messages.push_front(outbound);
+        None
+    }
+
+    /// Returns `None` once the queue is closed.
+    async fn pop_front(&self) -> Option<Outbound> {
+        loop {
+            if self.closed.load(Ordering::Acquire) {
+                return None;
+            }
+            let next = self
+                .messages
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .pop_front();
+            if next.is_some() {
+                return next;
+            }
+            self.ready.notified().await;
+        }
+    }
+
+    fn close(&self) {
+        self.closed.store(true, Ordering::Release);
+        self.ready.notify_one();
+    }
+}
+
+/// The single task that publishes a bridge's outbound queue to the remote broker in order.
+struct Egress {
+    client: Weak<MqttClient>,
+    queue: Arc<OutboundQueue>,
+    messages_sent: Arc<AtomicU64>,
+    bytes_sent: Arc<AtomicU64>,
+    bridge_name: String,
+}
+
+const EGRESS_RETRY_DELAY: Duration = Duration::from_millis(50);
+const EGRESS_UNSETTLED_CAPACITY: usize = u16::MAX as usize;
+
+enum Begun {
+    Handle(PublishHandle),
+    LinkDown,
+    Abandoned,
+}
+
+impl Egress {
+    /// Hands queued messages to the client only while the bridge is connected, so while it
+    /// is not they wait in the outbound queue, under its capacity, in order.
+    async fn run(self, mut link: watch::Receiver<bool>) {
+        let egress = Arc::new(self);
+        let (unsettled, settling) =
+            mpsc::channel::<(Outbound, PublishHandle)>(EGRESS_UNSETTLED_CAPACITY);
+        let settler = Arc::clone(&egress);
+        tokio::spawn(async move { settler.settle_all(settling).await });
+        loop {
+            if link.wait_for(|up| *up).await.is_err() {
+                return;
+            }
+            let Some(outbound) = egress.queue.pop_front().await else {
+                return;
+            };
+            match egress.begin(&outbound, &link).await {
+                Begun::Handle(handle) if outbound.options.qos == QoS::AtMostOnce => {
+                    egress.settle(outbound, handle).await;
+                }
+                Begun::Handle(handle) => {
+                    if unsettled.send((outbound, handle)).await.is_err() {
+                        return;
+                    }
+                }
+                Begun::LinkDown => {
+                    if let Some(dropped) = egress.queue.push_front(outbound) {
+                        warn!(bridge = %egress.bridge_name, topic = %dropped.topic, "outbound queue full, dropped the oldest message");
+                    }
+                }
+                Begun::Abandoned => {}
+            }
+        }
+    }
+
+    /// Hands the message to the client while the bridge is connected. A message refused because
+    /// the client is not connected, or whose wait for send quota ends without it being written,
+    /// is tried again while the bridge stays connected, so the messages behind it wait; once
+    /// the bridge is disconnected it goes back to the front of the queue.
+    async fn begin(&self, outbound: &Outbound, link: &watch::Receiver<bool>) -> Begun {
+        loop {
+            if !*link.borrow() {
+                return Begun::LinkDown;
+            }
+            let Some(live) = self.client.upgrade() else {
+                debug!(bridge = %self.bridge_name, topic = %outbound.topic, "publish abandoned: bridge client dropped");
+                return Begun::Abandoned;
+            };
+            let begun = live
+                .begin_publish(
+                    outbound.topic.as_str(),
+                    outbound.payload.to_vec(),
+                    outbound.options.clone(),
+                )
+                .await;
+            drop(live);
+            match begun {
+                Ok(handle) => return Begun::Handle(handle),
+                Err(
+                    MqttError::NotConnected
+                    | MqttError::FlowControlExceeded
+                    | MqttError::PacketIdExhausted,
+                ) => {
+                    tokio::time::sleep(EGRESS_RETRY_DELAY).await;
+                }
+                Err(e) => {
+                    warn!(bridge = %self.bridge_name, topic = %outbound.topic, error = %e, "publish not sent");
+                    return Begun::Abandoned;
+                }
+            }
+        }
+    }
+
+    async fn settle_all(&self, mut settling: mpsc::Receiver<(Outbound, PublishHandle)>) {
+        let mut unsettled: BTreeMap<u64, (Outbound, PublishHandle)> = BTreeMap::new();
+        let mut resolving = FuturesUnordered::new();
+        let mut next_sequence = 0u64;
+        let mut open = true;
+        let mut lost_waiting = false;
+        while open || !resolving.is_empty() {
+            tokio::select! {
+                item = settling.recv(), if open => match item {
+                    Some((outbound, handle)) => {
+                        let sequence = next_sequence;
+                        next_sequence += 1;
+                        let resolved = handle.clone();
+                        resolving.push(async move { (sequence, resolved.outcome().await) });
+                        unsettled.insert(sequence, (outbound, handle));
+                    }
+                    None => open = false,
+                },
+                Some((sequence, outcome)) = resolving.next(), if !resolving.is_empty() => {
+                    if outcome == PublishOutcome::Indeterminate(IndeterminateReason::SessionLost) {
+                        lost_waiting = true;
+                    } else if let Some((outbound, _)) = unsettled.remove(&sequence) {
+                        self.record(&outbound, outcome);
+                    }
+                    if lost_waiting {
+                        lost_waiting = self.requeue_lost(&mut unsettled);
+                    }
+                }
+            }
+        }
+    }
+
+    fn requeue_lost(&self, unsettled: &mut BTreeMap<u64, (Outbound, PublishHandle)>) -> bool {
+        let mut lost = Vec::new();
+        let mut blocked = false;
+        for (sequence, (outbound, handle)) in unsettled.iter() {
+            match handle.try_outcome() {
+                Some(PublishOutcome::Indeterminate(IndeterminateReason::SessionLost)) => {
+                    lost.push(*sequence);
+                }
+                None if outbound.options.qos == QoS::ExactlyOnce => {
+                    blocked = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        let requeued = lost
+            .into_iter()
+            .filter_map(|sequence| unsettled.remove(&sequence).map(|(outbound, _)| outbound))
+            .collect();
+        for dropped in self.queue.push_back_all(requeued) {
+            warn!(bridge = %self.bridge_name, topic = %dropped.topic, "outbound queue full, dropped the oldest message");
+        }
+        blocked
+    }
+
+    fn record(&self, outbound: &Outbound, outcome: PublishOutcome) {
+        match outcome {
+            PublishOutcome::Delivered(_) => {
+                self.messages_sent.fetch_add(1, Ordering::Relaxed);
+                self.bytes_sent
+                    .fetch_add(outbound.payload.len() as u64, Ordering::Relaxed);
+            }
+            outcome => {
+                warn!(bridge = %self.bridge_name, topic = %outbound.topic, outcome = ?outcome, "publish not delivered");
+            }
+        }
+    }
+
+    async fn settle(&self, outbound: Outbound, handle: PublishHandle) {
+        self.record(&outbound, handle.outcome().await);
+    }
+}
 
 /// Delivery lanes from the remote-facing client into the local router, mirroring the
 /// client handler's gated and ungated lanes.
@@ -142,12 +395,20 @@ pub struct BridgeConnection {
     current_broker: Arc<RwLock<Option<ConnectedBroker>>>,
     /// Handle to the health check task (runs when on backup)
     health_check_handle: Arc<RwLock<Option<JoinHandle<()>>>>,
-    /// Pending messages to forward when connection is established
-    pending_messages: Arc<Mutex<VecDeque<PublishPacket>>>,
     /// Lanes from the remote-facing client into the local router, created on first use
     ingress: OnceLock<Ingress>,
+    egress: OnceLock<Arc<OutboundQueue>>,
+    link: watch::Sender<bool>,
     /// Whether the remote subscriptions have been registered for this connection's lifetime
     subscribed: AtomicBool,
+}
+
+impl Drop for BridgeConnection {
+    fn drop(&mut self) {
+        if let Some(queue) = self.egress.get() {
+            queue.close();
+        }
+    }
 }
 
 impl BridgeConnection {
@@ -180,8 +441,9 @@ impl BridgeConnection {
             bytes_received: Arc::new(AtomicU64::new(0)),
             current_broker: Arc::new(RwLock::new(None)),
             health_check_handle: Arc::new(RwLock::new(None)),
-            pending_messages: Arc::new(Mutex::new(VecDeque::new())),
             ingress: OnceLock::new(),
+            egress: OnceLock::new(),
+            link: watch::Sender::new(false),
             subscribed: AtomicBool::new(false),
         })
     }
@@ -220,6 +482,7 @@ impl BridgeConnection {
 
         let mut stats = self.stats.write().await;
         stats.connected = false;
+        self.link.send_replace(false);
         stats.connected_since = None;
         *self.current_broker.write().await = None;
 
@@ -997,30 +1260,20 @@ impl BridgeConnection {
         }
     }
 
-    /// Forwards a message to the remote broker.
-    ///
-    /// # Errors
-    /// Returns an error if the message forwarding fails.
-    pub async fn forward_message(&self, packet: &PublishPacket) -> Result<()> {
+    /// Queues a message for the remote broker, behind those already queued.
+    pub fn forward_message(&self, packet: &PublishPacket) {
         let bridge_name = &self.config.name;
         let is_running = self.running.load(Ordering::Relaxed);
-        let is_connected = self.client.is_connected().await;
 
         debug!(
             bridge = %bridge_name,
             topic = %packet.topic_name,
             running = is_running,
-            connected = is_connected,
             "forward_message called"
         );
 
         if !is_running {
-            return Ok(());
-        }
-
-        if !is_connected {
-            self.queue_pending_message(packet.clone());
-            return Ok(());
+            return;
         }
 
         let mappings: Vec<TopicMappingCore> = self
@@ -1035,7 +1288,7 @@ impl BridgeConnection {
                 topic = %packet.topic_name,
                 "no matching topic pattern found"
             );
-            return Ok(());
+            return;
         };
 
         let remote_topic = decision.transformed_topic;
@@ -1043,95 +1296,43 @@ impl BridgeConnection {
             bridge = %bridge_name,
             local_topic = %packet.topic_name,
             remote_topic = %remote_topic,
-            "topic matched, spawning publish task"
+            "topic matched, queueing for publish"
         );
 
         let msg_props: crate::types::MessageProperties = packet.properties.clone().into();
-        let options = PublishOptions {
-            qos: decision.qos,
-            retain: packet.retain,
-            properties: msg_props.into(),
-            skip_codec: false,
+        let outbound = Outbound {
+            topic: remote_topic,
+            payload: packet.payload.clone(),
+            options: PublishOptions {
+                qos: decision.qos,
+                retain: packet.retain,
+                properties: msg_props.into(),
+                skip_codec: false,
+            },
         };
-
-        let client = Arc::downgrade(&self.client);
-        let payload = packet.payload.clone();
-        let messages_sent = self.messages_sent.clone();
-        let bytes_sent = self.bytes_sent.clone();
-        let payload_len = payload.len();
-        let bridge_name_clone = bridge_name.clone();
-
-        tokio::spawn(async move {
-            debug!(
-                bridge = %bridge_name_clone,
-                topic = %remote_topic,
-                "publish task started"
-            );
-            match Self::publish_to_remote(&client, &remote_topic, &payload, &options).await {
-                Ok(PublishOutcome::Delivered(_)) => {
-                    debug!(
-                        bridge = %bridge_name_clone,
-                        topic = %remote_topic,
-                        "publish delivered"
-                    );
-                    messages_sent.fetch_add(1, Ordering::Relaxed);
-                    bytes_sent.fetch_add(payload_len as u64, Ordering::Relaxed);
-                }
-                Ok(outcome) => {
-                    warn!(
-                        bridge = %bridge_name_clone,
-                        topic = %remote_topic,
-                        outcome = ?outcome,
-                        "publish not delivered"
-                    );
-                }
-                Err(e) => {
-                    error!(
-                        bridge = %bridge_name_clone,
-                        topic = %remote_topic,
-                        error = %e,
-                        "publish failed"
-                    );
-                }
-            }
-        });
-
-        Ok(())
+        if let Some(dropped) = self.egress().push_back(outbound) {
+            warn!(bridge = %bridge_name, topic = %dropped.topic, "outbound queue full, dropped the oldest message");
+        }
     }
 
-    /// Publishes to the remote broker until the message is settled there. A publish cut
-    /// off by a disconnect goes to the client's offline queue, and a `QoS` 2 message that
-    /// the new connection's server has no session for is published again.
-    async fn publish_to_remote(
-        client: &Weak<MqttClient>,
-        topic: &str,
-        payload: &Bytes,
-        options: &PublishOptions,
-    ) -> std::result::Result<PublishOutcome, MqttError> {
-        loop {
-            let Some(live) = client.upgrade() else {
-                return Ok(PublishOutcome::Indeterminate(
-                    IndeterminateReason::Abandoned,
-                ));
+    fn egress(&self) -> &Arc<OutboundQueue> {
+        self.egress.get_or_init(|| {
+            let queue = Arc::new(OutboundQueue::new(self.config.outbound_queue_capacity));
+            let egress = Egress {
+                client: Arc::downgrade(&self.client),
+                queue: Arc::clone(&queue),
+                messages_sent: Arc::clone(&self.messages_sent),
+                bytes_sent: Arc::clone(&self.bytes_sent),
+                bridge_name: self.config.name.clone(),
             };
-            let published = live
-                .publish_with_options(topic, payload.to_vec(), options.clone())
-                .await;
-            drop(live);
-            match published {
-                Err(MqttError::NotConnected | MqttError::FlowControlExceeded)
-                    if options.qos != QoS::AtMostOnce => {}
-                Err(e) => return Err(e),
-                Ok(published) => match published.outcome().await {
-                    PublishOutcome::Indeterminate(IndeterminateReason::SessionLost) => {}
-                    outcome => return Ok(outcome),
-                },
-            }
-        }
+            tokio::spawn(egress.run(self.link.subscribe()));
+            queue
+        })
     }
 
     /// Updates stats when connected
     async fn update_connected_stats(&self, broker: ConnectedBroker, address: &str) {
+        self.link.send_replace(true);
         let mut stats = self.stats.write().await;
         stats.connected = true;
         stats.connected_since = Some(Instant::now());
@@ -1140,62 +1341,13 @@ impl BridgeConnection {
         stats.on_primary = matches!(broker, ConnectedBroker::Primary);
 
         *self.current_broker.write().await = Some(broker);
-
-        self.flush_pending_messages().await;
-    }
-
-    fn queue_pending_message(&self, packet: PublishPacket) {
-        const MAX_PENDING: usize = 1000;
-        let Ok(mut queue) = self.pending_messages.lock() else {
-            return;
-        };
-        if queue.len() < MAX_PENDING {
-            queue.push_back(packet);
-        } else {
-            warn!(
-                bridge = %self.config.name,
-                "pending message queue full, dropping oldest message"
-            );
-            queue.pop_front();
-            queue.push_back(packet);
-        }
-    }
-
-    /// Flushes pending messages that were queued while disconnected
-    async fn flush_pending_messages(&self) {
-        let pending: Vec<PublishPacket> = {
-            let Ok(mut queue) = self.pending_messages.lock() else {
-                return;
-            };
-            queue.drain(..).collect()
-        };
-
-        if pending.is_empty() {
-            return;
-        }
-
-        info!(
-            bridge = %self.config.name,
-            count = pending.len(),
-            "flushing pending messages after connection established"
-        );
-
-        for packet in pending {
-            if let Err(e) = self.forward_message(&packet).await {
-                warn!(
-                    bridge = %self.config.name,
-                    topic = %packet.topic_name,
-                    error = %e,
-                    "failed to forward pending message"
-                );
-            }
-        }
     }
 
     /// Updates stats when an error occurs
     async fn update_error_stats(&self, error: String) {
         let mut stats = self.stats.write().await;
         stats.connected = false;
+        self.link.send_replace(false);
         stats.connected_since = None;
         stats.last_error = Some(error);
     }
@@ -1213,7 +1365,9 @@ impl BridgeConnection {
     /// Runs the bridge connection with automatic reconnection.
     ///
     /// # Errors
-    /// Returns an error if the maximum reconnect attempts is exceeded.
+    /// Returns an error if the maximum reconnect attempts is exceeded, or if setting up a
+    /// connection fails, for example when the remote refuses a subscription. Outbound
+    /// forwarding then stops.
     pub async fn run(&self) -> Result<()> {
         let mut shutdown_rx = self.shutdown_tx.subscribe();
 
@@ -1233,7 +1387,10 @@ impl BridgeConnection {
                         break;
                     }
 
-                    result?;
+                    if let Err(e) = result {
+                        self.link.send_replace(false);
+                        return Err(e);
+                    }
                 }
             }
         }
@@ -1254,12 +1411,16 @@ impl BridgeConnection {
         *self.current_broker.write().await = None;
         let mut stats = self.stats.write().await;
         stats.connected = false;
+        self.link.send_replace(false);
         stats.connected_since = None;
     }
 
     /// Runs a single connection until disconnected
     async fn run_connection(&self) -> Result<()> {
-        if !self.client.is_connected().await {
+        if self.client.is_connected().await {
+            self.link.send_replace(true);
+        } else {
+            self.client.set_queue_on_disconnect(false).await;
             self.register_ingress_callbacks().await?;
             Box::pin(self.connect()).await?;
             self.setup_subscriptions().await?;
@@ -1277,6 +1438,7 @@ impl BridgeConnection {
                 *self.current_broker.write().await = None;
                 let mut stats = self.stats.write().await;
                 stats.connected = false;
+                self.link.send_replace(false);
                 stats.connected_since = None;
                 break;
             }

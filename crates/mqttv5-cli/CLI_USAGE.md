@@ -13,7 +13,7 @@ Global flags:
 
 ## Quick Start
 
-Start a broker, publish a message, and subscribe — all in three terminals:
+Start a broker, publish a message, and subscribe, all in three terminals:
 
 ```bash
 mqttv5 broker --allow-anonymous
@@ -1248,12 +1248,19 @@ The backend URL scheme must match the transport the client should use for the ba
   "client_id": "string",
   "username": "string" | null,
   "password": "string" | null,
+  "protocol": "tcp" | "tls" | "quic" | "quicsecure",
   "use_tls": boolean,
   "tls_server_name": "string" | null,
   "ca_file": "string" | null,
   "client_cert_file": "string" | null,
   "client_key_file": "string" | null,
   "insecure": boolean | null,
+  "quic_stream_strategy": "control_only" | "data_per_publish" | "data_per_topic" | null,
+  "quic_flow_headers": boolean | null,
+  "quic_datagrams": boolean | null,
+  "quic_max_streams": number | null,
+  "fallback_protocols": ["tcp" | "tls" | "quic" | "quicsecure"],
+  "fallback_tcp": boolean,
   "alpn_protocols": ["string"] | null,
   "try_private": boolean,
   "clean_start": false,
@@ -1264,8 +1271,16 @@ The backend URL scheme must match the transport the client should use for the ba
   "max_reconnect_delay": duration,
   "backoff_multiplier": number,
   "max_reconnect_attempts": number | null,
+  "connection_retries": number,
+  "first_retry_delay": duration,
+  "retry_jitter": boolean,
+  "outbound_queue_capacity": number,
   "backup_brokers": ["string"],
-  "topics": [TopicMapping]
+  "primary_health_check_interval": duration,
+  "enable_failback": boolean,
+  "topics": [TopicMapping],
+  "loop_prevention_ttl": duration,
+  "loop_prevention_cache_size": number
 }
 ```
 
@@ -1273,15 +1288,22 @@ The backend URL scheme must match the transport the client should use for the ba
 | --- | --- | --- | --- |
 | `name` | `string` | Unique bridge name | Required |
 | `remote_address` | `string` | Remote broker address (host:port) | Required |
-| `client_id` | `string` | Client ID for bridge connection | `"bridge-{name}"` |
+| `client_id` | `string` | Client ID for bridge connection | Required (`BridgeConfig::new` sets `"bridge-{name}"`) |
 | `username` | `string\|null` | Authentication username | `null` |
 | `password` | `string\|null` | Authentication password | `null` |
-| `use_tls` | `boolean` | Enable TLS connection | `false` |
+| `protocol` | `string` | Transport: `"tcp"`, `"tls"`, `"quic"` or `"quicsecure"`. `"quic"` verifies the server certificate like `"quicsecure"` unless `insecure` is set | `"tcp"` |
+| `use_tls` | `boolean` | Use TLS when `protocol` is `"tcp"` (deprecated: set `protocol` to `"tls"`) | `false` |
 | `tls_server_name` | `string\|null` | Override TLS server name for verification | `null` |
 | `ca_file` | `string\|null` | CA certificate file for TLS verification | `null` |
 | `client_cert_file` | `string\|null` | Client certificate for mTLS | `null` |
 | `client_key_file` | `string\|null` | Client private key for mTLS | `null` |
 | `insecure` | `boolean\|null` | Disable TLS certificate verification | `false` |
+| `quic_stream_strategy` | `string\|null` | QUIC stream strategy: `"control_only"`, `"data_per_publish"` or `"data_per_topic"` | `null` (`"control_only"`) |
+| `quic_flow_headers` | `boolean\|null` | Send MQoQ flow headers over QUIC | `null` (`false`) |
+| `quic_datagrams` | `boolean\|null` | Send `QoS` 0 messages as QUIC datagrams | `null` (`false`) |
+| `quic_max_streams` | `number\|null` | Maximum concurrent QUIC streams | `null` (QUIC transport default) |
+| `fallback_protocols` | `string[]` | Protocols tried in order after `protocol` fails `connection_retries` times | `[]` |
+| `fallback_tcp` | `boolean` | Try `"tcp"` after the `fallback_protocols` | `false` |
 | `alpn_protocols` | `string[]\|null` | ALPN protocols (e.g., `["x-amzn-mqtt-ca"]` for AWS IoT) | `null` |
 | `try_private` | `boolean` | Send bridge user property (Mosquitto compatible) | `true` |
 | `clean_start` | `boolean` | Must be `false`: the bridge acknowledges a remote message only after routing it locally, which needs a persistent session | `false` |
@@ -1292,8 +1314,16 @@ The backend URL scheme must match the transport the client should use for the ba
 | `max_reconnect_delay` | `duration` | Maximum reconnection delay | `"5m"` |
 | `backoff_multiplier` | `number` | Exponential backoff multiplier | `2.0` |
 | `max_reconnect_attempts` | `number\|null` | Max reconnection attempts (null = infinite) | `null` |
+| `connection_retries` | `number` | Connection attempts with `protocol` before the fallback protocols are tried (at least 1) | `3` |
+| `first_retry_delay` | `duration` | Delay between connection attempts with `protocol` | `"1s"` |
+| `retry_jitter` | `boolean` | Vary retry delays by up to ±25% | `true` |
+| `outbound_queue_capacity` | `number` | Messages waiting to be forwarded to the remote broker, in order; when full, the oldest is dropped. At least 1 | `1000` |
 | `backup_brokers` | `string[]` | Backup broker addresses for failover | `[]` |
+| `primary_health_check_interval` | `duration` | How often the primary is checked while connected to a backup, doubled after each failback that ends on a backup again, up to `max_reconnect_delay`. Must be above zero when `enable_failback` is set with `backup_brokers` | `"30s"` |
+| `enable_failback` | `boolean` | Return to the primary when it is reachable again | `true` |
 | `topics` | `TopicMapping[]` | Topic mappings for message forwarding | Required |
+| `loop_prevention_ttl` | `duration` | How long message fingerprints are kept to stop loops. Shared by all bridges: the first bridge's value is used | `"1m"` |
+| `loop_prevention_cache_size` | `number` | Maximum number of message fingerprints kept. Shared by all bridges: the first bridge's value is used | `10000` |
 
 ### TopicMapping
 

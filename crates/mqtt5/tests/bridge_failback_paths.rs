@@ -249,7 +249,7 @@ async fn qos1_messages_forwarded_across_a_failback_all_arrive() {
     let total = 1500usize;
     for i in 0..total {
         let packet = PublishPacket::new("out/x", format!("{i}").into_bytes(), QoS::AtLeastOnce);
-        bridge.forward_message(&packet).await.unwrap();
+        bridge.forward_message(&packet);
         tokio::time::sleep(Duration::from_millis(2)).await;
     }
     assert!(wait_for(&primary.connections, 1).await, "failed back");

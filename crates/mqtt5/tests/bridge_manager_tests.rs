@@ -195,9 +195,7 @@ async fn test_bridge_manager_handle_outgoing() {
         QoS::AtMostOnce,
     );
 
-    // Should handle gracefully even with no bridges
-    let result = manager.handle_outgoing(&packet).await;
-    assert!(result.is_ok());
+    manager.handle_outgoing(&packet).await;
 
     // Add a bridge that matches
     let config = BridgeConfig::new("out-bridge", "localhost:1883").add_topic(
@@ -207,9 +205,7 @@ async fn test_bridge_manager_handle_outgoing() {
     );
     let _ = manager.add_bridge(config);
 
-    // Should still handle gracefully (even if bridge not connected)
-    let result = manager.handle_outgoing(&packet).await;
-    assert!(result.is_ok());
+    manager.handle_outgoing(&packet).await;
 }
 
 #[tokio::test]
