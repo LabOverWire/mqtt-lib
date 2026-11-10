@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- **`WasmBroker::add_user` takes the password as `&str`.** A Rust caller that passes a `String` borrows it instead. The JavaScript `addUser` is unchanged.
+
 ### Added
 
 - **`MqttClient::begin_publish` returns once the PUBLISH is written and hands back a `PublishHandle` for its outcome**. `publish_with_options` returns only after a QoS 1 or QoS 2 message is acknowledged, so keeping several in flight meant publishing from separate tasks, and those tasks reached the connection in any order, reordering the messages on a topic. `begin_publish` waits for send quota when the server's Receive Maximum is reached, writes the message and returns, so calls made one after another from one task keep up to Receive Maximum messages in flight and write them in call order. The handle settles with the PUBACK or PUBCOMP, or with `PublishRejection::Refused` for an error reason code; a QoS 0 handle is already settled. A message published while disconnected with offline queueing enabled is queued, as with `publish_with_options`.
@@ -28,7 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The wasm broker honours Retain Handling 1.** A second subscribe to a filter the session already holds no longer resends its retained messages.
 - **The wasm broker resends unacknowledged QoS 1 deliveries when a session resumes** (MQTT-4.4.0-1), in the order they were sent. It kept only QoS 2 deliveries. Unacknowledged QoS 1 and 2 deliveries go back on the session's queue with their packet identifiers and are resent through the client's Receive Maximum.
 - **A displaced wasm broker connection stops at once.** It went on waiting for its next packet and handled that packet, so a PUBLISH from it was routed and acknowledged. An MQTT 5 client now gets DISCONNECT with Session Taken Over, as from the native broker.
-- **A wasm broker re-authentication that names another user changes the user.** It kept the old user and all of its subscriptions. The connection and the stored session take the new user, the subscriptions it is not authorized for are dropped, and deliveries are checked for it. Only a custom provider given to `WasmClientHandler` can reach this: `WasmBroker` has no enhanced authentication.
+- **A wasm broker re-authentication that names another user changes the user.** It kept the old user and all of its subscriptions. The connection and the stored session take the new user, the subscriptions it is not authorized for are dropped, and deliveries are checked for it. The public API cannot reach this: `WasmBroker` has no enhanced authentication.
 - **The wasm broker sends nothing after its own DISCONNECT** (MQTT-3.14.4-1). The forwarder went on sending until the session was released.
 - **Re-authentication on the wasm broker can take several steps.** A second AUTH was refused as outside an authentication flow. An AUTH with another authentication method now gets DISCONNECT with Bad Authentication Method, and any AUTH on a connection that did not use enhanced authentication, or with an unexpected reason code, gets DISCONNECT with Protocol Error. During the authentication that a CONNECT starts, these get a CONNACK with the same reason code instead, since nothing may precede the CONNACK (MQTT-3.14.0-1).
 - **A PUBREC with an error reason code ends the wasm broker's QoS 2 delivery** (MQTT-4.3.3-4). It answered with a PUBREL. It now drops the delivery.

@@ -50,7 +50,7 @@ pub struct WasmTopicMapping {
 #[wasm_bindgen(js_class = "TopicMapping")]
 impl WasmTopicMapping {
     #[wasm_bindgen(constructor)]
-    #[allow(clippy::must_use_candidate)]
+    #[must_use]
     pub fn new(pattern: String, direction: WasmBridgeDirection) -> Self {
         Self {
             core: TopicMappingCore::new(pattern, direction.into()),
@@ -108,7 +108,7 @@ pub struct WasmBridgeConfig {
 #[wasm_bindgen(js_class = "BridgeConfig")]
 impl WasmBridgeConfig {
     #[wasm_bindgen(constructor)]
-    #[allow(clippy::must_use_candidate)]
+    #[must_use]
     pub fn new(name: String) -> Self {
         let client_id = format!("bridge-{name}");
         Self {
@@ -345,7 +345,6 @@ pub struct WasmBridgeManager {
 }
 
 impl WasmBridgeManager {
-    #[allow(clippy::must_use_candidate)]
     pub fn new(router: Arc<MessageRouter>) -> Self {
         Self {
             bridges: Rc::new(RefCell::new(HashMap::new())),

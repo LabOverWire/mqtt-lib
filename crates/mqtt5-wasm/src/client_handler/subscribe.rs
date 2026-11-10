@@ -38,7 +38,7 @@ impl WasmClientHandler {
                     reason_code: ReasonCode::ProtocolError,
                     properties: mqtt5_protocol::protocol::v5::properties::Properties::default(),
                 };
-                self.write_packet(&Packet::Disconnect(disconnect), writer)?;
+                Self::write_packet(&Packet::Disconnect(disconnect), writer)?;
                 return Err(MqttError::ProtocolError(
                     "NoLocal on shared subscription".to_string(),
                 ));
@@ -105,7 +105,7 @@ impl WasmClientHandler {
         suback.reason_codes = reason_codes;
         suback.protocol_version = self.protocol_version;
 
-        self.write_packet(&Packet::SubAck(suback), writer)?;
+        Self::write_packet(&Packet::SubAck(suback), writer)?;
 
         if !successful_subscriptions.is_empty() {
             self.fire_client_subscribe(&client_id, &successful_subscriptions);
@@ -324,7 +324,7 @@ impl WasmClientHandler {
         unsuback.reason_codes = reason_codes;
         unsuback.protocol_version = self.protocol_version;
 
-        self.write_packet(&Packet::UnsubAck(unsuback), writer)?;
+        Self::write_packet(&Packet::UnsubAck(unsuback), writer)?;
 
         if !unsubscribe.filters.is_empty() {
             self.fire_client_unsubscribe(&client_id, &unsubscribe.filters);

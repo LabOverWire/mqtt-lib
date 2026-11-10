@@ -86,7 +86,6 @@ impl Drop for BroadcastChannelWriter {
 }
 
 impl BroadcastChannelTransport {
-    #[allow(clippy::must_use_candidate)]
     pub fn new(channel_name: impl Into<String>) -> Self {
         Self {
             channel_name: channel_name.into(),
