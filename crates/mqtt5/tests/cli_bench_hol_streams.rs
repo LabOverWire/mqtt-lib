@@ -5,6 +5,7 @@ use bytes::BytesMut;
 use common::cli_helpers::{run_cli_command, CliResult};
 use mqtt5::broker::quic_acceptor::QuicAcceptorConfig;
 use mqtt5::packet::connack::ConnAckPacket;
+use mqtt5::packet::publish::PublishPacket;
 use mqtt5::packet::suback::{SubAckPacket, SubAckReasonCode};
 use mqtt5::protocol::v5::reason_codes::ReasonCode;
 use mqtt5::transport::packet_io::{encode_packet_to_buffer, read_packet_from_stream};
@@ -25,6 +26,8 @@ enum Behaviour {
     Silent,
     FirstTopicOnly,
     FirstConnectionOnly,
+    FirstStreamOnly,
+    StrayTopic,
 }
 type Routes = Arc<Mutex<Vec<(String, u64, SharedSend, quinn::Connection)>>>;
 
@@ -87,6 +90,79 @@ async fn serve_subscription_stream(
     while read(&mut recv, &mut buffer).await.is_some() {}
 }
 
+async fn route_publish(behaviour: Behaviour, publish: PublishPacket, routes: &Routes) {
+    let targets: Vec<(SharedSend, quinn::Connection)> = routes
+        .lock()
+        .await
+        .iter()
+        .filter(|(filter, _, _, _)| topic_matches_filter(&publish.topic_name, filter))
+        .map(|(_, _, send, subscriber)| (Arc::clone(send), subscriber.clone()))
+        .collect();
+    if targets.is_empty() {
+        return;
+    }
+    let subscriber = targets[0].1.clone();
+    match behaviour {
+        Behaviour::FirstTopicOnly if publish.topic_name != "bench/hol/0" => {
+            return;
+        }
+        Behaviour::FirstConnectionOnly => {
+            let first = routes.lock().await[0].3.stable_id();
+            for (target, conn) in &targets {
+                if conn.stable_id() == first {
+                    write(target, &Packet::Publish(publish.clone())).await;
+                }
+            }
+            return;
+        }
+        Behaviour::FirstStreamOnly => {
+            let firsts: Vec<SharedSend> = {
+                let all = routes.lock().await;
+                targets
+                    .iter()
+                    .filter_map(|(_, conn)| {
+                        all.iter()
+                            .find(|(_, _, _, c)| c.stable_id() == conn.stable_id())
+                            .map(|(_, _, send, _)| Arc::clone(send))
+                    })
+                    .collect()
+            };
+            for first in firsts {
+                write(&first, &Packet::Publish(publish.clone())).await;
+            }
+            return;
+        }
+        Behaviour::StrayTopic => {
+            let mut stray = publish.clone();
+            stray.topic_name = "bench/hol/99".to_string();
+            for (target, _) in &targets {
+                write(target, &Packet::Publish(stray.clone())).await;
+            }
+            return;
+        }
+        Behaviour::ServerUniStream => {
+            if let Ok(uni) = subscriber.open_uni().await {
+                let uni = Mutex::new(uni);
+                write(&uni, &Packet::Publish(publish.clone())).await;
+                let _ = uni.lock().await.finish();
+            }
+            return;
+        }
+        Behaviour::ServerBiStream => {
+            if let Ok((bi, _)) = subscriber.open_bi().await {
+                let bi = Mutex::new(bi);
+                write(&bi, &Packet::Publish(publish.clone())).await;
+                let _ = bi.lock().await.finish();
+            }
+            return;
+        }
+        _ => {}
+    }
+    for (target, _) in targets {
+        write(&target, &Packet::Publish(publish.clone())).await;
+    }
+}
+
 async fn serve_connection(conn: quinn::Connection, routes: Routes, behaviour: Behaviour) {
     let Ok((ctl_send, mut ctl_recv)) = conn.accept_bi().await else {
         return;
@@ -115,53 +191,7 @@ async fn serve_connection(conn: quinn::Connection, routes: Routes, behaviour: Be
 
     while let Some(packet) = read(&mut ctl_recv, &mut buffer).await {
         match packet {
-            Packet::Publish(publish) => {
-                let targets: Vec<(SharedSend, quinn::Connection)> = routes
-                    .lock()
-                    .await
-                    .iter()
-                    .filter(|(filter, _, _, _)| topic_matches_filter(&publish.topic_name, filter))
-                    .map(|(_, _, send, subscriber)| (Arc::clone(send), subscriber.clone()))
-                    .collect();
-                if targets.is_empty() {
-                    continue;
-                }
-                let subscriber = targets[0].1.clone();
-                match behaviour {
-                    Behaviour::FirstTopicOnly if publish.topic_name != "bench/hol/0" => {
-                        continue;
-                    }
-                    Behaviour::FirstConnectionOnly => {
-                        let first = routes.lock().await[0].3.stable_id();
-                        for (target, conn) in &targets {
-                            if conn.stable_id() == first {
-                                write(target, &Packet::Publish(publish.clone())).await;
-                            }
-                        }
-                        continue;
-                    }
-                    Behaviour::ServerUniStream => {
-                        if let Ok(uni) = subscriber.open_uni().await {
-                            let uni = Mutex::new(uni);
-                            write(&uni, &Packet::Publish(publish.clone())).await;
-                            let _ = uni.lock().await.finish();
-                        }
-                        continue;
-                    }
-                    Behaviour::ServerBiStream => {
-                        if let Ok((bi, _)) = subscriber.open_bi().await {
-                            let bi = Mutex::new(bi);
-                            write(&bi, &Packet::Publish(publish.clone())).await;
-                            let _ = bi.lock().await.finish();
-                        }
-                        continue;
-                    }
-                    _ => {}
-                }
-                for (target, _) in targets {
-                    write(&target, &Packet::Publish(publish.clone())).await;
-                }
-            }
+            Packet::Publish(publish) => route_publish(behaviour, publish, &routes).await,
             Packet::PingReq => {
                 write(&ctl_send, &Packet::PingResp).await;
             }
@@ -409,6 +439,21 @@ async fn wildcard_connection_without_deliveries_fails_the_run() {
         Behaviour::FirstConnectionOnly,
         &["--hol-wildcard"],
         "subscriber connection 1 received no messages in the measurement window",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn delivery_on_another_topics_stream_fails_the_run() {
+    assert_run_fails_with(Behaviour::FirstStreamOnly, &[], "delivered bench/hol/2").await;
+}
+
+#[tokio::test]
+async fn wildcard_delivery_outside_the_bench_topics_fails_the_run() {
+    assert_run_fails_with(
+        Behaviour::StrayTopic,
+        &["--hol-wildcard"],
+        "delivered bench/hol/99",
     )
     .await;
 }

@@ -265,7 +265,7 @@ async fn connect_one(
             tokio::spawn(read_deliveries(
                 recv,
                 buffer,
-                subscription.topic_idx,
+                subscription,
                 conn_idx,
                 Arc::clone(recorder),
             )),
@@ -343,19 +343,30 @@ async fn read_control(mut recv: RecvStream, mut buffer: BytesMut) -> Result<()> 
 async fn read_deliveries(
     mut recv: RecvStream,
     mut buffer: BytesMut,
-    topic_idx: Option<usize>,
+    subscription: Subscription,
     conn_idx: u16,
     recorder: Arc<HolRecorder>,
 ) -> Result<()> {
     let stream_id = u64::from(recv.id());
+    let num_topics = recorder.topic_samples.len();
+    let filter = subscription.filter;
     loop {
-        match read_packet(&mut recv, &mut buffer).await? {
-            Packet::Publish(publish) => {
-                if let Some(index) = topic_idx.or_else(|| hol_topic_index(&publish.topic_name)) {
-                    recorder.record(index, conn_idx, &publish.payload, Some(stream_id));
-                }
-            }
+        let publish = match read_packet(&mut recv, &mut buffer).await? {
+            Packet::Publish(publish) => publish,
             other => bail!("unexpected packet on subscription stream {stream_id}: {other:?}"),
-        }
+        };
+        let topic = &publish.topic_name;
+        let index = match subscription.topic_idx {
+            Some(index) if *topic == filter => index,
+            Some(_) => bail!("subscription stream {stream_id} for {filter} delivered {topic}"),
+            None => match hol_topic_index(topic).filter(|index| *index < num_topics) {
+                Some(index) => index,
+                None => bail!(
+                    "subscription stream {stream_id} for {filter} delivered {topic}, outside {HOL_TOPIC_PREFIX}0 to {HOL_TOPIC_PREFIX}{}",
+                    num_topics.saturating_sub(1)
+                ),
+            },
+        };
+        recorder.record(index, conn_idx, &publish.payload, Some(stream_id));
     }
 }
