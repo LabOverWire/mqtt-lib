@@ -176,6 +176,7 @@ async fn hol_config_omits_the_new_flags_when_unset() {
     let json = run_hol(broker.address(), &[]).await;
     let config = json["config"].as_object().unwrap();
     assert!(!config.contains_key("hol_wildcard"));
+    assert!(!config.contains_key("hol_subscription_streams"));
 }
 
 #[tokio::test]
