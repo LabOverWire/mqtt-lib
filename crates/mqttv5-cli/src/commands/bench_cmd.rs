@@ -1530,7 +1530,9 @@ impl HolRecorder {
 }
 
 fn hol_topic_index(topic: &str) -> Option<usize> {
-    topic.strip_prefix(HOL_TOPIC_PREFIX)?.parse().ok()
+    let suffix = topic.strip_prefix(HOL_TOPIC_PREFIX)?;
+    let index: usize = suffix.parse().ok()?;
+    (index.to_string() == suffix).then_some(index)
 }
 
 async fn subscribe_hol_topics(
@@ -2431,10 +2433,27 @@ fn inter_topic_spread(topic_samples: &[Vec<TimestampedSample>], window_ms: u64) 
 
 #[cfg(test)]
 mod tests {
-    use super::{nanos_as_u64, sleep_until_precise, stamp_when_ready, steady_state_mean};
+    use super::{
+        hol_topic_index, nanos_as_u64, sleep_until_precise, stamp_when_ready, steady_state_mean,
+    };
     use mqtt5::QoS;
     use std::sync::Arc;
     use tokio::sync::Semaphore;
+
+    #[test]
+    fn hol_topic_index_accepts_only_the_exact_bench_topic_names() {
+        assert_eq!(hol_topic_index("bench/hol/0"), Some(0));
+        assert_eq!(hol_topic_index("bench/hol/12"), Some(12));
+        for topic in [
+            "bench/hol/01",
+            "bench/hol/+1",
+            "bench/hol/",
+            "bench/hol/1/x",
+            "other/1",
+        ] {
+            assert_eq!(hol_topic_index(topic), None, "{topic}");
+        }
+    }
 
     #[tokio::test]
     async fn qos1_stamp_is_taken_after_the_inflight_slot_frees() {
