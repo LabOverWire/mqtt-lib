@@ -23,6 +23,8 @@ enum Behaviour {
     ServerUniStream,
     ServerBiStream,
     Silent,
+    FirstTopicOnly,
+    FirstConnectionOnly,
 }
 type Routes = Arc<Mutex<Vec<(String, u64, SharedSend, quinn::Connection)>>>;
 
@@ -74,10 +76,7 @@ async fn serve_subscription_stream(
         let _ = send.lock().await.finish();
         return;
     }
-    if matches!(
-        behaviour,
-        Behaviour::Serve | Behaviour::ServerUniStream | Behaviour::ServerBiStream
-    ) {
+    if !matches!(behaviour, Behaviour::Refuse | Behaviour::Silent) {
         routes.lock().await.push((
             subscribe.filters[0].filter.clone(),
             u64::from(recv.id()),
@@ -129,6 +128,18 @@ async fn serve_connection(conn: quinn::Connection, routes: Routes, behaviour: Be
                 }
                 let subscriber = targets[0].1.clone();
                 match behaviour {
+                    Behaviour::FirstTopicOnly if publish.topic_name != "bench/hol/0" => {
+                        continue;
+                    }
+                    Behaviour::FirstConnectionOnly => {
+                        let first = routes.lock().await[0].3.stable_id();
+                        for (target, conn) in &targets {
+                            if conn.stable_id() == first {
+                                write(target, &Packet::Publish(publish.clone())).await;
+                            }
+                        }
+                        continue;
+                    }
                     Behaviour::ServerUniStream => {
                         if let Ok(uni) = subscriber.open_uni().await {
                             let uni = Mutex::new(uni);
@@ -365,6 +376,41 @@ async fn run_without_deliveries_fails() {
         "{}",
         result.stderr
     );
+}
+
+async fn assert_run_fails_with(behaviour: Behaviour, extra: &[&str], needle: &str) {
+    let broker = fake_quic_broker(behaviour).await;
+    let result = run_hol_streams(&broker.url, extra).await;
+    assert!(
+        !result.success,
+        "bench must fail: {}\n{}",
+        result.stdout, result.stderr
+    );
+    assert!(
+        result.stderr.contains(needle),
+        "stderr must contain {needle:?}: {}",
+        result.stderr
+    );
+}
+
+#[tokio::test]
+async fn topic_without_deliveries_fails_the_run() {
+    assert_run_fails_with(
+        Behaviour::FirstTopicOnly,
+        &[],
+        "received no messages in the measurement window for bench/hol/1, bench/hol/2, bench/hol/3",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn wildcard_connection_without_deliveries_fails_the_run() {
+    assert_run_fails_with(
+        Behaviour::FirstConnectionOnly,
+        &["--hol-wildcard"],
+        "subscriber connection 1 received no messages in the measurement window",
+    )
+    .await;
 }
 
 #[tokio::test]

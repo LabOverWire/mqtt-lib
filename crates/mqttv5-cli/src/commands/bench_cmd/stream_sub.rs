@@ -51,6 +51,7 @@ impl StreamSubscriber {
 pub(super) async fn check_all(
     subscribers: &mut [StreamSubscriber],
     recorder: &HolRecorder,
+    wildcard: bool,
 ) -> Result<()> {
     if subscribers.is_empty() {
         return Ok(());
@@ -58,18 +59,31 @@ pub(super) async fn check_all(
     for subscriber in subscribers.iter_mut() {
         subscriber.check().await?;
     }
-    let received: usize = recorder
-        .topic_samples
-        .iter()
-        .map(|samples| {
-            samples
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .len()
-        })
-        .sum();
-    if received == 0 {
-        bail!("stream subscribers received no messages in the measurement window");
+    let mut per_connection = vec![0usize; subscribers.len()];
+    let mut empty_topics = Vec::new();
+    for (topic_idx, samples) in recorder.topic_samples.iter().enumerate() {
+        let samples = samples
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if samples.is_empty() {
+            empty_topics.push(format!("{HOL_TOPIC_PREFIX}{topic_idx}"));
+        }
+        for sample in samples.iter() {
+            if let Some(count) = per_connection.get_mut(usize::from(sample.conn_idx)) {
+                *count += 1;
+            }
+        }
+    }
+    if !empty_topics.is_empty() {
+        bail!(
+            "stream subscribers received no messages in the measurement window for {}",
+            empty_topics.join(", ")
+        );
+    }
+    if wildcard {
+        if let Some(conn) = per_connection.iter().position(|&count| count == 0) {
+            bail!("subscriber connection {conn} received no messages in the measurement window");
+        }
     }
     Ok(())
 }

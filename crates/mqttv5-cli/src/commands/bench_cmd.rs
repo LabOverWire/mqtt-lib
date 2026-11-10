@@ -418,6 +418,7 @@ struct ConnectionResults {
 struct TimestampedSample {
     received_at_us: u64,
     latency_us: u64,
+    conn_idx: u16,
 }
 
 #[derive(Serialize)]
@@ -1509,6 +1510,7 @@ impl HolRecorder {
             .push(TimestampedSample {
                 received_at_us,
                 latency_us,
+                conn_idx,
             });
         if let Some(traces) = &self.trace_records {
             traces
@@ -1938,7 +1940,7 @@ async fn run_hol_blocking(cmd: BenchCommand) -> Result<()> {
     )
     .await;
 
-    stream_sub::check_all(&mut stream_subscribers, &recorder).await?;
+    stream_sub::check_all(&mut stream_subscribers, &recorder, cmd.hol_wildcard).await?;
 
     let results = finalize_and_report_hol(
         &topic_samples,
