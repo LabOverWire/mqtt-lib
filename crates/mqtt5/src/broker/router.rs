@@ -228,6 +228,12 @@ fn generation_epoch() -> u64 {
     unix_millis_now().saturating_mul(GENERATIONS_PER_MILLISECOND)
 }
 
+async fn discard_in_flight(storage: &DynamicStorage, client_id: &str) {
+    if let Err(e) = storage.remove_all_inflight_messages(client_id).await {
+        warn!("Failed to remove in-flight messages of ended session {client_id}: {e}");
+    }
+}
+
 /// Information about a connected client
 #[derive(Debug)]
 pub struct ClientInfo {
@@ -925,6 +931,7 @@ impl MessageRouter {
                     return false;
                 }
             }
+            discard_in_flight(storage, client_id).await;
         }
         let had_subscriptions = self.subscription_count_for_client(client_id).await > 0;
         self.remove_client_subscriptions(client_id).await;
@@ -988,7 +995,10 @@ impl MessageRouter {
         }
         let mut session = match storage.get_session(&client_id).await {
             Ok(Some(session)) => session,
-            Ok(None) => return false,
+            Ok(None) => {
+                discard_in_flight(storage, &client_id).await;
+                return false;
+            }
             Err(e) => {
                 warn!("Failed to read session for {client_id} during recovery: {e}");
                 return false;
@@ -1005,11 +1015,13 @@ impl MessageRouter {
         session.subscriptions.retain(|_, sub| sub.flow_id.is_none());
         let unbound = session.subscriptions.len() != subscriptions;
         if session.expiry_interval == Some(0) || session.is_expired() {
-            if let Err(e) = storage
+            match storage
                 .remove_owned_session(&client_id, session.connection_token)
                 .await
             {
-                warn!("Failed to remove ended session for {client_id}: {e}");
+                Ok(true) => discard_in_flight(storage, &client_id).await,
+                Ok(false) => {}
+                Err(e) => warn!("Failed to remove ended session for {client_id}: {e}"),
             }
             return false;
         }

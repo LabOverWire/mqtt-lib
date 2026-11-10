@@ -250,7 +250,7 @@ impl ClientQueue {
         let entry = QueueEntry {
             seq,
             bytes: entry_bytes(&body),
-            expires_at: body.expires_at,
+            expires_at: body.deadline(),
             body: Some(Arc::clone(&body)),
             path: None,
         };
@@ -377,7 +377,7 @@ impl ClientQueue {
             entries.push(QueueEntry {
                 seq: first + index as u64,
                 bytes: entry_bytes(body),
-                expires_at: body.expires_at,
+                expires_at: body.deadline(),
                 body: Some(Arc::clone(body)),
                 path: None,
             });
@@ -481,7 +481,7 @@ impl ClientQueue {
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn push_scanned(&self, seq: u64, path: PathBuf, message: &QueuedMessage) {
         let bytes = entry_bytes(message);
-        let expires_at = message.expires_at;
+        let expires_at = message.deadline();
         let mut inner = self.inner.lock();
         inner.bytes += bytes;
         inner.entries.push_back(QueueEntry {

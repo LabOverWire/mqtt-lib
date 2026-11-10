@@ -1170,10 +1170,14 @@ impl QueuedMessage {
         })
     }
 
-    /// Check if message has expired
+    #[must_use]
+    pub fn deadline(&self) -> Option<SystemTime> {
+        self.expires_at.filter(|_| !self.dup)
+    }
+
     #[must_use]
     pub fn is_expired(&self) -> bool {
-        self.expires_at
+        self.deadline()
             .is_some_and(|expiry| SystemTime::now() > expiry)
     }
 }
@@ -1298,8 +1302,10 @@ impl InflightMessage {
 
     #[must_use]
     pub fn is_expired(&self) -> bool {
-        self.resolved_expires_at()
-            .is_some_and(|expiry| SystemTime::now() > expiry)
+        self.direction == InflightDirection::Inbound
+            && self
+                .resolved_expires_at()
+                .is_some_and(|expiry| SystemTime::now() > expiry)
     }
 }
 
