@@ -19,6 +19,8 @@ use tokio::time::Instant;
 use super::client_args::uses_tls;
 use super::parsers::{parse_duration_secs, parse_stream_strategy};
 
+mod stream_sub;
+
 #[derive(Debug, Clone, Copy, ValueEnum, Default)]
 pub enum BenchMode {
     #[default]
@@ -126,6 +128,12 @@ pub struct BenchCommand {
         help = "HOL mode: each subscriber connection makes one subscription to bench/hol/# instead of one per topic; the topic index is taken from the received topic name. With --sub-connections N every message is received N times"
     )]
     pub hol_wildcard: bool,
+
+    #[arg(
+        long,
+        help = "HOL mode over quic:// or quics:// only: subscribers are a minimal QUIC client that opens one bidirectional stream per subscription, sends that QoS 0 SUBSCRIBE on it and reads the SUBACK and the deliveries from it; the trace stream_id is the QUIC stream ID. A refused SUBACK, a stream that takes over 10s to subscribe or a stream that ends early fails the run"
+    )]
+    pub hol_subscription_streams: bool,
 
     #[arg(
         long,
@@ -361,6 +369,8 @@ struct BenchConfig {
     hol_sub_connections: usize,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     hol_wildcard: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    hol_subscription_streams: bool,
     payload_format: String,
     actual_payload_bytes: usize,
 }
@@ -479,6 +489,12 @@ struct BenchOutput {
 pub async fn execute(cmd: BenchCommand, verbose: bool, debug: bool) -> Result<()> {
     crate::init_basic_tracing(verbose, debug);
 
+    if cmd.hol_subscription_streams && !matches!(cmd.mode, BenchMode::HolBlocking) {
+        anyhow::bail!("--hol-subscription-streams needs --mode hol-blocking");
+    }
+    if cmd.hol_subscription_streams {
+        stream_sub::quic_url(&broker_url(&cmd))?;
+    }
     match cmd.mode {
         BenchMode::Throughput => run_throughput(cmd).await,
         BenchMode::Latency => run_latency(cmd).await,
@@ -537,6 +553,7 @@ fn bench_config(cmd: &BenchCommand, url: &str) -> BenchConfig {
         hol_pub_connections: cmd.pub_connections,
         hol_sub_connections: cmd.sub_connections,
         hol_wildcard: cmd.hol_wildcard,
+        hol_subscription_streams: cmd.hol_subscription_streams,
         payload_format: format_name(cmd.payload_format),
         actual_payload_bytes: sample.len(),
     }
@@ -1465,11 +1482,11 @@ struct HolRecorder {
 }
 
 impl HolRecorder {
-    fn record(&self, topic_idx: usize, conn_idx: u16, msg: &mqtt5::Message) {
+    fn record(&self, topic_idx: usize, conn_idx: u16, payload: &[u8], stream_id: Option<u64>) {
         let Some(samples) = self.topic_samples.get(topic_idx) else {
             return;
         };
-        let sent_nanos = decode_timestamp(self.format, &msg.payload);
+        let sent_nanos = decode_timestamp(self.format, payload);
         if sent_nanos == 0 {
             return;
         }
@@ -1494,11 +1511,11 @@ impl HolRecorder {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push(TraceRecord {
                     topic_idx: u16::try_from(topic_idx).unwrap_or(u16::MAX),
-                    seq: decode_sequence(self.format, &msg.payload),
+                    seq: decode_sequence(self.format, payload),
                     publish_ns: sent_nanos,
                     receive_ns: now_nanos,
                     latency_us,
-                    stream_id: msg.stream_id.unwrap_or(0),
+                    stream_id: stream_id.unwrap_or(0),
                     conn_idx,
                 });
         }
@@ -1526,7 +1543,7 @@ async fn subscribe_hol_topics(
             sub_client
                 .subscribe_with_options(HOL_WILDCARD_FILTER, options.clone(), move |msg| {
                     if let Some(topic_idx) = hol_topic_index(&msg.topic) {
-                        recorder.record(topic_idx, conn_idx, &msg);
+                        recorder.record(topic_idx, conn_idx, &msg.payload, msg.stream_id);
                     }
                 })
                 .await
@@ -1547,7 +1564,7 @@ async fn subscribe_hol_topics(
             .subscribe_with_options(
                 format!("{HOL_TOPIC_PREFIX}{topic_idx}"),
                 options.clone(),
-                move |msg| recorder.record(topic_idx, conn_idx, &msg),
+                move |msg| recorder.record(topic_idx, conn_idx, &msg.payload, msg.stream_id),
             )
             .await
             .context("failed to subscribe")?;
@@ -1802,6 +1819,33 @@ async fn connect_hol_clients(
     Ok((pub_clients, sub_clients))
 }
 
+async fn start_hol_subscribers(
+    cmd: &BenchCommand,
+    base_id: &str,
+    url: &str,
+    sub_clients: &[MqttClient],
+    recorder: &Arc<HolRecorder>,
+) -> Result<(
+    Vec<stream_sub::StreamSubscriber>,
+    Option<Arc<quinn::Connection>>,
+)> {
+    if cmd.hol_subscription_streams {
+        let subscribers =
+            stream_sub::connect_all(cmd, base_id, url, cmd.sub_connections.max(1), recorder)
+                .await?;
+        let stats_connection = subscribers
+            .first()
+            .map(stream_sub::StreamSubscriber::connection);
+        return Ok((subscribers, stats_connection));
+    }
+    subscribe_hol_topics(sub_clients, cmd.qos, cmd.hol_wildcard, recorder).await?;
+    let stats_connection = match sub_clients.first() {
+        Some(client) => client.quic_connection().await,
+        None => None,
+    };
+    Ok((Vec::new(), stats_connection))
+}
+
 async fn run_hol_blocking(cmd: BenchCommand) -> Result<()> {
     use std::sync::Mutex;
 
@@ -1817,8 +1861,9 @@ async fn run_hol_blocking(cmd: BenchCommand) -> Result<()> {
     eprintln!(
         "connecting {pub_conns} pub / {sub_conns} sub connection(s) (pub -> {pub_url}, sub -> {url}) for HOL blocking test with {num_topics} topics...",
     );
+    let client_sub_conns = sub_conns * usize::from(!cmd.hol_subscription_streams);
     let (pub_clients, sub_clients) =
-        connect_hol_clients(&cmd, &base_id, &pub_url, &url, pub_conns, sub_conns).await?;
+        connect_hol_clients(&cmd, &base_id, &pub_url, &url, pub_conns, client_sub_conns).await?;
 
     let topic_samples: Vec<Arc<Mutex<Vec<TimestampedSample>>>> = (0..num_topics)
         .map(|_| Arc::new(Mutex::new(Vec::with_capacity(100_000))))
@@ -1835,7 +1880,8 @@ async fn run_hol_blocking(cmd: BenchCommand) -> Result<()> {
         measure_start_nanos: Arc::clone(&measure_start_nanos),
         trace_records: trace_records.clone(),
     });
-    subscribe_hol_topics(&sub_clients, cmd.qos, cmd.hol_wildcard, &recorder).await?;
+    let (mut stream_subscribers, stats_connection) =
+        start_hol_subscribers(&cmd, &base_id, &url, &sub_clients, &recorder).await?;
 
     #[allow(clippy::cast_possible_truncation)]
     let per_topic_interval_us = (1_000_000u64 * (num_topics as u64)).checked_div(cmd.rate);
@@ -1875,7 +1921,7 @@ async fn run_hol_blocking(cmd: BenchCommand) -> Result<()> {
     });
 
     let (elapsed, total_published) = run_hol_measure_phase(
-        &sub_clients,
+        stats_connection,
         &pub_clients,
         &pub_cfg,
         &running,
@@ -1886,6 +1932,10 @@ async fn run_hol_blocking(cmd: BenchCommand) -> Result<()> {
         cmd.duration,
     )
     .await;
+
+    for subscriber in &mut stream_subscribers {
+        subscriber.check().await?;
+    }
 
     let results = finalize_and_report_hol(
         &topic_samples,
@@ -1904,13 +1954,21 @@ async fn run_hol_blocking(cmd: BenchCommand) -> Result<()> {
     };
     println!("{}", serde_json::to_string_pretty(&output)?);
 
-    for client in &pub_clients {
-        client.disconnect().await.ok();
-    }
-    for client in &sub_clients {
-        client.disconnect().await.ok();
-    }
+    close_hol_connections(&pub_clients, &sub_clients, stream_subscribers).await;
     Ok(())
+}
+
+async fn close_hol_connections(
+    pub_clients: &[MqttClient],
+    sub_clients: &[MqttClient],
+    stream_subscribers: Vec<stream_sub::StreamSubscriber>,
+) {
+    for client in pub_clients.iter().chain(sub_clients) {
+        client.disconnect().await.ok();
+    }
+    for subscriber in stream_subscribers {
+        subscriber.close();
+    }
 }
 
 fn finalize_and_report_hol(
@@ -1955,7 +2013,7 @@ fn finalize_and_report_hol(
 
 #[allow(clippy::too_many_arguments)]
 async fn run_hol_measure_phase(
-    sub_clients: &[MqttClient],
+    stats_connection: Option<Arc<quinn::Connection>>,
     pub_clients: &[MqttClient],
     pub_cfg: &HolPublishConfig,
     running: &Arc<std::sync::atomic::AtomicBool>,
@@ -1966,13 +2024,16 @@ async fn run_hol_measure_phase(
     duration: u64,
 ) -> (f64, u64) {
     running.store(true, Ordering::SeqCst);
-    let stats_handle = if let Some(stats) = stats_records {
-        sub_clients[0].quic_connection().await.map(|conn| {
+    let stats_handle = match (stats_records, stats_connection) {
+        (Some(stats), Some(conn)) => {
             eprintln!("  quinn stats sampler active (100ms interval)");
-            spawn_quinn_stats_sampler(conn, Arc::clone(stats), Arc::clone(running))
-        })
-    } else {
-        None
+            Some(spawn_quinn_stats_sampler(
+                conn,
+                Arc::clone(stats),
+                Arc::clone(running),
+            ))
+        }
+        _ => None,
     };
 
     eprintln!("measuring for {duration}s at {rate_label}...");

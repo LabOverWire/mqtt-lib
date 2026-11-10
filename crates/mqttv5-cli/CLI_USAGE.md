@@ -775,6 +775,7 @@ Run performance benchmarks against a broker. Four modes are available: **through
 | `--key <FILE>` | TLS client private key (PEM) | None |
 | `--pub-url <URL>` | Separate URL for publishers in HOL mode | None |
 | `--hol-wildcard` | HOL mode: each subscriber connection subscribes once to `bench/hol/#` instead of once per topic; with `--sub-connections N` every message is received N times | `false` |
+| `--hol-subscription-streams` | HOL mode over `quic://` or `quics://` only: subscribers are a minimal QUIC client that opens one bidirectional stream per subscription (one per connection with `--hol-wildcard`), sends that QoS 0 SUBSCRIBE on it and reads the SUBACK and deliveries from it; `stream_id` in `messages.csv` is the QUIC stream ID. A refused SUBACK, a subscription taking over 10s or a stream ending early fails the run | `false` |
 | `--quic-stream-strategy <S>` | QUIC stream strategy: `control-only`, `per-publish`, `per-topic`, `per-subscription` | `control-only` |
 | `--quic-flow-headers` | Enable QUIC flow headers for state tracking | `false` |
 | `--quic-flow-expire <SECS>` | Flow header expiry interval in seconds | `300` |

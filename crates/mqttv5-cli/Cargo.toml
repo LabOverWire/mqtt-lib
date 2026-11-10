@@ -34,6 +34,7 @@ time = { version = "0.3.53", features = ["local-offset", "parsing", "formatting"
 bebytes = "3.0.2"
 flate2 = "1.1.9"
 quinn = { version = "0.11.11", features = ["rustls-ring", "runtime-tokio"] }
+bytes = "1"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 clap = { version = "4.5", features = ["derive", "env"] }
