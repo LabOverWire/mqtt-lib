@@ -494,6 +494,11 @@ pub async fn execute(cmd: BenchCommand, verbose: bool, debug: bool) -> Result<()
     }
     if cmd.hol_subscription_streams {
         stream_sub::quic_url(&broker_url(&cmd))?;
+        if cmd.qos != QoS::AtMostOnce {
+            anyhow::bail!(
+                "--hol-subscription-streams subscribes at QoS 0 only; use --qos 0 with it"
+            );
+        }
     }
     match cmd.mode {
         BenchMode::Throughput => run_throughput(cmd).await,

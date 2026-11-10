@@ -303,6 +303,25 @@ async fn subscription_stream_that_ends_early_fails_the_run() {
 }
 
 #[tokio::test]
+async fn subscription_streams_refuse_qos_above_zero() {
+    let broker = fake_quic_broker(Behaviour::Serve).await;
+    let result = run_hol_streams(&broker.url, &["--qos", "1"]).await;
+    assert!(
+        !result.success,
+        "bench must refuse --qos 1: {}",
+        result.stdout
+    );
+    assert!(
+        result
+            .stderr
+            .contains("--hol-subscription-streams subscribes at QoS 0 only"),
+        "{}",
+        result.stderr
+    );
+    assert!(routed_filters(&broker).await.is_empty());
+}
+
+#[tokio::test]
 async fn subscription_streams_need_a_quic_url_and_hol_mode() {
     let tcp = run_hol_streams("mqtt://127.0.0.1:9", &[]).await;
     assert!(!tcp.success);
