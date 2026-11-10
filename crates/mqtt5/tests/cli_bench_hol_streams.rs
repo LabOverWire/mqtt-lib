@@ -20,8 +20,11 @@ enum Behaviour {
     Serve,
     Refuse,
     EndAfterSubAck,
+    ServerUniStream,
+    ServerBiStream,
+    Silent,
 }
-type Routes = Arc<Mutex<Vec<(String, u64, SharedSend)>>>;
+type Routes = Arc<Mutex<Vec<(String, u64, SharedSend, quinn::Connection)>>>;
 
 struct FakeQuicBroker {
     url: String,
@@ -50,6 +53,7 @@ async fn write(send: &Mutex<quinn::SendStream>, packet: &Packet) -> bool {
 async fn serve_subscription_stream(
     send: quinn::SendStream,
     mut recv: quinn::RecvStream,
+    conn: quinn::Connection,
     routes: Routes,
     behaviour: Behaviour,
 ) {
@@ -70,11 +74,15 @@ async fn serve_subscription_stream(
         let _ = send.lock().await.finish();
         return;
     }
-    if behaviour == Behaviour::Serve {
+    if matches!(
+        behaviour,
+        Behaviour::Serve | Behaviour::ServerUniStream | Behaviour::ServerBiStream
+    ) {
         routes.lock().await.push((
             subscribe.filters[0].filter.clone(),
             u64::from(recv.id()),
             Arc::clone(&send),
+            conn,
         ));
     }
     while read(&mut recv, &mut buffer).await.is_some() {}
@@ -99,6 +107,7 @@ async fn serve_connection(conn: quinn::Connection, routes: Routes, behaviour: Be
             tokio::spawn(serve_subscription_stream(
                 send,
                 recv,
+                stream_conn.clone(),
                 Arc::clone(&stream_routes),
                 behaviour,
             ));
@@ -108,14 +117,37 @@ async fn serve_connection(conn: quinn::Connection, routes: Routes, behaviour: Be
     while let Some(packet) = read(&mut ctl_recv, &mut buffer).await {
         match packet {
             Packet::Publish(publish) => {
-                let targets: Vec<SharedSend> = routes
+                let targets: Vec<(SharedSend, quinn::Connection)> = routes
                     .lock()
                     .await
                     .iter()
-                    .filter(|(filter, _, _)| topic_matches_filter(&publish.topic_name, filter))
-                    .map(|(_, _, send)| Arc::clone(send))
+                    .filter(|(filter, _, _, _)| topic_matches_filter(&publish.topic_name, filter))
+                    .map(|(_, _, send, subscriber)| (Arc::clone(send), subscriber.clone()))
                     .collect();
-                for target in targets {
+                if targets.is_empty() {
+                    continue;
+                }
+                let subscriber = targets[0].1.clone();
+                match behaviour {
+                    Behaviour::ServerUniStream => {
+                        if let Ok(uni) = subscriber.open_uni().await {
+                            let uni = Mutex::new(uni);
+                            write(&uni, &Packet::Publish(publish.clone())).await;
+                            let _ = uni.lock().await.finish();
+                        }
+                        continue;
+                    }
+                    Behaviour::ServerBiStream => {
+                        if let Ok((bi, _)) = subscriber.open_bi().await {
+                            let bi = Mutex::new(bi);
+                            write(&bi, &Packet::Publish(publish.clone())).await;
+                            let _ = bi.lock().await.finish();
+                        }
+                        continue;
+                    }
+                    _ => {}
+                }
+                for (target, _) in targets {
                     write(&target, &Packet::Publish(publish.clone())).await;
                 }
             }
@@ -196,7 +228,7 @@ async fn routed_filters(broker: &FakeQuicBroker) -> Vec<(String, u64)> {
         .lock()
         .await
         .iter()
-        .map(|(filter, stream_id, _)| (filter.clone(), *stream_id))
+        .map(|(filter, stream_id, _, _)| (filter.clone(), *stream_id))
         .collect();
     routes.sort();
     routes
@@ -298,6 +330,39 @@ async fn subscription_stream_that_ends_early_fails_the_run() {
     assert!(
         result.stderr.contains("ended before the run finished"),
         "stderr must name the stream that ended: {}",
+        result.stderr
+    );
+}
+
+async fn assert_server_stream_fails_the_run(behaviour: Behaviour) {
+    let broker = fake_quic_broker(behaviour).await;
+    let result = run_hol_streams(&broker.url, &[]).await;
+    assert!(!result.success, "bench must fail: {}", result.stdout);
+    assert!(
+        result.stderr.contains("broker opened stream"),
+        "stderr must name the server stream: {}",
+        result.stderr
+    );
+}
+
+#[tokio::test]
+async fn delivery_on_a_server_uni_stream_fails_the_run() {
+    assert_server_stream_fails_the_run(Behaviour::ServerUniStream).await;
+}
+
+#[tokio::test]
+async fn delivery_on_a_server_bi_stream_fails_the_run() {
+    assert_server_stream_fails_the_run(Behaviour::ServerBiStream).await;
+}
+
+#[tokio::test]
+async fn run_without_deliveries_fails() {
+    let broker = fake_quic_broker(Behaviour::Silent).await;
+    let result = run_hol_streams(&broker.url, &[]).await;
+    assert!(!result.success, "bench must fail: {}", result.stdout);
+    assert!(
+        result.stderr.contains("received no messages"),
+        "{}",
         result.stderr
     );
 }

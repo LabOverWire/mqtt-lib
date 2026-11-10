@@ -27,7 +27,7 @@ impl StreamSubscriber {
         Arc::clone(&self.connection)
     }
 
-    pub(super) async fn check(&mut self) -> Result<()> {
+    async fn check(&mut self) -> Result<()> {
         let Some(finished) = self.tasks.iter().position(|(_, task)| task.is_finished()) else {
             return Ok(());
         };
@@ -46,6 +46,32 @@ impl StreamSubscriber {
         drop(self.subscription_sends);
         self.connection.close(0u32.into(), b"bench done");
     }
+}
+
+pub(super) async fn check_all(
+    subscribers: &mut [StreamSubscriber],
+    recorder: &HolRecorder,
+) -> Result<()> {
+    if subscribers.is_empty() {
+        return Ok(());
+    }
+    for subscriber in subscribers.iter_mut() {
+        subscriber.check().await?;
+    }
+    let received: usize = recorder
+        .topic_samples
+        .iter()
+        .map(|samples| {
+            samples
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len()
+        })
+        .sum();
+    if received == 0 {
+        bail!("stream subscribers received no messages in the measurement window");
+    }
+    Ok(())
 }
 
 struct Subscription {
@@ -187,6 +213,10 @@ async fn connect_one(
 
     let mut tasks = vec![
         (
+            "server stream watch".to_string(),
+            tokio::spawn(refuse_server_streams(Arc::clone(&connection))),
+        ),
+        (
             "control stream keep-alive".to_string(),
             tokio::spawn(ping_control(control_send)),
         ),
@@ -259,6 +289,16 @@ async fn subscribe_on_new_stream(
         }
         other => bail!("expected the SUBACK for {filter} on stream {stream_id}, got {other:?}"),
     }
+}
+
+async fn refuse_server_streams(connection: Arc<quinn::Connection>) -> Result<()> {
+    let stream_id = tokio::select! {
+        bi = connection.accept_bi() => u64::from(bi?.1.id()),
+        uni = connection.accept_uni() => u64::from(uni?.id()),
+    };
+    bail!(
+        "broker opened stream {stream_id} for deliveries; the stream subscriber reads only the streams it opened for its subscriptions"
+    )
 }
 
 async fn ping_control(mut send: SendStream) -> Result<()> {

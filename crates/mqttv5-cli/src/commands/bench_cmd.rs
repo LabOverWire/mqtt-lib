@@ -1938,9 +1938,7 @@ async fn run_hol_blocking(cmd: BenchCommand) -> Result<()> {
     )
     .await;
 
-    for subscriber in &mut stream_subscribers {
-        subscriber.check().await?;
-    }
+    stream_sub::check_all(&mut stream_subscribers, &recorder).await?;
 
     let results = finalize_and_report_hol(
         &topic_samples,
