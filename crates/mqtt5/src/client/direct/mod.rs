@@ -1627,21 +1627,30 @@ impl DirectClientInner {
         if self.subscription_delivery == SubscriptionDelivery::ControlStream {
             return Ok(None);
         }
-        let serialized = self.subscription_writes.lock().await;
-        let reusable = self.subscription_streams.lock().reusable_for(packet);
-        let stream = match reusable {
-            Some(stream) => stream,
-            None => match self.open_subscription_reader().await? {
-                Some(stream) => stream,
-                None => return Ok(None),
-            },
-        };
         let filters: Vec<&str> = packet.filters.iter().map(|f| f.filter.as_str()).collect();
-        let sent = self
-            .write_on_subscription_stream(&stream, Packet::Subscribe(packet.clone()), &filters)
-            .await?;
-        drop(serialized);
-        Ok(Some(sent))
+        loop {
+            let available = self
+                .subscription_streams
+                .lock()
+                .reusable_for(packet)
+                .is_some();
+            if !available && self.open_subscription_reader().await?.is_none() {
+                return Ok(None);
+            }
+            let serialized = self.subscription_writes.lock().await;
+            let chosen = self.subscription_streams.lock().reusable_for(packet);
+            if let Some(stream) = chosen {
+                let sent = self
+                    .write_on_subscription_stream(
+                        &stream,
+                        Packet::Subscribe(packet.clone()),
+                        &filters,
+                    )
+                    .await?;
+                drop(serialized);
+                return Ok(Some(sent));
+            }
+        }
     }
 
     #[cfg(feature = "transport-quic")]
@@ -1667,6 +1676,31 @@ impl DirectClientInner {
             .await?;
         drop(serialized);
         Ok(Some(sent))
+    }
+
+    #[cfg(feature = "transport-quic")]
+    fn forget_refused_filters(
+        &self,
+        packet: &SubscribePacket,
+        suback: Option<&SubAckPacket>,
+        subscribe_sent: u64,
+    ) {
+        let mut streams = self.subscription_streams.lock();
+        for (index, filter) in packet.filters.iter().enumerate() {
+            let refused = suback.is_none_or(|ack| {
+                ack.reason_codes
+                    .get(index)
+                    .is_none_or(|rc| rc.granted_qos().is_none())
+            });
+            if refused
+                && streams
+                    .by_filter
+                    .get(&filter.filter)
+                    .is_some_and(|mapped| mapped.sent == subscribe_sent)
+            {
+                streams.by_filter.remove(&filter.filter);
+            }
+        }
     }
 
     #[cfg(feature = "transport-quic")]
@@ -1867,7 +1901,12 @@ impl DirectClientInner {
                 .await?;
         }
 
-        let suback = self.wait_for_suback(rx, packet_id).await?;
+        let suback = self.wait_for_suback(rx, packet_id).await;
+        #[cfg(feature = "transport-quic")]
+        if let Some(subscribe_sent) = sent_on_stream {
+            self.forget_refused_filters(&packet, suback.as_ref().ok(), subscribe_sent);
+        }
+        let suback = suback?;
 
         for (filter, reason_code) in packet.filters.iter().zip(suback.reason_codes.iter()) {
             if let Some(subscription) = Self::create_subscription_from_filter(filter, *reason_code)

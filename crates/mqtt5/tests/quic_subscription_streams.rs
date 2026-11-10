@@ -357,7 +357,7 @@ async fn resubscribe_after_reconnect_opens_a_stream_on_the_new_connection() {
 }
 
 #[tokio::test]
-async fn refused_subscription_keeps_its_stream_for_the_filter() {
+async fn refused_subscription_leaves_its_stream_open_and_idle() {
     let (client, broker) = connect_fake_broker("sub-streams-refused", true).await;
     let (task, _rx) = start_subscribe(&client, "mirror/denied", QoS::AtMostOnce);
     let (mut send, mut recv) = accept_subscription_stream(&broker.conn, 0x80).await;
@@ -367,10 +367,10 @@ async fn refused_subscription_keeps_its_stream_for_the_filter() {
         "refused subscription stream must stay open"
     );
 
-    let (task, _rx) = start_subscribe(&client, "mirror/denied", QoS::AtMostOnce);
+    let (task, _rx) = start_subscribe(&client, "mirror/other", QoS::AtMostOnce);
     let subscribe = tokio::time::timeout(Duration::from_secs(2), read_frame(&mut recv))
         .await
-        .expect("SUBSCRIBE of the same filter did not reuse its stream")
+        .expect("SUBSCRIBE of another filter did not reuse the idle stream")
         .unwrap();
     assert_eq!(subscribe[0], SUBSCRIBE);
     send.write_all(&[0x90, 0x04, subscribe[2], subscribe[3], 0x00, 0x00])
@@ -1609,4 +1609,95 @@ async fn disconnect_during_the_connack_wait_stays_in_force() {
         "disconnect waited {elapsed:?} for a SUBSCRIBE blocked on a stream open"
     );
     assert!(subscribed.is_err(), "{subscribed:?}");
+}
+
+#[tokio::test]
+async fn refused_filters_do_not_hold_streams_under_a_stream_limit() {
+    let options = ConnectOptions::new("sub-streams-refused-limit").with_automatic_reconnect(false);
+    let (client, broker) =
+        connect_fake_broker_limited(options, true, Some(bidi_stream_limit(3))).await;
+    let mut held = Vec::new();
+    for (filter, granted) in [("denied/1", 0x87), ("denied/2", 0x87), ("allowed/1", 0x00)] {
+        let (task, _rx) = start_subscribe(&client, filter, QoS::AtMostOnce);
+        let subscribe = next_subscription_frame(&broker.conn, &mut held).await;
+        assert_eq!(subscribe[0], SUBSCRIBE);
+        let (send, _) = held.last_mut().unwrap();
+        send.write_all(&[0x90, 0x04, subscribe[2], subscribe[3], 0x00, granted])
+            .await
+            .unwrap();
+        let outcome = tokio::time::timeout(Duration::from_secs(12), task)
+            .await
+            .unwrap()
+            .unwrap();
+        if granted == 0x00 {
+            assert!(outcome.is_ok(), "{outcome:?}");
+        } else {
+            assert!(
+                matches!(outcome, Err(MqttError::SubscriptionDenied(_))),
+                "{outcome:?}"
+            );
+        }
+    }
+    assert_eq!(held.len(), 1, "a refused filter kept its stream");
+}
+
+#[tokio::test]
+async fn subscribe_whose_suback_times_out_leaves_its_stream_idle() {
+    let (client, broker) = connect_fake_broker("sub-streams-suback-timeout", true).await;
+    let (task, _rx) = start_subscribe(&client, "silent/a", QoS::AtMostOnce);
+    let (mut send, mut recv) = broker.conn.accept_bi().await.unwrap();
+    let subscribe = read_frame(&mut recv).await.unwrap();
+    assert_eq!(subscribe[0], SUBSCRIBE);
+    let outcome = tokio::time::timeout(Duration::from_secs(12), task)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(outcome, Err(MqttError::Timeout)), "{outcome:?}");
+
+    let (task, _rx) = start_subscribe(&client, "silent/b", QoS::AtMostOnce);
+    let frame = tokio::time::timeout(Duration::from_secs(2), read_frame(&mut recv))
+        .await
+        .expect("SUBSCRIBE did not reuse the stream of the timed-out SUBSCRIBE")
+        .unwrap();
+    assert_eq!(frame[0], SUBSCRIBE);
+    send.write_all(&[0x90, 0x04, frame[2], frame[3], 0x00, 0x00])
+        .await
+        .unwrap();
+    task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn unsubscribe_is_not_held_back_by_a_subscribe_waiting_for_a_stream() {
+    let options =
+        ConnectOptions::new("sub-streams-unsub-behind-open").with_automatic_reconnect(false);
+    let (client, broker) =
+        connect_fake_broker_limited(options, true, Some(bidi_stream_limit(2))).await;
+    let (task, _rx) = start_subscribe(&client, "held/a", QoS::AtMostOnce);
+    let (mut send, mut recv) = accept_subscription_stream(&broker.conn, 0x00).await;
+    task.await.unwrap().unwrap();
+
+    let (blocked, _blocked_rx) = start_subscribe(&client, "held/b", QoS::AtMostOnce);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let started = std::time::Instant::now();
+    let unsubscriber = client.clone();
+    let unsubscribe = tokio::spawn(async move { unsubscriber.unsubscribe("held/a").await });
+    let frame = tokio::time::timeout(Duration::from_secs(12), read_frame(&mut recv))
+        .await
+        .unwrap()
+        .unwrap();
+    let waited = started.elapsed();
+    assert_eq!(frame[0], UNSUBSCRIBE);
+    assert!(
+        waited < Duration::from_secs(2),
+        "UNSUBSCRIBE held back {waited:?}"
+    );
+    send.write_all(&[0xB0, 0x04, frame[2], frame[3], 0x00, 0x00])
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), unsubscribe)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    blocked.abort();
 }
