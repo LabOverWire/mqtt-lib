@@ -3219,4 +3219,51 @@ mod tests {
     async fn a_qos_2_resend_held_by_a_stalled_connection_keeps_its_packet_id() {
         a_resend_held_by_a_stalled_connection_keeps_its_packet_id(QoS::ExactlyOnce).await;
     }
+
+    async fn resumed_after_message_expiry(
+        client_id: &str,
+        qos: QoS,
+        expiry: u32,
+    ) -> Vec<(char, bool, Vec<u8>)> {
+        let broker = broker();
+        let first = connected(&broker, connect_options(client_id, true, 3600)).await;
+        subscribed_at(&first, "expiry/x", qos as u8).await;
+        let mut publish =
+            mqtt5_protocol::packet::publish::PublishPacket::new("expiry/x", b"x".to_vec(), qos);
+        publish.properties.set_message_expiry_interval(expiry);
+        broker.router.route_message(&publish, None).await;
+        sleep(100).await;
+        assert_eq!(deliveries(&first.received()).len(), 1);
+        first.port.close();
+        sleep(1_600).await;
+        let second = start_connect(&broker, connect_options(client_id, false, 3600));
+        sleep(300).await;
+        route(&broker, "expiry/x", b"n", qos).await;
+        sleep(200).await;
+        deliveries(&second.received())
+    }
+
+    #[wasm_bindgen_test]
+    async fn an_unacknowledged_qos_1_delivery_is_resent_after_its_message_expiry() {
+        assert_eq!(
+            resumed_after_message_expiry("expiry1", QoS::AtLeastOnce, 1).await,
+            vec![('x', true, vec![0, 1]), ('n', false, vec![0, 2])]
+        );
+    }
+
+    #[wasm_bindgen_test]
+    async fn an_unacknowledged_qos_2_delivery_is_resent_after_its_message_expiry() {
+        assert_eq!(
+            resumed_after_message_expiry("expiry2", QoS::ExactlyOnce, 1).await,
+            vec![('x', true, vec![0, 1]), ('n', false, vec![0, 2])]
+        );
+    }
+
+    #[wasm_bindgen_test]
+    async fn control_an_unacknowledged_delivery_before_its_message_expiry_is_resent() {
+        assert_eq!(
+            resumed_after_message_expiry("expiry3", QoS::AtLeastOnce, 60).await,
+            vec![('x', true, vec![0, 1]), ('n', false, vec![0, 2])]
+        );
+    }
 }
