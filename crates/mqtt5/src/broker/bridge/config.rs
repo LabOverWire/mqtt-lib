@@ -129,6 +129,9 @@ pub struct BridgeConfig {
     #[serde(default = "default_retry_jitter")]
     pub retry_jitter: bool,
 
+    #[serde(default = "default_outbound_queue_capacity")]
+    pub outbound_queue_capacity: usize,
+
     /// Backup broker addresses for failover
     #[serde(default)]
     pub backup_brokers: Vec<String>,
@@ -288,6 +291,10 @@ fn default_retry_jitter() -> bool {
     true
 }
 
+fn default_outbound_queue_capacity() -> usize {
+    1000
+}
+
 fn default_loop_prevention_ttl() -> Duration {
     Duration::from_secs(60)
 }
@@ -332,6 +339,7 @@ impl BridgeConfig {
             connection_retries: 3,
             first_retry_delay: Duration::from_secs(1),
             retry_jitter: true,
+            outbound_queue_capacity: default_outbound_queue_capacity(),
             backup_brokers: Vec::new(),
             primary_health_check_interval: Duration::from_secs(30),
             enable_failback: true,
@@ -371,8 +379,8 @@ impl BridgeConfig {
     /// # Errors
     /// Returns an error for an empty name, client ID or topic list, an empty topic pattern,
     /// `clean_start` set, a protocol version other than MQTT 5.0, a negative or non-finite
-    /// `backoff_multiplier`, or a zero `primary_health_check_interval` with failback enabled
-    /// and backup brokers configured.
+    /// `backoff_multiplier`, a zero `outbound_queue_capacity`, or a zero
+    /// `primary_health_check_interval` with failback enabled and backup brokers configured.
     pub fn validate(&self) -> crate::Result<()> {
         use crate::error::MqttError;
 
@@ -389,6 +397,12 @@ impl BridgeConfig {
         if self.topics.is_empty() {
             return Err(MqttError::Configuration(
                 "Bridge must have at least one topic mapping".into(),
+            ));
+        }
+
+        if self.outbound_queue_capacity == 0 {
+            return Err(MqttError::Configuration(
+                "Bridge outbound_queue_capacity must be at least 1".into(),
             ));
         }
 

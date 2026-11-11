@@ -150,10 +150,7 @@ impl BridgeManager {
     }
 
     /// Handles outgoing messages (called by `MessageRouter`).
-    ///
-    /// # Errors
-    /// Returns an error if message forwarding fails.
-    pub async fn handle_outgoing(&self, packet: &PublishPacket) -> Result<()> {
+    pub async fn handle_outgoing(&self, packet: &PublishPacket) {
         debug!(
             topic = %packet.topic_name,
             payload_len = packet.payload.len(),
@@ -162,7 +159,7 @@ impl BridgeManager {
 
         if packet.topic_name.starts_with("$SYS/") {
             debug!(topic = %packet.topic_name, "skipping $SYS topic");
-            return Ok(());
+            return;
         }
 
         let loop_prevention = self.loop_prevention.read().clone();
@@ -172,7 +169,7 @@ impl BridgeManager {
                     topic = %packet.topic_name,
                     "Message loop detected, not forwarding to bridges"
                 );
-                return Ok(());
+                return;
             }
         }
 
@@ -186,7 +183,7 @@ impl BridgeManager {
 
         if bridge_list.is_empty() {
             debug!(topic = %packet.topic_name, "no bridges configured");
-            return Ok(());
+            return;
         }
 
         debug!(
@@ -197,12 +194,8 @@ impl BridgeManager {
 
         for (name, bridge) in bridge_list {
             debug!(bridge = %name, topic = %packet.topic_name, "calling forward_message");
-            if let Err(e) = bridge.forward_message(packet).await {
-                error!("Bridge '{}' failed to forward message: {}", name, e);
-            }
+            bridge.forward_message(packet);
         }
-
-        Ok(())
     }
 
     /// Gets statistics for all bridges

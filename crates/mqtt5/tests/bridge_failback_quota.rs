@@ -132,7 +132,7 @@ async fn forwarded_across(fail_back: bool, qos: QoS) -> Vec<usize> {
     let total = 60usize;
     for i in 0..total {
         let packet = PublishPacket::new("out/x", format!("{i}").into_bytes(), qos);
-        bridge.forward_message(&packet).await.unwrap();
+        bridge.forward_message(&packet);
     }
     tokio::time::sleep(Duration::from_secs(8)).await;
     let stats = bridge.get_stats().await;

@@ -100,7 +100,7 @@ async fn missing_after_forwarding(total: usize) -> Vec<usize> {
     assert!(bridge.get_stats().await.connected);
     for i in 0..total {
         let packet = PublishPacket::new("out/x", format!("{i}").into_bytes(), QoS::AtLeastOnce);
-        bridge.forward_message(&packet).await.unwrap();
+        bridge.forward_message(&packet);
     }
     let deadline = Duration::from_secs(2 * total as u64 + 20);
     let started = tokio::time::Instant::now();

@@ -66,10 +66,7 @@ async fn test_bridge_topic_mapping_out() {
         QoS::AtLeastOnce,
     );
 
-    // This should attempt to forward (will fail due to no connection)
-    let result = bridge.forward_message(&sensor_packet).await;
-    // We expect Ok even if not connected (bridge handles this gracefully)
-    assert!(result.is_ok());
+    bridge.forward_message(&sensor_packet);
 
     // Create a packet that should NOT be forwarded (In direction only)
     let command_packet = PublishPacket::new(
@@ -78,9 +75,7 @@ async fn test_bridge_topic_mapping_out() {
         QoS::AtMostOnce,
     );
 
-    // This should also be Ok but won't actually forward
-    let result = bridge.forward_message(&command_packet).await;
-    assert!(result.is_ok());
+    bridge.forward_message(&command_packet);
 }
 
 #[tokio::test]
@@ -106,7 +101,7 @@ async fn test_bridge_message_prefix_transformation() {
     );
 
     // Forward should work (even without connection)
-    assert!(bridge.forward_message(&packet).await.is_ok());
+    bridge.forward_message(&packet);
 
     // In a real scenario, this would send to "edge1/local/sensors/temp" on remote
 }
@@ -130,7 +125,7 @@ async fn test_bridge_qos_mapping() {
     ];
 
     for packet in packets {
-        assert!(bridge.forward_message(&packet).await.is_ok());
+        bridge.forward_message(&packet);
     }
 }
 
@@ -204,7 +199,7 @@ async fn test_bridge_multiple_topic_patterns() {
 
     for (topic, _should_forward) in test_packets {
         let packet = PublishPacket::new(topic.to_string(), &b"test"[..], QoS::AtMostOnce);
-        assert!(bridge.forward_message(&packet).await.is_ok());
+        bridge.forward_message(&packet);
     }
 }
 

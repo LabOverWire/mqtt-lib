@@ -80,7 +80,7 @@ async fn tasks_left_after_teardown(forward: bool) -> i64 {
     if forward {
         for i in 0..5 {
             let packet = PublishPacket::new("out/x", format!("{i}").into_bytes(), QoS::AtLeastOnce);
-            bridge.forward_message(&packet).await.unwrap();
+            bridge.forward_message(&packet);
         }
         tokio::time::sleep(Duration::from_millis(300)).await;
     }

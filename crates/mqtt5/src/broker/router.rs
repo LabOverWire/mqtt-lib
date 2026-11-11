@@ -1754,9 +1754,7 @@ impl MessageRouter {
             let bridge_manager_weak = self.bridge_manager.read().await.clone();
             if let Some(weak) = bridge_manager_weak {
                 if let Some(bridge_manager) = weak.upgrade() {
-                    if let Err(e) = bridge_manager.handle_outgoing(publish).await {
-                        error!("Failed to forward message to bridges: {e}");
-                    }
+                    bridge_manager.handle_outgoing(publish).await;
                 }
             }
         }

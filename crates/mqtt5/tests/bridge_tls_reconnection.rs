@@ -214,7 +214,7 @@ async fn outage_with_a_message_pending(name: &str, tls: bool) {
     remote.stop().await;
     tokio::time::sleep(Duration::from_millis(5500)).await;
     let packet = PublishPacket::new("out/pending".to_string(), &b"x"[..], QoS::AtLeastOnce);
-    bridge.forward_message(&packet).await.unwrap();
+    bridge.forward_message(&packet);
 
     let remote = start_remote(port, tls).await;
     let subscriber = plain_client(remote.plain, &format!("{name}-sub")).await;
