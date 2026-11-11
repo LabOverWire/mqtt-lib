@@ -249,6 +249,38 @@ impl FlowControlManager {
         if let Some(slots) = self.replay_slots.lock().take() {
             slots.close();
         }
+        self.quota_available.notify_waiters();
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) async fn wait_for_replay(flow: &Arc<RwLock<Self>>) -> Result<()> {
+        let (notify, slots, timeout) = {
+            let manager = flow.read().await;
+            (
+                Arc::clone(&manager.quota_available),
+                Arc::clone(&manager.replay_slots),
+                manager.config.backpressure_timeout,
+            )
+        };
+        let finished = async {
+            loop {
+                let notified = notify.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                if slots.lock().is_none() {
+                    return;
+                }
+                notified.await;
+            }
+        };
+        if let Some(limit) = timeout {
+            tokio::time::timeout(limit, finished)
+                .await
+                .map_err(|_| MqttError::FlowControlExceeded)
+        } else {
+            finished.await;
+            Ok(())
+        }
     }
 
     /// Checks if we can send a new `QoS` 1/2 message
