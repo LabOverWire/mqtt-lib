@@ -44,6 +44,10 @@ impl ServerCapabilities {
         }
     }
 
+    pub(crate) fn subscription_identifiers(self) -> bool {
+        self.subscription_identifiers
+    }
+
     pub(crate) fn check_subscribe(self, packet: &SubscribePacket) -> Result<()> {
         let identifiers = if packet.protocol_version == 5 {
             packet.properties.subscription_identifiers()

@@ -174,6 +174,19 @@ impl MqttClient {
         self.inner.read().await.is_connected()
     }
 
+    pub(crate) async fn subscription_identifiers_available(&self) -> bool {
+        self.inner.read().await.subscription_identifiers_available()
+    }
+
+    pub(crate) async fn forget_ack_subscriptions(&self) {
+        self.inner
+            .read()
+            .await
+            .stored_ack_subscriptions
+            .lock()
+            .clear();
+    }
+
     /// Returns the keep-alive interval currently in effect.
     ///
     /// On MQTT v5 this reflects the value after `ServerKeepAlive` negotiation:

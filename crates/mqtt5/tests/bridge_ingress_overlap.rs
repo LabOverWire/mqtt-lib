@@ -147,6 +147,63 @@ async fn overlapping_incoming_mappings_route_one_copy_each() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn overlapping_incoming_mappings_route_one_copy_each_without_subscription_identifiers() {
+    let mut remote_config = broker_config(free_port());
+    remote_config.subscription_identifier_available = false;
+    let remote = start_broker(remote_config).await;
+
+    let mut local_config = broker_config(free_port());
+    local_config.bridges = vec![overlapping_bridge(remote.addr)];
+    let local = start_broker(local_config).await;
+
+    let local_client = MqttClient::new("local-subscriber-no-ids");
+    local_client
+        .connect(&format!("mqtt://{}", local.addr))
+        .await
+        .unwrap();
+    let received = subscribe_all(&local_client, "#").await;
+
+    let remote_client = MqttClient::new("remote-publisher-no-ids");
+    remote_client
+        .connect(&format!("mqtt://{}", remote.addr))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    remote_client
+        .publish_qos1("sensors/x/temp", b"21")
+        .await
+        .unwrap();
+    remote_client
+        .publish_qos1("sensors/x/humidity", b"40")
+        .await
+        .unwrap();
+
+    wait_until(Duration::from_secs(5), || {
+        received.lock().unwrap().len() >= 3
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let mut topics = received.lock().unwrap().clone();
+    topics.sort();
+
+    remote_client.disconnect().await.unwrap();
+    local_client.disconnect().await.unwrap();
+    local.stop().await;
+    remote.stop().await;
+
+    assert_eq!(
+        topics,
+        vec![
+            "a/sensors/x/humidity".to_string(),
+            "a/sensors/x/temp".to_string(),
+            "b/sensors/x/temp".to_string()
+        ],
+        "a remote without subscription identifiers: exactly one copy per mapping that matches"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bridge_keeps_delivering_across_remote_restarts() {
     let remote_bind = free_port();
     let mut remote = start_broker(broker_config(remote_bind)).await;

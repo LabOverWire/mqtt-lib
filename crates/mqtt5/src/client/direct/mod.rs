@@ -372,6 +372,10 @@ impl DirectClientInner {
         self.connected.load(Ordering::SeqCst)
     }
 
+    pub(crate) fn subscription_identifiers_available(&self) -> bool {
+        self.server_capabilities.subscription_identifiers()
+    }
+
     pub fn negotiated_keep_alive(&self) -> Duration {
         Duration::from_secs(self.negotiated_keep_alive_secs.load(Ordering::Relaxed))
     }

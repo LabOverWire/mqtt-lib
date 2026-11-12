@@ -3,7 +3,7 @@
 //! Provides fine-grained topic-based access control for publish and subscribe operations.
 //! Supports pattern matching with wildcards, user-based permissions, and role-based access control (RBAC).
 
-mod rules;
+pub(crate) mod rules;
 
 pub use rules::{AclRule, FederatedRoleEntry, Permission, Role, RoleRule};
 
