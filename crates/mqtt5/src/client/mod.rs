@@ -8,6 +8,7 @@ use crate::packet::publish::PublishPacket;
 use crate::packet::subscribe::{SubscribePacket, SubscriptionOptions, TopicFilter};
 use crate::packet::unsubscribe::UnsubscribePacket;
 use crate::protocol::v5::properties::Properties;
+use crate::session::flow_control::FlowControlManager;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::transport::tls::TlsConfig;
 use crate::types::{ConnectOptions, ConnectResult, PublishOptions, SubscribeOptions};
@@ -447,9 +448,10 @@ impl MqttClient {
     /// # Errors
     ///
     /// Returns an error when the publish is definitely not delivered: invalid topic or
-    /// options, not connected without offline queueing, a capability violation, a
-    /// failed write before the message was stored, or an error reason code in PUBACK or
-    /// PUBREC (`PublishFailed`).
+    /// options, not connected without offline queueing, a capability violation, no send
+    /// quota (or, for `QoS` 0, no end to the resends after a reconnect) within the
+    /// backpressure timeout (`FlowControlExceeded`), a failed write before the message
+    /// was stored, or an error reason code in PUBACK or PUBREC (`PublishFailed`).
     #[instrument(skip(self, topic, payload, options), fields(qos = ?options.qos, retain = %options.retain))]
     pub async fn publish_with_options(
         &self,
@@ -524,15 +526,18 @@ impl MqttClient {
     /// from separate tasks are written in whatever order they reach the connection.
     /// Over QUIC with `StreamStrategy::DataPerPublish`, or for `QoS` 0 messages sent as
     /// datagrams, each PUBLISH travels separately and QUIC does not order them against
-    /// one another, so the server can receive them in a different order.
+    /// one another, so the server can receive them in a different order. After a
+    /// reconnect, a `QoS` 0 publish also waits until the client has written the messages
+    /// it resends.
     ///
     /// # Errors
     ///
     /// Returns an error when the publish is definitely not sent: invalid topic or
     /// options, not connected without offline queueing, a capability violation, no send
-    /// quota within the backpressure timeout, or a failed write of a `QoS` 0 message or
-    /// before the message was stored. A refusal in PUBACK or PUBREC is reported by the
-    /// handle as [`crate::PublishRejection::Refused`], not as an error.
+    /// quota (or, for `QoS` 0, no end to the resends) within the backpressure timeout,
+    /// or a failed write of a `QoS` 0 message or before the message was stored. A
+    /// refusal in PUBACK or PUBREC is reported by the handle as
+    /// [`crate::PublishRejection::Refused`], not as an error.
     #[instrument(skip(self, topic, payload, options), fields(qos = ?options.qos, retain = %options.retain))]
     pub async fn begin_publish(
         &self,
@@ -557,13 +562,12 @@ impl MqttClient {
 
     async fn write_staged_publish(&self, mut ready: Box<ReadyPublish>) -> Result<Written> {
         loop {
-            let claim = match ready.packet_id() {
-                Some(pid) => {
-                    let flow =
-                        Arc::clone(self.inner.read().await.session.read().await.flow_control());
-                    Some(QuotaClaim::acquire(flow, pid).await?)
-                }
-                None => None,
+            let flow = Arc::clone(self.inner.read().await.session.read().await.flow_control());
+            let claim = if let Some(pid) = ready.packet_id() {
+                Some(QuotaClaim::acquire(flow, pid).await?)
+            } else {
+                FlowControlManager::wait_for_replay(&flow).await?;
+                None
             };
             let transmitted = self
                 .inner
