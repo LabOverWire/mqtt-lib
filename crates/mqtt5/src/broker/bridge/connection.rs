@@ -44,11 +44,12 @@ struct Outbound {
     topic: String,
     payload: Bytes,
     options: PublishOptions,
+    arrival: u64,
 }
 
 /// A bridge's outbound messages in the order they reach it, after the messages the remote lost
-/// with its session, which are published again first. Adding never waits: when the queue is full
-/// the oldest waiting message is dropped.
+/// with its session, which are published again first in the order they reached it. Adding never
+/// waits: when the queue is full the oldest waiting message is dropped.
 struct OutboundQueue {
     messages: Mutex<Waiting>,
     capacity: usize,
@@ -66,6 +67,7 @@ enum Segment {
 struct Waiting {
     lost: VecDeque<Outbound>,
     arrived: VecDeque<Outbound>,
+    next_arrival: u64,
 }
 
 impl Waiting {
@@ -100,13 +102,25 @@ impl OutboundQueue {
     }
 
     /// Returns the message dropped to make room, if any.
-    fn push_back(&self, outbound: Outbound) -> Option<Outbound> {
+    fn push_back(
+        &self,
+        topic: String,
+        payload: Bytes,
+        options: PublishOptions,
+    ) -> Option<Outbound> {
         let dropped = {
             let mut messages = self.messages.lock().unwrap_or_else(PoisonError::into_inner);
             let dropped = (messages.len() >= self.capacity)
                 .then(|| messages.pop_oldest())
                 .flatten();
-            messages.arrived.push_back(outbound);
+            let arrival = messages.next_arrival;
+            messages.next_arrival += 1;
+            messages.arrived.push_back(Outbound {
+                topic,
+                payload,
+                options,
+                arrival,
+            });
             dropped
         };
         self.ready.notify_one();
@@ -116,7 +130,12 @@ impl OutboundQueue {
     fn push_lost(&self, outbounds: Vec<Outbound>) -> Vec<Outbound> {
         let dropped = {
             let mut messages = self.messages.lock().unwrap_or_else(PoisonError::into_inner);
-            messages.lost.extend(outbounds);
+            for outbound in outbounds {
+                let at = messages
+                    .lost
+                    .partition_point(|waiting| waiting.arrival < outbound.arrival);
+                messages.lost.insert(at, outbound);
+            }
             let excess = messages.len().saturating_sub(self.capacity);
             (0..excess)
                 .filter_map(|_| messages.pop_oldest())
@@ -1672,17 +1691,16 @@ impl BridgeConnection {
         );
 
         let msg_props: crate::types::MessageProperties = packet.properties.clone().into();
-        let outbound = Outbound {
-            topic: remote_topic,
-            payload: packet.payload.clone(),
-            options: PublishOptions {
-                qos: decision.qos,
-                retain: packet.retain,
-                properties: msg_props.into(),
-                skip_codec: false,
-            },
+        let options = PublishOptions {
+            qos: decision.qos,
+            retain: packet.retain,
+            properties: msg_props.into(),
+            skip_codec: false,
         };
-        if let Some(dropped) = self.egress().push_back(outbound) {
+        if let Some(dropped) =
+            self.egress()
+                .push_back(remote_topic, packet.payload.clone(), options)
+        {
             warn!(bridge = %bridge_name, topic = %dropped.topic, "outbound queue full, dropped the oldest message");
         }
     }
