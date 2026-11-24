@@ -46,19 +46,53 @@ struct Outbound {
     options: PublishOptions,
 }
 
-/// A bridge's outbound messages in the order they reach it. Adding never waits: when the queue
-/// is full the oldest waiting message is dropped.
+/// A bridge's outbound messages in the order they reach it, after the messages the remote lost
+/// with its session, which are published again first. Adding never waits: when the queue is full
+/// the oldest waiting message is dropped.
 struct OutboundQueue {
-    messages: Mutex<VecDeque<Outbound>>,
+    messages: Mutex<Waiting>,
     capacity: usize,
     ready: Notify,
     closed: AtomicBool,
 }
 
+#[derive(Clone, Copy)]
+enum Segment {
+    Lost,
+    Arrived,
+}
+
+#[derive(Default)]
+struct Waiting {
+    lost: VecDeque<Outbound>,
+    arrived: VecDeque<Outbound>,
+}
+
+impl Waiting {
+    fn len(&self) -> usize {
+        self.lost.len() + self.arrived.len()
+    }
+
+    fn pop_oldest(&mut self) -> Option<Outbound> {
+        self.pop_with_segment().map(|(outbound, _)| outbound)
+    }
+
+    fn pop_with_segment(&mut self) -> Option<(Outbound, Segment)> {
+        self.lost
+            .pop_front()
+            .map(|outbound| (outbound, Segment::Lost))
+            .or_else(|| {
+                self.arrived
+                    .pop_front()
+                    .map(|outbound| (outbound, Segment::Arrived))
+            })
+    }
+}
+
 impl OutboundQueue {
     fn new(capacity: usize) -> Self {
         Self {
-            messages: Mutex::new(VecDeque::new()),
+            messages: Mutex::new(Waiting::default()),
             capacity,
             ready: Notify::new(),
             closed: AtomicBool::new(false),
@@ -70,39 +104,42 @@ impl OutboundQueue {
         let dropped = {
             let mut messages = self.messages.lock().unwrap_or_else(PoisonError::into_inner);
             let dropped = (messages.len() >= self.capacity)
-                .then(|| messages.pop_front())
+                .then(|| messages.pop_oldest())
                 .flatten();
-            messages.push_back(outbound);
+            messages.arrived.push_back(outbound);
             dropped
         };
         self.ready.notify_one();
         dropped
     }
 
-    fn push_back_all(&self, mut outbounds: Vec<Outbound>) -> Vec<Outbound> {
+    fn push_lost(&self, outbounds: Vec<Outbound>) -> Vec<Outbound> {
         let dropped = {
             let mut messages = self.messages.lock().unwrap_or_else(PoisonError::into_inner);
-            let room = self.capacity.saturating_sub(messages.len());
-            let excess = outbounds.len().saturating_sub(room);
-            let dropped = outbounds.drain(..excess).collect::<Vec<_>>();
-            messages.extend(outbounds);
-            dropped
+            messages.lost.extend(outbounds);
+            let excess = messages.len().saturating_sub(self.capacity);
+            (0..excess)
+                .filter_map(|_| messages.pop_oldest())
+                .collect::<Vec<_>>()
         };
         self.ready.notify_one();
         dropped
     }
 
-    fn push_front(&self, outbound: Outbound) -> Option<Outbound> {
+    fn push_front(&self, outbound: Outbound, segment: Segment) -> Option<Outbound> {
         let mut messages = self.messages.lock().unwrap_or_else(PoisonError::into_inner);
         if messages.len() >= self.capacity {
             return Some(outbound);
         }
-        messages.push_front(outbound);
+        match segment {
+            Segment::Lost => messages.lost.push_front(outbound),
+            Segment::Arrived => messages.arrived.push_front(outbound),
+        }
         None
     }
 
     /// Returns `None` once the queue is closed.
-    async fn pop_front(&self) -> Option<Outbound> {
+    async fn pop_front(&self) -> Option<(Outbound, Segment)> {
         loop {
             if self.closed.load(Ordering::Acquire) {
                 return None;
@@ -111,7 +148,7 @@ impl OutboundQueue {
                 .messages
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
-                .pop_front();
+                .pop_with_segment();
             if next.is_some() {
                 return next;
             }
@@ -129,9 +166,53 @@ impl OutboundQueue {
 struct Egress {
     client: Weak<MqttClient>,
     queue: Arc<OutboundQueue>,
+    unsettled: Arc<Unsettled>,
     messages_sent: Arc<AtomicU64>,
     bytes_sent: Arc<AtomicU64>,
     bridge_name: String,
+}
+
+/// The `QoS` 1 and 2 publishes handed to the client whose outcome is not known yet, in the
+/// order they were sent.
+struct Unsettled {
+    publishes: Mutex<BTreeMap<u64, (Outbound, PublishHandle)>>,
+    queue: Arc<OutboundQueue>,
+    bridge_name: String,
+}
+
+impl Unsettled {
+    /// Puts the `QoS` 2 publishes the remote lost with its session back ahead of the queued
+    /// messages, in the order they were sent, up to the first `QoS` 2 publish still pending.
+    /// Returns whether one is still pending.
+    fn requeue_lost(&self) -> bool {
+        let mut publishes = self
+            .publishes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let mut lost = Vec::new();
+        let mut blocked = false;
+        for (sequence, (outbound, handle)) in publishes.iter() {
+            match handle.try_outcome() {
+                Some(PublishOutcome::Indeterminate(IndeterminateReason::SessionLost)) => {
+                    lost.push(*sequence);
+                }
+                None if outbound.options.qos == QoS::ExactlyOnce => {
+                    blocked = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        let requeued = lost
+            .into_iter()
+            .filter_map(|sequence| publishes.remove(&sequence).map(|(outbound, _)| outbound))
+            .collect();
+        drop(publishes);
+        for dropped in self.queue.push_lost(requeued) {
+            warn!(bridge = %self.bridge_name, topic = %dropped.topic, "outbound queue full, dropped the oldest message");
+        }
+        blocked
+    }
 }
 
 const EGRESS_RETRY_DELAY: Duration = Duration::from_millis(50);
@@ -156,7 +237,7 @@ impl Egress {
             if link.wait_for(|up| *up).await.is_err() {
                 return;
             }
-            let Some(outbound) = egress.queue.pop_front().await else {
+            let Some((outbound, segment)) = egress.queue.pop_front().await else {
                 return;
             };
             match egress.begin(&outbound, &link).await {
@@ -169,7 +250,7 @@ impl Egress {
                     }
                 }
                 Begun::LinkDown => {
-                    if let Some(dropped) = egress.queue.push_front(outbound) {
+                    if let Some(dropped) = egress.queue.push_front(outbound, segment) {
                         warn!(bridge = %egress.bridge_name, topic = %dropped.topic, "outbound queue full, dropped the oldest message");
                     }
                 }
@@ -217,7 +298,6 @@ impl Egress {
     }
 
     async fn settle_all(&self, mut settling: mpsc::Receiver<(Outbound, PublishHandle)>) {
-        let mut unsettled: BTreeMap<u64, (Outbound, PublishHandle)> = BTreeMap::new();
         let mut resolving = FuturesUnordered::new();
         let mut next_sequence = 0u64;
         let mut open = true;
@@ -230,47 +310,34 @@ impl Egress {
                         next_sequence += 1;
                         let resolved = handle.clone();
                         resolving.push(async move { (sequence, resolved.outcome().await) });
-                        unsettled.insert(sequence, (outbound, handle));
+                        self.unsettled
+                            .publishes
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .insert(sequence, (outbound, handle));
                     }
                     None => open = false,
                 },
                 Some((sequence, outcome)) = resolving.next(), if !resolving.is_empty() => {
                     if outcome == PublishOutcome::Indeterminate(IndeterminateReason::SessionLost) {
                         lost_waiting = true;
-                    } else if let Some((outbound, _)) = unsettled.remove(&sequence) {
-                        self.record(&outbound, outcome);
+                    } else {
+                        let settled = self
+                            .unsettled
+                            .publishes
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .remove(&sequence);
+                        if let Some((outbound, _)) = settled {
+                            self.record(&outbound, outcome);
+                        }
                     }
                     if lost_waiting {
-                        lost_waiting = self.requeue_lost(&mut unsettled);
+                        lost_waiting = self.unsettled.requeue_lost();
                     }
                 }
             }
         }
-    }
-
-    fn requeue_lost(&self, unsettled: &mut BTreeMap<u64, (Outbound, PublishHandle)>) -> bool {
-        let mut lost = Vec::new();
-        let mut blocked = false;
-        for (sequence, (outbound, handle)) in unsettled.iter() {
-            match handle.try_outcome() {
-                Some(PublishOutcome::Indeterminate(IndeterminateReason::SessionLost)) => {
-                    lost.push(*sequence);
-                }
-                None if outbound.options.qos == QoS::ExactlyOnce => {
-                    blocked = true;
-                    break;
-                }
-                _ => {}
-            }
-        }
-        let requeued = lost
-            .into_iter()
-            .filter_map(|sequence| unsettled.remove(&sequence).map(|(outbound, _)| outbound))
-            .collect();
-        for dropped in self.queue.push_back_all(requeued) {
-            warn!(bridge = %self.bridge_name, topic = %dropped.topic, "outbound queue full, dropped the oldest message");
-        }
-        blocked
     }
 
     fn record(&self, outbound: &Outbound, outcome: PublishOutcome) {
@@ -529,6 +596,7 @@ pub struct BridgeConnection {
     /// Lanes from the remote-facing client into the local router, created on first use
     ingress: OnceLock<Ingress>,
     egress: OnceLock<Arc<OutboundQueue>>,
+    unsettled: OnceLock<Arc<Unsettled>>,
     link: watch::Sender<bool>,
     subscribed: tokio::sync::Mutex<RemoteSubscriptions>,
     session_present: AtomicBool,
@@ -576,6 +644,7 @@ impl BridgeConnection {
             health_check_handle: Arc::new(RwLock::new(None)),
             ingress: OnceLock::new(),
             egress: OnceLock::new(),
+            unsettled: OnceLock::new(),
             link: watch::Sender::new(false),
             subscribed: tokio::sync::Mutex::new(RemoteSubscriptions::default()),
             session_present: AtomicBool::new(false),
@@ -1621,9 +1690,17 @@ impl BridgeConnection {
     fn egress(&self) -> &Arc<OutboundQueue> {
         self.egress.get_or_init(|| {
             let queue = Arc::new(OutboundQueue::new(self.config.outbound_queue_capacity));
+            let unsettled = Arc::clone(self.unsettled.get_or_init(|| {
+                Arc::new(Unsettled {
+                    publishes: Mutex::new(BTreeMap::new()),
+                    queue: Arc::clone(&queue),
+                    bridge_name: self.config.name.clone(),
+                })
+            }));
             let egress = Egress {
                 client: Arc::downgrade(&self.client),
                 queue: Arc::clone(&queue),
+                unsettled,
                 messages_sent: Arc::clone(&self.messages_sent),
                 bytes_sent: Arc::clone(&self.bytes_sent),
                 bridge_name: self.config.name.clone(),
@@ -1740,6 +1817,9 @@ impl BridgeConnection {
                 self.drop_connection().await;
                 self.mark_disconnected().await;
                 return Err(e);
+            }
+            if let Some(unsettled) = self.unsettled.get() {
+                unsettled.requeue_lost();
             }
             if self.client.is_connected().await {
                 self.link.send_replace(true);
