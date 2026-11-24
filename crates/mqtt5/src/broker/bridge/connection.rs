@@ -1256,22 +1256,30 @@ impl BridgeConnection {
             } else {
                 crate::RetainHandling::SendAtSubscribe
             };
-            let callback = self.ingress_callback(
-                Arc::clone(&filters),
-                ingress.qos1_tx.clone(),
-                ingress.qos0_tx.clone(),
-            );
             let options = SubscribeOptions {
                 qos: *qos,
                 subscription_identifier: *subscription_identifier,
                 retain_handling,
                 ..SubscribeOptions::default()
             };
-            if let Err(e) = self
-                .client
-                .subscribe_with_ack(remote_filter.clone(), options, callback)
-                .await
-            {
+            let outcome = loop {
+                let callback = self.ingress_callback(
+                    Arc::clone(&filters),
+                    ingress.qos1_tx.clone(),
+                    ingress.qos0_tx.clone(),
+                );
+                match self
+                    .client
+                    .subscribe_with_ack(remote_filter.clone(), options.clone(), callback)
+                    .await
+                {
+                    Err(MqttError::PacketIdExhausted) if self.client.is_connected().await => {
+                        tokio::time::sleep(EGRESS_RETRY_DELAY).await;
+                    }
+                    outcome => break outcome,
+                }
+            };
+            if let Err(e) = outcome {
                 if !self.connection_failed(&e).await {
                     return Err(e.into());
                 }
@@ -1295,7 +1303,15 @@ impl BridgeConnection {
             .map(|(_, filter)| filter.clone())
             .collect();
         for remote_filter in stale {
-            if let Err(e) = self.client.unsubscribe(remote_filter.clone()).await {
+            let outcome = loop {
+                match self.client.unsubscribe(remote_filter.clone()).await {
+                    Err(MqttError::PacketIdExhausted) if self.client.is_connected().await => {
+                        tokio::time::sleep(EGRESS_RETRY_DELAY).await;
+                    }
+                    outcome => break outcome,
+                }
+            };
+            if let Err(e) = outcome {
                 if !self.client.is_connected().await || self.connection_failed(&e).await {
                     warn!(bridge = %self.config.name, filter = %remote_filter, error = %e, "connection lost while unsubscribing; unsubscribing again after reconnecting");
                     self.drop_connection().await;
