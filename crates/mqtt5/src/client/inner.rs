@@ -144,6 +144,7 @@ impl MqttClient {
         &self,
         stored_subs: Vec<StoredSubscription>,
         session_present: bool,
+        session_state_resumed: bool,
         keep_alive: std::time::Duration,
     ) {
         self.trigger_connection_event(ConnectionEvent::Connected {
@@ -153,9 +154,9 @@ impl MqttClient {
         .await;
         #[cfg(feature = "transport-quic")]
         self.recover_quic_flows().await;
-        self.restore_subscriptions_after_connect(stored_subs, session_present)
+        self.restore_subscriptions_after_connect(stored_subs, session_state_resumed)
             .await;
-        if !session_present {
+        if !session_state_resumed {
             self.restore_ack_subscriptions_after_lost_session().await;
         }
     }
@@ -392,13 +393,20 @@ impl MqttClient {
         }
     }
 
+    fn transport_open_error(transport: &str, error: MqttError) -> MqttError {
+        match error {
+            MqttError::Timeout => MqttError::Timeout,
+            other => MqttError::ConnectionError(format!("{transport} connect failed: {other}")),
+        }
+    }
+
     async fn connect_tcp(addr: std::net::SocketAddr) -> Result<TransportType> {
         let config = TcpConfig::new(addr);
         let mut tcp_transport = TcpTransport::new(config);
         tcp_transport
             .connect()
             .await
-            .map_err(|e| MqttError::ConnectionError(format!("TCP connect failed: {e}")))?;
+            .map_err(|e| Self::transport_open_error("TCP", e))?;
         Ok(TransportType::Tcp(tcp_transport))
     }
 
@@ -430,7 +438,7 @@ impl MqttClient {
         tls_transport
             .connect()
             .await
-            .map_err(|e| MqttError::ConnectionError(format!("TLS connect failed: {e}")))?;
+            .map_err(|e| Self::transport_open_error("TLS", e))?;
         Ok(TransportType::Tls(Box::new(tls_transport)))
     }
 
@@ -610,7 +618,7 @@ impl MqttClient {
         quic_transport
             .connect()
             .await
-            .map_err(|e| MqttError::ConnectionError(format!("QUIC connect failed: {e}")))?;
+            .map_err(|e| Self::transport_open_error("QUIC", e))?;
         Ok(Connected {
             transport: TransportType::Quic(Box::new(quic_transport)),
             quic_built_for: Some(built_for),
@@ -776,11 +784,17 @@ impl MqttClient {
                     }
                     let stored_subs = inner.stored_subscriptions.lock().clone();
                     let session_present = result.session_present;
+                    let session_state_resumed = inner.session_state_owner.resumed;
                     let keep_alive = inner.negotiated_keep_alive();
                     drop(inner);
 
-                    self.on_successful_connect(stored_subs, session_present, keep_alive)
-                        .await;
+                    self.on_successful_connect(
+                        stored_subs,
+                        session_present,
+                        session_state_resumed,
+                        keep_alive,
+                    )
+                    .await;
 
                     return Ok(result);
                 }
@@ -818,7 +832,6 @@ impl MqttClient {
         given_tls: Option<&TlsConfig>,
     ) -> Result<ConnectResult> {
         const MAX_REDIRECTS: u8 = 3;
-        self.inner.read().await.options.validate_deferred_ack()?;
         let mut current_address = address.to_string();
         let mut redirect_count = redirects_followed;
         let started_over_wss = Self::parse_address(address)?.0.is_websocket_secure();
@@ -909,11 +922,17 @@ impl MqttClient {
                 inner.reconnect_attempt = 0;
                 let stored_subs = inner.stored_subscriptions.lock().clone();
                 let session_present = result.session_present;
+                let session_state_resumed = inner.session_state_owner.resumed;
                 let keep_alive = inner.negotiated_keep_alive();
                 drop(inner);
 
-                self.on_successful_connect(stored_subs, session_present, keep_alive)
-                    .await;
+                self.on_successful_connect(
+                    stored_subs,
+                    session_present,
+                    session_state_resumed,
+                    keep_alive,
+                )
+                .await;
 
                 Ok(result)
             }
@@ -954,12 +973,8 @@ impl MqttClient {
         }
 
         let in_progress = self
-            .begin_connect(
-                &options,
-                Reconnection::Address(address.to_string()),
-                options.properties.authentication_method.clone(),
-            )
-            .await;
+            .begin_connect(&options, Reconnection::Address(address.to_string()))
+            .await?;
 
         self.trigger_connection_event(ConnectionEvent::Connecting)
             .await;
@@ -978,12 +993,20 @@ impl MqttClient {
         &self,
         options: &ConnectOptions,
         reconnection: Reconnection,
-        auth_method: Option<String>,
-    ) -> ConnectInProgress {
+    ) -> Result<ConnectInProgress> {
+        options.validate_deferred_ack()?;
         let mut inner = self.inner.write().await;
+        inner
+            .session
+            .write()
+            .await
+            .set_client_id(options.client_id.clone());
         let replaced = ReplacedByConnect {
             options: std::mem::replace(&mut inner.options, options.clone()),
-            auth_method: std::mem::replace(&mut inner.auth_method, auth_method),
+            auth_method: std::mem::replace(
+                &mut inner.auth_method,
+                options.properties.authentication_method.clone(),
+            ),
             reconnection: inner.reconnection.replace(reconnection),
             lifecycle: inner.automatic_reconnect_lifecycle,
             reconnect_attempt: inner.reconnect_attempt,
@@ -993,11 +1016,11 @@ impl MqttClient {
         inner.reconnect_attempt = 0;
         inner.connects += 1;
         inner.automatic_reconnect_lifecycle = AutomaticReconnectLifecycle::Armed;
-        ConnectInProgress {
+        Ok(ConnectInProgress {
             client: self.clone(),
             connect: inner.connects,
             replaced: Some(replaced),
-        }
+        })
     }
 
     pub(crate) async fn settle_cancelled_connect(&self) {
@@ -1029,6 +1052,11 @@ impl MqttClient {
             return;
         }
         let stays_armed = armed && replaced.lifecycle == AutomaticReconnectLifecycle::Armed;
+        inner
+            .session
+            .write()
+            .await
+            .set_client_id(replaced.options.client_id.clone());
         inner.options = replaced.options;
         inner.auth_method = replaced.auth_method;
         inner.reconnection = replaced.reconnection;
@@ -1135,14 +1163,9 @@ impl MqttClient {
             return Err(MqttError::AlreadyConnected);
         }
 
-        let auth_method = options.properties.authentication_method.clone();
         let mut in_progress = self
-            .begin_connect(
-                &options,
-                Reconnection::Tls(Box::new(tls_config.clone())),
-                auth_method,
-            )
-            .await;
+            .begin_connect(&options, Reconnection::Tls(Box::new(tls_config.clone())))
+            .await?;
         {
             let mut stored = self.tls_config.write().await;
             let config = stored.config.clone();
