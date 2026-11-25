@@ -106,7 +106,6 @@ async fn received(collector: &MessageCollector, expected: usize) -> Vec<String> 
         .await;
     collector
         .get_messages()
-        .await
         .into_iter()
         .map(|message| String::from_utf8_lossy(&message.payload).into_owned())
         .collect()
