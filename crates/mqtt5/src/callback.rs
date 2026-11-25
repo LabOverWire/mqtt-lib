@@ -184,7 +184,16 @@ impl CallbackManager {
             wildcards.len() < count_before
         } else {
             let mut exact = self.exact_callbacks.lock();
-            exact.remove(actual_filter).is_some()
+            let Some(entries) = exact.get_mut(actual_filter) else {
+                return removed_from_registry;
+            };
+            let count_before = entries.len();
+            entries.retain(|entry| entry.topic_filter != topic_filter);
+            let removed = entries.len() < count_before;
+            if entries.is_empty() {
+                exact.remove(actual_filter);
+            }
+            removed
         };
 
         removed_from_registry || removed_from_callbacks
@@ -388,7 +397,6 @@ mod tests {
             counter2_clone.fetch_add(2, Ordering::Relaxed);
         });
 
-        // Register both callbacks for same topic
         manager.register("test/topic", callback1).unwrap();
         manager.register("test/topic", callback2).unwrap();
 
@@ -462,7 +470,7 @@ mod tests {
         assert_eq!(manager.callback_count(), 2);
 
         manager.register("test/exact", callback).unwrap();
-        assert_eq!(manager.callback_count(), 3); // Multiple callbacks for same topic
+        assert_eq!(manager.callback_count(), 3);
 
         manager.clear();
         assert_eq!(manager.callback_count(), 0);
