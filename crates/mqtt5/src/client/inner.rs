@@ -1045,10 +1045,12 @@ impl MqttClient {
     /// Whether another attempt can't help: the server refused this client or its credentials,
     /// or the options are wrong
     pub(super) fn refused_for_good(error: &MqttError) -> bool {
-        matches!(
-            error,
-            MqttError::Configuration(_)
-                | MqttError::ConnectionRefused(
+        match error {
+            MqttError::Configuration(_) => true,
+            MqttError::ConnectionRefused(reason_code)
+            | MqttError::ServerDisconnect(reason_code) => {
+                matches!(
+                    reason_code,
                     ReasonCode::NotAuthorized
                         | ReasonCode::BadUsernameOrPassword
                         | ReasonCode::Banned
@@ -1056,7 +1058,9 @@ impl MqttClient {
                         | ReasonCode::ClientIdentifierNotValid
                         | ReasonCode::UnsupportedProtocolVersion
                 )
-        )
+            }
+            _ => false,
+        }
     }
 
     /// Starts the task that reconnects when the connection made by connect
