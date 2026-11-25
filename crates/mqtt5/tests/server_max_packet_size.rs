@@ -155,7 +155,7 @@ async fn within_limit_payload_round_trips_end_to_end() {
         "subscriber should receive the within-limit message"
     );
 
-    let messages = collector.get_messages().await;
+    let messages = collector.get_messages();
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0].payload, payload, "payload must arrive intact");
 
