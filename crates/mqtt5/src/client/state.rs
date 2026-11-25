@@ -91,6 +91,14 @@ impl ClientTransportType {
         }
     }
 
+    pub(crate) fn opens_concurrently(&self) -> bool {
+        match self {
+            #[cfg(feature = "transport-quic")]
+            Self::Quic | Self::QuicSecure => true,
+            _ => false,
+        }
+    }
+
     pub(crate) fn dials_by_url(&self) -> bool {
         match self {
             #[cfg(feature = "transport-websocket")]
@@ -252,6 +260,13 @@ impl MqttClient {
 
             let inner = self.inner.read().await;
             if !inner.is_connected() {
+                if let Some(refusal) = inner
+                    .ended_by_server_disconnect()
+                    .filter(Self::refused_for_good)
+                {
+                    tracing::warn!("Not reconnecting: {refusal}");
+                    return Some(refusal);
+                }
                 tracing::info!(
                     "Connection monitor detected disconnection, triggering reconnection logic"
                 );
