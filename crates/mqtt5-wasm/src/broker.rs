@@ -3251,4 +3251,101 @@ mod tests {
             vec![('x', true, vec![0, 1]), ('n', false, vec![0, 2])]
         );
     }
+
+    const V311_PINGREQ: [u8; 2] = [0xC0, 0x00];
+    const V311_PINGRESP: [u8; 2] = [0xD0, 0x00];
+
+    fn refusal_publish(qos: u8, topic: &str, v5: bool) -> Vec<u8> {
+        let topic = topic.as_bytes();
+        let mut bytes = vec![0x30 | (qos << 1), 0, 0, u8::try_from(topic.len()).unwrap()];
+        bytes.extend_from_slice(topic);
+        if qos > 0 {
+            bytes.extend_from_slice(&[0, 7]);
+        }
+        if v5 {
+            bytes.push(0);
+        }
+        bytes.push(b'm');
+        bytes[1] = u8::try_from(bytes.len() - 2).unwrap();
+        bytes
+    }
+
+    async fn v311_connected(broker: &WasmBroker, client_id: &str) -> Client {
+        let client = Client::open(broker.create_client_port().unwrap());
+        client.send_raw(&v4_connect(client_id));
+        assert_eq!(client.wait_for(4).await.first(), Some(&0x20));
+        client.clear();
+        client
+    }
+
+    async fn v311_answer_then_ping(client: &Client, publish: &[u8]) -> Vec<u8> {
+        client.send_raw(publish);
+        sleep(100).await;
+        client.send_raw(&V311_PINGREQ);
+        sleep(100).await;
+        let received = client.received();
+        client.clear();
+        received
+    }
+
+    #[wasm_bindgen_test]
+    async fn an_unauthorized_qos_1_publish_ends_a_v311_connection_without_puback() {
+        let broker = broker();
+        broker
+            .add_acl_rule("*".to_string(), "no/#".to_string(), "deny".to_string())
+            .await
+            .unwrap();
+        let client = v311_connected(&broker, "v4-denied").await;
+        let accepted = v311_answer_then_ping(&client, &refusal_publish(1, "ok/x", false)).await;
+        assert_eq!(
+            accepted,
+            [0x40, 0x02, 0, 7, 0xD0, 0x00],
+            "PUBACK, then PINGRESP"
+        );
+        let received = v311_answer_then_ping(&client, &refusal_publish(1, "no/x", false)).await;
+        assert!(received.is_empty(), "v3.1.1 got {received:02x?}");
+    }
+
+    #[wasm_bindgen_test]
+    async fn a_qos_2_publish_over_the_maximum_ends_a_v311_connection_without_pubrec() {
+        let mut config = WasmBrokerConfig::new();
+        config.set_allow_anonymous(true);
+        config.set_maximum_qos(1);
+        let broker = WasmBroker::with_config(config).unwrap();
+        let client = v311_connected(&broker, "v4-qos2").await;
+        let received = v311_answer_then_ping(&client, &refusal_publish(2, "ok/x", false)).await;
+        assert!(received.is_empty(), "v3.1.1 got {received:02x?}");
+    }
+
+    #[wasm_bindgen_test]
+    async fn an_unauthorized_qos_0_publish_keeps_a_v311_connection() {
+        let broker = broker();
+        broker
+            .add_acl_rule("*".to_string(), "no/#".to_string(), "deny".to_string())
+            .await
+            .unwrap();
+        let client = v311_connected(&broker, "v4-denied-0").await;
+        let received = v311_answer_then_ping(&client, &refusal_publish(0, "no/x", false)).await;
+        assert_eq!(received, V311_PINGRESP);
+    }
+
+    #[wasm_bindgen_test]
+    async fn an_unknown_pubrel_gets_a_v311_pubcomp() {
+        let broker = broker();
+        let client = v311_connected(&broker, "v4-pubrel").await;
+        client.send_raw(&[0x62, 0x02, 0, 7]);
+        assert_eq!(client.wait_for(4).await, [0x70, 0x02, 0, 7]);
+    }
+
+    #[wasm_bindgen_test]
+    async fn an_unauthorized_qos_1_publish_gets_a_reason_code_on_v5() {
+        let broker = broker();
+        broker
+            .add_acl_rule("*".to_string(), "no/#".to_string(), "deny".to_string())
+            .await
+            .unwrap();
+        let client = connected(&broker, connect_options("v5-denied", true, 0)).await;
+        client.send_raw(&refusal_publish(1, "no/x", true));
+        assert_eq!(client.wait_for(6).await, [0x40, 0x04, 0, 7, 0x87, 0x00]);
+    }
 }

@@ -1211,6 +1211,9 @@ impl ClientHandler {
 
     async fn send_taken_over(&mut self) {
         info!("Session taken over by another client");
+        if self.protocol_version != 5 {
+            return;
+        }
         let disconnect = Packet::Disconnect(DisconnectPacket {
             reason_code: ReasonCode::SessionTakenOver,
             properties: Properties::default(),

@@ -72,7 +72,13 @@ impl ClientHandler {
                 "Client {client_id} (user: {:?}) not authorized to publish to topic: {}",
                 self.user_id, publish.topic_name
             );
-            return self.send_not_authorized_response(&publish).await;
+            return self
+                .refuse_publish(
+                    &publish,
+                    ReasonCode::NotAuthorized,
+                    "Not authorized to publish",
+                )
+                .await;
         }
 
         if (publish.qos as u8) > self.config.maximum_qos {
@@ -80,7 +86,13 @@ impl ClientHandler {
                 "Client {client_id} sent QoS {} but max is {}",
                 publish.qos as u8, self.config.maximum_qos
             );
-            return self.send_qos_not_supported_response(&publish).await;
+            let reason = format!(
+                "QoS {} not supported (maximum: {})",
+                publish.qos as u8, self.config.maximum_qos
+            );
+            return self
+                .refuse_publish(&publish, ReasonCode::QoSNotSupported, &reason)
+                .await;
         }
 
         if publish.retain && !publish.payload.is_empty() {
@@ -98,7 +110,9 @@ impl ClientHandler {
             .await
         {
             warn!("Message from {client_id} dropped due to rate limit");
-            return self.send_rate_limit_response(&publish).await;
+            return self
+                .refuse_publish(&publish, ReasonCode::QuotaExceeded, "Rate limit exceeded")
+                .await;
         }
 
         match self.fire_publish_event(&publish, &client_id).await {
@@ -124,8 +138,10 @@ impl ClientHandler {
                 server_receive_maximum = self.server_receive_maximum,
                 "Receive maximum exceeded"
             );
-            let disconnect = DisconnectPacket::new(ReasonCode::ReceiveMaximumExceeded);
-            self.write_to_client(Packet::Disconnect(disconnect)).await?;
+            if self.protocol_version == 5 {
+                let disconnect = DisconnectPacket::new(ReasonCode::ReceiveMaximumExceeded);
+                self.write_to_client(Packet::Disconnect(disconnect)).await?;
+            }
             return Err(MqttError::ProtocolError(
                 "Client exceeded server receive maximum".to_string(),
             ));
@@ -245,67 +261,46 @@ impl ClientHandler {
         Ok(())
     }
 
-    async fn send_not_authorized_response(&mut self, publish: &PublishPacket) -> Result<()> {
-        if publish.qos == QoS::AtMostOnce {
+    async fn refuse_publish(
+        &mut self,
+        publish: &PublishPacket,
+        reason_code: ReasonCode,
+        reason: &str,
+    ) -> Result<()> {
+        let Some(packet_id) = publish.packet_id else {
             return Ok(());
+        };
+        if self.protocol_version != 5 {
+            warn!(
+                packet_id,
+                ?reason_code,
+                reason,
+                "Closing MQTT 3.1.1 connection: it has no way to refuse a PUBLISH [MQTT-3.3.5-2]"
+            );
+            return Err(MqttError::PublishFailed(reason_code));
         }
-        match publish.qos {
+        let reason = self.request_problem_information.then(|| reason.to_string());
+        let packet = match publish.qos {
+            QoS::AtMostOnce => return Ok(()),
             QoS::AtLeastOnce => {
-                let mut puback = PubAckPacket::new(publish.packet_id.unwrap());
-                puback.reason_code = ReasonCode::NotAuthorized;
-                if self.request_problem_information {
-                    puback
-                        .properties
-                        .set_reason_string("Not authorized to publish".to_string());
+                let mut puback = PubAckPacket::new(packet_id);
+                puback.reason_code = reason_code;
+                if let Some(reason) = reason {
+                    puback.properties.set_reason_string(reason);
                 }
-                debug!("Sending PUBACK with NotAuthorized");
-                self.write_to_client(Packet::PubAck(puback)).await?;
+                Packet::PubAck(puback)
             }
             QoS::ExactlyOnce => {
-                let mut pubrec = PubRecPacket::new(publish.packet_id.unwrap());
-                pubrec.reason_code = ReasonCode::NotAuthorized;
-                if self.request_problem_information {
-                    pubrec
-                        .properties
-                        .set_reason_string("Not authorized to publish".to_string());
+                let mut pubrec = PubRecPacket::new(packet_id);
+                pubrec.reason_code = reason_code;
+                if let Some(reason) = reason {
+                    pubrec.properties.set_reason_string(reason);
                 }
-                debug!("Sending PUBREC with NotAuthorized");
-                self.write_to_client(Packet::PubRec(pubrec)).await?;
+                Packet::PubRec(pubrec)
             }
-            QoS::AtMostOnce => {}
-        }
-        Ok(())
-    }
-
-    async fn send_qos_not_supported_response(&mut self, publish: &PublishPacket) -> Result<()> {
-        if let Some(packet_id) = publish.packet_id {
-            match publish.qos {
-                QoS::AtLeastOnce => {
-                    let mut puback = PubAckPacket::new(packet_id);
-                    puback.reason_code = ReasonCode::QoSNotSupported;
-                    if self.request_problem_information {
-                        puback.properties.set_reason_string(format!(
-                            "QoS {} not supported (maximum: {})",
-                            publish.qos as u8, self.config.maximum_qos
-                        ));
-                    }
-                    self.write_to_client(Packet::PubAck(puback)).await?;
-                }
-                QoS::ExactlyOnce => {
-                    let mut pubrec = PubRecPacket::new(packet_id);
-                    pubrec.reason_code = ReasonCode::QoSNotSupported;
-                    if self.request_problem_information {
-                        pubrec.properties.set_reason_string(format!(
-                            "QoS {} not supported (maximum: {})",
-                            publish.qos as u8, self.config.maximum_qos
-                        ));
-                    }
-                    self.write_to_client(Packet::PubRec(pubrec)).await?;
-                }
-                QoS::AtMostOnce => {}
-            }
-        }
-        Ok(())
+        };
+        debug!(packet_id, ?reason_code, "Refusing PUBLISH");
+        self.write_to_client(packet).await
     }
 
     async fn check_retained_limits(
@@ -318,81 +313,28 @@ impl ClientHandler {
             let len = publish.payload.len();
             debug!("Client {client_id} retained message too large ({len} > {max_size})");
             return Ok(Some(
-                self.send_quota_exceeded_response(publish, "Retained message too large")
-                    .await,
+                self.refuse_publish(
+                    publish,
+                    ReasonCode::QuotaExceeded,
+                    "Retained message too large",
+                )
+                .await,
             ));
         }
 
         if self.router.retained_store_full(&publish.topic_name).await {
             let max = self.router.max_retained_messages();
-            let count = self.router.retained_count().await;
-            debug!("Client {client_id} retained message limit exceeded ({count}/{max})");
+            debug!("Client {client_id} retained message limit of {max} reached");
             return Ok(Some(
-                self.send_quota_exceeded_response(publish, "Retained message limit exceeded")
-                    .await,
+                self.refuse_publish(
+                    publish,
+                    ReasonCode::QuotaExceeded,
+                    "Retained message limit exceeded",
+                )
+                .await,
             ));
         }
         Ok(None)
-    }
-
-    async fn send_quota_exceeded_response(
-        &mut self,
-        publish: &PublishPacket,
-        reason: &str,
-    ) -> Result<()> {
-        if publish.qos == QoS::AtMostOnce {
-            return Ok(());
-        }
-        match publish.qos {
-            QoS::AtLeastOnce => {
-                let mut puback = PubAckPacket::new(publish.packet_id.unwrap());
-                puback.reason_code = ReasonCode::QuotaExceeded;
-                if self.request_problem_information {
-                    puback.properties.set_reason_string(reason.to_string());
-                }
-                self.write_to_client(Packet::PubAck(puback)).await?;
-            }
-            QoS::ExactlyOnce => {
-                let mut pubrec = PubRecPacket::new(publish.packet_id.unwrap());
-                pubrec.reason_code = ReasonCode::QuotaExceeded;
-                if self.request_problem_information {
-                    pubrec.properties.set_reason_string(reason.to_string());
-                }
-                self.write_to_client(Packet::PubRec(pubrec)).await?;
-            }
-            QoS::AtMostOnce => {}
-        }
-        Ok(())
-    }
-
-    async fn send_rate_limit_response(&mut self, publish: &PublishPacket) -> Result<()> {
-        if publish.qos == QoS::AtMostOnce {
-            return Ok(());
-        }
-        match publish.qos {
-            QoS::AtLeastOnce => {
-                let mut puback = PubAckPacket::new(publish.packet_id.unwrap());
-                puback.reason_code = ReasonCode::QuotaExceeded;
-                if self.request_problem_information {
-                    puback
-                        .properties
-                        .set_reason_string("Rate limit exceeded".to_string());
-                }
-                self.write_to_client(Packet::PubAck(puback)).await?;
-            }
-            QoS::ExactlyOnce => {
-                let mut pubrec = PubRecPacket::new(publish.packet_id.unwrap());
-                pubrec.reason_code = ReasonCode::QuotaExceeded;
-                if self.request_problem_information {
-                    pubrec
-                        .properties
-                        .set_reason_string("Rate limit exceeded".to_string());
-                }
-                self.write_to_client(Packet::PubRec(pubrec)).await?;
-            }
-            QoS::AtMostOnce => {}
-        }
-        Ok(())
     }
 
     async fn fire_publish_event(&self, publish: &PublishPacket, client_id: &str) -> PublishAction {
@@ -555,8 +497,10 @@ impl ClientHandler {
             }
 
             ReasonCode::Success
-        } else {
+        } else if self.protocol_version == 5 {
             ReasonCode::PacketIdentifierNotFound
+        } else {
+            ReasonCode::Success
         };
 
         let pubcomp = PubCompPacket::new_with_reason(pubrel.packet_id, reason_code);

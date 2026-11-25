@@ -1,5 +1,5 @@
 use mqtt5::broker::storage::{InflightDirection, InflightMessage, InflightPhase, StorageBackend};
-use mqtt5_protocol::error::Result;
+use mqtt5_protocol::error::{MqttError, Result};
 use mqtt5_protocol::packet::puback::PubAckPacket;
 use mqtt5_protocol::packet::pubcomp::PubCompPacket;
 use mqtt5_protocol::packet::publish::PublishPacket;
@@ -33,8 +33,7 @@ impl WasmClientHandler {
                 "Client {client_id} not authorized to publish to {}",
                 publish.topic_name
             );
-            Self::reject_publish(&publish, ReasonCode::NotAuthorized, writer)?;
-            return Ok(());
+            return self.reject_publish(&publish, ReasonCode::NotAuthorized, writer);
         }
 
         let max_qos = self.config.read().map_or_else(
@@ -49,8 +48,7 @@ impl WasmClientHandler {
                 "Client {client_id} sent QoS {} but max is {max_qos}",
                 publish.qos as u8
             );
-            Self::reject_publish(&publish, ReasonCode::QoSNotSupported, writer)?;
-            return Ok(());
+            return self.reject_publish(&publish, ReasonCode::QoSNotSupported, writer);
         }
 
         let payload_size = publish.payload.len();
@@ -60,8 +58,7 @@ impl WasmClientHandler {
             .await
         {
             warn!("Client {client_id} exceeded quota");
-            Self::reject_publish(&publish, ReasonCode::QuotaExceeded, writer)?;
-            return Ok(());
+            return self.reject_publish(&publish, ReasonCode::QuotaExceeded, writer);
         }
 
         publish.properties.inject_sender(self.user_id.as_deref());
@@ -120,26 +117,35 @@ impl WasmClientHandler {
     }
 
     fn reject_publish(
+        &self,
         publish: &PublishPacket,
         reason_code: ReasonCode,
         writer: &SharedWriter,
     ) -> Result<()> {
-        if let Some(packet_id) = publish.packet_id {
-            match publish.qos {
-                QoS::AtLeastOnce => {
-                    let mut puback = PubAckPacket::new(packet_id);
-                    puback.reason_code = reason_code;
-                    Self::write_packet(&Packet::PubAck(puback), writer)?;
-                }
-                QoS::ExactlyOnce => {
-                    let mut pubrec = PubRecPacket::new(packet_id);
-                    pubrec.reason_code = reason_code;
-                    Self::write_packet(&Packet::PubRec(pubrec), writer)?;
-                }
-                QoS::AtMostOnce => {}
-            }
+        let Some(packet_id) = publish.packet_id else {
+            return Ok(());
+        };
+        if self.protocol_version != 5 {
+            warn!(
+                packet_id,
+                ?reason_code,
+                "Closing MQTT 3.1.1 connection: it has no way to refuse a PUBLISH [MQTT-3.3.5-2]"
+            );
+            return Err(MqttError::PublishFailed(reason_code));
         }
-        Ok(())
+        match publish.qos {
+            QoS::AtLeastOnce => {
+                let mut puback = PubAckPacket::new(packet_id);
+                puback.reason_code = reason_code;
+                Self::write_packet(&Packet::PubAck(puback), writer)
+            }
+            QoS::ExactlyOnce => {
+                let mut pubrec = PubRecPacket::new(packet_id);
+                pubrec.reason_code = reason_code;
+                Self::write_packet(&Packet::PubRec(pubrec), writer)
+            }
+            QoS::AtMostOnce => Ok(()),
+        }
     }
 
     pub(super) async fn handle_puback(&mut self, puback: &PubAckPacket) {
@@ -199,8 +205,10 @@ impl WasmClientHandler {
                 .await;
             self.router.route_message(&publish, Some(client_id)).await;
             ReasonCode::Success
-        } else {
+        } else if self.protocol_version == 5 {
             ReasonCode::PacketIdentifierNotFound
+        } else {
+            ReasonCode::Success
         };
 
         let pubcomp = PubCompPacket::new_with_reason(pubrel.packet_id, reason_code);
