@@ -24,6 +24,7 @@ use tokio::time::Duration;
 
 use crate::callback::{CallbackId, CallbackManager};
 use crate::client::auth_handler::{AuthHandler, AuthResponse};
+use crate::client::connection::DisconnectReason;
 use crate::client::publish_outcome::{
     Delivery, IndeterminateReason, PublishHandle, PublishOutcome, PublishRejection, PublishResult,
 };
@@ -251,6 +252,7 @@ pub struct DirectClientInner {
     pub session: Arc<tokio::sync::RwLock<SessionState>>,
     pub session_state_owner: SessionStateOwner,
     pub connected: Arc<AtomicBool>,
+    last_disconnect_reason: Arc<Mutex<Option<DisconnectReason>>>,
     pub connection_event_callbacks:
         Arc<tokio::sync::RwLock<Vec<crate::client::ConnectionEventCallback>>>,
     pub connection_epoch: ConnectionEpoch,
@@ -332,6 +334,7 @@ impl DirectClientInner {
                 resumed: false,
             },
             connected: Arc::new(AtomicBool::new(false)),
+            last_disconnect_reason: Arc::new(Mutex::new(None)),
             connection_event_callbacks: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             connection_epoch: Arc::new(AtomicU64::new(0)),
             callback_manager: Arc::new(CallbackManager::new()),
@@ -381,6 +384,23 @@ impl DirectClientInner {
 
     pub fn is_connected(&self) -> bool {
         self.connected.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn forget_disconnect_reason(&self) -> Option<DisconnectReason> {
+        self.last_disconnect_reason.lock().take()
+    }
+
+    pub(crate) fn restore_disconnect_reason(&self, reason: Option<DisconnectReason>) {
+        *self.last_disconnect_reason.lock() = reason;
+    }
+
+    pub(crate) fn ended_by_server_disconnect(&self) -> Option<MqttError> {
+        match *self.last_disconnect_reason.lock() {
+            Some(DisconnectReason::ServerDisconnect(reason_code)) => {
+                Some(MqttError::ServerDisconnect(reason_code))
+            }
+            _ => None,
+        }
     }
 
     pub(crate) fn subscription_identifiers_available(&self) -> bool {
@@ -677,6 +697,7 @@ impl DirectClientInner {
         let replay_writer = Arc::downgrade(&writer_arc);
         self.writer = Some(writer_arc);
         self.connection_alive = Some(Arc::new(watch::channel(true).0));
+        self.restore_disconnect_reason(None);
         self.set_connected(true);
 
         tracing::debug!("Starting background tasks (packet reader and keepalive)");
@@ -1621,14 +1642,6 @@ impl DirectClientInner {
         self.pending_subacks.lock().insert(packet_id, tx);
         drop(reservation);
 
-        maybe_store_subscriptions(
-            &self.stored_subscriptions,
-            &packet.filters,
-            packet.properties.get_subscription_identifier(),
-            callback_id,
-            persistence,
-        );
-
         #[cfg(feature = "transport-quic")]
         let sent_on_flow = if let Some(manager) = self.subscribe_data_flow_manager(&packet) {
             let topic = packet.filters[0].filter.clone();
@@ -1651,6 +1664,15 @@ impl DirectClientInner {
         }
 
         let suback = self.wait_for_suback(rx, packet_id).await?;
+
+        maybe_store_subscriptions(
+            &self.stored_subscriptions,
+            &packet.filters,
+            &suback.reason_codes,
+            packet.properties.get_subscription_identifier(),
+            callback_id,
+            persistence,
+        );
 
         for (filter, reason_code) in packet.filters.iter().zip(suback.reason_codes.iter()) {
             if let Some(subscription) = Self::create_subscription_from_filter(filter, *reason_code)
@@ -1870,6 +1892,7 @@ impl DirectClientInner {
     ) -> Result<keepalive::ConnectionLifecycle> {
         Ok(keepalive::ConnectionLifecycle {
             connected: self.connected.clone(),
+            last_disconnect_reason: Arc::clone(&self.last_disconnect_reason),
             connection_epoch,
             current_connection_epoch: self.connection_epoch.clone(),
             callbacks: Arc::clone(&self.connection_event_callbacks),
@@ -2083,6 +2106,7 @@ impl DirectClientInner {
 fn maybe_store_subscriptions(
     stored_subscriptions: &StoredSubscriptions,
     filters: &[TopicFilter],
+    reason_codes: &[SubAckReasonCode],
     subscription_identifier: Option<u32>,
     callback_id: CallbackId,
     persistence: SubscriptionPersistence,
@@ -2092,7 +2116,11 @@ fn maybe_store_subscriptions(
     }
 
     let mut stored = stored_subscriptions.lock();
-    for filter in filters {
+    let granted = filters
+        .iter()
+        .zip(reason_codes)
+        .filter(|(_, reason_code)| reason_code.granted_qos().is_some());
+    for (filter, _) in granted {
         stored.push((
             filter.filter.clone(),
             filter.options,
@@ -2310,14 +2338,66 @@ pub mod tests {
             },
         }];
 
-        maybe_store_subscriptions(&stored, &filters, None, 7, SubscriptionPersistence::Skip);
+        let granted = [SubAckReasonCode::GrantedQoS1];
+
+        maybe_store_subscriptions(
+            &stored,
+            &filters,
+            &granted,
+            None,
+            7,
+            SubscriptionPersistence::Skip,
+        );
         assert!(stored.lock().is_empty());
 
-        maybe_store_subscriptions(&stored, &filters, None, 7, SubscriptionPersistence::Persist);
+        maybe_store_subscriptions(
+            &stored,
+            &filters,
+            &granted,
+            None,
+            7,
+            SubscriptionPersistence::Persist,
+        );
         let stored = stored.lock();
         assert_eq!(stored.len(), 1);
         assert_eq!(stored[0].0, "test/topic");
         assert_eq!(stored[0].3, 7);
+    }
+
+    #[test]
+    fn test_only_granted_filters_are_stored_for_restoring() {
+        let stored = Arc::new(Mutex::new(Vec::new()));
+        let options = SubscriptionOptions {
+            qos: QoS::AtLeastOnce,
+            no_local: false,
+            retain_as_published: false,
+            retain_handling: crate::packet::subscribe::RetainHandling::SendAtSubscribe,
+        };
+        let filters = vec![
+            TopicFilter {
+                filter: "granted/topic".to_string(),
+                options,
+            },
+            TopicFilter {
+                filter: "refused/topic".to_string(),
+                options,
+            },
+        ];
+
+        maybe_store_subscriptions(
+            &stored,
+            &filters,
+            &[
+                SubAckReasonCode::GrantedQoS0,
+                SubAckReasonCode::NotAuthorized,
+            ],
+            None,
+            7,
+            SubscriptionPersistence::Persist,
+        );
+        let stored = stored.lock();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].0, "granted/topic");
     }
 
     #[tokio::test]
