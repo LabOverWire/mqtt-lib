@@ -60,7 +60,7 @@ async fn test_basic_redirect() {
         .unwrap();
 
     assert!(collector.wait_for_messages(1, Duration::from_secs(3)).await);
-    let msgs = collector.get_messages().await;
+    let msgs = collector.get_messages();
     assert_eq!(msgs[0].payload, b"hello from redirect");
 
     client.disconnect().await.unwrap();
@@ -212,7 +212,7 @@ async fn test_server_moved_redirect() {
         .unwrap();
 
     assert!(collector.wait_for_messages(1, Duration::from_secs(3)).await);
-    let msgs = collector.get_messages().await;
+    let msgs = collector.get_messages();
     assert_eq!(msgs[0].payload, b"hello from moved");
 
     client.disconnect().await.unwrap();
@@ -239,7 +239,7 @@ async fn test_empty_backends_acts_as_normal_broker() {
         .unwrap();
 
     assert!(collector.wait_for_messages(1, Duration::from_secs(3)).await);
-    let msgs = collector.get_messages().await;
+    let msgs = collector.get_messages();
     assert_eq!(msgs[0].payload, b"no redirect");
 
     client.disconnect().await.unwrap();

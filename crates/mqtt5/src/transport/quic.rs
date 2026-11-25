@@ -372,6 +372,36 @@ impl QuicTransport {
     }
 }
 
+async fn handshake(
+    connecting: quinn::Connecting,
+    enable_early_data: bool,
+) -> Result<(Connection, bool)> {
+    let connecting = if enable_early_data {
+        match connecting.into_0rtt() {
+            Ok((connection, zero_rtt_future)) => {
+                debug!("0-RTT connection attempt succeeded, awaiting server confirmation");
+                let accepted = zero_rtt_future.await;
+                if accepted {
+                    tracing::info!("QUIC 0-RTT accepted by server");
+                } else {
+                    debug!("QUIC 0-RTT rejected by server, fell back to 1-RTT");
+                }
+                return Ok((connection, accepted));
+            }
+            Err(connecting) => {
+                debug!("no session ticket available, falling back to 1-RTT");
+                connecting
+            }
+        }
+    } else {
+        connecting
+    };
+    let connection = connecting
+        .await
+        .map_err(|e| MqttError::ConnectionError(format!("QUIC handshake failed: {e}")))?;
+    Ok((connection, false))
+}
+
 impl Transport for QuicTransport {
     #[instrument(skip(self), fields(server_name = %self.config.server_name, addr = %self.config.addr))]
     async fn connect(&mut self) -> Result<()> {
@@ -388,7 +418,11 @@ impl Transport for QuicTransport {
 
         self.built_client_config = Some(client_config.clone());
 
-        let mut endpoint = Endpoint::client(SocketAddr::from(([0, 0, 0, 0], 0)))
+        let local = match self.config.addr {
+            SocketAddr::V4(_) => SocketAddr::from((std::net::Ipv4Addr::UNSPECIFIED, 0)),
+            SocketAddr::V6(_) => SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, 0)),
+        };
+        let mut endpoint = Endpoint::client(local)
             .map_err(|e| MqttError::ConnectionError(format!("Failed to create endpoint: {e}")))?;
         endpoint.set_default_client_config(client_config);
 
@@ -396,36 +430,17 @@ impl Transport for QuicTransport {
             .connect(self.config.addr, &self.config.server_name)
             .map_err(|e| MqttError::ConnectionError(format!("QUIC connect failed: {e}")))?;
 
-        let (connection, zero_rtt_accepted) = if self.config.enable_early_data {
-            match connecting.into_0rtt() {
-                Ok((conn, zero_rtt_future)) => {
-                    debug!("0-RTT connection attempt succeeded, awaiting server confirmation");
-                    let accepted = zero_rtt_future.await;
-                    if accepted {
-                        tracing::info!("QUIC 0-RTT accepted by server");
-                    } else {
-                        debug!("QUIC 0-RTT rejected by server, fell back to 1-RTT");
-                    }
-                    (conn, accepted)
-                }
-                Err(connecting) => {
-                    debug!("no session ticket available, falling back to 1-RTT");
-                    let conn = tokio::time::timeout(self.config.connect_timeout, connecting)
-                        .await
-                        .map_err(|_| MqttError::Timeout)?
-                        .map_err(|e| {
-                            MqttError::ConnectionError(format!("QUIC handshake failed: {e}"))
-                        })?;
-                    (conn, false)
-                }
-            }
-        } else {
-            let conn = tokio::time::timeout(self.config.connect_timeout, connecting)
-                .await
-                .map_err(|_| MqttError::Timeout)?
-                .map_err(|e| MqttError::ConnectionError(format!("QUIC handshake failed: {e}")))?;
-            (conn, false)
-        };
+        let (connection, zero_rtt_accepted, (send, recv)) =
+            tokio::time::timeout(self.config.connect_timeout, async {
+                let (connection, zero_rtt_accepted) =
+                    handshake(connecting, self.config.enable_early_data).await?;
+                let streams = connection.open_bi().await.map_err(|e| {
+                    MqttError::ConnectionError(format!("Failed to open control stream: {e}"))
+                })?;
+                Ok::<_, MqttError>((connection, zero_rtt_accepted, streams))
+            })
+            .await
+            .map_err(|_| MqttError::Timeout)??;
 
         self.zero_rtt_accepted = zero_rtt_accepted;
 
@@ -445,10 +460,6 @@ impl Transport for QuicTransport {
             zero_rtt = zero_rtt_accepted,
             "QUIC connection established"
         );
-
-        let (send, recv) = connection.open_bi().await.map_err(|e| {
-            MqttError::ConnectionError(format!("Failed to open control stream: {e}"))
-        })?;
 
         tracing::debug!("QUIC control stream opened");
 

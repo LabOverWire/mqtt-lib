@@ -124,7 +124,7 @@ async fn watch_will_at(address: &str, client_id: &str) -> (MqttClient, MessageCo
 
 async fn assert_no_will_until(collector: &MessageCollector, deadline: Instant, context: &str) {
     sleep(deadline.saturating_duration_since(Instant::now())).await;
-    assert_eq!(collector.count().await, 0, "{context}");
+    assert_eq!(collector.count(), 0, "{context}");
 }
 
 async fn reconnect_within_delay_cancels_will(clean_start: bool) {
@@ -195,7 +195,7 @@ async fn will_published_after_delay_without_reconnect() {
         "the Will must be published once the Will Delay Interval elapses"
     );
     sleep(Duration::from_millis(500)).await;
-    assert_eq!(collector.count().await, 1, "the Will is published once");
+    assert_eq!(collector.count(), 1, "the Will is published once");
 
     watcher.disconnect().await.expect("watcher disconnect");
 }
@@ -304,7 +304,7 @@ async fn reconnect_then_drop_again_publishes_one_will_after_second_delay() {
         "the second connection's Will must be published after its delay"
     );
     sleep(Duration::from_millis(700)).await;
-    assert_eq!(collector.count().await, 1, "exactly one Will is published");
+    assert_eq!(collector.count(), 1, "exactly one Will is published");
 
     watcher.disconnect().await.expect("watcher disconnect");
 }
