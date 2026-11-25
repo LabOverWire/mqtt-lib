@@ -359,6 +359,7 @@ impl ClientHandler {
                     publish: msg,
                     target_flow: None,
                     subscription_instance: None,
+                    received_at_ms: crate::broker::storage::unix_millis_now(),
                 };
                 self.offer_retained(routable);
             }

@@ -3,10 +3,12 @@ use crate::broker::bridge::BridgeManager;
 use crate::broker::events::{BrokerEventHandler, RetainedSetEvent};
 use crate::broker::session_slot::{SessionSlotGuard, SessionSlots};
 use crate::broker::storage::{
-    unix_millis_now, ChangeOnlyState, ClientSession, DynamicStorage, QueueHandle, QueueLimits,
-    QueueRegistry, QueuedMessage, RetainedMessage, StorageBackend, StoredSubscription,
+    expiry_left, unix_millis_now, ChangeOnlyState, ClientSession, DynamicStorage, InflightMessage,
+    QueueHandle, QueueLimits, QueueRegistry, QueuedMessage, RetainedMessage, StorageBackend,
+    StoredSubscription,
 };
 use crate::packet::publish::PublishPacket;
+use crate::protocol::v5::properties::{Properties, PropertyId};
 use crate::types::ProtocolVersion;
 use crate::validation::{parse_shared_subscription, topic_matches_filter};
 use crate::QoS;
@@ -71,6 +73,87 @@ pub struct RoutableMessage {
     /// Instance of the subscription the message was routed for; `None` when it was not routed
     /// for a subscription
     pub subscription_instance: Option<u64>,
+    pub received_at_ms: u64,
+}
+
+impl RoutableMessage {
+    #[must_use]
+    pub fn from_queued(message: &QueuedMessage) -> Self {
+        Self {
+            publish: message.received_packet(),
+            target_flow: message.target_flow,
+            subscription_instance: message.subscription_instance,
+            received_at_ms: message.received_ms(),
+        }
+    }
+
+    #[must_use]
+    pub fn from_inflight(message: &InflightMessage) -> Self {
+        Self {
+            publish: message.received_packet(),
+            target_flow: None,
+            subscription_instance: None,
+            received_at_ms: message.received_ms(),
+        }
+    }
+
+    #[must_use]
+    pub fn started(&self) -> bool {
+        self.publish.dup && self.publish.packet_id.is_some()
+    }
+
+    #[must_use]
+    pub fn expired(&self) -> bool {
+        self.publish
+            .properties
+            .get_message_expiry_interval()
+            .is_some_and(|interval| {
+                unix_millis_now().saturating_sub(self.received_at_ms) > u64::from(interval) * 1000
+            })
+    }
+
+    #[must_use]
+    pub fn restamped(mut self) -> Self {
+        let Some(interval) = self.publish.properties.get_message_expiry_interval() else {
+            return self;
+        };
+        let left = expiry_left(interval, self.received_at_ms);
+        if left == interval {
+            return self;
+        }
+        let mut properties = Properties::default();
+        for (id, value) in self.publish.properties.iter() {
+            if id == PropertyId::MessageExpiryInterval {
+                continue;
+            }
+            if let Err(e) = properties.add(id, value.clone()) {
+                warn!("Dropping property {id:?} while setting the Message Expiry Interval: {e}");
+            }
+        }
+        properties.set_message_expiry_interval(left);
+        self.publish.properties = properties;
+        self.received_at_ms += u64::from(interval - left) * 1000;
+        self
+    }
+
+    #[must_use]
+    pub fn to_queued(self, client_id: &str) -> QueuedMessage {
+        let qos = self.publish.qos;
+        QueuedMessage::new(self.publish, client_id.to_string(), qos, None)
+            .with_target_flow(self.target_flow)
+            .with_subscription_instance(self.subscription_instance)
+            .with_received_at_ms(self.received_at_ms)
+    }
+
+    #[must_use]
+    pub fn to_resend(self, client_id: &str, packet_id: u16) -> QueuedMessage {
+        let qos = self.publish.qos;
+        let mut queued =
+            QueuedMessage::new(self.publish, client_id.to_string(), qos, Some(packet_id))
+                .with_received_at_ms(self.received_at_ms);
+        queued.dup = true;
+        queued
+    }
 }
 
 /// Parameters of one subscription registration passed to [`MessageRouter::subscribe`].
@@ -1793,10 +1876,7 @@ impl MessageRouter {
     }
 
     fn queue_behind(queue: &QueueHandle, epoch: u64, routable: RoutableMessage, client_id: &str) {
-        let qos = routable.publish.qos;
-        let queued = QueuedMessage::new(routable.publish, client_id.to_string(), qos, None)
-            .with_target_flow(routable.target_flow)
-            .with_subscription_instance(routable.subscription_instance);
+        let queued = routable.to_queued(client_id);
         let Some(outcome) = queue.push_in_epoch(queued, epoch) else {
             debug!(
                 client_id,
@@ -1940,6 +2020,7 @@ impl MessageRouter {
                     publish: message,
                     target_flow: sub.flow_id,
                     subscription_instance: sub.routed_instance(),
+                    received_at_ms: unix_millis_now(),
                 },
                 lanes: DeliveryLanes {
                     qos1_tx: client_info.qos1_tx.clone(),
@@ -1980,6 +2061,7 @@ impl MessageRouter {
                 publish: message,
                 target_flow: sub.flow_id,
                 subscription_instance: sub.routed_instance(),
+                received_at_ms: unix_millis_now(),
             },
             epoch: queue.epoch(),
             queue,
