@@ -151,7 +151,12 @@ impl OutboundQueue {
             return Some(outbound);
         }
         match segment {
-            Segment::Lost => messages.lost.push_front(outbound),
+            Segment::Lost => {
+                let at = messages
+                    .lost
+                    .partition_point(|waiting| waiting.arrival < outbound.arrival);
+                messages.lost.insert(at, outbound);
+            }
             Segment::Arrived => messages.arrived.push_front(outbound),
         }
         None
