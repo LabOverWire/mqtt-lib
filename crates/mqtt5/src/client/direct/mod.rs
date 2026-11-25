@@ -231,6 +231,11 @@ impl InFlight {
     }
 }
 
+pub struct SessionStateOwner {
+    client_id: String,
+    pub resumed: bool,
+}
+
 pub struct DirectClientInner {
     pub writer: Option<Arc<tokio::sync::Mutex<UnifiedWriter>>>,
     #[cfg(feature = "transport-quic")]
@@ -244,6 +249,7 @@ pub struct DirectClientInner {
     #[cfg(feature = "transport-quic")]
     pub quic_stream_manager: Option<Arc<QuicStreamManager>>,
     pub session: Arc<tokio::sync::RwLock<SessionState>>,
+    pub session_state_owner: SessionStateOwner,
     pub connected: Arc<AtomicBool>,
     pub connection_event_callbacks:
         Arc<tokio::sync::RwLock<Vec<crate::client::ConnectionEventCallback>>>,
@@ -299,6 +305,7 @@ impl DirectClientInner {
             options.clean_start,
         );
         let send_flow = Arc::clone(session_state.flow_control());
+        let session_state_client_id = options.client_id.clone();
         let session = Arc::new(tokio::sync::RwLock::new(session_state));
 
         let queue_on_disconnect = !options.clean_start;
@@ -320,6 +327,10 @@ impl DirectClientInner {
             #[cfg(feature = "transport-quic")]
             quic_stream_manager: None,
             session,
+            session_state_owner: SessionStateOwner {
+                client_id: session_state_client_id,
+                resumed: false,
+            },
             connected: Arc::new(AtomicBool::new(false)),
             connection_event_callbacks: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             connection_epoch: Arc::new(AtomicU64::new(0)),
@@ -723,10 +734,14 @@ impl DirectClientInner {
         &mut self,
         connack: &crate::packet::connack::ConnAckPacket,
     ) -> Result<u16> {
-        if !connack.session_present {
+        let sent_client_id = self.session.read().await.client_id().to_string();
+        self.session_state_owner.resumed =
+            connack.session_present && sent_client_id == self.session_state_owner.client_id;
+        if !self.session_state_owner.resumed {
             self.discard_session_state().await;
         }
         self.adopt_assigned_client_identifier(connack).await;
+        self.session_state_owner.client_id = self.session.read().await.client_id().to_string();
 
         if let Some(max_qos) = connack.properties.get_maximum_qos() {
             *self.server_max_qos.lock() = Some(max_qos);

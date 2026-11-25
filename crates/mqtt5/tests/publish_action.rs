@@ -88,7 +88,7 @@ async fn test_suppress_qos0() {
         .unwrap();
 
     tokio::time::sleep(Duration::from_millis(200)).await;
-    assert_eq!(collector.count().await, 0);
+    assert_eq!(collector.count(), 0);
 }
 
 #[tokio::test]
@@ -111,7 +111,7 @@ async fn test_suppress_qos1() {
         .unwrap();
 
     tokio::time::sleep(Duration::from_millis(200)).await;
-    assert_eq!(collector.count().await, 0);
+    assert_eq!(collector.count(), 0);
 }
 
 #[tokio::test]
@@ -134,7 +134,7 @@ async fn test_suppress_qos2() {
         .unwrap();
 
     tokio::time::sleep(Duration::from_millis(500)).await;
-    assert_eq!(collector.count().await, 0);
+    assert_eq!(collector.count(), 0);
 }
 
 #[tokio::test]
@@ -159,7 +159,7 @@ async fn test_transform_qos0() {
         collector.wait_for_messages(1, Duration::from_secs(2)).await,
         "transformed message should arrive"
     );
-    let msgs = collector.get_messages().await;
+    let msgs = collector.get_messages();
     assert_eq!(msgs[0].payload, b"transformed");
 }
 
@@ -189,7 +189,7 @@ async fn test_transform_qos1() {
         collector.wait_for_messages(1, Duration::from_secs(2)).await,
         "transformed message should arrive"
     );
-    let msgs = collector.get_messages().await;
+    let msgs = collector.get_messages();
     assert_eq!(msgs[0].payload, b"transformed-q1");
 }
 
@@ -219,7 +219,7 @@ async fn test_transform_qos2() {
         collector.wait_for_messages(1, Duration::from_secs(2)).await,
         "transformed message should arrive"
     );
-    let msgs = collector.get_messages().await;
+    let msgs = collector.get_messages();
     assert_eq!(msgs[0].payload, b"transformed-q2");
 }
 
@@ -242,7 +242,7 @@ async fn test_continue_preserves_default_behavior() {
         collector.wait_for_messages(1, Duration::from_secs(2)).await,
         "message should arrive with default Continue action"
     );
-    let msgs = collector.get_messages().await;
+    let msgs = collector.get_messages();
     assert_eq!(msgs[0].payload, b"hello");
 }
 
@@ -268,5 +268,5 @@ async fn test_suppress_multiple_publishes() {
     }
 
     tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(collector.count().await, 0);
+    assert_eq!(collector.count(), 0);
 }
