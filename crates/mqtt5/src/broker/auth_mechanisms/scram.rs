@@ -330,7 +330,13 @@ impl<S: ScramCredentialStore + 'static> AuthProvider for ScramSha256AuthProvider
         client_id: &'a str,
         _user_id: Option<&'a str>,
     ) -> Pin<Box<dyn Future<Output = Result<EnhancedAuthResult>> + Send + 'a>> {
-        self.authenticate_enhanced(auth_method, auth_data, client_id)
+        Box::pin(async move {
+            if self.state.write().await.remove(client_id).is_some() {
+                debug!(client_id = %client_id, "SCRAM re-authentication restarted");
+            }
+            self.authenticate_enhanced(auth_method, auth_data, client_id)
+                .await
+        })
     }
 }
 
