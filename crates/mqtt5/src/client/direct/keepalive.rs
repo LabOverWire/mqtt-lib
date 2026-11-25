@@ -76,6 +76,7 @@ pub(crate) fn mark_disconnected_if_current(
 #[derive(Clone)]
 pub(super) struct ConnectionLifecycle {
     pub(super) connected: Arc<AtomicBool>,
+    pub(super) last_disconnect_reason: Arc<Mutex<Option<DisconnectReason>>>,
     pub(super) connection_epoch: u64,
     pub(super) current_connection_epoch: Arc<AtomicU64>,
     pub(super) callbacks: Arc<tokio::sync::RwLock<Vec<ConnectionEventCallback>>>,
@@ -103,11 +104,19 @@ impl ConnectionLifecycle {
 
     pub(super) async fn end(&self, reason: DisconnectReason) {
         self.alive.send_replace(false);
-        if mark_disconnected_if_current(
-            &self.connected,
-            self.connection_epoch,
-            &self.current_connection_epoch,
-        ) {
+        let ended = {
+            let mut last_disconnect_reason = self.last_disconnect_reason.lock();
+            let ended = mark_disconnected_if_current(
+                &self.connected,
+                self.connection_epoch,
+                &self.current_connection_epoch,
+            );
+            if ended {
+                *last_disconnect_reason = Some(reason.clone());
+            }
+            ended
+        };
+        if ended {
             self.flow.read().await.close_send_quota();
             fire_connection_event(&self.callbacks, ConnectionEvent::Disconnected { reason }).await;
         }
