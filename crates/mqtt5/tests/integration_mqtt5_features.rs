@@ -263,7 +263,7 @@ async fn test_will_message_forwards_properties() {
 
     assert!(collector.wait_for_messages(1, Duration::from_secs(5)).await);
 
-    let msgs = collector.get_messages().await;
+    let msgs = collector.get_messages();
     let msg = &msgs[0];
     assert_eq!(msg.payload, b"gone");
     assert_eq!(msg.properties.payload_format_indicator, Some(true));
@@ -329,7 +329,7 @@ async fn test_will_message_strips_spoofed_sender() {
 
     assert!(collector.wait_for_messages(1, Duration::from_secs(5)).await);
 
-    let msgs = collector.get_messages().await;
+    let msgs = collector.get_messages();
     let msg = &msgs[0];
 
     let sender_props: Vec<&str> = msg
@@ -396,7 +396,7 @@ async fn test_delayed_will_message_forwards_properties() {
 
     assert!(collector.wait_for_messages(1, Duration::from_secs(5)).await);
 
-    let msgs = collector.get_messages().await;
+    let msgs = collector.get_messages();
     let msg = &msgs[0];
     assert_eq!(msg.payload, b"delayed-gone");
     assert_eq!(msg.properties.payload_format_indicator, Some(true));
@@ -456,7 +456,7 @@ async fn test_normal_publish_injects_sender() {
 
     assert!(collector.wait_for_messages(1, Duration::from_secs(5)).await);
 
-    let msgs = collector.get_messages().await;
+    let msgs = collector.get_messages();
     let msg = &msgs[0];
 
     let sender_props: Vec<&str> = msg
@@ -1055,7 +1055,7 @@ async fn test_will_message_blocked_by_acl() {
         !received,
         "will message should have been blocked by ACL deny rule"
     );
-    assert_eq!(collector.count().await, 0);
+    assert_eq!(collector.count(), 0);
 
     let allowed_collector = common::MessageCollector::new();
     sub_client
@@ -1120,7 +1120,7 @@ async fn test_publish_injects_client_id() {
 
     assert!(collector.wait_for_messages(1, Duration::from_secs(5)).await);
 
-    let msgs = collector.get_messages().await;
+    let msgs = collector.get_messages();
     let msg = &msgs[0];
 
     let client_id_props: Vec<&str> = msg
@@ -1176,7 +1176,7 @@ async fn test_publish_strips_spoofed_client_id() {
 
     assert!(collector.wait_for_messages(1, Duration::from_secs(5)).await);
 
-    let msgs = collector.get_messages().await;
+    let msgs = collector.get_messages();
     let msg = &msgs[0];
 
     let client_id_props: Vec<&str> = msg
@@ -1269,10 +1269,10 @@ async fn test_echo_suppression() {
 
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    assert_eq!(collector1.count().await, 0);
-    assert_eq!(collector2.count().await, 1);
+    assert_eq!(collector1.count(), 0);
+    assert_eq!(collector2.count(), 1);
 
-    let msgs = collector2.get_messages().await;
+    let msgs = collector2.get_messages();
     assert_eq!(&msgs[0].payload[..], b"echo-test");
 
     pub_client.disconnect().await.expect("disconnect pub");
