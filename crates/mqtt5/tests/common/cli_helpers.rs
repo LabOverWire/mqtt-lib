@@ -2,35 +2,10 @@
 
 use mqtt5::time::Duration;
 use std::io::Write;
-use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 use tokio::time::timeout;
 
-fn get_cli_binary_path() -> PathBuf {
-    if let Ok(path) = std::env::var("CARGO_BIN_EXE_mqttv5") {
-        return PathBuf::from(path);
-    }
-
-    let workspace_root = find_workspace_root();
-    workspace_root.join("target").join("release").join("mqttv5")
-}
-
-fn find_workspace_root() -> PathBuf {
-    let mut current = std::env::current_dir().expect("Failed to get current directory");
-
-    loop {
-        let cargo_toml = current.join("Cargo.toml");
-        if cargo_toml.exists() {
-            if let Ok(contents) = std::fs::read_to_string(&cargo_toml) {
-                if contents.contains("[workspace]") {
-                    return current;
-                }
-            }
-        }
-
-        assert!(current.pop(), "Could not find workspace root");
-    }
-}
+use super::{find_workspace_root, get_cli_binary_path};
 
 #[derive(Debug, Clone)]
 pub struct CliResult {
@@ -172,19 +147,15 @@ pub async fn verify_pub_sub_delivery(
     message: &str,
     extra_args: &[&str],
 ) -> Result<bool, String> {
-    // Start subscriber first
     let sub_handle = run_cli_sub_async(broker_url, topic, 1, extra_args);
 
-    // Give subscriber time to connect
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    // Publish message
     let pub_result = run_cli_pub(broker_url, topic, message, extra_args).await;
     if !pub_result.success {
         return Err(format!("Publish failed: {}", pub_result.stderr));
     }
 
-    // Wait for subscriber to receive message
     match timeout(Duration::from_secs(3), sub_handle).await {
         Ok(Ok(sub_result)) => {
             if sub_result.stdout_contains(message) {
@@ -301,13 +272,10 @@ pub async fn verify_will_delivery(
 
     let cli_binary = get_cli_binary_path();
 
-    // Start subscriber for will topic
     let sub_handle = run_cli_sub_async(broker_url, will_topic, 1, &[]);
 
-    // Give subscriber time to connect
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    // Start publisher with will message and keep-alive flag
     let mut pub_process = Command::new(&cli_binary)
         .args([
             "pub",
@@ -330,15 +298,12 @@ pub async fn verify_will_delivery(
         .spawn()
         .map_err(|e| format!("Failed to start publisher: {e}"))?;
 
-    // Give publisher time to connect
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    // Force kill the publisher to trigger will message
     pub_process
         .kill()
         .map_err(|e| format!("Failed to kill publisher: {e}"))?;
 
-    // Wait for will message delivery
     match timeout(Duration::from_secs(5), sub_handle).await {
         Ok(Ok(sub_result)) => {
             if sub_result.stdout_contains(will_message) {
@@ -367,7 +332,6 @@ pub async fn verify_retained_message(
     topic: &str,
     message: &str,
 ) -> Result<bool, String> {
-    // Publish retained message
     let pub_result = run_cli_command(&[
         "pub",
         "--url",
@@ -385,12 +349,10 @@ pub async fn verify_retained_message(
         return Err(format!("Failed to publish retained: {}", pub_result.stderr));
     }
 
-    // Verify "Message retained" output
     if !pub_result.stdout_contains("Message retained") {
         return Err("Retained flag not shown in output".to_string());
     }
 
-    // Subscribe and verify immediate delivery
     let sub_result = run_cli_command(&[
         "sub",
         "--url",
@@ -412,7 +374,6 @@ pub async fn verify_retained_message(
         return Err("Retained message not received".to_string());
     }
 
-    // Clear retained message
     let _ = run_cli_command(&[
         "pub",
         "--url",

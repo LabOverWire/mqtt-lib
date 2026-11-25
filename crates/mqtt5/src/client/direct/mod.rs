@@ -372,6 +372,7 @@ impl DirectClientInner {
         self.connected.load(Ordering::SeqCst)
     }
 
+    #[cfg(feature = "broker")]
     pub(crate) fn subscription_identifiers_available(&self) -> bool {
         self.server_capabilities.subscription_identifiers()
     }

@@ -174,10 +174,12 @@ impl MqttClient {
         self.inner.read().await.is_connected()
     }
 
+    #[cfg(feature = "broker")]
     pub(crate) async fn subscription_identifiers_available(&self) -> bool {
         self.inner.read().await.subscription_identifiers_available()
     }
 
+    #[cfg(feature = "broker")]
     pub(crate) async fn forget_ack_subscriptions(&self) {
         self.inner
             .read()
