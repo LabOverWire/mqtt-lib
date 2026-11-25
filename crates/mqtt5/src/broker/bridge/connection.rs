@@ -281,10 +281,11 @@ impl Egress {
     /// Hands the message to the client while the bridge is connected. A message refused because
     /// the client is not connected, or whose wait for send quota ends without it being written,
     /// is tried again while the bridge stays connected, so the messages behind it wait; once
-    /// the bridge is disconnected it goes back to the front of the queue.
+    /// the bridge has disconnected, even if it has connected again since, it goes back to the
+    /// front of the queue, behind any messages the remote lost with its session.
     async fn begin(&self, outbound: &Outbound, link: &watch::Receiver<bool>) -> Begun {
         loop {
-            if !*link.borrow() {
+            if !*link.borrow() || link.has_changed().unwrap_or(true) {
                 return Begun::LinkDown;
             }
             let Some(live) = self.client.upgrade() else {
