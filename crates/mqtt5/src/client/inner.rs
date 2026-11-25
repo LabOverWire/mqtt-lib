@@ -711,6 +711,20 @@ impl MqttClient {
         Ok(())
     }
 
+    async fn open_at(
+        &self,
+        addr: std::net::SocketAddr,
+        transport_type: ClientTransportType,
+        host: &str,
+        given_tls: Option<&TlsConfig>,
+    ) -> (std::net::SocketAddr, Result<Connected>) {
+        tracing::debug!("Trying to connect to address: {}", addr);
+        let opened = self
+            .try_connect_address(addr, transport_type, host, given_tls)
+            .await;
+        (addr, opened)
+    }
+
     pub(crate) async fn try_connect_to_addresses(
         &self,
         addresses: &[std::net::SocketAddr],
@@ -718,15 +732,28 @@ impl MqttClient {
         host: &str,
         given_tls: Option<&TlsConfig>,
     ) -> Result<ConnectResult> {
+        use futures::stream::{FuturesUnordered, StreamExt};
+
         let mut last_error = None;
+        let opened_together = if transport_type.opens_concurrently() {
+            addresses.len()
+        } else {
+            1
+        };
+        let mut waiting = addresses.iter().copied();
+        let mut opening: FuturesUnordered<_> = waiting
+            .by_ref()
+            .take(opened_together)
+            .map(|addr| self.open_at(addr, transport_type.clone(), host, given_tls))
+            .collect();
 
-        for addr in addresses {
-            tracing::debug!("Trying to connect to address: {}", addr);
-
-            let connected = match self
-                .try_connect_address(*addr, transport_type.clone(), host, given_tls)
-                .await
-            {
+        while let Some((addr, opened)) = opening.next().await {
+            opening.extend(
+                waiting
+                    .next()
+                    .map(|next| self.open_at(next, transport_type.clone(), host, given_tls)),
+            );
+            let connected = match opened {
                 Ok(connected) => connected,
                 Err(e) => {
                     tracing::debug!("Failed to connect to {}: {}", addr, e);
