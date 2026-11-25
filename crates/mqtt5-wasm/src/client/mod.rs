@@ -21,7 +21,6 @@ use mqtt5_protocol::packet::subscribe::{SubscribePacket, TopicFilter};
 use mqtt5_protocol::packet::unsubscribe::UnsubscribePacket;
 use mqtt5_protocol::packet::Packet;
 use mqtt5_protocol::protocol::v5::properties::{Properties, PropertyId, PropertyValue};
-use mqtt5_protocol::strip_shared_subscription_prefix;
 use mqtt5_protocol::QoS;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -355,8 +354,7 @@ impl WasmMqttClient {
         let reason_codes = js_sys::Array::from(&result);
         let first_code = reason_codes.get(0).as_f64().unwrap_or(0.0);
         if first_code >= 128.0 {
-            let actual_filter = strip_shared_subscription_prefix(topic);
-            self.state.borrow_mut().subscriptions.remove(actual_filter);
+            self.state.borrow_mut().subscriptions.remove(topic);
             return Err(js_error(format!(
                 "Subscribe rejected with reason code: {first_code}"
             )));
@@ -400,10 +398,7 @@ impl WasmMqttClient {
             self.state.borrow_mut().pending_unsubacks.remove(&packet_id);
             return Err(js_error(e));
         }
-        self.state
-            .borrow_mut()
-            .subscriptions
-            .remove(strip_shared_subscription_prefix(topic));
+        self.state.borrow_mut().subscriptions.remove(topic);
         Ok(packet_id)
     }
 
@@ -681,10 +676,7 @@ impl WasmMqttClient {
             let mut state = self.state.borrow_mut();
             state.pending_subacks.insert(packet_id, None);
             if let Some(callback) = callback {
-                state.subscriptions.insert(
-                    strip_shared_subscription_prefix(&topic).to_string(),
-                    callback,
-                );
+                state.subscriptions.insert(topic, callback);
             }
         }
 
@@ -755,10 +747,10 @@ impl WasmMqttClient {
                 None,
             )
             .await?;
-        self.state.borrow_mut().rust_subscriptions.insert(
-            strip_shared_subscription_prefix(topic).to_string(),
-            Rc::new(callback),
-        );
+        self.state
+            .borrow_mut()
+            .rust_subscriptions
+            .insert(topic.to_string(), Rc::new(callback));
         Ok(packet_id)
     }
 

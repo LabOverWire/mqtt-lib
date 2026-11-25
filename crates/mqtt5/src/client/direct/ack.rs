@@ -411,7 +411,7 @@ struct AckDispatchItem {
 /// Delivery runs on a lazily spawned FIFO worker so the user callback never blocks
 /// the reader task (obligation 4).
 pub(crate) struct AckCallbackManager {
-    exact: Mutex<HashMap<String, AckCallbackEntry>>,
+    exact: Mutex<HashMap<String, Vec<AckCallbackEntry>>>,
     wildcard: Mutex<Vec<AckCallbackEntry>>,
     next_id: AtomicU64,
     dispatch_tx: OnceLock<mpsc::UnboundedSender<AckDispatchItem>>,
@@ -466,7 +466,10 @@ impl AckCallbackManager {
             wildcard.retain(|existing| existing.topic_filter != topic_filter);
             wildcard.push(entry);
         } else {
-            self.exact.lock().insert(actual, entry);
+            let mut exact = self.exact.lock();
+            let entries = exact.entry(actual).or_default();
+            entries.retain(|existing| existing.topic_filter != topic_filter);
+            entries.push(entry);
         }
         id
     }
@@ -474,17 +477,31 @@ impl AckCallbackManager {
     /// Removes the ack callback(s) for a topic filter.
     pub(crate) fn unregister(&self, topic_filter: &str) -> bool {
         let actual = strip_shared_subscription_prefix(topic_filter);
-        let removed_exact = self.exact.lock().remove(actual).is_some();
+        let mut exact = self.exact.lock();
+        let removed_exact = exact.get_mut(actual).is_some_and(|entries| {
+            let before = entries.len();
+            entries.retain(|e| e.topic_filter != topic_filter);
+            entries.len() < before
+        });
+        if exact.get(actual).is_some_and(Vec::is_empty) {
+            exact.remove(actual);
+        }
+        drop(exact);
         let mut wildcard = self.wildcard.lock();
         let before = wildcard.len();
         wildcard.retain(|e| e.topic_filter != topic_filter);
         removed_exact || wildcard.len() < before
     }
 
-    /// Finds the single best-matching callback for a topic: an exact match wins,
-    /// otherwise the first matching wildcard.
+    /// Finds the single best-matching callback for a topic: the exact match registered last
+    /// wins, otherwise the first matching wildcard.
     pub(crate) fn find_one(&self, topic: &str) -> Option<AckPublishCallback> {
-        if let Some(entry) = self.exact.lock().get(topic) {
+        if let Some(entry) = self
+            .exact
+            .lock()
+            .get(topic)
+            .and_then(|entries| entries.last())
+        {
             return Some(Arc::clone(&entry.callback));
         }
         let wildcard = self.wildcard.lock();
