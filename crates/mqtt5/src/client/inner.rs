@@ -991,6 +991,7 @@ impl MqttClient {
             stored_tls: StoredTlsBeforeConnect::Untouched,
         };
         inner.reconnect_attempt = 0;
+        inner.forget_disconnect_reason();
         inner.connects += 1;
         inner.automatic_reconnect_lifecycle = AutomaticReconnectLifecycle::Armed;
         Ok(ConnectInProgress {
