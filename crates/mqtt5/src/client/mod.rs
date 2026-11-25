@@ -133,6 +133,7 @@ use self::direct::{
 #[derive(Clone)]
 pub struct MqttClient {
     pub(crate) inner: Arc<RwLock<DirectClientInner>>,
+    pub(crate) connected: Arc<std::sync::atomic::AtomicBool>,
     pub(crate) connection_event_callbacks: Arc<RwLock<Vec<ConnectionEventCallback>>>,
     pub(crate) error_recovery_config: Arc<RwLock<error_recovery::ErrorRecoveryConfig>>,
     pub(crate) connection_mutex: Arc<tokio::sync::Mutex<()>>,
@@ -170,8 +171,9 @@ impl StoredTlsConfig {
 
 impl MqttClient {
     /// Checks if the client is connected
-    pub async fn is_connected(&self) -> bool {
-        self.inner.read().await.is_connected()
+    pub fn is_connected(&self) -> impl Future<Output = bool> + Send + 'static {
+        let connected = Arc::clone(&self.connected);
+        async move { connected.load(std::sync::atomic::Ordering::SeqCst) }
     }
 
     #[cfg(feature = "broker")]
