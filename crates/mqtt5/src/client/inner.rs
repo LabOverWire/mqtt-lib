@@ -1,3 +1,4 @@
+use crate::client::connection::DisconnectReason;
 use crate::error::{MqttError, Result};
 use crate::protocol::v5::reason_codes::ReasonCode;
 use crate::types::{ConnectOptions, ConnectResult};
@@ -75,6 +76,7 @@ pub(crate) struct ReplacedByConnect {
     reconnect_attempt: u32,
     monitored: bool,
     stored_tls: StoredTlsBeforeConnect,
+    disconnect_reason: Option<DisconnectReason>,
 }
 
 enum StoredTlsBeforeConnect {
@@ -989,6 +991,7 @@ impl MqttClient {
             reconnect_attempt: inner.reconnect_attempt,
             monitored: *self.monitored_connect.lock() == Some(inner.connects),
             stored_tls: StoredTlsBeforeConnect::Untouched,
+            disconnect_reason: inner.forget_disconnect_reason(),
         };
         inner.reconnect_attempt = 0;
         inner.connects += 1;
@@ -1038,6 +1041,7 @@ impl MqttClient {
         inner.auth_method = replaced.auth_method;
         inner.reconnection = replaced.reconnection;
         inner.reconnect_attempt = replaced.reconnect_attempt;
+        inner.restore_disconnect_reason(replaced.disconnect_reason);
         inner.connects += 1;
         inner.automatic_reconnect_lifecycle = if stays_armed {
             AutomaticReconnectLifecycle::Armed
@@ -1073,10 +1077,12 @@ impl MqttClient {
     /// Whether another attempt can't help: the server refused this client or its credentials,
     /// or the options are wrong
     pub(super) fn refused_for_good(error: &MqttError) -> bool {
-        matches!(
-            error,
-            MqttError::Configuration(_)
-                | MqttError::ConnectionRefused(
+        match error {
+            MqttError::Configuration(_) => true,
+            MqttError::ConnectionRefused(reason_code)
+            | MqttError::ServerDisconnect(reason_code) => {
+                matches!(
+                    reason_code,
                     ReasonCode::NotAuthorized
                         | ReasonCode::BadUsernameOrPassword
                         | ReasonCode::Banned
@@ -1084,7 +1090,9 @@ impl MqttClient {
                         | ReasonCode::ClientIdentifierNotValid
                         | ReasonCode::UnsupportedProtocolVersion
                 )
-        )
+            }
+            _ => false,
+        }
     }
 
     /// Starts the task that reconnects when the connection made by connect
