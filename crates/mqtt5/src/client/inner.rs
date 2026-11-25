@@ -142,6 +142,7 @@ impl MqttClient {
         &self,
         stored_subs: Vec<StoredSubscription>,
         session_present: bool,
+        session_state_resumed: bool,
         keep_alive: std::time::Duration,
     ) {
         self.trigger_connection_event(ConnectionEvent::Connected {
@@ -151,9 +152,9 @@ impl MqttClient {
         .await;
         #[cfg(feature = "transport-quic")]
         self.recover_quic_flows().await;
-        self.restore_subscriptions_after_connect(stored_subs, session_present)
+        self.restore_subscriptions_after_connect(stored_subs, session_state_resumed)
             .await;
-        if !session_present {
+        if !session_state_resumed {
             self.restore_ack_subscriptions_after_lost_session().await;
         }
     }
@@ -753,11 +754,17 @@ impl MqttClient {
                     }
                     let stored_subs = inner.stored_subscriptions.lock().clone();
                     let session_present = result.session_present;
+                    let session_state_resumed = inner.session_state_owner.resumed;
                     let keep_alive = inner.negotiated_keep_alive();
                     drop(inner);
 
-                    self.on_successful_connect(stored_subs, session_present, keep_alive)
-                        .await;
+                    self.on_successful_connect(
+                        stored_subs,
+                        session_present,
+                        session_state_resumed,
+                        keep_alive,
+                    )
+                    .await;
 
                     return Ok(result);
                 }
@@ -885,11 +892,17 @@ impl MqttClient {
                 inner.reconnect_attempt = 0;
                 let stored_subs = inner.stored_subscriptions.lock().clone();
                 let session_present = result.session_present;
+                let session_state_resumed = inner.session_state_owner.resumed;
                 let keep_alive = inner.negotiated_keep_alive();
                 drop(inner);
 
-                self.on_successful_connect(stored_subs, session_present, keep_alive)
-                    .await;
+                self.on_successful_connect(
+                    stored_subs,
+                    session_present,
+                    session_state_resumed,
+                    keep_alive,
+                )
+                .await;
 
                 Ok(result)
             }
