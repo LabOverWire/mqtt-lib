@@ -1063,7 +1063,7 @@ mod tests {
         assert!(written.len() > 200);
     }
 
-    #[cfg(feature = "transport-quic")]
+    #[cfg(all(feature = "broker", feature = "transport-quic"))]
     #[tokio::test]
     async fn a_reservation_waits_until_earlier_ones_are_released() {
         let budget = ReadBudget::new(3 * READ_CHUNK);

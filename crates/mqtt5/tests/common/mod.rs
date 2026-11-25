@@ -27,15 +27,15 @@ pub fn find_workspace_root() -> PathBuf {
 
 #[allow(dead_code)]
 pub fn get_cli_binary_path() -> PathBuf {
-    if let Ok(path) = std::env::var("CARGO_BIN_EXE_mqttv5") {
-        return PathBuf::from(path);
-    }
-
-    let workspace_root = find_workspace_root();
-    let target_dir = std::env::var_os("CARGO_TARGET_DIR").map_or_else(
-        || workspace_root.join("target"),
-        |dir| workspace_root.join(dir),
-    );
+    let target_dir = std::env::current_exe()
+        .ok()
+        .and_then(|test_binary| {
+            test_binary
+                .ancestors()
+                .nth(3)
+                .map(std::path::Path::to_path_buf)
+        })
+        .unwrap_or_else(|| find_workspace_root().join("target"));
     target_dir
         .join("release")
         .join(format!("mqttv5{}", std::env::consts::EXE_SUFFIX))
