@@ -69,7 +69,7 @@ async fn start_server(disconnect_reason: u8) -> (String, Arc<AtomicUsize>) {
 async fn observe(disconnect_reason: u8) -> (usize, Vec<String>) {
     let (address, connects) = start_server(disconnect_reason).await;
     let options = ConnectOptions::new("reconnect-probe")
-        .with_credentials(USERNAME, b"secret")
+        .with_credentials(USERNAME, std::process::id().to_be_bytes())
         .with_automatic_reconnect(true)
         .with_reconnect_delay(Duration::from_millis(100), Duration::from_millis(200));
     let client = MqttClient::with_options(options.clone());
