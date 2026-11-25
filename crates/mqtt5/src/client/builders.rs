@@ -52,9 +52,11 @@ impl MqttClient {
         tracing::trace!(client_id = %options.client_id, "MQTT CLIENT - with_options() method called");
         let inner = DirectClientInner::new(options);
         let connection_event_callbacks = Arc::clone(&inner.connection_event_callbacks);
+        let connected = Arc::clone(&inner.connected);
 
         Self {
             inner: Arc::new(RwLock::new(inner)),
+            connected,
             connection_event_callbacks,
             error_recovery_config: Arc::new(RwLock::new(ErrorRecoveryConfig::default())),
             connection_mutex: Arc::new(tokio::sync::Mutex::new(())),
