@@ -82,7 +82,6 @@ async fn retained_on(broker: &TestBroker, topic: &str) -> usize {
     for _ in 0..100 {
         let marked = collector
             .get_messages()
-            .await
             .iter()
             .any(|message| message.payload == MARKER.as_bytes());
         if marked {
@@ -92,7 +91,6 @@ async fn retained_on(broker: &TestBroker, topic: &str) -> usize {
     }
     let retained = collector
         .get_messages()
-        .await
         .iter()
         .filter(|message| message.retain)
         .count();
