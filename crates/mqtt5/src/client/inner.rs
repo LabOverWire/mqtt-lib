@@ -15,7 +15,9 @@ use crate::transport::websocket::{WebSocketConfig, WebSocketTransport};
 #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
 use crate::transport::QuicTransport;
 #[cfg(not(target_arch = "wasm32"))]
-use crate::transport::{TcpTransport, TlsTransport, TransportType};
+use crate::transport::{
+    certificate_name, unbracketed_host, TcpTransport, TlsTransport, TransportType,
+};
 
 use super::connection::ConnectionEvent;
 use super::direct::{AutomaticReconnectLifecycle, DirectClientInner, StoredSubscription};
@@ -292,14 +294,6 @@ impl MqttClient {
         Ok(to.to_string())
     }
 
-    /// The name a certificate is checked against for `host`: an IPv6 address
-    /// without the brackets it is written with in a URL
-    fn server_name(host: &str) -> &str {
-        host.strip_prefix('[')
-            .and_then(|address| address.strip_suffix(']'))
-            .unwrap_or(host)
-    }
-
     /// Splits a host:port string
     ///
     /// # Errors
@@ -330,7 +324,7 @@ impl MqttClient {
         let addr_str = format!("{host}:{port}");
         tracing::debug!(addr_str = %addr_str, "🌐 DNS RESOLUTION - Starting address resolution");
 
-        let addrs: Vec<_> = tokio::net::lookup_host(addr_str.as_str())
+        let addrs: Vec<_> = tokio::net::lookup_host((unbracketed_host(host), port))
             .await
             .map_err(|e| {
                 tracing::error!(addr_str = %addr_str, error = %e, "🌐 DNS RESOLUTION - Failed to resolve address");
@@ -376,7 +370,7 @@ impl MqttClient {
                 Some(given) => {
                     let mut config = given.clone();
                     config.addr = addr;
-                    config.hostname = Self::server_name(host).to_string();
+                    config.hostname = certificate_name(host).to_string();
                     Self::open_tls(config).await.map(Connected::from)
                 }
                 None => self.connect_tls(addr, host).await.map(Connected::from),
@@ -420,12 +414,12 @@ impl MqttClient {
             );
             let mut cfg = existing_config.clone();
             cfg.addr = addr;
-            cfg.hostname = Self::server_name(host).to_string();
+            cfg.hostname = certificate_name(host).to_string();
             cfg.verify_server_cert = !insecure;
             cfg
         } else {
             tracing::debug!("No stored TLS config, using default");
-            TlsConfig::new(addr, Self::server_name(host)).with_verify_server_cert(!insecure)
+            TlsConfig::new(addr, certificate_name(host)).with_verify_server_cert(!insecure)
         };
         drop(tls_config_lock);
         Self::open_tls(config).await
@@ -538,13 +532,13 @@ impl MqttClient {
         let tls_config = match stored {
             Some(mut cfg) => {
                 cfg.addr = addr;
-                cfg.hostname = Self::server_name(host).to_string();
+                cfg.hostname = certificate_name(host).to_string();
                 cfg.verify_server_cert = !insecure;
                 cfg.alpn_protocols = None;
                 Some(cfg)
             }
             None if insecure => {
-                Some(TlsConfig::new(addr, Self::server_name(host)).with_verify_server_cert(false))
+                Some(TlsConfig::new(addr, certificate_name(host)).with_verify_server_cert(false))
             }
             None => None,
         };
@@ -584,7 +578,7 @@ impl MqttClient {
             datagrams: qc.datagrams,
             max_streams: qc.max_streams,
         };
-        let server_name = if host.parse::<std::net::IpAddr>().is_ok() {
+        let server_name = if certificate_name(host).parse::<std::net::IpAddr>().is_ok() {
             "localhost"
         } else {
             host
@@ -649,7 +643,9 @@ impl MqttClient {
             .server_name
             .as_ref()
             .filter(|(for_host, _)| for_host.eq_ignore_ascii_case(host))
-            .map_or(host, |(_, server_name)| server_name.as_str());
+            .map_or(certificate_name(host), |(_, server_name)| {
+                server_name.as_str()
+            });
         let mut config = QuicConfig::new(addr, server_name)
             .with_verify_server_cert(!qc.insecure_tls)
             .with_stream_strategy(qc.stream_strategy)

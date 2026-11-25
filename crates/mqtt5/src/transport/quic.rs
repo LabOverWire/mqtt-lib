@@ -388,7 +388,11 @@ impl Transport for QuicTransport {
 
         self.built_client_config = Some(client_config.clone());
 
-        let mut endpoint = Endpoint::client(SocketAddr::from(([0, 0, 0, 0], 0)))
+        let local = match self.config.addr {
+            SocketAddr::V4(_) => SocketAddr::from((std::net::Ipv4Addr::UNSPECIFIED, 0)),
+            SocketAddr::V6(_) => SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, 0)),
+        };
+        let mut endpoint = Endpoint::client(local)
             .map_err(|e| MqttError::ConnectionError(format!("Failed to create endpoint: {e}")))?;
         endpoint.set_default_client_config(client_config);
 

@@ -11,6 +11,7 @@ use crate::error::MqttError;
 use crate::packet::publish::PublishPacket;
 use crate::protocol::v5::reason_codes::ReasonCode;
 use crate::time::{Duration, Instant};
+use crate::transport::certificate_name;
 use crate::transport::tls::TlsConfig;
 use crate::types::ConnectOptions;
 use crate::types::PublishOptions;
@@ -725,10 +726,7 @@ impl BridgeConnection {
             server_name.clone()
         } else {
             let host = address.rsplit_once(':').map_or(address, |(host, _)| host);
-            host.strip_prefix('[')
-                .and_then(|address| address.strip_suffix(']'))
-                .unwrap_or(host)
-                .to_string()
+            certificate_name(host).to_string()
         };
 
         let mut tls_config = TlsConfig::new(addr, hostname);
